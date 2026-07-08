@@ -1,5 +1,6 @@
 import { AgentCard } from "@/components/AgentCard";
 import { ChainStats } from "@/components/ChainStats";
+import { MarketTable } from "@/components/MarketTable";
 import { AGENTS, FEED } from "@/lib/mock";
 
 export default function Dashboard() {
@@ -27,6 +28,9 @@ export default function Dashboard() {
               <AgentCard key={a.id} agent={a} />
             ))}
           </div>
+
+          <div className="section-title market-title">sherwood market · chainlink prices</div>
+          <MarketTable />
         </section>
 
         <aside className="rail">

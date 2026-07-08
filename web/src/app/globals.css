@@ -229,6 +229,66 @@ button { font: inherit; cursor: pointer; }
 .feed-line .err { color: var(--red); }
 .feed-line b { color: var(--text); font-weight: 600; }
 
+/* ---------- market table ---------- */
+.market-title { margin-top: 20px; }
+.market-empty {
+  padding: 24px; text-align: center;
+  color: var(--text-faint); font-size: 12px;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px;
+}
+.market-wrap {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow-x: auto;
+}
+.market-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.market-table th {
+  position: sticky; top: 0;
+  text-align: left;
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px;
+  color: var(--text-faint);
+  background: var(--bg-3);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.market-table td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.market-table tbody tr:last-child td { border-bottom: none; }
+.market-table tbody tr:hover { background: var(--bg-3); }
+.market-table .num { text-align: right; }
+.market-table .dim { color: var(--text-dim); }
+
+.tok { display: flex; align-items: center; gap: 8px; }
+.tok-logo {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--bg-3); flex-shrink: 0;
+}
+.tok-name { color: var(--text-dim); font-size: 11px; }
+.tok-etf {
+  font-size: 9px; color: var(--gold);
+  border: 1px solid color-mix(in srgb, var(--gold) 35%, transparent);
+  border-radius: 4px; padding: 0 4px;
+}
+
+.st {
+  font-family: var(--mono); font-size: 10px;
+  text-transform: uppercase; letter-spacing: 1px;
+  border-radius: 4px; padding: 1px 6px;
+}
+.st-live { color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); }
+.st-stale { color: var(--gold); background: color-mix(in srgb, var(--gold) 10%, transparent); }
+.st-paused { color: var(--red); background: color-mix(in srgb, var(--red) 10%, transparent); }
+.st-nofeed { color: var(--text-faint); background: var(--bg-3); }
+
 /* ---------- footer ---------- */
 .statusbar {
   margin-top: 24px;
