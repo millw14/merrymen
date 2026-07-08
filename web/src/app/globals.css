@@ -1,0 +1,250 @@
+/* ============================================================
+   merrymen — Sherwood dark terminal design system
+   Lineage: littlejohn's palette, Bloomberg density, calm confidence.
+   Numbers and addresses are ALWAYS mono. Green = gain, red = loss,
+   gold = the chain / live status. Nothing memes.
+   ============================================================ */
+
+:root {
+  --bg: #0a0e0b;
+  --bg-2: #0f1511;
+  --bg-3: #141c16;
+  --border: #1e2a21;
+  --border-2: #2a3a2e;
+  --text: #d7e2d9;
+  --text-dim: #7d8f81;
+  --text-faint: #55665a;
+  --green: #4ade80;
+  --green-deep: #16a34a;
+  --green-soft: #34d399;
+  --red: #f87171;
+  --red-deep: #7f1d1d;
+  --gold: #eab308;
+  --mono: "Cascadia Code", "JetBrains Mono", Consolas, "Courier New", monospace;
+  --sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+a { color: var(--green-soft); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button { font: inherit; cursor: pointer; }
+
+.mono { font-family: var(--mono); }
+
+/* ---------- topbar ---------- */
+.topbar {
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.brand {
+  display: flex; align-items: baseline; gap: 8px;
+  font-family: var(--mono); font-size: 16px; font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.brand .arrow { color: var(--green); }
+.brand .tagline { font-size: 11px; font-weight: 400; color: var(--text-faint); }
+.chain-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 11px;
+  color: var(--gold);
+  border: 1px solid color-mix(in srgb, var(--gold) 35%, transparent);
+  border-radius: 999px;
+  padding: 2px 10px;
+  background: color-mix(in srgb, var(--gold) 7%, transparent);
+}
+.chain-pill .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--gold);
+  animation: pulse 2.4s ease-in-out infinite;
+}
+.topstats {
+  display: flex; gap: 18px; margin-left: auto;
+  font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+}
+.topstats b { color: var(--text); font-weight: 600; }
+.connect-btn {
+  font-family: var(--mono); font-size: 12px;
+  color: var(--bg); background: var(--green);
+  border: none; border-radius: 6px; padding: 6px 14px; font-weight: 700;
+}
+.connect-btn:hover { background: var(--green-soft); }
+
+/* ---------- layout ---------- */
+.shell {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 16px;
+  padding: 16px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+@media (max-width: 980px) { .shell { grid-template-columns: 1fr; } }
+
+.section-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--text-faint);
+  margin-bottom: 10px;
+}
+
+/* ---------- agent cards ---------- */
+.agents { display: flex; flex-direction: column; gap: 12px; }
+.agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+
+.agent-card {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  display: flex; flex-direction: column; gap: 10px;
+  transition: border-color 0.2s;
+}
+.agent-card:hover { border-color: var(--border-2); }
+.agent-card.active { border-left: 3px solid var(--green-deep); }
+.agent-card.active .status-dot { animation: breathe 3s ease-in-out infinite; }
+.agent-card.paused { border-left: 3px solid var(--text-faint); opacity: 0.75; }
+
+.agent-head { display: flex; align-items: center; gap: 10px; }
+.agent-sigil {
+  width: 34px; height: 34px; border-radius: 8px;
+  display: grid; place-items: center; font-size: 17px;
+  background: var(--bg-3); border: 1px solid var(--border);
+}
+.agent-name { font-weight: 600; font-size: 14px; }
+.agent-strategy { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+.agent-status {
+  margin-left: auto; display: flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+}
+.status-dot { width: 7px; height: 7px; border-radius: 50%; }
+.agent-card.active .agent-status { color: var(--green); }
+.agent-card.active .status-dot { background: var(--green); }
+.agent-card.paused .agent-status { color: var(--text-faint); }
+.agent-card.paused .status-dot { background: var(--text-faint); }
+
+.agent-pnl { display: flex; align-items: center; gap: 12px; }
+.pnl-value { font-family: var(--mono); font-size: 18px; font-weight: 700; }
+.pnl-value.up { color: var(--green); }
+.pnl-value.down { color: var(--red); }
+.pnl-label { font-size: 10px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 1px; }
+.sparkline { margin-left: auto; }
+.sparkline polyline { fill: none; stroke-width: 1.5; }
+.sparkline .up { stroke: var(--green); }
+.sparkline .down { stroke: var(--red); }
+
+/* the permission wall summary — caps are trust artifacts, always visible */
+.caps { display: flex; flex-wrap: wrap; gap: 6px; }
+.cap {
+  font-family: var(--mono); font-size: 10.5px;
+  color: var(--text-dim);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 8px;
+}
+.cap b { color: var(--text); font-weight: 600; }
+
+.drawdown { display: flex; flex-direction: column; gap: 4px; }
+.drawdown-label {
+  display: flex; justify-content: space-between;
+  font-family: var(--mono); font-size: 10px; color: var(--text-faint);
+}
+.drawdown-track { height: 4px; border-radius: 2px; background: var(--bg-3); overflow: hidden; }
+.drawdown-fill { height: 100%; border-radius: 2px; background: var(--green-deep); }
+.drawdown-fill.warn { background: var(--gold); }
+.drawdown-fill.hot { background: var(--red); }
+
+.agent-actions { display: flex; gap: 8px; margin-top: 2px; }
+.btn-ghost {
+  flex: 1;
+  font-family: var(--mono); font-size: 11px;
+  color: var(--text-dim); background: transparent;
+  border: 1px solid var(--border); border-radius: 6px; padding: 5px 0;
+}
+.btn-ghost:hover { color: var(--text); border-color: var(--border-2); }
+.btn-kill {
+  flex: 1;
+  font-family: var(--mono); font-size: 11px; font-weight: 700;
+  color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
+  border-radius: 6px; padding: 5px 0;
+}
+.btn-kill:hover { background: color-mix(in srgb, var(--red) 18%, transparent); }
+
+/* ---------- right rail ---------- */
+.rail { display: flex; flex-direction: column; gap: 16px; }
+
+.panel {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.killall {
+  width: 100%;
+  font-family: var(--mono); font-size: 13px; font-weight: 700;
+  letter-spacing: 2px; text-transform: uppercase;
+  color: #fff; background: var(--red-deep);
+  border: 1px solid var(--red); border-radius: 8px;
+  padding: 12px 0;
+  box-shadow: inset 0 -3px 0 rgba(0,0,0,0.35);
+}
+.killall:hover { background: #991b1b; }
+.killall:active { box-shadow: inset 0 2px 4px rgba(0,0,0,0.5); transform: translateY(1px); }
+.killall-note {
+  margin-top: 8px; text-align: center;
+  font-family: var(--mono); font-size: 10px; color: var(--text-faint);
+}
+
+/* activity feed — terminal log */
+.feed { display: flex; flex-direction: column; gap: 6px; max-height: 480px; overflow-y: auto; }
+.feed-line {
+  font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+  display: flex; gap: 8px; align-items: baseline;
+}
+.feed-time { color: var(--text-faint); flex-shrink: 0; }
+.feed-line .ok { color: var(--green-soft); }
+.feed-line .warn { color: var(--gold); }
+.feed-line .err { color: var(--red); }
+.feed-line b { color: var(--text); font-weight: 600; }
+
+/* ---------- footer ---------- */
+.statusbar {
+  margin-top: 24px;
+  border-top: 1px solid var(--border);
+  padding: 10px 16px;
+  display: flex; gap: 20px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 10.5px; color: var(--text-faint);
+}
+.statusbar .live { color: var(--green); }
+
+/* ---------- motion ---------- */
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@keyframes breathe {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 45%, transparent); }
+  50% { box-shadow: 0 0 0 5px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}

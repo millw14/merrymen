@@ -1,0 +1,14 @@
+{
+  "name": "merrymen",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Autonomous trading agents for Robinhood Chain — hard on-chain permission walls, honest scoreboard.",
+  "workspaces": [
+    "packages/core",
+    "web",
+    "worker"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}
