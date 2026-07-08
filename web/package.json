@@ -10,6 +10,9 @@
   },
   "dependencies": {
     "@merrymen/core": "*",
+    "@zerodev/ecdsa-validator": "^5.4.9",
+    "@zerodev/permissions": "^5.6.3",
+    "@zerodev/sdk": "^5.5.10",
     "next": "^15.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

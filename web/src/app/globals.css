@@ -289,6 +289,98 @@ button { font: inherit; cursor: pointer; }
 .st-paused { color: var(--red); background: color-mix(in srgb, var(--red) 10%, transparent); }
 .st-nofeed { color: var(--text-faint); background: var(--bg-3); }
 
+/* ---------- grant page (the permission wall) ---------- */
+.grant-shell {
+  display: grid; place-items: center;
+  min-height: calc(100vh - 52px);
+  padding: 24px;
+}
+.grant-panel {
+  width: 100%; max-width: 560px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-radius: 14px;
+  padding: 28px;
+  display: flex; flex-direction: column; gap: 18px;
+}
+.grant-title {
+  font-family: var(--mono); font-size: 20px; font-weight: 700;
+  letter-spacing: 0.5px; text-align: center;
+}
+.grant-sub { color: var(--text-dim); text-align: center; font-size: 12.5px; }
+.grant-sub b { color: var(--text); }
+
+.grant-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.grant-fields .field:last-child { grid-column: span 2; }
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field-label {
+  font-family: var(--mono); font-size: 10px;
+  text-transform: uppercase; letter-spacing: 1px;
+  color: var(--text-faint);
+}
+.field-input {
+  display: flex; align-items: center;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 10px;
+}
+.field-input:focus-within { border-color: var(--green-deep); }
+.field-input input {
+  flex: 1; min-width: 0;
+  background: transparent; border: none; outline: none;
+  color: var(--text);
+  font-family: var(--mono); font-size: 15px; font-weight: 600;
+  padding: 9px 0;
+}
+.field-unit { font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
+
+.grant-summary {
+  font-size: 10.5px; line-height: 1.7;
+  color: var(--text-dim);
+  background: var(--bg-3);
+  border: 1px dashed var(--border-2);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.grant-btn {
+  font-family: var(--mono); font-size: 13px; font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--bg); background: var(--green);
+  border: none; border-radius: 8px;
+  padding: 13px 0;
+  display: block; width: 100%;
+}
+.grant-btn:hover:not(:disabled) { background: var(--green-soft); }
+.grant-btn:disabled { opacity: 0.6; cursor: wait; }
+
+.grant-error {
+  font-size: 11px; color: var(--red);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
+  border-radius: 8px; padding: 8px 12px;
+  word-break: break-word;
+}
+.grant-note {
+  font-size: 10.5px; color: var(--text-faint);
+  text-align: center; line-height: 1.6;
+}
+
+.grant-result {
+  display: flex; flex-direction: column; gap: 8px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  font-size: 12px;
+}
+.grant-result > div { display: flex; justify-content: space-between; }
+.grant-result .rk { color: var(--text-faint); }
+.grant-result .rv { color: var(--text); font-weight: 600; }
+.grant-actions { display: flex; gap: 10px; align-items: stretch; }
+.grant-actions .grant-btn { flex: 1; }
+
 /* ---------- footer ---------- */
 .statusbar {
   margin-top: 24px;

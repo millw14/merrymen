@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { AgentCard } from "@/components/AgentCard";
 import { ChainStats } from "@/components/ChainStats";
 import { MarketTable } from "@/components/MarketTable";
@@ -17,7 +18,9 @@ export default function Dashboard() {
           Robinhood Chain · 4663
         </span>
         <ChainStats />
-        <button className="connect-btn">connect</button>
+        <Link href="/grant" className="connect-btn" style={{ textDecoration: "none" }}>
+          deploy an agent
+        </Link>
       </header>
 
       <main className="shell">
