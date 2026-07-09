@@ -46,34 +46,25 @@ import {
   toRateLimitPolicy,
   toTimestampPolicy,
 } from "@zerodev/permissions/policies";
-import { CASH, MORPHO, RIALTO, robinhoodTestnet, USDG_DECIMALS } from "@merrymen/core";
+import {
+  CASH,
+  MORPHO,
+  RIALTO,
+  robinhoodTestnet,
+  USDG_DECIMALS,
+  type GrantCaps,
+  type StoredGrant,
+} from "@merrymen/core";
 import { ensureChain, getInjectedProvider, requestAccount } from "./wallet";
+
+export type { GrantCaps, StoredGrant };
 
 const VAULT_ABI = parseAbi([
   "function deposit(uint256 assets, address receiver) returns (uint256)",
   "function withdraw(uint256 assets, address receiver, address owner) returns (uint256)",
 ]);
 
-export interface GrantCaps {
-  perTradeUsdg: number;
-  dailyUsdg: number;
-  expiryDays: number;
-  maxDrawdownPct: number;
-  maxOpsPerDay: number;
-}
-
-export interface Grant {
-  smartAccount: Address;
-  owner: Address;
-  sessionKeyAddress: Address;
-  serialized: string;
-  caps: GrantCaps;
-  grantedAt: number;
-  expiresAt: number;
-  chainId: number;
-  /** TESTNET ONLY — production signers live in a TEE, never in the browser. */
-  demoSessionPrivateKey: `0x${string}`;
-}
+export type Grant = StoredGrant;
 
 const STORAGE_KEY = "merrymen.grant.v1";
 
@@ -209,5 +200,18 @@ export async function grantSessionKey(
     demoSessionPrivateKey: sessionPrivateKey,
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(grant));
+
+  // Hand the grant to the worker (dev-mode file handoff; Supabase later).
+  onStatus("handing the grant to the worker…");
+  try {
+    await fetch("/api/grants", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(grant),
+    });
+  } catch {
+    // Worker handoff failing must not lose the signed grant — it's in localStorage.
+  }
+
   return grant;
 }
