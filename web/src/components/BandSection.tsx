@@ -5,9 +5,29 @@ import { useEffect, useState } from "react";
 import { formatUnits } from "viem";
 import { USDG_DECIMALS } from "@merrymen/core";
 import type { AgentStatus } from "@/app/api/grants/route";
+import type { FeedResponse } from "@/app/api/feed/route";
 import { clearGrant } from "@/lib/session";
 import { AgentCard } from "./AgentCard";
 import { AGENTS } from "@/lib/mock";
+
+function EquitySparkline({ points }: { points: number[] }) {
+  if (points.length < 2) return null;
+  const w = 96;
+  const h = 28;
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const span = max - min || 1;
+  const step = w / (points.length - 1);
+  const up = points[points.length - 1]! >= points[0]!;
+  const path = points
+    .map((v, i) => `${(i * step).toFixed(1)},${(h - ((v - min) / span) * h).toFixed(1)}`)
+    .join(" ");
+  return (
+    <svg className="sparkline" width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden>
+      <polyline className={up ? "up" : "down"} points={path} />
+    </svg>
+  );
+}
 
 function countdown(expiresAt: number): string {
   const s = expiresAt - Math.floor(Date.now() / 1000);
@@ -23,13 +43,16 @@ function short(a: string): string {
 
 export function BandSection() {
   const [status, setStatus] = useState<AgentStatus | null>(null);
+  const [feed, setFeed] = useState<FeedResponse | null>(null);
 
   useEffect(() => {
     let alive = true;
     const load = async () => {
       try {
-        const res = await fetch("/api/grants");
-        if (res.ok && alive) setStatus((await res.json()) as AgentStatus);
+        const [gRes, fRes] = await Promise.all([fetch("/api/grants"), fetch("/api/feed")]);
+        if (!alive) return;
+        if (gRes.ok) setStatus((await gRes.json()) as AgentStatus);
+        if (fRes.ok) setFeed((await fRes.json()) as FeedResponse);
       } catch {
         // dashboard stays on last known state
       }
@@ -113,6 +136,21 @@ export function BandSection() {
         <span>
           <b>{vault.toFixed(2)}</b> USDG in vault
         </span>
+        {(() => {
+          const series = (feed?.equity ?? []).map((p) => p.equity_usdg);
+          if (series.length < 2) {
+            return <span className="dim">P&amp;L — no history yet</span>;
+          }
+          const delta = series[series.length - 1]! - series[0]!;
+          return (
+            <span style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
+              <b className={delta >= 0 ? "up" : "down"} style={{ color: delta >= 0 ? "var(--green)" : "var(--red)" }}>
+                {delta >= 0 ? "+" : "−"}${Math.abs(delta).toFixed(2)}
+              </b>
+              <EquitySparkline points={series} />
+            </span>
+          );
+        })()}
       </div>
 
       <div className="caps">

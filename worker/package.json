@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@merrymen/core": "*",
+    "@supabase/supabase-js": "^2.110.1",
     "@zerodev/permissions": "^5.6.3",
     "@zerodev/sdk": "^5.5.10",
     "viem": "^2.21.0"

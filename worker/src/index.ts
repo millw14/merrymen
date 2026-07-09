@@ -5,8 +5,9 @@
  * estimation rejects reverting ops) → execute via session key → record
  *
  * Config:
- *   MERRYMEN_GRANT_FILE    grant JSON (default ../.data/grant.json via web /grant)
- *   MERRYMEN_BUNDLER_URL   4337 bundler RPC; without it, execution stays stubbed
+ *   MERRYMEN_GRANT_FILE       grant JSON (default ../.data/grant.json via web /grant)
+ *   MERRYMEN_BUNDLER_URL      4337 bundler RPC; without it, execution stays stubbed
+ *   SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY   durable persistence (else .data/*.jsonl)
  *
  * `--selftest` sends one policy-legal no-op UserOp (approve 0.000001 USDG to the
  * Rialto router) through the FULL pipeline to prove grant → policy → bundler →
@@ -15,7 +16,14 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { createPublicClient, encodeFunctionData, erc20Abi, formatUnits, http } from "viem";
+import {
+  createPublicClient,
+  encodeFunctionData,
+  erc20Abi,
+  formatUnits,
+  http,
+  parseAbi,
+} from "viem";
 import {
   CASH,
   MORPHO,
@@ -31,10 +39,16 @@ import { loadGrantFile } from "./grant";
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
 import { steadyBasketTick, type SteadyBasketConfig, type Snapshot } from "./strategies/steady-basket";
 import { readAccountBalances, readMarketSafety } from "./snapshot";
+import { addEquity, addEvent, addTrade, ensureAgent, getSpentTodayUsdg } from "./store";
 
 const TICK_MS = 60_000;
 const usdg = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
+const usdgNum = (v: bigint) => Number(formatUnits(v, USDG_DECIMALS));
 const fmt = (v: bigint) => formatUnits(v, USDG_DECIMALS);
+
+const VAULT_ABI = parseAbi([
+  "function deposit(uint256 assets, address receiver) returns (uint256)",
+]);
 
 function limitsFromGrant(grant: StoredGrant): AgentLimits {
   return {
@@ -92,6 +106,8 @@ async function main() {
     ? createPublicClient({ chain: grantChain, transport: http() })
     : null;
 
+  const agentId = grant ? await ensureAgent(grant) : null;
+
   let executor: AgentExecutor | null = null;
   if (grant && bundlerUrl) {
     executor = await createAgentExecutor({
@@ -105,11 +121,20 @@ async function main() {
   }
 
   const limits = grant ? limitsFromGrant(grant) : null;
-  let spentTodayUsdg = 0n; // Supabase-persisted once persistence lands
+  let spentTodayUsdg = agentId ? usdg(await getSpentTodayUsdg(agentId)) : 0n;
   let highWaterMarkUsdg = 0n;
+  let lastSequencerUp = true;
+
+  if (agentId) {
+    await addEvent(
+      agentId,
+      "ok",
+      `worker online — executor ${executor ? "live" : "stubbed"}, spent ${fmt(spentTodayUsdg)} USDG in trailing 24h`,
+    );
+  }
 
   async function processIntent(intent: TradeIntent, equityUsdg: bigint): Promise<void> {
-    if (!limits) return;
+    if (!limits || !agentId) return;
     const state: AgentState = {
       spentTodayUsdg,
       highWaterMarkUsdg,
@@ -117,8 +142,20 @@ async function main() {
       nowSec: Math.floor(Date.now() / 1000),
     };
     const verdict = checkPolicy(intent, limits, state);
+    const notional = intent.kind === "swap" ? intent.sellAmountUsdg : intent.amountUsdg;
+
     if (!verdict.ok) {
       console.log(`[policy] REJECTED ${intent.kind}: ${verdict.rule} — ${verdict.detail}`);
+      await addEvent(agentId, "warn", `policy rejected ${intent.kind}: ${verdict.rule} — ${verdict.detail}`);
+      await addTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: intent.target,
+        amount_usdg: usdgNum(notional),
+        status: "rejected",
+        reject_rule: verdict.rule,
+        created_at: new Date().toISOString(),
+      });
       return;
     }
     if (!executor) {
@@ -126,23 +163,66 @@ async function main() {
       return;
     }
 
-    // The only call we can construct without the Rialto API key is the approval
-    // leg; swap calldata comes from their quote API once onboarded.
-    if (intent.kind === "swap") {
-      const data = encodeFunctionData({
-        abi: erc20Abi,
-        functionName: "approve",
-        args: [RIALTO.routerSnapshot as `0x${string}`, intent.sellAmountUsdg],
+    try {
+      let txHash: `0x${string}`;
+      if (intent.kind === "swap") {
+        // Approval leg only until Rialto API onboarding; swap calldata comes
+        // from their quote API. Bundler gas estimation simulates before signing.
+        const data = encodeFunctionData({
+          abi: erc20Abi,
+          functionName: "approve",
+          args: [RIALTO.routerSnapshot as `0x${string}`, intent.sellAmountUsdg],
+        });
+        txHash = await executor.execute([{ to: CASH.USDG as `0x${string}`, value: 0n, data }]);
+      } else if (intent.kind === "vault-deposit") {
+        const data = encodeFunctionData({
+          abi: VAULT_ABI,
+          functionName: "deposit",
+          args: [intent.amountUsdg, executor.address],
+        });
+        txHash = await executor.execute([
+          {
+            to: CASH.USDG as `0x${string}`,
+            value: 0n,
+            data: encodeFunctionData({
+              abi: erc20Abi,
+              functionName: "approve",
+              args: [MORPHO.steakhouseUsdgVault as `0x${string}`, intent.amountUsdg],
+            }),
+          },
+          { to: MORPHO.steakhouseUsdgVault as `0x${string}`, value: 0n, data },
+        ]);
+      } else {
+        console.log(`[execute] ${intent.kind} not wired yet`);
+        return;
+      }
+
+      spentTodayUsdg += notional;
+      console.log(`[execute] ${intent.kind} landed: ${txHash}`);
+      await addEvent(agentId, "ok", `${intent.kind} landed (${fmt(notional)} USDG): ${txHash}`);
+      await addTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: intent.target,
+        sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
+        buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
+        amount_usdg: usdgNum(notional),
+        tx_hash: txHash,
+        status: "landed",
+        created_at: new Date().toISOString(),
       });
-      // Bundler gas estimation simulates the op and rejects reverts — the
-      // "simulate before sign" step until Tenderly lands.
-      const txHash = await executor.execute([
-        { to: CASH.USDG as `0x${string}`, value: 0n, data },
-      ]);
-      spentTodayUsdg += intent.sellAmountUsdg;
-      console.log(`[execute] approval leg landed: ${txHash}`);
-    } else {
-      console.log(`[execute] ${intent.kind} pending vault calldata wiring`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[execute] ${intent.kind} failed:`, msg);
+      await addEvent(agentId, "err", `${intent.kind} failed pre-flight or on-chain: ${msg.slice(0, 200)}`);
+      await addTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: intent.target,
+        amount_usdg: usdgNum(notional),
+        status: "reverted",
+        created_at: new Date().toISOString(),
+      });
     }
   }
 
@@ -165,11 +245,19 @@ async function main() {
     heartbeat(market.blockNumber);
     console.log(
       `[tick] mainnet block ${market.blockNumber} · sequencer ${market.sequencerUp ? "up" : "DOWN"} · ` +
-        `${market.pausedTokens.size} paused · ${market.staleFeeds.size} stale feeds` +
-        (market.staleFeeds.size ? ` (${[...market.staleFeeds].slice(0, 5).join(", ")}…)` : ""),
+        `${market.pausedTokens.size} paused · ${market.staleFeeds.size} stale feeds`,
     );
 
-    if (!grant || !grantClient) return;
+    if (agentId && market.sequencerUp !== lastSequencerUp) {
+      await addEvent(
+        agentId,
+        market.sequencerUp ? "ok" : "warn",
+        market.sequencerUp ? "sequencer recovered — resuming" : "sequencer DOWN — all trading paused",
+      );
+      lastSequencerUp = market.sequencerUp;
+    }
+
+    if (!grant || !grantClient || !agentId) return;
 
     const balances = await readAccountBalances(grantClient, grant.smartAccount);
     const equityUsdg = balances.cashUsdg + balances.vaultUsdg;
@@ -178,6 +266,12 @@ async function main() {
       `[account] ${grant.smartAccount} · eth ${formatUnits(balances.ethWei, 18)} · ` +
         `cash ${fmt(balances.cashUsdg)} USDG · vault ${fmt(balances.vaultUsdg)} USDG`,
     );
+
+    await addEquity(agentId, {
+      ethWei: balances.ethWei,
+      cashUsdg: usdgNum(balances.cashUsdg),
+      vaultUsdg: usdgNum(balances.vaultUsdg),
+    });
 
     const snap: Snapshot = {
       cashUsdg: balances.cashUsdg,
