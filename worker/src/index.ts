@@ -7,7 +7,7 @@
  * Config:
  *   MERRYMEN_GRANT_FILE       grant JSON (default ../.data/grant.json via web /grant)
  *   MERRYMEN_BUNDLER_URL      4337 bundler RPC; without it, execution stays stubbed
- *   SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY   durable persistence (else .data/*.jsonl)
+ * Persistence: SQLite at .data/merrymen.db (node:sqlite) — no service, no keys.
  *
  * `--selftest` sends one policy-legal no-op UserOp (approve 0.000001 USDG to the
  * Rialto router) through the FULL pipeline to prove grant → policy → bundler →
@@ -39,7 +39,7 @@ import { loadGrantFile } from "./grant";
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
 import { steadyBasketTick, type SteadyBasketConfig, type Snapshot } from "./strategies/steady-basket";
 import { readAccountBalances, readMarketSafety } from "./snapshot";
-import { addEquity, addEvent, addTrade, ensureAgent, getSpentTodayUsdg } from "./store";
+import { addEquity, addEvent, addTrade, ensureAgent, getSpentTodayUsdg, initStore } from "./store";
 
 const TICK_MS = 60_000;
 const usdg = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
@@ -93,6 +93,7 @@ function selfTestIntent(): TradeIntent {
 }
 
 async function main() {
+  initStore();
   const grant = loadGrantFile();
   const bundlerUrl = process.env.MERRYMEN_BUNDLER_URL;
   const selftest = process.argv.includes("--selftest");
