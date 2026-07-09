@@ -229,6 +229,54 @@ button { font: inherit; cursor: pointer; }
 .feed-line .err { color: var(--red); }
 .feed-line b { color: var(--text); font-weight: 600; }
 
+/* ---------- band: empty state, demo watermark, real agent ---------- */
+.empty-state {
+  background: var(--bg-2);
+  border: 1px dashed var(--border-2);
+  border-radius: 12px;
+  padding: 32px 24px;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  text-align: center;
+}
+.empty-sigil { font-size: 28px; color: var(--green); }
+.empty-title { font-size: 15px; font-weight: 700; letter-spacing: 1px; }
+.empty-sub { color: var(--text-dim); font-size: 12px; max-width: 380px; }
+.empty-cta { max-width: 240px; margin-top: 6px; }
+
+.demo-wrap { margin-top: 18px; }
+.demo-banner {
+  font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase;
+  color: var(--gold);
+  border: 1px dashed color-mix(in srgb, var(--gold) 40%, transparent);
+  border-radius: 6px;
+  padding: 5px 10px;
+  margin-bottom: 10px;
+  display: inline-block;
+}
+.demo-cards { opacity: 0.55; filter: saturate(0.7); pointer-events: none; }
+
+.agent-card.armed { border-left: 3px solid var(--gold); }
+.agent-card.armed .agent-status { color: var(--gold); }
+.agent-card.armed .status-dot { background: var(--gold); }
+
+.real-balances {
+  display: flex; gap: 18px; flex-wrap: wrap;
+  font-size: 13px; color: var(--text-dim);
+}
+.real-balances b { color: var(--text); font-size: 15px; }
+.real-meta {
+  display: flex; gap: 14px; flex-wrap: wrap;
+  font-size: 10.5px; color: var(--text-faint);
+}
+.real-meta a { color: var(--green-soft); }
+.real-hint {
+  font-size: 10.5px; color: var(--gold);
+  background: color-mix(in srgb, var(--gold) 7%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--gold) 30%, transparent);
+  border-radius: 6px; padding: 7px 10px;
+}
+.feed-line .dim { color: var(--text-faint); }
+
 /* ---------- market table ---------- */
 .market-title { margin-top: 20px; }
 .market-empty {

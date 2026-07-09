@@ -13,6 +13,8 @@
  * on-chain policy enforcement, end to end.
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { createPublicClient, encodeFunctionData, erc20Abi, formatUnits, http } from "viem";
 import {
   CASH,
@@ -144,8 +146,23 @@ async function main() {
     }
   }
 
+  const dataDir = path.join(process.cwd(), "..", ".data");
+  function heartbeat(blockNumber: bigint) {
+    try {
+      mkdirSync(dataDir, { recursive: true });
+      writeFileSync(
+        path.join(dataDir, "heartbeat.json"),
+        JSON.stringify({ at: Math.floor(Date.now() / 1000), block: blockNumber.toString() }),
+        "utf8",
+      );
+    } catch {
+      // heartbeat is best-effort telemetry — never let it kill the loop
+    }
+  }
+
   async function tick() {
     const market = await readMarketSafety();
+    heartbeat(market.blockNumber);
     console.log(
       `[tick] mainnet block ${market.blockNumber} · sequencer ${market.sequencerUp ? "up" : "DOWN"} · ` +
         `${market.pausedTokens.size} paused · ${market.staleFeeds.size} stale feeds` +

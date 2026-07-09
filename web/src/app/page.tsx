@@ -1,8 +1,8 @@
 import Link from "next/link";
-import { AgentCard } from "@/components/AgentCard";
+import { BandSection } from "@/components/BandSection";
 import { ChainStats } from "@/components/ChainStats";
+import { FeedPanel } from "@/components/FeedPanel";
 import { MarketTable } from "@/components/MarketTable";
-import { AGENTS, FEED } from "@/lib/mock";
 
 export default function Dashboard() {
   return (
@@ -25,12 +25,8 @@ export default function Dashboard() {
 
       <main className="shell">
         <section className="agents">
-          <div className="section-title">the band · {AGENTS.length} agents</div>
-          <div className="agent-grid">
-            {AGENTS.map((a) => (
-              <AgentCard key={a.id} agent={a} />
-            ))}
-          </div>
+          <div className="section-title">the band</div>
+          <BandSection />
 
           <div className="section-title market-title">sherwood market · chainlink prices</div>
           <MarketTable />
@@ -46,17 +42,7 @@ export default function Dashboard() {
 
           <div className="panel">
             <div className="section-title">activity</div>
-            <div className="feed">
-              {FEED.map((l, i) => (
-                <div key={i} className="feed-line">
-                  <span className="feed-time">{l.time}</span>
-                  <span>
-                    <b>{l.agent}</b>{" "}
-                    <span className={l.kind}>{l.text}</span>
-                  </span>
-                </div>
-              ))}
-            </div>
+            <FeedPanel />
           </div>
         </aside>
       </main>
