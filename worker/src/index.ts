@@ -46,7 +46,8 @@ import { createAgentExecutor, type AgentExecutor } from "./executor";
 import { accrueAboveHwm } from "./fees";
 import { loadGrantFile } from "./grant";
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
-import { steadyBasketTick, type SteadyBasketConfig, type Snapshot } from "./strategies/steady-basket";
+import { basketTokens, buildStrategy, resolveStrategyName } from "./strategies/registry";
+import type { Holding, Snapshot } from "./strategies/types";
 import { readPositions } from "./positions";
 import { readAccountBalances, readMarketSafety } from "./snapshot";
 import {
@@ -105,23 +106,12 @@ function limitsFromGrant(grant: StoredGrant): AgentLimits {
   };
 }
 
-const BASKET_SYMBOLS = ["AAPL", "MSFT", "QQQ"] as const;
-const BASKET_TOKENS = STOCK_TOKENS.filter((t) =>
-  (BASKET_SYMBOLS as readonly string[]).includes(t.symbol),
-);
+const BASKET_TOKENS = basketTokens();
 
-const basket: SteadyBasketConfig = {
-  legs: STOCK_TOKENS.filter((t) => ["AAPL", "MSFT", "QQQ"].includes(t.symbol)).map((t, _, arr) => ({
-    symbol: t.symbol,
-    token: t.address,
-    weightBps: Math.floor(10_000 / arr.length),
-  })),
-  buyPerTickUsdg: usdg(25),
-  idleFloorUsdg: usdg(50),
+const strategy = buildStrategy(resolveStrategyName(process.env.MERRYMEN_STRATEGY), {
   swapRouter: SWAP_ROUTER,
-  vault: MORPHO.steakhouseUsdgVault as `0x${string}`,
-  usdg: CASH.USDG as `0x${string}`,
-};
+  usdg6: usdg,
+});
 
 /** A policy-legal no-op: approve a dust allowance to the allowlisted router. */
 function selfTestIntent(): TradeIntent {
@@ -130,7 +120,8 @@ function selfTestIntent(): TradeIntent {
     target: CASH.USDG as `0x${string}`,
     sellToken: CASH.USDG as `0x${string}`,
     buyToken: CASH.USDG as `0x${string}`,
-    sellAmountUsdg: 1n, // 0.000001 USDG
+    sellAmountRaw: 1n, // 0.000001 USDG
+    notionalUsdg: 1n,
   };
 }
 
@@ -229,7 +220,7 @@ async function main() {
       nowSec: Math.floor(Date.now() / 1000),
     };
     const verdict = checkPolicy(intent, limits, state);
-    const notional = intent.kind === "swap" ? intent.sellAmountUsdg : intent.amountUsdg;
+    const notional = intent.kind === "swap" ? intent.notionalUsdg : intent.amountUsdg;
 
     if (!verdict.ok) {
       console.log(`[policy] REJECTED ${intent.kind}: ${verdict.rule} — ${verdict.detail}`);
@@ -261,7 +252,7 @@ async function main() {
         const quote = await bestQuote(active.client, {
           tokenIn: intent.sellToken,
           tokenOut: intent.buyToken,
-          amountIn: intent.sellAmountUsdg,
+          amountIn: intent.sellAmountRaw,
         });
         if (!quote) {
           console.log(`[quote] no executable Uniswap route for ${intent.buyToken} — skipped`);
@@ -286,13 +277,14 @@ async function main() {
           sim_fee_tier: quote.fee,
           sim_gas: quote.gasEstimate.toString(),
         };
+        // Approve exactly what's sold — USDG on buys, the stock token on sells.
         const approve = {
-          to: CASH.USDG as `0x${string}`,
+          to: intent.sellToken,
           value: 0n,
           data: encodeFunctionData({
             abi: erc20Abi,
             functionName: "approve",
-            args: [UNISWAP.swapRouter02 as `0x${string}`, intent.sellAmountUsdg],
+            args: [UNISWAP.swapRouter02 as `0x${string}`, intent.sellAmountRaw],
           }),
         };
         const swap = buildSwapCall({
@@ -300,7 +292,7 @@ async function main() {
           tokenOut: intent.buyToken,
           fee: quote.fee,
           recipient: executor.address,
-          amountIn: intent.sellAmountUsdg,
+          amountIn: intent.sellAmountRaw,
           minAmountOut: minOut,
         });
         txHash = await executor.execute([approve, swap]);
@@ -315,9 +307,9 @@ async function main() {
         const data = encodeFunctionData({
           abi: erc20Abi,
           functionName: "approve",
-          args: [RIALTO.routerSnapshot as `0x${string}`, intent.sellAmountUsdg],
+          args: [RIALTO.routerSnapshot as `0x${string}`, intent.sellAmountRaw],
         });
-        txHash = await executor.execute([{ to: CASH.USDG as `0x${string}`, value: 0n, data }]);
+        txHash = await executor.execute([{ to: intent.sellToken, value: 0n, data }]);
       } else if (intent.kind === "vault-deposit") {
         const data = encodeFunctionData({
           abi: VAULT_ABI,
@@ -474,15 +466,27 @@ async function main() {
       })),
     );
 
+    const holdings = new Map<string, Holding>(
+      positions.map((p) => [
+        p.symbol,
+        {
+          token: p.token,
+          rawBalance: p.rawBalance,
+          valueUsdg: p.valueUsdg,
+          priceStale: p.priceStale,
+        },
+      ]),
+    );
     const snap: Snapshot = {
       cashUsdg: balances.cashUsdg,
       vaultUsdg: balances.vaultUsdg,
+      holdings,
       pausedTokens: market.pausedTokens,
       staleFeeds: market.staleFeeds,
       sequencerUp: market.sequencerUp,
     };
 
-    for (const intent of steadyBasketTick(basket, snap)) {
+    for (const intent of strategy.tick(snap)) {
       await processIntent(intent, equityUsdg);
     }
   }
@@ -499,7 +503,9 @@ async function main() {
     process.exit(0);
   }
 
-  console.log(`merrymen worker starting — safety reads from chain ${robinhoodChain.id}, grant re-synced every tick`);
+  console.log(
+    `merrymen worker starting — strategy ${strategy.name}, safety reads from chain ${robinhoodChain.id}, grant re-synced every tick`,
+  );
   await tick();
   setInterval(() => tick().catch((e) => console.error("[tick]", e)), TICK_MS);
 }

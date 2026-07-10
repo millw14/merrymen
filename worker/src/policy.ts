@@ -31,7 +31,10 @@ export type TradeIntent = {
   target: `0x${string}`;
   sellToken: `0x${string}`;
   buyToken: `0x${string}`;
-  sellAmountUsdg: bigint;
+  /** Raw units of sellToken (USDG = 6dp, stock tokens = 18dp) — what executes. */
+  sellAmountRaw: bigint;
+  /** USDG-equivalent size (6dp) — what the caps judge. */
+  notionalUsdg: bigint;
 } | {
   kind: "vault-deposit" | "vault-withdraw";
   target: `0x${string}`;
@@ -76,7 +79,7 @@ export function checkPolicy(intent: TradeIntent, limits: AgentLimits, state: Age
   // Withdrawals return funds to the account — the on-chain policy leaves them
   // unsized, so the mirror does too. Spend caps bound money leaving the wall.
   if (intent.kind !== "vault-withdraw") {
-    const notional = intent.kind === "swap" ? intent.sellAmountUsdg : intent.amountUsdg;
+    const notional = intent.kind === "swap" ? intent.notionalUsdg : intent.amountUsdg;
     if (notional > limits.perTradeUsdg) {
       return { ok: false, rule: "per-trade-cap", detail: `${notional} > ${limits.perTradeUsdg}` };
     }

@@ -40,7 +40,8 @@ function swap(over: Partial<Extract<TradeIntent, { kind: "swap" }>> = {}): Trade
     target: ROUTER,
     sellToken: USDG,
     buyToken: AAPL,
-    sellAmountUsdg: 25_000_000n,
+    sellAmountRaw: 25_000_000n,
+    notionalUsdg: 25_000_000n,
     ...over,
   };
 }
@@ -72,12 +73,12 @@ describe("checkPolicy", () => {
   });
 
   it("rejects a trade above the per-trade cap", () => {
-    const v = checkPolicy(swap({ sellAmountUsdg: 50_000_001n }), limits(), state());
+    const v = checkPolicy(swap({ sellAmountRaw: 50_000_001n, notionalUsdg: 50_000_001n }), limits(), state());
     assert.equal(!v.ok && v.rule, "per-trade-cap");
   });
 
   it("allows a trade exactly at the per-trade cap", () => {
-    assert.deepEqual(checkPolicy(swap({ sellAmountUsdg: 50_000_000n }), limits(), state()), { ok: true });
+    assert.deepEqual(checkPolicy(swap({ sellAmountRaw: 50_000_000n, notionalUsdg: 50_000_000n }), limits(), state()), { ok: true });
   });
 
   it("rejects when the daily cap would be exceeded", () => {

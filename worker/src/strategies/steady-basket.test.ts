@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { steadyBasketTick, type Snapshot, type SteadyBasketConfig } from "./steady-basket";
+import { steadyBasketTick, type SteadyBasketConfig } from "./steady-basket";
+import type { Snapshot } from "./types";
 
 const ROUTER = "0x1111111111111111111111111111111111111111" as const;
 const VAULT = "0x2222222222222222222222222222222222222222" as const;
@@ -27,6 +28,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
   return {
     cashUsdg: 100_000_000n, // 100 USDG
     vaultUsdg: 0n,
+    holdings: new Map(),
     pausedTokens: new Set<string>(),
     staleFeeds: new Set<string>(),
     sequencerUp: true,
@@ -44,7 +46,8 @@ describe("steadyBasketTick", () => {
     const swaps = intents.filter((i) => i.kind === "swap");
     assert.equal(swaps.length, 2);
     for (const s of swaps) {
-      assert.equal(s.kind === "swap" && s.sellAmountUsdg, 10_000_000n);
+      assert.equal(s.kind === "swap" && s.sellAmountRaw, 10_000_000n);
+      assert.equal(s.kind === "swap" && s.notionalUsdg, 10_000_000n);
       assert.equal(s.target, ROUTER);
     }
   });

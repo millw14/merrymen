@@ -8,6 +8,9 @@
  */
 
 import type { TradeIntent } from "../policy";
+import type { Snapshot } from "./types";
+
+export type { Snapshot };
 
 export interface BasketLeg {
   symbol: string;
@@ -24,16 +27,6 @@ export interface SteadyBasketConfig {
   swapRouter: `0x${string}`;
   vault: `0x${string}`;
   usdg: `0x${string}`;
-}
-
-export interface Snapshot {
-  cashUsdg: bigint;
-  vaultUsdg: bigint;
-  /** Per-token pause state read from the Stock contract — never trade a paused token. */
-  pausedTokens: Set<string>;
-  /** Chainlink staleness per symbol; weekends are expected-stale for stocks. */
-  staleFeeds: Set<string>;
-  sequencerUp: boolean;
 }
 
 export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): TradeIntent[] {
@@ -61,7 +54,8 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Trade
         target: cfg.swapRouter,
         sellToken: cfg.usdg,
         buyToken: leg.token,
-        sellAmountUsdg: legAmount,
+        sellAmountRaw: legAmount,
+        notionalUsdg: legAmount,
       });
     }
   }

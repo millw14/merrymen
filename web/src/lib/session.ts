@@ -50,6 +50,7 @@ import {
   CASH,
   MORPHO,
   RIALTO,
+  STOCK_TOKENS,
   UNISWAP,
   UNISWAP_SWAP_ROUTER_ABI,
   robinhoodTestnet,
@@ -145,6 +146,20 @@ export async function grantSessionKey(
             { condition: ParamCondition.LESS_THAN_OR_EQUAL, value: usdgUnits(caps.perTradeUsdg) },
           ],
         },
+        // approve basket stock tokens for SELLS, only to the allowed routers.
+        // No amount condition: share counts are 18dp and not USDG-comparable —
+        // routers can only pull what's approved, and the USDG cap above bounds
+        // what the agent could ever have bought in the first place.
+        ...STOCK_TOKENS.filter((t) => ["AAPL", "MSFT", "QQQ"].includes(t.symbol)).map(
+          (t) =>
+            ({
+              target: t.address as Address,
+              valueLimit: 0n,
+              abi: erc20Abi,
+              functionName: "approve",
+              args: [{ condition: ParamCondition.ONE_OF, value: allowedSpenders }, null],
+            }) as const,
+        ),
         {
           // Rialto router: target-scoped (its calldata comes from the quote API)
           target: RIALTO.routerSnapshot as Address,
