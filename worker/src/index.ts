@@ -46,6 +46,7 @@ import { createAgentExecutor, type AgentExecutor } from "./executor";
 import { loadGrantFile } from "./grant";
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
 import { steadyBasketTick, type SteadyBasketConfig, type Snapshot } from "./strategies/steady-basket";
+import { readPositions } from "./positions";
 import { readAccountBalances, readMarketSafety } from "./snapshot";
 import {
   addEquity,
@@ -56,6 +57,7 @@ import {
   getSpentTodayUsdg,
   initStore,
   setAgentStatus,
+  setPositions,
 } from "./store";
 
 const TICK_MS = 60_000;
@@ -95,6 +97,11 @@ function limitsFromGrant(grant: StoredGrant): AgentLimits {
     maxOpsPerDay: grant.caps.maxOpsPerDay,
   };
 }
+
+const BASKET_SYMBOLS = ["AAPL", "MSFT", "QQQ"] as const;
+const BASKET_TOKENS = STOCK_TOKENS.filter((t) =>
+  (BASKET_SYMBOLS as readonly string[]).includes(t.symbol),
+);
 
 const basket: SteadyBasketConfig = {
   legs: STOCK_TOKENS.filter((t) => ["AAPL", "MSFT", "QQQ"].includes(t.symbol)).map((t, _, arr) => ({
@@ -398,19 +405,39 @@ async function main() {
       return;
     }
 
-    const balances = await readAccountBalances(client, grant.smartAccount);
-    const equityUsdg = balances.cashUsdg + balances.vaultUsdg;
+    const [balances, positions] = await Promise.all([
+      readAccountBalances(client, grant.smartAccount),
+      readPositions(client, grant.smartAccount, BASKET_TOKENS, market.prices),
+    ]);
+    const positionsUsdg = positions.reduce((sum, p) => sum + p.valueUsdg, 0n);
+    // Equity is the whole book — cash, vault, and multiplier-aware stock value —
+    // so the drawdown breaker judges reality, not just the cash ledger.
+    const equityUsdg = balances.cashUsdg + balances.vaultUsdg + positionsUsdg;
     highWaterMarkUsdg = equityUsdg > highWaterMarkUsdg ? equityUsdg : highWaterMarkUsdg;
     console.log(
       `[account] ${grant.smartAccount} · eth ${formatUnits(balances.ethWei, 18)} · ` +
-        `cash ${fmt(balances.cashUsdg)} USDG · vault ${fmt(balances.vaultUsdg)} USDG`,
+        `cash ${fmt(balances.cashUsdg)} USDG · vault ${fmt(balances.vaultUsdg)} USDG · ` +
+        `positions ${fmt(positionsUsdg)} USDG (${positions.map((p) => p.symbol).join(",") || "none"})`,
     );
 
     await addEquity(agentId, {
       ethWei: balances.ethWei,
       cashUsdg: usdgNum(balances.cashUsdg),
       vaultUsdg: usdgNum(balances.vaultUsdg),
+      positionsUsdg: usdgNum(positionsUsdg),
     });
+    await setPositions(
+      agentId,
+      positions.map((p) => ({
+        symbol: p.symbol,
+        token: p.token,
+        rawBalance: p.rawBalance,
+        uiMultiplier: p.uiMultiplier,
+        priceUsd: Number(p.price8) / 1e8,
+        priceStale: p.priceStale,
+        valueUsdg: usdgNum(p.valueUsdg),
+      })),
+    );
 
     const snap: Snapshot = {
       cashUsdg: balances.cashUsdg,

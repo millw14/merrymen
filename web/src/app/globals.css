@@ -212,6 +212,13 @@ button { font: inherit; cursor: pointer; }
 }
 .killall:hover { background: #991b1b; }
 .killall:active { box-shadow: inset 0 2px 4px rgba(0,0,0,0.5); transform: translateY(1px); }
+.positions {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  margin-top: 8px; font-size: 12px;
+}
+.position { color: var(--text); }
+.position .dim { color: var(--text-faint); }
+
 .killall.armed {
   background: var(--red);
   animation: killpulse 0.9s ease-in-out infinite;

@@ -153,6 +153,26 @@ export function BandSection() {
         })()}
       </div>
 
+      {(feed?.positions ?? []).length > 0 && (
+        <div className="positions mono">
+          {feed!.positions.map((p) => {
+            const shares =
+              (Number(BigInt(p.raw_balance) / 10n ** 9n) / 1e9) *
+              (Number(BigInt(p.ui_multiplier) / 10n ** 9n) / 1e9);
+            return (
+              <span key={p.symbol} className="position">
+                <b>{shares.toFixed(4)}</b> {p.symbol}
+                <span className="dim">
+                  {" "}
+                  ${p.value_usdg.toFixed(2)}
+                  {p.price_stale ? " · px 24/5" : ""}
+                </span>
+              </span>
+            );
+          })}
+        </div>
+      )}
+
       <div className="caps">
         <span className="cap">max <b>{g.caps.perTradeUsdg} USDG</b>/trade</span>
         <span className="cap"><b>{g.caps.dailyUsdg} USDG</b>/day</span>

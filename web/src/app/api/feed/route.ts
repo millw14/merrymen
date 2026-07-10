@@ -23,15 +23,29 @@ export interface EquityPoint {
   equity_usdg: number;
   at: string;
 }
+export interface PositionRow {
+  symbol: string;
+  raw_balance: string;
+  ui_multiplier: string;
+  price_usd: number;
+  price_stale: number;
+  value_usdg: number;
+}
 export interface FeedResponse {
   source: "sqlite" | "none";
   events: FeedEvent[];
   equity: EquityPoint[];
+  positions: PositionRow[];
 }
 
 export async function GET() {
   if (!existsSync(DB_FILE)) {
-    return NextResponse.json({ source: "none", events: [], equity: [] } satisfies FeedResponse);
+    return NextResponse.json({
+      source: "none",
+      events: [],
+      equity: [],
+      positions: [],
+    } satisfies FeedResponse);
   }
 
   // Read-only open so the worker stays the single writer. Tolerate a DB the
@@ -40,6 +54,7 @@ export async function GET() {
   try {
     let events: FeedEvent[] = [];
     let equity: EquityPoint[] = [];
+    let positions: PositionRow[] = [];
     try {
       events = db
         .prepare(
@@ -61,7 +76,17 @@ export async function GET() {
     } catch {
       /* table not created yet */
     }
-    return NextResponse.json({ source: "sqlite", events, equity } satisfies FeedResponse);
+    try {
+      positions = db
+        .prepare(
+          `SELECT symbol, raw_balance, ui_multiplier, price_usd, price_stale, value_usdg
+           FROM positions ORDER BY value_usdg DESC`,
+        )
+        .all() as unknown as PositionRow[];
+    } catch {
+      /* table not created yet */
+    }
+    return NextResponse.json({ source: "sqlite", events, equity, positions } satisfies FeedResponse);
   } finally {
     db.close();
   }

@@ -66,7 +66,24 @@ function getDb(): DatabaseSync {
       at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS equity_agent_time ON equity (agent_id, at DESC);
+    CREATE TABLE IF NOT EXISTS positions (
+      agent_id TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      token TEXT NOT NULL,
+      raw_balance TEXT NOT NULL,
+      ui_multiplier TEXT NOT NULL,
+      price_usd REAL NOT NULL,
+      price_stale INTEGER NOT NULL DEFAULT 0,
+      value_usdg REAL NOT NULL,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      PRIMARY KEY (agent_id, symbol)
+    );
   `);
+  try {
+    db.exec("ALTER TABLE equity ADD COLUMN positions_usdg REAL NOT NULL DEFAULT 0");
+  } catch {
+    // column already exists
+  }
   console.log(`[store] sqlite at ${DB_FILE}`);
   return db;
 }
@@ -161,16 +178,70 @@ export async function addTrade(row: TradeRow): Promise<void> {
 
 export async function addEquity(
   agentId: string,
-  b: { ethWei: bigint; cashUsdg: number; vaultUsdg: number },
+  b: { ethWei: bigint; cashUsdg: number; vaultUsdg: number; positionsUsdg: number },
 ): Promise<void> {
   try {
     getDb()
       .prepare(
-        "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .run(agentId, b.ethWei.toString(), b.cashUsdg, b.vaultUsdg, b.cashUsdg + b.vaultUsdg);
+      .run(
+        agentId,
+        b.ethWei.toString(),
+        b.cashUsdg,
+        b.vaultUsdg,
+        b.positionsUsdg,
+        b.cashUsdg + b.vaultUsdg + b.positionsUsdg,
+      );
   } catch (e) {
     console.error("[store] equity insert failed:", e);
+  }
+}
+
+/** Latest holdings snapshot — replaces, then prunes symbols no longer held. */
+export async function setPositions(
+  agentId: string,
+  positions: readonly {
+    symbol: string;
+    token: string;
+    rawBalance: bigint;
+    uiMultiplier: bigint;
+    priceUsd: number;
+    priceStale: boolean;
+    valueUsdg: number;
+  }[],
+): Promise<void> {
+  try {
+    const db = getDb();
+    const upsert = db.prepare(
+      `INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale, value_usdg, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
+       ON CONFLICT(agent_id, symbol) DO UPDATE SET
+         raw_balance = excluded.raw_balance, ui_multiplier = excluded.ui_multiplier,
+         price_usd = excluded.price_usd, price_stale = excluded.price_stale,
+         value_usdg = excluded.value_usdg, updated_at = excluded.updated_at`,
+    );
+    for (const p of positions) {
+      upsert.run(
+        agentId,
+        p.symbol,
+        p.token,
+        p.rawBalance.toString(),
+        p.uiMultiplier.toString(),
+        p.priceUsd,
+        p.priceStale ? 1 : 0,
+        p.valueUsdg,
+      );
+    }
+    const held = positions.map((p) => p.symbol);
+    const placeholders = held.map(() => "?").join(",");
+    db.prepare(
+      held.length
+        ? `DELETE FROM positions WHERE agent_id = ? AND symbol NOT IN (${placeholders})`
+        : "DELETE FROM positions WHERE agent_id = ?",
+    ).run(agentId, ...held);
+  } catch (e) {
+    console.error("[store] positions update failed:", e);
   }
 }
 

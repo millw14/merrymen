@@ -30,6 +30,8 @@ export interface MarketSafety {
   pausedTokens: Set<string>;
   /** Symbols whose Chainlink feed is >2h old (expected on weekends — 24/5 feeds). */
   staleFeeds: Set<string>;
+  /** Latest Chainlink USD price per symbol (8dp), stale or not — for valuation. */
+  prices: Map<string, { price8: bigint; stale: boolean }>;
   sequencerUp: boolean;
   blockNumber: bigint;
 }
@@ -61,21 +63,26 @@ export async function readMarketSafety(): Promise<MarketSafety> {
   });
 
   const staleFeeds = new Set<string>();
+  const prices = new Map<string, { price8: bigint; stale: boolean }>();
   withFeed.forEach((t, i) => {
     const r = feedResults[i];
     if (r?.status !== "success") {
       staleFeeds.add(t.symbol);
       return;
     }
-    const [, , , updatedAt] = r.result as readonly [bigint, bigint, bigint, bigint, bigint];
-    if (now - Number(updatedAt) > 2 * 3600) staleFeeds.add(t.symbol);
+    const [, answer, , updatedAt] = r.result as readonly [bigint, bigint, bigint, bigint, bigint];
+    const stale = now - Number(updatedAt) > 2 * 3600;
+    if (stale) staleFeeds.add(t.symbol);
+    // Stale prices still value positions — a weekend AAPL holding isn't worth
+    // zero, it's worth Friday's close until Monday.
+    if (answer > 0n) prices.set(t.symbol, { price8: answer, stale });
   });
 
   // Sequencer heuristic until the Chainlink sequencer-uptime feed address is
   // confirmed for 4663: a healthy sequencer produces blocks continuously.
   const sequencerUp = now - Number(block.timestamp) < 120;
 
-  return { pausedTokens, staleFeeds, sequencerUp, blockNumber: block.number };
+  return { pausedTokens, staleFeeds, prices, sequencerUp, blockNumber: block.number };
 }
 
 export interface AccountBalances {
