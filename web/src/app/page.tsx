@@ -2,6 +2,7 @@ import Link from "next/link";
 import { BandSection } from "@/components/BandSection";
 import { ChainStats } from "@/components/ChainStats";
 import { FeedPanel } from "@/components/FeedPanel";
+import { KillSwitch } from "@/components/KillSwitch";
 import { MarketTable } from "@/components/MarketTable";
 
 export default function Dashboard() {
@@ -34,10 +35,7 @@ export default function Dashboard() {
 
         <aside className="rail">
           <div className="panel">
-            <button className="killall">◉ kill all agents</button>
-            <div className="killall-note">
-              revokes every session key on-chain · positions untouched
-            </div>
+            <KillSwitch />
           </div>
 
           <div className="panel">

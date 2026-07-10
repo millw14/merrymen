@@ -1,8 +1,13 @@
 /**
  * merrymen worker — the 24/7 loop.
  *
- * tick: snapshot → strategy intents → policy check → simulate (bundler gas
- * estimation rejects reverting ops) → execute via session key → record
+ * tick: sync grant → snapshot → strategy intents → policy check → simulate
+ * (bundler gas estimation rejects reverting ops) → execute via session key → record
+ *
+ * The grant file is re-read EVERY tick: sign a grant in the web app and the
+ * worker arms itself on the next tick; hit the kill switch (grant file deleted)
+ * and trading halts on the next tick — no restarts. Hard expiry on-chain is the
+ * backstop if this process dies with the file intact.
  *
  * Config:
  *   MERRYMEN_GRANT_FILE       grant JSON (default ../.data/grant.json via web /grant)
@@ -23,6 +28,7 @@ import {
   formatUnits,
   http,
   parseAbi,
+  type PublicClient,
 } from "viem";
 import {
   CASH,
@@ -39,7 +45,16 @@ import { loadGrantFile } from "./grant";
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
 import { steadyBasketTick, type SteadyBasketConfig, type Snapshot } from "./strategies/steady-basket";
 import { readAccountBalances, readMarketSafety } from "./snapshot";
-import { addEquity, addEvent, addTrade, ensureAgent, getOpsToday, getSpentTodayUsdg, initStore } from "./store";
+import {
+  addEquity,
+  addEvent,
+  addTrade,
+  ensureAgent,
+  getOpsToday,
+  getSpentTodayUsdg,
+  initStore,
+  setAgentStatus,
+} from "./store";
 
 const TICK_MS = 60_000;
 const usdg = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
@@ -94,51 +109,91 @@ function selfTestIntent(): TradeIntent {
   };
 }
 
+/** Everything tied to the currently armed grant — dies with the kill switch. */
+interface ActiveAgent {
+  grant: StoredGrant;
+  agentId: string;
+  client: PublicClient;
+  executor: AgentExecutor | null;
+  limits: AgentLimits;
+}
+
 async function main() {
   initStore();
-  const grant = loadGrantFile();
   const bundlerUrl = process.env.MERRYMEN_BUNDLER_URL;
   const selftest = process.argv.includes("--selftest");
 
-  if (!grant) {
-    console.log("[worker] no grant found — sign one at http://localhost:3100/grant");
-  }
-
-  const grantChain = grant?.chainId === robinhoodTestnet.id ? robinhoodTestnet : robinhoodChain;
-  const grantClient = grant
-    ? createPublicClient({ chain: grantChain, transport: http() })
-    : null;
-
-  const agentId = grant ? await ensureAgent(grant) : null;
-
-  let executor: AgentExecutor | null = null;
-  if (grant && bundlerUrl) {
-    executor = await createAgentExecutor({
-      chain: grantChain,
-      serializedGrant: grant.serialized,
-      bundlerUrl,
-    });
-    console.log(`[worker] executor live — smart account ${executor.address} on chain ${grantChain.id}`);
-  } else if (grant) {
-    console.log("[worker] no MERRYMEN_BUNDLER_URL — execution stubbed (policy/simulation still run)");
-  }
-
-  const limits = grant ? limitsFromGrant(grant) : null;
-  let spentTodayUsdg = agentId ? usdg(await getSpentTodayUsdg(agentId)) : 0n;
-  let opsToday = agentId ? await getOpsToday(agentId) : 0;
+  let active: ActiveAgent | null = null;
+  let spentTodayUsdg = 0n;
+  let opsToday = 0;
   let highWaterMarkUsdg = 0n;
   let lastSequencerUp = true;
 
-  if (agentId) {
+  /**
+   * Reconcile in-memory state with the grant file. Returns true if an agent is
+   * armed after the sync. Kill switch = grant file deleted by web's DELETE.
+   */
+  async function syncGrant(): Promise<boolean> {
+    const grant = loadGrantFile();
+
+    if (!grant) {
+      if (active) {
+        console.log("[kill] grant gone — session key destroyed client-side, trading halted");
+        await setAgentStatus(active.agentId, "killed");
+        await addEvent(
+          active.agentId,
+          "warn",
+          "KILL SWITCH — grant discarded, session key destroyed; trading halted",
+        );
+        active = null;
+      }
+      return false;
+    }
+
+    const unchanged =
+      active &&
+      active.grant.smartAccount === grant.smartAccount &&
+      active.grant.grantedAt === grant.grantedAt;
+    if (unchanged) return true;
+
+    const chain = grant.chainId === robinhoodTestnet.id ? robinhoodTestnet : robinhoodChain;
+    const agentId = await ensureAgent(grant);
+
+    let executor: AgentExecutor | null = null;
+    if (bundlerUrl) {
+      executor = await createAgentExecutor({
+        chain,
+        serializedGrant: grant.serialized,
+        bundlerUrl,
+      });
+      console.log(`[worker] executor live — smart account ${executor.address} on chain ${chain.id}`);
+    } else {
+      console.log("[worker] no MERRYMEN_BUNDLER_URL — execution stubbed (policy/simulation still run)");
+    }
+
+    active = {
+      grant,
+      agentId,
+      client: createPublicClient({ chain, transport: http() }),
+      executor,
+      limits: limitsFromGrant(grant),
+    };
+    spentTodayUsdg = usdg(await getSpentTodayUsdg(agentId));
+    opsToday = await getOpsToday(agentId);
+    highWaterMarkUsdg = 0n;
+    await setAgentStatus(agentId, "armed");
     await addEvent(
       agentId,
       "ok",
-      `worker online — executor ${executor ? "live" : "stubbed"}, spent ${fmt(spentTodayUsdg)} USDG in trailing 24h`,
+      `grant armed — executor ${executor ? "live" : "stubbed"}, ` +
+        `spent ${fmt(spentTodayUsdg)} USDG / ${opsToday} ops in trailing 24h`,
     );
+    return true;
   }
 
   async function processIntent(intent: TradeIntent, equityUsdg: bigint): Promise<void> {
-    if (!limits || !agentId) return;
+    if (!active) return;
+    const { agentId, limits, executor } = active;
     const state: AgentState = {
       spentTodayUsdg,
       opsToday,
@@ -253,6 +308,8 @@ async function main() {
   }
 
   async function tick() {
+    const armed = await syncGrant();
+
     const market = await readMarketSafety();
     heartbeat(market.blockNumber);
     console.log(
@@ -260,18 +317,27 @@ async function main() {
         `${market.pausedTokens.size} paused · ${market.staleFeeds.size} stale feeds`,
     );
 
-    if (agentId && market.sequencerUp !== lastSequencerUp) {
+    if (active && market.sequencerUp !== lastSequencerUp) {
       await addEvent(
-        agentId,
+        active.agentId,
         market.sequencerUp ? "ok" : "warn",
         market.sequencerUp ? "sequencer recovered — resuming" : "sequencer DOWN — all trading paused",
       );
-      lastSequencerUp = market.sequencerUp;
+    }
+    lastSequencerUp = market.sequencerUp;
+
+    if (!armed || !active) return;
+    const { grant, agentId, client } = active;
+
+    if (Math.floor(Date.now() / 1000) >= grant.expiresAt) {
+      console.log("[expiry] session key expired — agent retired");
+      await setAgentStatus(agentId, "expired");
+      await addEvent(agentId, "warn", "session key expired — agent retired (grant a new key to redeploy)");
+      active = null;
+      return;
     }
 
-    if (!grant || !grantClient || !agentId) return;
-
-    const balances = await readAccountBalances(grantClient, grant.smartAccount);
+    const balances = await readAccountBalances(client, grant.smartAccount);
     const equityUsdg = balances.cashUsdg + balances.vaultUsdg;
     highWaterMarkUsdg = equityUsdg > highWaterMarkUsdg ? equityUsdg : highWaterMarkUsdg;
     console.log(
@@ -299,7 +365,8 @@ async function main() {
   }
 
   if (selftest) {
-    if (!grant || !executor) {
+    const armed = await syncGrant();
+    if (!armed || !active || !(active as ActiveAgent).executor) {
       console.error("[selftest] needs a grant AND MERRYMEN_BUNDLER_URL");
       process.exit(1);
     }
@@ -309,7 +376,7 @@ async function main() {
     process.exit(0);
   }
 
-  console.log(`merrymen worker starting — grant chain ${grantChain.id}, safety reads from ${robinhoodChain.id}`);
+  console.log(`merrymen worker starting — safety reads from chain ${robinhoodChain.id}, grant re-synced every tick`);
   await tick();
   setInterval(() => tick().catch((e) => console.error("[tick]", e)), TICK_MS);
 }

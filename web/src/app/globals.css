@@ -212,6 +212,15 @@ button { font: inherit; cursor: pointer; }
 }
 .killall:hover { background: #991b1b; }
 .killall:active { box-shadow: inset 0 2px 4px rgba(0,0,0,0.5); transform: translateY(1px); }
+.killall.armed {
+  background: var(--red);
+  animation: killpulse 0.9s ease-in-out infinite;
+}
+.killall:disabled { opacity: 0.7; cursor: default; }
+@keyframes killpulse {
+  0%, 100% { box-shadow: inset 0 -3px 0 rgba(0,0,0,0.35), 0 0 0 0 rgba(248,113,113,0.5); }
+  50% { box-shadow: inset 0 -3px 0 rgba(0,0,0,0.35), 0 0 0 6px rgba(248,113,113,0); }
+}
 .killall-note {
   margin-top: 8px; text-align: center;
   font-family: var(--mono); font-size: 10px; color: var(--text-faint);

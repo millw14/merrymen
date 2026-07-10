@@ -110,6 +110,17 @@ export async function ensureAgent(grant: StoredGrant): Promise<string> {
   return grant.smartAccount;
 }
 
+export async function setAgentStatus(
+  agentId: string,
+  status: "armed" | "active" | "killed" | "expired",
+): Promise<void> {
+  try {
+    getDb().prepare("UPDATE agents SET status = ? WHERE smart_account = ?").run(status, agentId);
+  } catch (e) {
+    console.error("[store] status update failed:", e);
+  }
+}
+
 export async function addEvent(
   agentId: string,
   level: "ok" | "warn" | "err",
