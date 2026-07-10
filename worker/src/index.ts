@@ -41,6 +41,7 @@ import {
   robinhoodTestnet,
   type StoredGrant,
 } from "@merrymen/core";
+import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { bestQuote, buildSwapCall, minOutWithSlippage } from "./venues/uniswap";
 import { createAgentExecutor, type AgentExecutor } from "./executor";
 import { accrueAboveHwm } from "./fees";
@@ -73,6 +74,8 @@ const TICK_MS = 60_000;
  * "rialto" stays approval-only until their /quote API onboarding completes.
  */
 const SWAP_VENUE = (process.env.MERRYMEN_SWAP_VENUE ?? "uniswap") as "uniswap" | "rialto";
+/** Rialto integrator key (wallet-signed onboarding). Without it the venue is approval-only. */
+const RIALTO_API_KEY = process.env.MERRYMEN_RIALTO_API_KEY;
 const SLIPPAGE_BPS = Number(process.env.MERRYMEN_SLIPPAGE_BPS ?? 100);
 /** Performance fee on profit above the high-water mark. 1000 = 10%. Accrual-only. */
 const PERF_FEE_BPS = Number(process.env.MERRYMEN_PERF_FEE_BPS ?? 1000);
@@ -314,8 +317,58 @@ async function main() {
           "ok",
           `simulated ✓ quote ${quote.amountOut} min ${minOut} @ fee ${quote.fee / 10_000}% · gas ~${quote.gasEstimate}`,
         );
+      } else if (intent.kind === "swap" && RIALTO_API_KEY && intent.sellToken !== intent.buyToken) {
+        // Rialto full leg: registry-resolved router only, API-supplied calldata
+        // validated against it. A migrated router (≠ grant-time snapshot) means
+        // the on-chain call policy would reject anyway — skip with the reason.
+        const router = await resolveRialtoRouter(active.client);
+        if (router.toLowerCase() !== (RIALTO.routerSnapshot as string).toLowerCase()) {
+          await addEvent(
+            agentId,
+            "warn",
+            `Rialto router migrated to ${router} — re-issue the grant to trade; swap skipped`,
+          );
+          return;
+        }
+        const { quote, reason } = await fetchRialtoQuote(
+          { apiKey: RIALTO_API_KEY },
+          {
+            sellToken: intent.sellToken,
+            buyToken: intent.buyToken,
+            sellAmountRaw: intent.sellAmountRaw,
+            taker: executor.address,
+            expectedRouter: router,
+          },
+        );
+        if (!quote) {
+          console.log(`[rialto] no executable quote: ${reason}`);
+          await addEvent(agentId, "warn", `Rialto quote refused: ${reason} — swap skipped`);
+          await addTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            sell_token: intent.sellToken,
+            buy_token: intent.buyToken,
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: "no-quote",
+            created_at: new Date().toISOString(),
+          });
+          return;
+        }
+        sim = { sim_quote_out: quote.buyAmountRaw?.toString() };
+        const approve = {
+          to: intent.sellToken,
+          value: 0n,
+          data: encodeFunctionData({
+            abi: erc20Abi,
+            functionName: "approve",
+            args: [router, intent.sellAmountRaw],
+          }),
+        };
+        txHash = await executor.execute([approve, { to: quote.to, value: 0n, data: quote.data }]);
       } else if (intent.kind === "swap") {
-        // Rialto venue: approval leg only until their /quote API onboarding;
+        // Rialto venue without an API key: approval leg only until onboarding;
         // swap calldata comes from that API. Bundler estimation still simulates.
         const data = encodeFunctionData({
           abi: erc20Abi,
