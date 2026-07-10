@@ -101,6 +101,8 @@ export type FetchLike = (url: string, init?: { headers?: Record<string, string> 
 
 export interface RialtoClientOpts {
   apiKey: string;
+  /** Header the API expects the key in (default x-api-key; settings-configurable). */
+  headerName?: string;
   /** Injectable for tests; defaults to global fetch. */
   fetchFn?: FetchLike;
   apiBase?: string;
@@ -123,7 +125,7 @@ export async function fetchRialtoQuote(
 ): Promise<{ quote: RialtoQuote | null; reason?: string }> {
   const base = opts.apiBase ?? RIALTO.apiBase;
   const fetchFn = opts.fetchFn ?? (fetch as unknown as FetchLike);
-  const headerName = process.env.MERRYMEN_RIALTO_API_KEY_HEADER ?? "x-api-key";
+  const headerName = opts.headerName ?? process.env.MERRYMEN_RIALTO_API_KEY_HEADER ?? "x-api-key";
 
   const url =
     `${base}/quote?sellToken=${args.sellToken}&buyToken=${args.buyToken}` +

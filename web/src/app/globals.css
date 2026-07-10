@@ -212,6 +212,34 @@ button { font: inherit; cursor: pointer; }
 }
 .killall:hover { background: #991b1b; }
 .killall:active { box-shadow: inset 0 2px 4px rgba(0,0,0,0.5); transform: translateY(1px); }
+/* settings page */
+.settings-panel { max-width: 760px; }
+.settings-section {
+  margin: 22px 0 10px;
+  font-size: 11px; letter-spacing: 2px; text-transform: uppercase;
+  color: var(--text-faint);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+.settings-grid { grid-template-columns: 1fr 1fr; }
+.settings-field { position: relative; }
+.field-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 10.5px; line-height: 1.45;
+  color: var(--text-faint);
+}
+.settings-clear {
+  margin-left: 8px; padding: 4px 10px; font-size: 10px;
+}
+.symbol-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.symbol-chip { cursor: pointer; opacity: 0.55; border: 1px solid var(--border); background: none; }
+.symbol-chip.on { opacity: 1; border-color: var(--green); color: var(--green); }
+.settings-panel select {
+  width: 100%; background: var(--bg-2); color: var(--text);
+  border: none; outline: none; font-family: var(--mono); font-size: 13px;
+}
+
 .positions {
   display: flex; flex-wrap: wrap; gap: 10px;
   margin-top: 8px; font-size: 12px;

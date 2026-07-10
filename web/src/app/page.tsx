@@ -24,6 +24,9 @@ export default function Dashboard() {
         <Link href="/scoreboard" className="mono" style={{ color: "var(--text-dim)", fontSize: 12 }}>
           scoreboard
         </Link>
+        <Link href="/settings" className="mono" style={{ color: "var(--text-dim)", fontSize: 12 }}>
+          settings
+        </Link>
         <Link href="/grant" className="connect-btn" style={{ textDecoration: "none" }}>
           deploy an agent
         </Link>

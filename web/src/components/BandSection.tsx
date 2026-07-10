@@ -201,7 +201,8 @@ export function BandSection() {
 
       {state === "armed" && (
         <div className="real-hint mono">
-          wall is up — start the worker (npm run dev in worker/) and fund the account to go active
+          wall is up — start the worker (npm run dev in worker/), add a bundler URL in{" "}
+          <Link href="/settings">settings</Link>, and fund the account to go active
         </div>
       )}
 

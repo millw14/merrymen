@@ -1,22 +1,24 @@
 /**
  * merrymen worker — the 24/7 loop.
  *
- * tick: sync grant → snapshot → strategy intents → policy check → simulate
- * (bundler gas estimation rejects reverting ops) → execute via session key → record
+ * tick: refresh settings → sync grant → snapshot → strategy intents → policy
+ * check → simulate → execute via session key → record
  *
- * The grant file is re-read EVERY tick: sign a grant in the web app and the
- * worker arms itself on the next tick; hit the kill switch (grant file deleted)
- * and trading halts on the next tick — no restarts. Hard expiry on-chain is the
- * backstop if this process dies with the file intact.
+ * TWO files are re-read every tick, so the web UI drives the worker with no
+ * restarts:
+ *   .data/grant.json     — sign a grant and the worker arms next tick; kill
+ *                          switch deletes it and trading halts next tick
+ *   .data/settings.json  — API keys, bundler URL, strategy and every trading
+ *                          knob (see /settings in the web app). Connection
+ *                          changes re-arm the executor; strategy changes
+ *                          rebuild the strategy in place. Env vars remain the
+ *                          fallback; precedence is file > env > default.
  *
- * Config:
- *   MERRYMEN_GRANT_FILE       grant JSON (default ../.data/grant.json via web /grant)
- *   MERRYMEN_BUNDLER_URL      4337 bundler RPC; without it, execution stays stubbed
  * Persistence: SQLite at .data/merrymen.db (node:sqlite) — no service, no keys.
  *
- * `--selftest` sends one policy-legal no-op UserOp (approve 0.000001 USDG to the
- * Rialto router) through the FULL pipeline to prove grant → policy → bundler →
- * on-chain policy enforcement, end to end.
+ * `--selftest` sends one policy-legal no-op UserOp (approve 0.000001 USDG)
+ * through the FULL pipeline to prove grant → policy → bundler → on-chain
+ * policy enforcement, end to end.
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -34,11 +36,11 @@ import {
   CASH,
   MORPHO,
   RIALTO,
-  STOCK_TOKENS,
   UNISWAP,
   USDG_DECIMALS,
   robinhoodChain,
   robinhoodTestnet,
+  type StockToken,
   type StoredGrant,
 } from "@merrymen/core";
 import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
@@ -47,10 +49,16 @@ import { createAgentExecutor, type AgentExecutor } from "./executor";
 import { accrueAboveHwm } from "./fees";
 import { loadGrantFile } from "./grant";
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
-import { basketTokens, buildStrategy, resolveStrategyName } from "./strategies/registry";
-import type { Holding, Snapshot } from "./strategies/types";
+import {
+  connectionKey,
+  resolveConfig,
+  strategyKey,
+  type ResolvedConfig,
+} from "./settings";
+import { buildStrategy, tokensForSymbols } from "./strategies/registry";
+import type { Holding, Snapshot, Strategy } from "./strategies/types";
 import { readPositions } from "./positions";
-import { readAccountBalances, readMarketSafety } from "./snapshot";
+import { readAccountBalances, readMarketSafety, setMainnetRpc } from "./snapshot";
 import {
   addEquity,
   addEvent,
@@ -67,33 +75,21 @@ import {
   type TradeRow,
 } from "./store";
 
-const TICK_MS = 60_000;
-
-/**
- * Swap venue: "uniswap" executes the full quote→swap leg permissionlessly;
- * "rialto" stays approval-only until their /quote API onboarding completes.
- */
-const SWAP_VENUE = (process.env.MERRYMEN_SWAP_VENUE ?? "uniswap") as "uniswap" | "rialto";
-/** Rialto integrator key (wallet-signed onboarding). Without it the venue is approval-only. */
-const RIALTO_API_KEY = process.env.MERRYMEN_RIALTO_API_KEY;
-const SLIPPAGE_BPS = Number(process.env.MERRYMEN_SLIPPAGE_BPS ?? 100);
-/** Performance fee on profit above the high-water mark. 1000 = 10%. Accrual-only. */
-const PERF_FEE_BPS = Number(process.env.MERRYMEN_PERF_FEE_BPS ?? 1000);
-/** Deployed BreakerRegistry (contracts workspace). When set, a tripped breaker halts intents. */
-const BREAKER_ADDRESS = process.env.MERRYMEN_BREAKER_ADDRESS as `0x${string}` | undefined;
-
 const BREAKER_ABI = parseAbi(["function isTripped(address account) view returns (bool)"]);
-const SWAP_ROUTER = (SWAP_VENUE === "uniswap" ? UNISWAP.swapRouter02 : RIALTO.routerSnapshot) as `0x${string}`;
-const usdg = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
-const usdgNum = (v: bigint) => Number(formatUnits(v, USDG_DECIMALS));
-const fmt = (v: bigint) => formatUnits(v, USDG_DECIMALS);
-
 const VAULT_ABI = parseAbi([
   "function deposit(uint256 assets, address receiver) returns (uint256)",
   "function withdraw(uint256 assets, address receiver, address owner) returns (uint256)",
 ]);
 
-function limitsFromGrant(grant: StoredGrant): AgentLimits {
+const usdg = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
+const usdgNum = (v: bigint) => Number(formatUnits(v, USDG_DECIMALS));
+const fmt = (v: bigint) => formatUnits(v, USDG_DECIMALS);
+
+function swapRouterFor(cfg: ResolvedConfig): `0x${string}` {
+  return (cfg.swapVenue === "uniswap" ? UNISWAP.swapRouter02 : RIALTO.routerSnapshot) as `0x${string}`;
+}
+
+function limitsFromGrant(grant: StoredGrant, watchTokens: readonly StockToken[]): AgentLimits {
   return {
     perTradeUsdg: usdg(grant.caps.perTradeUsdg),
     dailyUsdg: usdg(grant.caps.dailyUsdg),
@@ -103,27 +99,12 @@ function limitsFromGrant(grant: StoredGrant): AgentLimits {
       MORPHO.steakhouseUsdgVault as `0x${string}`,
       CASH.USDG as `0x${string}`,
     ],
-    allowedAssets: [
-      CASH.USDG as `0x${string}`,
-      ...STOCK_TOKENS.filter((t) => ["AAPL", "MSFT", "QQQ"].includes(t.symbol)).map((t) => t.address),
-    ],
+    allowedAssets: [CASH.USDG as `0x${string}`, ...watchTokens.map((t) => t.address)],
     maxDrawdownBps: grant.caps.maxDrawdownPct * 100,
     expiresAt: grant.expiresAt,
     maxOpsPerDay: grant.caps.maxOpsPerDay,
   };
 }
-
-const BASKET_TOKENS = basketTokens();
-
-/** Rebindable sink so the strategist can log into the armed agent's event feed. */
-let strategyNote: (level: "ok" | "warn", message: string) => void = (l, m) =>
-  console.log(`[strategist:${l}] ${m}`);
-
-const strategy = buildStrategy(resolveStrategyName(process.env.MERRYMEN_STRATEGY), {
-  swapRouter: SWAP_ROUTER,
-  usdg6: usdg,
-  onNote: (l, m) => strategyNote(l, m),
-});
 
 /** A policy-legal no-op: approve a dust allowance to the allowlisted router. */
 function selfTestIntent(): TradeIntent {
@@ -148,14 +129,70 @@ interface ActiveAgent {
 
 async function main() {
   initStore();
-  const bundlerUrl = process.env.MERRYMEN_BUNDLER_URL;
   const selftest = process.argv.includes("--selftest");
 
   let active: ActiveAgent | null = null;
-  strategyNote = (level, message) => {
+
+  /** Rebindable sink so the strategist can log into the armed agent's event feed. */
+  const strategyNote = (level: "ok" | "warn", message: string) => {
     console.log(`[strategist:${level}] ${message}`);
     if (active) void addEvent(active.agentId, level, message);
   };
+
+  let cfg = resolveConfig();
+  setMainnetRpc(cfg.rpcMainnet);
+  let connKey = connectionKey(cfg);
+  let stratKey = strategyKey(cfg);
+  let watchTokens = tokensForSymbols(cfg.basketSymbols);
+
+  function makeStrategy(c: ResolvedConfig): Strategy {
+    return buildStrategy(c.strategy, {
+      swapRouter: swapRouterFor(c),
+      usdg6: usdg,
+      basketSymbols: c.basketSymbols,
+      buyPerTickUsdg: c.buyPerTickUsdg,
+      idleFloorUsdg: c.idleFloorUsdg,
+      gapEnterBudgetUsdg: c.gapEnterBudgetUsdg,
+      llm: {
+        apiKey: c.anthropicApiKey,
+        model: c.llmModel,
+        intervalMin: c.llmIntervalMin,
+        maxActionUsdg: c.llmMaxActionUsdg,
+      },
+      onNote: strategyNote,
+    });
+  }
+  let strategy = makeStrategy(cfg);
+
+  /** Re-read settings.json; apply what changed without a restart. */
+  async function refreshConfig(): Promise<void> {
+    const next = resolveConfig();
+    const nextConn = connectionKey(next);
+    const nextStrat = strategyKey(next);
+
+    if (nextConn !== connKey) {
+      console.log("[settings] connection settings changed — re-arming");
+      setMainnetRpc(next.rpcMainnet);
+      if (active) {
+        await addEvent(active.agentId, "ok", "connection settings changed — re-arming executor");
+        active = null; // syncGrant re-arms with the new bundler/RPC this tick
+      }
+      connKey = nextConn;
+    }
+    if (nextStrat !== stratKey) {
+      cfg = next; // makeStrategy reads the new values
+      strategy = makeStrategy(next);
+      watchTokens = tokensForSymbols(next.basketSymbols);
+      console.log(`[settings] strategy settings applied — ${strategy.name}, venue ${next.swapVenue}`);
+      if (active) {
+        active.limits = limitsFromGrant(active.grant, watchTokens);
+        await addEvent(active.agentId, "ok", `settings applied — strategy ${strategy.name}, venue ${next.swapVenue}`);
+      }
+      stratKey = nextStrat;
+    }
+    cfg = next;
+  }
+
   let spentTodayUsdg = 0n;
   let opsToday = 0;
   let highWaterMarkUsdg = 0n;
@@ -189,26 +226,27 @@ async function main() {
     if (unchanged) return true;
 
     const chain = grant.chainId === robinhoodTestnet.id ? robinhoodTestnet : robinhoodChain;
+    const rpc = chain.id === robinhoodTestnet.id ? cfg.rpcTestnet : cfg.rpcMainnet;
     const agentId = await ensureAgent(grant);
 
     let executor: AgentExecutor | null = null;
-    if (bundlerUrl) {
+    if (cfg.bundlerUrl) {
       executor = await createAgentExecutor({
         chain,
         serializedGrant: grant.serialized,
-        bundlerUrl,
+        bundlerUrl: cfg.bundlerUrl,
       });
       console.log(`[worker] executor live — smart account ${executor.address} on chain ${chain.id}`);
     } else {
-      console.log("[worker] no MERRYMEN_BUNDLER_URL — execution stubbed (policy/simulation still run)");
+      console.log("[worker] no bundler URL (settings or env) — execution stubbed (policy/simulation still run)");
     }
 
     active = {
       grant,
       agentId,
-      client: createPublicClient({ chain, transport: http() }),
+      client: createPublicClient({ chain, transport: http(rpc) }),
       executor,
-      limits: limitsFromGrant(grant),
+      limits: limitsFromGrant(grant, watchTokens),
     };
     spentTodayUsdg = usdg(await getSpentTodayUsdg(agentId));
     opsToday = await getOpsToday(agentId);
@@ -262,7 +300,7 @@ async function main() {
       let sim: Pick<TradeRow, "sim_quote_out" | "sim_min_out" | "sim_fee_tier" | "sim_gas"> = {};
       // Same-token "swaps" (the selftest no-op) skip the quote path — they are
       // approval-leg pipeline probes, not trades.
-      if (intent.kind === "swap" && SWAP_VENUE === "uniswap" && intent.sellToken !== intent.buyToken) {
+      if (intent.kind === "swap" && cfg.swapVenue === "uniswap" && intent.sellToken !== intent.buyToken) {
         // Full leg: QuoterV2 simulation (reverts where the swap would) →
         // slippage-bounded minOut → approve + exactInputSingle in one UserOp.
         const quote = await bestQuote(active.client, {
@@ -286,7 +324,7 @@ async function main() {
           });
           return;
         }
-        const minOut = minOutWithSlippage(quote.amountOut, SLIPPAGE_BPS);
+        const minOut = minOutWithSlippage(quote.amountOut, cfg.slippageBps);
         sim = {
           sim_quote_out: quote.amountOut.toString(),
           sim_min_out: minOut.toString(),
@@ -317,7 +355,7 @@ async function main() {
           "ok",
           `simulated ✓ quote ${quote.amountOut} min ${minOut} @ fee ${quote.fee / 10_000}% · gas ~${quote.gasEstimate}`,
         );
-      } else if (intent.kind === "swap" && RIALTO_API_KEY && intent.sellToken !== intent.buyToken) {
+      } else if (intent.kind === "swap" && cfg.rialtoApiKey && intent.sellToken !== intent.buyToken) {
         // Rialto full leg: registry-resolved router only, API-supplied calldata
         // validated against it. A migrated router (≠ grant-time snapshot) means
         // the on-chain call policy would reject anyway — skip with the reason.
@@ -331,7 +369,7 @@ async function main() {
           return;
         }
         const { quote, reason } = await fetchRialtoQuote(
-          { apiKey: RIALTO_API_KEY },
+          { apiKey: cfg.rialtoApiKey, headerName: cfg.rialtoApiKeyHeader },
           {
             sellToken: intent.sellToken,
             buyToken: intent.buyToken,
@@ -451,6 +489,7 @@ async function main() {
   }
 
   async function tick() {
+    await refreshConfig();
     const armed = await syncGrant();
 
     const market = await readMarketSafety();
@@ -482,14 +521,14 @@ async function main() {
 
     const [balances, positions] = await Promise.all([
       readAccountBalances(client, grant.smartAccount),
-      readPositions(client, grant.smartAccount, BASKET_TOKENS, market.prices),
+      readPositions(client, grant.smartAccount, watchTokens, market.prices),
     ]);
     const positionsUsdg = positions.reduce((sum, p) => sum + p.valueUsdg, 0n);
     // Equity is the whole book — cash, vault, and multiplier-aware stock value —
     // so the drawdown breaker judges reality, not just the cash ledger.
     const equityUsdg = balances.cashUsdg + balances.vaultUsdg + positionsUsdg;
 
-    const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, PERF_FEE_BPS);
+    const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, cfg.perfFeeBps);
     if (accrual.profitUsdg > 0n) {
       await addFeeAccrual(agentId, {
         profitUsdg: usdgNum(accrual.profitUsdg),
@@ -502,7 +541,7 @@ async function main() {
         await addEvent(
           agentId,
           "ok",
-          `new high-water mark ${fmt(accrual.newHwmUsdg)} USDG — fee accrued ${fmt(accrual.feeUsdg)} (${PERF_FEE_BPS / 100}% of ${fmt(accrual.profitUsdg)} profit)`,
+          `new high-water mark ${fmt(accrual.newHwmUsdg)} USDG — fee accrued ${fmt(accrual.feeUsdg)} (${cfg.perfFeeBps / 100}% of ${fmt(accrual.profitUsdg)} profit)`,
         );
       }
     }
@@ -534,10 +573,10 @@ async function main() {
 
     // On-chain breaker check — the contract is the authority once deployed;
     // this read stops the worker from wasting ops the chain would refuse.
-    if (BREAKER_ADDRESS) {
+    if (cfg.breakerAddress) {
       const tripped = await client
         .readContract({
-          address: BREAKER_ADDRESS,
+          address: cfg.breakerAddress,
           abi: BREAKER_ABI,
           functionName: "isTripped",
           args: [grant.smartAccount],
@@ -579,7 +618,7 @@ async function main() {
   if (selftest) {
     const armed = await syncGrant();
     if (!armed || !active || !(active as ActiveAgent).executor) {
-      console.error("[selftest] needs a grant AND MERRYMEN_BUNDLER_URL");
+      console.error("[selftest] needs a grant AND a bundler URL (settings or MERRYMEN_BUNDLER_URL)");
       process.exit(1);
     }
     console.log("[selftest] sending policy-legal no-op through the full pipeline…");
@@ -589,10 +628,15 @@ async function main() {
   }
 
   console.log(
-    `merrymen worker starting — strategy ${strategy.name}, safety reads from chain ${robinhoodChain.id}, grant re-synced every tick`,
+    `merrymen worker starting — strategy ${strategy.name}, venue ${cfg.swapVenue}, ` +
+      `tick ${cfg.tickSeconds}s, settings+grant re-synced every tick`,
   );
-  await tick();
-  setInterval(() => tick().catch((e) => console.error("[tick]", e)), TICK_MS);
+  const runLoop = () => {
+    tick()
+      .catch((e) => console.error("[tick]", e))
+      .finally(() => setTimeout(runLoop, cfg.tickSeconds * 1000));
+  };
+  runLoop();
 }
 
 main().catch((e) => {

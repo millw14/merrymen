@@ -75,9 +75,9 @@ const PROPOSE_TOOL = {
   },
 };
 
-export function createAnthropicDriver(opts?: { model?: string }): ProposalDriver {
-  const client = new Anthropic();
-  const model = opts?.model ?? process.env.MERRYMEN_LLM_MODEL ?? "claude-opus-4-8";
+export function createAnthropicDriver(opts: { apiKey: string; model?: string }): ProposalDriver {
+  const client = new Anthropic({ apiKey: opts.apiKey });
+  const model = opts.model ?? "claude-opus-4-8";
 
   return {
     name: `anthropic:${model}`,

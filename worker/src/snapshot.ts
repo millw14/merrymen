@@ -24,7 +24,12 @@ const VAULT_READS = parseAbi([
   "function convertToAssets(uint256 shares) view returns (uint256)",
 ]);
 
-const mainnet = createPublicClient({ chain: robinhoodChain, transport: http() });
+let mainnet = createPublicClient({ chain: robinhoodChain, transport: http() });
+
+/** Point safety reads at a custom mainnet RPC (settings/env); undefined = chain default. */
+export function setMainnetRpc(url?: string): void {
+  mainnet = createPublicClient({ chain: robinhoodChain, transport: http(url) });
+}
 
 export interface MarketSafety {
   pausedTokens: Set<string>;

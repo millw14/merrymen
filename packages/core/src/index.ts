@@ -1,4 +1,5 @@
 export * from "./chain";
+export * from "./settings";
 export * from "./tokens";
 export * from "./protocols";
 export * from "./abis";

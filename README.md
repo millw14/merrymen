@@ -42,11 +42,18 @@ npm run dev -w @merrymen/web -- -p 3100   # dashboard at localhost:3100
 npm run dev -w @merrymen/worker           # the 24/7 loop
 ```
 
+**Configure everything at `/settings`** — bundler URL, RPC overrides, API keys
+(Anthropic, Rialto), breaker address, strategy, and every trading knob. Saved
+to `.data/settings.json` (gitignored; secrets never echo back to the browser)
+and picked up by the worker within one tick: connection changes re-arm the
+executor, strategy changes rebuild in place. Precedence: settings file > env
+var > default.
+
 Sign a grant at `/grant` (testnet 46630); the worker arms itself on its next
 tick — no restart. The kill switch on the dashboard destroys the grant and the
 worker halts on its next tick; hard on-chain expiry is the backstop.
 
-Worker env:
+Worker env (fallbacks when the settings file doesn't set a value):
 
 | var | default | meaning |
 |---|---|---|
