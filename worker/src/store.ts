@@ -179,7 +179,8 @@ export async function getSpentTodayUsdg(agentId: string): Promise<number> {
   const row = getDb()
     .prepare(
       `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
-       WHERE agent_id = ? AND status = 'landed' AND created_at > unixepoch() - 86400`,
+       WHERE agent_id = ? AND status = 'landed' AND kind != 'vault-withdraw'
+         AND created_at > unixepoch() - 86400`,
     )
     .get(agentId) as { spent: number } | undefined;
   return row?.spent ?? 0;

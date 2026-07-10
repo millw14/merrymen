@@ -85,4 +85,30 @@ describe("steadyBasketTick", () => {
     // 70 - 20 = 50 idle, exactly at floor → no deposit
     assert.equal(intents.find((i) => i.kind === "vault-deposit"), undefined);
   });
+
+  it("withdraws from the vault when cash cannot cover a buy", () => {
+    const intents = steadyBasketTick(
+      cfg(),
+      snap({ cashUsdg: 5_000_000n, vaultUsdg: 200_000_000n }),
+    );
+    // Withdraw-only tick: top cash up to buyPerTick (20) + floor (50) = 70 → need 65
+    assert.equal(intents.length, 1);
+    const w = intents[0]!;
+    assert.equal(w.kind, "vault-withdraw");
+    assert.equal(w.kind === "vault-withdraw" && w.amountUsdg, 65_000_000n);
+  });
+
+  it("withdrawal is capped at the vault balance", () => {
+    const intents = steadyBasketTick(
+      cfg(),
+      snap({ cashUsdg: 0n, vaultUsdg: 12_000_000n }),
+    );
+    assert.equal(intents.length, 1);
+    assert.equal(intents[0]!.kind === "vault-withdraw" && intents[0]!.amountUsdg, 12_000_000n);
+  });
+
+  it("does not withdraw when the vault is empty", () => {
+    const intents = steadyBasketTick(cfg(), snap({ cashUsdg: 5_000_000n, vaultUsdg: 0n }));
+    assert.deepEqual(intents, []);
+  });
 });

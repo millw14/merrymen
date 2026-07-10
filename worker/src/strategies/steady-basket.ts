@@ -38,6 +38,15 @@ export interface Snapshot {
 export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): TradeIntent[] {
   if (!snap.sequencerUp) return [];
 
+  // Cash can't cover a buy but the vault can: pull enough back to fund the next
+  // tick's buy plus the liquidity floor. Withdraw-only tick — buys resume next
+  // tick once the cash has actually landed.
+  if (snap.cashUsdg < cfg.buyPerTickUsdg && snap.vaultUsdg > 0n) {
+    const need = cfg.buyPerTickUsdg + cfg.idleFloorUsdg - snap.cashUsdg;
+    const amountUsdg = need > snap.vaultUsdg ? snap.vaultUsdg : need;
+    return [{ kind: "vault-withdraw", target: cfg.vault, amountUsdg }];
+  }
+
   const intents: TradeIntent[] = [];
 
   if (snap.cashUsdg >= cfg.buyPerTickUsdg) {

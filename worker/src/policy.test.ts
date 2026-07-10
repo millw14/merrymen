@@ -131,4 +131,21 @@ describe("checkPolicy", () => {
     );
     assert.equal(!v.ok && v.rule, "per-trade-cap");
   });
+
+  it("vault withdrawals are exempt from spend caps (funds return to the account)", () => {
+    const v = checkPolicy(
+      { kind: "vault-withdraw", target: VAULT, amountUsdg: 10_000_000_000n },
+      limits(),
+      state({ spentTodayUsdg: 500_000_000n }),
+    );
+    assert.deepEqual(v, { ok: true });
+  });
+
+  it("vault withdrawals still respect expiry and the ops cap", () => {
+    const intent: TradeIntent = { kind: "vault-withdraw", target: VAULT, amountUsdg: 1n };
+    const expired = checkPolicy(intent, limits(), state({ nowSec: NOW + 86_401 }));
+    assert.equal(!expired.ok && expired.rule, "expiry");
+    const throttled = checkPolicy(intent, limits(), state({ opsToday: 48 }));
+    assert.equal(!throttled.ok && throttled.rule, "ops-cap");
+  });
 });

@@ -48,6 +48,7 @@ const fmt = (v: bigint) => formatUnits(v, USDG_DECIMALS);
 
 const VAULT_ABI = parseAbi([
   "function deposit(uint256 assets, address receiver) returns (uint256)",
+  "function withdraw(uint256 assets, address receiver, address owner) returns (uint256)",
 ]);
 
 function limitsFromGrant(grant: StoredGrant): AgentLimits {
@@ -197,11 +198,17 @@ async function main() {
           { to: MORPHO.steakhouseUsdgVault as `0x${string}`, value: 0n, data },
         ]);
       } else {
-        console.log(`[execute] ${intent.kind} not wired yet`);
-        return;
+        const data = encodeFunctionData({
+          abi: VAULT_ABI,
+          functionName: "withdraw",
+          args: [intent.amountUsdg, executor.address, executor.address],
+        });
+        txHash = await executor.execute([
+          { to: MORPHO.steakhouseUsdgVault as `0x${string}`, value: 0n, data },
+        ]);
       }
 
-      spentTodayUsdg += notional;
+      if (intent.kind !== "vault-withdraw") spentTodayUsdg += notional;
       opsToday += 1;
       console.log(`[execute] ${intent.kind} landed: ${txHash}`);
       await addEvent(agentId, "ok", `${intent.kind} landed (${fmt(notional)} USDG): ${txHash}`);

@@ -73,12 +73,16 @@ export function checkPolicy(intent: TradeIntent, limits: AgentLimits, state: Age
     return { ok: false, rule: "ops-cap", detail: `${state.opsToday} ops in 24h >= ${limits.maxOpsPerDay}` };
   }
 
-  const notional = intent.kind === "swap" ? intent.sellAmountUsdg : intent.amountUsdg;
-  if (notional > limits.perTradeUsdg) {
-    return { ok: false, rule: "per-trade-cap", detail: `${notional} > ${limits.perTradeUsdg}` };
-  }
-  if (state.spentTodayUsdg + notional > limits.dailyUsdg) {
-    return { ok: false, rule: "daily-cap", detail: `would exceed daily cap ${limits.dailyUsdg}` };
+  // Withdrawals return funds to the account — the on-chain policy leaves them
+  // unsized, so the mirror does too. Spend caps bound money leaving the wall.
+  if (intent.kind !== "vault-withdraw") {
+    const notional = intent.kind === "swap" ? intent.sellAmountUsdg : intent.amountUsdg;
+    if (notional > limits.perTradeUsdg) {
+      return { ok: false, rule: "per-trade-cap", detail: `${notional} > ${limits.perTradeUsdg}` };
+    }
+    if (state.spentTodayUsdg + notional > limits.dailyUsdg) {
+      return { ok: false, rule: "daily-cap", detail: `would exceed daily cap ${limits.dailyUsdg}` };
+    }
   }
 
   if (state.highWaterMarkUsdg > 0n) {
