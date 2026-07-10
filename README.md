@@ -12,9 +12,27 @@ simulated first · fees only on profit above high-water mark · honest scoreboar
 - `packages/core` — chain constants, token registry, shared types. Every address
   is probed on-chain before it lands here.
 - `web` — Next.js app: onboarding, permission-grant flow, agent dashboard with
-  live positions, trade record (simulation receipts included), and kill switch.
+  live positions, trade record (simulation receipts included), kill switch, and
+  the public scoreboard at `/scoreboard`.
 - `worker` — Node runtime: grant sync → scheduler → strategy tick → policy
-  check → simulate → execute → record.
+  check → simulate → execute → record. Plus the backtest harness
+  (`src/backtest.ts`) that runs real strategies through the real policy layer
+  over synthetic price series.
+- `contracts` — the on-chain drawdown breaker: `BreakerRegistry` (keeper-reported
+  equity, permissionless trip on reported data, owner-only reset) and
+  `KernelBreakerPolicy` (Kernel v3 module type 5 — fails every UserOp at
+  validation once tripped). `npm test -w @merrymen/contracts`; deployment waits
+  on a funded key (targets in `hardhat.config.ts`).
+
+## Strategies
+
+Selected via `MERRYMEN_STRATEGY`:
+
+| name | what it does |
+|---|---|
+| `steady-basket` (default) | DCA a weighted stock basket per tick; idle cash sweeps to the Morpho vault; pulls cash back when short |
+| `weekend-gap` | Enter each leg when its Chainlink feed goes stale (market close), exit the full holding when it refreshes (open) — the strategy class that only exists on-chain |
+| `llm-strategist` | Claude proposes typed buy/sell/hold actions at decision windows (default 30min); deterministic code validates and disposes — the model never sees an address or emits calldata. Needs `ANTHROPIC_API_KEY`; without it, the null driver proposes nothing |
 
 ## Run it
 
@@ -36,6 +54,11 @@ Worker env:
 | `MERRYMEN_SWAP_VENUE` | `uniswap` | `uniswap` = full quote→swap leg via SwapRouter02; `rialto` = approval-only until API onboarding |
 | `MERRYMEN_SLIPPAGE_BPS` | `100` | max slippage vs the QuoterV2 simulation |
 | `MERRYMEN_GRANT_FILE` | `.data/grant.json` | grant handoff written by the web app |
+| `MERRYMEN_STRATEGY` | `steady-basket` | strategy name (see table above) |
+| `MERRYMEN_PERF_FEE_BPS` | `1000` | performance fee on profit above the high-water mark (accrual-only ledger) |
+| `MERRYMEN_BREAKER_ADDRESS` | — | deployed BreakerRegistry; a tripped breaker halts all intents |
+| `MERRYMEN_RIALTO_API_KEY` | — | Rialto integrator key; enables the full quote→swap leg (target validated against the on-chain router registry) |
+| `ANTHROPIC_API_KEY` | — | enables the LLM strategist's Claude driver (`MERRYMEN_LLM_MODEL`, `MERRYMEN_LLM_INTERVAL_MIN`, `MERRYMEN_LLM_MAX_ACTION_USDG` tune it) |
 
 `npm run typecheck` and `npm test` cover the policy mirror, strategy, venue
 math (slippage, quote selection, calldata), and the ERC-8056 invariant that a
