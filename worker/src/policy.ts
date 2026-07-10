@@ -22,6 +22,8 @@ export interface AgentLimits {
   maxDrawdownBps: number;
   /** Unix seconds after which the session key is dead regardless of anything. */
   expiresAt: number;
+  /** Ops ceiling per rolling 24h — mirrors the on-chain rate-limit policy. */
+  maxOpsPerDay: number;
 }
 
 export type TradeIntent = {
@@ -42,6 +44,8 @@ export type Verdict =
 
 export interface AgentState {
   spentTodayUsdg: bigint;
+  /** Executed operations in the trailing 24h — mirrors the on-chain rate limit. */
+  opsToday: number;
   highWaterMarkUsdg: bigint;
   equityUsdg: bigint;
   nowSec: number;
@@ -63,6 +67,10 @@ export function checkPolicy(intent: TradeIntent, limits: AgentLimits, state: Age
         return { ok: false, rule: "asset-allowlist", detail: `asset ${token} not allowed` };
       }
     }
+  }
+
+  if (state.opsToday >= limits.maxOpsPerDay) {
+    return { ok: false, rule: "ops-cap", detail: `${state.opsToday} ops in 24h >= ${limits.maxOpsPerDay}` };
   }
 
   const notional = intent.kind === "swap" ? intent.sellAmountUsdg : intent.amountUsdg;

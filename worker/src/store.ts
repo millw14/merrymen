@@ -163,6 +163,17 @@ export async function addEquity(
   }
 }
 
+/** Landed op count in the trailing 24h — seeds the ops-cap counter across restarts. */
+export async function getOpsToday(agentId: string): Promise<number> {
+  const row = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM trades
+       WHERE agent_id = ? AND status = 'landed' AND created_at > unixepoch() - 86400`,
+    )
+    .get(agentId) as { n: number } | undefined;
+  return row?.n ?? 0;
+}
+
 /** Sum of landed spend in the trailing 24h — seeds the daily-cap counter across restarts. */
 export async function getSpentTodayUsdg(agentId: string): Promise<number> {
   const row = getDb()

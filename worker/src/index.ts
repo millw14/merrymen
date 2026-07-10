@@ -39,7 +39,7 @@ import { loadGrantFile } from "./grant";
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
 import { steadyBasketTick, type SteadyBasketConfig, type Snapshot } from "./strategies/steady-basket";
 import { readAccountBalances, readMarketSafety } from "./snapshot";
-import { addEquity, addEvent, addTrade, ensureAgent, getSpentTodayUsdg, initStore } from "./store";
+import { addEquity, addEvent, addTrade, ensureAgent, getOpsToday, getSpentTodayUsdg, initStore } from "./store";
 
 const TICK_MS = 60_000;
 const usdg = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
@@ -65,6 +65,7 @@ function limitsFromGrant(grant: StoredGrant): AgentLimits {
     ],
     maxDrawdownBps: grant.caps.maxDrawdownPct * 100,
     expiresAt: grant.expiresAt,
+    maxOpsPerDay: grant.caps.maxOpsPerDay,
   };
 }
 
@@ -123,6 +124,7 @@ async function main() {
 
   const limits = grant ? limitsFromGrant(grant) : null;
   let spentTodayUsdg = agentId ? usdg(await getSpentTodayUsdg(agentId)) : 0n;
+  let opsToday = agentId ? await getOpsToday(agentId) : 0;
   let highWaterMarkUsdg = 0n;
   let lastSequencerUp = true;
 
@@ -138,6 +140,7 @@ async function main() {
     if (!limits || !agentId) return;
     const state: AgentState = {
       spentTodayUsdg,
+      opsToday,
       highWaterMarkUsdg,
       equityUsdg,
       nowSec: Math.floor(Date.now() / 1000),
@@ -199,6 +202,7 @@ async function main() {
       }
 
       spentTodayUsdg += notional;
+      opsToday += 1;
       console.log(`[execute] ${intent.kind} landed: ${txHash}`);
       await addEvent(agentId, "ok", `${intent.kind} landed (${fmt(notional)} USDG): ${txHash}`);
       await addTrade({
