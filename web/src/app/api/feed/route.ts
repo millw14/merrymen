@@ -45,12 +45,17 @@ export interface TradeRecord {
   sim_gas: string | null;
   created_at: string;
 }
+export interface AgentFinancials {
+  hwm_usdg: number;
+  accrued_fee_usdg: number;
+}
 export interface FeedResponse {
   source: "sqlite" | "none";
   events: FeedEvent[];
   equity: EquityPoint[];
   positions: PositionRow[];
   trades: TradeRecord[];
+  financials: AgentFinancials | null;
 }
 
 export async function GET() {
@@ -61,6 +66,7 @@ export async function GET() {
       equity: [],
       positions: [],
       trades: [],
+      financials: null,
     } satisfies FeedResponse);
   }
 
@@ -72,6 +78,7 @@ export async function GET() {
     let equity: EquityPoint[] = [];
     let positions: PositionRow[] = [];
     let trades: TradeRecord[] = [];
+    let financials: AgentFinancials | null = null;
     try {
       events = db
         .prepare(
@@ -115,12 +122,23 @@ export async function GET() {
     } catch {
       /* table not created yet */
     }
+    try {
+      financials =
+        (db
+          .prepare(
+            "SELECT hwm_usdg, accrued_fee_usdg FROM agents ORDER BY created_at DESC LIMIT 1",
+          )
+          .get() as AgentFinancials | undefined) ?? null;
+    } catch {
+      /* columns not migrated yet */
+    }
     return NextResponse.json({
       source: "sqlite",
       events,
       equity,
       positions,
       trades,
+      financials,
     } satisfies FeedResponse);
   } finally {
     db.close();

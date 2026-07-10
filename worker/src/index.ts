@@ -43,6 +43,7 @@ import {
 } from "@merrymen/core";
 import { bestQuote, buildSwapCall, minOutWithSlippage } from "./venues/uniswap";
 import { createAgentExecutor, type AgentExecutor } from "./executor";
+import { accrueAboveHwm } from "./fees";
 import { loadGrantFile } from "./grant";
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
 import { steadyBasketTick, type SteadyBasketConfig, type Snapshot } from "./strategies/steady-basket";
@@ -51,11 +52,14 @@ import { readAccountBalances, readMarketSafety } from "./snapshot";
 import {
   addEquity,
   addEvent,
+  addFeeAccrual,
   addTrade,
   ensureAgent,
+  getAgentFinancials,
   getOpsToday,
   getSpentTodayUsdg,
   initStore,
+  setAgentHwm,
   setAgentStatus,
   setPositions,
   type TradeRow,
@@ -69,6 +73,8 @@ const TICK_MS = 60_000;
  */
 const SWAP_VENUE = (process.env.MERRYMEN_SWAP_VENUE ?? "uniswap") as "uniswap" | "rialto";
 const SLIPPAGE_BPS = Number(process.env.MERRYMEN_SLIPPAGE_BPS ?? 100);
+/** Performance fee on profit above the high-water mark. 1000 = 10%. Accrual-only. */
+const PERF_FEE_BPS = Number(process.env.MERRYMEN_PERF_FEE_BPS ?? 1000);
 const SWAP_ROUTER = (SWAP_VENUE === "uniswap" ? UNISWAP.swapRouter02 : RIALTO.routerSnapshot) as `0x${string}`;
 const usdg = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
 const usdgNum = (v: bigint) => Number(formatUnits(v, USDG_DECIMALS));
@@ -199,7 +205,9 @@ async function main() {
     };
     spentTodayUsdg = usdg(await getSpentTodayUsdg(agentId));
     opsToday = await getOpsToday(agentId);
-    highWaterMarkUsdg = 0n;
+    // HWM is persistent — a restart must not forget the peak, or the breaker
+    // re-arms low and the fee ledger double-charges old profit.
+    highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
     await setAgentStatus(agentId, "armed");
     await addEvent(
       agentId,
@@ -422,7 +430,25 @@ async function main() {
     // Equity is the whole book — cash, vault, and multiplier-aware stock value —
     // so the drawdown breaker judges reality, not just the cash ledger.
     const equityUsdg = balances.cashUsdg + balances.vaultUsdg + positionsUsdg;
-    highWaterMarkUsdg = equityUsdg > highWaterMarkUsdg ? equityUsdg : highWaterMarkUsdg;
+
+    const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, PERF_FEE_BPS);
+    if (accrual.profitUsdg > 0n) {
+      await addFeeAccrual(agentId, {
+        profitUsdg: usdgNum(accrual.profitUsdg),
+        feeUsdg: usdgNum(accrual.feeUsdg),
+        hwmBeforeUsdg: usdgNum(highWaterMarkUsdg),
+        hwmAfterUsdg: usdgNum(accrual.newHwmUsdg),
+      });
+      await setAgentHwm(agentId, usdgNum(accrual.newHwmUsdg));
+      if (accrual.feeUsdg > 0n) {
+        await addEvent(
+          agentId,
+          "ok",
+          `new high-water mark ${fmt(accrual.newHwmUsdg)} USDG — fee accrued ${fmt(accrual.feeUsdg)} (${PERF_FEE_BPS / 100}% of ${fmt(accrual.profitUsdg)} profit)`,
+        );
+      }
+    }
+    highWaterMarkUsdg = accrual.newHwmUsdg;
     console.log(
       `[account] ${grant.smartAccount} · eth ${formatUnits(balances.ethWei, 18)} · ` +
         `cash ${fmt(balances.cashUsdg)} USDG · vault ${fmt(balances.vaultUsdg)} USDG · ` +

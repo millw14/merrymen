@@ -66,6 +66,16 @@ function getDb(): DatabaseSync {
       at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS equity_agent_time ON equity (agent_id, at DESC);
+    CREATE TABLE IF NOT EXISTS fee_accruals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL,
+      profit_usdg REAL NOT NULL,
+      fee_usdg REAL NOT NULL,
+      hwm_before_usdg REAL NOT NULL,
+      hwm_after_usdg REAL NOT NULL,
+      at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS fee_accruals_agent_time ON fee_accruals (agent_id, at DESC);
     CREATE TABLE IF NOT EXISTS positions (
       agent_id TEXT NOT NULL,
       symbol TEXT NOT NULL,
@@ -81,6 +91,10 @@ function getDb(): DatabaseSync {
   `);
   for (const ddl of [
     "ALTER TABLE equity ADD COLUMN positions_usdg REAL NOT NULL DEFAULT 0",
+    // Persistent high-water mark + running fee total — HWM must survive
+    // restarts or the breaker and the fee ledger both forget the peak.
+    "ALTER TABLE agents ADD COLUMN hwm_usdg REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE agents ADD COLUMN accrued_fee_usdg REAL NOT NULL DEFAULT 0",
     // Simulation receipt: what the pre-trade quote promised, on the record.
     "ALTER TABLE trades ADD COLUMN sim_quote_out TEXT",
     "ALTER TABLE trades ADD COLUMN sim_min_out TEXT",
@@ -139,6 +153,46 @@ export async function ensureAgent(grant: StoredGrant): Promise<string> {
       grant.expiresAt,
     );
   return grant.smartAccount;
+}
+
+/** Persisted HWM + accrued fees, loaded at arm time. */
+export async function getAgentFinancials(
+  agentId: string,
+): Promise<{ hwmUsdg: number; accruedFeeUsdg: number }> {
+  const row = getDb()
+    .prepare("SELECT hwm_usdg, accrued_fee_usdg FROM agents WHERE smart_account = ?")
+    .get(agentId) as { hwm_usdg: number; accrued_fee_usdg: number } | undefined;
+  return { hwmUsdg: row?.hwm_usdg ?? 0, accruedFeeUsdg: row?.accrued_fee_usdg ?? 0 };
+}
+
+/** Ratchet the persisted HWM (monotonic — ignores values below the stored peak). */
+export async function setAgentHwm(agentId: string, hwmUsdg: number): Promise<void> {
+  try {
+    getDb()
+      .prepare("UPDATE agents SET hwm_usdg = MAX(hwm_usdg, ?) WHERE smart_account = ?")
+      .run(hwmUsdg, agentId);
+  } catch (e) {
+    console.error("[store] hwm update failed:", e);
+  }
+}
+
+/** Record one accrual event and roll it into the agent's running total. */
+export async function addFeeAccrual(
+  agentId: string,
+  a: { profitUsdg: number; feeUsdg: number; hwmBeforeUsdg: number; hwmAfterUsdg: number },
+): Promise<void> {
+  try {
+    const db = getDb();
+    db.prepare(
+      `INSERT INTO fee_accruals (agent_id, profit_usdg, fee_usdg, hwm_before_usdg, hwm_after_usdg)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(agentId, a.profitUsdg, a.feeUsdg, a.hwmBeforeUsdg, a.hwmAfterUsdg);
+    db.prepare(
+      "UPDATE agents SET accrued_fee_usdg = accrued_fee_usdg + ? WHERE smart_account = ?",
+    ).run(a.feeUsdg, agentId);
+  } catch (e) {
+    console.error("[store] fee accrual failed:", e);
+  }
 }
 
 export async function setAgentStatus(

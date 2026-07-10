@@ -179,6 +179,12 @@ export function BandSection() {
         <span className="cap"><b>{g.caps.maxOpsPerDay}</b> ops/day</span>
         <span className="cap">breaker <b>{g.caps.maxDrawdownPct}%</b></span>
         <span className="cap">key dies in <b>{countdown(g.expiresAt)}</b></span>
+        {feed?.financials && feed.financials.hwm_usdg > 0 && (
+          <span className="cap">
+            hwm <b>{feed.financials.hwm_usdg.toFixed(2)}</b> · fee accrued{" "}
+            <b>{feed.financials.accrued_fee_usdg.toFixed(2)} USDG</b>
+          </span>
+        )}
       </div>
 
       <div className="real-meta mono">
