@@ -1,0 +1,10 @@
+{
+  "name": "merrymen",
+  "version": "0.0.1",
+  "private": true,
+  "description": "merrymen CLI — onboard, run, and doctor your trading agents from the terminal.",
+  "type": "module",
+  "bin": {
+    "merrymen": "./bin.mjs"
+  }
+}

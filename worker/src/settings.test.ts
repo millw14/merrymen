@@ -42,10 +42,15 @@ describe("mergeSettings — file > env > default", () => {
     assert.equal(c.bundlerUrl, "https://env.example");
   });
 
+  it("custom strategy names pass through; builtins resolve directly", () => {
+    assert.equal(mergeSettings({ strategy: "my-momentum-bot" }, {}).strategy, "my-momentum-bot");
+    assert.equal(mergeSettings({ strategy: "weekend-gap" }, {}).strategy, "weekend-gap");
+  });
+
   it("junk is clamped to defaults, never trusted", () => {
     const c = mergeSettings(
       {
-        strategy: "yolo-mode" as never,
+        strategy: "not a token!!" as never,
         swapVenue: "cex" as never,
         slippageBps: 99_999,
         tickSeconds: 1,

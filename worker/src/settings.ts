@@ -22,7 +22,8 @@ export interface ResolvedConfig {
   rialtoApiKey: string | undefined;
   rialtoApiKeyHeader: string;
   breakerAddress: `0x${string}` | undefined;
-  strategy: "steady-basket" | "weekend-gap" | "llm-strategist";
+  /** Builtin name, or a user strategy filename (strategies/<name>.ts). */
+  strategy: string;
   swapVenue: "uniswap" | "rialto";
   slippageBps: number;
   perfFeeBps: number;
@@ -87,7 +88,13 @@ export function mergeSettings(
     rialtoApiKey: str(file.rialtoApiKey, env.MERRYMEN_RIALTO_API_KEY),
     rialtoApiKeyHeader: str(file.rialtoApiKeyHeader, env.MERRYMEN_RIALTO_API_KEY_HEADER, d.rialtoApiKeyHeader)!,
     breakerAddress,
-    strategy: oneOf(file.strategy, env.MERRYMEN_STRATEGY, ["steady-basket", "weekend-gap", "llm-strategist"], d.strategy),
+    // Any sane token is a valid strategy name — builtins resolve directly,
+    // everything else resolves to strategies/<name>.* (missing file = honest
+    // no-trades with the reason in the event feed, decided at tick time).
+    strategy: (() => {
+      const v = str(file.strategy, env.MERRYMEN_STRATEGY);
+      return v && /^[A-Za-z0-9_-]{1,64}$/.test(v) ? v : d.strategy;
+    })(),
     swapVenue: oneOf(file.swapVenue, env.MERRYMEN_SWAP_VENUE, ["uniswap", "rialto"], d.swapVenue),
     slippageBps: num(file.slippageBps, env.MERRYMEN_SLIPPAGE_BPS, d.slippageBps, 1, 5_000),
     perfFeeBps: num(file.perfFeeBps, env.MERRYMEN_PERF_FEE_BPS, d.perfFeeBps, 0, 5_000),
@@ -109,7 +116,8 @@ const SETTINGS_FILE =
 export function resolveConfig(): ResolvedConfig {
   let file: MerrymenSettings = {};
   try {
-    file = JSON.parse(readFileSync(SETTINGS_FILE, "utf8")) as MerrymenSettings;
+    // BOM-strip: editors and PowerShell write UTF-8 BOMs that break JSON.parse.
+    file = JSON.parse(readFileSync(SETTINGS_FILE, "utf8").replace(/^﻿/, "")) as MerrymenSettings;
   } catch {
     // no settings file yet — env + defaults
   }

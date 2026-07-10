@@ -7,9 +7,14 @@
     "packages/core",
     "web",
     "worker",
-    "contracts"
+    "contracts",
+    "cli"
   ],
   "scripts": {
+    "onboard": "node cli/bin.mjs onboard",
+    "start": "node cli/bin.mjs start",
+    "doctor": "node cli/bin.mjs doctor",
+    "status": "node cli/bin.mjs status",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   }

@@ -188,11 +188,24 @@ export default function SettingsPage() {
 
           <div className="settings-section mono">strategy &amp; trading</div>
           <div className="grant-fields settings-grid">
-            <Field label="strategy" hint="steady-basket = DCA + vault sweep · weekend-gap = trade the close→open gap · llm-strategist = Claude proposes, policy disposes.">
+            <Field
+              label="strategy"
+              hint="steady-basket = DCA + vault sweep · weekend-gap = trade the close→open gap · llm-strategist = Claude proposes, policy disposes. Your own bots from strategies/ appear below the line — scaffold one with `npx merrymen strategy new my-bot`."
+            >
               <select value={v("strategy") || d.strategy} onChange={set("strategy")}>
-                <option value="steady-basket">steady-basket</option>
-                <option value="weekend-gap">weekend-gap</option>
-                <option value="llm-strategist">llm-strategist</option>
+                {view.strategies.builtin.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+                {view.strategies.custom.length > 0 && (
+                  <option disabled>── your strategies ──</option>
+                )}
+                {view.strategies.custom.map((s) => (
+                  <option key={s} value={s}>
+                    {s} (custom)
+                  </option>
+                ))}
               </select>
             </Field>
             <Field label="swap venue" hint="uniswap = permissionless v3 (QQQ has liquidity today) · rialto = meta-router (needs the key above for full execution).">

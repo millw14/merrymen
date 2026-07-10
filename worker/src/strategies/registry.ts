@@ -8,12 +8,13 @@
 import { CASH, MORPHO, STOCK_TOKENS, type StockToken } from "@merrymen/core";
 import { createAnthropicDriver, nullDriver } from "../strategist/driver";
 import { makeLlmStrategist } from "../strategist/strategy";
+import { makeCustomStrategy } from "./custom";
 import { steadyBasketTick, type SteadyBasketConfig } from "./steady-basket";
 import { weekendGapTick, type WeekendGapConfig } from "./weekend-gap";
 import type { Strategy } from "./types";
 
-export const STRATEGY_NAMES = ["steady-basket", "weekend-gap", "llm-strategist"] as const;
-export type StrategyName = (typeof STRATEGY_NAMES)[number];
+export const BUILTIN_STRATEGIES = ["steady-basket", "weekend-gap", "llm-strategist"] as const;
+export type BuiltinStrategyName = (typeof BUILTIN_STRATEGIES)[number];
 
 export interface StrategyBuildOpts {
   swapRouter: `0x${string}`;
@@ -39,7 +40,13 @@ function legsFor(symbols: readonly string[]) {
   }));
 }
 
-export function buildStrategy(name: StrategyName, opts: StrategyBuildOpts): Strategy {
+export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
+  // Not a builtin → a user-written strategy file in strategies/ (lazy-loaded,
+  // hot-reloading, crash-isolated; every intent is shape-validated and then
+  // policy-checked like any other).
+  if (!(BUILTIN_STRATEGIES as readonly string[]).includes(name)) {
+    return makeCustomStrategy(name, { onNote: opts.onNote });
+  }
   if (name === "llm-strategist") {
     // LLM proposes; deterministic code disposes. Without a key, the null
     // driver proposes nothing — the worker still runs, honestly idle.

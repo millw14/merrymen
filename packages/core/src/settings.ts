@@ -31,7 +31,9 @@ export interface MerrymenSettings {
   breakerAddress?: string;
 
   // ── trading ────────────────────────────────────────────────────────────
-  strategy?: "steady-basket" | "weekend-gap" | "llm-strategist";
+  /** Builtin ("steady-basket" | "weekend-gap" | "llm-strategist") or the
+   * filename of a user-written strategy in strategies/. */
+  strategy?: string;
   swapVenue?: "uniswap" | "rialto";
   /** Max slippage vs the pre-trade quote, bps. */
   slippageBps?: number;

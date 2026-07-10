@@ -36,11 +36,50 @@ Selected via `MERRYMEN_STRATEGY`:
 
 ## Run it
 
+Self-hosted, terminal-first. You bring the keys; your machine runs the band.
+
 ```bash
+git clone https://github.com/millw14/merrymen && cd merrymen
 npm install
+npm run onboard     # wizard: bundler URL, API keys, strategy, basket
+npm start           # dashboard at localhost:3100 + the 24/7 worker
+```
+
+Then sign the permission wall at `localhost:3100/grant` (MetaMask, testnet
+46630), grab gas from the faucet, and check the stack anytime:
+
+```bash
+npx merrymen doctor     # node/keys/RPC/bundler/grant/db diagnostics
+npx merrymen status     # heartbeat, grant, trades, equity
+npx merrymen selftest   # one policy-legal no-op through the full pipeline
+npx merrymen kill       # kill switch from the terminal
+```
+
+## Write your own bot
+
+Your strategies live in [`strategies/`](./strategies) — hot-reloaded on save,
+crash-isolated, and incapable of exceeding the caps the user signed (every
+intent passes shape validation → the policy wall → quote simulation → the
+on-chain session key). Scaffold one and go:
+
+```bash
+npx merrymen strategy new my-bot   # drops a commented template
+# edit strategies/my-bot.ts, select "my-bot" in /settings — done
+```
+
+See [strategies/README.md](./strategies/README.md) for the contract and
+[strategies/example-dip-buyer.ts](./strategies/example-dip-buyer.ts) for a
+fully commented walkthrough.
+
+<details>
+<summary>manual run (without the CLI)</summary>
+
+```bash
 npm run dev -w @merrymen/web -- -p 3100   # dashboard at localhost:3100
 npm run dev -w @merrymen/worker           # the 24/7 loop
 ```
+
+</details>
 
 **Configure everything at `/settings`** — bundler URL, RPC overrides, API keys
 (Anthropic, Rialto), breaker address, strategy, and every trading knob. Saved

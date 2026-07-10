@@ -8,7 +8,7 @@
  * string replaces it. Non-secret fields: null/empty clears back to default.
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import {
@@ -36,11 +36,29 @@ export interface SettingsView {
   values: Omit<MerrymenSettings, "anthropicApiKey" | "rialtoApiKey">;
   defaults: typeof SETTINGS_DEFAULTS;
   knownSymbols: string[];
+  strategies: { builtin: string[]; custom: string[] };
+}
+
+const STRATEGIES_DIR = path.join(process.cwd(), "..", "strategies");
+const BUILTIN_STRATEGIES = ["steady-basket", "weekend-gap", "llm-strategist"];
+
+async function listCustomStrategies(): Promise<string[]> {
+  try {
+    const files = await readdir(STRATEGIES_DIR);
+    return files
+      .filter((f) => /\.(ts|mts|mjs|js)$/.test(f) && !f.startsWith("."))
+      .map((f) => f.replace(/\.(ts|mts|mjs|js)$/, ""))
+      .filter((name) => /^[A-Za-z0-9_-]{1,64}$/.test(name))
+      .sort();
+  } catch {
+    return [];
+  }
 }
 
 async function readStored(): Promise<MerrymenSettings> {
   try {
-    return JSON.parse(await readFile(SETTINGS_FILE, "utf8")) as MerrymenSettings;
+    // BOM-strip: hand-edited or PowerShell-written files may carry a UTF-8 BOM.
+    return JSON.parse((await readFile(SETTINGS_FILE, "utf8")).replace(/^﻿/, "")) as MerrymenSettings;
   } catch {
     return {};
   }
@@ -60,6 +78,7 @@ export async function GET() {
     values,
     defaults: SETTINGS_DEFAULTS,
     knownSymbols: STOCK_TOKENS.map((t) => t.symbol),
+    strategies: { builtin: BUILTIN_STRATEGIES, custom: await listCustomStrategies() },
   };
   return NextResponse.json(view);
 }
@@ -133,10 +152,15 @@ export async function PUT(req: Request) {
   // ── enums ───────────────────────────────────────────────────────────────
   if ("strategy" in body) {
     const v = body.strategy;
-    if (v === "" || v === null || v === undefined) setOrClear("strategy", undefined);
-    else if (["steady-basket", "weekend-gap", "llm-strategist"].includes(v as string))
+    if (v === "" || v === null || v === undefined) {
+      setOrClear("strategy", undefined);
+    } else if (typeof v === "string" && BUILTIN_STRATEGIES.includes(v)) {
       setOrClear("strategy", v as MerrymenSettings["strategy"]);
-    else errors.push("strategy: unknown strategy");
+    } else if (typeof v === "string" && (await listCustomStrategies()).includes(v)) {
+      setOrClear("strategy", v as MerrymenSettings["strategy"]);
+    } else {
+      errors.push(`strategy: not a builtin and no strategies/${String(v)}.ts file exists`);
+    }
   }
   if ("swapVenue" in body) {
     const v = body.swapVenue;
