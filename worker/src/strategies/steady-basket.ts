@@ -20,7 +20,8 @@ export interface SteadyBasketConfig {
   buyPerTickUsdg: bigint;
   /** Idle USDG above this floor gets deposited to the vault. */
   idleFloorUsdg: bigint;
-  rialtoRouter: `0x${string}`;
+  /** Venue-agnostic: Rialto meta-router or Uniswap SwapRouter02, runner's pick. */
+  swapRouter: `0x${string}`;
   vault: `0x${string}`;
   usdg: `0x${string}`;
 }
@@ -57,7 +58,7 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Trade
       if (legAmount === 0n) continue;
       intents.push({
         kind: "swap",
-        target: cfg.rialtoRouter,
+        target: cfg.swapRouter,
         sellToken: cfg.usdg,
         buyToken: leg.token,
         sellAmountUsdg: legAmount,

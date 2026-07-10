@@ -35,11 +35,13 @@ import {
   MORPHO,
   RIALTO,
   STOCK_TOKENS,
+  UNISWAP,
   USDG_DECIMALS,
   robinhoodChain,
   robinhoodTestnet,
   type StoredGrant,
 } from "@merrymen/core";
+import { bestQuote, buildSwapCall, minOutWithSlippage } from "./venues/uniswap";
 import { createAgentExecutor, type AgentExecutor } from "./executor";
 import { loadGrantFile } from "./grant";
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
@@ -57,6 +59,14 @@ import {
 } from "./store";
 
 const TICK_MS = 60_000;
+
+/**
+ * Swap venue: "uniswap" executes the full quote→swap leg permissionlessly;
+ * "rialto" stays approval-only until their /quote API onboarding completes.
+ */
+const SWAP_VENUE = (process.env.MERRYMEN_SWAP_VENUE ?? "uniswap") as "uniswap" | "rialto";
+const SLIPPAGE_BPS = Number(process.env.MERRYMEN_SLIPPAGE_BPS ?? 100);
+const SWAP_ROUTER = (SWAP_VENUE === "uniswap" ? UNISWAP.swapRouter02 : RIALTO.routerSnapshot) as `0x${string}`;
 const usdg = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
 const usdgNum = (v: bigint) => Number(formatUnits(v, USDG_DECIMALS));
 const fmt = (v: bigint) => formatUnits(v, USDG_DECIMALS);
@@ -72,6 +82,7 @@ function limitsFromGrant(grant: StoredGrant): AgentLimits {
     dailyUsdg: usdg(grant.caps.dailyUsdg),
     allowedTargets: [
       RIALTO.routerSnapshot as `0x${string}`,
+      UNISWAP.swapRouter02 as `0x${string}`,
       MORPHO.steakhouseUsdgVault as `0x${string}`,
       CASH.USDG as `0x${string}`,
     ],
@@ -93,7 +104,7 @@ const basket: SteadyBasketConfig = {
   })),
   buyPerTickUsdg: usdg(25),
   idleFloorUsdg: usdg(50),
-  rialtoRouter: RIALTO.routerSnapshot as `0x${string}`,
+  swapRouter: SWAP_ROUTER,
   vault: MORPHO.steakhouseUsdgVault as `0x${string}`,
   usdg: CASH.USDG as `0x${string}`,
 };
@@ -225,9 +236,59 @@ async function main() {
 
     try {
       let txHash: `0x${string}`;
-      if (intent.kind === "swap") {
-        // Approval leg only until Rialto API onboarding; swap calldata comes
-        // from their quote API. Bundler gas estimation simulates before signing.
+      // Same-token "swaps" (the selftest no-op) skip the quote path — they are
+      // approval-leg pipeline probes, not trades.
+      if (intent.kind === "swap" && SWAP_VENUE === "uniswap" && intent.sellToken !== intent.buyToken) {
+        // Full leg: QuoterV2 simulation (reverts where the swap would) →
+        // slippage-bounded minOut → approve + exactInputSingle in one UserOp.
+        const quote = await bestQuote(active.client, {
+          tokenIn: intent.sellToken,
+          tokenOut: intent.buyToken,
+          amountIn: intent.sellAmountUsdg,
+        });
+        if (!quote) {
+          console.log(`[quote] no executable Uniswap route for ${intent.buyToken} — skipped`);
+          await addEvent(agentId, "warn", `no Uniswap route for ${intent.buyToken} — swap skipped`);
+          await addTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            sell_token: intent.sellToken,
+            buy_token: intent.buyToken,
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: "no-route",
+            created_at: new Date().toISOString(),
+          });
+          return;
+        }
+        const minOut = minOutWithSlippage(quote.amountOut, SLIPPAGE_BPS);
+        const approve = {
+          to: CASH.USDG as `0x${string}`,
+          value: 0n,
+          data: encodeFunctionData({
+            abi: erc20Abi,
+            functionName: "approve",
+            args: [UNISWAP.swapRouter02 as `0x${string}`, intent.sellAmountUsdg],
+          }),
+        };
+        const swap = buildSwapCall({
+          tokenIn: intent.sellToken,
+          tokenOut: intent.buyToken,
+          fee: quote.fee,
+          recipient: executor.address,
+          amountIn: intent.sellAmountUsdg,
+          minAmountOut: minOut,
+        });
+        txHash = await executor.execute([approve, swap]);
+        await addEvent(
+          agentId,
+          "ok",
+          `simulated ✓ quote ${quote.amountOut} min ${minOut} @ fee ${quote.fee / 10_000}% · gas ~${quote.gasEstimate}`,
+        );
+      } else if (intent.kind === "swap") {
+        // Rialto venue: approval leg only until their /quote API onboarding;
+        // swap calldata comes from that API. Bundler estimation still simulates.
         const data = encodeFunctionData({
           abi: erc20Abi,
           functionName: "approve",

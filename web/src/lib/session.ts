@@ -50,6 +50,8 @@ import {
   CASH,
   MORPHO,
   RIALTO,
+  UNISWAP,
+  UNISWAP_SWAP_ROUTER_ABI,
   robinhoodTestnet,
   USDG_DECIMALS,
   type GrantCaps,
@@ -119,6 +121,7 @@ export async function grantSessionKey(
   const expiresAt = now + caps.expiryDays * 86_400;
   const allowedSpenders: Address[] = [
     RIALTO.routerSnapshot as Address,
+    UNISWAP.swapRouter02 as Address,
     MORPHO.steakhouseUsdgVault as Address,
   ];
 
@@ -146,6 +149,14 @@ export async function grantSessionKey(
           // Rialto router: target-scoped (its calldata comes from the quote API)
           target: RIALTO.routerSnapshot as Address,
           valueLimit: 0n,
+        },
+        {
+          // Uniswap SwapRouter02: only exactInputSingle. Spend is bounded by
+          // the approve cap above — the router can pull nothing beyond it.
+          target: UNISWAP.swapRouter02 as Address,
+          valueLimit: 0n,
+          abi: UNISWAP_SWAP_ROUTER_ABI,
+          functionName: "exactInputSingle",
         },
         {
           // Morpho vault: deposits capped at the daily limit per call
