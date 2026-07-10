@@ -23,6 +23,8 @@ export interface Snapshot {
   vaultUsdg: bigint;
   /** Current stock holdings by symbol. */
   holdings: Map<string, Holding>;
+  /** Latest Chainlink USD prices (8dp) by symbol — stale prices flagged, not hidden. */
+  prices: Map<string, { price8: bigint; stale: boolean }>;
   /** Per-token pause state read from the Stock contract — never trade a paused token. */
   pausedTokens: Set<string>;
   /** Chainlink staleness per symbol; stale = underlying market closed (nights/weekends). */
@@ -32,5 +34,6 @@ export interface Snapshot {
 
 export interface Strategy {
   name: string;
-  tick(snap: Snapshot): TradeIntent[];
+  /** Async allowed: the LLM strategist awaits a model at decision windows. */
+  tick(snap: Snapshot): TradeIntent[] | Promise<TradeIntent[]>;
 }

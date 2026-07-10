@@ -29,6 +29,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     cashUsdg: 100_000_000n, // 100 USDG
     vaultUsdg: 0n,
     holdings: new Map(),
+    prices: new Map(),
     pausedTokens: new Set<string>(),
     staleFeeds: new Set<string>(),
     sequencerUp: true,

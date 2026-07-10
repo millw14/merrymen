@@ -112,9 +112,14 @@ function limitsFromGrant(grant: StoredGrant): AgentLimits {
 
 const BASKET_TOKENS = basketTokens();
 
+/** Rebindable sink so the strategist can log into the armed agent's event feed. */
+let strategyNote: (level: "ok" | "warn", message: string) => void = (l, m) =>
+  console.log(`[strategist:${l}] ${m}`);
+
 const strategy = buildStrategy(resolveStrategyName(process.env.MERRYMEN_STRATEGY), {
   swapRouter: SWAP_ROUTER,
   usdg6: usdg,
+  onNote: (l, m) => strategyNote(l, m),
 });
 
 /** A policy-legal no-op: approve a dust allowance to the allowlisted router. */
@@ -144,6 +149,10 @@ async function main() {
   const selftest = process.argv.includes("--selftest");
 
   let active: ActiveAgent | null = null;
+  strategyNote = (level, message) => {
+    console.log(`[strategist:${level}] ${message}`);
+    if (active) void addEvent(active.agentId, level, message);
+  };
   let spentTodayUsdg = 0n;
   let opsToday = 0;
   let highWaterMarkUsdg = 0n;
@@ -503,12 +512,13 @@ async function main() {
       cashUsdg: balances.cashUsdg,
       vaultUsdg: balances.vaultUsdg,
       holdings,
+      prices: market.prices,
       pausedTokens: market.pausedTokens,
       staleFeeds: market.staleFeeds,
       sequencerUp: market.sequencerUp,
     };
 
-    for (const intent of strategy.tick(snap)) {
+    for (const intent of await strategy.tick(snap)) {
       await processIntent(intent, equityUsdg);
     }
   }
