@@ -79,10 +79,19 @@ function getDb(): DatabaseSync {
       PRIMARY KEY (agent_id, symbol)
     );
   `);
-  try {
-    db.exec("ALTER TABLE equity ADD COLUMN positions_usdg REAL NOT NULL DEFAULT 0");
-  } catch {
-    // column already exists
+  for (const ddl of [
+    "ALTER TABLE equity ADD COLUMN positions_usdg REAL NOT NULL DEFAULT 0",
+    // Simulation receipt: what the pre-trade quote promised, on the record.
+    "ALTER TABLE trades ADD COLUMN sim_quote_out TEXT",
+    "ALTER TABLE trades ADD COLUMN sim_min_out TEXT",
+    "ALTER TABLE trades ADD COLUMN sim_fee_tier INTEGER",
+    "ALTER TABLE trades ADD COLUMN sim_gas TEXT",
+  ]) {
+    try {
+      db.exec(ddl);
+    } catch {
+      // column already exists
+    }
   }
   console.log(`[store] sqlite at ${DB_FILE}`);
   return db;
@@ -105,6 +114,11 @@ export interface TradeRow {
   status: "landed" | "reverted" | "rejected";
   reject_rule?: string;
   created_at: string;
+  /** Simulation receipt (Uniswap QuoterV2): quoted out, slippage-bounded min, tier, gas. */
+  sim_quote_out?: string;
+  sim_min_out?: string;
+  sim_fee_tier?: number;
+  sim_gas?: string;
 }
 
 export async function ensureAgent(grant: StoredGrant): Promise<string> {
@@ -156,8 +170,9 @@ export async function addTrade(row: TradeRow): Promise<void> {
   try {
     getDb()
       .prepare(
-        `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, reject_rule)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, reject_rule,
+                             sim_quote_out, sim_min_out, sim_fee_tier, sim_gas)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.agent_id,
@@ -170,6 +185,10 @@ export async function addTrade(row: TradeRow): Promise<void> {
         row.tx_hash ?? null,
         row.status,
         row.reject_rule ?? null,
+        row.sim_quote_out ?? null,
+        row.sim_min_out ?? null,
+        row.sim_fee_tier ?? null,
+        row.sim_gas ?? null,
       );
   } catch (e) {
     console.error("[store] trade insert failed:", e);

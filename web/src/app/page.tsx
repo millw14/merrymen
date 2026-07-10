@@ -4,6 +4,8 @@ import { ChainStats } from "@/components/ChainStats";
 import { FeedPanel } from "@/components/FeedPanel";
 import { KillSwitch } from "@/components/KillSwitch";
 import { MarketTable } from "@/components/MarketTable";
+import { Statusbar } from "@/components/Statusbar";
+import { TradesPanel } from "@/components/TradesPanel";
 
 export default function Dashboard() {
   return (
@@ -29,6 +31,8 @@ export default function Dashboard() {
           <div className="section-title">the band</div>
           <BandSection />
 
+          <TradesPanel />
+
           <div className="section-title market-title">sherwood market · chainlink prices</div>
           <MarketTable />
         </section>
@@ -45,12 +49,7 @@ export default function Dashboard() {
         </aside>
       </main>
 
-      <footer className="statusbar">
-        <span className="live">● sequencer up</span>
-        <span>oracles: chainlink 24/5 · weekend staleness expected</span>
-        <span>execution: rialto meta-router · morpho vault v2</span>
-        <span>every trade simulated before it is signed</span>
-      </footer>
+      <Statusbar />
     </>
   );
 }

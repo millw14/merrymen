@@ -31,11 +31,26 @@ export interface PositionRow {
   price_stale: number;
   value_usdg: number;
 }
+export interface TradeRecord {
+  kind: string;
+  sell_token: string | null;
+  buy_token: string | null;
+  amount_usdg: number;
+  tx_hash: string | null;
+  status: "landed" | "reverted" | "rejected";
+  reject_rule: string | null;
+  sim_quote_out: string | null;
+  sim_min_out: string | null;
+  sim_fee_tier: number | null;
+  sim_gas: string | null;
+  created_at: string;
+}
 export interface FeedResponse {
   source: "sqlite" | "none";
   events: FeedEvent[];
   equity: EquityPoint[];
   positions: PositionRow[];
+  trades: TradeRecord[];
 }
 
 export async function GET() {
@@ -45,6 +60,7 @@ export async function GET() {
       events: [],
       equity: [],
       positions: [],
+      trades: [],
     } satisfies FeedResponse);
   }
 
@@ -55,6 +71,7 @@ export async function GET() {
     let events: FeedEvent[] = [];
     let equity: EquityPoint[] = [];
     let positions: PositionRow[] = [];
+    let trades: TradeRecord[] = [];
     try {
       events = db
         .prepare(
@@ -86,7 +103,25 @@ export async function GET() {
     } catch {
       /* table not created yet */
     }
-    return NextResponse.json({ source: "sqlite", events, equity, positions } satisfies FeedResponse);
+    try {
+      trades = db
+        .prepare(
+          `SELECT kind, sell_token, buy_token, amount_usdg, tx_hash, status, reject_rule,
+                  sim_quote_out, sim_min_out, sim_fee_tier, sim_gas,
+                  datetime(created_at, 'unixepoch') AS created_at
+           FROM trades ORDER BY created_at DESC, id DESC LIMIT 30`,
+        )
+        .all() as unknown as TradeRecord[];
+    } catch {
+      /* table not created yet */
+    }
+    return NextResponse.json({
+      source: "sqlite",
+      events,
+      equity,
+      positions,
+      trades,
+    } satisfies FeedResponse);
   } finally {
     db.close();
   }

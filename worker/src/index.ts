@@ -58,6 +58,7 @@ import {
   initStore,
   setAgentStatus,
   setPositions,
+  type TradeRow,
 } from "./store";
 
 const TICK_MS = 60_000;
@@ -243,6 +244,7 @@ async function main() {
 
     try {
       let txHash: `0x${string}`;
+      let sim: Pick<TradeRow, "sim_quote_out" | "sim_min_out" | "sim_fee_tier" | "sim_gas"> = {};
       // Same-token "swaps" (the selftest no-op) skip the quote path — they are
       // approval-leg pipeline probes, not trades.
       if (intent.kind === "swap" && SWAP_VENUE === "uniswap" && intent.sellToken !== intent.buyToken) {
@@ -270,6 +272,12 @@ async function main() {
           return;
         }
         const minOut = minOutWithSlippage(quote.amountOut, SLIPPAGE_BPS);
+        sim = {
+          sim_quote_out: quote.amountOut.toString(),
+          sim_min_out: minOut.toString(),
+          sim_fee_tier: quote.fee,
+          sim_gas: quote.gasEstimate.toString(),
+        };
         const approve = {
           to: CASH.USDG as `0x${string}`,
           value: 0n,
@@ -345,6 +353,7 @@ async function main() {
         tx_hash: txHash,
         status: "landed",
         created_at: new Date().toISOString(),
+        ...sim,
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
