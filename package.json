@@ -6,7 +6,8 @@
   "workspaces": [
     "packages/core",
     "web",
-    "worker"
+    "worker",
+    "contracts"
   ],
   "scripts": {
     "test": "npm run test --workspaces --if-present",

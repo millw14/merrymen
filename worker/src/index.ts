@@ -76,6 +76,10 @@ const SWAP_VENUE = (process.env.MERRYMEN_SWAP_VENUE ?? "uniswap") as "uniswap" |
 const SLIPPAGE_BPS = Number(process.env.MERRYMEN_SLIPPAGE_BPS ?? 100);
 /** Performance fee on profit above the high-water mark. 1000 = 10%. Accrual-only. */
 const PERF_FEE_BPS = Number(process.env.MERRYMEN_PERF_FEE_BPS ?? 1000);
+/** Deployed BreakerRegistry (contracts workspace). When set, a tripped breaker halts intents. */
+const BREAKER_ADDRESS = process.env.MERRYMEN_BREAKER_ADDRESS as `0x${string}` | undefined;
+
+const BREAKER_ABI = parseAbi(["function isTripped(address account) view returns (bool)"]);
 const SWAP_ROUTER = (SWAP_VENUE === "uniswap" ? UNISWAP.swapRouter02 : RIALTO.routerSnapshot) as `0x${string}`;
 const usdg = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
 const usdgNum = (v: bigint) => Number(formatUnits(v, USDG_DECIMALS));
@@ -465,6 +469,24 @@ async function main() {
         valueUsdg: usdgNum(p.valueUsdg),
       })),
     );
+
+    // On-chain breaker check — the contract is the authority once deployed;
+    // this read stops the worker from wasting ops the chain would refuse.
+    if (BREAKER_ADDRESS) {
+      const tripped = await client
+        .readContract({
+          address: BREAKER_ADDRESS,
+          abi: BREAKER_ABI,
+          functionName: "isTripped",
+          args: [grant.smartAccount],
+        })
+        .catch(() => false);
+      if (tripped) {
+        console.log("[breaker] ON-CHAIN BREAKER TRIPPED — no intents this tick");
+        await addEvent(agentId, "err", "on-chain drawdown breaker TRIPPED — trading halted at the wall");
+        return;
+      }
+    }
 
     const holdings = new Map<string, Holding>(
       positions.map((p) => [

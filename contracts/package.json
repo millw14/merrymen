@@ -1,0 +1,18 @@
+{
+  "name": "@merrymen/contracts",
+  "version": "0.0.1",
+  "private": true,
+  "description": "On-chain drawdown breaker: BreakerRegistry + Kernel v3 policy adapter.",
+  "scripts": {
+    "build": "hardhat compile",
+    "test": "hardhat test"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-viem": "^2.0.0",
+    "chai": "^4.5.0",
+    "hardhat": "^2.26.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.0",
+    "viem": "^2.21.0"
+  }
+}

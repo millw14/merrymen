@@ -7,3 +7,5 @@ node_modules/
 dist/
 .vercel/
 *.tsbuildinfo
+contracts/artifacts/
+contracts/cache/
