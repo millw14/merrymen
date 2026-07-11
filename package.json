@@ -23,6 +23,7 @@
     "README.md",
     "!web/.next/cache",
     "!web/tsconfig.tsbuildinfo",
+    "!web/public/merrymenlogo.png",
     "!**/*.test.ts"
   ],
   "scripts": {
