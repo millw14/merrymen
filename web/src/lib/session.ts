@@ -1,35 +1,32 @@
 "use client";
 
 /**
- * The permission wall — granting a scoped session key to an agent.
+ * The permission wall — creating an agent account and granting it a scoped key.
  *
- * Flow (all counterfactual — nothing is deployed until the agent's first trade):
- *  1. Owner wallet becomes the Kernel account's sudo validator (ECDSA).
- *  2. A fresh session keypair is generated for the agent.
+ * NO EXTERNAL WALLET. The account's owner key is generated in the browser, so
+ * there's nothing to connect — you create the wallet, back up its owner key,
+ * and fund the account address. The flow (all counterfactual — nothing is
+ * deployed until the agent's first trade):
+ *  1. A fresh OWNER keypair is generated → it's the Kernel account's sudo
+ *     validator (ECDSA). The smart-account address derives from it.
+ *  2. A fresh SESSION keypair is generated for the agent.
  *  3. The session key is wrapped in a permission validator whose policies are
  *     enforced BY THE ACCOUNT CONTRACT on every UserOp:
  *       - call policy: only approve(USDG→allowed targets) with capped amounts,
  *         only vault.deposit with capped assets, only the Rialto router
  *       - rate limit: bounded ops per day
- *       - timestamp: hard expiry, owner-set
- *  4. Owner signs ONE typed-data approval; the serialized grant is what the
- *     worker uses to act. Revocation = on-chain nonce invalidation (or expiry).
+ *       - timestamp: hard expiry
+ *  4. The owner key signs the grant locally (no popup); the serialized grant is
+ *     what the worker uses to act. Revocation = expiry (or nonce invalidation).
  *
- * TESTNET DEMO CAVEATS (labeled in the UI): the session private key is kept in
- * localStorage so you can inspect the flow; production keys live in a Turnkey
- * TEE and never touch a browser. Drawdown breaker is worker-enforced until the
- * breaker contract ships (Phase 2).
+ * TESTNET DEMO CAVEATS (labeled in the UI): both private keys are kept in
+ * localStorage so you can inspect and back them up; production owner keys live
+ * in a Turnkey TEE and never touch a browser. Whoever holds the owner key
+ * controls the funds — the UI forces a backup before funding. Drawdown breaker
+ * is worker-enforced until the breaker contract ships (Phase 2).
  */
 
-import {
-  createPublicClient,
-  createWalletClient,
-  custom,
-  erc20Abi,
-  http,
-  parseAbi,
-  type Address,
-} from "viem";
+import { createPublicClient, erc20Abi, http, parseAbi, type Address } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { createKernelAccount } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
@@ -58,9 +55,11 @@ import {
   type GrantCaps,
   type StoredGrant,
 } from "@merrymen/core";
-import { ensureChain, getInjectedProvider, requestAccount } from "./wallet";
 
 export type { GrantCaps, StoredGrant };
+
+/** Testnet gas faucet — where users top up the account's native balance. */
+export const FAUCET_URL = "https://faucet.testnet.chain.robinhood.com";
 
 const VAULT_ABI = parseAbi([
   "function deposit(uint256 assets, address receiver) returns (uint256)",
@@ -86,30 +85,26 @@ export function clearGrant(): void {
 
 const usdgUnits = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
 
-export async function grantSessionKey(
+export async function createAgentWallet(
   caps: GrantCaps,
   onStatus: (status: string) => void,
 ): Promise<Grant> {
   const chain = robinhoodTestnet;
-  const provider = getInjectedProvider();
-
-  onStatus("switching wallet to Robinhood Chain testnet…");
-  await ensureChain(provider, chain);
-  const owner = await requestAccount(provider);
-
   const publicClient = createPublicClient({ chain, transport: http() });
-  const walletClient = createWalletClient({
-    chain,
-    transport: custom(provider),
-    account: owner,
-  });
 
   const entryPoint = getEntryPoint("0.7");
   const kernelVersion = KERNEL_V3_3;
 
+  // Generate the OWNER key in-browser — this is the account's sudo signer and
+  // the root of fund custody. No external wallet, nothing to connect.
+  onStatus("minting your agent's owner key…");
+  const ownerPrivateKey = generatePrivateKey();
+  const ownerAccount = privateKeyToAccount(ownerPrivateKey);
+  const owner = ownerAccount.address;
+
   onStatus("deriving your smart account…");
   const ecdsaValidator = await signerToEcdsaValidator(publicClient, {
-    signer: walletClient,
+    signer: ownerAccount,
     entryPoint,
     kernelVersion,
   });
@@ -211,7 +206,7 @@ export async function grantSessionKey(
     },
   });
 
-  onStatus("sign the permission grant in your wallet…");
+  onStatus("sealing the permission grant…");
   const serialized = await serializePermissionAccount(account, sessionPrivateKey);
 
   const grant: Grant = {
@@ -224,6 +219,7 @@ export async function grantSessionKey(
     expiresAt,
     chainId: chain.id,
     demoSessionPrivateKey: sessionPrivateKey,
+    demoOwnerPrivateKey: ownerPrivateKey,
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(grant));
 
@@ -240,4 +236,28 @@ export async function grantSessionKey(
   }
 
   return grant;
+}
+
+/** Live on-chain balances of the account address — for the "fund it" step. */
+export interface Funding {
+  gasWei: bigint;
+  usdgUnits: bigint;
+  usdg: number;
+}
+
+export async function readFunding(smartAccount: Address): Promise<Funding> {
+  const publicClient = createPublicClient({ chain: robinhoodTestnet, transport: http() });
+  const [gasWei, usdgUnits] = await Promise.all([
+    publicClient.getBalance({ address: smartAccount }).catch(() => 0n),
+    publicClient
+      .readContract({
+        address: CASH.USDG as Address,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [smartAccount],
+      })
+      .then((v) => v as bigint)
+      .catch(() => 0n),
+  ]);
+  return { gasWei, usdgUnits, usdg: Number(usdgUnits) / 10 ** USDG_DECIMALS };
 }

@@ -1,11 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   clearGrant,
-  grantSessionKey,
+  createAgentWallet,
+  FAUCET_URL,
   loadGrant,
+  readFunding,
+  type Funding,
   type Grant,
   type GrantCaps,
 } from "@/lib/session";
@@ -18,8 +21,30 @@ const DEFAULTS: GrantCaps = {
   maxOpsPerDay: 48,
 };
 
+const BACKUP_KEY = "merrymen.grant.backedup.v1";
+
 function short(a: string): string {
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
+}
+
+function CopyBtn({ value, label = "copy" }: { value: string; label?: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      className="copy-btn"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+          setDone(true);
+          setTimeout(() => setDone(false), 1200);
+        } catch {
+          /* clipboard blocked — user can select manually */
+        }
+      }}
+    >
+      {done ? "copied ✓" : label}
+    </button>
+  );
 }
 
 export default function GrantPage() {
@@ -27,19 +52,40 @@ export default function GrantPage() {
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [grant, setGrant] = useState<Grant | null>(null);
+  const [backedUp, setBackedUp] = useState(false);
+  const [reveal, setReveal] = useState(false);
+  const [ack, setAck] = useState(false);
+  const [funding, setFunding] = useState<Funding | null>(null);
 
   useEffect(() => {
     setGrant(loadGrant());
+    setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
   }, []);
+
+  // Poll the account's on-chain balances once we're at the fund step.
+  const refreshFunding = useCallback(async (addr: `0x${string}`) => {
+    try {
+      setFunding(await readFunding(addr));
+    } catch {
+      /* transient RPC error — keep the last reading */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!grant || !backedUp) return;
+    refreshFunding(grant.smartAccount);
+    const id = setInterval(() => refreshFunding(grant.smartAccount), 8000);
+    return () => clearInterval(id);
+  }, [grant, backedUp, refreshFunding]);
 
   const set = (k: keyof GrantCaps) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setCaps((c) => ({ ...c, [k]: Number(e.target.value) }));
 
-  async function onGrant() {
+  async function onCreate() {
     setError(null);
     setStatus("starting…");
     try {
-      const g = await grantSessionKey(caps, setStatus);
+      const g = await createAgentWallet(caps, setStatus);
       setGrant(g);
       setStatus(null);
     } catch (e) {
@@ -47,6 +93,24 @@ export default function GrantPage() {
       setError(e instanceof Error ? e.message : String(e));
     }
   }
+
+  function confirmBackup() {
+    localStorage.setItem(BACKUP_KEY, "1");
+    setBackedUp(true);
+  }
+
+  function discard() {
+    clearGrant();
+    localStorage.removeItem(BACKUP_KEY);
+    setGrant(null);
+    setBackedUp(false);
+    setReveal(false);
+    setAck(false);
+    setFunding(null);
+  }
+
+  const gasFunded = (funding?.gasWei ?? 0n) > 0n;
+  const usdgFunded = (funding?.usdgUnits ?? 0n) > 0n;
 
   return (
     <>
@@ -62,13 +126,14 @@ export default function GrantPage() {
       </header>
 
       <main className="grant-shell">
-        {!grant ? (
+        {/* ─── phase 1: configure caps + create the wallet ─────────────── */}
+        {!grant && (
           <div className="grant-panel">
-            <h1 className="grant-title">raise the permission wall</h1>
+            <h1 className="grant-title">create your agent wallet</h1>
             <p className="grant-sub">
-              Your agent gets a session key that the <b>account contract itself</b> constrains —
-              these caps are enforced on-chain, not promises. One signature; revoke or let it
-              expire any time.
+              No wallet to connect — merrymen mints a fresh account whose owner key lives with
+              you. Set the caps the <b>account contract itself</b> will enforce on every trade,
+              then create it and fund it.
             </p>
 
             <div className="grant-fields">
@@ -116,30 +181,113 @@ export default function GrantPage() {
               {caps.expiryDays}d regardless
             </div>
 
-            <button className="grant-btn" onClick={onGrant} disabled={status !== null}>
-              {status ?? "connect wallet & raise the wall"}
+            <button className="grant-btn" onClick={onCreate} disabled={status !== null}>
+              {status ?? "create wallet & raise the wall"}
             </button>
             {error && <div className="grant-error mono">{error}</div>}
 
             <div className="grant-note">
-              testnet demo: the session key stays in your browser so you can inspect it —
-              production keys live in a TEE and never leave it. drawdown breaker is
-              worker-enforced until the breaker contract ships.
+              testnet demo: the owner &amp; session keys are generated in your browser so you can
+              back them up and inspect the flow — production owner keys live in a TEE and never
+              leave it.
             </div>
           </div>
-        ) : (
+        )}
+
+        {/* ─── phase 2: back up the owner key (gated) ──────────────────── */}
+        {grant && !backedUp && (
           <div className="grant-panel">
-            <h1 className="grant-title">the wall is up</h1>
+            <h1 className="grant-title">back up your owner key</h1>
             <p className="grant-sub">
-              Grant signed. Nothing is deployed yet — the smart account materializes with the
-              agent&apos;s first trade, and the caps below travel with every operation.
+              This key controls the account and <b>every dollar you fund it with</b>. It lives only
+              in this browser. Save it somewhere safe now — if you lose it, the funds are gone. We
+              can&apos;t recover it for you.
             </p>
 
-            <div className="grant-result mono">
-              <div>
-                <span className="rk">smart account</span>
-                <span className="rv">{short(grant.smartAccount)}</span>
+            <div className="key-box mono">
+              <div className="key-row">
+                <span className="rk">owner key</span>
+                <span className="rv" style={{ wordBreak: "break-all" }}>
+                  {reveal ? grant.demoOwnerPrivateKey ?? "(external wallet — no key stored)" : "•".repeat(40)}
+                </span>
               </div>
+              <div className="key-actions">
+                <button className="copy-btn" onClick={() => setReveal((r) => !r)}>
+                  {reveal ? "hide" : "reveal"}
+                </button>
+                {grant.demoOwnerPrivateKey && (
+                  <CopyBtn value={grant.demoOwnerPrivateKey} label="copy key" />
+                )}
+              </div>
+            </div>
+
+            <label className="ack-row">
+              <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
+              <span>I&apos;ve saved my owner key somewhere safe. I understand losing it means losing the funds.</span>
+            </label>
+
+            <button className="grant-btn" onClick={confirmBackup} disabled={!ack}>
+              I&apos;ve backed it up — fund the account
+            </button>
+
+            <div className="grant-note">
+              your account: <span className="mono">{short(grant.smartAccount)}</span> · session key
+              (worker-only, capped): <span className="mono">{short(grant.sessionKeyAddress)}</span>
+            </div>
+          </div>
+        )}
+
+        {/* ─── phase 3: fund the account ───────────────────────────────── */}
+        {grant && backedUp && (
+          <div className="grant-panel">
+            <h1 className="grant-title">fund your account</h1>
+            <p className="grant-sub">
+              Send testnet gas and USDG to the account address below. Nothing deploys until the
+              first trade — funding is what lets that first UserOp land.
+            </p>
+
+            <div className="fund-addr mono">
+              <span className="rk">account address</span>
+              <span className="rv" style={{ wordBreak: "break-all" }}>{grant.smartAccount}</span>
+              <CopyBtn value={grant.smartAccount} label="copy address" />
+            </div>
+
+            <div className="fund-balances">
+              <div className={`fund-bal ${gasFunded ? "ok" : ""}`}>
+                <span className="fund-bal-k">native gas</span>
+                <span className="fund-bal-v mono">
+                  {funding ? (Number(funding.gasWei) / 1e18).toFixed(5) : "…"}
+                </span>
+                <span className="fund-bal-s">{gasFunded ? "funded ✓" : "needed to deploy + trade"}</span>
+              </div>
+              <div className={`fund-bal ${usdgFunded ? "ok" : ""}`}>
+                <span className="fund-bal-k">USDG</span>
+                <span className="fund-bal-v mono">{funding ? funding.usdg.toFixed(2) : "…"}</span>
+                <span className="fund-bal-s">{usdgFunded ? "funded ✓" : "the agent's trading capital"}</span>
+              </div>
+            </div>
+
+            <div className="fund-actions">
+              <a className="grant-btn" href={FAUCET_URL} target="_blank" rel="noreferrer" style={{ textAlign: "center", textDecoration: "none" }}>
+                open the gas faucet ↗
+              </a>
+              <button className="copy-btn" onClick={() => grant && refreshFunding(grant.smartAccount)}>
+                refresh balances
+              </button>
+            </div>
+
+            {gasFunded ? (
+              <div className="fund-ready mono">
+                funded — run <b>merrymen start</b> and your band rides. balances refresh here every
+                few seconds.
+              </div>
+            ) : (
+              <div className="grant-note">
+                waiting for the first deposit to land… this panel updates automatically.
+              </div>
+            )}
+
+            <div className="grant-result mono" style={{ marginTop: 18 }}>
               <div>
                 <span className="rk">owner</span>
                 <span className="rv">{short(grant.owner)}</span>
@@ -154,7 +302,7 @@ export default function GrantPage() {
               </div>
             </div>
 
-            <div className="caps" style={{ justifyContent: "center" }}>
+            <div className="caps" style={{ justifyContent: "center", marginTop: 14 }}>
               <span className="cap">max <b>{grant.caps.perTradeUsdg} USDG</b>/trade</span>
               <span className="cap"><b>{grant.caps.dailyUsdg} USDG</b>/day</span>
               <span className="cap"><b>{grant.caps.maxOpsPerDay}</b> ops/day</span>
@@ -165,15 +313,8 @@ export default function GrantPage() {
               <Link href="/" className="grant-btn" style={{ textAlign: "center", textDecoration: "none" }}>
                 back to the band
               </Link>
-              <button
-                className="btn-kill"
-                style={{ padding: "10px 16px" }}
-                onClick={() => {
-                  clearGrant();
-                  setGrant(null);
-                }}
-              >
-                discard grant
+              <button className="btn-kill" style={{ padding: "10px 16px" }} onClick={discard}>
+                discard &amp; start over
               </button>
             </div>
           </div>

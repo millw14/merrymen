@@ -20,4 +20,11 @@ export interface StoredGrant {
   chainId: number;
   /** TESTNET ONLY — production signers live in a TEE, never serialized. */
   demoSessionPrivateKey: `0x${string}`;
+  /**
+   * TESTNET ONLY — the generated owner key that controls the account. When the
+   * wallet is created in-browser (no external wallet connected) this is the ONLY
+   * way to recover funds, so the UI forces the user to back it up before
+   * funding. Absent when an external wallet (MetaMask) was the owner.
+   */
+  demoOwnerPrivateKey?: `0x${string}`;
 }
