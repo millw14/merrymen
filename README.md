@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="web/public/logo.svg" alt="merrymen — autonomous trading agents for Robinhood Chain" width="380" />
+  <img src="web/public/merrymenlogo.png" alt="merrymen — autonomous trading agents for Robinhood Chain" width="360" />
 </p>
 
 # merrymen
