@@ -20,7 +20,9 @@ import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { homePaths } from "../home";
 import type { ResolvedConfig } from "../settings";
+import { appendJournal, getName, relationship } from "../soul";
 import { esc, sendMessage } from "./api";
+import { narrateJournal } from "./interpreter";
 import { readReport, type StatusContext } from "./reads";
 import type { StateRef } from "./state";
 
@@ -155,6 +157,24 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       await fire("low-gas", `⛽ gas is running low — top up the account from the faucet or the trades stop landing.`);
     }
 
+    // ── relationship milestones (fire once, ever) ───────────────────────────
+    const fireOnce = async (key: string, message: string): Promise<void> => {
+      const st = deps.stateRef.get();
+      if (st.firedAlerts[key] !== undefined) return;
+      await sendMessage({ token }, chatId, message);
+      deps.stateRef.set({ ...st, firedAlerts: { ...st.firedAlerts, [key]: now() } });
+    };
+    const rel = relationship(deps.stateRef.get().linkedAt, deps.stateRef.get().messageCount, now());
+    const MILESTONES: Record<number, string> = {
+      7: `🌱 a week on the road together. I'm ${esc(getName())}, and I'm starting to learn your ways — here's to the rides ahead.`,
+      30: `🌳 a month riding together! Whatever the market did, we did it side by side. I know you better now — ask /soul and see.`,
+      100: `🏹 a hundred days. Most bands don't last a fortnight. You and me — we're the real merrymen now.`,
+      365: `👑 one year. Through every gap, drawdown and rally — still riding with you. Sworn brother-in-arms, always.`,
+    };
+    for (const [days, message] of Object.entries(MILESTONES)) {
+      if (rel.daysTogether >= Number(days)) await fireOnce(`milestone:${days}`, message);
+    }
+
     // ── user price alerts (one-shot, crossing-edge) ─────────────────────────
     if (latestPrices.size > 0) {
       const st = deps.stateRef.get();
@@ -186,13 +206,22 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       }
     }
 
-    // ── daily campfire report ───────────────────────────────────────────────
+    // ── daily campfire report + tonight's journal entry ────────────────────
     const d = new Date(now() * 1000);
     const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     const st2 = deps.stateRef.get();
     if (st2.lastDigestDate !== today && d.getHours() >= cfg.telegramDigestHour && inputs.grantExpiresAt !== null) {
-      await sendMessage({ token }, chatId, readReport(deps.buildStatusContext()));
+      const report = readReport(deps.buildStatusContext());
+      await sendMessage({ token }, chatId, report);
       deps.stateRef.set({ ...deps.stateRef.get(), lastDigestDate: today });
+      // The merryman keeps its own journal — its .md grows with every day on
+      // the road. LLM voice when a key is set, honest stat lines otherwise.
+      const plainReport = report.replace(/<[^>]+>/g, "");
+      const evidence = `${plainReport}\n\nRELATIONSHIP: ${rel.stage}, day ${rel.daysTogether}, ${rel.messageCount} messages with my owner.`;
+      const entry = cfg.anthropicApiKey
+        ? await narrateJournal(evidence, { apiKey: cfg.anthropicApiKey, model: cfg.llmModel })
+        : `Day ${rel.daysTogether} with my owner (${rel.stage}).\n${plainReport}`;
+      appendJournal(entry, now());
     }
   };
 

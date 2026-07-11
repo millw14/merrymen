@@ -25,6 +25,8 @@ function usd(n: number): string {
 }
 
 export interface StatusContext {
+  /** The merryman's user-given name (soul IDENTITY.md). */
+  name: string;
   strategy: string;
   venue: string;
   paused: boolean;
@@ -35,7 +37,7 @@ export interface StatusContext {
 
 export function readStatus(ctx: StatusContext): string {
   const lines: string[] = [];
-  lines.push(`🏹 <b>merryman status</b>`);
+  lines.push(`🏹 <b>${esc(ctx.name)} — status</b>`);
   const alive = ctx.workerAliveSec !== null && ctx.workerAliveSec < 90;
   lines.push(`• worker: ${alive ? "alive" : "not running"}${ctx.paused ? " · ⏸ paused" : ""}`);
   lines.push(`• strategy: ${esc(ctx.strategy)} · venue: ${esc(ctx.venue)}`);
@@ -366,6 +368,8 @@ export const HELP_TEXT = [
   "/status · /positions · /pnl · /trades — see what the band's doing",
   "/report — today's campfire report · /brag — your scorecard",
   "/why — why I made my last trade",
+  "/name &lt;name&gt; — christen your merryman · /soul — who I am &amp; what I know of you",
+  "/remember &lt;fact&gt; — tell me something to keep · /forget — wipe what I know",
   "/pause · /resume — hold or ride",
   "/strategy &lt;name&gt; — switch strategy (steady-basket, weekend-gap, llm-strategist, or your own)",
   "/cap &lt;usdg&gt; — set the per-action ceiling for chat trades",

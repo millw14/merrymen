@@ -63,6 +63,7 @@ import { isPaused, startTelegram } from "./telegram/service";
 import { startNotifier } from "./telegram/notifier";
 import { createStateRef } from "./telegram/state";
 import { readPositionRaw } from "./telegram/reads";
+import { ensureSoul, getName } from "./soul";
 import { readPositions } from "./positions";
 import { readAccountBalances, readMarketSafety, setMainnetRpc } from "./snapshot";
 import {
@@ -76,6 +77,7 @@ import {
   getSpentTodayUsdg,
   getTransferredTodayUsdg,
   initStore,
+  setAgentName,
   setAgentHwm,
   setAgentStatus,
   setPositions,
@@ -238,6 +240,9 @@ async function main() {
     const chain = grant.chainId === robinhoodTestnet.id ? robinhoodTestnet : robinhoodChain;
     const rpc = chain.id === robinhoodTestnet.id ? cfg.rpcTestnet : cfg.rpcMainnet;
     const agentId = await ensureAgent(grant);
+    // The soul's name is the source of truth — mirror it onto the roster.
+    ensureSoul();
+    await setAgentName(agentId, getName());
 
     let executor: AgentExecutor | null = null;
     if (cfg.bundlerUrl) {
@@ -710,6 +715,7 @@ async function main() {
   }
 
   const buildStatusContext = () => ({
+    name: getName(),
     strategy: strategy.name,
     venue: cfg.swapVenue,
     paused: isPaused(),
@@ -743,6 +749,9 @@ async function main() {
     grantHasTransfer: () => active?.grant.grantFeatures?.includes("transfer") ?? false,
     submitTrade: submitChatTrade,
     submitTransfer: submitChatTransfer,
+    onNameChange: (name) => {
+      if (active) void setAgentName(active.agentId, name);
+    },
     kill: () => {
       try {
         if (!loadGrantFile()) return { ok: false, reason: "no grant" };

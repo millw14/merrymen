@@ -114,6 +114,16 @@ function deps(over: Partial<CommandDeps> = {}): CommandDeps & { calls: string[] 
       calls.push(`unalert:${id}`);
       return "ALERT REMOVED";
     },
+    setName: (n) => {
+      calls.push(`setName:${n}`);
+      return { ok: true, name: n };
+    },
+    remember: (f) => {
+      calls.push(`remember:${f}`);
+      return true;
+    },
+    soulInfo: () => "SOUL",
+    forgetOwner: () => calls.push("forget"),
     help: () => "HELP",
     now: () => 1_000_000,
     ...over,
@@ -315,5 +325,40 @@ describe("executeCommand — alerts and rich reads route through deps", () => {
     assert.equal(await executeCommand({ kind: "why" }, d), "WHY");
     assert.equal(await executeCommand({ kind: "brag" }, d), "BRAG");
     assert.deepEqual(d.calls, []);
+  });
+});
+
+describe("soul commands — naming, memory, identity", () => {
+  it("parses /name /remember /soul /forget", () => {
+    assert.deepEqual(parseSlash("/name Will Scarlet"), { kind: "name", name: "Will Scarlet" });
+    assert.deepEqual(parseSlash("/rename Marian"), { kind: "name", name: "Marian" });
+    assert.deepEqual(parseSlash("/remember I prefer small trades"), { kind: "remember", fact: "I prefer small trades" });
+    assert.deepEqual(parseSlash("/soul"), { kind: "soul" });
+    assert.deepEqual(parseSlash("/forget"), { kind: "forget" });
+    assert.equal(parseSlash("/name")?.kind, "unknown");
+  });
+
+  it("coerces LLM name/remember kinds, degrading to chat when empty", () => {
+    const named = coerceLlmCommand({ kind: "name", symbol: "", name: "Will", usdg: 0, address: "", op: "", price: 0, id: 0, fact: "", remember: "", reply: "" });
+    assert.deepEqual(named, { kind: "name", name: "Will" });
+    const noName = coerceLlmCommand({ kind: "name", symbol: "", name: "", usdg: 0, address: "", op: "", price: 0, id: 0, fact: "", remember: "", reply: "" });
+    assert.equal(noName.kind, "chat");
+    const rem = coerceLlmCommand({ kind: "remember", symbol: "", name: "", usdg: 0, address: "", op: "", price: 0, id: 0, fact: "hates mondays", remember: "", reply: "" });
+    assert.deepEqual(rem, { kind: "remember", fact: "hates mondays" });
+  });
+
+  it("executor routes naming and memory through deps (ungated — not fund control)", async () => {
+    const d = deps({ controlEnabled: false }); // even with control OFF
+    assert.match(await executeCommand({ kind: "name", name: "Will Scarlet" }, d), /Will Scarlet/);
+    assert.match(await executeCommand({ kind: "remember", fact: "likes QQQ" }, d), /noted/i);
+    assert.equal(await executeCommand({ kind: "soul" }, d), "SOUL");
+    assert.match(await executeCommand({ kind: "forget" }, d), /let go/i);
+    assert.deepEqual(d.calls, ["setName:Will Scarlet", "remember:likes QQQ", "forget"]);
+  });
+
+  it("a rejected memory (address-shaped) gets the honest refusal reply", async () => {
+    const d = deps({ remember: () => false });
+    const r = await executeCommand({ kind: "remember", fact: "wallet 0xdead" }, d);
+    assert.match(r, /never store/i);
   });
 });

@@ -326,6 +326,15 @@ export async function getOpsToday(agentId: string): Promise<number> {
   return row?.n ?? 0;
 }
 
+/** Rename the agent — the user-given merryman name (shown on the dashboard). */
+export async function setAgentName(agentId: string, name: string): Promise<void> {
+  try {
+    getDb().prepare(`UPDATE agents SET name = ? WHERE smart_account = ?`).run(name, agentId);
+  } catch (e) {
+    console.error("[store] agent rename failed:", e);
+  }
+}
+
 /** Sum of landed chat transfers in the trailing 24h — the transfer sub-budget. */
 export async function getTransferredTodayUsdg(agentId: string): Promise<number> {
   const row = getDb()

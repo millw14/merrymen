@@ -31,6 +31,10 @@ export interface TelegramState {
   /** Increments on each successful /link so the code rotates. */
   linkRound: number;
   ownerId: number | null;
+  /** Unix seconds of the FIRST successful /link — the relationship's day zero. */
+  linkedAt: number | null;
+  /** Owner messages handled — feeds the relationship stage. */
+  messageCount: number;
   /** Highest trades.id already pushed to the owner chat. -1 = not initialized. */
   lastNotifiedTradeId: number;
   /** Condition-episode dedupe: key → unix seconds last fired. */
@@ -45,6 +49,8 @@ const DEFAULT: TelegramState = {
   linkCode: "",
   linkRound: 0,
   ownerId: null,
+  linkedAt: null,
+  messageCount: 0,
   lastNotifiedTradeId: -1,
   firedAlerts: {},
   lastDigestDate: "",
@@ -60,6 +66,8 @@ export function loadTelegramState(): TelegramState {
       linkCode: typeof s.linkCode === "string" ? s.linkCode : "",
       linkRound: typeof s.linkRound === "number" ? s.linkRound : 0,
       ownerId: typeof s.ownerId === "number" ? s.ownerId : null,
+      linkedAt: typeof s.linkedAt === "number" ? s.linkedAt : null,
+      messageCount: typeof s.messageCount === "number" ? s.messageCount : 0,
       lastNotifiedTradeId: typeof s.lastNotifiedTradeId === "number" ? s.lastNotifiedTradeId : -1,
       firedAlerts: s.firedAlerts && typeof s.firedAlerts === "object" ? (s.firedAlerts as Record<string, number>) : {},
       lastDigestDate: typeof s.lastDigestDate === "string" ? s.lastDigestDate : "",

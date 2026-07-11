@@ -56,6 +56,11 @@ export interface CommandDeps {
   addAlert(symbol: string, op: ">" | "<", price: number): string;
   listAlerts(): string;
   removeAlert(id: number): string;
+  /** Soul: identity + owner memory (soul.ts via the service). */
+  setName(name: string): { ok: boolean; name?: string; reason?: string };
+  remember(fact: string): boolean;
+  soulInfo(): string;
+  forgetOwner(): void;
   help(): string;
   now?: () => number;
 }
@@ -167,6 +172,21 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       return deps.listAlerts();
     case "unalert":
       return deps.removeAlert(cmd.id);
+    case "name": {
+      const r = deps.setName(cmd.name);
+      return r.ok
+        ? `🏹 ${esc(r.name!)} it is — that's my name now, and I'll wear it proudly. Sworn to you.`
+        : `can't take that name: ${esc(r.reason ?? "invalid")}`;
+    }
+    case "remember":
+      return deps.remember(cmd.fact)
+        ? "📝 noted — I'll carry that with me."
+        : "I couldn't keep that one (too long, or it looked like an address/key — I never store those).";
+    case "soul":
+      return deps.soulInfo();
+    case "forget":
+      deps.forgetOwner();
+      return "🍂 done — I've let go of what I knew about you. We start fresh from here.";
     case "kill": {
       const r = deps.kill();
       return r.ok

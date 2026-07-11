@@ -7,6 +7,8 @@ const base: TelegramState = {
   linkCode: "",
   linkRound: 0,
   ownerId: null,
+  linkedAt: null,
+  messageCount: 0,
   lastNotifiedTradeId: -1,
   firedAlerts: {},
   lastDigestDate: "",

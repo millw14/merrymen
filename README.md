@@ -158,6 +158,29 @@ and bound any chat-triggered action with the per-action USDG ceiling — both in
 returns to the browser. Polling is off by default; existing installs are
 untouched until you opt in.
 
+### Your merryman has a soul
+
+Every merryman is an individual with a name **you** give it — and it grows with
+you. Its soul lives as plain markdown in **`~/.merrymen/soul/`** that it keeps
+up to date itself (and that you can read or edit with any editor):
+
+| file | what it holds |
+|---|---|
+| `IDENTITY.md` | who it is — its name (`/name Will Scarlet`), born date |
+| `OWNER.md` | what it's learned about **you** — one dated line at a time, from conversation or `/remember` |
+| `JOURNAL.md` | what it writes about its days — a first-person entry at campfire time |
+
+The longer you ride together, the closer the bond: *new companion* → *trusted
+companion* (a week) → *old friend* (a month) → *sworn brother-in-arms* (100
+days), with milestone messages along the way — and its tone in chat warms to
+match. `/soul` shows who it is and what it knows; `/forget` wipes its owner
+notes; deleting the folder is a full rebirth.
+
+Memory is **context, never capability**: soul files flavor chat only — every
+command still passes the closed enum and the policy wall, and the memory
+sanitizer refuses anything address-, key-, or code-shaped, so a poisoned note
+can never smuggle a transfer recipient into a prompt.
+
 <details>
 <summary>develop from a clone</summary>
 

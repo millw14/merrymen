@@ -37,6 +37,17 @@ import {
   type StatusContext,
 } from "./reads";
 import { ensureLinkCode, rotateLinkCode, type StateRef } from "./state";
+import {
+  ensureSoul,
+  forgetOwner,
+  getBornDate,
+  getName,
+  ownerFacts,
+  relationship,
+  rememberOwnerFact,
+  setName as setSoulName,
+  soulPromptBlock,
+} from "../soul";
 
 export interface TelegramServiceDeps {
   /** Live config (reassigned each tick by refreshConfig — pass a getter). */
@@ -59,6 +70,8 @@ export interface TelegramServiceDeps {
   submitTransfer: (to: `0x${string}`, usdg: number) => Promise<string>;
   /** Delete the grant (kill switch). */
   kill: () => { ok: boolean; reason?: string };
+  /** Mirror a /name change into the agents table (dashboard display). */
+  onNameChange?: (name: string) => void;
   /** Injectable for tests. */
   now?: () => number;
 }
@@ -88,6 +101,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   const stateRef = deps.stateRef;
   let warnedUnreachable = false;
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
+  ensureSoul(now()); // the merryman is born (IDENTITY/OWNER/JOURNAL.md) on first run
 
   // Per-chat runtime (in-memory only — cleared on restart, which is safe):
   const pending = new Map<number, PendingTransfer>(); // awaiting /confirm
@@ -125,11 +139,16 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       }
       linkFails.delete(msg.chatId);
       // First-come owner + allowlist the chat; the code is consumed (rotates).
+      // linkedAt marks day zero of the relationship — the bond grows from here.
       const next = new Set(cfg.telegramAllowlist);
       next.add(msg.chatId);
       patchSettingsFile({ telegramAllowlist: [...next] });
-      state = rotateLinkCode({ ...state, ownerId: state.ownerId ?? msg.fromId }, token);
+      state = rotateLinkCode(
+        { ...state, ownerId: state.ownerId ?? msg.fromId, linkedAt: state.linkedAt ?? now() },
+        token,
+      );
       stateRef.set(state);
+      if (msg.fromUsername) rememberOwnerFact(`Their Telegram handle is @${msg.fromUsername}.`, now());
       deps.note("ok", `Telegram: linked chat ${msg.chatId}${msg.fromUsername ? ` (@${msg.fromUsername})` : ""}`);
       return { ok: true };
     };
@@ -203,19 +222,55 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         stateRef.set({ ...st, priceAlerts: next });
         return `🔕 alert #${id} removed.`;
       },
+      setName: (name) => {
+        const r = setSoulName(name);
+        if (r.ok) {
+          deps.onNameChange?.(r.name);
+          deps.note("ok", `Telegram: the merryman is now called ${r.name}`);
+        }
+        return r;
+      },
+      remember: (fact) => rememberOwnerFact(fact, now()),
+      soulInfo: () => {
+        const st = stateRef.get();
+        const rel = relationship(st.linkedAt, st.messageCount, now());
+        const facts = ownerFacts();
+        return [
+          `🌳 <b>${esc(getName())}</b> of the merrymen`,
+          `• born ${getBornDate()} · ${rel.stage}`,
+          `• ${rel.daysTogether} day(s) riding with you · ${rel.messageCount} messages shared`,
+          facts.length
+            ? `• what I know about you:\n${facts.slice(-8).map((f) => `  ${esc(f.replace(/^- /, "· "))}`).join("\n")}`
+            : `• I don't know much about you yet — tell me things, or /remember them for me`,
+          ``,
+          `my soul lives in ~/.merrymen/soul/ — read it, edit it, it's yours. /name renames me · /forget wipes what I know.`,
+        ].join("\n");
+      },
+      forgetOwner: () => forgetOwner(),
       help: () => HELP_TEXT,
       now,
     };
+
+    // The relationship deepens one message at a time (owner chats only).
+    if (msg.fromId === stateRef.get().ownerId || msg.chatId === stateRef.get().ownerId) {
+      stateRef.set({ ...stateRef.get(), messageCount: stateRef.get().messageCount + 1 });
+    }
 
     // Slash command wins; else natural language (LLM) if a key is set; else nudge.
     let cmd = slash;
     if (!cmd) {
       if (cfg.anthropicApiKey) {
-        cmd = await interpretWithLlm(
+        const st = stateRef.get();
+        const soulBlock = soulPromptBlock(st.linkedAt, st.messageCount, now());
+        const r = await interpretWithLlm(
           msg.text,
-          { state: readLlmState(statusCtx()), history: history.get(msg.chatId) },
+          { state: `SOUL:\n${soulBlock}\n\n${readLlmState(statusCtx())}`, history: history.get(msg.chatId) },
           { apiKey: cfg.anthropicApiKey, model: cfg.llmModel },
         );
+        cmd = r.cmd;
+        // The get-to-know-you side-channel: the model proposes a fact, the
+        // sanitizer disposes (drops addresses/keys/markup, dedupes, caps).
+        if (r.remember) rememberOwnerFact(r.remember, now());
       } else {
         cmd = { kind: "chat", reply: "add an Anthropic key in the dashboard to chat in plain English. For now, try /help." };
       }

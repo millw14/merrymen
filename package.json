@@ -1,6 +1,6 @@
 {
   "name": "merrymen",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Self-hosted autonomous trading agents for Robinhood Chain — your keys, your caps, hard on-chain permission walls, write-your-own strategies.",
   "license": "MIT",
   "repository": {
