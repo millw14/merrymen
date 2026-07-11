@@ -21,7 +21,7 @@
  * policy enforcement, end to end.
  */
 
-import { writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import {
   createPublicClient,
   encodeFunctionData,
@@ -35,6 +35,7 @@ import {
   CASH,
   MORPHO,
   RIALTO,
+  STOCK_TOKENS,
   UNISWAP,
   USDG_DECIMALS,
   robinhoodChain,
@@ -55,8 +56,11 @@ import {
   strategyKey,
   type ResolvedConfig,
 } from "./settings";
-import { buildStrategy, tokensForSymbols } from "./strategies/registry";
+import { BUILTIN_STRATEGIES, buildStrategy, tokensForSymbols } from "./strategies/registry";
+import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy } from "./strategies/types";
+import { isPaused, startTelegram } from "./telegram/service";
+import { readPositionRaw } from "./telegram/reads";
 import { readPositions } from "./positions";
 import { readAccountBalances, readMarketSafety, setMainnetRpc } from "./snapshot";
 import {
@@ -197,6 +201,7 @@ async function main() {
   let opsToday = 0;
   let highWaterMarkUsdg = 0n;
   let lastSequencerUp = true;
+  let lastEquityUsdg = 0n; // updated each tick; used by chat-triggered trades
 
   /**
    * Reconcile in-memory state with the grant file. Returns true if an agent is
@@ -609,6 +614,12 @@ async function main() {
       sequencerUp: market.sequencerUp,
     };
 
+    lastEquityUsdg = equityUsdg; // for chat-triggered trades between ticks
+
+    // Pause marker (toggled from Telegram/dashboard): keep reading state, but
+    // the strategy stops proposing trades until resumed.
+    if (isPaused()) return;
+
     for (const intent of await strategy.tick(snap)) {
       await processIntent(intent, equityUsdg);
     }
@@ -626,9 +637,69 @@ async function main() {
     process.exit(0);
   }
 
+  // ── Telegram bridge — independent long-poll loop, never blocks the tick ──
+  async function submitChatTrade(side: "buy" | "sell", symbol: string, usdgAmount: number): Promise<string> {
+    if (!active) return "no agent armed — sign a grant in the dashboard first.";
+    const token = STOCK_TOKENS.find((t) => t.symbol === symbol)?.address;
+    if (!token) return `unknown or unsupported symbol ${symbol}. I trade the basket tokens.`;
+    const router = swapRouterFor(cfg);
+    let intent: TradeIntent;
+    if (side === "buy") {
+      const raw = usdg(usdgAmount);
+      intent = { kind: "swap", target: router, sellToken: CASH.USDG as `0x${string}`, buyToken: token, sellAmountRaw: raw, notionalUsdg: raw };
+    } else {
+      const pos = readPositionRaw(active.agentId, symbol, usdg);
+      if (!pos) return `you don't hold any ${symbol}.`;
+      const want = usdg(usdgAmount);
+      const sellRaw = want < pos.valueUsdg ? (pos.rawBalance * want) / pos.valueUsdg : pos.rawBalance;
+      const notional = want < pos.valueUsdg ? want : pos.valueUsdg;
+      if (sellRaw === 0n) return `${symbol} amount rounds to zero shares.`;
+      intent = { kind: "swap", target: router, sellToken: token, buyToken: CASH.USDG as `0x${string}`, sellAmountRaw: sellRaw, notionalUsdg: notional };
+    }
+    await processIntent(intent, lastEquityUsdg);
+    return `🏹 submitted ${side} ${usdgAmount} USDG ${symbol} — watch /trades for the result (it still passes the policy wall).`;
+  }
+
+  startTelegram({
+    getCfg: () => cfg,
+    note: strategyNote,
+    buildStatusContext: () => ({
+      strategy: strategy.name,
+      venue: cfg.swapVenue,
+      paused: isPaused(),
+      workerAliveSec: 0, // the worker itself is answering, so it's alive
+      grant: active
+        ? {
+            perTradeUsdg: active.grant.caps.perTradeUsdg,
+            dailyUsdg: active.grant.caps.dailyUsdg,
+            maxDrawdownPct: active.grant.caps.maxDrawdownPct,
+            expiresInDays: Math.max(0, Math.floor((active.grant.expiresAt - Math.floor(Date.now() / 1000)) / 86400)),
+          }
+        : null,
+      telegramMaxActionUsdg: cfg.telegramMaxActionUsdg,
+    }),
+    setStrategy: (name) => {
+      if ((BUILTIN_STRATEGIES as readonly string[]).includes(name)) return { ok: true };
+      if (resolveStrategyFile(name, customStrategiesDir())) return { ok: true };
+      return { ok: false, reason: `no builtin and no strategies/${name} file` };
+    },
+    grantPerTradeUsdg: () => active?.grant.caps.perTradeUsdg,
+    submitTrade: submitChatTrade,
+    kill: () => {
+      try {
+        if (!loadGrantFile()) return { ok: false, reason: "no grant" };
+        rmSync(homePaths.grant(), { force: true });
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+      }
+    },
+  });
+
   console.log(
     `merrymen worker starting — strategy ${strategy.name}, venue ${cfg.swapVenue}, ` +
-      `tick ${cfg.tickSeconds}s, settings+grant re-synced every tick`,
+      `tick ${cfg.tickSeconds}s, settings+grant re-synced every tick` +
+      (cfg.telegramEnabled ? ", telegram ON" : ""),
   );
   const runLoop = () => {
     tick()

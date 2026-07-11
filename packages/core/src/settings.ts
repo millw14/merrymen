@@ -53,10 +53,22 @@ export interface MerrymenSettings {
   llmModel?: string;
   llmIntervalMin?: number;
   llmMaxActionUsdg?: number;
+
+  // ── telegram (chat with your merryman) ─────────────────────────────────
+  /** Bot token from @BotFather (secret). Enables the Telegram bridge. */
+  telegramBotToken?: string;
+  /** Master switch — the poller only runs when this is true and a token is set. */
+  telegramEnabled?: boolean;
+  /** Allow state-changing commands (pause/strategy/cap/kill). Off = read + chat only. */
+  telegramControlEnabled?: boolean;
+  /** Obeyed Telegram chat IDs. First /link adds the owner; others rejected. */
+  telegramAllowlist?: number[];
+  /** Per-action USDG ceiling for chat-triggered trades — beneath the grant caps. */
+  telegramMaxActionUsdg?: number;
 }
 
 /** Keys whose values must never be echoed back to a browser. */
-export const SECRET_SETTING_KEYS = ["anthropicApiKey", "rialtoApiKey"] as const;
+export const SECRET_SETTING_KEYS = ["anthropicApiKey", "rialtoApiKey", "telegramBotToken"] as const;
 export type SecretSettingKey = (typeof SECRET_SETTING_KEYS)[number];
 
 export const SETTINGS_DEFAULTS = {
@@ -73,4 +85,8 @@ export const SETTINGS_DEFAULTS = {
   llmModel: "claude-opus-4-8",
   llmIntervalMin: 30,
   llmMaxActionUsdg: 50,
+  telegramEnabled: false,
+  telegramControlEnabled: true,
+  telegramAllowlist: [] as number[],
+  telegramMaxActionUsdg: 25,
 };

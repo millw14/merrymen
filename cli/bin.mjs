@@ -282,6 +282,16 @@ async function onboard() {
     if (valid.length) current.basketSymbols = valid;
   }
 
+  console.log(bold(`\n  ${c.arrow} a raven to Telegram`) + dim("  (chat with your merryman — optional)"));
+  console.log(dim("  Create a bot: message @BotFather in Telegram, send /newbot, copy the token."));
+  console.log(dim("  Then finish linking from the dashboard settings, or leave blank to skip."));
+  const tgToken = (await p.askSecret(`  Telegram bot token${keep(current.telegramBotToken)}: `)).trim();
+  if (tgToken) {
+    current.telegramBotToken = tgToken;
+    current.telegramEnabled = true;
+    ok("telegram enabled — you'll link your chat from the dashboard");
+  }
+
   p.close();
   const s = spinner("stashing your plans in the hollow oak");
   writeSettings(current);
@@ -444,7 +454,32 @@ async function doctor() {
   else if (custom.includes(strategy)) ok(`strategy: ${strategy} (yours, ~/.merrymen/strategies/${strategy}.*)`);
   else bad(`strategy "${strategy}" is neither builtin nor in ${STRATEGIES} — the worker will idle with a warning`);
   if (custom.length) console.log(`  ${dim(`your strategies: ${custom.join(", ")}`)}`);
+
+  // telegram
+  if (s.telegramBotToken && s.telegramEnabled) {
+    const tg = await rpcTelegramGetMe(s.telegramBotToken);
+    tg ? ok(`telegram: connected as @${tg}`) : bad("telegram: token set but getMe failed — check the token");
+  } else if (s.telegramBotToken) {
+    warn("telegram: token set but disabled — enable it in the dashboard");
+  } else {
+    console.log(`  ${dim("telegram: not configured (optional — set it up in the dashboard)")}`);
+  }
   console.log();
+}
+
+/** getMe against the Bot API for `doctor`; returns @username or null. */
+async function rpcTelegramGetMe(token) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 7000);
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, { signal: controller.signal });
+    const j = await res.json();
+    return j && j.ok && j.result && j.result.username ? j.result.username : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ──────────────────────────────────────────────────────────────── status ──

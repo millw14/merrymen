@@ -83,6 +83,40 @@ injects the verified registry (`ctx.tokenBySymbol.QQQ`, `ctx.CASH.USDG`,
 [strategies/example-dip-buyer.mjs](./strategies/example-dip-buyer.mjs) for the
 full walkthrough.
 
+## Chat with your merryman (Telegram)
+
+Link a Telegram bot and run your band from your phone — natural-language chat plus
+commands, all inside the same permission walls. Telegram is a **control surface,
+never a trade path**: every message is untrusted text that flows through the same
+discipline the LLM strategist uses (parse → validate → policy wall → signed
+on-chain grant). Chat can *tighten* caps but can never widen them — raising a cap
+still needs a browser re-sign.
+
+```
+1. @BotFather on Telegram → /newbot → copy the token
+2. /settings → Telegram → paste token, "test connection" (shows @yourbot), enable
+3. Message your bot: /link <code>   (the one-time code shown in /settings)
+   → you're now the owner; only allowlisted chats are obeyed
+```
+
+Commands (all work without an Anthropic key; with one, plain English works too —
+"how are we doing?", "pause everything", "switch to weekend-gap"):
+
+| command | does |
+|---|---|
+| `/status` `/positions` `/pnl` `/trades` | read the live book |
+| `/pause` `/resume` | halt / resume the strategy loop (kill-switch marker) |
+| `/strategy <name>` | switch strategy (builtin or your `~/.merrymen/strategies/*`) |
+| `/cap perTrade <usdg>` | tighten a cap within the signed grant (never widens) |
+| `/kill` | destroy the grant — the worker halts next tick |
+| `/help` | the full list |
+
+Turn off state-changing commands (read + chat only) with the **control** toggle,
+and bound any chat-triggered trade with the per-action USDG ceiling — both in
+`/settings`. The bot token is a secret: it stays in `~/.merrymen` and never
+returns to the browser. Polling is off by default; existing installs are
+untouched until you opt in.
+
 <details>
 <summary>develop from a clone</summary>
 
@@ -118,7 +152,8 @@ Worker env (fallbacks when the settings file doesn't set a value):
 | `MERRYMEN_PERF_FEE_BPS` | `1000` | performance fee on profit above the high-water mark (accrual-only ledger) |
 | `MERRYMEN_BREAKER_ADDRESS` | — | deployed BreakerRegistry; a tripped breaker halts all intents |
 | `MERRYMEN_RIALTO_API_KEY` | — | Rialto integrator key; enables the full quote→swap leg (target validated against the on-chain router registry) |
-| `ANTHROPIC_API_KEY` | — | enables the LLM strategist's Claude driver (`MERRYMEN_LLM_MODEL`, `MERRYMEN_LLM_INTERVAL_MIN`, `MERRYMEN_LLM_MAX_ACTION_USDG` tune it) |
+| `ANTHROPIC_API_KEY` | — | enables the LLM strategist's Claude driver (`MERRYMEN_LLM_MODEL`, `MERRYMEN_LLM_INTERVAL_MIN`, `MERRYMEN_LLM_MAX_ACTION_USDG` tune it) — also powers Telegram natural-language chat |
+| `MERRYMEN_TELEGRAM_BOT_TOKEN` | — | @BotFather token; enables the Telegram control/chat bridge (`MERRYMEN_TELEGRAM_ENABLED`, `MERRYMEN_TELEGRAM_CONTROL_ENABLED`, `MERRYMEN_TELEGRAM_ALLOWLIST`, `MERRYMEN_TELEGRAM_MAX_ACTION_USDG` tune it) |
 
 `npm run typecheck` and `npm test` cover the policy mirror, strategy, venue
 math (slippage, quote selection, calldata), and the ERC-8056 invariant that a

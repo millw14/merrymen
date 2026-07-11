@@ -6,13 +6,13 @@
  * the new bundler/RPC; trading fields rebuild the strategy in place.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import {
   SETTINGS_DEFAULTS,
   STOCK_TOKENS,
   type MerrymenSettings,
 } from "../../packages/core/src/index";
-import { homePaths } from "./home";
+import { ensureHome, homePaths } from "./home";
 
 export interface ResolvedConfig {
   bundlerUrl: string | undefined;
@@ -35,6 +35,11 @@ export interface ResolvedConfig {
   llmModel: string;
   llmIntervalMin: number;
   llmMaxActionUsdg: number;
+  telegramBotToken: string | undefined;
+  telegramEnabled: boolean;
+  telegramControlEnabled: boolean;
+  telegramAllowlist: number[];
+  telegramMaxActionUsdg: number;
 }
 
 const KNOWN_SYMBOLS = new Set(STOCK_TOKENS.map((t) => t.symbol));
@@ -61,6 +66,28 @@ function oneOf<T extends string>(
 ): T {
   if (typeof file === "string" && (allowed as readonly string[]).includes(file)) return file as T;
   if (env !== undefined && (allowed as readonly string[]).includes(env)) return env as T;
+  return fallback;
+}
+
+/** file boolean > env ("1"/"true") > default. */
+function bool(file: unknown, env: string | undefined, fallback: boolean): boolean {
+  if (typeof file === "boolean") return file;
+  if (env !== undefined) return env === "1" || env.toLowerCase() === "true";
+  return fallback;
+}
+
+/** Numeric chat-ID allowlist; file array wins, else comma-separated env, else default. */
+function numArray(file: unknown, env: string | undefined, fallback: number[]): number[] {
+  if (Array.isArray(file)) {
+    const ids = file.filter((n): n is number => typeof n === "number" && Number.isFinite(n));
+    return ids;
+  }
+  if (env !== undefined && env.trim() !== "") {
+    return env
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n));
+  }
   return fallback;
 }
 
@@ -106,6 +133,11 @@ export function mergeSettings(
     llmModel: str(file.llmModel, env.MERRYMEN_LLM_MODEL, d.llmModel)!,
     llmIntervalMin: num(file.llmIntervalMin, env.MERRYMEN_LLM_INTERVAL_MIN, d.llmIntervalMin, 1, 1_440),
     llmMaxActionUsdg: num(file.llmMaxActionUsdg, env.MERRYMEN_LLM_MAX_ACTION_USDG, d.llmMaxActionUsdg, 1, 100_000),
+    telegramBotToken: str(file.telegramBotToken, env.MERRYMEN_TELEGRAM_BOT_TOKEN),
+    telegramEnabled: bool(file.telegramEnabled, env.MERRYMEN_TELEGRAM_ENABLED, d.telegramEnabled),
+    telegramControlEnabled: bool(file.telegramControlEnabled, env.MERRYMEN_TELEGRAM_CONTROL, d.telegramControlEnabled),
+    telegramAllowlist: numArray(file.telegramAllowlist, env.MERRYMEN_TELEGRAM_ALLOWLIST, d.telegramAllowlist),
+    telegramMaxActionUsdg: num(file.telegramMaxActionUsdg, env.MERRYMEN_TELEGRAM_MAX_ACTION_USDG, d.telegramMaxActionUsdg, 1, 100_000),
   };
 }
 
@@ -122,9 +154,45 @@ export function resolveConfig(): ResolvedConfig {
   return mergeSettings(file ?? {}, process.env);
 }
 
+/** Read the raw settings file (unresolved), tolerating BOM/missing. */
+export function readSettingsFile(): MerrymenSettings {
+  const file = process.env.MERRYMEN_SETTINGS_FILE ?? homePaths.settings();
+  try {
+    return JSON.parse(readFileSync(file, "utf8").replace(/^﻿/, "")) as MerrymenSettings;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Merge a patch into settings.json and write it back — used by the Telegram
+ * control commands to change strategy/cap/allowlist. The worker re-reads the
+ * file on its next tick, so the change applies without a restart. Returns the
+ * merged object.
+ */
+export function patchSettingsFile(patch: Partial<MerrymenSettings>): MerrymenSettings {
+  const file = process.env.MERRYMEN_SETTINGS_FILE ?? homePaths.settings();
+  const next = { ...readSettingsFile(), ...patch };
+  ensureHome();
+  writeFileSync(file, JSON.stringify(next, null, 2), "utf8");
+  return next;
+}
+
 /** Fingerprint of fields that require re-arming the executor when changed. */
 export function connectionKey(cfg: ResolvedConfig): string {
   return [cfg.bundlerUrl, cfg.rpcMainnet, cfg.rpcTestnet].join("|");
+}
+
+/** Fingerprint of Telegram fields — the poller restarts when this changes. */
+export function telegramKey(cfg: ResolvedConfig): string {
+  return [
+    cfg.telegramBotToken ?? "",
+    cfg.telegramEnabled ? "on" : "off",
+    cfg.telegramControlEnabled ? "control" : "readonly",
+    cfg.telegramAllowlist.join(","),
+    cfg.telegramMaxActionUsdg,
+    cfg.anthropicApiKey ? "llm" : "nollm",
+  ].join("|");
 }
 
 /** Fingerprint of fields that require rebuilding the strategy when changed. */

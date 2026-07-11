@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { connectionKey, mergeSettings, strategyKey } from "./settings";
+import { connectionKey, mergeSettings, strategyKey, telegramKey } from "./settings";
 
 describe("mergeSettings — file > env > default", () => {
   it("defaults hold with nothing set", () => {
@@ -76,6 +76,45 @@ describe("mergeSettings — file > env > default", () => {
     const c = mergeSettings({ basketSymbols: ["DOGE", "SHIB"] }, {});
     assert.deepEqual(c.basketSymbols, ["AAPL", "MSFT", "QQQ"]);
   });
+
+  it("telegram fields resolve with sane defaults and validation", () => {
+    const def = mergeSettings({}, {});
+    assert.equal(def.telegramBotToken, undefined);
+    assert.equal(def.telegramEnabled, false);
+    assert.equal(def.telegramControlEnabled, true);
+    assert.deepEqual(def.telegramAllowlist, []);
+    assert.equal(def.telegramMaxActionUsdg, 25);
+
+    const set = mergeSettings(
+      {
+        telegramBotToken: "123:abc",
+        telegramEnabled: true,
+        telegramControlEnabled: false,
+        telegramAllowlist: [111, 222, "junk" as never, 333],
+        telegramMaxActionUsdg: 40,
+      },
+      {},
+    );
+    assert.equal(set.telegramBotToken, "123:abc");
+    assert.equal(set.telegramEnabled, true);
+    assert.equal(set.telegramControlEnabled, false);
+    assert.deepEqual(set.telegramAllowlist, [111, 222, 333]); // non-numbers dropped
+    assert.equal(set.telegramMaxActionUsdg, 40);
+  });
+
+  it("telegram env fallbacks (enabled flag, comma allowlist)", () => {
+    const c = mergeSettings(
+      {},
+      {
+        MERRYMEN_TELEGRAM_BOT_TOKEN: "999:xyz",
+        MERRYMEN_TELEGRAM_ENABLED: "true",
+        MERRYMEN_TELEGRAM_ALLOWLIST: "5, 6 ,7",
+      },
+    );
+    assert.equal(c.telegramBotToken, "999:xyz");
+    assert.equal(c.telegramEnabled, true);
+    assert.deepEqual(c.telegramAllowlist, [5, 6, 7]);
+  });
 });
 
 describe("change fingerprints", () => {
@@ -96,5 +135,17 @@ describe("change fingerprints", () => {
     const k2 = mergeSettings({ anthropicApiKey: "sk-2" }, {});
     assert.notEqual(strategyKey(k1), strategyKey(k2)); // rotated key = rebuilt driver
     assert.notEqual(strategyKey(a), strategyKey(k1)); // gaining a key = rebuild
+  });
+
+  it("telegram key moves on token, enable, allowlist — not on unrelated fields", () => {
+    const a = mergeSettings({ telegramBotToken: "t", telegramEnabled: true, telegramAllowlist: [1] }, {});
+    const tokenChanged = mergeSettings({ telegramBotToken: "t2", telegramEnabled: true, telegramAllowlist: [1] }, {});
+    const allowChanged = mergeSettings({ telegramBotToken: "t", telegramEnabled: true, telegramAllowlist: [1, 2] }, {});
+    const disabled = mergeSettings({ telegramBotToken: "t", telegramEnabled: false, telegramAllowlist: [1] }, {});
+    const unrelated = mergeSettings({ telegramBotToken: "t", telegramEnabled: true, telegramAllowlist: [1], slippageBps: 300 }, {});
+    assert.notEqual(telegramKey(a), telegramKey(tokenChanged));
+    assert.notEqual(telegramKey(a), telegramKey(allowChanged));
+    assert.notEqual(telegramKey(a), telegramKey(disabled));
+    assert.equal(telegramKey(a), telegramKey(unrelated));
   });
 });

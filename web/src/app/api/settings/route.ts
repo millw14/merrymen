@@ -32,8 +32,9 @@ export interface SettingsView {
   // secrets, masked
   anthropicApiKey: SecretView;
   rialtoApiKey: SecretView;
+  telegramBotToken: SecretView;
   // everything else, verbatim (undefined = using env/default)
-  values: Omit<MerrymenSettings, "anthropicApiKey" | "rialtoApiKey">;
+  values: Omit<MerrymenSettings, "anthropicApiKey" | "rialtoApiKey" | "telegramBotToken">;
   defaults: typeof SETTINGS_DEFAULTS;
   knownSymbols: string[];
   strategies: { builtin: string[]; custom: string[] };
@@ -71,10 +72,11 @@ function mask(value: string | undefined): SecretView {
 
 export async function GET() {
   const stored = await readStored();
-  const { anthropicApiKey, rialtoApiKey, ...values } = stored;
+  const { anthropicApiKey, rialtoApiKey, telegramBotToken, ...values } = stored;
   const view: SettingsView = {
     anthropicApiKey: mask(anthropicApiKey),
     rialtoApiKey: mask(rialtoApiKey),
+    telegramBotToken: mask(telegramBotToken),
     values,
     defaults: SETTINGS_DEFAULTS,
     knownSymbols: STOCK_TOKENS.map((t) => t.symbol),
@@ -94,7 +96,9 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   gapEnterBudgetUsdg: [1, 1_000_000],
   llmIntervalMin: [1, 1_440],
   llmMaxActionUsdg: [1, 100_000],
+  telegramMaxActionUsdg: [1, 100_000],
 };
+const BOOL_FIELDS = ["telegramEnabled", "telegramControlEnabled"] as const;
 
 export async function PUT(req: Request) {
   let body: Partial<Record<keyof MerrymenSettings, unknown>>;
@@ -191,6 +195,34 @@ export async function PUT(req: Request) {
     else if (typeof v === "string" && /^[a-z0-9.-]{3,64}$/.test(v.trim()))
       setOrClear("llmModel", v.trim());
     else errors.push("llmModel: must be a model id like claude-opus-4-8");
+  }
+
+  // ── booleans (telegram toggles) ─────────────────────────────────────────
+  for (const key of BOOL_FIELDS) {
+    if (!(key in body)) continue;
+    const v = body[key];
+    if (v === null || v === undefined) setOrClear(key, undefined);
+    else if (typeof v === "boolean") setOrClear(key, v as never);
+    else errors.push(`${key}: must be true or false`);
+  }
+
+  // ── telegram allowlist (numeric chat IDs) ───────────────────────────────
+  if ("telegramAllowlist" in body) {
+    const v = body.telegramAllowlist;
+    if (v === null || v === undefined) {
+      setOrClear("telegramAllowlist", undefined);
+    } else if (Array.isArray(v)) {
+      const ids = v.map((x) => (typeof x === "number" ? x : Number(x)));
+      if (ids.some((n) => !Number.isFinite(n) || !Number.isInteger(n))) {
+        errors.push("telegramAllowlist: chat IDs must be integers");
+      } else if (ids.length > 50) {
+        errors.push("telegramAllowlist: at most 50 chat IDs");
+      } else {
+        setOrClear("telegramAllowlist", ids as never);
+      }
+    } else {
+      errors.push("telegramAllowlist: must be an array of chat IDs");
+    }
   }
 
   // ── basket symbols ──────────────────────────────────────────────────────

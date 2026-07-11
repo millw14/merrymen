@@ -22,6 +22,10 @@ export const homePaths = {
   heartbeat: () => path.join(merrymenHome(), "heartbeat.json"),
   db: () => path.join(merrymenHome(), "merrymen.db"),
   strategies: () => path.join(merrymenHome(), "strategies"),
+  /** Telegram runtime state: update offset, link code, owner id. */
+  telegram: () => path.join(merrymenHome(), "telegram.json"),
+  /** Pause marker — present = trading halted (toggled from Telegram/dashboard). */
+  paused: () => path.join(merrymenHome(), "paused"),
 };
 
 let ensured = false;

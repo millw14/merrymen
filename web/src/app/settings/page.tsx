@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import type { SettingsView } from "@/app/api/settings/route";
+import type { TelegramStatus } from "@/app/api/telegram/route";
 
 type Draft = Record<string, string>;
 
@@ -26,6 +27,18 @@ export default function SettingsPage() {
   const [symbols, setSymbols] = useState<string[] | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
+  // Telegram: booleans/allowlist can't ride the string `draft`, so track separately.
+  const [tg, setTg] = useState<TelegramStatus | null>(null);
+  const [tgEnabled, setTgEnabled] = useState<boolean | null>(null);
+  const [tgControl, setTgControl] = useState<boolean | null>(null);
+  const [allowlist, setAllowlist] = useState<number[] | null>(null);
+  const [tgTest, setTgTest] = useState<string | null>(null);
+
+  const loadTelegram = () =>
+    fetch("/api/telegram")
+      .then((r) => (r.ok ? (r.json() as Promise<TelegramStatus>) : null))
+      .then((s) => s && setTg(s))
+      .catch(() => {});
 
   useEffect(() => {
     void (async () => {
@@ -35,6 +48,7 @@ export default function SettingsPage() {
       } catch {
         /* page shows loading state */
       }
+      void loadTelegram();
     })();
   }, []);
 
@@ -57,6 +71,9 @@ export default function SettingsPage() {
     setErrors([]);
     const body: Record<string, unknown> = { ...draft };
     if (symbols !== null) body.basketSymbols = symbols;
+    if (tgEnabled !== null) body.telegramEnabled = tgEnabled;
+    if (tgControl !== null) body.telegramControlEnabled = tgControl;
+    if (allowlist !== null) body.telegramAllowlist = allowlist;
     // Secrets: only send when the user typed something or hit clear ("").
     try {
       const res = await fetch("/api/settings", {
@@ -73,8 +90,12 @@ export default function SettingsPage() {
       setStatus("saved — the worker applies it within one tick");
       setDraft({});
       setSymbols(null);
+      setTgEnabled(null);
+      setTgControl(null);
+      setAllowlist(null);
       const fresh = await fetch("/api/settings");
       if (fresh.ok) setView((await fresh.json()) as SettingsView);
+      void loadTelegram();
       setTimeout(() => setStatus(null), 4000);
     } catch {
       setErrors(["could not reach the settings API"]);
@@ -94,6 +115,26 @@ export default function SettingsPage() {
   const activeSymbols = symbols ?? view.values.basketSymbols ?? d.basketSymbols;
   const secretPlaceholder = (s: { set: boolean; hint: string | null }) =>
     s.set ? `saved ····${s.hint ?? ""} — type to replace` : "not set";
+
+  const tgEnabledVal = tgEnabled ?? view.values.telegramEnabled ?? d.telegramEnabled;
+  const tgControlVal = tgControl ?? view.values.telegramControlEnabled ?? d.telegramControlEnabled;
+  const allowlistVal = allowlist ?? view.values.telegramAllowlist ?? [];
+
+  async function testTelegram() {
+    setTgTest("testing…");
+    try {
+      const res = await fetch("/api/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "test", token: draft.telegramBotToken || undefined }),
+      });
+      const j = (await res.json()) as { ok?: boolean; username?: string; reason?: string };
+      setTgTest(j.ok ? `✓ connected as @${j.username}` : `✗ ${j.reason ?? "failed"}`);
+      void loadTelegram();
+    } catch {
+      setTgTest("✗ could not reach the API");
+    }
+  }
 
   return (
     <>
@@ -184,6 +225,105 @@ export default function SettingsPage() {
             <Field label="Rialto key header" hint={`Header name their API expects (default ${d.rialtoApiKeyHeader}).`}>
               <input type="text" placeholder={d.rialtoApiKeyHeader} value={v("rialtoApiKeyHeader")} onChange={set("rialtoApiKeyHeader")} />
             </Field>
+          </div>
+
+          <div className="settings-section mono">telegram · chat with your merryman</div>
+          <p className="grant-note" style={{ marginTop: 0 }}>
+            Create a bot with <b>@BotFather</b> in Telegram (send <code>/newbot</code>), paste its
+            token below, enable, and hit <b>test</b>. Then message your bot <code>/link {tg?.linkCode ?? "……"}</code> to
+            claim it. Commands and natural-language chat run inside the same policy wall — Telegram can
+            never exceed your signed grant.
+          </p>
+          <div className="grant-fields settings-grid">
+            <Field
+              label="bot token"
+              hint="From @BotFather. Stored locally, never sent back to the browser."
+            >
+              <input
+                type="password"
+                placeholder={secretPlaceholder(view.telegramBotToken)}
+                value={draft.telegramBotToken ?? ""}
+                onChange={set("telegramBotToken")}
+              />
+              {view.telegramBotToken.set && (
+                <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, telegramBotToken: "" }))}>
+                  clear
+                </button>
+              )}
+            </Field>
+            <Field label="connection" hint="Live check against Telegram (getMe).">
+              <button type="button" className="cap" style={{ cursor: "pointer" }} onClick={() => void testTelegram()}>
+                test connection
+              </button>
+              <span className="field-unit">
+                {tgTest ?? (tg?.connected ? `✓ @${tg.botUsername}` : tg?.hasToken ? "not verified" : "no token")}
+              </span>
+            </Field>
+            <label className="field settings-field">
+              <span className="field-label">enable telegram</span>
+              <span className="field-input">
+                <input type="checkbox" checked={tgEnabledVal} onChange={(e) => setTgEnabled(e.target.checked)} style={{ width: "auto" }} />
+                <span className="field-unit">{tgEnabledVal ? "the bot is listening" : "off"}</span>
+              </span>
+              <span className="field-hint">Master switch for the Telegram poller.</span>
+            </label>
+            <label className="field settings-field">
+              <span className="field-label">allow control commands</span>
+              <span className="field-input">
+                <input type="checkbox" checked={tgControlVal} onChange={(e) => setTgControl(e.target.checked)} style={{ width: "auto" }} />
+                <span className="field-unit">{tgControlVal ? "pause/strategy/trade/kill" : "read + chat only"}</span>
+              </span>
+              <span className="field-hint">Off = the bot can answer questions but not change state.</span>
+            </label>
+            <Field label="chat trade ceiling" hint="Max USDG per chat-triggered trade — beneath your grant caps.">
+              <input
+                type="number"
+                min={1}
+                placeholder={String(d.telegramMaxActionUsdg)}
+                value={v("telegramMaxActionUsdg")}
+                onChange={set("telegramMaxActionUsdg")}
+              />
+              <span className="field-unit">USDG</span>
+            </Field>
+          </div>
+          <div className="grant-note" style={{ marginTop: 4 }}>
+            {tg?.linkCode ? (
+              <>
+                link code: <b className="mono">{tg.linkCode}</b> — send <code>/link {tg.linkCode}</code> from Telegram
+              </>
+            ) : (
+              "save a token to generate your link code"
+            )}
+          </div>
+          <div className="symbol-grid" style={{ marginTop: 6 }}>
+            {allowlistVal.length === 0 && <span className="dim mono">no linked chats yet</span>}
+            {allowlistVal.map((id) => (
+              <span key={id} className="cap symbol-chip on">
+                {id}
+                <button
+                  type="button"
+                  onClick={() => setAllowlist(allowlistVal.filter((x) => x !== id))}
+                  style={{ marginLeft: 6, background: "none", border: "none", color: "inherit", cursor: "pointer" }}
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+            <input
+              type="text"
+              inputMode="numeric"
+              placeholder="add chat id…"
+              className="mono"
+              style={{ width: 120, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", fontSize: 12, padding: "2px 6px" }}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                const n = Number((e.target as HTMLInputElement).value.trim());
+                if (Number.isInteger(n) && !allowlistVal.includes(n)) {
+                  setAllowlist([...allowlistVal, n]);
+                  (e.target as HTMLInputElement).value = "";
+                }
+              }}
+            />
           </div>
 
           <div className="settings-section mono">strategy &amp; trading</div>
