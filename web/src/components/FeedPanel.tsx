@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import type { AgentStatus } from "@/app/api/grants/route";
 import type { FeedResponse } from "@/app/api/feed/route";
-import { FEED } from "@/lib/mock";
 
 export function FeedPanel() {
   const [status, setStatus] = useState<AgentStatus | null>(null);
@@ -30,6 +29,7 @@ export function FeedPanel() {
   }, []);
 
   const hasGrant = status?.exists && status.grant;
+  const name = feed?.agent?.name ?? "Robin";
 
   // Real history from the worker (recorded events), newest first.
   if (hasGrant && feed && feed.events.length > 0) {
@@ -41,7 +41,7 @@ export function FeedPanel() {
               {new Date(e.created_at).toLocaleTimeString([], { hour12: false })}
             </span>
             <span>
-              <b>Robin</b> <span className={e.level}>{e.message}</span>
+              <b>{name}</b> <span className={e.level}>{e.message}</span>
             </span>
           </div>
         ))}
@@ -61,7 +61,7 @@ export function FeedPanel() {
             {new Date(g.grantedAt * 1000).toLocaleTimeString([], { hour12: false })}
           </span>
           <span>
-            <b>Robin</b>{" "}
+            <b>{name}</b>{" "}
             <span className="ok">
               permission wall raised — ≤{g.caps.perTradeUsdg} USDG/trade, ≤{g.caps.dailyUsdg}/day
             </span>
@@ -80,21 +80,15 @@ export function FeedPanel() {
     );
   }
 
+  // No grant yet — nothing to narrate. Honest emptiness, not demo theater.
   return (
-    <>
-      <div className="demo-banner mono" style={{ marginBottom: 8 }}>
-        demo data
+    <div className="feed">
+      <div className="feed-line">
+        <span className="feed-time">—</span>
+        <span className="dim">
+          the campfire is quiet — create your agent wallet and every event lands here, unedited
+        </span>
       </div>
-      <div className="feed demo-cards">
-        {FEED.map((l, i) => (
-          <div key={i} className="feed-line">
-            <span className="feed-time">{l.time}</span>
-            <span>
-              <b>{l.agent}</b> <span className={l.kind}>{l.text}</span>
-            </span>
-          </div>
-        ))}
-      </div>
-    </>
+    </div>
   );
 }

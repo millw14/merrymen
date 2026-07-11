@@ -4,9 +4,11 @@
  */
 
 import { existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { NextResponse } from "next/server";
 import { homePaths } from "@/lib/home";
+import type { MerrymenSettings } from "@merrymen/core";
 
 export const dynamic = "force-dynamic";
 
@@ -49,6 +51,13 @@ export interface AgentFinancials {
   hwm_usdg: number;
   accrued_fee_usdg: number;
 }
+/** Live identity: the user-given name (soul, mirrored into the agents table by
+ * the worker) + the strategy/basket actually configured in settings.json. */
+export interface AgentIdentity {
+  name: string;
+  strategy: string;
+  basket: string[];
+}
 export interface FeedResponse {
   source: "sqlite" | "none";
   events: FeedEvent[];
@@ -56,10 +65,26 @@ export interface FeedResponse {
   positions: PositionRow[];
   trades: TradeRecord[];
   financials: AgentFinancials | null;
+  agent: AgentIdentity | null;
+}
+
+/** The configured strategy + basket, straight from settings.json (live). */
+function readIdentitySettings(): { strategy: string; basket: string[] } {
+  try {
+    const raw = readFileSync(homePaths.settings(), "utf8").replace(/^﻿/, "");
+    const s = JSON.parse(raw) as MerrymenSettings;
+    return {
+      strategy: typeof s.strategy === "string" && s.strategy ? s.strategy : "steady-basket",
+      basket: Array.isArray(s.basketSymbols) && s.basketSymbols.length ? s.basketSymbols : ["AAPL", "MSFT", "QQQ"],
+    };
+  } catch {
+    return { strategy: "steady-basket", basket: ["AAPL", "MSFT", "QQQ"] };
+  }
 }
 
 export async function GET() {
   if (!existsSync(DB_FILE)) {
+    // No ledger yet — identity still resolves live from settings + default name.
     return NextResponse.json({
       source: "none",
       events: [],
@@ -67,6 +92,7 @@ export async function GET() {
       positions: [],
       trades: [],
       financials: null,
+      agent: { name: "Robin", ...readIdentitySettings() },
     } satisfies FeedResponse);
   }
 
@@ -79,6 +105,7 @@ export async function GET() {
     let positions: PositionRow[] = [];
     let trades: TradeRecord[] = [];
     let financials: AgentFinancials | null = null;
+    let name = "Robin";
     try {
       events = db
         .prepare(
@@ -123,12 +150,15 @@ export async function GET() {
       /* table not created yet */
     }
     try {
-      financials =
-        (db
-          .prepare(
-            "SELECT hwm_usdg, accrued_fee_usdg FROM agents ORDER BY created_at DESC LIMIT 1",
-          )
-          .get() as AgentFinancials | undefined) ?? null;
+      const row = db
+        .prepare(
+          "SELECT name, hwm_usdg, accrued_fee_usdg FROM agents ORDER BY created_at DESC LIMIT 1",
+        )
+        .get() as ({ name: string } & AgentFinancials) | undefined;
+      if (row) {
+        financials = { hwm_usdg: row.hwm_usdg, accrued_fee_usdg: row.accrued_fee_usdg };
+        if (typeof row.name === "string" && row.name) name = row.name;
+      }
     } catch {
       /* columns not migrated yet */
     }
@@ -139,6 +169,7 @@ export async function GET() {
       positions,
       trades,
       financials,
+      agent: { name, ...readIdentitySettings() },
     } satisfies FeedResponse);
   } finally {
     db.close();

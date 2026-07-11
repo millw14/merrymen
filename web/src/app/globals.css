@@ -287,18 +287,6 @@ button { font: inherit; cursor: pointer; }
 .empty-sub { color: var(--text-dim); font-size: 12px; max-width: 380px; }
 .empty-cta { max-width: 240px; margin-top: 6px; }
 
-.demo-wrap { margin-top: 18px; }
-.demo-banner {
-  font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase;
-  color: var(--gold);
-  border: 1px dashed color-mix(in srgb, var(--gold) 40%, transparent);
-  border-radius: 6px;
-  padding: 5px 10px;
-  margin-bottom: 10px;
-  display: inline-block;
-}
-.demo-cards { opacity: 0.55; filter: saturate(0.7); pointer-events: none; }
-
 .agent-card.armed { border-left: 3px solid var(--gold); }
 .agent-card.armed .agent-status { color: var(--gold); }
 .agent-card.armed .status-dot { background: var(--gold); }

@@ -137,7 +137,7 @@ export default function ScoreboardPage() {
           {data === null && <div className="market-empty mono">tallying the ledger…</div>}
           {data !== null && data.agents.length === 0 && (
             <div className="empty-state">
-              <div className="empty-sigil">➳</div>
+              <div className="empty-sigil"><LogoMark size={56} /></div>
               <div className="empty-title mono">no agents have run yet</div>
               <p className="empty-sub">
                 The scoreboard fills itself from the worker&apos;s ledger — deploy an agent and

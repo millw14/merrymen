@@ -7,8 +7,7 @@ import { USDG_DECIMALS, explorerFor } from "@merrymen/core";
 import type { AgentStatus } from "@/app/api/grants/route";
 import type { FeedResponse } from "@/app/api/feed/route";
 import { clearGrant } from "@/lib/session";
-import { AgentCard } from "./AgentCard";
-import { AGENTS } from "@/lib/mock";
+import { LogoMark } from "./Logo";
 
 function EquitySparkline({ points }: { points: number[] }) {
   if (points.length < 2) return null;
@@ -77,28 +76,17 @@ export function BandSection() {
 
   if (!status.exists || !status.grant) {
     return (
-      <>
-        <div className="empty-state">
-          <div className="empty-sigil">➳</div>
-          <div className="empty-title mono">no agents yet</div>
-          <p className="empty-sub">
-            Raise the permission wall to deploy your first agent — one signature,
-            hard on-chain caps, revocable any time.
-          </p>
-          <Link href="/grant" className="grant-btn empty-cta">
-            raise the wall
-          </Link>
-        </div>
-
-        <div className="demo-wrap">
-          <div className="demo-banner mono">▼ demo data — what a running band looks like. none of this is real.</div>
-          <div className="agent-grid demo-cards">
-            {AGENTS.map((a) => (
-              <AgentCard key={a.id} agent={a} />
-            ))}
-          </div>
-        </div>
-      </>
+      <div className="empty-state">
+        <div className="empty-sigil"><LogoMark size={56} /></div>
+        <div className="empty-title mono">no merryman yet</div>
+        <p className="empty-sub">
+          Create your agent wallet to deploy your first merryman — generated keys,
+          hard on-chain caps, revocable any time.
+        </p>
+        <Link href="/grant" className="grant-btn empty-cta">
+          create your agent wallet
+        </Link>
+      </div>
     );
   }
 
@@ -117,8 +105,13 @@ export function BandSection() {
       <div className="agent-head">
         <div className="agent-sigil">🏹</div>
         <div>
-          <div className="agent-name">Robin</div>
-          <div className="agent-strategy">steady basket DCA · AAPL MSFT QQQ · chain {g.chainId}</div>
+          <div className="agent-name">{feed?.agent?.name ?? "Robin"}</div>
+          <div className="agent-strategy">
+            {feed?.agent
+              ? `${feed.agent.strategy} · ${feed.agent.basket.join(" ")}`
+              : "…"}{" "}
+            · {g.chainId === 46630 ? "testnet" : "mainnet"} {g.chainId}
+          </div>
         </div>
         <div className="agent-status">
           <span className="status-dot" />
@@ -201,7 +194,7 @@ export function BandSection() {
 
       {state === "armed" && (
         <div className="real-hint mono">
-          wall is up — start the worker (npm run dev in worker/), add a bundler URL in{" "}
+          wall is up — run <b>merrymen start</b>, add a bundler URL in{" "}
           <Link href="/settings">settings</Link>, and fund the account to go active
         </div>
       )}
