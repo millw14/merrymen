@@ -45,7 +45,12 @@ merrymen start                     # dashboard at localhost:3100 + the 24/7 work
 ```
 
 Requires Node 22.12+. All your data lives in **`~/.merrymen`** (settings, grant,
-ledger, strategies) — the install is disposable, upgrades never touch it.
+ledger, strategies) — the install is disposable, upgrades never touch it. Secrets
+(bundler/RPC keys, Anthropic, Rialto, Telegram token) stay in that folder, never
+leave the machine, and never echo back to the browser (masked to their last 4).
+The dashboard binds to **localhost only** — it has no login and holds your trading
+controls, so it isn't reachable from your network. To open it to a trusted LAN
+(e.g. your phone on home WiFi), start with `MERRYMEN_HOST=0.0.0.0 merrymen start`.
 
 > **`merrymen: command not found`?** Your npm global-bin folder isn't on PATH
 > (this also breaks other global CLIs like `yarn`/`vercel`). Two options:

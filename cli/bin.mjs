@@ -330,6 +330,11 @@ function openBrowser(url) {
 async function start() {
   ensureHome();
   const noOpen = process.argv.includes("--no-open");
+  // Bind localhost-only by default: the dashboard has no login and holds your
+  // trading controls, so it must not be reachable from the LAN. Opt into
+  // network access explicitly with MERRYMEN_HOST=0.0.0.0 (e.g. phone on your
+  // home WiFi) — only on a network you trust.
+  const host = process.env.MERRYMEN_HOST || "127.0.0.1";
   const url = "http://localhost:3100";
   await banner("the band rides out");
   const web = path.join(ROOT, "web");
@@ -358,7 +363,7 @@ async function start() {
 
   // Next serves from the app dir as cwd; the worker runs from ROOT.
   const procs = [
-    { name: "tavern", bin: localBin("next"), args: ["start", "-p", "3100"], cwd: web },
+    { name: "tavern", bin: localBin("next"), args: ["start", "-p", "3100", "-H", host], cwd: web },
     { name: "band  ", bin: localBin("tsx"), args: [path.join(ROOT, "worker", "src", "index.ts")], cwd: ROOT },
   ].map(({ name, bin, args, cwd }) => {
     const child = toolSpawn(bin, args, { cwd });

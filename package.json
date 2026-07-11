@@ -1,6 +1,6 @@
 {
   "name": "merrymen",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Self-hosted autonomous trading agents for Robinhood Chain — your keys, your caps, hard on-chain permission walls, write-your-own strategies.",
   "license": "MIT",
   "repository": {
@@ -32,7 +32,7 @@
     "status": "node cli/bin.mjs status",
     "build": "cd web && next build",
     "prepare": "node cli/build.mjs",
-    "dev:web": "cd web && next dev -p 3100",
+    "dev:web": "cd web && next dev -p 3100 -H 127.0.0.1",
     "dev:worker": "tsx worker/src/index.ts",
     "test": "tsx --test \"worker/src/**/*.test.ts\"",
     "test:contracts": "cd contracts && npm test",
