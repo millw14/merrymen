@@ -1,0 +1,30 @@
+# npm uses THIS file instead of .gitignore when packing. The whole point is to
+# ship web/.next (the prebuilt dashboard) — .gitignore excludes it, which shipped
+# an incomplete build and made every user's machine try (and fail) to rebuild.
+# So here we exclude the same secrets/junk .gitignore did, but NOT web/.next.
+#
+# The `files` allowlist in package.json is the primary gate (only cli, web,
+# worker, packages/core, strategies ship); these rules prune within it.
+# node_modules and .git are always excluded by npm regardless.
+
+# secrets & local runtime data — NEVER publish
+.data/
+**/.data/
+.env
+.env.*
+**/.env
+**/.env.*
+*.log
+
+# dev-only artifacts
+**/*.test.ts
+web/.next/cache/
+*.tsbuildinfo
+**/tsconfig.tsbuildinfo
+
+# tooling / editor
+.claude/
+.vscode/
+.idea/
+
+# NOT excluded (ship these): web/.next/** — the prebuilt production dashboard

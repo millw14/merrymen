@@ -6,6 +6,13 @@ const nextConfig = {
   experimental: {
     externalDir: true,
   },
+  // We typecheck + lint separately (`npm run typecheck`), and the published
+  // package ships the dashboard prebuilt. If a fallback build ever runs on a
+  // user's machine (`npm i -g` installs runtime deps only, not the @types /
+  // eslint dev toolchain), it must not fail on type or lint checks it can't
+  // run. Correctness is guarded by our own typecheck in dev/CI, not here.
+  typescript: { ignoreBuildErrors: true },
+  eslint: { ignoreDuringBuilds: true },
 };
 
 export default nextConfig;
