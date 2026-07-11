@@ -38,13 +38,29 @@ Selected via `MERRYMEN_STRATEGY`:
 
 Self-hosted, terminal-first — install once, run from anywhere. No clone.
 
+**No Node yet? One line does everything** — installs Node if missing, then merrymen, and fixes PATH:
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/millw14/merrymen/main/install.ps1 | iex
+```
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | bash
+```
+
+**Already have Node 22.12+?** Just:
+
 ```bash
 npm install -g merrymen            # or: npm i -g github:millw14/merrymen
+merrymen setup                     # check node/npm/PATH (prints fixes if anything's off)
 merrymen onboard                   # wizard: bundler URL, API keys, strategy, basket
 merrymen start                     # dashboard at localhost:3100 + the 24/7 worker
 ```
 
-Requires Node 22.12+. All your data lives in **`~/.merrymen`** (settings, grant,
+Requires Node 22.12+. `merrymen setup` diagnoses the two things that trip people
+up — an old Node, and npm's global-bin folder missing from PATH — and gives you
+the exact copy-paste fix for your OS. All your data lives in **`~/.merrymen`** (settings, grant,
 ledger, strategies) — the install is disposable, upgrades never touch it. Secrets
 (bundler/RPC keys, Anthropic, Rialto, Telegram token) stay in that folder, never
 leave the machine, and never echo back to the browser (masked to their last 4).

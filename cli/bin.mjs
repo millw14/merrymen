@@ -329,6 +329,7 @@ function openBrowser(url) {
 
 async function start() {
   ensureHome();
+  warnIfOldNode();
   const noOpen = process.argv.includes("--no-open");
   // Bind localhost-only by default: the dashboard has no login and holds your
   // trading controls, so it must not be reachable from the LAN. Opt into
@@ -401,8 +402,13 @@ async function doctor() {
   ensureHome();
   const s = readJson(SETTINGS) ?? {};
 
-  const major = Number(process.versions.node.split(".")[0]);
-  major >= 22 ? ok(`node ${process.versions.node}`) : bad(`node ${process.versions.node} — need 22+ for node:sqlite`);
+  nodeVersionOk()
+    ? ok(`node ${process.versions.node}`)
+    : bad(`node ${process.versions.node} — need ${NODE_MIN.join(".")}+ for node:sqlite (run: merrymen setup)`);
+  const npmV = sh("npm", ["--version"]);
+  npmV ? ok(`npm ${npmV}`) : warn("npm not found on PATH — reinstall Node (run: merrymen setup)");
+  const binDir = npmGlobalBinDir();
+  if (binDir && !onPath(binDir)) warn(`npm global bin not on PATH — "command not found" trap (run: merrymen setup)`);
   existsSync(path.join(ROOT, "node_modules")) ? ok("package install complete") : bad("node_modules missing — reinstall");
   console.log(`  ${dim(`package: ${ROOT}`)}`);
   console.log(`  ${dim(`home:    ${HOME}`)}`);
@@ -619,6 +625,113 @@ async function kill() {
   }
 }
 
+// ──────────────────────────────────────────────────────── environment setup ──
+
+const NODE_MIN = [22, 12]; // node:sqlite + the modern APIs the worker leans on
+
+function nodeVersionOk(v = process.versions.node) {
+  const [maj, min] = v.split(".").map(Number);
+  return maj > NODE_MIN[0] || (maj === NODE_MIN[0] && min >= NODE_MIN[1]);
+}
+
+/** Run a command, capture trimmed stdout, never throw. null on any failure. */
+function sh(cmd, args) {
+  try {
+    const r = spawnSync(cmd, args, { encoding: "utf8", shell: process.platform === "win32" });
+    if (r.status === 0 && typeof r.stdout === "string") return r.stdout.trim();
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/** The dir npm drops global CLIs into — what must be on PATH for `merrymen`. */
+function npmGlobalBinDir() {
+  const prefix = sh("npm", ["prefix", "-g"]);
+  if (!prefix) return null;
+  // Windows: the prefix dir itself holds the shims; POSIX: <prefix>/bin.
+  return process.platform === "win32" ? prefix : path.join(prefix, "bin");
+}
+
+function onPath(dir) {
+  if (!dir) return false;
+  const norm = (p) =>
+    process.platform === "win32" ? p.toLowerCase().replace(/[\\/]+$/, "") : p.replace(/\/+$/, "");
+  return (process.env.PATH || "")
+    .split(path.delimiter)
+    .filter(Boolean)
+    .map(norm)
+    .includes(norm(dir));
+}
+
+/** The exact copy-paste line to put a dir on PATH for this OS. */
+function pathFix(dir) {
+  if (process.platform === "win32") {
+    return `[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path","User") + ";${dir}", "User")`;
+  }
+  return `echo 'export PATH="${dir}:$PATH"' >> ~/.zshrc && source ~/.zshrc`;
+}
+
+/** How to install a modern Node on this OS. */
+function nodeInstallHint() {
+  if (process.platform === "win32") return "winget install OpenJS.NodeJS.LTS   (or https://nodejs.org)";
+  if (process.platform === "darwin") return "brew install node   (or https://nodejs.org)";
+  return "use nvm/fnm, or https://nodejs.org/en/download";
+}
+
+/**
+ * `merrymen setup` — a rig check that runs even when things are broken:
+ * Node version, npm, and the global-bin PATH trap that yields
+ * "merrymen: command not found". Prints exact, copy-paste fixes.
+ */
+async function setup() {
+  await banner("kit up — check your rig");
+  console.log();
+
+  const v = process.versions.node;
+  if (nodeVersionOk(v)) {
+    ok(`node ${v} ${dim(`(need ${NODE_MIN.join(".")}+)`)}`);
+  } else {
+    bad(`node ${v} is too old — merrymen needs ${NODE_MIN.join(".")}+ (node:sqlite)`);
+    console.log(`      ${bold("install a newer Node:")} ${dim(nodeInstallHint())}`);
+  }
+
+  const npmV = sh("npm", ["--version"]);
+  npmV
+    ? ok(`npm ${npmV}`)
+    : bad("npm not found — it ships with Node; (re)install Node from https://nodejs.org");
+
+  const binDir = npmGlobalBinDir();
+  if (!binDir) {
+    warn("couldn't locate npm's global bin (npm prefix -g failed) — is npm on PATH?");
+  } else if (onPath(binDir)) {
+    ok(`global CLIs on PATH ${dim(binDir)}`);
+  } else {
+    bad('npm\'s global bin isn\'t on PATH — the "merrymen: command not found" trap');
+    console.log(`      ${dim(binDir)}`);
+    console.log(`      ${bold("fix once")} ${dim("(then open a NEW terminal):")}`);
+    console.log(`      ${dim(pathFix(binDir))}`);
+    console.log(`      ${dim("…or just prefix commands: ")}${bold("npx merrymen start")}`);
+  }
+
+  const resolved =
+    process.platform === "win32" ? sh("where", ["merrymen"]) : sh("which", ["merrymen"]);
+  resolved
+    ? ok(`merrymen resolves ${dim(resolved.split(/\r?\n/)[0])}`)
+    : warn("merrymen not yet resolvable by name — use the PATH fix above, or `npx merrymen`");
+
+  console.log(`\n  ${c.gold(c.arrow)} ${dim("rig ready? → ")}${bold("merrymen onboard")}\n`);
+}
+
+/** Soft guard for commands that need a modern Node; warns, points to setup. */
+function warnIfOldNode() {
+  if (!nodeVersionOk()) {
+    warn(
+      `node ${process.versions.node} is below ${NODE_MIN.join(".")} — the worker needs node:sqlite. Run ${bold("merrymen setup")} for the fix.`,
+    );
+  }
+}
+
 // ────────────────────────────────────────────────────────────────── main ──
 
 const [, , cmd, ...rest] = process.argv;
@@ -626,6 +739,9 @@ await maybeFirstRun(cmd);
 switch (cmd) {
   case "welcome":
     await welcome();
+    break;
+  case "setup":
+    await setup();
     break;
   case "onboard":
     await onboard();
@@ -652,6 +768,7 @@ switch (cmd) {
     await banner("stand and deliver — autonomous agents for Robinhood Chain");
     console.log(`${dim("  install: npm install -g merrymen · your loot: ~/.merrymen")}
 
+  ${bold("merrymen setup")}          check your rig — node, npm, PATH (with fixes)
   ${bold("merrymen onboard")}        gather the band (keys, strategy, basket)
   ${bold("merrymen start")}          open the tavern (localhost:3100) + loose the worker
   ${bold("merrymen doctor")}         muster check — node/keys/RPC/bundler/grant/db
