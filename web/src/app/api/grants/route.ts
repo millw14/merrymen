@@ -26,7 +26,7 @@ const BALANCE_ABI = parseAbi(["function balanceOf(address) view returns (uint256
 
 export interface AgentStatus {
   exists: boolean;
-  grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey">;
+  grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
   balances?: { ethWei: string; cashUsdg: string; vaultUsdg: string };
   workerAliveAt?: number | null;
 }
@@ -77,7 +77,9 @@ export async function GET() {
     // no heartbeat file — worker never ran
   }
 
-  const { serialized: _s, demoSessionPrivateKey: _k, ...publicGrant } = grant;
+  // Never echo key material to the browser: the serialized session account, the
+  // session key, AND the generated owner key (which custodies the funds).
+  const { serialized: _s, demoSessionPrivateKey: _k, demoOwnerPrivateKey: _o, ...publicGrant } = grant;
 
   const status: AgentStatus = {
     exists: true,

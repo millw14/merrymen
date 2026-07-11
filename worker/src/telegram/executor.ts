@@ -3,11 +3,22 @@
  * the side effect, and returns the chat reply. This is the "code disposes" half:
  * control commands are gated by `controlEnabled`, `/cap` is clamped to the signed
  * grant (tighten only), and trades are handed to `trade()` which routes through
- * the same policy wall + on-chain session key as autonomous trading. Nothing here
- * can exceed the grant.
+ * the same policy wall + on-chain session key as autonomous trading.
+ *
+ * Transfers are double-gated: the dashboard toggle must be on AND the grant must
+ * carry the transfer permission — and even then a transfer only ever becomes a
+ * PENDING action here. Nothing moves until the user sends /confirm after seeing
+ * the full recipient address echoed back. Nothing here can exceed the grant.
  */
 
+import { esc } from "./api";
 import { CONTROL_KINDS, type Command } from "./interpreter";
+
+export interface PendingTransfer {
+  to: `0x${string}`;
+  usdg: number;
+  expiresAt: number; // unix seconds
+}
 
 export interface CommandDeps {
   controlEnabled: boolean;
@@ -15,11 +26,18 @@ export interface CommandDeps {
   maxActionUsdg: number;
   /** On-chain per-trade ceiling for clamping /cap; undefined when no grant armed. */
   grantPerTradeUsdg?: number;
+  /** Dashboard toggle: may Telegram move funds out at all? */
+  transferEnabled: boolean;
+  /** Does the armed grant carry the on-chain transfer permission? */
+  grantHasTransfer: boolean;
   reads: {
     status(): string;
     positions(): string;
     pnl(): string;
     trades(): string;
+    report(): string | Promise<string>;
+    why(): string | Promise<string>;
+    brag(): string | Promise<string>;
   };
   setStrategy(name: string): { ok: boolean; reason?: string };
   setCap(usdg: number): void;
@@ -28,14 +46,28 @@ export interface CommandDeps {
   link(code: string): { ok: boolean; reason?: string };
   /** Build a bounded TradeIntent and route it through processIntent → policy wall. */
   trade(side: "buy" | "sell", symbol: string, usdg: number): Promise<string>;
+  /** Build a bounded transfer intent and route it through processIntent → policy wall. */
+  transfer(to: `0x${string}`, usdg: number): Promise<string>;
+  /** Pending-confirm store, bound to this chat by the service. */
+  getPending(): PendingTransfer | null;
+  setPending(p: PendingTransfer): void;
+  clearPending(): void;
+  /** Price alerts, persisted by the service. */
+  addAlert(symbol: string, op: ">" | "<", price: number): string;
+  listAlerts(): string;
+  removeAlert(id: number): string;
   help(): string;
+  now?: () => number;
 }
+
+const CONFIRM_TTL_SEC = 90;
 
 export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<string> {
   // Gate state-changing commands behind the control switch.
   if (CONTROL_KINDS.has(cmd.kind) && !deps.controlEnabled) {
     return "🔒 control commands are turned off. Turn on “control” for Telegram in the dashboard to pause, switch strategy, trade, or kill.";
   }
+  const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
 
   switch (cmd.kind) {
     case "link": {
@@ -54,6 +86,12 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       return deps.reads.pnl();
     case "trades":
       return deps.reads.trades();
+    case "report":
+      return await deps.reads.report();
+    case "why":
+      return await deps.reads.why();
+    case "brag":
+      return await deps.reads.brag();
     case "pause":
       deps.setPaused(true);
       return "⏸ paused — the band holds position. /resume to ride again.";
@@ -62,7 +100,7 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       return "▶️ resumed — the band rides on the next tick.";
     case "strategy": {
       const r = deps.setStrategy(cmd.name);
-      return r.ok ? `🎯 strategy set to ${cmd.name}. Applies on the next tick.` : `can't switch: ${r.reason}`;
+      return r.ok ? `🎯 strategy set to ${esc(cmd.name)}. Applies on the next tick.` : `can't switch: ${esc(r.reason ?? "unknown")}`;
     }
     case "cap": {
       const ceiling = deps.grantPerTradeUsdg;
@@ -86,6 +124,49 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       const reply = await deps.trade(cmd.kind, cmd.symbol, usdg);
       return reply + note;
     }
+    case "transfer": {
+      if (!deps.transferEnabled) {
+        return "🔒 transfers from chat are off. Turn on “allow transfers” for Telegram in the dashboard first.";
+      }
+      if (!deps.grantHasTransfer) {
+        return "🧱 your permission wall predates transfers — discard the grant and re-create your wallet at /grant to add the (capped) transfer permission.";
+      }
+      let usdg = cmd.usdg;
+      let note = "";
+      if (usdg > deps.maxActionUsdg) {
+        usdg = deps.maxActionUsdg;
+        note = ` (trimmed to your ${deps.maxActionUsdg} USDG chat ceiling)`;
+      }
+      deps.setPending({ to: cmd.to, usdg, expiresAt: now() + CONFIRM_TTL_SEC });
+      return [
+        `⚠️ <b>confirm transfer</b>${note}`,
+        `send <b>${usdg} USDG</b> to`,
+        `<code>${esc(cmd.to)}</code>`,
+        ``,
+        `Check that address carefully — this leaves the wall. /confirm to send (${CONFIRM_TTL_SEC}s) or /cancel.`,
+      ].join("\n");
+    }
+    case "confirm": {
+      const p = deps.getPending();
+      if (!p) return "nothing pending to confirm.";
+      if (now() > p.expiresAt) {
+        deps.clearPending();
+        return "⌛ that confirmation expired — start the transfer again.";
+      }
+      deps.clearPending();
+      return await deps.transfer(p.to, p.usdg);
+    }
+    case "cancel": {
+      const had = deps.getPending() !== null;
+      deps.clearPending();
+      return had ? "🚫 cancelled — nothing moved." : "nothing pending to cancel.";
+    }
+    case "alert":
+      return deps.addAlert(cmd.symbol, cmd.op, cmd.price);
+    case "alerts":
+      return deps.listAlerts();
+    case "unalert":
+      return deps.removeAlert(cmd.id);
     case "kill": {
       const r = deps.kill();
       return r.ok
@@ -95,6 +176,6 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     case "chat":
       return cmd.reply;
     case "unknown":
-      return cmd.text;
+      return esc(cmd.text);
   }
 }

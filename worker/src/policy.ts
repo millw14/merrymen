@@ -39,6 +39,17 @@ export type TradeIntent = {
   kind: "vault-deposit" | "vault-withdraw";
   target: `0x${string}`;
   amountUsdg: bigint;
+} | {
+  /**
+   * USDG leaving the wall to an external recipient (chat /transfer, confirmed).
+   * target is the USDG token contract; the recipient is free-form but the
+   * amount is capped on-chain by the grant's transfer permission and here by
+   * the same per-trade/daily caps as any spend.
+   */
+  kind: "transfer";
+  target: `0x${string}`;
+  recipient: `0x${string}`;
+  amountUsdg: bigint;
 };
 
 export type Verdict =
@@ -69,6 +80,17 @@ export function checkPolicy(intent: TradeIntent, limits: AgentLimits, state: Age
       if (!limits.allowedAssets.map(lc).includes(lc(token))) {
         return { ok: false, rule: "asset-allowlist", detail: `asset ${token} not allowed` };
       }
+    }
+  }
+
+  if (intent.kind === "transfer") {
+    // Recipient is free-form by design (user-confirmed in chat) but must at
+    // least be a plausible address — garbage never reaches calldata.
+    if (!/^0x[0-9a-fA-F]{40}$/.test(intent.recipient)) {
+      return { ok: false, rule: "transfer-recipient", detail: `recipient ${intent.recipient} is not an address` };
+    }
+    if (intent.amountUsdg <= 0n) {
+      return { ok: false, rule: "transfer-amount", detail: "transfer amount must be positive" };
     }
   }
 

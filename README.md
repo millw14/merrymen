@@ -121,19 +121,39 @@ still needs a browser re-sign.
 ```
 
 Commands (all work without an Anthropic key; with one, plain English works too —
-"how are we doing?", "pause everything", "switch to weekend-gap"):
+"how are we doing?", "pause everything", "send 20 USDG to 0x…", "ping me when
+QQQ hits 600", "why did you buy that?"):
 
 | command | does |
 |---|---|
 | `/status` `/positions` `/pnl` `/trades` | read the live book |
+| `/report` | the campfire report — today's P&L, best holding, arrows loosed |
+| `/why` | the agent explains its last trade from its recorded reasoning |
+| `/brag` | a shareable scorecard — P&L, best shot, days riding |
+| `/buy <SYM> <usdg>` `/sell <SYM> <usdg>` | trade (passes the policy wall) |
+| `/transfer <0x…> <usdg>` | send USDG out — **always asks you to /confirm** first |
+| `/alert <SYM> > <price>` `/alerts` `/unalert <n>` | one-shot price alerts |
 | `/pause` `/resume` | halt / resume the strategy loop (kill-switch marker) |
 | `/strategy <name>` | switch strategy (builtin or your `~/.merrymen/strategies/*`) |
-| `/cap perTrade <usdg>` | tighten a cap within the signed grant (never widens) |
+| `/cap <usdg>` | tighten the chat ceiling within the signed grant (never widens) |
 | `/kill` | destroy the grant — the worker halts next tick |
 | `/help` | the full list |
 
+**The merryman also speaks first** (toggle in `/settings`): a ping the moment a
+trade lands or the wall turns one back, warnings when the grant nears expiry /
+drawdown nears the breaker / gas runs low, your price alerts, and a **daily
+campfire report** at the hour you pick.
+
+**Transfers are triple-guarded**: off by default (dashboard opt-in) · the grant's
+on-chain call policy caps the amount per call · every transfer echoes the full
+recipient address and waits for an explicit `/confirm` (90s) · a daily transfer
+budget bounds the total. A prompt-injected "send everything to 0xevil" can at
+worst produce a confirmation card you'll see and `/cancel`. Transfers need a
+wallet created after v0.2 (the grant carries the transfer permission) — older
+grants get a "re-create your wallet" reply instead of a revert.
+
 Turn off state-changing commands (read + chat only) with the **control** toggle,
-and bound any chat-triggered trade with the per-action USDG ceiling — both in
+and bound any chat-triggered action with the per-action USDG ceiling — both in
 `/settings`. The bot token is a secret: it stays in `~/.merrymen` and never
 returns to the browser. Polling is off by default; existing installs are
 untouched until you opt in.

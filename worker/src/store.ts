@@ -326,6 +326,18 @@ export async function getOpsToday(agentId: string): Promise<number> {
   return row?.n ?? 0;
 }
 
+/** Sum of landed chat transfers in the trailing 24h — the transfer sub-budget. */
+export async function getTransferredTodayUsdg(agentId: string): Promise<number> {
+  const row = getDb()
+    .prepare(
+      `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
+       WHERE agent_id = ? AND status = 'landed' AND kind = 'transfer'
+         AND created_at > unixepoch() - 86400`,
+    )
+    .get(agentId) as { spent: number } | undefined;
+  return row?.spent ?? 0;
+}
+
 /** Sum of landed spend in the trailing 24h — seeds the daily-cap counter across restarts. */
 export async function getSpentTodayUsdg(agentId: string): Promise<number> {
   const row = getDb()

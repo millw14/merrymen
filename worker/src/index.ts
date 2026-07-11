@@ -60,6 +60,8 @@ import { BUILTIN_STRATEGIES, buildStrategy, tokensForSymbols } from "./strategie
 import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy } from "./strategies/types";
 import { isPaused, startTelegram } from "./telegram/service";
+import { startNotifier } from "./telegram/notifier";
+import { createStateRef } from "./telegram/state";
 import { readPositionRaw } from "./telegram/reads";
 import { readPositions } from "./positions";
 import { readAccountBalances, readMarketSafety, setMainnetRpc } from "./snapshot";
@@ -72,6 +74,7 @@ import {
   getAgentFinancials,
   getOpsToday,
   getSpentTodayUsdg,
+  getTransferredTodayUsdg,
   initStore,
   setAgentHwm,
   setAgentStatus,
@@ -202,6 +205,8 @@ async function main() {
   let highWaterMarkUsdg = 0n;
   let lastSequencerUp = true;
   let lastEquityUsdg = 0n; // updated each tick; used by chat-triggered trades
+  let lastGasWei = 0n; // updated each tick; feeds the low-gas Telegram alert
+  let notifierHandle: ReturnType<typeof startNotifier> | null = null;
 
   /**
    * Reconcile in-memory state with the grant file. Returns true if an agent is
@@ -299,6 +304,14 @@ async function main() {
       console.log(`[policy] approved ${intent.kind} — execution stubbed (no bundler)`);
       return;
     }
+
+    // Reserve spend/ops BEFORE the await-heavy execution and roll back on
+    // failure. Incrementing only after success opens a TOCTOU window: a chat
+    // trade interleaved with a tick could both pass checkPolicy against the
+    // same stale spentTodayUsdg and overshoot the daily cap by one action.
+    const countsSpend = intent.kind !== "vault-withdraw";
+    if (countsSpend) spentTodayUsdg += notional;
+    opsToday += 1;
 
     try {
       let txHash: `0x${string}`;
@@ -419,6 +432,16 @@ async function main() {
           args: [RIALTO.routerSnapshot as `0x${string}`, intent.sellAmountRaw],
         });
         txHash = await executor.execute([{ to: intent.sellToken, value: 0n, data }]);
+      } else if (intent.kind === "transfer") {
+        // USDG leaving the wall — user-confirmed in chat, amount capped by the
+        // grant's on-chain transfer permission AND the per-trade/daily caps
+        // checkPolicy already applied above. One call, no approvals.
+        const data = encodeFunctionData({
+          abi: erc20Abi,
+          functionName: "transfer",
+          args: [intent.recipient, intent.amountUsdg],
+        });
+        txHash = await executor.execute([{ to: CASH.USDG as `0x${string}`, value: 0n, data }]);
       } else if (intent.kind === "vault-deposit") {
         const data = encodeFunctionData({
           abi: VAULT_ABI,
@@ -448,8 +471,6 @@ async function main() {
         ]);
       }
 
-      if (intent.kind !== "vault-withdraw") spentTodayUsdg += notional;
-      opsToday += 1;
       console.log(`[execute] ${intent.kind} landed: ${txHash}`);
       await addEvent(agentId, "ok", `${intent.kind} landed (${fmt(notional)} USDG): ${txHash}`);
       await addTrade({
@@ -465,6 +486,9 @@ async function main() {
         ...sim,
       });
     } catch (e) {
+      // Roll back the optimistic reservation — the money didn't move.
+      if (countsSpend) spentTodayUsdg -= notional;
+      opsToday -= 1;
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`[execute] ${intent.kind} failed:`, msg);
       await addEvent(agentId, "err", `${intent.kind} failed pre-flight or on-chain: ${msg.slice(0, 200)}`);
@@ -615,6 +639,9 @@ async function main() {
     };
 
     lastEquityUsdg = equityUsdg; // for chat-triggered trades between ticks
+    lastGasWei = balances.ethWei;
+    // Fresh feed prices → the notifier's price alerts (evaluated off-tick).
+    notifierHandle?.publishPrices(market.prices);
 
     // Pause marker (toggled from Telegram/dashboard): keep reading state, but
     // the strategy stops proposing trades until resumed.
@@ -640,6 +667,9 @@ async function main() {
   // ── Telegram bridge — independent long-poll loop, never blocks the tick ──
   async function submitChatTrade(side: "buy" | "sell", symbol: string, usdgAmount: number): Promise<string> {
     if (!active) return "no agent armed — sign a grant in the dashboard first.";
+    // Before the first tick completes, equity is unknown (0n) and the drawdown
+    // check would judge garbage — hold chat trades until the book is read.
+    if (lastEquityUsdg === 0n) return "🐎 the band is still saddling up (first tick pending) — try again in a minute.";
     const token = STOCK_TOKENS.find((t) => t.symbol === symbol)?.address;
     if (!token) return `unknown or unsupported symbol ${symbol}. I trade the basket tokens.`;
     const router = swapRouterFor(cfg);
@@ -660,31 +690,59 @@ async function main() {
     return `🏹 submitted ${side} ${usdgAmount} USDG ${symbol} — watch /trades for the result (it still passes the policy wall).`;
   }
 
+  async function submitChatTransfer(to: `0x${string}`, usdgAmount: number): Promise<string> {
+    if (!active) return "no agent armed — sign a grant in the dashboard first.";
+    if (lastEquityUsdg === 0n) return "🐎 the band is still saddling up (first tick pending) — try again in a minute.";
+    // Worker-side daily transfer budget, on top of the grant's per-trade/daily
+    // caps (checkPolicy) and the on-chain transfer amount cap.
+    const transferredToday = await getTransferredTodayUsdg(active.agentId);
+    if (transferredToday + usdgAmount > cfg.telegramTransferDailyUsdg) {
+      return `🧢 that would blow the daily transfer budget (${cfg.telegramTransferDailyUsdg} USDG/day, ${transferredToday.toFixed(2)} already sent today). Raise it in the dashboard if you mean it.`;
+    }
+    const intent: TradeIntent = {
+      kind: "transfer",
+      target: CASH.USDG as `0x${string}`,
+      recipient: to,
+      amountUsdg: usdg(usdgAmount),
+    };
+    await processIntent(intent, lastEquityUsdg);
+    return `📤 transfer submitted — ${usdgAmount} USDG to ${to.slice(0, 6)}…${to.slice(-4)}. Watch /trades for the result (it still passes the policy wall).`;
+  }
+
+  const buildStatusContext = () => ({
+    strategy: strategy.name,
+    venue: cfg.swapVenue,
+    paused: isPaused(),
+    workerAliveSec: 0, // the worker itself is answering, so it's alive
+    grant: active
+      ? {
+          perTradeUsdg: active.grant.caps.perTradeUsdg,
+          dailyUsdg: active.grant.caps.dailyUsdg,
+          maxDrawdownPct: active.grant.caps.maxDrawdownPct,
+          expiresInDays: Math.max(0, Math.floor((active.grant.expiresAt - Math.floor(Date.now() / 1000)) / 86400)),
+        }
+      : null,
+    telegramMaxActionUsdg: cfg.telegramMaxActionUsdg,
+  });
+
+  // One shared persisted-state handle — the poll service and the notifier both
+  // write telegram.json; separate copies would lose each other's writes.
+  const tgState = createStateRef();
+
   startTelegram({
     getCfg: () => cfg,
+    stateRef: tgState,
     note: strategyNote,
-    buildStatusContext: () => ({
-      strategy: strategy.name,
-      venue: cfg.swapVenue,
-      paused: isPaused(),
-      workerAliveSec: 0, // the worker itself is answering, so it's alive
-      grant: active
-        ? {
-            perTradeUsdg: active.grant.caps.perTradeUsdg,
-            dailyUsdg: active.grant.caps.dailyUsdg,
-            maxDrawdownPct: active.grant.caps.maxDrawdownPct,
-            expiresInDays: Math.max(0, Math.floor((active.grant.expiresAt - Math.floor(Date.now() / 1000)) / 86400)),
-          }
-        : null,
-      telegramMaxActionUsdg: cfg.telegramMaxActionUsdg,
-    }),
+    buildStatusContext,
     setStrategy: (name) => {
       if ((BUILTIN_STRATEGIES as readonly string[]).includes(name)) return { ok: true };
       if (resolveStrategyFile(name, customStrategiesDir())) return { ok: true };
       return { ok: false, reason: `no builtin and no strategies/${name} file` };
     },
     grantPerTradeUsdg: () => active?.grant.caps.perTradeUsdg,
+    grantHasTransfer: () => active?.grant.grantFeatures?.includes("transfer") ?? false,
     submitTrade: submitChatTrade,
+    submitTransfer: submitChatTransfer,
     kill: () => {
       try {
         if (!loadGrantFile()) return { ok: false, reason: "no grant" };
@@ -694,6 +752,24 @@ async function main() {
         return { ok: false, reason: e instanceof Error ? e.message : String(e) };
       }
     },
+  });
+
+  // The merryman speaks first: trade pings, warnings, price alerts, the daily
+  // campfire report — pushed to the owner chat, gated by telegramNotifyEnabled.
+  notifierHandle = startNotifier({
+    getCfg: () => cfg,
+    note: strategyNote,
+    stateRef: tgState,
+    buildStatusContext,
+    getAlertInputs: () => ({
+      grantExpiresAt: active?.grant.expiresAt ?? null,
+      drawdownBps:
+        highWaterMarkUsdg > 0n && lastEquityUsdg > 0n
+          ? Number(((highWaterMarkUsdg - lastEquityUsdg) * 10_000n) / highWaterMarkUsdg)
+          : null,
+      breakerBps: active ? active.limits.maxDrawdownBps : null,
+      gasWei: lastGasWei > 0n ? lastGasWei : null,
+    }),
   });
 
   console.log(

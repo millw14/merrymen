@@ -156,6 +156,19 @@ export async function createAgentWallet(
             }) as const,
         ),
         {
+          // USDG transfer OUT of the wall — recipient free-form (chat /transfer,
+          // user-confirmed) but the amount is hard-capped per call ON-CHAIN at
+          // the per-trade cap. Daily budgets bound it further worker-side.
+          target: CASH.USDG as Address,
+          valueLimit: 0n,
+          abi: erc20Abi,
+          functionName: "transfer",
+          args: [
+            null,
+            { condition: ParamCondition.LESS_THAN_OR_EQUAL, value: usdgUnits(caps.perTradeUsdg) },
+          ],
+        },
+        {
           // Rialto router: target-scoped (its calldata comes from the quote API)
           target: RIALTO.routerSnapshot as Address,
           valueLimit: 0n,
@@ -218,6 +231,7 @@ export async function createAgentWallet(
     grantedAt: now,
     expiresAt,
     chainId: chain.id,
+    grantFeatures: ["transfer"],
     demoSessionPrivateKey: sessionPrivateKey,
     demoOwnerPrivateKey: ownerPrivateKey,
   };

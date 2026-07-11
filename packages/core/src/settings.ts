@@ -65,6 +65,14 @@ export interface MerrymenSettings {
   telegramAllowlist?: number[];
   /** Per-action USDG ceiling for chat-triggered trades — beneath the grant caps. */
   telegramMaxActionUsdg?: number;
+  /** Allow /transfer from chat (still needs a transfer-capable grant + /confirm). OFF by default. */
+  telegramTransferEnabled?: boolean;
+  /** Daily USDG budget for chat transfers — beneath the grant daily cap. */
+  telegramTransferDailyUsdg?: number;
+  /** Proactive pings to the owner chat: trade results, warnings, price alerts, daily report. */
+  telegramNotifyEnabled?: boolean;
+  /** Local hour (0-23) after which the daily campfire report is sent. */
+  telegramDigestHour?: number;
 }
 
 /** Keys whose values must never be echoed back to a browser. */
@@ -89,4 +97,8 @@ export const SETTINGS_DEFAULTS = {
   telegramControlEnabled: true,
   telegramAllowlist: [] as number[],
   telegramMaxActionUsdg: 25,
+  telegramTransferEnabled: false,
+  telegramTransferDailyUsdg: 100,
+  telegramNotifyEnabled: true,
+  telegramDigestHour: 18,
 };

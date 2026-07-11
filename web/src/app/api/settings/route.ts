@@ -97,8 +97,15 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   llmIntervalMin: [1, 1_440],
   llmMaxActionUsdg: [1, 100_000],
   telegramMaxActionUsdg: [1, 100_000],
+  telegramTransferDailyUsdg: [1, 1_000_000],
+  telegramDigestHour: [0, 23],
 };
-const BOOL_FIELDS = ["telegramEnabled", "telegramControlEnabled"] as const;
+const BOOL_FIELDS = [
+  "telegramEnabled",
+  "telegramControlEnabled",
+  "telegramTransferEnabled",
+  "telegramNotifyEnabled",
+] as const;
 
 export async function PUT(req: Request) {
   let body: Partial<Record<keyof MerrymenSettings, unknown>>;

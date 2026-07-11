@@ -31,6 +31,8 @@ export default function SettingsPage() {
   const [tg, setTg] = useState<TelegramStatus | null>(null);
   const [tgEnabled, setTgEnabled] = useState<boolean | null>(null);
   const [tgControl, setTgControl] = useState<boolean | null>(null);
+  const [tgTransfer, setTgTransfer] = useState<boolean | null>(null);
+  const [tgNotify, setTgNotify] = useState<boolean | null>(null);
   const [allowlist, setAllowlist] = useState<number[] | null>(null);
   const [tgTest, setTgTest] = useState<string | null>(null);
 
@@ -73,6 +75,8 @@ export default function SettingsPage() {
     if (symbols !== null) body.basketSymbols = symbols;
     if (tgEnabled !== null) body.telegramEnabled = tgEnabled;
     if (tgControl !== null) body.telegramControlEnabled = tgControl;
+    if (tgTransfer !== null) body.telegramTransferEnabled = tgTransfer;
+    if (tgNotify !== null) body.telegramNotifyEnabled = tgNotify;
     if (allowlist !== null) body.telegramAllowlist = allowlist;
     // Secrets: only send when the user typed something or hit clear ("").
     try {
@@ -92,6 +96,8 @@ export default function SettingsPage() {
       setSymbols(null);
       setTgEnabled(null);
       setTgControl(null);
+      setTgTransfer(null);
+      setTgNotify(null);
       setAllowlist(null);
       const fresh = await fetch("/api/settings");
       if (fresh.ok) setView((await fresh.json()) as SettingsView);
@@ -118,6 +124,8 @@ export default function SettingsPage() {
 
   const tgEnabledVal = tgEnabled ?? view.values.telegramEnabled ?? d.telegramEnabled;
   const tgControlVal = tgControl ?? view.values.telegramControlEnabled ?? d.telegramControlEnabled;
+  const tgTransferVal = tgTransfer ?? view.values.telegramTransferEnabled ?? d.telegramTransferEnabled;
+  const tgNotifyVal = tgNotify ?? view.values.telegramNotifyEnabled ?? d.telegramNotifyEnabled;
   const allowlistVal = allowlist ?? view.values.telegramAllowlist ?? [];
 
   async function testTelegram() {
@@ -284,6 +292,45 @@ export default function SettingsPage() {
                 onChange={set("telegramMaxActionUsdg")}
               />
               <span className="field-unit">USDG</span>
+            </Field>
+            <label className="field settings-field">
+              <span className="field-label">allow transfers</span>
+              <span className="field-input">
+                <input type="checkbox" checked={tgTransferVal} onChange={(e) => setTgTransfer(e.target.checked)} style={{ width: "auto" }} />
+                <span className="field-unit">{tgTransferVal ? "/transfer with /confirm" : "off"}</span>
+              </span>
+              <span className="field-hint">
+                Lets chat send USDG out (always asks to /confirm; amount capped on-chain by your per-trade cap). Needs a grant created after this feature shipped.
+              </span>
+            </label>
+            <Field label="daily transfer budget" hint="Max USDG chat transfers may send per day — on top of the grant caps.">
+              <input
+                type="number"
+                min={1}
+                placeholder={String(d.telegramTransferDailyUsdg)}
+                value={v("telegramTransferDailyUsdg")}
+                onChange={set("telegramTransferDailyUsdg")}
+              />
+              <span className="field-unit">USDG</span>
+            </Field>
+            <label className="field settings-field">
+              <span className="field-label">proactive pings</span>
+              <span className="field-input">
+                <input type="checkbox" checked={tgNotifyVal} onChange={(e) => setTgNotify(e.target.checked)} style={{ width: "auto" }} />
+                <span className="field-unit">{tgNotifyVal ? "trade pings + warnings + daily report" : "quiet"}</span>
+              </span>
+              <span className="field-hint">The bot messages you first: trades landing, drawdown/gas/expiry warnings, price alerts, and the daily campfire report.</span>
+            </label>
+            <Field label="daily report hour" hint="Local hour (0–23) after which the campfire report is sent.">
+              <input
+                type="number"
+                min={0}
+                max={23}
+                placeholder={String(d.telegramDigestHour)}
+                value={v("telegramDigestHour")}
+                onChange={set("telegramDigestHour")}
+              />
+              <span className="field-unit">h</span>
             </Field>
           </div>
           <div className="grant-note" style={{ marginTop: 4 }}>

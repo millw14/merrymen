@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { getMe, getUpdates, sendMessage, type FetchLike } from "./api";
+import { esc, getMe, getUpdates, sendMessage, type FetchLike } from "./api";
 
 /** Fake fetch capturing the last call, returning a canned envelope. */
 function fakeFetch(status: number, body: unknown): FetchLike & { lastUrl?: string; lastBody?: string } {
@@ -108,5 +108,37 @@ describe("sendMessage", () => {
     const { ok, reason } = await sendMessage({ token: "t", fetchFn: f }, 1, "hi");
     assert.equal(ok, false);
     assert.match(reason!, /chat not found/);
+  });
+
+  it("sends with HTML parse mode so <b>/<code> render", async () => {
+    const f = fakeFetch(200, OK({ message_id: 1 }));
+    await sendMessage({ token: "t", fetchFn: f }, 1, "<b>bold</b>");
+    assert.match(f.lastBody!, /"parse_mode":"HTML"/);
+  });
+
+  it("retries as plain text when Telegram rejects the entities — a reply is never lost", async () => {
+    const bodies: string[] = [];
+    let call = 0;
+    const f: FetchLike = async (_url, init) => {
+      bodies.push(init?.body ?? "");
+      call += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () =>
+          call === 1 ? { ok: false, description: "Bad Request: can't parse entities" } : OK({ message_id: 2 }),
+      };
+    };
+    const { ok } = await sendMessage({ token: "t", fetchFn: f }, 1, "<b>broken <tag");
+    assert.equal(ok, true);
+    assert.equal(bodies.length, 2);
+    assert.ok(!bodies[1]!.includes("parse_mode")); // second attempt is plain
+  });
+});
+
+describe("esc — HTML escaping for user-echoed content", () => {
+  it("escapes the three HTML-significant characters", () => {
+    assert.equal(esc("<script>&x</script>"), "&lt;script&gt;&amp;x&lt;/script&gt;");
+    assert.equal(esc("plain text"), "plain text");
   });
 });

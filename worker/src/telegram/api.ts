@@ -133,7 +133,20 @@ export async function getUpdates(
   return { messages, nextOffset };
 }
 
-/** Send a message. Best-effort — returns a reason on failure, never throws. */
+/**
+ * Escape text for Telegram HTML parse mode. Any dynamic content that can carry
+ * user input (echoed commands, strategy names, error messages) MUST pass
+ * through this before being embedded in an HTML-formatted reply.
+ */
+export function esc(s: string): string {
+  return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+/**
+ * Send a message. Best-effort — returns a reason on failure, never throws.
+ * Sends with HTML parse mode (formatters use <b>/<code>); if Telegram rejects
+ * the entities, retries as plain text so a formatting bug never eats a reply.
+ */
 export async function sendMessage(
   opts: TelegramOpts,
   chatId: number,
@@ -141,6 +154,11 @@ export async function sendMessage(
 ): Promise<{ ok: boolean; reason?: string }> {
   // Telegram caps message text at 4096 chars.
   const body = text.length > 4096 ? text.slice(0, 4090) + "\n…" : text;
-  const { result, reason } = await call(opts, "sendMessage", { chat_id: chatId, text: body });
-  return result != null ? { ok: true } : { ok: false, reason };
+  const html = await call(opts, "sendMessage", { chat_id: chatId, text: body, parse_mode: "HTML" });
+  if (html.result != null) return { ok: true };
+  if (html.reason && /parse|entit|tag/i.test(html.reason)) {
+    const plain = await call(opts, "sendMessage", { chat_id: chatId, text: body.replace(/<[^>]+>/g, "") });
+    return plain.result != null ? { ok: true } : { ok: false, reason: plain.reason };
+  }
+  return { ok: false, reason: html.reason };
 }

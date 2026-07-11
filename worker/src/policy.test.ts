@@ -149,4 +149,47 @@ describe("checkPolicy", () => {
     const throttled = checkPolicy(intent, limits(), state({ opsToday: 48 }));
     assert.equal(!throttled.ok && throttled.rule, "ops-cap");
   });
+
+  // ── transfers: money leaving the wall is a spend, not a withdrawal ────────
+  const RECIPIENT = "0x5555555555555555555555555555555555555555" as const;
+  const transfer = (over: Partial<Extract<TradeIntent, { kind: "transfer" }>> = {}): TradeIntent => ({
+    kind: "transfer",
+    target: USDG,
+    recipient: RECIPIENT,
+    amountUsdg: 25_000_000n,
+    ...over,
+  });
+
+  it("approves a legal transfer (free-form recipient, capped amount)", () => {
+    assert.deepEqual(checkPolicy(transfer(), limits(), state()), { ok: true });
+  });
+
+  it("rejects a transfer with a malformed recipient — garbage never reaches calldata", () => {
+    const v = checkPolicy(transfer({ recipient: "robins-other-wallet" as `0x${string}` }), limits(), state());
+    assert.equal(!v.ok && v.rule, "transfer-recipient");
+    const v2 = checkPolicy(transfer({ recipient: "0xdeadbeef" as `0x${string}` }), limits(), state());
+    assert.equal(!v2.ok && v2.rule, "transfer-recipient");
+  });
+
+  it("rejects a zero/negative transfer", () => {
+    const v = checkPolicy(transfer({ amountUsdg: 0n }), limits(), state());
+    assert.equal(!v.ok && v.rule, "transfer-amount");
+  });
+
+  it("transfers obey the per-trade cap", () => {
+    const v = checkPolicy(transfer({ amountUsdg: 50_000_001n }), limits(), state());
+    assert.equal(!v.ok && v.rule, "per-trade-cap");
+  });
+
+  it("transfers count against the daily cap — NOT exempt like vault withdrawals", () => {
+    const v = checkPolicy(transfer(), limits(), state({ spentTodayUsdg: 490_000_000n }));
+    assert.equal(!v.ok && v.rule, "daily-cap");
+  });
+
+  it("transfers still respect expiry and the ops cap", () => {
+    const expired = checkPolicy(transfer(), limits(), state({ nowSec: NOW + 86_401 }));
+    assert.equal(!expired.ok && expired.rule, "expiry");
+    const throttled = checkPolicy(transfer(), limits(), state({ opsToday: 48 }));
+    assert.equal(!throttled.ok && throttled.rule, "ops-cap");
+  });
 });

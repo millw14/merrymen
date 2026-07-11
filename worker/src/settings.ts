@@ -40,6 +40,10 @@ export interface ResolvedConfig {
   telegramControlEnabled: boolean;
   telegramAllowlist: number[];
   telegramMaxActionUsdg: number;
+  telegramTransferEnabled: boolean;
+  telegramTransferDailyUsdg: number;
+  telegramNotifyEnabled: boolean;
+  telegramDigestHour: number;
 }
 
 const KNOWN_SYMBOLS = new Set(STOCK_TOKENS.map((t) => t.symbol));
@@ -138,6 +142,10 @@ export function mergeSettings(
     telegramControlEnabled: bool(file.telegramControlEnabled, env.MERRYMEN_TELEGRAM_CONTROL, d.telegramControlEnabled),
     telegramAllowlist: numArray(file.telegramAllowlist, env.MERRYMEN_TELEGRAM_ALLOWLIST, d.telegramAllowlist),
     telegramMaxActionUsdg: num(file.telegramMaxActionUsdg, env.MERRYMEN_TELEGRAM_MAX_ACTION_USDG, d.telegramMaxActionUsdg, 1, 100_000),
+    telegramTransferEnabled: bool(file.telegramTransferEnabled, env.MERRYMEN_TELEGRAM_TRANSFER, d.telegramTransferEnabled),
+    telegramTransferDailyUsdg: num(file.telegramTransferDailyUsdg, env.MERRYMEN_TELEGRAM_TRANSFER_DAILY_USDG, d.telegramTransferDailyUsdg, 1, 1_000_000),
+    telegramNotifyEnabled: bool(file.telegramNotifyEnabled, env.MERRYMEN_TELEGRAM_NOTIFY, d.telegramNotifyEnabled),
+    telegramDigestHour: num(file.telegramDigestHour, env.MERRYMEN_TELEGRAM_DIGEST_HOUR, d.telegramDigestHour, 0, 23),
   };
 }
 
@@ -191,6 +199,9 @@ export function telegramKey(cfg: ResolvedConfig): string {
     cfg.telegramControlEnabled ? "control" : "readonly",
     cfg.telegramAllowlist.join(","),
     cfg.telegramMaxActionUsdg,
+    cfg.telegramTransferEnabled ? "transfer" : "notransfer",
+    cfg.telegramNotifyEnabled ? "notify" : "quiet",
+    cfg.telegramDigestHour,
     cfg.anthropicApiKey ? "llm" : "nollm",
   ].join("|");
 }

@@ -115,6 +115,30 @@ describe("mergeSettings — file > env > default", () => {
     assert.equal(c.telegramEnabled, true);
     assert.deepEqual(c.telegramAllowlist, [5, 6, 7]);
   });
+
+  it("transfer/notify/digest fields: safe defaults, file + env resolution, hour clamp", () => {
+    const def = mergeSettings({}, {});
+    assert.equal(def.telegramTransferEnabled, false); // transfers are OPT-IN
+    assert.equal(def.telegramTransferDailyUsdg, 100);
+    assert.equal(def.telegramNotifyEnabled, true);
+    assert.equal(def.telegramDigestHour, 18);
+
+    const set = mergeSettings(
+      { telegramTransferEnabled: true, telegramTransferDailyUsdg: 250, telegramNotifyEnabled: false, telegramDigestHour: 9 },
+      {},
+    );
+    assert.equal(set.telegramTransferEnabled, true);
+    assert.equal(set.telegramTransferDailyUsdg, 250);
+    assert.equal(set.telegramNotifyEnabled, false);
+    assert.equal(set.telegramDigestHour, 9);
+
+    // Out-of-range digest hour falls back to the default.
+    assert.equal(mergeSettings({ telegramDigestHour: 99 }, {}).telegramDigestHour, 18);
+    // Env fallbacks work.
+    const env = mergeSettings({}, { MERRYMEN_TELEGRAM_TRANSFER: "1", MERRYMEN_TELEGRAM_DIGEST_HOUR: "7" });
+    assert.equal(env.telegramTransferEnabled, true);
+    assert.equal(env.telegramDigestHour, 7);
+  });
 });
 
 describe("change fingerprints", () => {

@@ -18,6 +18,12 @@ export interface StoredGrant {
   grantedAt: number;
   expiresAt: number;
   chainId: number;
+  /**
+   * Capabilities baked into this grant's on-chain call policy beyond the
+   * original set (e.g. "transfer"). Lets the worker tell a pre-transfer grant
+   * apart from a new one instead of letting the UserOp revert at the wall.
+   */
+  grantFeatures?: string[];
   /** TESTNET ONLY — production signers live in a TEE, never serialized. */
   demoSessionPrivateKey: `0x${string}`;
   /**
