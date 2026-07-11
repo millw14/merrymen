@@ -37,6 +37,7 @@ const HEARTBEAT = path.join(HOME, "heartbeat.json");
 const DB = path.join(HOME, "merrymen.db");
 const STRATEGIES = path.join(HOME, "strategies");
 const PKG_STRATEGIES = path.join(ROOT, "strategies");
+const WELCOMED = path.join(HOME, ".welcomed");
 
 const RPC_MAINNET = "https://rpc.mainnet.chain.robinhood.com";
 const RPC_TESTNET = "https://rpc.testnet.chain.robinhood.com";
@@ -181,6 +182,39 @@ async function rpcCall(url, method, params = []) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ─────────────────────────────────────────────────────────────── welcome ──
+
+/** Animated welcome — the delightful first thing after install. */
+async function welcome() {
+  await banner("stand and deliver — you just joined the band");
+  console.log(
+    `  ${bold("the band is mustered.")} raise your first agent:\n\n` +
+      `     ${bold(c.lime("merrymen onboard"))}   ${dim("gather the band — bundler, keys, strategy, basket")}\n` +
+      `     ${bold(c.lime("merrymen start"))}     ${dim("open the tavern (localhost:3100) + loose the worker")}\n\n` +
+      `  ${c.gold(c.arrow)} ${dim("your keys, your caps · bounded worst case · every trade simulated first")}\n`,
+  );
+}
+
+/**
+ * Show the welcome once, the first time any command runs after install.
+ * Marker lives in ~/.merrymen so a reinstall (fresh home) re-greets.
+ */
+async function maybeFirstRun(cmd) {
+  if (existsSync(WELCOMED)) return;
+  try {
+    ensureHome();
+    writeFileSync(WELCOMED, new Date().toISOString(), "utf8");
+  } catch {
+    return; // can't write marker → skip rather than greet every run
+  }
+  // These already open with their own banner (onboard/start/welcome) or the
+  // help banner (bare command) — a second one would just be noise. First-run
+  // greeting is for the commands that otherwise start cold.
+  if (cmd === undefined || ["welcome", "onboard", "start"].includes(cmd)) return;
+  await welcome();
+  console.log(dim("  ─────────────────────────────────────────────\n"));
 }
 
 // ─────────────────────────────────────────────────────────────── onboard ──
@@ -548,7 +582,11 @@ async function kill() {
 // ────────────────────────────────────────────────────────────────── main ──
 
 const [, , cmd, ...rest] = process.argv;
+await maybeFirstRun(cmd);
 switch (cmd) {
+  case "welcome":
+    await welcome();
+    break;
   case "onboard":
     await onboard();
     break;
@@ -582,6 +620,7 @@ switch (cmd) {
   ${bold("merrymen strategy list")}  the roster — builtins + your strategies
   ${bold("merrymen selftest")}       fire one arrow through the whole pipeline
   ${bold("merrymen kill")}           call the band home (kill switch)
+  ${bold("merrymen welcome")}        replay the intro 🏹
 
   ${c.gold(c.arrow)} ${dim("your keys, your caps · bounded worst case · every trade simulated first")}
 `);
