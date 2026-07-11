@@ -47,6 +47,13 @@ merrymen start                     # dashboard at localhost:3100 + the 24/7 work
 Requires Node 22.12+. All your data lives in **`~/.merrymen`** (settings, grant,
 ledger, strategies) — the install is disposable, upgrades never touch it.
 
+> **`merrymen: command not found`?** Your npm global-bin folder isn't on PATH
+> (this also breaks other global CLIs like `yarn`/`vercel`). Two options:
+> use `npx merrymen onboard` / `npx merrymen start` — works everywhere, no PATH
+> changes — or add the folder to PATH once:
+> - **Windows:** `[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path","User") + ";$env:APPDATA\npm", "User")` then open a new terminal
+> - **macOS/Linux:** ensure `$(npm prefix -g)/bin` is on your `PATH` (add it to `~/.zshrc` / `~/.bashrc`)
+
 Then sign the permission wall at `localhost:3100/grant` (MetaMask, testnet
 46630), grab gas from the faucet, and check the stack anytime:
 
