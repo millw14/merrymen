@@ -1,27 +1,5 @@
 {
-  "name": "@merrymen/web",
-  "version": "0.0.1",
+  "name": "merrymen-web-marker",
   "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@merrymen/core": "*",
-    "@zerodev/ecdsa-validator": "^5.4.9",
-    "@zerodev/permissions": "^5.6.3",
-    "@zerodev/sdk": "^5.5.10",
-    "next": "^15.1.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "viem": "^2.21.0"
-  },
-  "devDependencies": {
-    "@types/node": "^22.0.0",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "typescript": "^5.6.0"
-  }
+  "description": "Marker only - the web app ships as part of the root merrymen package; deps live in the root package.json."
 }

@@ -1,41 +1,49 @@
-# strategies/ — write your own bot
+# write your own bot
 
-Drop a `.ts` / `.mjs` / `.js` file here, default-export `{ name, tick }`, and
-select it by filename in `/settings` (or during `npm run onboard`). Scaffold
-one with:
+Your strategies live in **`~/.merrymen/strategies/`** — outside the install,
+so upgrades and reinstalls never touch them. Scaffold one:
 
 ```bash
-npx merrymen strategy new my-bot
+merrymen strategy new my-bot
+# edit ~/.merrymen/strategies/my-bot.mjs, select "my-bot" in /settings — done
 ```
+
+(This folder in the package only ships the example + this doc; `merrymen
+onboard` copies them into your home folder.)
 
 ## The contract
 
-```ts
+```js
 export default {
   name: "my-bot",
-  tick(snapshot) {
-    // return TradeIntent[] (or a Promise of one)
+  tick(snapshot, ctx) {
+    // return an array of intents (or a Promise of one); [] = do nothing
   },
 };
 ```
 
-`snapshot` gives you: `cashUsdg`, `vaultUsdg`, `holdings` (per-symbol raw
-balance + USDG value + staleness), `prices` (Chainlink, 8dp, stale-flagged),
-`pausedTokens`, `staleFeeds`, `sequencerUp`. See
-[example-dip-buyer.ts](./example-dip-buyer.ts) for a fully commented walkthrough
-including the units cheat-sheet (USDG = 6dp bigint, shares = 18dp, prices = 8dp).
+No imports needed — `ctx` injects the verified registry and helpers:
+`ctx.tokenBySymbol.QQQ`, `ctx.CASH.USDG`, `ctx.UNISWAP.swapRouter02`,
+`ctx.RIALTO.routerSnapshot`, `ctx.MORPHO.steakhouseUsdgVault`,
+`ctx.STOCK_TOKENS`, and `ctx.usdg(25)` → `25_000_000n`.
+
+`snapshot` gives you `cashUsdg`, `vaultUsdg`, `holdings` (per-symbol raw
+balance + USDG value + staleness), `prices` (Chainlink, stale-flagged),
+`pausedTokens`, `staleFeeds`, `sequencerUp`. Units: USDG = 6dp bigint,
+stock balances = 18dp bigint, prices = 8dp bigint.
+
+See [example-dip-buyer.mjs](./example-dip-buyer.mjs) for a fully commented
+walkthrough including sell / vault intents.
 
 ## What you can rely on
 
 - **Hot reload** — save the file, it applies on the next tick. No restarts.
-- **Crash isolation** — a thrown tick or malformed intent skips the tick and
-  puts the reason in the dashboard activity feed. The worker never dies on
-  your bug.
-- **You cannot exceed the wall** — every intent you return is shape-validated,
-  then passes the policy layer (per-trade/daily/ops caps, drawdown breaker,
-  asset/target allowlists), quote simulation, and the on-chain session-key
-  policies the user signed. Your strategy proposes; deterministic code
-  disposes. There is no code path from here to raw calldata.
+- **Crash isolation** — a thrown tick or malformed intent skips the tick with
+  the reason in the dashboard activity feed. The worker never dies on your bug.
+- **You cannot exceed the wall** — every intent is shape-validated, then passes
+  the policy layer (per-trade/daily/ops caps, drawdown breaker, allowlists),
+  quote simulation, and the on-chain session-key policies the user signed.
+  Your strategy proposes; deterministic code disposes.
 
 ## Rules of the house
 

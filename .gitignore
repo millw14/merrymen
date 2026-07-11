@@ -9,3 +9,4 @@ dist/
 *.tsbuildinfo
 contracts/artifacts/
 contracts/cache/
+*.tgz

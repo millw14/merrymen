@@ -21,8 +21,7 @@
  * policy enforcement, end to end.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
-import path from "node:path";
+import { writeFileSync } from "node:fs";
 import {
   createPublicClient,
   encodeFunctionData,
@@ -42,12 +41,13 @@ import {
   robinhoodTestnet,
   type StockToken,
   type StoredGrant,
-} from "@merrymen/core";
+} from "../../packages/core/src/index";
 import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { bestQuote, buildSwapCall, minOutWithSlippage } from "./venues/uniswap";
 import { createAgentExecutor, type AgentExecutor } from "./executor";
 import { accrueAboveHwm } from "./fees";
 import { loadGrantFile } from "./grant";
+import { ensureHome, homePaths } from "./home";
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
 import {
   connectionKey,
@@ -474,12 +474,11 @@ async function main() {
     }
   }
 
-  const dataDir = path.join(process.cwd(), "..", ".data");
   function heartbeat(blockNumber: bigint) {
     try {
-      mkdirSync(dataDir, { recursive: true });
+      ensureHome();
       writeFileSync(
-        path.join(dataDir, "heartbeat.json"),
+        homePaths.heartbeat(),
         JSON.stringify({ at: Math.floor(Date.now() / 1000), block: blockNumber.toString() }),
         "utf8",
       );

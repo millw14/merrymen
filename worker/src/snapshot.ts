@@ -14,7 +14,7 @@ import {
   STOCK_ABI,
   STOCK_TOKENS,
   robinhoodChain,
-} from "@merrymen/core";
+} from "../../packages/core/src/index";
 
 const ERC20_READS = parseAbi([
   "function balanceOf(address) view returns (uint256)",

@@ -34,49 +34,56 @@ Selected via `MERRYMEN_STRATEGY`:
 | `weekend-gap` | Enter each leg when its Chainlink feed goes stale (market close), exit the full holding when it refreshes (open) — the strategy class that only exists on-chain |
 | `llm-strategist` | Claude proposes typed buy/sell/hold actions at decision windows (default 30min); deterministic code validates and disposes — the model never sees an address or emits calldata. Needs `ANTHROPIC_API_KEY`; without it, the null driver proposes nothing |
 
-## Run it
+## Install
 
-Self-hosted, terminal-first. You bring the keys; your machine runs the band.
+Self-hosted, terminal-first — install once, run from anywhere. No clone.
 
 ```bash
-git clone https://github.com/millw14/merrymen && cd merrymen
-npm install
-npm run onboard     # wizard: bundler URL, API keys, strategy, basket
-npm start           # dashboard at localhost:3100 + the 24/7 worker
+npm install -g merrymen            # or: npm i -g github:millw14/merrymen
+merrymen onboard                   # wizard: bundler URL, API keys, strategy, basket
+merrymen start                     # dashboard at localhost:3100 + the 24/7 worker
 ```
+
+Requires Node 22.12+. All your data lives in **`~/.merrymen`** (settings, grant,
+ledger, strategies) — the install is disposable, upgrades never touch it.
 
 Then sign the permission wall at `localhost:3100/grant` (MetaMask, testnet
 46630), grab gas from the faucet, and check the stack anytime:
 
 ```bash
-npx merrymen doctor     # node/keys/RPC/bundler/grant/db diagnostics
-npx merrymen status     # heartbeat, grant, trades, equity
-npx merrymen selftest   # one policy-legal no-op through the full pipeline
-npx merrymen kill       # kill switch from the terminal
+merrymen doctor     # node/keys/RPC/bundler/grant/db diagnostics
+merrymen status     # heartbeat, grant, trades, equity
+merrymen selftest   # one policy-legal no-op through the full pipeline
+merrymen kill       # kill switch from the terminal
 ```
 
 ## Write your own bot
 
-Your strategies live in [`strategies/`](./strategies) — hot-reloaded on save,
-crash-isolated, and incapable of exceeding the caps the user signed (every
-intent passes shape validation → the policy wall → quote simulation → the
-on-chain session key). Scaffold one and go:
+Your strategies live in **`~/.merrymen/strategies/`** — hot-reloaded on save,
+crash-isolated, and incapable of exceeding the caps you signed (every intent
+passes shape validation → the policy wall → quote simulation → the on-chain
+session key). Scaffold one and go:
 
 ```bash
-npx merrymen strategy new my-bot   # drops a commented template
-# edit strategies/my-bot.ts, select "my-bot" in /settings — done
+merrymen strategy new my-bot       # drops a commented template in ~/.merrymen/strategies
+# edit ~/.merrymen/strategies/my-bot.mjs, select "my-bot" in /settings — done
 ```
 
-See [strategies/README.md](./strategies/README.md) for the contract and
-[strategies/example-dip-buyer.ts](./strategies/example-dip-buyer.ts) for a
-fully commented walkthrough.
+Default-export `{ name, tick(snapshot, ctx) }` — no imports needed, `ctx`
+injects the verified registry (`ctx.tokenBySymbol.QQQ`, `ctx.CASH.USDG`,
+`ctx.UNISWAP.swapRouter02`, `ctx.usdg(10)`). See
+[strategies/README.md](./strategies/README.md) and
+[strategies/example-dip-buyer.mjs](./strategies/example-dip-buyer.mjs) for the
+full walkthrough.
 
 <details>
-<summary>manual run (without the CLI)</summary>
+<summary>develop from a clone</summary>
 
 ```bash
-npm run dev -w @merrymen/web -- -p 3100   # dashboard at localhost:3100
-npm run dev -w @merrymen/worker           # the 24/7 loop
+git clone https://github.com/millw14/merrymen && cd merrymen
+npm install          # prepare hook builds the dashboard
+npm run onboard && npm start
+# or run halves separately: npm run dev:web · npm run dev:worker
 ```
 
 </details>

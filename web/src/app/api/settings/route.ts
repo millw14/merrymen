@@ -9,8 +9,8 @@
  */
 
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { NextResponse } from "next/server";
+import { homePaths, merrymenHome } from "@/lib/home";
 import {
   SECRET_SETTING_KEYS,
   SETTINGS_DEFAULTS,
@@ -20,8 +20,8 @@ import {
 
 export const dynamic = "force-dynamic";
 
-const DATA_DIR = path.join(process.cwd(), "..", ".data");
-const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
+const DATA_DIR = merrymenHome();
+const SETTINGS_FILE = homePaths.settings();
 
 export interface SecretView {
   set: boolean;
@@ -39,7 +39,7 @@ export interface SettingsView {
   strategies: { builtin: string[]; custom: string[] };
 }
 
-const STRATEGIES_DIR = path.join(process.cwd(), "..", "strategies");
+const STRATEGIES_DIR = homePaths.strategies();
 const BUILTIN_STRATEGIES = ["steady-basket", "weekend-gap", "llm-strategist"];
 
 async function listCustomStrategies(): Promise<string[]> {

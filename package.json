@@ -1,21 +1,58 @@
 {
   "name": "merrymen",
-  "private": true,
-  "version": "0.0.1",
-  "description": "Autonomous trading agents for Robinhood Chain — hard on-chain permission walls, honest scoreboard.",
-  "workspaces": [
-    "packages/core",
+  "version": "0.1.0",
+  "description": "Self-hosted autonomous trading agents for Robinhood Chain — your keys, your caps, hard on-chain permission walls, write-your-own strategies.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/millw14/merrymen.git"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "bin": {
+    "merrymen": "cli/bin.mjs"
+  },
+  "files": [
+    "cli",
     "web",
     "worker",
-    "contracts",
-    "cli"
+    "packages/core",
+    "strategies",
+    "tsconfig.json",
+    "README.md",
+    "!web/.next/cache",
+    "!web/tsconfig.tsbuildinfo",
+    "!**/*.test.ts"
   ],
   "scripts": {
     "onboard": "node cli/bin.mjs onboard",
     "start": "node cli/bin.mjs start",
     "doctor": "node cli/bin.mjs doctor",
     "status": "node cli/bin.mjs status",
-    "test": "npm run test --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "build": "cd web && next build",
+    "prepare": "node cli/build.mjs",
+    "dev:web": "cd web && next dev -p 3100",
+    "dev:worker": "tsx worker/src/index.ts",
+    "test": "tsx --test \"worker/src/**/*.test.ts\"",
+    "test:contracts": "cd contracts && npm test",
+    "typecheck": "tsc --noEmit -p worker && tsc --noEmit -p web"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
+    "@zerodev/ecdsa-validator": "^5.4.9",
+    "@zerodev/permissions": "^5.6.3",
+    "@zerodev/sdk": "^5.5.10",
+    "next": "^15.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0"
   }
 }

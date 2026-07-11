@@ -5,7 +5,7 @@
  * changes settings.
  */
 
-import { CASH, MORPHO, STOCK_TOKENS, type StockToken } from "@merrymen/core";
+import { CASH, MORPHO, STOCK_TOKENS, type StockToken } from "../../../packages/core/src/index";
 import { createAnthropicDriver, nullDriver } from "../strategist/driver";
 import { makeLlmStrategist } from "../strategist/strategy";
 import { makeCustomStrategy } from "./custom";

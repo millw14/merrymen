@@ -14,7 +14,7 @@
  */
 
 import { encodeFunctionData, parseAbi, type Hex, type PublicClient } from "viem";
-import { UNISWAP, UNISWAP_SWAP_ROUTER_ABI } from "@merrymen/core";
+import { UNISWAP, UNISWAP_SWAP_ROUTER_ABI } from "../../../packages/core/src/index";
 
 /** Fee tiers to scan, most-likely-liquid first. */
 export const FEE_TIERS = [500, 3000, 10000] as const;

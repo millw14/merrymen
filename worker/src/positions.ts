@@ -13,7 +13,7 @@
  */
 
 import type { PublicClient } from "viem";
-import { STOCK_ABI, type StockToken } from "@merrymen/core";
+import { STOCK_ABI, type StockToken } from "../../packages/core/src/index";
 
 /** One valued holding. price8 = Chainlink USD price, 8 decimals. */
 export interface Position {

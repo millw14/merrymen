@@ -7,8 +7,8 @@
  */
 
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { NextResponse } from "next/server";
+import { homePaths, merrymenHome } from "@/lib/home";
 import { createPublicClient, http, parseAbi } from "viem";
 import {
   CASH,
@@ -18,9 +18,9 @@ import {
   type StoredGrant,
 } from "@merrymen/core";
 
-const DATA_DIR = path.join(process.cwd(), "..", ".data");
-const GRANT_FILE = path.join(DATA_DIR, "grant.json");
-const HEARTBEAT_FILE = path.join(DATA_DIR, "heartbeat.json");
+const DATA_DIR = merrymenHome();
+const GRANT_FILE = homePaths.grant();
+const HEARTBEAT_FILE = homePaths.heartbeat();
 
 const BALANCE_ABI = parseAbi(["function balanceOf(address) view returns (uint256)"]);
 

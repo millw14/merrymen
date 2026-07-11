@@ -7,12 +7,12 @@
  */
 
 import { readFileSync } from "node:fs";
-import path from "node:path";
 import {
   SETTINGS_DEFAULTS,
   STOCK_TOKENS,
   type MerrymenSettings,
-} from "@merrymen/core";
+} from "../../packages/core/src/index";
+import { homePaths } from "./home";
 
 export interface ResolvedConfig {
   bundlerUrl: string | undefined;
@@ -109,11 +109,9 @@ export function mergeSettings(
   };
 }
 
-const SETTINGS_FILE =
-  process.env.MERRYMEN_SETTINGS_FILE ?? path.join(process.cwd(), "..", ".data", "settings.json");
-
 /** Read + merge. A missing or corrupt file is just "no overrides". */
 export function resolveConfig(): ResolvedConfig {
+  const SETTINGS_FILE = process.env.MERRYMEN_SETTINGS_FILE ?? homePaths.settings();
   let file: MerrymenSettings = {};
   try {
     // BOM-strip: editors and PowerShell write UTF-8 BOMs that break JSON.parse.

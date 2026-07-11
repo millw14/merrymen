@@ -5,19 +5,16 @@
  * Postgres is a schema port when the platform goes multi-user.
  */
 
-import { mkdirSync } from "node:fs";
-import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { StoredGrant } from "@merrymen/core";
-
-const DATA_DIR = path.join(process.cwd(), "..", ".data");
-const DB_FILE = path.join(DATA_DIR, "merrymen.db");
+import type { StoredGrant } from "../../packages/core/src/index";
+import { ensureHome, homePaths } from "./home";
 
 let db: DatabaseSync | null = null;
 
 function getDb(): DatabaseSync {
   if (db) return db;
-  mkdirSync(DATA_DIR, { recursive: true });
+  ensureHome();
+  const DB_FILE = homePaths.db();
   db = new DatabaseSync(DB_FILE);
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec(`

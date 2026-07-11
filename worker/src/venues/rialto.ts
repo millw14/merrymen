@@ -14,7 +14,7 @@
  */
 
 import { isAddress, isHex, parseAbi, type PublicClient } from "viem";
-import { RIALTO } from "@merrymen/core";
+import { RIALTO } from "../../../packages/core/src/index";
 
 const REGISTRY_ABI = parseAbi(["function ownerOf(uint256 id) view returns (address)"]);
 

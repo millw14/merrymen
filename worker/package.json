@@ -1,23 +1,6 @@
 {
-  "name": "@merrymen/worker",
-  "version": "0.0.1",
+  "name": "merrymen-worker-marker",
   "private": true,
   "type": "module",
-  "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
-    "test": "tsx --test src/**/*.test.ts",
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.110.0",
-    "@merrymen/core": "*",
-    "@zerodev/permissions": "^5.6.3",
-    "@zerodev/sdk": "^5.5.10",
-    "viem": "^2.21.0"
-  },
-  "devDependencies": {
-    "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
-  }
+  "description": "Marker only — the worker ships as part of the root merrymen package; deps live in the root package.json."
 }

@@ -3,15 +3,12 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["node"],
     "baseUrl": ".",
     "paths": {
-      "@merrymen/core": ["../packages/core/src/index.ts"]
+      "@merrymen/core": ["packages/core/src/index.ts"]
     }
   },
-  "include": ["src", "../packages/core/src"]
+  "include": ["worker/src", "packages/core/src"]
 }

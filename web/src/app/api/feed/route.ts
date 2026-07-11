@@ -4,13 +4,13 @@
  */
 
 import { existsSync } from "node:fs";
-import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { NextResponse } from "next/server";
+import { homePaths } from "@/lib/home";
 
 export const dynamic = "force-dynamic";
 
-const DB_FILE = path.join(process.cwd(), "..", ".data", "merrymen.db");
+const DB_FILE = homePaths.db();
 
 export interface FeedEvent {
   level: "ok" | "warn" | "err";

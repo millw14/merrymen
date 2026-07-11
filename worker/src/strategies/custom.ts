@@ -15,13 +15,44 @@
 import { statSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { CASH, MORPHO, RIALTO, STOCK_TOKENS, UNISWAP, USDG_DECIMALS } from "../../../packages/core/src/index";
+import { homePaths } from "../home";
 import type { TradeIntent } from "../policy";
 import type { Snapshot, Strategy } from "./types";
 
 const EXTENSIONS = [".ts", ".mts", ".mjs", ".js"];
 
 export function customStrategiesDir(): string {
-  return process.env.MERRYMEN_STRATEGIES_DIR ?? path.join(process.cwd(), "..", "strategies");
+  return process.env.MERRYMEN_STRATEGIES_DIR ?? homePaths.strategies();
+}
+
+/**
+ * Everything a user strategy needs, injected as tick's second argument so
+ * strategy files stay dependency-free (they live in ~/.merrymen/strategies,
+ * outside any node_modules). Addresses come from the verified registry.
+ */
+export interface StrategyCtx {
+  CASH: typeof CASH;
+  UNISWAP: typeof UNISWAP;
+  RIALTO: typeof RIALTO;
+  MORPHO: typeof MORPHO;
+  STOCK_TOKENS: typeof STOCK_TOKENS;
+  /** token address by symbol, lowercase-safe lookups left to the caller */
+  tokenBySymbol: Record<string, `0x${string}`>;
+  /** 25 → 25_000_000n (USDG 6dp) */
+  usdg: (v: number) => bigint;
+}
+
+export function buildStrategyCtx(): StrategyCtx {
+  return {
+    CASH,
+    UNISWAP,
+    RIALTO,
+    MORPHO,
+    STOCK_TOKENS,
+    tokenBySymbol: Object.fromEntries(STOCK_TOKENS.map((t) => [t.symbol, t.address])),
+    usdg: (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS)),
+  };
 }
 
 /** Find the strategy file for a name, or null. Names are plain tokens — no paths. */
@@ -83,7 +114,7 @@ export function validateIntent(raw: unknown): { intent: TradeIntent | null; reas
 
 interface LoadedModule {
   mtimeMs: number;
-  strategy: { name?: string; tick: (snap: Snapshot) => unknown } | null;
+  strategy: { name?: string; tick: (snap: Snapshot, ctx: StrategyCtx) => unknown } | null;
   error?: string;
 }
 
@@ -103,6 +134,7 @@ export function makeCustomStrategy(
   const dir = opts?.dir ?? customStrategiesDir();
   const note = opts?.onNote ?? ((l, m) => console.log(`[custom:${l}] ${m}`));
   const importer = opts?.importer ?? ((url) => import(url));
+  const ctx = buildStrategyCtx();
   let loaded: LoadedModule | null = null;
 
   async function load(): Promise<LoadedModule> {
@@ -152,7 +184,7 @@ export function makeCustomStrategy(
 
       let raw: unknown;
       try {
-        raw = await loaded.strategy.tick(snap);
+        raw = await loaded.strategy.tick(snap, ctx);
       } catch (e) {
         note("warn", `custom strategy "${name}" threw: ${e instanceof Error ? e.message : String(e)}`);
         return [];
