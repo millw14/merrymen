@@ -41,7 +41,7 @@ export const RIALTO = {
   docs: "https://docs.rialto.xyz",
   routerRegistry: "0x71a120CbBf3Ce7cD910a3c50fF77aFc62735687E",
   /** Snapshot 2026-07-09 — do not hardcode in execution paths; read the registry. */
-  routerSnapshot: "0xC94135b63772b91d79d0A2dAab2A8801F32359bd",
+  routerSnapshot: "0xC94135b63772b91D79d0A2DaAb2a8801f32359bD",
   FEATURE_TAKER_ROUTER: 2,
   FEATURE_GASLESS_ROUTER: 3,
 } as const;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { fetchRialtoQuote, parseRialtoQuote, type FetchLike } from "./rialto";
 
-const ROUTER = "0xC94135b63772b91d79d0A2dAab2A8801F32359bd" as const;
+const ROUTER = "0xC94135b63772b91D79d0A2DaAb2a8801f32359bD" as const;
 const EVIL = "0x9999999999999999999999999999999999999999" as const;
 const USDG = "0x3333333333333333333333333333333333333333" as const;
 const AAPL = "0x4444444444444444444444444444444444444444" as const;
