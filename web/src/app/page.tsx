@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { LogoMark } from "@/components/Logo";
 import { BandSection } from "@/components/BandSection";
 import { ChainStats } from "@/components/ChainStats";
 import { FeedPanel } from "@/components/FeedPanel";
@@ -12,7 +13,7 @@ export default function Dashboard() {
     <>
       <header className="topbar">
         <div className="brand">
-          <span className="arrow">➳</span>
+          <span className="arrow"><LogoMark size={20} /></span>
           <span>merrymen</span>
           <span className="tagline">your band works Sherwood 24/7</span>
         </div>

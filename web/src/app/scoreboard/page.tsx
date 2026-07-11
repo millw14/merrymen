@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { LogoMark } from "@/components/Logo";
 import type { ScoreboardAgent, ScoreboardResponse } from "@/app/api/scoreboard/route";
 
 function short(a: string): string {
@@ -118,7 +119,7 @@ export default function ScoreboardPage() {
     <>
       <header className="topbar">
         <Link href="/" className="brand" style={{ color: "inherit", textDecoration: "none" }}>
-          <span className="arrow">➳</span>
+          <span className="arrow"><LogoMark size={20} /></span>
           <span>merrymen</span>
           <span className="tagline">the honest scoreboard</span>
         </Link>

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { LogoMark } from "@/components/Logo";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 
@@ -148,7 +149,7 @@ export default function SettingsPage() {
     <>
       <header className="topbar">
         <Link href="/" className="brand" style={{ color: "inherit", textDecoration: "none" }}>
-          <span className="arrow">➳</span>
+          <span className="arrow"><LogoMark size={20} /></span>
           <span>merrymen</span>
           <span className="tagline">settings</span>
         </Link>

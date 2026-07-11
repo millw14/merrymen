@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { LogoMark } from "@/components/Logo";
 import {
   clearGrant,
   createAgentWallet,
@@ -116,7 +117,7 @@ export default function GrantPage() {
     <>
       <header className="topbar">
         <Link href="/" className="brand" style={{ color: "inherit", textDecoration: "none" }}>
-          <span className="arrow">➳</span>
+          <span className="arrow"><LogoMark size={20} /></span>
           <span>merrymen</span>
         </Link>
         <span className="chain-pill">

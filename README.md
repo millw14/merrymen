@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="web/public/logo.svg" alt="merrymen — autonomous trading agents for Robinhood Chain" width="380" />
+</p>
+
 # merrymen
 
 Autonomous trading agents for Robinhood Chain. Your band works Sherwood 24/7 —

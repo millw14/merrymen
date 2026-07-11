@@ -1,0 +1,17 @@
+<svg width="520" height="300" viewBox="0 0 520 300" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- merrymen — autonomous trading agents for Robinhood Chain -->
+  <rect width="520" height="300" rx="24" fill="#ffffff"/>
+  <g transform="translate(210,20) scale(1.5)">
+    <g transform="rotate(45 50 50)">
+      <rect x="36" y="4" width="28" height="33" rx="14" fill="#a5ce1f"/>
+      <path d="M50 22 C66 30 70 52 62 68 C58 76 54 84 50 93 C46 84 42 76 38 68 C30 52 34 30 50 22 Z" fill="#16181c" stroke="#ffffff" stroke-width="4"/>
+      <path d="M50 89 L50 28" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round"/>
+      <path d="M50 7 L58 22 L50 17.5 L42 22 Z" fill="#16181c"/>
+      <path d="M50 81 L60 71" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round"/>
+      <path d="M50 72.5 L59 63.5" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round"/>
+    </g>
+  </g>
+  <text x="260" y="228" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="52" font-weight="700" letter-spacing="1" fill="#16181c">merrymen</text>
+  <text x="260" y="262" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="15" font-weight="600" letter-spacing="3" fill="#4b5563">— AUTONOMOUS TRADING AGENTS —</text>
+  <text x="260" y="284" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" letter-spacing="3" fill="#a5ce1f">FOR ROBINHOOD CHAIN</text>
+</svg>
