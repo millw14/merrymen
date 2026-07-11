@@ -25,6 +25,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { banner, c, spinner, type as typeOut, withSpinner } from "./ui.mjs";
 
 // Where the PACKAGE lives (npm global dir or a checkout) — code, never data.
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -41,14 +42,14 @@ const RPC_MAINNET = "https://rpc.mainnet.chain.robinhood.com";
 const RPC_TESTNET = "https://rpc.testnet.chain.robinhood.com";
 const BUILTINS = ["steady-basket", "weekend-gap", "llm-strategist"];
 
-const green = (s) => `\x1b[32m${s}\x1b[0m`;
-const red = (s) => `\x1b[31m${s}\x1b[0m`;
-const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
-const dim = (s) => `\x1b[2m${s}\x1b[0m`;
-const bold = (s) => `\x1b[1m${s}\x1b[0m`;
+const green = c.green;
+const red = c.red;
+const yellow = c.gold;
+const dim = c.dim;
+const bold = c.bold;
 const ok = (s) => console.log(`  ${green("✓")} ${s}`);
 const bad = (s) => console.log(`  ${red("✗")} ${s}`);
-const warn = (s) => console.log(`  ${yellow("!")} ${s}`);
+const warn = (s) => console.log(`  ${yellow("⚑")} ${s}`);
 
 function readJson(file) {
   try {
@@ -118,6 +119,22 @@ async function listCustom() {
   }
 }
 
+/**
+ * Spawn a local tool robustly across platforms. On Windows the .bin shims are
+ * .cmd files, which Node 22 only runs via shell:true — and shell:true needs the
+ * exe path AND any space-containing args quoted (the package or repo path may
+ * contain spaces, e.g. "milla projects"). On POSIX we spawn directly, no shell.
+ */
+function toolSpawn(bin, args, opts, sync = false) {
+  const runner = sync ? spawnSync : spawn;
+  if (process.platform === "win32") {
+    const q = (s) => (/[\s&()[\]{}^=;!'+,`~]/.test(s) ? `"${s}"` : s);
+    const line = `${q(bin)} ${args.map(q).join(" ")}`;
+    return runner(line, { ...opts, shell: true, windowsHide: true });
+  }
+  return runner(bin, args, { ...opts, shell: false });
+}
+
 /** Local binary from the package's own node_modules (works installed or cloned). */
 function localBin(name) {
   const bin = path.join(ROOT, "node_modules", ".bin", process.platform === "win32" ? `${name}.cmd` : name);
@@ -169,13 +186,12 @@ async function rpcCall(url, method, params = []) {
 // ─────────────────────────────────────────────────────────────── onboard ──
 
 async function onboard() {
-  console.log(`
-${bold("➳ merrymen")} — autonomous trading agents for Robinhood Chain
-${dim("your keys, your caps · bounded worst case · every trade simulated first")}
-
-Everything you enter lands in ${dim(HOME)} — yours, outside the install.
-Blank answers keep what's already saved. Ctrl+C to bail anytime.
-`);
+  await banner("gather your band · rob the spread · give yourself the yield");
+  console.log(
+    `  ${dim("your keys, your caps · bounded worst case · every trade simulated first")}\n` +
+      `  Everything you tell me is stashed in ${dim(HOME)} — yours, outside the install.\n` +
+      `  Blank answers keep what's saved. Ctrl+C to slip back into the forest anytime.\n`,
+  );
 
   const major = Number(process.versions.node.split(".")[0]);
   if (major < 22) {
@@ -192,21 +208,21 @@ Blank answers keep what's already saved. Ctrl+C to bail anytime.
   const p = makePrompter();
   const keep = (has) => dim(has ? ` [saved — blank keeps it]` : ` [blank skips]`);
 
-  console.log(bold("\n1/4 · execution"));
+  console.log(bold(`\n  ${c.arrow} 1/4 · the getaway horse`) + dim("  (how ops reach the chain)"));
   console.log(dim("  A 4337 bundler signs and submits the agent's operations."));
   console.log(dim("  Free keys: dashboard.pimlico.io or dashboard.alchemy.com (chain 46630 testnet / 4663 mainnet)."));
   const bundler = (await p.ask(`  bundler RPC URL${keep(current.bundlerUrl)}: `)).trim();
   if (bundler) current.bundlerUrl = bundler;
 
-  console.log(bold("\n2/4 · api keys") + dim("  (stored locally, never leave this machine)"));
-  console.log(dim("  Anthropic key powers the llm-strategist — console.anthropic.com → API keys."));
+  console.log(bold(`\n  ${c.arrow} 2/4 · your quiver`) + dim("  (keys — stored locally, never leave this machine)"));
+  console.log(dim("  Anthropic key arms the llm-strategist — console.anthropic.com → API keys."));
   const anthropic = (await p.askSecret(`  Anthropic API key${keep(current.anthropicApiKey)}: `)).trim();
   if (anthropic) current.anthropicApiKey = anthropic;
-  console.log(dim("  Rialto integrator key enables their meta-router — docs.rialto.xyz (wallet-signed onboarding)."));
+  console.log(dim("  Rialto integrator key opens their meta-router — docs.rialto.xyz (wallet-signed onboarding)."));
   const rialto = (await p.askSecret(`  Rialto API key${keep(current.rialtoApiKey)}: `)).trim();
   if (rialto) current.rialtoApiKey = rialto;
 
-  console.log(bold("\n3/4 · strategy"));
+  console.log(bold(`\n  ${c.arrow} 3/4 · pick your outlaw`) + dim("  (strategy)"));
   const custom = await listCustom();
   const all = [...BUILTINS, ...custom];
   all.forEach((s, i) =>
@@ -214,12 +230,12 @@ Blank answers keep what's already saved. Ctrl+C to bail anytime.
       `  ${i + 1}. ${s}${custom.includes(s) ? dim(" (yours)") : ""}${s === (current.strategy ?? "steady-basket") ? green(" ← current") : ""}`,
     ),
   );
-  console.log(dim(`  write your own: merrymen strategy new <name>  (template lands in ${STRATEGIES})`));
+  console.log(dim(`  forge your own outlaw: merrymen strategy new <name>  (template lands in ${STRATEGIES})`));
   const pick = (await p.ask(`  pick 1-${all.length} [blank keeps current]: `)).trim();
   const idx = Number(pick) - 1;
   if (pick && Number.isInteger(idx) && all[idx]) current.strategy = all[idx];
 
-  console.log(bold("\n4/4 · basket"));
+  console.log(bold(`\n  ${c.arrow} 4/4 · the loot`) + dim("  (basket — equal-weighted)"));
   const symbols = knownSymbols();
   console.log(dim(`  available: ${symbols.join(" ")}`));
   const basketNow = (current.basketSymbols ?? ["AAPL", "MSFT", "QQQ"]).join(",");
@@ -233,58 +249,96 @@ Blank answers keep what's already saved. Ctrl+C to bail anytime.
   }
 
   p.close();
+  const s = spinner("stashing your plans in the hollow oak");
   writeSettings(current);
+  await new Promise((r) => setTimeout(r, 400));
+  s.succeed(`stashed ${dim(SETTINGS)}`);
 
   console.log(`
-${green("✓ saved")} ${dim(SETTINGS)}
+${bold(`  ${c.arrow} ride out`)}
+  1. ${bold("merrymen start")} — opens the tavern (dashboard) at http://localhost:3100 + looses the worker
+  2. at ${bold("/grant")}, raise the permission wall with MetaMask (testnet 46630) — your keys, your caps
+  3. testnet gas from the sheriff's vault: ${dim("https://faucet.testnet.chain.robinhood.com")}
+  4. prove the shot lands: ${bold("merrymen selftest")}
+  5. muster check anytime: ${bold("merrymen doctor")} · tune the band: ${dim("http://localhost:3100/settings")}
 
-${bold("next steps")}
-  1. ${bold("merrymen start")} — dashboard on http://localhost:3100 + the worker
-  2. open ${bold("http://localhost:3100/grant")} and sign the permission wall with MetaMask (testnet 46630)
-  3. testnet gas: ${dim("https://faucet.testnet.chain.robinhood.com")}
-  4. prove the pipeline: ${bold("merrymen selftest")}
-  5. checkup anytime: ${bold("merrymen doctor")} · fine-tuning: ${dim("http://localhost:3100/settings")}
+  ${c.gold("nock, draw, loose. 🏹")}
 `);
+}
+
+/** Open a URL in the default browser, cross-platform. Best-effort, never throws. */
+function openBrowser(url) {
+  try {
+    const [cmd, args] =
+      process.platform === "win32"
+        ? ["cmd", ["/c", "start", "", url]]
+        : process.platform === "darwin"
+          ? ["open", [url]]
+          : ["xdg-open", [url]];
+    spawn(cmd, args, { stdio: "ignore", detached: true, shell: false }).unref();
+  } catch {
+    // no browser to open (headless/server) — the URL is printed anyway
+  }
 }
 
 // ───────────────────────────────────────────────────────────────── start ──
 
-function start() {
+async function start() {
   ensureHome();
-  console.log(`${bold("➳ merrymen")} — starting web (http://localhost:3100) + worker. Ctrl+C stops both.\n`);
-  const shell = process.platform === "win32";
+  const noOpen = process.argv.includes("--no-open");
+  const url = "http://localhost:3100";
+  await banner("the band rides out");
   const web = path.join(ROOT, "web");
-  // Serve the prebuilt production app (next start), not dev-mode — it's the
-  // robust distribution model. If the build is missing (e.g. a source install
-  // where prepare didn't run), build it once now.
+  // Serve the prebuilt production app (next start), not dev-mode — the robust
+  // distribution model. If the build is missing (a source install where the
+  // prepare hook didn't run), build it once under a spinner.
   if (!existsSync(path.join(web, ".next", "BUILD_ID"))) {
-    console.log(dim("  first run — building the dashboard (~15s)…"));
-    const b = spawnSync(localBin("next"), ["build"], { cwd: web, stdio: "inherit", shell });
-    if (b.status !== 0) {
-      bad("dashboard build failed — the worker can still run via `merrymen selftest`. Fix and retry `merrymen start`.");
+    try {
+      await withSpinner("raising the tavern (first-run build, ~15s)", async () => {
+        const b = toolSpawn(localBin("next"), ["build"], { cwd: web }, true);
+        if (b.status !== 0) throw new Error("build failed");
+      });
+    } catch {
+      bad("the tavern won't stand (dashboard build failed) — the worker still runs via `merrymen selftest`.");
       process.exit(1);
     }
   }
+
+  let opened = false;
+  const openOnce = () => {
+    if (opened || noOpen) return;
+    opened = true;
+    console.log(`\n  ${c.green(c.arrow)} tavern's open — ${c.bold(url)} ${dim("(opening your browser…)")}\n`);
+    openBrowser(url);
+  };
+
   // Next serves from the app dir as cwd; the worker runs from ROOT.
   const procs = [
-    { name: "web   ", bin: localBin("next"), args: ["start", "-p", "3100"], cwd: web },
-    { name: "worker", bin: localBin("tsx"), args: [path.join(ROOT, "worker", "src", "index.ts")], cwd: ROOT },
+    { name: "tavern", bin: localBin("next"), args: ["start", "-p", "3100"], cwd: web },
+    { name: "band  ", bin: localBin("tsx"), args: [path.join(ROOT, "worker", "src", "index.ts")], cwd: ROOT },
   ].map(({ name, bin, args, cwd }) => {
-    const child = spawn(bin, args, { cwd, shell });
+    const child = toolSpawn(bin, args, { cwd });
     const pipe = (stream, sink) =>
-      stream.on("data", (chunk) =>
-        String(chunk)
+      stream.on("data", (chunk) => {
+        const text = String(chunk);
+        if (name === "tavern" && /Ready|started server|Local:/i.test(text)) openOnce();
+        text
           .split(/\r?\n/)
           .filter((l) => l.trim())
-          .forEach((l) => sink.write(`${dim(`[${name}]`)} ${l}\n`)),
-      );
+          .forEach((l) => sink.write(`${dim(`[${name}]`)} ${l}\n`));
+      });
     pipe(child.stdout, process.stdout);
     pipe(child.stderr, process.stderr);
-    child.on("exit", (code) => console.log(`${dim(`[${name}]`)} exited (${code})`));
+    child.on("exit", (code) => console.log(`${dim(`[${name}]`)} rode off (${code})`));
     return child;
   });
+  // Fallback: open even if we never matched a ready line.
+  setTimeout(openOnce, 12_000);
+
+  console.log(dim("  Ctrl+C calls the whole band home.\n"));
   const stop = () => {
-    procs.forEach((c) => c.kill("SIGINT"));
+    console.log(`\n  ${c.gold(c.arrow)} calling the band home…`);
+    procs.forEach((ch) => ch.kill("SIGINT"));
     setTimeout(() => process.exit(0), 500);
   };
   process.on("SIGINT", stop);
@@ -294,7 +348,7 @@ function start() {
 // ──────────────────────────────────────────────────────────────── doctor ──
 
 async function doctor() {
-  console.log(`${bold("➳ merrymen doctor")}\n`);
+  console.log(`\n${bold(`  ${c.arrow} muster check`)}  ${dim("is the band ready to ride?")}\n`);
   ensureHome();
   const s = readJson(SETTINGS) ?? {};
 
@@ -315,16 +369,23 @@ async function doctor() {
     ? ok("Rialto key set")
     : warn("no Rialto key — rialto venue stays approval-only");
 
+  const sp1 = spinner("scouting the Robinhood Chain (mainnet)");
   const mainnetBlock = await rpcCall(s.rpcMainnet ?? RPC_MAINNET, "eth_blockNumber");
-  mainnetBlock ? ok(`mainnet RPC reachable (block ${parseInt(mainnetBlock, 16).toLocaleString()})`) : bad("mainnet RPC unreachable");
+  mainnetBlock
+    ? sp1.succeed(`mainnet RPC reachable ${dim(`block ${parseInt(mainnetBlock, 16).toLocaleString()}`)}`)
+    : sp1.fail("mainnet RPC unreachable");
+  const sp2 = spinner("scouting the testnet road");
   const testnetBlock = await rpcCall(s.rpcTestnet ?? RPC_TESTNET, "eth_blockNumber");
-  testnetBlock ? ok(`testnet RPC reachable (block ${parseInt(testnetBlock, 16).toLocaleString()})`) : bad("testnet RPC unreachable");
+  testnetBlock
+    ? sp2.succeed(`testnet RPC reachable ${dim(`block ${parseInt(testnetBlock, 16).toLocaleString()}`)}`)
+    : sp2.fail("testnet RPC unreachable");
 
   if (s.bundlerUrl) {
+    const sp3 = spinner("waking the getaway horse (bundler)");
     const eps = await rpcCall(s.bundlerUrl, "eth_supportedEntryPoints");
     Array.isArray(eps) && eps.length
-      ? ok(`bundler reachable (${eps.length} entrypoint${eps.length > 1 ? "s" : ""})`)
-      : bad("bundler did not answer eth_supportedEntryPoints — check the URL/key");
+      ? sp3.succeed(`bundler reachable ${dim(`${eps.length} entrypoint${eps.length > 1 ? "s" : ""}`)}`)
+      : sp3.fail("bundler did not answer eth_supportedEntryPoints — check the URL/key");
   }
 
   const grant = readJson(GRANT);
@@ -355,7 +416,7 @@ async function doctor() {
 // ──────────────────────────────────────────────────────────────── status ──
 
 async function status() {
-  console.log(`${bold("➳ merrymen status")}\n`);
+  console.log(`\n${bold(`  ${c.arrow} the band, right now`)}\n`);
   const hb = readJson(HEARTBEAT);
   const now = Math.floor(Date.now() / 1000);
   if (hb && now - hb.at < 90) ok(`worker alive — heartbeat ${now - hb.at}s ago at block ${hb.block}`);
@@ -460,28 +521,27 @@ async function strategyCmd(sub, name) {
 // ────────────────────────────────────────────────────────── selftest/kill ──
 
 function selftest() {
-  console.log(`${bold("➳ merrymen selftest")} — one policy-legal no-op through grant → policy → bundler → chain\n`);
-  const child = spawn(localBin("tsx"), [path.join(ROOT, "worker", "src", "index.ts"), "--selftest"], {
+  console.log(`\n  ${bold(`${c.arrow} one arrow through the whole pipeline`)} ${dim("grant → policy → bundler → chain")}\n`);
+  const child = toolSpawn(localBin("tsx"), [path.join(ROOT, "worker", "src", "index.ts"), "--selftest"], {
     cwd: ROOT,
     stdio: "inherit",
-    shell: process.platform === "win32",
   });
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
 async function kill() {
   if (!existsSync(GRANT)) {
-    warn("no grant to kill — the band is already standing down");
+    warn("no grant to call in — the band's already home");
     return;
   }
   const p = makePrompter();
-  const answer = (await p.ask(`${red("KILL SWITCH")} — destroy the grant? The worker halts on its next tick. [y/N]: `)).trim().toLowerCase();
+  const answer = (await p.ask(`  ${red("CALL THE BAND HOME")} — destroy the grant? The worker halts on its next tick. [y/N]: `)).trim().toLowerCase();
   p.close();
   if (answer === "y" || answer === "yes") {
     rmSync(GRANT, { force: true });
-    ok("grant destroyed — trading halts on the worker's next tick (on-chain expiry remains the backstop)");
+    ok("grant destroyed — the band stands down on the next tick (on-chain expiry is the backstop)");
   } else {
-    console.log(dim("aborted — nothing touched"));
+    console.log(dim("  stayed the hand — nothing touched"));
   }
 }
 
@@ -493,7 +553,7 @@ switch (cmd) {
     await onboard();
     break;
   case "start":
-    start();
+    await start();
     break;
   case "doctor":
     await doctor();
@@ -511,17 +571,18 @@ switch (cmd) {
     await kill();
     break;
   default:
-    console.log(`
-${bold("➳ merrymen")} — self-hosted trading agents for Robinhood Chain
-${dim("install: npm install -g merrymen · data: ~/.merrymen")}
+    await banner("stand and deliver — autonomous agents for Robinhood Chain");
+    console.log(`${dim("  install: npm install -g merrymen · your loot: ~/.merrymen")}
 
-  ${bold("merrymen onboard")}        setup wizard (keys, strategy, basket)
-  ${bold("merrymen start")}          run dashboard (localhost:3100) + worker
-  ${bold("merrymen doctor")}         diagnose node/keys/RPC/bundler/grant/db
-  ${bold("merrymen status")}         heartbeat, grant, trades, equity
-  ${bold("merrymen strategy new")}   scaffold your own bot in ~/.merrymen/strategies
-  ${bold("merrymen strategy list")}  builtins + your strategies
-  ${bold("merrymen selftest")}       prove the pipeline end to end
-  ${bold("merrymen kill")}           kill switch from the terminal
+  ${bold("merrymen onboard")}        gather the band (keys, strategy, basket)
+  ${bold("merrymen start")}          open the tavern (localhost:3100) + loose the worker
+  ${bold("merrymen doctor")}         muster check — node/keys/RPC/bundler/grant/db
+  ${bold("merrymen status")}         what the band's up to — heartbeat, grant, trades, equity
+  ${bold("merrymen strategy new")}   forge your own outlaw in ~/.merrymen/strategies
+  ${bold("merrymen strategy list")}  the roster — builtins + your strategies
+  ${bold("merrymen selftest")}       fire one arrow through the whole pipeline
+  ${bold("merrymen kill")}           call the band home (kill switch)
+
+  ${c.gold(c.arrow)} ${dim("your keys, your caps · bounded worst case · every trade simulated first")}
 `);
 }
