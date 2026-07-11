@@ -32,6 +32,8 @@ export interface StatusContext {
   paused: boolean;
   workerAliveSec: number | null;
   grant: { perTradeUsdg: number; dailyUsdg: number; maxDrawdownPct: number; expiresInDays: number } | null;
+  /** The armed grant's chain (4663 mainnet = real funds, 46630 testnet); null when no grant. */
+  chainId: number | null;
   telegramMaxActionUsdg: number;
 }
 
@@ -41,6 +43,13 @@ export function readStatus(ctx: StatusContext): string {
   const alive = ctx.workerAliveSec !== null && ctx.workerAliveSec < 90;
   lines.push(`• worker: ${alive ? "alive" : "not running"}${ctx.paused ? " · ⏸ paused" : ""}`);
   lines.push(`• strategy: ${esc(ctx.strategy)} · venue: ${esc(ctx.venue)}`);
+  if (ctx.chainId !== null) {
+    lines.push(
+      ctx.chainId === 46630
+        ? `• chain: testnet 46630 (practice — venues absent, swaps simulate)`
+        : `• chain: <b>mainnet ${ctx.chainId} · REAL FUNDS</b>`,
+    );
+  }
   if (ctx.grant) {
     lines.push(
       `• caps: ${ctx.grant.perTradeUsdg}/trade · ${ctx.grant.dailyUsdg}/day · breaker ${ctx.grant.maxDrawdownPct}% · key dies in ${ctx.grant.expiresInDays}d`,

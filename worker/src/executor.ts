@@ -33,8 +33,10 @@ export async function createAgentExecutor(opts: {
   chain: Chain;
   serializedGrant: string;
   bundlerUrl: string;
+  /** RPC override (settings rpcMainnet/rpcTestnet) — falls back to the chain default. */
+  rpcUrl?: string;
 }): Promise<AgentExecutor> {
-  const publicClient = createPublicClient({ chain: opts.chain, transport: http() });
+  const publicClient = createPublicClient({ chain: opts.chain, transport: http(opts.rpcUrl) });
   const entryPoint = getEntryPoint("0.7");
 
   const account = await deserializePermissionAccount(

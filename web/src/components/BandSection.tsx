@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { formatUnits } from "viem";
-import { USDG_DECIMALS } from "@merrymen/core";
+import { USDG_DECIMALS, explorerFor } from "@merrymen/core";
 import type { AgentStatus } from "@/app/api/grants/route";
 import type { FeedResponse } from "@/app/api/feed/route";
 import { clearGrant } from "@/lib/session";
@@ -189,7 +189,7 @@ export function BandSection() {
 
       <div className="real-meta mono">
         <a
-          href={`https://explorer.testnet.chain.robinhood.com/address/${g.smartAccount}`}
+          href={`${explorerFor(g.chainId)}/address/${g.smartAccount}`}
           target="_blank"
           rel="noreferrer"
         >

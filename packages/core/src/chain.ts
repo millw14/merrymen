@@ -41,6 +41,20 @@ export const robinhoodTestnet = defineChain({
   },
 });
 
+/**
+ * Resolve a chain object from a grant/selector chain id. Anything that isn't
+ * the testnet id is treated as mainnet — the two Robinhood chains are the only
+ * chains this product runs on.
+ */
+export function chainForId(id: number): typeof robinhoodChain | typeof robinhoodTestnet {
+  return id === robinhoodTestnet.id ? robinhoodTestnet : robinhoodChain;
+}
+
+/** Block-explorer base URL for a chain id (Blockscout on both chains). */
+export function explorerFor(chainId: number): string {
+  return chainForId(chainId).blockExplorers!.default.url;
+}
+
 /** ERC-4337 EntryPoints — all deployed on both mainnet and testnet (probed 2026-07-09). */
 export const ENTRYPOINT = {
   v06: "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",

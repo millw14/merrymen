@@ -38,7 +38,7 @@ import {
   STOCK_TOKENS,
   UNISWAP,
   USDG_DECIMALS,
-  robinhoodChain,
+  chainForId,
   robinhoodTestnet,
   type StockToken,
   type StoredGrant,
@@ -51,6 +51,7 @@ import { loadGrantFile } from "./grant";
 import { ensureHome, homePaths } from "./home";
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
 import {
+  bundlerChainMismatch,
   connectionKey,
   resolveConfig,
   strategyKey,
@@ -134,6 +135,9 @@ interface ActiveAgent {
   client: PublicClient;
   executor: AgentExecutor | null;
   limits: AgentLimits;
+  /** True only when breakerAddress has CODE on the grant chain — otherwise the
+   * on-chain read would silently fail open (.catch → "not tripped"). */
+  breakerLive: boolean;
 }
 
 async function main() {
@@ -237,12 +241,25 @@ async function main() {
       active.grant.grantedAt === grant.grantedAt;
     if (unchanged) return true;
 
-    const chain = grant.chainId === robinhoodTestnet.id ? robinhoodTestnet : robinhoodChain;
+    const chain = chainForId(grant.chainId);
     const rpc = chain.id === robinhoodTestnet.id ? cfg.rpcTestnet : cfg.rpcMainnet;
     const agentId = await ensureAgent(grant);
     // The soul's name is the source of truth — mirror it onto the roster.
     ensureSoul();
     await setAgentName(agentId, getName());
+
+    // Pimlico/Alchemy bundler URLs embed a chain id — a testnet bundler with a
+    // mainnet grant (or vice versa) fails every op with opaque errors. Advisory
+    // heuristic: warn loudly, never block.
+    const mismatch = bundlerChainMismatch(cfg.bundlerUrl, grant.chainId);
+    if (mismatch !== null) {
+      console.log(`[worker] WARNING: bundler URL looks like chain ${mismatch} but the grant is chain ${grant.chainId}`);
+      await addEvent(
+        agentId,
+        "warn",
+        `bundler URL looks like chain ${mismatch} but the grant is chain ${grant.chainId} — every op will fail; fix the bundler URL in /settings`,
+      );
+    }
 
     let executor: AgentExecutor | null = null;
     if (cfg.bundlerUrl) {
@@ -250,18 +267,39 @@ async function main() {
         chain,
         serializedGrant: grant.serialized,
         bundlerUrl: cfg.bundlerUrl,
+        rpcUrl: rpc,
       });
       console.log(`[worker] executor live — smart account ${executor.address} on chain ${chain.id}`);
     } else {
       console.log("[worker] no bundler URL (settings or env) — execution stubbed (policy/simulation still run)");
     }
 
+    const client = createPublicClient({ chain, transport: http(rpc) });
+
+    // The on-chain breaker is only trusted when its address has CODE on the
+    // grant chain — otherwise the tick's read silently fails open ("not
+    // tripped") while the user believes they're protected.
+    let breakerLive = false;
+    if (cfg.breakerAddress) {
+      const code = await client.getCode({ address: cfg.breakerAddress }).catch(() => undefined);
+      breakerLive = code !== undefined && code !== "0x";
+      if (!breakerLive) {
+        console.log(`[worker] breaker ${cfg.breakerAddress} has no code on chain ${chain.id} — worker-enforced drawdown only`);
+        await addEvent(
+          agentId,
+          "warn",
+          `breaker address has no code on chain ${chain.id} — on-chain drawdown protection is OFF (worker-enforced only)`,
+        );
+      }
+    }
+
     active = {
       grant,
       agentId,
-      client: createPublicClient({ chain, transport: http(rpc) }),
+      client,
       executor,
       limits: limitsFromGrant(grant, watchTokens),
+      breakerLive,
     };
     spentTodayUsdg = usdg(await getSpentTodayUsdg(agentId));
     opsToday = await getOpsToday(agentId);
@@ -606,7 +644,10 @@ async function main() {
 
     // On-chain breaker check — the contract is the authority once deployed;
     // this read stops the worker from wasting ops the chain would refuse.
-    if (cfg.breakerAddress) {
+    // Gated on breakerLive: an address with no code on the grant chain would
+    // silently fail open here (.catch → "not tripped"), which is worse than
+    // honestly reporting worker-enforced-only at arm time.
+    if (cfg.breakerAddress && active.breakerLive) {
       const tripped = await client
         .readContract({
           address: cfg.breakerAddress,
@@ -718,6 +759,7 @@ async function main() {
     name: getName(),
     strategy: strategy.name,
     venue: cfg.swapVenue,
+    chainId: active ? active.grant.chainId : null,
     paused: isPaused(),
     workerAliveSec: 0, // the worker itself is answering, so it's alive
     grant: active

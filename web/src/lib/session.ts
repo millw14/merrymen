@@ -50,6 +50,7 @@ import {
   STOCK_TOKENS,
   UNISWAP,
   UNISWAP_SWAP_ROUTER_ABI,
+  chainForId,
   robinhoodTestnet,
   USDG_DECIMALS,
   type GrantCaps,
@@ -88,8 +89,14 @@ const usdgUnits = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
 export async function createAgentWallet(
   caps: GrantCaps,
   onStatus: (status: string) => void,
+  chainId: number = robinhoodTestnet.id,
 ): Promise<Grant> {
-  const chain = robinhoodTestnet;
+  // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
+  // choice behind an explicit consent step. Note: the call-policy addresses
+  // below (UNISWAP/RIALTO/MORPHO/USDG) are MAINNET deployments — the wall is
+  // real on mainnet and inert on testnet, where those contracts don't exist
+  // and swaps no-route by design.
+  const chain = chainForId(chainId);
   const publicClient = createPublicClient({ chain, transport: http() });
 
   const entryPoint = getEntryPoint("0.7");
@@ -259,8 +266,8 @@ export interface Funding {
   usdg: number;
 }
 
-export async function readFunding(smartAccount: Address): Promise<Funding> {
-  const publicClient = createPublicClient({ chain: robinhoodTestnet, transport: http() });
+export async function readFunding(smartAccount: Address, chainId: number = robinhoodTestnet.id): Promise<Funding> {
+  const publicClient = createPublicClient({ chain: chainForId(chainId), transport: http() });
   const [gasWei, usdgUnits] = await Promise.all([
     publicClient.getBalance({ address: smartAccount }).catch(() => 0n),
     publicClient

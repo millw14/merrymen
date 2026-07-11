@@ -244,7 +244,8 @@ async function onboard() {
 
   console.log(bold(`\n  ${c.arrow} 1/4 · the getaway horse`) + dim("  (how ops reach the chain)"));
   console.log(dim("  A 4337 bundler signs and submits the agent's operations."));
-  console.log(dim("  Free keys: dashboard.pimlico.io or dashboard.alchemy.com (chain 46630 testnet / 4663 mainnet)."));
+  console.log(dim("  Free keys: dashboard.pimlico.io or dashboard.alchemy.com."));
+  console.log(dim("  The chain id in the URL must match your wallet's chain: 46630 testnet · 4663 mainnet."));
   const bundler = (await p.ask(`  bundler RPC URL${keep(current.bundlerUrl)}: `)).trim();
   if (bundler) current.bundlerUrl = bundler;
 
@@ -301,8 +302,8 @@ async function onboard() {
   console.log(`
 ${bold(`  ${c.arrow} ride out`)}
   1. ${bold("merrymen start")} — opens the tavern (dashboard) at http://localhost:3100 + looses the worker
-  2. at ${bold("/grant")}, raise the permission wall with MetaMask (testnet 46630) — your keys, your caps
-  3. testnet gas from the sheriff's vault: ${dim("https://faucet.testnet.chain.robinhood.com")}
+  2. at ${bold("/grant")}, create your agent wallet — pick testnet 46630 (practice) or mainnet 4663 (real funds)
+  3. testnet gas from the sheriff's vault: ${dim("https://faucet.testnet.chain.robinhood.com")} ${dim("(mainnet: fund from your own wallet)")}
   4. prove the shot lands: ${bold("merrymen selftest")}
   5. muster check anytime: ${bold("merrymen doctor")} · tune the band: ${dim("http://localhost:3100/settings")}
 

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { LogoMark } from "@/components/Logo";
+import { explorerFor, robinhoodChain, robinhoodTestnet } from "@merrymen/core";
 import {
   clearGrant,
   createAgentWallet,
@@ -23,9 +24,15 @@ const DEFAULTS: GrantCaps = {
 };
 
 const BACKUP_KEY = "merrymen.grant.backedup.v1";
+const TESTNET = robinhoodTestnet.id; // 46630 — the sandbox
+const MAINNET = robinhoodChain.id; // 4663 — real funds
 
 function short(a: string): string {
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
+}
+
+function chainLabel(id: number): string {
+  return id === TESTNET ? `testnet · ${TESTNET}` : `mainnet · ${MAINNET}`;
 }
 
 function CopyBtn({ value, label = "copy" }: { value: string; label?: string }) {
@@ -50,6 +57,8 @@ function CopyBtn({ value, label = "copy" }: { value: string; label?: string }) {
 
 export default function GrantPage() {
   const [caps, setCaps] = useState<GrantCaps>(DEFAULTS);
+  const [chainId, setChainId] = useState<number>(TESTNET);
+  const [mainnetAck, setMainnetAck] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [grant, setGrant] = useState<Grant | null>(null);
@@ -63,10 +72,10 @@ export default function GrantPage() {
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
   }, []);
 
-  // Poll the account's on-chain balances once we're at the fund step.
-  const refreshFunding = useCallback(async (addr: `0x${string}`) => {
+  // Poll the account's on-chain balances (on the GRANT's chain) at the fund step.
+  const refreshFunding = useCallback(async (addr: `0x${string}`, forChain: number) => {
     try {
-      setFunding(await readFunding(addr));
+      setFunding(await readFunding(addr, forChain));
     } catch {
       /* transient RPC error — keep the last reading */
     }
@@ -74,19 +83,24 @@ export default function GrantPage() {
 
   useEffect(() => {
     if (!grant || !backedUp) return;
-    refreshFunding(grant.smartAccount);
-    const id = setInterval(() => refreshFunding(grant.smartAccount), 8000);
+    refreshFunding(grant.smartAccount, grant.chainId);
+    const id = setInterval(() => refreshFunding(grant.smartAccount, grant.chainId), 8000);
     return () => clearInterval(id);
   }, [grant, backedUp, refreshFunding]);
 
   const set = (k: keyof GrantCaps) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setCaps((c) => ({ ...c, [k]: Number(e.target.value) }));
 
+  const isMainnet = chainId === MAINNET;
+  // Mainnet is real money — the create button stays locked until the user
+  // explicitly owns that (keys are plaintext-local; caps are the seatbelt).
+  const createBlocked = isMainnet && !mainnetAck;
+
   async function onCreate() {
     setError(null);
     setStatus("starting…");
     try {
-      const g = await createAgentWallet(caps, setStatus);
+      const g = await createAgentWallet(caps, setStatus, chainId);
       setGrant(g);
       setStatus(null);
     } catch (e) {
@@ -102,16 +116,23 @@ export default function GrantPage() {
 
   function discard() {
     clearGrant();
+    // Also destroy the worker-side handoff — otherwise the "discarded" grant
+    // stays armed and the worker keeps trading on it (kill-switch semantics).
+    void fetch("/api/grants", { method: "DELETE" }).catch(() => {});
     localStorage.removeItem(BACKUP_KEY);
     setGrant(null);
     setBackedUp(false);
     setReveal(false);
     setAck(false);
+    setMainnetAck(false);
     setFunding(null);
   }
 
   const gasFunded = (funding?.gasWei ?? 0n) > 0n;
   const usdgFunded = (funding?.usdgUnits ?? 0n) > 0n;
+  // Once a grant exists, the truth is what's IN it — not the selector state.
+  const activeChainId = grant ? grant.chainId : chainId;
+  const grantIsTestnet = (grant?.chainId ?? TESTNET) === TESTNET;
 
   return (
     <>
@@ -120,22 +141,67 @@ export default function GrantPage() {
           <span className="arrow"><LogoMark size={20} /></span>
           <span>merrymen</span>
         </Link>
-        <span className="chain-pill">
+        <span className={`chain-pill ${activeChainId === MAINNET ? "mainnet" : ""}`}>
           <span className="dot" />
-          testnet · 46630
+          {chainLabel(activeChainId)}
         </span>
       </header>
 
       <main className="grant-shell">
-        {/* ─── phase 1: configure caps + create the wallet ─────────────── */}
+        {/* ─── phase 1: pick a chain, set caps, create the wallet ────────── */}
         {!grant && (
           <div className="grant-panel">
             <h1 className="grant-title">create your agent wallet</h1>
             <p className="grant-sub">
               No wallet to connect — merrymen mints a fresh account whose owner key lives with
-              you. Set the caps the <b>account contract itself</b> will enforce on every trade,
+              you. Pick your ground, set the caps the <b>account contract itself</b> will enforce,
               then create it and fund it.
             </p>
+
+            <div className="chain-choice">
+              <button
+                type="button"
+                className={`chain-card ${!isMainnet ? "selected" : ""}`}
+                onClick={() => setChainId(TESTNET)}
+              >
+                <span className="chain-card-title">🌲 testnet · practice</span>
+                <span className="chain-card-body">
+                  free funds from the faucet, the same pipeline end to end. Venues are absent here,
+                  so swaps simulate and no-route — the sandbox.
+                </span>
+              </button>
+              <button
+                type="button"
+                className={`chain-card danger ${isMainnet ? "selected" : ""}`}
+                onClick={() => setChainId(MAINNET)}
+              >
+                <span className="chain-card-title">⚔️ mainnet · real funds</span>
+                <span className="chain-card-body">
+                  the real Robinhood Chain — real USDG, real stock tokens, real execution. This is
+                  where the band actually trades.
+                </span>
+              </button>
+            </div>
+
+            {isMainnet && (
+              <div className="mainnet-warning">
+                <b>This is real money.</b> Your owner &amp; session keys are generated and stored in
+                plain text on <b>this machine</b> (~/.merrymen and this browser) — anyone with
+                access to it controls the funds. There is no recovery service and no undo. Your
+                caps below are the seatbelt: start small, raise them as trust grows.
+                <label className="ack-row" style={{ marginTop: 10 }}>
+                  <input
+                    type="checkbox"
+                    checked={mainnetAck}
+                    onChange={(e) => setMainnetAck(e.target.checked)}
+                  />
+                  <span>
+                    I understand — real funds, keys stored locally in plain text, and my caps are my
+                    protection.
+                  </span>
+                </label>
+              </div>
+            )}
 
             <div className="grant-fields">
               <label className="field">
@@ -176,21 +242,23 @@ export default function GrantPage() {
             </div>
 
             <div className="grant-summary mono">
-              this key may ONLY: approve USDG to Rialto router / Morpho vault (≤{" "}
-              {caps.perTradeUsdg} USDG) · call the Rialto router · deposit ≤ {caps.dailyUsdg} USDG
-              to the vault · withdraw from the vault · ≤ {caps.maxOpsPerDay} ops/day · dead in{" "}
-              {caps.expiryDays}d regardless
+              on {chainLabel(chainId)} — this key may ONLY: approve USDG to Rialto router / Morpho
+              vault (≤ {caps.perTradeUsdg} USDG) · call the Rialto router · deposit ≤{" "}
+              {caps.dailyUsdg} USDG to the vault · withdraw from the vault · ≤ {caps.maxOpsPerDay}{" "}
+              ops/day · dead in {caps.expiryDays}d regardless
             </div>
 
-            <button className="grant-btn" onClick={onCreate} disabled={status !== null}>
-              {status ?? "create wallet & raise the wall"}
+            <button className="grant-btn" onClick={onCreate} disabled={status !== null || createBlocked}>
+              {status ??
+                (createBlocked
+                  ? "acknowledge the real-funds warning above first"
+                  : `create wallet on ${isMainnet ? "mainnet" : "testnet"} & raise the wall`)}
             </button>
             {error && <div className="grant-error mono">{error}</div>}
 
             <div className="grant-note">
-              testnet demo: the owner &amp; session keys are generated in your browser so you can
-              back them up and inspect the flow — production owner keys live in a TEE and never
-              leave it.
+              the owner &amp; session keys are generated in your browser so you can back them up and
+              inspect the flow — production owner keys will live in a TEE and never leave it.
             </div>
           </div>
         )}
@@ -243,12 +311,22 @@ export default function GrantPage() {
           <div className="grant-panel">
             <h1 className="grant-title">fund your account</h1>
             <p className="grant-sub">
-              Send testnet gas and USDG to the account address below. Nothing deploys until the
-              first trade — funding is what lets that first UserOp land.
+              {grantIsTestnet ? (
+                <>
+                  Send testnet gas and USDG to the account address below. Nothing deploys until the
+                  first trade — funding is what lets that first UserOp land.
+                </>
+              ) : (
+                <>
+                  Send <b>ETH (for gas)</b> and <b>USDG (trading capital)</b> on Robinhood Chain
+                  (4663) to the account address below. <b>Real funds</b> — double-check the address
+                  and start with a small test amount first.
+                </>
+              )}
             </p>
 
             <div className="fund-addr mono">
-              <span className="rk">account address</span>
+              <span className="rk">account address · {chainLabel(grant.chainId)}</span>
               <span className="rv" style={{ wordBreak: "break-all" }}>{grant.smartAccount}</span>
               <CopyBtn value={grant.smartAccount} label="copy address" />
             </div>
@@ -269,10 +347,22 @@ export default function GrantPage() {
             </div>
 
             <div className="fund-actions">
-              <a className="grant-btn" href={FAUCET_URL} target="_blank" rel="noreferrer" style={{ textAlign: "center", textDecoration: "none" }}>
-                open the gas faucet ↗
-              </a>
-              <button className="copy-btn" onClick={() => grant && refreshFunding(grant.smartAccount)}>
+              {grantIsTestnet ? (
+                <a className="grant-btn" href={FAUCET_URL} target="_blank" rel="noreferrer" style={{ textAlign: "center", textDecoration: "none" }}>
+                  open the gas faucet ↗
+                </a>
+              ) : (
+                <a
+                  className="grant-btn"
+                  href={`${explorerFor(grant.chainId)}/address/${grant.smartAccount}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ textAlign: "center", textDecoration: "none" }}
+                >
+                  view on explorer ↗
+                </a>
+              )}
+              <button className="copy-btn" onClick={() => grant && refreshFunding(grant.smartAccount, grant.chainId)}>
                 refresh balances
               </button>
             </div>
@@ -285,10 +375,15 @@ export default function GrantPage() {
             ) : (
               <div className="grant-note">
                 waiting for the first deposit to land… this panel updates automatically.
+                {!grantIsTestnet && " (no faucet on mainnet — send from your own wallet or exchange)"}
               </div>
             )}
 
             <div className="grant-result mono" style={{ marginTop: 18 }}>
+              <div>
+                <span className="rk">chain</span>
+                <span className="rv">{chainLabel(grant.chainId)}</span>
+              </div>
               <div>
                 <span className="rk">owner</span>
                 <span className="rv">{short(grant.owner)}</span>

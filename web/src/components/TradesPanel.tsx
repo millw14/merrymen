@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { formatUnits } from "viem";
-import { CASH, STOCK_TOKENS } from "@merrymen/core";
+import { CASH, STOCK_TOKENS, explorerFor, robinhoodChain } from "@merrymen/core";
 import type { AgentStatus } from "@/app/api/grants/route";
 import type { FeedResponse, TradeRecord } from "@/app/api/feed/route";
 
@@ -90,7 +90,7 @@ export function TradesPanel() {
               <td className="mono">
                 {t.tx_hash ? (
                   <a
-                    href={`https://explorer.testnet.chain.robinhood.com/tx/${t.tx_hash}`}
+                    href={`${explorerFor(status?.grant?.chainId ?? robinhoodChain.id)}/tx/${t.tx_hash}`}
                     target="_blank"
                     rel="noreferrer"
                   >

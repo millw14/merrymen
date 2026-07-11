@@ -171,7 +171,7 @@ export default function SettingsPage() {
           <div className="grant-fields settings-grid">
             <Field
               label="bundler RPC URL"
-              hint="ERC-4337 bundler for chain 46630/4663 — get one free at dashboard.pimlico.io or dashboard.alchemy.com. Without it, the agent simulates but never signs."
+              hint="ERC-4337 bundler — get one free at dashboard.pimlico.io or dashboard.alchemy.com. The chain id in the URL MUST match your grant's chain (46630 testnet · 4663 mainnet) or every op fails. Without it, the agent simulates but never signs."
             >
               <input
                 type="url"

@@ -79,8 +79,24 @@ controls, so it isn't reachable from your network. To open it to a trusted LAN
 > - **Windows:** `[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path","User") + ";$env:APPDATA\npm", "User")` then open a new terminal
 > - **macOS/Linux:** ensure `$(npm prefix -g)/bin` is on your `PATH` (add it to `~/.zshrc` / `~/.bashrc`)
 
-Then sign the permission wall at `localhost:3100/grant` (MetaMask, testnet
-46630), grab gas from the faucet, and check the stack anytime:
+Then create your agent wallet at `localhost:3100/grant` — no wallet to connect;
+merrymen mints the keys and walks you through backup and funding. **Pick your
+ground on that page:**
+
+- **testnet · 46630** (default) — the sandbox. Free gas from the faucet, the
+  full pipeline end to end; the trading venues aren't deployed there, so swaps
+  simulate and no-route by design.
+- **mainnet · 4663** — **real funds.** Real USDG, real stock tokens, real
+  execution — this is where the band actually trades. The page makes you
+  acknowledge it first: your keys are generated and stored **in plain text on
+  your machine** (TEE custody is on the roadmap), so treat the box like a hot
+  wallet — your caps are the seatbelt, start small. No faucet: fund the account
+  address from your own wallet or exchange (ETH for gas + USDG as capital).
+  One more gotcha: your **bundler URL embeds a chain id** — it must match your
+  wallet's chain (…/v2/4663/… for mainnet) or every op fails; the worker warns
+  you if they disagree.
+
+Check the stack anytime:
 
 ```bash
 merrymen doctor     # node/keys/RPC/bundler/grant/db diagnostics

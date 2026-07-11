@@ -10,13 +10,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@/lib/home";
 import { createPublicClient, http, parseAbi } from "viem";
-import {
-  CASH,
-  MORPHO,
-  robinhoodChain,
-  robinhoodTestnet,
-  type StoredGrant,
-} from "@merrymen/core";
+import { CASH, MORPHO, chainForId, type StoredGrant } from "@merrymen/core";
 
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
@@ -54,7 +48,7 @@ export async function GET() {
     return NextResponse.json({ exists: false } satisfies AgentStatus);
   }
 
-  const chain = grant.chainId === robinhoodTestnet.id ? robinhoodTestnet : robinhoodChain;
+  const chain = chainForId(grant.chainId);
   const client = createPublicClient({ chain, transport: http() });
 
   const [ethWei, tokenReads] = await Promise.all([
