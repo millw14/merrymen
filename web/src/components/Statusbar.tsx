@@ -50,6 +50,9 @@ export function Statusbar() {
       <span>oracles: chainlink 24/5 · weekend staleness expected</span>
       <span>execution: uniswap v3 direct · morpho vault v2 · rialto pending API</span>
       <span>every trade simulated before it is signed</span>
+      <span>
+        <a href="https://merrymen.dev" target="_blank" rel="noreferrer">merrymen.dev</a>
+      </span>
     </footer>
   );
 }

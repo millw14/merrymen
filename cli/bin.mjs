@@ -193,7 +193,8 @@ async function welcome() {
     `  ${bold("the band is mustered.")} raise your first agent:\n\n` +
       `     ${bold(c.lime("merrymen onboard"))}   ${dim("gather the band — bundler, keys, strategy, basket")}\n` +
       `     ${bold(c.lime("merrymen start"))}     ${dim("open the tavern (localhost:3100) + loose the worker")}\n\n` +
-      `  ${c.gold(c.arrow)} ${dim("your keys, your caps · bounded worst case · every trade simulated first")}\n`,
+      `  ${c.gold(c.arrow)} ${dim("your keys, your caps · bounded worst case · every trade simulated first")}\n` +
+      `  ${c.gold(c.arrow)} ${dim("learn more:")} ${bold("https://merrymen.dev")}\n`,
   );
 }
 
@@ -306,6 +307,8 @@ ${bold(`  ${c.arrow} ride out`)}
   3. testnet gas from the sheriff's vault: ${dim("https://faucet.testnet.chain.robinhood.com")} ${dim("(mainnet: fund from your own wallet)")}
   4. prove the shot lands: ${bold("merrymen selftest")}
   5. muster check anytime: ${bold("merrymen doctor")} · tune the band: ${dim("http://localhost:3100/settings")}
+
+  ${dim("guide & docs:")} ${bold("https://merrymen.dev")} ${dim("·")} ${dim("https://merrymen.dev/docs")}
 
   ${c.gold("nock, draw, loose. 🏹")}
 `);

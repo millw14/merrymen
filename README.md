@@ -2,6 +2,13 @@
   <img src="web/public/merrymenlogo.png" alt="merrymen — autonomous trading agents for Robinhood Chain" width="360" />
 </p>
 
+<p align="center">
+  <a href="https://merrymen.dev"><b>Website</b></a> ·
+  <a href="https://merrymen.dev/docs">Docs</a> ·
+  <a href="https://x.com/MerrymenAI">X</a> ·
+  <a href="https://www.npmjs.com/package/merrymen">npm</a>
+</p>
+
 # merrymen
 
 Self-hosted autonomous trading agents for Robinhood Chain. Your band works

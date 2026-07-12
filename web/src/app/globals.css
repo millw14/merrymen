@@ -609,6 +609,9 @@ button { font: inherit; cursor: pointer; }
   font-family: var(--mono); font-size: 10.5px; color: var(--text-faint);
 }
 .statusbar .live { color: var(--green); }
+.statusbar > span:last-child { margin-left: auto; }
+.statusbar a { color: var(--text-faint); text-decoration: none; transition: color .15s; }
+.statusbar a:hover { color: var(--green); }
 
 /* ---------- motion ---------- */
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }

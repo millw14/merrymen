@@ -3,9 +3,13 @@
   "version": "0.5.0",
   "description": "Self-hosted autonomous trading agents for Robinhood Chain — your keys, your caps, hard on-chain permission walls, write-your-own strategies.",
   "license": "MIT",
+  "homepage": "https://merrymen.dev",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/millw14/merrymen.git"
+  },
+  "bugs": {
+    "url": "https://github.com/millw14/merrymen/issues"
   },
   "engines": {
     "node": ">=22.12"
