@@ -9,6 +9,17 @@ $ErrorActionPreference = "Stop"
 
 function Say($msg, $color = "Gray") { Write-Host "  $msg" -ForegroundColor $color }
 
+# Run npm without tripping PowerShell's execution policy. Typing `npm` in
+# PowerShell resolves to its `npm.ps1` shim, which a default "Restricted" policy
+# refuses to load (PSSecurityException / UnauthorizedAccess). Route through
+# cmd.exe's `npm.cmd` batch shim instead — the execution policy never touches it,
+# so the install works on a locked-down stock Windows without asking the user to
+# change any system setting.
+function Invoke-Npm($cmdLine) {
+  & cmd.exe /c "npm $cmdLine"
+  if ($LASTEXITCODE -ne 0) { throw "npm $cmdLine failed (exit $LASTEXITCODE)" }
+}
+
 Write-Host ""
 Say "merrymen -- stand and deliver" "Green"
 Say "setting up your rig..." "DarkGray"
@@ -45,7 +56,7 @@ if (Test-NodeOk) {
 }
 
 Say "[..] installing merrymen (global)..." "Yellow"
-npm install -g merrymen
+Invoke-Npm "install -g merrymen"
 
 # ensure npm's global bin is on the USER PATH so `merrymen` resolves in new shells
 $npmBin = Join-Path $env:APPDATA "npm"
