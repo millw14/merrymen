@@ -1,0 +1,23 @@
+{
+  "name": "merrymen-site",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Marketing + docs site for merrymen — deployed to Vercel (root directory: site).",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "15.5.20",
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "@types/react": "19.0.2",
+    "@types/react-dom": "19.0.2",
+    "typescript": "5.7.2"
+  }
+}
