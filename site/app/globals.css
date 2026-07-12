@@ -92,11 +92,8 @@ h1, h2, h3, h4, .display { font-family: var(--font-display); font-weight: 700; l
 /* ---------- nav ---------- */
 .nav {
   position: sticky; top: 0; z-index: 50;
-  backdrop-filter: blur(16px) saturate(135%);
-  -webkit-backdrop-filter: blur(16px) saturate(135%);
-  background: color-mix(in srgb, var(--bg) 40%, transparent);
-  border-bottom: 1px solid transparent;
-  transition: background .25s ease, border-color .25s ease;
+  background: transparent; border-bottom: none;
+  transition: backdrop-filter .3s ease, -webkit-backdrop-filter .3s ease;
 }
 .nav-inner { position: relative; display: flex; align-items: center; height: 62px; }
 .brand { display: flex; align-items: center; gap: 9px; font-family: var(--font-display); font-weight: 600; font-size: 17px; letter-spacing: -0.02em; }
@@ -337,10 +334,11 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
 /* magnetic wrapper — the JS drifts this toward the cursor; it eases back on leave */
 .mag { display: inline-flex; transition: transform .4s cubic-bezier(0.16, 1, 0.3, 1); }
 
-/* nav: floats clean at the top, firms up once you scroll */
+/* nav: fully transparent so the background runs straight through; once you
+   scroll, only a faint frost (no colour band, no divider) aids legibility */
 .nav.scrolled {
-  background: color-mix(in srgb, var(--bg) 72%, transparent);
-  border-bottom-color: var(--border-soft);
+  backdrop-filter: blur(9px) saturate(125%);
+  -webkit-backdrop-filter: blur(9px) saturate(125%);
 }
 
 /* nav-link hover swap — the label rides up as a copy rises to take its place */
