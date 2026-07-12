@@ -233,6 +233,21 @@ button { font: inherit; cursor: pointer; }
   margin-left: 8px; padding: 4px 10px; font-size: 10px;
 }
 .symbol-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.settings-subtle {
+  font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--text-faint); margin: 12px 0 4px;
+}
+.settings-advanced { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 8px; }
+.settings-advanced > summary {
+  cursor: pointer; list-style: none;
+  font-family: var(--mono); font-size: 12px; color: var(--text-dim);
+  padding: 8px 0; user-select: none;
+}
+.settings-advanced > summary::-webkit-details-marker { display: none; }
+.settings-advanced > summary::before { content: "▸ "; color: var(--text-faint); }
+.settings-advanced[open] > summary::before { content: "▾ "; }
+.settings-advanced > summary:hover { color: var(--text); }
+
 .symbol-chip { cursor: pointer; opacity: 0.55; border: 1px solid var(--border); background: none; }
 .symbol-chip.on { opacity: 1; border-color: var(--green); color: var(--green); }
 .cap-list { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px; }

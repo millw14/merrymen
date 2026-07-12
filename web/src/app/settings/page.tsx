@@ -191,48 +191,20 @@ export default function SettingsPage() {
 
       <main className="grant-shell">
         <div className="grant-panel settings-panel">
-          <h1 className="grant-title">connections &amp; keys</h1>
+          <h1 className="grant-title">settings</h1>
           <p className="grant-sub">
-            Everything here is stored locally in <code>.data/settings.json</code> (gitignored) and
-            picked up by the worker within one tick — no restarts. Keys are never sent back to the
-            browser. Leave a key field blank to keep what&apos;s saved; use clear to remove it.
+            The handful of things you need to get riding are up top; everything else lives under{" "}
+            <b>Advanced</b>. Stored locally in <code>~/.merrymen/settings.json</code> and picked up
+            by the worker within one tick — no restarts. Keys never leave your machine; leave a key
+            blank to keep what&apos;s saved.
           </p>
 
-          <div className="settings-section mono">execution</div>
-          <div className="grant-fields settings-grid">
-            <Field
-              label="bundler RPC URL"
-              hint="ERC-4337 bundler — get one free at dashboard.pimlico.io or dashboard.alchemy.com. The chain id in the URL MUST match your grant's chain (46630 testnet · 4663 mainnet) or every op fails. Without it, the agent simulates but never signs."
-            >
-              <input
-                type="url"
-                placeholder="https://api.pimlico.io/v2/46630/rpc?apikey=…"
-                value={v("bundlerUrl")}
-                onChange={set("bundlerUrl")}
-              />
-            </Field>
-            <Field
-              label="mainnet RPC override"
-              hint="Optional. The public RPC rate-limits at 1-minute ticks; a free Alchemy/QuickNode endpoint is smoother."
-            >
-              <input type="url" placeholder="default: rpc.mainnet.chain.robinhood.com" value={v("rpcMainnet")} onChange={set("rpcMainnet")} />
-            </Field>
-            <Field label="testnet RPC override" hint="Optional.">
-              <input type="url" placeholder="default: rpc.testnet.chain.robinhood.com" value={v("rpcTestnet")} onChange={set("rpcTestnet")} />
-            </Field>
-            <Field
-              label="breaker contract"
-              hint="Deployed BreakerRegistry address. Once set, a tripped breaker halts all trading at the wall."
-            >
-              <input type="text" placeholder="0x…" value={v("breakerAddress")} onChange={set("breakerAddress")} />
-            </Field>
-          </div>
-
-          <div className="settings-section mono">api keys</div>
+          {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
+          <div className="settings-section mono">essentials</div>
           <div className="grant-fields settings-grid">
             <Field
               label="Anthropic API key"
-              hint="Powers the LLM strategist. Create one at console.anthropic.com → API keys. Blank keeps the saved key."
+              hint="Powers plain-English chat, the llm-strategist, and vision. Create one at console.anthropic.com. Blank keeps the saved key."
             >
               <input
                 type="password"
@@ -247,26 +219,56 @@ export default function SettingsPage() {
               )}
             </Field>
             <Field
-              label="Rialto integrator key"
-              hint="From Rialto's wallet-signed onboarding (docs.rialto.xyz). Enables real stock-token routing through their propAMMs."
+              label="bundler RPC URL"
+              hint="Required to actually sign trades — free at dashboard.pimlico.io or dashboard.alchemy.com. The chain id in the URL must match your wallet's chain (46630 testnet · 4663 mainnet). Without it, the agent simulates but never signs."
             >
               <input
-                type="password"
-                placeholder={secretPlaceholder(view.rialtoApiKey)}
-                value={draft.rialtoApiKey ?? ""}
-                onChange={set("rialtoApiKey")}
+                type="url"
+                placeholder="https://api.pimlico.io/v2/46630/rpc?apikey=…"
+                value={v("bundlerUrl")}
+                onChange={set("bundlerUrl")}
               />
-              {view.rialtoApiKey.set && (
-                <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, rialtoApiKey: "" }))}>
-                  clear
-                </button>
-              )}
             </Field>
-            <Field label="Rialto key header" hint={`Header name their API expects (default ${d.rialtoApiKeyHeader}).`}>
-              <input type="text" placeholder={d.rialtoApiKeyHeader} value={v("rialtoApiKeyHeader")} onChange={set("rialtoApiKeyHeader")} />
+            <Field
+              label="strategy"
+              hint="steady-basket = DCA + vault sweep · weekend-gap = trade the close→open gap · llm-strategist = Claude proposes, policy disposes. Your own bots from strategies/ appear below the line."
+            >
+              <select value={v("strategy") || d.strategy} onChange={set("strategy")}>
+                {view.strategies.builtin.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+                {view.strategies.custom.length > 0 && <option disabled>── your strategies ──</option>}
+                {view.strategies.custom.map((s) => (
+                  <option key={s} value={s}>
+                    {s} (custom)
+                  </option>
+                ))}
+              </select>
             </Field>
           </div>
 
+          <div className="settings-subtle mono">basket · equal-weighted</div>
+          <div className="symbol-grid">
+            {view.knownSymbols.map((sym) => (
+              <button
+                key={sym}
+                type="button"
+                className={`cap symbol-chip${activeSymbols.includes(sym) ? " on" : ""}`}
+                onClick={() => toggleSymbol(sym)}
+              >
+                {sym}
+              </button>
+            ))}
+          </div>
+          <div className="grant-note">
+            {activeSymbols.length === 0
+              ? "select at least one symbol (empty falls back to the default basket)"
+              : `trading ${activeSymbols.join(" · ")}`}
+          </div>
+
+          {/* ── TELEGRAM (essentials: token + enable) ──────────────────── */}
           <div id="telegram" className="settings-section mono">telegram · chat with your merryman</div>
           <p className="grant-note" style={{ marginTop: 0 }}>
             Create a bot with <b>@BotFather</b> in Telegram (send <code>/newbot</code>), paste its
@@ -307,6 +309,14 @@ export default function SettingsPage() {
               </span>
               <span className="field-hint">Master switch for the Telegram poller.</span>
             </label>
+          </div>
+
+          {/* ── ADVANCED (collapsed by default) ────────────────────────── */}
+          <details className="settings-advanced">
+            <summary>⚙ Advanced — Telegram controls · remote PC control · RPC / fees / cadence / LLM</summary>
+
+            <div className="settings-section mono">telegram · controls &amp; transfers</div>
+            <div className="grant-fields settings-grid">
             <label className="field settings-field">
               <span className="field-label">allow control commands</span>
               <span className="field-input">
@@ -512,29 +522,47 @@ export default function SettingsPage() {
             <span className="field-hint">Names /open may launch. Full https:// URLs open without an allowlist.</span>
           </div>
 
-          <div className="settings-section mono">strategy &amp; trading</div>
+          <div className="settings-section mono">execution &amp; keys</div>
           <div className="grant-fields settings-grid">
             <Field
-              label="strategy"
-              hint="steady-basket = DCA + vault sweep · weekend-gap = trade the close→open gap · llm-strategist = Claude proposes, policy disposes. Your own bots from strategies/ appear below the line — scaffold one with `npx merrymen strategy new my-bot`."
+              label="mainnet RPC override"
+              hint="Optional. The public RPC rate-limits at 1-minute ticks; a free Alchemy/QuickNode endpoint is smoother."
             >
-              <select value={v("strategy") || d.strategy} onChange={set("strategy")}>
-                {view.strategies.builtin.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-                {view.strategies.custom.length > 0 && (
-                  <option disabled>── your strategies ──</option>
-                )}
-                {view.strategies.custom.map((s) => (
-                  <option key={s} value={s}>
-                    {s} (custom)
-                  </option>
-                ))}
-              </select>
+              <input type="url" placeholder="default: rpc.mainnet.chain.robinhood.com" value={v("rpcMainnet")} onChange={set("rpcMainnet")} />
             </Field>
-            <Field label="swap venue" hint="uniswap = permissionless v3 (QQQ has liquidity today) · rialto = meta-router (needs the key above for full execution).">
+            <Field label="testnet RPC override" hint="Optional.">
+              <input type="url" placeholder="default: rpc.testnet.chain.robinhood.com" value={v("rpcTestnet")} onChange={set("rpcTestnet")} />
+            </Field>
+            <Field
+              label="breaker contract"
+              hint="Deployed BreakerRegistry address. Once set, a tripped breaker halts all trading at the wall."
+            >
+              <input type="text" placeholder="0x…" value={v("breakerAddress")} onChange={set("breakerAddress")} />
+            </Field>
+            <Field
+              label="Rialto integrator key"
+              hint="From Rialto's wallet-signed onboarding (docs.rialto.xyz). Enables real stock-token routing through their propAMMs."
+            >
+              <input
+                type="password"
+                placeholder={secretPlaceholder(view.rialtoApiKey)}
+                value={draft.rialtoApiKey ?? ""}
+                onChange={set("rialtoApiKey")}
+              />
+              {view.rialtoApiKey.set && (
+                <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, rialtoApiKey: "" }))}>
+                  clear
+                </button>
+              )}
+            </Field>
+            <Field label="Rialto key header" hint={`Header name their API expects (default ${d.rialtoApiKeyHeader}).`}>
+              <input type="text" placeholder={d.rialtoApiKeyHeader} value={v("rialtoApiKeyHeader")} onChange={set("rialtoApiKeyHeader")} />
+            </Field>
+          </div>
+
+          <div className="settings-section mono">trading knobs</div>
+          <div className="grant-fields settings-grid">
+            <Field label="swap venue" hint="uniswap = permissionless v3 (QQQ has liquidity today) · rialto = meta-router (needs the Rialto key above for full execution).">
               <select value={v("swapVenue") || d.swapVenue} onChange={set("swapVenue")}>
                 <option value="uniswap">uniswap</option>
                 <option value="rialto">rialto</option>
@@ -577,24 +605,7 @@ export default function SettingsPage() {
             </Field>
           </div>
 
-          <div className="settings-section mono">basket universe · equal-weighted</div>
-          <div className="symbol-grid">
-            {view.knownSymbols.map((sym) => (
-              <button
-                key={sym}
-                type="button"
-                className={`cap symbol-chip${activeSymbols.includes(sym) ? " on" : ""}`}
-                onClick={() => toggleSymbol(sym)}
-              >
-                {sym}
-              </button>
-            ))}
-          </div>
-          <div className="grant-note">
-            {activeSymbols.length === 0
-              ? "select at least one symbol (empty falls back to the default basket)"
-              : `trading ${activeSymbols.join(" · ")}`}
-          </div>
+          </details>
 
           <button className="grant-btn" onClick={() => void save()} disabled={status === "saving…"}>
             {status ?? "save settings"}
@@ -610,7 +621,7 @@ export default function SettingsPage() {
           <div className="grant-note">
             precedence: these settings → environment variables → defaults. the worker re-reads this
             file every tick; connection changes re-arm the executor automatically. keys live only in
-            .data/settings.json on this machine.
+            ~/.merrymen/settings.json on this machine.
           </div>
         </div>
       </main>
