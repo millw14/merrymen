@@ -33,8 +33,9 @@ export interface SettingsView {
   anthropicApiKey: SecretView;
   rialtoApiKey: SecretView;
   telegramBotToken: SecretView;
+  telegramTranscribeKey: SecretView;
   // everything else, verbatim (undefined = using env/default)
-  values: Omit<MerrymenSettings, "anthropicApiKey" | "rialtoApiKey" | "telegramBotToken">;
+  values: Omit<MerrymenSettings, "anthropicApiKey" | "rialtoApiKey" | "telegramBotToken" | "telegramTranscribeKey">;
   defaults: typeof SETTINGS_DEFAULTS;
   knownSymbols: string[];
   strategies: { builtin: string[]; custom: string[] };
@@ -72,11 +73,12 @@ function mask(value: string | undefined): SecretView {
 
 export async function GET() {
   const stored = await readStored();
-  const { anthropicApiKey, rialtoApiKey, telegramBotToken, ...values } = stored;
+  const { anthropicApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, ...values } = stored;
   const view: SettingsView = {
     anthropicApiKey: mask(anthropicApiKey),
     rialtoApiKey: mask(rialtoApiKey),
     telegramBotToken: mask(telegramBotToken),
+    telegramTranscribeKey: mask(telegramTranscribeKey),
     values,
     defaults: SETTINGS_DEFAULTS,
     knownSymbols: STOCK_TOKENS.map((t) => t.symbol),
@@ -105,7 +107,14 @@ const BOOL_FIELDS = [
   "telegramControlEnabled",
   "telegramTransferEnabled",
   "telegramNotifyEnabled",
+  "telegramPcControlEnabled",
 ] as const;
+/** Telegram PC string-array allowlists: (field, per-entry maxLen). */
+const STR_ARRAY_FIELDS: Record<string, number> = {
+  telegramCapabilities: 24,
+  telegramShellAllowlist: 200,
+  telegramAppAllowlist: 128,
+};
 
 export async function PUT(req: Request) {
   let body: Partial<Record<keyof MerrymenSettings, unknown>>;
@@ -203,6 +212,19 @@ export async function PUT(req: Request) {
       setOrClear("llmModel", v.trim());
     else errors.push("llmModel: must be a model id like claude-opus-4-8");
   }
+  // PC files root — an absolute path (or blank to disable file ops).
+  if ("telegramFilesRoot" in body) {
+    const v = body.telegramFilesRoot;
+    if (v === "" || v === null || v === undefined) setOrClear("telegramFilesRoot", undefined);
+    else if (typeof v === "string" && v.trim().length <= 400) setOrClear("telegramFilesRoot", v.trim());
+    else errors.push("telegramFilesRoot: must be a path");
+  }
+  if ("telegramTranscribeBase" in body) {
+    const v = body.telegramTranscribeBase;
+    if (v === "" || v === null || v === undefined) setOrClear("telegramTranscribeBase", undefined);
+    else if (typeof v === "string" && /^https?:\/\/.+/.test(v.trim())) setOrClear("telegramTranscribeBase", v.trim());
+    else errors.push("telegramTranscribeBase: must be an http(s) URL");
+  }
 
   // ── booleans (telegram toggles) ─────────────────────────────────────────
   for (const key of BOOL_FIELDS) {
@@ -229,6 +251,23 @@ export async function PUT(req: Request) {
       }
     } else {
       errors.push("telegramAllowlist: must be an array of chat IDs");
+    }
+  }
+
+  // ── telegram PC string allowlists (capabilities / shell / app) ──────────
+  for (const [key, maxLen] of Object.entries(STR_ARRAY_FIELDS)) {
+    const k = key as keyof MerrymenSettings;
+    if (!(k in body)) continue;
+    const v = body[k];
+    if (v === null || v === undefined) {
+      setOrClear(k, undefined);
+    } else if (Array.isArray(v)) {
+      const items = v.map((x) => (typeof x === "string" ? x.trim() : "")).filter((s) => s !== "");
+      if (items.some((s) => s.length > maxLen)) errors.push(`${key}: each entry must be ≤ ${maxLen} chars`);
+      else if (items.length > 50) errors.push(`${key}: at most 50 entries`);
+      else setOrClear(k, items as never);
+    } else {
+      errors.push(`${key}: must be an array of strings`);
     }
   }
 

@@ -12,13 +12,19 @@
  */
 
 import { esc } from "./api";
-import { CONTROL_KINDS, type Command } from "./interpreter";
+import { CONTROL_KINDS, PC_CAP_OF, PC_KINDS, type Command } from "./interpreter";
+import { resolveInRoot, shellAllowed, type PcActions } from "./pc";
 
-export interface PendingTransfer {
-  to: `0x${string}`;
-  usdg: number;
-  expiresAt: number; // unix seconds
-}
+/** A vetted action awaiting the user's explicit /confirm. Widened from the
+ * original transfer-only store so a pending PC action and a pending transfer
+ * share one per-chat slot (the latest ask wins). */
+export type PendingAction =
+  | { kind: "transfer"; to: `0x${string}`; usdg: number; expiresAt: number }
+  | { kind: "shell"; cmd: string; expiresAt: number }
+  | { kind: "getfile"; path: string; expiresAt: number }
+  | { kind: "type"; text: string; expiresAt: number }
+  | { kind: "hotkey"; combo: string; expiresAt: number }
+  | { kind: "power"; action: "sleep" | "shutdown"; expiresAt: number };
 
 export interface CommandDeps {
   controlEnabled: boolean;
@@ -49,8 +55,8 @@ export interface CommandDeps {
   /** Build a bounded transfer intent and route it through processIntent → policy wall. */
   transfer(to: `0x${string}`, usdg: number): Promise<string>;
   /** Pending-confirm store, bound to this chat by the service. */
-  getPending(): PendingTransfer | null;
-  setPending(p: PendingTransfer): void;
+  getPending(): PendingAction | null;
+  setPending(p: PendingAction): void;
   clearPending(): void;
   /** Price alerts, persisted by the service. */
   addAlert(symbol: string, op: ">" | "<", price: number): string;
@@ -61,17 +67,49 @@ export interface CommandDeps {
   remember(fact: string): boolean;
   soulInfo(): string;
   forgetOwner(): void;
+  // ── PC control (all gated: master switch + per-capability) ───────────────
+  pcControlEnabled: boolean;
+  capabilities: Set<string>;
+  filesRoot?: string;
+  shellAllowlist: string[];
+  pc: PcActions;
+  pcStatus(): string;
+  // reminders (ungated pings) & watchers (gated under "watchers")
+  addReminder(when: string, text: string): string;
+  listReminders(): string;
+  removeReminder(id: number): string;
+  addWatcher(spec: string): string;
+  listWatchers(): string;
+  removeWatcher(id: number): string;
   help(): string;
   now?: () => number;
 }
 
 const CONFIRM_TTL_SEC = 90;
 
+/** Refuse a PC command when the master switch is off or its capability isn't
+ * enabled. Returns the refusal string, or null when the command may proceed.
+ * "pc" (status) is always allowed. Reminders (not in PC_CAP_OF) aren't gated. */
+function pcRefusal(cmd: Command, deps: CommandDeps): string | null {
+  if (!PC_KINDS.has(cmd.kind) || cmd.kind === "pc") return null;
+  if (!deps.pcControlEnabled) {
+    return "🔒 PC control is off. Turn on “remote control” for Telegram in the dashboard first.";
+  }
+  const group = PC_CAP_OF[cmd.kind];
+  if (group && !deps.capabilities.has(group)) {
+    return `🔒 the “${group}” capability is off — enable it in the dashboard to use that.`;
+  }
+  return null;
+}
+
 export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<string> {
-  // Gate state-changing commands behind the control switch.
+  // Gate trading state-changing commands behind the trading-control switch.
   if (CONTROL_KINDS.has(cmd.kind) && !deps.controlEnabled) {
     return "🔒 control commands are turned off. Turn on “control” for Telegram in the dashboard to pause, switch strategy, trade, or kill.";
   }
+  // Gate PC commands behind the master switch + per-capability allowlist.
+  const refusal = pcRefusal(cmd, deps);
+  if (refusal) return refusal;
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
 
   switch (cmd.kind) {
@@ -142,7 +180,7 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
         usdg = deps.maxActionUsdg;
         note = ` (trimmed to your ${deps.maxActionUsdg} USDG chat ceiling)`;
       }
-      deps.setPending({ to: cmd.to, usdg, expiresAt: now() + CONFIRM_TTL_SEC });
+      deps.setPending({ kind: "transfer", to: cmd.to, usdg, expiresAt: now() + CONFIRM_TTL_SEC });
       return [
         `⚠️ <b>confirm transfer</b>${note}`,
         `send <b>${usdg} USDG</b> to`,
@@ -156,15 +194,28 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       if (!p) return "nothing pending to confirm.";
       if (now() > p.expiresAt) {
         deps.clearPending();
-        return "⌛ that confirmation expired — start the transfer again.";
+        return "⌛ that confirmation expired — ask again.";
       }
       deps.clearPending();
-      return await deps.transfer(p.to, p.usdg);
+      switch (p.kind) {
+        case "transfer":
+          return await deps.transfer(p.to, p.usdg);
+        case "shell":
+          return await deps.pc.runShell(p.cmd);
+        case "getfile":
+          return await deps.pc.getFile(p.path);
+        case "type":
+          return await deps.pc.typeText(p.text);
+        case "hotkey":
+          return await deps.pc.hotkey(p.combo);
+        case "power":
+          return await deps.pc.power(p.action);
+      }
     }
     case "cancel": {
       const had = deps.getPending() !== null;
       deps.clearPending();
-      return had ? "🚫 cancelled — nothing moved." : "nothing pending to cancel.";
+      return had ? "🚫 cancelled — nothing done." : "nothing pending to cancel.";
     }
     case "alert":
       return deps.addAlert(cmd.symbol, cmd.op, cmd.price);
@@ -187,6 +238,70 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     case "forget":
       deps.forgetOwner();
       return "🍂 done — I've let go of what I knew about you. We start fresh from here.";
+    // ── PC control: direct (already capability-gated above) ──────────────────
+    case "screenshot":
+      return await deps.pc.screenshot();
+    case "look":
+      return await deps.pc.look(cmd.question);
+    case "open":
+      return await deps.pc.open(cmd.target);
+    case "sysinfo":
+      return await deps.pc.sysinfo();
+    case "volume":
+      return await deps.pc.volume(cmd.spec);
+    case "media":
+      return await deps.pc.media(cmd.key);
+    case "notify":
+      return await deps.pc.notify(cmd.text);
+    case "lock":
+      return await deps.pc.lock();
+    case "ls":
+      return await deps.pc.ls(cmd.path);
+    case "clipget":
+      return await deps.pc.clipGet();
+    case "clipset":
+      return await deps.pc.clipSet(cmd.text);
+    case "pc":
+      return deps.pcStatus();
+    // ── PC control: dangerous → park for /confirm (vetted at park time) ──────
+    case "shell": {
+      if (!shellAllowed(cmd.cmd, deps.shellAllowlist)) {
+        return `🔒 “${esc(cmd.cmd)}” isn't in your shell allowlist (or it chains/redirects). Add exact commands in the dashboard.`;
+      }
+      deps.setPending({ kind: "shell", cmd: cmd.cmd, expiresAt: now() + CONFIRM_TTL_SEC });
+      return `⚠️ <b>confirm run</b>\n<code>${esc(cmd.cmd)}</code>\n\n/confirm to run (${CONFIRM_TTL_SEC}s) or /cancel.`;
+    }
+    case "getfile": {
+      const res = resolveInRoot(deps.filesRoot, cmd.path);
+      if (!res.ok) return `🔒 ${esc(res.reason)}`;
+      deps.setPending({ kind: "getfile", path: cmd.path, expiresAt: now() + CONFIRM_TTL_SEC });
+      return `⚠️ <b>confirm send file</b>\n<code>${esc(cmd.path)}</code> will be sent to this chat.\n\n/confirm (${CONFIRM_TTL_SEC}s) or /cancel.`;
+    }
+    case "type": {
+      deps.setPending({ kind: "type", text: cmd.text, expiresAt: now() + CONFIRM_TTL_SEC });
+      return `⚠️ <b>confirm type</b> into your active window:\n<code>${esc(cmd.text)}</code>\n\n/confirm (${CONFIRM_TTL_SEC}s) or /cancel.`;
+    }
+    case "hotkey": {
+      deps.setPending({ kind: "hotkey", combo: cmd.combo, expiresAt: now() + CONFIRM_TTL_SEC });
+      return `⚠️ <b>confirm hotkey</b> <code>${esc(cmd.combo)}</code>\n\n/confirm (${CONFIRM_TTL_SEC}s) or /cancel.`;
+    }
+    case "power": {
+      deps.setPending({ kind: "power", action: cmd.action, expiresAt: now() + CONFIRM_TTL_SEC });
+      return `⚠️ <b>confirm ${cmd.action}</b> — this will ${cmd.action} your machine.\n\n/confirm (${CONFIRM_TTL_SEC}s) or /cancel.`;
+    }
+    // ── reminders (ungated) & watchers (gated above under "watchers") ────────
+    case "remind":
+      return deps.addReminder(cmd.when, cmd.text);
+    case "reminders":
+      return deps.listReminders();
+    case "unremind":
+      return deps.removeReminder(cmd.id);
+    case "watch":
+      return deps.addWatcher(cmd.spec);
+    case "watchers":
+      return deps.listWatchers();
+    case "unwatch":
+      return deps.removeWatcher(cmd.id);
     case "kill": {
       const r = deps.kill();
       return r.ok

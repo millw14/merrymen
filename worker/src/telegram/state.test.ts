@@ -13,6 +13,9 @@ const base: TelegramState = {
   firedAlerts: {},
   lastDigestDate: "",
   priceAlerts: [],
+  reminders: [],
+  watchers: [],
+  nextId: 1,
 };
 
 describe("link code — deterministic, rotating, unambiguous", () => {

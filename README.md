@@ -178,6 +178,41 @@ and bound any chat-triggered action with the per-action USDG ceiling — both in
 returns to the browser. Polling is off by default; existing installs are
 untouched until you opt in.
 
+### Remote control — your merryman runs your PC (OpenClaw-style)
+
+With an Anthropic key and the **remote control** section enabled in `/settings`,
+your merryman can act on the machine it runs on — from Telegram, in plain English
+or slash commands:
+
+| capability | what it does |
+|---|---|
+| 📸 screen | `/shot` sends a screenshot; **👁️ vision** answers "what am I looking at?" / "read this error" from the screen |
+| 🚀 apps & web | `/open spotify`, `/open github.com` — apps from your allowlist, any URL |
+| ⚙️ system | `/sys` info, volume, media keys, desktop `/notify`, `/lock`, sleep/shutdown |
+| 📂 files · 📋 clipboard | `/ls`, `/get` inside one folder you pick; read/set the clipboard |
+| 🖥️ shell | `/run <cmd>` — only exact commands you allowlisted |
+| ⌨️ keyboard | `/type <text>`, `/key ctrl+s` into the active window |
+| 🎙️ voice | send a voice note → transcribed → run as a command |
+| 👀 watchers | `/remind 20m …`, `/watch cpu>80`, `/watch file build.log`, `/watch proc chrome` |
+
+**The safety model is the whole point.** It's a hot wallet for your desktop, so:
+
+- **Off by default**, then **one capability at a time** — nothing runs unless you
+  turned that group on.
+- **Allowlists for the sharp edges**: shell runs *only* your exact pre-approved
+  commands (chaining/redirects always refused); files are confined to one root
+  (no `..` escape); apps to a name list.
+- **Confirm gate**: shell, keyboard, file-send, and power actions never fire
+  until you reply `/confirm` to the exact action echoed back.
+- **Everything is local** and logged to the dashboard feed; a chat message can
+  only ever produce one command from a closed set — it can't invent a capability
+  or smuggle a raw command past the allowlist. `/pc` shows what's enabled;
+  turning the master switch off kills all of it instantly.
+
+Windows is fully supported; macOS/Linux use the standard tools (`screencapture`,
+`open`, `pbcopy`, …) and gracefully say so where one isn't present. Voice needs
+an OpenAI-compatible transcription key (set it in the dashboard).
+
 ### Your merryman has a soul
 
 Every merryman is an individual with a name **you** give it — and it grows with

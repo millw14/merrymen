@@ -6,6 +6,7 @@ import { FeedPanel } from "@/components/FeedPanel";
 import { KillSwitch } from "@/components/KillSwitch";
 import { MarketTable } from "@/components/MarketTable";
 import { Statusbar } from "@/components/Statusbar";
+import { TelegramCta } from "@/components/TelegramCta";
 import { TradesPanel } from "@/components/TradesPanel";
 
 export default function Dashboard() {
@@ -28,6 +29,7 @@ export default function Dashboard() {
         <Link href="/settings" className="mono" style={{ color: "var(--text-dim)", fontSize: 12 }}>
           settings
         </Link>
+        <TelegramCta variant="pill" />
         <Link href="/grant" className="connect-btn" style={{ textDecoration: "none" }}>
           deploy an agent
         </Link>
@@ -45,6 +47,8 @@ export default function Dashboard() {
         </section>
 
         <aside className="rail">
+          <TelegramCta />
+
           <div className="panel">
             <KillSwitch />
           </div>

@@ -25,6 +25,24 @@ export interface PriceAlert {
   lastPrice?: number;
 }
 
+export interface Reminder {
+  id: number;
+  fireAt: number; // unix seconds
+  text: string;
+}
+
+export interface Watcher {
+  id: number;
+  kind: "cpu" | "file" | "proc";
+  /** For cpu: threshold percent (in `threshold`); for file: a path; for proc: a name. */
+  arg: string;
+  threshold?: number;
+  /** Last observed boolean condition (cpu-above / proc-running) — edge-triggered. */
+  lastState?: boolean;
+  /** Last observed numeric value (file mtime ms) — change-triggered. */
+  lastValue?: number;
+}
+
 export interface TelegramState {
   offset: number;
   linkCode: string;
@@ -42,6 +60,10 @@ export interface TelegramState {
   /** YYYY-MM-DD of the last daily digest sent. */
   lastDigestDate: string;
   priceAlerts: PriceAlert[];
+  reminders: Reminder[];
+  watchers: Watcher[];
+  /** Monotonic id source for reminders/watchers. */
+  nextId: number;
 }
 
 const DEFAULT: TelegramState = {
@@ -55,6 +77,9 @@ const DEFAULT: TelegramState = {
   firedAlerts: {},
   lastDigestDate: "",
   priceAlerts: [],
+  reminders: [],
+  watchers: [],
+  nextId: 1,
 };
 
 export function loadTelegramState(): TelegramState {
@@ -81,6 +106,15 @@ export function loadTelegramState(): TelegramState {
               typeof a.price === "number",
           )
         : [],
+      reminders: Array.isArray(s.reminders)
+        ? (s.reminders as Reminder[]).filter((r) => r && typeof r.id === "number" && typeof r.fireAt === "number" && typeof r.text === "string")
+        : [],
+      watchers: Array.isArray(s.watchers)
+        ? (s.watchers as Watcher[]).filter(
+            (w) => w && typeof w.id === "number" && (w.kind === "cpu" || w.kind === "file" || w.kind === "proc") && typeof w.arg === "string",
+          )
+        : [],
+      nextId: typeof s.nextId === "number" && s.nextId > 0 ? s.nextId : 1,
     };
   } catch {
     return { ...DEFAULT };

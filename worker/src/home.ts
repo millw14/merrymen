@@ -26,6 +26,8 @@ export const homePaths = {
   telegram: () => path.join(merrymenHome(), "telegram.json"),
   /** Pause marker — present = trading halted (toggled from Telegram/dashboard). */
   paused: () => path.join(merrymenHome(), "paused"),
+  /** Scratch dir for transient PC-control artifacts (screenshots, voice notes). */
+  scratch: () => path.join(merrymenHome(), "scratch"),
 };
 
 let ensured = false;
@@ -36,6 +38,7 @@ export function ensureHome(): string {
   if (ensured) return home;
   mkdirSync(home, { recursive: true });
   mkdirSync(homePaths.strategies(), { recursive: true });
+  mkdirSync(homePaths.scratch(), { recursive: true });
 
   // Legacy checkout layouts: worker ran with cwd=worker/ (../.data) or cwd=root (.data).
   for (const legacyDir of [path.join(process.cwd(), "..", ".data"), path.join(process.cwd(), ".data")]) {

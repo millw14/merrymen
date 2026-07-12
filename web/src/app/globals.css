@@ -235,6 +235,11 @@ button { font: inherit; cursor: pointer; }
 .symbol-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .symbol-chip { cursor: pointer; opacity: 0.55; border: 1px solid var(--border); background: none; }
 .symbol-chip.on { opacity: 1; border-color: var(--green); color: var(--green); }
+.cap-list { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px; }
+.cap-list .symbol-chip { display: inline-flex; align-items: center; gap: 6px; }
+.cap-list code { font-family: var(--mono); font-size: 11px; }
+.chip-x { background: none; border: none; color: inherit; cursor: pointer; font-size: 11px; opacity: 0.7; padding: 0; }
+.chip-x:hover { opacity: 1; }
 .settings-panel select {
   width: 100%; background: var(--bg-2); color: var(--text);
   border: none; outline: none; font-family: var(--mono); font-size: 13px;
@@ -460,6 +465,32 @@ button { font: inherit; cursor: pointer; }
 .grant-result .rv { color: var(--text); font-weight: 600; }
 .grant-actions { display: flex; gap: 10px; align-items: stretch; }
 .grant-actions .grant-btn { flex: 1; }
+
+/* ---------- telegram CTA (dashboard) ---------- */
+.tg-pill {
+  font-family: var(--mono); font-size: 12px; font-weight: 600;
+  color: #29a9eb; text-decoration: none; white-space: nowrap;
+  border: 1px solid color-mix(in srgb, #29a9eb 40%, transparent);
+  border-radius: 999px; padding: 5px 12px;
+  background: color-mix(in srgb, #29a9eb 8%, transparent);
+}
+.tg-pill:hover { background: color-mix(in srgb, #29a9eb 16%, transparent); }
+
+.tg-card { display: flex; flex-direction: column; gap: 8px; }
+.tg-card-title { font-size: 13px; font-weight: 700; letter-spacing: 0.3px; }
+.tg-card-sub { font-size: 11.5px; line-height: 1.55; color: var(--text-dim); }
+.tg-card-sub code {
+  font-family: var(--mono); font-size: 11px;
+  background: var(--bg-3); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 5px;
+}
+.tg-cta-btn {
+  align-self: flex-start; text-decoration: none;
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  color: #fff; background: #29a9eb;
+  border-radius: 8px; padding: 9px 14px;
+}
+.tg-cta-btn:hover { background: #1c93d0; }
 
 /* ---------- create-wallet: chain choice ---------- */
 .chain-choice { display: flex; gap: 10px; }

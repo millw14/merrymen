@@ -73,11 +73,48 @@ export interface MerrymenSettings {
   telegramNotifyEnabled?: boolean;
   /** Local hour (0-23) after which the daily campfire report is sent. */
   telegramDigestHour?: number;
+
+  // ── remote control · your PC (OpenClaw-style — all OFF by default) ──────
+  /** MASTER switch for PC control. Off = no screenshot/app/file/shell command runs. */
+  telegramPcControlEnabled?: boolean;
+  /** Enabled capability groups: screen, vision, apps, system, files, clipboard,
+   * shell, keyboard, voice, watchers. A command whose group isn't listed is refused. */
+  telegramCapabilities?: string[];
+  /** The ONE directory file operations (ls/getfile) are confined to. Empty = files off. */
+  telegramFilesRoot?: string;
+  /** Exact command prefixes /run may execute (e.g. "git status", "npm test"). Empty = none. */
+  telegramShellAllowlist?: string[];
+  /** App names /open may launch (e.g. "spotify", "code"). URLs need no allowlist. */
+  telegramAppAllowlist?: string[];
+  /** OpenAI-compatible transcription key for voice notes (secret). Blank = voice off. */
+  telegramTranscribeKey?: string;
+  /** Transcription API base (OpenAI-compatible /audio/transcriptions). Default OpenAI. */
+  telegramTranscribeBase?: string;
 }
 
 /** Keys whose values must never be echoed back to a browser. */
-export const SECRET_SETTING_KEYS = ["anthropicApiKey", "rialtoApiKey", "telegramBotToken"] as const;
+export const SECRET_SETTING_KEYS = [
+  "anthropicApiKey",
+  "rialtoApiKey",
+  "telegramBotToken",
+  "telegramTranscribeKey",
+] as const;
 export type SecretSettingKey = (typeof SECRET_SETTING_KEYS)[number];
+
+/** The PC-control capability groups a user can enable, in dashboard order. */
+export const PC_CAPABILITIES = [
+  "screen",
+  "vision",
+  "apps",
+  "system",
+  "files",
+  "clipboard",
+  "shell",
+  "keyboard",
+  "voice",
+  "watchers",
+] as const;
+export type PcCapability = (typeof PC_CAPABILITIES)[number];
 
 export const SETTINGS_DEFAULTS = {
   rialtoApiKeyHeader: "x-api-key",
@@ -101,4 +138,10 @@ export const SETTINGS_DEFAULTS = {
   telegramTransferDailyUsdg: 100,
   telegramNotifyEnabled: true,
   telegramDigestHour: 18,
+  telegramPcControlEnabled: false,
+  telegramCapabilities: [] as string[],
+  telegramFilesRoot: "",
+  telegramShellAllowlist: [] as string[],
+  telegramAppAllowlist: [] as string[],
+  telegramTranscribeBase: "https://api.openai.com/v1",
 };

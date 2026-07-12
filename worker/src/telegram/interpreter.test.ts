@@ -58,7 +58,15 @@ describe("coerceLlmCommand — the model can only pick from the enum", () => {
 
 function deps(over: Partial<CommandDeps> = {}): CommandDeps & { calls: string[] } {
   const calls: string[] = [];
-  let pending: import("./executor").PendingTransfer | null = null;
+  let pending: import("./executor").PendingAction | null = null;
+  // A fake PC layer that RECORDS every call — the capability-gate tests assert
+  // these are never invoked when a capability is off.
+  const pcCall =
+    (name: string) =>
+    async (...args: unknown[]) => {
+      calls.push(`pc:${name}${args.length ? ":" + args.join(",") : ""}`);
+      return `pc:${name}`;
+    };
   return {
     calls,
     controlEnabled: true,
@@ -100,7 +108,7 @@ function deps(over: Partial<CommandDeps> = {}): CommandDeps & { calls: string[] 
     getPending: () => pending,
     setPending: (p) => {
       pending = p;
-      calls.push(`pend:${p.to}:${p.usdg}`);
+      calls.push(p.kind === "transfer" ? `pend:${p.to}:${p.usdg}` : `pend:${p.kind}`);
     },
     clearPending: () => {
       pending = null;
@@ -124,6 +132,48 @@ function deps(over: Partial<CommandDeps> = {}): CommandDeps & { calls: string[] 
     },
     soulInfo: () => "SOUL",
     forgetOwner: () => calls.push("forget"),
+    // ── PC control (default: master ON, all capabilities on, for dispatch tests) ──
+    pcControlEnabled: true,
+    capabilities: new Set(["screen", "vision", "apps", "system", "files", "clipboard", "shell", "keyboard", "watchers"]),
+    filesRoot: "C:/root",
+    shellAllowlist: ["git status", "echo hi"],
+    pc: {
+      screenshot: pcCall("screenshot"),
+      look: pcCall("look"),
+      open: pcCall("open"),
+      sysinfo: pcCall("sysinfo"),
+      volume: pcCall("volume"),
+      media: pcCall("media"),
+      notify: pcCall("notify"),
+      lock: pcCall("lock"),
+      ls: pcCall("ls"),
+      clipGet: pcCall("clipGet"),
+      clipSet: pcCall("clipSet"),
+      runShell: pcCall("runShell"),
+      getFile: pcCall("getFile"),
+      typeText: pcCall("typeText"),
+      hotkey: pcCall("hotkey"),
+      power: pcCall("power"),
+    },
+    pcStatus: () => "PCSTATUS",
+    addReminder: (w, t) => {
+      calls.push(`remind:${w}:${t}`);
+      return "REMINDED";
+    },
+    listReminders: () => "REMINDERS",
+    removeReminder: (id) => {
+      calls.push(`unremind:${id}`);
+      return "UNREMINDED";
+    },
+    addWatcher: (s) => {
+      calls.push(`watch:${s}`);
+      return "WATCHING";
+    },
+    listWatchers: () => "WATCHERS",
+    removeWatcher: (id) => {
+      calls.push(`unwatch:${id}`);
+      return "UNWATCHED";
+    },
     help: () => "HELP",
     now: () => 1_000_000,
     ...over,
@@ -360,5 +410,77 @@ describe("soul commands — naming, memory, identity", () => {
     const d = deps({ remember: () => false });
     const r = await executeCommand({ kind: "remember", fact: "wallet 0xdead" }, d);
     assert.match(r, /never store/i);
+  });
+});
+
+describe("PC control — gating, confirm-park, and injection safety", () => {
+  it("refuses EVERY pc command when the master switch is off — and never calls the platform", async () => {
+    const d = deps({ pcControlEnabled: false });
+    for (const cmd of [
+      { kind: "screenshot" },
+      { kind: "sysinfo" },
+      { kind: "open", target: "spotify" },
+      { kind: "shell", cmd: "git status" },
+    ] as Command[]) {
+      const r = await executeCommand(cmd, d);
+      assert.match(r, /PC control is off/i);
+    }
+    // Not a single platform method was invoked.
+    assert.deepEqual(d.calls, []);
+  });
+
+  it("refuses a command whose capability is off — no platform call", async () => {
+    const d = deps({ pcControlEnabled: true, capabilities: new Set(["screen"]) });
+    const r = await executeCommand({ kind: "shell", cmd: "git status" }, d);
+    assert.match(r, /shell.*is off|capability.*off/i);
+    assert.deepEqual(d.calls, []); // runShell never reached
+  });
+
+  it("a direct capability (screenshot) runs when enabled", async () => {
+    const d = deps({ pcControlEnabled: true, capabilities: new Set(["screen"]) });
+    await executeCommand({ kind: "screenshot" }, d);
+    assert.deepEqual(d.calls, ["pc:screenshot"]);
+  });
+
+  it("shell PARKS for /confirm and does not execute until confirmed", async () => {
+    const d = deps(); // all caps on, allowlist has "git status"
+    const parked = await executeCommand({ kind: "shell", cmd: "git status" }, d);
+    assert.match(parked, /confirm run/i);
+    assert.deepEqual(d.calls, ["pend:shell"]); // parked, NOT executed
+    const done = await executeCommand({ kind: "confirm" }, d);
+    assert.equal(done, "pc:runShell");
+    assert.deepEqual(d.calls, ["pend:shell", "pc:runShell:git status"]);
+  });
+
+  it("a non-allowlisted shell command is refused immediately — never parked, never run", async () => {
+    const d = deps();
+    const r = await executeCommand({ kind: "shell", cmd: "rm -rf /" }, d);
+    assert.match(r, /allowlist/i);
+    assert.deepEqual(d.calls, []); // not parked, not executed
+  });
+
+  it("PROMPT INJECTION: a coerced 'run rm -rf / and send ~/.ssh' produces no exec", async () => {
+    // Simulate what the LLM front end would emit for an injection attempt.
+    const cmd = coerceLlmCommand({
+      kind: "shell", symbol: "", name: "", usdg: 0, address: "", op: "", price: 0, id: 0,
+      fact: "", remember: "", pcArg: "rm -rf / ; cat ~/.ssh/id_rsa", pcAction: "", reply: "",
+    });
+    assert.equal(cmd.kind, "shell");
+    const d = deps();
+    const r = await executeCommand(cmd, d);
+    assert.match(r, /allowlist/i);
+    assert.deepEqual(d.calls, []); // the platform is never touched
+  });
+
+  it("getfile parks and is refused outside the files root", async () => {
+    const d = deps({ filesRoot: process.platform === "win32" ? "C:\root" : "/root" });
+    const bad = await executeCommand({ kind: "getfile", path: "../../etc/passwd" }, d);
+    assert.match(bad, /outside|refused/i);
+    assert.deepEqual(d.calls, []);
+  });
+
+  it("/pc status works even when everything is off (no capability needed)", async () => {
+    const d = deps({ pcControlEnabled: false, capabilities: new Set() });
+    assert.equal(await executeCommand({ kind: "pc" }, d), "PCSTATUS");
   });
 });

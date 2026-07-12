@@ -387,5 +387,12 @@ export const HELP_TEXT = [
   "/alert &lt;SYM&gt; &gt; &lt;price&gt; — ping me at a price · /alerts · /unalert &lt;n&gt;",
   "/kill — destroy the grant, stand the band down",
   "",
-  "…or just talk to me in plain English if an Anthropic key is set.",
+  "🖥️ <b>your PC</b> (enable in dashboard → remote control):",
+  "/shot — screenshot · /look &lt;q&gt; — what am I looking at? · /sys — system info",
+  "/open &lt;app|url&gt; · /vol &lt;up|down|mute&gt; · /media &lt;play|pause|next|prev&gt; · /notify &lt;msg&gt; · /lock",
+  "/ls [path] · /get &lt;path&gt; · /clip [text] — browse/send files, clipboard",
+  "/run &lt;cmd&gt; · /type &lt;text&gt; · /key &lt;combo&gt; — shell/keyboard (allowlisted + /confirm)",
+  "/remind &lt;20m&gt; &lt;msg&gt; · /watch &lt;cpu&gt;80|file …|proc …&gt; · /pc — what's enabled",
+  "",
+  "…or just talk to me in plain English if an Anthropic key is set — voice notes work too.",
 ].join("\n");

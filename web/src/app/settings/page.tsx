@@ -36,6 +36,11 @@ export default function SettingsPage() {
   const [tgNotify, setTgNotify] = useState<boolean | null>(null);
   const [allowlist, setAllowlist] = useState<number[] | null>(null);
   const [tgTest, setTgTest] = useState<string | null>(null);
+  // PC control: master + capability set + string allowlists (also can't ride `draft`).
+  const [pcEnabled, setPcEnabled] = useState<boolean | null>(null);
+  const [caps, setCaps] = useState<string[] | null>(null);
+  const [shellList, setShellList] = useState<string[] | null>(null);
+  const [appList, setAppList] = useState<string[] | null>(null);
 
   const loadTelegram = () =>
     fetch("/api/telegram")
@@ -79,6 +84,10 @@ export default function SettingsPage() {
     if (tgTransfer !== null) body.telegramTransferEnabled = tgTransfer;
     if (tgNotify !== null) body.telegramNotifyEnabled = tgNotify;
     if (allowlist !== null) body.telegramAllowlist = allowlist;
+    if (pcEnabled !== null) body.telegramPcControlEnabled = pcEnabled;
+    if (caps !== null) body.telegramCapabilities = caps;
+    if (shellList !== null) body.telegramShellAllowlist = shellList;
+    if (appList !== null) body.telegramAppAllowlist = appList;
     // Secrets: only send when the user typed something or hit clear ("").
     try {
       const res = await fetch("/api/settings", {
@@ -100,6 +109,10 @@ export default function SettingsPage() {
       setTgTransfer(null);
       setTgNotify(null);
       setAllowlist(null);
+      setPcEnabled(null);
+      setCaps(null);
+      setShellList(null);
+      setAppList(null);
       const fresh = await fetch("/api/settings");
       if (fresh.ok) setView((await fresh.json()) as SettingsView);
       void loadTelegram();
@@ -128,6 +141,24 @@ export default function SettingsPage() {
   const tgTransferVal = tgTransfer ?? view.values.telegramTransferEnabled ?? d.telegramTransferEnabled;
   const tgNotifyVal = tgNotify ?? view.values.telegramNotifyEnabled ?? d.telegramNotifyEnabled;
   const allowlistVal = allowlist ?? view.values.telegramAllowlist ?? [];
+  const pcEnabledVal = pcEnabled ?? view.values.telegramPcControlEnabled ?? d.telegramPcControlEnabled;
+  const capsVal = caps ?? view.values.telegramCapabilities ?? [];
+  const shellListVal = shellList ?? view.values.telegramShellAllowlist ?? [];
+  const appListVal = appList ?? view.values.telegramAppAllowlist ?? [];
+  const toggleCap = (c: string) =>
+    setCaps(capsVal.includes(c) ? capsVal.filter((x) => x !== c) : [...capsVal, c]);
+  const PC_CAPS: { id: string; label: string }[] = [
+    { id: "screen", label: "📸 screen" },
+    { id: "vision", label: "👁️ vision" },
+    { id: "apps", label: "🚀 apps & web" },
+    { id: "system", label: "⚙️ system" },
+    { id: "files", label: "📂 files" },
+    { id: "clipboard", label: "📋 clipboard" },
+    { id: "shell", label: "🖥️ shell" },
+    { id: "keyboard", label: "⌨️ keyboard" },
+    { id: "voice", label: "🎙️ voice" },
+    { id: "watchers", label: "👀 watchers" },
+  ];
 
   async function testTelegram() {
     setTgTest("testing…");
@@ -236,7 +267,7 @@ export default function SettingsPage() {
             </Field>
           </div>
 
-          <div className="settings-section mono">telegram · chat with your merryman</div>
+          <div id="telegram" className="settings-section mono">telegram · chat with your merryman</div>
           <p className="grant-note" style={{ marginTop: 0 }}>
             Create a bot with <b>@BotFather</b> in Telegram (send <code>/newbot</code>), paste its
             token below, enable, and hit <b>test</b>. Then message your bot <code>/link {tg?.linkCode ?? "……"}</code> to
@@ -372,6 +403,113 @@ export default function SettingsPage() {
                 }
               }}
             />
+          </div>
+
+          {/* ── remote control · your PC (OpenClaw-style) ─────────────────── */}
+          <div className="settings-section mono">🖥️ remote control · your PC</div>
+          <div className="mainnet-warning" style={{ marginBottom: 12 }}>
+            <b>This lets Telegram touch this computer.</b> With it on, an allowlisted chat can take
+            screenshots, open apps, browse a folder you pick, and — if you enable them — run
+            allowlisted shell commands and type keystrokes. Everything is <b>off by default</b>,
+            enabled one capability at a time, and the sharp ones (shell, keyboard, files, power)
+            always ask you to <code>/confirm</code> first. Only turn on what you want.
+          </div>
+          <label className="field settings-field">
+            <span className="field-label">enable remote control</span>
+            <span className="field-input">
+              <input type="checkbox" checked={pcEnabledVal} onChange={(e) => setPcEnabled(e.target.checked)} style={{ width: "auto" }} />
+              <span className="field-unit">{pcEnabledVal ? "ON — capabilities below apply" : "off — no PC command runs"}</span>
+            </span>
+            <span className="field-hint">The master switch. Off = every PC command is refused, regardless of the toggles below.</span>
+          </label>
+
+          <div className="field settings-field">
+            <span className="field-label">capabilities</span>
+            <div className="caps" style={{ marginTop: 4 }}>
+              {PC_CAPS.map((c) => (
+                <span
+                  key={c.id}
+                  className={`cap symbol-chip ${capsVal.includes(c.id) ? "on" : ""}`}
+                  onClick={() => toggleCap(c.id)}
+                  style={{ cursor: "pointer", opacity: pcEnabledVal ? 1 : 0.5 }}
+                >
+                  {c.label}
+                </span>
+              ))}
+            </div>
+            <span className="field-hint">Click to toggle. Only enabled groups work; the rest are refused. “vision” and “voice” need extra keys below.</span>
+          </div>
+
+          <div className="grant-fields settings-grid">
+            <Field
+              label="files root"
+              hint="The ONE folder /ls and /get are confined to (absolute path). Blank = files off. Nothing outside it is reachable."
+            >
+              <input type="text" placeholder="C:\\Users\\you\\Documents\\shared" value={v("telegramFilesRoot")} onChange={set("telegramFilesRoot")} />
+            </Field>
+            <Field
+              label="transcription key (voice)"
+              hint="OpenAI-compatible key for voice notes → text. Blank = voice off. Stored locally, never shown."
+            >
+              <input
+                type="password"
+                placeholder={secretPlaceholder(view.telegramTranscribeKey)}
+                value={draft.telegramTranscribeKey ?? ""}
+                onChange={set("telegramTranscribeKey")}
+              />
+            </Field>
+          </div>
+
+          <div className="field settings-field">
+            <span className="field-label">shell allowlist</span>
+            <div className="cap-list">
+              {shellListVal.map((cmd) => (
+                <span key={cmd} className="cap symbol-chip on">
+                  <code>{cmd}</code>
+                  <button type="button" onClick={() => setShellList(shellListVal.filter((x) => x !== cmd))} className="chip-x">✕</button>
+                </span>
+              ))}
+              <input
+                type="text"
+                placeholder="exact command, e.g. git status ↵"
+                style={{ width: 220, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", fontSize: 12, padding: "2px 6px" }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return;
+                  const s = (e.target as HTMLInputElement).value.trim();
+                  if (s && !shellListVal.includes(s)) {
+                    setShellList([...shellListVal, s]);
+                    (e.target as HTMLInputElement).value = "";
+                  }
+                }}
+              />
+            </div>
+            <span className="field-hint">Only these exact commands (or command + args) may run via /run — and each still needs /confirm. Chaining/redirects are always refused.</span>
+          </div>
+
+          <div className="field settings-field">
+            <span className="field-label">app allowlist</span>
+            <div className="cap-list">
+              {appListVal.map((app) => (
+                <span key={app} className="cap symbol-chip on">
+                  {app}
+                  <button type="button" onClick={() => setAppList(appListVal.filter((x) => x !== app))} className="chip-x">✕</button>
+                </span>
+              ))}
+              <input
+                type="text"
+                placeholder="app name, e.g. spotify ↵"
+                style={{ width: 180, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", fontSize: 12, padding: "2px 6px" }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return;
+                  const s = (e.target as HTMLInputElement).value.trim();
+                  if (s && !appListVal.includes(s)) {
+                    setAppList([...appListVal, s]);
+                    (e.target as HTMLInputElement).value = "";
+                  }
+                }}
+              />
+            </div>
+            <span className="field-hint">Names /open may launch. Full https:// URLs open without an allowlist.</span>
           </div>
 
           <div className="settings-section mono">strategy &amp; trading</div>

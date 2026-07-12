@@ -16,15 +16,16 @@
  * nor change settings. Gated by telegramNotifyEnabled.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { homePaths } from "../home";
 import type { ResolvedConfig } from "../settings";
 import { appendJournal, getName, relationship } from "../soul";
+import { cpuPercent, procRunning } from "../pc/platform";
 import { esc, sendMessage } from "./api";
 import { narrateJournal } from "./interpreter";
 import { readReport, type StatusContext } from "./reads";
-import type { StateRef } from "./state";
+import type { StateRef, Watcher } from "./state";
 
 export interface AlertInputs {
   /** Grant expiry (unix) or null when not armed. */
@@ -203,6 +204,65 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
           }
         }
         if (changed) deps.stateRef.set({ ...deps.stateRef.get(), priceAlerts: keep });
+      }
+    }
+
+    // ── reminders (due → fire once → remove) ────────────────────────────────
+    {
+      const st = deps.stateRef.get();
+      const due = st.reminders.filter((r) => r.fireAt <= now());
+      if (due.length) {
+        for (const r of due) await sendMessage({ token }, chatId, `⏰ <b>reminder</b> — ${esc(r.text)}`);
+        deps.stateRef.set({ ...deps.stateRef.get(), reminders: deps.stateRef.get().reminders.filter((r) => r.fireAt > now()) });
+      }
+    }
+
+    // ── watchers (edge/change-triggered) — only when the capability is on ────
+    if (cfg.telegramPcControlEnabled && cfg.telegramCapabilities.includes("watchers")) {
+      const st = deps.stateRef.get();
+      if (st.watchers.length) {
+        const updated: Watcher[] = [];
+        for (const w of st.watchers) {
+          let next = w;
+          try {
+            if (w.kind === "cpu" && w.threshold) {
+              const pct = await cpuPercent();
+              if (pct !== null) {
+                const above = pct >= w.threshold;
+                if (above && w.lastState === false) {
+                  await sendMessage({ token }, chatId, `🔥 CPU is at ${pct}% (watch #${w.id}: > ${w.threshold}%).`);
+                }
+                next = { ...w, lastState: above };
+              }
+            } else if (w.kind === "file") {
+              let mtime: number | null = null;
+              try {
+                mtime = existsSync(w.arg) ? statSync(w.arg).mtimeMs : null;
+              } catch {
+                mtime = null;
+              }
+              if (mtime !== null) {
+                if (w.lastValue !== undefined && mtime > w.lastValue) {
+                  await sendMessage({ token }, chatId, `📄 <code>${esc(w.arg)}</code> changed (watch #${w.id}).`);
+                }
+                next = { ...w, lastValue: mtime };
+              }
+            } else if (w.kind === "proc") {
+              const running = await procRunning(w.arg);
+              if (running !== null) {
+                if (w.lastState !== undefined && running !== w.lastState) {
+                  await sendMessage({ token }, chatId, `⚙️ <b>${esc(w.arg)}</b> ${running ? "started" : "stopped"} (watch #${w.id}).`);
+                }
+                next = { ...w, lastState: running };
+              }
+            }
+          } catch {
+            /* a flaky probe must not kill the pass */
+          }
+          updated.push(next);
+        }
+        // Persist the observed states (edge detection needs them next pass).
+        deps.stateRef.set({ ...deps.stateRef.get(), watchers: updated });
       }
     }
 

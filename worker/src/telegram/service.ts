@@ -19,11 +19,15 @@
  */
 
 import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { PC_CAPABILITIES } from "@merrymen/core";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { ensureHome, homePaths } from "../home";
-import { esc, getMe, getUpdates, sendMessage, type TgMessage } from "./api";
-import { executeCommand, type CommandDeps, type PendingTransfer } from "./executor";
+import { esc, getFileUrl, getMe, getUpdates, sendMessage, type TgMessage } from "./api";
+import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { interpretWithLlm, narrateWhy, parseSlash } from "./interpreter";
+import { makePcActions, resolveInRoot } from "./pc";
+import { transcribeVoice } from "./voice";
+import { fmtReminders, fmtWatchers, parseWatchSpec, parseWhenSec } from "./watchers";
 import {
   HELP_TEXT,
   readBrag,
@@ -104,7 +108,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   ensureSoul(now()); // the merryman is born (IDENTITY/OWNER/JOURNAL.md) on first run
 
   // Per-chat runtime (in-memory only — cleared on restart, which is safe):
-  const pending = new Map<number, PendingTransfer>(); // awaiting /confirm
+  const pending = new Map<number, PendingAction>(); // awaiting /confirm
   const linkFails = new Map<number, { fails: number; until: number }>();
   const history = new Map<number, { role: "user" | "assistant"; content: string }[]>();
 
@@ -118,6 +122,34 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   const handle = async (msg: TgMessage, cfg: ResolvedConfig): Promise<void> => {
     const token = cfg.telegramBotToken!;
     const allowed = cfg.telegramAllowlist.includes(msg.chatId) || cfg.telegramAllowlist.includes(msg.fromId);
+
+    // Voice note → text: only for allowlisted chats with the "voice" capability.
+    // Transcribed text then flows through the SAME path as a typed message.
+    if (msg.voiceFileId && !msg.text) {
+      if (!allowed) {
+        await sendMessage({ token }, msg.chatId, "🚫 not authorized.");
+        return;
+      }
+      if (!cfg.telegramPcControlEnabled || !cfg.telegramCapabilities.includes("voice")) {
+        await sendMessage({ token }, msg.chatId, "🎙️ voice is off — enable “remote control” + the voice capability in the dashboard.");
+        return;
+      }
+      if (!cfg.telegramTranscribeKey) {
+        await sendMessage({ token }, msg.chatId, "🎙️ add a transcription key (OpenAI-compatible) in the dashboard to talk to me by voice.");
+        return;
+      }
+      const { url } = await getFileUrl({ token }, msg.voiceFileId);
+      const t = url
+        ? await transcribeVoice(url, { key: cfg.telegramTranscribeKey, base: cfg.telegramTranscribeBase })
+        : { text: null as string | null, reason: "couldn't fetch the voice file" };
+      if (!t.text) {
+        await sendMessage({ token }, msg.chatId, `🎙️ couldn't transcribe that: ${esc(t.reason ?? "unknown")}`);
+        return;
+      }
+      msg = { ...msg, text: t.text };
+      await sendMessage({ token }, msg.chatId, `🎙️ <i>heard:</i> ${esc(t.text)}`);
+    }
+
     const slash = parseSlash(msg.text);
 
     // /link is the only command an unlisted chat may use — and it's rate-limited.
@@ -247,6 +279,82 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         ].join("\n");
       },
       forgetOwner: () => forgetOwner(),
+      // ── PC control ─────────────────────────────────────────────────────
+      pcControlEnabled: cfg.telegramPcControlEnabled,
+      capabilities: new Set(cfg.telegramCapabilities),
+      filesRoot: cfg.telegramFilesRoot,
+      shellAllowlist: cfg.telegramShellAllowlist,
+      pc: makePcActions(
+        { token },
+        msg.chatId,
+        {
+          filesRoot: cfg.telegramFilesRoot,
+          shellAllowlist: cfg.telegramShellAllowlist,
+          appAllowlist: cfg.telegramAppAllowlist,
+          anthropicApiKey: cfg.anthropicApiKey,
+          llmModel: cfg.llmModel,
+        },
+        deps.note,
+      ),
+      pcStatus: () => {
+        const on = cfg.telegramPcControlEnabled;
+        const caps = new Set(cfg.telegramCapabilities);
+        const rows = PC_CAPABILITIES.map((c) => `${caps.has(c) ? "✅" : "▫️"} ${c}`).join("  ");
+        return [
+          `🖥️ <b>remote control</b> — master ${on ? "ON" : "OFF"}`,
+          rows,
+          on
+            ? `enabled: ${[...caps].join(", ") || "(none — turn some on in the dashboard)"}`
+            : `turn it on in the dashboard → settings → remote control.`,
+          `shell + type + files + power always ask for /confirm first.`,
+        ].join("\n");
+      },
+      addReminder: (when, text) => {
+        const sec = parseWhenSec(when);
+        if (sec === null) return "when? e.g. /remind 20m stretch (s/m/h/d).";
+        const st = stateRef.get();
+        if (st.reminders.length >= 20) return "you're at the 20-reminder limit — /unremind one first.";
+        const id = st.nextId;
+        stateRef.set({
+          ...st,
+          nextId: id + 1,
+          reminders: [...st.reminders, { id, fireAt: now() + sec, text: text.slice(0, 300) }],
+        });
+        return `⏰ reminder #${id} set — I'll ping you in ${when}. (needs the worker running)`;
+      },
+      listReminders: () => fmtReminders(stateRef.get().reminders, now()),
+      removeReminder: (id) => {
+        const st = stateRef.get();
+        const next = st.reminders.filter((r) => r.id !== id);
+        if (next.length === st.reminders.length) return `no reminder #${id}. /reminders lists them.`;
+        stateRef.set({ ...st, reminders: next });
+        return `🗑️ reminder #${id} removed.`;
+      },
+      addWatcher: (spec) => {
+        const parsed = parseWatchSpec(spec);
+        if (!parsed) return "watch what? e.g. cpu>80, file &lt;path&gt;, proc &lt;name&gt;";
+        if (parsed.kind === "file") {
+          const res = resolveInRoot(cfg.telegramFilesRoot, parsed.arg);
+          if (!res.ok) return `🔒 ${esc(res.reason)}`;
+        }
+        const st = stateRef.get();
+        if (st.watchers.length >= 20) return "you're at the 20-watcher limit — /unwatch one first.";
+        const id = st.nextId;
+        stateRef.set({
+          ...st,
+          nextId: id + 1,
+          watchers: [...st.watchers, { id, kind: parsed.kind, arg: parsed.kind === "cpu" ? "" : parsed.arg, threshold: parsed.kind === "cpu" ? parsed.threshold : undefined }],
+        });
+        return `👀 watcher #${id} set. (needs the worker running)`;
+      },
+      listWatchers: () => fmtWatchers(stateRef.get().watchers),
+      removeWatcher: (id) => {
+        const st = stateRef.get();
+        const next = st.watchers.filter((w) => w.id !== id);
+        if (next.length === st.watchers.length) return `no watcher #${id}. /watchers lists them.`;
+        stateRef.set({ ...st, watchers: next });
+        return `🗑️ watcher #${id} removed.`;
+      },
       help: () => HELP_TEXT,
       now,
     };

@@ -34,6 +34,8 @@ export interface TgMessage {
   fromId: number;
   fromUsername?: string;
   text: string;
+  /** Telegram file_id of an attached voice/audio note, if any (for transcription). */
+  voiceFileId?: string;
 }
 
 export interface TgBotInfo {
@@ -116,21 +118,46 @@ export async function getUpdates(
     const u = raw as { update_id?: unknown; message?: unknown };
     if (typeof u.update_id === "number") nextOffset = Math.max(nextOffset, u.update_id + 1);
     const m = u.message as
-      | { chat?: { id?: unknown }; from?: { id?: unknown; username?: unknown }; text?: unknown }
+      | {
+          chat?: { id?: unknown };
+          from?: { id?: unknown; username?: unknown };
+          text?: unknown;
+          caption?: unknown;
+          voice?: { file_id?: unknown };
+          audio?: { file_id?: unknown };
+        }
       | undefined;
-    if (!m || typeof m.text !== "string") continue; // ignore non-text updates
+    if (!m) continue;
     const chatId = m.chat?.id;
     const fromId = m.from?.id;
     if (typeof chatId !== "number" || typeof fromId !== "number") continue;
+    // Accept text messages OR voice/audio notes (for transcription). Voice notes
+    // may carry no text; text falls back to the caption then empty.
+    const voiceFileId =
+      typeof m.voice?.file_id === "string" ? m.voice.file_id
+      : typeof m.audio?.file_id === "string" ? m.audio.file_id
+      : undefined;
+    const text = typeof m.text === "string" ? m.text : typeof m.caption === "string" ? m.caption : "";
+    if (!text && !voiceFileId) continue; // ignore stickers/photos/etc.
     messages.push({
       updateId: typeof u.update_id === "number" ? u.update_id : 0,
       chatId,
       fromId,
       fromUsername: typeof m.from?.username === "string" ? m.from.username : undefined,
-      text: m.text,
+      text,
+      voiceFileId,
     });
   }
   return { messages, nextOffset };
+}
+
+/** Resolve a Telegram file_id to a downloadable URL (getFile → file_path). */
+export async function getFileUrl(opts: TelegramOpts, fileId: string): Promise<{ url: string | null; reason?: string }> {
+  const { result, reason } = await call(opts, "getFile", { file_id: fileId });
+  const fp = (result as { file_path?: unknown } | null)?.file_path;
+  if (typeof fp !== "string") return { url: null, reason: reason ?? "no file_path" };
+  const base = opts.apiBase ?? API_BASE;
+  return { url: `${base}/file/bot${opts.token}/${fp}` };
 }
 
 /**
@@ -161,4 +188,48 @@ export async function sendMessage(
     return plain.result != null ? { ok: true } : { ok: false, reason: plain.reason };
   }
   return { ok: false, reason: html.reason };
+}
+
+/**
+ * Upload a local file as a photo or document via multipart/form-data. Bypasses
+ * the JSON-only `call()` (uses global FormData/Blob/fetch, Node 22+). Never
+ * throws — a failed upload returns a reason so the poll loop keeps running.
+ * `field` is "photo" (sendPhoto) or "document" (sendDocument).
+ */
+async function sendFile(
+  opts: TelegramOpts,
+  method: "sendPhoto" | "sendDocument",
+  field: "photo" | "document",
+  chatId: number,
+  filePath: string,
+  caption?: string,
+): Promise<{ ok: boolean; reason?: string }> {
+  const base = opts.apiBase ?? API_BASE;
+  const fetchFn = (opts.fetchFn ?? (fetch as unknown)) as typeof fetch;
+  try {
+    const { readFileSync } = await import("node:fs");
+    const path = await import("node:path");
+    const bytes = readFileSync(filePath);
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    if (caption) {
+      form.append("caption", caption.length > 1024 ? caption.slice(0, 1020) + "…" : caption);
+      form.append("parse_mode", "HTML");
+    }
+    form.append(field, new Blob([bytes]), path.basename(filePath));
+    const res = await fetchFn(`${base}/bot${opts.token}/${method}`, { method: "POST", body: form });
+    const body = (await res.json().catch(() => null)) as { ok?: boolean; description?: string } | null;
+    if (body?.ok) return { ok: true };
+    return { ok: false, reason: body?.description ?? `HTTP ${res.status}` };
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export function sendPhoto(opts: TelegramOpts, chatId: number, filePath: string, caption?: string) {
+  return sendFile(opts, "sendPhoto", "photo", chatId, filePath, caption);
+}
+
+export function sendDocument(opts: TelegramOpts, chatId: number, filePath: string, caption?: string) {
+  return sendFile(opts, "sendDocument", "document", chatId, filePath, caption);
 }

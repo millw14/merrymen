@@ -44,6 +44,13 @@ export interface ResolvedConfig {
   telegramTransferDailyUsdg: number;
   telegramNotifyEnabled: boolean;
   telegramDigestHour: number;
+  telegramPcControlEnabled: boolean;
+  telegramCapabilities: string[];
+  telegramFilesRoot: string | undefined;
+  telegramShellAllowlist: string[];
+  telegramAppAllowlist: string[];
+  telegramTranscribeKey: string | undefined;
+  telegramTranscribeBase: string;
 }
 
 const KNOWN_SYMBOLS = new Set(STOCK_TOKENS.map((t) => t.symbol));
@@ -91,6 +98,21 @@ function numArray(file: unknown, env: string | undefined, fallback: number[]): n
       .split(",")
       .map((s) => Number(s.trim()))
       .filter((n) => Number.isFinite(n));
+  }
+  return fallback;
+}
+
+/** String allowlist (capabilities, shell/app allowlists); file array wins, else
+ * comma-separated env, else default. Non-empty trimmed strings only. */
+export function strArray(file: unknown, env: string | undefined, fallback: string[]): string[] {
+  if (Array.isArray(file)) {
+    return file.filter((s): s is string => typeof s === "string" && s.trim() !== "").map((s) => s.trim());
+  }
+  if (env !== undefined && env.trim() !== "") {
+    return env
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s !== "");
   }
   return fallback;
 }
@@ -146,6 +168,13 @@ export function mergeSettings(
     telegramTransferDailyUsdg: num(file.telegramTransferDailyUsdg, env.MERRYMEN_TELEGRAM_TRANSFER_DAILY_USDG, d.telegramTransferDailyUsdg, 1, 1_000_000),
     telegramNotifyEnabled: bool(file.telegramNotifyEnabled, env.MERRYMEN_TELEGRAM_NOTIFY, d.telegramNotifyEnabled),
     telegramDigestHour: num(file.telegramDigestHour, env.MERRYMEN_TELEGRAM_DIGEST_HOUR, d.telegramDigestHour, 0, 23),
+    telegramPcControlEnabled: bool(file.telegramPcControlEnabled, env.MERRYMEN_TELEGRAM_PC_CONTROL, d.telegramPcControlEnabled),
+    telegramCapabilities: strArray(file.telegramCapabilities, env.MERRYMEN_TELEGRAM_CAPABILITIES, d.telegramCapabilities),
+    telegramFilesRoot: str(file.telegramFilesRoot, env.MERRYMEN_TELEGRAM_FILES_ROOT),
+    telegramShellAllowlist: strArray(file.telegramShellAllowlist, env.MERRYMEN_TELEGRAM_SHELL_ALLOWLIST, d.telegramShellAllowlist),
+    telegramAppAllowlist: strArray(file.telegramAppAllowlist, env.MERRYMEN_TELEGRAM_APP_ALLOWLIST, d.telegramAppAllowlist),
+    telegramTranscribeKey: str(file.telegramTranscribeKey, env.MERRYMEN_TELEGRAM_TRANSCRIBE_KEY),
+    telegramTranscribeBase: str(file.telegramTranscribeBase, env.MERRYMEN_TELEGRAM_TRANSCRIBE_BASE, d.telegramTranscribeBase)!,
   };
 }
 
