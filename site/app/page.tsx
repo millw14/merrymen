@@ -63,8 +63,8 @@ export default function Home() {
             them from Telegram. Your keys never leave your machine.
           </p>
           <div className="hero-cta">
-            <Link href="/docs" className="btn btn-primary btn-lg">
-              Get started <Icon name="arrow" size={16} />
+            <Link href="/docs" className="btn btn-primary btn-lg has-box">
+              Get started <span className="box"><Icon name="arrow" size={16} /></span>
             </Link>
             <a href={GITHUB} target="_blank" rel="noreferrer" className="btn btn-ghost btn-lg">
               View on GitHub
@@ -296,8 +296,8 @@ npm install -g merrymen && merrymen start`}
                 <li>Say “how are we doing?” — you&apos;re chatting with your band</li>
               </ol>
               <p style={{ marginTop: 22 }}>
-                <Link href="/docs#telegram" className="btn btn-ghost">
-                  Full Telegram guide <Icon name="arrow" size={15} />
+                <Link href="/docs#telegram" className="btn btn-ghost has-box">
+                  Full Telegram guide <span className="box"><Icon name="arrow" size={15} /></span>
                 </Link>
               </p>
             </div>
@@ -322,8 +322,8 @@ npm install -g merrymen && merrymen start`}
           <h2>Muster your band.</h2>
           <p>Free, open source, and yours. Install it, name your merryman, loose the first arrow.</p>
           <div className="hero-cta" style={{ marginTop: 30 }}>
-            <Link href="/docs" className="btn btn-primary btn-lg">
-              Read the docs <Icon name="arrow" size={16} />
+            <Link href="/docs" className="btn btn-primary btn-lg has-box">
+              Read the docs <span className="box"><Icon name="arrow" size={16} /></span>
             </Link>
             <a href={GITHUB} target="_blank" rel="noreferrer" className="btn btn-ghost btn-lg">
               GitHub

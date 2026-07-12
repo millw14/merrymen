@@ -1,17 +1,18 @@
 import type { Metadata } from "next";
-import { Inter, JetBrains_Mono, Bricolage_Grotesque } from "next/font/google";
+import { Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Nav } from "@/components/Nav";
 import { Footer } from "@/components/Footer";
 
-const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "swap" });
-const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono-jb", display: "swap" });
-const display = Bricolage_Grotesque({
+// A refined, warm humanist grotesque — the closest open-source match to the
+// polished agency-grade grotesques these sites use. One family, many weights.
+const hanken = Hanken_Grotesk({
   subsets: ["latin"],
-  variable: "--font-display",
-  weight: ["600", "700", "800"],
+  variable: "--font-sans",
+  weight: ["400", "500", "600", "700", "800"],
   display: "swap",
 });
+const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono-jb", display: "swap" });
 
 const url = "https://merrymen.dev";
 
@@ -38,10 +39,11 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${inter.variable} ${mono.variable} ${display.variable}`}>
+    <html lang="en" className={`${hanken.variable} ${mono.variable}`}>
       <body>
         <div className="page">
           <div className="ambient" />
+          <div className="halftone" />
           <div className="grain" />
           <Nav />
           <main>{children}</main>

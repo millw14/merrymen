@@ -22,8 +22,8 @@ export function Nav() {
           <a href={GITHUB} target="_blank" rel="noreferrer" className="nav-ghost">
             GitHub
           </a>
-          <Link href="/docs" className="btn btn-primary">
-            Get started <Icon name="arrow" size={15} />
+          <Link href="/docs" className="btn btn-primary has-box">
+            Get started <span className="box"><Icon name="arrow" size={15} /></span>
           </Link>
         </div>
       </div>

@@ -23,9 +23,9 @@
 
   --maxw: 1200px;
   --radius: 14px;
-  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  /* next/font sets --font-display (Bricolage) on <html>; reference it directly — do NOT
-     redefine it here or it self-references and falls back to the sans stack. */
+  /* next/font sets --font-sans (Hanken Grotesk, with its own fallback) on <html>.
+     One refined family for everything, headings included. */
+  --font-display: var(--font-sans);
   --font-mono: var(--font-mono-jb), ui-monospace, "SF Mono", Menlo, monospace;
 }
 
@@ -47,18 +47,29 @@ a { color: inherit; text-decoration: none; }
 
 h1, h2, h3, h4, .display { font-family: var(--font-display); font-weight: 700; letter-spacing: -0.025em; }
 
-/* ---------- ambient: cinematic light + grain ---------- */
+/* ---------- ambient: cinematic light + halftone + grain ---------- */
 .page { position: relative; isolation: isolate; }
+/* soft studio light on a dark surface — a grey glow high-center fading to black,
+   a faint lime wash, a hint of light off to one side. Filmic, not flat. */
 .ambient {
-  position: fixed; inset: 0; z-index: -2; pointer-events: none;
+  position: fixed; inset: 0; z-index: -3; pointer-events: none;
   background:
-    radial-gradient(80% 55% at 50% -12%, color-mix(in srgb, var(--lime) 13%, transparent), transparent 62%),
-    radial-gradient(45% 45% at 88% 6%, color-mix(in srgb, var(--green) 8%, transparent), transparent 70%),
-    radial-gradient(70% 60% at 50% 120%, color-mix(in srgb, var(--lime) 6%, transparent), transparent 60%);
+    radial-gradient(130% 70% at 50% 24%, rgba(158,170,158,0.13), rgba(58,66,58,0.05) 38%, transparent 64%),
+    radial-gradient(70% 46% at 50% -6%, color-mix(in srgb, var(--lime) 10%, transparent), transparent 55%),
+    radial-gradient(46% 40% at 84% 14%, rgba(190,205,190,0.06), transparent 72%),
+    linear-gradient(180deg, #0b0f0c 0%, var(--bg) 60%);
+}
+/* halftone dots — the printed-poster texture, fading toward the edges */
+.halftone {
+  position: fixed; inset: 0; z-index: -2; pointer-events: none;
+  background-image: radial-gradient(rgba(233,242,236,0.05) 0.9px, transparent 1.3px);
+  background-size: 4px 4px;
+  -webkit-mask-image: radial-gradient(78% 60% at 50% 20%, #000, transparent 78%);
+  mask-image: radial-gradient(78% 60% at 50% 20%, #000, transparent 78%);
 }
 .grain {
-  position: fixed; inset: -50%; z-index: -1; pointer-events: none; opacity: 0.05;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  position: fixed; inset: -50%; z-index: -1; pointer-events: none; opacity: 0.09;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
 .wrap { width: 100%; max-width: var(--maxw); margin: 0 auto; padding: 0 28px; }
@@ -80,30 +91,36 @@ h1, h2, h3, h4, .display { font-family: var(--font-display); font-weight: 700; l
   background: color-mix(in srgb, var(--bg) 62%, transparent);
   border-bottom: 1px solid var(--border-soft);
 }
-.nav-inner { display: flex; align-items: center; gap: 26px; height: 66px; }
+.nav-inner { position: relative; display: flex; align-items: center; height: 68px; }
 .brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-weight: 700; font-size: 18px; letter-spacing: -0.02em; }
-.nav-links { display: flex; gap: 26px; margin-left: 12px; }
-.nav-links a { color: var(--text-dim); font-size: 14px; font-weight: 450; transition: color .15s; }
+.nav-links { position: absolute; left: 50%; transform: translateX(-50%); display: flex; gap: 30px; }
+.nav-links a { color: var(--text-dim); font-size: 14px; font-weight: 500; transition: color .15s; }
 .nav-links a:hover { color: var(--text); }
 .nav-right { margin-left: auto; display: flex; align-items: center; gap: 18px; }
-.nav-ghost { color: var(--text-dim); font-size: 14px; }
+.nav-ghost { color: var(--text-dim); font-size: 14px; font-weight: 500; }
 .nav-ghost:hover { color: var(--text); }
 
 /* ---------- buttons ---------- */
 .btn {
-  display: inline-flex; align-items: center; gap: 9px;
-  font-family: var(--font-sans); font-weight: 600; font-size: 14px;
-  border-radius: 999px; padding: 11px 20px; cursor: pointer; border: 1px solid transparent;
+  display: inline-flex; align-items: center; gap: 12px;
+  font-family: var(--font-sans); font-weight: 600; font-size: 14px; letter-spacing: -0.005em;
+  border-radius: 12px; padding: 10px 20px; cursor: pointer; border: 1px solid transparent;
   transition: transform .08s ease, background .18s ease, border-color .18s ease, color .18s ease;
   white-space: nowrap;
 }
-.btn svg { margin-right: -2px; }
+.btn.has-box { padding-right: 8px; }
+.btn .box { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; flex: 0 0 auto; transition: border-color .18s, background .18s; }
 .btn:active { transform: translateY(1px); }
 .btn-primary { background: var(--lime); color: #0a1400; }
 .btn-primary:hover { background: var(--lime-2); }
+.btn-primary .box { background: rgba(8, 18, 0, 0.16); }
 .btn-ghost { background: transparent; color: var(--text); border-color: var(--line); }
-.btn-ghost:hover { border-color: color-mix(in srgb, var(--lime) 60%, transparent); background: color-mix(in srgb, var(--lime) 6%, transparent); }
-.btn-lg { padding: 14px 26px; font-size: 15px; }
+.btn-ghost:hover { border-color: color-mix(in srgb, var(--lime) 55%, transparent); }
+.btn-ghost .box { border: 1px solid var(--line); }
+.btn-ghost:hover .box { border-color: color-mix(in srgb, var(--lime) 55%, transparent); }
+.btn-lg { font-size: 15px; padding: 11px 24px; }
+.btn-lg.has-box { padding-right: 9px; }
+.btn-lg .box { width: 34px; height: 34px; }
 
 /* ---------- hero ---------- */
 .hero { padding: 96px 0 0; text-align: center; }
@@ -114,25 +131,27 @@ h1, h2, h3, h4, .display { font-family: var(--font-display); font-weight: 700; l
 @keyframes spin { to { transform: rotate(360deg); } }
 .hero-pill { margin: 30px auto 0; }
 .hero-statement {
-  font-family: var(--font-display); font-weight: 700;
-  font-size: clamp(30px, 5.4vw, 62px); line-height: 1.04; letter-spacing: -0.035em;
-  margin: 30px auto 0; max-width: 18ch; color: var(--text);
+  font-family: var(--font-display); font-weight: 500;
+  font-size: clamp(27px, 4.2vw, 50px); line-height: 1.1; letter-spacing: -0.02em;
+  margin: 28px auto 0; max-width: 19ch; color: var(--text);
 }
 .hero-statement .mut { color: var(--text-faint); }
-.hero-statement .accent { color: var(--lime); }
-.hero-sub { margin: 26px auto 0; max-width: 56ch; font-size: clamp(16px, 2vw, 19px); color: var(--text-dim); }
+.hero-statement .accent { color: var(--lime); font-weight: 600; }
+.hero-sub { margin: 24px auto 0; max-width: 54ch; font-size: clamp(15.5px, 1.9vw, 18px); color: var(--text-dim); line-height: 1.65; }
 .hero-cta { display: flex; gap: 12px; justify-content: center; margin-top: 34px; flex-wrap: wrap; }
-.hero-meta { margin-top: 20px; font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.04em; color: var(--text-faint); }
+.hero-meta { margin-top: 22px; font-family: var(--font-mono); font-size: 11.5px; letter-spacing: 0.05em; color: var(--text-faint); }
 
-/* the monumental wordmark */
-.wordmark-wrap { margin-top: 58px; overflow: hidden; width: 100%; line-height: 0.8; mask-image: linear-gradient(180deg, #000 62%, transparent); }
+/* the monumental wordmark — solid, dominant, emerging from the fold */
+.wordmark-wrap {
+  margin-top: 44px; overflow: hidden; width: 100%; line-height: 0.74;
+  -webkit-mask-image: linear-gradient(180deg, transparent, #000 34%, #000 92%, transparent);
+  mask-image: linear-gradient(180deg, transparent, #000 34%, #000 92%, transparent);
+}
 .wordmark {
   font-family: var(--font-display); font-weight: 800;
-  font-size: 20.5vw; letter-spacing: -0.05em; line-height: 0.78;
-  color: transparent; -webkit-text-stroke: 1.3px color-mix(in srgb, var(--text) 26%, transparent);
+  font-size: 19.5vw; letter-spacing: -0.055em; line-height: 0.74;
   text-align: center; white-space: nowrap; user-select: none; margin: 0;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--lime) 22%, transparent), transparent 78%);
-  -webkit-background-clip: text; background-clip: text;
+  color: rgba(233, 242, 236, 0.13);
 }
 
 /* ---------- pill / eyebrow ---------- */
