@@ -10,12 +10,21 @@ type Draft = Record<string, string>;
 
 function Field(props: {
   label: string;
-  hint?: string;
+  hint?: React.ReactNode;
+  /** Optional "get a key ↗" link shown beside the label (opens the provider). */
+  action?: { href: string; label: string };
   children: React.ReactNode;
 }) {
   return (
     <label className="field settings-field">
-      <span className="field-label">{props.label}</span>
+      <span className="field-labelrow">
+        <span className="field-label">{props.label}</span>
+        {props.action && (
+          <a className="field-getkey" href={props.action.href} target="_blank" rel="noreferrer">
+            {props.action.label} ↗
+          </a>
+        )}
+      </span>
       <span className="field-input">{props.children}</span>
       {props.hint && <span className="field-hint">{props.hint}</span>}
     </label>
@@ -125,7 +134,7 @@ export default function SettingsPage() {
 
   if (view === null) {
     return (
-      <main className="grant-shell">
+      <main className="grant-shell setup-look">
         <div className="grant-panel mono">loading settings…</div>
       </main>
     );
@@ -178,7 +187,7 @@ export default function SettingsPage() {
 
   return (
     <>
-      <header className="topbar">
+      <header className="topbar setup-look">
         <Link href="/" className="brand" style={{ color: "inherit", textDecoration: "none" }}>
           <span className="arrow"><LogoMark size={20} /></span>
           <span>merrymen</span>
@@ -189,7 +198,7 @@ export default function SettingsPage() {
         </Link>
       </header>
 
-      <main className="grant-shell">
+      <main className="grant-shell setup-look">
         <div className="grant-panel settings-panel">
           <h1 className="grant-title">settings</h1>
           <p className="grant-sub">
@@ -204,7 +213,8 @@ export default function SettingsPage() {
           <div className="grant-fields settings-grid">
             <Field
               label="Anthropic API key"
-              hint="Powers plain-English chat, the llm-strategist, and vision. Create one at console.anthropic.com. Blank keeps the saved key."
+              action={{ href: "https://console.anthropic.com/settings/keys", label: "Get a key" }}
+              hint="Optional — unlocks the AI strategist, plain-English chat, and screen vision. The built-in strategies need no key at all. Tap “Get a key”, create one in seconds, paste it here. Blank keeps the saved key."
             >
               <input
                 type="password"
@@ -220,7 +230,8 @@ export default function SettingsPage() {
             </Field>
             <Field
               label="Pimlico API key"
-              hint="The one key needed to trade live. Grab it free at dashboard.pimlico.io → API Keys and paste it — we build the bundler URL for your wallet's chain automatically. Blank = practice mode: the agent simulates every trade but never signs."
+              action={{ href: "https://dashboard.pimlico.io", label: "Get a free key" }}
+              hint="The one key needed to trade live. Tap “Get a free key” → API Keys, paste it here — we build the bundler URL for your wallet's chain automatically. Blank = practice mode: the agent simulates every trade but never signs."
             >
               <input
                 type="password"
