@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Logo } from "./Logo";
+import { Icon } from "./Icon";
 
 const GITHUB = "https://github.com/millw14/merrymen";
 
@@ -22,7 +23,7 @@ export function Nav() {
             GitHub
           </a>
           <Link href="/docs" className="btn btn-primary">
-            Get started
+            Get started <Icon name="arrow" size={15} />
           </Link>
         </div>
       </div>
