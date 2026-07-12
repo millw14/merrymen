@@ -51,12 +51,6 @@ export default function Home() {
           <div className="hero-motif">
             <Icon name="globe" size={46} />
           </div>
-          <div className="hero-pill">
-            <a href={GITHUB} target="_blank" rel="noreferrer" className="pill">
-              <span className="dot" /> <b>v0.5</b> · PC control &amp; voice from Telegram
-              <Icon name="arrow" size={13} />
-            </a>
-          </div>
           <h1 className="hero-statement">
             Autonomous trading agents that answer only to you.
           </h1>
