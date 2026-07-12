@@ -1,6 +1,13 @@
 import Link from "next/link";
 import { Icon, type IconName } from "@/components/Icon";
 import { Parallax } from "@/components/Parallax";
+import { Marquee } from "@/components/Marquee";
+
+const MARQUEE = [
+  "Self-hosted", "Your keys, your caps", "On-chain permission wall", "LLM proposes, code disposes",
+  "Telegram control", "Voice & vision", "Simulated before signed", "Fees only on profit",
+  "Kill switch", "Open source · MIT",
+];
 
 const GITHUB = "https://github.com/millw14/merrymen";
 
@@ -48,26 +55,28 @@ export default function Home() {
       {/* ── hero ─────────────────────────────────────────────────────────── */}
       <section className="hero">
         <div className="wrap">
-          <div className="hero-motif">
+          <div className="hero-motif" data-reveal="fade">
             <Icon name="globe" size={46} />
           </div>
-          <h1 className="hero-statement">
+          <h1 className="hero-statement" data-reveal="mask">
             Autonomous trading agents that answer only to you.
           </h1>
-          <p className="hero-sub">
+          <p className="hero-sub" data-reveal="up" style={{ ["--d" as string]: "90ms" }}>
             merrymen is a self-hosted band of agents for Robinhood Chain. They work the market 24/7
             inside hard on-chain permission walls you set — you name them, chat with them, and steer
             them from Telegram. Your keys never leave your machine.
           </p>
-          <div className="hero-cta">
-            <Link href="/docs" className="btn btn-primary btn-lg has-box">
-              Get started <span className="box"><Icon name="arrow" size={16} /></span>
-            </Link>
+          <div className="hero-cta" data-reveal="up" style={{ ["--d" as string]: "170ms" }}>
+            <span className="mag" data-magnetic>
+              <Link href="/docs" className="btn btn-primary btn-lg has-box">
+                Get started <span className="box"><Icon name="arrow" size={16} /></span>
+              </Link>
+            </span>
             <a href={GITHUB} target="_blank" rel="noreferrer" className="btn btn-ghost btn-lg">
               View on GitHub
             </a>
           </div>
-          <div className="hero-meta">MIT-licensed · runs on your machine · no account, no cloud</div>
+          <div className="hero-meta" data-reveal="up" style={{ ["--d" as string]: "240ms" }}>MIT-licensed · runs on your machine · no account, no cloud</div>
         </div>
         <Wordmark />
       </section>
@@ -77,7 +86,7 @@ export default function Home() {
         <div className="wrap">
           <div className="grid" style={{ gridTemplateColumns: "repeat(5, 1fr)" }}>
             {PROMISES.map(([, label], i) => (
-              <div key={label} className="cell promise">
+              <div key={label} className="cell promise" data-reveal="up" style={{ ["--d" as string]: `${i * 70}ms` }}>
                 <span className="promise-n">{String(i + 1).padStart(2, "0")}</span>
                 <h4>{label}</h4>
               </div>
@@ -86,13 +95,16 @@ export default function Home() {
         </div>
       </section>
 
+      {/* ── marquee band ─────────────────────────────────────────────────── */}
+      <Marquee items={MARQUEE} />
+
       {/* ── features ─────────────────────────────────────────────────────── */}
       <section id="features">
         <div className="wrap">
           <div className="section-head">
-            <div className="tag"><span className="n">01</span> — what it is</div>
-            <h2>An agent that works Sherwood while you sleep.</h2>
-            <p>
+            <div className="tag" data-reveal="fade"><span className="n">01</span> — what it is</div>
+            <h2 data-reveal="mask">An agent that works Sherwood while you sleep.</h2>
+            <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>
               The strategist proposes; deterministic code disposes. Nothing the model outputs — a
               trade, a transfer, a command — reaches your funds or your machine without passing a
               typed, closed command set and the on-chain policy wall.
@@ -100,7 +112,7 @@ export default function Home() {
           </div>
 
           <div className="feature-row">
-            <div className="feature-copy">
+            <div className="feature-copy" data-reveal="up">
               <div className="feature-kicker">Self-hosted</div>
               <h3>Runs on your machine. Full stop.</h3>
               <p>
@@ -114,7 +126,7 @@ export default function Home() {
                 ))}
               </ul>
             </div>
-            <div className="mock">
+            <div className="mock" data-reveal="up" style={{ ["--d" as string]: "120ms" }}>
               <pre className="code" style={{ border: "none", borderRadius: 0, background: "transparent" }}>
 {`~/.merrymen/
 ├─ settings.json     `}<span className="tok">{`# your knobs`}</span>{`
@@ -130,7 +142,7 @@ export default function Home() {
           </div>
 
           <div className="feature-row flip">
-            <div className="feature-copy">
+            <div className="feature-copy" data-reveal="up">
               <div className="feature-kicker">Telegram</div>
               <h3>Run the whole band from your phone.</h3>
               <p>
@@ -144,7 +156,7 @@ export default function Home() {
                 ))}
               </ul>
             </div>
-            <div className="mock chat">
+            <div className="mock chat" data-reveal="up" style={{ ["--d" as string]: "120ms" }}>
               <div className="msg me">how are we doing today?</div>
               <div className="msg bot">Up <b>+$14.20</b> (+2.1%) · QQQ is your best holding. Two arrows loosed, both landed. Quiet and green.</div>
               <div className="msg me">buy 20 usdg of msft</div>
@@ -153,7 +165,7 @@ export default function Home() {
           </div>
 
           <div className="feature-row">
-            <div className="feature-copy">
+            <div className="feature-copy" data-reveal="up">
               <div className="feature-kicker">Remote control</div>
               <h3>It can run your PC, too.</h3>
               <p>
@@ -167,7 +179,7 @@ export default function Home() {
                 ))}
               </ul>
             </div>
-            <div className="mock chat">
+            <div className="mock chat" data-reveal="up" style={{ ["--d" as string]: "120ms" }}>
               <div className="msg me">what am I looking at?</div>
               <div className="msg bot">A failing test in <span className="mono">policy.test.ts</span> — the daily-cap assertion expected 500 but got 525. Off-by-one in the reserve.</div>
               <div className="msg me">run npm test</div>
@@ -176,7 +188,7 @@ export default function Home() {
           </div>
 
           <div className="feature-row flip">
-            <div className="feature-copy">
+            <div className="feature-copy" data-reveal="up">
               <div className="feature-kicker">The soul</div>
               <h3>Every merryman is an individual.</h3>
               <p>
@@ -190,7 +202,7 @@ export default function Home() {
                 ))}
               </ul>
             </div>
-            <div className="mock chat">
+            <div className="mock chat" data-reveal="up" style={{ ["--d" as string]: "120ms" }}>
               <div className="msg me">/soul</div>
               <div className="msg bot">
                 <b>Little John</b> of the merrymen · old friend · 34 days riding with you, 210
@@ -206,12 +218,12 @@ export default function Home() {
       <section style={{ paddingTop: 40 }}>
         <div className="wrap">
           <div className="section-head center">
-            <div className="tag" style={{ justifyContent: "center" }}><span className="n">02</span> — the toolkit</div>
-            <h2>Everything, gated by design.</h2>
+            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade"><span className="n">02</span> — the toolkit</div>
+            <h2 data-reveal="mask">Everything, gated by design.</h2>
           </div>
           <div className="grid">
-            {CAPS.map(([ic, t, d]) => (
-              <div key={t} className="cell">
+            {CAPS.map(([ic, t, d], i) => (
+              <div key={t} className="cell" data-reveal="up" style={{ ["--d" as string]: `${(i % 3) * 80}ms` }}>
                 <div className="cell-ic"><Icon name={ic} size={26} /></div>
                 <h4>{t}</h4>
                 <p>{d}</p>
@@ -227,7 +239,7 @@ export default function Home() {
           <div className="section-head">
             <div className="tag"><span className="n">03</span> — the safety model</div>
           </div>
-          <div className="safety">
+          <div className="safety" data-reveal="up">
             <div className="quote">
               The rule of the house: <b>the model proposes, deterministic code disposes.</b>
             </div>
@@ -247,9 +259,9 @@ export default function Home() {
       <section id="install">
         <div className="wrap">
           <div className="section-head center">
-            <div className="tag" style={{ justifyContent: "center" }}><span className="n">04</span> — quickstart</div>
-            <h2>Riding in five steps.</h2>
-            <p>No Node yet? The one-line installer sets it up for you.</p>
+            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade"><span className="n">04</span> — quickstart</div>
+            <h2 data-reveal="mask">Riding in five steps.</h2>
+            <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>No Node yet? The one-line installer sets it up for you.</p>
           </div>
 
           <div style={{ maxWidth: 780, margin: "0 auto 34px" }}>
@@ -266,8 +278,8 @@ npm install -g merrymen && merrymen start`}
           </div>
 
           <div className="steps">
-            {STEPS.map(([n, t, d]) => (
-              <div key={n} className="step">
+            {STEPS.map(([n, t, d], i) => (
+              <div key={n} className="step" data-reveal="up" style={{ ["--d" as string]: `${i * 70}ms` }}>
                 <div className="num">{n}</div>
                 <h4>{t}</h4>
                 <p>{d}</p>
@@ -281,7 +293,7 @@ npm install -g merrymen && merrymen start`}
       <section id="telegram" style={{ paddingTop: 40 }}>
         <div className="wrap">
           <div className="feature-row" style={{ borderTop: "none", paddingTop: 0 }}>
-            <div className="feature-copy">
+            <div className="feature-copy" data-reveal="up">
               <div className="tag"><span className="n">05</span> — two minutes</div>
               <h3 style={{ marginTop: 18 }}>Set up Telegram</h3>
               <ol style={{ paddingLeft: 20, color: "var(--text-dim)", marginTop: 18, lineHeight: 1.9, fontSize: 15.5 }}>
@@ -296,7 +308,7 @@ npm install -g merrymen && merrymen start`}
                 </Link>
               </p>
             </div>
-            <div className="mock chat">
+            <div className="mock chat" data-reveal="up" style={{ ["--d" as string]: "120ms" }}>
               <div className="msg me">/link 5HDE9E</div>
               <div className="msg bot">You&apos;re linked — you now command this merryman. Try /status.</div>
               <div className="msg me">/status</div>
@@ -314,12 +326,14 @@ npm install -g merrymen && merrymen start`}
       {/* ── final CTA ────────────────────────────────────────────────────── */}
       <section className="cta">
         <div className="wrap">
-          <h2>Muster your band.</h2>
-          <p>Free, open source, and yours. Install it, name your merryman, loose the first arrow.</p>
-          <div className="hero-cta" style={{ marginTop: 30 }}>
-            <Link href="/docs" className="btn btn-primary btn-lg has-box">
-              Read the docs <span className="box"><Icon name="arrow" size={16} /></span>
-            </Link>
+          <h2 data-reveal="mask">Muster your band.</h2>
+          <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>Free, open source, and yours. Install it, name your merryman, loose the first arrow.</p>
+          <div className="hero-cta" data-reveal="up" style={{ marginTop: 30, ["--d" as string]: "150ms" }}>
+            <span className="mag" data-magnetic>
+              <Link href="/docs" className="btn btn-primary btn-lg has-box">
+                Read the docs <span className="box"><Icon name="arrow" size={16} /></span>
+              </Link>
+            </span>
             <a href={GITHUB} target="_blank" rel="noreferrer" className="btn btn-ghost btn-lg">
               GitHub
             </a>

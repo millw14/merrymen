@@ -13,18 +13,20 @@ export function Nav() {
           <span>merrymen</span>
         </Link>
         <nav className="nav-links">
-          <Link href="/#features">Features</Link>
-          <Link href="/#telegram">Telegram</Link>
-          <Link href="/#install">Install</Link>
-          <Link href="/docs">Docs</Link>
+          <Link href="/#features" data-text="Features"><span>Features</span></Link>
+          <Link href="/#telegram" data-text="Telegram"><span>Telegram</span></Link>
+          <Link href="/#install" data-text="Install"><span>Install</span></Link>
+          <Link href="/docs" data-text="Docs"><span>Docs</span></Link>
         </nav>
         <div className="nav-right">
           <a href={GITHUB} target="_blank" rel="noreferrer" className="nav-ghost">
             GitHub
           </a>
-          <Link href="/docs" className="btn btn-primary has-box">
-            Get started <span className="box"><Icon name="arrow" size={15} /></span>
-          </Link>
+          <span className="mag" data-magnetic>
+            <Link href="/docs" className="btn btn-primary has-box">
+              Get started <span className="box"><Icon name="arrow" size={15} /></span>
+            </Link>
+          </span>
         </div>
       </div>
     </header>

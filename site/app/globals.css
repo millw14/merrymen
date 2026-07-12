@@ -314,3 +314,61 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
   .foot-grid { grid-template-columns: 1fr; }
   .safety { padding: 28px; }
 }
+
+/* ══════════════════════ motion ══════════════════════ */
+
+/* scroll-reveal — hidden states apply only once JS marks the doc ready,
+   so no-JS / reduced-motion renders everything visible and static. */
+.fx-ready [data-reveal] { opacity: 0; }
+.fx-ready [data-reveal="up"]   { transform: translateY(24px); }
+.fx-ready [data-reveal="fade"] { transform: none; }
+.fx-ready [data-reveal="mask"] { transform: translateY(0.18em); clip-path: inset(0 0 102% 0); }
+.fx-ready [data-reveal].is-in {
+  opacity: 1; transform: none; clip-path: inset(0 0 -8% 0);
+  transition:
+    opacity .7s ease,
+    transform .9s cubic-bezier(0.16, 1, 0.3, 1),
+    clip-path .95s cubic-bezier(0.16, 1, 0.3, 1);
+  transition-delay: var(--d, 0ms);
+}
+/* backstop: if the motion layer never ran, force everything visible */
+.fx-done [data-reveal] { opacity: 1 !important; transform: none !important; clip-path: none !important; }
+
+/* magnetic wrapper — the JS drifts this toward the cursor; it eases back on leave */
+.mag { display: inline-flex; transition: transform .4s cubic-bezier(0.16, 1, 0.3, 1); }
+
+/* nav: floats clean at the top, firms up once you scroll */
+.nav.scrolled {
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  border-bottom-color: var(--border-soft);
+}
+
+/* nav-link hover swap — the label rides up as a copy rises to take its place */
+.nav-links a { position: relative; display: inline-block; overflow: hidden; color: var(--text-dim); }
+.nav-links a > span { display: block; transition: transform .42s cubic-bezier(0.16, 1, 0.3, 1); }
+.nav-links a::after {
+  content: attr(data-text); position: absolute; inset: 0; color: var(--text);
+  transform: translateY(112%); transition: transform .42s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.nav-links a:hover > span { transform: translateY(-112%); }
+.nav-links a:hover::after { transform: translateY(0); }
+
+/* marquee — a seamless two-track keyword band */
+.marquee { overflow: hidden; border-block: 1px solid var(--border-soft); padding: 15px 0; -webkit-mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent); mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent); }
+.marquee-track { display: flex; width: max-content; animation: marquee 34s linear infinite; }
+.marquee:hover .marquee-track { animation-play-state: paused; }
+.marquee-row { display: flex; flex: 0 0 auto; }
+.marquee-item {
+  display: inline-flex; align-items: center; gap: 26px; padding-right: 26px;
+  font-family: var(--font-mono); font-size: 12.5px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-2); white-space: nowrap;
+}
+.marquee-dot { width: 4px; height: 4px; border-radius: 50%; background: color-mix(in srgb, var(--lime) 60%, var(--text-faint)); flex: 0 0 auto; }
+@keyframes marquee { to { transform: translateX(-50%); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .marquee-track { animation: none; }
+  .nav-links a::after { display: none; }
+  .nav-links a > span { transition: none; }
+  .mag { transition: none; }
+}

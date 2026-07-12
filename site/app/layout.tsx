@@ -3,6 +3,7 @@ import { Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Nav } from "@/components/Nav";
 import { Footer } from "@/components/Footer";
+import { ScrollFx } from "@/components/ScrollFx";
 
 // A refined, warm humanist grotesque — the closest open-source match to the
 // polished agency-grade grotesques these sites use. One family, many weights.
@@ -41,10 +42,19 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className={`${hanken.variable} ${mono.variable}`}>
       <body>
+        {/* Arm the reveal layer before first paint so content never flashes in
+            un-animated; a delayed backstop un-hides everything if JS stalled. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "try{var d=document.documentElement;if(!matchMedia('(prefers-reduced-motion: reduce)').matches){d.classList.add('fx-ready');setTimeout(function(){if(!document.querySelector('[data-reveal].is-in'))d.classList.add('fx-done')},4000)}}catch(e){}",
+          }}
+        />
         <div className="page">
           <div className="ambient" />
           <div className="halftone" />
           <div className="grain" />
+          <ScrollFx />
           <Nav />
           <main>{children}</main>
           <Footer />
