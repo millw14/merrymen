@@ -107,25 +107,38 @@ h1, h2, h3, h4, .display { font-family: var(--font-display); font-weight: 700; l
 
 /* ---------- buttons ---------- */
 .btn {
-  display: inline-flex; align-items: center; gap: 12px;
-  font-family: var(--font-sans); font-weight: 600; font-size: 14px; letter-spacing: -0.005em;
-  border-radius: 12px; padding: 10px 20px; cursor: pointer; border: 1px solid transparent;
-  transition: transform .08s ease, background .18s ease, border-color .18s ease, color .18s ease;
-  white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 8px; line-height: 1; white-space: nowrap;
+  font-family: var(--font-sans); font-weight: 500; font-size: 14px; letter-spacing: -0.01em;
+  border-radius: 3px; padding: 9px 15px; cursor: pointer; border: 1px solid transparent;
+  transition: transform .35s cubic-bezier(0.34, 1.56, 0.64, 1), background-color .25s ease, color .2s ease, border-color .25s ease;
 }
-.btn.has-box { padding-right: 8px; }
-.btn .box { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; flex: 0 0 auto; transition: border-color .18s, background .18s; }
-.btn:active { transform: translateY(1px); }
-.btn-primary { background: #e9efec; color: #0a0d0b; }
-.btn-primary:hover { background: #ffffff; }
-.btn-primary .box { background: rgba(10, 13, 11, 0.14); }
+.btn:active { transform: translateY(0.5px) scale(0.99); }
+
+/* signature icon-chip: an inverted mini-square holding the diagonal arrow, tucked flush right */
+.btn.has-box { padding: 5px 5px 5px 15px; gap: 10px; }
+.btn .box {
+  display: grid; place-items: center; width: 24px; height: 24px; border-radius: 3px;
+  flex: 0 0 auto; overflow: hidden; transition: background-color .25s ease, border-color .25s ease;
+}
+.btn .box svg { transition: transform .35s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.btn:hover .box svg { transform: translate(1.5px, -1.5px); }
+
+/* primary — warm off-white face, near-black inverted chip with a light arrow */
+.btn-primary { background: #e8e8e2; color: #0a0d0b; }
+.btn-primary:hover { background: #fff; transform: translateY(-1px); }
+.btn-primary .box { background: #0b0f0c; }
+.btn-primary .box svg { color: #e8e8e2; }
+
+/* ghost — hairline outline, faint light chip */
 .btn-ghost { background: transparent; color: var(--text); border-color: var(--line); }
-.btn-ghost:hover { border-color: color-mix(in srgb, var(--lime) 55%, transparent); }
-.btn-ghost .box { border: 1px solid var(--line); }
-.btn-ghost:hover .box { border-color: color-mix(in srgb, var(--lime) 55%, transparent); }
-.btn-lg { font-size: 15px; padding: 11px 24px; }
-.btn-lg.has-box { padding-right: 9px; }
-.btn-lg .box { width: 34px; height: 34px; }
+.btn-ghost:hover { border-color: color-mix(in srgb, var(--text) 30%, transparent); transform: translateY(-1px); }
+.btn-ghost .box { background: rgba(233, 242, 236, 0.09); }
+.btn-ghost:hover .box { background: rgba(233, 242, 236, 0.16); }
+.btn-ghost .box svg { color: var(--text); }
+
+.btn-lg { font-size: 15px; padding: 11px 20px; }
+.btn-lg.has-box { padding: 6px 6px 6px 18px; }
+.btn-lg .box { width: 28px; height: 28px; }
 
 /* ---------- hero ---------- */
 .hero { padding: 96px 0 0; text-align: center; }
