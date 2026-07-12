@@ -1,12 +1,15 @@
 import Link from "next/link";
 import { Icon, type IconName } from "@/components/Icon";
+import { Parallax } from "@/components/Parallax";
 
 const GITHUB = "https://github.com/millw14/merrymen";
 
 function Wordmark() {
   return (
     <div className="wordmark-wrap" aria-hidden>
-      <div className="wordmark">MERRYMEN</div>
+      <Parallax speed={0.32}>
+        <div className="wordmark">MERRYMEN</div>
+      </Parallax>
     </div>
   );
 }
@@ -55,7 +58,7 @@ export default function Home() {
             </a>
           </div>
           <h1 className="hero-statement">
-            Autonomous trading agents that <span className="accent">answer only to you.</span>
+            Autonomous trading agents that answer only to you.
           </h1>
           <p className="hero-sub">
             merrymen is a self-hosted band of agents for Robinhood Chain. They work the market 24/7
@@ -76,15 +79,13 @@ export default function Home() {
       </section>
 
       {/* ── promises ─────────────────────────────────────────────────────── */}
-      <section style={{ paddingTop: 40, paddingBottom: 40 }}>
+      <section style={{ paddingTop: 44, paddingBottom: 44 }}>
         <div className="wrap">
           <div className="grid" style={{ gridTemplateColumns: "repeat(5, 1fr)" }}>
-            {PROMISES.map(([ic, label]) => (
-              <div key={label} className="cell" style={{ padding: "26px 22px" }}>
-                <div className="cell-ic">
-                  <Icon name={ic} size={26} />
-                </div>
-                <h4 style={{ fontSize: 15, marginTop: 14 }}>{label}</h4>
+            {PROMISES.map(([, label], i) => (
+              <div key={label} className="cell promise">
+                <span className="promise-n">{String(i + 1).padStart(2, "0")}</span>
+                <h4>{label}</h4>
               </div>
             ))}
           </div>
@@ -106,7 +107,7 @@ export default function Home() {
 
           <div className="feature-row">
             <div className="feature-copy">
-              <div className="feature-icon"><Icon name="wallet" size={26} /></div>
+              <div className="feature-kicker">Self-hosted</div>
               <h3>Runs on your machine. Full stop.</h3>
               <p>
                 One <code className="inline">npm install</code>, a local dashboard, and a worker that
@@ -115,7 +116,7 @@ export default function Home() {
               </p>
               <ul className="feature-list">
                 {["Create a wallet in-browser — nothing to connect", "Caps enforced by the account contract on every op", "Testnet sandbox or real mainnet, you choose", "Kill switch destroys the grant, halts the band"].map((t) => (
-                  <li key={t}><Icon name="check" size={16} />{t}</li>
+                  <li key={t}>{t}</li>
                 ))}
               </ul>
             </div>
@@ -136,7 +137,7 @@ export default function Home() {
 
           <div className="feature-row flip">
             <div className="feature-copy">
-              <div className="feature-icon"><Icon name="chat" size={26} /></div>
+              <div className="feature-kicker">Telegram</div>
               <h3>Run the whole band from your phone.</h3>
               <p>
                 Link a bot and chat with your merryman in plain English or slash commands. Check the
@@ -145,7 +146,7 @@ export default function Home() {
               </p>
               <ul className="feature-list">
                 {["“how are we doing?” · “pause everything”", "Trade pings, drawdown & gas warnings, daily digest", "Transfers are triple-guarded and always confirmed", "Voice notes work too"].map((t) => (
-                  <li key={t}><Icon name="check" size={16} />{t}</li>
+                  <li key={t}>{t}</li>
                 ))}
               </ul>
             </div>
@@ -159,7 +160,7 @@ export default function Home() {
 
           <div className="feature-row">
             <div className="feature-copy">
-              <div className="feature-icon"><Icon name="desktop" size={26} /></div>
+              <div className="feature-kicker">Remote control</div>
               <h3>It can run your PC, too.</h3>
               <p>
                 Screenshots, “what am I looking at?”, open apps, browse files, allowlisted shell,
@@ -168,7 +169,7 @@ export default function Home() {
               </p>
               <ul className="feature-list">
                 {["Screenshot & vision · open apps and URLs", "Allowlisted shell · type & hotkeys", "“ping me when my build finishes”", "Every sharp action needs an explicit confirm"].map((t) => (
-                  <li key={t}><Icon name="check" size={16} />{t}</li>
+                  <li key={t}>{t}</li>
                 ))}
               </ul>
             </div>
@@ -182,7 +183,7 @@ export default function Home() {
 
           <div className="feature-row flip">
             <div className="feature-copy">
-              <div className="feature-icon"><Icon name="feather" size={26} /></div>
+              <div className="feature-kicker">The soul</div>
               <h3>Every merryman is an individual.</h3>
               <p>
                 Give it a name. It keeps its own markdown files, learns who you are, writes a journal
@@ -191,7 +192,7 @@ export default function Home() {
               </p>
               <ul className="feature-list">
                 {["“I'll call you Will Scarlet” — it's named", "It remembers your preferences from conversation", "Milestones at a week, a month, a hundred days", "Read or edit its soul with any editor"].map((t) => (
-                  <li key={t}><Icon name="check" size={16} />{t}</li>
+                  <li key={t}>{t}</li>
                 ))}
               </ul>
             </div>

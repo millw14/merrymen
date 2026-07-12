@@ -54,21 +54,26 @@ h1, h2, h3, h4, .display { font-family: var(--font-display); font-weight: 700; l
 .ambient {
   position: fixed; inset: 0; z-index: -3; pointer-events: none;
   background:
-    radial-gradient(130% 70% at 50% 24%, rgba(158,170,158,0.13), rgba(58,66,58,0.05) 38%, transparent 64%),
-    radial-gradient(70% 46% at 50% -6%, color-mix(in srgb, var(--lime) 10%, transparent), transparent 55%),
-    radial-gradient(46% 40% at 84% 14%, rgba(190,205,190,0.06), transparent 72%),
-    linear-gradient(180deg, #0b0f0c 0%, var(--bg) 60%);
+    /* diagonal light sweep across a dark surface */
+    linear-gradient(118deg, transparent 22%, rgba(188,200,190,0.05) 46%, rgba(206,218,208,0.09) 55%, rgba(150,162,152,0.03) 64%, transparent 82%),
+    /* soft studio key light, high centre */
+    radial-gradient(120% 72% at 50% 20%, rgba(176,188,176,0.16), rgba(52,60,54,0.06) 40%, transparent 66%),
+    /* fill light off to the right */
+    radial-gradient(52% 42% at 82% 10%, rgba(206,220,206,0.07), transparent 72%),
+    /* vignette + base */
+    radial-gradient(120% 120% at 50% 42%, transparent 52%, rgba(0,0,0,0.5) 100%),
+    linear-gradient(180deg, #0c110d 0%, var(--bg) 58%);
 }
-/* halftone dots — the printed-poster texture, fading toward the edges */
+/* halftone dots — the printed-poster texture over the whole upper canvas */
 .halftone {
   position: fixed; inset: 0; z-index: -2; pointer-events: none;
-  background-image: radial-gradient(rgba(233,242,236,0.05) 0.9px, transparent 1.3px);
-  background-size: 4px 4px;
-  -webkit-mask-image: radial-gradient(78% 60% at 50% 20%, #000, transparent 78%);
-  mask-image: radial-gradient(78% 60% at 50% 20%, #000, transparent 78%);
+  background-image: radial-gradient(rgba(233,242,236,0.06) 0.9px, transparent 1.35px);
+  background-size: 3.5px 3.5px;
+  -webkit-mask-image: radial-gradient(95% 78% at 50% 26%, #000, transparent 88%);
+  mask-image: radial-gradient(95% 78% at 50% 26%, #000, transparent 88%);
 }
 .grain {
-  position: fixed; inset: -50%; z-index: -1; pointer-events: none; opacity: 0.09;
+  position: fixed; inset: -50%; z-index: -1; pointer-events: none; opacity: 0.11;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
@@ -111,9 +116,9 @@ h1, h2, h3, h4, .display { font-family: var(--font-display); font-weight: 700; l
 .btn.has-box { padding-right: 8px; }
 .btn .box { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; flex: 0 0 auto; transition: border-color .18s, background .18s; }
 .btn:active { transform: translateY(1px); }
-.btn-primary { background: var(--lime); color: #0a1400; }
-.btn-primary:hover { background: var(--lime-2); }
-.btn-primary .box { background: rgba(8, 18, 0, 0.16); }
+.btn-primary { background: #e9efec; color: #0a0d0b; }
+.btn-primary:hover { background: #ffffff; }
+.btn-primary .box { background: rgba(10, 13, 11, 0.14); }
 .btn-ghost { background: transparent; color: var(--text); border-color: var(--line); }
 .btn-ghost:hover { border-color: color-mix(in srgb, var(--lime) 55%, transparent); }
 .btn-ghost .box { border: 1px solid var(--line); }
@@ -151,7 +156,7 @@ h1, h2, h3, h4, .display { font-family: var(--font-display); font-weight: 700; l
   font-family: var(--font-display); font-weight: 800;
   font-size: 19.5vw; letter-spacing: -0.055em; line-height: 0.74;
   text-align: center; white-space: nowrap; user-select: none; margin: 0;
-  color: rgba(233, 242, 236, 0.13);
+  color: rgba(214, 224, 216, 0.4);
 }
 
 /* ---------- pill / eyebrow ---------- */
@@ -178,15 +183,16 @@ section { padding: 96px 0; }
   padding: 56px 0; border-top: 1px solid var(--border-soft);
 }
 .feature-row.flip .feature-copy { order: 2; }
+.feature-kicker { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-faint); }
 .feature-icon {
-  width: 52px; height: 52px; display: grid; place-items: center; color: var(--lime);
-  border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--lime) 6%, transparent);
+  width: 50px; height: 50px; display: grid; place-items: center; color: var(--text-2);
+  border: 1px solid var(--line); border-radius: 12px; background: var(--bg-2);
 }
 .feature-copy h3 { font-size: clamp(26px, 3vw, 34px); margin: 22px 0 0; line-height: 1.08; }
 .feature-copy p { color: var(--text-dim); margin: 16px 0 0; font-size: 16.5px; }
-.feature-list { list-style: none; padding: 0; margin: 22px 0 0; display: flex; flex-direction: column; gap: 11px; }
-.feature-list li { position: relative; padding-left: 28px; color: var(--text-2); font-size: 15px; }
-.feature-list li svg { position: absolute; left: 0; top: 2px; color: var(--lime); }
+.feature-list { list-style: none; padding: 0; margin: 24px 0 0; display: flex; flex-direction: column; gap: 12px; }
+.feature-list li { position: relative; padding-left: 24px; color: var(--text-2); font-size: 15px; }
+.feature-list li::before { content: ""; position: absolute; left: 0; top: 11px; width: 12px; height: 1px; background: var(--text-faint); }
 
 /* code / terminal / chat mockups */
 .mock {
@@ -223,9 +229,13 @@ code.inline {
 .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border-soft); border: 1px solid var(--border-soft); border-radius: var(--radius); overflow: hidden; }
 .cell { background: var(--bg-1); padding: 30px 26px; transition: background .18s; }
 .cell:hover { background: var(--bg-2); }
-.cell-ic { width: 40px; height: 40px; color: var(--lime); display: grid; place-items: center; }
+.cell-ic { width: 40px; height: 40px; color: var(--text-dim); display: grid; place-items: center; }
+.cell:hover .cell-ic { color: var(--text-2); }
 .cell h4 { font-size: 17px; margin: 18px 0 0; letter-spacing: -0.01em; }
 .cell p { margin: 9px 0 0; color: var(--text-dim); font-size: 14px; line-height: 1.6; }
+.cell.promise { padding: 24px 22px; }
+.cell.promise .promise-n { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); letter-spacing: 0.08em; }
+.cell.promise h4 { font-size: 15.5px; margin-top: 12px; font-weight: 600; }
 
 /* ---------- steps ---------- */
 .steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; background: var(--border-soft); border: 1px solid var(--border-soft); border-radius: var(--radius); overflow: hidden; }
