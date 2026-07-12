@@ -34,7 +34,13 @@ export const metadata: Metadata = {
     siteName: "merrymen",
     type: "website",
   },
-  twitter: { card: "summary_large_image", title: "merrymen", description: "Autonomous trading agents you own and control." },
+  twitter: {
+    card: "summary_large_image",
+    title: "merrymen",
+    description: "Autonomous trading agents you own and control.",
+    site: "@MerrymenAI",
+    creator: "@MerrymenAI",
+  },
   icons: { icon: "/favicon.svg" },
 };
 

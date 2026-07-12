@@ -3,6 +3,7 @@ import { Logo } from "./Logo";
 
 const GITHUB = "https://github.com/millw14/merrymen";
 const NPM = "https://www.npmjs.com/package/merrymen";
+const X_URL = "https://x.com/MerrymenAI";
 
 export function Footer() {
   return (
@@ -35,6 +36,7 @@ export function Footer() {
 
           <div className="foot-col">
             <h5>Project</h5>
+            <a href={X_URL} target="_blank" rel="noreferrer">X (Twitter)</a>
             <a href={GITHUB} target="_blank" rel="noreferrer">GitHub</a>
             <a href={NPM} target="_blank" rel="noreferrer">npm</a>
             <Link href="/terms">Terms</Link>

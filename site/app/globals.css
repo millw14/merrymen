@@ -103,6 +103,8 @@ h1, h2, h3, h4, .display { font-family: var(--font-display); font-weight: 700; l
 .nav-right { margin-left: auto; display: flex; align-items: center; gap: 18px; }
 .nav-ghost { color: var(--text-dim); font-size: 14px; font-weight: 500; }
 .nav-ghost:hover { color: var(--text); }
+.nav-social { display: inline-flex; align-items: center; }
+.nav-social svg { display: block; }
 
 /* ---------- buttons ---------- */
 .btn {
