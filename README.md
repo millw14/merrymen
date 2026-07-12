@@ -4,45 +4,48 @@
 
 # merrymen
 
-Autonomous trading agents for Robinhood Chain. Your band works Sherwood 24/7 —
-trading Stock Tokens, farming yield, LPing — inside hard on-chain permission
-walls you set and can see.
+Self-hosted autonomous trading agents for Robinhood Chain. Your band works
+Sherwood 24/7 — trading Stock Tokens, farming yield, LPing — inside hard on-chain
+permission walls you set and can see. Name your merryman, chat with it and steer
+it from Telegram (it can even run your PC), and watch every trade on a local
+dashboard.
 
 **The five promises:** your keys, your caps · bounded worst case · every trade
-simulated first · fees only on profit above high-water mark · honest scoreboard.
+simulated first · fees only on profit above the high-water mark · an honest
+scoreboard.
 
-## Layout
+**The one rule of the house:** the model proposes, deterministic code disposes.
+No model — the strategist, a Telegram message, a voice note — ever constructs
+calldata, moves funds, or touches your PC without passing a closed, typed
+command set and the on-chain policy wall. This is the whole safety story;
+everything below is a consequence of it.
 
-- `packages/core` — chain constants, token registry, shared types. Every address
-  is probed on-chain before it lands here.
-- `web` — Next.js app: onboarding, permission-grant flow, agent dashboard with
-  live positions, trade record (simulation receipts included), kill switch, and
-  the public scoreboard at `/scoreboard`.
-- `worker` — Node runtime: grant sync → scheduler → strategy tick → policy
-  check → simulate → execute → record. Plus the backtest harness
-  (`src/backtest.ts`) that runs real strategies through the real policy layer
-  over synthetic price series.
-- `contracts` — the on-chain drawdown breaker: `BreakerRegistry` (keeper-reported
-  equity, permissionless trip on reported data, owner-only reset) and
-  `KernelBreakerPolicy` (Kernel v3 module type 5 — fails every UserOp at
-  validation once tripped). `npm test -w @merrymen/contracts`; deployment waits
-  on a funded key (targets in `hardhat.config.ts`).
+---
 
-## Strategies
+## The workflow, end to end
 
-Selected via `MERRYMEN_STRATEGY`:
+1. **Install** it (one line — installs Node too if you need it).
+2. **`merrymen start`** — opens the dashboard at `localhost:3100` and looses the
+   24/7 worker.
+3. **Create your agent wallet** at `/grant` — no wallet to connect; merrymen
+   mints the keys, you back them up, pick **testnet** (practice) or **mainnet**
+   (real funds), and set the caps the account contract itself enforces.
+4. **Fund it** — testnet gas from the faucet, or send ETH + USDG to the account
+   address on mainnet. The worker arms itself on its next tick, no restart.
+5. **(optional) Link Telegram** — chat with your merryman, give it a name, let it
+   trade, report, alert, and control your PC — all inside the same walls.
 
-| name | what it does |
-|---|---|
-| `steady-basket` (default) | DCA a weighted stock basket per tick; idle cash sweeps to the Morpho vault; pulls cash back when short |
-| `weekend-gap` | Enter each leg when its Chainlink feed goes stale (market close), exit the full holding when it refreshes (open) — the strategy class that only exists on-chain |
-| `llm-strategist` | Claude proposes typed buy/sell/hold actions at decision windows (default 30min); deterministic code validates and disposes — the model never sees an address or emits calldata. Needs `ANTHROPIC_API_KEY`; without it, the null driver proposes nothing |
+Everything lives in **`~/.merrymen`** (settings, grant, ledger, your strategies,
+your merryman's soul). The install is disposable; upgrades never touch your data.
 
-## Install
+---
 
-Self-hosted, terminal-first — install once, run from anywhere. No clone.
+## 1 · Install
 
-**No Node yet? One line does everything** — installs Node if missing, then merrymen, and fixes PATH:
+Self-hosted, terminal-first. Install once, run from anywhere. No clone.
+
+**No Node yet? One line does everything** — installs Node if missing, then
+merrymen, and puts it on PATH:
 
 ```powershell
 # Windows (PowerShell)
@@ -53,231 +56,260 @@ irm https://raw.githubusercontent.com/millw14/merrymen/main/install.ps1 | iex
 curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | bash
 ```
 
-**Already have Node 22.12+?** Just:
+**Already have Node 22.12+?**
 
 ```bash
 npm install -g merrymen            # or: npm i -g github:millw14/merrymen
-merrymen setup                     # check node/npm/PATH (prints fixes if anything's off)
-merrymen onboard                   # wizard: bundler URL, API keys, strategy, basket
-merrymen start                     # dashboard at localhost:3100 + the 24/7 worker
+merrymen setup                     # checks node / npm / PATH, prints exact fixes
+merrymen onboard                   # optional wizard: bundler URL, keys, strategy, basket
+merrymen start                     # dashboard at localhost:3100 + the worker
 ```
 
 Requires Node 22.12+. `merrymen setup` diagnoses the two things that trip people
-up — an old Node, and npm's global-bin folder missing from PATH — and gives you
-the exact copy-paste fix for your OS. All your data lives in **`~/.merrymen`** (settings, grant,
-ledger, strategies) — the install is disposable, upgrades never touch it. Secrets
-(bundler/RPC keys, Anthropic, Rialto, Telegram token) stay in that folder, never
-leave the machine, and never echo back to the browser (masked to their last 4).
-The dashboard binds to **localhost only** — it has no login and holds your trading
-controls, so it isn't reachable from your network. To open it to a trusted LAN
-(e.g. your phone on home WiFi), start with `MERRYMEN_HOST=0.0.0.0 merrymen start`.
+up — an old Node, and npm's global-bin folder missing from PATH.
 
-> **`merrymen: command not found`?** Your npm global-bin folder isn't on PATH
-> (this also breaks other global CLIs like `yarn`/`vercel`). Two options:
-> use `npx merrymen onboard` / `npx merrymen start` — works everywhere, no PATH
-> changes — or add the folder to PATH once:
-> - **Windows:** `[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path","User") + ";$env:APPDATA\npm", "User")` then open a new terminal
-> - **macOS/Linux:** ensure `$(npm prefix -g)/bin` is on your `PATH` (add it to `~/.zshrc` / `~/.bashrc`)
+> **`merrymen: command not found`?** npm's global-bin folder isn't on PATH. Use
+> `npx merrymen start` (works everywhere), or add it once:
+> - **Windows:** `[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path","User") + ";$env:APPDATA\npm", "User")` then reopen the terminal
+> - **macOS/Linux:** put `$(npm prefix -g)/bin` on your `PATH` (in `~/.zshrc` / `~/.bashrc`)
 
-Then create your agent wallet at `localhost:3100/grant` — no wallet to connect;
-merrymen mints the keys and walks you through backup and funding. **Pick your
-ground on that page:**
+The dashboard binds to **localhost only** — it has no login and holds your
+trading controls, so it isn't reachable from your network. To open it to a
+trusted LAN (your phone on home WiFi), start with
+`MERRYMEN_HOST=0.0.0.0 merrymen start`.
 
-- **testnet · 46630** (default) — the sandbox. Free gas from the faucet, the
-  full pipeline end to end; the trading venues aren't deployed there, so swaps
-  simulate and no-route by design.
-- **mainnet · 4663** — **real funds.** Real USDG, real stock tokens, real
-  execution — this is where the band actually trades. The page makes you
-  acknowledge it first: your keys are generated and stored **in plain text on
-  your machine** (TEE custody is on the roadmap), so treat the box like a hot
-  wallet — your caps are the seatbelt, start small. No faucet: fund the account
-  address from your own wallet or exchange (ETH for gas + USDG as capital).
-  One more gotcha: your **bundler URL embeds a chain id** — it must match your
-  wallet's chain (…/v2/4663/… for mainnet) or every op fails; the worker warns
-  you if they disagree.
+---
 
-Check the stack anytime:
+## 2 · Create & fund your agent wallet
+
+Open `localhost:3100/grant`. There's nothing to connect — merrymen generates a
+fresh account, shows you the owner key to **back up** (lose it and the funds are
+gone), and lets you fund it. **Pick your ground:**
+
+- **testnet · 46630** (default) — the sandbox. Free gas from the faucet, the full
+  pipeline end to end. The trading venues aren't deployed there, so swaps
+  simulate and no-route by design — perfect for learning the flow.
+- **mainnet · 4663** — **real funds.** Real USDG, real Stock Tokens, real
+  execution. The page makes you acknowledge it first: keys are generated and
+  stored **in plain text on your machine** (TEE custody is on the roadmap), so
+  treat the account like a hot wallet — your caps are the seatbelt, start small.
+  No faucet: send ETH (gas) + USDG (capital) from your own wallet or an exchange.
+
+The caps you set — per-trade, daily, ops/day, drawdown breaker, key expiry — are
+enforced **by the account contract on every operation**, not by promises. The
+worker can tighten within them but can never widen them without a new signed
+grant.
+
+> **Bundler gotcha:** a 4337 bundler URL (Pimlico/Alchemy) embeds its chain id in
+> the path (`…/v2/4663/…`). It must match your wallet's chain or every op fails —
+> the worker warns you at arm time if they disagree. Without a bundler URL at
+> all, the agent runs policy + simulation but never signs.
+
+---
+
+## 3 · Run it
 
 ```bash
-merrymen doctor     # node/keys/RPC/bundler/grant/db diagnostics
+merrymen start      # dashboard (localhost:3100) + the 24/7 worker
+merrymen doctor     # node / keys / RPC / bundler / grant / db diagnostics
 merrymen status     # heartbeat, grant, trades, equity
 merrymen selftest   # one policy-legal no-op through the full pipeline
-merrymen kill       # kill switch from the terminal
+merrymen kill       # kill switch from the terminal (destroys the grant)
 ```
 
-## Write your own bot
+The worker's loop each tick: **grant sync → market safety (prices, pauses,
+sequencer) → strategy proposes → policy check → quote simulation → execute →
+record**. It re-reads `~/.merrymen/settings.json` every tick, so changes from the
+dashboard apply within one tick — connection changes re-arm the executor,
+strategy changes rebuild in place; no restart. The dashboard shows live
+positions, the trade record (with simulation receipts), the event feed, and a
+kill switch; the public scoreboard is at `/scoreboard`.
 
-Your strategies live in **`~/.merrymen/strategies/`** — hot-reloaded on save,
-crash-isolated, and incapable of exceeding the caps you signed (every intent
-passes shape validation → the policy wall → quote simulation → the on-chain
-session key). Scaffold one and go:
+---
 
-```bash
-merrymen strategy new my-bot       # drops a commented template in ~/.merrymen/strategies
-# edit ~/.merrymen/strategies/my-bot.mjs, select "my-bot" in /settings — done
-```
+## 4 · Chat with your merryman (Telegram)
 
-Default-export `{ name, tick(snapshot, ctx) }` — no imports needed, `ctx`
-injects the verified registry (`ctx.tokenBySymbol.QQQ`, `ctx.CASH.USDG`,
-`ctx.UNISWAP.swapRouter02`, `ctx.usdg(10)`). See
-[strategies/README.md](./strategies/README.md) and
-[strategies/example-dip-buyer.mjs](./strategies/example-dip-buyer.mjs) for the
-full walkthrough.
-
-## Chat with your merryman (Telegram)
-
-Link a Telegram bot and run your band from your phone — natural-language chat plus
+Link a bot and run the band from your phone — natural-language chat plus slash
 commands, all inside the same permission walls. Telegram is a **control surface,
 never a trade path**: every message is untrusted text that flows through the same
-discipline the LLM strategist uses (parse → validate → policy wall → signed
-on-chain grant). Chat can *tighten* caps but can never widen them — raising a cap
-still needs a browser re-sign.
+parse → validate → policy wall → signed grant discipline as the strategist.
 
 ```
-1. @BotFather on Telegram → /newbot → copy the token
-2. /settings → Telegram → paste token, "test connection" (shows @yourbot), enable
-3. Message your bot: /link <code>   (the one-time code shown in /settings)
+1. @BotFather → /newbot → copy the token
+2. localhost:3100/settings → Telegram → paste token, "test connection", enable
+3. Message your bot:  /link <code>   (the one-time code shown in /settings)
    → you're now the owner; only allowlisted chats are obeyed
 ```
 
-Commands (all work without an Anthropic key; with one, plain English works too —
-"how are we doing?", "pause everything", "send 20 USDG to 0x…", "ping me when
-QQQ hits 600", "why did you buy that?"):
+There's an obvious **Chat on Telegram** button right on the dashboard (topbar +
+a card) so you don't have to hunt for it.
+
+Commands work bare; with an Anthropic key, plain English does too ("how are we
+doing?", "pause everything", "send 20 USDG to 0x…", "ping me when QQQ hits 600",
+"why did you buy that?"). Voice notes work as well.
 
 | command | does |
 |---|---|
 | `/status` `/positions` `/pnl` `/trades` | read the live book |
-| `/report` | the campfire report — today's P&L, best holding, arrows loosed |
-| `/why` | the agent explains its last trade from its recorded reasoning |
-| `/brag` | a shareable scorecard — P&L, best shot, days riding |
+| `/report` · `/brag` · `/why` | daily campfire report · shareable scorecard · explain the last trade |
 | `/buy <SYM> <usdg>` `/sell <SYM> <usdg>` | trade (passes the policy wall) |
-| `/transfer <0x…> <usdg>` | send USDG out — **always asks you to /confirm** first |
+| `/transfer <0x…> <usdg>` | send USDG out — **always asks you to `/confirm`** |
 | `/alert <SYM> > <price>` `/alerts` `/unalert <n>` | one-shot price alerts |
-| `/pause` `/resume` | halt / resume the strategy loop (kill-switch marker) |
-| `/strategy <name>` | switch strategy (builtin or your `~/.merrymen/strategies/*`) |
-| `/cap <usdg>` | tighten the chat ceiling within the signed grant (never widens) |
-| `/kill` | destroy the grant — the worker halts next tick |
+| `/pause` `/resume` · `/strategy <name>` · `/cap <usdg>` | steer the worker (cap only tightens) |
+| `/name <name>` · `/soul` · `/remember <fact>` | name it, see who it is, teach it about you |
+| `/kill` | destroy the grant, stand the band down |
 | `/help` | the full list |
 
-**The merryman also speaks first** (toggle in `/settings`): a ping the moment a
-trade lands or the wall turns one back, warnings when the grant nears expiry /
-drawdown nears the breaker / gas runs low, your price alerts, and a **daily
-campfire report** at the hour you pick.
+**It speaks first, too** (toggle in `/settings`): a ping the moment a trade lands
+or the wall turns one back; warnings when the grant nears expiry, drawdown nears
+the breaker, or gas runs low; your price alerts; and a **daily campfire report**
+at the hour you pick.
 
-**Transfers are triple-guarded**: off by default (dashboard opt-in) · the grant's
-on-chain call policy caps the amount per call · every transfer echoes the full
-recipient address and waits for an explicit `/confirm` (90s) · a daily transfer
-budget bounds the total. A prompt-injected "send everything to 0xevil" can at
-worst produce a confirmation card you'll see and `/cancel`. Transfers need a
-wallet created after v0.2 (the grant carries the transfer permission) — older
-grants get a "re-create your wallet" reply instead of a revert.
-
-Turn off state-changing commands (read + chat only) with the **control** toggle,
-and bound any chat-triggered action with the per-action USDG ceiling — both in
-`/settings`. The bot token is a secret: it stays in `~/.merrymen` and never
-returns to the browser. Polling is off by default; existing installs are
-untouched until you opt in.
+**Transfers are triple-guarded:** off by default · the grant's on-chain call
+policy caps the amount · every transfer echoes the full recipient address and
+waits for an explicit `/confirm` (90s). A prompt-injected "send everything to
+0xevil" can at worst produce a confirmation card you'll see and `/cancel`. (New
+wallets carry the transfer permission; a pre-transfer grant gets a "re-create
+your wallet" reply instead.) Turn off all state-changing commands with the
+**control** toggle for read + chat only.
 
 ### Remote control — your merryman runs your PC (OpenClaw-style)
 
-With an Anthropic key and the **remote control** section enabled in `/settings`,
-your merryman can act on the machine it runs on — from Telegram, in plain English
-or slash commands:
+Enable the **remote control** section in `/settings` and your merryman can act on
+the machine it runs on, from Telegram:
 
 | capability | what it does |
 |---|---|
-| 📸 screen | `/shot` sends a screenshot; **👁️ vision** answers "what am I looking at?" / "read this error" from the screen |
-| 🚀 apps & web | `/open spotify`, `/open github.com` — apps from your allowlist, any URL |
-| ⚙️ system | `/sys` info, volume, media keys, desktop `/notify`, `/lock`, sleep/shutdown |
+| 📸 screen · 👁️ vision | `/shot` a screenshot; ask "what am I looking at? / read this error" (Claude vision) |
+| 🚀 apps & web | `/open spotify`, `/open github.com` — allowlisted apps, any URL |
+| ⚙️ system | `/sys` info, volume, media keys, `/notify`, `/lock`, sleep/shutdown |
 | 📂 files · 📋 clipboard | `/ls`, `/get` inside one folder you pick; read/set the clipboard |
-| 🖥️ shell | `/run <cmd>` — only exact commands you allowlisted |
-| ⌨️ keyboard | `/type <text>`, `/key ctrl+s` into the active window |
-| 🎙️ voice | send a voice note → transcribed → run as a command |
-| 👀 watchers | `/remind 20m …`, `/watch cpu>80`, `/watch file build.log`, `/watch proc chrome` |
+| 🖥️ shell · ⌨️ keyboard | `/run` allowlisted commands; `/type`, `/key ctrl+s` |
+| 🎙️ voice · 👀 watchers | voice note → command; `/remind 20m …`, `/watch cpu>80`, `/watch file …`, `/watch proc …` |
 
-**The safety model is the whole point.** It's a hot wallet for your desktop, so:
+**The safety model is the point** — it's a hot wallet for your desktop:
 
 - **Off by default**, then **one capability at a time** — nothing runs unless you
-  turned that group on.
+  turned that group on. `/pc` shows what's enabled; the master switch off kills
+  all of it instantly.
 - **Allowlists for the sharp edges**: shell runs *only* your exact pre-approved
   commands (chaining/redirects always refused); files are confined to one root
   (no `..` escape); apps to a name list.
-- **Confirm gate**: shell, keyboard, file-send, and power actions never fire
-  until you reply `/confirm` to the exact action echoed back.
-- **Everything is local** and logged to the dashboard feed; a chat message can
-  only ever produce one command from a closed set — it can't invent a capability
-  or smuggle a raw command past the allowlist. `/pc` shows what's enabled;
-  turning the master switch off kills all of it instantly.
+- **Confirm gate**: shell, keyboard, file-send, and power never fire until you
+  reply `/confirm` to the exact action echoed back.
+- **Local + logged**: a chat message can only ever emit one command from a closed
+  set — it can't invent a capability or smuggle a raw command past the allowlist.
 
 Windows is fully supported; macOS/Linux use the standard tools (`screencapture`,
-`open`, `pbcopy`, …) and gracefully say so where one isn't present. Voice needs
-an OpenAI-compatible transcription key (set it in the dashboard).
+`open`, `pbcopy`, …) and say so where one isn't present. Voice needs an
+OpenAI-compatible transcription key (set it in the dashboard).
 
 ### Your merryman has a soul
 
 Every merryman is an individual with a name **you** give it — and it grows with
-you. Its soul lives as plain markdown in **`~/.merrymen/soul/`** that it keeps
-up to date itself (and that you can read or edit with any editor):
+you. Its soul lives as plain markdown in **`~/.merrymen/soul/`** that it keeps up
+to date itself (read or edit it with any editor):
 
 | file | what it holds |
 |---|---|
 | `IDENTITY.md` | who it is — its name (`/name Will Scarlet`), born date |
-| `OWNER.md` | what it's learned about **you** — one dated line at a time, from conversation or `/remember` |
-| `JOURNAL.md` | what it writes about its days — a first-person entry at campfire time |
+| `OWNER.md` | what it's learned about **you**, one dated line at a time |
+| `JOURNAL.md` | a first-person entry it writes at campfire time |
 
 The longer you ride together, the closer the bond: *new companion* → *trusted
 companion* (a week) → *old friend* (a month) → *sworn brother-in-arms* (100
-days), with milestone messages along the way — and its tone in chat warms to
-match. `/soul` shows who it is and what it knows; `/forget` wipes its owner
-notes; deleting the folder is a full rebirth.
+days), with milestone messages and a tone that warms to match. Memory is
+**context, never capability** — soul files flavor chat only; every command still
+passes the closed enum and the policy wall, and the memory sanitizer refuses
+anything address-, key-, or code-shaped, so a poisoned note can't smuggle a
+recipient into a prompt.
 
-Memory is **context, never capability**: soul files flavor chat only — every
-command still passes the closed enum and the policy wall, and the memory
-sanitizer refuses anything address-, key-, or code-shaped, so a poisoned note
-can never smuggle a transfer recipient into a prompt.
+---
+
+## Strategies
+
+Pick one in `/settings` (or `/strategy <name>` from Telegram; `MERRYMEN_STRATEGY`
+is the headless fallback):
+
+| name | what it does |
+|---|---|
+| `steady-basket` (default) | DCA a weighted stock basket per tick; idle cash sweeps to the Morpho vault; pulls cash back when short |
+| `weekend-gap` | Enter each leg when its Chainlink feed goes stale (market close), exit when it refreshes (open) — a strategy class that only exists on-chain |
+| `llm-strategist` | Claude proposes typed buy/sell/hold at decision windows; deterministic code validates and disposes — the model never sees an address or emits calldata. Needs an Anthropic key |
+
+### Write your own
+
+Your strategies live in **`~/.merrymen/strategies/`** — hot-reloaded on save,
+crash-isolated, and incapable of exceeding the caps you signed (every intent
+passes shape validation → the policy wall → quote simulation → the on-chain
+session key):
+
+```bash
+merrymen strategy new my-bot       # commented template in ~/.merrymen/strategies
+# edit it, select "my-bot" in /settings — done
+```
+
+Default-export `{ name, tick(snapshot, ctx) }` — no imports needed; `ctx` injects
+the verified registry (`ctx.tokenBySymbol.QQQ`, `ctx.CASH.USDG`,
+`ctx.UNISWAP.swapRouter02`, `ctx.usdg(10)`). See
+[strategies/README.md](./strategies/README.md) and
+[strategies/example-dip-buyer.mjs](./strategies/example-dip-buyer.mjs).
+
+---
+
+## For developers
 
 <details>
-<summary>develop from a clone</summary>
+<summary>repo layout · clone-dev · env vars · tests</summary>
 
+### Layout
+- `packages/core` — chain constants, token registry, shared types. Every address
+  is probed on-chain before it lands here.
+- `web` — Next.js dashboard: onboarding, the create-wallet/grant flow, live
+  positions, trade record (simulation receipts), kill switch, scoreboard,
+  settings + all APIs.
+- `worker` — Node runtime: grant sync → scheduler → strategy tick → policy check
+  → simulate → execute → record; the Telegram bridge + PC-control layer; the
+  backtest harness (`src/backtest.ts`) that runs real strategies through the real
+  policy layer over synthetic prices.
+- `contracts` — the on-chain drawdown breaker: `BreakerRegistry` +
+  `KernelBreakerPolicy` (Kernel v3 module type 5 — fails every UserOp once
+  tripped). `npm test -w @merrymen/contracts`; deployment waits on a funded key.
+  Until deployed, the breaker is worker-enforced.
+
+### Develop from a clone
 ```bash
 git clone https://github.com/millw14/merrymen && cd merrymen
 npm install          # prepare hook builds the dashboard
 npm run onboard && npm start
 # or run halves separately: npm run dev:web · npm run dev:worker
+npm run typecheck && npm test
 ```
 
-</details>
-
-**Configure everything at `/settings`** — bundler URL, RPC overrides, API keys
-(Anthropic, Rialto), breaker address, strategy, and every trading knob. Saved
-to `.data/settings.json` (gitignored; secrets never echo back to the browser)
-and picked up by the worker within one tick: connection changes re-arm the
-executor, strategy changes rebuild in place. Precedence: settings file > env
-var > default.
-
-Sign a grant at `/grant` (testnet 46630); the worker arms itself on its next
-tick — no restart. The kill switch on the dashboard destroys the grant and the
-worker halts on its next tick; hard on-chain expiry is the backstop.
-
-Worker env (fallbacks when the settings file doesn't set a value):
+### Configuration
+The dashboard `/settings` is the source of truth (Anthropic/Rialto/Telegram keys,
+bundler + RPC URLs, strategy + every trading knob, the Telegram + PC-control
+toggles and allowlists). Saved to `~/.merrymen/settings.json`; secrets are masked
+to their last 4 and never echo back to the browser. Precedence:
+**settings file > env var > default.** Env vars are the headless fallback:
 
 | var | default | meaning |
 |---|---|---|
+| `MERRYMEN_HOST` | `127.0.0.1` | dashboard bind host; set `0.0.0.0` for trusted-LAN access |
 | `MERRYMEN_BUNDLER_URL` | — | 4337 bundler RPC; without it execution is stubbed (policy/simulation still run) |
-| `MERRYMEN_SWAP_VENUE` | `uniswap` | `uniswap` = full quote→swap leg via SwapRouter02; `rialto` = approval-only until API onboarding |
+| `MERRYMEN_SWAP_VENUE` | `uniswap` | `uniswap` = full quote→swap via SwapRouter02; `rialto` = approval-only until API onboarding |
 | `MERRYMEN_SLIPPAGE_BPS` | `100` | max slippage vs the QuoterV2 simulation |
-| `MERRYMEN_GRANT_FILE` | `.data/grant.json` | grant handoff written by the web app |
+| `MERRYMEN_GRANT_FILE` | `~/.merrymen/grant.json` | grant handoff written by the web app |
 | `MERRYMEN_STRATEGY` | `steady-basket` | strategy name (see table above) |
-| `MERRYMEN_PERF_FEE_BPS` | `1000` | performance fee on profit above the high-water mark (accrual-only ledger) |
+| `MERRYMEN_PERF_FEE_BPS` | `1000` | performance fee on profit above the high-water mark (accrual-only) |
 | `MERRYMEN_BREAKER_ADDRESS` | — | deployed BreakerRegistry; a tripped breaker halts all intents |
-| `MERRYMEN_RIALTO_API_KEY` | — | Rialto integrator key; enables the full quote→swap leg (target validated against the on-chain router registry) |
-| `ANTHROPIC_API_KEY` | — | enables the LLM strategist's Claude driver (`MERRYMEN_LLM_MODEL`, `MERRYMEN_LLM_INTERVAL_MIN`, `MERRYMEN_LLM_MAX_ACTION_USDG` tune it) — also powers Telegram natural-language chat |
-| `MERRYMEN_TELEGRAM_BOT_TOKEN` | — | @BotFather token; enables the Telegram control/chat bridge (`MERRYMEN_TELEGRAM_ENABLED`, `MERRYMEN_TELEGRAM_CONTROL_ENABLED`, `MERRYMEN_TELEGRAM_ALLOWLIST`, `MERRYMEN_TELEGRAM_MAX_ACTION_USDG` tune it) |
+| `MERRYMEN_RIALTO_API_KEY` | — | Rialto integrator key; enables the full quote→swap leg |
+| `ANTHROPIC_API_KEY` | — | LLM strategist driver + Telegram natural-language chat + vision |
+| `MERRYMEN_TELEGRAM_BOT_TOKEN` | — | @BotFather token; enables the Telegram bridge (all other Telegram + PC-control settings live in `/settings`) |
 
-`npm run typecheck` and `npm test` cover the policy mirror, strategy, venue
-math (slippage, quote selection, calldata), and the ERC-8056 invariant that a
-stock split is not a crash.
+`npm test` covers the policy mirror, strategies, venue math (slippage, quote
+selection, calldata), the ERC-8056 invariant that a stock split is not a crash,
+and the Telegram + PC-control safety layer (allowlist enforcement, path-traversal
+rejection, capability gating, confirm-park, prompt-injection → no-op).
 
-Plan: `../agent-trading-platform-plan.md`. Architecture rule of the house:
-**the LLM proposes, deterministic code disposes** — no model ever constructs
-calldata or bypasses the policy layer.
+</details>
