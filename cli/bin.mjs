@@ -224,6 +224,9 @@ async function onboard() {
   await banner("gather your band · rob the spread · give yourself the yield");
   console.log(
     `  ${dim("your keys, your caps · bounded worst case · every trade simulated first")}\n` +
+      `  ${bold("Every step here is optional.")} Press Enter through them all and your band\n` +
+      `  rides in ${green("practice mode")} — real market, simulated fills, zero setup. Add a key\n` +
+      `  later (here or in the dashboard) whenever you want to go live.\n\n` +
       `  Everything you tell me is stashed in ${dim(HOME)} — yours, outside the install.\n` +
       `  Blank answers keep what's saved. Ctrl+C to slip back into the forest anytime.\n`,
   );
@@ -243,20 +246,18 @@ async function onboard() {
   const p = makePrompter();
   const keep = (has) => dim(has ? ` [saved — blank keeps it]` : ` [blank skips]`);
 
-  console.log(bold(`\n  ${c.arrow} 1/4 · the getaway horse`) + dim("  (how ops reach the chain)"));
-  console.log(dim("  A 4337 bundler signs and submits the agent's operations."));
-  console.log(dim("  Free keys: dashboard.pimlico.io or dashboard.alchemy.com."));
-  console.log(dim("  The chain id in the URL must match your wallet's chain: 46630 testnet · 4663 mainnet."));
-  const bundler = (await p.ask(`  bundler RPC URL${keep(current.bundlerUrl)}: `)).trim();
-  if (bundler) current.bundlerUrl = bundler;
+  console.log(bold(`\n  ${c.arrow} 1/4 · go live`) + dim("  (optional — skip to stay in practice mode)"));
+  console.log(dim("  To place real trades, merrymen needs one key: a free ") + "Pimlico" + dim(" key that relays"));
+  console.log(dim("  your agent's transactions on-chain. Grab it at ") + bold("dashboard.pimlico.io") + dim(" → API Keys."));
+  console.log(dim("  Paste just the key — we build the right URL for your chain automatically."));
+  const bundlerKey = (await p.askSecret(`  Pimlico API key${keep(current.bundlerApiKey || current.bundlerUrl)}: `)).trim();
+  if (bundlerKey) current.bundlerApiKey = bundlerKey;
 
-  console.log(bold(`\n  ${c.arrow} 2/4 · your quiver`) + dim("  (keys — stored locally, never leave this machine)"));
-  console.log(dim("  Anthropic key arms the llm-strategist — console.anthropic.com → API keys."));
+  console.log(bold(`\n  ${c.arrow} 2/4 · the smart strategist`) + dim("  (optional — AI-picked entries)"));
+  console.log(dim("  The built-in strategies need no key at all. Add an Anthropic key only if you"));
+  console.log(dim("  want the llm-strategist — get one at ") + bold("console.anthropic.com") + dim(" → API keys."));
   const anthropic = (await p.askSecret(`  Anthropic API key${keep(current.anthropicApiKey)}: `)).trim();
   if (anthropic) current.anthropicApiKey = anthropic;
-  console.log(dim("  Rialto integrator key opens their meta-router — docs.rialto.xyz (wallet-signed onboarding)."));
-  const rialto = (await p.askSecret(`  Rialto API key${keep(current.rialtoApiKey)}: `)).trim();
-  if (rialto) current.rialtoApiKey = rialto;
 
   console.log(bold(`\n  ${c.arrow} 3/4 · pick your outlaw`) + dim("  (strategy)"));
   const custom = await listCustom();

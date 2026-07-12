@@ -99,11 +99,13 @@ merrymen start      # dashboard at localhost:3100 + the worker`}
           <strong>by the account contract on every operation</strong>. The worker can tighten within
           them but never widen them without a new signed grant.
         </p>
-        <div className="callout warn">
-          <strong>Bundler gotcha:</strong> a 4337 bundler URL (Pimlico/Alchemy) embeds its chain id
-          (<code className="inline">…/v2/4663/…</code>). It must match your wallet&apos;s chain or every op fails —
-          the worker warns you at arm time. Without a bundler URL, the agent runs policy + simulation
-          but never signs.
+        <div className="callout">
+          <strong>Going live is one key.</strong> To sign real trades, paste a free{" "}
+          <a href="https://dashboard.pimlico.io" target="_blank" rel="noreferrer">Pimlico</a> API key in
+          settings — merrymen builds the bundler URL for your wallet&apos;s chain automatically, so it can
+          never point at the wrong one. No key? The band runs in <strong>practice mode</strong>: real
+          market, full policy + simulation, no signing. Advanced users can still paste a full bundler
+          URL (Alchemy or self-hosted) instead.
         </div>
 
         {/* ── run ── */}
@@ -281,7 +283,7 @@ merrymen kill       # kill switch — destroys the grant`}
         <h3>The dashboard won&apos;t open</h3>
         <p>Run <code className="inline">merrymen doctor</code>. The prebuilt dashboard ships with the package, so a missing build usually means an interrupted install — reinstall with <code className="inline">npm i -g merrymen@latest</code>.</p>
         <h3>Trades never land</h3>
-        <p>You need a <strong>bundler URL</strong> whose chain id matches your wallet, plus gas in the account. Without a bundler URL the agent simulates but never signs. On testnet, stock-token venues aren&apos;t deployed, so swaps no-route by design — that&apos;s expected.</p>
+        <p>Live trading needs a <strong>Pimlico API key</strong> in settings (or a full bundler URL), plus gas in the account. Without a bundler key the agent stays in practice mode — it simulates but never signs. On testnet, stock-token venues aren&apos;t deployed, so swaps no-route by design — that&apos;s expected.</p>
         <h3>Telegram says “not authorized”</h3>
         <p>Only allowlisted chats are obeyed. Send <code className="inline">/link &lt;code&gt;</code> with the code from settings to claim ownership.</p>
         <h3>A PC command is refused</h3>

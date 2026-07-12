@@ -55,6 +55,16 @@ export function explorerFor(chainId: number): string {
   return chainForId(chainId).blockExplorers!.default.url;
 }
 
+/**
+ * Build the Pimlico bundler RPC for a chain from just an API key. The chain id
+ * is stamped from the grant itself, so the URL can never point at the wrong
+ * chain — the whole class of "testnet bundler with a mainnet grant" bugs the
+ * mismatch guard exists for simply cannot happen on this path.
+ */
+export function pimlicoBundlerUrl(chainId: number, apiKey: string): string {
+  return `https://api.pimlico.io/v2/${chainId}/rpc?apikey=${encodeURIComponent(apiKey)}`;
+}
+
 /** ERC-4337 EntryPoints — all deployed on both mainnet and testnet (probed 2026-07-09). */
 export const ENTRYPOINT = {
   v06: "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",

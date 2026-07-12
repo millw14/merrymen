@@ -15,6 +15,7 @@ import {
 import { ensureHome, homePaths } from "./home";
 
 export interface ResolvedConfig {
+  bundlerApiKey: string | undefined;
   bundlerUrl: string | undefined;
   rpcMainnet: string | undefined;
   rpcTestnet: string | undefined;
@@ -134,6 +135,7 @@ export function mergeSettings(
   const basketSymbols = fileSymbols.length > 0 ? fileSymbols : d.basketSymbols;
 
   return {
+    bundlerApiKey: str(file.bundlerApiKey, env.MERRYMEN_BUNDLER_API_KEY),
     bundlerUrl: str(file.bundlerUrl, env.MERRYMEN_BUNDLER_URL),
     rpcMainnet: str(file.rpcMainnet, env.MERRYMEN_RPC_MAINNET),
     rpcTestnet: str(file.rpcTestnet, env.MERRYMEN_RPC_TESTNET),
@@ -217,7 +219,7 @@ export function patchSettingsFile(patch: Partial<MerrymenSettings>): MerrymenSet
 
 /** Fingerprint of fields that require re-arming the executor when changed. */
 export function connectionKey(cfg: ResolvedConfig): string {
-  return [cfg.bundlerUrl, cfg.rpcMainnet, cfg.rpcTestnet].join("|");
+  return [cfg.bundlerApiKey, cfg.bundlerUrl, cfg.rpcMainnet, cfg.rpcTestnet].join("|");
 }
 
 /**

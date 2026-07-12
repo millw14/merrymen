@@ -11,7 +11,12 @@
 
 export interface MerrymenSettings {
   // ── connections ────────────────────────────────────────────────────────
-  /** 4337 bundler RPC (Pimlico/Alchemy). Without it execution is stubbed. */
+  /** The easy path to live trading: a Pimlico API key (secret). The worker
+   * builds the bundler URL for the grant's chain automatically, so it can
+   * never point at the wrong chain. Blank = simulation only. */
+  bundlerApiKey?: string;
+  /** Advanced override: a full 4337 bundler RPC (Alchemy or self-hosted). Takes
+   * precedence over bundlerApiKey. Without either, execution is stubbed. */
   bundlerUrl?: string;
   /** Override the public mainnet RPC (rate limits bite at 1-minute ticks). */
   rpcMainnet?: string;
@@ -94,6 +99,7 @@ export interface MerrymenSettings {
 
 /** Keys whose values must never be echoed back to a browser. */
 export const SECRET_SETTING_KEYS = [
+  "bundlerApiKey",
   "anthropicApiKey",
   "rialtoApiKey",
   "telegramBotToken",

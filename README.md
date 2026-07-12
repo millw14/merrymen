@@ -68,7 +68,7 @@ curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | 
 ```bash
 npm install -g merrymen            # or: npm i -g github:millw14/merrymen
 merrymen setup                     # checks node / npm / PATH, prints exact fixes
-merrymen onboard                   # optional wizard: bundler URL, keys, strategy, basket
+merrymen onboard                   # optional wizard: Pimlico key, strategy, basket (all skippable)
 merrymen start                     # dashboard at localhost:3100 + the worker
 ```
 
@@ -107,10 +107,11 @@ enforced **by the account contract on every operation**, not by promises. The
 worker can tighten within them but can never widen them without a new signed
 grant.
 
-> **Bundler gotcha:** a 4337 bundler URL (Pimlico/Alchemy) embeds its chain id in
-> the path (`…/v2/4663/…`). It must match your wallet's chain or every op fails —
-> the worker warns you at arm time if they disagree. Without a bundler URL at
-> all, the agent runs policy + simulation but never signs.
+> **Going live is one key.** To sign real trades, paste a free [Pimlico](https://dashboard.pimlico.io)
+> API key in `/settings` — merrymen builds the bundler URL for your wallet's chain
+> automatically, so it can never point at the wrong one. No key = **practice mode**:
+> real market, full policy + simulation, no signing. Advanced users can still supply
+> a full bundler URL (Alchemy or self-hosted) instead.
 
 ---
 
@@ -303,7 +304,8 @@ to their last 4 and never echo back to the browser. Precedence:
 | var | default | meaning |
 |---|---|---|
 | `MERRYMEN_HOST` | `127.0.0.1` | dashboard bind host; set `0.0.0.0` for trusted-LAN access |
-| `MERRYMEN_BUNDLER_URL` | — | 4337 bundler RPC; without it execution is stubbed (policy/simulation still run) |
+| `MERRYMEN_BUNDLER_API_KEY` | — | Pimlico API key; the bundler URL is built for your grant's chain automatically |
+| `MERRYMEN_BUNDLER_URL` | — | advanced: full 4337 bundler RPC (overrides the key); without either, execution is stubbed |
 | `MERRYMEN_SWAP_VENUE` | `uniswap` | `uniswap` = full quote→swap via SwapRouter02; `rialto` = approval-only until API onboarding |
 | `MERRYMEN_SLIPPAGE_BPS` | `100` | max slippage vs the QuoterV2 simulation |
 | `MERRYMEN_GRANT_FILE` | `~/.merrymen/grant.json` | grant handoff written by the web app |

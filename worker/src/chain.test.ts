@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { chainForId, explorerFor, robinhoodChain, robinhoodTestnet } from "../../packages/core/src/index";
+import { chainForId, explorerFor, pimlicoBundlerUrl, robinhoodChain, robinhoodTestnet } from "../../packages/core/src/index";
 import { bundlerChainMismatch } from "./settings";
 import { readStatus, type StatusContext } from "./telegram/reads";
 
@@ -40,6 +40,20 @@ describe("chainForId / explorerFor", () => {
   it("explorer URLs differ per chain", () => {
     assert.equal(explorerFor(46630), "https://explorer.testnet.chain.robinhood.com");
     assert.equal(explorerFor(4663), "https://robinhoodchain.blockscout.com");
+  });
+});
+
+describe("pimlicoBundlerUrl — the easy-path builder is always chain-correct", () => {
+  it("stamps the grant's chain id into the URL, so the mismatch guard can't fire on it", () => {
+    for (const id of [46630, 4663]) {
+      const url = pimlicoBundlerUrl(id, "pim_secret");
+      assert.equal(url, `https://api.pimlico.io/v2/${id}/rpc?apikey=pim_secret`);
+      // the generated URL always matches the chain it was built for
+      assert.equal(bundlerChainMismatch(url, id), null);
+    }
+  });
+  it("url-encodes the key so odd characters can't break the URL", () => {
+    assert.match(pimlicoBundlerUrl(4663, "a b/c?d"), /apikey=a%20b%2Fc%3Fd$/);
   });
 });
 

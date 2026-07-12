@@ -39,6 +39,7 @@ import {
   UNISWAP,
   USDG_DECIMALS,
   chainForId,
+  pimlicoBundlerUrl,
   robinhoodTestnet,
   type StockToken,
   type StoredGrant,
@@ -243,6 +244,11 @@ async function main() {
 
     const chain = chainForId(grant.chainId);
     const rpc = chain.id === robinhoodTestnet.id ? cfg.rpcTestnet : cfg.rpcMainnet;
+    // Effective bundler: an explicit full URL wins (advanced/Alchemy/self-host);
+    // otherwise build the Pimlico URL from just the API key + the grant's chain
+    // id, so it is always pointed at the right chain.
+    const bundlerUrl =
+      cfg.bundlerUrl || (cfg.bundlerApiKey ? pimlicoBundlerUrl(grant.chainId, cfg.bundlerApiKey) : undefined);
     const agentId = await ensureAgent(grant);
     // The soul's name is the source of truth — mirror it onto the roster.
     ensureSoul();
@@ -262,16 +268,18 @@ async function main() {
     }
 
     let executor: AgentExecutor | null = null;
-    if (cfg.bundlerUrl) {
+    if (bundlerUrl) {
       executor = await createAgentExecutor({
         chain,
         serializedGrant: grant.serialized,
-        bundlerUrl: cfg.bundlerUrl,
+        bundlerUrl,
         rpcUrl: rpc,
       });
       console.log(`[worker] executor live — smart account ${executor.address} on chain ${chain.id}`);
     } else {
-      console.log("[worker] no bundler URL (settings or env) — execution stubbed (policy/simulation still run)");
+      console.log(
+        "[worker] practice mode — no bundler key (add a Pimlico key in /settings to trade live). Policy + simulation still run.",
+      );
     }
 
     const client = createPublicClient({ chain, transport: http(rpc) });
@@ -701,7 +709,7 @@ async function main() {
   if (selftest) {
     const armed = await syncGrant();
     if (!armed || !active || !(active as ActiveAgent).executor) {
-      console.error("[selftest] needs a grant AND a bundler URL (settings or MERRYMEN_BUNDLER_URL)");
+      console.error("[selftest] needs a grant AND a bundler key (a Pimlico key in /settings, or MERRYMEN_BUNDLER_API_KEY / MERRYMEN_BUNDLER_URL)");
       process.exit(1);
     }
     console.log("[selftest] sending policy-legal no-op through the full pipeline…");

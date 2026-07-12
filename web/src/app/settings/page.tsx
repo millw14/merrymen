@@ -219,15 +219,20 @@ export default function SettingsPage() {
               )}
             </Field>
             <Field
-              label="bundler RPC URL"
-              hint="Required to actually sign trades — free at dashboard.pimlico.io or dashboard.alchemy.com. The chain id in the URL must match your wallet's chain (46630 testnet · 4663 mainnet). Without it, the agent simulates but never signs."
+              label="Pimlico API key"
+              hint="The one key needed to trade live. Grab it free at dashboard.pimlico.io → API Keys and paste it — we build the bundler URL for your wallet's chain automatically. Blank = practice mode: the agent simulates every trade but never signs."
             >
               <input
-                type="url"
-                placeholder="https://api.pimlico.io/v2/46630/rpc?apikey=…"
-                value={v("bundlerUrl")}
-                onChange={set("bundlerUrl")}
+                type="password"
+                placeholder={secretPlaceholder(view.bundlerApiKey)}
+                value={draft.bundlerApiKey ?? ""}
+                onChange={set("bundlerApiKey")}
               />
+              {view.bundlerApiKey.set && (
+                <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, bundlerApiKey: "" }))}>
+                  clear
+                </button>
+              )}
             </Field>
             <Field
               label="strategy"
@@ -532,6 +537,12 @@ export default function SettingsPage() {
             </Field>
             <Field label="testnet RPC override" hint="Optional.">
               <input type="url" placeholder="default: rpc.testnet.chain.robinhood.com" value={v("rpcTestnet")} onChange={set("rpcTestnet")} />
+            </Field>
+            <Field
+              label="bundler URL override"
+              hint="Advanced — only if you use Alchemy or a self-hosted bundler instead of a Pimlico key. Takes precedence over the Pimlico key; the chain id must match your wallet's chain."
+            >
+              <input type="url" placeholder="https://…/rpc?apikey=…" value={v("bundlerUrl")} onChange={set("bundlerUrl")} />
             </Field>
             <Field
               label="breaker contract"
