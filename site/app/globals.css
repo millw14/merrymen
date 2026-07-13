@@ -249,6 +249,8 @@ code.inline {
 
 /* ---------- safety ---------- */
 .safety { border: 1px solid var(--line); border-radius: 20px; padding: 48px; background: linear-gradient(180deg, var(--bg-1), var(--bg)); }
+.moat-grid { grid-template-columns: 1fr 1fr; margin-top: 22px; }
+@media (max-width: 700px) { .moat-grid { grid-template-columns: 1fr; } }
 .safety .quote { font-family: var(--font-display); font-weight: 700; font-size: clamp(22px, 3.4vw, 34px); letter-spacing: -0.02em; line-height: 1.2; color: var(--text); }
 .safety .quote b { color: var(--lime); }
 .safety p { color: var(--text-dim); margin: 20px 0 0; font-size: 16px; max-width: 74ch; }

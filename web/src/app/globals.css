@@ -507,6 +507,38 @@ button { font: inherit; cursor: pointer; }
 }
 .tg-cta-btn:hover { background: #1c93d0; }
 
+/* ---------- the wall (trust layer) panel ---------- */
+.wall-panel { display: flex; flex-direction: column; gap: 10px; }
+.wall-sub { font-size: 11.5px; color: var(--text-dim); line-height: 1.55; }
+.wall-sub b { color: var(--text); }
+.wall-caps { display: flex; flex-wrap: wrap; gap: 6px; }
+.wall-addrs { display: flex; flex-direction: column; gap: 3px; font-size: 10.5px; }
+.wall-addrs a { color: var(--green-soft); }
+.wall-prove {
+  align-self: flex-start;
+  font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: 0.5px;
+  color: var(--bg); background: var(--green);
+  border: none; border-radius: 7px; padding: 8px 14px;
+}
+.wall-prove:hover:not(:disabled) { background: var(--green-soft); }
+.wall-prove:disabled { opacity: 0.7; cursor: default; }
+.wall-cases { display: flex; flex-direction: column; gap: 6px; }
+.wall-case {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: 11px; line-height: 1.45;
+  padding: 6px 8px; border-radius: 6px;
+  background: var(--bg-3); border: 1px solid var(--border);
+}
+.wall-verdict { flex: 0 0 auto; font-size: 10px; font-weight: 700; letter-spacing: 0.3px; }
+.wall-verdict.no { color: var(--red); }
+.wall-verdict.ok { color: var(--green); }
+.wall-case.breach { border-color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent); }
+.wall-attempt { color: var(--text-dim); }
+.wall-note {
+  margin-top: 2px; font-size: 10px; line-height: 1.55; color: var(--text-faint);
+}
+.wall-note code { font-family: var(--mono); font-size: 9.5px; color: var(--text-dim); }
+
 /* ---------- create-wallet: chain choice ---------- */
 .chain-choice { display: flex; gap: 10px; }
 .chain-card {

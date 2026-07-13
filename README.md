@@ -11,11 +11,13 @@
 
 # merrymen
 
-Self-hosted autonomous trading agents for Robinhood Chain. Your band works
-Sherwood 24/7 — trading Stock Tokens, farming yield, LPing — inside hard on-chain
-permission walls you set and can see. Name your merryman, chat with it and steer
-it from Telegram (it can even run your PC), and watch every trade on a local
-dashboard.
+**Trading agents you never have to trust.** merrymen is a self-hosted band of
+agents for Robinhood Chain: your keys never leave your machine, and every cap
+you set — per-trade, daily, ops/day, drawdown, key expiry — is enforced by your
+account contract **on-chain**, not by promises. Inside that wall your band works
+Sherwood 24/7 — trading Stock Tokens, farming yield, LPing — while you name your
+merryman, chat with it and steer it from Telegram (it can even run your PC), and
+watch every trade on a local dashboard.
 
 **The five promises:** your keys, your caps · bounded worst case · every trade
 simulated first · fees only on profit above the high-water mark · an honest
@@ -24,8 +26,26 @@ scoreboard.
 **The one rule of the house:** the model proposes, deterministic code disposes.
 No model — the strategist, a Telegram message, a voice note — ever constructs
 calldata, moves funds, or touches your PC without passing a closed, typed
-command set and the on-chain policy wall. This is the whole safety story;
-everything below is a consequence of it.
+command set and the on-chain policy wall. This is the product; everything below
+is built on top of it.
+
+## Why merrymen — the moat
+
+Anyone can ship a trading agent, and platforms will ship their own. A
+first-party agent is **custodial by construction**: their servers, their keys,
+their discretion — the safety story is a terms-of-service. merrymen inverts it:
+
+- **Your machine.** The agent, its memory, and its ledger live in `~/.merrymen`.
+  There is no server-side anything.
+- **Your keys.** Minted locally, backed up by you, never transmitted.
+- **The chain enforces the caps.** The session key's limits live in the account
+  contract; even a fully compromised agent cannot spend past the wall.
+- **Verifiable, not claimed.** The dashboard links every address and cap to the
+  block explorer, and its **prove the wall** button fires malicious intents
+  (an oversized trade, a "send everything to 0xevil" transfer, an expired key)
+  through the live policy so you can watch each one bounce.
+
+You verify; it trades.
 
 ---
 

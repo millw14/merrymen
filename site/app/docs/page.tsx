@@ -266,6 +266,17 @@ merrymen kill       # kill switch — destroys the grant`}
           Keys are stored in plain text locally today (production TEE custody is on the roadmap).
           Treat the account like a hot wallet — small amounts, back up the owner key.
         </div>
+        <h3>Why not a platform&apos;s own agent?</h3>
+        <p>
+          A first-party agent is custodial by construction — their servers, their keys, their
+          discretion; the safety story is a terms-of-service. merrymen inverts the trust: the agent
+          runs on <em>your</em> machine, the keys never leave it, and the caps live in your account
+          contract on-chain, so even a fully compromised agent cannot spend past the wall. And you
+          can check, not believe: the dashboard links the account contract, session key, and every
+          cap to the block explorer, and its <strong>prove the wall</strong> button fires malicious
+          intents — an oversized trade, a &ldquo;send everything to 0xevil&rdquo; transfer, an
+          expired key — through the live policy so you can watch each one bounce.
+        </p>
 
         {/* ── config ── */}
         <h2 id="config">Configuration</h2>

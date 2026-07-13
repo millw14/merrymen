@@ -188,8 +188,20 @@ export function BandSection() {
         >
           account {short(g.smartAccount)}
         </a>
-        <span>session key {short(g.sessionKeyAddress)}</span>
-        <span>owner {short(g.owner)}</span>
+        <a
+          href={`${explorerFor(g.chainId)}/address/${g.sessionKeyAddress}`}
+          target="_blank"
+          rel="noreferrer"
+        >
+          session key {short(g.sessionKeyAddress)}
+        </a>
+        <a
+          href={`${explorerFor(g.chainId)}/address/${g.owner}`}
+          target="_blank"
+          rel="noreferrer"
+        >
+          owner {short(g.owner)}
+        </a>
       </div>
 
       {state === "armed" && (

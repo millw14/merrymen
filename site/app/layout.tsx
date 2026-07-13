@@ -20,16 +20,16 @@ const url = "https://merrymen.dev";
 export const metadata: Metadata = {
   metadataBase: new URL(url),
   title: {
-    default: "merrymen — autonomous trading agents for Robinhood Chain",
+    default: "merrymen — trading agents you never have to trust",
     template: "%s — merrymen",
   },
   description:
-    "Self-hosted autonomous trading agents for Robinhood Chain. Your keys, your caps, hard on-chain permission walls. Name your agent, chat with it and control it from Telegram — it can even run your PC.",
-  keywords: ["merrymen", "Robinhood Chain", "trading agent", "self-hosted", "Telegram bot", "crypto", "autonomous agent"],
+    "Self-hosted trading agents for Robinhood Chain that you never have to trust: keys stay on your machine, every cap is enforced by the account contract on-chain. Name your agent, chat with it and steer it from Telegram.",
+  keywords: ["merrymen", "Robinhood Chain", "trading agent", "self-hosted", "non-custodial", "self-custody", "Telegram bot", "crypto", "autonomous agent"],
   openGraph: {
-    title: "merrymen — autonomous trading agents for Robinhood Chain",
+    title: "merrymen — trading agents you never have to trust",
     description:
-      "Self-hosted trading agents inside hard on-chain permission walls. Chat with and control your agent from Telegram.",
+      "Self-hosted, non-custodial trading agents inside caps the chain itself enforces. Verify the wall on-chain; steer the band from Telegram.",
     url,
     siteName: "merrymen",
     type: "website",
@@ -37,7 +37,7 @@ export const metadata: Metadata = {
   twitter: {
     card: "summary_large_image",
     title: "merrymen",
-    description: "Autonomous trading agents you own and control.",
+    description: "Trading agents you never have to trust — your keys, your caps, enforced on-chain.",
     site: "@MerrymenAI",
     creator: "@MerrymenAI",
   },

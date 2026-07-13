@@ -59,12 +59,13 @@ export default function Home() {
             <Icon name="globe" size={46} />
           </div>
           <h1 className="hero-statement" data-reveal="mask">
-            Autonomous trading agents that answer only to you.
+            Trading agents you never have to trust.
           </h1>
           <p className="hero-sub" data-reveal="up" style={{ ["--d" as string]: "90ms" }}>
-            merrymen is a self-hosted band of agents for Robinhood Chain. They work the market 24/7
-            inside hard on-chain permission walls you set — you name them, chat with them, and steer
-            them from Telegram. Your keys never leave your machine.
+            merrymen is a self-hosted band of agents for Robinhood Chain. Your keys never leave your
+            machine, and every cap you set is enforced by the account contract on-chain — not by
+            promises. Inside that wall, your band works the market 24/7 while you name them, chat
+            with them, and steer them from Telegram.
           </p>
           <div className="hero-cta" data-reveal="up" style={{ ["--d" as string]: "170ms" }}>
             <span className="mag" data-magnetic>
@@ -98,11 +99,67 @@ export default function Home() {
       {/* ── marquee band ─────────────────────────────────────────────────── */}
       <Marquee items={MARQUEE} />
 
+      {/* ── the trust layer — load-bearing, everything rests on it ────────── */}
+      <section id="safety">
+        <div className="wrap">
+          <div className="section-head">
+            <div className="tag" data-reveal="fade"><span className="n">01</span> — the trust layer</div>
+            <h2 data-reveal="mask">The wall is the product.</h2>
+            <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>
+              Anyone can ship a trading agent. The hard thing — the thing merrymen is — is an agent
+              you don&apos;t have to trust: it runs on your machine, holds keys that never leave it,
+              and trades inside caps the chain itself enforces. Everything else on this page is
+              built on top of that wall.
+            </p>
+          </div>
+
+          <div className="safety" data-reveal="up">
+            <div className="quote">
+              The rule of the house: <b>the model proposes, deterministic code disposes.</b>
+            </div>
+            <p>
+              No strategist, Telegram message, or voice note ever constructs calldata, moves funds,
+              or touches your PC without passing a closed, typed command set and — for money — the
+              on-chain policy wall. Trades pass caps enforced by the account contract. Transfers are
+              amount-capped and confirm-gated. PC actions are off by default, allowlisted, and
+              confirmed. A prompt-injected “send everything to 0xevil” can at worst produce a
+              confirmation card you will see and cancel.
+            </p>
+            <p>
+              And you don&apos;t take our word for it: your dashboard shows the account contract,
+              the session key, and every cap with explorer links — and a <b>prove the wall</b>{" "}
+              button that fires malicious intents through the live policy so you can watch each one
+              bounce.
+            </p>
+          </div>
+
+          <div className="grid moat-grid">
+            <div className="cell" data-reveal="up">
+              <h4>Why not wait for a platform&apos;s own agent?</h4>
+              <p>
+                A first-party agent is custodial by construction: their servers, their keys, their
+                discretion — the safety story is a terms-of-service. If the platform, its model, or
+                its prompt gets compromised, so does your account. You trust; it trades.
+              </p>
+            </div>
+            <div className="cell" data-reveal="up" style={{ ["--d" as string]: "80ms" }}>
+              <h4>merrymen inverts it</h4>
+              <p>
+                The agent lives on your machine and holds a session key whose caps — per-trade,
+                daily, ops/day, drawdown, expiry — are enforced by your account contract on-chain,
+                verifiable in the explorer. Even a fully compromised agent cannot spend past the
+                wall. You verify; it trades.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* ── features ─────────────────────────────────────────────────────── */}
       <section id="features">
         <div className="wrap">
           <div className="section-head">
-            <div className="tag" data-reveal="fade"><span className="n">01</span> — what it is</div>
+            <div className="tag" data-reveal="fade"><span className="n">02</span> — what it is</div>
             <h2 data-reveal="mask">An agent that works Sherwood while you sleep.</h2>
             <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>
               The strategist proposes; deterministic code disposes. Nothing the model outputs — a
@@ -218,7 +275,7 @@ export default function Home() {
       <section style={{ paddingTop: 40 }}>
         <div className="wrap">
           <div className="section-head center">
-            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade"><span className="n">02</span> — the toolkit</div>
+            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade"><span className="n">03</span> — the toolkit</div>
             <h2 data-reveal="mask">Everything, gated by design.</h2>
           </div>
           <div className="grid">
@@ -229,28 +286,6 @@ export default function Home() {
                 <p>{d}</p>
               </div>
             ))}
-          </div>
-        </div>
-      </section>
-
-      {/* ── safety ───────────────────────────────────────────────────────── */}
-      <section id="safety">
-        <div className="wrap">
-          <div className="section-head">
-            <div className="tag"><span className="n">03</span> — the safety model</div>
-          </div>
-          <div className="safety" data-reveal="up">
-            <div className="quote">
-              The rule of the house: <b>the model proposes, deterministic code disposes.</b>
-            </div>
-            <p>
-              No strategist, Telegram message, or voice note ever constructs calldata, moves funds,
-              or touches your PC without passing a closed, typed command set and — for money — the
-              on-chain policy wall. Trades pass caps enforced by the account contract. Transfers are
-              amount-capped and confirm-gated. PC actions are off by default, allowlisted, and
-              confirmed. A prompt-injected “send everything to 0xevil” can at worst produce a
-              confirmation card you will see and cancel.
-            </p>
           </div>
         </div>
       </section>

@@ -8,6 +8,7 @@ import { MarketTable } from "@/components/MarketTable";
 import { Statusbar } from "@/components/Statusbar";
 import { TelegramCta } from "@/components/TelegramCta";
 import { TradesPanel } from "@/components/TradesPanel";
+import { WallPanel } from "@/components/WallPanel";
 
 export default function Dashboard() {
   return (
@@ -48,6 +49,8 @@ export default function Dashboard() {
 
         <aside className="rail">
           <TelegramCta />
+
+          <WallPanel />
 
           <div className="panel">
             <KillSwitch />

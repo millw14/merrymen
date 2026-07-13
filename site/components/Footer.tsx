@@ -15,7 +15,7 @@ export function Footer() {
               <Logo size={20} />
               <span>merrymen</span>
             </Link>
-            <p>Self-hosted autonomous trading agents for Robinhood Chain. Your keys, your caps, your machine.</p>
+            <p>Trading agents you never have to trust. Your keys, your caps, your machine — enforced on-chain.</p>
           </div>
 
           <div className="foot-col">

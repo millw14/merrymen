@@ -16,7 +16,8 @@
     "plugins": [{ "name": "next" }],
     "paths": {
       "@/*": ["./src/*"],
-      "@merrymen/core": ["../packages/core/src/index.ts"]
+      "@merrymen/core": ["../packages/core/src/index.ts"],
+      "@merrymen/policy": ["../worker/src/policy.ts"]
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
