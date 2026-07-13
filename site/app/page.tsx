@@ -358,6 +358,37 @@ npm install -g merrymen && merrymen start`}
         </div>
       </section>
 
+      {/* ── word from the woods — real quotes, verifiable receipts ───────── */}
+      <section id="words">
+        <div className="wrap">
+          <div className="section-head center">
+            <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade"><span className="n">06</span> — word from the woods</div>
+            <h2 data-reveal="mask">Early words. Honest receipts.</h2>
+          </div>
+
+          <div className="safety words-quote" data-reveal="up">
+            <div className="quote">
+              “The on-chain permission wall is good — smart. <b>The trust layer makes the moat.</b>”
+            </div>
+            <p className="words-attr">— an early code reviewer, unprompted, after reading the source</p>
+          </div>
+
+          <div className="receipts" data-reveal="up" style={{ ["--d" as string]: "80ms" }}>
+            <span>MIT open source — read every line</span>
+            <span>200+ tests on the policy wall &amp; pipeline</span>
+            <span>caps enforced by the account contract, verifiable in the explorer</span>
+            <span>zero servers — it runs on your machine</span>
+          </div>
+
+          <p className="words-invite" data-reveal="up" style={{ ["--d" as string]: "140ms" }}>
+            Riding with the band? Tell us what broke and what sang —{" "}
+            <a href="https://x.com/MerrymenAI" target="_blank" rel="noreferrer">@MerrymenAI</a> or a{" "}
+            <a href={GITHUB + "/issues"} target="_blank" rel="noreferrer">GitHub issue</a>. Real words
+            from real riders end up here.
+          </p>
+        </div>
+      </section>
+
       {/* ── final CTA ────────────────────────────────────────────────────── */}
       <section className="cta">
         <div className="wrap">

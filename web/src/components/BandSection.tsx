@@ -7,7 +7,10 @@ import { USDG_DECIMALS, explorerFor } from "@merrymen/core";
 import type { AgentStatus } from "@/app/api/grants/route";
 import type { FeedResponse } from "@/app/api/feed/route";
 import { clearGrant } from "@/lib/session";
+import { DemoBand } from "./DemoBand";
 import { LogoMark } from "./Logo";
+
+const DEMO_KEY = "merrymen.demo.v1";
 
 function EquitySparkline({ points }: { points: number[] }) {
   if (points.length < 2) return null;
@@ -43,6 +46,17 @@ function short(a: string): string {
 export function BandSection() {
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [feed, setFeed] = useState<FeedResponse | null>(null);
+  const [demo, setDemo] = useState(false);
+
+  useEffect(() => {
+    setDemo(localStorage.getItem(DEMO_KEY) === "1");
+  }, []);
+
+  function setDemoMode(on: boolean) {
+    if (on) localStorage.setItem(DEMO_KEY, "1");
+    else localStorage.removeItem(DEMO_KEY);
+    setDemo(on);
+  }
 
   useEffect(() => {
     let alive = true;
@@ -75,6 +89,7 @@ export function BandSection() {
   }
 
   if (!status.exists || !status.grant) {
+    if (demo) return <DemoBand onExit={() => setDemoMode(false)} />;
     return (
       <div className="empty-state">
         <div className="empty-sigil"><LogoMark size={56} /></div>
@@ -83,9 +98,14 @@ export function BandSection() {
           Create your agent wallet to deploy your first merryman — generated keys,
           hard on-chain caps, revocable any time.
         </p>
-        <Link href="/grant" className="grant-btn empty-cta">
-          create your agent wallet
-        </Link>
+        <div className="empty-actions">
+          <Link href="/grant" className="grant-btn empty-cta">
+            create your agent wallet
+          </Link>
+          <button className="demo-btn mono" onClick={() => setDemoMode(true)}>
+            ⚡ or watch a demo band ride — 5 seconds, nothing real
+          </button>
+        </div>
       </div>
     );
   }

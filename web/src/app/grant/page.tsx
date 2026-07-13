@@ -23,6 +23,31 @@ const DEFAULTS: GrantCaps = {
   maxOpsPerDay: 48,
 };
 
+/** One-click cap presets — pick a temperament, tweak if you like, ride. */
+const PRESETS: { id: string; label: string; blurb: string; caps: GrantCaps }[] = [
+  {
+    id: "scout",
+    label: "🌱 cautious · the scout",
+    blurb: "dip a toe — tiny trades, tight leash",
+    caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5, maxOpsPerDay: 24 },
+  },
+  {
+    id: "outlaw",
+    label: "🏹 balanced · the outlaw",
+    blurb: "the sensible default",
+    caps: DEFAULTS,
+  },
+  {
+    id: "warlord",
+    label: "⚔️ bold · the warlord",
+    blurb: "bigger arrows, wider walls",
+    caps: { perTradeUsdg: 200, dailyUsdg: 2000, expiryDays: 30, maxDrawdownPct: 15, maxOpsPerDay: 96 },
+  },
+];
+
+const sameCaps = (a: GrantCaps, b: GrantCaps) =>
+  (Object.keys(a) as (keyof GrantCaps)[]).every((k) => a[k] === b[k]);
+
 const BACKUP_KEY = "merrymen.grant.backedup.v1";
 const TESTNET = robinhoodTestnet.id; // 46630 — the sandbox
 const MAINNET = robinhoodChain.id; // 4663 — real funds
@@ -202,6 +227,24 @@ export default function GrantPage() {
                 </label>
               </div>
             )}
+
+            <div className="preset-row">
+              {PRESETS.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  className={`preset-card ${sameCaps(caps, p.caps) ? "selected" : ""}`}
+                  onClick={() => setCaps(p.caps)}
+                >
+                  <span className="preset-label">{p.label}</span>
+                  <span className="preset-blurb">{p.blurb}</span>
+                  <span className="preset-caps mono">
+                    {p.caps.perTradeUsdg}/trade · {p.caps.dailyUsdg}/day · {p.caps.maxDrawdownPct}% breaker ·{" "}
+                    {p.caps.expiryDays}d key
+                  </span>
+                </button>
+              ))}
+            </div>
 
             <div className="grant-fields">
               <label className="field">

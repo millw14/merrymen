@@ -539,6 +539,46 @@ button { font: inherit; cursor: pointer; }
 }
 .wall-note code { font-family: var(--mono); font-size: 9.5px; color: var(--text-dim); }
 
+/* ---------- the demo band (make-believe, loudly labeled) ---------- */
+.empty-actions { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.demo-btn {
+  background: none; border: 1px dashed var(--border-2); border-radius: 8px;
+  color: var(--text-dim); font-size: 11px; padding: 8px 14px;
+  transition: color .15s, border-color .15s;
+}
+.demo-btn:hover { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 45%, transparent); }
+.demo-card { border-color: color-mix(in srgb, var(--gold) 40%, var(--border)); }
+.demo-banner {
+  font-size: 10px; letter-spacing: 0.5px; color: var(--gold);
+  background: color-mix(in srgb, var(--gold) 8%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--gold) 35%, transparent);
+  border-radius: 6px; padding: 6px 10px; margin-bottom: 10px;
+}
+.demo-tag {
+  font-size: 9px; color: var(--gold); border: 1px solid color-mix(in srgb, var(--gold) 40%, transparent);
+  border-radius: 4px; padding: 1px 5px; margin-left: 6px; vertical-align: middle;
+}
+.demo-fills { display: flex; flex-direction: column; gap: 5px; margin-top: 10px; font-size: 11px; }
+.demo-fill { animation: demoFillIn .35s ease; }
+@keyframes demoFillIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.demo-actions { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.demo-cta { text-decoration: none; padding: 10px 16px; }
+
+/* ---------- create-wallet: cap presets ---------- */
+.preset-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.preset-card {
+  display: flex; flex-direction: column; gap: 4px; text-align: left;
+  background: var(--bg-3); border: 1px solid var(--border); border-radius: 10px;
+  padding: 11px 12px; cursor: pointer; color: var(--text);
+  transition: border-color .15s, background .15s;
+}
+.preset-card:hover { border-color: var(--border-2); }
+.preset-card.selected { border-color: var(--green-deep); background: color-mix(in srgb, var(--green) 6%, var(--bg-3)); }
+.preset-label { font-size: 12.5px; font-weight: 600; }
+.preset-blurb { font-size: 11px; color: var(--text-dim); }
+.preset-caps { font-size: 9.5px; color: var(--text-faint); margin-top: 2px; }
+@media (max-width: 640px) { .preset-row { grid-template-columns: 1fr; } }
+
 /* ---------- create-wallet: chain choice ---------- */
 .chain-choice { display: flex; gap: 10px; }
 .chain-card {
