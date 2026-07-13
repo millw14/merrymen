@@ -19,7 +19,10 @@
  */
 
 import { existsSync, rmSync, writeFileSync } from "node:fs";
-import { PC_CAPABILITIES } from "@merrymen/core";
+// RELATIVE import only — the "@merrymen/core" alias exists solely in dev
+// tsconfigs; inside the installed package tsx can't resolve it and the worker
+// dies at startup (which silently kills Telegram). Never alias-import in worker/.
+import { PC_CAPABILITIES } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { ensureHome, homePaths } from "../home";
 import { esc, getFileUrl, getMe, getUpdates, sendMessage, type TgMessage } from "./api";
