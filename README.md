@@ -80,6 +80,12 @@ up — an old Node, and npm's global-bin folder missing from PATH.
 > - **Windows:** `[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path","User") + ";$env:APPDATA\npm", "User")` then reopen the terminal
 > - **macOS/Linux:** put `$(npm prefix -g)/bin` on your `PATH` (in `~/.zshrc` / `~/.bashrc`)
 
+> **Windows: `running scripts is disabled on this system` / `PSSecurityException`?**
+> PowerShell's default `Restricted` policy blocks npm's and merrymen's `.ps1`
+> shims. The installer now relaxes it for you; if you installed earlier, run once
+> (no admin, current user only): `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+> Or just call `merrymen.cmd …` (or use cmd.exe / Git Bash) to skip the policy.
+
 The dashboard binds to **localhost only** — it has no login and holds your
 trading controls, so it isn't reachable from your network. To open it to a
 trusted LAN (your phone on home WiFi), start with

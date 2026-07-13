@@ -20,6 +20,27 @@ function Invoke-Npm($cmdLine) {
   if ($LASTEXITCODE -ne 0) { throw "npm $cmdLine failed (exit $LASTEXITCODE)" }
 }
 
+# npm installs the `merrymen` CLI on Windows as a merrymen.ps1 shim. A default
+# "Restricted" (or "AllSigned") execution policy refuses to load it, so
+# `merrymen ...` would fail with PSSecurityException right after a successful
+# install. Relax the CURRENT-USER policy to RemoteSigned — the standard
+# Node-on-Windows setting: your own local scripts run, remote ones must be
+# signed. No admin needed; only the current user is affected; reversible with
+# `Set-ExecutionPolicy -Scope CurrentUser Undefined`.
+function Enable-LocalScripts {
+  try {
+    $eff = Get-ExecutionPolicy
+    if ($eff -eq "Restricted" -or $eff -eq "AllSigned") {
+      Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force -ErrorAction Stop
+      Say "[ok] allowed your local scripts to run (CurrentUser RemoteSigned) so 'merrymen' works" "Green"
+    }
+  } catch {
+    Say "PowerShell is blocking scripts and I couldn't change it (locked by policy?)." "Yellow"
+    Say "Run this once so 'merrymen' works:  Set-ExecutionPolicy -Scope CurrentUser RemoteSigned" "DarkGray"
+    Say "...or just call it as 'merrymen.cmd setup' / from cmd.exe." "DarkGray"
+  }
+}
+
 Write-Host ""
 Say "merrymen -- stand and deliver" "Green"
 Say "setting up your rig..." "DarkGray"
@@ -57,6 +78,9 @@ if (Test-NodeOk) {
 
 Say "[..] installing merrymen (global)..." "Yellow"
 Invoke-Npm "install -g merrymen"
+
+# So the freshly-installed `merrymen` command can actually run in PowerShell.
+Enable-LocalScripts
 
 # ensure npm's global bin is on the USER PATH so `merrymen` resolves in new shells
 $npmBin = Join-Path $env:APPDATA "npm"

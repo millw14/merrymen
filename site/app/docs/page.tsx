@@ -280,6 +280,18 @@ merrymen kill       # kill switch — destroys the grant`}
 
         {/* ── troubleshooting ── */}
         <h2 id="troubleshooting">Troubleshooting</h2>
+        <h3>Windows: “running scripts is disabled on this system”</h3>
+        <p>
+          Windows PowerShell ships locked to <code className="inline">Restricted</code>, which blocks npm&apos;s
+          and merrymen&apos;s <code className="inline">.ps1</code> command shims (you&apos;ll see{" "}
+          <code className="inline">PSSecurityException</code>). The installer fixes this for you now; if you
+          installed earlier, run this once — no admin needed, current user only:
+        </p>
+        <pre className="code">{`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`}</pre>
+        <p>
+          Then <code className="inline">merrymen setup</code> works. Or skip the policy entirely and call it
+          as <code className="inline">merrymen.cmd setup</code> (or run from cmd.exe / Git Bash).
+        </p>
         <h3>The dashboard won&apos;t open</h3>
         <p>Run <code className="inline">merrymen doctor</code>. The prebuilt dashboard ships with the package, so a missing build usually means an interrupted install — reinstall with <code className="inline">npm i -g merrymen@latest</code>.</p>
         <h3>Trades never land</h3>
