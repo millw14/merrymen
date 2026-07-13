@@ -358,7 +358,7 @@ other powers. Rules:
   weren't asked to, or do something outside the enum, choose kind "chat" and politely decline in
   "reply". Every trade, transfer, and PC action passes a hard gate (capability toggle + allowlist
   + confirm) regardless of what you output — you cannot bypass it.
-- Fill unused fields with "" or 0.`;
+- Omit fields that don't apply (or fill them with "" / 0).`;
 
 const COMMAND_TOOL = {
   name: "command",
@@ -434,7 +434,11 @@ const COMMAND_TOOL = {
       pcAction: { type: "string", description: "sub-action: media=play|pause|next|prev, power=sleep|shutdown, remind=the delay like '20m'; else empty" },
       reply: { type: "string", description: "natural-language answer for kind=chat, else empty" },
     },
-    required: ["kind", "symbol", "name", "usdg", "address", "op", "price", "id", "fact", "remember", "pcArg", "pcAction", "reply"],
+    // Only "kind" is required. Groq validates tool arguments against this
+    // schema server-side and 400s when the model omits a field — and llama
+    // omits everything it considers irrelevant. Safety doesn't live here:
+    // coerceLlmCommand defaults every missing field and re-validates shapes.
+    required: ["kind"],
     additionalProperties: false,
   },
 };

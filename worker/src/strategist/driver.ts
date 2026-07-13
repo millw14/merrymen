@@ -66,7 +66,9 @@ const PROPOSE_TOOL = {
             sizeUsdg: { type: "number" },
             reason: { type: "string" },
           },
-          required: ["action", "symbol", "sizeUsdg", "reason"],
+          // "reason" optional: Groq validates arguments server-side and llama
+          // sometimes omits it; parseProposals defaults it to "" anyway.
+          required: ["action", "symbol", "sizeUsdg"],
           additionalProperties: false,
         },
       },

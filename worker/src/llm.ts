@@ -83,17 +83,27 @@ export async function llmToolCall(
     tools: [{ type: "function", function: { name: opts.tool.name, description: opts.tool.description, parameters: opts.tool.schema } }],
     tool_choice: { type: "function", function: { name: opts.tool.name } },
   };
-  const r = await fetch(GROQ_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${creds.apiKey}` },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(`groq ${r.status}: ${(await r.text()).slice(0, 200)}`);
-  const j = (await r.json()) as {
-    choices?: { message?: { tool_calls?: { function?: { arguments?: string } }[] } }[];
-  };
-  const args = j.choices?.[0]?.message?.tool_calls?.[0]?.function?.arguments;
-  return args ? (JSON.parse(args) as Record<string, unknown>) : {};
+  // Groq validates tool arguments server-side and the model is nondeterministic
+  // — a malformed emission 400s. One retry usually lands; then we throw honestly.
+  let lastErr = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = await fetch(GROQ_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${creds.apiKey}` },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      lastErr = `groq ${r.status}: ${(await r.text()).slice(0, 200)}`;
+      if (r.status === 400 && attempt === 0) continue;
+      throw new Error(lastErr);
+    }
+    const j = (await r.json()) as {
+      choices?: { message?: { tool_calls?: { function?: { arguments?: string } }[] } }[];
+    };
+    const args = j.choices?.[0]?.message?.tool_calls?.[0]?.function?.arguments;
+    return args ? (JSON.parse(args) as Record<string, unknown>) : {};
+  }
+  throw new Error(lastErr);
 }
 
 /** Plain text completion (narration). Throws on transport error. */
