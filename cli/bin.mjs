@@ -740,6 +740,40 @@ function warnIfOldNode() {
   }
 }
 
+/**
+ * Self-update. A running dashboard/worker holds file locks inside the global
+ * install, so a bare `npm i -g merrymen@latest` dies with EBUSY on Windows.
+ * This stops the band's child processes (NOT this CLI — the pattern matches
+ * the nested node_modules the children run from), then upgrades from a cwd
+ * OUTSIDE the install folder so nothing we hold can block npm's rename.
+ */
+async function update() {
+  await banner("fresh arrows from the fletcher");
+  if (process.platform === "win32") {
+    // -Command text is unaffected by the .ps1 execution policy.
+    const ps =
+      "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | " +
+      "Where-Object { $_.CommandLine -like '*merrymen\\node_modules\\*' -and $_.ProcessId -ne " + process.pid + " } | " +
+      "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }";
+    spawnSync("powershell", ["-NoProfile", "-Command", ps], { stdio: "ignore" });
+  } else {
+    spawnSync("sh", ["-c", "pkill -f 'merrymen/node_modules' 2>/dev/null || true"], { stdio: "ignore" });
+  }
+  ok("band called home — any running dashboard/worker stopped");
+
+  console.log(dim("  fetching the latest from the fletcher…\n"));
+  const r =
+    process.platform === "win32"
+      ? spawnSync("cmd.exe", ["/c", "npm install -g merrymen@latest"], { stdio: "inherit", cwd: os.tmpdir() })
+      : spawnSync("sh", ["-c", "npm install -g merrymen@latest"], { stdio: "inherit", cwd: os.tmpdir() });
+
+  if (r.status === 0) {
+    console.log(`\n  ${green("✓")} ${bold("upgraded.")} ride out again: ${bold(c.lime("merrymen start"))}\n`);
+  } else {
+    bad("upgrade failed — if it said EBUSY, close any terminal cd'd into the install folder and rerun merrymen update");
+  }
+}
+
 // ────────────────────────────────────────────────────────────────── main ──
 
 const [, , cmd, ...rest] = process.argv;
@@ -772,6 +806,10 @@ switch (cmd) {
   case "kill":
     await kill();
     break;
+  case "update":
+  case "upgrade":
+    await update();
+    break;
   default:
     await banner("stand and deliver — autonomous agents for Robinhood Chain");
     console.log(`${dim("  install: npm install -g merrymen · your loot: ~/.merrymen")}
@@ -785,6 +823,7 @@ switch (cmd) {
   ${bold("merrymen strategy list")}  the roster — builtins + your strategies
   ${bold("merrymen selftest")}       fire one arrow through the whole pipeline
   ${bold("merrymen kill")}           call the band home (kill switch)
+  ${bold("merrymen update")}         stop the band, upgrade to latest, no EBUSY
   ${bold("merrymen welcome")}        replay the intro 🏹
 
   ${c.gold(c.arrow)} ${dim("your keys, your caps · bounded worst case · every trade simulated first")}
