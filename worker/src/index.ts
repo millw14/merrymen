@@ -786,7 +786,10 @@ async function main() {
   const tgState = createStateRef();
 
   startTelegram({
-    getCfg: () => cfg,
+    // Resolve FRESH on every read: /link writes the allowlist to settings.json
+    // and the very next message must see it — the tick-refreshed `cfg` snapshot
+    // lags up to tickSeconds, which reads as "linked, then not authorized".
+    getCfg: () => resolveConfig(),
     stateRef: tgState,
     note: strategyNote,
     buildStatusContext,
@@ -816,7 +819,7 @@ async function main() {
   // The merryman speaks first: trade pings, warnings, price alerts, the daily
   // campfire report — pushed to the owner chat, gated by telegramNotifyEnabled.
   notifierHandle = startNotifier({
-    getCfg: () => cfg,
+    getCfg: () => resolveConfig(), // fresh for the same reason as the poller
     note: strategyNote,
     stateRef: tgState,
     buildStatusContext,
