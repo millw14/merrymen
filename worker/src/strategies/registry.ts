@@ -6,7 +6,8 @@
  */
 
 import { CASH, MORPHO, STOCK_TOKENS, type StockToken } from "../../../packages/core/src/index";
-import { createAnthropicDriver, nullDriver } from "../strategist/driver";
+import type { LlmCreds } from "../llm";
+import { createDriver, nullDriver } from "../strategist/driver";
 import { makeLlmStrategist } from "../strategist/strategy";
 import { makeCustomStrategy } from "./custom";
 import { steadyBasketTick, type SteadyBasketConfig } from "./steady-basket";
@@ -23,7 +24,7 @@ export interface StrategyBuildOpts {
   buyPerTickUsdg: number;
   idleFloorUsdg: number;
   gapEnterBudgetUsdg: number;
-  llm: { apiKey?: string; model: string; intervalMin: number; maxActionUsdg: number };
+  llm: { creds: LlmCreds | null; intervalMin: number; maxActionUsdg: number };
   onNote?: (level: "ok" | "warn", message: string) => void;
 }
 
@@ -50,11 +51,9 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
   if (name === "llm-strategist") {
     // LLM proposes; deterministic code disposes. Without a key, the null
     // driver proposes nothing — the worker still runs, honestly idle.
-    const driver = opts.llm.apiKey
-      ? createAnthropicDriver({ apiKey: opts.llm.apiKey, model: opts.llm.model })
-      : nullDriver;
+    const driver = opts.llm.creds ? createDriver(opts.llm.creds) : nullDriver;
     if (driver === nullDriver) {
-      console.log("[strategist] no Anthropic API key — llm-strategist runs with the null driver (no trades)");
+      console.log("[strategist] no LLM key (Groq or Anthropic) — llm-strategist runs with the null driver (no trades)");
     }
     return makeLlmStrategist({
       driver,

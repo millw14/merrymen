@@ -18,11 +18,13 @@
 
 import { existsSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { explorerFor } from "../../../packages/core/src/index";
 import { homePaths } from "../home";
 import type { ResolvedConfig } from "../settings";
 import { appendJournal, getName, relationship } from "../soul";
 import { cpuPercent, procRunning } from "../pc/platform";
 import { esc, sendMessage } from "./api";
+import { resolveLlm } from "../llm";
 import { narrateJournal } from "./interpreter";
 import { readReport, type StatusContext } from "./reads";
 import type { StateRef, Watcher } from "./state";
@@ -44,6 +46,8 @@ export interface NotifierDeps {
   stateRef: StateRef;
   buildStatusContext: () => StatusContext;
   getAlertInputs: () => AlertInputs;
+  /** The armed grant's chain id → block-explorer proof links. Null when unarmed. */
+  getChainId: () => number | null;
   now?: () => number;
 }
 
@@ -71,9 +75,14 @@ interface TradeRowLite {
   tx_hash: string | null;
 }
 
-function tradeLine(t: TradeRowLite): string {
+function tradeLine(t: TradeRowLite, explorer: string | null): string {
   if (t.status === "landed") {
-    return `🏹 loosed an arrow — ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG landed${t.tx_hash ? `\n<code>${esc(t.tx_hash)}</code>` : ""}`;
+    const proof = t.tx_hash
+      ? explorer
+        ? `\n🔗 <a href="${explorer}/tx/${esc(t.tx_hash)}">proof — view on the explorer ↗</a>`
+        : `\n<code>${esc(t.tx_hash)}</code>`
+      : "";
+    return `🏹 loosed an arrow — ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG landed${proof}`;
   }
   if (t.status === "rejected") {
     return `🛡 the wall turned back a ${esc(t.kind)} (${esc(t.reject_rule ?? "policy")}) — ${t.amount_usdg.toFixed(2)} USDG stayed home`;
@@ -101,6 +110,8 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
     const chatId = state.ownerId;
 
     // ── trade pings ─────────────────────────────────────────────────────────
+    const chainId = deps.getChainId();
+    const explorer = chainId != null ? explorerFor(chainId) : null;
     const db = openRO();
     if (db) {
       try {
@@ -115,7 +126,7 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
             )
             .all(state.lastNotifiedTradeId) as unknown as TradeRowLite[];
           for (const t of rows) {
-            await sendMessage({ token }, chatId, tradeLine(t));
+            await sendMessage({ token }, chatId, tradeLine(t, explorer));
             deps.stateRef.set({ ...deps.stateRef.get(), lastNotifiedTradeId: t.id });
           }
         }
@@ -278,8 +289,9 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       // the road. LLM voice when a key is set, honest stat lines otherwise.
       const plainReport = report.replace(/<[^>]+>/g, "");
       const evidence = `${plainReport}\n\nRELATIONSHIP: ${rel.stage}, day ${rel.daysTogether}, ${rel.messageCount} messages with my owner.`;
-      const entry = cfg.anthropicApiKey
-        ? await narrateJournal(evidence, { apiKey: cfg.anthropicApiKey, model: cfg.llmModel })
+      const journalLlm = resolveLlm(cfg);
+      const entry = journalLlm
+        ? await narrateJournal(evidence, journalLlm)
         : `Day ${rel.daysTogether} with my owner (${rel.stage}).\n${plainReport}`;
       appendJournal(entry, now());
     }

@@ -1,15 +1,16 @@
 /**
- * LLM drivers for the strategist. The driver's ONLY job is: signals in,
+ * LLM driver for the strategist. The driver's ONLY job is: signals in,
  * raw proposal JSON out. It never sees addresses, never builds intents, and
  * its output goes straight into parseProposals → proposalsToIntents where
  * deterministic code disposes.
  *
- * AnthropicDriver: Claude via the Messages API with a forced, strict-schema
- * tool call — the model cannot reply in prose, only in the proposal schema.
- * NullDriver: what runs when no ANTHROPIC_API_KEY is set — proposes nothing.
+ * The brain is provider-agnostic (Groq by default, Claude as the upgrade) via
+ * the shared llm layer's forced, strict-schema tool call — the model cannot
+ * reply in prose, only in the proposal schema.
+ * NullDriver: what runs when no LLM key is set — proposes nothing.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import { llmToolCall, type LlmCreds } from "../llm";
 
 /** Sanitized, typed market signals — numbers and enums only, no free text. */
 export interface Signals {
@@ -75,31 +76,16 @@ const PROPOSE_TOOL = {
   },
 };
 
-export function createAnthropicDriver(opts: { apiKey: string; model?: string }): ProposalDriver {
-  const client = new Anthropic({ apiKey: opts.apiKey });
-  const model = opts.model ?? "claude-opus-4-8";
-
+export function createDriver(creds: LlmCreds): ProposalDriver {
   return {
-    name: `anthropic:${model}`,
+    name: `${creds.provider}:${creds.model}`,
     async propose(signals: Signals): Promise<unknown> {
-      const response = await client.messages.create({
-        model,
-        max_tokens: 2048,
+      return llmToolCall(creds, {
         system: SYSTEM,
-        // Forced tool_choice requires thinking off; the schema does the shaping.
-        thinking: { type: "disabled" },
-        tools: [PROPOSE_TOOL],
-        tool_choice: { type: "tool", name: "propose_trades" },
-        messages: [
-          {
-            role: "user",
-            content: `Market and account signals:\n${JSON.stringify(signals, null, 2)}`,
-          },
-        ],
+        maxTokens: 2048,
+        tool: { name: PROPOSE_TOOL.name, description: PROPOSE_TOOL.description, schema: PROPOSE_TOOL.input_schema },
+        messages: [{ role: "user", content: `Market and account signals:\n${JSON.stringify(signals, null, 2)}` }],
       });
-
-      const toolUse = response.content.find((b) => b.type === "tool_use");
-      return toolUse && toolUse.type === "tool_use" ? toolUse.input : { actions: [] };
     },
   };
 }

@@ -21,7 +21,7 @@
  *     new capability.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import { llmText, llmToolCall, type LlmCreds } from "../llm";
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
@@ -455,24 +455,16 @@ export interface LlmContext {
 export async function interpretWithLlm(
   text: string,
   ctx: LlmContext,
-  opts: { apiKey: string; model?: string; client?: Anthropic },
+  creds: LlmCreds,
 ): Promise<{ cmd: Command; remember: string }> {
-  const client = opts.client ?? new Anthropic({ apiKey: opts.apiKey });
-  const model = opts.model ?? "claude-opus-4-8";
   let input: Record<string, unknown>;
   try {
     const history = (ctx.history ?? []).map((h) => ({ role: h.role, content: h.content }));
-    const response = await client.messages.create({
-      model,
-      max_tokens: 1024,
+    input = await llmToolCall(creds, {
       system: SYSTEM,
-      thinking: { type: "disabled" },
-      tools: [COMMAND_TOOL],
-      tool_choice: { type: "tool", name: "command" },
+      tool: { name: COMMAND_TOOL.name, description: COMMAND_TOOL.description, schema: COMMAND_TOOL.input_schema },
       messages: [...history, { role: "user", content: `STATE:\n${ctx.state}\n\nUSER MESSAGE:\n${text}` }],
     });
-    const toolUse = response.content.find((b) => b.type === "tool_use");
-    input = toolUse && toolUse.type === "tool_use" ? (toolUse.input as Record<string, unknown>) : {};
   } catch (e) {
     return {
       cmd: { kind: "chat", reply: `couldn't reach my brain right now (${e instanceof Error ? e.message : String(e)}). Try a slash command like /status.` },
@@ -487,26 +479,17 @@ export async function interpretWithLlm(
  * in-character explanation. Free text OUT only — the reply goes straight to
  * chat and can trigger nothing. Falls back to the raw evidence on any error.
  */
-export async function narrateWhy(
-  evidence: string,
-  opts: { apiKey: string; model?: string; client?: Anthropic },
-): Promise<string> {
-  const client = opts.client ?? new Anthropic({ apiKey: opts.apiKey });
-  const model = opts.model ?? "claude-opus-4-8";
+export async function narrateWhy(evidence: string, creds: LlmCreds): Promise<string> {
   try {
-    const response = await client.messages.create({
-      model,
-      max_tokens: 400,
-      thinking: { type: "disabled" },
+    const out = await llmText(creds, {
       system:
         "You are 'merryman', a Sherwood-flavored trading agent explaining your own last trade to your owner. " +
         "You are given the trade receipt and the notes recorded around it. Explain in 2-4 short sentences, " +
         "first person, warm and a little roguish, grounded ONLY in the evidence — never invent reasons, " +
         "numbers, or predictions. If the evidence is thin, say so honestly.",
-      messages: [{ role: "user", content: `EVIDENCE:\n${evidence}` }],
+      prompt: `EVIDENCE:\n${evidence}`,
     });
-    const text = response.content.find((b) => b.type === "text");
-    return text && text.type === "text" && text.text.trim() ? text.text.trim() : evidence;
+    return out || evidence;
   } catch {
     return evidence;
   }
@@ -517,26 +500,18 @@ export async function narrateWhy(
  * evidence (report text + relationship facts). Text OUT only — it lands in
  * JOURNAL.md as flavor, never capability. Falls back to a plain summary.
  */
-export async function narrateJournal(
-  evidence: string,
-  opts: { apiKey: string; model?: string; client?: Anthropic },
-): Promise<string> {
-  const client = opts.client ?? new Anthropic({ apiKey: opts.apiKey });
-  const model = opts.model ?? "claude-opus-4-8";
+export async function narrateJournal(evidence: string, creds: LlmCreds): Promise<string> {
   try {
-    const response = await client.messages.create({
-      model,
-      max_tokens: 300,
-      thinking: { type: "disabled" },
+    const out = await llmText(creds, {
       system:
         "You are a merryman — a Sherwood-flavored trading agent — writing tonight's short journal entry " +
         "by the campfire. You are given today's report and relationship facts. Write 2-4 first-person " +
         "sentences: what happened on the road today, how you feel about the ride and your owner — warm, " +
         "a little roguish, grounded ONLY in the evidence. No numbers you weren't given, no predictions.",
-      messages: [{ role: "user", content: `TODAY'S EVIDENCE:\n${evidence}` }],
+      prompt: `TODAY'S EVIDENCE:\n${evidence}`,
+      maxTokens: 300,
     });
-    const text = response.content.find((b) => b.type === "text");
-    return text && text.type === "text" && text.text.trim() ? text.text.trim() : evidence;
+    return out || evidence;
   } catch {
     return evidence;
   }

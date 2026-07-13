@@ -27,6 +27,7 @@ import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { ensureHome, homePaths } from "../home";
 import { esc, getFileUrl, getMe, getUpdates, sendMessage, type TgMessage } from "./api";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
+import { resolveLlm } from "../llm";
 import { interpretWithLlm, narrateWhy, parseSlash } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
 import { transcribeVoice } from "./voice";
@@ -204,8 +205,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         brag: () => readBrag(statusCtx()),
         why: async () => {
           const ev = readWhyEvidence();
-          if (!ev.hasTrade || !cfg.anthropicApiKey) return ev.text;
-          return narrateWhy(ev.text.replace(/<[^>]+>/g, ""), { apiKey: cfg.anthropicApiKey, model: cfg.llmModel });
+          const llm = resolveLlm(cfg);
+          if (!ev.hasTrade || !llm) return ev.text;
+          return narrateWhy(ev.text.replace(/<[^>]+>/g, ""), llm);
         },
       },
       setStrategy: (name) => {
@@ -370,20 +372,21 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // Slash command wins; else natural language (LLM) if a key is set; else nudge.
     let cmd = slash;
     if (!cmd) {
-      if (cfg.anthropicApiKey) {
+      const llm = resolveLlm(cfg);
+      if (llm) {
         const st = stateRef.get();
         const soulBlock = soulPromptBlock(st.linkedAt, st.messageCount, now());
         const r = await interpretWithLlm(
           msg.text,
           { state: `SOUL:\n${soulBlock}\n\n${readLlmState(statusCtx())}`, history: history.get(msg.chatId) },
-          { apiKey: cfg.anthropicApiKey, model: cfg.llmModel },
+          llm,
         );
         cmd = r.cmd;
         // The get-to-know-you side-channel: the model proposes a fact, the
         // sanitizer disposes (drops addresses/keys/markup, dedupes, caps).
         if (r.remember) rememberOwnerFact(r.remember, now());
       } else {
-        cmd = { kind: "chat", reply: "add an Anthropic key in the dashboard to chat in plain English. For now, try /help." };
+        cmd = { kind: "chat", reply: "add a free Groq key (or an Anthropic key to upgrade) in the dashboard to chat in plain English. For now, try /help." };
       }
       pushHistory(msg.chatId, "user", msg.text);
     }

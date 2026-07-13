@@ -50,6 +50,7 @@ import { createAgentExecutor, type AgentExecutor } from "./executor";
 import { accrueAboveHwm } from "./fees";
 import { loadGrantFile } from "./grant";
 import { ensureHome, homePaths } from "./home";
+import { resolveLlm } from "./llm";
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
 import {
   bundlerChainMismatch,
@@ -168,8 +169,7 @@ async function main() {
       idleFloorUsdg: c.idleFloorUsdg,
       gapEnterBudgetUsdg: c.gapEnterBudgetUsdg,
       llm: {
-        apiKey: c.anthropicApiKey,
-        model: c.llmModel,
+        creds: resolveLlm(c),
         intervalMin: c.llmIntervalMin,
         maxActionUsdg: c.llmMaxActionUsdg,
       },
@@ -832,6 +832,7 @@ async function main() {
       breakerBps: active ? active.limits.maxDrawdownBps : null,
       gasWei: lastGasWei > 0n ? lastGasWei : null,
     }),
+    getChainId: () => active?.grant.chainId ?? null,
   });
 
   console.log(

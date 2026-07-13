@@ -212,9 +212,26 @@ export default function SettingsPage() {
           <div className="settings-section mono">essentials</div>
           <div className="grant-fields settings-grid">
             <Field
-              label="Anthropic API key"
+              label="Groq API key · the free brain"
+              action={{ href: "https://console.groq.com/keys", label: "Get a free key" }}
+              hint="The default, free way to test everything — plain-English chat and the AI strategist run on Groq's fast models. Tap “Get a free key”, paste it here. Built-in strategies need no key at all. Blank keeps the saved key."
+            >
+              <input
+                type="password"
+                placeholder={secretPlaceholder(view.groqApiKey)}
+                value={draft.groqApiKey ?? ""}
+                onChange={set("groqApiKey")}
+              />
+              {view.groqApiKey.set && (
+                <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, groqApiKey: "" }))}>
+                  clear
+                </button>
+              )}
+            </Field>
+            <Field
+              label="Anthropic API key · the upgrade"
               action={{ href: "https://console.anthropic.com/settings/keys", label: "Get a key" }}
-              hint="Optional — unlocks the AI strategist, plain-English chat, and screen vision. The built-in strategies need no key at all. Tap “Get a key”, create one in seconds, paste it here. Blank keeps the saved key."
+              hint="Optional upgrade — routes chat and the strategist through Claude (the smartest brain) and unlocks screen vision. Set this and it takes over from Groq automatically. Blank keeps the saved key."
             >
               <input
                 type="password"

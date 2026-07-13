@@ -19,6 +19,8 @@ export interface ResolvedConfig {
   bundlerUrl: string | undefined;
   rpcMainnet: string | undefined;
   rpcTestnet: string | undefined;
+  groqApiKey: string | undefined;
+  groqModel: string;
   anthropicApiKey: string | undefined;
   rialtoApiKey: string | undefined;
   rialtoApiKeyHeader: string;
@@ -139,6 +141,8 @@ export function mergeSettings(
     bundlerUrl: str(file.bundlerUrl, env.MERRYMEN_BUNDLER_URL),
     rpcMainnet: str(file.rpcMainnet, env.MERRYMEN_RPC_MAINNET),
     rpcTestnet: str(file.rpcTestnet, env.MERRYMEN_RPC_TESTNET),
+    groqApiKey: str(file.groqApiKey, env.GROQ_API_KEY),
+    groqModel: str(file.groqModel, env.MERRYMEN_GROQ_MODEL, d.groqModel)!,
     anthropicApiKey: str(file.anthropicApiKey, env.ANTHROPIC_API_KEY),
     rialtoApiKey: str(file.rialtoApiKey, env.MERRYMEN_RIALTO_API_KEY),
     rialtoApiKeyHeader: str(file.rialtoApiKeyHeader, env.MERRYMEN_RIALTO_API_KEY_HEADER, d.rialtoApiKeyHeader)!,
@@ -248,7 +252,7 @@ export function telegramKey(cfg: ResolvedConfig): string {
     cfg.telegramTransferEnabled ? "transfer" : "notransfer",
     cfg.telegramNotifyEnabled ? "notify" : "quiet",
     cfg.telegramDigestHour,
-    cfg.anthropicApiKey ? "llm" : "nollm",
+    cfg.anthropicApiKey ? "llm" : cfg.groqApiKey ? "groq" : "nollm",
   ].join("|");
 }
 
@@ -261,8 +265,10 @@ export function strategyKey(cfg: ResolvedConfig): string {
     cfg.buyPerTickUsdg,
     cfg.idleFloorUsdg,
     cfg.gapEnterBudgetUsdg,
-    cfg.anthropicApiKey ?? "", // key text included: rotating the key rebuilds the driver
-
+    // key/provider text included: rotating a key or switching brains rebuilds the driver
+    cfg.anthropicApiKey ?? "",
+    cfg.groqApiKey ?? "",
+    cfg.groqModel,
     cfg.llmModel,
     cfg.llmIntervalMin,
     cfg.llmMaxActionUsdg,

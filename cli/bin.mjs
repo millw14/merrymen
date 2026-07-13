@@ -253,10 +253,13 @@ async function onboard() {
   const bundlerKey = (await p.askSecret(`  Pimlico API key${keep(current.bundlerApiKey || current.bundlerUrl)}: `)).trim();
   if (bundlerKey) current.bundlerApiKey = bundlerKey;
 
-  console.log(bold(`\n  ${c.arrow} 2/4 · the smart strategist`) + dim("  (optional — AI-picked entries)"));
-  console.log(dim("  The built-in strategies need no key at all. Add an Anthropic key only if you"));
-  console.log(dim("  want the llm-strategist — get one at ") + bold("console.anthropic.com") + dim(" → API keys."));
-  const anthropic = (await p.askSecret(`  Anthropic API key${keep(current.anthropicApiKey)}: `)).trim();
+  console.log(bold(`\n  ${c.arrow} 2/4 · give it a brain`) + dim("  (optional — free to test)"));
+  console.log(dim("  Plain-English chat and the AI strategist run free on ") + "Groq" + dim("."));
+  console.log(dim("  Grab a key at ") + bold("console.groq.com/keys") + dim(" — 30s, no card. (Built-ins need no key.)"));
+  const groq = (await p.askSecret(`  Groq API key${keep(current.groqApiKey)}: `)).trim();
+  if (groq) current.groqApiKey = groq;
+  console.log(dim("  Want the smartest brain + screen vision? Add an Anthropic key to upgrade:"));
+  const anthropic = (await p.askSecret(`  Anthropic API key (upgrade)${keep(current.anthropicApiKey)}: `)).trim();
   if (anthropic) current.anthropicApiKey = anthropic;
 
   console.log(bold(`\n  ${c.arrow} 3/4 · pick your outlaw`) + dim("  (strategy)"));

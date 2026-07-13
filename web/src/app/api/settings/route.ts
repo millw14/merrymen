@@ -31,12 +31,13 @@ export interface SecretView {
 export interface SettingsView {
   // secrets, masked
   bundlerApiKey: SecretView;
+  groqApiKey: SecretView;
   anthropicApiKey: SecretView;
   rialtoApiKey: SecretView;
   telegramBotToken: SecretView;
   telegramTranscribeKey: SecretView;
   // everything else, verbatim (undefined = using env/default)
-  values: Omit<MerrymenSettings, "bundlerApiKey" | "anthropicApiKey" | "rialtoApiKey" | "telegramBotToken" | "telegramTranscribeKey">;
+  values: Omit<MerrymenSettings, "bundlerApiKey" | "groqApiKey" | "anthropicApiKey" | "rialtoApiKey" | "telegramBotToken" | "telegramTranscribeKey">;
   defaults: typeof SETTINGS_DEFAULTS;
   knownSymbols: string[];
   strategies: { builtin: string[]; custom: string[] };
@@ -74,9 +75,10 @@ function mask(value: string | undefined): SecretView {
 
 export async function GET() {
   const stored = await readStored();
-  const { bundlerApiKey, anthropicApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, ...values } = stored;
+  const { bundlerApiKey, groqApiKey, anthropicApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, ...values } = stored;
   const view: SettingsView = {
     bundlerApiKey: mask(bundlerApiKey),
+    groqApiKey: mask(groqApiKey),
     anthropicApiKey: mask(anthropicApiKey),
     rialtoApiKey: mask(rialtoApiKey),
     telegramBotToken: mask(telegramBotToken),

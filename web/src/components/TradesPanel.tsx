@@ -69,7 +69,7 @@ export function TradesPanel() {
             <th>trade</th>
             <th>status</th>
             <th>simulation receipt</th>
-            <th>tx</th>
+            <th>on-chain proof</th>
           </tr>
         </thead>
         <tbody>
@@ -90,11 +90,13 @@ export function TradesPanel() {
               <td className="mono">
                 {t.tx_hash ? (
                   <a
+                    className="tx-proof"
                     href={`${explorerFor(status?.grant?.chainId ?? robinhoodChain.id)}/tx/${t.tx_hash}`}
                     target="_blank"
                     rel="noreferrer"
+                    title={t.tx_hash}
                   >
-                    {t.tx_hash.slice(0, 10)}…
+                    proof ↗
                   </a>
                 ) : (
                   "—"

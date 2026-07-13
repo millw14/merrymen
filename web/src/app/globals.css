@@ -539,6 +539,10 @@ button { font: inherit; cursor: pointer; }
 }
 .wall-note code { font-family: var(--mono); font-size: 9.5px; color: var(--text-dim); }
 
+/* on-chain proof link in the trades table */
+.tx-proof { color: var(--green-soft); font-weight: 600; }
+.tx-proof:hover { color: var(--green); }
+
 /* ---------- the demo band (make-believe, loudly labeled) ---------- */
 .empty-actions { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .demo-btn {

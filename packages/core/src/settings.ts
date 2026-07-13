@@ -24,7 +24,13 @@ export interface MerrymenSettings {
   rpcTestnet?: string;
 
   // ── API keys (secret — masked in every API response) ───────────────────
-  /** Enables the LLM strategist's Claude driver. */
+  /** The free/default brain: a Groq key (console.groq.com) powers chat, the
+   * strategist, and narration on Groq's fast OpenAI-compatible models. */
+  groqApiKey?: string;
+  /** Groq model id (default llama-3.3-70b-versatile). */
+  groqModel?: string;
+  /** The upgrade: an Anthropic key routes everything through Claude instead
+   * (and unlocks screen vision). Takes precedence over Groq when both are set. */
   anthropicApiKey?: string;
   /** Rialto integrator key — enables the full quote→swap leg. */
   rialtoApiKey?: string;
@@ -100,6 +106,7 @@ export interface MerrymenSettings {
 /** Keys whose values must never be echoed back to a browser. */
 export const SECRET_SETTING_KEYS = [
   "bundlerApiKey",
+  "groqApiKey",
   "anthropicApiKey",
   "rialtoApiKey",
   "telegramBotToken",
@@ -133,6 +140,7 @@ export const SETTINGS_DEFAULTS = {
   buyPerTickUsdg: 25,
   idleFloorUsdg: 50,
   gapEnterBudgetUsdg: 75,
+  groqModel: "llama-3.3-70b-versatile",
   llmModel: "claude-opus-4-8",
   llmIntervalMin: 30,
   llmMaxActionUsdg: 50,
