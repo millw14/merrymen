@@ -539,6 +539,10 @@ button { font: inherit; cursor: pointer; }
 }
 .wall-note code { font-family: var(--mono); font-size: 9.5px; color: var(--text-dim); }
 
+/* grant desync banner — browser wallet the server no longer holds */
+.desync-panel { border-color: color-mix(in srgb, var(--gold) 45%, var(--border-2)); }
+.desync-panel .grant-title { color: var(--gold); }
+
 /* on-chain proof link in the trades table */
 .tx-proof { color: var(--green-soft); font-weight: 600; }
 .tx-proof:hover { color: var(--green); }

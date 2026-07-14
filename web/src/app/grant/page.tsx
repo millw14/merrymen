@@ -91,11 +91,39 @@ export default function GrantPage() {
   const [reveal, setReveal] = useState(false);
   const [ack, setAck] = useState(false);
   const [funding, setFunding] = useState<Funding | null>(null);
+  // Whether the SERVER still holds this grant (grant.json). null = still checking.
+  // The browser copy and the server file can desync — a kill switch or CLI kill
+  // deletes the server file but not this localStorage — so the dashboard shows
+  // "no merryman" while this page would happily show a wallet the worker ignores.
+  const [serverArmed, setServerArmed] = useState<boolean | null>(null);
+  const [reArming, setReArming] = useState(false);
 
   useEffect(() => {
     setGrant(loadGrant());
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
+    fetch("/api/grants")
+      .then((r) => (r.ok ? r.json() : { exists: false }))
+      .then((s: { exists?: boolean }) => setServerArmed(!!s.exists))
+      .catch(() => setServerArmed(null));
   }, []);
+
+  /** Re-push the stored grant so the worker obeys it again (undo a desync). */
+  async function reArm() {
+    const g = loadGrant();
+    if (!g) return;
+    setReArming(true);
+    try {
+      const r = await fetch("/api/grants", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(g),
+      });
+      if (r.ok) setServerArmed(true);
+    } catch {
+      /* leave the banner up; the button re-enables */
+    }
+    setReArming(false);
+  }
 
   // Poll the account's on-chain balances (on the GRANT's chain) at the fund step.
   const refreshFunding = useCallback(async (addr: `0x${string}`, forChain: number) => {
@@ -158,6 +186,9 @@ export default function GrantPage() {
   // Once a grant exists, the truth is what's IN it — not the selector state.
   const activeChainId = grant ? grant.chainId : chainId;
   const grantIsTestnet = (grant?.chainId ?? TESTNET) === TESTNET;
+  // This browser thinks it has a wallet, but the server/worker no longer holds
+  // its grant — the wallet is inert until re-armed (or should be discarded).
+  const desynced = grant !== null && serverArmed === false;
 
   return (
     <>
@@ -173,6 +204,31 @@ export default function GrantPage() {
       </header>
 
       <main className="grant-shell">
+        {/* ─── desync banner: browser has a wallet the server no longer holds ── */}
+        {desynced && (
+          <div className="grant-panel desync-panel">
+            <h1 className="grant-title">this wallet isn&apos;t active</h1>
+            <p className="grant-sub">
+              Your browser still has this wallet, but the worker no longer holds its grant — so the
+              dashboard shows no merryman and it won&apos;t trade. This happens after a{" "}
+              <b>kill switch</b> or a <code>merrymen kill</code>. Re-arm it to make the band obey it
+              again, or discard it and start fresh.
+            </p>
+            <div className="fund-addr mono">
+              <span className="rk">account · {chainLabel(grant!.chainId)}</span>
+              <span className="rv" style={{ wordBreak: "break-all" }}>{grant!.smartAccount}</span>
+            </div>
+            <div className="fund-actions" style={{ display: "flex", gap: 10 }}>
+              <button className="grant-btn" onClick={() => void reArm()} disabled={reArming} style={{ flex: 1 }}>
+                {reArming ? "re-arming…" : "re-arm this wallet"}
+              </button>
+              <button className="btn-kill" onClick={discard} style={{ flex: 1 }}>
+                discard &amp; start fresh
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* ─── phase 1: pick a chain, set caps, create the wallet ────────── */}
         {!grant && (
           <div className="grant-panel">
@@ -307,7 +363,7 @@ export default function GrantPage() {
         )}
 
         {/* ─── phase 2: back up the owner key (gated) ──────────────────── */}
-        {grant && !backedUp && (
+        {grant && !backedUp && !desynced && (
           <div className="grant-panel">
             <h1 className="grant-title">back up your owner key</h1>
             <p className="grant-sub">
@@ -350,7 +406,7 @@ export default function GrantPage() {
         )}
 
         {/* ─── phase 3: fund the account ───────────────────────────────── */}
-        {grant && backedUp && (
+        {grant && backedUp && !desynced && (
           <div className="grant-panel">
             <h1 className="grant-title">fund your account</h1>
             <p className="grant-sub">
