@@ -39,7 +39,7 @@ export interface TradeRecord {
   buy_token: string | null;
   amount_usdg: number;
   tx_hash: string | null;
-  status: "landed" | "reverted" | "rejected";
+  status: "landed" | "reverted" | "rejected" | "paper";
   reject_rule: string | null;
   sim_quote_out: string | null;
   sim_min_out: string | null;

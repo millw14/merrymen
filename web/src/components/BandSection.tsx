@@ -115,17 +115,34 @@ export function BandSection() {
   const expired = now >= g.expiresAt;
   const workerAlive = status.workerAliveAt != null && now - status.workerAliveAt < 90;
   const state = expired ? "expired" : workerAlive ? "active" : "armed";
+  const paper = status.mode === "paper";
 
-  const eth = status.balances ? Number(formatUnits(BigInt(status.balances.ethWei), 18)) : 0;
-  const cash = status.balances ? Number(formatUnits(BigInt(status.balances.cashUsdg), USDG_DECIMALS)) : 0;
-  const vault = status.balances ? Number(formatUnits(BigInt(status.balances.vaultUsdg), USDG_DECIMALS)) : 0;
+  // In paper mode the on-chain balances are 0; the real book is the equity
+  // ledger the worker writes each tick (cash/vault come straight from it).
+  const lastEq = feed?.equity?.[feed.equity.length - 1];
+  const eth = paper ? 0 : status.balances ? Number(formatUnits(BigInt(status.balances.ethWei), 18)) : 0;
+  const cash = paper
+    ? lastEq?.cash_usdg ?? 0
+    : status.balances ? Number(formatUnits(BigInt(status.balances.cashUsdg), USDG_DECIMALS)) : 0;
+  const vault = paper
+    ? lastEq?.vault_usdg ?? 0
+    : status.balances ? Number(formatUnits(BigInt(status.balances.vaultUsdg), USDG_DECIMALS)) : 0;
 
   return (
     <div className={`agent-card real ${state === "active" ? "active" : state === "expired" ? "paused" : "armed"}`}>
+      {status.exists && !workerAlive && (
+        <div className="worker-down mono">
+          ● worker not running — nothing trades until you run <b>merrymen start</b>
+        </div>
+      )}
+
       <div className="agent-head">
         <div className="agent-sigil">🏹</div>
         <div>
-          <div className="agent-name">{feed?.agent?.name ?? "Robin"}</div>
+          <div className="agent-name">
+            {feed?.agent?.name ?? "Robin"}
+            {paper && <span className="paper-badge mono">📜 paper</span>}
+          </div>
           <div className="agent-strategy">
             {feed?.agent
               ? `${feed.agent.strategy} · ${feed.agent.basket.join(" ")}`
@@ -139,12 +156,21 @@ export function BandSection() {
         </div>
       </div>
 
+      {paper && (
+        <div className="paper-note mono">
+          fills simulate at live oracle prices · nothing signs · add a Pimlico key in{" "}
+          <Link href="/settings">settings</Link> to trade live
+        </div>
+      )}
+
       <div className="real-balances mono">
+        {!paper && (
+          <span>
+            <b>{eth.toFixed(4)}</b> ETH
+          </span>
+        )}
         <span>
-          <b>{eth.toFixed(4)}</b> ETH
-        </span>
-        <span>
-          <b>{cash.toFixed(2)}</b> USDG cash
+          <b>{cash.toFixed(2)}</b> {paper ? "USDG paper cash" : "USDG cash"}
         </span>
         <span>
           <b>{vault.toFixed(2)}</b> USDG in vault

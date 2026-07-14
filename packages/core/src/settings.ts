@@ -41,6 +41,14 @@ export interface MerrymenSettings {
   /** Deployed BreakerRegistry; a tripped breaker halts all intents. */
   breakerAddress?: string;
 
+  // ── paper trading (the full loop with zero funds) ──────────────────────
+  /** When the account can't sign (no bundler key), fill approved intents as
+   * PAPER trades at live oracle prices instead of stubbing execution. The
+   * whole loop — pings, P&L, journal, chat trades — works with no funding. */
+  paperTradingEnabled?: boolean;
+  /** Starting paper cash, USDG. */
+  paperStartUsdg?: number;
+
   // ── trading ────────────────────────────────────────────────────────────
   /** Builtin ("steady-basket" | "weekend-gap" | "llm-strategist") or the
    * filename of a user-written strategy in strategies/. */
@@ -130,6 +138,8 @@ export const PC_CAPABILITIES = [
 export type PcCapability = (typeof PC_CAPABILITIES)[number];
 
 export const SETTINGS_DEFAULTS = {
+  paperTradingEnabled: true,
+  paperStartUsdg: 1000,
   rialtoApiKeyHeader: "x-api-key",
   strategy: "steady-basket" as const,
   swapVenue: "uniswap" as const,

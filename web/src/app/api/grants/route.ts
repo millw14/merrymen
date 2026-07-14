@@ -23,6 +23,8 @@ export interface AgentStatus {
   grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
   balances?: { ethWei: string; cashUsdg: string; vaultUsdg: string };
   workerAliveAt?: number | null;
+  /** "paper" (simulated fills), "live" (signing), or "idle" — from the heartbeat. */
+  mode?: "paper" | "live" | "idle" | null;
 }
 
 export async function POST(req: Request) {
@@ -64,9 +66,11 @@ export async function GET() {
   ]);
 
   let workerAliveAt: number | null = null;
+  let mode: AgentStatus["mode"] = null;
   try {
-    const hb = JSON.parse(await readFile(HEARTBEAT_FILE, "utf8")) as { at: number };
+    const hb = JSON.parse(await readFile(HEARTBEAT_FILE, "utf8")) as { at: number; mode?: AgentStatus["mode"] };
     workerAliveAt = hb.at;
+    mode = hb.mode ?? null;
   } catch {
     // no heartbeat file — worker never ran
   }
@@ -84,6 +88,7 @@ export async function GET() {
       vaultUsdg: (tokenReads?.[1]?.status === "success" ? (tokenReads[1].result as bigint) : 0n).toString(),
     },
     workerAliveAt,
+    mode,
   };
   return NextResponse.json(status);
 }

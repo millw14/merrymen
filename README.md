@@ -65,6 +65,14 @@ You verify; it trades.
 Everything lives in **`~/.merrymen`** (settings, grant, ledger, your strategies,
 your merryman's soul). The install is disposable; upgrades never touch your data.
 
+**Ride in 2 minutes — paper mode.** Until you add a bundler key, your band trades
+in **paper mode**: approved intents fill at the *live* on-chain oracle prices
+(the Chainlink feeds Robinhood publishes for every stock token), recorded to the
+real ledger as `PAPER` trades. The whole loop — the strategist, chat `/buy`, P&L,
+pings, the journal — works with zero funds, zero faucet, zero Pimlico. Add a
+Pimlico key and the same wall signs for real. Upgrade any time with
+`merrymen update` (stops the band, installs, restarts — no Windows file-lock).
+
 ---
 
 ## 1 · Install

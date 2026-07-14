@@ -100,6 +100,7 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   buyPerTickUsdg: [1, 100_000],
   idleFloorUsdg: [0, 1_000_000],
   gapEnterBudgetUsdg: [1, 1_000_000],
+  paperStartUsdg: [1, 10_000_000],
   llmIntervalMin: [1, 1_440],
   llmMaxActionUsdg: [1, 100_000],
   telegramMaxActionUsdg: [1, 100_000],
@@ -107,6 +108,7 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   telegramDigestHour: [0, 23],
 };
 const BOOL_FIELDS = [
+  "paperTradingEnabled",
   "telegramEnabled",
   "telegramControlEnabled",
   "telegramTransferEnabled",

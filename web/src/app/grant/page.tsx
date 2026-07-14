@@ -424,6 +424,13 @@ export default function GrantPage() {
               )}
             </p>
 
+            <div className="paper-note mono" style={{ marginBottom: 14 }}>
+              📜 <b>Already riding.</b> Your band is trading in <b>paper mode</b> right now — real
+              live prices, simulated fills — so you can watch it work before funding anything. Head
+              to the <Link href="/">dashboard</Link> to see it. Fund the account below only when
+              you&apos;re ready for live trades.
+            </div>
+
             <div className="fund-addr mono">
               <span className="rk">account address · {chainLabel(grant.chainId)}</span>
               <span className="rv" style={{ wordBreak: "break-all" }}>{grant.smartAccount}</span>

@@ -34,6 +34,8 @@ export interface StatusContext {
   grant: { perTradeUsdg: number; dailyUsdg: number; maxDrawdownPct: number; expiresInDays: number } | null;
   /** The armed grant's chain (4663 mainnet = real funds, 46630 testnet); null when no grant. */
   chainId: number | null;
+  /** Paper mode: fills simulate at the live oracle price, nothing signs. */
+  paper?: boolean;
   telegramMaxActionUsdg: number;
 }
 
@@ -43,6 +45,9 @@ export function readStatus(ctx: StatusContext): string {
   const alive = ctx.workerAliveSec !== null && ctx.workerAliveSec < 90;
   lines.push(`• worker: ${alive ? "alive" : "not running"}${ctx.paused ? " · ⏸ paused" : ""}`);
   lines.push(`• strategy: ${esc(ctx.strategy)} · venue: ${esc(ctx.venue)}`);
+  if (ctx.paper) {
+    lines.push(`• mode: 📜 <b>paper</b> — fills simulate at live prices, nothing signs`);
+  }
   if (ctx.chainId !== null) {
     lines.push(
       ctx.chainId === 46630

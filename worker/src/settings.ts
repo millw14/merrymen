@@ -25,6 +25,8 @@ export interface ResolvedConfig {
   rialtoApiKey: string | undefined;
   rialtoApiKeyHeader: string;
   breakerAddress: `0x${string}` | undefined;
+  paperTradingEnabled: boolean;
+  paperStartUsdg: number;
   /** Builtin name, or a user strategy filename (strategies/<name>.ts). */
   strategy: string;
   swapVenue: "uniswap" | "rialto";
@@ -147,6 +149,8 @@ export function mergeSettings(
     rialtoApiKey: str(file.rialtoApiKey, env.MERRYMEN_RIALTO_API_KEY),
     rialtoApiKeyHeader: str(file.rialtoApiKeyHeader, env.MERRYMEN_RIALTO_API_KEY_HEADER, d.rialtoApiKeyHeader)!,
     breakerAddress,
+    paperTradingEnabled: bool(file.paperTradingEnabled, env.MERRYMEN_PAPER_TRADING, d.paperTradingEnabled),
+    paperStartUsdg: num(file.paperStartUsdg, env.MERRYMEN_PAPER_START_USDG, d.paperStartUsdg, 1, 10_000_000),
     // Any sane token is a valid strategy name — builtins resolve directly,
     // everything else resolves to strategies/<name>.* (missing file = honest
     // no-trades with the reason in the event feed, decided at tick time).

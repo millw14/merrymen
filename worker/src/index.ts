@@ -51,6 +51,7 @@ import { accrueAboveHwm } from "./fees";
 import { loadGrantFile } from "./grant";
 import { ensureHome, homePaths } from "./home";
 import { resolveLlm } from "./llm";
+import { applyPaperIntent, type PaperPosition } from "./paper";
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
 import {
   bundlerChainMismatch,
@@ -77,9 +78,11 @@ import {
   ensureAgent,
   getAgentFinancials,
   getOpsToday,
+  getPaperBook,
   getSpentTodayUsdg,
   getTransferredTodayUsdg,
   initStore,
+  setPaperBook,
   setAgentName,
   setAgentHwm,
   setAgentStatus,
@@ -159,6 +162,20 @@ async function main() {
   let connKey = connectionKey(cfg);
   let stratKey = strategyKey(cfg);
   let watchTokens = tokensForSymbols(cfg.basketSymbols);
+
+  // ── paper trading plumbing ────────────────────────────────────────────
+  // Paper mode = a grant but no signer: fills simulate at live oracle prices.
+  let lastPrices: Map<string, { price8: bigint; stale: boolean }> = new Map();
+  const paperActive = () => !!active && !active.executor && cfg.paperTradingEnabled;
+  function paperPriceOf(token: `0x${string}`): { priceUsd: number; stale: boolean } | null {
+    const t = watchTokens.find((w) => w.address.toLowerCase() === token.toLowerCase());
+    const p = t ? lastPrices.get(t.symbol) : undefined;
+    return p ? { priceUsd: Number(p.price8) / 1e8, stale: p.stale } : null;
+  }
+  const paperSymbolOf = (token: `0x${string}`) =>
+    watchTokens.find((w) => w.address.toLowerCase() === token.toLowerCase())?.symbol ?? null;
+  const paperPositionsOf = (shares: Record<string, { token: `0x${string}`; shares: number }>): PaperPosition[] =>
+    Object.entries(shares).map(([symbol, v]) => ({ symbol, token: v.token, shares: v.shares }));
 
   function makeStrategy(c: ResolvedConfig): Strategy {
     return buildStrategy(c.strategy, {
@@ -278,7 +295,9 @@ async function main() {
       console.log(`[worker] executor live — smart account ${executor.address} on chain ${chain.id}`);
     } else {
       console.log(
-        "[worker] practice mode — no bundler key (add a Pimlico key in /settings to trade live). Policy + simulation still run.",
+        cfg.paperTradingEnabled
+          ? "[worker] PAPER MODE — fills simulate at live oracle prices, nothing signs. Add a Pimlico key in /settings to trade live."
+          : "[worker] practice mode — no bundler key (add a Pimlico key in /settings to trade live). Policy + simulation still run.",
       );
     }
 
@@ -352,7 +371,59 @@ async function main() {
       return;
     }
     if (!executor) {
-      console.log(`[policy] approved ${intent.kind} — execution stubbed (no bundler)`);
+      if (!cfg.paperTradingEnabled) {
+        console.log(`[policy] approved ${intent.kind} — execution stubbed (no bundler, paper trading off)`);
+        return;
+      }
+      // ── PAPER FILL: same wall, simulated execution at the live oracle px ──
+      const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
+      const fill = applyPaperIntent(
+        intent,
+        { cashUsdg: bookRow.cashUsdg, vaultUsdg: bookRow.vaultUsdg, hwmUsdg: bookRow.hwmUsdg },
+        paperPositionsOf(bookRow.shares),
+        {
+          priceUsdOf: paperPriceOf,
+          symbolOf: paperSymbolOf,
+          usdgAddress: CASH.USDG as `0x${string}`,
+          slippageBps: cfg.slippageBps,
+          notionalUsdg: usdgNum(notional),
+        },
+      );
+      if (!fill.ok) {
+        console.log(`[paper] refused ${intent.kind}: ${fill.reason}`);
+        await addEvent(agentId, "warn", `paper fill refused: ${fill.reason}`);
+        await addTrade({
+          agent_id: agentId,
+          kind: intent.kind,
+          target: intent.target,
+          amount_usdg: usdgNum(notional),
+          status: "rejected",
+          reject_rule: `paper: ${fill.reason}`,
+          created_at: new Date().toISOString(),
+        });
+        return;
+      }
+      await setPaperBook(agentId, {
+        cashUsdg: fill.book.cashUsdg,
+        vaultUsdg: fill.book.vaultUsdg,
+        hwmUsdg: bookRow.hwmUsdg,
+        shares: Object.fromEntries(fill.positions.map((p) => [p.symbol, { token: p.token, shares: p.shares }])),
+      });
+      if (intent.kind !== "vault-withdraw") spentTodayUsdg += notional;
+      opsToday += 1;
+      console.log(`[paper] ${fill.receipt}`);
+      await addEvent(agentId, "ok", `📜 ${fill.receipt} — inside the wall, nothing signed`);
+      await addTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: intent.target,
+        sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
+        buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
+        amount_usdg: usdgNum(notional),
+        status: "paper",
+        sim_quote_out: fill.receipt,
+        created_at: new Date().toISOString(),
+      });
       return;
     }
 
@@ -557,9 +628,10 @@ async function main() {
   function heartbeat(blockNumber: bigint) {
     try {
       ensureHome();
+      const mode = paperActive() ? "paper" : active?.executor ? "live" : "idle";
       writeFileSync(
         homePaths.heartbeat(),
-        JSON.stringify({ at: Math.floor(Date.now() / 1000), block: blockNumber.toString() }),
+        JSON.stringify({ at: Math.floor(Date.now() / 1000), block: blockNumber.toString(), mode }),
         "utf8",
       );
     } catch {
@@ -598,33 +670,71 @@ async function main() {
       return;
     }
 
-    const [balances, positions] = await Promise.all([
-      readAccountBalances(client, grant.smartAccount),
-      readPositions(client, grant.smartAccount, watchTokens, market.prices),
-    ]);
+    // Feed prices land BEFORE the book read so paper valuation uses this tick's px.
+    lastPrices = market.prices;
+
+    const paper = paperActive();
+    let balances: { ethWei: bigint; cashUsdg: bigint; vaultUsdg: bigint };
+    let positions: Awaited<ReturnType<typeof readPositions>>;
+    if (paper) {
+      // The book IS the paper ledger, marked to market at the live oracle px.
+      const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
+      balances = { ethWei: 0n, cashUsdg: usdg(bookRow.cashUsdg), vaultUsdg: usdg(bookRow.vaultUsdg) };
+      positions = paperPositionsOf(bookRow.shares).flatMap((p) => {
+        const px = paperPriceOf(p.token);
+        if (!px) return [];
+        return [{
+          symbol: p.symbol,
+          token: p.token,
+          rawBalance: BigInt(Math.round(p.shares * 1e18)),
+          uiMultiplier: 10n ** 18n,
+          price8: BigInt(Math.round(px.priceUsd * 1e8)),
+          priceStale: px.stale,
+          valueUsdg: usdg(p.shares * px.priceUsd),
+        }];
+      });
+    } else {
+      [balances, positions] = await Promise.all([
+        readAccountBalances(client, grant.smartAccount),
+        readPositions(client, grant.smartAccount, watchTokens, market.prices),
+      ]);
+    }
     const positionsUsdg = positions.reduce((sum, p) => sum + p.valueUsdg, 0n);
     // Equity is the whole book — cash, vault, and multiplier-aware stock value —
     // so the drawdown breaker judges reality, not just the cash ledger.
     const equityUsdg = balances.cashUsdg + balances.vaultUsdg + positionsUsdg;
 
-    const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, cfg.perfFeeBps);
-    if (accrual.profitUsdg > 0n) {
-      await addFeeAccrual(agentId, {
-        profitUsdg: usdgNum(accrual.profitUsdg),
-        feeUsdg: usdgNum(accrual.feeUsdg),
-        hwmBeforeUsdg: usdgNum(highWaterMarkUsdg),
-        hwmAfterUsdg: usdgNum(accrual.newHwmUsdg),
-      });
-      await setAgentHwm(agentId, usdgNum(accrual.newHwmUsdg));
-      if (accrual.feeUsdg > 0n) {
-        await addEvent(
-          agentId,
-          "ok",
-          `new high-water mark ${fmt(accrual.newHwmUsdg)} USDG — fee accrued ${fmt(accrual.feeUsdg)} (${cfg.perfFeeBps / 100}% of ${fmt(accrual.profitUsdg)} profit)`,
-        );
+    if (paper) {
+      // Paper profit accrues NO fees and never touches the persistent agent
+      // HWM — mixing paper peaks into real accounting would trip the breaker
+      // (or charge fees) against money that never existed. The paper book
+      // keeps its own HWM so the drawdown breaker still works in practice.
+      const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
+      if (usdgNum(equityUsdg) > bookRow.hwmUsdg) {
+        bookRow.hwmUsdg = usdgNum(equityUsdg);
+        await setPaperBook(agentId, bookRow);
       }
+      highWaterMarkUsdg = usdg(bookRow.hwmUsdg);
+    } else {
+      const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, cfg.perfFeeBps);
+      if (accrual.profitUsdg > 0n) {
+        await addFeeAccrual(agentId, {
+          profitUsdg: usdgNum(accrual.profitUsdg),
+          feeUsdg: usdgNum(accrual.feeUsdg),
+          hwmBeforeUsdg: usdgNum(highWaterMarkUsdg),
+          hwmAfterUsdg: usdgNum(accrual.newHwmUsdg),
+        });
+        await setAgentHwm(agentId, usdgNum(accrual.newHwmUsdg));
+        if (accrual.feeUsdg > 0n) {
+          await addEvent(
+            agentId,
+            "ok",
+            `new high-water mark ${fmt(accrual.newHwmUsdg)} USDG — fee accrued ${fmt(accrual.feeUsdg)} (${cfg.perfFeeBps / 100}% of ${fmt(accrual.profitUsdg)} profit)`,
+          );
+        }
+      }
+      highWaterMarkUsdg = accrual.newHwmUsdg;
     }
-    highWaterMarkUsdg = accrual.newHwmUsdg;
     console.log(
       `[account] ${grant.smartAccount} · eth ${formatUnits(balances.ethWei, 18)} · ` +
         `cash ${fmt(balances.cashUsdg)} USDG · vault ${fmt(balances.vaultUsdg)} USDG · ` +
@@ -768,6 +878,7 @@ async function main() {
     strategy: strategy.name,
     venue: cfg.swapVenue,
     chainId: active ? active.grant.chainId : null,
+    paper: paperActive(),
     paused: isPaused(),
     workerAliveSec: 0, // the worker itself is answering, so it's alive
     grant: active

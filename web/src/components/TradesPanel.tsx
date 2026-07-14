@@ -81,6 +81,7 @@ export function TradesPanel() {
               <td className="mono">{describe(t)}</td>
               <td className="mono">
                 {t.status === "landed" && <span className="ok">landed</span>}
+                {t.status === "paper" && <span className="paper-chip">📜 paper</span>}
                 {t.status === "reverted" && <span className="err">reverted</span>}
                 {t.status === "rejected" && (
                   <span className="warn">rejected · {t.reject_rule ?? "policy"}</span>

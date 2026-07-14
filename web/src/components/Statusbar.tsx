@@ -11,6 +11,14 @@ const RPC = "https://rpc.mainnet.chain.robinhood.com";
  */
 export function Statusbar() {
   const [seq, setSeq] = useState<"checking" | "up" | "down">("checking");
+  const [version, setVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/version")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { version?: string } | null) => j?.version && setVersion(j.version))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -52,6 +60,7 @@ export function Statusbar() {
       <span>every trade simulated before it is signed</span>
       <span>
         <a href="https://merrymen.dev" target="_blank" rel="noreferrer">merrymen.dev</a>
+        {version && <span className="dim"> · v{version}</span>}
       </span>
     </footer>
   );

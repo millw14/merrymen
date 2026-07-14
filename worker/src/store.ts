@@ -85,6 +85,14 @@ function getDb(): DatabaseSync {
       updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
       PRIMARY KEY (agent_id, symbol)
     );
+    CREATE TABLE IF NOT EXISTS paper_book (
+      agent_id TEXT PRIMARY KEY,
+      cash_usdg REAL NOT NULL,
+      vault_usdg REAL NOT NULL DEFAULT 0,
+      hwm_usdg REAL NOT NULL DEFAULT 0,
+      shares TEXT NOT NULL DEFAULT '{}',
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
   `);
   for (const ddl of [
     "ALTER TABLE equity ADD COLUMN positions_usdg REAL NOT NULL DEFAULT 0",
@@ -122,7 +130,7 @@ export interface TradeRow {
   amount_usdg: number;
   user_op_hash?: string;
   tx_hash?: string;
-  status: "landed" | "reverted" | "rejected";
+  status: "landed" | "reverted" | "rejected" | "paper";
   reject_rule?: string;
   created_at: string;
   /** Simulation receipt (Uniswap QuoterV2): quoted out, slippage-bounded min, tier, gas. */
@@ -320,7 +328,7 @@ export async function getOpsToday(agentId: string): Promise<number> {
   const row = getDb()
     .prepare(
       `SELECT COUNT(*) AS n FROM trades
-       WHERE agent_id = ? AND status = 'landed' AND created_at > unixepoch() - 86400`,
+       WHERE agent_id = ? AND status IN ('landed', 'paper') AND created_at > unixepoch() - 86400`,
     )
     .get(agentId) as { n: number } | undefined;
   return row?.n ?? 0;
@@ -352,9 +360,45 @@ export async function getSpentTodayUsdg(agentId: string): Promise<number> {
   const row = getDb()
     .prepare(
       `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
-       WHERE agent_id = ? AND status = 'landed' AND kind != 'vault-withdraw'
+       WHERE agent_id = ? AND status IN ('landed', 'paper') AND kind != 'vault-withdraw'
          AND created_at > unixepoch() - 86400`,
     )
     .get(agentId) as { spent: number } | undefined;
   return row?.spent ?? 0;
+}
+
+// ── paper book — the zero-funds ledger (see paper.ts) ─────────────────────
+
+export interface PaperBookRow {
+  cashUsdg: number;
+  vaultUsdg: number;
+  hwmUsdg: number;
+  /** symbol → { token, shares } */
+  shares: Record<string, { token: `0x${string}`; shares: number }>;
+}
+
+/** Load the paper book, seeding it with the starting cash on first touch. */
+export async function getPaperBook(agentId: string, startUsdg: number): Promise<PaperBookRow> {
+  getDb()
+    .prepare("INSERT OR IGNORE INTO paper_book (agent_id, cash_usdg) VALUES (?, ?)")
+    .run(agentId, startUsdg);
+  const row = getDb()
+    .prepare("SELECT cash_usdg, vault_usdg, hwm_usdg, shares FROM paper_book WHERE agent_id = ?")
+    .get(agentId) as { cash_usdg: number; vault_usdg: number; hwm_usdg: number; shares: string };
+  let shares: PaperBookRow["shares"] = {};
+  try {
+    shares = JSON.parse(row.shares) as PaperBookRow["shares"];
+  } catch {
+    // corrupt shares blob — start clean rather than crash the tick
+  }
+  return { cashUsdg: row.cash_usdg, vaultUsdg: row.vault_usdg, hwmUsdg: row.hwm_usdg, shares };
+}
+
+export async function setPaperBook(agentId: string, book: PaperBookRow): Promise<void> {
+  getDb()
+    .prepare(
+      `UPDATE paper_book SET cash_usdg = ?, vault_usdg = ?, hwm_usdg = ?, shares = ?, updated_at = unixepoch()
+       WHERE agent_id = ?`,
+    )
+    .run(book.cashUsdg, book.vaultUsdg, book.hwmUsdg, JSON.stringify(book.shares), agentId);
 }

@@ -225,8 +225,8 @@ async function onboard() {
   console.log(
     `  ${dim("your keys, your caps · bounded worst case · every trade simulated first")}\n` +
       `  ${bold("Every step here is optional.")} Press Enter through them all and your band\n` +
-      `  rides in ${green("practice mode")} — real market, simulated fills, zero setup. Add a key\n` +
-      `  later (here or in the dashboard) whenever you want to go live.\n\n` +
+      `  rides in ${green("paper mode")} — real live prices, simulated fills, zero funds. Add a\n` +
+      `  Pimlico key later (here or in the dashboard) whenever you want to trade for real.\n\n` +
       `  Everything you tell me is stashed in ${dim(HOME)} — yours, outside the install.\n` +
       `  Blank answers keep what's saved. Ctrl+C to slip back into the forest anytime.\n`,
   );
@@ -371,36 +371,75 @@ async function start() {
   };
 
   // Next serves from the app dir as cwd; the worker runs from ROOT.
-  const procs = [
-    { name: "tavern", bin: localBin("next"), args: ["start", "-p", "3100", "-H", host], cwd: web },
-    { name: "band  ", bin: localBin("tsx"), args: [path.join(ROOT, "worker", "src", "index.ts")], cwd: ROOT },
-  ].map(({ name, bin, args, cwd }) => {
-    const child = toolSpawn(bin, args, { cwd });
+  // The WORKER is supervised: a crash (a bad tick, an RPC blip) auto-restarts
+  // with backoff instead of leaving a silently-dead band. The dashboard is not
+  // — a broken build should fail visibly, not crash-loop.
+  let shuttingDown = false;
+  const children = new Set();
+  let bandRestarts = 0;
+
+  const specs = [
+    { name: "tavern", bin: localBin("next"), args: ["start", "-p", "3100", "-H", host], cwd: web, supervise: false },
+    { name: "band  ", bin: localBin("tsx"), args: [path.join(ROOT, "worker", "src", "index.ts")], cwd: ROOT, supervise: true },
+  ];
+
+  function launch(spec) {
+    const startedAt = Date.now();
+    const child = toolSpawn(spec.bin, spec.args, { cwd: spec.cwd });
+    children.add(child);
     const pipe = (stream, sink) =>
       stream.on("data", (chunk) => {
         const text = String(chunk);
-        if (name === "tavern" && /Ready|started server|Local:/i.test(text)) openOnce();
+        if (spec.name === "tavern" && /Ready|started server|Local:/i.test(text)) openOnce();
         text
           .split(/\r?\n/)
           .filter((l) => l.trim())
-          .forEach((l) => sink.write(`${dim(`[${name}]`)} ${l}\n`));
+          .forEach((l) => sink.write(`${dim(`[${spec.name}]`)} ${l}\n`));
       });
     pipe(child.stdout, process.stdout);
     pipe(child.stderr, process.stderr);
-    child.on("exit", (code) => console.log(`${dim(`[${name}]`)} rode off (${code})`));
-    return child;
-  });
+    child.on("exit", (code) => {
+      children.delete(child);
+      console.log(`${dim(`[${spec.name}]`)} rode off (${code})`);
+      if (shuttingDown || !spec.supervise) return;
+      // A long-lived run that then dies is a fresh incident, not a crash loop.
+      if (Date.now() - startedAt > 60_000) bandRestarts = 0;
+      bandRestarts += 1;
+      if (bandRestarts > 8) {
+        bad("the band keeps falling right after starting — fix the error above, then `merrymen start`.");
+        return;
+      }
+      const delay = Math.min(30_000, 1_000 * 2 ** Math.min(bandRestarts, 5));
+      warn(`band stopped — rallying again in ${Math.round(delay / 1000)}s (restart #${bandRestarts})`);
+      setTimeout(() => {
+        if (!shuttingDown) launch(spec);
+      }, delay);
+    });
+  }
+
+  specs.forEach(launch);
   // Fallback: open even if we never matched a ready line.
   setTimeout(openOnce, 12_000);
 
   console.log(dim("  Ctrl+C calls the whole band home.\n"));
   const stop = () => {
+    shuttingDown = true;
     console.log(`\n  ${c.gold(c.arrow)} calling the band home…`);
-    procs.forEach((ch) => ch.kill("SIGINT"));
+    children.forEach((ch) => ch.kill("SIGINT"));
     setTimeout(() => process.exit(0), 500);
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
+}
+
+/** Print the installed version — so you can tell what build is running. */
+function version() {
+  try {
+    const pkg = readJson(path.join(ROOT, "package.json"));
+    console.log(`merrymen v${pkg?.version ?? "unknown"}`);
+  } catch {
+    console.log("merrymen (version unknown)");
+  }
 }
 
 // ──────────────────────────────────────────────────────────────── doctor ──
@@ -422,15 +461,33 @@ async function doctor() {
   console.log(`  ${dim(`home:    ${HOME}`)}`);
 
   existsSync(SETTINGS) ? ok("settings present") : warn("no settings yet — run: merrymen onboard");
-  s.bundlerUrl || process.env.MERRYMEN_BUNDLER_URL
-    ? ok("bundler URL configured")
-    : warn("no bundler URL — the agent will simulate but never sign (get one: dashboard.pimlico.io)");
-  s.anthropicApiKey || process.env.ANTHROPIC_API_KEY
-    ? ok("Anthropic key set (llm-strategist can trade)")
-    : warn("no Anthropic key — llm-strategist would run idle");
-  s.rialtoApiKey || process.env.MERRYMEN_RIALTO_API_KEY
-    ? ok("Rialto key set")
-    : warn("no Rialto key — rialto venue stays approval-only");
+  const paperOn = s.paperTradingEnabled !== false;
+  const hasSigner = !!(s.bundlerApiKey || s.bundlerUrl || process.env.MERRYMEN_BUNDLER_API_KEY || process.env.MERRYMEN_BUNDLER_URL);
+  hasSigner
+    ? ok("bundler key configured — can sign live trades")
+    : paperOn
+      ? ok("no bundler key — running in 📜 paper mode (simulated fills at live prices)")
+      : warn("no bundler key and paper trading off — the agent won't trade (get a key: dashboard.pimlico.io)");
+  // The four things that silently mute the bot / idle the brain:
+  const hasLlm = !!(s.groqApiKey || s.anthropicApiKey || process.env.GROQ_API_KEY || process.env.ANTHROPIC_API_KEY);
+  hasLlm
+    ? ok(`LLM brain set (${s.anthropicApiKey || process.env.ANTHROPIC_API_KEY ? "Anthropic — full" : "Groq — free"})`)
+    : warn("no LLM key — plain-English chat + llm-strategist idle (free key: console.groq.com)");
+  if (s.telegramBotToken || process.env.MERRYMEN_TELEGRAM_BOT_TOKEN) {
+    s.telegramEnabled === false
+      ? warn("Telegram token set but DISABLED — enable it in /settings so the bot answers")
+      : Array.isArray(s.telegramAllowlist) && s.telegramAllowlist.length
+        ? ok(`Telegram on and linked (${s.telegramAllowlist.length} chat${s.telegramAllowlist.length > 1 ? "s" : ""})`)
+        : warn("Telegram on but nobody linked — send /link <code> from the dashboard to claim it");
+  } else {
+    warn("no Telegram token — chat/control off (optional; add one in /settings)");
+  }
+  if (process.platform === "win32") {
+    const pol = sh("powershell", ["-NoProfile", "-Command", "Get-ExecutionPolicy"]);
+    pol && /Restricted|AllSigned/i.test(pol)
+      ? bad(`PowerShell policy is ${pol.trim()} — 'merrymen' scripts are blocked. Fix: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`)
+      : ok(`PowerShell script policy ok (${(pol || "unknown").trim()})`);
+  }
 
   const sp1 = spinner("scouting the Robinhood Chain (mainnet)");
   const mainnetBlock = await rpcCall(s.rpcMainnet ?? RPC_MAINNET, "eth_blockNumber");
@@ -462,7 +519,8 @@ async function doctor() {
   }
 
   const hb = readJson(HEARTBEAT);
-  if (hb && Math.floor(Date.now() / 1000) - hb.at < 90) ok(`worker alive (heartbeat ${Math.floor(Date.now() / 1000) - hb.at}s ago, block ${hb.block})`);
+  if (hb && Math.floor(Date.now() / 1000) - hb.at < 90)
+    ok(`worker alive (heartbeat ${Math.floor(Date.now() / 1000) - hb.at}s ago, block ${hb.block}${hb.mode ? `, mode ${hb.mode}` : ""})`);
   else warn("worker not running (no heartbeat in 90s) — merrymen start");
 
   existsSync(DB) ? ok("ledger present (~/.merrymen/merrymen.db)") : warn("no ledger yet — appears after the worker's first tick");
@@ -810,6 +868,11 @@ switch (cmd) {
   case "upgrade":
     await update();
     break;
+  case "version":
+  case "--version":
+  case "-v":
+    version();
+    break;
   default:
     await banner("stand and deliver — autonomous agents for Robinhood Chain");
     console.log(`${dim("  install: npm install -g merrymen · your loot: ~/.merrymen")}
@@ -824,6 +887,7 @@ switch (cmd) {
   ${bold("merrymen selftest")}       fire one arrow through the whole pipeline
   ${bold("merrymen kill")}           call the band home (kill switch)
   ${bold("merrymen update")}         stop the band, upgrade to latest, no EBUSY
+  ${bold("merrymen version")}        which build is this (-v)
   ${bold("merrymen welcome")}        replay the intro 🏹
 
   ${c.gold(c.arrow)} ${dim("your keys, your caps · bounded worst case · every trade simulated first")}

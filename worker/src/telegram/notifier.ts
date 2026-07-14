@@ -84,6 +84,9 @@ function tradeLine(t: TradeRowLite, explorer: string | null): string {
       : "";
     return `🏹 loosed an arrow — ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG landed${proof}`;
   }
+  if (t.status === "paper") {
+    return `📜 paper arrow — ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG filled at the live price (simulated, nothing signed)`;
+  }
   if (t.status === "rejected") {
     return `🛡 the wall turned back a ${esc(t.kind)} (${esc(t.reject_rule ?? "policy")}) — ${t.amount_usdg.toFixed(2)} USDG stayed home`;
   }
