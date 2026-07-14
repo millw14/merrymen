@@ -42,6 +42,11 @@ export const metadata: Metadata = {
     creator: "@MerrymenAI",
   },
   icons: { icon: "/favicon.svg" },
+  // Site-verification tokens (public by design — they prove ownership of the
+  // domain to third-party platforms). Rendered as <meta name=… content=… />.
+  other: {
+    "virtual-protocol-site-verification": "26638f81e63af7797ea3c878c60be319",
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
