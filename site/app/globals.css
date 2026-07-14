@@ -252,6 +252,12 @@ code.inline {
 .moat-grid { grid-template-columns: 1fr 1fr; margin-top: 22px; }
 @media (max-width: 700px) { .moat-grid { grid-template-columns: 1fr; } }
 
+.install-note {
+  max-width: 720px; margin: 0 auto 34px; text-align: center;
+  font-size: 14px; line-height: 1.65; color: var(--text-dim);
+}
+.install-note b { color: var(--text); }
+
 /* ---------- word from the woods ---------- */
 .words-quote { max-width: 860px; margin: 0 auto; text-align: center; }
 .words-attr { color: var(--text-faint); font-size: 13.5px; margin-top: 18px; }

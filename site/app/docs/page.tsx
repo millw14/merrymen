@@ -42,20 +42,32 @@ export default function Docs() {
 
         {/* ── install ── */}
         <h2 id="install">Install</h2>
-        <p>Requires <strong>Node 22.12+</strong>. No Node yet? The one-line installer sets it up and puts merrymen on your PATH.</p>
+        <p>
+          Runs on <strong>Linux, macOS, and Windows</strong> — one Node package, no Docker, no clone.
+          Requires <strong>Node 22.12+</strong> (for the built-in SQLite); no Node yet? The one-line
+          installer sets it up and puts merrymen on your PATH.
+        </p>
         <pre className="code">
-{`# Windows (PowerShell)
-irm https://raw.githubusercontent.com/millw14/merrymen/main/install.ps1 | iex
+{`# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | bash
 
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | bash`}
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/millw14/merrymen/main/install.ps1 | iex`}
         </pre>
-        <p>Already have Node?</p>
+        <p>Already have Node 22.12+? This works on any OS:</p>
         <pre className="code">
 {`npm install -g merrymen
 merrymen setup      # checks node / npm / PATH, prints exact fixes
-merrymen start      # dashboard at localhost:3100 + the worker`}
+merrymen start      # dashboard at localhost:3100 + the worker
+merrymen update     # upgrade later (stops the band, installs, restarts)`}
         </pre>
+        <p>
+          On a headless Linux box the dashboard won&apos;t auto-open — it prints{" "}
+          <code className="inline">localhost:3100</code>; set{" "}
+          <code className="inline">MERRYMEN_HOST=0.0.0.0</code> to reach it across a trusted LAN.
+          Verify a fresh box with <code className="inline">merrymen doctor</code> — it checks Node,
+          SQLite, RPC reach, keys, and paper/live mode, no wallet needed.
+        </p>
         <div className="callout">
           <strong>“merrymen: command not found”?</strong> npm&apos;s global-bin folder isn&apos;t on your PATH.
           Use <code className="inline">npx merrymen start</code>, or run <code className="inline">merrymen setup</code> for the

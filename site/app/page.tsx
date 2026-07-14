@@ -299,18 +299,25 @@ export default function Home() {
             <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>No Node yet? The one-line installer sets it up for you.</p>
           </div>
 
-          <div style={{ maxWidth: 780, margin: "0 auto 34px" }}>
+          <div style={{ maxWidth: 780, margin: "0 auto 20px" }}>
             <pre className="code">
-{`# Windows (PowerShell)
-irm https://raw.githubusercontent.com/millw14/merrymen/main/install.ps1 | iex
-
-# macOS / Linux
+{`# Linux / macOS
 curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | bash
 
-# already have Node 22.12+ ?
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/millw14/merrymen/main/install.ps1 | iex
+
+# already have Node 22.12+ ? (any OS)
 npm install -g merrymen && merrymen start`}
             </pre>
           </div>
+          <p className="install-note" data-reveal="up">
+            Runs on <b>Linux, macOS, and Windows</b> — one Node package, no Docker, no clone. The
+            installers set up Node for you; with Node 22.12+ already, <code className="inline">npm i -g merrymen</code>{" "}
+            works anywhere. Your band starts in <b>paper mode</b> (live prices, simulated fills, zero
+            funds), so you can watch it trade in a couple of minutes. Upgrade any time with{" "}
+            <code className="inline">merrymen update</code>.
+          </p>
 
           <div className="steps">
             {STEPS.map(([n, t, d], i) => (
