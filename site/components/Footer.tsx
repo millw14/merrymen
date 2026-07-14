@@ -1,9 +1,11 @@
 import Link from "next/link";
 import { Logo } from "./Logo";
+import { TokenCA } from "./TokenCA";
 
 const GITHUB = "https://github.com/millw14/merrymen";
 const NPM = "https://www.npmjs.com/package/merrymen";
 const X_URL = "https://x.com/MerrymenAI";
+const TOKEN_EXPLORER = "https://robinhoodchain.blockscout.com/token/0xa15cd06dd305269a0f48bebeb30aa3588fba7b32";
 
 export function Footer() {
   return (
@@ -39,10 +41,13 @@ export function Footer() {
             <a href={X_URL} target="_blank" rel="noreferrer">X (Twitter)</a>
             <a href={GITHUB} target="_blank" rel="noreferrer">GitHub</a>
             <a href={NPM} target="_blank" rel="noreferrer">npm</a>
+            <a href={TOKEN_EXPLORER} target="_blank" rel="noreferrer">$MERRYMEN token</a>
             <Link href="/terms">Terms</Link>
             <Link href="/privacy">Privacy</Link>
           </div>
         </div>
+
+        <TokenCA />
 
         <div className="foot-bottom">
           <span>© {new Date().getFullYear()} merrymen · MIT-licensed, open source</span>
