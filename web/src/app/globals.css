@@ -6,33 +6,42 @@
    ============================================================ */
 
 :root {
-  --bg: #0a0e0b;
-  --bg-2: #0f1511;
-  --bg-3: #141c16;
-  --border: #1e2a21;
-  --border-2: #2a3a2e;
-  --text: #d7e2d9;
-  --text-dim: #7d8f81;
-  --text-faint: #55665a;
-  --green: #4ade80;
-  --green-deep: #16a34a;
-  --green-soft: #34d399;
-  --red: #f87171;
-  --red-deep: #7f1d1d;
-  --gold: #eab308;
-  --mono: "Cascadia Code", "JetBrains Mono", Consolas, "Courier New", monospace;
-  --sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+  /* warmer, softer dark — friendlier than the old near-black terminal */
+  --bg: #0d1512;
+  --bg-1: #111a16;
+  --bg-2: #16211c;
+  --bg-3: #1d2b25;
+  --border: #26362f;
+  --border-2: #384a41;
+  --text: #e9f2ec;
+  --text-dim: #94a89e;
+  --text-faint: #647a70;
+  --green: #34d399;       /* friendlier mint */
+  --green-deep: #10b981;
+  --green-soft: #6ee7b7;
+  --red: #fb7185;         /* warm rose instead of harsh red */
+  --red-deep: #9f1239;
+  --gold: #fbbf24;        /* warm amber */
+  --accent: #38d9c8;      /* soft teal — friendly, non-financial highlights */
+  --radius: 14px;
+  --radius-sm: 9px;
+  --mono: var(--font-jbmono), "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  --sans: var(--font-hanken), "Segoe UI", system-ui, -apple-system, sans-serif;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
-  background: var(--bg);
+  background:
+    radial-gradient(120% 80% at 50% -10%, color-mix(in srgb, var(--green) 6%, transparent), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
   color: var(--text);
   font-family: var(--sans);
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 13.5px;
+  line-height: 1.55;
   min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
 }
 
 a { color: var(--green-soft); text-decoration: none; }
@@ -43,12 +52,14 @@ button { font: inherit; cursor: pointer; }
 
 /* ---------- topbar ---------- */
 .topbar {
-  height: 52px;
+  height: 58px;
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 0 16px;
-  background: var(--bg-2);
+  padding: 0 20px;
+  background: color-mix(in srgb, var(--bg-2) 78%, transparent);
+  backdrop-filter: blur(14px) saturate(130%);
+  -webkit-backdrop-filter: blur(14px) saturate(130%);
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
@@ -56,8 +67,8 @@ button { font: inherit; cursor: pointer; }
 }
 .brand {
   display: flex; align-items: baseline; gap: 8px;
-  font-family: var(--mono); font-size: 16px; font-weight: 700;
-  letter-spacing: 0.5px;
+  font-family: var(--sans); font-size: 17px; font-weight: 700;
+  letter-spacing: -0.01em;
 }
 .brand .arrow { color: var(--green); }
 .brand .tagline { font-size: 11px; font-weight: 400; color: var(--text-faint); }
@@ -81,11 +92,12 @@ button { font: inherit; cursor: pointer; }
 }
 .topstats b { color: var(--text); font-weight: 600; }
 .connect-btn {
-  font-family: var(--mono); font-size: 12px;
-  color: var(--bg); background: var(--green);
-  border: none; border-radius: 6px; padding: 6px 14px; font-weight: 700;
+  font-family: var(--sans); font-size: 13px;
+  color: #06231a; background: var(--green);
+  border: none; border-radius: 999px; padding: 8px 16px; font-weight: 600;
+  transition: transform .15s cubic-bezier(0.34,1.56,0.64,1), background .15s;
 }
-.connect-btn:hover { background: var(--green-soft); }
+.connect-btn:hover { background: var(--green-soft); transform: translateY(-1px); }
 
 /* ---------- layout ---------- */
 .shell {
@@ -99,12 +111,12 @@ button { font: inherit; cursor: pointer; }
 @media (max-width: 980px) { .shell { grid-template-columns: 1fr; } }
 
 .section-title {
-  font-family: var(--mono);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
-  color: var(--text-faint);
-  margin-bottom: 10px;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--text-dim);
+  margin-bottom: 12px;
 }
 
 /* ---------- agent cards ---------- */
@@ -112,26 +124,30 @@ button { font: inherit; cursor: pointer; }
 .agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
 
 .agent-card {
-  background: var(--bg-2);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--green) 4%, transparent), transparent 40%),
+    var(--bg-2);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 14px;
-  display: flex; flex-direction: column; gap: 10px;
-  transition: border-color 0.2s;
+  border-radius: var(--radius);
+  padding: 18px;
+  display: flex; flex-direction: column; gap: 12px;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.02) inset, 0 8px 24px rgba(0,0,0,0.18);
+  transition: border-color 0.2s, transform 0.2s;
 }
 .agent-card:hover { border-color: var(--border-2); }
-.agent-card.active { border-left: 3px solid var(--green-deep); }
+.agent-card.active { border-left: 3px solid var(--green); }
 .agent-card.active .status-dot { animation: breathe 3s ease-in-out infinite; }
 .agent-card.paused { border-left: 3px solid var(--text-faint); opacity: 0.75; }
 
 .agent-head { display: flex; align-items: center; gap: 10px; }
 .agent-sigil {
-  width: 34px; height: 34px; border-radius: 8px;
-  display: grid; place-items: center; font-size: 17px;
-  background: var(--bg-3); border: 1px solid var(--border);
+  width: 38px; height: 38px; border-radius: 11px;
+  display: grid; place-items: center; font-size: 19px;
+  background: color-mix(in srgb, var(--green) 12%, var(--bg-3));
+  border: 1px solid color-mix(in srgb, var(--green) 22%, var(--border));
 }
-.agent-name { font-weight: 600; font-size: 14px; }
-.agent-strategy { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+.agent-name { font-weight: 600; font-size: 15px; }
+.agent-strategy { font-family: var(--sans); font-size: 12px; color: var(--text-dim); }
 .agent-status {
   margin-left: auto; display: flex; align-items: center; gap: 6px;
   font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
@@ -153,16 +169,16 @@ button { font: inherit; cursor: pointer; }
 .sparkline .down { stroke: var(--red); }
 
 /* the permission wall summary — caps are trust artifacts, always visible */
-.caps { display: flex; flex-wrap: wrap; gap: 6px; }
+.caps { display: flex; flex-wrap: wrap; gap: 7px; }
 .cap {
-  font-family: var(--mono); font-size: 10.5px;
+  font-family: var(--sans); font-size: 11.5px;
   color: var(--text-dim);
   background: var(--bg-3);
   border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 2px 8px;
+  border-radius: 999px;
+  padding: 4px 11px;
 }
-.cap b { color: var(--text); font-weight: 600; }
+.cap b { color: var(--text); font-weight: 600; font-family: var(--mono); }
 
 .drawdown { display: flex; flex-direction: column; gap: 4px; }
 .drawdown-label {
@@ -177,19 +193,20 @@ button { font: inherit; cursor: pointer; }
 .agent-actions { display: flex; gap: 8px; margin-top: 2px; }
 .btn-ghost {
   flex: 1;
-  font-family: var(--mono); font-size: 11px;
-  color: var(--text-dim); background: transparent;
-  border: 1px solid var(--border); border-radius: 6px; padding: 5px 0;
+  font-family: var(--sans); font-size: 12.5px;
+  color: var(--text-dim); background: var(--bg-3);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 0;
+  transition: color .15s, border-color .15s, background .15s;
 }
-.btn-ghost:hover { color: var(--text); border-color: var(--border-2); }
+.btn-ghost:hover { color: var(--text); border-color: var(--border-2); background: var(--bg-1); }
 .btn-kill {
   flex: 1;
-  font-family: var(--mono); font-size: 11px; font-weight: 700;
+  font-family: var(--sans); font-size: 12.5px; font-weight: 600;
   color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
-  border-radius: 6px; padding: 5px 0;
+  border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
+  border-radius: var(--radius-sm); padding: 8px 0;
 }
-.btn-kill:hover { background: color-mix(in srgb, var(--red) 18%, transparent); }
+.btn-kill:hover { background: color-mix(in srgb, var(--red) 16%, transparent); }
 
 /* ---------- right rail ---------- */
 .rail { display: flex; flex-direction: column; gap: 16px; }
@@ -197,21 +214,22 @@ button { font: inherit; cursor: pointer; }
 .panel {
   background: var(--bg-2);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 14px;
+  border-radius: var(--radius);
+  padding: 18px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.15);
 }
 
 .killall {
   width: 100%;
-  font-family: var(--mono); font-size: 13px; font-weight: 700;
-  letter-spacing: 2px; text-transform: uppercase;
+  font-family: var(--sans); font-size: 14px; font-weight: 700;
+  letter-spacing: 0.3px;
   color: #fff; background: var(--red-deep);
-  border: 1px solid var(--red); border-radius: 8px;
-  padding: 12px 0;
-  box-shadow: inset 0 -3px 0 rgba(0,0,0,0.35);
+  border: 1px solid color-mix(in srgb, var(--red) 60%, transparent); border-radius: var(--radius-sm);
+  padding: 13px 0;
+  transition: background .15s, transform .12s;
 }
-.killall:hover { background: #991b1b; }
-.killall:active { box-shadow: inset 0 2px 4px rgba(0,0,0,0.5); transform: translateY(1px); }
+.killall:hover { background: #b31239; }
+.killall:active { transform: translateY(1px); }
 /* settings page */
 .settings-panel { max-width: 760px; }
 .settings-section {

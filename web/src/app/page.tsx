@@ -17,7 +17,7 @@ export default function Dashboard() {
         <div className="brand">
           <span className="arrow"><LogoMark size={20} /></span>
           <span>merrymen</span>
-          <span className="tagline">your band works Sherwood 24/7</span>
+          <span className="tagline">your AI trader, working 24/7 🏹</span>
         </div>
         <span className="chain-pill">
           <span className="dot" />
