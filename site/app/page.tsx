@@ -42,11 +42,9 @@ const CAPS: [IconName, string, string][] = [
 ];
 
 const STEPS: [string, string, string][] = [
-  ["01", "Install & start", "One install, then merrymen start opens the dashboard and looses the worker."],
-  ["02", "Create a wallet", "At /grant — nothing to connect. Pick testnet or mainnet, set the caps the contract enforces."],
-  ["03", "Fund it", "Faucet gas on testnet, or send ETH + USDG on mainnet. The worker arms on its next tick."],
-  ["04", "Link Telegram", "Paste a bot token in settings, link the code, run the band from your phone."],
-  ["05", "Name it & ride", "“I'll call you Little John.” Watch it trade, chat with it, let it grow."],
+  ["1", "Install & open it", "One command installs merrymen and opens your dashboard. No accounts, nothing to connect."],
+  ["2", "Create your agent — it trades on paper instantly", "Pick a spending-limit preset and go. Your agent starts trading at real live prices with pretend money, so you watch it work before risking a cent."],
+  ["3", "Add a key to go live", "When you're ready, paste one free key and the same agent trades for real — inside the exact same limits. Steer it from Telegram if you like."],
 ];
 
 export default function Home() {
@@ -62,10 +60,10 @@ export default function Home() {
             Trading agents you never have to trust.
           </h1>
           <p className="hero-sub" data-reveal="up" style={{ ["--d" as string]: "90ms" }}>
-            merrymen is a self-hosted band of agents for Robinhood Chain. Your keys never leave your
-            machine, and every cap you set is enforced by the account contract on-chain — not by
-            promises. Inside that wall, your band works the market 24/7 while you name them, chat
-            with them, and steer them from Telegram.
+            merrymen is a trading bot you run yourself. It works the market for you on Robinhood Chain —
+            but your keys stay on your machine, and the spending limits you set are enforced by the
+            blockchain itself, so it can never spend more than you allow. Name it, chat with it, and
+            steer it from Telegram.
           </p>
           <div className="hero-cta" data-reveal="up" style={{ ["--d" as string]: "170ms" }}>
             <span className="mag" data-magnetic>
@@ -295,8 +293,8 @@ export default function Home() {
         <div className="wrap">
           <div className="section-head center">
             <div className="tag" style={{ justifyContent: "center" }} data-reveal="fade"><span className="n">04</span> — quickstart</div>
-            <h2 data-reveal="mask">Riding in five steps.</h2>
-            <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>No Node yet? The one-line installer sets it up for you.</p>
+            <h2 data-reveal="mask">Up and running in three steps.</h2>
+            <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>Install, create an agent, watch it trade on paper. Real money is optional and comes later. No Node yet? The one-line installer handles it.</p>
           </div>
 
           <div style={{ maxWidth: 780, margin: "0 auto 20px" }}>

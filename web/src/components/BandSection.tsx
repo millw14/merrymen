@@ -93,17 +93,39 @@ export function BandSection() {
     return (
       <div className="empty-state">
         <div className="empty-sigil"><LogoMark size={56} /></div>
-        <div className="empty-title mono">no merryman yet</div>
-        <p className="empty-sub">
-          Create your agent wallet to deploy your first merryman — generated keys,
-          hard on-chain caps, revocable any time.
-        </p>
+        <div className="empty-title mono">Let&apos;s set up your trading agent</div>
+        <p className="empty-sub">Three steps. It starts trading on paper right away — no money needed.</p>
+
+        <ol className="start-steps">
+          <li>
+            <span className="start-n">1</span>
+            <div>
+              <b>Create your agent&apos;s wallet.</b> merrymen makes the keys and hands them to you —
+              nothing to connect, no sign-up. You set the spending limits.
+            </div>
+          </li>
+          <li>
+            <span className="start-n">2</span>
+            <div>
+              <b>It starts trading on paper — instantly.</b> Real market prices, pretend money. Watch
+              your agent work before risking a cent.
+            </div>
+          </li>
+          <li>
+            <span className="start-n">3</span>
+            <div>
+              <b>Go live when you&apos;re ready.</b> Add one key in Settings and the same agent trades
+              for real — inside the exact same limits.
+            </div>
+          </li>
+        </ol>
+
         <div className="empty-actions">
           <Link href="/grant" className="grant-btn empty-cta">
-            create your agent wallet
+            Create my agent →
           </Link>
           <button className="demo-btn mono" onClick={() => setDemoMode(true)}>
-            ⚡ or watch a demo band ride — 5 seconds, nothing real
+            ⚡ or watch a 5-second demo first — nothing real
           </button>
         </div>
       </div>

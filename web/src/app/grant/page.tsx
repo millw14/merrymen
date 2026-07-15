@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { Info } from "@/components/Info";
 import { LogoMark } from "@/components/Logo";
 import { explorerFor, robinhoodChain, robinhoodTestnet } from "@merrymen/core";
 import {
@@ -232,11 +233,12 @@ export default function GrantPage() {
         {/* ─── phase 1: pick a chain, set caps, create the wallet ────────── */}
         {!grant && (
           <div className="grant-panel">
-            <h1 className="grant-title">create your agent wallet</h1>
+            <h1 className="grant-title">Create your agent&apos;s wallet</h1>
             <p className="grant-sub">
-              No wallet to connect — merrymen mints a fresh account whose owner key lives with
-              you. Pick your ground, set the caps the <b>account contract itself</b> will enforce,
-              then create it and fund it.
+              No wallet to connect. merrymen makes a fresh wallet and gives <b>you</b> the key. You
+              set the spending limits below — and the blockchain itself{" "}
+              <Info>These aren&apos;t honor-system limits. The account contract on the chain rejects any trade over your caps, so even a hacked agent can&apos;t break them.</Info>{" "}
+              enforces them, so your agent can never spend more than you allow.
             </p>
 
             <div className="chain-choice">
@@ -245,10 +247,9 @@ export default function GrantPage() {
                 className={`chain-card ${!isMainnet ? "selected" : ""}`}
                 onClick={() => setChainId(TESTNET)}
               >
-                <span className="chain-card-title">🌲 testnet · practice</span>
+                <span className="chain-card-title">🌲 Practice (testnet)</span>
                 <span className="chain-card-body">
-                  free funds from the faucet, the same pipeline end to end. Venues are absent here,
-                  so swaps simulate and no-route — the sandbox.
+                  Free play money, same exact flow. Best place to start and learn how it works.
                 </span>
               </button>
               <button
@@ -256,10 +257,9 @@ export default function GrantPage() {
                 className={`chain-card danger ${isMainnet ? "selected" : ""}`}
                 onClick={() => setChainId(MAINNET)}
               >
-                <span className="chain-card-title">⚔️ mainnet · real funds</span>
+                <span className="chain-card-title">⚔️ Real money (mainnet)</span>
                 <span className="chain-card-body">
-                  the real Robinhood Chain — real USDG, real stock tokens, real execution. This is
-                  where the band actually trades.
+                  The real Robinhood Chain — real funds, real trades. Only when you&apos;re ready.
                 </span>
               </button>
             </div>
@@ -302,37 +302,44 @@ export default function GrantPage() {
               ))}
             </div>
 
+            <p className="field-lead">Pick a preset above, or fine-tune the limits:</p>
             <div className="grant-fields">
               <label className="field">
-                <span className="field-label">max per trade</span>
+                <span className="field-label">most it can spend on one trade</span>
                 <span className="field-input">
                   <input type="number" min={1} value={caps.perTradeUsdg} onChange={set("perTradeUsdg")} />
                   <span className="field-unit">USDG</span>
                 </span>
               </label>
               <label className="field">
-                <span className="field-label">max per day</span>
+                <span className="field-label">most it can spend in a day</span>
                 <span className="field-input">
                   <input type="number" min={1} value={caps.dailyUsdg} onChange={set("dailyUsdg")} />
                   <span className="field-unit">USDG</span>
                 </span>
               </label>
               <label className="field">
-                <span className="field-label">key expires in</span>
+                <span className="field-label">
+                  auto-expire the agent after{" "}
+                  <Info>A safety timer. After this many days the agent&apos;s key stops working on its own — so a forgotten agent can&apos;t trade forever.</Info>
+                </span>
                 <span className="field-input">
                   <input type="number" min={1} max={90} value={caps.expiryDays} onChange={set("expiryDays")} />
                   <span className="field-unit">days</span>
                 </span>
               </label>
               <label className="field">
-                <span className="field-label">max ops per day</span>
+                <span className="field-label">most trades per day</span>
                 <span className="field-input">
                   <input type="number" min={1} value={caps.maxOpsPerDay} onChange={set("maxOpsPerDay")} />
-                  <span className="field-unit">ops</span>
+                  <span className="field-unit">trades</span>
                 </span>
               </label>
               <label className="field">
-                <span className="field-label">drawdown breaker</span>
+                <span className="field-label">
+                  stop if it&apos;s down by{" "}
+                  <Info>A circuit breaker. If the account drops this far from its best value, the agent stops trading automatically to stem the bleeding.</Info>
+                </span>
                 <span className="field-input">
                   <input type="number" min={1} max={50} value={caps.maxDrawdownPct} onChange={set("maxDrawdownPct")} />
                   <span className="field-unit">%</span>
@@ -340,24 +347,25 @@ export default function GrantPage() {
               </label>
             </div>
 
-            <div className="grant-summary mono">
-              on {chainLabel(chainId)} — this key may ONLY: approve USDG to Rialto router / Morpho
-              vault (≤ {caps.perTradeUsdg} USDG) · call the Rialto router · deposit ≤{" "}
-              {caps.dailyUsdg} USDG to the vault · withdraw from the vault · ≤ {caps.maxOpsPerDay}{" "}
-              ops/day · dead in {caps.expiryDays}d regardless
+            <div className="grant-summary">
+              <b>In plain English:</b> on {isMainnet ? "real money" : "practice"}, this agent can trade
+              at most <b>{caps.perTradeUsdg} USDG</b> per trade, <b>{caps.dailyUsdg} USDG</b> per day,
+              and <b>{caps.maxOpsPerDay}</b> trades per day. It stops itself if it&apos;s down{" "}
+              <b>{caps.maxDrawdownPct}%</b>, and its key auto-expires in <b>{caps.expiryDays} days</b>.
+              These limits are enforced by the blockchain — the agent literally cannot exceed them.
             </div>
 
             <button className="grant-btn" onClick={onCreate} disabled={status !== null || createBlocked}>
               {status ??
                 (createBlocked
                   ? "acknowledge the real-funds warning above first"
-                  : `create wallet on ${isMainnet ? "mainnet" : "testnet"} & raise the wall`)}
+                  : `Create my agent (${isMainnet ? "real money" : "practice"})`)}
             </button>
             {error && <div className="grant-error mono">{error}</div>}
 
             <div className="grant-note">
-              the owner &amp; session keys are generated in your browser so you can back them up and
-              inspect the flow — production owner keys will live in a TEE and never leave it.
+              The keys are made right here in your browser so you can save them yourself — nobody else
+              ever sees them.
             </div>
           </div>
         )}

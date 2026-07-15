@@ -436,13 +436,14 @@ button { font: inherit; cursor: pointer; }
 .field-unit { font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
 
 .grant-summary {
-  font-size: 10.5px; line-height: 1.7;
+  font-size: 12.5px; line-height: 1.65;
   color: var(--text-dim);
   background: var(--bg-3);
-  border: 1px dashed var(--border-2);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border: 1px solid var(--border-2);
+  border-radius: 10px;
+  padding: 13px 15px;
 }
+.grant-summary b { color: var(--text); }
 
 .grant-btn {
   font-family: var(--mono); font-size: 13px; font-weight: 700;
@@ -567,6 +568,37 @@ button { font: inherit; cursor: pointer; }
   border: 1px solid color-mix(in srgb, var(--red) 40%, transparent);
   border-radius: 6px; padding: 7px 11px; margin-bottom: 10px;
 }
+
+/* ---------- plain-English clarity: 3-step start, tooltips ---------- */
+.start-steps { list-style: none; display: flex; flex-direction: column; gap: 12px; margin: 6px 0 18px; text-align: left; max-width: 460px; }
+.start-steps li { display: flex; gap: 12px; align-items: flex-start; font-size: 13px; line-height: 1.5; color: var(--text-dim); }
+.start-steps li b { color: var(--text); }
+.start-n {
+  flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%;
+  display: grid; place-items: center; font-family: var(--mono); font-size: 11px; font-weight: 700;
+  color: var(--green); border: 1px solid color-mix(in srgb, var(--green) 40%, transparent);
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+}
+.field-lead { font-size: 12px; color: var(--text-dim); margin: 4px 0 2px; }
+
+/* the "?" info tooltip */
+.info {
+  display: inline-grid; place-items: center; width: 15px; height: 15px; vertical-align: middle;
+  border-radius: 50%; border: 1px solid var(--border-2); color: var(--text-faint);
+  font-size: 9.5px; font-weight: 700; cursor: help; position: relative; margin: 0 1px;
+  font-family: var(--mono); user-select: none;
+}
+.info:hover, .info:focus { color: var(--text); border-color: var(--text-dim); outline: none; }
+.info-pop {
+  position: absolute; bottom: 140%; left: 50%; transform: translateX(-50%);
+  width: max-content; max-width: 260px; z-index: 30;
+  background: var(--bg-3); border: 1px solid var(--border-2); border-radius: 8px;
+  padding: 9px 11px; font-family: var(--sans); font-size: 11.5px; font-weight: 400;
+  line-height: 1.5; color: var(--text-dim); text-align: left; letter-spacing: 0;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  opacity: 0; pointer-events: none; transition: opacity .12s;
+}
+.info:hover .info-pop, .info:focus .info-pop { opacity: 1; }
 
 /* ---------- the demo band (make-believe, loudly labeled) ---------- */
 .empty-actions { display: flex; flex-direction: column; align-items: center; gap: 10px; }
