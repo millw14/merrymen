@@ -874,44 +874,52 @@ async function recover() {
   let ownerKey;
   let chainId;
   let expect;
-  if (grant && grant.demoOwnerPrivateKey) {
-    ownerKey = grant.demoOwnerPrivateKey;
-    chainId = grant.chainId || 4663;
-    expect = grant.smartAccount;
-    ok(`found your active grant — account ${grant.smartAccount.slice(0, 10)}… on chain ${chainId}`);
-  } else {
-    // No live grant — but this machine may still hold archived wallets (every
-    // replaced/killed wallet is kept with its owner key). Offer those first so
-    // nobody has to hunt down a key they already have on disk.
-    const archived = (await archivedWallets()).filter((g) => /^0x[0-9a-fA-F]{64}$/.test(g.demoOwnerPrivateKey ?? ""));
-    if (archived.length > 0) {
-      console.log(`  ${green("✓")} found ${archived.length} archived wallet${archived.length > 1 ? "s" : ""} on this machine:`);
-      archived.forEach((g, i) =>
-        console.log(`    ${i + 1}. ${bold(g.smartAccount)} ${dim(`· chain ${g.chainId}`)}`),
-      );
-      const pick = (await p.ask(`  pick 1-${archived.length}, or Enter to paste a key instead: `)).trim();
-      const idx = Number(pick) - 1;
-      if (pick && Number.isInteger(idx) && archived[idx]) {
-        ownerKey = archived[idx].demoOwnerPrivateKey;
-        chainId = archived[idx].chainId || 4663;
-        expect = archived[idx].smartAccount;
-        ok(`using archived wallet ${expect.slice(0, 10)}… (owner key read from disk — never typed)`);
-      }
-    }
 
-    if (!ownerKey) {
-      warn("no stored owner key — a wallet created before archiving shipped, or a fresh machine.");
-      console.log(dim("  Paste the owner key you backed up when you created the wallet (input hidden)."));
-      ownerKey = (await p.askSecret("  owner private key (0x…): ")).trim();
-      if (!/^0x[0-9a-fA-F]{64}$/.test(ownerKey)) {
-        p.close();
-        bad("that isn't a 32-byte hex private key (expected 0x + 64 hex chars).");
-        return;
-      }
-      const chainAns = (await p.ask("  chain — [1] mainnet 4663 (real funds)  ·  [2] testnet 46630  [1]: ")).trim();
-      chainId = chainAns === "2" ? 46630 : 4663;
-      expect = "";
+  // Every wallet on this machine whose owner key we hold: the active grant PLUS
+  // every archived one (replaced/killed wallets are kept with their key). A picker
+  // across ALL of them lets you recover a wallet that isn't the currently-armed
+  // one — e.g. an old funded wallet you switched away from.
+  const candidates = [];
+  if (grant && /^0x[0-9a-fA-F]{64}$/.test(grant.demoOwnerPrivateKey ?? "")) {
+    candidates.push({ key: grant.demoOwnerPrivateKey, account: grant.smartAccount, chainId: grant.chainId || 4663, active: true });
+  }
+  for (const g of await archivedWallets()) {
+    if (
+      /^0x[0-9a-fA-F]{64}$/.test(g.demoOwnerPrivateKey ?? "") &&
+      !candidates.some((c) => c.account?.toLowerCase() === g.smartAccount.toLowerCase())
+    ) {
+      candidates.push({ key: g.demoOwnerPrivateKey, account: g.smartAccount, chainId: g.chainId || 4663, active: false });
     }
+  }
+
+  if (candidates.length === 1) {
+    ({ key: ownerKey, account: expect, chainId } = candidates[0]);
+    ok(`recovering ${expect.slice(0, 10)}… on chain ${chainId} ${dim("(owner key read from disk)")}`);
+  } else if (candidates.length > 1) {
+    console.log(`  ${green("✓")} ${candidates.length} wallets on this machine ${dim("(owner key on disk)")}:`);
+    candidates.forEach((c, i) =>
+      console.log(`    ${i + 1}. ${bold(c.account)} ${dim(`· chain ${c.chainId} · ${c.active ? "active" : "archived"}`)}`),
+    );
+    const pick = (await p.ask(`  which to recover? 1-${candidates.length}, or Enter to paste a different key: `)).trim();
+    const idx = Number(pick) - 1;
+    if (pick && Number.isInteger(idx) && candidates[idx]) {
+      ({ key: ownerKey, account: expect, chainId } = candidates[idx]);
+      ok(`using ${expect.slice(0, 10)}… ${dim("(owner key read from disk — never typed)")}`);
+    }
+  }
+
+  if (!ownerKey) {
+    warn(candidates.length ? "paste a different owner key to recover another wallet." : "no stored wallet — paste the owner key you backed up.");
+    console.log(dim("  (input hidden)"));
+    ownerKey = (await p.askSecret("  owner private key (0x…): ")).trim();
+    if (!/^0x[0-9a-fA-F]{64}$/.test(ownerKey)) {
+      p.close();
+      bad("that isn't a 32-byte hex private key (expected 0x + 64 hex chars).");
+      return;
+    }
+    const chainAns = (await p.ask("  chain — [1] mainnet 4663 (real funds)  ·  [2] testnet 46630  [1]: ")).trim();
+    chainId = chainAns === "2" ? 46630 : 4663;
+    expect = "";
   }
 
   const s = readJson(SETTINGS) ?? {};
