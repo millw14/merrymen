@@ -124,13 +124,22 @@ describe("checkPolicy", () => {
     assert.equal(!v.ok && v.rule, "ops-cap");
   });
 
-  it("vault deposits obey the same caps", () => {
+  it("vault deposits are capped at the DAILY limit, mirroring the on-chain policy", () => {
+    // A deposit above the per-trade cap (50) but under the daily cap (500) is
+    // fine — parking idle cash in the vault isn't a market spend, and the
+    // on-chain deposit policy caps at dailyUsdg, not perTradeUsdg. The old
+    // mirror rejected this and stranded funded agents in a rejection loop.
+    assert.deepEqual(
+      checkPolicy({ kind: "vault-deposit", target: VAULT, amountUsdg: 60_000_000n }, limits(), state()),
+      { ok: true },
+    );
+    // But a single deposit over the daily cap is still rejected.
     const v = checkPolicy(
-      { kind: "vault-deposit", target: VAULT, amountUsdg: 50_000_001n },
+      { kind: "vault-deposit", target: VAULT, amountUsdg: 500_000_001n },
       limits(),
       state(),
     );
-    assert.equal(!v.ok && v.rule, "per-trade-cap");
+    assert.equal(!v.ok && v.rule, "deposit-cap");
   });
 
   it("vault withdrawals are exempt from spend caps (funds return to the account)", () => {

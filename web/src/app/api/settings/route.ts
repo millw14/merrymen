@@ -44,7 +44,9 @@ export interface SettingsView {
 }
 
 const STRATEGIES_DIR = homePaths.strategies();
-const BUILTIN_STRATEGIES = ["steady-basket", "weekend-gap", "llm-strategist"];
+// Free + Merry Circle (holder-gated) builtins — both selectable; the worker runs
+// the Circle ones only for $MERRYMEN holders. Mirrors worker/src/strategies/registry.ts.
+const BUILTIN_STRATEGIES = ["steady-basket", "weekend-gap", "llm-strategist", "even-keel", "dip-hunter"];
 
 async function listCustomStrategies(): Promise<string[]> {
   try {
@@ -203,6 +205,14 @@ export async function PUT(req: Request) {
     else if (typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v.trim()))
       setOrClear("breakerAddress", v.trim());
     else errors.push("breakerAddress: must be a 0x… address");
+  }
+  // $MERRYMEN holder wallet — a read-only address for the Merry Circle fee tier.
+  if ("holderAddress" in body) {
+    const v = body.holderAddress;
+    if (v === "" || v === null || v === undefined) setOrClear("holderAddress", undefined);
+    else if (typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v.trim()))
+      setOrClear("holderAddress", v.trim());
+    else errors.push("holderAddress: must be a 0x… address");
   }
   if ("rialtoApiKeyHeader" in body) {
     const v = body.rialtoApiKeyHeader;

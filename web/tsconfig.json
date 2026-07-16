@@ -17,7 +17,8 @@
     "paths": {
       "@/*": ["./src/*"],
       "@merrymen/core": ["../packages/core/src/index.ts"],
-      "@merrymen/policy": ["../worker/src/policy.ts"]
+      "@merrymen/policy": ["../worker/src/policy.ts"],
+      "@merrymen/recover": ["../worker/src/recover.ts"]
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],

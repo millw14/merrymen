@@ -5,6 +5,8 @@ import { ChainStats } from "@/components/ChainStats";
 import { FeedPanel } from "@/components/FeedPanel";
 import { KillSwitch } from "@/components/KillSwitch";
 import { MarketTable } from "@/components/MarketTable";
+import { MerryCirclePanel } from "@/components/MerryCirclePanel";
+import { RecoverPanel } from "@/components/RecoverPanel";
 import { Statusbar } from "@/components/Statusbar";
 import { TelegramCta } from "@/components/TelegramCta";
 import { TradesPanel } from "@/components/TradesPanel";
@@ -52,9 +54,13 @@ export default function Dashboard() {
 
           <WallPanel />
 
+          <MerryCirclePanel />
+
           <div className="panel">
             <KillSwitch />
           </div>
+
+          <RecoverPanel />
 
           <div className="panel">
             <div className="section-title">activity</div>

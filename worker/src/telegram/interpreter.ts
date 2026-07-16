@@ -28,6 +28,8 @@ const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 export type Command =
   | { kind: "link"; code: string }
   | { kind: "help" }
+  /** Wallet actions live in the local dashboard, never in chat — this points there. */
+  | { kind: "wallet" }
   | { kind: "status" }
   | { kind: "positions" }
   | { kind: "pnl" }
@@ -134,6 +136,19 @@ export function parseSlash(text: string): Command | null {
     case "start":
     case "help":
       return { kind: "help" };
+    // Wallet actions belong to the local dashboard (the owner key must never
+    // touch chat), but people naturally type /grant here after reading a doc
+    // that says "go to /grant" — so answer with the way in instead of "unknown
+    // command". Every plausible synonym lands on the same signpost.
+    // NOTE: /withdraw is deliberately NOT here — it's an existing alias for
+    // /transfer (send USDG out). Don't steal working commands for a signpost.
+    case "grant":
+    case "wallet":
+    case "restore":
+    case "recover":
+    case "reconnect":
+    case "fund":
+      return { kind: "wallet" };
     case "status":
       return { kind: "status" };
     case "positions":

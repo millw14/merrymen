@@ -24,4 +24,11 @@ export const homePaths = {
   heartbeat: () => path.join(merrymenHome(), "heartbeat.json"),
   db: () => path.join(merrymenHome(), "merrymen.db"),
   strategies: () => path.join(merrymenHome(), "strategies"),
+  /**
+   * Every wallet this machine has ever armed, one file per smart account.
+   * grant.json is a SINGLE slot — creating or killing a wallet used to blow the
+   * old one away along with its owner key, stranding any funds in it forever.
+   * Grants are archived here first, so a funded wallet is never lost to a click.
+   */
+  grantsArchive: () => path.join(merrymenHome(), "grants"),
 };

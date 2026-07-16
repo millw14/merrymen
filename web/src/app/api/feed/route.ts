@@ -8,7 +8,9 @@ import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { NextResponse } from "next/server";
 import { homePaths } from "@/lib/home";
-import type { MerrymenSettings } from "@merrymen/core";
+import { TRADEABLE_SYMBOLS, type MerrymenSettings } from "@merrymen/core";
+
+const DEFAULT_BASKET = [...TRADEABLE_SYMBOLS];
 
 export const dynamic = "force-dynamic";
 
@@ -75,10 +77,10 @@ function readIdentitySettings(): { strategy: string; basket: string[] } {
     const s = JSON.parse(raw) as MerrymenSettings;
     return {
       strategy: typeof s.strategy === "string" && s.strategy ? s.strategy : "steady-basket",
-      basket: Array.isArray(s.basketSymbols) && s.basketSymbols.length ? s.basketSymbols : ["AAPL", "MSFT", "QQQ"],
+      basket: Array.isArray(s.basketSymbols) && s.basketSymbols.length ? s.basketSymbols : DEFAULT_BASKET,
     };
   } catch {
-    return { strategy: "steady-basket", basket: ["AAPL", "MSFT", "QQQ"] };
+    return { strategy: "steady-basket", basket: DEFAULT_BASKET };
   }
 }
 

@@ -98,12 +98,26 @@ export function checkPolicy(intent: TradeIntent, limits: AgentLimits, state: Age
     return { ok: false, rule: "ops-cap", detail: `${state.opsToday} ops in 24h >= ${limits.maxOpsPerDay}` };
   }
 
-  // Withdrawals return funds to the account — the on-chain policy leaves them
-  // unsized, so the mirror does too. Spend caps bound money leaving the wall.
+  // Per-op size ceiling — mirrors the on-chain call policy EXACTLY, because a
+  // stricter mirror rejects trades the chain would happily allow (a real bug per
+  // this file's contract). On-chain (web/src/lib/session.ts):
+  //   • swaps & transfers  → approve/transfer USDG capped at the PER-TRADE limit
+  //   • vault deposits      → capped at the DAILY limit (parking idle cash in the
+  //                           Morpho vault isn't a market spend; it's reversible)
+  //   • vault withdrawals   → unsized (funds return to the account)
+  // The old mirror capped deposits at the per-trade limit, so a large idle-cash
+  // sweep (e.g. 80 USDG with a 30-USDG per-trade cap) was rejected every tick
+  // while the chain would have accepted it.
   if (intent.kind !== "vault-withdraw") {
     const notional = intent.kind === "swap" ? intent.notionalUsdg : intent.amountUsdg;
-    if (notional > limits.perTradeUsdg) {
-      return { ok: false, rule: "per-trade-cap", detail: `${notional} > ${limits.perTradeUsdg}` };
+    const isDeposit = intent.kind === "vault-deposit";
+    const perOpCap = isDeposit ? limits.dailyUsdg : limits.perTradeUsdg;
+    if (notional > perOpCap) {
+      return {
+        ok: false,
+        rule: isDeposit ? "deposit-cap" : "per-trade-cap",
+        detail: `${notional} > ${perOpCap}`,
+      };
     }
     if (state.spentTodayUsdg + notional > limits.dailyUsdg) {
       return { ok: false, rule: "daily-cap", detail: `would exceed daily cap ${limits.dailyUsdg}` };

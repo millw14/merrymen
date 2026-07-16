@@ -13,6 +13,8 @@
  *   merrymen strategy list  builtins + your strategies
  *   merrymen selftest       one policy-legal no-op through the full pipeline
  *   merrymen kill           terminal kill switch (deletes the grant)
+ *   merrymen wallets        every wallet on this machine (live + archived) + balances
+ *   merrymen recover        sweep the smart account's funds to a wallet you control
  *
  * Zero dependencies. All user data lives in ~/.merrymen (override with
  * MERRYMEN_HOME) — the install location stays disposable.
@@ -36,12 +38,25 @@ const GRANT = path.join(HOME, "grant.json");
 const HEARTBEAT = path.join(HOME, "heartbeat.json");
 const DB = path.join(HOME, "merrymen.db");
 const STRATEGIES = path.join(HOME, "strategies");
+// Every wallet this machine has armed — one file per smart account. grant.json is
+// a single slot, so replacing or killing a wallet archives the old one here first
+// (with its owner key) instead of stranding whatever's still funded in it.
+const GRANTS_ARCHIVE = path.join(HOME, "grants");
 const PKG_STRATEGIES = path.join(ROOT, "strategies");
 const WELCOMED = path.join(HOME, ".welcomed");
 
 const RPC_MAINNET = "https://rpc.mainnet.chain.robinhood.com";
 const RPC_TESTNET = "https://rpc.testnet.chain.robinhood.com";
 const BUILTINS = ["steady-basket", "weekend-gap", "llm-strategist"];
+// Merry Circle strategies — selectable, but only RUN for $MERRYMEN holders (the
+// worker gates them by tier). Listed apart so the lock is obvious.
+const CIRCLE_STRATEGIES = ["even-keel", "dip-hunter"];
+// tsx worker entry that rebuilds the Kernel account and sweeps it (merrymen recover).
+const RECOVER_CLI = path.join(ROOT, "worker", "src", "recover-cli.ts");
+const EXPLORER = {
+  4663: "https://robinhoodchain.blockscout.com",
+  46630: "https://explorer.testnet.chain.robinhood.com",
+};
 
 const green = c.green;
 const red = c.red;
@@ -184,6 +199,104 @@ async function rpcCall(url, method, params = []) {
   }
 }
 
+// ───────────────────────────────────────────────────────── wallets/archive ──
+
+const USDG_ADDR = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"; // 6 decimals
+
+/** Copy the live grant into the archive before anything destroys it. */
+function archiveCurrentGrant() {
+  try {
+    const raw = readFileSync(GRANT, "utf8");
+    const g = JSON.parse(raw.replace(/^﻿/, ""));
+    if (!g?.smartAccount) return null;
+    mkdirSync(GRANTS_ARCHIVE, { recursive: true });
+    writeFileSync(path.join(GRANTS_ARCHIVE, `${g.smartAccount.toLowerCase()}.json`), raw, "utf8");
+    return g.smartAccount;
+  } catch {
+    return null; // nothing to keep
+  }
+}
+
+/** Archived wallets that still carry their owner key (i.e. recoverable). */
+async function archivedWallets() {
+  try {
+    const files = await readdir(GRANTS_ARCHIVE);
+    return files
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => readJson(path.join(GRANTS_ARCHIVE, f)))
+      .filter((g) => g && g.smartAccount);
+  } catch {
+    return [];
+  }
+}
+
+const rpcFor = (s, chainId) =>
+  chainId === 46630 ? (s.rpcTestnet ?? RPC_TESTNET) : (s.rpcMainnet ?? RPC_MAINNET);
+
+async function usdgBalance(rpc, addr) {
+  const data = "0x70a08231" + addr.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  const r = await rpcCall(rpc, "eth_call", [{ to: USDG_ADDR, data }, "latest"]);
+  try {
+    return Number(BigInt(r)) / 1e6;
+  } catch {
+    return null;
+  }
+}
+
+async function ethBalance(rpc, addr) {
+  const r = await rpcCall(rpc, "eth_getBalance", [addr, "latest"]);
+  try {
+    return Number(BigInt(r)) / 1e18;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `merrymen wallets` — every wallet this machine knows about, live + archived,
+ * with what each one actually holds. The answer to "where did my other wallet go?"
+ */
+async function wallets() {
+  await banner("every wallet on this machine");
+  ensureHome();
+  const s = readJson(SETTINGS) ?? {};
+
+  const seen = new Set();
+  const list = [];
+  const current = readJson(GRANT);
+  if (current?.smartAccount) {
+    list.push({ g: current, active: true });
+    seen.add(current.smartAccount.toLowerCase());
+  }
+  for (const g of await archivedWallets()) {
+    if (!seen.has(g.smartAccount.toLowerCase())) {
+      list.push({ g, active: false });
+      seen.add(g.smartAccount.toLowerCase());
+    }
+  }
+
+  if (list.length === 0) {
+    warn("no wallets on this machine yet.");
+    console.log(`  create one at ${bold("http://localhost:3100/grant")}\n`);
+    return;
+  }
+
+  console.log();
+  for (const { g, active } of list) {
+    const rpc = rpcFor(s, g.chainId);
+    const [usdg, eth] = await Promise.all([usdgBalance(rpc, g.smartAccount), ethBalance(rpc, g.smartAccount)]);
+    const key = g.demoOwnerPrivateKey ? green("🔑 owner key on disk") : red("⚠ no owner key — not recoverable here");
+    console.log(`  ${active ? green("● active ") : dim("○ archived")}  ${bold(g.smartAccount)} ${dim(`· chain ${g.chainId}`)}`);
+    console.log(
+      `     ${bold(usdg === null ? "?" : `${usdg.toFixed(2)} USDG`)} · ${eth === null ? "?" : `${eth.toFixed(5)} ETH`}  ${key}`,
+    );
+  }
+  console.log(
+    `\n  ${c.gold(c.arrow)} ${dim("sweep funds out:")} ${bold("merrymen recover")}\n` +
+      `  ${c.gold(c.arrow)} ${dim("put one back to work:")} ${bold("http://localhost:3100/grant")} ${dim("→ restore a funded wallet")}\n`,
+  );
+}
+
 // ─────────────────────────────────────────────────────────────── welcome ──
 
 /** Animated welcome — the delightful first thing after install. */
@@ -264,10 +377,10 @@ async function onboard() {
 
   console.log(bold(`\n  ${c.arrow} 3/4 · pick your outlaw`) + dim("  (strategy)"));
   const custom = await listCustom();
-  const all = [...BUILTINS, ...custom];
+  const all = [...BUILTINS, ...CIRCLE_STRATEGIES, ...custom];
   all.forEach((s, i) =>
     console.log(
-      `  ${i + 1}. ${s}${custom.includes(s) ? dim(" (yours)") : ""}${s === (current.strategy ?? "steady-basket") ? green(" ← current") : ""}`,
+      `  ${i + 1}. ${s}${custom.includes(s) ? dim(" (yours)") : ""}${CIRCLE_STRATEGIES.includes(s) ? dim(" 🏹 merry circle — hold $MERRYMEN") : ""}${s === (current.strategy ?? "steady-basket") ? green(" ← current") : ""}`,
     ),
   );
   console.log(dim(`  forge your own outlaw: merrymen strategy new <name>  (template lands in ${STRATEGIES})`));
@@ -278,7 +391,7 @@ async function onboard() {
   console.log(bold(`\n  ${c.arrow} 4/4 · the loot`) + dim("  (basket — equal-weighted)"));
   const symbols = knownSymbols();
   console.log(dim(`  available: ${symbols.join(" ")}`));
-  const basketNow = (current.basketSymbols ?? ["AAPL", "MSFT", "QQQ"]).join(",");
+  const basketNow = (current.basketSymbols ?? ["QQQ", "NVDA", "TSLA"]).join(",");
   const basket = (await p.ask(`  symbols, comma-separated [${basketNow}]: `)).trim();
   if (basket) {
     const chosen = basket.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
@@ -528,6 +641,8 @@ async function doctor() {
   const custom = await listCustom();
   const strategy = s.strategy ?? "steady-basket";
   if (BUILTINS.includes(strategy)) ok(`strategy: ${strategy} (builtin)`);
+  else if (CIRCLE_STRATEGIES.includes(strategy))
+    ok(`strategy: ${strategy} (🏹 merry circle — runs when you hold $MERRYMEN at your holder wallet)`);
   else if (custom.includes(strategy)) ok(`strategy: ${strategy} (yours, ~/.merrymen/strategies/${strategy}.*)`);
   else bad(`strategy "${strategy}" is neither builtin nor in ${STRATEGIES} — the worker will idle with a warning`);
   if (custom.length) console.log(`  ${dim(`your strategies: ${custom.join(", ")}`)}`);
@@ -636,6 +751,8 @@ async function strategyCmd(sub, name) {
   if (sub === "list") {
     console.log(bold("builtin"));
     BUILTINS.forEach((s) => console.log(`  ${s}`));
+    console.log(bold("merry circle") + dim(" (hold $MERRYMEN — Merry Man tier — to run)"));
+    CIRCLE_STRATEGIES.forEach((s) => console.log(`  ${s} ${dim("🏹")}`));
     const custom = await listCustom();
     console.log(bold("yours") + dim(` (${STRATEGIES})`));
     custom.length ? custom.forEach((s) => console.log(`  ${s}`)) : console.log(dim("  none yet — merrymen strategy new <name>"));
@@ -684,10 +801,182 @@ async function kill() {
   const answer = (await p.ask(`  ${red("CALL THE BAND HOME")} — destroy the grant? The worker halts on its next tick. [y/N]: `)).trim().toLowerCase();
   p.close();
   if (answer === "y" || answer === "yes") {
+    // Keep the wallet + its owner key before the grant goes — killing the session
+    // key must never mean losing access to funds still sitting in the account.
+    const archived = archiveCurrentGrant();
     rmSync(GRANT, { force: true });
     ok("grant destroyed — the band stands down on the next tick (on-chain expiry is the backstop)");
+    if (archived) {
+      console.log(
+        `  ${dim("wallet archived — funds stay reachable:")} ${bold("merrymen wallets")} ${dim("·")} ${bold("merrymen recover")}`,
+      );
+    }
   } else {
     console.log(dim("  stayed the hand — nothing touched"));
+  }
+}
+
+// ───────────────────────────────────────────────────────────────── recover ──
+
+/**
+ * Spawn recover-cli.ts (needs viem/@zerodev, which this CLI doesn't carry) and
+ * relay it. The owner key rides in an env var — never on the command line, never
+ * logged — so it can't leak into `ps` or shell history. Human progress streams
+ * from the child's stderr; the one machine result line comes back on stdout.
+ */
+function runRecoverChild(mode, { ownerKey, to, chainId, expect }) {
+  return new Promise((resolve) => {
+    const env = {
+      ...process.env,
+      MERRYMEN_RECOVER_OWNER_KEY: ownerKey,
+      MERRYMEN_RECOVER_EXPECT: expect || "",
+    };
+    const child = toolSpawn(localBin("tsx"), [RECOVER_CLI, mode, to, String(chainId)], { cwd: ROOT, env });
+    let out = "";
+    child.stdout.on("data", (d) => (out += String(d)));
+    child.stderr.on("data", (d) => process.stderr.write(d)); // live progress
+    child.on("exit", (code) => {
+      let result = null;
+      const line = out.split(/\r?\n/).find((l) => l.startsWith("__RESULT__"));
+      if (line) {
+        try {
+          result = JSON.parse(line.slice("__RESULT__".length));
+        } catch {
+          /* leave result null — caller treats as failure */
+        }
+      }
+      resolve({ code: code ?? 1, result });
+    });
+  });
+}
+
+/**
+ * `merrymen recover` — sweep a smart account back to a wallet you control.
+ *
+ * The funded address is an ERC-4337 smart account, not a plain wallet: its owner
+ * key derives a DIFFERENT address (what MetaMask shows — empty), so funds can't
+ * be reached by importing the key. This rebuilds the account from the owner key
+ * and moves everything out in one op. Works even after a kill switch, because it
+ * signs with the owner (sudo) key, not the destroyed session key.
+ */
+async function recover() {
+  await banner("recover your funds — call the loot home");
+  ensureHome();
+  warnIfOldNode();
+  console.log(
+    `  ${dim("The address you funded is a smart account, not a MetaMask wallet — its owner key")}\n` +
+      `  ${dim("shows a different, empty address if you import it. This sweeps the real balance out.")}\n`,
+  );
+
+  const grant = readJson(GRANT);
+  const p = makePrompter();
+
+  let ownerKey;
+  let chainId;
+  let expect;
+  if (grant && grant.demoOwnerPrivateKey) {
+    ownerKey = grant.demoOwnerPrivateKey;
+    chainId = grant.chainId || 4663;
+    expect = grant.smartAccount;
+    ok(`found your active grant — account ${grant.smartAccount.slice(0, 10)}… on chain ${chainId}`);
+  } else {
+    // No live grant — but this machine may still hold archived wallets (every
+    // replaced/killed wallet is kept with its owner key). Offer those first so
+    // nobody has to hunt down a key they already have on disk.
+    const archived = (await archivedWallets()).filter((g) => /^0x[0-9a-fA-F]{64}$/.test(g.demoOwnerPrivateKey ?? ""));
+    if (archived.length > 0) {
+      console.log(`  ${green("✓")} found ${archived.length} archived wallet${archived.length > 1 ? "s" : ""} on this machine:`);
+      archived.forEach((g, i) =>
+        console.log(`    ${i + 1}. ${bold(g.smartAccount)} ${dim(`· chain ${g.chainId}`)}`),
+      );
+      const pick = (await p.ask(`  pick 1-${archived.length}, or Enter to paste a key instead: `)).trim();
+      const idx = Number(pick) - 1;
+      if (pick && Number.isInteger(idx) && archived[idx]) {
+        ownerKey = archived[idx].demoOwnerPrivateKey;
+        chainId = archived[idx].chainId || 4663;
+        expect = archived[idx].smartAccount;
+        ok(`using archived wallet ${expect.slice(0, 10)}… (owner key read from disk — never typed)`);
+      }
+    }
+
+    if (!ownerKey) {
+      warn("no stored owner key — a wallet created before archiving shipped, or a fresh machine.");
+      console.log(dim("  Paste the owner key you backed up when you created the wallet (input hidden)."));
+      ownerKey = (await p.askSecret("  owner private key (0x…): ")).trim();
+      if (!/^0x[0-9a-fA-F]{64}$/.test(ownerKey)) {
+        p.close();
+        bad("that isn't a 32-byte hex private key (expected 0x + 64 hex chars).");
+        return;
+      }
+      const chainAns = (await p.ask("  chain — [1] mainnet 4663 (real funds)  ·  [2] testnet 46630  [1]: ")).trim();
+      chainId = chainAns === "2" ? 46630 : 4663;
+      expect = "";
+    }
+  }
+
+  const s = readJson(SETTINGS) ?? {};
+  const hasBundler = !!(
+    s.bundlerApiKey ||
+    s.bundlerUrl ||
+    process.env.MERRYMEN_BUNDLER_API_KEY ||
+    process.env.MERRYMEN_BUNDLER_URL
+  );
+  if (!hasBundler) {
+    p.close();
+    bad("recovery needs a bundler key — a smart account can only move funds by sending a UserOp.");
+    console.log(
+      `  Add a free Pimlico key at ${bold("dashboard.pimlico.io")}, paste it into ${bold("merrymen onboard")}\n` +
+        `  (or the dashboard ${dim("/settings")}), then rerun ${bold("merrymen recover")}.`,
+    );
+    return;
+  }
+
+  const to = (await p.ask("  send the funds to which address? (one YOU control — e.g. your MetaMask): ")).trim();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(to)) {
+    p.close();
+    bad("that isn't a valid address (expected 0x + 40 hex chars).");
+    return;
+  }
+
+  console.log(dim("\n  reading what the account holds…\n"));
+  const plan = await runRecoverChild("plan", { ownerKey, to, chainId, expect });
+  if (!plan.result || plan.result.ok !== true) {
+    p.close();
+    bad(`couldn't read the account${plan.result?.error ? ` — ${plan.result.error}` : ""}.`);
+    return;
+  }
+  const balances = plan.result.balances ?? [];
+  if (balances.length === 0) {
+    p.close();
+    warn(`nothing to recover — ${plan.result.smartAccount} holds no USDG or tokens.`);
+    console.log(dim("  If you expected funds here, check you're using the right owner key and chain."));
+    return;
+  }
+
+  const list = balances.map((b) => `${b.amount} ${b.symbol}`).join(", ");
+  console.log();
+  warn(`about to sweep ${bold(list)}`);
+  console.log(`  from ${dim(plan.result.smartAccount)}`);
+  console.log(`  to   ${bold(to)}`);
+  console.log(dim("  real and irreversible. the account keeps its dust ETH — it pays this op's gas.\n"));
+  const confirm = (await p.ask(`  type ${bold("sweep")} to confirm: `)).trim().toLowerCase();
+  p.close();
+  if (confirm !== "sweep") {
+    console.log(dim("  stayed the hand — nothing moved."));
+    return;
+  }
+
+  console.log(dim("\n  signing the recovery op with your owner key…\n"));
+  const done = await runRecoverChild("sweep", { ownerKey, to, chainId, expect });
+  if (done.result?.ok && done.result.txHash) {
+    const base = EXPLORER[chainId] ?? EXPLORER[4663];
+    console.log(`\n  ${green("✓")} ${bold("recovered.")} ${list} → ${to}`);
+    console.log(`  proof: ${bold(`${base}/tx/${done.result.txHash}`)}\n`);
+  } else {
+    bad(
+      `recovery didn't complete${done.result?.error ? ` — ${done.result.error}` : ""}. ` +
+        "Your funds are still safe in the account; fix the cause above and rerun merrymen recover.",
+    );
   }
 }
 
@@ -864,6 +1153,13 @@ switch (cmd) {
   case "kill":
     await kill();
     break;
+  case "wallets":
+    await wallets();
+    break;
+  case "recover":
+  case "withdraw":
+    await recover();
+    break;
   case "update":
   case "upgrade":
     await update();
@@ -886,6 +1182,8 @@ switch (cmd) {
   ${bold("merrymen strategy list")}  the roster — builtins + your strategies
   ${bold("merrymen selftest")}       fire one arrow through the whole pipeline
   ${bold("merrymen kill")}           call the band home (kill switch)
+  ${bold("merrymen wallets")}        every wallet on this machine + what it holds
+  ${bold("merrymen recover")}        sweep your account's funds to a wallet you control
   ${bold("merrymen update")}         stop the band, upgrade to latest, no EBUSY
   ${bold("merrymen version")}        which build is this (-v)
   ${bold("merrymen welcome")}        replay the intro 🏹

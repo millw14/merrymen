@@ -17,6 +17,18 @@ describe("parseSlash — pure slash parser", () => {
     assert.deepEqual(parseSlash("/status@merryman_bot"), { kind: "status" });
   });
 
+  it("wallet words all land on the dashboard signpost, never 'unknown command'", () => {
+    // People type /grant in chat after reading "go to /grant" — dead-ending them
+    // there is how a funded user gets stuck. Every synonym must answer.
+    for (const w of ["/grant", "/wallet", "/restore", "/recover", "/reconnect", "/fund"]) {
+      assert.deepEqual(parseSlash(w), { kind: "wallet" }, `${w} should point at the dashboard`);
+    }
+    assert.deepEqual(parseSlash("/grant@merryman_bot"), { kind: "wallet" });
+    // …but /withdraw stays an alias for /transfer — a signpost must not eat a
+    // working command.
+    assert.equal(parseSlash("/withdraw 0x1111111111111111111111111111111111111111 5")?.kind, "transfer");
+  });
+
   it("parses cap and buy/sell with either argument order", () => {
     assert.deepEqual(parseSlash("/cap 20"), { kind: "cap", usdg: 20 });
     assert.deepEqual(parseSlash("/buy QQQ 10"), { kind: "buy", symbol: "QQQ", usdg: 10 });

@@ -40,6 +40,8 @@ export interface ResolvedConfig {
   llmModel: string;
   llmIntervalMin: number;
   llmMaxActionUsdg: number;
+  /** Wallet holding $MERRYMEN — sets the Merry Circle tier / fee discount. */
+  holderAddress: `0x${string}` | undefined;
   telegramBotToken: string | undefined;
   telegramEnabled: boolean;
   telegramControlEnabled: boolean;
@@ -133,6 +135,10 @@ export function mergeSettings(
   const breakerAddress =
     rawBreaker && /^0x[0-9a-fA-F]{40}$/.test(rawBreaker) ? (rawBreaker as `0x${string}`) : undefined;
 
+  const rawHolder = str(file.holderAddress, env.MERRYMEN_HOLDER_ADDRESS);
+  const holderAddress =
+    rawHolder && /^0x[0-9a-fA-F]{40}$/.test(rawHolder) ? (rawHolder as `0x${string}`) : undefined;
+
   const fileSymbols = Array.isArray(file.basketSymbols)
     ? file.basketSymbols.filter((s): s is string => typeof s === "string" && KNOWN_SYMBOLS.has(s))
     : [];
@@ -169,6 +175,7 @@ export function mergeSettings(
     llmModel: str(file.llmModel, env.MERRYMEN_LLM_MODEL, d.llmModel)!,
     llmIntervalMin: num(file.llmIntervalMin, env.MERRYMEN_LLM_INTERVAL_MIN, d.llmIntervalMin, 1, 1_440),
     llmMaxActionUsdg: num(file.llmMaxActionUsdg, env.MERRYMEN_LLM_MAX_ACTION_USDG, d.llmMaxActionUsdg, 1, 100_000),
+    holderAddress,
     telegramBotToken: str(file.telegramBotToken, env.MERRYMEN_TELEGRAM_BOT_TOKEN),
     telegramEnabled: bool(file.telegramEnabled, env.MERRYMEN_TELEGRAM_ENABLED, d.telegramEnabled),
     telegramControlEnabled: bool(file.telegramControlEnabled, env.MERRYMEN_TELEGRAM_CONTROL, d.telegramControlEnabled),

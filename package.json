@@ -1,6 +1,6 @@
 {
   "name": "merrymen",
-  "version": "0.8.2",
+  "version": "0.9.5",
   "description": "Trading agents you never have to trust — self-hosted, keys stay on your machine, caps enforced by the account contract on-chain. For Robinhood Chain; Telegram control; write-your-own strategies.",
   "license": "MIT",
   "homepage": "https://merrymen.dev",
@@ -53,7 +53,7 @@
     "react-dom": "^19.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
-    "viem": "^2.21.0"
+    "viem": "^2.28.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

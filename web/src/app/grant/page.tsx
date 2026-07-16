@@ -10,10 +10,13 @@ import {
   createAgentWallet,
   FAUCET_URL,
   loadGrant,
+  previewOwnerAccount,
   readFunding,
+  restoreAgentWallet,
   type Funding,
   type Grant,
   type GrantCaps,
+  type OwnerPreview,
 } from "@/lib/session";
 
 const DEFAULTS: GrantCaps = {
@@ -98,6 +101,16 @@ export default function GrantPage() {
   // "no merryman" while this page would happily show a wallet the worker ignores.
   const [serverArmed, setServerArmed] = useState<boolean | null>(null);
   const [reArming, setReArming] = useState(false);
+  // ── restore: bring an already-funded wallet back with its owner key ──────
+  const [mode, setMode] = useState<"create" | "restore">("create");
+  const [restoreKey, setRestoreKey] = useState("");
+  const [preview, setPreview] = useState<OwnerPreview | null>(null);
+  const [previewFunding, setPreviewFunding] = useState<Funding | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  // Swapping the ACTIVE wallet for another one you own. Without this you'd have
+  // to "discard" a funded wallet just to reach the restore tab — the exact scary
+  // click that strands people. Switching archives the outgoing wallet instead.
+  const [switching, setSwitching] = useState(false);
 
   useEffect(() => {
     setGrant(loadGrant());
@@ -163,12 +176,70 @@ export default function GrantPage() {
     }
   }
 
+  /** Which account does this owner key control, and what's in it? Read-only. */
+  async function checkOwnerKey() {
+    setError(null);
+    setPreview(null);
+    setPreviewFunding(null);
+    const key = restoreKey.trim();
+    if (!/^0x[0-9a-fA-F]{64}$/.test(key)) {
+      setError("that isn't an owner key — expected 0x followed by 64 hex characters.");
+      return;
+    }
+    setPreviewing(true);
+    try {
+      const p = await previewOwnerAccount(key as `0x${string}`, chainId);
+      setPreview(p);
+      setPreviewFunding(await readFunding(p.smartAccount, chainId).catch(() => null));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+    setPreviewing(false);
+  }
+
+  /** Re-arm the funded account with a fresh session key under the caps above. */
+  async function onRestore() {
+    setError(null);
+    setStatus("starting…");
+    try {
+      const g = await restoreAgentWallet(restoreKey.trim() as `0x${string}`, caps, setStatus, chainId);
+      // They just pasted the owner key, so it's demonstrably backed up — skip the
+      // backup gate and drop them straight into the funded/manage view.
+      localStorage.setItem(BACKUP_KEY, "1");
+      setBackedUp(true);
+      setGrant(g);
+      setRestoreKey("");
+      setPreview(null);
+      setSwitching(false); // the restored wallet IS the active one now
+      setServerArmed(true);
+      setStatus(null);
+    } catch (e) {
+      setStatus(null);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   function confirmBackup() {
     localStorage.setItem(BACKUP_KEY, "1");
     setBackedUp(true);
   }
 
   function discard() {
+    // Discarding forgets THIS wallet's keys from the browser. If it still holds
+    // funds, those funds don't move — they stay in the smart account, reachable
+    // only with the owner key. Make the user acknowledge that before they can
+    // strand money by starting over (exactly the trap that loses funded wallets).
+    if ((funding?.usdgUnits ?? 0n) > 0n) {
+      const amt = funding ? funding.usdg.toFixed(2) : "some";
+      const okToDrop = window.confirm(
+        `This wallet still holds ${amt} USDG.\n\n` +
+          `Discarding it here does NOT move the funds — they stay in the smart account and can ` +
+          `only be reached with THIS wallet's owner key. Back that key up first, or sweep the ` +
+          `funds out now by running:  merrymen recover\n\n` +
+          `Discard anyway?`,
+      );
+      if (!okToDrop) return;
+    }
     clearGrant();
     // Also destroy the worker-side handoff — otherwise the "discarded" grant
     // stays armed and the worker keeps trading on it (kill-switch semantics).
@@ -231,14 +302,71 @@ export default function GrantPage() {
         )}
 
         {/* ─── phase 1: pick a chain, set caps, create the wallet ────────── */}
-        {!grant && (
+        {(!grant || switching) && (
           <div className="grant-panel">
-            <h1 className="grant-title">Create your agent&apos;s wallet</h1>
+            {switching && grant && (
+              <div className="switch-note">
+                You&apos;re running <span className="mono">{short(grant.smartAccount)}</span> right
+                now. Restoring another wallet makes <b>that</b> one the active agent instead — your
+                current wallet is <b>archived on this machine with its owner key</b>, so nothing is
+                lost and you can switch back or sweep it anytime.
+                <button
+                  className="copy-btn"
+                  style={{ marginTop: 10 }}
+                  onClick={() => {
+                    setSwitching(false);
+                    setError(null);
+                    setPreview(null);
+                    setRestoreKey("");
+                  }}
+                >
+                  ← never mind, keep {short(grant.smartAccount)}
+                </button>
+              </div>
+            )}
+            <div className="mode-tabs">
+              <button
+                type="button"
+                className={`mode-tab ${mode === "create" ? "on" : ""}`}
+                onClick={() => {
+                  setMode("create");
+                  setError(null);
+                }}
+              >
+                new wallet
+              </button>
+              <button
+                type="button"
+                className={`mode-tab ${mode === "restore" ? "on" : ""}`}
+                onClick={() => {
+                  setMode("restore");
+                  setError(null);
+                }}
+              >
+                restore a funded wallet
+              </button>
+            </div>
+
+            <h1 className="grant-title">
+              {mode === "create" ? "Create your agent's wallet" : "Restore your funded wallet"}
+            </h1>
             <p className="grant-sub">
-              No wallet to connect. merrymen makes a fresh wallet and gives <b>you</b> the key. You
-              set the spending limits below — and the blockchain itself{" "}
-              <Info>These aren&apos;t honor-system limits. The account contract on the chain rejects any trade over your caps, so even a hacked agent can&apos;t break them.</Info>{" "}
-              enforces them, so your agent can never spend more than you allow.
+              {mode === "create" ? (
+                <>
+                  No wallet to connect. merrymen makes a fresh wallet and gives <b>you</b> the key.
+                  You set the spending limits below — and the blockchain itself{" "}
+                  <Info>These aren&apos;t honor-system limits. The account contract on the chain rejects any trade over your caps, so even a hacked agent can&apos;t break them.</Info>{" "}
+                  enforces them, so your agent can never spend more than you allow.
+                </>
+              ) : (
+                <>
+                  Already funded a merrymen wallet? Paste its <b>owner key</b> and the very same
+                  account comes back{" "}
+                  <Info>Your smart-account address is derived from the owner key, so the same key always reproduces the same account — with the funds still in it. Restoring signs a fresh session key; it moves nothing on-chain.</Info>{" "}
+                  — same address, same funds — armed with a fresh session key under the caps you set
+                  below. This is the way back in after a kill switch or a new machine.
+                </>
+              )}
             </p>
 
             <div className="chain-choice">
@@ -281,6 +409,45 @@ export default function GrantPage() {
                     protection.
                   </span>
                 </label>
+              </div>
+            )}
+
+            {mode === "restore" && (
+              <div className="restore-box">
+                <span className="field-label">your wallet&apos;s owner key</span>
+                <input
+                  className="restore-input mono"
+                  type="password"
+                  placeholder="0x… (the key you backed up when you created it)"
+                  value={restoreKey}
+                  onChange={(e) => setRestoreKey(e.target.value)}
+                  autoComplete="off"
+                />
+                <button className="copy-btn" onClick={() => void checkOwnerKey()} disabled={previewing}>
+                  {previewing ? "checking…" : "check this wallet"}
+                </button>
+
+                {preview && (
+                  <div className="restore-preview mono">
+                    <div>
+                      <span className="rk">this key controls</span>
+                      <span className="rv" style={{ wordBreak: "break-all" }}>{preview.smartAccount}</span>
+                    </div>
+                    <div>
+                      <span className="rk">which holds</span>
+                      <span className="rv">
+                        {previewFunding
+                          ? `${previewFunding.usdg.toFixed(2)} USDG · ${(Number(previewFunding.gasWei) / 1e18).toFixed(5)} ETH`
+                          : "…"}
+                      </span>
+                    </div>
+                    <div className="restore-confirm">
+                      {previewFunding && previewFunding.usdg > 0
+                        ? "✓ Funds found — restore it below and your band rides again."
+                        : "This account is empty on this chain. Check the chain selector, or try your other owner key."}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -355,23 +522,39 @@ export default function GrantPage() {
               These limits are enforced by the blockchain — the agent literally cannot exceed them.
             </div>
 
-            <button className="grant-btn" onClick={onCreate} disabled={status !== null || createBlocked}>
-              {status ??
-                (createBlocked
-                  ? "acknowledge the real-funds warning above first"
-                  : `Create my agent (${isMainnet ? "real money" : "practice"})`)}
-            </button>
+            {mode === "create" ? (
+              <button className="grant-btn" onClick={onCreate} disabled={status !== null || createBlocked}>
+                {status ??
+                  (createBlocked
+                    ? "acknowledge the real-funds warning above first"
+                    : `Create my agent (${isMainnet ? "real money" : "practice"})`)}
+              </button>
+            ) : (
+              <button
+                className="grant-btn"
+                onClick={() => void onRestore()}
+                disabled={status !== null || createBlocked || !preview}
+              >
+                {status ??
+                  (createBlocked
+                    ? "acknowledge the real-funds warning above first"
+                    : !preview
+                      ? "check your owner key above first"
+                      : `Restore & arm ${short(preview.smartAccount)}`)}
+              </button>
+            )}
             {error && <div className="grant-error mono">{error}</div>}
 
             <div className="grant-note">
-              The keys are made right here in your browser so you can save them yourself — nobody else
-              ever sees them.
+              {mode === "create"
+                ? "The keys are made right here in your browser so you can save them yourself — nobody else ever sees them."
+                : "Your owner key never leaves this browser — it's used to re-derive your account and sign the new session key locally. Restoring moves no funds and costs no gas."}
             </div>
           </div>
         )}
 
         {/* ─── phase 2: back up the owner key (gated) ──────────────────── */}
-        {grant && !backedUp && !desynced && (
+        {grant && !backedUp && !desynced && !switching && (
           <div className="grant-panel">
             <h1 className="grant-title">back up your owner key</h1>
             <p className="grant-sub">
@@ -409,12 +592,17 @@ export default function GrantPage() {
             <div className="grant-note">
               your account: <span className="mono">{short(grant.smartAccount)}</span> · session key
               (worker-only, capped): <span className="mono">{short(grant.sessionKeyAddress)}</span>
+              <br />
+              This key controls the account, but its <i>own</i> address (
+              <span className="mono">{short(grant.owner)}</span>) is different — that&apos;s the
+              address MetaMask shows if you import the key. You fund and recover the{" "}
+              <b>account</b> address, not the key&apos;s address.
             </div>
           </div>
         )}
 
         {/* ─── phase 3: fund the account ───────────────────────────────── */}
-        {grant && backedUp && !desynced && (
+        {grant && backedUp && !desynced && !switching && (
           <div className="grant-panel">
             <h1 className="grant-title">fund your account</h1>
             <p className="grant-sub">
@@ -443,6 +631,16 @@ export default function GrantPage() {
               <span className="rk">account address · {chainLabel(grant.chainId)}</span>
               <span className="rv" style={{ wordBreak: "break-all" }}>{grant.smartAccount}</span>
               <CopyBtn value={grant.smartAccount} label="copy address" />
+            </div>
+
+            <div className="grant-note" style={{ marginTop: 12 }}>
+              <b>This is a smart-account address, not a MetaMask wallet.</b>{" "}
+              <Info>An ERC-4337 smart account. Your owner key controls it, but the key&apos;s own address (what MetaMask derives when you import it) is different — so MetaMask shows an empty wallet, not this account. That&apos;s expected.</Info>{" "}
+              Your owner key controls it, but that key&apos;s <i>own</i> address is different — import
+              the key into MetaMask and you&apos;ll see an empty wallet, not these funds. To move the
+              money out anytime — even after a kill switch — run{" "}
+              <span className="mono">merrymen recover</span>, which sweeps the balance to any address
+              you choose.
             </div>
 
             <div className="fund-balances">
@@ -523,6 +721,17 @@ export default function GrantPage() {
               <Link href="/" className="grant-btn" style={{ textAlign: "center", textDecoration: "none" }}>
                 back to the band
               </Link>
+              <button
+                className="copy-btn"
+                style={{ padding: "10px 16px" }}
+                onClick={() => {
+                  setSwitching(true);
+                  setMode("restore");
+                  setError(null);
+                }}
+              >
+                switch to another wallet
+              </button>
               <button className="btn-kill" style={{ padding: "10px 16px" }} onClick={discard}>
                 discard &amp; start over
               </button>

@@ -15,6 +15,7 @@ import { http, createPublicClient, type Chain, type Hex } from "viem";
 import { createKernelAccountClient } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { deserializePermissionAccount } from "@zerodev/permissions";
+import { userOpGasConfig } from "./gas";
 
 export interface Call {
   to: `0x${string}`;
@@ -50,6 +51,9 @@ export async function createAgentExecutor(opts: {
     account,
     chain: opts.chain,
     bundlerTransport: http(opts.bundlerUrl),
+    // Without this the SDK calls the ZeroDev-only `zd_getUserOperationGasPrice`,
+    // which Pimlico/Alchemy/self-hosted bundlers reject — see worker/src/gas.ts.
+    userOperation: userOpGasConfig(publicClient, opts.bundlerUrl),
   });
 
   return {
@@ -60,7 +64,9 @@ export async function createAgentExecutor(opts: {
       });
       const receipt = await client.waitForUserOperationReceipt({ hash: userOpHash });
       if (!receipt.success) {
-        throw new Error(`UserOp reverted on-chain: ${userOpHash}`);
+        // Surface the on-chain revert reason when the bundler provides one.
+        const reason = (receipt as { reason?: string }).reason;
+        throw new Error(`reverted on-chain${reason ? `: ${reason}` : ""} (${userOpHash})`);
       }
       return receipt.receipt.transactionHash;
     },

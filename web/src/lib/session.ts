@@ -48,6 +48,7 @@ import {
   MORPHO,
   RIALTO,
   STOCK_TOKENS,
+  TRADEABLE_SYMBOLS,
   UNISWAP,
   UNISWAP_SWAP_ROUTER_ABI,
   chainForId,
@@ -86,10 +87,21 @@ export function clearGrant(): void {
 
 const usdgUnits = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
 
-export async function createAgentWallet(
+/**
+ * Mint a grant for a given OWNER key: derive the Kernel account, generate a
+ * fresh session key, wrap it in the policy validator, and seal the grant.
+ *
+ * The account address derives from the owner key alone (the sudo ECDSA
+ * validator + factory + index) — the session/permission plugin is enabled at
+ * UserOp time and does NOT affect the address. That's what makes restore work:
+ * the same owner key always reproduces the same smart account, so an existing
+ * funded wallet can be re-armed with a brand-new session key.
+ */
+async function mintGrant(
+  ownerPrivateKey: `0x${string}`,
   caps: GrantCaps,
   onStatus: (status: string) => void,
-  chainId: number = robinhoodTestnet.id,
+  chainId: number,
 ): Promise<Grant> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
@@ -102,10 +114,6 @@ export async function createAgentWallet(
   const entryPoint = getEntryPoint("0.7");
   const kernelVersion = KERNEL_V3_3;
 
-  // Generate the OWNER key in-browser — this is the account's sudo signer and
-  // the root of fund custody. No external wallet, nothing to connect.
-  onStatus("minting your agent's owner key…");
-  const ownerPrivateKey = generatePrivateKey();
   const ownerAccount = privateKeyToAccount(ownerPrivateKey);
   const owner = ownerAccount.address;
 
@@ -148,11 +156,12 @@ export async function createAgentWallet(
             { condition: ParamCondition.LESS_THAN_OR_EQUAL, value: usdgUnits(caps.perTradeUsdg) },
           ],
         },
-        // approve basket stock tokens for SELLS, only to the allowed routers.
-        // No amount condition: share counts are 18dp and not USDG-comparable —
-        // routers can only pull what's approved, and the USDG cap above bounds
-        // what the agent could ever have bought in the first place.
-        ...STOCK_TOKENS.filter((t) => ["AAPL", "MSFT", "QQQ"].includes(t.symbol)).map(
+        // approve the TRADEABLE stock tokens for SELLS, only to the allowed
+        // routers. These match the v3-liquid set (tokens.ts) so a token the agent
+        // can buy, it can also sell. No amount condition: share counts are 18dp and
+        // not USDG-comparable — routers can only pull what's approved, and the USDG
+        // cap above bounds what the agent could ever have bought in the first place.
+        ...STOCK_TOKENS.filter((t) => (TRADEABLE_SYMBOLS as readonly string[]).includes(t.symbol)).map(
           (t) =>
             ({
               target: t.address as Address,
@@ -257,6 +266,70 @@ export async function createAgentWallet(
   }
 
   return grant;
+}
+
+/**
+ * Create a BRAND-NEW agent wallet: a fresh owner key is generated in-browser
+ * (this is the account's sudo signer and the root of fund custody — no external
+ * wallet, nothing to connect), then a grant is sealed on it.
+ */
+export async function createAgentWallet(
+  caps: GrantCaps,
+  onStatus: (status: string) => void,
+  chainId: number = robinhoodTestnet.id,
+): Promise<Grant> {
+  onStatus("minting your agent's owner key…");
+  return mintGrant(generatePrivateKey(), caps, onStatus, chainId);
+}
+
+/**
+ * RESTORE an existing agent wallet from its backed-up owner key — the way back
+ * in after a kill switch, a discarded grant, or a new machine. The same owner
+ * key re-derives the SAME smart account, so a wallet you already funded comes
+ * back to life with a brand-new session key and whatever caps you pick now.
+ * Nothing moves on-chain; no funds are touched.
+ */
+export async function restoreAgentWallet(
+  ownerPrivateKey: `0x${string}`,
+  caps: GrantCaps,
+  onStatus: (status: string) => void,
+  chainId: number = robinhoodTestnet.id,
+): Promise<Grant> {
+  onStatus("re-deriving your smart account from the owner key…");
+  return mintGrant(ownerPrivateKey, caps, onStatus, chainId);
+}
+
+export interface OwnerPreview {
+  /** The smart account this owner key controls — where your funds actually are. */
+  smartAccount: Address;
+  /** The owner key's own EOA — what MetaMask would show (usually empty). */
+  owner: Address;
+}
+
+/**
+ * Read-only: which smart account does this owner key control? Lets the restore
+ * flow show the derived address (and its balances) so the user can confirm it's
+ * the funded wallet they meant BEFORE anything is signed or armed.
+ */
+export async function previewOwnerAccount(
+  ownerPrivateKey: `0x${string}`,
+  chainId: number = robinhoodTestnet.id,
+): Promise<OwnerPreview> {
+  const chain = chainForId(chainId);
+  const publicClient = createPublicClient({ chain, transport: http() });
+  const ownerAccount = privateKeyToAccount(ownerPrivateKey);
+  const ecdsaValidator = await signerToEcdsaValidator(publicClient, {
+    signer: ownerAccount,
+    entryPoint: getEntryPoint("0.7"),
+    kernelVersion: KERNEL_V3_3,
+  });
+  // sudo-only derivation — the permission plugin doesn't change the address.
+  const account = await createKernelAccount(publicClient, {
+    entryPoint: getEntryPoint("0.7"),
+    kernelVersion: KERNEL_V3_3,
+    plugins: { sudo: ecdsaValidator },
+  });
+  return { smartAccount: account.address, owner: ownerAccount.address };
 }
 
 /** Live on-chain balances of the account address — for the "fund it" step. */

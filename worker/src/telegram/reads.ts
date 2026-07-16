@@ -377,6 +377,27 @@ export function readLlmState(ctx: StatusContext): string {
   ].join("\n");
 }
 
+/**
+ * Answer for /grant, /wallet, /restore, /recover… — the commands people type in
+ * chat after reading "go to /grant". Wallet actions can't happen here (the owner
+ * key must never touch a chat app), so this is a signpost to the local dashboard
+ * rather than a dead end.
+ */
+export const WALLET_TEXT = [
+  "🏹 <b>your wallet lives in the dashboard</b> — not in chat.",
+  "",
+  "Open <b>http://localhost:3100/grant</b> on the machine running merrymen:",
+  "• <b>new wallet</b> — create an agent wallet and fund it",
+  "• <b>restore a funded wallet</b> — paste your owner key to bring an already-funded wallet back: same address, same funds, no gas",
+  "• if it says <i>“this wallet isn’t active”</i> → hit <b>re-arm this wallet</b> (one click, no key needed)",
+  "",
+  "To move funds <b>out</b>: the dashboard’s <b>recover funds</b> panel, or run <code>merrymen recover</code> in your terminal.",
+  "",
+  "Heads-up: the address you funded is a <b>smart account</b>, not a MetaMask wallet — importing your owner key into MetaMask shows a different, empty address. That’s normal; your funds are safe at the account address.",
+  "",
+  "Why not here? Your owner key never touches chat — wallet actions stay on your machine.",
+].join("\n");
+
 export const HELP_TEXT = [
   "🏹 <b>merryman — commands</b>",
   "/status · /positions · /pnl · /trades — see what the band's doing",
@@ -390,6 +411,7 @@ export const HELP_TEXT = [
   "/buy &lt;SYM&gt; &lt;usdg&gt; · /sell &lt;SYM&gt; &lt;usdg&gt; — trade (passes the policy wall)",
   "/transfer &lt;0x…&gt; &lt;usdg&gt; — send USDG out (asks you to /confirm; enable in dashboard)",
   "/alert &lt;SYM&gt; &gt; &lt;price&gt; — ping me at a price · /alerts · /unalert &lt;n&gt;",
+  "/wallet — create, restore, or recover a wallet (points you to the dashboard)",
   "/kill — destroy the grant, stand the band down",
   "",
   "🖥️ <b>your PC</b> (enable in dashboard → remote control):",

@@ -10,7 +10,7 @@ describe("mergeSettings — file > env > default", () => {
     assert.equal(c.slippageBps, 100);
     assert.equal(c.perfFeeBps, 1000);
     assert.equal(c.tickSeconds, 60);
-    assert.deepEqual(c.basketSymbols, ["AAPL", "MSFT", "QQQ"]);
+    assert.deepEqual(c.basketSymbols, ["QQQ", "NVDA", "TSLA"]);
     assert.equal(c.bundlerUrl, undefined);
     assert.equal(c.anthropicApiKey, undefined);
     assert.equal(c.rialtoApiKeyHeader, "x-api-key");
@@ -74,7 +74,7 @@ describe("mergeSettings — file > env > default", () => {
 
   it("all unknown basket symbols fall back to the default basket", () => {
     const c = mergeSettings({ basketSymbols: ["DOGE", "SHIB"] }, {});
-    assert.deepEqual(c.basketSymbols, ["AAPL", "MSFT", "QQQ"]);
+    assert.deepEqual(c.basketSymbols, ["QQQ", "NVDA", "TSLA"]);
   });
 
   it("telegram fields resolve with sane defaults and validation", () => {

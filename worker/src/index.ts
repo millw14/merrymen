@@ -33,20 +33,24 @@ import {
 } from "viem";
 import {
   CASH,
+  CIRCLE_TIERS,
   MORPHO,
   RIALTO,
   STOCK_TOKENS,
   UNISWAP,
   USDG_DECIMALS,
   chainForId,
+  effectivePerfFeeBps,
   pimlicoBundlerUrl,
   robinhoodTestnet,
+  type CircleTier,
   type StockToken,
   type StoredGrant,
 } from "../../packages/core/src/index";
 import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { bestQuote, buildSwapCall, minOutWithSlippage } from "./venues/uniswap";
 import { createAgentExecutor, type AgentExecutor } from "./executor";
+import { readHolderStatus } from "./circle";
 import { accrueAboveHwm } from "./fees";
 import { loadGrantFile } from "./grant";
 import { ensureHome, homePaths } from "./home";
@@ -60,7 +64,7 @@ import {
   strategyKey,
   type ResolvedConfig,
 } from "./settings";
-import { BUILTIN_STRATEGIES, buildStrategy, tokensForSymbols } from "./strategies/registry";
+import { BUILTIN_STRATEGIES, buildStrategy, isCircleStrategy, tokensForSymbols } from "./strategies/registry";
 import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy } from "./strategies/types";
 import { isPaused, startTelegram } from "./telegram/service";
@@ -227,6 +231,11 @@ async function main() {
   let spentTodayUsdg = 0n;
   let opsToday = 0;
   let highWaterMarkUsdg = 0n;
+  // Merry Circle — the holder's $MERRYMEN tier, refreshed each tick; drives the
+  // performance-fee discount. Starts as the outsider (no discount) until read.
+  let holderTier: CircleTier = CIRCLE_TIERS[0]!;
+  let lastTierId = holderTier.id;
+  let circleBlockedNoted = false; // so the "hold to unlock" note isn't spammed each tick
   let lastSequencerUp = true;
   let lastEquityUsdg = 0n; // updated each tick; used by chat-triggered trades
   let lastGasWei = 0n; // updated each tick; feeds the low-gas Telegram alert
@@ -612,14 +621,23 @@ async function main() {
       if (countsSpend) spentTodayUsdg -= notional;
       opsToday -= 1;
       const msg = e instanceof Error ? e.message : String(e);
+      // Distinguish a genuine on-chain revert (executor threw "reverted on-chain…")
+      // from a failure BEFORE submission (bundler/RPC/gas error), so the user isn't
+      // told "reverted on-chain" for something that never reached the chain. The
+      // short reason rides on reject_rule (the notifier + dashboard already read it).
+      const onChain = /reverted on-chain/i.test(msg);
+      const reason = onChain
+        ? msg.replace(/\s*\(0x[0-9a-fA-F]+\)\s*$/, "").slice(0, 90)
+        : `couldn't submit: ${msg.replace(/\s+/g, " ").slice(0, 80)}`;
       console.error(`[execute] ${intent.kind} failed:`, msg);
-      await addEvent(agentId, "err", `${intent.kind} failed pre-flight or on-chain: ${msg.slice(0, 200)}`);
+      await addEvent(agentId, "err", `${intent.kind} ${onChain ? "reverted on-chain" : "failed before submit"}: ${msg.slice(0, 200)}`);
       await addTrade({
         agent_id: agentId,
         kind: intent.kind,
         target: intent.target,
         amount_usdg: usdgNum(notional),
         status: "reverted",
+        reject_rule: reason,
         created_at: new Date().toISOString(),
       });
     }
@@ -704,6 +722,21 @@ async function main() {
     // so the drawdown breaker judges reality, not just the cash ledger.
     const equityUsdg = balances.cashUsdg + balances.vaultUsdg + positionsUsdg;
 
+    // Merry Circle — refresh the holder's tier ($MERRYMEN on mainnet, read-only)
+    // and note tier changes. The tier discounts the performance fee below.
+    holderTier = (await readHolderStatus(cfg.rpcMainnet, cfg.holderAddress)).tier;
+    if (holderTier.id !== lastTierId) {
+      lastTierId = holderTier.id;
+      await addEvent(
+        agentId,
+        "ok",
+        holderTier.id === "outsider"
+          ? "Merry Circle — no $MERRYMEN at your holder wallet; standard platform fee applies"
+          : `Merry Circle — ${holderTier.emoji} ${holderTier.name}: ${holderTier.feeDiscountBps / 100}% off the platform fee`,
+      );
+    }
+    const effFeeBps = effectivePerfFeeBps(cfg.perfFeeBps, holderTier);
+
     if (paper) {
       // Paper profit accrues NO fees and never touches the persistent agent
       // HWM — mixing paper peaks into real accounting would trip the breaker
@@ -716,7 +749,18 @@ async function main() {
       }
       highWaterMarkUsdg = usdg(bookRow.hwmUsdg);
     } else {
-      const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, cfg.perfFeeBps);
+      // The first funded observation is COST BASIS, not profit. Seed the HWM to
+      // it so the performance fee only ever accrues on gains ABOVE what was put
+      // in — otherwise a fresh agent (HWM 0) books its entire initial deposit as
+      // "profit" and accrues a fee on the user's own money (e.g. 15.49 on a 154.87
+      // deposit at 10%). Persist it so a restart doesn't re-seed from 0.
+      if (highWaterMarkUsdg === 0n && equityUsdg > 0n) {
+        highWaterMarkUsdg = equityUsdg;
+        await setAgentHwm(agentId, usdgNum(equityUsdg));
+      }
+      // The Merry Circle discount is applied to the REAL fee here, so holders
+      // actually accrue less — the perk is in the ledger, not just the marketing.
+      const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, effFeeBps);
       if (accrual.profitUsdg > 0n) {
         await addFeeAccrual(agentId, {
           profitUsdg: usdgNum(accrual.profitUsdg),
@@ -726,10 +770,14 @@ async function main() {
         });
         await setAgentHwm(agentId, usdgNum(accrual.newHwmUsdg));
         if (accrual.feeUsdg > 0n) {
+          const circle =
+            holderTier.feeDiscountBps > 0
+              ? ` — ${holderTier.emoji} ${holderTier.name} rate ${effFeeBps / 100}% (${holderTier.feeDiscountBps / 100}% off)`
+              : "";
           await addEvent(
             agentId,
             "ok",
-            `new high-water mark ${fmt(accrual.newHwmUsdg)} USDG — fee accrued ${fmt(accrual.feeUsdg)} (${cfg.perfFeeBps / 100}% of ${fmt(accrual.profitUsdg)} profit)`,
+            `new high-water mark ${fmt(accrual.newHwmUsdg)} USDG — fee accrued ${fmt(accrual.feeUsdg)} (${effFeeBps / 100}% of ${fmt(accrual.profitUsdg)} profit)${circle}`,
           );
         }
       }
@@ -810,6 +858,21 @@ async function main() {
     // Pause marker (toggled from Telegram/dashboard): keep reading state, but
     // the strategy stops proposing trades until resumed.
     if (isPaused()) return;
+
+    // Merry Circle strategies run only for holders (Merry Man+). A non-holder may
+    // select one, but it stays idle with a one-time note until they hold $MERRYMEN.
+    if (isCircleStrategy(strategy.name) && !holderTier.bonusStrategies) {
+      if (!circleBlockedNoted) {
+        circleBlockedNoted = true;
+        await addEvent(
+          agentId,
+          "warn",
+          `${strategy.name} is a Merry Circle strategy — hold $MERRYMEN (Merry Man tier) to run it; idle until then`,
+        );
+      }
+      return;
+    }
+    circleBlockedNoted = false;
 
     for (const intent of await strategy.tick(snap)) {
       await processIntent(intent, equityUsdg);

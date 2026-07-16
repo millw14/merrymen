@@ -14,6 +14,7 @@
 import { esc } from "./api";
 import { CONTROL_KINDS, PC_CAP_OF, PC_KINDS, type Command } from "./interpreter";
 import { resolveInRoot, shellAllowed, type PcActions } from "./pc";
+import { WALLET_TEXT } from "./reads";
 
 /** A vetted action awaiting the user's explicit /confirm. Widened from the
  * original transfer-only store so a pending PC action and a pending transfer
@@ -121,6 +122,10 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     }
     case "help":
       return deps.help();
+    // Static signpost — no state, no gating: it only tells you where the
+    // dashboard is. Safe to answer even unlinked/read-only.
+    case "wallet":
+      return WALLET_TEXT;
     case "status":
       return deps.reads.status();
     case "positions":

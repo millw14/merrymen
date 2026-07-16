@@ -7,6 +7,7 @@
  */
 
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@/lib/home";
 import { createPublicClient, http, parseAbi } from "viem";
@@ -15,8 +16,32 @@ import { CASH, MORPHO, chainForId, type StoredGrant } from "@merrymen/core";
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
 const HEARTBEAT_FILE = homePaths.heartbeat();
+const ARCHIVE_DIR = homePaths.grantsArchive();
 
 const BALANCE_ABI = parseAbi(["function balanceOf(address) view returns (uint256)"]);
+
+/**
+ * Copy whatever grant.json currently holds into the archive, keyed by its smart
+ * account, BEFORE we overwrite or delete it.
+ *
+ * grant.json is a single slot: creating a second wallet (or hitting the kill
+ * switch) used to destroy the previous grant — and with it the ONLY on-disk copy
+ * of that wallet's owner key, permanently stranding any funds still in it. This
+ * is the safety net. Best-effort: archiving must never block arming a grant.
+ */
+async function archiveCurrentGrant(): Promise<void> {
+  try {
+    const raw = await readFile(GRANT_FILE, "utf8");
+    const prev = JSON.parse(raw) as StoredGrant;
+    if (!prev?.smartAccount) return;
+    await mkdir(ARCHIVE_DIR, { recursive: true });
+    // One file per wallet, named by its address. Re-arming the same wallet just
+    // refreshes its archive copy; a different wallet gets its own file.
+    await writeFile(path.join(ARCHIVE_DIR, `${prev.smartAccount.toLowerCase()}.json`), raw, "utf8");
+  } catch {
+    // no grant.json yet, or it's unreadable — nothing worth keeping
+  }
+}
 
 export interface AgentStatus {
   exists: boolean;
@@ -33,11 +58,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "not a grant" }, { status: 400 });
   }
   await mkdir(DATA_DIR, { recursive: true });
+  // Keep the outgoing wallet (and its owner key) before this one replaces it.
+  await archiveCurrentGrant();
   await writeFile(GRANT_FILE, JSON.stringify(grant, null, 2), "utf8");
   return NextResponse.json({ ok: true });
 }
 
 export async function DELETE() {
+  // The kill switch destroys the session key, NOT the wallet — archive it so the
+  // owner key survives and the funds stay reachable.
+  await archiveCurrentGrant();
   await rm(GRANT_FILE, { force: true });
   return NextResponse.json({ ok: true });
 }

@@ -90,7 +90,11 @@ function tradeLine(t: TradeRowLite, explorer: string | null): string {
   if (t.status === "rejected") {
     return `🛡 the wall turned back a ${esc(t.kind)} (${esc(t.reject_rule ?? "policy")}) — ${t.amount_usdg.toFixed(2)} USDG stayed home`;
   }
-  return `⚠️ a ${esc(t.kind)} of ${t.amount_usdg.toFixed(2)} USDG reverted on-chain — nothing moved`;
+  // "reverted" status covers both an on-chain revert AND a pre-submission failure
+  // (bundler/gas/RPC). reject_rule carries the specific reason — show it rather than
+  // always claiming an on-chain revert.
+  const why = t.reject_rule ? ` — ${esc(t.reject_rule)}` : "";
+  return `⚠️ a ${esc(t.kind)} of ${t.amount_usdg.toFixed(2)} USDG didn't go through${why} (nothing moved)`;
 }
 
 export interface NotifierHandle {

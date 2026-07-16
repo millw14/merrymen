@@ -12,7 +12,9 @@ import type { MarketData } from "@/lib/market";
  * never be mistaken for the honest ledger.
  */
 
-const DEMO_SYMBOLS = ["AAPL", "MSFT", "QQQ"] as const;
+// Match the real default basket (v3-tradeable) so the demo mirrors what a fresh
+// agent actually trades.
+const DEMO_SYMBOLS = ["QQQ", "NVDA", "TSLA"] as const;
 const START_EQUITY = 500;
 
 interface DemoFill {

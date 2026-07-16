@@ -9,6 +9,8 @@
  * returns only { set, hint } for them.
  */
 
+import { TRADEABLE_SYMBOLS } from "./tokens";
+
 export interface MerrymenSettings {
   // ── connections ────────────────────────────────────────────────────────
   /** The easy path to live trading: a Pimlico API key (secret). The worker
@@ -72,6 +74,12 @@ export interface MerrymenSettings {
   llmModel?: string;
   llmIntervalMin?: number;
   llmMaxActionUsdg?: number;
+
+  // ── $MERRYMEN · the Merry Circle (holder perks) ────────────────────────
+  /** The wallet you hold $MERRYMEN in. The worker reads its balance (read-only)
+   * to set your Circle tier — which lowers your platform fee and unlocks perks.
+   * Optional; blank = no tier. Purely a discount/perk lookup, never a spend key. */
+  holderAddress?: string;
 
   // ── telegram (chat with your merryman) ─────────────────────────────────
   /** Bot token from @BotFather (secret). Enables the Telegram bridge. */
@@ -146,7 +154,9 @@ export const SETTINGS_DEFAULTS = {
   slippageBps: 100,
   perfFeeBps: 1000,
   tickSeconds: 60,
-  basketSymbols: ["AAPL", "MSFT", "QQQ"],
+  // Only tokens with a live Uniswap v3 pool — otherwise a fresh agent's buys
+  // all no-route. See TRADEABLE_SYMBOLS in tokens.ts.
+  basketSymbols: [...TRADEABLE_SYMBOLS] as string[],
   buyPerTickUsdg: 25,
   idleFloorUsdg: 50,
   gapEnterBudgetUsdg: 75,

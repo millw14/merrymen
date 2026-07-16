@@ -157,7 +157,32 @@ merrymen doctor     # node / keys / RPC / bundler / grant / db diagnostics
 merrymen status     # heartbeat, grant, trades, equity
 merrymen selftest   # one policy-legal no-op through the full pipeline
 merrymen kill       # kill switch from the terminal (destroys the grant)
+merrymen recover    # sweep the account's funds to a wallet you control
 ```
+
+> **Getting your funds back out.** The address you funded is an ERC-4337 **smart
+> account**, not a plain wallet — its owner key derives a *different* address, so
+> importing that key into MetaMask shows an empty wallet, not your funds (this
+> trips everyone up once). To move money out — including after a kill switch —
+> run **`merrymen recover`**: it rebuilds the account from your owner key (or a
+> backed-up key you paste) and sweeps every balance to any address you choose in
+> one signed op. It needs a bundler key, same as live trading.
+
+> **Getting a funded wallet back — without moving anything.** Killed the agent,
+> wiped the browser, or moved machines? Your smart-account address is derived from
+> the **owner key**, so the same key always reproduces the same account, funds and
+> all. Two ways back in:
+>
+> 1. **Still on the same browser?** `/grant` shows *"this wallet isn't active"* —
+>    hit **re-arm this wallet**. One click, no key needed.
+> 2. **Fresh browser / new machine?** `/grant` → **restore a funded wallet** →
+>    paste your owner key → **check this wallet** (it shows the derived address and
+>    its balance so you can confirm it's the right one) → pick caps → restore. It
+>    signs a brand-new session key on your existing account. **No funds move, no
+>    gas is spent.**
+>
+> merrymen runs **one agent per install**. To run two funded wallets at once, give
+> each its own `MERRYMEN_HOME` (e.g. `MERRYMEN_HOME=~/.merrymen-b merrymen start`).
 
 The worker's loop each tick: **grant sync → market safety (prices, pauses,
 sequencer) → strategy proposes → policy check → quote simulation → execute →
@@ -278,6 +303,8 @@ is the headless fallback):
 | `steady-basket` (default) | DCA a weighted stock basket per tick; idle cash sweeps to the Morpho vault; pulls cash back when short |
 | `weekend-gap` | Enter each leg when its Chainlink feed goes stale (market close), exit when it refreshes (open) — a strategy class that only exists on-chain |
 | `llm-strategist` | Claude proposes typed buy/sell/hold at decision windows; deterministic code validates and disposes — the model never sees an address or emits calldata. Needs an Anthropic key |
+| `even-keel` 🏹 | Keeps the basket at equal weight — trims winners, tops up laggards — to harvest mean reversion. **Merry Circle** (holder-only) |
+| `dip-hunter` 🏹 | Concentrates each tick on the basket token furthest below its rolling high. **Merry Circle** (holder-only) |
 
 ### Write your own
 
@@ -296,6 +323,31 @@ the verified registry (`ctx.tokenBySymbol.QQQ`, `ctx.CASH.USDG`,
 `ctx.UNISWAP.swapRouter02`, `ctx.usdg(10)`). See
 [strategies/README.md](./strategies/README.md) and
 [strategies/example-dip-buyer.mjs](./strategies/example-dip-buyer.mjs).
+
+---
+
+## $MERRYMEN — the Merry Circle
+
+merrymen is **free and open to everyone**, whether you hold the token or not. Holding
+**$MERRYMEN** (on Robinhood Chain — [the token page](https://merrymen.dev/token)) just adds
+holder perks — it buys *access*, never the product. **Utility only: no price, no returns, no
+buyback/burn.**
+
+Paste the wallet you hold $MERRYMEN in into the dashboard's **Merry Circle** panel (or set
+`holderAddress` in `/settings`). merrymen reads that balance **read-only** — it never asks for or
+touches the wallet's keys — and sets your tier:
+
+| tier | hold | perk |
+|---|---|---|
+| 🌱 **Villager of Sherwood** | 10k+ | **10% off** the platform performance fee · badge · 1× roadmap vote |
+| 🏹 **Merry Man** | 100k+ | **25% off** · the bonus strategy pack (`even-keel`, `dip-hunter`) · 3× vote |
+| 👑 **Lord of Sherwood** | 1M+ | **50% off** — the lowest we offer · every bonus strategy · 10× vote |
+
+The fee discount is real: merrymen's performance fee is only ever taken on profit above your
+high-water mark, and your tier lowers it in the **actual accrual** (shown live in the panel), not
+just in the copy. Holders also steer the roadmap — which tokens join the basket, which strategies
+ship — weighted by tier ([governance](https://merrymen.dev/governance)). Thresholds live in
+[`packages/core/src/token.ts`](./packages/core/src/token.ts).
 
 ---
 

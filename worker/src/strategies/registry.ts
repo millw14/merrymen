@@ -12,10 +12,22 @@ import { makeLlmStrategist } from "../strategist/strategy";
 import { makeCustomStrategy } from "./custom";
 import { steadyBasketTick, type SteadyBasketConfig } from "./steady-basket";
 import { weekendGapTick, type WeekendGapConfig } from "./weekend-gap";
+import { evenKeelTick, type EvenKeelConfig } from "./even-keel";
+import { makeDipHunter, type DipHunterConfig } from "./dip-hunter";
 import type { Strategy } from "./types";
 
-export const BUILTIN_STRATEGIES = ["steady-basket", "weekend-gap", "llm-strategist"] as const;
+/** Free, open strategies — available to everyone. */
+const FREE_STRATEGIES = ["steady-basket", "weekend-gap", "llm-strategist"] as const;
+/** Merry Circle strategies — buildable and selectable, but only RUN for holders
+ * (Merry Man tier and up). The worker gates them at tick time by holder tier. */
+export const CIRCLE_STRATEGIES = ["even-keel", "dip-hunter"] as const;
+export const BUILTIN_STRATEGIES = [...FREE_STRATEGIES, ...CIRCLE_STRATEGIES] as const;
 export type BuiltinStrategyName = (typeof BUILTIN_STRATEGIES)[number];
+
+/** Is this a holder-only (Merry Circle) strategy? */
+export function isCircleStrategy(name: string): boolean {
+  return (CIRCLE_STRATEGIES as readonly string[]).includes(name);
+}
 
 export interface StrategyBuildOpts {
   swapRouter: `0x${string}`;
@@ -76,6 +88,27 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
       usdg: CASH.USDG as `0x${string}`,
     };
     return { name, tick: (snap) => weekendGapTick(cfg, snap) };
+  }
+  if (name === "even-keel") {
+    const cfg: EvenKeelConfig = {
+      legs: legsFor(opts.basketSymbols).map((l) => ({ symbol: l.symbol, token: l.token })),
+      swapRouter: opts.swapRouter,
+      usdg: CASH.USDG as `0x${string}`,
+      maxTradeUsdg: opts.usdg6(opts.buyPerTickUsdg),
+      bandBps: 500, // rebalance a leg once it's ~5% off equal weight
+      seedBudgetUsdg: opts.usdg6(opts.buyPerTickUsdg),
+    };
+    return { name, tick: (snap) => evenKeelTick(cfg, snap) };
+  }
+  if (name === "dip-hunter") {
+    const cfg: DipHunterConfig = {
+      legs: legsFor(opts.basketSymbols).map((l) => ({ symbol: l.symbol, token: l.token })),
+      swapRouter: opts.swapRouter,
+      usdg: CASH.USDG as `0x${string}`,
+      buyPerTickUsdg: opts.usdg6(opts.buyPerTickUsdg),
+      minDipBps: 150, // buy once a token is ~1.5% below its rolling high
+    };
+    return makeDipHunter(cfg);
   }
   const cfg: SteadyBasketConfig = {
     legs: legsFor(opts.basketSymbols),

@@ -82,6 +82,20 @@ export const STOCK_TOKENS: StockToken[] = [
   { symbol: "USO", name: "United States Oil", address: "0xa30FA36Db767ad9eD3f7a60fC79526fB4d56D344", chainlinkFeed: "0x75a9c76Ef439e2C7c2E5a34Ab105EcFe3766431c", kind: "etf" },
 ];
 
+/**
+ * Stock tokens with a live Uniswap v3 pool on Robinhood Chain — the ONLY tokens
+ * merrymen can actually swap today (it executes on Uniswap v3). Verified via
+ * QuoterV2 across the 500/3000/10000 fee tiers on 2026-07-16: QQQ, NVDA, TSLA
+ * route; AAPL/MSFT/AMZN/PLTR/SPCX/SPY (and others) have NO v3 pool — they trade on
+ * Uniswap v4 + Doppler and no-route on v3 until a Rialto or v4 path is wired up.
+ *
+ * Single source of truth: the default basket (SETTINGS_DEFAULTS.basketSymbols) and
+ * the grant's on-chain sell-approval allowlist (web/src/lib/session.ts) are both
+ * drawn from this set, so a fresh agent can actually buy AND sell out of the box.
+ * Re-run the routing check and extend this as more pools are seeded.
+ */
+export const TRADEABLE_SYMBOLS = ["QQQ", "NVDA", "TSLA"] as const;
+
 /** Minimal Stock ABI — the surface merrymen reads. Extracted from verified source 2026-07-09. */
 export const STOCK_ABI = [
   // Standard ERC-20 reads
