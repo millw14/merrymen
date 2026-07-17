@@ -42,6 +42,10 @@ export interface ResolvedConfig {
   llmMaxActionUsdg: number;
   /** Wallet holding $MERRYMEN — sets the Merry Circle tier / fee discount. */
   holderAddress: `0x${string}` | undefined;
+  /** Virtuals API key (secret) — streams agent activity to its Virtuals page. */
+  virtualsApiKey: string | undefined;
+  /** Master switch for Virtuals Terminal streaming (off by default). */
+  virtualsEnabled: boolean;
   telegramBotToken: string | undefined;
   telegramEnabled: boolean;
   telegramControlEnabled: boolean;
@@ -176,6 +180,8 @@ export function mergeSettings(
     llmIntervalMin: num(file.llmIntervalMin, env.MERRYMEN_LLM_INTERVAL_MIN, d.llmIntervalMin, 1, 1_440),
     llmMaxActionUsdg: num(file.llmMaxActionUsdg, env.MERRYMEN_LLM_MAX_ACTION_USDG, d.llmMaxActionUsdg, 1, 100_000),
     holderAddress,
+    virtualsApiKey: str(file.virtualsApiKey, env.MERRYMEN_VIRTUALS_API_KEY),
+    virtualsEnabled: bool(file.virtualsEnabled, env.MERRYMEN_VIRTUALS_ENABLED, d.virtualsEnabled),
     telegramBotToken: str(file.telegramBotToken, env.MERRYMEN_TELEGRAM_BOT_TOKEN),
     telegramEnabled: bool(file.telegramEnabled, env.MERRYMEN_TELEGRAM_ENABLED, d.telegramEnabled),
     telegramControlEnabled: bool(file.telegramControlEnabled, env.MERRYMEN_TELEGRAM_CONTROL, d.telegramControlEnabled),

@@ -81,6 +81,15 @@ export interface MerrymenSettings {
    * Optional; blank = no tier. Purely a discount/perk lookup, never a spend key. */
   holderAddress?: string;
 
+  // ── Virtuals Terminal (stream your agent's activity to its Virtuals page) ─
+  /** Virtuals API key (secret). Get it from your agent's page on app.virtuals.io.
+   * Enables streaming the merryman's live activity to its Virtuals Terminal. */
+  virtualsApiKey?: string;
+  /** Master switch — OFF by default. When on (and a key is set), landed/rejected
+   * trades and the daily report are PUBLISHED to your agent's Virtuals page.
+   * Outbound + public: nothing streams until you turn this on. */
+  virtualsEnabled?: boolean;
+
   // ── telegram (chat with your merryman) ─────────────────────────────────
   /** Bot token from @BotFather (secret). Enables the Telegram bridge. */
   telegramBotToken?: string;
@@ -127,6 +136,7 @@ export const SECRET_SETTING_KEYS = [
   "rialtoApiKey",
   "telegramBotToken",
   "telegramTranscribeKey",
+  "virtualsApiKey",
 ] as const;
 export type SecretSettingKey = (typeof SECRET_SETTING_KEYS)[number];
 
@@ -178,4 +188,5 @@ export const SETTINGS_DEFAULTS = {
   telegramShellAllowlist: [] as string[],
   telegramAppAllowlist: [] as string[],
   telegramTranscribeBase: "https://api.openai.com/v1",
+  virtualsEnabled: false,
 };

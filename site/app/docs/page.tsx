@@ -8,7 +8,7 @@ export const metadata: Metadata = {
 const TOC = [
   ["Getting started", [["install", "Install"], ["wallet", "Create & fund a wallet"], ["run", "Run it"]]],
   ["Telegram", [["telegram", "Set up Telegram"], ["commands", "Commands"], ["transfers", "Transfers"], ["pc-control", "PC remote control"], ["voice", "Voice & vision"], ["soul", "The soul"]]],
-  ["Trading", [["strategies", "Strategies"], ["custom", "Write your own bot"]]],
+  ["Trading", [["strategies", "Strategies"], ["custom", "Write your own bot"], ["virtuals", "Stream to Virtuals"]]],
   ["Reference", [["safety", "Safety model"], ["config", "Configuration"], ["troubleshooting", "Troubleshooting"], ["faq", "FAQ"]]],
 ] as const;
 
@@ -259,6 +259,26 @@ merrymen kill       # kill switch — destroys the grant`}
           intent still passes shape validation → the policy wall → quote simulation → the on-chain
           session key.
         </p>
+
+        {/* ── virtuals ── */}
+        <h2 id="virtuals">Stream to Virtuals</h2>
+        <p>
+          Put your merryman&apos;s activity live on its page at <strong>app.virtuals.io</strong>. When
+          you turn it on, every <strong>landed trade</strong> and the <strong>daily campfire
+          report</strong> are posted to your agent&apos;s public Virtuals Terminal — a running,
+          verifiable trading journal (rejections aren&apos;t posted one-by-one; the daily report
+          summarizes them).
+        </p>
+        <ol>
+          <li>Grab your <strong>Virtuals API key</strong> from your agent&apos;s page on app.virtuals.io.</li>
+          <li>In merrymen <strong>settings → virtuals terminal</strong>, paste the key and flip <strong>stream to Virtuals</strong> on.</li>
+        </ol>
+        <div className="callout">
+          <strong>Outbound &amp; public, and off by default.</strong> Nothing is streamed until you
+          enable it. The key is used <em>only</em> to post activity logs — it can never trade or move
+          funds — and it stays on your machine like every other key. Turn it off anytime and the
+          stream stops.
+        </div>
 
         {/* ── safety ── */}
         <h2 id="safety">Safety model</h2>

@@ -69,6 +69,7 @@ import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy } from "./strategies/types";
 import { isPaused, startTelegram } from "./telegram/service";
 import { startNotifier } from "./telegram/notifier";
+import { startVirtualsStreamer } from "./virtuals-streamer";
 import { createStateRef } from "./telegram/state";
 import { readPositionRaw } from "./telegram/reads";
 import { ensureSoul, getName } from "./soul";
@@ -1007,6 +1008,17 @@ async function main() {
       gasWei: lastGasWei > 0n ? lastGasWei : null,
     }),
     getChainId: () => active?.grant.chainId ?? null,
+  });
+
+  // Stream the band's activity to its Virtuals Terminal page — landed/paper
+  // fills + the daily report. Independent loop, opt-in (virtualsEnabled), OUTBOUND
+  // + public, decoupled from Telegram. Reads the ledger read-only; can only post.
+  startVirtualsStreamer({
+    getCfg: () => resolveConfig(),
+    note: strategyNote,
+    buildStatusContext,
+    getChainId: () => active?.grant.chainId ?? null,
+    getAgentName: () => getName(),
   });
 
   console.log(

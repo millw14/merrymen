@@ -24,6 +24,8 @@ export const homePaths = {
   strategies: () => path.join(merrymenHome(), "strategies"),
   /** Telegram runtime state: update offset, link code, owner id. */
   telegram: () => path.join(merrymenHome(), "telegram.json"),
+  /** Virtuals Terminal streamer cursor: last-streamed trade id + last report date. */
+  virtuals: () => path.join(merrymenHome(), "virtuals.json"),
   /** Pause marker — present = trading halted (toggled from Telegram/dashboard). */
   paused: () => path.join(merrymenHome(), "paused"),
   /** Scratch dir for transient PC-control artifacts (screenshots, voice notes). */

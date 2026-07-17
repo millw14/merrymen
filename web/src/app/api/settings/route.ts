@@ -36,8 +36,9 @@ export interface SettingsView {
   rialtoApiKey: SecretView;
   telegramBotToken: SecretView;
   telegramTranscribeKey: SecretView;
+  virtualsApiKey: SecretView;
   // everything else, verbatim (undefined = using env/default)
-  values: Omit<MerrymenSettings, "bundlerApiKey" | "groqApiKey" | "anthropicApiKey" | "rialtoApiKey" | "telegramBotToken" | "telegramTranscribeKey">;
+  values: Omit<MerrymenSettings, "bundlerApiKey" | "groqApiKey" | "anthropicApiKey" | "rialtoApiKey" | "telegramBotToken" | "telegramTranscribeKey" | "virtualsApiKey">;
   defaults: typeof SETTINGS_DEFAULTS;
   knownSymbols: string[];
   strategies: { builtin: string[]; custom: string[] };
@@ -77,7 +78,7 @@ function mask(value: string | undefined): SecretView {
 
 export async function GET() {
   const stored = await readStored();
-  const { bundlerApiKey, groqApiKey, anthropicApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, ...values } = stored;
+  const { bundlerApiKey, groqApiKey, anthropicApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, virtualsApiKey, ...values } = stored;
   const view: SettingsView = {
     bundlerApiKey: mask(bundlerApiKey),
     groqApiKey: mask(groqApiKey),
@@ -85,6 +86,7 @@ export async function GET() {
     rialtoApiKey: mask(rialtoApiKey),
     telegramBotToken: mask(telegramBotToken),
     telegramTranscribeKey: mask(telegramTranscribeKey),
+    virtualsApiKey: mask(virtualsApiKey),
     values,
     defaults: SETTINGS_DEFAULTS,
     knownSymbols: STOCK_TOKENS.map((t) => t.symbol),
@@ -116,6 +118,7 @@ const BOOL_FIELDS = [
   "telegramTransferEnabled",
   "telegramNotifyEnabled",
   "telegramPcControlEnabled",
+  "virtualsEnabled",
 ] as const;
 /** Telegram PC string-array allowlists: (field, per-entry maxLen). */
 const STR_ARRAY_FIELDS: Record<string, number> = {

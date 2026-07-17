@@ -43,6 +43,7 @@ export default function SettingsPage() {
   const [tgControl, setTgControl] = useState<boolean | null>(null);
   const [tgTransfer, setTgTransfer] = useState<boolean | null>(null);
   const [tgNotify, setTgNotify] = useState<boolean | null>(null);
+  const [virtualsEnabled, setVirtualsEnabled] = useState<boolean | null>(null);
   const [allowlist, setAllowlist] = useState<number[] | null>(null);
   const [tgTest, setTgTest] = useState<string | null>(null);
   // PC control: master + capability set + string allowlists (also can't ride `draft`).
@@ -92,6 +93,7 @@ export default function SettingsPage() {
     if (tgControl !== null) body.telegramControlEnabled = tgControl;
     if (tgTransfer !== null) body.telegramTransferEnabled = tgTransfer;
     if (tgNotify !== null) body.telegramNotifyEnabled = tgNotify;
+    if (virtualsEnabled !== null) body.virtualsEnabled = virtualsEnabled;
     if (allowlist !== null) body.telegramAllowlist = allowlist;
     if (pcEnabled !== null) body.telegramPcControlEnabled = pcEnabled;
     if (caps !== null) body.telegramCapabilities = caps;
@@ -117,6 +119,7 @@ export default function SettingsPage() {
       setTgControl(null);
       setTgTransfer(null);
       setTgNotify(null);
+      setVirtualsEnabled(null);
       setAllowlist(null);
       setPcEnabled(null);
       setCaps(null);
@@ -149,6 +152,7 @@ export default function SettingsPage() {
   const tgControlVal = tgControl ?? view.values.telegramControlEnabled ?? d.telegramControlEnabled;
   const tgTransferVal = tgTransfer ?? view.values.telegramTransferEnabled ?? d.telegramTransferEnabled;
   const tgNotifyVal = tgNotify ?? view.values.telegramNotifyEnabled ?? d.telegramNotifyEnabled;
+  const virtualsEnabledVal = virtualsEnabled ?? view.values.virtualsEnabled ?? d.virtualsEnabled;
   const allowlistVal = allowlist ?? view.values.telegramAllowlist ?? [];
   const pcEnabledVal = pcEnabled ?? view.values.telegramPcControlEnabled ?? d.telegramPcControlEnabled;
   const capsVal = caps ?? view.values.telegramCapabilities ?? [];
@@ -596,6 +600,38 @@ export default function SettingsPage() {
             </Field>
             <Field label="Rialto key header" hint={`Header name their API expects (default ${d.rialtoApiKeyHeader}).`}>
               <input type="text" placeholder={d.rialtoApiKeyHeader} value={v("rialtoApiKeyHeader")} onChange={set("rialtoApiKeyHeader")} />
+            </Field>
+          </div>
+
+          <div className="settings-section mono">virtuals terminal</div>
+          <div className="grant-fields settings-grid">
+            <label className="field settings-field">
+              <span className="field-label">stream to Virtuals</span>
+              <span className="field-input">
+                <input type="checkbox" checked={virtualsEnabledVal} onChange={(e) => setVirtualsEnabled(e.target.checked)} style={{ width: "auto" }} />
+                <span className="field-unit">{virtualsEnabledVal ? "live activity → your $MERRYMEN agent page" : "off"}</span>
+              </span>
+              <span className="field-hint">
+                Publishes landed trades and the daily report to your agent&apos;s public page on
+                app.virtuals.io. <b>Outbound &amp; public</b> — off by default; nothing streams until
+                you turn this on and add a key.
+              </span>
+            </label>
+            <Field
+              label="Virtuals API key"
+              hint="From your agent's page on app.virtuals.io. Stays on your machine; used only to post activity logs — it can never trade or move funds."
+            >
+              <input
+                type="password"
+                placeholder={secretPlaceholder(view.virtualsApiKey)}
+                value={draft.virtualsApiKey ?? ""}
+                onChange={set("virtualsApiKey")}
+              />
+              {view.virtualsApiKey.set && (
+                <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, virtualsApiKey: "" }))}>
+                  clear
+                </button>
+              )}
             </Field>
           </div>
 
