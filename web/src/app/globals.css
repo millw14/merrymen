@@ -694,6 +694,19 @@ button { font: inherit; cursor: pointer; }
 }
 .switch-note b { color: var(--text); }
 .switch-note .mono { color: var(--text); }
+/* key-expiry banner — renewal is free & local, so keep it calm, not alarming */
+.renew-note {
+  font-size: 12px; line-height: 1.6; color: var(--gold);
+  background: color-mix(in srgb, var(--gold) 7%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--gold) 35%, transparent);
+  border-radius: 8px; padding: 12px 14px; margin-bottom: 16px;
+}
+.renew-note.expired {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 7%, transparent);
+  border-color: color-mix(in srgb, var(--red) 35%, transparent);
+}
+.renew-note b { color: var(--text); }
 
 /* grant desync banner — browser wallet the server no longer holds */
 .desync-panel { border-color: color-mix(in srgb, var(--gold) 45%, var(--border-2)); }

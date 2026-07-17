@@ -219,6 +219,28 @@ export default function GrantPage() {
     }
   }
 
+  /**
+   * One-click key renewal: re-sign the SAME wallet (same owner key, same caps,
+   * same address, same funds) with a fresh session key and a fresh expiry.
+   * A grant is a local signature — nothing goes on-chain, no gas is spent, and
+   * it works in paper and live mode alike. This exists so expiry never forces
+   * anyone through discard/restore.
+   */
+  const [renewing, setRenewing] = useState(false);
+  async function renewKey() {
+    if (!grant?.demoOwnerPrivateKey) return;
+    setError(null);
+    setRenewing(true);
+    try {
+      const g = await restoreAgentWallet(grant.demoOwnerPrivateKey, grant.caps, () => {}, grant.chainId);
+      setGrant(g);
+      setServerArmed(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+    setRenewing(false);
+  }
+
   function confirmBackup() {
     localStorage.setItem(BACKUP_KEY, "1");
     setBackedUp(true);
@@ -604,6 +626,27 @@ export default function GrantPage() {
         {/* ─── phase 3: fund the account ───────────────────────────────── */}
         {grant && backedUp && !desynced && !switching && (
           <div className="grant-panel">
+            {/* Key expiry — renewal is one click, free (a local signature; no
+                gas, nothing moves, same wallet). Applies in paper AND live mode. */}
+            {(() => {
+              const secsLeft = grant.expiresAt - Math.floor(Date.now() / 1000);
+              if (secsLeft > 3 * 86_400 || !grant.demoOwnerPrivateKey) return null;
+              const expired = secsLeft <= 0;
+              return (
+                <div className={expired ? "renew-note expired" : "renew-note"}>
+                  {expired ? (
+                    <>⏳ <b>Your agent&apos;s key has expired</b> — it stopped trading (the safety timer did its job). Your funds are untouched.</>
+                  ) : (
+                    <>⏳ <b>Your agent&apos;s key expires in {Math.max(1, Math.ceil(secsLeft / 86_400))} day{secsLeft > 86_400 ? "s" : ""}.</b></>
+                  )}{" "}
+                  Renewing is free and instant — same wallet, same funds, fresh key under the same
+                  caps. Nothing is sent on-chain.
+                  <button className="grant-btn" style={{ marginTop: 10, width: "100%" }} onClick={() => void renewKey()} disabled={renewing}>
+                    {renewing ? "renewing…" : "renew the key (free)"}
+                  </button>
+                </div>
+              );
+            })()}
             <h1 className="grant-title">fund your account</h1>
             <p className="grant-sub">
               {grantIsTestnet ? (
