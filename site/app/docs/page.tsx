@@ -9,7 +9,7 @@ const TOC = [
   ["Getting started", [["install", "Install"], ["wallet", "Create & fund a wallet"], ["run", "Run it"]]],
   ["Telegram", [["telegram", "Set up Telegram"], ["commands", "Commands"], ["transfers", "Transfers"], ["pc-control", "PC remote control"], ["voice", "Voice & vision"], ["soul", "The soul"]]],
   ["Trading", [["strategies", "Strategies"], ["custom", "Write your own bot"]]],
-  ["Reference", [["safety", "Safety model"], ["config", "Configuration"], ["troubleshooting", "Troubleshooting"]]],
+  ["Reference", [["safety", "Safety model"], ["config", "Configuration"], ["troubleshooting", "Troubleshooting"], ["faq", "FAQ"]]],
 ] as const;
 
 const GITHUB = "https://github.com/millw14/merrymen";
@@ -323,6 +323,36 @@ merrymen kill       # kill switch — destroys the grant`}
         <p>Only allowlisted chats are obeyed. Send <code className="inline">/link &lt;code&gt;</code> with the code from settings to claim ownership.</p>
         <h3>A PC command is refused</h3>
         <p>Enable <strong>remote control</strong> and the specific capability in settings. Shell/apps also need the exact command/app on their allowlist; <code className="inline">/pc</code> shows what&apos;s on.</p>
+
+        {/* ── faq ── */}
+        <h2 id="faq">FAQ</h2>
+        <h3>My session key expired — do I pay to renew it? Do I have to redeploy?</h3>
+        <p>
+          <strong>No and no.</strong> The expiry is a safety timer, not a subscription. A grant is a
+          signature your owner key makes <em>locally</em> — nothing goes on-chain to create one, so
+          renewing costs <strong>zero gas and zero fees</strong>, and your wallet, funds, and history
+          stay exactly where they are. When the key is close to expiring (or already dead), the{" "}
+          <code className="inline">/grant</code> page shows a <strong>“renew the key (free)”</strong>{" "}
+          button — one click re-signs the same wallet with a fresh key under the same caps. Your
+          merryman also pings you on Telegram before it expires.
+        </p>
+        <h3>Does the expiry apply in paper mode too?</h3>
+        <p>
+          Yes — expiry applies in <strong>every</strong> mode, paper and live. It&apos;s the guarantee
+          that a forgotten agent can&apos;t run forever, and it&apos;s enforced twice: the worker retires
+          the agent, and on-chain the account contract refuses the dead key regardless. Renewal is
+          the same free one-click either way.
+        </p>
+        <h3>This feels built for devs — is easier onboarding coming? A desktop app?</h3>
+        <p>
+          Heard, and yes. Today the easiest path is the <a className="link" href="#install">one-line
+          installer</a> — it checks Node, installs merrymen, and <code className="inline">merrymen
+          start</code> opens the dashboard in your browser; you never need to write code (strategies
+          are optional, presets cover the rest). A <strong>1-click desktop app</strong> (.exe/.dmg
+          — no terminal at all) is on the roadmap; self-hosting is non-negotiable — your keys stay
+          on your machine — so the app will be exactly this stack in a wrapper, not a hosted
+          service. Follow progress on <a className="link" href={GITHUB} target="_blank" rel="noreferrer">GitHub</a>.
+        </p>
 
         <div className="callout" style={{ marginTop: 40 }}>
           Still stuck? Open an issue on <a className="link" href={GITHUB} target="_blank" rel="noreferrer">GitHub</a>.
