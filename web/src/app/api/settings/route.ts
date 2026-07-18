@@ -8,7 +8,7 @@
  * string replaces it. Non-secret fields: null/empty clears back to default.
  */
 
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@/lib/home";
 import {
@@ -308,6 +308,9 @@ export async function PUT(req: Request) {
   if (errors.length > 0) return NextResponse.json({ errors }, { status: 400 });
 
   await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(SETTINGS_FILE, JSON.stringify(next, null, 2), "utf8");
+  // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —
+  // owner-only perms (0600), not the default world-readable 0644.
+  await writeFile(SETTINGS_FILE, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
+  await chmod(SETTINGS_FILE, 0o600).catch(() => {});
   return NextResponse.json({ ok: true, appliesWithin: "one worker tick" });
 }

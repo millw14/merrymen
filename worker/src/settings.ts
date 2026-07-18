@@ -6,7 +6,7 @@
  * the new bundler/RPC; trading fields rebuild the strategy in place.
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import {
   SETTINGS_DEFAULTS,
   STOCK_TOKENS,
@@ -234,7 +234,13 @@ export function patchSettingsFile(patch: Partial<MerrymenSettings>): MerrymenSet
   const file = process.env.MERRYMEN_SETTINGS_FILE ?? homePaths.settings();
   const next = { ...readSettingsFile(), ...patch };
   ensureHome();
-  writeFileSync(file, JSON.stringify(next, null, 2), "utf8");
+  // settings.json holds plaintext API keys — owner-only perms (0600).
+  writeFileSync(file, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
+  try {
+    chmodSync(file, 0o600);
+  } catch {
+    /* non-POSIX / already tight — best effort */
+  }
   return next;
 }
 

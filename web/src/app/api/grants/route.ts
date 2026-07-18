@@ -6,7 +6,7 @@
  * Replaced by Supabase (encrypted, per-user) once persistence lands.
  */
 
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@/lib/home";
@@ -34,10 +34,14 @@ async function archiveCurrentGrant(): Promise<void> {
     const raw = await readFile(GRANT_FILE, "utf8");
     const prev = JSON.parse(raw) as StoredGrant;
     if (!prev?.smartAccount) return;
-    await mkdir(ARCHIVE_DIR, { recursive: true });
+    await mkdir(ARCHIVE_DIR, { recursive: true, mode: 0o700 });
     // One file per wallet, named by its address. Re-arming the same wallet just
     // refreshes its archive copy; a different wallet gets its own file.
-    await writeFile(path.join(ARCHIVE_DIR, `${prev.smartAccount.toLowerCase()}.json`), raw, "utf8");
+    const dst = path.join(ARCHIVE_DIR, `${prev.smartAccount.toLowerCase()}.json`);
+    await writeFile(dst, raw, { encoding: "utf8", mode: 0o600 });
+    // This file holds a plaintext OWNER KEY — keep it owner-only (0600), not the
+    // default world-readable 0644. chmod covers the file-already-existed case.
+    await chmod(dst, 0o600).catch(() => {});
   } catch {
     // no grant.json yet, or it's unreadable — nothing worth keeping
   }
@@ -60,7 +64,9 @@ export async function POST(req: Request) {
   await mkdir(DATA_DIR, { recursive: true });
   // Keep the outgoing wallet (and its owner key) before this one replaces it.
   await archiveCurrentGrant();
-  await writeFile(GRANT_FILE, JSON.stringify(grant, null, 2), "utf8");
+  // grant.json holds the owner + session PRIVATE KEYS — owner-only perms (0600).
+  await writeFile(GRANT_FILE, JSON.stringify(grant, null, 2), { encoding: "utf8", mode: 0o600 });
+  await chmod(GRANT_FILE, 0o600).catch(() => {});
   return NextResponse.json({ ok: true });
 }
 

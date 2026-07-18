@@ -21,7 +21,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -107,9 +107,19 @@ function ensureHome() {
   }
 }
 
+/** Write a file that holds secrets with owner-only (0600) perms. Best-effort on non-POSIX. */
+function writeSecret(file, data) {
+  writeFileSync(file, data, { encoding: "utf8", mode: 0o600 });
+  try {
+    chmodSync(file, 0o600);
+  } catch {
+    /* Windows / already tight */
+  }
+}
+
 function writeSettings(next) {
   ensureHome();
-  writeFileSync(SETTINGS, JSON.stringify(next, null, 2), "utf8");
+  writeSecret(SETTINGS, JSON.stringify(next, null, 2)); // holds plaintext API keys
 }
 
 /** Symbols straight from the registry source — stays in sync with core. */
@@ -209,8 +219,9 @@ function archiveCurrentGrant() {
     const raw = readFileSync(GRANT, "utf8");
     const g = JSON.parse(raw.replace(/^﻿/, ""));
     if (!g?.smartAccount) return null;
-    mkdirSync(GRANTS_ARCHIVE, { recursive: true });
-    writeFileSync(path.join(GRANTS_ARCHIVE, `${g.smartAccount.toLowerCase()}.json`), raw, "utf8");
+    mkdirSync(GRANTS_ARCHIVE, { recursive: true, mode: 0o700 });
+    // Archived grant holds a plaintext OWNER KEY — owner-only perms (0600).
+    writeSecret(path.join(GRANTS_ARCHIVE, `${g.smartAccount.toLowerCase()}.json`), raw);
     return g.smartAccount;
   } catch {
     return null; // nothing to keep
