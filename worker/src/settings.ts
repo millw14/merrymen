@@ -22,6 +22,14 @@ export interface ResolvedConfig {
   groqApiKey: string | undefined;
   groqModel: string;
   anthropicApiKey: string | undefined;
+  /** Selected AI provider id (LLM_PROVIDERS) or "custom"; undefined = legacy auto. */
+  llmProvider: string | undefined;
+  /** Key for the selected provider (groq/anthropic fall back to their classic keys). */
+  llmApiKey: string | undefined;
+  /** Base URL for provider "custom". */
+  llmBaseUrl: string | undefined;
+  /** Model override for the selected provider; undefined = provider default. */
+  llmProviderModel: string | undefined;
   rialtoApiKey: string | undefined;
   rialtoApiKeyHeader: string;
   breakerAddress: `0x${string}` | undefined;
@@ -156,6 +164,10 @@ export function mergeSettings(
     groqApiKey: str(file.groqApiKey, env.GROQ_API_KEY),
     groqModel: str(file.groqModel, env.MERRYMEN_GROQ_MODEL, d.groqModel)!,
     anthropicApiKey: str(file.anthropicApiKey, env.ANTHROPIC_API_KEY),
+    llmProvider: str(file.llmProvider, env.MERRYMEN_LLM_PROVIDER),
+    llmApiKey: str(file.llmApiKey, env.MERRYMEN_LLM_API_KEY),
+    llmBaseUrl: str(file.llmBaseUrl, env.MERRYMEN_LLM_BASE_URL),
+    llmProviderModel: str(file.llmProviderModel, env.MERRYMEN_LLM_PROVIDER_MODEL),
     rialtoApiKey: str(file.rialtoApiKey, env.MERRYMEN_RIALTO_API_KEY),
     rialtoApiKeyHeader: str(file.rialtoApiKeyHeader, env.MERRYMEN_RIALTO_API_KEY_HEADER, d.rialtoApiKeyHeader)!,
     breakerAddress,
@@ -275,6 +287,9 @@ export function telegramKey(cfg: ResolvedConfig): string {
     cfg.telegramTransferEnabled ? "transfer" : "notransfer",
     cfg.telegramNotifyEnabled ? "notify" : "quiet",
     cfg.telegramDigestHour,
+    // brain fingerprint: provider selection + any key presence flips the poller
+    cfg.llmProvider ?? "",
+    cfg.llmApiKey ? "k" : "",
     cfg.anthropicApiKey ? "llm" : cfg.groqApiKey ? "groq" : "nollm",
   ].join("|");
 }
@@ -289,6 +304,10 @@ export function strategyKey(cfg: ResolvedConfig): string {
     cfg.idleFloorUsdg,
     cfg.gapEnterBudgetUsdg,
     // key/provider text included: rotating a key or switching brains rebuilds the driver
+    cfg.llmProvider ?? "",
+    cfg.llmApiKey ?? "",
+    cfg.llmBaseUrl ?? "",
+    cfg.llmProviderModel ?? "",
     cfg.anthropicApiKey ?? "",
     cfg.groqApiKey ?? "",
     cfg.groqModel,

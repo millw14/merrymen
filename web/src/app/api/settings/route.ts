@@ -12,9 +12,12 @@ import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@/lib/home";
 import {
+  LLM_PROVIDER_IDS,
+  LLM_PROVIDERS,
   SECRET_SETTING_KEYS,
   SETTINGS_DEFAULTS,
   STOCK_TOKENS,
+  type LlmProviderInfo,
   type MerrymenSettings,
 } from "@merrymen/core";
 
@@ -33,15 +36,18 @@ export interface SettingsView {
   bundlerApiKey: SecretView;
   groqApiKey: SecretView;
   anthropicApiKey: SecretView;
+  llmApiKey: SecretView;
   rialtoApiKey: SecretView;
   telegramBotToken: SecretView;
   telegramTranscribeKey: SecretView;
   virtualsApiKey: SecretView;
   // everything else, verbatim (undefined = using env/default)
-  values: Omit<MerrymenSettings, "bundlerApiKey" | "groqApiKey" | "anthropicApiKey" | "rialtoApiKey" | "telegramBotToken" | "telegramTranscribeKey" | "virtualsApiKey">;
+  values: Omit<MerrymenSettings, "bundlerApiKey" | "groqApiKey" | "anthropicApiKey" | "llmApiKey" | "rialtoApiKey" | "telegramBotToken" | "telegramTranscribeKey" | "virtualsApiKey">;
   defaults: typeof SETTINGS_DEFAULTS;
   knownSymbols: string[];
   strategies: { builtin: string[]; custom: string[] };
+  /** The AI providers the brain can run on — powers the Settings picker. */
+  llmProviders: LlmProviderInfo[];
 }
 
 const STRATEGIES_DIR = homePaths.strategies();
@@ -98,7 +104,7 @@ function redactUrl(u: unknown): string | undefined {
 
 export async function GET() {
   const stored = await readStored();
-  const { bundlerApiKey, groqApiKey, anthropicApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, virtualsApiKey, ...values } = stored;
+  const { bundlerApiKey, groqApiKey, anthropicApiKey, llmApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, virtualsApiKey, ...values } = stored;
   // These URL fields can embed API keys — redact before they leave the server.
   const safeValues = {
     ...values,
@@ -111,6 +117,7 @@ export async function GET() {
     bundlerApiKey: mask(bundlerApiKey),
     groqApiKey: mask(groqApiKey),
     anthropicApiKey: mask(anthropicApiKey),
+    llmApiKey: mask(llmApiKey),
     rialtoApiKey: mask(rialtoApiKey),
     telegramBotToken: mask(telegramBotToken),
     telegramTranscribeKey: mask(telegramTranscribeKey),
@@ -119,6 +126,7 @@ export async function GET() {
     defaults: SETTINGS_DEFAULTS,
     knownSymbols: STOCK_TOKENS.map((t) => t.symbol),
     strategies: { builtin: BUILTIN_STRATEGIES, custom: await listCustomStrategies() },
+    llmProviders: LLM_PROVIDERS,
   };
   return NextResponse.json(view);
 }
@@ -262,6 +270,29 @@ export async function PUT(req: Request) {
     else if (typeof v === "string" && /^[a-z0-9.-]{3,64}$/.test(v.trim()))
       setOrClear("llmModel", v.trim());
     else errors.push("llmModel: must be a model id like claude-opus-4-8");
+  }
+  // AI provider selection — an id from the catalog (or "custom"), blank = legacy auto.
+  if ("llmProvider" in body) {
+    const v = body.llmProvider;
+    if (v === "" || v === null || v === undefined) setOrClear("llmProvider", undefined);
+    else if (typeof v === "string" && LLM_PROVIDER_IDS.includes(v)) setOrClear("llmProvider", v);
+    else errors.push(`llmProvider: must be one of ${LLM_PROVIDER_IDS.join(", ")}`);
+  }
+  // Custom provider base URL — an OpenAI-compatible endpoint. Not credential-bearing
+  // (the key rides the Authorization header), so it's shown/edited in the clear.
+  if ("llmBaseUrl" in body) {
+    const v = body.llmBaseUrl;
+    if (v === "" || v === null || v === undefined) setOrClear("llmBaseUrl", undefined);
+    else if (typeof v === "string" && /^https?:\/\/.+/.test(v.trim())) setOrClear("llmBaseUrl", v.trim());
+    else errors.push("llmBaseUrl: must be an http(s) URL");
+  }
+  // Model id for the selected provider — looser than llmModel: vendor ids carry
+  // slashes and uppercase (e.g. meta-llama/Llama-3.3-70B-Instruct-Turbo).
+  if ("llmProviderModel" in body) {
+    const v = body.llmProviderModel;
+    if (v === "" || v === null || v === undefined) setOrClear("llmProviderModel", undefined);
+    else if (typeof v === "string" && /^[A-Za-z0-9._/:-]{2,96}$/.test(v.trim())) setOrClear("llmProviderModel", v.trim());
+    else errors.push("llmProviderModel: must be a model id (letters, digits, . _ / : -)");
   }
   // PC files root — an absolute path (or blank to disable file ops).
   if ("telegramFilesRoot" in body) {

@@ -34,6 +34,21 @@ export interface MerrymenSettings {
   /** The upgrade: an Anthropic key routes everything through Claude instead
    * (and unlocks screen vision). Takes precedence over Groq when both are set. */
   anthropicApiKey?: string;
+
+  // ── AI provider (bring any key) ────────────────────────────────────────
+  /** Which brain powers chat + the strategist: an id from LLM_PROVIDERS
+   * (groq, openai, anthropic, google, xai, deepseek, mistral, openrouter,
+   * together, perplexity, cerebras, fireworks, ollama) or "custom". Blank =
+   * the legacy auto path (Anthropic key wins, else Groq key). */
+  llmProvider?: string;
+  /** API key for the selected provider (secret). For groq/anthropic the classic
+   * groqApiKey/anthropicApiKey are used instead, so old setups keep working. */
+  llmApiKey?: string;
+  /** Only for provider "custom": the OpenAI-compatible base URL (…/v1). */
+  llmBaseUrl?: string;
+  /** Model id for the selected provider. Blank = the provider's default. Accepts
+   * vendor ids with slashes/case (e.g. meta-llama/Llama-3.3-70B-Instruct-Turbo). */
+  llmProviderModel?: string;
   /** Rialto integrator key — enables the full quote→swap leg. */
   rialtoApiKey?: string;
   /** Header name the Rialto API expects the key in (their docs say). */
@@ -133,6 +148,7 @@ export const SECRET_SETTING_KEYS = [
   "bundlerApiKey",
   "groqApiKey",
   "anthropicApiKey",
+  "llmApiKey",
   "rialtoApiKey",
   "telegramBotToken",
   "telegramTranscribeKey",

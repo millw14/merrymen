@@ -421,5 +421,5 @@ export const HELP_TEXT = [
   "/run &lt;cmd&gt; · /type &lt;text&gt; · /key &lt;combo&gt; — shell/keyboard (allowlisted + /confirm)",
   "/remind &lt;20m&gt; &lt;msg&gt; · /watch &lt;cpu&gt;80|file …|proc …&gt; · /pc — what's enabled",
   "",
-  "…or just talk to me in plain English if an Anthropic key is set — voice notes work too.",
+  "…or just talk to me in plain English once an AI provider is set in Settings — voice notes work too.",
 ].join("\n");

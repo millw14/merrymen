@@ -156,6 +156,18 @@ export default function SettingsPage() {
   const secretPlaceholder = (s: { set: boolean; hint: string | null }) =>
     s.set ? `saved ····${s.hint ?? ""} — type to replace` : "not set";
 
+  // ── AI provider (bring any key) ──────────────────────────────────────────
+  // One picker drives which key/model fields show. Groq & Anthropic reuse their
+  // classic secret fields (old setups keep working); every other provider stores
+  // its key in the generic llmApiKey.
+  const providers = view.llmProviders;
+  const llmProviderVal = draft.llmProvider ?? view.values.llmProvider ?? "groq";
+  const prov = providers.find((p) => p.id === llmProviderVal) ?? providers[0]!;
+  const providerKeyField = prov.id === "groq" ? "groqApiKey" : prov.id === "anthropic" ? "anthropicApiKey" : "llmApiKey";
+  const providerKeyView = prov.id === "groq" ? view.groqApiKey : prov.id === "anthropic" ? view.anthropicApiKey : view.llmApiKey;
+  const providerModelField = prov.id === "groq" ? "groqModel" : prov.id === "anthropic" ? "llmModel" : "llmProviderModel";
+  const providerNeedsKey = prov.needsKey !== false;
+
   const tgEnabledVal = tgEnabled ?? view.values.telegramEnabled ?? d.telegramEnabled;
   const tgControlVal = tgControl ?? view.values.telegramControlEnabled ?? d.telegramControlEnabled;
   const tgTransferVal = tgTransfer ?? view.values.telegramTransferEnabled ?? d.telegramTransferEnabled;
@@ -223,39 +235,57 @@ export default function SettingsPage() {
           {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
           <div className="settings-section mono">essentials</div>
           <div className="grant-fields settings-grid">
+            {/* ── AI provider · bring any key ──────────────────────────── */}
             <Field
-              label="Groq API key · the free brain"
-              action={{ href: "https://console.groq.com/keys", label: "Get a free key" }}
-              hint="The default, free way to test everything — plain-English chat and the AI strategist run on Groq's fast models. Tap “Get a free key”, paste it here. Built-in strategies need no key at all. Blank keeps the saved key."
+              label="AI provider · the brain"
+              action={prov.keyUrl ? { href: prov.keyUrl, label: providerNeedsKey ? "get a key" : "install" } : undefined}
+              hint={`Powers plain-English chat and the AI strategist. ${prov.blurb} Built-in strategies need no key at all. Blank keeps the saved key.`}
             >
-              <input
-                type="password"
-                placeholder={secretPlaceholder(view.groqApiKey)}
-                value={draft.groqApiKey ?? ""}
-                onChange={set("groqApiKey")}
-              />
-              {view.groqApiKey.set && (
-                <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, groqApiKey: "" }))}>
-                  clear
-                </button>
-              )}
+              <select value={llmProviderVal} onChange={set("llmProvider")}>
+                {providers.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                    {p.free ? " · free" : ""}
+                    {p.vision ? " · vision" : ""}
+                    {p.needsKey === false ? " · local" : ""}
+                  </option>
+                ))}
+              </select>
             </Field>
+            {providerNeedsKey && (
+              <Field
+                label={`${prov.label} API key`}
+                action={prov.keyUrl ? { href: prov.keyUrl, label: "get a key" } : undefined}
+                hint="Paste the key for the provider you picked above. Never leaves your machine. Blank keeps the saved key."
+              >
+                <input
+                  type="password"
+                  placeholder={secretPlaceholder(providerKeyView)}
+                  value={draft[providerKeyField] ?? ""}
+                  onChange={set(providerKeyField)}
+                />
+                {providerKeyView.set && (
+                  <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, [providerKeyField]: "" }))}>
+                    clear
+                  </button>
+                )}
+              </Field>
+            )}
+            {prov.id === "custom" && (
+              <Field label="base URL" hint="Any OpenAI-compatible endpoint, e.g. https://your-host/v1">
+                <input type="text" placeholder="https://…/v1" value={v("llmBaseUrl")} onChange={set("llmBaseUrl")} />
+              </Field>
+            )}
             <Field
-              label="Anthropic API key · the upgrade"
-              action={{ href: "https://console.anthropic.com/settings/keys", label: "Get a key" }}
-              hint="Optional upgrade — routes chat and the strategist through Claude (the smartest brain) and unlocks screen vision. Set this and it takes over from Groq automatically. Blank keeps the saved key."
+              label="model"
+              hint={`Which model to run. Blank uses the provider default${prov.defaultModel ? ` (${prov.defaultModel})` : ""}.`}
             >
               <input
-                type="password"
-                placeholder={secretPlaceholder(view.anthropicApiKey)}
-                value={draft.anthropicApiKey ?? ""}
-                onChange={set("anthropicApiKey")}
+                type="text"
+                placeholder={prov.defaultModel || "model id"}
+                value={v(providerModelField as keyof SettingsView["values"])}
+                onChange={set(providerModelField)}
               />
-              {view.anthropicApiKey.set && (
-                <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, anthropicApiKey: "" }))}>
-                  clear
-                </button>
-              )}
             </Field>
             <Field
               label="Pimlico API key"
@@ -686,7 +716,7 @@ export default function SettingsPage() {
               <input type="number" min={1} placeholder={String(d.gapEnterBudgetUsdg)} value={v("gapEnterBudgetUsdg")} onChange={set("gapEnterBudgetUsdg")} />
               <span className="field-unit">USDG</span>
             </Field>
-            <Field label="LLM model" hint="Model id for the strategist.">
+            <Field label="Claude / vision model" hint="Model id used when the brain is Anthropic, and for screen vision. The active provider's model is set up top under “AI provider”.">
               <input type="text" placeholder={d.llmModel} value={v("llmModel")} onChange={set("llmModel")} />
             </Field>
             <Field label="LLM decision window" hint="Minutes between model calls — decisions are windows, not ticks.">

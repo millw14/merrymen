@@ -388,7 +388,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // sanitizer disposes (drops addresses/keys/markup, dedupes, caps).
         if (r.remember) rememberOwnerFact(r.remember, now());
       } else {
-        cmd = { kind: "chat", reply: "add a free Groq key (or an Anthropic key to upgrade) in the dashboard to chat in plain English. For now, try /help." };
+        cmd = { kind: "chat", reply: "pick an AI provider and paste its key in the dashboard (Settings → AI provider) to chat in plain English — Groq, Google and Cerebras are free, or run Ollama locally. For now, try /help." };
       }
       pushHistory(msg.chatId, "user", msg.text);
     }

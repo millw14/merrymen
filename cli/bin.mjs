@@ -378,13 +378,52 @@ async function onboard() {
   if (bundlerKey) current.bundlerApiKey = bundlerKey;
 
   console.log(bold(`\n  ${c.arrow} 2/4 · give it a brain`) + dim("  (optional — free to test)"));
-  console.log(dim("  Plain-English chat and the AI strategist run free on ") + "Groq" + dim("."));
-  console.log(dim("  Grab a key at ") + bold("console.groq.com/keys") + dim(" — 30s, no card. (Built-ins need no key.)"));
-  const groq = (await p.askSecret(`  Groq API key${keep(current.groqApiKey)}: `)).trim();
-  if (groq) current.groqApiKey = groq;
-  console.log(dim("  Want the smartest brain + screen vision? Add an Anthropic key to upgrade:"));
-  const anthropic = (await p.askSecret(`  Anthropic API key (upgrade)${keep(current.anthropicApiKey)}: `)).trim();
-  if (anthropic) current.anthropicApiKey = anthropic;
+  // Mirrors packages/core/src/llm-providers.ts. Kept inline because this CLI is
+  // plain ESM and can't import the TS core. keyField routes the key to the field
+  // the worker reads: groq/anthropic keep their classic fields, the rest use llmApiKey.
+  const LLM_PROVIDERS = [
+    { id: "groq", label: "Groq", keyField: "groqApiKey", modelField: "groqModel", def: "llama-3.3-70b-versatile", key: "console.groq.com/keys", free: true, needsKey: true },
+    { id: "openai", label: "OpenAI", keyField: "llmApiKey", modelField: "llmProviderModel", def: "gpt-4o-mini", key: "platform.openai.com/api-keys", needsKey: true },
+    { id: "anthropic", label: "Anthropic (Claude)", keyField: "anthropicApiKey", modelField: "llmModel", def: "claude-opus-4-8", key: "console.anthropic.com/settings/keys", needsKey: true },
+    { id: "google", label: "Google Gemini", keyField: "llmApiKey", modelField: "llmProviderModel", def: "gemini-2.0-flash", key: "aistudio.google.com/apikey", free: true, needsKey: true },
+    { id: "xai", label: "xAI (Grok)", keyField: "llmApiKey", modelField: "llmProviderModel", def: "grok-2-latest", key: "console.x.ai", needsKey: true },
+    { id: "deepseek", label: "DeepSeek", keyField: "llmApiKey", modelField: "llmProviderModel", def: "deepseek-chat", key: "platform.deepseek.com/api_keys", needsKey: true },
+    { id: "mistral", label: "Mistral", keyField: "llmApiKey", modelField: "llmProviderModel", def: "mistral-large-latest", key: "console.mistral.ai/api-keys", needsKey: true },
+    { id: "openrouter", label: "OpenRouter", keyField: "llmApiKey", modelField: "llmProviderModel", def: "meta-llama/llama-3.3-70b-instruct", key: "openrouter.ai/keys", needsKey: true },
+    { id: "together", label: "Together AI", keyField: "llmApiKey", modelField: "llmProviderModel", def: "meta-llama/Llama-3.3-70B-Instruct-Turbo", key: "api.together.ai/settings/api-keys", needsKey: true },
+    { id: "perplexity", label: "Perplexity", keyField: "llmApiKey", modelField: "llmProviderModel", def: "sonar", key: "perplexity.ai/settings/api", needsKey: true },
+    { id: "cerebras", label: "Cerebras", keyField: "llmApiKey", modelField: "llmProviderModel", def: "llama-3.3-70b", key: "cloud.cerebras.ai", free: true, needsKey: true },
+    { id: "fireworks", label: "Fireworks", keyField: "llmApiKey", modelField: "llmProviderModel", def: "accounts/fireworks/models/llama-v3p3-70b-instruct", key: "fireworks.ai/account/api-keys", needsKey: true },
+    { id: "ollama", label: "Ollama (local)", keyField: "llmApiKey", modelField: "llmProviderModel", def: "llama3.1", key: "ollama.com/download", needsKey: false },
+    { id: "custom", label: "Custom (OpenAI-compatible)", keyField: "llmApiKey", modelField: "llmProviderModel", def: "", key: "", needsKey: true, custom: true },
+  ];
+  console.log(dim("  Pick who powers plain-English chat + the AI strategist. Free: Groq, Google, Cerebras. Local (no key): Ollama."));
+  LLM_PROVIDERS.forEach((prov, i) =>
+    console.log(
+      `  ${i + 1}. ${prov.label}${prov.free ? green(" free") : ""}${prov.needsKey === false ? dim(" · local") : ""}${prov.id === (current.llmProvider ?? "groq") ? green(" ← current") : ""}`,
+    ),
+  );
+  const brainPick = (await p.ask(`  pick 1-${LLM_PROVIDERS.length} [blank keeps current]: `)).trim();
+  const brainIdx = Number(brainPick) - 1;
+  const chosen =
+    brainPick && Number.isInteger(brainIdx) && LLM_PROVIDERS[brainIdx]
+      ? LLM_PROVIDERS[brainIdx]
+      : (LLM_PROVIDERS.find((x) => x.id === (current.llmProvider ?? "groq")) ?? LLM_PROVIDERS[0]);
+  current.llmProvider = chosen.id;
+  if (chosen.custom) {
+    const base = (await p.ask(`  base URL (OpenAI-compatible /v1)${keep(current.llmBaseUrl)}: `)).trim();
+    if (base) current.llmBaseUrl = base;
+  }
+  if (chosen.needsKey === false) {
+    console.log(dim(`  ${chosen.label} runs on your machine — no key needed. Install/run it: `) + bold(chosen.key));
+  } else {
+    if (chosen.key) console.log(dim("  Grab a key at ") + bold(chosen.key) + dim("."));
+    const brainKey = (await p.askSecret(`  ${chosen.label} API key${keep(current[chosen.keyField])}: `)).trim();
+    if (brainKey) current[chosen.keyField] = brainKey;
+  }
+  const modelPrompt = current[chosen.modelField] || chosen.def || "provider default";
+  const brainModel = (await p.ask(`  model [${modelPrompt}]: `)).trim();
+  if (brainModel) current[chosen.modelField] = brainModel;
 
   console.log(bold(`\n  ${c.arrow} 3/4 · pick your outlaw`) + dim("  (strategy)"));
   const custom = await listCustom();
@@ -593,10 +632,23 @@ async function doctor() {
       ? ok("no bundler key — running in 📜 paper mode (simulated fills at live prices)")
       : warn("no bundler key and paper trading off — the agent won't trade (get a key: dashboard.pimlico.io)");
   // The four things that silently mute the bot / idle the brain:
-  const hasLlm = !!(s.groqApiKey || s.anthropicApiKey || process.env.GROQ_API_KEY || process.env.ANTHROPIC_API_KEY);
+  const hasLlm = !!(
+    s.groqApiKey ||
+    s.anthropicApiKey ||
+    s.llmApiKey ||
+    s.llmProvider === "ollama" ||
+    process.env.GROQ_API_KEY ||
+    process.env.ANTHROPIC_API_KEY ||
+    process.env.MERRYMEN_LLM_API_KEY
+  );
+  const brainName = s.llmProvider
+    ? s.llmProvider
+    : s.anthropicApiKey || process.env.ANTHROPIC_API_KEY
+      ? "anthropic"
+      : "groq";
   hasLlm
-    ? ok(`LLM brain set (${s.anthropicApiKey || process.env.ANTHROPIC_API_KEY ? "Anthropic — full" : "Groq — free"})`)
-    : warn("no LLM key — plain-English chat + llm-strategist idle (free key: console.groq.com)");
+    ? ok(`AI brain set (${brainName})`)
+    : warn("no AI provider key — plain-English chat + llm-strategist idle. Pick one in /settings (free: Groq, Google, Cerebras; local: Ollama).");
   if (s.telegramBotToken || process.env.MERRYMEN_TELEGRAM_BOT_TOKEN) {
     s.telegramEnabled === false
       ? warn("Telegram token set but DISABLED — enable it in /settings so the bot answers")

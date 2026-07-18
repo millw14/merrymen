@@ -65,7 +65,7 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
     // driver proposes nothing — the worker still runs, honestly idle.
     const driver = opts.llm.creds ? createDriver(opts.llm.creds) : nullDriver;
     if (driver === nullDriver) {
-      console.log("[strategist] no LLM key (Groq or Anthropic) — llm-strategist runs with the null driver (no trades)");
+      console.log("[strategist] no AI provider key set — llm-strategist runs with the null driver (no trades). Pick a provider in Settings.");
     }
     return makeLlmStrategist({
       driver,
