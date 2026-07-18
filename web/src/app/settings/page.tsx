@@ -79,6 +79,14 @@ export default function SettingsPage() {
     return stored === undefined || stored === null ? "" : String(stored);
   };
 
+  // URL fields (bundler/RPC) come back REDACTED from GET because they can embed
+  // an API key. Render them empty (type-to-replace) with the redacted saved value
+  // as the placeholder, so the masked value is never in an editable input.
+  const urlPlaceholder = (k: keyof SettingsView["values"], fallback: string): string => {
+    const stored = view?.values[k];
+    return typeof stored === "string" && stored ? `saved: ${stored}` : fallback;
+  };
+
   function toggleSymbol(sym: string) {
     const current = symbols ?? view?.values.basketSymbols ?? view?.defaults.basketSymbols ?? [];
     setSymbols(current.includes(sym) ? current.filter((s) => s !== sym) : [...current, sym]);
@@ -487,6 +495,17 @@ export default function SettingsPage() {
             <span className="field-hint">Click to toggle. Only enabled groups work; the rest are refused. “vision” and “voice” need extra keys below.</span>
           </div>
 
+          {pcEnabledVal && (capsVal.includes("shell") || capsVal.includes("keyboard")) && (
+            <div className="pc-danger">
+              ⚠️ <b>This is remote control of your computer.</b> <b>Keyboard</b> types keystrokes into
+              whatever window is focused, and <b>shell</b> runs your allowlisted commands — together
+              they can do essentially anything you can. Allowlisting an <b>interpreter</b> (python,
+              node, bash, powershell, git…) hands over <b>everything that program can do</b>, not just
+              one command. Only enable these on a machine you trust, keep the shell allowlist as
+              narrow as possible, and note each one still asks for <code>/confirm</code> first.
+            </div>
+          )}
+
           <div className="grant-fields settings-grid">
             <Field
               label="files root"
@@ -565,16 +584,16 @@ export default function SettingsPage() {
               label="mainnet RPC override"
               hint="Optional. The public RPC rate-limits at 1-minute ticks; a free Alchemy/QuickNode endpoint is smoother."
             >
-              <input type="url" placeholder="default: rpc.mainnet.chain.robinhood.com" value={v("rpcMainnet")} onChange={set("rpcMainnet")} />
+              <input type="url" placeholder={urlPlaceholder("rpcMainnet", "default: rpc.mainnet.chain.robinhood.com")} value={draft.rpcMainnet ?? ""} onChange={set("rpcMainnet")} />
             </Field>
             <Field label="testnet RPC override" hint="Optional.">
-              <input type="url" placeholder="default: rpc.testnet.chain.robinhood.com" value={v("rpcTestnet")} onChange={set("rpcTestnet")} />
+              <input type="url" placeholder={urlPlaceholder("rpcTestnet", "default: rpc.testnet.chain.robinhood.com")} value={draft.rpcTestnet ?? ""} onChange={set("rpcTestnet")} />
             </Field>
             <Field
               label="bundler URL override"
               hint="Advanced — only if you use Alchemy or a self-hosted bundler instead of a Pimlico key. Takes precedence over the Pimlico key; the chain id must match your wallet's chain."
             >
-              <input type="url" placeholder="https://…/rpc?apikey=…" value={v("bundlerUrl")} onChange={set("bundlerUrl")} />
+              <input type="url" placeholder={urlPlaceholder("bundlerUrl", "https://…/rpc?apikey=…")} value={draft.bundlerUrl ?? ""} onChange={set("bundlerUrl")} />
             </Field>
             <Field
               label="breaker contract"

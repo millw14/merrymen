@@ -76,9 +76,37 @@ function mask(value: string | undefined): SecretView {
   return { set: true, hint: value.length > 4 ? value.slice(-4) : "••••" };
 }
 
+/** ASCII sentinel that cannot appear in a real URL path — encoding-robust
+ * (a unicode marker can get mangled across clients and defeat the keep-guard). */
+const REDACT_MARK = "[key hidden]";
+/**
+ * Bundler/RPC URLs routinely embed an API key (Pimlico: ?apikey=…; Alchemy:
+ * /v2/<KEY> in the path). Never return them verbatim — show scheme+host so the
+ * user recognizes the provider, hide the rest behind the sentinel. The PUT
+ * handler treats an incoming value carrying the sentinel as "keep", so this
+ * round-trips safely (and the UI shows it as a placeholder, not an editable value).
+ */
+function redactUrl(u: unknown): string | undefined {
+  if (typeof u !== "string" || u === "") return u as undefined;
+  try {
+    const url = new URL(u);
+    return `${url.protocol}//${url.host}/${REDACT_MARK}`;
+  } catch {
+    return REDACT_MARK;
+  }
+}
+
 export async function GET() {
   const stored = await readStored();
   const { bundlerApiKey, groqApiKey, anthropicApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, virtualsApiKey, ...values } = stored;
+  // These URL fields can embed API keys — redact before they leave the server.
+  const safeValues = {
+    ...values,
+    bundlerUrl: redactUrl(values.bundlerUrl),
+    rpcMainnet: redactUrl(values.rpcMainnet),
+    rpcTestnet: redactUrl(values.rpcTestnet),
+    telegramTranscribeBase: redactUrl(values.telegramTranscribeBase),
+  };
   const view: SettingsView = {
     bundlerApiKey: mask(bundlerApiKey),
     groqApiKey: mask(groqApiKey),
@@ -87,7 +115,7 @@ export async function GET() {
     telegramBotToken: mask(telegramBotToken),
     telegramTranscribeKey: mask(telegramTranscribeKey),
     virtualsApiKey: mask(virtualsApiKey),
-    values,
+    values: safeValues,
     defaults: SETTINGS_DEFAULTS,
     knownSymbols: STOCK_TOKENS.map((t) => t.symbol),
     strategies: { builtin: BUILTIN_STRATEGIES, custom: await listCustomStrategies() },
@@ -157,6 +185,10 @@ export async function PUT(req: Request) {
   for (const key of URL_FIELDS) {
     if (!(key in body)) continue;
     const v = body[key];
+    // GET redacts credential-carrying URLs behind a sentinel; if that echoes
+    // back, keep the stored one — never overwrite a real URL with its redacted
+    // display form.
+    if (typeof v === "string" && v.includes(REDACT_MARK)) continue;
     if (v === "" || v === null || v === undefined) {
       setOrClear(key, undefined);
     } else if (typeof v === "string" && /^https?:\/\/.+/.test(v.trim())) {
@@ -240,7 +272,9 @@ export async function PUT(req: Request) {
   }
   if ("telegramTranscribeBase" in body) {
     const v = body.telegramTranscribeBase;
-    if (v === "" || v === null || v === undefined) setOrClear("telegramTranscribeBase", undefined);
+    if (typeof v === "string" && v.includes(REDACT_MARK)) {
+      /* redacted echo — keep the stored value */
+    } else if (v === "" || v === null || v === undefined) setOrClear("telegramTranscribeBase", undefined);
     else if (typeof v === "string" && /^https?:\/\/.+/.test(v.trim())) setOrClear("telegramTranscribeBase", v.trim());
     else errors.push("telegramTranscribeBase: must be an http(s) URL");
   }

@@ -232,6 +232,15 @@ button { font: inherit; cursor: pointer; }
 .killall:active { transform: translateY(1px); }
 /* settings page */
 .settings-panel { max-width: 760px; }
+/* the "you just enabled desktop RCE" warning under PC capabilities */
+.pc-danger {
+  margin: 4px 0 14px; padding: 12px 14px; border-radius: 8px;
+  font-size: 12.5px; line-height: 1.6; color: var(--red);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 40%, transparent);
+}
+.pc-danger b { color: var(--text); }
+.pc-danger code { font-family: var(--mono); font-size: 11px; }
 .settings-section {
   margin: 22px 0 10px;
   font-size: 11px; letter-spacing: 2px; text-transform: uppercase;
