@@ -291,6 +291,27 @@ describe("coerceLlmCommand — transfer address must be shape-valid", () => {
     const c = coerceLlmCommand({ kind: "transfer", symbol: "", name: "", usdg: 20, address: "robin's other wallet", op: "", price: 0, id: 0, reply: "" });
     assert.equal(c.kind, "chat");
   });
+
+  it("SECURITY: a transfer address NOT in the user's message is refused (prompt-injection guard)", () => {
+    // Model emits a valid-looking address the user never typed → must NOT become a transfer.
+    const injected = coerceLlmCommand(
+      { kind: "transfer", address: ADDR, usdg: 20 },
+      "please send my usual amount to my other wallet",
+    );
+    assert.equal(injected.kind, "chat");
+    // Same address, but present verbatim in the message → allowed.
+    const legit = coerceLlmCommand({ kind: "transfer", address: ADDR, usdg: 20 }, `send 20 to ${ADDR}`);
+    assert.deepEqual(legit, { kind: "transfer", to: ADDR, usdg: 20 });
+  });
+
+  it("SECURITY: the LLM cannot emit confirm/cancel — only a slash command can", () => {
+    // A prompt-injected turn can no longer auto-approve a parked action.
+    assert.equal(coerceLlmCommand({ kind: "confirm" }, "yes do it").kind, "chat");
+    assert.equal(coerceLlmCommand({ kind: "cancel" }, "nevermind").kind, "chat");
+    // …but the literal slash commands still work (unchanged).
+    assert.deepEqual(parseSlash("/confirm"), { kind: "confirm" });
+    assert.deepEqual(parseSlash("/cancel"), { kind: "cancel" });
+  });
 });
 
 describe("executeCommand — transfer confirm flow", () => {

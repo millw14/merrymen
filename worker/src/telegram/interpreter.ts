@@ -399,8 +399,6 @@ const COMMAND_TOOL = {
           "buy",
           "sell",
           "transfer",
-          "confirm",
-          "cancel",
           "alert",
           "alerts",
           "unalert",
@@ -490,7 +488,7 @@ export async function interpretWithLlm(
       remember: "",
     };
   }
-  return { cmd: coerceLlmCommand(input), remember: typeof input.remember === "string" ? input.remember : "" };
+  return { cmd: coerceLlmCommand(input, text), remember: typeof input.remember === "string" ? input.remember : "" };
 }
 
 /**
@@ -537,7 +535,7 @@ export async function narrateJournal(evidence: string, creds: LlmCreds): Promise
 }
 
 /** Validate the model's structured output into a typed Command. Exported for tests. */
-export function coerceLlmCommand(input: Record<string, unknown>): Command {
+export function coerceLlmCommand(input: Record<string, unknown>, userMessage = ""): Command {
   const kind = typeof input.kind === "string" ? input.kind : "chat";
   const symbol = typeof input.symbol === "string" ? input.symbol.toUpperCase() : "";
   const name = typeof input.name === "string" ? input.name : "";
@@ -562,8 +560,6 @@ export function coerceLlmCommand(input: Record<string, unknown>): Command {
     case "forget":
     case "pause":
     case "resume":
-    case "confirm":
-    case "cancel":
     case "alerts":
     case "kill":
     // PC read/no-arg kinds
@@ -626,10 +622,22 @@ export function coerceLlmCommand(input: Record<string, unknown>): Command {
     case "buy":
     case "sell":
       return symbol && usdg > 0 ? { kind, symbol, usdg } : { kind: "chat", reply: `to ${kind}, tell me a ticker and a USDG amount, e.g. '${kind} 10 of QQQ'` };
-    case "transfer":
-      return ADDRESS_RE.test(address) && usdg > 0
+    case "transfer": {
+      // DEFENSE IN DEPTH: the recipient must appear VERBATIM in the user's own
+      // message. The system prompt asks for this, but a jailbroken/injected model
+      // could otherwise emit an address pulled from state/history — so enforce it
+      // in code, not just in the prompt. (Skipped when userMessage is unavailable,
+      // e.g. a direct unit-test call.)
+      const inMessage = userMessage === "" || userMessage.toLowerCase().includes(address.toLowerCase());
+      return ADDRESS_RE.test(address) && usdg > 0 && inMessage
         ? { kind: "transfer", to: address as `0x${string}`, usdg }
-        : { kind: "chat", reply: "to transfer, give me the full 0x address and a USDG amount — I'll ask you to confirm before anything moves." };
+        : {
+            kind: "chat",
+            reply: ADDRESS_RE.test(address) && !inMessage
+              ? "I only ever send to an address you typed in your own message — paste the full 0x address in the message and I'll set it up."
+              : "to transfer, give me the full 0x address and a USDG amount — I'll ask you to confirm before anything moves.",
+          };
+    }
     case "alert":
       return symbol && op && price > 0
         ? { kind: "alert", symbol, op, price }

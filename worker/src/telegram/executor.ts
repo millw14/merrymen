@@ -201,6 +201,20 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
         deps.clearPending();
         return "⌛ that confirmation expired — ask again.";
       }
+      // Re-vet at confirm time: the owner may have disabled the toggle/capability
+      // during the 90s window. Don't fire a parked action against a now-closed gate.
+      if (p.kind === "transfer") {
+        if (!deps.transferEnabled || !deps.grantHasTransfer) {
+          deps.clearPending();
+          return "🔒 transfers were turned off before you confirmed — nothing moved.";
+        }
+      } else {
+        const refusal = pcRefusal({ kind: p.kind } as Command, deps);
+        if (refusal) {
+          deps.clearPending();
+          return refusal;
+        }
+      }
       deps.clearPending();
       switch (p.kind) {
         case "transfer":

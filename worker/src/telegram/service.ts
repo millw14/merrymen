@@ -28,7 +28,7 @@ import { ensureHome, homePaths } from "../home";
 import { esc, getFileUrl, getMe, getUpdates, sendMessage, type TgMessage } from "./api";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
-import { interpretWithLlm, narrateWhy, parseSlash } from "./interpreter";
+import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateWhy, parseSlash } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
 import { transcribeVoice } from "./voice";
 import { fmtReminders, fmtWatchers, parseWatchSpec, parseWhenSec } from "./watchers";
@@ -112,7 +112,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   ensureSoul(now()); // the merryman is born (IDENTITY/OWNER/JOURNAL.md) on first run
 
   // Per-chat runtime (in-memory only — cleared on restart, which is safe):
-  const pending = new Map<number, PendingAction>(); // awaiting /confirm
+  // Keyed by `${chatId}:${fromId}` — a parked action is bound to the USER who
+  // parked it, so in a group one member can't /confirm another's transfer/shell.
+  const pending = new Map<string, PendingAction>(); // awaiting /confirm
   const linkFails = new Map<number, { fails: number; until: number }>();
   const history = new Map<number, { role: "user" | "assistant"; content: string }[]>();
 
@@ -237,9 +239,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         deps.note("warn", `Telegram: transfer ${usdg} USDG → ${to} confirmed by chat ${msg.chatId}`);
         return deps.submitTransfer(to, usdg);
       },
-      getPending: () => pending.get(msg.chatId) ?? null,
-      setPending: (p) => pending.set(msg.chatId, p),
-      clearPending: () => pending.delete(msg.chatId),
+      getPending: () => pending.get(`${msg.chatId}:${msg.fromId}`) ?? null,
+      setPending: (p) => pending.set(`${msg.chatId}:${msg.fromId}`, p),
+      clearPending: () => pending.delete(`${msg.chatId}:${msg.fromId}`),
       addAlert: (symbol, op, price) => {
         const st = stateRef.get();
         if (st.priceAlerts.length >= 20) return "you're at the 20-alert limit — /unalert one first.";
@@ -389,6 +391,26 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         cmd = { kind: "chat", reply: "add a free Groq key (or an Anthropic key to upgrade) in the dashboard to chat in plain English. For now, try /help." };
       }
       pushHistory(msg.chatId, "user", msg.text);
+    }
+
+    // Sender-level authz for state-changing commands. In a GROUP the chatId is a
+    // negative group id (≠ the sender's id), so allowlisting the group would grant
+    // EVERY member trade/transfer/PC/kill power. Require the SENDER's own id to be
+    // allowlisted for anything state-changing; reads stay chat-level. Private chats
+    // (chatId === fromId) are unaffected. `confirm`/`cancel` only arrive via
+    // parseSlash now (the LLM can't emit them), and are gated here too.
+    const stateChanging =
+      CONTROL_KINDS.has(cmd.kind) ||
+      PC_KINDS.has(cmd.kind) ||
+      cmd.kind === "transfer" ||
+      cmd.kind === "confirm";
+    if (stateChanging && msg.chatId !== msg.fromId && !cfg.telegramAllowlist.includes(msg.fromId)) {
+      await sendMessage(
+        { token },
+        msg.chatId,
+        "🚫 in a group, only individually-allowlisted users can run that. The owner can add your Telegram user id in the dashboard.",
+      );
+      return;
     }
 
     // A failed command must still answer — silence reads as a dead bot.

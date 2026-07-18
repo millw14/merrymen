@@ -75,8 +75,20 @@ describe("appAllowed / isUrl", () => {
   it("recognizes http(s) URLs", () => {
     assert.equal(isUrl("https://github.com"), true);
     assert.equal(isUrl("http://localhost:3100"), true);
+    assert.equal(isUrl("https://x.com/MerrymenAI?ref=1"), true);
     assert.equal(isUrl("spotify"), false);
     assert.equal(isUrl("file:///etc/passwd"), false);
+  });
+
+  it("SECURITY: rejects URLs carrying shell metacharacters (it ends up in a shell command)", () => {
+    assert.equal(isUrl("https://x.com & calc.exe"), false);
+    assert.equal(isUrl("https://x.com&calc"), false);
+    assert.equal(isUrl("https://x.com|whoami"), false);
+    assert.equal(isUrl("https://x.com;rm -rf ~"), false);
+    assert.equal(isUrl("https://x.com`id`"), false);
+    assert.equal(isUrl("https://x.com$(id)"), false);
+    assert.equal(isUrl('https://x.com"pwn'), false);
+    assert.equal(isUrl("https://evil.com/%0Acalc"), false); // stray metachar
   });
 });
 

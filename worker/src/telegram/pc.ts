@@ -63,7 +63,18 @@ export function appAllowed(name: string, allowlist: string[]): boolean {
 }
 
 export function isUrl(s: string): boolean {
-  return /^https?:\/\/\S+$/i.test(s.trim());
+  const t = s.trim();
+  // Must be a well-formed http(s) URL AND free of shell metacharacters — it ends
+  // up in `cmd /c start "" <url>` / `open <url>`, so &, |, ;, quotes, backticks,
+  // $(), redirects, whitespace, or newlines could break out into command exec.
+  if (!/^https?:\/\/[^\s"'`]+$/i.test(t)) return false;
+  if (/[&|;`$<>^%!\\]|\$\(/.test(t)) return false;
+  try {
+    const u = new URL(t);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 // ── formatters ───────────────────────────────────────────────────────────
