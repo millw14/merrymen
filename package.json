@@ -1,6 +1,6 @@
 {
   "name": "merrymen",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Trading agents you never have to trust — self-hosted, keys stay on your machine, caps enforced by the account contract on-chain. For Robinhood Chain; Telegram control; write-your-own strategies.",
   "license": "MIT",
   "homepage": "https://merrymen.dev",
@@ -37,6 +37,7 @@
     "status": "node cli/bin.mjs status",
     "build": "cd web && next build",
     "prepare": "node cli/build.mjs",
+    "prepublishOnly": "node cli/prepublish.mjs",
     "dev:web": "cd web && next dev -p 3100 -H 127.0.0.1",
     "dev:worker": "tsx worker/src/index.ts",
     "test": "tsx --test \"worker/src/**/*.test.ts\"",

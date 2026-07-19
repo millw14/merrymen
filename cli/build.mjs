@@ -27,19 +27,16 @@ function skip(reason) {
 if (process.env.MERRYMEN_SKIP_BUILD) skip("MERRYMEN_SKIP_BUILD set");
 if (existsSync(BUILD_ID)) skip("already built (.next present)");
 
-const nextBin = path.join(
-  ROOT,
-  "node_modules",
-  ".bin",
-  process.platform === "win32" ? "next.cmd" : "next",
-);
-if (!existsSync(nextBin)) skip("next not installed (dev tooling absent)");
+// Invoke next's JS entry with node directly — the .cmd shim needs shell:true on
+// Windows, which silently breaks on spaces in the install path (e.g.
+// "C:\Program Files\..."). node + the script path needs no shell at all.
+const nextJs = path.join(ROOT, "node_modules", "next", "dist", "bin", "next");
+if (!existsSync(nextJs)) skip("next not installed (dev tooling absent)");
 
 console.log("[merrymen] building the dashboard (one-time, ~15s)…");
-const res = spawnSync(nextBin, ["build"], {
+const res = spawnSync(process.execPath, [nextJs, "build"], {
   cwd: WEB,
   stdio: "inherit",
-  shell: process.platform === "win32",
 });
 if (res.status !== 0) {
   console.log("[merrymen] web build failed — the CLI still works; run `npm run build` to retry.");
