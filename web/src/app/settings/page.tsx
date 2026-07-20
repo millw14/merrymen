@@ -51,6 +51,9 @@ export default function SettingsPage() {
   const [caps, setCaps] = useState<string[] | null>(null);
   const [shellList, setShellList] = useState<string[] | null>(null);
   const [appList, setAppList] = useState<string[] | null>(null);
+  // Agent mode (/agent): master + free-form shell toggle (also booleans).
+  const [agentEnabled, setAgentEnabled] = useState<boolean | null>(null);
+  const [agentAutoShell, setAgentAutoShell] = useState<boolean | null>(null);
 
   const loadTelegram = () =>
     fetch("/api/telegram")
@@ -107,6 +110,8 @@ export default function SettingsPage() {
     if (caps !== null) body.telegramCapabilities = caps;
     if (shellList !== null) body.telegramShellAllowlist = shellList;
     if (appList !== null) body.telegramAppAllowlist = appList;
+    if (agentEnabled !== null) body.telegramAgentEnabled = agentEnabled;
+    if (agentAutoShell !== null) body.telegramAgentAutoShell = agentAutoShell;
     // Secrets: only send when the user typed something or hit clear ("").
     try {
       const res = await fetch("/api/settings", {
@@ -133,6 +138,8 @@ export default function SettingsPage() {
       setCaps(null);
       setShellList(null);
       setAppList(null);
+      setAgentEnabled(null);
+      setAgentAutoShell(null);
       const fresh = await fetch("/api/settings");
       if (fresh.ok) setView((await fresh.json()) as SettingsView);
       void loadTelegram();
@@ -175,6 +182,8 @@ export default function SettingsPage() {
   const virtualsEnabledVal = virtualsEnabled ?? view.values.virtualsEnabled ?? d.virtualsEnabled;
   const allowlistVal = allowlist ?? view.values.telegramAllowlist ?? [];
   const pcEnabledVal = pcEnabled ?? view.values.telegramPcControlEnabled ?? d.telegramPcControlEnabled;
+  const agentEnabledVal = agentEnabled ?? view.values.telegramAgentEnabled ?? d.telegramAgentEnabled;
+  const agentAutoShellVal = agentAutoShell ?? view.values.telegramAgentAutoShell ?? d.telegramAgentAutoShell;
   const capsVal = caps ?? view.values.telegramCapabilities ?? [];
   const shellListVal = shellList ?? view.values.telegramShellAllowlist ?? [];
   const appListVal = appList ?? view.values.telegramAppAllowlist ?? [];
@@ -534,6 +543,65 @@ export default function SettingsPage() {
               one command. Only enable these on a machine you trust, keep the shell allowlist as
               narrow as possible, and note each one still asks for <code>/confirm</code> first.
             </div>
+          )}
+
+          {/* ── agent mode · /agent <task> ─────────────────────────────── */}
+          <label className="field settings-field">
+            <span className="field-label">🤖 agent mode · /agent</span>
+            <span className="field-input">
+              <input
+                type="checkbox"
+                checked={agentEnabledVal}
+                onChange={(e) => setAgentEnabled(e.target.checked)}
+                style={{ width: "auto" }}
+                disabled={!pcEnabledVal}
+              />
+              <span className="field-unit">
+                {!pcEnabledVal ? "needs remote control ON" : agentEnabledVal ? "ON — /agent works multi-step tasks" : "off"}
+              </span>
+            </span>
+            <span className="field-hint">
+              Send <code>/agent clone repo X, install, build, tell me what breaks</code> and the
+              merryman works your PC in a tool loop — shell, files, screen, vision — streaming
+              progress to the chat until it&apos;s done. Uses only the capability groups you enabled
+              above; <code>/agent stop</code> halts it.
+            </span>
+          </label>
+          {agentEnabledVal && pcEnabledVal && (
+            <>
+              <label className="field settings-field">
+                <span className="field-label">free-form shell for /agent</span>
+                <span className="field-input">
+                  <input
+                    type="checkbox"
+                    checked={agentAutoShellVal}
+                    onChange={(e) => setAgentAutoShell(e.target.checked)}
+                    style={{ width: "auto" }}
+                  />
+                  <span className="field-unit">{agentAutoShellVal ? "ON — beyond the allowlist, no per-command confirm" : "off — allowlist only"}</span>
+                </span>
+                <span className="field-hint">
+                  Off: /agent may only run your allowlisted commands. On: it may compose its own
+                  commands (installs, builds, git) — destructive commands and secrets paths are
+                  refused always.
+                </span>
+              </label>
+              {agentAutoShellVal && (
+                <div className="pc-danger">
+                  ⚠️ <b>Free-form shell is remote code execution by an AI.</b> The agent can run
+                  almost any command your user account can, without asking per command. Hard blocks
+                  remain (no rm -rf / format / shutdown / registry / wallet &amp; key paths), but
+                  they are a seatbelt, not a cage. Only arm this on a machine you'd let a very
+                  eager intern use, and keep <code>/agent stop</code> handy.
+                </div>
+              )}
+              <div className="grant-fields settings-grid">
+                <Field label="step budget" hint="Max model↔tool steps per /agent task — the runaway brake.">
+                  <input type="number" min={1} max={60} placeholder={String(d.telegramAgentMaxSteps)} value={v("telegramAgentMaxSteps")} onChange={set("telegramAgentMaxSteps")} />
+                  <span className="field-unit">steps</span>
+                </Field>
+              </div>
+            </>
           )}
 
           <div className="grant-fields settings-grid">

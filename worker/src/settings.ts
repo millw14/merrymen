@@ -70,6 +70,12 @@ export interface ResolvedConfig {
   telegramAppAllowlist: string[];
   telegramTranscribeKey: string | undefined;
   telegramTranscribeBase: string;
+  /** /agent master switch (default off) — multi-step AI tasks on this PC. */
+  telegramAgentEnabled: boolean;
+  /** /agent may run non-allowlisted, non-destructive shell without confirm. */
+  telegramAgentAutoShell: boolean;
+  /** Model↔tool step budget per /agent task. */
+  telegramAgentMaxSteps: number;
 }
 
 const KNOWN_SYMBOLS = new Set(STOCK_TOKENS.map((t) => t.symbol));
@@ -210,6 +216,9 @@ export function mergeSettings(
     telegramAppAllowlist: strArray(file.telegramAppAllowlist, env.MERRYMEN_TELEGRAM_APP_ALLOWLIST, d.telegramAppAllowlist),
     telegramTranscribeKey: str(file.telegramTranscribeKey, env.MERRYMEN_TELEGRAM_TRANSCRIBE_KEY),
     telegramTranscribeBase: str(file.telegramTranscribeBase, env.MERRYMEN_TELEGRAM_TRANSCRIBE_BASE, d.telegramTranscribeBase)!,
+    telegramAgentEnabled: bool(file.telegramAgentEnabled, env.MERRYMEN_TELEGRAM_AGENT, d.telegramAgentEnabled),
+    telegramAgentAutoShell: bool(file.telegramAgentAutoShell, env.MERRYMEN_TELEGRAM_AGENT_AUTOSHELL, d.telegramAgentAutoShell),
+    telegramAgentMaxSteps: num(file.telegramAgentMaxSteps, env.MERRYMEN_TELEGRAM_AGENT_MAX_STEPS, d.telegramAgentMaxSteps, 1, 60),
   };
 }
 
@@ -287,6 +296,8 @@ export function telegramKey(cfg: ResolvedConfig): string {
     cfg.telegramTransferEnabled ? "transfer" : "notransfer",
     cfg.telegramNotifyEnabled ? "notify" : "quiet",
     cfg.telegramDigestHour,
+    cfg.telegramAgentEnabled ? "agent" : "",
+    cfg.telegramAgentAutoShell ? "autoshell" : "",
     // brain fingerprint: provider selection + any key presence flips the poller
     cfg.llmProvider ?? "",
     cfg.llmApiKey ? "k" : "",

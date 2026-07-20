@@ -41,7 +41,7 @@ export interface RunResult {
 function run(
   cmd: string,
   args: string[],
-  opts: { shell?: boolean; input?: string; env?: Record<string, string>; timeoutMs?: number } = {},
+  opts: { shell?: boolean; input?: string; env?: Record<string, string>; timeoutMs?: number; cwd?: string } = {},
 ): Promise<RunResult> {
   return new Promise((resolve) => {
     let child;
@@ -49,6 +49,7 @@ function run(
       child = spawn(cmd, args, {
         shell: opts.shell ?? false,
         env: { ...process.env, ...(opts.env ?? {}) },
+        cwd: opts.cwd,
         windowsHide: true,
       });
     } catch (e) {
@@ -332,12 +333,14 @@ export async function clipSet(text: string): Promise<RunResult> {
 
 // ── shell (exact allowlist match, already confirmed) ─────────────────────────
 
-/** Run a pre-approved, confirmed command in the platform shell. */
-export async function runShell(cmd: string): Promise<RunResult> {
+/** Run a pre-approved, confirmed command in the platform shell. Agent mode
+ * passes a longer timeout (installs/builds run minutes) and its own cwd. */
+export async function runShell(cmd: string, opts: { timeoutMs?: number; cwd?: string } = {}): Promise<RunResult> {
+  const spawnOpts = { shell: false, timeoutMs: opts.timeoutMs ?? 20_000, cwd: opts.cwd };
   const r =
     PLATFORM === "win32"
-      ? await run("cmd.exe", ["/d", "/s", "/c", cmd], { shell: false, timeoutMs: 20_000 })
-      : await run("/bin/sh", ["-c", cmd], { shell: false, timeoutMs: 20_000 });
+      ? await run("cmd.exe", ["/d", "/s", "/c", cmd], spawnOpts)
+      : await run("/bin/sh", ["-c", cmd], spawnOpts);
   return { ...r, stdout: r.stdout.slice(0, OUT_CAP), stderr: r.stderr.slice(0, OUT_CAP) };
 }
 

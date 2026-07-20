@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { llmText, resolveLlm } from "./llm";
+import { llmAgentTurn, llmText, resolveLlm, type AgentMsg } from "./llm";
 import { mergeSettings } from "./settings";
 
 /** Build a ResolvedConfig from a settings patch, ignoring env. */
@@ -100,6 +100,52 @@ test("llmText posts to <baseUrl>/chat/completions with a Bearer header", async (
   assert.equal(out, "hello");
   assert.equal(seenUrl, "https://api.deepseek.com/chat/completions");
   assert.equal(seenAuth, "Bearer sk-deep");
+});
+
+test("llmAgentTurn (openai transport): converts history + parses tool calls", async () => {
+  let sentBody: {
+    messages: { role: string; content?: string | null; tool_call_id?: string; tool_calls?: unknown[] }[];
+    tools: { function: { name: string } }[];
+    tool_choice?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_url: string, init: { body: string }) => {
+    sentBody = JSON.parse(init.body);
+    return {
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: "on it",
+              tool_calls: [{ id: "call_9", function: { name: "run", arguments: '{"command":"git status"}' } }],
+            },
+          },
+        ],
+      }),
+    };
+  }) as never;
+
+  const creds = resolveLlm(cfg({ llmProvider: "openai", llmApiKey: "sk" }))!;
+  const messages: AgentMsg[] = [
+    { role: "user", text: "check the repo" },
+    { role: "assistant", text: "looking", toolUses: [{ id: "call_1", name: "list_dir", input: {} }] },
+    { role: "tools", results: [{ id: "call_1", name: "list_dir", output: "src/" }] },
+  ];
+  const turn = await llmAgentTurn(creds, {
+    system: "sys",
+    messages,
+    tools: [{ name: "run", description: "d", schema: { type: "object" } }],
+  });
+
+  assert.equal(turn.text, "on it");
+  assert.deepEqual(turn.toolUses, [{ id: "call_9", name: "run", input: { command: "git status" } }]);
+  // conversion shape: system first, assistant carries tool_calls, results ride role:"tool"
+  const roles = sentBody!.messages.map((m) => m.role);
+  assert.deepEqual(roles, ["system", "user", "assistant", "tool"]);
+  assert.equal(sentBody!.messages[3]!.tool_call_id, "call_1");
+  assert.ok(Array.isArray(sentBody!.messages[2]!.tool_calls));
+  // multi-tool catalog, model's choice — no forced tool_choice
+  assert.equal(sentBody!.tool_choice, undefined);
 });
 
 test("keyless (ollama) sends no Authorization header", async () => {

@@ -141,6 +141,19 @@ export interface MerrymenSettings {
   telegramTranscribeKey?: string;
   /** Transcription API base (OpenAI-compatible /audio/transcriptions). Default OpenAI. */
   telegramTranscribeBase?: string;
+
+  // ── agent mode · /agent <task> (OpenClaw-style multi-step tasks) ────────
+  /** Master switch for /agent — the AI works your PC in a tool loop (shell,
+   * files, screen, vision), streaming progress to the chat. Requires PC control
+   * on; each tool is still gated by its capability group. OFF by default. */
+  telegramAgentEnabled?: boolean;
+  /** Let /agent run shell commands BEYOND the allowlist without per-command
+   * confirmation (destructive commands are always refused). This is what makes
+   * "clone it, install deps, build, fix the errors" possible — and it is remote
+   * code execution by design. OFF by default. */
+  telegramAgentAutoShell?: boolean;
+  /** Max model↔tool steps per /agent task (runaway brake). */
+  telegramAgentMaxSteps?: number;
 }
 
 /** Keys whose values must never be echoed back to a browser. */
@@ -204,5 +217,8 @@ export const SETTINGS_DEFAULTS = {
   telegramShellAllowlist: [] as string[],
   telegramAppAllowlist: [] as string[],
   telegramTranscribeBase: "https://api.openai.com/v1",
+  telegramAgentEnabled: false,
+  telegramAgentAutoShell: false,
+  telegramAgentMaxSteps: 20,
   virtualsEnabled: false,
 };

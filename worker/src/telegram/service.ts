@@ -26,6 +26,7 @@ import { PC_CAPABILITIES } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { ensureHome, homePaths } from "../home";
 import { esc, getFileUrl, getMe, getUpdates, sendMessage, type TgMessage } from "./api";
+import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
 import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateWhy, parseSlash } from "./interpreter";
@@ -117,6 +118,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   const pending = new Map<string, PendingAction>(); // awaiting /confirm
   const linkFails = new Map<number, { fails: number; until: number }>();
   const history = new Map<number, { role: "user" | "assistant"; content: string }[]>();
+  // One detached /agent task per chat; /agent stop flips the flag mid-run.
+  const agentRuns = new Map<number, { stopped: boolean }>();
 
   const pushHistory = (chatId: number, role: "user" | "assistant", content: string): void => {
     const h = history.get(chatId) ?? [];
@@ -161,6 +164,72 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // /link is the only command an unlisted chat may use — and it's rate-limited.
     if (!allowed && !(slash?.kind === "link")) {
       await sendMessage({ token }, msg.chatId, "🚫 not authorized. Ask the owner to add you, or /link &lt;code&gt; if you have the code from the dashboard.");
+      return;
+    }
+
+    // ── /agent — multi-step tasks on this PC (detached, one per chat) ────────
+    // Handled before the interpreter: it has its own loop, streams its own
+    // messages, and must not block the poll (or /agent stop could never land).
+    const agentMatch = msg.text?.match(/^\/agent(?:@\w+)?(?:\s+([\s\S]+))?$/i);
+    if (agentMatch) {
+      // Same sender-level rule as other state-changing commands: in a group,
+      // only individually-allowlisted users may drive the PC.
+      if (msg.chatId !== msg.fromId && !cfg.telegramAllowlist.includes(msg.fromId)) {
+        await sendMessage({ token }, msg.chatId, "🚫 in a group, only individually-allowlisted users can run /agent.");
+        return;
+      }
+      const arg = (agentMatch[1] ?? "").trim();
+      if (/^stop$/i.test(arg)) {
+        const running = agentRuns.get(msg.chatId);
+        if (running) {
+          running.stopped = true;
+          await sendMessage({ token }, msg.chatId, "🛑 stopping after the current step…");
+        } else {
+          await sendMessage({ token }, msg.chatId, "nothing running.");
+        }
+        return;
+      }
+      if (!cfg.telegramPcControlEnabled || !cfg.telegramAgentEnabled) {
+        await sendMessage({ token }, msg.chatId, "🤖 agent mode is off — enable “remote control” and “agent mode” in the dashboard → settings.");
+        return;
+      }
+      if (!arg) {
+        await sendMessage({ token }, msg.chatId, "what's the task? e.g. <code>/agent clone github.com/x/y, install deps, build, and tell me what breaks</code> · <code>/agent stop</code> halts.");
+        return;
+      }
+      const llm = resolveLlm(cfg);
+      if (!llm) {
+        await sendMessage({ token }, msg.chatId, "🤖 agent mode needs an AI provider — pick one in the dashboard (Settings → AI provider).");
+        return;
+      }
+      if (agentRuns.has(msg.chatId)) {
+        await sendMessage({ token }, msg.chatId, "⏳ I'm already on a task here — /agent stop first, or wait for it to finish.");
+        return;
+      }
+      const stopFlag = { stopped: false };
+      agentRuns.set(msg.chatId, stopFlag);
+      await sendMessage({ token }, msg.chatId, "🏹 on it — I'll message progress here. /agent stop halts me.");
+      void runAgentTask(arg, {
+        creds: llm,
+        cfg: {
+          capabilities: new Set(cfg.telegramCapabilities),
+          filesRoot: cfg.telegramFilesRoot,
+          shellAllowlist: cfg.telegramShellAllowlist,
+          appAllowlist: cfg.telegramAppAllowlist,
+          autoShell: cfg.telegramAgentAutoShell,
+          maxSteps: cfg.telegramAgentMaxSteps,
+          anthropicApiKey: cfg.anthropicApiKey,
+          llmModel: cfg.llmModel,
+        },
+        opts: { token },
+        chatId: msg.chatId,
+        // Model text is HTML-escaped here — it must never inject parse-mode markup.
+        send: async (text) => {
+          await sendMessage({ token }, msg.chatId, esc(text));
+        },
+        note: deps.note,
+        stopFlag,
+      }).finally(() => agentRuns.delete(msg.chatId));
       return;
     }
 

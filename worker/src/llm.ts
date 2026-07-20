@@ -174,6 +174,110 @@ export async function llmToolCall(
   throw new Error(lastErr);
 }
 
+// ── agentic turns (multi-tool, model chooses) ────────────────────────────────
+// Used by /agent: unlike llmToolCall (ONE forced tool), the model here sees a
+// CATALOG of tools and freely interleaves text (progress narration) with tool
+// calls until it stops calling tools. The loop lives in telegram/agent.ts; this
+// layer only translates one neutral message shape to both transports.
+
+export interface AgentToolUse {
+  /** Provider-issued call id — must be echoed back with the result. */
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+}
+
+export type AgentMsg =
+  | { role: "user"; text: string }
+  | { role: "assistant"; text: string; toolUses: AgentToolUse[] }
+  | { role: "tools"; results: { id: string; name: string; output: string }[] };
+
+export interface AgentTurn {
+  text: string;
+  toolUses: AgentToolUse[];
+}
+
+/** One model turn: text and/or tool calls. Throws on transport error. */
+export async function llmAgentTurn(
+  creds: LlmCreds,
+  opts: { system: string; messages: AgentMsg[]; tools: ToolSpec[]; maxTokens?: number },
+): Promise<AgentTurn> {
+  if (creds.transport === "anthropic") {
+    const client = new Anthropic({ apiKey: creds.apiKey });
+    const messages = opts.messages.map((m) => {
+      if (m.role === "user") return { role: "user" as const, content: m.text };
+      if (m.role === "assistant") {
+        const blocks: unknown[] = [];
+        if (m.text) blocks.push({ type: "text", text: m.text });
+        for (const t of m.toolUses) blocks.push({ type: "tool_use", id: t.id, name: t.name, input: t.input });
+        return { role: "assistant" as const, content: blocks as never };
+      }
+      // tool results ride a user turn in the Anthropic shape
+      return {
+        role: "user" as const,
+        content: m.results.map((r) => ({ type: "tool_result", tool_use_id: r.id, content: r.output })) as never,
+      };
+    });
+    const res = await client.messages.create({
+      model: creds.model,
+      max_tokens: opts.maxTokens ?? 1500,
+      system: opts.system,
+      thinking: { type: "disabled" },
+      tools: opts.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.schema }) as never),
+      messages,
+    });
+    const text = res.content.filter((b) => b.type === "text").map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
+    const toolUses: AgentToolUse[] = res.content
+      .filter((b) => b.type === "tool_use")
+      .map((b) => (b.type === "tool_use" ? { id: b.id, name: b.name, input: b.input as Record<string, unknown> } : null))
+      .filter((t): t is AgentToolUse => t !== null);
+    return { text, toolUses };
+  }
+
+  // openai-compatible: assistant tool_calls + role:"tool" results
+  const messages: unknown[] = [{ role: "system", content: opts.system }];
+  for (const m of opts.messages) {
+    if (m.role === "user") messages.push({ role: "user", content: m.text });
+    else if (m.role === "assistant") {
+      messages.push({
+        role: "assistant",
+        content: m.text || "",
+        ...(m.toolUses.length > 0
+          ? { tool_calls: m.toolUses.map((t) => ({ id: t.id, type: "function", function: { name: t.name, arguments: JSON.stringify(t.input) } })) }
+          : {}),
+      });
+    } else {
+      for (const r of m.results) messages.push({ role: "tool", tool_call_id: r.id, content: r.output });
+    }
+  }
+  const body = {
+    model: creds.model,
+    max_tokens: opts.maxTokens ?? 1500,
+    temperature: 0.2,
+    messages,
+    tools: opts.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.schema } })),
+  };
+  const r = await fetch(chatUrl(creds), { method: "POST", headers: openaiHeaders(creds), body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(`${creds.provider} ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const j = (await r.json()) as {
+    choices?: { message?: { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] } }[];
+  };
+  const msg = j.choices?.[0]?.message;
+  const toolUses: AgentToolUse[] = (msg?.tool_calls ?? [])
+    .map((tc, i) => {
+      if (!tc.function?.name) return null;
+      let input: Record<string, unknown> = {};
+      try {
+        input = tc.function.arguments ? (JSON.parse(tc.function.arguments) as Record<string, unknown>) : {};
+      } catch {
+        /* malformed args — surface an empty input; the tool will complain */
+      }
+      return { id: tc.id ?? `call_${i}`, name: tc.function.name, input };
+    })
+    .filter((t): t is AgentToolUse => t !== null);
+  return { text: (msg?.content ?? "").trim(), toolUses };
+}
+
 /** Plain text completion (narration). Throws on transport error. */
 export async function llmText(
   creds: LlmCreds,
