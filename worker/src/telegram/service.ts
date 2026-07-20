@@ -53,6 +53,7 @@ import {
   getName,
   ownerFacts,
   relationship,
+  rememberNote,
   rememberOwnerFact,
   setName as setSoulName,
   soulPromptBlock,
@@ -167,9 +168,70 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       return;
     }
 
-    // ── /agent — multi-step tasks on this PC (detached, one per chat) ────────
-    // Handled before the interpreter: it has its own loop, streams its own
-    // messages, and must not block the poll (or /agent stop could never land).
+    // Launch a detached agent task (from /agent OR natural language). Streams its
+    // own progress; returns immediately so the poll (and /agent stop) keep flowing.
+    // Every gate is checked here, so both entry points are equally locked down.
+    const startAgent = async (task: string): Promise<void> => {
+      if (!cfg.telegramPcControlEnabled || !cfg.telegramAgentEnabled) {
+        await sendMessage({ token }, msg.chatId, "🤖 that's a multi-step task — turn on “remote control” + “agent mode” in the dashboard (settings) and I'll do it hands-on. For now I can answer questions and run single commands.");
+        return;
+      }
+      const llm = resolveLlm(cfg);
+      if (!llm) {
+        await sendMessage({ token }, msg.chatId, "🤖 agent mode needs an AI provider — pick one in the dashboard (Settings → AI provider).");
+        return;
+      }
+      if (agentRuns.has(msg.chatId)) {
+        await sendMessage({ token }, msg.chatId, "⏳ I'm already on a task here — say “stop” (or /agent stop) first, or wait for it to finish.");
+        return;
+      }
+      const st = stateRef.get();
+      const soulBlock = soulPromptBlock(st.linkedAt, st.messageCount, now());
+      // Live secret VALUES to strip from every tool output and block from
+      // send_file — however the agent reads them, they never reach chat.
+      const secrets = [
+        cfg.telegramBotToken,
+        cfg.anthropicApiKey,
+        cfg.groqApiKey,
+        cfg.llmApiKey,
+        cfg.bundlerApiKey,
+        cfg.rialtoApiKey,
+        cfg.telegramTranscribeKey,
+        cfg.virtualsApiKey,
+      ].filter((s): s is string => typeof s === "string" && s.length >= 8);
+      const stopFlag = { stopped: false };
+      agentRuns.set(msg.chatId, stopFlag);
+      await sendMessage({ token }, msg.chatId, "🏹 on it — I'll message progress here. Say “stop” to halt me.");
+      void runAgentTask(task, {
+        creds: llm,
+        cfg: {
+          capabilities: new Set(cfg.telegramCapabilities),
+          filesRoot: cfg.telegramFilesRoot,
+          shellAllowlist: cfg.telegramShellAllowlist,
+          appAllowlist: cfg.telegramAppAllowlist,
+          autoShell: cfg.telegramAgentAutoShell,
+          maxSteps: cfg.telegramAgentMaxSteps,
+          anthropicApiKey: cfg.anthropicApiKey,
+          llmModel: cfg.llmModel,
+          secrets,
+        },
+        opts: { token },
+        chatId: msg.chatId,
+        // Model text is HTML-escaped here — it must never inject parse-mode markup.
+        send: async (text) => {
+          await sendMessage({ token }, msg.chatId, esc(text));
+        },
+        note: deps.note,
+        remember: (n) => rememberNote(n, now()),
+        soulBlock,
+        stopFlag,
+      }).finally(() => agentRuns.delete(msg.chatId));
+    };
+
+    // ── /agent — explicit slash entry (also handles /agent stop) ─────────────
+    // Handled before the interpreter: the loop streams its own messages and must
+    // not block the poll (or a stop could never land). Natural-language agent
+    // tasks route through the SAME startAgent below, after interpretation.
     const agentMatch = msg.text?.match(/^\/agent(?:@\w+)?(?:\s+([\s\S]+))?$/i);
     if (agentMatch) {
       // Same sender-level rule as other state-changing commands: in a group,
@@ -189,48 +251,21 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         }
         return;
       }
-      if (!cfg.telegramPcControlEnabled || !cfg.telegramAgentEnabled) {
-        await sendMessage({ token }, msg.chatId, "🤖 agent mode is off — enable “remote control” and “agent mode” in the dashboard → settings.");
-        return;
-      }
       if (!arg) {
-        await sendMessage({ token }, msg.chatId, "what's the task? e.g. <code>/agent clone github.com/x/y, install deps, build, and tell me what breaks</code> · <code>/agent stop</code> halts.");
+        await sendMessage({ token }, msg.chatId, "what's the task? e.g. <code>/agent clone github.com/x/y, install deps, build, and tell me what breaks</code> — or just say it in plain English. <code>/agent stop</code> halts.");
         return;
       }
-      const llm = resolveLlm(cfg);
-      if (!llm) {
-        await sendMessage({ token }, msg.chatId, "🤖 agent mode needs an AI provider — pick one in the dashboard (Settings → AI provider).");
-        return;
-      }
-      if (agentRuns.has(msg.chatId)) {
-        await sendMessage({ token }, msg.chatId, "⏳ I'm already on a task here — /agent stop first, or wait for it to finish.");
-        return;
-      }
-      const stopFlag = { stopped: false };
-      agentRuns.set(msg.chatId, stopFlag);
-      await sendMessage({ token }, msg.chatId, "🏹 on it — I'll message progress here. /agent stop halts me.");
-      void runAgentTask(arg, {
-        creds: llm,
-        cfg: {
-          capabilities: new Set(cfg.telegramCapabilities),
-          filesRoot: cfg.telegramFilesRoot,
-          shellAllowlist: cfg.telegramShellAllowlist,
-          appAllowlist: cfg.telegramAppAllowlist,
-          autoShell: cfg.telegramAgentAutoShell,
-          maxSteps: cfg.telegramAgentMaxSteps,
-          anthropicApiKey: cfg.anthropicApiKey,
-          llmModel: cfg.llmModel,
-        },
-        opts: { token },
-        chatId: msg.chatId,
-        // Model text is HTML-escaped here — it must never inject parse-mode markup.
-        send: async (text) => {
-          await sendMessage({ token }, msg.chatId, esc(text));
-        },
-        note: deps.note,
-        stopFlag,
-      }).finally(() => agentRuns.delete(msg.chatId));
+      await startAgent(arg);
       return;
+    }
+
+    // "stop" / "halt" while a task is running → stop it (natural-language stop).
+    if (agentRuns.has(msg.chatId) && /^\s*(stop|halt|cancel|abort)\b/i.test(msg.text ?? "")) {
+      if (msg.chatId === msg.fromId || cfg.telegramAllowlist.includes(msg.fromId)) {
+        agentRuns.get(msg.chatId)!.stopped = true;
+        await sendMessage({ token }, msg.chatId, "🛑 stopping after the current step…");
+        return;
+      }
     }
 
     const linkDep = (code: string): { ok: boolean; reason?: string } => {
@@ -472,13 +507,21 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       CONTROL_KINDS.has(cmd.kind) ||
       PC_KINDS.has(cmd.kind) ||
       cmd.kind === "transfer" ||
-      cmd.kind === "confirm";
+      cmd.kind === "confirm" ||
+      cmd.kind === "agent";
     if (stateChanging && msg.chatId !== msg.fromId && !cfg.telegramAllowlist.includes(msg.fromId)) {
       await sendMessage(
         { token },
         msg.chatId,
         "🚫 in a group, only individually-allowlisted users can run that. The owner can add your Telegram user id in the dashboard.",
       );
+      return;
+    }
+
+    // Natural-language multi-step task → the agent loop (same gates as /agent).
+    if (cmd.kind === "agent") {
+      pushHistory(msg.chatId, "assistant", "starting an agent task");
+      await startAgent(cmd.task);
       return;
     }
 

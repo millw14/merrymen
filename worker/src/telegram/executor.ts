@@ -331,5 +331,10 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       return cmd.reply;
     case "unknown":
       return esc(cmd.text);
+    case "agent":
+      // Agent tasks are intercepted in service.ts (they run a detached loop that
+      // streams its own messages). This branch keeps the switch exhaustive and is
+      // not reached in normal flow.
+      return "🏹 starting…";
   }
 }

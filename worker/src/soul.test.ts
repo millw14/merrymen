@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { relationship, sanitizeMemory } from "./soul";
+import { relationship, sanitizeMemory, sanitizeNote } from "./soul";
 
 describe("sanitizeMemory — memory is context, never capability", () => {
   it("keeps a normal owner fact, whitespace-normalized", () => {
@@ -24,6 +24,27 @@ describe("sanitizeMemory — memory is context, never capability", () => {
   it("refuses empty and oversized facts", () => {
     assert.equal(sanitizeMemory("  "), null);
     assert.equal(sanitizeMemory("x".repeat(300)), null);
+  });
+});
+
+describe("sanitizeNote — agent memory is context, never capability", () => {
+  it("keeps a project note (paths, versions), whitespace-normalized", () => {
+    assert.equal(
+      sanitizeNote("  The Sakura-ios repo   is missing hianime.ts and megacloud.ts "),
+      "The Sakura-ios repo is missing hianime.ts and megacloud.ts",
+    );
+  });
+
+  it("allows a longer note than an owner fact (paths run long)", () => {
+    const note = "The BIM coursework lives in C:/Users/me/Documents/bim_coursework with PartB.dyn and PartC report.";
+    assert.equal(sanitizeNote(note), note);
+  });
+
+  it("still refuses addresses, secret blobs, and markup", () => {
+    assert.equal(sanitizeNote("wallet 0xd76257aee404f1243831A9235dEcB5bb339A45cb"), null);
+    assert.equal(sanitizeNote("token sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), null);
+    assert.equal(sanitizeNote("uses <script>alert(1)</script>"), null);
+    assert.equal(sanitizeNote("x".repeat(400)), null);
   });
 });
 

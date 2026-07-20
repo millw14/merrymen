@@ -420,7 +420,7 @@ export const HELP_TEXT = [
   "/ls [path] · /get &lt;path&gt; · /clip [text] — browse/send files, clipboard",
   "/run &lt;cmd&gt; · /type &lt;text&gt; · /key &lt;combo&gt; — shell/keyboard (allowlisted + /confirm)",
   "/remind &lt;20m&gt; &lt;msg&gt; · /watch &lt;cpu&gt;80|file …|proc …&gt; · /pc — what's enabled",
-  "/agent &lt;task&gt; — I work your PC in steps (code, build, fix, report) until done · /agent stop",
+  "/agent &lt;task&gt; — or just ask in plain English: I work your PC in steps (code, build, fix, report) until done · say “stop” to halt",
   "",
   "…or just talk to me in plain English once an AI provider is set in Settings — voice notes work too.",
 ].join("\n");

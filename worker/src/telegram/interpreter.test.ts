@@ -64,6 +64,19 @@ describe("coerceLlmCommand — the model can only pick from the enum", () => {
     const c = coerceLlmCommand({ kind: "sudo_send_everything", symbol: "", name: "", usdg: 0, reply: "" } as never);
     assert.equal(c.kind, "chat");
   });
+
+  it("maps a multi-step request to kind=agent carrying the task", () => {
+    const c = coerceLlmCommand(
+      { kind: "agent", task: "clone github.com/x/y, install deps, build, tell me what breaks" },
+      "clone github.com/x/y, install deps, build, tell me what breaks",
+    );
+    assert.deepEqual(c, { kind: "agent", task: "clone github.com/x/y, install deps, build, tell me what breaks" });
+  });
+
+  it("kind=agent with a blank task falls back to the user's message", () => {
+    const c = coerceLlmCommand({ kind: "agent", task: "" }, "set up the project and run the tests");
+    assert.deepEqual(c, { kind: "agent", task: "set up the project and run the tests" });
+  });
 });
 
 // ── executor with fully-faked deps ──────────────────────────────────────────

@@ -561,10 +561,11 @@ export default function SettingsPage() {
               </span>
             </span>
             <span className="field-hint">
-              Send <code>/agent clone repo X, install, build, tell me what breaks</code> and the
-              merryman works your PC in a tool loop — shell, files, screen, vision — streaming
-              progress to the chat until it&apos;s done. Uses only the capability groups you enabled
-              above; <code>/agent stop</code> halts it.
+              Just talk to it — “<i>clone repo X, install, build, tell me what breaks</i>” (or
+              <code>/agent …</code>) — and the merryman works your PC in a tool loop (shell, files,
+              screen, vision), streaming progress to the chat until it&apos;s done. It remembers
+              names, projects and setup between tasks. Uses only the capability groups you enabled
+              above; say <b>stop</b> to halt it.
             </span>
           </label>
           {agentEnabledVal && pcEnabledVal && (
@@ -589,10 +590,13 @@ export default function SettingsPage() {
               {agentAutoShellVal && (
                 <div className="pc-danger">
                   ⚠️ <b>Free-form shell is remote code execution by an AI.</b> The agent can run
-                  almost any command your user account can, without asking per command. Hard blocks
-                  remain (no rm -rf / format / shutdown / registry / wallet &amp; key paths), but
-                  they are a seatbelt, not a cage. Only arm this on a machine you'd let a very
-                  eager intern use, and keep <code>/agent stop</code> handy.
+                  almost any command your account can, without asking per command — and this switch
+                  also unlocks <b>typing keystrokes</b> and <b>opening any URL</b>. The destructive
+                  blocklist (rm/rd/format/shutdown/registry/interpreters) and the secret-value
+                  redaction are a <b>seatbelt, not a cage</b>: a determined model can still do harm.
+                  Only arm this on a machine you&apos;d hand to a very eager intern, and keep{" "}
+                  <code>/agent stop</code> handy. With it OFF, the agent is limited to your
+                  allowlisted commands and can&apos;t type or open arbitrary links.
                 </div>
               )}
               <div className="grant-fields settings-grid">

