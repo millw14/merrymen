@@ -20,13 +20,15 @@
 
 const { app, BrowserWindow, Menu, shell, dialog } = require("electron");
 const { spawn } = require("node:child_process");
+const { existsSync } = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 
 const HOST = "127.0.0.1";
 const PORT = 3100;
-const HOME = path.join(os.homedir(), ".merrymen");
+// Shared with the CLI (~/.merrymen); honor an override so data can be relocated.
+const HOME = process.env.MERRYMEN_HOME || path.join(os.homedir(), ".merrymen");
 
 let mainWin = null;
 let splashWin = null;
@@ -37,8 +39,17 @@ function merrymenRoot() {
   // require.resolve finds merrymen wherever npm placed it (nested or hoisted).
   return path.dirname(require.resolve("merrymen/package.json"));
 }
-function resolveBin(spec, roots) {
-  return require.resolve(spec, { paths: roots });
+
+// Locate a tool binary ON DISK, not via require.resolve — packages like tsx have
+// an `exports` map that blocks deep subpaths (e.g. tsx/dist/cli.mjs), which throws
+// even though the file exists. We search the two node_modules layouts npm can
+// produce (merrymen's own nested deps, or hoisted next to merrymen).
+function findTool(relPath, roots, what) {
+  for (const nm of roots) {
+    const p = path.join(nm, relPath);
+    if (existsSync(p)) return p;
+  }
+  throw new Error(`couldn't find ${what} — looked in ${roots.join(" | ")}`);
 }
 
 // Run a Node script using Electron's own Node runtime (no system Node needed).
@@ -60,15 +71,17 @@ function startBackend() {
   const root = merrymenRoot();
   const webDir = path.join(root, "web");
   const workerEntry = path.join(root, "worker", "src", "index.ts");
-  const roots = [root, __dirname];
+  // node_modules layouts to search: merrymen's own nested deps, and the dir that
+  // CONTAINS merrymen (hoisted deps sit here).
+  const nmRoots = [path.join(root, "node_modules"), path.dirname(root)];
   const env = { MERRYMEN_HOME: HOME };
 
   // Dashboard: the prebuilt Next production server, served from the package's web/.
-  const nextBin = resolveBin("next/dist/bin/next", roots);
+  const nextBin = findTool(path.join("next", "dist", "bin", "next"), nmRoots, "next");
   runNode(nextBin, ["start", "-p", String(PORT), "-H", HOST], { cwd: webDir, env, tag: "dashboard" });
 
   // Agent worker: the tsx runner executes the TypeScript worker directly.
-  const tsxCli = resolveBin("tsx/dist/cli.mjs", roots);
+  const tsxCli = findTool(path.join("tsx", "dist", "cli.mjs"), nmRoots, "tsx");
   runNode(tsxCli, [workerEntry], { cwd: root, env, tag: "worker" });
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "merrymen-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "merrymen — the one-click desktop app. Bundles Node, boots the agent worker + dashboard, opens it in a native window. No terminal, no npm.",
   "author": "merrymen",
