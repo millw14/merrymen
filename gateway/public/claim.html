@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Merrymen AI — claim your key</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0b0b0d; color: #e8e6e1;
+         font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  .card { width: min(92vw, 460px); background: #141416; border: 1px solid #26262b; border-radius: 16px; padding: 28px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p { color: #a5a29b; margin: 8px 0; }
+  button { width: 100%; margin-top: 16px; padding: 12px; border-radius: 10px; border: 0; cursor: pointer;
+           background: #6f9c4b; color: #0b0b0d; font-weight: 700; font-size: 15px; }
+  button:disabled { opacity: .5; cursor: default; }
+  code, .token { display: block; margin-top: 12px; padding: 12px; background: #0b0b0d; border: 1px solid #26262b;
+                 border-radius: 8px; word-break: break-all; font-family: ui-monospace, monospace; font-size: 13px; }
+  .ok { color: #8fce6a; } .err { color: #e08a7a; }
+  .tag { display:inline-block; font-size:12px; color:#8fce6a; border:1px solid #2e3a24; border-radius:999px; padding:2px 10px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <span class="tag">🏹 Merry Circle</span>
+    <h1>Claim your Merrymen AI key</h1>
+    <p>Hold $MERRYMEN? Prove it by signing a message (free, no transaction, read-only) and get a key that powers your agent's brain — no third-party signup.</p>
+    <button id="go">Connect wallet &amp; claim</button>
+    <div id="out"></div>
+    <p style="font-size:13px;margin-top:16px">Paste the key into merrymen → Settings → AI provider → <b>Merrymen AI</b>.</p>
+  </div>
+<script>
+  const out = document.getElementById("out");
+  const btn = document.getElementById("go");
+  const show = (html) => { out.innerHTML = html; };
+
+  btn.onclick = async () => {
+    if (!window.ethereum) return show('<p class="err">No wallet found — open this in a wallet browser or install MetaMask.</p>');
+    btn.disabled = true;
+    try {
+      const [addr] = await window.ethereum.request({ method: "eth_requestAccounts" });
+      const day = new Date().toISOString().slice(0, 10);
+      // MUST match server claimMessage()
+      const message = `Merrymen AI — prove you hold $MERRYMEN\nAddress: ${addr}\nDate (UTC): ${day}`;
+      show('<p>Sign the message in your wallet…</p>');
+      const signature = await window.ethereum.request({ method: "personal_sign", params: [message, addr] });
+      show('<p>Checking your holdings…</p>');
+      const r = await fetch("/claim", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ address: addr, signature }),
+      });
+      const j = await r.json();
+      if (!r.ok) return show('<p class="err">' + (j.error || "couldn't issue a key") + "</p>");
+      show('<p class="ok">✓ You\'re in — key valid ' + j.expiresInDays + ' days. Copy it:</p><div class="token">' + j.token + "</div>");
+    } catch (e) {
+      show('<p class="err">' + (e && e.message ? e.message : "cancelled") + "</p>");
+    } finally {
+      btn.disabled = false;
+    }
+  };
+</script>
+</body>
+</html>

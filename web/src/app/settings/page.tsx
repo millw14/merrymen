@@ -254,6 +254,7 @@ export default function SettingsPage() {
                 {providers.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.label}
+                    {p.holder ? " · 🏹 holders" : ""}
                     {p.free ? " · free" : ""}
                     {p.vision ? " · vision" : ""}
                     {p.needsKey === false ? " · local" : ""}

@@ -30,6 +30,8 @@ export interface LlmProviderInfo {
   free?: boolean;
   /** false = no API key required (local runtimes like Ollama). */
   needsKey?: boolean;
+  /** Gated to verified $MERRYMEN holders (the Merrymen AI gateway). Surfaced as a badge. */
+  holder?: boolean;
   /** One-line pitch shown under the picker. */
   blurb: string;
 }
@@ -39,6 +41,22 @@ export interface LlmProviderInfo {
  * then the big names, then the aggregators, then local, then custom last.
  */
 export const LLM_PROVIDERS: LlmProviderInfo[] = [
+  {
+    // The holder perk: a merryman-run gateway (gateway/) proxies to a fast model
+    // behind the scenes. Holders claim a token (prove they hold $MERRYMEN by
+    // signing) and paste it here — no third-party API key, no signup. The client
+    // never sees the upstream key; the gateway checks holdings + rate-limits.
+    // baseUrl points at YOUR deployed gateway (see gateway/README.md).
+    id: "merrymen",
+    label: "Merrymen AI",
+    transport: "openai",
+    baseUrl: "https://ai.merrymen.dev/v1",
+    defaultModel: "merrymen-fast", // cosmetic — the gateway picks the real model
+    keyUrl: "https://ai.merrymen.dev/claim",
+    vision: false,
+    holder: true,
+    blurb: "For verified $MERRYMEN holders — no API key or signup. Claim a token by signing with your holder wallet, paste it, done.",
+  },
   {
     id: "groq",
     label: "Groq",

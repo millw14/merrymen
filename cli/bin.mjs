@@ -382,6 +382,7 @@ async function onboard() {
   // plain ESM and can't import the TS core. keyField routes the key to the field
   // the worker reads: groq/anthropic keep their classic fields, the rest use llmApiKey.
   const LLM_PROVIDERS = [
+    { id: "merrymen", label: "Merrymen AI", keyField: "llmApiKey", modelField: "llmProviderModel", def: "merrymen-fast", key: "ai.merrymen.dev/claim", holder: true, needsKey: true },
     { id: "groq", label: "Groq", keyField: "groqApiKey", modelField: "groqModel", def: "llama-3.3-70b-versatile", key: "console.groq.com/keys", free: true, needsKey: true },
     { id: "openai", label: "OpenAI", keyField: "llmApiKey", modelField: "llmProviderModel", def: "gpt-4o-mini", key: "platform.openai.com/api-keys", needsKey: true },
     { id: "anthropic", label: "Anthropic (Claude)", keyField: "anthropicApiKey", modelField: "llmModel", def: "claude-opus-4-8", key: "console.anthropic.com/settings/keys", needsKey: true },
@@ -400,7 +401,7 @@ async function onboard() {
   console.log(dim("  Pick who powers plain-English chat + the AI strategist. Free: Groq, Google, Cerebras. Local (no key): Ollama."));
   LLM_PROVIDERS.forEach((prov, i) =>
     console.log(
-      `  ${i + 1}. ${prov.label}${prov.free ? green(" free") : ""}${prov.needsKey === false ? dim(" · local") : ""}${prov.id === (current.llmProvider ?? "groq") ? green(" ← current") : ""}`,
+      `  ${i + 1}. ${prov.label}${prov.holder ? green(" 🏹 holders") : ""}${prov.free ? green(" free") : ""}${prov.needsKey === false ? dim(" · local") : ""}${prov.id === (current.llmProvider ?? "groq") ? green(" ← current") : ""}`,
     ),
   );
   const brainPick = (await p.ask(`  pick 1-${LLM_PROVIDERS.length} [blank keeps current]: `)).trim();
