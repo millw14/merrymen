@@ -1,0 +1,55 @@
+# electron-builder — produces the installers.
+#   npm run dist:win   → dist/merrymen-Setup-<v>.exe   (NSIS, Windows)
+#   npm run dist:mac   → dist/merrymen-<v>.dmg          (must run ON a Mac)
+#   npm run dist:linux → dist/merrymen-<v>.AppImage
+appId: dev.merrymen.desktop
+productName: merrymen
+copyright: merrymen
+
+# The whole point: bundle Node + merrymen + its deps so nothing is fetched at
+# runtime. asar is OFF because Next/tsx read many files from disk and don't run
+# cleanly from inside an asar archive (optimize later with asarUnpack if wanted).
+asar: false
+
+directories:
+  output: dist
+  buildResources: build
+
+# Ship the app + everything under node_modules (merrymen, next, tsx, viem, …).
+# The prebuilt dashboard (merrymen/web/.next) and the worker source ride along.
+files:
+  - main.js
+  - loading.html
+  - "node_modules/**/*"
+  - "!node_modules/**/{CHANGELOG.md,README.md,readme.md,*.map,*.ts.map}"
+  - "!node_modules/merrymen/web/.next/cache/**"
+
+win:
+  target:
+    - nsis
+  icon: build/icon.ico
+  # signing (recommended — unsigned .exe shows a SmartScreen warning):
+  # set env CSC_LINK (path to .pfx) + CSC_KEY_PASSWORD, then electron-builder signs.
+
+nsis:
+  oneClick: true # true = single-click install; false = choose-folder wizard
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
+mac:
+  target:
+    - dmg
+  category: public.app-category.finance
+  icon: build/icon.icns
+  # notarization (required for Gatekeeper — unsigned .dmg is blocked on modern macOS):
+  # sign with a Developer ID cert (CSC_LINK/CSC_KEY_PASSWORD) and notarize with
+  # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID env vars.
+  hardenedRuntime: true
+
+linux:
+  target:
+    - AppImage
+  category: Finance
+  icon: build/icon.png
