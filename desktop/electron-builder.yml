@@ -24,10 +24,12 @@ files:
   - "!node_modules/**/{CHANGELOG.md,README.md,readme.md,*.map,*.ts.map}"
   - "!node_modules/merrymen/web/.next/cache/**"
 
+# Icons: a single build/icon.png (1024×1024) — electron-builder auto-generates
+# the .ico (Windows) and .icns (macOS) from it, so no per-platform icon needed.
+
 win:
   target:
     - nsis
-  icon: build/icon.ico
   # signing (recommended — unsigned .exe shows a SmartScreen warning):
   # set env CSC_LINK (path to .pfx) + CSC_KEY_PASSWORD, then electron-builder signs.
 
@@ -42,7 +44,6 @@ mac:
   target:
     - dmg
   category: public.app-category.finance
-  icon: build/icon.icns
   # notarization (required for Gatekeeper — unsigned .dmg is blocked on modern macOS):
   # sign with a Developer ID cert (CSC_LINK/CSC_KEY_PASSWORD) and notarize with
   # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID env vars.
@@ -52,4 +53,3 @@ linux:
   target:
     - AppImage
   category: Finance
-  icon: build/icon.png
