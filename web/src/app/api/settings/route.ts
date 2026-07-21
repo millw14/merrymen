@@ -274,6 +274,15 @@ export async function PUT(req: Request) {
       setOrClear("llmModel", v.trim());
     else errors.push("llmModel: must be a model id like claude-opus-4-8");
   }
+  // Groq model — the settings-page model field writes this when Groq is the
+  // selected provider, so it must be persisted here (else the change is dropped).
+  if ("groqModel" in body) {
+    const v = body.groqModel;
+    if (v === "" || v === null || v === undefined) setOrClear("groqModel", undefined);
+    else if (typeof v === "string" && /^[a-z0-9.-]{3,64}$/.test(v.trim()))
+      setOrClear("groqModel", v.trim());
+    else errors.push("groqModel: must be a model id like llama-3.3-70b-versatile");
+  }
   // AI provider selection — an id from the catalog (or "custom"), blank = legacy auto.
   if ("llmProvider" in body) {
     const v = body.llmProvider;

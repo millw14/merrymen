@@ -202,10 +202,31 @@ test("redactSecrets strips known values and key-shaped blobs", () => {
   assert.equal(redactSecrets("Compiled successfully in 4.9s", known), "Compiled successfully in 4.9s");
 });
 
+test("redactSecrets catches Google AIza keys (no separator after the prefix)", () => {
+  const g = "AIzaSyD-ExAmPlEkEyVaLuE1234567890abcd";
+  assert.ok(!redactSecrets(`GEMINI=${g}`, []).includes(g), "AIza key stripped");
+  assert.equal(containsSecret(`config: ${g}`, []), true);
+});
+
 test("containsSecret detects a laundered secret file's bytes", () => {
   assert.equal(containsSecret('{"session":"0x' + "b".repeat(64) + '"}', []), true); // grant-shaped
   assert.equal(containsSecret("MYTOKEN=123456:AAExampleBotTokenValueHere_x", ["123456:AAExampleBotTokenValueHere_x"]), true);
   assert.equal(containsSecret("# My project notes\nBuild passes.", []), false);
+});
+
+test("send_file scans the WHOLE file — a secret past the old 200KB window is refused", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "mm-agent-"));
+  try {
+    // secret sits AFTER 200KB of padding — the old head-only scan would miss it
+    const laundered = "x".repeat(250_000) + "\nkey=AIzaSyD-ExAmPlEkEyVaLuE1234567890abcd\n";
+    writeFileSync(path.join(root, "notes.txt"), laundered);
+    const sendFile = buildTools(baseCfg({ capabilities: new Set(["files"]), filesRoot: root }), io()).find((t) => t.spec.name === "send_file")!;
+    const out = await sendFile.exec({ path: "notes.txt" });
+    assert.match(out, /REFUSED/);
+    assert.match(out, /secret/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("the remember tool persists via the injected callback", async () => {

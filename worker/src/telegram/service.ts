@@ -172,6 +172,10 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // own progress; returns immediately so the poll (and /agent stop) keep flowing.
     // Every gate is checked here, so both entry points are equally locked down.
     const startAgent = async (task: string): Promise<void> => {
+      if (!task.trim()) {
+        await sendMessage({ token }, msg.chatId, "what would you like me to do? Describe the task, e.g. “clone github.com/x/y, install, build, and tell me what breaks”.");
+        return;
+      }
       if (!cfg.telegramPcControlEnabled || !cfg.telegramAgentEnabled) {
         await sendMessage({ token }, msg.chatId, "🤖 that's a multi-step task — turn on “remote control” + “agent mode” in the dashboard (settings) and I'll do it hands-on. For now I can answer questions and run single commands.");
         return;

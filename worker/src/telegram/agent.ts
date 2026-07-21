@@ -25,7 +25,7 @@
  *    the grant caps are enforced on-chain regardless.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { llmAgentTurn, type AgentMsg, type LlmCreds, type ToolSpec } from "../llm";
@@ -118,7 +118,9 @@ export function shellTouchesSecrets(cmd: string): boolean {
 /** Key/credential shapes to redact even when we don't know the exact value. */
 const SECRET_SHAPES: RegExp[] = [
   /0x[0-9a-fA-F]{64}/g, // 32-byte private keys
-  /\b(sk|gsk|xai|pk|rk|npm|ghp|glpat|AIza)[-_][A-Za-z0-9_-]{16,}/g, // provider/API key prefixes
+  // provider/API key prefixes. Most use a separator (sk-, gsk_, ghp_…); Google's
+  // AIza keys are AIzaSy… with NO separator, so it gets its own branch (else dead).
+  /\b(?:(?:sk|gsk|xai|pk|rk|npm|ghp|glpat)[-_]|AIza)[A-Za-z0-9_-]{16,}/g,
   /\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, // JWTs
   /\b[0-9]{6,}:[A-Za-z0-9_-]{30,}/g, // Telegram bot tokens (id:hash)
 ];
@@ -166,6 +168,7 @@ export function agentShellVerdict(
 
 const FILE_READ_CAP = 6000; // chars of a file the model may read per call
 const SHELL_TIMEOUT_MS = 180_000; // installs and builds take minutes
+const SEND_SCAN_CAP = 8_000_000; // 8MB: largest file we'll fully scan-for-secrets before sending
 
 export interface AgentConfig {
   capabilities: Set<string>;
@@ -310,13 +313,17 @@ export function buildTools(cfg: AgentConfig, io: AgentIo): ToolImpl[] {
           const res = resolveInRoot(cfg.filesRoot, rel);
           if (!res.ok) return `REFUSED: ${res.reason}`;
           // Content check — defeats the "copy a secret into the root under a clean
-          // name, then send it" laundering path. Refuse to ship a file whose bytes
-          // carry a known secret value or a key-shaped blob.
+          // name, then send it" laundering path. Scan the WHOLE file (a secret can
+          // sit anywhere, not just the first N KB); refuse to send a file too large
+          // to scan in full rather than shipping it after a partial check.
           try {
-            const head = readFileSync(res.abs, "utf8").slice(0, 200_000);
-            if (containsSecret(head, cfg.secrets)) return "REFUSED: that file contains something secret-shaped (a key/token) — I won't send it.";
+            if (statSync(res.abs).size > SEND_SCAN_CAP) {
+              return "REFUSED: that file is too large for me to scan for secrets before sending — share a smaller piece.";
+            }
+            const content = readFileSync(res.abs, "utf8");
+            if (containsSecret(content, cfg.secrets)) return "REFUSED: that file contains something secret-shaped (a key/token) — I won't send it.";
           } catch {
-            /* binary/unreadable — no text secret to leak; allow */
+            /* stat/read failed (gone/permission) — the sendDocument below will error cleanly */
           }
           const sent = await sendDocument(io.opts, io.chatId, res.abs, `📎 ${path.basename(res.abs)}`);
           io.note("warn", `Telegram agent: sent file ${path.basename(res.abs)}`);
@@ -371,7 +378,9 @@ export function buildTools(cfg: AgentConfig, io: AgentIo): ToolImpl[] {
             ],
           });
           const t = resp.content.find((b) => b.type === "text");
-          return t && t.type === "text" ? t.text.trim() : "(no description)";
+          // The screen may show a secret (an open .env, a key echoed in a terminal);
+          // redact the transcription like every other tool's output.
+          return redactSecrets(t && t.type === "text" ? t.text.trim() : "(no description)", cfg.secrets);
         } catch (e) {
           return `error: ${e instanceof Error ? e.message : String(e)}`;
         }
