@@ -90,7 +90,8 @@ export default function Terms() {
 
         <h2>8 · Contact</h2>
         <p>
-          Questions or issues? Open an issue on{" "}
+          Questions or issues? Email{" "}
+          <a className="link" href="mailto:support@merrymen.dev">support@merrymen.dev</a> or open an issue on{" "}
           <a className="link" href="https://github.com/millw14/merrymen" target="_blank" rel="noreferrer">
             GitHub
           </a>

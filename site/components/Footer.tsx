@@ -5,6 +5,7 @@ import { TokenCA } from "./TokenCA";
 const GITHUB = "https://github.com/millw14/merrymen";
 const NPM = "https://www.npmjs.com/package/merrymen";
 const X_URL = "https://x.com/MerrymenAI";
+const SUPPORT = "support@merrymen.dev";
 
 export function Footer() {
   return (
@@ -33,6 +34,7 @@ export function Footer() {
             <Link href="/docs#wallet">Create a wallet</Link>
             <Link href="/docs#telegram">Set up Telegram</Link>
             <Link href="/docs#pc-control">PC control</Link>
+            <a href={`mailto:${SUPPORT}`}>Support</a>
           </div>
 
           <div className="foot-col">
@@ -51,7 +53,9 @@ export function Footer() {
 
         <div className="foot-bottom">
           <span>© {new Date().getFullYear()} merrymen · MIT-licensed, open source</span>
-          <span>Not financial advice. Trade at your own risk.</span>
+          <span>
+            Support: <a href={`mailto:${SUPPORT}`}>{SUPPORT}</a> · Not financial advice. Trade at your own risk.
+          </span>
         </div>
       </div>
     </footer>

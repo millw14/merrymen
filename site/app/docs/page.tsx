@@ -343,6 +343,8 @@ merrymen kill       # kill switch — destroys the grant`}
         <p>Only allowlisted chats are obeyed. Send <code className="inline">/link &lt;code&gt;</code> with the code from settings to claim ownership.</p>
         <h3>A PC command is refused</h3>
         <p>Enable <strong>remote control</strong> and the specific capability in settings. Shell/apps also need the exact command/app on their allowlist; <code className="inline">/pc</code> shows what&apos;s on.</p>
+        <h3>Still stuck?</h3>
+        <p>Email <a className="link" href="mailto:support@merrymen.dev">support@merrymen.dev</a> or open an issue on <a className="link" href="https://github.com/millw14/merrymen" target="_blank" rel="noreferrer">GitHub</a> — include your OS and what <code className="inline">merrymen doctor</code> prints.</p>
 
         {/* ── faq ── */}
         <h2 id="faq">FAQ</h2>

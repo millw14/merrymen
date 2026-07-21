@@ -69,7 +69,8 @@ export default function Privacy() {
 
         <h2>6 · Contact</h2>
         <p>
-          Questions? Open an issue on{" "}
+          Questions? Email{" "}
+          <a className="link" href="mailto:support@merrymen.dev">support@merrymen.dev</a> or open an issue on{" "}
           <a className="link" href="https://github.com/millw14/merrymen" target="_blank" rel="noreferrer">
             GitHub
           </a>
