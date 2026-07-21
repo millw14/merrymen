@@ -29,17 +29,27 @@ jobs:
 
       # Root install runs the `prepare` hook, which builds the dashboard (web/.next).
       - name: Install root deps + build dashboard
+        shell: bash
         run: npm install
 
-      # Pulls electron/electron-builder + the local merrymen (file:..) with the
-      # prebuilt dashboard, worker source, and all runtime deps.
+      # Pack merrymen into a tarball (with the prebuilt dashboard + worker) so the
+      # desktop app installs a REAL COPY of it — not a `file:` symlink, which a
+      # fresh CI npm may create and which electron-builder (asar off) chokes on.
+      - name: Pack merrymen (symlink-free copy)
+        shell: bash
+        run: npm pack
+
       - name: Install desktop deps
+        shell: bash
         working-directory: desktop
-        run: npm install
+        run: |
+          npm install                      # electron + electron-builder + deps
+          npm install ../merrymen-*.tgz    # replace file:.. with the packed copy
 
       - name: Build the installer for this OS
+        shell: bash
         working-directory: desktop
-        run: npm run dist
+        run: npx --no-install electron-builder --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # No signing certs → skip auto-discovery so the mac build doesn't fail
