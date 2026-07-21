@@ -97,6 +97,35 @@ function tradeLine(t: TradeRowLite, explorer: string | null): string {
   return `⚠️ a ${esc(t.kind)} of ${t.amount_usdg.toFixed(2)} USDG didn't go through${why} (nothing moved)`;
 }
 
+interface TradeAgg {
+  status: string;
+  c: number;
+  s: number;
+}
+
+/** Pretty a period like 5/15/60/1440 minutes → "5m" / "1h" / "24h". */
+function periodLabel(min: number): string {
+  if (min % 1440 === 0) return `${min / 1440}d`;
+  if (min % 60 === 0) return `${min / 60}h`;
+  return `${min}m`;
+}
+
+/**
+ * Quiet mode: one line summarising the trades since the last flush, instead of a
+ * ping per fill. Pure + exported for tests. Only non-empty status buckets show.
+ */
+export function tradeDigestLine(rows: TradeAgg[], periodMin: number): string {
+  const by: Record<string, TradeAgg> = {};
+  for (const r of rows) by[r.status] = r;
+  const parts: string[] = [];
+  if (by.landed) parts.push(`🏹 ${by.landed.c}× landed (${by.landed.s.toFixed(2)} USDG)`);
+  if (by.paper) parts.push(`📜 ${by.paper.c}× paper (${by.paper.s.toFixed(2)} USDG)`);
+  if (by.rejected) parts.push(`🛡 ${by.rejected.c}× turned back`);
+  if (by.reverted) parts.push(`⚠️ ${by.reverted.c}× didn't go through`);
+  const label = periodLabel(periodMin);
+  return `📊 <b>last ${label}</b> — ${parts.join(" · ") || "quiet"}\n<i>you're on a ${label} summary; /status or /trades for detail.</i>`;
+}
+
 export interface NotifierHandle {
   stop(): void;
   /** Called from the tick with fresh feed prices (symbol → {price8, stale}). */
@@ -119,14 +148,16 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
     // ── trade pings ─────────────────────────────────────────────────────────
     const chainId = deps.getChainId();
     const explorer = chainId != null ? explorerFor(chainId) : null;
+    const periodMin = cfg.telegramNotifyEveryMin;
     const db = openRO();
     if (db) {
       try {
         if (state.lastNotifiedTradeId < 0) {
           // First run: start at the current high-water so history isn't replayed.
           const max = db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM trades").get() as { m: number } | undefined;
-          deps.stateRef.set({ ...deps.stateRef.get(), lastNotifiedTradeId: max?.m ?? 0 });
-        } else {
+          deps.stateRef.set({ ...deps.stateRef.get(), lastNotifiedTradeId: max?.m ?? 0, lastTradeDigestAt: now() });
+        } else if (periodMin <= 0) {
+          // Immediate: one message per trade row.
           const rows = db
             .prepare(
               "SELECT id, kind, amount_usdg, status, reject_rule, tx_hash FROM trades WHERE id > ? ORDER BY id ASC LIMIT 10",
@@ -135,6 +166,22 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
           for (const t of rows) {
             await sendMessage({ token }, chatId, tradeLine(t, explorer));
             deps.stateRef.set({ ...deps.stateRef.get(), lastNotifiedTradeId: t.id });
+          }
+        } else {
+          // Quiet mode: batch trade pings into ONE summary every periodMin minutes.
+          const st = deps.stateRef.get();
+          if (now() - st.lastTradeDigestAt >= periodMin * 60) {
+            const agg = db
+              .prepare("SELECT status, COUNT(*) AS c, COALESCE(SUM(amount_usdg), 0) AS s FROM trades WHERE id > ? GROUP BY status")
+              .all(st.lastNotifiedTradeId) as unknown as TradeAgg[];
+            const maxRow = db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM trades").get() as { m: number } | undefined;
+            const total = agg.reduce((n, r) => n + r.c, 0);
+            if (total > 0) await sendMessage({ token }, chatId, tradeDigestLine(agg, periodMin));
+            deps.stateRef.set({
+              ...deps.stateRef.get(),
+              lastNotifiedTradeId: Math.max(st.lastNotifiedTradeId, maxRow?.m ?? st.lastNotifiedTradeId),
+              lastTradeDigestAt: now(),
+            });
           }
         }
       } catch {

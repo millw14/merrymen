@@ -10,6 +10,7 @@ const base: TelegramState = {
   linkedAt: null,
   messageCount: 0,
   lastNotifiedTradeId: -1,
+  lastTradeDigestAt: 0,
   firedAlerts: {},
   lastDigestDate: "",
   priceAlerts: [],

@@ -55,6 +55,8 @@ export interface TelegramState {
   messageCount: number;
   /** Highest trades.id already pushed to the owner chat. -1 = not initialized. */
   lastNotifiedTradeId: number;
+  /** Unix seconds of the last batched trade summary (quiet mode). */
+  lastTradeDigestAt: number;
   /** Condition-episode dedupe: key → unix seconds last fired. */
   firedAlerts: Record<string, number>;
   /** YYYY-MM-DD of the last daily digest sent. */
@@ -74,6 +76,7 @@ const DEFAULT: TelegramState = {
   linkedAt: null,
   messageCount: 0,
   lastNotifiedTradeId: -1,
+  lastTradeDigestAt: 0,
   firedAlerts: {},
   lastDigestDate: "",
   priceAlerts: [],
@@ -94,6 +97,7 @@ export function loadTelegramState(): TelegramState {
       linkedAt: typeof s.linkedAt === "number" ? s.linkedAt : null,
       messageCount: typeof s.messageCount === "number" ? s.messageCount : 0,
       lastNotifiedTradeId: typeof s.lastNotifiedTradeId === "number" ? s.lastNotifiedTradeId : -1,
+      lastTradeDigestAt: typeof s.lastTradeDigestAt === "number" ? s.lastTradeDigestAt : 0,
       firedAlerts: s.firedAlerts && typeof s.firedAlerts === "object" ? (s.firedAlerts as Record<string, number>) : {},
       lastDigestDate: typeof s.lastDigestDate === "string" ? s.lastDigestDate : "",
       priceAlerts: Array.isArray(s.priceAlerts)

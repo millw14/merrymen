@@ -122,6 +122,10 @@ export interface MerrymenSettings {
   telegramTransferDailyUsdg?: number;
   /** Proactive pings to the owner chat: trade results, warnings, price alerts, daily report. */
   telegramNotifyEnabled?: boolean;
+  /** How often to send routine trade pings. 0 = one message per trade (default);
+   * >0 = batch them into a single summary every N minutes (quiet mode). Warnings,
+   * price alerts, reminders and the daily report always come through immediately. */
+  telegramNotifyEveryMin?: number;
   /** Local hour (0-23) after which the daily campfire report is sent. */
   telegramDigestHour?: number;
 
@@ -210,6 +214,7 @@ export const SETTINGS_DEFAULTS = {
   telegramTransferEnabled: false,
   telegramTransferDailyUsdg: 100,
   telegramNotifyEnabled: true,
+  telegramNotifyEveryMin: 0,
   telegramDigestHour: 18,
   telegramPcControlEnabled: false,
   telegramCapabilities: [] as string[],

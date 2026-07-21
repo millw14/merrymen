@@ -448,6 +448,20 @@ export default function SettingsPage() {
               </span>
               <span className="field-hint">The bot messages you first: trades landing, drawdown/gas/expiry warnings, price alerts, and the daily campfire report.</span>
             </label>
+            {tgNotifyVal && (
+              <Field
+                label="trade pings — how often"
+                hint="Batch the routine trade notifications so you're not pinged every fill. Warnings, price alerts, reminders and the daily report always come through right away."
+              >
+                <select value={v("telegramNotifyEveryMin") || "0"} onChange={set("telegramNotifyEveryMin")}>
+                  <option value="0">Every trade</option>
+                  <option value="5">A summary every 5 minutes</option>
+                  <option value="15">A summary every 15 minutes</option>
+                  <option value="30">A summary every 30 minutes</option>
+                  <option value="60">A summary every hour</option>
+                </select>
+              </Field>
+            )}
             <Field label="daily report hour" hint="Local hour (0–23) after which the campfire report is sent.">
               <input
                 type="number"

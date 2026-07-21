@@ -146,6 +146,7 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   telegramMaxActionUsdg: [1, 100_000],
   telegramTransferDailyUsdg: [1, 1_000_000],
   telegramDigestHour: [0, 23],
+  telegramNotifyEveryMin: [0, 1440],
   telegramAgentMaxSteps: [1, 60],
 };
 const BOOL_FIELDS = [
