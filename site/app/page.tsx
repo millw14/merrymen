@@ -297,6 +297,22 @@ export default function Home() {
             <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>Install, create an agent, watch it trade on paper. Real money is optional and comes later. No Node yet? The one-line installer handles it.</p>
           </div>
 
+          <div data-reveal="up" style={{ maxWidth: 780, margin: "0 auto 22px", textAlign: "center" }}>
+            <span className="mag" data-magnetic>
+              <a href={`${GITHUB}/releases`} target="_blank" rel="noreferrer" className="btn btn-primary btn-lg has-box">
+                Download for Windows <span className="box"><Icon name="arrow" size={16} /></span>
+              </a>
+            </span>
+            <p className="install-note" style={{ marginTop: 12 }}>
+              <b>The one-click app</b> — double-click to install, no terminal, no Node. Same dashboard +
+              agent, with a tray icon to pause or quit.{" "}
+              <span style={{ opacity: 0.72 }}>
+                Unsigned for now, so Windows SmartScreen shows a warning → <b>More info → Run anyway</b>.
+                On macOS / Linux, use the command-line install below.
+              </span>
+            </p>
+          </div>
+
           <div style={{ maxWidth: 780, margin: "0 auto 20px" }}>
             <pre className="code">
 {`# Linux / macOS
