@@ -20,6 +20,7 @@ directories:
 files:
   - main.js
   - loading.html
+  - build/icon.png # bundled at RUNTIME too — used for the window + tray icon
   - "node_modules/**/*"
   - "!node_modules/**/{CHANGELOG.md,README.md,readme.md,*.map,*.ts.map}"
   - "!node_modules/merrymen/web/.next/cache/**"
