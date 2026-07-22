@@ -29,7 +29,7 @@ import { esc, getFileUrl, getMe, getUpdates, sendMessage, type TgMessage } from 
 import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
-import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateWhy, parseSlash } from "./interpreter";
+import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
 import { transcribeVoice } from "./voice";
 import { fmtReminders, fmtWatchers, parseWatchSpec, parseWhenSec } from "./watchers";
@@ -47,6 +47,7 @@ import {
 } from "./reads";
 import { ensureLinkCode, rotateLinkCode, type StateRef } from "./state";
 import {
+  ageDays,
   ensureSoul,
   forgetOwner,
   getBornDate,
@@ -384,7 +385,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const facts = ownerFacts();
         return [
           `🌳 <b>${esc(getName())}</b> of the merrymen`,
-          `• born ${getBornDate()} · ${rel.stage}`,
+          `• ${ageDays(now())} days old · born ${getBornDate()} · ${rel.stage}`,
           `• ${rel.daysTogether} day(s) riding with you · ${rel.messageCount} messages shared`,
           facts.length
             ? `• what I know about you:\n${facts.slice(-8).map((f) => `  ${esc(f.replace(/^- /, "· "))}`).join("\n")}`
@@ -486,15 +487,18 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       if (llm) {
         const st = stateRef.get();
         const soulBlock = soulPromptBlock(st.linkedAt, st.messageCount, now());
-        const r = await interpretWithLlm(
-          msg.text,
-          { state: `SOUL:\n${soulBlock}\n\n${readLlmState(statusCtx())}`, history: history.get(msg.chatId) },
-          llm,
-        );
+        const chatCtx = { state: `SOUL:\n${soulBlock}\n\n${readLlmState(statusCtx())}`, history: history.get(msg.chatId) };
+        const r = await interpretWithLlm(msg.text, chatCtx, llm);
         cmd = r.cmd;
         // The get-to-know-you side-channel: the model proposes a fact, the
         // sanitizer disposes (drops addresses/keys/markup, dedupes, caps).
         if (r.remember) rememberOwnerFact(r.remember, now());
+        // A conversational turn gets a warm, free-form voice — the classifier's
+        // terse `reply` is for routing, not for talking. Text out triggers nothing.
+        if (cmd.kind === "chat") {
+          const fluent = await narrateChat(msg.text, chatCtx, llm);
+          if (fluent) cmd = { kind: "chat", reply: fluent };
+        }
       } else {
         cmd = { kind: "chat", reply: "pick an AI provider and paste its key in the dashboard (Settings → AI provider) to chat in plain English — Groq, Google and Cerebras are free, or run Ollama locally. For now, try /help." };
       }

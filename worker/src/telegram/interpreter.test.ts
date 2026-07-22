@@ -1,7 +1,43 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
-import { coerceLlmCommand, parseSlash, type Command } from "./interpreter";
+import { afterEach, describe, it } from "node:test";
+import { coerceLlmCommand, narrateChat, parseSlash, type Command } from "./interpreter";
 import { executeCommand, type CommandDeps } from "./executor";
+import type { LlmCreds } from "../llm";
+
+describe("narrateChat — warm free-text voice, triggers nothing", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+  const creds: LlmCreds = { provider: "test", transport: "openai", baseUrl: "http://x", apiKey: "k", model: "m", vision: false };
+
+  it("returns the model's prose and sends the warm in-character system prompt + context", async () => {
+    let sentSystem = "";
+    let sentUser = "";
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { messages: { role: string; content: string }[] };
+      sentSystem = body.messages[0]!.content;
+      sentUser = body.messages[body.messages.length - 1]!.content;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "Aye — we're green on QQQ, friend. 🏹" } }] }) };
+    }) as never;
+
+    const out = await narrateChat(
+      "how are we doing?",
+      { state: "SOUL:\nYou are Robin, 42 days old.\nPOSITIONS: QQQ +3%", history: [{ role: "user", content: "hey" }] },
+      creds,
+    );
+    assert.equal(out, "Aye — we're green on QQQ, friend. 🏹");
+    assert.match(sentSystem, /merryman/i);
+    assert.match(sentSystem, /never say you are an ai/i); // stays in character
+    assert.match(sentUser, /42 days old/); // the soul/state context reached the model
+    assert.match(sentUser, /how are we doing\?/);
+  });
+
+  it("returns empty string on a transport error (caller falls back to the terse reply)", async () => {
+    globalThis.fetch = (async () => ({ ok: false, status: 500, text: async () => "boom" })) as never;
+    assert.equal(await narrateChat("hi", { state: "x" }, creds), "");
+  });
+});
 
 describe("parseSlash — pure slash parser", () => {
   it("parses read + control commands", () => {
