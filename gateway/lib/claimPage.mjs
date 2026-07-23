@@ -1,4 +1,8 @@
-<!doctype html>
+// The claim page, as a string so BOTH runtimes serve the exact same markup —
+// the standalone http server and the Vercel function (no file I/O / bundling
+// quirks). It signs whatever /nonce returns, so there's no template to keep in
+// sync with the server.
+export const CLAIM_HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
@@ -56,7 +60,7 @@
       });
       const j = await r.json();
       if (!r.ok) return show('<p class="err">' + (j.error || "couldn't issue a key") + "</p>");
-      show('<p class="ok">✓ You\'re in — key valid ' + j.expiresInDays + ' days. Copy it:</p><div class="token">' + j.token + "</div>");
+      show('<p class="ok">✓ You\\'re in — key valid ' + j.expiresInDays + ' days. Copy it:</p><div class="token">' + j.token + "</div>");
     } catch (e) {
       show('<p class="err">' + (e && e.message ? e.message : "cancelled") + "</p>");
     } finally {
@@ -65,4 +69,4 @@
   };
 </script>
 </body>
-</html>
+</html>`;

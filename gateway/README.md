@@ -24,7 +24,14 @@ merrymen ──Bearer token──▶ /v1/chat/completions ──your key──�
 
 Signing is **read-only proof of control** — no transaction, no private key ever leaves the holder's wallet. Fully in keeping with merrymen's non-custodial stance.
 
-## Run it
+## Two ways to run it
+
+The security logic lives once in `lib/core.mjs`; two thin runtimes wrap it:
+`server.mjs` (a long-lived process) and `api/*.js` (Vercel serverless functions).
+Point the client's domain — `https://ai.merrymen.dev` in the shipped provider
+(`packages/core/src/llm-providers.ts` → the `merrymen` entry) — at whichever you pick.
+
+### A) Persistent process (Railway / Fly / Render / VPS / Docker)
 
 ```bash
 cd gateway
@@ -34,10 +41,25 @@ npm run check             # offline self-test (token scheme + single-use nonce +
 npm start                 # listens on :8787
 ```
 
-Then host it on any always-on box (Railway, Fly, Render, a small VPS) behind HTTPS at
-the domain you point the client at — `https://ai.merrymen.dev` in the shipped provider
-(`packages/core/src/llm-providers.ts` → the `merrymen` entry). Change that `baseUrl`
-+ `keyUrl` if you use a different domain.
+A `Dockerfile` (universal) and `render.yaml` (Render Blueprint) are included for a
+connect-the-repo deploy. In-memory state is fine here (one process); set
+`KV_REST_API_URL`/`KV_REST_API_TOKEN` only if you run multiple instances.
+
+### B) Vercel serverless (the `ai.merrymen.dev` domain already points at Vercel)
+
+Serverless isolates don't share memory, so the nonce/rate-limit/balance state MUST
+live in a KV store — this is a hard requirement (the functions refuse to start
+without it). `vercel.json` maps the clean URLs (`/nonce`, `/claim`, `/v1/…`) to the
+functions in `api/`.
+
+1. Vercel → **New Project** → import `millw14/merrymen`, set **Root Directory = `gateway`**.
+2. Add a KV store: Vercel dashboard → **Storage → Upstash Redis** (or KV). It sets
+   `KV_REST_API_URL` + `KV_REST_API_TOKEN` on the project automatically.
+3. Add the three secrets as env vars: `MERRYMEN_GATEWAY_UPSTREAM_KEY`,
+   `MERRYMEN_GATEWAY_SECRET` (≥32 bytes), `MERRYMEN_GATEWAY_RPC` (+ optional
+   `MERRYMEN_GATEWAY_DOMAIN=ai.merrymen.dev`).
+4. **Deploy.** Then add the custom domain `ai.merrymen.dev` (the DNS is already on
+   Vercel) and confirm: `curl https://ai.merrymen.dev/healthz` → `{"ok":true}`.
 
 ### Endpoints
 - `GET /` or `/claim` — the claim page (holder connects wallet, signs, gets a token).
@@ -55,9 +77,9 @@ the domain you point the client at — `https://ai.merrymen.dev` in the shipped 
 ## Costs & limits (read before you flip it on)
 
 You are paying for holders' inference. Protect yourself:
-- Keep `MERRYMEN_GATEWAY_MIN_TOKENS` meaningful, and `RATE_PER_MIN` / `MAX_COMPLETION_TOKENS` conservative (edit in `server.mjs`).
+- Keep `MERRYMEN_GATEWAY_MIN_TOKENS` meaningful, and `RATE_PER_MIN` / `MAX_COMPLETION_TOKENS` conservative (defaults in `lib/core.mjs`).
 - Groq's **free tier is per-key rate-limited** — a shared free key will throttle fast under many holders. Use a paid plan, or expect holders to queue.
-- The in-memory rate limiter is **per instance**. If you run multiple instances, back it (and the balance cache) with Redis/Upstash — otherwise limits are per-replica.
+- State (nonces, rate limits, balance cache) lives in `lib/store.mjs`: in-memory for a single process, or a shared KV (Upstash/Vercel KV) when `KV_REST_API_URL`/`KV_REST_API_TOKEN` are set. On serverless the KV is **required** (isolates don't share memory), so rate limits and single-use nonces hold across invocations.
 - Rotating `MERRYMEN_GATEWAY_SECRET` invalidates every issued token (your kill-switch).
 
 ## Honesty note

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/*.js": { "maxDuration": 60 }
+  },
+  "rewrites": [
+    { "source": "/", "destination": "/api/claim" },
+    { "source": "/claim", "destination": "/api/claim" },
+    { "source": "/nonce", "destination": "/api/nonce" },
+    { "source": "/healthz", "destination": "/api/health" },
+    { "source": "/v1/chat/completions", "destination": "/api/chat" },
+    { "source": "/chat/completions", "destination": "/api/chat" }
+  ]
+}

@@ -1,6 +1,6 @@
 {
   "name": "merrymen-ai-gateway",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Merrymen AI — a holder-gated proxy that fronts a fast LLM for verified $MERRYMEN holders. Holds the upstream key server-side; issues signed tokens after an on-chain balance check.",
   "type": "module",

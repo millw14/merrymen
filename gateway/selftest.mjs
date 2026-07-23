@@ -1,108 +1,69 @@
 /**
- * Offline self-test for the gateway's security-critical pure logic: HMAC token
- * issue/verify (tamper + expiry + wrong-secret rejection) and claim-message
- * parity with claim.html. No network, no keys. Run: node selftest.mjs
- * (server.mjs guards on env, so we import its pieces under a test env).
+ * Offline self-test for the gateway's security-critical pure logic, exercising the
+ * REAL shared core (lib/core.mjs) — HMAC token issue/verify (tamper + expiry +
+ * wrong-secret + garbage), single-use domain-bound nonces (authenticity + binding
+ * + expiry + tamper), and atomic replay protection via the store. No network, no
+ * real keys. Run: node selftest.mjs
  */
 process.env.MERRYMEN_GATEWAY_UPSTREAM_KEY ||= "test-upstream-key";
 process.env.MERRYMEN_GATEWAY_SECRET ||= "test-secret-at-least-32-bytes-long-for-hmac!!";
 process.env.MERRYMEN_GATEWAY_RPC ||= "https://example.invalid";
 
 import assert from "node:assert/strict";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createGateway } from "./lib/core.mjs";
+import { createStore } from "./lib/store.mjs";
 
-// Re-derive the token functions from the same SECRET the server uses, so this
-// test pins the exact scheme (server.mjs keeps them private; this mirrors them).
 const SECRET = process.env.MERRYMEN_GATEWAY_SECRET;
-const sign = (p) => createHmac("sha256", SECRET).update(p).digest("base64url");
-const issueToken = (addr, ttl = 3600) => {
-  const exp = Math.floor(Date.now() / 1000) + ttl;
-  const payload = Buffer.from(JSON.stringify({ a: addr.toLowerCase(), exp })).toString("base64url");
-  return `mmk_${payload}.${sign(payload)}`;
+const baseCfg = {
+  upstreamUrl: "https://example.invalid",
+  upstreamKey: "x",
+  model: "test-model",
+  domain: "merrymen.dev",
+  minTokens: 10000n,
+  tokenAddress: "0x0000000000000000000000000000000000000000",
+  publicClient: { readContract: async () => 0n }, // isHolder isn't exercised here
 };
-const verifyToken = (token, secret = SECRET) => {
-  const s = (p) => createHmac("sha256", secret).update(p).digest("base64url");
-  if (typeof token !== "string" || !token.startsWith("mmk_")) return null;
-  const [payload, mac] = token.slice(4).split(".");
-  if (!payload || !mac) return null;
-  const a = Buffer.from(mac);
-  const b = Buffer.from(s(payload));
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
-  try {
-    const { a: addr, exp } = JSON.parse(Buffer.from(payload, "base64url").toString());
-    if (!addr || typeof exp !== "number" || exp * 1000 < Date.now()) return null;
-    return addr;
-  } catch {
-    return null;
-  }
-};
+const store = createStore(); // in-memory (no KV env in the test)
+const gw = createGateway({ ...baseCfg, secret: SECRET, store });
+const gwOther = createGateway({ ...baseCfg, secret: "a-totally-different-secret-value-32bytes!!", store });
+const { sign, issueToken, verifyToken, issueNonce, verifyNonceAuthentic, claimMessage } = gw._tokens;
 
 const ADDR = "0x1111111111111111111111111111111111111111";
+const OTHER = "0x2222222222222222222222222222222222222222";
 
-// round-trip
+// ── HMAC access tokens ───────────────────────────────────────────────────────
 assert.equal(verifyToken(issueToken(ADDR)), ADDR.toLowerCase(), "valid token verifies to its address");
 
-// tampered payload rejected
 const t = issueToken(ADDR);
-const [p, mac] = t.slice(4).split(".");
-const evil = Buffer.from(JSON.stringify({ a: "0x2222222222222222222222222222222222222222", exp: 9e9 })).toString("base64url");
-assert.equal(verifyToken(`mmk_${evil}.${mac}`), null, "swapping the payload but keeping the mac is rejected");
+const mac = t.slice(4).split(".")[1];
+const evilPayload = Buffer.from(JSON.stringify({ a: OTHER, exp: 9e9 })).toString("base64url");
+assert.equal(verifyToken(`mmk_${evilPayload}.${mac}`), null, "swapping the payload but keeping the mac is rejected");
 
-// wrong secret rejected
-assert.equal(verifyToken(t, "a-totally-different-secret-value-here"), null, "a token signed with a different secret is rejected");
+const expiredPayload = Buffer.from(JSON.stringify({ a: ADDR.toLowerCase(), exp: Math.floor(Date.now() / 1000) - 10 })).toString("base64url");
+assert.equal(verifyToken(`mmk_${expiredPayload}.${sign(expiredPayload)}`), null, "an expired token is rejected");
 
-// expired rejected
-assert.equal(verifyToken(issueToken(ADDR, -10)), null, "an expired token is rejected");
+assert.equal(gwOther._tokens.verifyToken(t), null, "a token signed with a different secret is rejected");
 
-// garbage rejected
 for (const bad of ["", "hello", "mmk_", "mmk_a.b", "Bearer x"]) assert.equal(verifyToken(bad), null, `garbage rejected: ${bad}`);
 
-// ── single-use claim nonces (mirrors server.mjs issueNonce/verifyNonce) ──────
-const NONCE_TTL_SEC = 5 * 60;
-const issueNonce = (addr, ttl = NONCE_TTL_SEC) => {
-  const exp = Math.floor(Date.now() / 1000) + ttl;
-  const payload = Buffer.from(JSON.stringify({ a: addr.toLowerCase(), exp, r: "test-random" })).toString("base64url");
-  return `${payload}.${sign(payload)}`;
-};
-const usedNonces = new Set();
-const verifyNonce = (nonceToken, addr) => {
-  if (typeof nonceToken !== "string" || !nonceToken.includes(".")) return null;
-  const [payload, mac] = nonceToken.split(".");
-  if (!payload || !mac) return null;
-  const a = Buffer.from(mac);
-  const b = Buffer.from(sign(payload));
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
-  let d;
-  try {
-    d = JSON.parse(Buffer.from(payload, "base64url").toString());
-  } catch {
-    return null;
-  }
-  if (!d.a || typeof d.exp !== "number" || d.exp * 1000 < Date.now()) return null;
-  if (d.a !== addr.toLowerCase()) return null;
-  if (usedNonces.has(nonceToken)) return null;
-  return d.a;
-};
-
-const OTHER = "0x2222222222222222222222222222222222222222";
+// ── single-use, domain-bound claim nonces ────────────────────────────────────
 const n = issueNonce(ADDR);
-assert.equal(verifyNonce(n, ADDR), ADDR.toLowerCase(), "a fresh nonce verifies for its own address");
-assert.equal(verifyNonce(n, OTHER), null, "a nonce is bound to its address (can't be reused for another wallet)");
-usedNonces.add(n);
-assert.equal(verifyNonce(n, ADDR), null, "a spent nonce is rejected — no signature replay");
-assert.equal(verifyNonce(issueNonce(ADDR, -10), ADDR), null, "an expired nonce is rejected");
-const evilPayload = Buffer.from(JSON.stringify({ a: ADDR.toLowerCase(), exp: 9e9, r: "x" })).toString("base64url");
-const goodMac = issueNonce(ADDR).split(".")[1];
-assert.equal(verifyNonce(`${evilPayload}.${goodMac}`, ADDR), null, "swapping the nonce payload but keeping a mac is rejected");
+assert.equal(verifyNonceAuthentic(n, ADDR), true, "a fresh nonce is authentic for its own address");
+assert.equal(verifyNonceAuthentic(n, OTHER), false, "a nonce is bound to its address (can't be reused for another wallet)");
 
-// claim message is domain- + nonce-bound (no reusable date-stamped template)
-const message = [
-  "Merrymen AI — prove you hold $MERRYMEN",
-  "Domain: merrymen.dev",
-  `Address: ${ADDR}`,
-  `Nonce: ${n}`,
-  "This signature is free, read-only, and cannot move funds or approve spending.",
-].join("\n");
-assert.ok(message.includes(`Nonce: ${n}`) && message.includes("Domain:"), "the signed message binds a fresh nonce + the domain");
+const nMac = issueNonce(ADDR).split(".")[1];
+const evilNonce = Buffer.from(JSON.stringify({ a: ADDR.toLowerCase(), exp: 9e9, r: "x" })).toString("base64url");
+assert.equal(verifyNonceAuthentic(`${evilNonce}.${nMac}`, ADDR), false, "swapping the nonce payload but keeping a mac is rejected");
 
-console.log("[gateway] selftest OK — token scheme + single-use nonce + replay protection verified");
+const expiredNonce = Buffer.from(JSON.stringify({ a: ADDR.toLowerCase(), exp: Math.floor(Date.now() / 1000) - 10, r: "x" })).toString("base64url");
+assert.equal(verifyNonceAuthentic(`${expiredNonce}.${sign(expiredNonce)}`, ADDR), false, "an expired nonce is rejected");
+
+// atomic replay protection lives in the store: first spend wins, the rest fail
+assert.equal(await store.spendNonce(n, 300), true, "first spend of a nonce succeeds");
+assert.equal(await store.spendNonce(n, 300), false, "a spent nonce cannot be spent again — no replay");
+
+// message is domain- + nonce-bound (no reusable date-stamped template)
+const message = claimMessage(ADDR, n);
+assert.ok(message.includes(`Nonce: ${n}`) && message.includes("Domain: merrymen.dev"), "the signed message binds a fresh nonce + the domain");
+
+console.log("[gateway] selftest OK — shared core: token scheme + single-use nonce + replay protection verified");

@@ -9,9 +9,9 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 
-# App source (server + the static claim page + the offline selftest).
+# App source (thin http server + shared core in lib/ + the offline selftest).
 COPY server.mjs selftest.mjs ./
-COPY public ./public
+COPY lib ./lib
 
 # Fail the image build if the security-critical logic (token scheme + single-use
 # nonce + replay protection) regresses. selftest.mjs supplies its own test env.
