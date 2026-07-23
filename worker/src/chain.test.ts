@@ -19,8 +19,18 @@ describe("/status chain line — you always know which mode the band rides", () 
   it("mainnet reads as REAL FUNDS", () => {
     assert.match(readStatus(statusCtx(4663)), /mainnet 4663 · REAL FUNDS/);
   });
-  it("testnet reads as practice", () => {
-    assert.match(readStatus(statusCtx(46630)), /testnet 46630 \(practice/);
+  it("testnet reads as practice only", () => {
+    assert.match(readStatus(statusCtx(46630)), /testnet 46630 — <b>practice only<\/b>/);
+  });
+  // People fund testnet, see 0, and think merrymen is broken. /status must say why.
+  it("testnet explains that funded balances are neither used nor shown", () => {
+    const out = readStatus({ ...statusCtx(46630), paperStartUsdg: 1000 });
+    assert.match(out, /not used and not shown/);
+    assert.match(out, /1000 USDG book/);
+    assert.match(out, /switch to mainnet/);
+  });
+  it("mainnet shows no testnet explainer", () => {
+    assert.doesNotMatch(readStatus(statusCtx(4663)), /not used and not shown/);
   });
   it("no grant → no chain line", () => {
     assert.doesNotMatch(readStatus(statusCtx(null)), /chain:/);

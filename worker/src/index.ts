@@ -954,6 +954,7 @@ async function main() {
         }
       : null,
     telegramMaxActionUsdg: cfg.telegramMaxActionUsdg,
+    paperStartUsdg: cfg.paperStartUsdg,
   });
 
   // One shared persisted-state handle — the poll service and the notifier both

@@ -150,6 +150,14 @@ export function BandSection() {
     ? lastEq?.vault_usdg ?? 0
     : status.balances ? Number(formatUnits(BigInt(status.balances.vaultUsdg), USDG_DECIMALS)) : 0;
 
+  // Testnet reality: the token registry is mainnet-only, so on-chain reads on
+  // 46630 return 0 no matter how much faucet USDG you sent. A bare "0.00" reads
+  // as lost funds — say what's actually happening instead.
+  const testnet = g.chainId === 46630;
+  const balancesUnread = testnet && !paper;
+  // The paper book only exists once the worker has written its first equity row.
+  const paperPending = paper && !lastEq;
+
   return (
     <div className={`agent-card real ${state === "active" ? "active" : state === "expired" ? "paused" : "armed"}`}>
       {status.exists && !workerAlive && (
@@ -185,18 +193,35 @@ export function BandSection() {
         </div>
       )}
 
+      {testnet && (
+        <div className="paper-note mono">
+          testnet = <b>practice</b>. Funds you send here are <b>never used and never shown</b> —
+          merrymen only knows mainnet token addresses, so a funded testnet balance reads 0. Swaps
+          only simulate. For real trades: switch to mainnet, add a bundler key in{" "}
+          <Link href="/settings">settings</Link>, and fund the smart account.
+        </div>
+      )}
+
       <div className="real-balances mono">
-        {!paper && (
+        {!paper && !balancesUnread && (
           <span>
             <b>{eth.toFixed(4)}</b> ETH
           </span>
         )}
-        <span>
-          <b>{cash.toFixed(2)}</b> {paper ? "USDG paper cash" : "USDG cash"}
-        </span>
-        <span>
-          <b>{vault.toFixed(2)}</b> USDG in vault
-        </span>
+        {balancesUnread ? (
+          <span className="dim">on-chain balances aren&apos;t read on testnet — see above</span>
+        ) : paperPending ? (
+          <span className="dim">paper book opens on the first tick</span>
+        ) : (
+          <>
+            <span>
+              <b>{cash.toFixed(2)}</b> {paper ? "USDG paper cash" : "USDG cash"}
+            </span>
+            <span>
+              <b>{vault.toFixed(2)}</b> USDG in vault
+            </span>
+          </>
+        )}
         {(() => {
           const series = (feed?.equity ?? []).map((p) => p.equity_usdg);
           if (series.length < 2) {

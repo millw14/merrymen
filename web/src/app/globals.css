@@ -343,6 +343,9 @@ button { font: inherit; cursor: pointer; }
   font-size: 13px; color: var(--text-dim);
 }
 .real-balances b { color: var(--text); font-size: 15px; }
+/* "balances aren't read on testnet" / "paper book opens on the first tick" — an
+   explanation standing in for a number, so it reads as intent, not as zero. */
+.real-balances .dim { color: var(--text-faint); font-style: italic; }
 .real-meta {
   display: flex; gap: 14px; flex-wrap: wrap;
   font-size: 10.5px; color: var(--text-faint);

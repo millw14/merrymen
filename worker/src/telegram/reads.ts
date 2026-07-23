@@ -37,6 +37,8 @@ export interface StatusContext {
   /** Paper mode: fills simulate at the live oracle price, nothing signs. */
   paper?: boolean;
   telegramMaxActionUsdg: number;
+  /** Simulated starting cash for the paper book — quoted in the testnet explainer. */
+  paperStartUsdg?: number;
 }
 
 export function readStatus(ctx: StatusContext): string {
@@ -49,11 +51,20 @@ export function readStatus(ctx: StatusContext): string {
     lines.push(`• mode: 📜 <b>paper</b> — fills simulate at live prices, nothing signs`);
   }
   if (ctx.chainId !== null) {
-    lines.push(
-      ctx.chainId === 46630
-        ? `• chain: testnet 46630 (practice — venues absent, swaps simulate)`
-        : `• chain: <b>mainnet ${ctx.chainId} · REAL FUNDS</b>`,
-    );
+    if (ctx.chainId === 46630) {
+      // Say the quiet part out loud: people fund testnet, see 0, and think it's
+      // broken. It isn't — the token registry is mainnet-only, so on-chain reads
+      // there always return 0, and practice never spends those funds anyway.
+      lines.push(`• chain: testnet 46630 — <b>practice only</b> (no real swaps)`);
+      lines.push(
+        `• ℹ️ testnet funds you send are <b>not used and not shown</b> — merrymen only knows mainnet ` +
+          `token addresses, so a funded balance reads 0 here. It paper-trades a simulated ` +
+          `${ctx.paperStartUsdg ?? 1000} USDG book at live prices. Real trades → switch to mainnet, ` +
+          `add a bundler key, fund the smart account.`,
+      );
+    } else {
+      lines.push(`• chain: <b>mainnet ${ctx.chainId} · REAL FUNDS</b>`);
+    }
   }
   if (ctx.grant) {
     lines.push(

@@ -1,6 +1,6 @@
 {
   "name": "merrymen",
-  "version": "0.16.2",
+  "version": "0.16.3",
   "description": "Trading agents you never have to trust — self-hosted, keys stay on your machine, caps enforced by the account contract on-chain. For Robinhood Chain; Telegram control; write-your-own strategies.",
   "license": "MIT",
   "homepage": "https://merrymen.dev",
