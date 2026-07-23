@@ -23,7 +23,7 @@
  */
 
 import { createServer } from "node:http";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,10 +45,13 @@ const CHAIN_ID = 4663;
 
 // tunables
 const TOKEN_TTL_SEC = 7 * 24 * 3600; // issued tokens last a week; re-claim to refresh
+const NONCE_TTL_SEC = 5 * 60; // a claim nonce must be signed + spent within 5 min
 const MAX_COMPLETION_TOKENS = 2048; // hard clamp on client-requested max_tokens
 const MAX_BODY_BYTES = 256 * 1024; // reject oversized chat payloads
-const RATE_PER_MIN = 60; // per-address requests/minute
+const RATE_PER_MIN = 60; // per-address requests/minute (also per-IP on /claim + /nonce)
 const BALANCE_TTL_MS = 10 * 60 * 1000; // re-check holdings at most this often
+const MAX_BAL_CACHE = 10_000; // bound the holder cache so /claim floods can't grow it forever
+const GATEWAY_DOMAIN = process.env.MERRYMEN_GATEWAY_DOMAIN || "merrymen.dev"; // shown in the signed message
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -58,8 +61,8 @@ for (const [k, v] of Object.entries({ MERRYMEN_GATEWAY_UPSTREAM_KEY: UPSTREAM_KE
     process.exit(1);
   }
 }
-if (SECRET.length < 24) {
-  console.error("[gateway] refusing to start: MERRYMEN_GATEWAY_SECRET is too short — use 32+ random bytes.");
+if (Buffer.byteLength(SECRET, "utf8") < 32) {
+  console.error("[gateway] refusing to start: MERRYMEN_GATEWAY_SECRET is too short — use 32+ random bytes (see .env.example).");
   process.exit(1);
 }
 
@@ -83,6 +86,11 @@ async function isHolder(addr) {
     ok = raw / 10n ** DECIMALS >= MIN_TOKENS;
   } catch (e) {
     ok = false; // fail closed — never grant access we can't verify
+  }
+  // Bound the cache: a /claim flood of fresh addresses must not grow it forever.
+  // Evict the oldest inserted entry (Map preserves insertion order) once full.
+  if (balCache.size >= MAX_BAL_CACHE && !balCache.has(key)) {
+    balCache.delete(balCache.keys().next().value);
   }
   balCache.set(key, { ok, at: Date.now() });
   return ok;
@@ -115,30 +123,97 @@ function verifyToken(token) {
   }
 }
 
-// The message the claim page asks the holder to sign. Must match claim.html.
-export function claimMessage(addr) {
-  const day = new Date().toISOString().slice(0, 10);
-  return `Merrymen AI — prove you hold $MERRYMEN\nAddress: ${addr}\nDate (UTC): ${day}`;
+// ── single-use, domain-bound claim nonces ────────────────────────────────────
+// A bare date-stamped message is phishable: any page can get you to sign it and
+// replay the signature all day. Instead the server mints a short-lived, HMAC-
+// signed nonce bound to YOUR address; the message you sign names the domain +
+// that nonce; and each nonce is spent exactly once. A stolen signature is then
+// useless — the nonce is either expired or already consumed.
+const usedNonces = new Map(); // nonceToken -> expiryMs (spent nonces, until they'd expire anyway)
+
+function issueNonce(addr) {
+  const exp = Math.floor(Date.now() / 1000) + NONCE_TTL_SEC;
+  const payload = Buffer.from(
+    JSON.stringify({ a: addr.toLowerCase(), exp, r: randomBytes(12).toString("base64url") }),
+  ).toString("base64url");
+  return `${payload}.${sign(payload)}`;
 }
 
-// ── per-address rate limit (in-memory; back with Redis for multi-instance) ───
+/** Returns the nonce's address if the token is authentic + unexpired + unspent, else null. */
+function verifyNonce(nonceToken, addr) {
+  if (typeof nonceToken !== "string" || !nonceToken.includes(".")) return null;
+  const [payload, mac] = nonceToken.split(".");
+  if (!payload || !mac) return null;
+  const a = Buffer.from(mac);
+  const b = Buffer.from(sign(payload));
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+  let decoded;
+  try {
+    decoded = JSON.parse(Buffer.from(payload, "base64url").toString());
+  } catch {
+    return null;
+  }
+  if (!decoded.a || typeof decoded.exp !== "number" || decoded.exp * 1000 < Date.now()) return null;
+  if (decoded.a !== addr.toLowerCase()) return null; // nonce was minted for a different wallet
+  if (usedNonces.has(nonceToken)) return null; // already spent (no replay)
+  return decoded.a;
+}
+
+function spendNonce(nonceToken) {
+  // Retain the spent nonce only until it would have expired on its own; after
+  // that its own `exp` rejects it, so dropping it here is safe.
+  usedNonces.set(nonceToken, Date.now() + NONCE_TTL_SEC * 1000);
+  if (usedNonces.size > 4 * MAX_BAL_CACHE) {
+    const now = Date.now();
+    for (const [k, until] of usedNonces) if (until < now) usedNonces.delete(k);
+  }
+}
+
+// The exact message a holder signs. Names the domain + the server nonce so a
+// wallet shows real context and the signature can't be replayed. claim.html signs
+// verbatim what /nonce returns, so there is no client/server template to drift.
+export function claimMessage(addr, nonceToken) {
+  return [
+    `Merrymen AI — prove you hold $MERRYMEN`,
+    `Domain: ${GATEWAY_DOMAIN}`,
+    `Address: ${addr}`,
+    `Nonce: ${nonceToken}`,
+    `This signature is free, read-only, and cannot move funds or approve spending.`,
+  ].join("\n");
+}
+
+// ── per-key rate limit (in-memory; back with Redis for multi-instance) ───────
+// Keyed by address for /v1, and by client IP for the unauthenticated /claim +
+// /nonce routes (address there is attacker-chosen, so it can't be the key).
 const buckets = new Map();
-function rateOk(addr) {
+function rateOk(key) {
   const now = Date.now();
-  const w = buckets.get(addr) || { n: 0, reset: now + 60_000 };
+  const w = buckets.get(key) || { n: 0, reset: now + 60_000 };
   if (now > w.reset) {
     w.n = 0;
     w.reset = now + 60_000;
   }
   w.n += 1;
-  buckets.set(addr, w);
+  buckets.set(key, w);
   return w.n <= RATE_PER_MIN;
+}
+
+/** Best-effort client IP: first X-Forwarded-For hop when behind a trusted proxy,
+ * else the socket peer. Spoofable behind no proxy, but it still bounds a flood. */
+function clientIp(req) {
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string" && xff.length) return xff.split(",")[0].trim();
+  return req.socket?.remoteAddress || "unknown";
 }
 
 // ── http helpers ─────────────────────────────────────────────────────────────
 function send(res, code, obj, extraHeaders = {}) {
+  // No `access-control-allow-origin`: the claim page is same-origin and the
+  // merrymen client is a server-side (Node) caller exempt from CORS. Withholding
+  // ACAO makes browsers refuse to read any gateway response cross-origin — which
+  // is what stops a phishing page from exfiltrating a freshly minted token.
   const body = typeof obj === "string" ? obj : JSON.stringify(obj);
-  res.writeHead(code, { "content-type": typeof obj === "string" ? "text/html; charset=utf-8" : "application/json", "access-control-allow-origin": "*", ...extraHeaders });
+  res.writeHead(code, { "content-type": typeof obj === "string" ? "text/html; charset=utf-8" : "application/json", ...extraHeaders });
   res.end(body);
 }
 
@@ -166,7 +241,9 @@ const server = createServer(async (req, res) => {
   const pathname = url.pathname;
 
   if (req.method === "OPTIONS") {
-    return send(res, 204, "", { "access-control-allow-methods": "POST, GET, OPTIONS", "access-control-allow-headers": "content-type, authorization" });
+    // Deny cross-origin by omitting CORS headers (see send()). Same-origin form
+    // posts from the claim page don't preflight; server-side callers ignore CORS.
+    return send(res, 204, "");
   }
 
   // health
@@ -181,8 +258,19 @@ const server = createServer(async (req, res) => {
     }
   }
 
-  // claim: verify a wallet signature + holdings, issue a token
+  // nonce: mint a short-lived, single-use challenge bound to this address. The
+  // claim page signs the returned `message` verbatim (no template to drift).
+  if (req.method === "GET" && pathname === "/nonce") {
+    if (!rateOk("claim:" + clientIp(req))) return send(res, 429, { error: "slow down — too many claim attempts" });
+    const address = (url.searchParams.get("address") || "").trim();
+    if (!isAddress(address)) return send(res, 400, { error: "valid ?address= required" });
+    const nonce = issueNonce(address);
+    return send(res, 200, { nonce, message: claimMessage(address, nonce), expiresInSec: NONCE_TTL_SEC });
+  }
+
+  // claim: verify a signature over a FRESH single-use nonce + holdings, issue a token.
   if (req.method === "POST" && pathname === "/claim") {
+    if (!rateOk("claim:" + clientIp(req))) return send(res, 429, { error: "slow down — too many claim attempts" });
     let body;
     try {
       body = JSON.parse(await readBody(req));
@@ -191,14 +279,22 @@ const server = createServer(async (req, res) => {
     }
     const address = typeof body.address === "string" ? body.address.trim() : "";
     const signature = typeof body.signature === "string" ? body.signature.trim() : "";
-    if (!isAddress(address) || !signature.startsWith("0x")) return send(res, 400, { error: "address and signature required" });
+    const nonce = typeof body.nonce === "string" ? body.nonce.trim() : "";
+    if (!isAddress(address) || !signature.startsWith("0x") || !nonce) {
+      return send(res, 400, { error: "address, signature and nonce required — GET /nonce first" });
+    }
+    // The nonce must be authentic, unexpired, bound to THIS address, and unspent.
+    if (!verifyNonce(nonce, address)) {
+      return send(res, 401, { error: "nonce invalid, expired, or already used — refresh the page and sign again" });
+    }
     let valid = false;
     try {
-      valid = await verifyMessage({ address, message: claimMessage(address), signature });
+      valid = await verifyMessage({ address, message: claimMessage(address, nonce), signature });
     } catch {
       valid = false;
     }
-    if (!valid) return send(res, 401, { error: "signature didn't verify — sign today's exact message with this wallet" });
+    if (!valid) return send(res, 401, { error: "signature didn't verify — sign the exact message shown, with this wallet" });
+    spendNonce(nonce); // one signature, one token — no replay
     if (!(await isHolder(address))) {
       return send(res, 403, { error: `this wallet doesn't hold at least ${MIN_TOKENS} $MERRYMEN — join the Circle, then claim.` });
     }
@@ -225,6 +321,14 @@ const server = createServer(async (req, res) => {
     payload.model = MODEL;
     payload.stream = false;
     if (typeof payload.max_tokens !== "number" || payload.max_tokens > MAX_COMPLETION_TOKENS) payload.max_tokens = MAX_COMPLETION_TOKENS;
+    // max_tokens alone doesn't bound cost: `n`/`best_of` fan out N completions per
+    // request (defeating the per-request rate limit), and newer models honor
+    // `max_completion_tokens` over the now-deprecated `max_tokens`. Pin them all.
+    payload.n = 1;
+    delete payload.best_of;
+    if (typeof payload.max_completion_tokens === "number" && payload.max_completion_tokens > MAX_COMPLETION_TOKENS) {
+      payload.max_completion_tokens = MAX_COMPLETION_TOKENS;
+    }
 
     try {
       const upstream = await fetch(UPSTREAM_URL, {
@@ -234,7 +338,7 @@ const server = createServer(async (req, res) => {
       });
       const text = await upstream.text();
       // Pass the model name back as our brand, not the upstream's, if present.
-      res.writeHead(upstream.status, { "content-type": "application/json", "access-control-allow-origin": "*" });
+      res.writeHead(upstream.status, { "content-type": "application/json" });
       res.end(text.replace(new RegExp(`"model"\\s*:\\s*"${MODEL}"`, "g"), '"model":"merrymen-fast"'));
     } catch (e) {
       return send(res, 502, { error: { message: "upstream unavailable" } });

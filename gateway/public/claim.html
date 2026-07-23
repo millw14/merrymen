@@ -39,16 +39,20 @@
     btn.disabled = true;
     try {
       const [addr] = await window.ethereum.request({ method: "eth_requestAccounts" });
-      const day = new Date().toISOString().slice(0, 10);
-      // MUST match server claimMessage()
-      const message = `Merrymen AI — prove you hold $MERRYMEN\nAddress: ${addr}\nDate (UTC): ${day}`;
+      show('<p>Getting a one-time challenge…</p>');
+      // Ask the server for a fresh, single-use nonce bound to this address, then
+      // sign the EXACT message it returns. Nothing to keep in sync with the server,
+      // and the signature can't be pre-collected or replayed.
+      const nr = await fetch("/nonce?address=" + encodeURIComponent(addr));
+      const nj = await nr.json();
+      if (!nr.ok) return show('<p class="err">' + (nj.error || "couldn't start the claim") + "</p>");
       show('<p>Sign the message in your wallet…</p>');
-      const signature = await window.ethereum.request({ method: "personal_sign", params: [message, addr] });
+      const signature = await window.ethereum.request({ method: "personal_sign", params: [nj.message, addr] });
       show('<p>Checking your holdings…</p>');
       const r = await fetch("/claim", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ address: addr, signature }),
+        body: JSON.stringify({ address: addr, signature, nonce: nj.nonce }),
       });
       const j = await r.json();
       if (!r.ok) return show('<p class="err">' + (j.error || "couldn't issue a key") + "</p>");

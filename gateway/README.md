@@ -11,14 +11,15 @@ by everyone who installs it — it would be scraped and abused within hours, blo
 rate limits, and get banned. So the client never holds the key. Instead:
 
 ```
-holder ──sign──▶ /claim ──balanceOf──▶ issues token ──▶ paste into merrymen
+holder ──GET /nonce──▶ single-use challenge ──sign──▶ /claim ──balanceOf──▶ token ──▶ paste into merrymen
 merrymen ──Bearer token──▶ /v1/chat/completions ──your key──▶ upstream LLM ──▶ reply
 ```
 
 - The upstream key lives only in `MERRYMEN_GATEWAY_UPSTREAM_KEY` (env). Never logged, never sent to the client.
 - Access tokens are **HMAC-signed and expiring** (stateless — no database).
-- Every request **re-checks the wallet's on-chain $MERRYMEN balance** (cached 10 min), so a holder who sells loses access.
-- **Per-address rate limit + a hard `max_tokens` clamp + body-size cap** bound cost and abuse.
+- The claim uses a **server-issued, single-use, domain-bound nonce** (5-min TTL): the message a holder signs names the domain + a one-time nonce, so a captured signature **can't be replayed** or pre-collected, and responses carry **no wildcard CORS** so a phishing page can't read a minted token.
+- Every request **re-checks the wallet's on-chain $MERRYMEN balance** (cached 10 min, bounded size), so a holder who sells loses access.
+- **Per-address rate limit** on `/v1`, **per-IP rate limit** on `/nonce` + `/claim`, a hard completion clamp (`max_tokens` + `max_completion_tokens`, `n`/`best_of` pinned), and a body-size cap bound cost and abuse.
 - The gateway **forces its own model** server-side — the client can't run up an expensive one and never even learns which model it is (it's branded `merrymen-fast`).
 
 Signing is **read-only proof of control** — no transaction, no private key ever leaves the holder's wallet. Fully in keeping with merrymen's non-custodial stance.
@@ -29,7 +30,7 @@ Signing is **read-only proof of control** — no transaction, no private key eve
 cd gateway
 cp .env.example .env      # fill in UPSTREAM_KEY, SECRET, RPC
 npm install
-npm run check             # offline self-test (token scheme + claim-message parity)
+npm run check             # offline self-test (token scheme + single-use nonce + replay protection)
 npm start                 # listens on :8787
 ```
 
@@ -40,7 +41,8 @@ the domain you point the client at — `https://ai.merrymen.dev` in the shipped 
 
 ### Endpoints
 - `GET /` or `/claim` — the claim page (holder connects wallet, signs, gets a token).
-- `POST /claim` — `{address, signature}` → `{token, expiresInDays}` after a balance check.
+- `GET /nonce?address=0x…` — mint a single-use, domain-bound challenge → `{nonce, message}` (sign `message` verbatim).
+- `POST /claim` — `{address, signature, nonce}` → `{token, expiresInDays}` after nonce + signature + balance checks.
 - `POST /v1/chat/completions` — OpenAI-compatible; `Authorization: Bearer <token>`. This is what merrymen calls.
 - `GET /healthz` — liveness.
 
