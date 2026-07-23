@@ -153,6 +153,19 @@ function showWindow() {
   mainWin.focus();
 }
 
+const LOCAL_ORIGIN = `http://${HOST}:${PORT}`;
+
+/** True only when `u` is EXACTLY our local dashboard origin. Parsing to compare
+ * origins (not a string prefix) is what rejects tricks like
+ * "http://127.0.0.1:3100@evil.com/", whose real host is evil.com. */
+function isLocalUrl(u) {
+  try {
+    return new URL(u).origin === LOCAL_ORIGIN;
+  } catch {
+    return false;
+  }
+}
+
 function makeMain() {
   mainWin = new BrowserWindow({
     width: 1280,
@@ -163,7 +176,9 @@ function makeMain() {
     backgroundColor: "#0b0b0d",
     title: "merrymen",
     icon: ICON,
-    webPreferences: { contextIsolation: true },
+    // Renderer stays fully sandboxed: no Node, isolated context, no preload. Even
+    // a compromised dashboard page can't reach the host — it's just a web view.
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   mainWin.loadURL(`http://${HOST}:${PORT}`);
   mainWin.once("ready-to-show", () => {
@@ -173,13 +188,19 @@ function makeMain() {
     }
     mainWin.show();
   });
-  // External links open in the real browser, not in-app.
+  // External links open in the real browser, never in an in-app window. Exact
+  // origin match — a prefix check would let "http://127.0.0.1:3100@evil.com" through.
   mainWin.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith("http") && !url.startsWith(`http://${HOST}:${PORT}`)) {
-      shell.openExternal(url);
-      return { action: "deny" };
-    }
-    return { action: "allow" };
+    if (isLocalUrl(url)) return { action: "allow" };
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return { action: "deny" };
+  });
+  // The main window may only ever sit on the local dashboard. Block any in-place
+  // top-level navigation to another origin and hand it to the real browser instead.
+  mainWin.webContents.on("will-navigate", (e, url) => {
+    if (isLocalUrl(url)) return;
+    e.preventDefault();
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
   });
   // Closing the window keeps the agent running in the tray — only "Quit" stops it.
   mainWin.on("close", (e) => {
