@@ -25,6 +25,7 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { PC_CAPABILITIES } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { ensureHome, homePaths } from "../home";
+import { loadGrantFile } from "../grant";
 import { esc, getFileUrl, getMe, getUpdates, sendMessage, type TgMessage } from "./api";
 import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
@@ -194,6 +195,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       const soulBlock = soulPromptBlock(st.linkedAt, st.messageCount, now());
       // Live secret VALUES to strip from every tool output and block from
       // send_file — however the agent reads them, they never reach chat.
+      const grant = loadGrantFile();
       const secrets = [
         cfg.telegramBotToken,
         cfg.anthropicApiKey,
@@ -203,6 +205,12 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         cfg.rialtoApiKey,
         cfg.telegramTranscribeKey,
         cfg.virtualsApiKey,
+        // The signed wallet grant custodies funds. Its 0x owner/session keys already
+        // match the shape-redactor, but the base64 `serialized` session-account blob
+        // does NOT — list all three explicitly so no tool output can exfiltrate them.
+        grant?.serialized,
+        grant?.demoOwnerPrivateKey,
+        grant?.demoSessionPrivateKey,
       ].filter((s): s is string => typeof s === "string" && s.length >= 8);
       const stopFlag = { stopped: false };
       agentRuns.set(msg.chatId, stopFlag);
@@ -475,8 +483,12 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       now,
     };
 
-    // The relationship deepens one message at a time (owner chats only).
-    if (msg.fromId === stateRef.get().ownerId || msg.chatId === stateRef.get().ownerId) {
+    // Only the OWNER shapes the soul — both relationship growth AND persistent
+    // memory. In a GROUP, `allowed` is true for every member, so without this gate
+    // an ordinary member could deepen the bond or (below) write/evict the owner's
+    // remembered facts. Private chats have chatId === fromId, so this is a no-op there.
+    const isOwnerMsg = msg.fromId === stateRef.get().ownerId || msg.chatId === stateRef.get().ownerId;
+    if (isOwnerMsg) {
       stateRef.set({ ...stateRef.get(), messageCount: stateRef.get().messageCount + 1 });
     }
 
@@ -491,8 +503,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const r = await interpretWithLlm(msg.text, chatCtx, llm);
         cmd = r.cmd;
         // The get-to-know-you side-channel: the model proposes a fact, the
-        // sanitizer disposes (drops addresses/keys/markup, dedupes, caps).
-        if (r.remember) rememberOwnerFact(r.remember, now());
+        // sanitizer disposes (drops addresses/keys/markup, dedupes, caps). Only the
+        // OWNER may write it — else a group member could poison/evict owner memory.
+        if (r.remember && isOwnerMsg) rememberOwnerFact(r.remember, now());
         // A conversational turn gets a warm, free-form voice — the classifier's
         // terse `reply` is for routing, not for talking. Text out triggers nothing.
         if (cmd.kind === "chat") {
