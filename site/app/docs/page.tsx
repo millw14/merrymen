@@ -94,7 +94,7 @@ merrymen update     # upgrade later (stops the band, installs, restarts)`}
           <tbody>
             <tr>
               <td><strong>testnet · 46630</strong></td>
-              <td>The sandbox (default). Free gas from the faucet, the full pipeline end to end. The trading venues aren&apos;t deployed there, so swaps simulate and no-route by design — ideal for learning the flow.</td>
+              <td>The sandbox (default). Free <strong>gas</strong> from the faucet, and the grant, caps, policy checks, live prices and journal all run for real. The trading venues aren&apos;t deployed there, so swaps simulate and no-route by design. <strong>Send gas, not capital:</strong> merrymen only knows the mainnet token addresses, so USDG sent to testnet reads 0 and is never traded — the band trades a simulated 1,000 USDG paper book at live prices instead.</td>
             </tr>
             <tr>
               <td><strong>mainnet · 4663</strong></td>
@@ -338,7 +338,7 @@ merrymen kill       # kill switch — destroys the grant`}
         <h3>The dashboard won&apos;t open</h3>
         <p>Run <code className="inline">merrymen doctor</code>. The prebuilt dashboard ships with the package, so a missing build usually means an interrupted install — reinstall with <code className="inline">npm i -g merrymen@latest</code>.</p>
         <h3>Trades never land</h3>
-        <p>Live trading needs a <strong>Pimlico API key</strong> in settings (or a full bundler URL), plus gas in the account. Without a bundler key the agent stays in practice mode — it simulates but never signs. On testnet, stock-token venues aren&apos;t deployed, so swaps no-route by design — that&apos;s expected.</p>
+        <p>Live trading needs three things together: the wallet on <strong>mainnet · 4663</strong>, a <strong>Pimlico API key</strong> in settings (or a full bundler URL), and the smart account funded with <strong>ETH for gas and USDG for capital</strong>. Without a bundler key the agent stays in practice mode — it simulates but never signs. On testnet no trade can land by design: the stock-token venues aren&apos;t deployed, so swaps no-route, and any USDG you sent there reads 0 because merrymen only knows the mainnet token addresses. Switch to mainnet for real fills.</p>
         <h3>Telegram says “not authorized”</h3>
         <p>Only allowlisted chats are obeyed. Send <code className="inline">/link &lt;code&gt;</code> with the code from settings to claim ownership.</p>
         <h3>A PC command is refused</h3>

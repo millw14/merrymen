@@ -57,8 +57,10 @@ You verify; it trades.
 3. **Create your agent wallet** at `/grant` — no wallet to connect; merrymen
    mints the keys, you back them up, pick **testnet** (practice) or **mainnet**
    (real funds), and set the caps the account contract itself enforces.
-4. **Fund it** — testnet gas from the faucet, or send ETH + USDG to the account
-   address on mainnet. The worker arms itself on its next tick, no restart.
+4. **Fund it** — on **mainnet**, send ETH (gas) + USDG (capital) to the account
+   address. On **testnet**, gas from the faucet and nothing else: USDG sent there
+   is never shown and never traded. The worker arms itself on its next tick, no
+   restart.
 5. **(optional) Link Telegram** — chat with your merryman, give it a name, let it
    trade, report, alert, and control your PC — all inside the same walls.
 
@@ -127,9 +129,12 @@ Open `localhost:3100/grant`. There's nothing to connect — merrymen generates a
 fresh account, shows you the owner key to **back up** (lose it and the funds are
 gone), and lets you fund it. **Pick your ground:**
 
-- **testnet · 46630** (default) — the sandbox. Free gas from the faucet, the full
-  pipeline end to end. The trading venues aren't deployed there, so swaps
-  simulate and no-route by design — perfect for learning the flow.
+- **testnet · 46630** (default) — the sandbox. Free **gas** from the faucet, and
+  the grant, the caps, the policy checks, the live prices and the journal all run
+  for real. Two things don't: the token registry is mainnet-only, so **any USDG
+  you send to testnet reads as 0 and is never used**, and the trading venues
+  aren't deployed there, so swaps simulate and no-route by design. Send gas, not
+  capital — paper mode is already trading a simulated book at live prices.
 - **mainnet · 4663** — **real funds.** Real USDG, real Stock Tokens, real
   execution. The page makes you acknowledge it first: keys are generated and
   stored **in plain text on your machine** (TEE custody is on the roadmap), so

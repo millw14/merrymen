@@ -300,7 +300,7 @@ export default function SettingsPage() {
             <Field
               label="Pimlico API key"
               action={{ href: "https://dashboard.pimlico.io", label: "Get a free key" }}
-              hint="The one key needed to trade live. Tap “Get a free key” → API Keys, paste it here — we build the bundler URL for your wallet's chain automatically. Blank = practice mode: the agent simulates every trade but never signs."
+              hint="The key needed to trade live on mainnet. Tap “Get a free key” → API Keys, paste it here — we build the bundler URL for your wallet's chain automatically. Leave it blank on a testnet wallet: a key can't enable trades there (no venues, balances read 0) and it switches off the paper book. Blank = practice mode: the agent simulates every trade but never signs."
             >
               <input
                 type="password"

@@ -399,7 +399,9 @@ export default function GrantPage() {
               >
                 <span className="chain-card-title">🌲 Practice (testnet)</span>
                 <span className="chain-card-body">
-                  Free play money, same exact flow. Best place to start and learn how it works.
+                  Your band trades a simulated book at real live prices. Nothing routes on-chain and
+                  USDG sent here won&apos;t show up — so don&apos;t fund it. Best place to watch it
+                  work before risking anything.
                 </span>
               </button>
               <button
@@ -651,8 +653,10 @@ export default function GrantPage() {
             <p className="grant-sub">
               {grantIsTestnet ? (
                 <>
-                  Send testnet gas and USDG to the account address below. Nothing deploys until the
-                  first trade — funding is what lets that first UserOp land.
+                  Send <b>testnet gas (ETH)</b> to the account address below — that&apos;s the only
+                  thing worth sending here. <b>Don&apos;t send USDG:</b> merrymen only knows the
+                  mainnet token addresses, so testnet USDG reads 0 and is never traded. Practice
+                  trades a simulated book instead.
                 </>
               ) : (
                 <>
@@ -666,8 +670,10 @@ export default function GrantPage() {
             <div className="paper-note mono" style={{ marginBottom: 14 }}>
               📜 <b>Already riding.</b> Your band is trading in <b>paper mode</b> right now — real
               live prices, simulated fills — so you can watch it work before funding anything. Head
-              to the <Link href="/">dashboard</Link> to see it. Fund the account below only when
-              you&apos;re ready for live trades.
+              to the <Link href="/">dashboard</Link> to see it.{" "}
+              {grantIsTestnet
+                ? "On practice there's nothing to fund for live trading — testnet has no trading venues, and testnet USDG won't even show up below. Faucet gas is still worth grabbing if you want to watch a real UserOp land. Going live means a mainnet wallet plus a bundler key in settings."
+                : "Fund the account below only when you're ready for live trades."}
             </div>
 
             <div className="fund-addr mono">
@@ -692,12 +698,29 @@ export default function GrantPage() {
                 <span className="fund-bal-v mono">
                   {funding ? (Number(funding.gasWei) / 1e18).toFixed(5) : "…"}
                 </span>
-                <span className="fund-bal-s">{gasFunded ? "funded ✓" : "needed to deploy + trade"}</span>
+                <span className="fund-bal-s">
+                  {gasFunded
+                    ? "funded ✓"
+                    : grantIsTestnet
+                      ? "lets a UserOp land — no real swaps on testnet"
+                      : "needed to deploy + trade"}
+                </span>
               </div>
-              <div className={`fund-bal ${usdgFunded ? "ok" : ""}`}>
+              {/* On testnet this tile reads the MAINNET USDG contract, so it is pinned at 0.00
+                  forever no matter what lands. Show a dash + why, not a zero that looks like
+                  the deposit vanished. */}
+              <div className={`fund-bal ${!grantIsTestnet && usdgFunded ? "ok" : ""}`}>
                 <span className="fund-bal-k">USDG</span>
-                <span className="fund-bal-v mono">{funding ? funding.usdg.toFixed(2) : "…"}</span>
-                <span className="fund-bal-s">{usdgFunded ? "funded ✓" : "the agent's trading capital"}</span>
+                <span className="fund-bal-v mono">
+                  {grantIsTestnet ? "—" : funding ? funding.usdg.toFixed(2) : "…"}
+                </span>
+                <span className="fund-bal-s">
+                  {grantIsTestnet
+                    ? "not tracked on practice — merrymen only knows the mainnet USDG address"
+                    : usdgFunded
+                      ? "funded ✓"
+                      : "the agent's trading capital"}
+                </span>
               </div>
             </div>
 
@@ -724,8 +747,23 @@ export default function GrantPage() {
 
             {gasFunded ? (
               <div className="fund-ready mono">
-                funded — run <b>merrymen start</b> and your band rides. balances refresh here every
-                few seconds.
+                {grantIsTestnet ? (
+                  <>
+                    gas landed — run <b>merrymen start</b> and the band rides its <b>paper book</b>:
+                    live prices, simulated fills. testnet has no trading venues, so no real swap can
+                    route here, and the USDG line above stays blank whatever you send.
+                  </>
+                ) : usdgFunded ? (
+                  <>
+                    funded — run <b>merrymen start</b> and your band rides. balances refresh here
+                    every few seconds.
+                  </>
+                ) : (
+                  <>
+                    gas landed — still waiting on <b>USDG</b>, the agent&apos;s trading capital.
+                    until it arrives the band stays on its paper book.
+                  </>
+                )}
               </div>
             ) : (
               <div className="grant-note">

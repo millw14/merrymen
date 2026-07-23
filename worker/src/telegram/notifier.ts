@@ -220,7 +220,13 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       }
     }
     if (inputs.gasWei !== null && inputs.gasWei > 0n && inputs.gasWei < LOW_GAS_WEI) {
-      await fire("low-gas", `⛽ gas is running low — top up the account from the faucet or the trades stop landing.`);
+      // Chain- and mode-agnostic on purpose: there's no faucet on mainnet, and in
+      // paper mode nothing signs, so gas can't be what's stopping a trade. Also
+      // names gas-vs-capital — "top up the account" is what sends people to USDG.
+      await fire(
+        "low-gas",
+        `⛽ native gas is low. If you're signing live trades, send a little <b>ETH</b> to the smart account or they stop landing — ETH is gas, USDG is capital. (In paper mode nothing signs, so gas doesn't matter; on testnet gas is the only thing worth sending.)`,
+      );
     }
 
     // ── relationship milestones (fire once, ever) ───────────────────────────

@@ -114,8 +114,9 @@ export function BandSection() {
           <li>
             <span className="start-n">3</span>
             <div>
-              <b>Go live when you&apos;re ready.</b> Add one key in Settings and the same agent trades
-              for real — inside the exact same limits.
+              <b>Go live when you&apos;re ready.</b> That means a <b>mainnet</b> wallet, one key in
+              Settings, and real ETH + USDG in your agent&apos;s account — same agent, same limits. A
+              testnet wallet stays practice no matter what you send it.
             </div>
           </li>
         </ol>

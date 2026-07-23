@@ -472,7 +472,9 @@ async function onboard() {
 ${bold(`  ${c.arrow} ride out`)}
   1. ${bold("merrymen start")} — opens the tavern (dashboard) at http://localhost:3100 + looses the worker
   2. at ${bold("/grant")}, create your agent wallet — pick testnet 46630 (practice) or mainnet 4663 (real funds)
-  3. testnet gas from the sheriff's vault: ${dim("https://faucet.testnet.chain.robinhood.com")} ${dim("(mainnet: fund from your own wallet)")}
+  3. testnet ${bold("gas")} from the sheriff's vault: ${dim("https://faucet.testnet.chain.robinhood.com")}
+     ${dim("gas only — USDG sent to a testnet account is never shown and never traded.")}
+     ${dim("mainnet: send ETH (gas) + USDG (capital) from your own wallet.")}
   4. prove the shot lands: ${bold("merrymen selftest")}
   5. muster check anytime: ${bold("merrymen doctor")} · tune the band: ${dim("http://localhost:3100/settings")}
 
