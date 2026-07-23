@@ -20,6 +20,11 @@ const ARCHIVE_DIR = homePaths.grantsArchive();
 
 const BALANCE_ABI = parseAbi(["function balanceOf(address) view returns (uint256)"]);
 
+/** A well-formed 0x EVM address — the ONLY thing we ever build an archive filename
+ * from. Rejecting anything else keeps `smartAccount` from smuggling path separators
+ * (../, absolute paths) into archiveCurrentGrant's `${addr}.json`. */
+const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
+
 /**
  * Copy whatever grant.json currently holds into the archive, keyed by its smart
  * account, BEFORE we overwrite or delete it.
@@ -33,7 +38,7 @@ async function archiveCurrentGrant(): Promise<void> {
   try {
     const raw = await readFile(GRANT_FILE, "utf8");
     const prev = JSON.parse(raw) as StoredGrant;
-    if (!prev?.smartAccount) return;
+    if (!isAddr(prev?.smartAccount)) return; // never derive a path from a malformed address
     await mkdir(ARCHIVE_DIR, { recursive: true, mode: 0o700 });
     // One file per wallet, named by its address. Re-arming the same wallet just
     // refreshes its archive copy; a different wallet gets its own file.
@@ -58,7 +63,7 @@ export interface AgentStatus {
 
 export async function POST(req: Request) {
   const grant = (await req.json()) as StoredGrant;
-  if (!grant?.serialized || !grant?.smartAccount) {
+  if (!grant?.serialized || !isAddr(grant?.smartAccount)) {
     return NextResponse.json({ error: "not a grant" }, { status: 400 });
   }
   await mkdir(DATA_DIR, { recursive: true });

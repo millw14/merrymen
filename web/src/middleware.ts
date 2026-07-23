@@ -42,10 +42,18 @@ function hostAllowed(hostHeader: string | null): boolean {
     if (a === 169 && b === 254) return true; // link-local
     return false;
   }
-  if (hostname === "::1") return true; // IPv6 loopback
-  if (hostname.startsWith("fe80:")) return true; // IPv6 link-local
-  if (hostname.startsWith("fc") || hostname.startsWith("fd")) return true; // IPv6 ULA
-  return false; // a public domain or public IP → blocked (this is the DNS-rebind kill)
+  // IPv6 literals only. After the port + brackets are stripped, a real IPv6 host
+  // still contains ':' — a DNS name never does. Gating the ULA/link-local checks
+  // on that ':' is what stops a PUBLIC domain like "fd-x.com" or "fc2.evil.com"
+  // (they start with "fd"/"fc") from being mistaken for an fc00::/7 address and
+  // sailing straight through the DNS-rebind guard.
+  if (hostname.includes(":")) {
+    if (hostname === "::1") return true; // loopback
+    if (hostname.startsWith("fe80:")) return true; // link-local fe80::/10
+    if (hostname.startsWith("fc") || hostname.startsWith("fd")) return true; // ULA fc00::/7
+    return false; // any other global IPv6 → blocked
+  }
+  return false; // a public domain or public IPv4 → blocked (this is the DNS-rebind kill)
 }
 
 export function middleware(req: NextRequest) {
