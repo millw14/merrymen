@@ -79,6 +79,11 @@ export function TelegramCta({ variant = "card" }: { variant?: "card" | "pill" })
     );
   }
 
+  // Not linked and no code yet: the token is valid (connected), but the worker
+  // hasn't minted a code — either Telegram isn't switched on, or merrymen isn't
+  // running. Say WHY, instead of a bare "…" that reads like a hidden code.
+  const noCode = !linked && !tg.linkCode;
+
   return (
     <div className="panel tg-card">
       <div className="tg-card-title">💬 {linked ? "Chat with your merryman" : "Link your Telegram"}</div>
@@ -86,15 +91,31 @@ export function TelegramCta({ variant = "card" }: { variant?: "card" | "pill" })
         <p className="tg-card-sub">
           Connected as <b>@{tg.botUsername}</b>. Message it anytime — try <code>/status</code> or just talk.
         </p>
-      ) : (
+      ) : tg.linkCode ? (
         <p className="tg-card-sub">
           Open <b>@{tg.botUsername}</b> and send{" "}
-          <code>/link {tg.linkCode ?? "…"}</code> to claim it as its owner.
+          <code>/link {tg.linkCode}</code> to claim it as its owner.
+        </p>
+      ) : tg.enabled ? (
+        <p className="tg-card-sub">
+          Generating your one-time link code — make sure merrymen is <b>running</b>, then refresh in a
+          moment and it&apos;ll appear here.
+        </p>
+      ) : (
+        <p className="tg-card-sub">
+          Almost there — <b>turn Telegram on</b> in settings and save, and your one-time{" "}
+          <code>/link</code> code shows up right here.
         </p>
       )}
-      <a href={botLink!} target="_blank" rel="noreferrer" className="tg-cta-btn">
-        {linked ? `Open @${tg.botUsername} →` : "Open the bot →"}
-      </a>
+      {noCode ? (
+        <Link href="/settings#telegram" className="tg-cta-btn">
+          {tg.enabled ? "Check settings →" : "Turn on Telegram →"}
+        </Link>
+      ) : (
+        <a href={botLink!} target="_blank" rel="noreferrer" className="tg-cta-btn">
+          {linked ? `Open @${tg.botUsername} →` : "Open the bot →"}
+        </a>
+      )}
     </div>
   );
 }
