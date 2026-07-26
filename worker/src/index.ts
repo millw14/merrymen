@@ -1034,9 +1034,12 @@ async function main() {
         },
       ]),
     );
+    const dailyCapUsdg = usdg(grant.caps.dailyUsdg);
+    const dailyRemainingUsdg = dailyCapUsdg > spentTodayUsdg ? dailyCapUsdg - spentTodayUsdg : 0n;
     const snap: Snapshot = {
       cashUsdg: balances.cashUsdg,
       vaultUsdg: balances.vaultUsdg,
+      dailyRemainingUsdg,
       holdings,
       prices: market.prices,
       pausedTokens: market.pausedTokens,

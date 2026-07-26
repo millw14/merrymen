@@ -105,17 +105,18 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
     }
     equitySeries.push({ tSec: bar.tSec, equityUsdg: equity });
 
-    const snap: Snapshot = {
-      cashUsdg: cash,
-      vaultUsdg: vault,
-      holdings,
-      prices: new Map(
-        [...bar.prices.entries()].map(([s, p]) => [s, { price8: p, stale: stale.has(s) }]),
-      ),
-      pausedTokens: new Set(),
-      staleFeeds: stale,
-      sequencerUp: true,
-    };
+   const snap: Snapshot = {
+     cashUsdg: cash,
+     vaultUsdg: vault,
+     dailyRemainingUsdg: 1_000_000_000_000n,
+     holdings,
+     prices: new Map(
+       [...bar.prices.entries()].map(([s, p]) => [s, { price8: p, stale: stale.has(s) }]),
+  ),
+     pausedTokens: new Set(),
+     staleFeeds: stale,
+     sequencerUp: true,
+   };
 
     const intents = await cfg.strategy.tick(snap);
     for (const intent of intents) {

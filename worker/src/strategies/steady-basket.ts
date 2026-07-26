@@ -61,15 +61,16 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Trade
   }
 
   const idleAfterBuys = snap.cashUsdg - (intents.length ? cfg.buyPerTickUsdg : 0n);
-  if (idleAfterBuys > cfg.idleFloorUsdg) {
-    const excess = idleAfterBuys - cfg.idleFloorUsdg;
-    const amountUsdg = excess > cfg.maxDepositPerTickUsdg ? cfg.maxDepositPerTickUsdg : excess;
-    intents.push({
-      kind: "vault-deposit",
-      target: cfg.vault,
-      amountUsdg,
-    });
-  }
+if (idleAfterBuys > cfg.idleFloorUsdg && snap.dailyRemainingUsdg > 0n) {
+  const excess = idleAfterBuys - cfg.idleFloorUsdg;
+  const capped = excess > cfg.maxDepositPerTickUsdg ? cfg.maxDepositPerTickUsdg : excess;
+  const amountUsdg = capped > snap.dailyRemainingUsdg ? snap.dailyRemainingUsdg : capped;
+  intents.push({
+    kind: "vault-deposit",
+    target: cfg.vault,
+    amountUsdg,
+  });
+}
 
   return intents;
 }

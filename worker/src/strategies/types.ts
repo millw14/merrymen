@@ -21,6 +21,8 @@ export interface Holding {
 export interface Snapshot {
   cashUsdg: bigint;
   vaultUsdg: bigint;
+  /** USDG still available today before hitting the daily cap. */
+  dailyRemainingUsdg: bigint;
   /** Current stock holdings by symbol. */
   holdings: Map<string, Holding>;
   /** Latest Chainlink USD prices (8dp) by symbol — stale prices flagged, not hidden. */

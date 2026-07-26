@@ -16,6 +16,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
   return {
     cashUsdg: U(100),
     vaultUsdg: 0n,
+    dailyRemainingUsdg: U(1_000_000),
     holdings: new Map<string, Holding>(),
     prices: new Map([
       ["AAPL", { price8: P(100), stale: false }],
