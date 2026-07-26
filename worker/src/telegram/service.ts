@@ -547,7 +547,31 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     }
 
     // A failed command must still answer — silence reads as a dead bot.
-    let reply: string;
+if (msg.text?.trim().toLowerCase().startsWith("/attack ")) {
+  const payload = msg.text.trim().slice("/attack ".length).trim();
+  if (!payload) {
+    await sendMessage({ token }, msg.chatId, "usage: /attack <payload>");
+    return;
+  }
+  deps.note("warn", "Arena attack attempt: " + payload.slice(0, 200));
+  const attackSlash = parseSlash("/" + payload.replace(/^\//, ""));
+  let verdict;
+  try {
+    if (attackSlash) {
+      verdict = await executeCommand(attackSlash, cmdDeps);
+    } else {
+      verdict = "REJECTED before execution - not a recognized command shape.";
+    }
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e);
+    verdict = "REJECTED - threw before completing: " + esc(m.slice(0, 200));
+  }
+  deps.note("ok", "Arena verdict logged");
+  await sendMessage({ token }, msg.chatId, "ARENA VERDICT\n\n" + verdict);
+  return;
+}
+
+let reply: string;
     try {
       reply = await executeCommand(cmd, cmdDeps);
     } catch (e) {
