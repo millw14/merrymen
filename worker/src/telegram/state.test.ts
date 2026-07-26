@@ -50,4 +50,17 @@ describe("link code — deterministic, rotating, unambiguous", () => {
       seen.add(st.linkCode);
     }
   });
+
+  it("regression: a brand-new install (never touched) still yields a code — this is what the dashboard reads before any /link ever happens", () => {
+    // This mirrors PR #3: the dashboard's GET /api/telegram used to just read
+    // the saved linkCode, which was empty on a fresh install because nothing
+    // had generated one yet — ensureLinkCode was only ever called reactively,
+    // inside the /link handler. The dashboard route now calls ensureLinkCode
+    // itself, so this must produce a real code from the untouched default state.
+    const fresh: TelegramState = { ...base }; // as loaded on first-ever run
+    assert.equal(fresh.linkCode, "");
+    const result = ensureLinkCode(fresh, "some-bot-token");
+    assert.notEqual(result.linkCode, "");
+    assert.match(result.linkCode, /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/);
+  });
 });
