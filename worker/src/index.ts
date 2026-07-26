@@ -196,7 +196,8 @@ async function main() {
       basketSymbols: c.basketSymbols,
       buyPerTickUsdg: c.buyPerTickUsdg,
       idleFloorUsdg: c.idleFloorUsdg,
-      gapEnterBudgetUsdg: c.gapEnterBudgetUsdg,
+    maxDepositPerTickUsdg: c.maxDepositPerTickUsdg,
+    gapEnterBudgetUsdg: c.gapEnterBudgetUsdg,
       llm: {
         creds: resolveLlm(c),
         intervalMin: c.llmIntervalMin,

@@ -17,6 +17,7 @@ function cfg(over: Partial<SteadyBasketConfig> = {}): SteadyBasketConfig {
     ],
     buyPerTickUsdg: 20_000_000n, // 20 USDG per tick
     idleFloorUsdg: 50_000_000n, // keep 50 USDG liquid
+    maxDepositPerTickUsdg: 300_000_000n, // cap a single vault-deposit at 300 USDG
     swapRouter: ROUTER,
     vault: VAULT,
     usdg: USDG,

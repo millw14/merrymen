@@ -83,8 +83,10 @@ export interface MerrymenSettings {
   buyPerTickUsdg?: number;
   /** Steady-basket: cash floor kept liquid; the excess sweeps to the vault. */
   idleFloorUsdg?: number;
-  /** Weekend-gap: total USDG deployed per gap window. */
-  gapEnterBudgetUsdg?: number;
+  /** Steady-basket: max USDG swept to the vault in a single tick, so the daily cap doesn't reject the whole sweep. */
+maxDepositPerTickUsdg?: number;
+/** Weekend-gap: total USDG deployed per gap window. */
+gapEnterBudgetUsdg?: number;
   /** LLM strategist knobs. */
   llmModel?: string;
   llmIntervalMin?: number;
@@ -202,6 +204,7 @@ export const SETTINGS_DEFAULTS = {
   basketSymbols: [...TRADEABLE_SYMBOLS] as string[],
   buyPerTickUsdg: 25,
   idleFloorUsdg: 50,
+  maxDepositPerTickUsdg: 300,
   gapEnterBudgetUsdg: 75,
   groqModel: "llama-3.3-70b-versatile",
   llmModel: "claude-opus-4-8",

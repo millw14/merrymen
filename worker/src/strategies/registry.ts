@@ -35,6 +35,7 @@ export interface StrategyBuildOpts {
   basketSymbols: string[];
   buyPerTickUsdg: number;
   idleFloorUsdg: number;
+  maxDepositPerTickUsdg: number;
   gapEnterBudgetUsdg: number;
   llm: {
     creds: LlmCreds | null;
@@ -123,6 +124,7 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
     legs: legsFor(opts.basketSymbols),
     buyPerTickUsdg: opts.usdg6(opts.buyPerTickUsdg),
     idleFloorUsdg: opts.usdg6(opts.idleFloorUsdg),
+    maxDepositPerTickUsdg: opts.usdg6(opts.maxDepositPerTickUsdg),
     swapRouter: opts.swapRouter,
     vault: MORPHO.steakhouseUsdgVault as `0x${string}`,
     usdg: CASH.USDG as `0x${string}`,

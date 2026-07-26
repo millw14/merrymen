@@ -44,6 +44,7 @@ export interface ResolvedConfig {
   basketSymbols: string[];
   buyPerTickUsdg: number;
   idleFloorUsdg: number;
+  maxDepositPerTickUsdg: number;
   gapEnterBudgetUsdg: number;
   llmModel: string;
   llmIntervalMin: number;
@@ -194,6 +195,7 @@ export function mergeSettings(
     basketSymbols,
     buyPerTickUsdg: num(file.buyPerTickUsdg, env.MERRYMEN_BUY_PER_TICK_USDG, d.buyPerTickUsdg, 1, 100_000),
     idleFloorUsdg: num(file.idleFloorUsdg, env.MERRYMEN_IDLE_FLOOR_USDG, d.idleFloorUsdg, 0, 1_000_000),
+    maxDepositPerTickUsdg: num(file.maxDepositPerTickUsdg, env.MERRYMEN_MAX_DEPOSIT_PER_TICK_USDG, d.maxDepositPerTickUsdg, 1, 1_000_000),
     gapEnterBudgetUsdg: num(file.gapEnterBudgetUsdg, env.MERRYMEN_GAP_BUDGET_USDG, d.gapEnterBudgetUsdg, 1, 1_000_000),
     llmModel: str(file.llmModel, env.MERRYMEN_LLM_MODEL, d.llmModel)!,
     llmIntervalMin: num(file.llmIntervalMin, env.MERRYMEN_LLM_INTERVAL_MIN, d.llmIntervalMin, 1, 1_440),

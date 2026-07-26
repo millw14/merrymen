@@ -21,9 +21,9 @@ export interface BasketLeg {
 export interface SteadyBasketConfig {
   legs: BasketLeg[];
   buyPerTickUsdg: bigint;
-  /** Idle USDG above this floor gets deposited to the vault. */
   idleFloorUsdg: bigint;
-  /** Venue-agnostic: Rialto meta-router or Uniswap SwapRouter02, runner's pick. */
+  /** Never propose more than this in a single vault-deposit intent, so the policy wall's daily cap doesn't reject the whole sweep forever. */
+  maxDepositPerTickUsdg: bigint;
   swapRouter: `0x${string}`;
   vault: `0x${string}`;
   usdg: `0x${string}`;
@@ -62,10 +62,12 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Trade
 
   const idleAfterBuys = snap.cashUsdg - (intents.length ? cfg.buyPerTickUsdg : 0n);
   if (idleAfterBuys > cfg.idleFloorUsdg) {
+    const excess = idleAfterBuys - cfg.idleFloorUsdg;
+    const amountUsdg = excess > cfg.maxDepositPerTickUsdg ? cfg.maxDepositPerTickUsdg : excess;
     intents.push({
       kind: "vault-deposit",
       target: cfg.vault,
-      amountUsdg: idleAfterBuys - cfg.idleFloorUsdg,
+      amountUsdg,
     });
   }
 

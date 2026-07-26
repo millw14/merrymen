@@ -30,13 +30,14 @@ function limits(over: Partial<AgentLimits> = {}): AgentLimits {
 describe("runBacktest — real strategies, real policy, synthetic prices", () => {
   it("steady basket DCAs in and sweeps idle cash to the vault", async () => {
     const cfg: SteadyBasketConfig = {
-      legs: [{ symbol: "AAPL", token: AAPL, weightBps: 10_000 }],
-      buyPerTickUsdg: U(25),
-      idleFloorUsdg: U(50),
-      swapRouter: ROUTER,
-      vault: VAULT,
-      usdg: USDG,
-    };
+  legs: [{ symbol: "AAPL", token: AAPL, weightBps: 10_000 }],
+  buyPerTickUsdg: U(25),
+  idleFloorUsdg: U(50),
+  maxDepositPerTickUsdg: U(300),
+  swapRouter: ROUTER,
+  vault: VAULT,
+  usdg: USDG,
+};
     const bars: Bar[] = Array.from({ length: 5 }, (_, i) => ({
       tSec: 1000 + i * 60,
       prices: new Map([["AAPL", usd(200)]]),
@@ -64,6 +65,7 @@ describe("runBacktest — real strategies, real policy, synthetic prices", () =>
       legs: [{ symbol: "AAPL", token: AAPL, weightBps: 10_000 }],
       buyPerTickUsdg: U(25),
       idleFloorUsdg: U(1_000),
+      maxDepositPerTickUsdg: U(2_000),
       swapRouter: ROUTER,
       vault: VAULT,
       usdg: USDG,
@@ -119,6 +121,7 @@ describe("runBacktest — real strategies, real policy, synthetic prices", () =>
       legs: [{ symbol: "AAPL", token: AAPL, weightBps: 10_000 }],
       buyPerTickUsdg: U(100), // above the 50 per-trade cap
       idleFloorUsdg: U(10_000),
+      maxDepositPerTickUsdg: U(1_000_000),
       swapRouter: ROUTER,
       vault: VAULT,
       usdg: USDG,
@@ -143,6 +146,7 @@ describe("runBacktest — real strategies, real policy, synthetic prices", () =>
       legs: [],
       buyPerTickUsdg: U(1_000_000), // never buys
       idleFloorUsdg: 0n, // sweep everything
+      maxDepositPerTickUsdg: U(1_000_000),
       swapRouter: ROUTER,
       vault: VAULT,
       usdg: USDG,
