@@ -11,3 +11,6 @@ dist/
 contracts/artifacts/
 contracts/cache/
 *.tgz
+contracts/out/
+cache/
+foundry.lock
