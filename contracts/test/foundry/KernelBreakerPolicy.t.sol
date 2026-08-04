@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Test, console} from "forge-std/Test.sol";
 import {BreakerRegistry} from "src/BreakerRegistry.sol";
 import {KernelBreakerPolicy} from "src/KernelBreakerPolicy.sol";
-import {PackedUserOperation} from "src/IPolicy.sol";
+import {PackedUserOperation} from "src/interfaces/IPolicy.sol";
 
 contract KernelBreakerPolicyTest is Test {
     BreakerRegistry public registry;

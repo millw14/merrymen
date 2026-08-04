@@ -1,5 +1,5 @@
 [profile.default]
-src = "contracts/src"
+src = "contracts/contracts"
 out = "contracts/out"
 libs = ["lib", "contracts/lib"]
 test = "contracts/test/foundry"
@@ -8,7 +8,7 @@ optimizer = true
 optimizer_runs = 200
 
 remappings = [
-    "src/=contracts/src/"
+    "src/=contracts/contracts/"
 ]
 
 [fuzz]
