@@ -8,51 +8,21 @@
  * bounce off the mirror of the caps their account contract enforces on-chain.
  */
 
-import { readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
-import { homePaths } from "@/lib/home";
+import { readStoredGrant } from "@/lib/grant";
 import {
   CASH,
-  MORPHO,
-  RIALTO,
   STOCK_TOKENS,
   UNISWAP,
   chainForId,
   explorerFor,
   type StoredGrant,
 } from "@merrymen/core";
-import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "@merrymen/policy";
-
-const GRANT_FILE = homePaths.grant();
+import { limitsFromGrant } from "@merrymen/limits";
+import { checkPolicy, type AgentState, type TradeIntent } from "@merrymen/policy";
 
 /** USDG uses 6 decimals; caps in the grant are plain numbers in UI units. */
 const usdg = (n: number) => BigInt(Math.round(n * 1_000_000));
-
-/** Mirror of the worker's limitsFromGrant (worker/src/index.ts) — same targets, same math. */
-function limitsFromGrant(grant: StoredGrant): AgentLimits {
-  return {
-    perTradeUsdg: usdg(grant.caps.perTradeUsdg),
-    dailyUsdg: usdg(grant.caps.dailyUsdg),
-    allowedTargets: [
-      RIALTO.routerSnapshot as `0x${string}`,
-      UNISWAP.swapRouter02 as `0x${string}`,
-      MORPHO.steakhouseUsdgVault as `0x${string}`,
-      CASH.USDG as `0x${string}`,
-    ],
-    allowedAssets: [CASH.USDG as `0x${string}`, ...STOCK_TOKENS.map((t) => t.address)],
-    maxDrawdownBps: grant.caps.maxDrawdownPct * 100,
-    expiresAt: grant.expiresAt,
-    maxOpsPerDay: grant.caps.maxOpsPerDay,
-  };
-}
-
-async function readGrant(): Promise<StoredGrant | null> {
-  try {
-    return JSON.parse(await readFile(GRANT_FILE, "utf8")) as StoredGrant;
-  } catch {
-    return null;
-  }
-}
 
 export interface WallInfo {
   armed: boolean;
@@ -65,7 +35,7 @@ export interface WallInfo {
 }
 
 export async function GET() {
-  const grant = await readGrant();
+  const grant = await readStoredGrant();
   if (!grant) return NextResponse.json({ armed: false } satisfies WallInfo);
   const info: WallInfo = {
     armed: true,
@@ -101,7 +71,7 @@ const RANDOM_VENUE = "0x1111111111111111111111111111111111111111" as `0x${string
 const UNKNOWN_TOKEN = "0x2222222222222222222222222222222222222222" as `0x${string}`;
 
 export async function POST() {
-  const grant = await readGrant();
+  const grant = await readStoredGrant();
   if (!grant) return NextResponse.json({ error: "no grant — create a wallet first" }, { status: 404 });
 
   const limits = limitsFromGrant(grant);
