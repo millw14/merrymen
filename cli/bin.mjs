@@ -21,7 +21,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -121,7 +121,25 @@ function writeSecret(file, data) {
 
 function writeSettings(next) {
   ensureHome();
-  writeSecret(SETTINGS, JSON.stringify(next, null, 2)); // holds plaintext API keys
+  // settings.json holds plaintext API keys — write to a temp file then rename,
+  // so a crash mid-write can never leave a truncated file that the worker would
+  // silently read as defaults. rename is atomic on POSIX.
+  const tmp = `${SETTINGS}.tmp`;
+  writeSecret(tmp, JSON.stringify(next, null, 2));
+  renameSync(tmp, SETTINGS);
+}
+
+/**
+ * Does the band already have a meaningful config? The shared gate between the
+ * terminal and the dashboard: once ANY core thing is set up on either surface,
+ * neither onboarding surface may nag again. Mirrors the wizard's check.
+ */
+function hasMeaningfulConfig() {
+  const s = readJson(SETTINGS) ?? {};
+  return Boolean(
+    s.llmProvider || s.groqApiKey || s.anthropicApiKey || s.llmApiKey ||
+      s.bundlerApiKey || s.telegramBotToken || s.strategy,
+  );
 }
 
 /** Symbols straight from the registry source — stays in sync with core. */
@@ -316,8 +334,8 @@ async function welcome() {
   await banner("stand and deliver — you just joined the band");
   console.log(
     `  ${bold("the band is mustered.")} raise your first agent:\n\n` +
-      `     ${bold(c.lime("merrymen onboard"))}   ${dim("gather the band — bundler, keys, strategy, basket")}\n` +
-      `     ${bold(c.lime("merrymen start"))}     ${dim("open the tavern (localhost:3100) + loose the worker")}\n\n` +
+      `     ${bold(c.lime("merrymen start"))}      ${dim("first-run setup + open the tavern (localhost:3100) + loose the worker")}\n` +
+      `     ${bold(c.lime("merrymen onboard"))}   ${dim("or gather the band right here — bundler, keys, strategy, basket")}\n\n` +
       `  ${c.gold(c.arrow)} ${dim("your keys, your caps · bounded worst case · every trade simulated first")}\n` +
       `  ${c.gold(c.arrow)} ${dim("learn more:")} ${bold("https://merrymen.dev")}\n`,
   );
@@ -527,6 +545,9 @@ async function onboard() {
   }
 
   p.close();
+  // Onboarding happened on SOME surface — mark it so the dashboard wizard never
+  // nags a user who set up (or deliberately skipped) right here in the terminal.
+  current.webOnboarded = true;
   const s = spinner("stashing your plans in the hollow oak");
   writeSettings(current);
   await new Promise((r) => setTimeout(r, 400));
@@ -535,6 +556,7 @@ async function onboard() {
   console.log(`
 ${bold(`  ${c.arrow} ride out`)}
   1. ${bold("merrymen start")} — opens the tavern (dashboard) at http://localhost:3100 + looses the worker
+     ${dim("(or set up from the browser instead: the dashboard walks you through the same wizard)")}
   2. at ${bold("/grant")}, create your agent wallet — pick testnet 46630 (practice) or mainnet 4663 (real funds)
   3. testnet ${bold("gas")} from the sheriff's vault: ${dim("https://faucet.testnet.chain.robinhood.com")}
      ${dim("gas only — USDG sent to a testnet account is never shown and never traded.")}
@@ -576,6 +598,31 @@ async function start() {
   const host = process.env.MERRYMEN_HOST || "127.0.0.1";
   const url = "http://localhost:3100";
   await banner("the band rides out");
+
+  // ── first run: pick the onboarding surface ──────────────────────────────
+  // Same gate as the dashboard wizard: nothing meaningful configured AND not
+  // explicitly marked done. The browser is the default (it's already about to
+  // open), but terminal-only folks can run the wizard right here. Mirrors the
+  // installer's local/Docker choice. No TTY (headless/Docker) skips straight to
+  // the browser path — the wizard will be there.
+  const firstRun = !hasMeaningfulConfig() && readJson(SETTINGS)?.webOnboarded !== true;
+  if (firstRun && process.stdin.isTTY) {
+    console.log(`\n  ${bold("first run — how do you want to gather your band?")}`);
+    console.log(dim("  1) in the browser — the dashboard wizard (localhost:3100)"));
+    console.log(dim("  2) right here in the terminal (merrymen onboard)"));
+    const p = makePrompter();
+    let choice = "";
+    while (choice !== "1" && choice !== "2") {
+      choice = (await p.ask(`  choice [1/2]: `)).trim();
+      if (choice !== "1" && choice !== "2") {
+        warn("pick 1 or 2.");
+        choice = "";
+      }
+    }
+    p.close();
+    if (choice === "2") await onboard();
+  }
+
   const web = path.join(ROOT, "web");
   // Serve the prebuilt production app (next start), not dev-mode — the robust
   // distribution model. If the build is missing (a source install where the
