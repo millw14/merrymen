@@ -27,6 +27,26 @@ export type PendingAction =
   | { kind: "hotkey"; combo: string; expiresAt: number }
   | { kind: "power"; action: "sleep" | "shutdown"; expiresAt: number };
 
+/** One short phrase naming what a parked action WOULD do — fed to the LLM so it
+ * can tell the owner exactly what's waiting to be confirmed ("press ctrl+s",
+ * "transfer 20 USDG → 0x…", …). */
+export function describePending(p: PendingAction): string {
+  switch (p.kind) {
+    case "transfer":
+      return `transfer ${p.usdg} USDG → ${p.to}`;
+    case "shell":
+      return `run shell command "${p.cmd}"`;
+    case "getfile":
+      return `send file ${p.path}`;
+    case "type":
+      return `type "${p.text}"`;
+    case "hotkey":
+      return `press ${p.combo}`;
+    case "power":
+      return `power ${p.action}`;
+  }
+}
+
 export interface CommandDeps {
   controlEnabled: boolean;
   /** Current chat per-action ceiling (telegramMaxActionUsdg). */

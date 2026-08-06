@@ -43,6 +43,29 @@ export interface TgBotInfo {
   username: string;
 }
 
+/** One inline button. callback_data must be ≤ 64 bytes — our values are short. */
+export interface TgInlineButton {
+  text: string;
+  callback_data?: string;
+  url?: string;
+}
+
+/** reply_markup for an inline keyboard row group (used for confirm/cancel). */
+export type TgInlineKeyboard = { inline_keyboard: TgInlineButton[][] };
+
+/** One inbound callback_query (an inline-button tap). */
+export interface TgCallback {
+  updateId: number;
+  chatId: number;
+  fromId: number;
+  /** message_id of the message that carried the button row. */
+  messageId: number;
+  /** The button's callback_data — for us always "confirm" or "cancel". */
+  data: string;
+  /** Token to acknowledge the tap with answerCallbackQuery. */
+  queryId: string;
+}
+
 function short(token: string): string {
   return token.length > 8 ? `…${token.slice(-6)}` : "…";
 }
@@ -103,20 +126,48 @@ export async function getUpdates(
   opts: TelegramOpts,
   offset: number,
   timeoutSec = 25,
-): Promise<{ messages: TgMessage[]; nextOffset: number; reason?: string }> {
+): Promise<{ messages: TgMessage[]; callbacks: TgCallback[]; nextOffset: number; reason?: string }> {
   const { result, reason } = await call(opts, "getUpdates", {
     offset,
     timeout: timeoutSec,
-    allowed_updates: ["message"],
+    allowed_updates: ["message", "callback_query"],
   });
-  if (!Array.isArray(result)) return { messages: [], nextOffset: offset, reason };
+  if (!Array.isArray(result)) return { messages: [], callbacks: [], nextOffset: offset, reason };
 
   const messages: TgMessage[] = [];
+  const callbacks: TgCallback[] = [];
   let nextOffset = offset;
   for (const raw of result) {
     if (!raw || typeof raw !== "object") continue;
-    const u = raw as { update_id?: unknown; message?: unknown };
+    const u = raw as { update_id?: unknown; message?: unknown; callback_query?: unknown };
     if (typeof u.update_id === "number") nextOffset = Math.max(nextOffset, u.update_id + 1);
+
+    // A message or an inline-button tap — the two update kinds we act on.
+    const cq = u.callback_query as
+      | {
+          id?: unknown;
+          from?: { id?: unknown };
+          message?: { chat?: { id?: unknown }; message_id?: unknown };
+          data?: unknown;
+        }
+      | undefined;
+    if (cq && typeof cq.id === "string") {
+      const cChat = cq.message?.chat?.id;
+      const cFrom = cq.from?.id;
+      const cMsg = cq.message?.message_id;
+      if (typeof cChat === "number" && typeof cFrom === "number" && typeof cMsg === "number" && typeof cq.data === "string") {
+        callbacks.push({
+          updateId: typeof u.update_id === "number" ? u.update_id : 0,
+          chatId: cChat,
+          fromId: cFrom,
+          messageId: cMsg,
+          data: cq.data,
+          queryId: cq.id,
+        });
+      }
+      continue;
+    }
+
     const m = u.message as
       | {
           chat?: { id?: unknown };
@@ -148,7 +199,7 @@ export async function getUpdates(
       voiceFileId,
     });
   }
-  return { messages, nextOffset };
+  return { messages, callbacks, nextOffset };
 }
 
 /** Resolve a Telegram file_id to a downloadable URL (getFile → file_path). */
@@ -173,21 +224,78 @@ export function esc(s: string): string {
  * Send a message. Best-effort — returns a reason on failure, never throws.
  * Sends with HTML parse mode (formatters use <b>/<code>); if Telegram rejects
  * the entities, retries as plain text so a formatting bug never eats a reply.
+ * An optional `markup` attaches an inline keyboard (confirm/cancel buttons).
  */
 export async function sendMessage(
   opts: TelegramOpts,
   chatId: number,
   text: string,
+  markup?: TgInlineKeyboard,
 ): Promise<{ ok: boolean; reason?: string }> {
   // Telegram caps message text at 4096 chars.
   const body = text.length > 4096 ? text.slice(0, 4090) + "\n…" : text;
-  const html = await call(opts, "sendMessage", { chat_id: chatId, text: body, parse_mode: "HTML" });
+  const params = { chat_id: chatId, text: body, parse_mode: "HTML", ...(markup ? { reply_markup: markup } : {}) };
+  const html = await call(opts, "sendMessage", params);
   if (html.result != null) return { ok: true };
   if (html.reason && /parse|entit|tag/i.test(html.reason)) {
-    const plain = await call(opts, "sendMessage", { chat_id: chatId, text: body.replace(/<[^>]+>/g, "") });
+    const plain = await call(opts, "sendMessage", {
+      chat_id: chatId,
+      text: body.replace(/<[^>]+>/g, ""),
+      ...(markup ? { reply_markup: markup } : {}),
+    });
     return plain.result != null ? { ok: true } : { ok: false, reason: plain.reason };
   }
   return { ok: false, reason: html.reason };
+}
+
+/**
+ * Replace a message in place — used to resolve a parked confirm/cancel message
+ * into its outcome without leaving the buttons behind (an empty inline_keyboard
+ * removes them). Mirrors sendMessage's HTML→plain retry discipline.
+ */
+export async function editMessageText(
+  opts: TelegramOpts,
+  chatId: number,
+  messageId: number,
+  text: string,
+): Promise<{ ok: boolean; reason?: string }> {
+  const body = text.length > 4096 ? text.slice(0, 4090) + "\n…" : text;
+  const params = {
+    chat_id: chatId,
+    message_id: messageId,
+    text: body,
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: [] },
+  };
+  const html = await call(opts, "editMessageText", params);
+  if (html.result != null) return { ok: true };
+  if (html.reason && /parse|entit|tag/i.test(html.reason)) {
+    const plain = await call(opts, "editMessageText", {
+      ...params,
+      parse_mode: undefined,
+      text: body.replace(/<[^>]+>/g, ""),
+    });
+    return plain.result != null ? { ok: true } : { ok: false, reason: plain.reason };
+  }
+  return { ok: false, reason: html.reason };
+}
+
+/**
+ * Acknowledge an inline-button tap. Telegram expects an answer to every
+ * callback_query; the optional `text` shows as a brief toast on the user's
+ * phone (≤ 64 chars).
+ */
+export async function answerCallbackQuery(
+  opts: TelegramOpts,
+  callbackQueryId: string,
+  extra?: { text?: string; alert?: boolean },
+): Promise<{ ok: boolean; reason?: string }> {
+  const { result, reason } = await call(opts, "answerCallbackQuery", {
+    callback_query_id: callbackQueryId,
+    ...(extra?.text ? { text: extra.text } : {}),
+    ...(extra?.alert ? { show_alert: true } : {}),
+  });
+  return result != null ? { ok: true } : { ok: false, reason };
 }
 
 /**

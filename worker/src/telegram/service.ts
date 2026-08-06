@@ -26,11 +26,11 @@ import { PC_CAPABILITIES } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { ensureHome, homePaths } from "../home";
 import { loadGrantFile } from "../grant";
-import { esc, getFileUrl, getMe, getUpdates, sendMessage, type TgMessage } from "./api";
+import { esc, answerCallbackQuery, editMessageText, getFileUrl, getMe, getUpdates, sendMessage, type TgCallback, type TgInlineKeyboard, type TgMessage } from "./api";
 import { runAgentTask } from "./agent";
-import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
+import { describePending, executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
-import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash } from "./interpreter";
+import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash, type Command } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
 import { transcribeVoice } from "./voice";
 import { fmtReminders, fmtWatchers, parseWatchSpec, parseWhenSec } from "./watchers";
@@ -111,6 +111,18 @@ const LINK_MAX_FAILS = 5;
 const LINK_LOCKOUT_SEC = 600;
 const HISTORY_TURNS = 6; // user+assistant pairs kept per chat for follow-ups
 
+/** Inline Confirm/Cancel row attached to every parked-action reply, so the
+ * user taps instead of typing /confirm. Only the same chat+fromId that parked
+ * the action is ever allowed to resolve it (see handleCallback). */
+const CONFIRM_MARKUP: TgInlineKeyboard = {
+  inline_keyboard: [
+    [
+      { text: "✅ Confirm", callback_data: "confirm" },
+      { text: "✖ Cancel", callback_data: "cancel" },
+    ],
+  ],
+};
+
 /** Start the poll loop. Returns a stop() handle. */
 export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   let stopped = false;
@@ -131,6 +143,238 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   const stickyIds = new Map<number, Set<string>>();
   // One detached /agent task per chat; /agent stop flips the flag mid-run.
   const agentRuns = new Map<number, { stopped: boolean }>();
+
+  /**
+   * Who a message/callback is FROM. The pending-confirm store and the deps are
+   * keyed on this so an inline-button tap can resolve the exact action the
+   * SAME user parked — a group member can't tap another member's confirm.
+   */
+  type Peer = { chatId: number; fromId: number; fromUsername?: string };
+
+  /**
+   * Shared /link implementation, parameterized over the peer (chat/from). Used
+   * from executeCommand's "link" branch for messages; callbacks never link.
+   */
+  const linkDep = (cfg: ResolvedConfig, peer: Peer, code: string): { ok: boolean; reason?: string } => {
+    const token = cfg.telegramBotToken!;
+    const lock = linkFails.get(peer.chatId);
+    if (lock && lock.fails >= LINK_MAX_FAILS && now() < lock.until) {
+      return { ok: false, reason: "too many attempts — try again in a few minutes" };
+    }
+    let state = ensureLinkCode(stateRef.get(), token);
+    if (!code || code.toUpperCase() !== state.linkCode.toUpperCase()) {
+      const prev = lock && now() < lock.until ? lock.fails : 0;
+      linkFails.set(peer.chatId, { fails: prev + 1, until: now() + LINK_LOCKOUT_SEC });
+      return { ok: false, reason: "bad or expired code" };
+    }
+    linkFails.delete(peer.chatId);
+    // First-come owner + allowlist the chat; the code is consumed (rotates).
+    // linkedAt marks day zero of the relationship — the bond grows from here.
+    const next = new Set(cfg.telegramAllowlist);
+    next.add(peer.chatId);
+    patchSettingsFile({ telegramAllowlist: [...next] });
+    state = rotateLinkCode(
+      { ...state, ownerId: state.ownerId ?? peer.fromId, linkedAt: state.linkedAt ?? now() },
+      token,
+    );
+    stateRef.set(state);
+    if (peer.fromUsername) rememberOwnerFact(`Their Telegram handle is @${peer.fromUsername}.`, now());
+    deps.note("ok", `Telegram: linked chat ${peer.chatId}${peer.fromUsername ? ` (@${peer.fromUsername})` : ""}`);
+    return { ok: true };
+  };
+
+  /**
+   * The executor's dependencies for a given peer. Shared by message handling
+   * and inline-button resolution, so /confirm-from-a-button and
+   * /confirm-typed land on the exact same code path (same re-vetting, same
+   * gates) — there is no second, weaker confirmation route.
+   */
+  const buildCmdDeps = (cfg: ResolvedConfig, peer: Peer): CommandDeps => {
+    const key = `${peer.chatId}:${peer.fromId}`;
+    const statusCtx = () => deps.buildStatusContext();
+    return {
+      controlEnabled: cfg.telegramControlEnabled,
+      maxActionUsdg: cfg.telegramMaxActionUsdg,
+      grantPerTradeUsdg: deps.grantPerTradeUsdg(),
+      transferEnabled: cfg.telegramTransferEnabled,
+      grantHasTransfer: deps.grantHasTransfer(),
+      reads: {
+        status: () => readStatus(statusCtx()),
+        positions: () => readPositions(),
+        pnl: () => readPnl(),
+        trades: () => readTrades(),
+        report: () => readReport(statusCtx()),
+        brag: () => readBrag(statusCtx()),
+        why: async () => {
+          const ev = readWhyEvidence();
+          const llm = resolveLlm(cfg);
+          if (!ev.hasTrade || !llm) return ev.text;
+          return narrateWhy(ev.text.replace(/<[^>]+>/g, ""), llm);
+        },
+      },
+      setStrategy: (name) => {
+        const r = deps.setStrategy(name);
+        if (r.ok) {
+          patchSettingsFile({ strategy: name });
+          deps.note("ok", `Telegram: strategy → ${name}`);
+        }
+        return r;
+      },
+      setCap: (usdg) => {
+        patchSettingsFile({ telegramMaxActionUsdg: usdg });
+        deps.note("ok", `Telegram: chat cap → ${usdg} USDG`);
+      },
+      setPaused: (paused) => {
+        setPaused(paused);
+        deps.note("warn", `Telegram: ${paused ? "paused" : "resumed"} by chat ${peer.chatId}`);
+      },
+      kill: () => {
+        const r = deps.kill();
+        if (r.ok) deps.note("warn", `Telegram: KILL by chat ${peer.chatId}`);
+        return r;
+      },
+      link: (code) => linkDep(cfg, peer, code),
+      trade: deps.submitTrade,
+      transfer: async (to, usdg) => {
+        deps.note("warn", `Telegram: transfer ${usdg} USDG → ${to} confirmed by chat ${peer.chatId}`);
+        return deps.submitTransfer(to, usdg);
+      },
+      getPending: () => pending.get(key) ?? null,
+      setPending: (p) => pending.set(key, p),
+      clearPending: () => pending.delete(key),
+      addAlert: (symbol, op, price) => {
+        const st = stateRef.get();
+        if (st.priceAlerts.length >= 20) return "you're at the 20-alert limit — /unalert one first.";
+        const id = st.priceAlerts.reduce((m, a) => Math.max(m, a.id), 0) + 1;
+        stateRef.set({ ...st, priceAlerts: [...st.priceAlerts, { id, symbol: symbol.toUpperCase(), op, price }] });
+        return `🔔 alert #${id} set — I'll ping you when ${esc(symbol.toUpperCase())} goes ${op === ">" ? "above" : "below"} ${price}. (fires once; needs the worker running)`;
+      },
+      listAlerts: () => {
+        const st = stateRef.get();
+        if (!st.priceAlerts.length) return "no price alerts set. Try: /alert QQQ &gt; 600";
+        return ["🔔 <b>price alerts</b>", ...st.priceAlerts.map((a) => `#${a.id} — ${esc(a.symbol)} ${a.op === ">" ? "&gt;" : "&lt;"} ${a.price}`)].join("\n");
+      },
+      removeAlert: (id) => {
+        const st = stateRef.get();
+        const next = st.priceAlerts.filter((a) => a.id !== id);
+        if (next.length === st.priceAlerts.length) return `no alert #${id}. /alerts lists them.`;
+        stateRef.set({ ...st, priceAlerts: next });
+        return `🔕 alert #${id} removed.`;
+      },
+      setName: (name) => {
+        const r = setSoulName(name);
+        if (r.ok) {
+          deps.onNameChange?.(r.name);
+          deps.note("ok", `Telegram: the merryman is now called ${r.name}`);
+        }
+        return r;
+      },
+      remember: (fact) => rememberOwnerFact(fact, now()),
+      soulInfo: () => {
+        const st = stateRef.get();
+        const rel = relationship(st.linkedAt, st.messageCount, now());
+        const facts = ownerFacts();
+        return [
+          `🌳 <b>${esc(getName())}</b> of the merrymen`,
+          `• ${ageDays(now())} days old · born ${getBornDate()} · ${rel.stage}`,
+          `• ${rel.daysTogether} day(s) riding with you · ${rel.messageCount} messages shared`,
+          facts.length
+            ? `• what I know about you:\n${facts.slice(-8).map((f) => `  ${esc(f.replace(/^- /, "· "))}`).join("\n")}`
+            : `• I don't know much about you yet — tell me things, or /remember them for me`,
+          ``,
+          `my soul lives in ~/.merrymen/soul/ — read it, edit it, it's yours. /name renames me · /forget wipes what I know.`,
+        ].join("\n");
+      },
+      // /forget must now clear the CONVERSATION too, not just OWNER.md —
+      // turns persist to disk since chat_turns, so wiping only the facts while
+      // the transcript survived would make the reply ("I've let go of what I
+      // knew about you") untrue.
+      forgetOwner: () => {
+        forgetOwner();
+        clearChatTurns(peer.chatId);
+        history.delete(peer.chatId);
+        stickyIds.delete(peer.chatId);
+      },
+      // ── PC control ─────────────────────────────────────────────────────
+      pcControlEnabled: cfg.telegramPcControlEnabled,
+      capabilities: new Set(cfg.telegramCapabilities),
+      filesRoot: cfg.telegramFilesRoot,
+      shellAllowlist: cfg.telegramShellAllowlist,
+      pc: makePcActions(
+        { token: cfg.telegramBotToken! },
+        peer.chatId,
+        {
+          filesRoot: cfg.telegramFilesRoot,
+          shellAllowlist: cfg.telegramShellAllowlist,
+          appAllowlist: cfg.telegramAppAllowlist,
+          anthropicApiKey: cfg.anthropicApiKey,
+          llmModel: cfg.llmModel,
+        },
+        deps.note,
+      ),
+      pcStatus: () => {
+        const on = cfg.telegramPcControlEnabled;
+        const caps = new Set(cfg.telegramCapabilities);
+        const rows = PC_CAPABILITIES.map((c) => `${caps.has(c) ? "✅" : "▫️"} ${c}`).join("  ");
+        return [
+          `🖥️ <b>remote control</b> — master ${on ? "ON" : "OFF"}`,
+          rows,
+          on
+            ? `enabled: ${[...caps].join(", ") || "(none — turn some on in the dashboard)"}`
+            : `turn it on in the dashboard → settings → remote control.`,
+          `shell + type + files + power always ask for /confirm first.`,
+        ].join("\n");
+      },
+      addReminder: (when, text) => {
+        const sec = parseWhenSec(when);
+        if (sec === null) return "when? e.g. /remind 20m stretch (s/m/h/d).";
+        const st = stateRef.get();
+        if (st.reminders.length >= 20) return "you're at the 20-reminder limit — /unremind one first.";
+        const id = st.nextId;
+        stateRef.set({
+          ...st,
+          nextId: id + 1,
+          reminders: [...st.reminders, { id, fireAt: now() + sec, text: text.slice(0, 300) }],
+        });
+        return `⏰ reminder #${id} set — I'll ping you in ${when}. (needs the worker running)`;
+      },
+      listReminders: () => fmtReminders(stateRef.get().reminders, now()),
+      removeReminder: (id) => {
+        const st = stateRef.get();
+        const next = st.reminders.filter((r) => r.id !== id);
+        if (next.length === st.reminders.length) return `no reminder #${id}. /reminders lists them.`;
+        stateRef.set({ ...st, reminders: next });
+        return `🗑️ reminder #${id} removed.`;
+      },
+      addWatcher: (spec) => {
+        const parsed = parseWatchSpec(spec);
+        if (!parsed) return "watch what? e.g. cpu>80, file &lt;path&gt;, proc &lt;name&gt;";
+        if (parsed.kind === "file") {
+          const res = resolveInRoot(cfg.telegramFilesRoot, parsed.arg);
+          if (!res.ok) return `🔒 ${esc(res.reason)}`;
+        }
+        const st = stateRef.get();
+        if (st.watchers.length >= 20) return "you're at the 20-watcher limit — /unwatch one first.";
+        const id = st.nextId;
+        stateRef.set({
+          ...st,
+          nextId: id + 1,
+          watchers: [...st.watchers, { id, kind: parsed.kind, arg: parsed.kind === "cpu" ? "" : parsed.arg, threshold: parsed.kind === "cpu" ? parsed.threshold : undefined }],
+        });
+        return `👀 watcher #${id} set. (needs the worker running)`;
+      },
+      listWatchers: () => fmtWatchers(stateRef.get().watchers),
+      removeWatcher: (id) => {
+        const st = stateRef.get();
+        const next = st.watchers.filter((w) => w.id !== id);
+        if (next.length === st.watchers.length) return `no watcher #${id}. /watchers lists them.`;
+        stateRef.set({ ...st, watchers: next });
+        return `🗑️ watcher #${id} removed.`;
+      },
+      help: () => HELP_TEXT,
+      now,
+    };
+  };
 
   /**
    * The in-memory map is now a CACHE over the sqlite log, not the source of
@@ -315,216 +559,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       }
     }
 
-    const linkDep = (code: string): { ok: boolean; reason?: string } => {
-      const lock = linkFails.get(msg.chatId);
-      if (lock && lock.fails >= LINK_MAX_FAILS && now() < lock.until) {
-        return { ok: false, reason: "too many attempts — try again in a few minutes" };
-      }
-      let state = ensureLinkCode(stateRef.get(), token);
-      if (!code || code.toUpperCase() !== state.linkCode.toUpperCase()) {
-        const prev = lock && now() < lock.until ? lock.fails : 0;
-        linkFails.set(msg.chatId, { fails: prev + 1, until: now() + LINK_LOCKOUT_SEC });
-        return { ok: false, reason: "bad or expired code" };
-      }
-      linkFails.delete(msg.chatId);
-      // First-come owner + allowlist the chat; the code is consumed (rotates).
-      // linkedAt marks day zero of the relationship — the bond grows from here.
-      const next = new Set(cfg.telegramAllowlist);
-      next.add(msg.chatId);
-      patchSettingsFile({ telegramAllowlist: [...next] });
-      state = rotateLinkCode(
-        { ...state, ownerId: state.ownerId ?? msg.fromId, linkedAt: state.linkedAt ?? now() },
-        token,
-      );
-      stateRef.set(state);
-      if (msg.fromUsername) rememberOwnerFact(`Their Telegram handle is @${msg.fromUsername}.`, now());
-      deps.note("ok", `Telegram: linked chat ${msg.chatId}${msg.fromUsername ? ` (@${msg.fromUsername})` : ""}`);
-      return { ok: true };
-    };
-
+    const peer: Peer = { chatId: msg.chatId, fromId: msg.fromId, fromUsername: msg.fromUsername };
+    const cmdDeps = buildCmdDeps(cfg, peer);
     const statusCtx = () => deps.buildStatusContext();
-    const cmdDeps: CommandDeps = {
-      controlEnabled: cfg.telegramControlEnabled,
-      maxActionUsdg: cfg.telegramMaxActionUsdg,
-      grantPerTradeUsdg: deps.grantPerTradeUsdg(),
-      transferEnabled: cfg.telegramTransferEnabled,
-      grantHasTransfer: deps.grantHasTransfer(),
-      reads: {
-        status: () => readStatus(statusCtx()),
-        positions: () => readPositions(),
-        pnl: () => readPnl(),
-        trades: () => readTrades(),
-        report: () => readReport(statusCtx()),
-        brag: () => readBrag(statusCtx()),
-        why: async () => {
-          const ev = readWhyEvidence();
-          const llm = resolveLlm(cfg);
-          if (!ev.hasTrade || !llm) return ev.text;
-          return narrateWhy(ev.text.replace(/<[^>]+>/g, ""), llm);
-        },
-      },
-      setStrategy: (name) => {
-        const r = deps.setStrategy(name);
-        if (r.ok) {
-          patchSettingsFile({ strategy: name });
-          deps.note("ok", `Telegram: strategy → ${name}`);
-        }
-        return r;
-      },
-      setCap: (usdg) => {
-        patchSettingsFile({ telegramMaxActionUsdg: usdg });
-        deps.note("ok", `Telegram: chat cap → ${usdg} USDG`);
-      },
-      setPaused: (paused) => {
-        setPaused(paused);
-        deps.note("warn", `Telegram: ${paused ? "paused" : "resumed"} by chat ${msg.chatId}`);
-      },
-      kill: () => {
-        const r = deps.kill();
-        if (r.ok) deps.note("warn", `Telegram: KILL by chat ${msg.chatId}`);
-        return r;
-      },
-      link: linkDep,
-      trade: deps.submitTrade,
-      transfer: async (to, usdg) => {
-        deps.note("warn", `Telegram: transfer ${usdg} USDG → ${to} confirmed by chat ${msg.chatId}`);
-        return deps.submitTransfer(to, usdg);
-      },
-      getPending: () => pending.get(`${msg.chatId}:${msg.fromId}`) ?? null,
-      setPending: (p) => pending.set(`${msg.chatId}:${msg.fromId}`, p),
-      clearPending: () => pending.delete(`${msg.chatId}:${msg.fromId}`),
-      addAlert: (symbol, op, price) => {
-        const st = stateRef.get();
-        if (st.priceAlerts.length >= 20) return "you're at the 20-alert limit — /unalert one first.";
-        const id = st.priceAlerts.reduce((m, a) => Math.max(m, a.id), 0) + 1;
-        stateRef.set({ ...st, priceAlerts: [...st.priceAlerts, { id, symbol: symbol.toUpperCase(), op, price }] });
-        return `🔔 alert #${id} set — I'll ping you when ${esc(symbol.toUpperCase())} goes ${op === ">" ? "above" : "below"} ${price}. (fires once; needs the worker running)`;
-      },
-      listAlerts: () => {
-        const st = stateRef.get();
-        if (!st.priceAlerts.length) return "no price alerts set. Try: /alert QQQ &gt; 600";
-        return ["🔔 <b>price alerts</b>", ...st.priceAlerts.map((a) => `#${a.id} — ${esc(a.symbol)} ${a.op === ">" ? "&gt;" : "&lt;"} ${a.price}`)].join("\n");
-      },
-      removeAlert: (id) => {
-        const st = stateRef.get();
-        const next = st.priceAlerts.filter((a) => a.id !== id);
-        if (next.length === st.priceAlerts.length) return `no alert #${id}. /alerts lists them.`;
-        stateRef.set({ ...st, priceAlerts: next });
-        return `🔕 alert #${id} removed.`;
-      },
-      setName: (name) => {
-        const r = setSoulName(name);
-        if (r.ok) {
-          deps.onNameChange?.(r.name);
-          deps.note("ok", `Telegram: the merryman is now called ${r.name}`);
-        }
-        return r;
-      },
-      remember: (fact) => rememberOwnerFact(fact, now()),
-      soulInfo: () => {
-        const st = stateRef.get();
-        const rel = relationship(st.linkedAt, st.messageCount, now());
-        const facts = ownerFacts();
-        return [
-          `🌳 <b>${esc(getName())}</b> of the merrymen`,
-          `• ${ageDays(now())} days old · born ${getBornDate()} · ${rel.stage}`,
-          `• ${rel.daysTogether} day(s) riding with you · ${rel.messageCount} messages shared`,
-          facts.length
-            ? `• what I know about you:\n${facts.slice(-8).map((f) => `  ${esc(f.replace(/^- /, "· "))}`).join("\n")}`
-            : `• I don't know much about you yet — tell me things, or /remember them for me`,
-          ``,
-          `my soul lives in ~/.merrymen/soul/ — read it, edit it, it's yours. /name renames me · /forget wipes what I know.`,
-        ].join("\n");
-      },
-      // /forget must now clear the CONVERSATION too, not just OWNER.md —
-      // turns persist to disk since chat_turns, so wiping only the facts while
-      // the transcript survived would make the reply ("I've let go of what I
-      // knew about you") untrue.
-      forgetOwner: () => {
-        forgetOwner();
-        clearChatTurns(msg.chatId);
-        history.delete(msg.chatId);
-        stickyIds.delete(msg.chatId);
-      },
-      // ── PC control ─────────────────────────────────────────────────────
-      pcControlEnabled: cfg.telegramPcControlEnabled,
-      capabilities: new Set(cfg.telegramCapabilities),
-      filesRoot: cfg.telegramFilesRoot,
-      shellAllowlist: cfg.telegramShellAllowlist,
-      pc: makePcActions(
-        { token },
-        msg.chatId,
-        {
-          filesRoot: cfg.telegramFilesRoot,
-          shellAllowlist: cfg.telegramShellAllowlist,
-          appAllowlist: cfg.telegramAppAllowlist,
-          anthropicApiKey: cfg.anthropicApiKey,
-          llmModel: cfg.llmModel,
-        },
-        deps.note,
-      ),
-      pcStatus: () => {
-        const on = cfg.telegramPcControlEnabled;
-        const caps = new Set(cfg.telegramCapabilities);
-        const rows = PC_CAPABILITIES.map((c) => `${caps.has(c) ? "✅" : "▫️"} ${c}`).join("  ");
-        return [
-          `🖥️ <b>remote control</b> — master ${on ? "ON" : "OFF"}`,
-          rows,
-          on
-            ? `enabled: ${[...caps].join(", ") || "(none — turn some on in the dashboard)"}`
-            : `turn it on in the dashboard → settings → remote control.`,
-          `shell + type + files + power always ask for /confirm first.`,
-        ].join("\n");
-      },
-      addReminder: (when, text) => {
-        const sec = parseWhenSec(when);
-        if (sec === null) return "when? e.g. /remind 20m stretch (s/m/h/d).";
-        const st = stateRef.get();
-        if (st.reminders.length >= 20) return "you're at the 20-reminder limit — /unremind one first.";
-        const id = st.nextId;
-        stateRef.set({
-          ...st,
-          nextId: id + 1,
-          reminders: [...st.reminders, { id, fireAt: now() + sec, text: text.slice(0, 300) }],
-        });
-        return `⏰ reminder #${id} set — I'll ping you in ${when}. (needs the worker running)`;
-      },
-      listReminders: () => fmtReminders(stateRef.get().reminders, now()),
-      removeReminder: (id) => {
-        const st = stateRef.get();
-        const next = st.reminders.filter((r) => r.id !== id);
-        if (next.length === st.reminders.length) return `no reminder #${id}. /reminders lists them.`;
-        stateRef.set({ ...st, reminders: next });
-        return `🗑️ reminder #${id} removed.`;
-      },
-      addWatcher: (spec) => {
-        const parsed = parseWatchSpec(spec);
-        if (!parsed) return "watch what? e.g. cpu>80, file &lt;path&gt;, proc &lt;name&gt;";
-        if (parsed.kind === "file") {
-          const res = resolveInRoot(cfg.telegramFilesRoot, parsed.arg);
-          if (!res.ok) return `🔒 ${esc(res.reason)}`;
-        }
-        const st = stateRef.get();
-        if (st.watchers.length >= 20) return "you're at the 20-watcher limit — /unwatch one first.";
-        const id = st.nextId;
-        stateRef.set({
-          ...st,
-          nextId: id + 1,
-          watchers: [...st.watchers, { id, kind: parsed.kind, arg: parsed.kind === "cpu" ? "" : parsed.arg, threshold: parsed.kind === "cpu" ? parsed.threshold : undefined }],
-        });
-        return `👀 watcher #${id} set. (needs the worker running)`;
-      },
-      listWatchers: () => fmtWatchers(stateRef.get().watchers),
-      removeWatcher: (id) => {
-        const st = stateRef.get();
-        const next = st.watchers.filter((w) => w.id !== id);
-        if (next.length === st.watchers.length) return `no watcher #${id}. /watchers lists them.`;
-        stateRef.set({ ...st, watchers: next });
-        return `🗑️ watcher #${id} removed.`;
-      },
-      help: () => HELP_TEXT,
-      now,
-    };
 
     // Only the OWNER shapes the soul — both relationship growth AND persistent
     // memory. In a GROUP, `allowed` is true for every member, so without this gate
@@ -549,7 +586,19 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // means a remembered line can never nudge routing toward a trade.
         const identity = identityBlock(st.linkedAt, st.messageCount, now());
         const liveState = readLlmState(statusCtx());
-        const routeCtx = { state: `SOUL:\n${identity}\n\n${liveState}`, history: historyFor(msg.chatId) };
+        // Tell the model about a parked confirm, if one is waiting for THIS user —
+        // otherwise "yes do it" (typed instead of tapping the buttons) is answered
+        // blind. The hint only steers the owner to the buttons / /confirm; natural
+        // language still can never resolve the action itself (confirm/cancel are
+        // not in the LLM enum).
+        const pendingHere = pending.get(`${msg.chatId}:${msg.fromId}`);
+        const pendingHint = pendingHere
+          ? `PENDING CONFIRM: ${describePending(pendingHere)} is waiting for the owner's approval. If they now say yes/confirm/go ahead, tell them to tap ✅ Confirm (or send /confirm). If they say no/cancel, tell them to tap ✖ Cancel (or send /cancel). You cannot confirm it yourself — only the owner can.`
+          : "";
+        const routeCtx = {
+          state: [`SOUL:\n${identity}\n\n${liveState}`, pendingHint].filter(Boolean).join("\n\n"),
+          history: historyFor(msg.chatId),
+        };
         const r = await interpretWithLlm(msg.text, routeCtx, llm);
         cmd = r.cmd;
         // The get-to-know-you side-channel: the model proposes a fact, the
@@ -573,6 +622,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
               `SOUL:\n${identity}`,
               gap ? `TIME SINCE THEIR LAST MESSAGE: ${gap}` : "",
               recalled.block,
+              pendingHint,
               "",
               liveState,
             ]
@@ -624,6 +674,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
 
     // A failed command must still answer — silence reads as a dead bot.
     let reply: string;
+    const hadPending = pending.has(`${msg.chatId}:${msg.fromId}`);
     try {
       reply = await executeCommand(cmd, cmdDeps);
     } catch (e) {
@@ -631,8 +682,55 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       deps.note("warn", `Telegram: ${cmd.kind} failed — ${m}`);
       reply = `🚫 that ${cmd.kind} failed: ${esc(m.slice(0, 200))}`;
     }
+    // If this command just PARKED a fresh action (nothing was pending before and
+    // something is now), attach the Confirm/Cancel buttons so the user can tap
+    // instead of typing /confirm or /cancel. Resolving ones (confirm/cancel)
+    // clear the slot and send plain text.
+    const parked = !hadPending && pending.has(`${msg.chatId}:${msg.fromId}`);
     if (!slash) pushHistory(msg.chatId, "assistant", reply.replace(/<[^>]+>/g, ""), turnMemoryIds);
-    await sendMessage({ token }, msg.chatId, reply);
+    await sendMessage({ token }, msg.chatId, reply, parked ? CONFIRM_MARKUP : undefined);
+  };
+
+  /**
+   * Resolve an inline-button tap (Confirm/Cancel) into the parked action it
+   * belongs to. The pending slot is keyed chat:from, so only the SAME user who
+   * parked the action can confirm or cancel it — a group member can't tap
+   * another member's confirm button. Runs through the exact same executor
+   * confirm/cancel branch as typing /confirm (same re-vetting, same gates).
+   * The parked message is edited in place to the outcome (buttons removed) and
+   * the tap is acknowledged with a toast.
+   */
+  const handleCallback = async (cb: TgCallback, cfg: ResolvedConfig): Promise<void> => {
+    const token = cfg.telegramBotToken!;
+    const { chatId, fromId } = cb;
+    const key = `${chatId}:${fromId}`;
+    const action: Command | null =
+      cb.data === "confirm" ? { kind: "confirm" }
+      : cb.data === "cancel" ? { kind: "cancel" }
+      : null;
+
+    // No parked action (or a different user's — same chat but the slot is bound
+    // to the parker, so a stranger tapping finds nothing): drop the buttons and
+    // say so, but still acknowledge the tap so the button stops spinning.
+    if (!action || !pending.has(key)) {
+      await answerCallbackQuery({ token }, cb.queryId, {});
+      await editMessageText({ token }, chatId, cb.messageId, "nothing pending to confirm — the ask has expired or already resolved.");
+      return;
+    }
+
+    let reply: string;
+    try {
+      reply = await executeCommand(action, buildCmdDeps(cfg, { chatId, fromId }));
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      deps.note("warn", `Telegram: ${cb.data} callback failed — ${m}`);
+      reply = `🚫 that ${cb.data} failed: ${esc(m.slice(0, 200))}`;
+    }
+    await answerCallbackQuery({ token }, cb.queryId, {
+      text: cb.data === "confirm" ? "Confirmed ✓" : "Cancelled",
+    });
+    const edited = await editMessageText({ token }, chatId, cb.messageId, reply);
+    if (!edited.ok) await sendMessage({ token }, chatId, reply);
   };
 
   const pollOnce = async (): Promise<void> => {
@@ -640,7 +738,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     if (!cfg.telegramEnabled || !cfg.telegramBotToken) return; // idle until enabled
     stateRef.set(ensureLinkCode(stateRef.get(), cfg.telegramBotToken));
 
-    const { messages, nextOffset, reason } = await getUpdates({ token: cfg.telegramBotToken }, stateRef.get().offset);
+    const { messages, callbacks, nextOffset, reason } = await getUpdates({ token: cfg.telegramBotToken }, stateRef.get().offset);
     if (reason) {
       if (!warnedUnreachable) {
         deps.note("warn", `Telegram: getUpdates — ${reason}`);
@@ -654,6 +752,13 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         await handle(msg, cfg);
       } catch (e) {
         deps.note("warn", `Telegram: error handling message — ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    for (const cb of callbacks) {
+      try {
+        await handleCallback(cb, cfg);
+      } catch (e) {
+        deps.note("warn", `Telegram: error handling callback — ${e instanceof Error ? e.message : String(e)}`);
       }
     }
     if (nextOffset !== stateRef.get().offset) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { coerceLlmCommand, narrateChat, parseSlash, type Command } from "./interpreter";
-import { executeCommand, type CommandDeps } from "./executor";
+import { describePending, executeCommand, type CommandDeps } from "./executor";
 import type { LlmCreds } from "../llm";
 
 describe("narrateChat — warm free-text voice, triggers nothing", () => {
@@ -564,5 +564,20 @@ describe("PC control — gating, confirm-park, and injection safety", () => {
   it("/pc status works even when everything is off (no capability needed)", async () => {
     const d = deps({ pcControlEnabled: false, capabilities: new Set() });
     assert.equal(await executeCommand({ kind: "pc" }, d), "PCSTATUS");
+  });
+});
+
+describe("describePending — the one-liner fed to the LLM so it can name a parked action", () => {
+  const at = 1000;
+  it("names each of the six kinds", () => {
+    assert.equal(
+      describePending({ kind: "transfer", to: "0x1234567890abcdef1234567890abcdef12345678", usdg: 20, expiresAt: at }),
+      "transfer 20 USDG → 0x1234567890abcdef1234567890abcdef12345678",
+    );
+    assert.equal(describePending({ kind: "shell", cmd: "ls -la", expiresAt: at }), 'run shell command "ls -la"');
+    assert.equal(describePending({ kind: "getfile", path: "notes.txt", expiresAt: at }), "send file notes.txt");
+    assert.equal(describePending({ kind: "type", text: "hello", expiresAt: at }), 'type "hello"');
+    assert.equal(describePending({ kind: "hotkey", combo: "ctrl+s", expiresAt: at }), "press ctrl+s");
+    assert.equal(describePending({ kind: "power", action: "shutdown", expiresAt: at }), "power shutdown");
   });
 });
