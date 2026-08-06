@@ -557,7 +557,9 @@ function openBrowser(url) {
         : process.platform === "darwin"
           ? ["open", [url]]
           : ["xdg-open", [url]];
-    spawn(cmd, args, { stdio: "ignore", detached: true, shell: false }).unref();
+    spawn(cmd, args, { stdio: "ignore", detached: true, shell: false })
+      .on("error", () => {})
+      .unref();
   } catch {
     // no browser to open (headless/server) — the URL is printed anyway
   }

@@ -426,15 +426,27 @@ curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | 
 irm https://raw.githubusercontent.com/millw14/merrymen/main/install.ps1 | iex
 
 # already have Node 22.12+ ? (any OS)
-npm install -g merrymen && merrymen start`}
+npm install -g merrymen && merrymen start
+
+# or run it in Docker (built locally, no registry)
+git clone https://github.com/millw14/merrymen.git && cd merrymen
+docker build -t merrymen:latest .
+docker run -d --name merrymen --restart unless-stopped \\
+  -p 3100:3100 -v "$HOME/.merrymen:/app/.merrymen" \\
+  -e MERRYMEN_HOST=0.0.0.0 -e MERRYMEN_HOME=/app/.merrymen \\
+  merrymen:latest`}
             </pre>
           </div>
           <p className="install-note" data-reveal="up">
-            Runs on <b>Linux, macOS, and Windows</b> — one Node package, no Docker, no clone. The
-            installers set up Node for you; with Node 22.12+ already, <code className="inline">npm i -g merrymen</code>{" "}
-            works anywhere. Your band starts in <b>paper mode</b> (live prices, simulated fills, zero
-            funds), so you can watch it trade in a couple of minutes. Upgrade any time with{" "}
-            <code className="inline">merrymen update</code>.
+            Runs on <b>Linux, macOS, and Windows</b> — one Node package, no clone. The installers ask
+            how you want to run merrymen: <b>local</b> (Node + npm) or <b>Docker</b> (the image is
+            built locally, nothing is pulled from a registry; your keys and ledger live on your
+            machine in <code className="inline">~/.merrymen</code>). Pick <b>Docker</b> on a VPS and the
+            installer self-hosts it in one shot — detects the box&apos;s public IP, allowlists it, opens
+            port 3100, starts the band, and prints <code className="inline">http://&lt;ip&gt;:3100</code>.
+            Your band starts in{" "}
+            <b>paper mode</b> (live prices, simulated fills, zero funds), so you can watch it trade in
+            a couple of minutes. Upgrade any time with <code className="inline">merrymen update</code>.
           </p>
 
           <div className="steps">

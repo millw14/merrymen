@@ -1,0 +1,51 @@
+# merrymen — self-hosted trading agent, via Docker Compose.
+#
+# This is how the Docker install is driven: install.sh / install.ps1 build the
+# image (no registry) and then `docker compose up -d` from this file. No
+# `merrymen` command is installed for the Docker path — everything is compose.
+#
+# Runs the band as a detached daemon: the dashboard on :3100 plus the
+# supervised worker. All persistent state — settings, grant/keys, SQLite
+# ledger, heartbeat — lives on the host in ~/.merrymen, mounted into the
+# container, so the container stays disposable. `docker compose down` never
+# touches that data.
+#
+#   mkdir -p ~/.merrymen           # first: Docker auto-creates a missing bind
+#                                  # mount source as ROOT, which the unprivileged
+#                                  # container user then can't write into
+#   MYUID=$(id -u) MYGID=$(id -g) docker compose up -d   # run as YOUR user
+#   docker compose ps              # status
+#   docker compose logs -f         # tail the band's logs
+#   docker compose down            # stop the daemon
+#
+# One-shot commands run in a throwaway container against the same volume:
+#   docker compose run --rm merrymen node cli/bin.mjs doctor
+#   docker compose run --rm merrymen node cli/bin.mjs onboard
+#
+# The `user` maps the container to your host UID/GID so files it writes to the
+# bind mount belong to you (readable/backuppable without sudo). bash's $UID/$GID
+# are readonly and never reach compose, so they're read from MYUID/MYGID here;
+# unset, they default to 1000:1000. On macOS / Windows, Docker Desktop emulates
+# this and the default is fine.
+#
+# TZ inherits your host timezone when set. MERRYMEN_ALLOWED_HOSTS opts exact
+# hostnames (comma-separated, no ports) past the dashboard's host guard — the
+# only way a public domain reaches the APIs; leave unset for LAN-only.
+services:
+  merrymen:
+    image: merrymen:latest
+    build:
+      context: .
+    container_name: merrymen
+    restart: unless-stopped
+    user: "${MYUID:-1000}:${MYGID:-1000}"
+    ports:
+      - "3100:3100"
+    environment:
+      MERRYMEN_HOST: "0.0.0.0"
+      MERRYMEN_HOME: "/app/.merrymen"
+      TZ: "${TZ:-UTC}"
+      MERRYMEN_ALLOWED_HOSTS: "${MERRYMEN_ALLOWED_HOSTS:-}"
+    volumes:
+      - "${MERRYMEN_HOME:-$HOME/.merrymen}:/app/.merrymen"
+    command: ["node", "cli/bin.mjs", "start", "--no-open"]

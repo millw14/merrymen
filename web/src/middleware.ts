@@ -11,7 +11,10 @@ import { NextResponse, type NextRequest } from "next/server";
  *   1. Host allowlist — reject any Host that isn't loopback or a private-LAN IP
  *      literal. DNS rebinding needs a PUBLIC domain name in the Host header, so
  *      this kills it, while still allowing the explicit MERRYMEN_HOST=0.0.0.0 LAN
- *      opt-in (reached via a private IP like 192.168.x.x).
+ *      opt-in (reached via a private IP like 192.168.x.x). An owner who hosts the
+ *      dashboard behind their own domain can opt those exact hostnames in via
+ *      MERRYMEN_ALLOWED_HOSTS (comma-separated, no ports) — the explicit, only
+ *      way a public domain ever passes.
  *   2. Cross-site block — reject requests whose Sec-Fetch-Site is cross-site or
  *      same-site (a different site the browser labels as such). same-origin (the
  *      dashboard itself) and none (a top-level navigation, or a non-browser client
@@ -20,6 +23,17 @@ import { NextResponse, type NextRequest } from "next/server";
  *
  * Without this, a single unauthenticated cross-origin POST drains the account.
  */
+
+/**
+ * Exact public hostnames the owner explicitly allows past the host check, via
+ * MERRYMEN_ALLOWED_HOSTS (comma-separated). Hostnames only — the port is already
+ * stripped from the Host header before matching, so "example.com" (not
+ * "example.com:3100"). Case-insensitive. Empty when unset = no public domains pass.
+ */
+const EXTRA_HOSTS = (process.env.MERRYMEN_ALLOWED_HOSTS ?? "")
+  .split(",")
+  .map((h) => h.trim().toLowerCase())
+  .filter((h) => h.length > 0);
 
 /** True only for loopback + RFC1918 private + link-local hosts (never a public domain/IP). */
 function hostAllowed(hostHeader: string | null): boolean {
@@ -30,6 +44,7 @@ function hostAllowed(hostHeader: string | null): boolean {
     .replace(/^\[|\]$/g, "")
     .toLowerCase();
   if (hostname === "localhost") return true;
+  if (EXTRA_HOSTS.includes(hostname)) return true; // the owner's own self-hosted domain(s)
 
   const v4 = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (v4) {
