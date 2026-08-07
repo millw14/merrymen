@@ -116,24 +116,25 @@ const io = (remember: (n: string) => boolean = () => true) => ({
   cwd: { value: "" },
   note: () => {},
   remember,
+  offerInstall: () => null,
 });
 
-test("no capabilities → no tools (not even remember)", () => {
-  assert.equal(buildTools(baseCfg({}), io()).length, 0);
+test("no capabilities → install_tool only (always available, no remember)", () => {
+  assert.deepEqual(buildTools(baseCfg({}), io()).map((t) => t.spec.name), ["install_tool"]);
 });
 
 test("each capability arms exactly its tools (+ remember once any action tool exists)", () => {
   const names = (cfg: AgentConfig) => buildTools(cfg, io()).map((t) => t.spec.name).sort();
-  assert.deepEqual(names(baseCfg({ capabilities: new Set(["shell"]) })), ["remember", "run"]);
-  assert.deepEqual(names(baseCfg({ capabilities: new Set(["files"]) })), ["list_dir", "read_file", "remember", "send_file", "write_file"]);
-  assert.deepEqual(names(baseCfg({ capabilities: new Set(["screen"]) })), ["remember", "screenshot"]);
-  assert.deepEqual(names(baseCfg({ capabilities: new Set(["apps"]) })), ["open", "remember"]);
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["shell"]) })), ["install_tool", "remember", "run"]);
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["files"]) })), ["install_tool", "list_dir", "read_file", "remember", "send_file", "write_file"]);
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["screen"]) })), ["install_tool", "remember", "screenshot"]);
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["apps"]) })), ["install_tool", "open", "remember"]);
   // keyboard is RCE-equivalent → dark unless auto-shell is armed
-  assert.deepEqual(names(baseCfg({ capabilities: new Set(["keyboard"]) })), []);
-  assert.deepEqual(names(baseCfg({ capabilities: new Set(["keyboard"]), autoShell: true })), ["hotkey", "remember", "type_text"]);
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["keyboard"]) })), ["install_tool"]);
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["keyboard"]), autoShell: true })), ["hotkey", "install_tool", "remember", "type_text"]);
   // vision without an Anthropic key stays dark (and no action tool → no remember either)
-  assert.deepEqual(names(baseCfg({ capabilities: new Set(["vision"]) })), []);
-  assert.deepEqual(names(baseCfg({ capabilities: new Set(["vision"]), anthropicApiKey: "sk" })), ["look", "remember"]);
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["vision"]) })), ["install_tool"]);
+  assert.deepEqual(names(baseCfg({ capabilities: new Set(["vision"]), anthropicApiKey: "sk" })), ["install_tool", "look", "remember"]);
 });
 
 test("open tool refuses arbitrary URLs in safe mode (auto-shell off)", async () => {
@@ -257,6 +258,7 @@ function makeDeps(cfg: AgentConfig, turns: AgentTurn[], sent: string[], seen?: A
     },
     note: () => {},
     remember: () => true,
+    offerInstall: () => null,
     soulBlock: "IDENTITY: you are Robin.",
     stopFlag: { stopped: false },
     turnFn: async (_creds, opts: { messages: AgentMsg[]; tools: ToolSpec[]; system: string }) => {

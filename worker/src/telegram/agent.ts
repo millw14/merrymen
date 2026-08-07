@@ -201,6 +201,13 @@ export interface AgentIo {
   note: (level: "ok" | "warn", msg: string) => void;
   /** Persist a durable note to the merryman's memory (sanitized by the caller). */
   remember: (note: string) => boolean;
+  /**
+   * Offer to install a missing tool: parks the pending action keyed to this
+   * chat and posts the buttoned offer message. Returns the package name, or
+   * null when no offer is possible (unknown package / no passwordless sudo /
+   * headless). Installs only ever run after the owner confirms.
+   */
+  offerInstall(tool: string): string | null;
 }
 
 /** Build the tools the armed capability groups allow. Exported for tests. */
@@ -453,10 +460,31 @@ export function buildTools(cfg: AgentConfig, io: AgentIo): ToolImpl[] {
     );
   }
 
+  // Install offers — ALWAYS available (not gated by capability groups): if a
+  // task hits a missing tool, the agent can offer to install it. The offer only
+  // parks a pending action + posts a buttoned message; the install itself runs
+  // only after the owner taps Confirm / sends /confirm. Park-only, so it can't
+  // execute anything on its own.
+  tools.push({
+    spec: {
+      name: "install_tool",
+      description:
+        "Offer to install a system tool that's missing on the owner's PC (e.g. grim, ydotool, playerctl). Parks an install offer for the owner to approve — the install itself only runs after they tap Confirm or send /confirm. Returns the package name if the offer was made, or an explanation if it can't be.",
+      schema: { type: "object", properties: { tool: { type: "string", description: "The binary name of the missing tool" } }, required: ["tool"] },
+    },
+    async exec(input) {
+      const tool = str(input, "tool").trim();
+      if (!tool) return "REFUSED: specify the tool name.";
+      const pkg = io.offerInstall(tool);
+      if (!pkg) return `REFUSED: can't offer an install for "${tool}" — unknown package, no passwordless sudo, or not a Linux desktop.`;
+      return `install offer parked for ${pkg} — waiting for the owner to tap Confirm (or /confirm). Tell them to approve.`;
+    },
+  });
+
   // Memory — always available WHEN the agent can act (so a no-capability agent
   // still reports "no tools" rather than a memory-only stub). It's how names,
   // projects, and setup survive between tasks. Sanitized by the caller.
-  if (tools.length > 0) {
+  if (tools.length > 1) {
     tools.push({
       spec: {
         name: "remember",
@@ -486,6 +514,8 @@ export interface AgentRunDeps {
   note: (level: "ok" | "warn", msg: string) => void;
   /** Persist a durable note (sanitized). Powers the "remember" tool + memory. */
   remember: (note: string) => boolean;
+  /** Park an install offer + post the buttoned message; returns package or null. */
+  offerInstall(tool: string): string | null;
   /** Soul/memory block (identity, owner facts, notes, journal) for continuity. */
   soulBlock: string;
   /** Flipped by /agent stop. Checked between steps and between tools. */
@@ -525,9 +555,10 @@ export async function runAgentTask(task: string, deps: AgentRunDeps): Promise<vo
     cwd,
     note: deps.note,
     remember: deps.remember,
+    offerInstall: deps.offerInstall,
   });
 
-  if (tools.length === 0) {
+  if (tools.length === 1) {
     await deps.send("🤷 no agent tools are enabled — turn on capability groups (shell, files, screen…) in the dashboard.");
     return;
   }

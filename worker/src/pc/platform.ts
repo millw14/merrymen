@@ -17,8 +17,8 @@
  *    supported on <platform>" rather than blowing up.
  */
 
-import { spawn } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { accessSync, constants, existsSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ensureHome, homePaths } from "../home";
@@ -32,6 +32,18 @@ export interface RunResult {
   stdout: string;
   stderr: string;
   reason?: string;
+  /**
+   * Set when the failure is a MISSING TOOL that could be installed (never on a
+   * dead command or a headless box). Carries the tool's binary name so callers
+   * can look it up in the install map and offer a /confirm install.
+   */
+  missing?: { tool: string };
+  /**
+   * Set when the tool is INSTALLED but its daemon isn't running (e.g. ydotool
+   * without ydotoold) — a recoverable state that a /confirm service-start can
+   * fix, distinct from `missing` (which means install a package).
+   */
+  needsService?: { tool: string; argv: string[] };
 }
 
 /**
@@ -101,10 +113,250 @@ function unsupported(action: string): RunResult {
   return { ok: false, code: null, stdout: "", stderr: "", reason: `${action} isn't supported on ${PLATFORM} yet` };
 }
 
+// ── session detection & tool probes ────────────────────────────────────────
+
+export type SessionType = "wayland" | "x11" | "headless";
+
+/**
+ * The display session the worker runs in. Same rule OpenClaw/Hermes use:
+ * XDG_SESSION_TYPE first, then WAYLAND_DISPLAY, then DISPLAY. In an XWayland
+ * mixed session (both WAYLAND_DISPLAY and DISPLAY set) Wayland wins — X11 tools
+ * can't reach native Wayland windows. Non-Linux platforms report "headless"
+ * and never act on it.
+ */
+export function sessionType(): SessionType {
+  const xdg = (process.env.XDG_SESSION_TYPE ?? "").toLowerCase();
+  if (xdg === "wayland" || process.env.WAYLAND_DISPLAY) return "wayland";
+  if (xdg === "x11" || process.env.DISPLAY) return "x11";
+  return "headless";
+}
+
+/**
+ * True when `name` is an executable on PATH. `name` is always a fixed internal
+ * string — never caller input — so walking PATH to find it is safe.
+ */
+export function toolExists(name: string): boolean {
+  for (const dir of (process.env.PATH ?? "").split(":")) {
+    if (!dir) continue;
+    try {
+      accessSync(path.join(dir, name), constants.X_OK);
+      return true;
+    } catch {
+      /* keep walking */
+    }
+  }
+  return false;
+}
+
+/** First tool in `tools` the `exists` predicate accepts, else null (pure). */
+export function resolveToolChain(tools: readonly string[], exists: (name: string) => boolean): string | null {
+  for (const t of tools) if (exists(t)) return t;
+  return null;
+}
+
+// ── package-manager install plans (Hermes-style scoped NOPASSWD) ─────────────
+
+/** Binary → package name per package manager. null means "don't offer" — an
+ * install we're not sure about must never be suggested. Mirrors Hermes'
+ * distro-aware show_manual_install_hint: only fill entries we trust. */
+const PACKAGE_MAP: Record<string, Record<string, string>> = {
+  pacman: {
+    "wl-copy": "wl-clipboard",
+    "wl-paste": "wl-clipboard",
+    xclip: "xclip",
+    grim: "grim",
+    "gnome-screenshot": "gnome-screenshot",
+    spectacle: "spectacle",
+    scrot: "scrot",
+    maim: "maim",
+    import: "imagemagick",
+    wtype: "wtype",
+    ydotool: "ydotool",
+    xdotool: "xdotool",
+    playerctl: "playerctl",
+    "notify-send": "libnotify",
+    wpctl: "wireplumber",
+    amixer: "alsa-utils",
+  },
+  "apt-get": {
+    "wl-copy": "wl-clipboard",
+    "wl-paste": "wl-clipboard",
+    xclip: "xclip",
+    grim: "grim",
+    "gnome-screenshot": "gnome-screenshot",
+    spectacle: "spectacle",
+    scrot: "scrot",
+    maim: "maim",
+    import: "imagemagick",
+    wtype: "wtype",
+    ydotool: "ydotool",
+    xdotool: "xdotool",
+    playerctl: "playerctl",
+    "notify-send": "libnotify-bin",
+    wpctl: "pipewire-bin",
+    amixer: "alsa-utils",
+  },
+  dnf: {
+    "wl-copy": "wl-clipboard",
+    "wl-paste": "wl-clipboard",
+    xclip: "xclip",
+    grim: "grim",
+    "gnome-screenshot": "gnome-screenshot",
+    spectacle: "spectacle",
+    scrot: "scrot",
+    maim: "maim",
+    import: "imagemagick",
+    wtype: "wtype",
+    ydotool: "ydotool",
+    xdotool: "xdotool",
+    playerctl: "playerctl",
+    "notify-send": "libnotify",
+    amixer: "alsa-utils",
+  },
+  apk: {
+    "wl-copy": "wl-clipboard",
+    "wl-paste": "wl-clipboard",
+    xclip: "xclip",
+    grim: "grim",
+    "gnome-screenshot": "gnome-screenshot",
+    spectacle: "spectacle",
+    scrot: "scrot",
+    maim: "maim",
+    import: "imagemagick",
+    wtype: "wtype",
+    ydotool: "ydotool",
+    xdotool: "xdotool",
+    playerctl: "playerctl",
+    "notify-send": "libnotify",
+    amixer: "alsa-utils",
+  },
+  brew: {
+    "wl-copy": "wl-clipboard",
+    "wl-paste": "wl-clipboard",
+    xclip: "xclip",
+    grim: "grim",
+    scrot: "scrot",
+    wtype: "wtype",
+    ydotool: "ydotool",
+    xdotool: "xdotool",
+    playerctl: "playerctl",
+  },
+};
+
+const PM_ORDER = ["pacman", "apt-get", "dnf", "apk", "brew"] as const;
+type PmName = (typeof PM_ORDER)[number];
+
+/** The installed package manager, in order (pure — injectable for tests). */
+export function pmFor(exists: (name: string) => boolean): PmName | null {
+  for (const pm of PM_ORDER) if (exists(pm)) return pm;
+  return null;
+}
+
+/** The detected package manager on this machine, or null when none. */
+export function detectPm(): PmName | null {
+  return pmFor(toolExists);
+}
+
+/** Package name for `tool` under `pm`, or null when unknown (no offer). */
+export function pkgFor(pm: PmName, tool: string): string | null {
+  return PACKAGE_MAP[pm]?.[tool] ?? null;
+}
+
+/** The exact argv to install `pkg` under `pm`. brew needs no sudo; everything
+ * else runs under `sudo -n` (passwordless) — the only non-interactive route. */
+export function installArgvFor(pm: PmName, pkg: string): string[] {
+  switch (pm) {
+    case "brew":
+      return ["brew", "install", pkg];
+    case "apt-get":
+      return ["sudo", "-n", "apt-get", "install", "-y", pkg];
+    case "dnf":
+      return ["sudo", "-n", "dnf", "install", "-y", pkg];
+    case "apk":
+      return ["sudo", "-n", "apk", "add", pkg];
+    case "pacman":
+    default:
+      // --noconfirm: pacman prompts "Proceed with installation? [Y/n]" on a
+      // piped stdin; without it the install blocks forever. sudo -n only
+      // silences the sudo password prompt, not pacman's own.
+      return ["sudo", "-n", "pacman", "-S", "--needed", "--noconfirm", pkg];
+  }
+}
+
+/** A harmless `sudo -n <pm> …` invocation to probe scoped NOPASSWD rules. The
+ * probe must name the SAME binary a scoped rule would whitelist (e.g.
+ * `NOPASSWD: /usr/bin/pacman`) — `sudo -n true` fails under a scoped rule, so
+ * it would falsely report no passwordless sudo. brew needs no sudo at all. */
+export function sudoProbeArgvFor(pm: PmName): string[] {
+  switch (pm) {
+    case "brew":
+      return [];
+    case "apt-get":
+      return ["-n", "apt-get", "--version"];
+    case "dnf":
+      return ["-n", "dnf", "--version"];
+    case "apk":
+      return ["-n", "apk", "--version"];
+    case "pacman":
+    default:
+      return ["-n", "pacman", "-V"];
+  }
+}
+
+/** True when passwordless sudo works for `pm` right now. Defaults to the
+ * detected package manager. brew never needs sudo (always true on linux). */
+export function canSudoNonInteractive(pm?: PmName): boolean {
+  if (PLATFORM !== "linux") return false;
+  const target = pm ?? detectPm();
+  if (!target) return false;
+  if (target === "brew") return true;
+  try {
+    const r = spawnSync("sudo", sudoProbeArgvFor(target), { stdio: "ignore" });
+    return r.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** A full install plan for `tool`, or null when it can't be offered (no package
+ * manager, unknown package, or passwordless sudo unavailable). */
+export function installPlanFor(tool: string): { pm: PmName; package: string; argv: string[] } | null {
+  const pm = pmFor(toolExists);
+  if (!pm) return null;
+  const pkg = pkgFor(pm, tool);
+  if (!pkg) return null;
+  if (!canSudoNonInteractive(pm)) return null;
+  return { pm, package: pkg, argv: installArgvFor(pm, pkg) };
+}
+
+/** Extra caveat text appended to an install offer, when one applies. */
+const INSTALL_CAVEATS: Record<string, string> = {
+  ydotool: "note: ydotool needs the ydotoold daemon running and your user in the input group.",
+  grim: "note: grim works on wlroots compositors (Sway/Hyprland) only.",
+};
+
+/** Caveat for a tool, or "" — appended to the offer message. */
+export function installCaveat(tool: string): string {
+  return INSTALL_CAVEATS[tool] ?? "";
+}
+
+/** Run an install plan with an install-sized timeout. argv is internally
+ * generated from the fixed map — never caller text. */
+export function runInstall(argv: string[]): Promise<RunResult> {
+  return run(argv[0] ?? "", argv.slice(1), { timeoutMs: 300_000 });
+}
+
+/** Run a service-start plan (e.g. `systemctl --user enable --now ydotool`).
+ * User-level units need no sudo; argv is internally generated from the fixed
+ * plan map — never caller text. */
+export function runServiceStart(argv: string[]): Promise<RunResult> {
+  return run(argv[0] ?? "", argv.slice(1), { timeoutMs: 60_000 });
+}
+
 // ── screenshot ────────────────────────────────────────────────────────────
 
 /** Capture the full (multi-monitor) screen to a PNG in the scratch dir. */
-export async function capture(): Promise<{ ok: boolean; path?: string; reason?: string }> {
+export async function capture(): Promise<{ ok: boolean; path?: string; reason?: string; missing?: { tool: string } }> {
   ensureHome();
   const out = path.join(homePaths.scratch(), "screenshot.png");
   let r: RunResult;
@@ -123,14 +375,180 @@ export async function capture(): Promise<{ ok: boolean; path?: string; reason?: 
   } else if (PLATFORM === "darwin") {
     r = await run("screencapture", ["-x", out]);
   } else {
-    // Linux: try scrot, then imagemagick, then gnome-screenshot.
-    r = await run("scrot", ["-o", out]);
-    if (!r.ok) r = await run("import", ["-window", "root", out]);
-    if (!r.ok) r = await run("gnome-screenshot", ["-f", out]);
+    r = await captureLinux(out);
   }
-  if (!r.ok) return { ok: false, reason: r.reason || r.stderr.slice(0, 200) || "capture failed" };
+  if (!r.ok) return { ok: false, reason: r.reason || r.stderr.slice(0, 200) || "capture failed", missing: r.missing };
   if (!existsSync(out)) return { ok: false, reason: "capture produced no file" };
   return { ok: true, path: out };
+}
+
+/**
+ * The capture toolchain order for a Linux session. On Wayland the desktop
+ * environment's native tool goes first (grim is wlroots-only and GNOME's mutter
+ * doesn't speak wlr-screencopy), then the rest as fallbacks; on X11 every tool
+ * works so the classic order stands. Pure — injectable for tests.
+ */
+export function captureChainFor(de: string | undefined, exists: (name: string) => boolean, session: SessionType): readonly string[] {
+  const base: readonly string[] =
+    session === "wayland"
+      ? ["grim", "gnome-screenshot", "spectacle"]
+      : ["scrot", "maim", "import", "gnome-screenshot"];
+  if (session !== "wayland") return base;
+  const preferred = /GNOME/i.test(de ?? "") ? "gnome-screenshot" : /KDE/i.test(de ?? "") ? "spectacle" : "grim";
+  if (!exists(preferred) || !base.includes(preferred)) return base;
+  return [preferred, ...base.filter((t) => t !== preferred)];
+}
+
+/**
+ * The typing/hotkey toolchain order for a Linux session, mirroring
+ * captureChainFor: the desktop environment's native tool goes first. On KDE
+ * and GNOME the compositor (KWin/mutter) doesn't implement the Wayland
+ * virtual-keyboard protocol wtype needs, so ydotool (uinput via the ydotoold
+ * daemon) is the tool that actually works — it must be offered FIRST, or an
+ * installed-but-unusable wtype re-offer loops forever. On wlroots compositors
+ * (Sway/Hyprland) wtype is the right first choice. Pure — injectable for tests.
+ */
+export function typingChainFor(de: string | undefined, session: SessionType): readonly string[] {
+  if (session === "x11") return ["xdotool"];
+  if (session !== "wayland") return [];
+  // The system-preferred tool stays FIRST even when it's missing, so an offer
+  // picks the tool that actually works here (ydotool on KDE/GNOME, wtype on
+  // wlroots) rather than looping on an installed-but-unusable wtype.
+  const preferred = /GNOME|KDE|plasma/i.test(de ?? "") ? "ydotool" : "wtype";
+  return [preferred, ...["wtype", "ydotool"].filter((t) => t !== preferred)];
+}
+
+/**
+ * Which typing tool to OFFER after the whole chain failed. Returns the FIRST
+ * tool in the system-preferred order that isn't installed (so on KDE you get
+ * "install ydotool", never a pointless wtype re-offer), or null when every
+ * tool is present — that's a runtime problem (dead daemon, etc.), not a
+ * missing install, and no offer should be made. Pure — injectable for tests.
+ */
+export function typingOfferFor(chain: readonly string[], exists: (name: string) => boolean): string | null {
+  for (const tool of chain) if (!exists(tool)) return tool;
+  return null;
+}
+
+/**
+ * When the whole typing chain is installed but nothing typed, a daemon-based
+ * tool (ydotool) can still be recovered by STARTING its service rather than
+ * reinstalling. Returns the start plan when the chain uses ydotool and the
+ * daemon is down, or null when no service-start applies (daemon running, chain
+ * has no daemon-based tool, or the daemon state is unknown). Pure — injectable
+ * for tests. The argv is a fixed, internally-generated user-level unit start —
+ * never caller text, and `systemctl --user` needs no sudo.
+ */
+export function typingServicePlanFor(chain: readonly string[], daemonRunning: boolean | null): { tool: string; argv: string[] } | null {
+  if (!chain.includes("ydotool") || daemonRunning !== false) return null;
+  return { tool: "ydotool", argv: ["systemctl", "--user", "enable", "--now", "ydotool"] };
+}
+
+/** What a failing typing run should do NEXT: offer a genuinely-missing tool,
+ *  offer to start a down daemon, or give up. Mirrors the decision inside
+ *  `typeText` exactly — extracted so the branching is testable without spawning
+ *  real tools. Pure — injectable for tests. */
+export type TypingOutcome =
+  | { kind: "missing"; tool: string }
+  | { kind: "service"; plan: { tool: string; argv: string[] } }
+  | { kind: "failed" };
+
+export function typingOutcome(deps: {
+  chain: readonly string[];
+  present: (name: string) => boolean;
+  daemonRunning: boolean | null;
+}): TypingOutcome {
+  const offer = typingOfferFor(deps.chain, deps.present);
+  if (offer) return { kind: "missing", tool: offer };
+  const servicePlan = typingServicePlanFor(deps.chain, deps.daemonRunning);
+  if (servicePlan) return { kind: "service", plan: servicePlan };
+  return { kind: "failed" };
+}
+
+/** Same decision for hotkeys, but with the executor filter baked in: only wtype
+ *  and xdotool have real hotkey drivers today (ydotool has no keycode driver
+ *  yet), so a chain that merely prefers ydotool must NOT loop an offer the
+ *  executor can't honor. Pure — injectable for tests. */
+export function hotkeyOutcome(deps: {
+  chain: readonly string[];
+  present: (name: string) => boolean;
+}): TypingOutcome {
+  const offerable = deps.chain.filter((t) => t === "wtype" || t === "xdotool");
+  const offer = typingOfferFor(offerable, deps.present);
+  if (offer) return { kind: "missing", tool: offer };
+  return { kind: "failed" };
+}
+
+function typeWith(tool: string, text: string): Promise<RunResult> {
+  switch (tool) {
+    case "wtype":
+      return run("wtype", ["-"], { input: text });
+    case "ydotool":
+      return run("ydotool", ["type", text]);
+    case "xdotool":
+      return run("xdotool", ["type", "--", text]);
+    default:
+      return Promise.resolve({ ok: false, code: null, stdout: "", stderr: "", reason: `unknown typing tool ${tool}` });
+  }
+}
+
+function hotkeyWith(tool: string, combo: string): Promise<RunResult> {
+  switch (tool) {
+    case "wtype":
+      return run("wtype", ["-s", combo.replace(/\s+/g, "")]);
+    case "xdotool":
+      return run("xdotool", ["key", combo]);
+    default:
+      return Promise.resolve({ ok: false, code: null, stdout: "", stderr: "", reason: `unknown hotkey tool ${tool}` });
+  }
+}
+
+function captureWith(tool: string, out: string): Promise<RunResult> {
+  switch (tool) {
+    case "grim":
+      return run("grim", [out]);
+    case "gnome-screenshot":
+      return run("gnome-screenshot", ["-f", out]);
+    case "spectacle":
+      return run("spectacle", ["-b", "-o", out]);
+    case "scrot":
+      return run("scrot", ["-o", out]);
+    case "maim":
+      return run("maim", [out]);
+    case "import":
+      return run("import", ["-window", "root", out]);
+    default:
+      return Promise.resolve({ ok: false, code: null, stdout: "", stderr: "", reason: `unknown capture tool ${tool}` });
+  }
+}
+
+/** Session-aware Linux capture. Headless boxes (the VPS) fail fast and clearly. */
+async function captureLinux(out: string): Promise<RunResult> {
+  const session = sessionType();
+  if (session === "headless") {
+    return {
+      ok: false,
+      code: null,
+      stdout: "",
+      stderr: "",
+      reason: "no display server — screenshots need a desktop session, not a headless box",
+    };
+  }
+  const chain = captureChainFor(process.env.XDG_CURRENT_DESKTOP, toolExists, session);
+  for (const tool of chain) {
+    const r = await captureWith(tool, out);
+    if (r.ok) return r;
+  }
+  const names = session === "wayland" ? "grim, gnome-screenshot, or spectacle" : "scrot, maim, import, or gnome-screenshot";
+  const preferred = chain[0] ?? "grim";
+  return {
+    ok: false,
+    code: null,
+    stdout: "",
+    stderr: "",
+    reason: `no screenshot tool works — install one: sudo pacman -S ${session === "wayland" ? "grim" : "scrot"} (${names})`,
+    missing: { tool: preferred },
+  };
 }
 
 // ── open app / url ──────────────────────────────────────────────────────────
@@ -224,12 +642,51 @@ export async function setVolume(spec: string): Promise<RunResult> {
     if (Number.isFinite(abs)) return run("osascript", ["-e", `set volume output volume ${Math.max(0, Math.min(100, abs))}`]);
     return { ok: false, code: null, stdout: "", stderr: "", reason: "volume: use a number, up, down, or mute" };
   }
-  // Linux (amixer)
-  if (s === "mute") return run("amixer", ["set", "Master", "toggle"]);
-  if (s === "up") return run("amixer", ["set", "Master", "10%+"]);
-  if (s === "down") return run("amixer", ["set", "Master", "10%-"]);
-  if (Number.isFinite(abs)) return run("amixer", ["set", "Master", `${Math.max(0, Math.min(100, abs))}%`]);
-  return { ok: false, code: null, stdout: "", stderr: "", reason: "volume: use a number, up, down, or mute" };
+  // Linux: PipeWire → PulseAudio → ALSA.
+  return setVolumeLinux(s, abs);
+}
+
+/**
+ * Linux volume — chain PipeWire (wpctl) → PulseAudio (pactl) → ALSA (amixer).
+ * Each drives the default sink/device, so no per-user state is needed.
+ */
+async function setVolumeLinux(s: string, abs: number): Promise<RunResult> {
+  if (s !== "mute" && s !== "up" && s !== "down" && !Number.isFinite(abs)) {
+    return { ok: false, code: null, stdout: "", stderr: "", reason: "volume: use a number, up, down, or mute" };
+  }
+  const attempts: Array<() => Promise<RunResult>> = [
+    () => {
+      if (s === "mute") return run("wpctl", ["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
+      if (s === "up") return run("wpctl", ["set-volume", "@DEFAULT_AUDIO_SINK@", "0.1+"]);
+      if (s === "down") return run("wpctl", ["set-volume", "@DEFAULT_AUDIO_SINK@", "0.1-"]);
+      return run("wpctl", ["set-volume", "@DEFAULT_AUDIO_SINK@", String(Math.max(0, Math.min(100, abs)) / 100)]);
+    },
+    () => {
+      if (s === "mute") return run("pactl", ["set-sink-mute", "@DEFAULT_SINK@", "toggle"]);
+      if (s === "up") return run("pactl", ["set-sink-volume", "@DEFAULT_SINK@", "+10%"]);
+      if (s === "down") return run("pactl", ["set-sink-volume", "@DEFAULT_SINK@", "-10%"]);
+      return run("pactl", ["set-sink-volume", "@DEFAULT_SINK@", `${Math.max(0, Math.min(100, abs))}%`]);
+    },
+    () => {
+      if (s === "mute") return run("amixer", ["set", "Master", "toggle"]);
+      if (s === "up") return run("amixer", ["set", "Master", "10%+"]);
+      if (s === "down") return run("amixer", ["set", "Master", "10%-"]);
+      return run("amixer", ["set", "Master", `${Math.max(0, Math.min(100, abs))}%`]);
+    },
+  ];
+  let last: RunResult | null = null;
+  for (const attempt of attempts) {
+    last = await attempt();
+    if (last.ok) return last;
+  }
+  return {
+    ok: false,
+    code: null,
+    stdout: "",
+    stderr: "",
+    reason: "no volume control works — install one of: wpctl (pipewire), pactl (pulseaudio), amixer (alsa-utils)",
+    missing: { tool: "wpctl" },
+  };
 }
 
 /** key: play | pause | next | prev (play/pause share one toggle key). */
@@ -242,6 +699,9 @@ export async function mediaKey(key: string): Promise<RunResult> {
   if (PLATFORM === "darwin") {
     // No first-party CLI; try the common `media-control`/`nowplaying-cli`, else unsupported.
     return unsupported("media keys");
+  }
+  if (!toolExists("playerctl")) {
+    return { ok: false, code: null, stdout: "", stderr: "", reason: "media keys need playerctl — install it (pacman -S playerctl)", missing: { tool: "playerctl" } };
   }
   const cmd = k === "next" ? "next" : k === "prev" || k === "previous" ? "previous" : "play-pause";
   return run("playerctl", [cmd]);
@@ -260,6 +720,9 @@ export async function notify(text: string): Promise<RunResult> {
   }
   if (PLATFORM === "darwin") {
     return run("osascript", ["-e", "on run argv", "-e", 'display notification (item 1 of argv) with title "merryman"', "-e", "end run", text]);
+  }
+  if (!toolExists("notify-send")) {
+    return { ok: false, code: null, stdout: "", stderr: "", reason: "notifications need notify-send — install libnotify (pacman -S libnotify)", missing: { tool: "notify-send" } };
   }
   return run("notify-send", ["merryman", text]);
 }
@@ -316,11 +779,18 @@ export function listDir(absPath: string): { ok: boolean; entries?: DirEntry[]; r
 
 // ── clipboard ────────────────────────────────────────────────────────────
 
-export async function clipGet(): Promise<{ ok: boolean; text?: string; reason?: string }> {
+export async function clipGet(): Promise<{ ok: boolean; text?: string; reason?: string; missing?: { tool: string } }> {
   let r: RunResult;
+  const headless = sessionType() === "headless";
   if (PLATFORM === "win32") r = await pwsh("Get-Clipboard -Raw");
   else if (PLATFORM === "darwin") r = await run("pbpaste", []);
-  else r = await run("xclip", ["-selection", "clipboard", "-o"]);
+  else if (sessionType() === "wayland") {
+    if (!toolExists("wl-paste")) return { ok: false, reason: "clipboard needs wl-paste — install wl-clipboard (pacman -S wl-clipboard)", ...(headless ? {} : { missing: { tool: "wl-paste" } }) };
+    r = await run("wl-paste", ["--no-newline"]);
+  } else {
+    if (!toolExists("xclip")) return { ok: false, reason: "clipboard needs xclip — install it (pacman -S xclip)", ...(headless ? {} : { missing: { tool: "xclip" } }) };
+    r = await run("xclip", ["-selection", "clipboard", "-o"]);
+  }
   if (!r.ok) return { ok: false, reason: r.reason || "clipboard read failed" };
   return { ok: true, text: r.stdout.slice(0, OUT_CAP) };
 }
@@ -328,6 +798,16 @@ export async function clipGet(): Promise<{ ok: boolean; text?: string; reason?: 
 export async function clipSet(text: string): Promise<RunResult> {
   if (PLATFORM === "win32") return pwsh("Set-Clipboard -Value $env:MERRYMEN_CLIP", { MERRYMEN_CLIP: text });
   if (PLATFORM === "darwin") return run("pbcopy", [], { input: text });
+  const headless = sessionType() === "headless";
+  if (sessionType() === "wayland") {
+    if (!toolExists("wl-copy")) {
+      return { ok: false, code: null, stdout: "", stderr: "", reason: "clipboard needs wl-copy — install wl-clipboard (pacman -S wl-clipboard)", missing: headless ? undefined : { tool: "wl-copy" } };
+    }
+    return run("wl-copy", [], { input: text });
+  }
+  if (!toolExists("xclip")) {
+    return { ok: false, code: null, stdout: "", stderr: "", reason: "clipboard needs xclip — install it (pacman -S xclip)", missing: headless ? undefined : { tool: "xclip" } };
+  }
   return run("xclip", ["-selection", "clipboard"], { input: text });
 }
 
@@ -380,7 +860,57 @@ export async function typeText(text: string): Promise<RunResult> {
       MERRYMEN_KEYS: escapeSendKeys(text),
     });
   }
-  if (PLATFORM === "linux") return run("xdotool", ["type", "--", text]);
+  if (PLATFORM === "linux") {
+    const session = sessionType();
+    const chain = typingChainFor(process.env.XDG_CURRENT_DESKTOP, session);
+    if (chain.length === 0) {
+      return {
+        ok: false,
+        code: null,
+        stdout: "",
+        stderr: "",
+        reason: "no display server — typing needs a desktop session, not a headless box",
+      };
+    }
+    for (const tool of chain) {
+      const r = await typeWith(tool, text);
+      if (r.ok) return r;
+    }
+    const outcome = typingOutcome({
+      chain,
+      present: toolExists,
+      daemonRunning: await procRunning("ydotoold"),
+    });
+    if (outcome.kind === "missing") {
+      return {
+        ok: false,
+        code: null,
+        stdout: "",
+        stderr: "",
+        reason: `typing needs ${outcome.tool} on this ${session} session — install it and try again`,
+        missing: { tool: outcome.tool },
+      };
+    }
+    if (outcome.kind === "service") {
+      return {
+        ok: false,
+        code: null,
+        stdout: "",
+        stderr: "",
+        reason: `typing failed: the ${outcome.plan.tool} daemon (ydotoold) isn't running — start it and try again`,
+        needsService: outcome.plan,
+      };
+    }
+    return {
+      ok: false,
+      code: null,
+      stdout: "",
+      stderr: "",
+      reason: `typing failed: ${chain.join(", ")} ${chain.length > 1 ? "are" : "is"} installed but none could type${
+        chain.includes("ydotool") ? " — ydotool needs the ydotoold daemon running and your user in the input group" : ""
+      }`,
+    };
+  }
   if (PLATFORM === "darwin") return unsupported("type");
   return unsupported("type");
 }
@@ -391,7 +921,46 @@ export async function hotkey(combo: string): Promise<RunResult> {
     if (!sk) return { ok: false, code: null, stdout: "", stderr: "", reason: `couldn't parse hotkey "${combo}"` };
     return pwsh("(New-Object -ComObject WScript.Shell).SendKeys($env:MERRYMEN_KEYS)", { MERRYMEN_KEYS: sk });
   }
-  if (PLATFORM === "linux") return run("xdotool", ["key", combo.replace(/\+/g, "+")]);
+  if (PLATFORM === "linux") {
+    const session = sessionType();
+    const chain = typingChainFor(process.env.XDG_CURRENT_DESKTOP, session);
+    if (chain.length === 0) {
+      return {
+        ok: false,
+        code: null,
+        stdout: "",
+        stderr: "",
+        reason: "no display server — hotkeys need a desktop session, not a headless box",
+      };
+    }
+    for (const tool of chain) {
+      const r = await hotkeyWith(tool, combo);
+      if (r.ok) return r;
+    }
+    // Hotkeys only have real executors for wtype/xdotool today. On KDE/GNOME
+    // the system-preferred tool is ydotool, which has no keycode driver yet —
+    // so don't loop an offer the executor can't honor. Report the true state.
+    const outcome = hotkeyOutcome({ chain, present: toolExists });
+    if (outcome.kind === "missing") {
+      return {
+        ok: false,
+        code: null,
+        stdout: "",
+        stderr: "",
+        reason: `hotkeys need ${outcome.tool} on this ${session} session — install it and try again`,
+        missing: { tool: outcome.tool },
+      };
+    }
+    return {
+      ok: false,
+      code: null,
+      stdout: "",
+      stderr: "",
+      reason: `hotkeys failed: ${chain.join(", ")} installed but none could fire${
+        chain.includes("ydotool") ? " — ydotool hotkeys need a keycode driver (only /type works via ydotool for now)" : ""
+      }`,
+    };
+  }
   return unsupported("hotkey");
 }
 
@@ -428,6 +997,30 @@ export async function procRunning(name: string): Promise<boolean | null> {
 /** Capped, chat-safe rendering of command/dir output. */
 export function capOutput(s: string): string {
   return s.length > OUT_CAP ? s.slice(0, OUT_CAP) + "\n…(truncated)" : s;
+}
+
+// ── diagnostics (/pc doctor line) ──────────────────────────────────────────
+
+export interface PcDoctorTool {
+  name: string;
+  present: boolean;
+}
+
+export interface PcDoctorReport {
+  platform: string;
+  session: SessionType;
+  tools: PcDoctorTool[];
+}
+
+/** Probe the tools the CURRENT session would use, for the /pc status line. */
+export function pcDoctor(): PcDoctorReport {
+  const st = sessionType();
+  if (PLATFORM !== "linux") return { platform: PLATFORM, session: st, tools: [] };
+  const capture = captureChainFor(process.env.XDG_CURRENT_DESKTOP, toolExists, st);
+  const clipboard = st === "wayland" ? ["wl-paste", "wl-copy"] : ["xclip"];
+  const input = typingChainFor(process.env.XDG_CURRENT_DESKTOP, st);
+  const names = [...new Set([...capture, ...clipboard, ...input, "wpctl", "pactl", "amixer", "playerctl", "notify-send"])];
+  return { platform: PLATFORM, session: st, tools: names.map((name) => ({ name, present: toolExists(name) })) };
 }
 
 export { PLATFORM };
