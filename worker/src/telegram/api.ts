@@ -175,6 +175,7 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: "transfer", description: "send USDG out (asks to /confirm)" },
   { command: "confirm", description: "approve a pending send or PC action" },
   { command: "cancel", description: "cancel a pending action" },
+  { command: "kill", description: "destroy the grant, stand the band down" },
   { command: "alert", description: "ping me at a price" },
   { command: "alerts", description: "list price alerts" },
   { command: "unalert", description: "remove an alert" },
@@ -214,8 +215,12 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
 export async function setMyCommands(
   opts: TelegramOpts,
   commands?: { command: string; description: string }[],
+  scope?: { type: string },
 ): Promise<{ ok: boolean; reason?: string }> {
-  const { result, reason } = await call(opts, "setMyCommands", { commands: commands ?? BOT_COMMANDS });
+  const { result, reason } = await call(opts, "setMyCommands", {
+    commands: commands ?? BOT_COMMANDS,
+    ...(scope ? { scope } : {}),
+  });
   return result != null ? { ok: true } : { ok: false, reason };
 }
 

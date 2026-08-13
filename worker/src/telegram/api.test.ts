@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { BOT_COMMANDS, esc, getMe, getUpdates, sendMessage, setMyCommands, type FetchLike } from "./api";
+import { parseSlash } from "./interpreter";
 
 /** Fake fetch capturing the last call, returning a canned envelope. */
 function fakeFetch(status: number, body: unknown): FetchLike & { lastUrl?: string; lastBody?: string } {
@@ -171,10 +172,43 @@ describe("setMyCommands", () => {
     assert.deepEqual(body.commands, BOT_COMMANDS);
   });
 
+  it("omits the scope when none is given", async () => {
+    const f = fakeFetch(200, OK(true));
+    await setMyCommands({ token: "123:abc", fetchFn: f });
+    const body = JSON.parse(f.lastBody!) as { scope?: unknown };
+    assert.equal(body.scope, undefined);
+  });
+
+  it("sends the scope when one is given", async () => {
+    const f = fakeFetch(200, OK(true));
+    await setMyCommands({ token: "123:abc", fetchFn: f }, undefined, { type: "all_private_chats" });
+    const body = JSON.parse(f.lastBody!) as { scope?: unknown };
+    assert.deepEqual(body.scope, { type: "all_private_chats" });
+  });
+
   it("degrades gracefully on ok:false (bad token or unsupported)", async () => {
     const f = fakeFetch(200, { ok: false, description: "Unauthorized" });
     const { ok, reason } = await setMyCommands({ token: "bad", fetchFn: f });
     assert.equal(ok, false);
     assert.match(reason!, /Unauthorized/);
+  });
+});
+
+describe("BOT_COMMANDS — every menu entry is a real command", () => {
+  it("parses each entry through parseSlash without hitting the unknown branch", () => {
+    for (const { command } of BOT_COMMANDS) {
+      // /agent is routed before parseSlash (a dedicated match in service.ts), so
+      // parseSlash correctly reports it as unknown — it's still a real command.
+      if (command === "agent") continue;
+      const parsed = parseSlash(`/${command}`);
+      assert.ok(parsed, `/${command} should parse`);
+      if (parsed.kind === "unknown") {
+        assert.ok(!/^unknown command/.test(parsed.text), `/${command} hit the unknown branch`);
+      }
+    }
+  });
+
+  it("includes /kill for parity with /help and CONTROL_KINDS", () => {
+    assert.ok(BOT_COMMANDS.some(({ command }) => command === "kill"));
   });
 });

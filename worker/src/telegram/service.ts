@@ -646,7 +646,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // token changes). Best-effort — a failure logs once, never breaks the poll.
     if (cfg.telegramBotToken && cfg.telegramBotToken !== commandsRegisteredFor) {
       commandsRegisteredFor = cfg.telegramBotToken;
-      const menu = await setMyCommands({ token: cfg.telegramBotToken });
+      const menu = await setMyCommands({ token: cfg.telegramBotToken }, undefined, { type: "all_private_chats" });
       if (!menu.ok) deps.note("warn", `Telegram: command menu — ${menu.reason}`);
     }
 
