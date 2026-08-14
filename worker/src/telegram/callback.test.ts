@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { livePendingEntry, resolveCallback, type ResolveCallbackCtx } from "./callback";
+import { expiredPendingEntry, livePendingEntry, resolveCallback, type ResolveCallbackCtx } from "./callback";
 import type { TgCallback } from "./api";
 import type { Command } from "./interpreter";
 import type { PendingAction } from "./executor";
@@ -98,6 +98,26 @@ describe("livePendingEntry — expired slots are swept on read", () => {
   });
 });
 
+describe("expiredPendingEntry — a lapsed slot is swept and reported", () => {
+  it("returns the entry when it exists but is past its expiry, and sweeps it", () => {
+    const pending = new Map<string, PendingAction>([["111:111", pendingFor("abc12345", 1_000_050)]]);
+    const hit = expiredPendingEntry(pending, "111:111", 1_000_090);
+    assert.equal(hit?.kind, "type");
+    assert.equal(hit?.nonce, "abc12345");
+    assert.equal(pending.has("111:111"), false); // swept, not just hidden
+  });
+
+  it("returns null and leaves a live entry untouched", () => {
+    const pending = new Map<string, PendingAction>([["111:111", pendingFor()]]);
+    assert.equal(expiredPendingEntry(pending, "111:111", 1_000_000), null);
+    assert.equal(pending.has("111:111"), true);
+  });
+
+  it("returns null for a missing key", () => {
+    assert.equal(expiredPendingEntry(new Map(), "111:111", 1_000_000), null);
+  });
+});
+
 // ── resolveCallback — the four fixed behaviours ─────────────────────────────
 
 describe("resolveCallback — nonce binding (stale buttons can't confirm a newer ask)", () => {
@@ -163,16 +183,23 @@ describe("resolveCallback — callback authorization (same gates as messages)", 
 });
 
 describe("resolveCallback — only the pending owner's message is ever edited", () => {
-  it("a tap with no live pending (stranger/expired) toasts only — never edits", async () => {
+  it("an owner's expired ask is swept, told to re-run, and their message edited", async () => {
+    const h = harness();
+    h.pending.set("111:111", pendingFor("abc12345", 999_900)); // expired (now = 1_000_000)
+    await resolveCallback(cb({ data: "confirm:abc12345" }), h.ctx);
+    assert.deepEqual(h.calls, [
+      "answer:⏳ that ask expired — re-run the command to try again.",
+      "edit:42:⏳ that ask expired — re-run the command to try again.",
+    ]);
+    assert.ok(!h.calls.some((c) => c.startsWith("exec:"))); // nothing runs
+    assert.equal(h.pending.has("111:111"), false); // swept — slot freed
+  });
+
+  it("a tap with no live pending (never parked / another's button) toasts not-yours — never edits", async () => {
     const h = harness();
     await resolveCallback(cb(), h.ctx); // nothing parked at all
-    assert.deepEqual(h.calls, ["answer:"]);
-
-    h.calls.length = 0;
-    h.pending.set("111:111", pendingFor("abc12345", 999_900)); // expired (now = 1_000_000) — swept on read
-    await resolveCallback(cb({ data: "confirm:abc12345" }), h.ctx);
-    assert.deepEqual(h.calls, ["answer:"]); // no edit, no execute
-    assert.equal(h.pending.has("111:111"), false); // swept
+    assert.deepEqual(h.calls, ["answer:⏳ that's not yours to confirm."]);
+    assert.ok(!h.calls.some((c) => c.startsWith("edit:") || c.startsWith("exec:")));
   });
 });
 
