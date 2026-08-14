@@ -60,7 +60,7 @@ export interface TgCallback {
   fromId: number;
   /** message_id of the message that carried the button row. */
   messageId: number;
-  /** The button's callback_data — for us always "confirm" or "cancel". */
+  /** The button's callback_data — for us "confirm:<nonce>" or "cancel:<nonce>". */
   data: string;
   /** Token to acknowledge the tap with answerCallbackQuery. */
   queryId: string;

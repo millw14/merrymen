@@ -29,8 +29,9 @@ import { loadGrantFile } from "../grant";
 import { esc, answerCallbackQuery, editMessageText, getFileUrl, getMe, getUpdates, sendMessage, type TgCallback, type TgInlineKeyboard, type TgMessage } from "./api";
 import { runAgentTask } from "./agent";
 import { describePending, executeCommand, type CommandDeps, type PendingAction } from "./executor";
+import { livePendingEntry, resolveCallback } from "./callback";
 import { resolveLlm } from "../llm";
-import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash, type Command } from "./interpreter";
+import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
 import { transcribeVoice } from "./voice";
 import { fmtReminders, fmtWatchers, parseWatchSpec, parseWhenSec } from "./watchers";
@@ -113,15 +114,18 @@ const HISTORY_TURNS = 6; // user+assistant pairs kept per chat for follow-ups
 
 /** Inline Confirm/Cancel row attached to every parked-action reply, so the
  * user taps instead of typing /confirm. Only the same chat+fromId that parked
- * the action is ever allowed to resolve it (see handleCallback). */
-const CONFIRM_MARKUP: TgInlineKeyboard = {
+ * the action is ever allowed to resolve it (see handleCallback). The nonce
+ * binds each button to the exact action it was attached to — a button left over
+ * from a superseded ask is refused instead of confirming whatever lands in the
+ * slot later. */
+const confirmMarkup = (nonce: string): TgInlineKeyboard => ({
   inline_keyboard: [
     [
-      { text: "✅ Confirm", callback_data: "confirm" },
-      { text: "✖ Cancel", callback_data: "cancel" },
+      { text: "✅ Confirm", callback_data: `confirm:${nonce}` },
+      { text: "✖ Cancel", callback_data: `cancel:${nonce}` },
     ],
   ],
-};
+});
 
 /** Start the poll loop. Returns a stop() handle. */
 export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
@@ -135,6 +139,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   // Keyed by `${chatId}:${fromId}` — a parked action is bound to the USER who
   // parked it, so in a group one member can't /confirm another's transfer/shell.
   const pending = new Map<string, PendingAction>(); // awaiting /confirm
+  const livePending = (key: string): PendingAction | null => livePendingEntry(pending, key, now());
   const linkFails = new Map<number, { fails: number; until: number }>();
   const history = new Map<number, { role: "user" | "assistant"; content: string }[]>();
   // Memory ids surfaced on the previous turn, per chat. A follow-up like "is it
@@ -591,7 +596,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // blind. The hint only steers the owner to the buttons / /confirm; natural
         // language still can never resolve the action itself (confirm/cancel are
         // not in the LLM enum).
-        const pendingHere = pending.get(`${msg.chatId}:${msg.fromId}`);
+        const pendingHere = livePending(`${msg.chatId}:${msg.fromId}`);
         const pendingHint = pendingHere
           ? `PENDING CONFIRM: ${describePending(pendingHere)} is waiting for the owner's approval. If they now say yes/confirm/go ahead, tell them to tap ✅ Confirm (or send /confirm). If they say no/cancel, tell them to tap ✖ Cancel (or send /cancel). You cannot confirm it yourself — only the owner can.`
           : "";
@@ -674,7 +679,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
 
     // A failed command must still answer — silence reads as a dead bot.
     let reply: string;
-    const hadPending = pending.has(`${msg.chatId}:${msg.fromId}`);
+    const key = `${msg.chatId}:${msg.fromId}`;
+    const before = livePending(key);
     try {
       reply = await executeCommand(cmd, cmdDeps);
     } catch (e) {
@@ -682,55 +688,37 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       deps.note("warn", `Telegram: ${cmd.kind} failed — ${m}`);
       reply = `🚫 that ${cmd.kind} failed: ${esc(m.slice(0, 200))}`;
     }
-    // If this command just PARKED a fresh action (nothing was pending before and
-    // something is now), attach the Confirm/Cancel buttons so the user can tap
-    // instead of typing /confirm or /cancel. Resolving ones (confirm/cancel)
-    // clear the slot and send plain text.
-    const parked = !hadPending && pending.has(`${msg.chatId}:${msg.fromId}`);
+    // If this command just PARKED a fresh action (its nonce differs from
+    // whatever was in the slot before), attach the Confirm/Cancel buttons so the
+    // user can tap instead of typing /confirm or /cancel. Resolving ones
+    // (confirm/cancel) clear the slot and send plain text; reads while a
+    // pending exists leave the nonce unchanged and carry no stray buttons.
+    const after = livePending(key);
+    const parked = !!after && after.nonce !== before?.nonce;
     if (!slash) pushHistory(msg.chatId, "assistant", reply.replace(/<[^>]+>/g, ""), turnMemoryIds);
-    await sendMessage({ token }, msg.chatId, reply, parked ? CONFIRM_MARKUP : undefined);
+    await sendMessage({ token }, msg.chatId, reply, parked ? confirmMarkup(after!.nonce) : undefined);
   };
 
   /**
    * Resolve an inline-button tap (Confirm/Cancel) into the parked action it
-   * belongs to. The pending slot is keyed chat:from, so only the SAME user who
-   * parked the action can confirm or cancel it — a group member can't tap
-   * another member's confirm button. Runs through the exact same executor
-   * confirm/cancel branch as typing /confirm (same re-vetting, same gates).
-   * The parked message is edited in place to the outcome (buttons removed) and
-   * the tap is acknowledged with a toast.
+   * belongs to. Pure decision logic lives in resolveCallback (callback.ts) so
+   * the whole surface is unit-tested without a live bot; this wrapper binds the
+   * service's real executor/api surface and the per-chat pending map to it.
    */
   const handleCallback = async (cb: TgCallback, cfg: ResolvedConfig): Promise<void> => {
     const token = cfg.telegramBotToken!;
-    const { chatId, fromId } = cb;
-    const key = `${chatId}:${fromId}`;
-    const action: Command | null =
-      cb.data === "confirm" ? { kind: "confirm" }
-      : cb.data === "cancel" ? { kind: "cancel" }
-      : null;
-
-    // No parked action (or a different user's — same chat but the slot is bound
-    // to the parker, so a stranger tapping finds nothing): drop the buttons and
-    // say so, but still acknowledge the tap so the button stops spinning.
-    if (!action || !pending.has(key)) {
-      await answerCallbackQuery({ token }, cb.queryId, {});
-      await editMessageText({ token }, chatId, cb.messageId, "nothing pending to confirm — the ask has expired or already resolved.");
-      return;
-    }
-
-    let reply: string;
-    try {
-      reply = await executeCommand(action, buildCmdDeps(cfg, { chatId, fromId }));
-    } catch (e) {
-      const m = e instanceof Error ? e.message : String(e);
-      deps.note("warn", `Telegram: ${cb.data} callback failed — ${m}`);
-      reply = `🚫 that ${cb.data} failed: ${esc(m.slice(0, 200))}`;
-    }
-    await answerCallbackQuery({ token }, cb.queryId, {
-      text: cb.data === "confirm" ? "Confirmed ✓" : "Cancelled",
+    const peer = { chatId: cb.chatId, fromId: cb.fromId };
+    await resolveCallback(cb, {
+      token,
+      allowlist: cfg.telegramAllowlist,
+      pending,
+      now,
+      execute: (action) => executeCommand(action, buildCmdDeps(cfg, peer)),
+      note: deps.note,
+      answer: (queryId, extra) => answerCallbackQuery({ token }, queryId, extra),
+      edit: (chatId, messageId, text) => editMessageText({ token }, chatId, messageId, text),
+      send: (chatId, text) => sendMessage({ token }, chatId, text),
     });
-    const edited = await editMessageText({ token }, chatId, cb.messageId, reply);
-    if (!edited.ok) await sendMessage({ token }, chatId, reply);
   };
 
   const pollOnce = async (): Promise<void> => {

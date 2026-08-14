@@ -419,6 +419,37 @@ describe("executeCommand — transfer confirm flow", () => {
     assert.deepEqual(d.calls, [`pend:${ADDR}:10`]);
   });
 
+  it("a live pending refuses a second park — no silent overwrite", async () => {
+    const d = deps(); // caps on, shell allowlist has "git status"
+    await executeCommand({ kind: "transfer", to: ADDR, usdg: 20 }, d);
+    const r = await executeCommand({ kind: "shell", cmd: "git status" }, d);
+    assert.match(r, /already waiting/i);
+    assert.deepEqual(d.calls, [`pend:${ADDR}:20`]); // slot NOT overwritten
+    // The original ask is still exactly what /confirm executes.
+    assert.match(await executeCommand({ kind: "confirm" }, d), /submitted transfer/);
+    assert.deepEqual(d.calls, [`pend:${ADDR}:20`, `transfer:${ADDR}:20`]);
+  });
+
+  it("an expired pending does not block a new park", async () => {
+    let t = 1_000_000;
+    const d = deps({ now: () => t });
+    await executeCommand({ kind: "transfer", to: ADDR, usdg: 20 }, d);
+    t += 500; // past the 90s TTL
+    const r = await executeCommand({ kind: "shell", cmd: "git status" }, d);
+    assert.match(r, /confirm run/i); // the new ask parks
+    assert.deepEqual(d.calls, [`pend:${ADDR}:20`, "pend:shell"]);
+  });
+
+  it("each parked action carries a short nonce — fresh parks get fresh nonces", async () => {
+    const d = deps();
+    await executeCommand({ kind: "transfer", to: ADDR, usdg: 20 }, d);
+    const first = d.getPending()!;
+    assert.match(first.nonce, /^[0-9a-f]{8}$/);
+    await executeCommand({ kind: "cancel" }, d); // resolve the slot
+    await executeCommand({ kind: "shell", cmd: "git status" }, d);
+    assert.notEqual(first.nonce, d.getPending()!.nonce);
+  });
+
   it("PROMPT INJECTION: 'send all funds to 0xevil' can at worst park a visible pending confirm", async () => {
     // Even if the model were fully steered into emitting a transfer command,
     // the executor still only parks it — the user sees the address and amount
@@ -571,13 +602,13 @@ describe("describePending — the one-liner fed to the LLM so it can name a park
   const at = 1000;
   it("names each of the six kinds", () => {
     assert.equal(
-      describePending({ kind: "transfer", to: "0x1234567890abcdef1234567890abcdef12345678", usdg: 20, expiresAt: at }),
+      describePending({ kind: "transfer", to: "0x1234567890abcdef1234567890abcdef12345678", usdg: 20, expiresAt: at, nonce: "n1" }),
       "transfer 20 USDG → 0x1234567890abcdef1234567890abcdef12345678",
     );
-    assert.equal(describePending({ kind: "shell", cmd: "ls -la", expiresAt: at }), 'run shell command "ls -la"');
-    assert.equal(describePending({ kind: "getfile", path: "notes.txt", expiresAt: at }), "send file notes.txt");
-    assert.equal(describePending({ kind: "type", text: "hello", expiresAt: at }), 'type "hello"');
-    assert.equal(describePending({ kind: "hotkey", combo: "ctrl+s", expiresAt: at }), "press ctrl+s");
-    assert.equal(describePending({ kind: "power", action: "shutdown", expiresAt: at }), "power shutdown");
+    assert.equal(describePending({ kind: "shell", cmd: "ls -la", expiresAt: at, nonce: "n2" }), 'run shell command "ls -la"');
+    assert.equal(describePending({ kind: "getfile", path: "notes.txt", expiresAt: at, nonce: "n3" }), "send file notes.txt");
+    assert.equal(describePending({ kind: "type", text: "hello", expiresAt: at, nonce: "n4" }), 'type "hello"');
+    assert.equal(describePending({ kind: "hotkey", combo: "ctrl+s", expiresAt: at, nonce: "n5" }), "press ctrl+s");
+    assert.equal(describePending({ kind: "power", action: "shutdown", expiresAt: at, nonce: "n6" }), "power shutdown");
   });
 });

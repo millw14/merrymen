@@ -169,13 +169,13 @@ describe("sendMessage", () => {
   it("attaches an inline keyboard (confirm/cancel) when markup is given", async () => {
     const f = fakeFetch(200, OK({ message_id: 3 }));
     const markup = {
-      inline_keyboard: [[{ text: "✅ Confirm", callback_data: "confirm" }, { text: "✖ Cancel", callback_data: "cancel" }]],
+      inline_keyboard: [[{ text: "✅ Confirm", callback_data: "confirm:1a2b3c4d" }, { text: "✖ Cancel", callback_data: "cancel:1a2b3c4d" }]],
     };
     const { ok } = await sendMessage({ token: "t", fetchFn: f }, 777, "confirm?", markup);
     assert.equal(ok, true);
     const parsed = JSON.parse(f.lastBody!) as { reply_markup: { inline_keyboard: { text: string; callback_data: string }[][] } };
-    assert.equal(parsed.reply_markup.inline_keyboard[0]![0]!.callback_data, "confirm");
-    assert.equal(parsed.reply_markup.inline_keyboard[0]![1]!.callback_data, "cancel");
+    assert.equal(parsed.reply_markup.inline_keyboard[0]![0]!.callback_data, "confirm:1a2b3c4d");
+    assert.equal(parsed.reply_markup.inline_keyboard[0]![1]!.callback_data, "cancel:1a2b3c4d");
   });
 });
 
