@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { coerceLlmCommand, narrateChat, parseSlash, type Command } from "./interpreter";
-import { executeCommand, type CommandDeps } from "./executor";
+import { describePending, executeCommand, type CommandDeps } from "./executor";
 import type { LlmCreds } from "../llm";
 
 describe("narrateChat — warm free-text voice, triggers nothing", () => {
@@ -215,6 +215,8 @@ function deps(over: Partial<CommandDeps> = {}): CommandDeps & { calls: string[] 
       typeText: pcCall("typeText"),
       hotkey: pcCall("hotkey"),
       power: pcCall("power"),
+      install: pcCall("install"),
+      startService: pcCall("startService"),
     },
     pcStatus: () => "PCSTATUS",
     addReminder: (w, t) => {
@@ -564,5 +566,57 @@ describe("PC control — gating, confirm-park, and injection safety", () => {
   it("/pc status works even when everything is off (no capability needed)", async () => {
     const d = deps({ pcControlEnabled: false, capabilities: new Set() });
     assert.equal(await executeCommand({ kind: "pc" }, d), "PCSTATUS");
+  });
+});
+
+describe("describePending — the one-liner fed to the LLM so it can name a parked action", () => {
+  const at = 1000;
+  it("names each of the six kinds", () => {
+    assert.equal(
+      describePending({ kind: "transfer", to: "0x1234567890abcdef1234567890abcdef12345678", usdg: 20, expiresAt: at }),
+      "transfer 20 USDG → 0x1234567890abcdef1234567890abcdef12345678",
+    );
+    assert.equal(describePending({ kind: "shell", cmd: "ls -la", expiresAt: at }), 'run shell command "ls -la"');
+    assert.equal(describePending({ kind: "getfile", path: "notes.txt", expiresAt: at }), "send file notes.txt");
+    assert.equal(describePending({ kind: "type", text: "hello", expiresAt: at }), 'type "hello"');
+    assert.equal(describePending({ kind: "hotkey", combo: "ctrl+s", expiresAt: at }), "press ctrl+s");
+    assert.equal(describePending({ kind: "power", action: "shutdown", expiresAt: at }), "power shutdown");
+    assert.equal(describePending({ kind: "install", tool: "ydotool", package: "ydotool", argv: [], expiresAt: at }), "install ydotool");
+    assert.equal(describePending({ kind: "service", tool: "ydotool", argv: [], expiresAt: at }), "start the ydotool daemon");
+  });
+});
+
+describe("executeCommand — install / service-start confirm flow", () => {
+  it("/confirm executes a parked service-start exactly once", async () => {
+    const d = deps();
+    d.setPending({ kind: "service", tool: "ydotool", argv: ["systemctl", "--user", "enable", "--now", "ydotool"], expiresAt: 1_000_000 + 90_000 });
+    const r = await executeCommand({ kind: "confirm" }, d);
+    assert.deepEqual(d.calls, ["pend:service", "pc:startService:[object Object]"]);
+    assert.match(await executeCommand({ kind: "confirm" }, d), /nothing pending/i);
+  });
+
+  it("/confirm re-vets the master switch before starting a service", async () => {
+    const d = deps({ pcControlEnabled: false });
+    d.setPending({ kind: "service", tool: "ydotool", argv: ["systemctl", "--user", "enable", "--now", "ydotool"], expiresAt: 1_000_000 + 90_000 });
+    const r = await executeCommand({ kind: "confirm" }, d);
+    assert.match(r, /PC control was turned off/i);
+    assert.deepEqual(d.calls, ["pend:service"]); // startService never invoked
+    assert.match(await executeCommand({ kind: "confirm" }, d), /nothing pending/i); // cleared
+  });
+
+  it("/confirm re-vets the master switch before installing", async () => {
+    const d = deps({ pcControlEnabled: false });
+    d.setPending({ kind: "install", tool: "ydotool", package: "ydotool", argv: ["sudo", "-n", "pacman", "-S", "ydotool"], expiresAt: 1_000_000 + 90_000 });
+    const r = await executeCommand({ kind: "confirm" }, d);
+    assert.match(r, /PC control was turned off/i);
+    assert.deepEqual(d.calls, ["pend:install"]);
+  });
+
+  it("/cancel clears a parked service-start — nothing starts", async () => {
+    const d = deps();
+    d.setPending({ kind: "service", tool: "ydotool", argv: ["systemctl", "--user", "enable", "--now", "ydotool"], expiresAt: 1_000_000 + 90_000 });
+    assert.match(await executeCommand({ kind: "cancel" }, d), /cancelled/i);
+    assert.ok(!d.calls.some((c) => c.startsWith("pc:startService")));
+    assert.match(await executeCommand({ kind: "confirm" }, d), /nothing pending/i);
   });
 });

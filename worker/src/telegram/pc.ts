@@ -126,6 +126,10 @@ export interface PcActions {
   typeText(text: string): Promise<string>;
   hotkey(combo: string): Promise<string>;
   power(action: "sleep" | "shutdown"): Promise<string>;
+  // installs — only ever invoked from the /confirm handler, argv from the map
+  install(plan: { argv: string[]; package: string }): Promise<string>;
+  // daemon/service starts — only ever invoked from the /confirm handler, argv from the plan
+  startService(plan: { tool: string; argv: string[] }): Promise<string>;
 }
 
 export interface PcActionConfig {
@@ -134,6 +138,41 @@ export interface PcActionConfig {
   appAllowlist: string[];
   anthropicApiKey: string | undefined;
   llmModel: string;
+  /**
+   * Offer to install a missing tool: parks the pending action (keyed to this
+   * chat) and returns the package name, or null when the install can't be
+   * offered (unknown package / no passwordless sudo). The reply text is built
+   * by the caller; the service wires the parked action + buttons.
+   */
+  requestInstall(tool: string): string | null;
+  /**
+   * Offer to START an installed tool's daemon (e.g. ydotoold for ydotool):
+   * parks a service-start pending action and returns the service name, or null
+   * when it can't be offered. The reply text is built by the caller; the
+   * service wires the parked action + buttons.
+   */
+  requestServiceStart(tool: string, argv: string[]): string | null;
+}
+
+/** Map a failed platform result to the right reply: a missing-tool install
+ *  offer wins, then a service-start offer, then a plain failure message. Pure —
+ *  injectable for tests. The offer builders are passed in because they call into
+ *  `cfg` to park the pending action. */
+export function pcResultReply(
+  r: { reason?: string; missing?: { tool: string }; needsService?: { tool: string; argv: string[] } },
+  offer: (tool: string) => string | null,
+  offerService: (tool: string, argv: string[]) => string | null,
+  fail: (reason?: string) => string,
+): string {
+  if (r.missing) {
+    const o = offer(r.missing.tool);
+    if (o) return o;
+  }
+  if (r.needsService) {
+    const s = offerService(r.needsService.tool, r.needsService.argv);
+    if (s) return s;
+  }
+  return fail(r.reason ?? "");
 }
 
 /** Bind the platform layer to a single chat (token+chatId) for outbound media. */
@@ -145,10 +184,29 @@ export function makePcActions(
 ): PcActions {
   const fail = (r?: string) => `⚠️ ${esc(r ?? "that didn't work")}`;
 
+  /** Build an install offer for a missing tool, or null when it can't be
+   * offered. `requestInstall` parks the pending action (the service then sees a
+   * fresh pending and attaches the ✅/✖ buttons); this only formats the text. */
+  const offer = (tool: string): string | null => {
+    const pkg = cfg.requestInstall(tool);
+    if (!pkg) return null;
+    const caveat = pcp.installCaveat(tool);
+    return `📦 I can install <b>${esc(pkg)}</b> for you. Tap ✅ to install (or /confirm) — or /cancel.${caveat ? `\n<code>${esc(caveat)}</code>` : ""}`;
+  };
+
+  /** Build a daemon-start offer for an installed-but-idle tool, or null when it
+   * can't be offered. `requestServiceStart` parks the pending action (the
+   * service attaches ✅/✖); this only formats the text. */
+  const offerService = (tool: string, argv: string[]): string | null => {
+    const service = cfg.requestServiceStart(tool, argv);
+    if (!service) return null;
+    return `⚙️ I can start the <b>${esc(service)}</b> daemon for you. Tap ✅ to start (or /confirm) — or /cancel.`;
+  };
+
   return {
     async screenshot() {
       const r = await pcp.capture();
-      if (!r.ok || !r.path) return fail(r.reason);
+      if (!r.ok || !r.path) return (r && r.missing ? offer(r.missing.tool) : null) ?? fail(r.reason);
       const sent = await sendPhoto(opts, chatId, r.path, "📸 your screen");
       note("ok", "Telegram: sent a screenshot");
       return sent.ok ? "" /* photo speaks for itself */ : fail(sent.reason);
@@ -204,17 +262,20 @@ export function makePcActions(
 
     async volume(spec) {
       const r = await pcp.setVolume(spec);
-      return r.ok ? `🔊 volume ${esc(spec)}` : fail(r.reason || r.stderr);
+      if (!r.ok) return (r.missing ? offer(r.missing.tool) : null) ?? fail(r.reason || r.stderr);
+      return `🔊 volume ${esc(spec)}`;
     },
 
     async media(key) {
       const r = await pcp.mediaKey(key);
-      return r.ok ? `⏯️ ${esc(key)}` : fail(r.reason || r.stderr);
+      if (!r.ok) return (r.missing ? offer(r.missing.tool) : null) ?? fail(r.reason || r.stderr);
+      return `⏯️ ${esc(key)}`;
     },
 
     async notify(text) {
       const r = await pcp.notify(text);
-      return r.ok ? "🔔 popped a desktop notification" : fail(r.reason || r.stderr);
+      if (!r.ok) return (r.missing ? offer(r.missing.tool) : null) ?? fail(r.reason || r.stderr);
+      return "🔔 popped a desktop notification";
     },
 
     async lock() {
@@ -232,14 +293,15 @@ export function makePcActions(
 
     async clipGet() {
       const r = await pcp.clipGet();
-      if (!r.ok) return fail(r.reason);
+      if (!r.ok) return (r.missing ? offer(r.missing.tool) : null) ?? fail(r.reason);
       const t = (r.text ?? "").trim();
       return t ? `📋 <code>${esc(t)}</code>` : "📋 clipboard is empty";
     },
 
     async clipSet(text) {
       const r = await pcp.clipSet(text);
-      return r.ok ? "📋 copied to your clipboard" : fail(r.reason || r.stderr);
+      if (!r.ok) return (r.missing ? offer(r.missing.tool) : null) ?? fail(r.reason || r.stderr);
+      return "📋 copied to your clipboard";
     },
 
     // ── dangerous (confirmed) ────────────────────────────────────────────
@@ -264,20 +326,38 @@ export function makePcActions(
 
     async typeText(text) {
       const r = await pcp.typeText(text);
+      if (!r.ok) return pcResultReply(r, offer, offerService, (reason) => fail(reason || r.stderr));
       note("warn", "Telegram: typed into the active window");
-      return r.ok ? `⌨️ typed it` : fail(r.reason || r.stderr);
+      return `⌨️ typed it`;
     },
 
     async hotkey(combo) {
       const r = await pcp.hotkey(combo);
+      if (!r.ok) return (r.missing ? offer(r.missing.tool) : null) ?? fail(r.reason || r.stderr);
       note("warn", `Telegram: pressed ${combo}`);
-      return r.ok ? `⌨️ pressed ${esc(combo)}` : fail(r.reason || r.stderr);
+      return `⌨️ pressed ${esc(combo)}`;
     },
 
     async power(action) {
       const r = await pcp.powerAction(action);
       note("warn", `Telegram: ${action}`);
       return r.ok ? `⏻ ${action}…` : fail(r.reason || r.stderr);
+    },
+
+    async install({ argv, package: pkg }) {
+      note("warn", `Telegram: installing ${pkg} via ${argv[0] ?? "?"}`);
+      const r = await pcp.runInstall(argv);
+      return r.ok
+        ? `✅ installed ${esc(pkg)}. Try that action again.`
+        : fail((r.reason || r.stderr.slice(0, 200) || "install failed") + ` — if it needs a password, run it yourself: <code>${esc(argv.join(" "))}</code>`);
+    },
+
+    async startService({ tool, argv }) {
+      note("warn", `Telegram: starting ${tool} daemon via ${argv[0] ?? "?"}`);
+      const r = await pcp.runServiceStart(argv);
+      return r.ok
+        ? `✅ started the ${esc(tool)} daemon. Try that action again.`
+        : fail((r.reason || r.stderr.slice(0, 200) || "start failed") + ` — run it yourself: <code>${esc(argv.join(" "))}</code>`);
     },
   };
 }
