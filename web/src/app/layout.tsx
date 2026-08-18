@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { RegisterSW } from "@/components/RegisterSW";
+import { TelegramLinkModal } from "@/components/TelegramLinkModal";
 
 // The merrymen.dev typefaces — used on the setup/settings screens (.setup-look)
 // so onboarding feels like the website; the trading terminal keeps its own fonts.
@@ -50,6 +51,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         {children}
         <RegisterSW />
+        <TelegramLinkModal />
       </body>
     </html>
   );
