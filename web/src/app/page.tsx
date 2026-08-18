@@ -6,6 +6,7 @@ import { FeedPanel } from "@/components/FeedPanel";
 import { KillSwitch } from "@/components/KillSwitch";
 import { MarketTable } from "@/components/MarketTable";
 import { MerryCirclePanel } from "@/components/MerryCirclePanel";
+import { OnboardWizard } from "@/components/OnboardWizard";
 import { RecoverPanel } from "@/components/RecoverPanel";
 import { Statusbar } from "@/components/Statusbar";
 import { TelegramCta } from "@/components/TelegramCta";
@@ -70,6 +71,8 @@ export default function Dashboard() {
       </main>
 
       <Statusbar />
+
+      <OnboardWizard />
     </>
   );
 }

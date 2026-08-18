@@ -3,34 +3,12 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { LogoMark } from "@/components/Logo";
+import { Field, secretPlaceholder } from "@/components/setup-fields";
 import { MERRYMEN_GATEWAY_ORIGIN, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 
 type Draft = Record<string, string>;
-
-function Field(props: {
-  label: string;
-  hint?: React.ReactNode;
-  /** Optional "get a key ↗" link shown beside the label (opens the provider). */
-  action?: { href: string; label: string };
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="field settings-field">
-      <span className="field-labelrow">
-        <span className="field-label">{props.label}</span>
-        {props.action && (
-          <a className="field-getkey" href={props.action.href} target="_blank" rel="noreferrer">
-            {props.action.label} ↗
-          </a>
-        )}
-      </span>
-      <span className="field-input">{props.children}</span>
-      {props.hint && <span className="field-hint">{props.hint}</span>}
-    </label>
-  );
-}
 
 export default function SettingsPage() {
   const [view, setView] = useState<SettingsView | null>(null);
@@ -265,8 +243,6 @@ export default function SettingsPage() {
   // Read the grant straight from localStorage — this page has no other handle on
   // it, and what matters is the signature the browser actually holds.
   const unsellable = uncoveredBasketSymbols(activeSymbols, storedGrant);
-  const secretPlaceholder = (s: { set: boolean; hint: string | null }) =>
-    s.set ? `saved ····${s.hint ?? ""} — type to replace` : "not set";
 
   // ── AI provider (bring any key) ──────────────────────────────────────────
   // One picker drives which key/model fields show. Groq & Anthropic reuse their
