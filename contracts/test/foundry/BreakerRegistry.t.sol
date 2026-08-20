@@ -332,13 +332,9 @@ contract BreakerRegistryTest is Test {
         registry.reportEquity(agent, hwm);
         vm.prank(keeper);
         registry.reportEquity(agent, equity);
-        uint256 dd = registry.drawdownBps(agent);
-        // drawdownBps = (hwm - equity) * 10_000 / hwm, which is always < 10_000
-        assertLe(dd, 10_000);
-        // The drawdown must be <= 100% of HWM-equity difference
-        uint256 actualDiff = hwm - equity;
-        assertLe(dd, 10_000);
-        assertGe(dd, 0);
+        // drawdownBps must equal the formula exactly, not merely be bounded
+        uint256 expected = (uint256(hwm) - equity) * 10_000 / hwm;
+        assertEq(registry.drawdownBps(agent), expected);
     }
 
     // ── Fuzz: report equity with random values ───────────────────────────
@@ -371,6 +367,9 @@ contract BreakerRegistryTest is Test {
                 if (max > 0 && (uint256(max - equities[i]) * 10_000) / max >= 2000) {
                     everTripped = true;
                     assertTrue(registry.isTripped(agent));
+                } else {
+                    // Two-sided: a spuriously-tripping contract must fail here
+                    assertFalse(registry.isTripped(agent), "tripped below threshold");
                 }
             }
             if (everTripped) {

@@ -19,3 +19,4 @@ max_test_rejects = 100000
 runs = 256
 depth = 100
 call_override = false
+fail_on_revert = true
