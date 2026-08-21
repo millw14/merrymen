@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { WallCase, WallInfo } from "@/app/api/wall/route";
+import type { WallInfo } from "@/app/api/wall/route";
+import type { WallCase } from "@merrymen/wall-battery";
 
 /**
  * The trust layer, made first-class: the grant's caps and addresses with

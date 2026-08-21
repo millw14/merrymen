@@ -18,7 +18,13 @@
       "@/*": ["./src/*"],
       "@merrymen/core": ["../packages/core/src/index.ts"],
       "@merrymen/policy": ["../worker/src/policy.ts"],
-      "@merrymen/recover": ["../worker/src/recover.ts"]
+      "@merrymen/recover": ["../worker/src/recover.ts"],
+      "@merrymen/backtest": ["../worker/src/backtest.ts"],
+      "@merrymen/backtest-scenario": ["../worker/src/backtest-scenario.ts"],
+      "@merrymen/limits": ["../worker/src/limits.ts"],
+      "@merrymen/playground-api": ["../worker/src/playground-api.ts"],
+      "@merrymen/wall-battery": ["../worker/src/wall-battery.ts"],
+      "@merrymen/strategies/*": ["../worker/src/strategies/*"]
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],

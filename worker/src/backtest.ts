@@ -31,6 +31,8 @@ export interface BacktestConfig {
   executionCostBps?: number;
   /** Simple vault APY in bps applied to vault balance over elapsed time. */
   vaultApyBps?: number;
+  /** Capture every rejection for timeline UIs. Off by default to keep long runs bounded. */
+  collectRejectedEvents?: boolean;
 }
 
 export interface BacktestResult {
@@ -40,6 +42,7 @@ export interface BacktestResult {
   equitySeries: { tSec: number; equityUsdg: bigint }[];
   executed: number;
   rejected: { rule: string; count: number }[];
+  rejectedEvents: { tSec: number; rule: string }[];
 }
 
 const ONE = 10n ** 18n;
@@ -76,6 +79,7 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
   let maxDrawdownBps = 0;
   let executed = 0;
   const rejectCounts = new Map<string, number>();
+  const rejectedEvents: { tSec: number; rule: string }[] = [];
   const equitySeries: { tSec: number; equityUsdg: bigint }[] = [];
   let prevT: number | null = null;
 
@@ -151,6 +155,9 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
       const verdict = checkPolicy(intent, cfg.limits, state);
       if (!verdict.ok) {
         rejectCounts.set(verdict.rule, (rejectCounts.get(verdict.rule) ?? 0) + 1);
+        if (cfg.collectRejectedEvents) {
+          rejectedEvents.push({ tSec: bar.tSec, rule: verdict.rule });
+        }
         continue;
       }
       applyFill(intent);
@@ -214,6 +221,7 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
     equitySeries,
     executed,
     rejected: [...rejectCounts.entries()].map(([rule, count]) => ({ rule, count })),
+    rejectedEvents,
   };
 }
 

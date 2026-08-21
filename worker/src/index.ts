@@ -44,12 +44,10 @@ import {
   pimlicoBundlerUrl,
   robinhoodTestnet,
   grantHasV4,
-  sellableAssets,
   tokenCoverage,
   uncoveredBasketSymbols,
   type CircleTier,
   type PriceQuote,
-  type StockToken,
   type StoredGrant,
 } from "../../packages/core/src/index";
 import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
@@ -59,6 +57,7 @@ import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus } from "./circle";
 import { accrueAboveHwm } from "./fees";
 import { loadGrantFile } from "./grant";
+import { limitsFromGrant } from "./limits";
 import { ensureHome, homePaths } from "./home";
 import { resolveLlm } from "./llm";
 import { applyPaperIntent, type PaperPosition } from "./paper";
@@ -135,33 +134,6 @@ const fmt = (v: bigint) => formatUnits(v, USDG_DECIMALS);
 
 function swapRouterFor(cfg: ResolvedConfig): `0x${string}` {
   return (cfg.swapVenue === "uniswap" ? UNISWAP.swapRouter02 : RIALTO.routerSnapshot) as `0x${string}`;
-}
-
-function limitsFromGrant(grant: StoredGrant, watchTokens: readonly StockToken[]): AgentLimits {
-  return {
-    perTradeUsdg: usdg(grant.caps.perTradeUsdg),
-    dailyUsdg: usdg(grant.caps.dailyUsdg),
-    allowedTargets: [
-      RIALTO.routerSnapshot as `0x${string}`,
-      UNISWAP.swapRouter02 as `0x${string}`,
-      MORPHO.steakhouseUsdgVault as `0x${string}`,
-      CASH.USDG as `0x${string}`,
-      // v4's two contacts. Listed only when the signature actually carries the
-      // v4 permissions — this layer MIRRORS the on-chain policy, and claiming a
-      // target the key can't reach would make the mirror lie in the permissive
-      // direction, which is the one that costs gas on a doomed UserOp.
-      ...(grantHasV4(grant)
-        ? [UNISWAP.permit2 as `0x${string}`, UNISWAP.universalRouter as `0x${string}`]
-        : []),
-    ],
-    allowedAssets: [CASH.USDG as `0x${string}`, ...watchTokens.map((t) => t.address)],
-    // What this SIGNATURE can sell, which is not the same as what the owner
-    // pointed the agent at — see the no-exit rule in policy.ts.
-    sellableAssets: [...sellableAssets(grant)],
-    maxDrawdownBps: grant.caps.maxDrawdownPct * 100,
-    expiresAt: grant.expiresAt,
-    maxOpsPerDay: grant.caps.maxOpsPerDay,
-  };
 }
 
 /** A policy-legal no-op: approve a dust allowance to the allowlisted router. */

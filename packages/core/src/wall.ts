@@ -32,7 +32,19 @@ const VAULT_ABI = parseAbi([
   "function withdraw(uint256 assets, address receiver, address owner) returns (uint256)",
 ]);
 
-const usdgUnits = (v: number): bigint => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
+const USDG_SCALE = 10 ** USDG_DECIMALS;
+
+/** Largest UI-unit value that can be converted to exact USDG base units. */
+export const MAX_USDG_UI = Number.MAX_SAFE_INTEGER / USDG_SCALE;
+
+/** Convert a finite UI-unit USDG amount to its exact 6-decimal base units. */
+export function usdgUnits(value: number): bigint {
+  const scaled = Math.round(value * USDG_SCALE);
+  if (!Number.isFinite(value) || !Number.isSafeInteger(scaled)) {
+    throw new RangeError(`USDG amount must be finite and no larger than ${MAX_USDG_UI}`);
+  }
+  return BigInt(scaled);
+}
 
 /**
  * THE SESSION KEY MAY EXECUTE, BUT IT MAY NOT SIGN.

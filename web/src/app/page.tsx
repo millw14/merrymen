@@ -29,6 +29,9 @@ export default function Dashboard() {
         <Link href="/scoreboard" className="mono" style={{ color: "var(--text-dim)", fontSize: 12 }}>
           scoreboard
         </Link>
+        <Link href="/playground" className="mono" style={{ color: "var(--text-dim)", fontSize: 12 }}>
+          playground
+        </Link>
         <Link href="/settings" className="mono" style={{ color: "var(--text-dim)", fontSize: 12 }}>
           settings
         </Link>

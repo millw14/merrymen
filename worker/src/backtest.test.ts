@@ -134,6 +134,30 @@ describe("runBacktest — real strategies, real policy, synthetic prices", () =>
     );
     assert.equal(r.executed, 0);
     assert.deepEqual(r.rejected, [{ rule: "per-trade-cap", count: 1 }]);
+    assert.deepEqual(r.rejectedEvents, [], "timeline events are opt-in");
+  });
+
+  it("captures timestamped policy rejections only when requested", async () => {
+    const cfg: SteadyBasketConfig = {
+      legs: [{ symbol: "AAPL", token: AAPL, weightBps: 10_000 }],
+      buyPerTickUsdg: U(100),
+      idleFloorUsdg: U(10_000),
+      swapRouter: ROUTER,
+      vault: VAULT,
+      usdg: USDG,
+    };
+    const r = await runBacktest(
+      {
+        strategy: { name: "basket", tick: (s) => steadyBasketTick(cfg, s) },
+        limits: limits(),
+        legs: LEGS,
+        initialCashUsdg: U(500),
+        collectRejectedEvents: true,
+      },
+      [{ tSec: 1234, prices: new Map([["AAPL", usd(200)]]) }],
+    );
+
+    assert.deepEqual(r.rejectedEvents, [{ tSec: 1234, rule: "per-trade-cap" }]);
   });
 
   it("vault APY accrues over time", async () => {
