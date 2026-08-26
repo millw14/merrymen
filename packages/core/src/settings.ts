@@ -243,6 +243,12 @@ export interface MerrymenSettings {
   telegramAgentAutoShell?: boolean;
   /** Max model↔tool steps per /agent task (runaway brake). */
   telegramAgentMaxSteps?: number;
+
+  // ── onboarding ─────────────────────────────────────────────────────────
+  /** True once first-run setup has been finished OR skipped on any surface
+   * (terminal `merrymen onboard` or the dashboard wizard). A pure UI flag —
+   * stops the onboarding surfaces re-appearing. The worker ignores it. */
+  webOnboarded?: boolean;
 }
 
 /** Keys whose values must never be echoed back to a browser. */

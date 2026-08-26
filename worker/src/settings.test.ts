@@ -211,3 +211,60 @@ describe("mergeSettings — the basket can name an owner-added token", () => {
     assert.deepEqual(c.basketSymbols, [...SETTINGS_DEFAULTS.basketSymbols]);
   });
 });
+
+describe("onboarding gate — bundlerUrl and webOnboarded", () => {
+  // Mirrors cli/bin.mjs hasMeaningfulConfig() and OnboardWizard.tsx configured().
+  function hasMeaningfulConfig(s: Record<string, unknown>): boolean {
+    if (s.bundlerUrl) return true;
+    return Boolean(
+      s.llmProvider || s.groqApiKey || s.anthropicApiKey || s.llmApiKey ||
+        s.bundlerApiKey || s.telegramBotToken || s.strategy,
+    );
+  }
+  function configured(values: Record<string, unknown>, secrets: Record<string, { set: boolean }>): boolean {
+    if (values.bundlerUrl) return true;
+    return Boolean(
+      values.llmProvider || secrets.groqApiKey?.set || secrets.anthropicApiKey?.set ||
+        secrets.llmApiKey?.set || secrets.bundlerApiKey?.set || secrets.telegramBotToken?.set ||
+        values.strategy,
+    );
+  }
+
+  it("treats bundlerUrl-only config as onboarded (URL takes precedence over API key)", () => {
+    assert.equal(hasMeaningfulConfig({ bundlerUrl: "https://pimlico.example/v2/abc" }), true);
+    assert.equal(hasMeaningfulConfig({ bundlerApiKey: "sk-..." }), true);
+    assert.equal(hasMeaningfulConfig({}), false);
+    assert.equal(configured({ bundlerUrl: "https://pimlico.example/v2/abc" }, {} as never), true);
+    assert.equal(configured({}, { bundlerApiKey: { set: true } } as never), true);
+    assert.equal(configured({}, {} as never), false);
+  });
+
+  it("treats env-configured installs as onboarded (Docker/systemd)", () => {
+    // Env vars are first-class config — a Docker install with only env should not show the wizard.
+    assert.equal(mergeSettings({}, { MERRYMEN_BUNDLER_URL: "https://pimlico.example" }).bundlerUrl, "https://pimlico.example");
+    assert.equal(mergeSettings({}, { GROQ_API_KEY: "gsk_..." }).groqApiKey, "gsk_...");
+    assert.equal(mergeSettings({}, { MERRYMEN_TELEGRAM_BOT_TOKEN: "123:abc" }).telegramBotToken, "123:abc");
+  });
+
+  it("webOnboarded round-trips as a boolean flag", () => {
+    // Simulates the API route's BOOL_FIELDS handling for webOnboarded.
+    function applyPut(stored: Record<string, unknown>, body: Record<string, unknown>): Record<string, unknown> {
+      const next = { ...stored };
+      if ("webOnboarded" in body) {
+        const v = body.webOnboarded;
+        if (v === null || v === undefined) delete next.webOnboarded;
+        else if (typeof v === "boolean") next.webOnboarded = v;
+        else throw new Error("must be true or false");
+      }
+      return next;
+    }
+    let s: Record<string, unknown> = {};
+    s = applyPut(s, { webOnboarded: true });
+    assert.equal(s.webOnboarded, true);
+    s = applyPut(s, { webOnboarded: false });
+    assert.equal(s.webOnboarded, false);
+    s = applyPut(s, { webOnboarded: null });
+    assert.equal(s.webOnboarded, undefined);
+    assert.throws(() => applyPut({}, { webOnboarded: "true" as unknown as boolean }), /must be true or false/);
+  });
+});

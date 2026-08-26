@@ -21,7 +21,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -119,9 +119,63 @@ function writeSecret(file, data) {
   }
 }
 
+function uniqueTmp(target) {
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `${target}.tmp.${process.pid}.${rand}`;
+}
 function writeSettings(next) {
   ensureHome();
-  writeSecret(SETTINGS, JSON.stringify(next, null, 2)); // holds plaintext API keys
+  // settings.json holds plaintext API keys — write to a temp file then rename,
+  // so a crash mid-write can never leave a truncated file that the worker would
+  // silently read as defaults. rename is atomic on POSIX.
+  const tmp = uniqueTmp(SETTINGS);
+  const data = JSON.stringify(next, null, 2);
+  try {
+    writeSecret(tmp, data);
+    // Windows refuses rename over an open handle (editor/antivirus/reader) —
+    // retry a few times with backoff before giving up.
+    let lastErr;
+    for (let i = 0; i < 5; i++) {
+      try { renameSync(tmp, SETTINGS); lastErr = null; break; }
+      catch (e) {
+        lastErr = e;
+        // EPERM on Windows when target is open; also handle EBUSY
+        const code = e && typeof e.code === "string" ? e.code : "";
+        if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * (i + 1));
+      }
+    }
+    if (lastErr) throw lastErr;
+  } catch (e) {
+    try { rmSync(tmp, { force: true }); } catch {}
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`\n  ✗ couldn't save settings: ${msg}`);
+    console.error(`  Your entries were not written — try again. The temp file was cleaned up.`);
+    process.exit(1);
+  }
+}
+
+/**
+ * Does the band already have a meaningful config? The shared gate between the
+ * terminal and the dashboard: once ANY core thing is set up on either surface,
+ * neither onboarding surface may nag again. Mirrors the wizard's check.
+ */
+function hasMeaningfulConfig() {
+  const s = readJson(SETTINGS) ?? {};
+  // bundlerUrl takes precedence over bundlerApiKey (settings.ts:22), so a
+  // URL-configured install counts too. Env vars are first-class config (file
+  // wins over env, but env alone means a live Docker/systemd agent). A funded
+  // agent (grant.json) has also unambiguously onboarded.
+  if (s.bundlerUrl) return true;
+  if (existsSync(GRANT)) return true;
+  if (process.env.MERRYMEN_BUNDLER_URL || process.env.MERRYMEN_BUNDLER_API_KEY ||
+      process.env.GROQ_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.MERRYMEN_LLM_API_KEY ||
+      process.env.MERRYMEN_TELEGRAM_BOT_TOKEN || process.env.MERRYMEN_LLM_PROVIDER ||
+      process.env.MERRYMEN_STRATEGY) return true;
+  return Boolean(
+    s.llmProvider || s.groqApiKey || s.anthropicApiKey || s.llmApiKey ||
+      s.bundlerApiKey || s.telegramBotToken || s.strategy,
+  );
 }
 
 /** Symbols straight from the registry source — stays in sync with core. */
@@ -175,7 +229,17 @@ function localBin(name) {
 
 function makePrompter() {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-  const ask = (q) => new Promise((res) => rl.question(q, res));
+  const ask = (q) =>
+    new Promise((res) => {
+      let done = false;
+      const onClose = () => {
+        if (!done) { done = true; res(null); }
+      };
+      rl.once("close", onClose);
+      rl.question(q, (answer) => {
+        if (!done) { done = true; rl.off("close", onClose); res(answer); }
+      });
+    });
   const askSecret = (q) =>
     new Promise((res) => {
       const orig = rl._writeToOutput.bind(rl);
@@ -316,8 +380,8 @@ async function welcome() {
   await banner("stand and deliver — you just joined the band");
   console.log(
     `  ${bold("the band is mustered.")} raise your first agent:\n\n` +
-      `     ${bold(c.lime("merrymen onboard"))}   ${dim("gather the band — bundler, keys, strategy, basket")}\n` +
-      `     ${bold(c.lime("merrymen start"))}     ${dim("open the tavern (localhost:3100) + loose the worker")}\n\n` +
+      `     ${bold(c.lime("merrymen start"))}      ${dim("first-run setup + open the tavern (localhost:3100) + loose the worker")}\n` +
+      `     ${bold(c.lime("merrymen onboard"))}   ${dim("or gather the band right here — bundler, keys, strategy, basket")}\n\n` +
       `  ${c.gold(c.arrow)} ${dim("your keys, your caps · bounded worst case · every trade simulated first")}\n` +
       `  ${c.gold(c.arrow)} ${dim("learn more:")} ${bold("https://merrymen.dev")}\n`,
   );
@@ -522,11 +586,15 @@ async function onboard() {
   const tgToken = (await p.askSecret(`  Telegram bot token${keep(current.telegramBotToken)}: `)).trim();
   if (tgToken) {
     current.telegramBotToken = tgToken;
-    current.telegramEnabled = true;
-    ok("telegram enabled — you'll link your chat from the dashboard");
+    const enable = (await p.ask(`  Start the bot now? [Y/n]: `)).trim().toLowerCase();
+    current.telegramEnabled = enable !== "n" && enable !== "no";
+    ok(current.telegramEnabled ? "telegram enabled — you'll link your chat from the dashboard" : "telegram token saved (bot stays off until you enable it)");
   }
 
   p.close();
+  // Onboarding happened on SOME surface — mark it so the dashboard wizard never
+  // nags a user who set up (or deliberately skipped) right here in the terminal.
+  current.webOnboarded = true;
   const s = spinner("stashing your plans in the hollow oak");
   writeSettings(current);
   await new Promise((r) => setTimeout(r, 400));
@@ -535,6 +603,7 @@ async function onboard() {
   console.log(`
 ${bold(`  ${c.arrow} ride out`)}
   1. ${bold("merrymen start")} — opens the tavern (dashboard) at http://localhost:3100 + looses the worker
+     ${dim("(or set up from the browser instead: the dashboard walks you through the same wizard)")}
   2. at ${bold("/grant")}, create your agent wallet — pick testnet 46630 (practice) or mainnet 4663 (real funds)
   3. testnet ${bold("gas")} from the sheriff's vault: ${dim("https://faucet.testnet.chain.robinhood.com")}
      ${dim("gas only — USDG sent to a testnet account is never shown and never traded.")}
@@ -576,6 +645,40 @@ async function start() {
   const host = process.env.MERRYMEN_HOST || "127.0.0.1";
   const url = "http://localhost:3100";
   await banner("the band rides out");
+
+  // ── first run: pick the onboarding surface ──────────────────────────────
+  // Same gate as the dashboard wizard: nothing meaningful configured AND not
+  // explicitly marked done. The browser is the default (it's already about to
+  // open), but terminal-only folks can run the wizard right here. Mirrors the
+  // installer's local/Docker choice. No TTY (headless/Docker) skips straight to
+  // the browser path — the wizard will be there.
+  const firstRun = !hasMeaningfulConfig() && readJson(SETTINGS)?.webOnboarded !== true;
+  const interactive = process.stdin.isTTY && !process.env.CI && process.env.MERRYMEN_NONINTERACTIVE !== "1";
+  if (firstRun && interactive) {
+    console.log(`\n  ${bold("first run — how do you want to gather your band?")}`);
+    console.log(dim("  1) in the browser — the dashboard wizard (localhost:3100)"));
+    console.log(dim("  2) right here in the terminal (merrymen onboard)"));
+    const p = makePrompter();
+    let choice = "";
+    let eof = false;
+    while (choice !== "1" && choice !== "2") {
+      const raw = await p.ask(`  choice [1/2]: `);
+      if (raw === null || raw === undefined) { eof = true; break; }
+      choice = raw.trim();
+      if (choice === "") { eof = true; break; }
+      if (choice !== "1" && choice !== "2") {
+        warn("pick 1 or 2.");
+        choice = "";
+      }
+    }
+    p.close();
+    if (eof) {
+      console.log(dim("  (no input — opening the browser setup)"));
+    } else if (choice === "2") {
+      await onboard();
+    }
+  }
+
   const web = path.join(ROOT, "web");
   // Serve the prebuilt production app (next start), not dev-mode — the robust
   // distribution model. If the build is missing (a source install where the

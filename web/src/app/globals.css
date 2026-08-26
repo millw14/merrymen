@@ -1299,3 +1299,97 @@ body {
   .topstats { font-size: 10px; gap: 10px; }
   .shell { padding: 10px; }
 }
+
+/* ---------- first-run onboarding overlay ---------- */
+/* The wizard is only ever shown on a brand-new install, so it owns the whole
+   viewport — no dashboard noise behind it. Same setup-look type as /settings. */
+.onboard-backdrop {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background:
+    radial-gradient(120% 80% at 50% -10%, color-mix(in srgb, var(--green) 8%, transparent), transparent 60%),
+    var(--bg);
+  overflow-y: auto;
+}
+.onboard-panel {
+  width: 100%; max-width: 560px;
+  display: flex; flex-direction: column; gap: 18px;
+  background: color-mix(in srgb, var(--bg-1) 92%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px 30px 24px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+.onboard-brand {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--font-hanken); font-weight: 700; letter-spacing: -0.01em;
+  font-size: 15px;
+}
+.onboard-brand .arrow { display: inline-flex; }
+.onboard-progress { display: flex; align-items: center; gap: 6px; }
+.onboard-chunk,
+.onboard-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--border-2); transition: background .2s;
+}
+.onboard-chunk.on { background: var(--green); }
+.onboard-dot.on { background: var(--green); }
+.onboard-dot.past { background: var(--green-deep); opacity: 0.5; }
+.onboard-step { display: flex; flex-direction: column; gap: 4px; }
+.onboard-stepno {
+  font-family: var(--font-jbmono); font-size: 10px; letter-spacing: 0.15em;
+  color: var(--text-faint); text-transform: uppercase;
+}
+.onboard-title {
+  font-family: var(--font-hanken); font-size: 26px; font-weight: 700;
+  letter-spacing: -0.02em; line-height: 1.1;
+}
+.onboard-copy { display: flex; flex-direction: column; gap: 12px; }
+.onboard-copy > p { font-size: 13px; line-height: 1.6; color: var(--text-dim); }
+.onboard-copy > p b { color: var(--text); }
+.onboard-copy code {
+  font-family: var(--font-jbmono); font-size: 11px;
+  background: var(--bg-3); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 5px; color: var(--text);
+}
+.onboard-perks { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.onboard-perks li {
+  font-size: 12px; line-height: 1.5; color: var(--text-dim);
+  padding-left: 18px; position: relative;
+}
+.onboard-perks li::before { content: "🏹"; position: absolute; left: 0; font-size: 9px; top: 2px; }
+.onboard-fields { display: flex; flex-direction: column; gap: 14px; }
+.onboard-nav {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 6px; padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.onboard-grow { flex: 1; }
+.onboard-btn {
+  font-family: var(--font-hanken); font-weight: 600; font-size: 13.5px;
+  letter-spacing: -0.01em; color: #0a0d0b; background: #e8e8e2;
+  border: none; border-radius: 9px; padding: 10px 16px;
+  transition: background .2s ease, transform .2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.onboard-btn:hover:not(:disabled) { background: #fff; transform: translateY(-1px); }
+.onboard-btn:disabled { opacity: 0.6; cursor: wait; }
+.onboard-btn.ghost {
+  background: transparent; color: var(--text-dim); border: 1px solid var(--border);
+}
+.onboard-btn.ghost:hover:not(:disabled) {
+  background: transparent; color: var(--text); border-color: color-mix(in srgb, var(--text) 28%, transparent);
+}
+.onboard-next {
+  align-self: flex-start;
+  font-family: var(--font-hanken); font-weight: 600; font-size: 14px;
+  color: #0a0d0b; background: #e8e8e2;
+  border-radius: 9px; padding: 10px 18px; text-decoration: none;
+}
+.onboard-next:hover { background: #fff; text-decoration: none; }
+.onboard-panel .settings-subtle { margin-top: 2px; }
+
+@media (max-width: 480px) {
+  .onboard-panel { padding: 22px 18px 18px; }
+  .onboard-title { font-size: 21px; }
+}

@@ -6,7 +6,7 @@
  * the new bundler/RPC; trading fields rebuild the strategy in place.
  */
 
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import {
   SETTINGS_DEFAULTS,
   STOCK_TOKENS,
@@ -314,12 +314,28 @@ export function patchSettingsFile(patch: Partial<MerrymenSettings>): MerrymenSet
   const file = process.env.MERRYMEN_SETTINGS_FILE ?? homePaths.settings();
   const next = { ...readSettingsFile(), ...patch };
   ensureHome();
-  // settings.json holds plaintext API keys — owner-only perms (0600).
-  writeFileSync(file, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
+  // settings.json holds plaintext API keys — owner-only perms (0600). Atomic
+  // tmp+rename so a crash mid-write never leaves a truncated file.
+  const tmp = `${file}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 8)}`;
+  const data = JSON.stringify(next, null, 2);
   try {
-    chmodSync(file, 0o600);
-  } catch {
-    /* non-POSIX / already tight — best effort */
+    writeFileSync(tmp, data, { encoding: "utf8", mode: 0o600 });
+    try { chmodSync(tmp, 0o600); } catch {}
+    let lastErr: unknown = null;
+    for (let i = 0; i < 5; i++) {
+      try { renameSync(tmp, file); lastErr = null; break; }
+      catch (e: unknown) {
+        lastErr = e;
+        const code = (e as { code?: string })?.code ?? "";
+        if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * (i + 1));
+      }
+    }
+    if (lastErr) throw lastErr;
+    try { chmodSync(file, 0o600); } catch {}
+  } catch (e) {
+    try { rmSync(tmp, { force: true }); } catch {}
+    throw e;
   }
   return next;
 }

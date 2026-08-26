@@ -8,7 +8,7 @@
  * string replaces it. Non-secret fields: null/empty clears back to default.
  */
 
-import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@/lib/home";
 import {
@@ -49,6 +49,10 @@ export interface SettingsView {
   defaults: typeof SETTINGS_DEFAULTS;
   knownSymbols: string[];
   strategies: { builtin: string[]; custom: string[] };
+  /** True once first-run setup was finished/skipped on any surface. */
+  webOnboarded: boolean;
+  /** True when any env var provides meaningful config (env is first-class, file wins). */
+  envHasConfig: boolean;
   /** The AI providers the brain can run on — powers the Settings picker. */
   llmProviders: LlmProviderInfo[];
 }
@@ -116,6 +120,12 @@ export async function GET() {
     rpcTestnet: redactUrl(values.rpcTestnet),
     telegramTranscribeBase: redactUrl(values.telegramTranscribeBase),
   };
+  const envHasConfig = Boolean(
+    process.env.MERRYMEN_BUNDLER_URL || process.env.MERRYMEN_BUNDLER_API_KEY ||
+      process.env.GROQ_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.MERRYMEN_LLM_API_KEY ||
+      process.env.MERRYMEN_TELEGRAM_BOT_TOKEN || process.env.MERRYMEN_LLM_PROVIDER ||
+      process.env.MERRYMEN_STRATEGY,
+  );
   const view: SettingsView = {
     bundlerApiKey: mask(bundlerApiKey),
     groqApiKey: mask(groqApiKey),
@@ -132,6 +142,8 @@ export async function GET() {
     knownSymbols: STOCK_TOKENS.map((t) => t.symbol),
     strategies: { builtin: BUILTIN_STRATEGIES, custom: await listCustomStrategies() },
     llmProviders: LLM_PROVIDERS,
+    webOnboarded: safeValues.webOnboarded === true,
+    envHasConfig,
   };
   return NextResponse.json(view);
 }
@@ -179,6 +191,9 @@ const BOOL_FIELDS = [
   "virtualsEnabled",
   "scoutEnabled",
   "discoveryEnabled",
+  // First-run marker: true = finished/skipped on any surface; false/empty
+  // clears it (re-shows the onboarding surfaces).
+  "webOnboarded",
 ] as const;
 /** Telegram PC string-array allowlists: (field, per-entry maxLen). */
 const STR_ARRAY_FIELDS: Record<string, number> = {
@@ -451,8 +466,29 @@ export async function PUT(req: Request) {
 
   await mkdir(DATA_DIR, { recursive: true });
   // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —
-  // owner-only perms (0600), not the default world-readable 0644.
-  await writeFile(SETTINGS_FILE, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
-  await chmod(SETTINGS_FILE, 0o600).catch(() => {});
+  // owner-only perms (0600), not the default world-readable 0644. Write to a
+  // temp file then rename, so a crash mid-write can never leave a truncated
+  // settings.json that the worker would silently read as defaults.
+  const tmp = `${SETTINGS_FILE}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    await writeFile(tmp, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
+    // Windows refuses rename over an open handle — retry with backoff.
+    let lastErr: unknown = null;
+    for (let i = 0; i < 5; i++) {
+      try { await rename(tmp, SETTINGS_FILE); lastErr = null; break; }
+      catch (e: unknown) {
+        lastErr = e;
+        const code = (e as { code?: string })?.code ?? "";
+        if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") break;
+        await new Promise((r) => setTimeout(r, 20 * (i + 1)));
+      }
+    }
+    if (lastErr) throw lastErr;
+    await chmod(SETTINGS_FILE, 0o600).catch(() => {});
+  } catch (e) {
+    await rm(tmp, { force: true }).catch(() => {});
+    const msg = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({ errors: [`couldn't save settings: ${msg}`] }, { status: 500 });
+  }
   return NextResponse.json({ ok: true, appliesWithin: "one worker tick" });
 }
