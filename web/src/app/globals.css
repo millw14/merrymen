@@ -569,6 +569,54 @@ button { font: inherit; cursor: pointer; }
 }
 .tg-cta-btn:hover { background: #1c93d0; }
 
+/* ---------- telegram link modal (global first-link onboarding) ---------- */
+.tg-modal-backdrop {
+  position: fixed; inset: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  backdrop-filter: blur(3px);
+  animation: tg-fade 160ms ease-out;
+}
+.tg-modal {
+  position: relative;
+  width: min(380px, 100%);
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 22px 20px 20px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  animation: tg-pop 180ms ease-out;
+}
+.tg-modal-close {
+  position: absolute; top: 10px; right: 12px;
+  width: 28px; height: 28px; line-height: 1;
+  border: none; background: none; color: var(--text-faint);
+  font-size: 22px; cursor: pointer; border-radius: 6px;
+}
+.tg-modal-close:hover { color: var(--text); background: var(--bg-3); }
+.tg-code-row { display: flex; align-items: stretch; gap: 8px; }
+.tg-code {
+  flex: 1;
+  font-family: var(--mono); font-size: 17px; font-weight: 700;
+  letter-spacing: 4px; text-align: center;
+  color: var(--green-soft);
+  background: var(--bg-3); border: 1px solid var(--border-2);
+  border-radius: 8px; padding: 10px 8px;
+  user-select: all;
+}
+.tg-copy-btn {
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  color: var(--text); background: var(--bg-3);
+  border: 1px solid var(--border-2); border-radius: 8px;
+  padding: 0 12px; cursor: pointer; white-space: nowrap;
+}
+.tg-copy-btn:hover { border-color: var(--green-deep); color: var(--green-soft); }
+.tg-modal-note { font-size: 10.5px; color: var(--text-faint); }
+@keyframes tg-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes tg-pop { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }
+
 /* ---------- the wall (trust layer) panel ---------- */
 .wall-panel { display: flex; flex-direction: column; gap: 10px; }
 .wall-sub { font-size: 11.5px; color: var(--text-dim); line-height: 1.55; }

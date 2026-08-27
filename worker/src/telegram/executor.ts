@@ -11,30 +11,56 @@
  * the full recipient address echoed back. Nothing here can exceed the grant.
  */
 
+import { randomBytes } from "node:crypto";
 import { esc } from "./api";
 import { CONTROL_KINDS, PC_CAP_OF, PC_KINDS, type Command } from "./interpreter";
 import { resolveInRoot, shellAllowed, type PcActions } from "./pc";
 import { WALLET_TEXT } from "./reads";
 
+/** Short random token binding an inline Confirm/Cancel button to the exact
+ * parked action it was attached to (see service.ts handleCallback). Not a
+ * security boundary — the allowlist + chat:from key are — but it stops a stale
+ * button from confirming whatever action later lands in the same slot. */
+const nonce = (): string => randomBytes(4).toString("hex");
+
 /** A vetted action awaiting the user's explicit /confirm. Widened from the
  * original transfer-only store so a pending PC action and a pending transfer
- * share one per-chat slot (the latest ask wins). */
+ * share one per-chat slot. A live (unexpired) pending blocks a new park until
+ * it is resolved or expires — a stale button can never confirm a newer ask. */
 export type PendingAction =
-  | { kind: "transfer"; to: `0x${string}`; usdg: number; expiresAt: number }
-  | { kind: "shell"; cmd: string; expiresAt: number }
-  | { kind: "getfile"; path: string; expiresAt: number }
-  | { kind: "type"; text: string; expiresAt: number }
-  | { kind: "hotkey"; combo: string; expiresAt: number }
-  | { kind: "power"; action: "sleep" | "shutdown"; expiresAt: number }
-  /**
-   * The kill switch, parked for confirmation like a transfer.
-   *
-   * It used to fire on a single message. It destroys the grant file, which for
-   * a grant that has never been replaced is the only on-disk copy of the owner
-   * key — so a misread instruction was a permanent loss of funds. A transfer of
-   * $5 asks first; ending the agent should too.
-   */
-  | { kind: "kill"; expiresAt: number };
+  | { kind: "transfer"; to: `0x${string}`; usdg: number; expiresAt: number; nonce: string }
+  | { kind: "shell"; cmd: string; expiresAt: number; nonce: string }
+  | { kind: "getfile"; path: string; expiresAt: number; nonce: string }
+  | { kind: "type"; text: string; expiresAt: number; nonce: string }
+  | { kind: "hotkey"; combo: string; expiresAt: number; nonce: string }
+  | { kind: "power"; action: "sleep" | "shutdown"; expiresAt: number; nonce: string }
+  | { kind: "kill"; expiresAt: number; nonce: string };
+
+/** What KIND of parked action is waiting — fed to the LLM only so it can
+ * steer the owner to the buttons. Must NOT include payload (text, address,
+ * cmd, path) — that would send a pasted password or address to the LLM
+ * provider. The human-facing card already shows the verbatim payload. */
+export function describePending(p: PendingAction): string {
+  switch (p.kind) {
+    case "transfer":
+      return "a transfer is waiting for confirmation";
+    case "shell":
+      return "a shell command is waiting for confirmation";
+    case "getfile":
+      return "a file send is waiting for confirmation";
+    case "type":
+    case "hotkey":
+      return "a keyboard action is waiting for confirmation";
+    case "power":
+      return "a power action is waiting for confirmation";
+    case "kill":
+      return "a kill is waiting for confirmation";
+    default: {
+      const _exhaustive: never = p;
+      return _exhaustive;
+    }
+  }
+}
 
 export interface CommandDeps {
   controlEnabled: boolean;
@@ -49,8 +75,7 @@ export interface CommandDeps {
   reads: {
     status(): string;
     positions(): string;
-    /** Liquidity depth for one ticker — a chain read, so always async. */
-    depth(symbol: string): Promise<string>;
+    depth(symbol: string): string | Promise<string>;
     pnl(): string;
     trades(): string;
     report(): string | Promise<string>;
@@ -60,7 +85,6 @@ export interface CommandDeps {
   setStrategy(name: string): { ok: boolean; reason?: string };
   setCap(usdg: number): void;
   setPaused(paused: boolean): void;
-  /** Destroy the grant. Archives the owner key first — `archived` names the account kept. */
   kill(): { ok: boolean; reason?: string; archived?: string | null };
   link(code: string): { ok: boolean; reason?: string };
   /** Build a bounded TradeIntent and route it through processIntent → policy wall. */
@@ -124,6 +148,11 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
   const refusal = pcRefusal(cmd, deps);
   if (refusal) return refusal;
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
+  const blocked = (): string | null => {
+    const live = deps.getPending();
+    if (live && now() <= live.expiresAt) return `⏳ ${describePending(live)} — /confirm it or /cancel first.`;
+    return null;
+  };
 
   switch (cmd.kind) {
     case "link": {
@@ -191,12 +220,7 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
         return "🔒 transfers from chat are off. Turn on “allow transfers” for Telegram in the dashboard first.";
       }
       if (!deps.grantHasTransfer) {
-        // The old text told the owner to DESTROY their grant and re-create the
-        // wallet to gain a permission the new wall would not contain either —
-        // advice that costs a session key and delivers nothing. Worded to
-        // match what checkPolicy says for the same refusal, so the two read
-        // alike wherever the owner meets them.
-        return "🧱 this wall carries no transfer permission — no withdrawal address was registered when it was signed, so the chain would refuse the send. Move funds with your owner key: `merrymen recover`.";
+        return "🔒 this wall carries no transfer permission — no withdrawal address was registered when it was signed, so the chain would refuse the send. Move funds with your owner key: `merrymen recover`.";
       }
       let usdg = cmd.usdg;
       let note = "";
@@ -204,7 +228,9 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
         usdg = deps.maxActionUsdg;
         note = ` (trimmed to your ${deps.maxActionUsdg} USDG chat ceiling)`;
       }
-      deps.setPending({ kind: "transfer", to: cmd.to, usdg, expiresAt: now() + CONFIRM_TTL_SEC });
+      const b0 = blocked();
+      if (b0) return b0;
+      deps.setPending({ kind: "transfer", to: cmd.to, usdg, expiresAt: now() + CONFIRM_TTL_SEC, nonce: nonce() });
       return [
         `⚠️ <b>confirm transfer</b>${note}`,
         `send <b>${usdg} USDG</b> to`,
@@ -228,9 +254,6 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           return "🔒 transfers were turned off before you confirmed — nothing moved.";
         }
       } else if (p.kind === "kill") {
-        // Kill is a control command, not a PC capability — re-vet the control
-        // switch rather than running it through pcRefusal, which knows nothing
-        // about it and would let it through.
         if (!deps.controlEnabled) {
           deps.clearPending();
           return "🔒 control was turned off before you confirmed — the grant is untouched.";
@@ -259,13 +282,8 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
         case "kill": {
           const r = deps.kill();
           if (!r.ok) return `nothing to kill: ${r.reason ?? "no grant"}`;
-          return (
-            `🛑 KILL SWITCH — grant destroyed, the band stands down on the next tick.\n` +
-            (r.archived
-              ? `Owner key archived to <code>~/.merrymen/grants/</code> — <code>merrymen recover</code> can still sweep the funds.`
-              : `⚠️ nothing could be archived — if this account held funds, check ~/.merrymen/grants/ before re-granting.`) +
-            `\nRe-grant in the dashboard to ride again.`
-          );
+          const arch = r.archived ? ` Your owner key is archived to ${r.archived}.` : "";
+          return `🛑 KILL SWITCH — grant destroyed, the band stands down on the next tick.${arch} Re-grant in the dashboard to ride again.`;
         }
       }
     }
@@ -325,25 +343,35 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       if (!shellAllowed(cmd.cmd, deps.shellAllowlist)) {
         return `🔒 “${esc(cmd.cmd)}” isn't in your shell allowlist (or it chains/redirects). Add exact commands in the dashboard.`;
       }
-      deps.setPending({ kind: "shell", cmd: cmd.cmd, expiresAt: now() + CONFIRM_TTL_SEC });
+      const b1 = blocked();
+      if (b1) return b1;
+      deps.setPending({ kind: "shell", cmd: cmd.cmd, expiresAt: now() + CONFIRM_TTL_SEC, nonce: nonce() });
       return `⚠️ <b>confirm run</b>\n<code>${esc(cmd.cmd)}</code>\n\n/confirm to run (${CONFIRM_TTL_SEC}s) or /cancel.`;
     }
     case "getfile": {
       const res = resolveInRoot(deps.filesRoot, cmd.path);
       if (!res.ok) return `🔒 ${esc(res.reason)}`;
-      deps.setPending({ kind: "getfile", path: cmd.path, expiresAt: now() + CONFIRM_TTL_SEC });
+      const b2 = blocked();
+      if (b2) return b2;
+      deps.setPending({ kind: "getfile", path: cmd.path, expiresAt: now() + CONFIRM_TTL_SEC, nonce: nonce() });
       return `⚠️ <b>confirm send file</b>\n<code>${esc(cmd.path)}</code> will be sent to this chat.\n\n/confirm (${CONFIRM_TTL_SEC}s) or /cancel.`;
     }
     case "type": {
-      deps.setPending({ kind: "type", text: cmd.text, expiresAt: now() + CONFIRM_TTL_SEC });
+      const b3 = blocked();
+      if (b3) return b3;
+      deps.setPending({ kind: "type", text: cmd.text, expiresAt: now() + CONFIRM_TTL_SEC, nonce: nonce() });
       return `⚠️ <b>confirm type</b> into your active window:\n<code>${esc(cmd.text)}</code>\n\n/confirm (${CONFIRM_TTL_SEC}s) or /cancel.`;
     }
     case "hotkey": {
-      deps.setPending({ kind: "hotkey", combo: cmd.combo, expiresAt: now() + CONFIRM_TTL_SEC });
+      const b4 = blocked();
+      if (b4) return b4;
+      deps.setPending({ kind: "hotkey", combo: cmd.combo, expiresAt: now() + CONFIRM_TTL_SEC, nonce: nonce() });
       return `⚠️ <b>confirm hotkey</b> <code>${esc(cmd.combo)}</code>\n\n/confirm (${CONFIRM_TTL_SEC}s) or /cancel.`;
     }
     case "power": {
-      deps.setPending({ kind: "power", action: cmd.action, expiresAt: now() + CONFIRM_TTL_SEC });
+      const b5 = blocked();
+      if (b5) return b5;
+      deps.setPending({ kind: "power", action: cmd.action, expiresAt: now() + CONFIRM_TTL_SEC, nonce: nonce() });
       return `⚠️ <b>confirm ${cmd.action}</b> — this will ${cmd.action} your machine.\n\n/confirm (${CONFIRM_TTL_SEC}s) or /cancel.`;
     }
     // ── reminders (ungated) & watchers (gated above under "watchers") ────────
@@ -360,7 +388,9 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     case "unwatch":
       return deps.removeWatcher(cmd.id);
     case "kill": {
-      deps.setPending({ kind: "kill", expiresAt: now() + CONFIRM_TTL_SEC });
+      const bKill = blocked();
+      if (bKill) return bKill;
+      deps.setPending({ kind: "kill", expiresAt: now() + CONFIRM_TTL_SEC, nonce: nonce() });
       return (
         `⚠️ <b>confirm kill</b> — this destroys the grant and stands the band down.\n` +
         `Your owner key is archived to <code>~/.merrymen/grants/</code> first, so ` +
