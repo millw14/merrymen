@@ -10,6 +10,7 @@ import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import {
   HOUSE_KEY_FIELDS,
   SETTINGS_DEFAULTS,
+  SLIPPAGE_BPS_MAX,
   STOCK_TOKENS,
   isHostedMode,
   isValidCustomToken,
@@ -272,7 +273,7 @@ export function mergeSettings(
       return v && /^[A-Za-z0-9_-]{1,64}$/.test(v) ? v : d.strategy;
     })(),
     swapVenue: oneOf(file.swapVenue, env.MERRYMEN_SWAP_VENUE, ["uniswap", "rialto"], d.swapVenue),
-    slippageBps: num(file.slippageBps, env.MERRYMEN_SLIPPAGE_BPS, d.slippageBps, 1, 5_000),
+    slippageBps: num(file.slippageBps, env.MERRYMEN_SLIPPAGE_BPS, d.slippageBps, 1, SLIPPAGE_BPS_MAX),
     // Floor of 0 is meaningful here: it turns the guard off. Ceiling of 10_000
     // is 100% impact, past which the number stops meaning anything.
     maxImpactBps: num(file.maxImpactBps, env.MERRYMEN_MAX_IMPACT_BPS, d.maxImpactBps, 0, 10_000),

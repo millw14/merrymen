@@ -17,6 +17,7 @@ import {
   LLM_PROVIDERS,
   SECRET_SETTING_KEYS,
   SETTINGS_DEFAULTS,
+  SLIPPAGE_BPS_MAX,
   STOCK_TOKENS,
   isHostedMode,
   isValidCustomToken,
@@ -149,7 +150,10 @@ export async function GET(req: Request) {
 const KNOWN_SYMBOLS = new Set(STOCK_TOKENS.map((t) => t.symbol));
 const URL_FIELDS = ["bundlerUrl", "rpcMainnet", "rpcTestnet"] as const;
 const NUM_FIELDS: Record<string, [number, number]> = {
-  slippageBps: [1, 5_000],
+  // Imported, never a literal. This entry and the worker's own clamp are two
+  // enforcement points for one rule, and they read 5_000 and 5_000 while the
+  // rule they were meant to express was never written down anywhere.
+  slippageBps: [1, SLIPPAGE_BPS_MAX],
   // 0 is a MEANINGFUL low bound here, not a typo: it is the impact guard's
   // off switch, and the guard's own rejection message tells owners to raise
   // this setting — which was impossible while it was missing from this list.

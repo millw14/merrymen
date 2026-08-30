@@ -385,6 +385,28 @@ export const PC_CAPABILITIES = [
 ] as const;
 export type PcCapability = (typeof PC_CAPABILITIES)[number];
 
+/**
+ * The highest slippage a grant may ever be configured with, in bps.
+ *
+ * This was 5,000 — a minOut of HALF the quote — and it lived in a web
+ * route's validation table rather than anywhere a policy belongs, duplicated
+ * in the worker where an out-of-range value silently fell back to the default
+ * instead of being refused. The worker-side sanity check in
+ * `minOutWithSlippage` is looser still (`>= 10_000`), because its job is only
+ * to stop a negative minOut, not to express a bound.
+ *
+ * 1,000 bps, and it is a PRODUCT POLICY rather than a preference: there is no
+ * env var and no settings field that raises it, because a ceiling a running
+ * agent can lift for itself is not a ceiling. Vex pins the same number for
+ * the same reason, and names 5,000 as the range where a provider will accept
+ * a fill that is a total loss.
+ *
+ * Above ~1,000 bps on this chain the number stops describing slippage. The v4
+ * fee survey found a median LP fee of 86.33%, so a fill 10% below quote is
+ * not a market moving — it is a pool set up to keep the difference.
+ */
+export const SLIPPAGE_BPS_MAX = 1_000;
+
 export const SETTINGS_DEFAULTS = {
   paperTradingEnabled: true,
   paperStartUsdg: 1000,

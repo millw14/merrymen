@@ -62,6 +62,7 @@ import { impactBps, judgeImpact, probeAmountIn } from "./impact";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
   createAgentExecutor,
+  GasRefused,
   UserOpReverted,
   UserOpUnresolved,
   type AgentExecutor,
@@ -71,6 +72,7 @@ import {
 } from "./executor";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } from "./fills";
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
+import { classifyRevert, suppressionKey } from "./revert";
 import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { priceGas, wethPriceToken } from "./gas-price";
@@ -394,6 +396,14 @@ async function main() {
   // did not.
   let settledSpentUsdg = 0n;
   let settledOps = 0;
+  /**
+   * Intents the chain refused for a reason retrying cannot fix, this arm.
+   *
+   * suppressionKey (kind + token pair) -> the RevertClass that closed it, so a
+   * refusal names itself in the tape instead of looking like a strategy that
+   * quietly stopped proposing. Cleared at every arm.
+   */
+  const suppressedIntents = new Map<string, string>();
   let inFlightSpentUsdg = 0n;
   let inFlightOps = 0;
   const spentToday = () => settledSpentUsdg + inFlightSpentUsdg;
@@ -1803,6 +1813,7 @@ async function main() {
     // Nothing is in flight at arm time, so clear any stale reservation with it.
     inFlightSpentUsdg = 0n;
     inFlightOps = 0;
+    suppressedIntents.clear();
     // Recover any op that landed on-chain last run but never reached the ledger,
     // BEFORE seeding — else the seed under-counts the day's spend and loosens the
     // cap. Live only (paper never touches the chain); best-effort (guarded).
@@ -2008,7 +2019,45 @@ async function main() {
     };
   }
 
-  async function processIntent(
+  /**
+   * SERIALIZED. Every caller goes through processIntent, which holds this.
+   *
+   * The hazard is named in this file already, at the budget reservation: "a
+   * chat trade interleaved with a tick could both pass checkPolicy against the
+   * same stale spend figure and overshoot the daily cap by one action". The
+   * reservation narrows that window and does not close it — `state` is
+   * snapshotted, then `await scoutContextFor(intent)` yields the event loop
+   * BEFORE checkPolicy judges it, and reserveBudget is not taken until several
+   * awaits later still.
+   *
+   * And there is a second race the reservation cannot touch at all: two
+   * concurrent sendUserOperation calls read the same account NONCE, so the
+   * bundler drops one. The tick is serialized against itself by runLoop, but
+   * submitChatTrade and submitChatTransfer fire on the Telegram poll's event
+   * loop and can enter mid-tick.
+   *
+   * One lock closes both, because processIntent IS the critical section — from
+   * reading the counters to writing the row. Cheap where it matters: the tick
+   * already awaits its intents in sequence, so it never contends with itself.
+   *
+   * A promise chain rather than a semaphore, and deliberately unbounded: there
+   * is no timeout because a caller that gave up waiting would proceed into
+   * exactly the concurrency this exists to prevent. The chain is kept alive
+   * across a rejection (the .catch below), or one throwing intent would
+   * poison every later one — which is how a lock like this usually fails.
+   */
+  let intentChain: Promise<unknown> = Promise.resolve();
+  function processIntent(intent: TradeIntent, equityUsdg: bigint, equityKnown = true): Promise<void> {
+    const run = intentChain.then(
+      () => processIntentLocked(intent, equityUsdg, equityKnown),
+      () => processIntentLocked(intent, equityUsdg, equityKnown),
+    );
+    // The chain must never hold a rejection, or the next waiter inherits it.
+    intentChain = run.catch(() => {});
+    return run;
+  }
+
+  async function processIntentLocked(
     intent: TradeIntent,
     equityUsdg: bigint,
     equityKnown = true,
@@ -2110,6 +2159,33 @@ async function main() {
     // on the broker rail. Step 5's schema work gives broker rows their own
     // columns — until then the ticker in `target` keeps the tape readable.
     const tradeTarget = intent.kind === "equity-order" ? intent.ticker : intent.target;
+
+    // ── ALREADY REFUSED, FOR A REASON RETRYING CANNOT FIX ────────────────
+    // Read AFTER checkPolicy so the tape's ordering does not change: a trade
+    // that breaks a cap should still say so, because that is the more useful
+    // fact about it. This only catches what the policy would have allowed.
+    //
+    // The row is a rejection carrying the ORIGINAL revert class, not a new
+    // word — so 'why did it stop trading NVDA' has the same answer on the
+    // hundredth tick as on the first, instead of a gap in the tape.
+    const suppressed = suppressedIntents.get(
+      suppressionKey(
+        intent.kind,
+        intent.kind === "swap" ? intent.sellToken : undefined,
+        intent.kind === "swap" ? intent.buyToken : undefined,
+      ),
+    );
+    if (suppressed && verdict.ok) {
+      await recordTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: tradeTarget,
+        amount_usdg: usdgNum(notional),
+        status: "rejected",
+        reject_rule: suppressed,
+      });
+      return;
+    }
 
     if (!verdict.ok) {
       console.log(`[policy] REJECTED ${intent.kind}: ${verdict.rule} — ${verdict.detail}`);
@@ -3011,6 +3087,33 @@ async function main() {
       // pre-broadcast 'submitted' row exactly as it is, and say so. The row
       // already carries the hash, which is what makes it recoverable — by the
       // arm-time reconciler, or by anyone with a block explorer.
+      // ── REFUSED BEFORE BROADCAST, ON GAS ────────────────────────────
+      // Nothing was signed and nothing spent, so this is a sibling of a policy
+      // rejection and not of a revert. Booking it 'reverted' would put a row in
+      // the tape claiming the chain refused a trade the chain never saw, and
+      // the reason it exists — a bundler estimate we would not stake an
+      // operation on — would be flattened into "couldn't submit".
+      //
+      // The rule string is a literal from gas-limits.ts, so it joins the
+      // vocabulary the notifier and the dashboard already read rather than
+      // becoming another free-form sentence in reject_rule.
+      if (e instanceof GasRefused) {
+        releaseBudget();
+        await addEvent(agentId, "warn", `${intent.kind} refused before signing: ${msg.slice(0, 300)}`);
+        await recordTrade({
+          agent_id: agentId,
+          kind: intent.kind,
+          target: tradeTarget,
+          sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
+          buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
+          amount_usdg: usdgNum(notional),
+          status: "rejected",
+          reject_rule: e.rule,
+          ...sim,
+        });
+        return;
+      }
+
       if (e instanceof UserOpUnresolved) {
         lastTradeOutcome = { status: "submitted", rejectRule: "receipt-unresolved" };
         // KEEP THE SPEND COUNTED. `finally` below releases the reservation
@@ -3057,10 +3160,49 @@ async function main() {
       // string test was how the timeout above ended up in the wrong branch, and
       // every future error phrasing would have found the same hole.
       const onChain = e instanceof UserOpReverted;
-      const reason = onChain
-        ? msg.replace(/\s*\(0x[0-9a-fA-F]+\)\s*$/, "").slice(0, 90)
+      // CLASSIFIED, not stored raw. reject_rule used to take ninety characters
+      // of the error text — free-form, unbounded cardinality, in a column every
+      // other producer fills from a small vocabulary. Nothing could read it, so
+      // nothing did, and the same trade was re-proposed on the next tick.
+      //
+      // classifyRevert sees the RAW message: truncation is for storage, and
+      // matching an already-sliced string would make the verdict depend on where
+      // the 90th character happened to fall.
+      const revertVerdict = onChain ? classifyRevert(msg) : null;
+      const reason = revertVerdict
+        ? revertVerdict.rule
         : `couldn't submit: ${msg.replace(/\s+/g, " ").slice(0, 80)}`;
-      await addEvent(agentId, "err", `${intent.kind} ${onChain ? "reverted on-chain" : "failed before submit"}: ${msg.slice(0, 200)}`);
+      // The raw text still reaches the owner — the classification is for the
+      // LOOP, and losing the original would trade one blindness for another.
+      await addEvent(
+        agentId,
+        "err",
+        `${intent.kind} ${onChain ? "reverted on-chain" : "failed before submit"}: ${msg.slice(0, 200)}` +
+          (revertVerdict ? ` — ${revertVerdict.detail}` : ""),
+      );
+      // WHAT MAKES THE TAXONOMY WORTH HAVING. Vex's tells a person which
+      // parameter to change; there is no person here, so a class whose cause
+      // cannot change without something else changing first must stop the intent
+      // being re-proposed every 60 seconds for the rest of the arm.
+      //
+      // Keyed on the token pair, not the intent object: the same buy re-proposed
+      // next tick is a different object with the same meaning. Cleared at arm and
+      // never persisted — a fresh arm has fresh information (a re-signed grant, a
+      // funded account), and a suppression outliving its reason is
+      // indistinguishable from a strategy that simply stopped working.
+      if (revertVerdict && !revertVerdict.retryable) {
+        const key = suppressionKey(
+          intent.kind,
+          intent.kind === "swap" ? intent.sellToken : undefined,
+          intent.kind === "swap" ? intent.buyToken : undefined,
+        );
+        suppressedIntents.set(key, revertVerdict.rule);
+        await addEvent(
+          agentId,
+          "warn",
+          `${intent.kind} ${revertVerdict.rule} — not retried again until the next arm, because retrying cannot fix it`,
+        );
+      }
       await recordTrade({
         agent_id: agentId,
         kind: intent.kind,

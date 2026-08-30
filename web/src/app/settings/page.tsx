@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { LogoMark } from "@/components/Logo";
-import { MERRYMEN_GATEWAY_ORIGIN, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
+import { MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 import SetupChecklist from "./SetupChecklist";
@@ -1218,7 +1218,7 @@ export default function SettingsPage() {
               </select>
             </Field>
             <Field label="max slippage" hint="vs the pre-trade quote.">
-              <input type="number" min={1} max={5000} placeholder={String(d.slippageBps)} value={v("slippageBps")} onChange={set("slippageBps")} />
+              <input type="number" min={1} max={SLIPPAGE_BPS_MAX} placeholder={String(d.slippageBps)} value={v("slippageBps")} onChange={set("slippageBps")} />
               <span className="field-unit">bps</span>
             </Field>
             <Field label="performance fee" hint="On profit above the high-water mark only. Accrual ledger — nothing is collected yet.">

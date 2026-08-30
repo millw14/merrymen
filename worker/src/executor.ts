@@ -17,6 +17,7 @@ import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { deserializeFlaggedPermissionAccount } from "./session-account";
 import { WALL_POLICY_FLAG } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
+import { boundGas, type UserOpGas } from "./gas-limits";
 
 export interface Call {
   to: `0x${string}`;
@@ -87,6 +88,18 @@ export class UserOpUnresolved extends Error {
   }
 }
 
+/**
+ * Refused BEFORE broadcast, on gas grounds. Nothing was signed and nothing
+ * spent, so this is a sibling of a policy rejection rather than of a revert —
+ * index.ts must not book it as an on-chain failure.
+ */
+export class GasRefused extends Error {
+  constructor(readonly rule: string, detail: string) {
+    super(`gas refused (${rule}): ${detail}`);
+    this.name = "GasRefused";
+  }
+}
+
 /** How many times the RECEIPT is re-read. Never the send — see execute(). */
 const RECEIPT_ATTEMPTS = 3;
 
@@ -145,9 +158,74 @@ export async function createAgentExecutor(opts: {
   return {
     address: account.address,
     async execute(calls: Call[], hooks?: ExecuteHooks) {
+      const callData = await account.encodeCalls(calls);
+
+      // ── BOUND THE GAS BEFORE SIGNING ANYTHING ───────────────────────
+      // Estimating ourselves is not optional here: viem's prepareUserOperation
+      // fills each field only when it is undefined, and skips the bundler
+      // estimate entirely once all three are set — so the only way to bound a
+      // limit is to have a number of our own first. See gas-limits.ts for why a
+      // floor matters at all (an under-estimated callGasLimit does not bounce;
+      // it OOGs inside the EntryPoint and the account pays anyway).
+      //
+      // TWO estimates of the same calldata. The second is the disagreement
+      // probe, and it is the only signal available for "this number is not
+      // trustworthy" without knowing what the calldata should cost. It costs one
+      // round trip against an operation that is about to spend real money.
+      // Kept outside the closure so a refusal can carry what the bundler said.
+      let estimateError = "";
+      const estimate = async (): Promise<UserOpGas | null> => {
+        try {
+          const g = (await client.estimateUserOperationGas({ callData })) as Partial<UserOpGas>;
+          if (
+            typeof g.callGasLimit !== "bigint" ||
+            typeof g.verificationGasLimit !== "bigint" ||
+            typeof g.preVerificationGas !== "bigint"
+          ) {
+            return null;
+          }
+          return {
+            callGasLimit: g.callGasLimit,
+            verificationGasLimit: g.verificationGasLimit,
+            preVerificationGas: g.preVerificationGas,
+          };
+        } catch (e) {
+          // A refusal to quote, NOT a quote of zero — boundGas is told null and
+          // says so in its own words.
+          //
+          // BUT KEEP THE REASON. Before this file existed, a failing estimate
+          // happened INSIDE prepareUserOperation and its error propagated with
+          // the AA code and revert reason attached — reaching the owner as
+          // `couldn't submit: <the actual cause>`. Moving the estimate one
+          // layer earlier and swallowing it here would collapse AA21 (account
+          // underfunded), AA23 (the wall refused the call), a simulation
+          // revert, a 429 and a bundler outage into one sentence that names
+          // none of them — on the single most likely outcome of a first op.
+          estimateError = e instanceof Error ? e.message : String(e);
+          return null;
+        }
+      };
+      const first = await estimate();
+      // Only probe a second time when the first succeeded: a null first is
+      // already a refusal, and asking again would just be slower.
+      const second = first ? await estimate() : null;
+      const bounded = boundGas(first, second);
+      if (!bounded.ok) {
+        // BEFORE the send, so nothing is spent and no 'submitted' row exists.
+        // This is a pre-broadcast rejection in the same shape as a policy one.
+        throw new GasRefused(
+          bounded.rule,
+          // The bundler's own words first when we have them — they are the
+          // diagnosis; ours is the policy.
+          estimateError ? `${estimateError} — ${bounded.detail}` : bounded.detail,
+        );
+      }
+
       const userOpHash = await client.sendUserOperation({
-        callData: await account.encodeCalls(calls),
-      });
+        callData,
+        // Explicit, so prepareUserOperation uses these instead of estimating.
+        ...bounded.gas,
+      } as never);
       // DURABILITY BEFORE THE WAIT. Between here and the ledger write in
       // index.ts sits a receipt wait, a network price call and a DB round
       // trip; nothing was written durably across any of it, so a SIGTERM from
