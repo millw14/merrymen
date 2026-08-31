@@ -401,6 +401,15 @@ export function buildCallPermissions(
   }
   // A buy permission with no adapter to call is meaningless, and silently
   // ignoring the flag would let a grant claim a capability it does not carry.
+  if (opts.nativeBuyValueLimitWei !== undefined && opts.nativeBuyValueLimitWei <= 0n) {
+    // A permission that can never send value is not a buy route, it is a
+    // signature claiming one. Refuse rather than mint a dead capability the
+    // owner believes they have.
+    throw new Error(
+      `nativeBuyValueLimitWei must be positive, got ${opts.nativeBuyValueLimitWei} — ` +
+        `a zero ceiling grants a buy permission that can never buy.`,
+    );
+  }
   if (opts.allowNativeBuy && !nativeAdapter) {
     throw new Error(
       "allowNativeBuy was set without a nativeAdapterAddress — there is no contract to permit. " +
@@ -420,6 +429,31 @@ export function buildCallPermissions(
   // approve permissions below cover. This is what the adapter's tokenIn and
   // tokenOut are pinned to — same source, same call, so the approve set and
   // the swap set cannot drift apart within one grant.
+  /**
+   * The only assets a NATIVE-quoted curve can legitimately trade: the owner's
+   * own added tokens, and nothing else.
+   *
+   * THIS EXISTS BECAUSE PINNING THESE LEGS TO `adapterAssets` OPENED A CASH
+   * DRAIN. That list begins with USDG and includes every tradeable stock token,
+   * and `sellForNative` has no output leg to pin — the native side is implied by
+   * the selector — so `approve(USDG, nativeAdapter, perTradeUsdg)` followed by
+   * `sellForNative(attackerCurve, USDG, perTradeUsdg, 1, …)` sat entirely inside
+   * the wall, and cost the attacker one wei of ETH to satisfy the floor.
+   *
+   * That is strictly worse than the wall's other USDG-touching routes:
+   * `exactInputSingle` and `tradeExactIn` both pin their OUTPUT leg ONE_OF this
+   * same list, so draining cash through them means actually delivering a real
+   * allowlisted ERC-20. With no output leg, there was nothing to deliver.
+   *
+   * PINNED BY CATEGORY, NOT BY IDENTITY. Excluding USDG alone would reopen the
+   * same hole one asset over the moment an owner adds a stablecoin as an extra.
+   * A Pons curve's `token()` is the launched memecoin, which always arrives as
+   * an owner-added EXTRA and is never a builtin — so restricting to `extras`
+   * loses no legitimate trade and removes cash and equities from reach
+   * entirely. Derived from the same `extras` variable in the same call as the
+   * approve permissions, per this file's own anti-drift rule.
+   */
+  const nativeCurveAssets: Address[] = extras.map((t) => t.address as Address);
   const adapterAssets: Address[] = [
     CASH.USDG as Address,
     ...STOCK_TOKENS.filter((t) => (TRADEABLE_SYMBOLS as readonly string[]).includes(t.symbol)).map(
@@ -701,7 +735,9 @@ export function buildCallPermissions(
             functionName: "sellForNative",
             args: [
               null, // curve — unpinnable, a new address per token
-              { condition: ParamCondition.ONE_OF, value: adapterAssets },
+              // EXTRAS ONLY — see nativeCurveAssets. Pinning this to adapterAssets
+              // let the account's cash be pulled into an attacker's curve for a wei.
+              { condition: ParamCondition.ONE_OF, value: nativeCurveAssets },
               null, // amountIn — bounded by the approve caps
               null, // minNativeOut — denominated in wei, says nothing useful
               null, // deadline
@@ -728,7 +764,9 @@ export function buildCallPermissions(
             functionName: "buyWithNative",
             args: [
               null, // curve — unpinnable
-              { condition: ParamCondition.ONE_OF, value: adapterAssets },
+              // Same list, same reason: the thing bought on a curve is a launched
+              // token, never cash and never an equity.
+              { condition: ParamCondition.ONE_OF, value: nativeCurveAssets },
               null, // minTokensOut
               null, // deadline
             ],
@@ -876,6 +914,12 @@ export function buildWallPolicies(args: {
         allowUniswapV4: args.allowUniswapV4,
         v4AdapterAddress: args.v4AdapterAddress,
         ponsAdapterAddress: args.ponsAdapterAddress,
+        // THE SAME OMISSION AS ponsAdapterAddress, one release later. It
+        // type-checks either way, and the grant simply comes out without the
+        // permission it claims — which is why the note above this block exists.
+        nativeAdapterAddress: args.nativeAdapterAddress,
+        allowNativeBuy: args.allowNativeBuy,
+        nativeBuyValueLimitWei: args.nativeBuyValueLimitWei,
       }) as never,
     }),
   ];

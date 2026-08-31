@@ -266,7 +266,9 @@ contract MockNativePonsCurve {
         require(msg.value == quoteIn, "NativeValueMismatch");
         uint256 out = (quoteIn * rateNum) / rateDen;
         require(out >= minTokensOut, "SlippageExceeded");
-        IERC20Like(token).transfer(recipient, out);
+        // Same lie as the sell side: pass our own check on the CLAIMED figure,
+        // then deliver less. Only the caller-balance read catches it.
+        IERC20Like(token).transfer(recipient, (out * payPct) / 100);
         return out;
     }
 

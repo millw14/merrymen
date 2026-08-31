@@ -208,6 +208,53 @@ describe("PonsNativeTrade — buying with native ETH", () => {
     }
   });
 
+  it("enforces the BUY floor against what ARRIVED — the only permission that moves ETH", async () => {
+    // This branch was executed by no test, on the one selector in the whole
+    // wall carrying a non-zero valueLimit. The curve passes its own slippage
+    // check on the figure it reports and then delivers half of it.
+    const { account, token, curve, adapter } = await setup();
+    await curve.write.setPayPct([50n]);
+    const before = await token.read.balanceOf([account]);
+    try {
+      await adapter.write.buyWithNative([curve.address, token.address, 2000n, FOREVER], {
+        value: 1000n,
+      });
+      expect.fail("a short delivery must revert even when the curve says otherwise");
+    } catch (e) {
+      expect(errorNameOf(e)).to.equal("InsufficientOutput");
+    }
+    expect(await token.read.balanceOf([account])).to.equal(before, "a reverted buy moves nothing");
+  });
+
+  it("refuses an expired deadline on the buy leg too", async () => {
+    const { token, curve, adapter } = await setup();
+    try {
+      await adapter.write.buyWithNative([curve.address, token.address, 1n, 1n], { value: 1000n });
+      expect.fail("an expired deadline must revert");
+    } catch (e) {
+      expect(errorNameOf(e)).to.equal("Expired");
+    }
+  });
+
+  it("refuses a non-contract curve or token on both legs", async () => {
+    // NotAContract was untested on both selectors. A raw .call to an EOA
+    // returns success having moved nothing, which is the failure this guards.
+    const { token, curve, adapter } = await setup();
+    const EOA = "0x00000000000000000000000000000000000000dd" as const;
+    try {
+      await adapter.write.buyWithNative([EOA, token.address, 1n, FOREVER], { value: 1000n });
+      expect.fail("a non-contract curve must revert");
+    } catch (e) {
+      expect(errorNameOf(e)).to.equal("NotAContract");
+    }
+    try {
+      await adapter.write.sellForNative([curve.address, EOA, 1000n, 1n, FOREVER]);
+      expect.fail("a non-contract token must revert");
+    } catch (e) {
+      expect(errorNameOf(e)).to.equal("NotAContract");
+    }
+  });
+
   it("refuses a zero-value buy — msg.value IS the size", async () => {
     const { token, curve, adapter } = await setup();
     try {
@@ -237,12 +284,16 @@ describe("PonsNativeTrade — the contract holds nothing", () => {
     // there is nothing here to steal and no rescue function to need, and a
     // receive() added later for convenience would quietly end that.
     const { wallet, adapter, publicClient } = await setup();
+    // A bare catch here would swallow expect.fail's own AssertionError and let
+    // this pass whether or not a receive() existed. Record the outcome instead.
+    let accepted = false;
     try {
       await wallet!.sendTransaction({ to: adapter.address, value: 1n });
-      expect.fail("the adapter must not accept a plain ETH transfer");
+      accepted = true;
     } catch {
       /* expected: no receive, no fallback */
     }
+    expect(accepted).to.equal(false, "the adapter must not accept a plain ETH transfer");
     expect(await publicClient.getBalance({ address: adapter.address })).to.equal(0n);
   });
 

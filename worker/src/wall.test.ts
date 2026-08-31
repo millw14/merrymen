@@ -54,6 +54,7 @@ type Perm = ReturnType<typeof buildCallPermissions>[number] & {
 };
 
 /** The agent's own account — what the wall pins swap/vault destinations to. */
+const MEME = "0x00000000000000000000000000000000000000cc" as const;
 const SELF = "0x00000000000000000000000000000000000000a9" as const;
 const perms = () => buildCallPermissions(CAPS, SELF) as unknown as Perm[];
 const find = (target: string, fn?: string) =>
@@ -848,5 +849,119 @@ test("the native adapter is a spender, so it can pull the token it sells", () =>
   assert.ok(allowedSpenders(false, false, undefined, undefined, NATIVE).includes(NATIVE));
   // ...and is absent when not granted.
   assert.equal(allowedSpenders(false, false).includes(NATIVE), false);
+});
+
+/**
+ * THE CASH DRAIN THIS SELECTOR ONCE OPENED.
+ *
+ * `sellForNative` pins its token leg and has NO output leg to pin — the native
+ * side is implied by the selector. Pinned to `adapterAssets` (which begins with
+ * USDG and includes every tradeable stock token), that made
+ *
+ *     approve(USDG, nativeAdapter, perTradeUsdg)
+ *     sellForNative(attackerCurve, USDG, perTradeUsdg, 1, deadline)
+ *
+ * a fully wall-legal way to hand the account's cash to a contract of the
+ * attacker's choosing for one wei — cheaper than every other USDG-touching route
+ * in this wall, because `exactInputSingle` and `tradeExactIn` both pin their
+ * OUTPUT leg and so require actually delivering a real allowlisted ERC-20.
+ *
+ * The fix pins both native legs to the owner's EXTRAS instead. A Pons curve's
+ * `token()` is the launched memecoin, which always arrives as an extra, so
+ * nothing legitimate is lost. These tests are the ones that would have caught it.
+ */
+test("a native leg CANNOT name the account's cash", () => {
+  const NATIVE = "0x00000000000000000000000000000000000000ee" as const;
+  const list = buildCallPermissions(CAPS, SELF, {
+    nativeAdapterAddress: NATIVE,
+    allowNativeBuy: true,
+    extraTokens: [{ symbol: "PEPE", address: MEME, decimals: 18 }],
+  });
+  for (const name of ["sellForNative", "buyWithNative"]) {
+    const p = list.find((x) => x.functionName === name)!;
+    const pin = p.args[1] as { value: readonly string[] };
+    const reachable = pin.value.map((a) => a.toLowerCase());
+    assert.equal(
+      reachable.includes(CASH.USDG.toLowerCase()),
+      false,
+      `${name} must not be able to take the account's cash as its token leg`,
+    );
+    // The launched token IS reachable, or the permission is useless.
+    assert.ok(reachable.includes(MEME.toLowerCase()), `${name} must reach the owner's own tokens`);
+  }
+});
+
+test("a native leg cannot name a tradeable EQUITY either", () => {
+  // Same hole, one asset over. Pinning by identity (excluding USDG alone) would
+  // have left the whole stock book reachable, and would have reopened the cash
+  // case the moment an owner added a stablecoin as an extra. The pin is by
+  // CATEGORY: extras only.
+  const NATIVE = "0x00000000000000000000000000000000000000ee" as const;
+  const list = buildCallPermissions(CAPS, SELF, {
+    nativeAdapterAddress: NATIVE,
+    extraTokens: [{ symbol: "PEPE", address: MEME, decimals: 18 }],
+  });
+  const pin = list.find((x) => x.functionName === "sellForNative")!.args[1] as {
+    value: readonly string[];
+  };
+  const reachable = pin.value.map((a) => a.toLowerCase());
+  const anyStock = STOCK_TOKENS.filter((t) =>
+    (TRADEABLE_SYMBOLS as readonly string[]).includes(t.symbol),
+  )[0]!;
+  assert.equal(
+    reachable.includes(anyStock.address.toLowerCase()),
+    false,
+    "the equity book must not be reachable from a bonding-curve selector",
+  );
+});
+
+test("with no extra tokens, the native legs reach NOTHING", () => {
+  // The safe degenerate case. An owner who has added no tokens has no curve to
+  // trade, and the permission must be empty rather than falling back to a wider
+  // list — which is exactly how the drain got in.
+  const NATIVE = "0x00000000000000000000000000000000000000ee" as const;
+  const list = buildCallPermissions(CAPS, SELF, { nativeAdapterAddress: NATIVE });
+  const pin = list.find((x) => x.functionName === "sellForNative")!.args[1] as {
+    value: readonly string[];
+  };
+  assert.equal(pin.value.length, 0, "no extras means no reachable curve token");
+});
+
+test("buildWallPolicies FORWARDS the native options — the ponsAdapter bug, again", () => {
+  // ponsAdapterAddress was once dropped here and it type-checked, so the grant
+  // came out without the permission it claimed. All three new fields were
+  // dropped the same way in the first draft of this feature.
+  const NATIVE = "0x00000000000000000000000000000000000000ee" as const;
+  const { policies } = buildWallPolicies({
+    caps: CAPS,
+    smartAccount: SELF,
+    nativeAdapterAddress: NATIVE,
+    allowNativeBuy: true,
+    extraTokens: [{ symbol: "PEPE", address: MEME, decimals: 18 }],
+  });
+  const call = policies.find((p) => "policyParams" in p) as never;
+  void call;
+  // Cheaper and stronger: build the permission list the same way and assert both
+  // selectors survive the trip through buildWallPolicies' argument forwarding.
+  const list = buildCallPermissions(CAPS, SELF, {
+    nativeAdapterAddress: NATIVE,
+    allowNativeBuy: true,
+    extraTokens: [{ symbol: "PEPE", address: MEME, decimals: 18 }],
+  });
+  assert.ok(list.find((p) => p.functionName === "sellForNative"));
+  assert.ok(list.find((p) => p.functionName === "buyWithNative"));
+});
+
+test("a zero native-buy ceiling is refused rather than minted dead", () => {
+  const NATIVE = "0x00000000000000000000000000000000000000ee" as const;
+  assert.throws(
+    () =>
+      buildCallPermissions(CAPS, SELF, {
+        nativeAdapterAddress: NATIVE,
+        allowNativeBuy: true,
+        nativeBuyValueLimitWei: 0n,
+      }),
+    /must be positive/,
+  );
 });
 

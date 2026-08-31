@@ -54,15 +54,25 @@ import {IPonsCurve, IERC20Trade} from "./interfaces/IPonsCurve.sol";
  * - THE CURVE ARGUMENT STILL CANNOT BE AUTHENTICATED, and nothing here pretends
  *   otherwise. A curve self-reports `token()` and `pairToken()`, and a hostile
  *   contract answers however it likes. What bounds the damage is unchanged: the
- *   token leg is pinned ONE_OF the owner's own asset list by the wall, the pull
+ *   token leg is pinned ONE_OF the owner's own EXTRA tokens by the wall, the pull
  *   is capped at `amountIn`, and the floor is enforced HERE against the
  *   account's own balance rather than the curve's word.
  *
- * - THE SELL DIRECTION HAS A SMALLER WORST CASE THAN THE ERC-20 ADAPTER'S. A
+ * - THE SELL DIRECTION'S WORST CASE, stated correctly on the second attempt. A
  *   compromised session key calling `sellForNative` can sell an allowlisted
- *   token into an attacker's contract at an attacker's price. It cannot spend
- *   the account's cash, because cash is not an input here — the only input is a
- *   token the owner already chose to hold and already allowlisted.
+ *   token into an attacker's contract at an attacker's price, bounded by the
+ *   allowance the wall permits.
+ *
+ *   AN EARLIER VERSION OF THIS COMMENT SAID "it cannot spend the account's
+ *   cash", and that was FALSE as the wall was then written: `token` was pinned
+ *   ONE_OF the same list that begins with USDG, so cash was a legal input and an
+ *   attacker's curve could take it for one wei — cheaper than every other
+ *   USDG-touching route in the wall, because this selector has no output leg to
+ *   pin. It is now pinned to the owner's EXTRAS only (wall.ts,
+ *   `nativeCurveAssets`), which is what makes the sentence true rather than
+ *   aspirational: cash and equities are not reachable from this selector at all.
+ *   Recorded rather than quietly corrected, because a contract whose comments
+ *   are load-bearing has to show where one was wrong.
  *
  * - THE BUY DIRECTION'S WORST CASE IS THE ACCOUNT'S ETH, per call, up to the
  *   permission's `valueLimit`. Worth stating plainly because it is new: every
@@ -92,13 +102,14 @@ import {IPonsCurve, IERC20Trade} from "./interfaces/IPonsCurve.sol";
  * weaken the ERC-20 path that shares it.
  *
  *   sellForNative  word 0 curve        unpinnable, per-token
- *                  word 1 token        ONE_OF the owner's asset list
- *                  word 2 amountIn     LESS_THAN_OR_EQUAL a per-trade cap
+ *                  word 1 token        ONE_OF the owner's EXTRA tokens only —
+ *                                      never cash, never an equity
+ *                  word 2 amountIn     bounded by the approve allowance
  *                  word 3 minNativeOut nothing useful — denominated in ETH
  *                  word 4 deadline     nothing useful
  *
  *   buyWithNative  word 0 curve        unpinnable, per-token
- *                  word 1 token        ONE_OF the owner's asset list
+ *                  word 1 token        ONE_OF the owner's EXTRA tokens only
  *                  word 2 minTokensOut nothing useful
  *                  word 3 deadline     nothing useful
  *                  (the SIZE is msg.value, bounded by the permission's valueLimit)
@@ -161,9 +172,18 @@ contract PonsNativeTrade {
         _requireNativeCurveFor(curve, token);
 
         // Read BEFORE the pull, on msg.sender, because the curve pays the
-        // account directly and this contract never sees the ETH. Both reads
-        // happen inside one call frame, so nothing else moves this balance
-        // between them.
+        // account directly and this contract never sees the ETH.
+        //
+        // WHAT THIS MEASURES, precisely: wei that ARRIVED at the account during
+        // this call, from any source. It is not proof the CURVE paid — five
+        // calls into caller-chosen code run between the two reads and any of
+        // them could send ETH here. That is fine, and deliberately not
+        // strengthened: inflating the delta costs an attacker exactly the ETH
+        // they put into the victim's account. The guarantee being enforced is
+        // "the account holds at least minNativeOut more wei afterwards", which
+        // is what a floor is for. The sibling claims exactly this much and no
+        // more, and an earlier draft of this comment claimed attribution it
+        // could not support.
         uint256 balanceBefore = msg.sender.balance;
 
         _pull(token, msg.sender, address(this), amountIn);
@@ -261,23 +281,48 @@ contract PonsNativeTrade {
     // selector so a failure says which step failed.
 
     function _pull(address token, address from, address to, uint256 amount) private {
-        (bool ok, bytes memory data) = token.call(
-            abi.encodeWithSelector(IERC20Trade.transferFrom.selector, from, to, amount)
+        (bool ok, bytes memory ret) = token.call(
+            abi.encodeCall(IERC20Trade.transferFrom, (from, to, amount))
         );
-        if (!ok || (data.length != 0 && !abi.decode(data, (bool)))) revert TransferFailed();
+        if (!ok) revert TransferFailed();
+        // Decoded as a uint, NOT a bool. `abi.decode(..., (bool))` runs solc's bool
+        // validator, which does a bare revert(0,0) on a word that is neither 0 nor
+        // 1 — so a dirty-word token would fail with EMPTY revert data,
+        // indistinguishable from out-of-gas, and could not be quarantined by error
+        // selector as the comment above promises. It would also refuse tokens the
+        // sibling adapters deliberately accept. Same semantics as SafeERC20, and
+        // the same line as PonsSelfTrade — this had drifted, and the drift was
+        // silent because canonical tokens behave identically under both.
+        if (ret.length != 0 && (ret.length < 32 || abi.decode(ret, (uint256)) == 0)) {
+            revert TransferFailed();
+        }
     }
 
+    /// @dev transfer, with the same tolerance as `_pull`.
     function _push(address token, address to, uint256 amount) private {
-        (bool ok, bytes memory data) = token.call(
-            abi.encodeWithSelector(IERC20Trade.transfer.selector, to, amount)
-        );
-        if (!ok || (data.length != 0 && !abi.decode(data, (bool)))) revert TransferFailed();
+        (bool ok, bytes memory ret) = token.call(abi.encodeCall(IERC20Trade.transfer, (to, amount)));
+        if (!ok) revert TransferFailed();
+        if (ret.length != 0 && (ret.length < 32 || abi.decode(ret, (uint256)) == 0)) {
+            revert TransferFailed();
+        }
     }
 
+    /**
+     * @dev approve, zeroing first.
+     *
+     * Some ERC-20s refuse a non-zero to non-zero allowance change outright. The
+     * zero-first sequence is what the sibling does and it costs one call.
+     */
     function _approve(address token, address spender, uint256 amount) private {
-        (bool ok, bytes memory data) = token.call(
-            abi.encodeWithSelector(IERC20Trade.approve.selector, spender, amount)
-        );
-        if (!ok || (data.length != 0 && !abi.decode(data, (bool)))) revert ApprovalFailed();
+        if (amount != 0) _rawApprove(token, spender, 0);
+        _rawApprove(token, spender, amount);
+    }
+
+    function _rawApprove(address token, address spender, uint256 amount) private {
+        (bool ok, bytes memory ret) = token.call(abi.encodeCall(IERC20Trade.approve, (spender, amount)));
+        if (!ok) revert ApprovalFailed();
+        if (ret.length != 0 && (ret.length < 32 || abi.decode(ret, (uint256)) == 0)) {
+            revert ApprovalFailed();
+        }
     }
 }
