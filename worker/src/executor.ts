@@ -15,6 +15,7 @@
 
 import { http, createPublicClient, type Chain, type Hex } from "viem";
 import { createKernelAccountClient } from "@zerodev/sdk";
+import { SponsorRefused, assertBoundsHeld, type Sponsor } from "./paymaster";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { deserializeFlaggedPermissionAccount } from "./session-account";
 import { WALL_POLICY_FLAG } from "../../packages/core/src/index";
@@ -132,6 +133,12 @@ export async function createAgentExecutor(opts: {
   bundlerUrl: string;
   /** RPC override (settings rpcMainnet/rpcTestnet) — falls back to the chain default. */
   rpcUrl?: string;
+  /**
+   * Who pays the gas. Absent means the account self-pays from its own ETH,
+   * which is what every agent did before sponsorship existed and what a
+   * self-hosted owner still does unless they wire their own.
+   */
+  sponsor?: Sponsor;
 }): Promise<AgentExecutor> {
   const publicClient = createPublicClient({ chain: opts.chain, transport: http(opts.rpcUrl) });
   const entryPoint = getEntryPoint("0.7");
@@ -148,10 +155,17 @@ export async function createAgentExecutor(opts: {
     WALL_POLICY_FLAG,
   );
 
+  // WHO PAYS, and nothing else. A paymaster settles with the EntryPoint
+  // directly, so the account never handles ETH and every `valueLimit: 0n` in
+  // the wall is untouched. A sponsored operation faces exactly the policies an
+  // unsponsored one does; only the payer changes.
   const client = createKernelAccountClient({
     account,
     chain: opts.chain,
     bundlerTransport: http(opts.bundlerUrl),
+    ...(opts.sponsor
+      ? { paymaster: opts.sponsor.paymaster, paymasterContext: opts.sponsor.paymasterContext }
+      : {}),
     // Without this the SDK calls the ZeroDev-only `zd_getUserOperationGasPrice`,
     // which Pimlico/Alchemy/self-hosted bundlers reject — see worker/src/gas.ts.
     userOperation: userOpGasConfig(publicClient, opts.bundlerUrl),
@@ -178,7 +192,14 @@ export async function createAgentExecutor(opts: {
       let estimateError = "";
       const estimate = async (): Promise<UserOpGas | null> => {
         try {
-          const g = (await client.estimateUserOperationGas({ callData })) as Partial<UserOpGas>;
+          const g = (await client.estimateUserOperationGas({
+            callData,
+            // Estimate the operation we will actually SEND. An unsponsored probe
+            // of a sponsored op omits the paymaster's own verification and postOp
+            // gas, so the three limits we bound would be measured against a
+            // different operation than the one that gets signed.
+            ...(opts.sponsor ? { paymaster: opts.sponsor.estimateOnly } : {}),
+          })) as Partial<UserOpGas>;
           if (
             typeof g.callGasLimit !== "bigint" ||
             typeof g.verificationGasLimit !== "bigint" ||
@@ -203,6 +224,12 @@ export async function createAgentExecutor(opts: {
           // underfunded), AA23 (the wall refused the call), a simulation
           // revert, a 429 and a bundler outage into one sentence that names
           // none of them — on the single most likely outcome of a first op.
+          // A SPONSOR REFUSAL IS NOT AN UNREADABLE ESTIMATE. This catch exists to
+          // keep a bundler's diagnosis, and it would otherwise swallow
+          // SponsorRefused into `estimateError` — so a drained or declining
+          // sponsor would book as `gas-unreadable` and the typed vocabulary this
+          // whole class exists for would never fire on its most likely path.
+          if (e instanceof SponsorRefused) throw e;
           estimateError = e instanceof Error ? e.message : String(e);
           return null;
         }
@@ -221,6 +248,20 @@ export async function createAgentExecutor(opts: {
           // diagnosis; ours is the policy.
           estimateError ? `${estimateError} — ${bounded.detail}` : bounded.detail,
         );
+      }
+
+      // THE LIMITS WE SIGNED MUST BE THE LIMITS WE BOUNDED. viem spreads the
+      // paymaster's reply OVER the prepared request, so a sponsor that returned
+      // callGasLimit would replace boundGas's number with no error and no log —
+      // and under sponsorship the payer of an out-of-gas is the house. The
+      // allowlist in paymaster.ts stops our wrappers propagating that; this
+      // proves it stayed stopped, against the operation about to be signed.
+      if (opts.sponsor) {
+        const prepared = (await client.prepareUserOperation({
+          callData,
+          ...bounded.gas,
+        } as never)) as Record<string, unknown>;
+        assertBoundsHeld(bounded.gas, prepared);
       }
 
       const userOpHash = await client.sendUserOperation({

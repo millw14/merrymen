@@ -33,6 +33,15 @@ export interface AgentSnapshot {
   mode: "live" | "paper" | "idle";
   /** Practice chain — nothing here is real, whatever else is true. */
   testnet: boolean;
+  /**
+   * Is somebody else paying this agent's gas?
+   *
+   * When true, `hasGas` stops gating trading — which matters because the
+   * no-gas branch is evaluated ABOVE testnet, paper and live, so it wins over
+   * every other sentence. A sponsored agent whose owner sent only USDG would
+   * otherwise read 'no ETH to pay the fees' forever while trading normally.
+   */
+  gasSponsored?: boolean;
   /** Does the smart account hold any gas? Without it nothing can be signed. */
   hasGas: boolean;
   /** Trading capital, in USDG. */
@@ -138,6 +147,28 @@ export function statusLine(a: AgentSnapshot): StatusLine {
   // So when there IS cash, say so first and name the two-asset thing
   // outright. Rule 2 still holds: this claims nothing it did not check —
   // `cashUsdg` and `hasGas` are both read from the same snapshot.
+  // SPONSORED AND UNFUNDED IS A WORKING AGENT, not a broken one.
+  //
+  // Note what this does NOT say: 'you never need ETH'. Withdrawal is a
+  // different path — recover.ts pays for the sweep out of the same balance it
+  // is sweeping — so an owner told they need no ETH at all could trade happily
+  // and then find they cannot get their money out. Sponsorship covers TRADING,
+  // and the sentence says exactly that much.
+  if (!a.hasGas && a.gasSponsored) {
+    return a.cashUsdg > 0
+      ? {
+          headline: `${name} is live and its trading fees are covered — you only fund ${money(a.cashUsdg)}.`,
+          next:
+            "We pay the network fee on every trade, so you never have to top up gas to keep it running. " +
+            "Moving money back OUT to your own wallet is the one thing that still needs a little ETH in the account.",
+          tone: "good",
+        }
+      : {
+          headline: `${name} is ready and its fees are covered — it just needs something to trade with.`,
+          next: `Send USDG to the account address, on ${net}. You do not need ETH for it to trade.`,
+          tone: "waiting",
+        };
+  }
   if (!a.hasGas) {
     return a.cashUsdg > 0
       ? {

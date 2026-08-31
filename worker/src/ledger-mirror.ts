@@ -69,6 +69,9 @@ const LOG_TABLES = [
       "realized_pnl_usdg",
       "basis_source",
       "gas_wei",
+      // Otherwise 'what did sponsorship cost the house this week' is a question
+      // that can only be answered by sshing into 18 separate child databases.
+      "sponsored_gas_wei",
       "created_at",
     ],
   },

@@ -65,6 +65,24 @@ export function pimlicoBundlerUrl(chainId: number, apiKey: string): string {
   return `https://api.pimlico.io/v2/${chainId}/rpc?apikey=${encodeURIComponent(apiKey)}`;
 }
 
+/**
+ * The Pimlico PAYMASTER RPC — the same endpoint as the bundler.
+ *
+ * Verified by probe, not by documentation: `pm_getPaymasterStubData` against
+ * chain 4663 on this URL returns a real paymaster address and signed
+ * paymasterData. That mattered enough to check, because the alternative to
+ * Pimlico serving one here is deploying our own paymaster contract.
+ *
+ * A separate function despite being the same string today, for the reason the
+ * bundler helper exists: the chain id is stamped from the grant, so a testnet
+ * grant can never reach a mainnet sponsor. Deliberately NOT an operator-supplied
+ * override — an override would reintroduce the wrong-chain class this shape makes
+ * impossible, and bundlerChainMismatch only inspects the bundler URL.
+ */
+export function pimlicoPaymasterUrl(chainId: number, apiKey: string): string {
+  return `https://api.pimlico.io/v2/${chainId}/rpc?apikey=${encodeURIComponent(apiKey)}`;
+}
+
 /** ERC-4337 EntryPoints — all deployed on both mainnet and testnet (probed 2026-07-09). */
 export const ENTRYPOINT = {
   v06: "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",

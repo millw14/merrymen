@@ -43,6 +43,7 @@ import {
   chainForId,
   effectivePerfFeeBps,
   pimlicoBundlerUrl,
+  pimlicoPaymasterUrl,
   robinhoodTestnet,
   grantHasMultihop,
   // Aliased: `grantHasTransfer` is also the name of the dep this file passes
@@ -70,6 +71,7 @@ import {
   type ExecuteHooks,
   type ExecutionResult,
 } from "./executor";
+import { createSponsor, type Sponsor } from "./paymaster";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } from "./fills";
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey } from "./revert";
@@ -340,6 +342,14 @@ async function main() {
   /** Could this agent put a real order on-chain right now? */
   const canTradeForReal = () => !!active && !!active.executor && chainCanTrade() && !readAsBroke();
   const paperActive = () => !!active && !canTradeForReal() && cfg.paperTradingEnabled;
+  /**
+   * Is somebody else paying the gas?
+   *
+   * Read from the CONFIG rather than from the executor, because the question is
+   * asked in places that run before an executor exists — including the refusal
+   * below that used to make sponsorship unreachable.
+   */
+  const gasSponsored = () => cfg.sponsorGasEnabled && !!cfg.bundlerApiKey;
   function paperPriceOf(
     token: `0x${string}`,
   ): { priceUsd: number; stale: boolean; source: PriceQuote["source"] } | null {
@@ -1826,6 +1836,18 @@ async function main() {
     // id, so it is always pointed at the right chain.
     const bundlerUrl =
       cfg.bundlerUrl || (cfg.bundlerApiKey ? pimlicoBundlerUrl(grant.chainId, cfg.bundlerApiKey) : undefined);
+    // GAS SPONSORSHIP, from the SAME key and the SAME chain id as the bundler.
+    // Derived rather than configurable for the reason the bundler URL is: the
+    // chain id is stamped from the grant, so a testnet grant can never reach a
+    // mainnet sponsor. Absent unless the house turned it on AND there is a key
+    // to build it from.
+    const sponsor: Sponsor | undefined =
+      cfg.sponsorGasEnabled && cfg.bundlerApiKey
+        ? createSponsor({
+            url: pimlicoPaymasterUrl(grant.chainId, cfg.bundlerApiKey),
+            policyId: cfg.sponsorshipPolicyId,
+          })
+        : undefined;
     const agentId = await ensureAgent(grant);
     // The soul's name is the source of truth — mirror it onto the roster. The
     // configured name was reconciled into the soul above the short-circuit, so
@@ -1869,8 +1891,12 @@ async function main() {
           serializedGrant: grant.serialized,
           bundlerUrl,
           rpcUrl: rpc,
+          sponsor,
         });
-        console.log(`[worker] executor live — smart account ${executor.address} on chain ${chain.id}`);
+        console.log(
+          `[worker] executor live — smart account ${executor.address} on chain ${chain.id}` +
+            (sponsor ? " · gas sponsored" : " · self-paying gas"),
+        );
         lastArmFailure = null;
       } catch (e) {
         const why = e instanceof Error ? e.message : String(e);
@@ -2699,7 +2725,14 @@ async function main() {
     // refuses a trade the chain would have accepted is a worse failure than the
     // one being fixed: it would look identical to the agent being broken. Below
     // the floor we warn and let the chain decide.
-    if (lastGasWei === 0n) {
+    // SPONSORSHIP LIFTS THIS, and until it does nothing above matters: this
+    // returns BEFORE the executor is reached, so a sponsored client is never
+    // even constructed and all 73 gasless agents behave exactly as they did.
+    //
+    // `lastGasWei` is the account's ETH BALANCE, not a gas cost — the name
+    // misleads at every use site. When a sponsor pays, that balance gates
+    // nothing, which is the entire point of having one.
+    if (lastGasWei === 0n && !gasSponsored()) {
       await addEvent(
         agentId,
         "err",
@@ -3317,11 +3350,21 @@ async function main() {
         amount_usdg: usdgNum(notional),
         tx_hash: txHash,
         user_op_hash: exec.userOpHash,
-        gas_wei: exec.gasWei.toString(),
-        // Gas priced at the moment it was burned, not at today's rate: the cost
-        // was incurred then, and re-valuing it later would make a past trade's
-        // P&L drift with the ETH price.
-        ...(gasCost.usdg === null ? {} : { gas_usdg: usdgNum(gasCost.usdg) }),
+        // WHOSE COST WAS THIS? The EntryPoint reports actualGasCost either way,
+        // but under sponsorship it was debited from the sponsor's deposit and
+        // never left this account. gas_wei feeds pnlUsdg, which SUBTRACTS it from
+        // the owner's return — on the public scoreboard among other places — so
+        // writing a sponsored cost there understates every sponsored user's
+        // performance by money they did not spend.
+        ...(gasSponsored()
+          ? { sponsored_gas_wei: exec.gasWei.toString() }
+          : {
+              gas_wei: exec.gasWei.toString(),
+              // Gas priced at the moment it was burned, not at today's rate: the
+              // cost was incurred then, and re-valuing it later would make a past
+              // trade's P&L drift with the ETH price.
+              ...(gasCost.usdg === null ? {} : { gas_usdg: usdgNum(gasCost.usdg) }),
+            }),
         ...(slippageBps === null ? {} : { fill_slippage_bps: slippageBps }),
         status: "landed",
         ...sim,

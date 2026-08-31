@@ -234,6 +234,16 @@ export interface MerrymenSettings {
    * the per-trade cap and the wall.
    */
   trencherLiveEnabled?: boolean;
+  /**
+   * Pay this agent's gas from a sponsor, so the owner funds USDG only.
+   *
+   * HOUSE-OWNED (see HOUSE_KEY_FIELDS) because hosted it spends OUR money, not
+   * the tenant's — a third category from the key/URL split that file draws.
+   * A tenant who could set this would be writing a cheque on the house.
+   */
+  sponsorGasEnabled?: boolean;
+  /** Pimlico sponsorship policy id (`sp_…`), which is where the real spend limits live. */
+  sponsorshipPolicyId?: string;
   scoutEnabled?: boolean;
   /** Max USDG of COST that may sit in unpriceable positions at once. 0 = off. */
   scoutBudgetUsdg?: number;
@@ -348,6 +358,14 @@ export const HOUSE_KEY_FIELDS = [
   // a key is a credential the tenant pays with, a base URL is an address OUR
   // egress would connect to. One is their money, the other is our SSRF.
   "llmBaseUrl",
+  // SPONSORSHIP IS THE HOUSE'S MONEY — a third category.
+  //
+  // The distinction above is a tenant's credential versus our egress. This is
+  // neither: it decides whether WE pay for a tenant's gas. Leaving it out would
+  // let a hosted tenant enable it in their own settings, which is a cheque
+  // written on the house account, stored and honoured.
+  "sponsorGasEnabled",
+  "sponsorshipPolicyId",
   "rialtoApiKey",
   "rialtoApiKeyHeader",
   "bitqueryApiKey",
@@ -449,6 +467,8 @@ export const SETTINGS_DEFAULTS = {
   discoveryEnabled: true,
   discoveryIntervalMin: 10,
   trencherLiveEnabled: false,
+  // Off by default like every other switch that spends money.
+  sponsorGasEnabled: false,
   scoutEnabled: false,
   scoutBudgetUsdg: 0,
   scoutPerTokenUsdg: 25,

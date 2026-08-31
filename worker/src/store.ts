@@ -296,6 +296,12 @@ const SQLITE_ALTERS: string[] = [
     // sim_gas holds QuoterV2's estimate for the SWAP CALL only, unmultiplied by
     // any gas price, so realized P&L was gross of gas forever.
     "ALTER TABLE trades ADD COLUMN gas_wei TEXT",
+    // What the SPONSOR paid, when somebody else paid. Kept separate from
+    // gas_wei rather than sharing it, because gas_wei means 'what this owner
+    // spent' and is subtracted from their P&L at five call sites. The
+    // EntryPoint still reports actualGasCost for a sponsored op, so the number
+    // survives sponsorship — only its owner changes.
+    "ALTER TABLE trades ADD COLUMN sponsored_gas_wei TEXT",
     // EPOCH. Everything written before the accounting was fixed stays epoch 1
     // and is excluded from performance reporting — kept for forensics, never
     // presented as measured. The first tick after the fix opens epoch 2. This

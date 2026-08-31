@@ -73,6 +73,8 @@ export interface ResolvedConfig {
   discoveryIntervalMin: number;
   /** Scout mode: may the agent buy tokens it cannot price? Off by default. */
   trencherLiveEnabled: boolean;
+  sponsorGasEnabled: boolean;
+  sponsorshipPolicyId?: string;
   browserUrl: string | undefined;
   browserToken: string | undefined;
   scoutEnabled: boolean;
@@ -286,6 +288,8 @@ export function mergeSettings(
     discoveryEnabled: bool(file.discoveryEnabled, env.MERRYMEN_DISCOVERY_ENABLED, d.discoveryEnabled),
     discoveryIntervalMin: num(file.discoveryIntervalMin, env.MERRYMEN_DISCOVERY_INTERVAL_MIN, d.discoveryIntervalMin, 1, 1440),
     trencherLiveEnabled: bool(file.trencherLiveEnabled, env.MERRYMEN_TRENCHER_LIVE, d.trencherLiveEnabled),
+    sponsorGasEnabled: bool(file.sponsorGasEnabled, env.MERRYMEN_SPONSOR_GAS, d.sponsorGasEnabled),
+    sponsorshipPolicyId: str(file.sponsorshipPolicyId, env.MERRYMEN_SPONSORSHIP_POLICY_ID),
     browserUrl: str(file.browserUrl, env.MERRYMEN_BROWSER_URL),
     browserToken: str(file.browserToken, env.MERRYMEN_BROWSER_TOKEN),
     scoutEnabled: bool(file.scoutEnabled, env.MERRYMEN_SCOUT_ENABLED, d.scoutEnabled),
@@ -376,7 +380,17 @@ export function patchSettingsFile(patch: Partial<MerrymenSettings>): MerrymenSet
 
 /** Fingerprint of fields that require re-arming the executor when changed. */
 export function connectionKey(cfg: ResolvedConfig): string {
-  return [cfg.bundlerApiKey, cfg.bundlerUrl, cfg.rpcMainnet, cfg.rpcTestnet].join("|");
+  // SPONSORSHIP BELONGS IN THE FINGERPRINT. The paymaster attaches inside
+  // createAgentExecutor, which is rebuilt only when this changes — so without
+  // these two the toggle saves, reports ok, and does nothing until a restart.
+  return [
+    cfg.bundlerApiKey,
+    cfg.bundlerUrl,
+    cfg.rpcMainnet,
+    cfg.rpcTestnet,
+    String(cfg.sponsorGasEnabled),
+    cfg.sponsorshipPolicyId ?? "",
+  ].join("|");
 }
 
 /**
