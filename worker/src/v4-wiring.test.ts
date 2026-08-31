@@ -97,7 +97,30 @@ describe("a v4 mark is a weaker kind of evidence, and stays one", () => {
  */
 describe("trencher goes live only when the owner says so", () => {
   it("still returns nothing when neither paper nor live is on", () => {
-    assert.match(INDEX, /if \(!paperActive\(\) && !cfg\.trencherLiveEnabled\) return \[\];/);
+    // Tests the GUARD, not its formatting. This pinned the exact one-line source
+    // and broke the moment the branch grew a body — a fine trade if the body were
+    // cosmetic, but the body IS the fix (next test).
+    assert.match(INDEX, /if \(!paperActive\(\) && !cfg\.trencherLiveEnabled\) \{/);
+    const guard = INDEX.slice(INDEX.indexOf("if (!paperActive() && !cfg.trencherLiveEnabled)")).slice(0, 1400);
+    assert.match(guard, /return \[\];/, "the guard must still return no candidates");
+  });
+
+  it("SAYS SO instead of returning an empty feed in silence", () => {
+    // A user picked trencher, armed a real key, and got an empty candidate feed
+    // every tick forever. He reported it as “it didn't take any trades yet” and
+    // then “I think I'm stuck in paper mode” — the shape of a system refusing
+    // without saying so. index.ts's own comment calls the surprise out, and then
+    // left it silent.
+    const guard = INDEX.slice(INDEX.indexOf("if (!paperActive() && !cfg.trencherLiveEnabled)")).slice(0, 1400);
+    assert.match(guard, /trencherRailAnnounced/, "the refusal must be announced");
+    assert.match(guard, /addEvent/, "and recorded where the owner can see it");
+  });
+
+  it("the remedy is reachable from the settings page", () => {
+    // The flag had an API branch and no input, so the one action that would fix
+    // it could not be taken. Same class as ponsAdapterAddress.
+    const page = readFileSync(new URL("../../web/src/app/settings/page.tsx", import.meta.url), "utf8");
+    assert.match(page, /trencherLiveEnabled/, "no control means no remedy");
   });
 
   it("is OFF by default — spending real money is opt-in", async () => {

@@ -66,6 +66,7 @@ export default function SettingsPage() {
   // Scout mode is a boolean, so it can't ride the string `draft`.
   const [scoutEnabled, setScoutEnabled] = useState<boolean | null>(null);
   const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
+  const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
   const [allowlist, setAllowlist] = useState<number[] | null>(null);
   const [tgTest, setTgTest] = useState<string | null>(null);
   // PC control: master + capability set + string allowlists (also can't ride `draft`).
@@ -220,6 +221,7 @@ export default function SettingsPage() {
     if (virtualsEnabled !== null) body.virtualsEnabled = virtualsEnabled;
     if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
     if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
+    if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
     if (allowlist !== null) body.telegramAllowlist = allowlist;
     if (pcEnabled !== null) body.telegramPcControlEnabled = pcEnabled;
     if (caps !== null) body.telegramCapabilities = caps;
@@ -317,6 +319,7 @@ export default function SettingsPage() {
   const virtualsEnabledVal = virtualsEnabled ?? view.values.virtualsEnabled ?? d.virtualsEnabled;
   const scoutEnabledVal = scoutEnabled ?? view.values.scoutEnabled ?? d.scoutEnabled;
   const discoveryEnabledVal = discoveryEnabled ?? view.values.discoveryEnabled ?? d.discoveryEnabled;
+  const trencherLiveVal = trencherLive ?? view.values.trencherLiveEnabled ?? d.trencherLiveEnabled;
   const allowlistVal = allowlist ?? view.values.telegramAllowlist ?? [];
   const pcEnabledVal = pcEnabled ?? view.values.telegramPcControlEnabled ?? d.telegramPcControlEnabled;
   const agentEnabledVal = agentEnabled ?? view.values.telegramAgentEnabled ?? d.telegramAgentEnabled;
@@ -682,6 +685,32 @@ export default function SettingsPage() {
               <span className="field-hint">
                 Needs a Bitquery key above (or the Merry Circle brain, whose token works for both).
                 Without one this does nothing and says nothing.
+              </span>
+            </label>
+            {/* THE FLAG THAT MADE TRENCHER LOOK BROKEN.
+                It has had an API branch and no control, so an owner who picked
+                trencher and went live got a candidate feed that returned nothing,
+                forever, with nothing said. index.ts says the surprise out loud
+                -- “the strategy stopped seeing anything at the exact moment it
+                became able to act” -- and then left the only remedy unreachable. */}
+            <label className="field settings-field">
+              <span className="field-label">let trencher trade for real</span>
+              <span className="field-input">
+                <input
+                  type="checkbox"
+                  checked={trencherLiveVal}
+                  onChange={(e) => setTrencherLive(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="field-unit">
+                  {trencherLiveVal ? "trencher can open real positions" : "practice only"}
+                </span>
+              </span>
+              <span className="field-hint">
+                Off by default, and until you turn it on the trencher strategy sees no
+                candidates at all once your agent can actually trade &mdash; so it looks like
+                it simply never finds anything. It still cannot touch a token your grant
+                does not name: turning this on removes a rail, not the wall.
               </span>
             </label>
             <Field

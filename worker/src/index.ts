@@ -1128,6 +1128,8 @@ async function main() {
    * Live trenching is reachable, it just costs the owner the same two deliberate
    * steps as any other token. That is the feature, not a limitation.
    */
+  // Once per arm — a warning repeated every 60 seconds is a log nobody reads.
+  let trencherRailAnnounced = false;
   async function trenchCandidates(): Promise<Candidate[]> {
     // THE RAIL, MADE EXPLICIT rather than removed.
     //
@@ -1140,7 +1142,30 @@ async function main() {
     // replaces every other bound — the scout budget still gates a buy into a
     // token nobody can independently value, the per-trade cap still holds, and
     // the wall still refuses any asset the signature does not name.
-    if (!paperActive() && !cfg.trencherLiveEnabled) return [];
+    if (!paperActive() && !cfg.trencherLiveEnabled) {
+      // SAY IT. The rail was made explicit in the config and stayed invisible in
+      // operation: an owner who picked trencher and armed a real key got an empty
+      // feed every tick, forever, and the only evidence was the absence of
+      // trades. A user reported it as “it didn't take any trades yet” and then
+      // as “I think I'm stuck in paper mode”, which is the shape of a system
+      // that refuses without saying so. Logged once per arm, not per tick.
+      if (!trencherRailAnnounced) {
+        trencherRailAnnounced = true;
+        console.log(
+          "[trencher] live trenching is off, so the candidate feed is empty. " +
+            "Turn on 'let trencher trade for real' in settings to enable it.",
+        );
+        if (active) {
+          void addEvent(
+            active.agentId,
+            "warn",
+            "trencher is running but live trenching is off, so it sees no candidates and will never " +
+              "open a position. Turn on 'let trencher trade for real' in settings.",
+          );
+        }
+      }
+      return [];
+    }
     const nowSec = Math.floor(Date.now() / 1000);
     const out: Candidate[] = [];
     for (const c of await recentCandidates(TRENCHER_DEFAULTS.maxAgeSec, 25, { poolsOnly: true })) {
