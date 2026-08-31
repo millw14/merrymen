@@ -106,6 +106,30 @@ export function grantV4Adapter(
 export const GRANT_PONS_ADAPTER = "pons-adapter";
 
 /**
+ * The NATIVE-quoted curve adapter, and a THIRD distinct marker for a third
+ * distinct decision.
+ *
+ * Separate from `pons-adapter` because the two contracts reach disjoint halves
+ * of the launchpad and carry different worst cases: the ERC-20 one can spend
+ * the account's cash, this one's sell leg can only ever ADD native ETH to the
+ * account. An owner may reasonably want the exit without the entry, and a
+ * single marker would make that impossible to express.
+ */
+export const GRANT_NATIVE_ADAPTER = "native-adapter";
+
+/**
+ * The account may SPEND native ETH on a native-quoted curve.
+ *
+ * ITS OWN MARKER, and the only one in this repo that corresponds to a
+ * permission with a non-zero `valueLimit`. Everything else in the wall carries
+ * `valueLimit: 0`, which is what makes 'the session key cannot move native ETH'
+ * true as a blanket statement. Granting this ends that blanket statement for
+ * exactly one selector on exactly one contract, which is why it is opted into
+ * separately from the adapter that hosts it.
+ */
+export const GRANT_NATIVE_BUY = "native-buy";
+
+/**
  * The Pons adapter address this signature can actually call, or null.
  *
  * BOTH the marker and a valid address are required, for the same reason
@@ -116,6 +140,22 @@ export const GRANT_PONS_ADAPTER = "pons-adapter";
  * signing time; the worker must call THIS address, never whatever settings says
  * at tick time.
  */
+/** The sealed native-curve adapter, or null. Marker AND address, like its siblings. */
+export function grantNativeAdapter(
+  grant: Pick<StoredGrant, "grantFeatures" | "nativeAdapterAddress"> | null | undefined,
+): `0x${string}` | null {
+  if (!grant?.grantFeatures?.includes(GRANT_NATIVE_ADAPTER)) return null;
+  const a = grant?.nativeAdapterAddress;
+  return a && /^0x[0-9a-fA-F]{40}$/.test(a) ? (a.toLowerCase() as `0x${string}`) : null;
+}
+
+/** Did the owner separately allow SPENDING native ETH on a curve? */
+export function grantAllowsNativeBuy(
+  grant: Pick<StoredGrant, "grantFeatures"> | null | undefined,
+): boolean {
+  return !!grant?.grantFeatures?.includes(GRANT_NATIVE_BUY);
+}
+
 export function grantPonsAdapter(
   grant: Pick<StoredGrant, "grantFeatures" | "ponsAdapterAddress"> | null | undefined,
 ): `0x${string}` | null {
@@ -264,6 +304,8 @@ export interface StoredGrant {
    * GRANT_PONS_ADAPTER marker alongside it.
    */
   ponsAdapterAddress?: string;
+  /** The sealed PonsNativeTrade adapter, for native-quoted curves. */
+  nativeAdapterAddress?: string;
   /**
    * HOSTED ONLY — the two signatures that bind this account to a tenant.
    *

@@ -2,7 +2,7 @@ import { erc20Abi, parseAbi, type Address } from "viem";
 import { PolicyFlags } from "@zerodev/permissions";
 import { CallPolicyVersion, ParamCondition, toCallPolicy } from "@zerodev/permissions/policies";
 import { toTimestampPolicy } from "@zerodev/permissions/policies";
-import { UNISWAP_SWAP_ROUTER_ABI, PERMIT2_ABI, UNIVERSAL_ROUTER_ABI, V4SELFSWAP_ABI, PONS_SELFTRADE_ABI } from "./abis";
+import { UNISWAP_SWAP_ROUTER_ABI, PERMIT2_ABI, UNIVERSAL_ROUTER_ABI, V4SELFSWAP_ABI, PONS_SELFTRADE_ABI, PONS_NATIVE_ABI } from "./abis";
 import { MORPHO, RIALTO, UNISWAP } from "./protocols";
 import { CASH, STOCK_TOKENS, TRADEABLE_SYMBOLS, USDG_DECIMALS, isValidCustomToken, type CustomToken } from "./tokens";
 import { builtinGrantTargets, type GrantCaps } from "./grant";
@@ -101,6 +101,16 @@ export const WALL_POLICY_FLAG = PolicyFlags.NOT_FOR_VALIDATE_SIG;
  * probe is to assert what THIS code sealed. If a version bump moves an address,
  * the probe must fail loudly rather than follow it.
  */
+/**
+ * Default per-call ceiling on a native-ETH buy, in wei. 0.01 ETH.
+ *
+ * Small on purpose, and not derived from the daily USDG cap. This is the
+ * account's GAS money being spent as CAPITAL, and the two failure modes are not
+ * symmetric: too small refuses a trade, too large drains the account's ability
+ * to pay for anything — including, when gas is not sponsored, its own exit.
+ */
+export const NATIVE_BUY_VALUE_LIMIT_WEI = 10_000_000_000_000_000n;
+
 export const WALL_POLICY_CONTRACTS: readonly { name: string; address: Address }[] = [
   { name: "TimestampPolicy", address: "0xB9f8f524bE6EcD8C945b1b87f9ae5C192FdCE20F" as Address },
   { name: "CallPolicy V0_0_4", address: "0x9a52283276A0ec8740DF50bF01B28A80D880eaf2" as Address },
@@ -119,6 +129,7 @@ export function allowedSpenders(
   allowUniswapV4 = false,
   v4AdapterAddress?: Address,
   ponsAdapterAddress?: Address,
+  nativeAdapterAddress?: Address,
 ): Address[] {
   return [
     // Rialto is OPT-IN, and off by default — see WallOptions.allowRialto. An
@@ -155,6 +166,13 @@ export function allowedSpenders(
     // that its CURVE argument cannot be pinned by any policy — see the call
     // permission below, which says so rather than implying otherwise.
     ...(ponsAdapterAddress ? [ponsAdapterAddress] : []),
+    // The native-curve adapter, for its SELL leg only — that is the direction
+    // that pulls a token with transferFrom. Its buy leg pulls nothing at all:
+    // the size is msg.value, so it needs no allowance to spend and gets none
+    // here. Same settlement guarantee as the two above, and one better on the
+    // sell: the curve pays the account in native ETH directly, so the adapter
+    // never holds the output either.
+    ...(nativeAdapterAddress ? [nativeAdapterAddress] : []),
   ];
 }
 
@@ -280,6 +298,40 @@ export interface WallOptions {
    * covers.
    */
   ponsAdapterAddress?: Address;
+  /**
+   * The deployed PonsNativeTrade to grant, or absent for none — CLOSED by default.
+   *
+   * Reaches the ~47% of launches quoted in native ETH, which PonsSelfTrade
+   * refuses because it is non-payable. Granting it installs the EXIT permission
+   * (`sellForNative`) at `valueLimit: 0` like everything else here: the account
+   * sends no value, the curve pays it. An exit can only ADD native ETH.
+   *
+   * The ENTRY is a separate flag below, because it is a separate risk.
+   */
+  nativeAdapterAddress?: Address;
+  /**
+   * Let the account SPEND native ETH buying a native-quoted curve.
+   *
+   * THE ONLY PERMISSION IN THIS WALL WITH A NON-ZERO `valueLimit`, and the
+   * reason it is a distinct opt-in rather than a consequence of granting the
+   * adapter. Everything else here carries `valueLimit: 0`, which is what makes
+   * “the session key cannot move native ETH” true as a blanket statement rather
+   * than a claim with an asterisk. Turning this on ends the blanket statement
+   * for exactly one selector on exactly one contract.
+   *
+   * Worth an owner knowing before they choose: under gas sponsorship the
+   * account holds little or no ETH, so this both risks less AND buys less.
+   */
+  allowNativeBuy?: boolean;
+  /**
+   * Per-call ceiling on that spend, in wei. Ignored unless `allowNativeBuy`.
+   *
+   * Defaults to a deliberately small figure rather than the daily cap: this is
+   * the account's GAS money being spent as CAPITAL, and the failure mode of too
+   * small is a refused trade while the failure mode of too large is a drained
+   * account.
+   */
+  nativeBuyValueLimitWei?: bigint;
 }
 
 /**
@@ -338,6 +390,23 @@ export function buildCallPermissions(
     }
     adapter = opts.v4AdapterAddress.toLowerCase() as Address;
   }
+  let nativeAdapter: Address | undefined;
+  if (opts.nativeAdapterAddress !== undefined) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(opts.nativeAdapterAddress)) {
+      throw new Error(
+        `nativeAdapterAddress is not an address: ${JSON.stringify(opts.nativeAdapterAddress)}`,
+      );
+    }
+    nativeAdapter = opts.nativeAdapterAddress.toLowerCase() as Address;
+  }
+  // A buy permission with no adapter to call is meaningless, and silently
+  // ignoring the flag would let a grant claim a capability it does not carry.
+  if (opts.allowNativeBuy && !nativeAdapter) {
+    throw new Error(
+      "allowNativeBuy was set without a nativeAdapterAddress — there is no contract to permit. " +
+        "Refusing to mint a grant that claims a capability it does not carry.",
+    );
+  }
   let ponsAdapter: Address | undefined;
   if (opts.ponsAdapterAddress !== undefined) {
     if (!/^0x[0-9a-fA-F]{40}$/.test(opts.ponsAdapterAddress)) {
@@ -345,7 +414,7 @@ export function buildCallPermissions(
     }
     ponsAdapter = opts.ponsAdapterAddress.toLowerCase() as Address;
   }
-  const spenders = allowedSpenders(opts.allowRialto, opts.allowUniswapV4, adapter, ponsAdapter);
+  const spenders = allowedSpenders(opts.allowRialto, opts.allowUniswapV4, adapter, ponsAdapter, nativeAdapter);
   const extras = usableExtraTokens(opts.extraTokens);
   // Every asset this signature may hold a leg in: USDG plus everything the
   // approve permissions below cover. This is what the adapter's tokenIn and
@@ -604,6 +673,63 @@ export function buildCallPermissions(
               { condition: ParamCondition.ONE_OF, value: adapterAssets },
               null, // amountIn — bounded by the approve caps
               null, // minAmountOut — denominated in the output asset, says nothing useful
+              null, // deadline
+            ],
+          } as const,
+        ]
+      : []),
+    // ── the native-quoted curve adapter ──────────────────────────────────
+    //
+    // TWO SELECTORS, TWO PERMISSIONS, and that separation is the design. The
+    // sibling adapter refuses native-quoted curves because it is non-payable;
+    // this one reaches them, and the two directions are not equally expensive.
+    //
+    // THE EXIT IS FREE, in the sense that matters here. `IPonsCurve.sell` pays a
+    // caller-named recipient DIRECTLY, so the adapter passes `msg.sender`, never
+    // touches the ETH, needs no `receive()`, and sends no value — which is why
+    // this permission carries `valueLimit: 0n` alongside every other one. There
+    // is also NO assetOut argument to pin: the native side is implied by the
+    // SELECTOR, which is what keeps a zero-address sentinel out of the ONE_OF
+    // list the ERC-20 path shares. `amountIn` is bounded by the approve caps,
+    // exactly as on the sibling.
+    ...(nativeAdapter
+      ? [
+          {
+            target: nativeAdapter,
+            valueLimit: 0n,
+            abi: PONS_NATIVE_ABI,
+            functionName: "sellForNative",
+            args: [
+              null, // curve — unpinnable, a new address per token
+              { condition: ParamCondition.ONE_OF, value: adapterAssets },
+              null, // amountIn — bounded by the approve caps
+              null, // minNativeOut — denominated in wei, says nothing useful
+              null, // deadline
+            ],
+          } as const,
+        ]
+      : []),
+    // THE ENTRY IS NOT FREE, and this is the only place in this file where a
+    // permission can move native ETH. `IPonsCurve.buy` is payable and requires
+    // `msg.value == quoteIn` exactly, so the ACCOUNT must send value; no
+    // contract design removes that. Hence a non-zero valueLimit, hence its own
+    // opt-in, hence its own grant marker.
+    //
+    // What still binds: the token leg is pinned ONE_OF the owner's own list, the
+    // per-call spend is capped here, the adapter forwards the whole value to the
+    // curve and retains nothing, and the floor is enforced against the account's
+    // own balance change rather than the curve's claim.
+    ...(nativeAdapter && opts.allowNativeBuy
+      ? [
+          {
+            target: nativeAdapter,
+            valueLimit: opts.nativeBuyValueLimitWei ?? NATIVE_BUY_VALUE_LIMIT_WEI,
+            abi: PONS_NATIVE_ABI,
+            functionName: "buyWithNative",
+            args: [
+              null, // curve — unpinnable
+              { condition: ParamCondition.ONE_OF, value: adapterAssets },
+              null, // minTokensOut
               null, // deadline
             ],
           } as const,

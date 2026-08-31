@@ -12,6 +12,7 @@ import {
   UNISWAP,
   UNISWAP_SWAP_ROUTER_ABI,
   PONS_SELFTRADE_ABI, V4SELFSWAP_ABI,
+  NATIVE_BUY_VALUE_LIMIT_WEI,
   allowedSpenders,
   buildCallPermissions,
   buildWallPolicies,
@@ -749,3 +750,103 @@ test("the swap's pinned asset set IS the approve set — they cannot drift", () 
     }
   }
 });
+
+/**
+ * THE NATIVE-QUOTED CURVE ADAPTER — two selectors, two decisions.
+ *
+ * PonsSelfTrade refuses native-quoted curves because it is non-payable, and that
+ * is roughly 47% of launches out of reach. PonsNativeTrade reaches them, and the
+ * two directions cost very different things. These tests exist to keep that
+ * difference visible in the wall rather than only in a comment.
+ */
+test("granting the native adapter installs the EXIT at valueLimit 0", () => {
+  const NATIVE = "0x00000000000000000000000000000000000000ee" as const;
+  const list = buildCallPermissions(CAPS, SELF, { nativeAdapterAddress: NATIVE });
+  const sell = list.find((p) => p.functionName === "sellForNative");
+  assert.ok(sell, "the exit must be granted whenever the adapter is");
+
+  // THE PROPERTY THE WHOLE DESIGN TURNS ON. IPonsCurve.sell pays a caller-named
+  // recipient directly, so the account sends no value and the adapter never
+  // holds any — which is why an exit can sit alongside every other permission
+  // at valueLimit 0 instead of costing an invariant.
+  assert.equal(sell!.valueLimit, 0n, "an exit must never be allowed to move native ETH");
+  assert.equal(sell!.target, NATIVE);
+
+  // And there is NO buy permission without the separate opt-in.
+  assert.equal(
+    list.find((p) => p.functionName === "buyWithNative"),
+    undefined,
+    "the entry must not ride along with the exit",
+  );
+});
+
+test("the native BUY is a separate opt-in, and the only permission that can move ETH", () => {
+  const NATIVE = "0x00000000000000000000000000000000000000ee" as const;
+  const list = buildCallPermissions(CAPS, SELF, {
+    nativeAdapterAddress: NATIVE,
+    allowNativeBuy: true,
+  });
+  const buy = list.find((p) => p.functionName === "buyWithNative");
+  assert.ok(buy, "the opt-in must actually grant it");
+  assert.ok(buy!.valueLimit > 0n, "a native buy that cannot send value is not a buy");
+
+  // THE INVARIANT, RESTATED RATHER THAN DELETED. Every other permission in the
+  // wall still carries valueLimit 0; this is the single deliberate exception,
+  // and it exists only because the owner asked for it by name. If a second
+  // entry ever appears in this list, somebody widened the wall by accident.
+  const canMoveEth = list.filter((p) => p.valueLimit !== 0n);
+  assert.equal(canMoveEth.length, 1, "exactly one permission may move native ETH, and only on request");
+  assert.equal(canMoveEth[0]!.functionName, "buyWithNative");
+});
+
+test("a native buy is bounded per call, and the bound is the owner's", () => {
+  const NATIVE = "0x00000000000000000000000000000000000000ee" as const;
+  const dflt = buildCallPermissions(CAPS, SELF, {
+    nativeAdapterAddress: NATIVE,
+    allowNativeBuy: true,
+  }).find((p) => p.functionName === "buyWithNative");
+  assert.equal(dflt!.valueLimit, NATIVE_BUY_VALUE_LIMIT_WEI);
+
+  const custom = buildCallPermissions(CAPS, SELF, {
+    nativeAdapterAddress: NATIVE,
+    allowNativeBuy: true,
+    nativeBuyValueLimitWei: 5_000_000_000_000_000n,
+  }).find((p) => p.functionName === "buyWithNative");
+  assert.equal(custom!.valueLimit, 5_000_000_000_000_000n);
+});
+
+test("allowNativeBuy without an adapter REFUSES to mint", () => {
+  // A permission with no contract to call is a grant claiming a capability it
+  // does not carry. Silently dropping the flag would let the marker and the
+  // permission set disagree, which is the shape of every wall bug in this file's
+  // history.
+  assert.throws(
+    () => buildCallPermissions(CAPS, SELF, { allowNativeBuy: true }),
+    /allowNativeBuy was set without a nativeAdapterAddress/,
+  );
+});
+
+test("both native legs pin the token to the owner's own list", () => {
+  const NATIVE = "0x00000000000000000000000000000000000000ee" as const;
+  const list = buildCallPermissions(CAPS, SELF, {
+    nativeAdapterAddress: NATIVE,
+    allowNativeBuy: true,
+  });
+  for (const name of ["sellForNative", "buyWithNative"]) {
+    const p = list.find((x) => x.functionName === name)!;
+    // word 1 is the token on BOTH selectors, by construction — see PONS_NATIVE_ABI.
+    const tokenArg = p.args[1] as { condition?: unknown; value?: unknown } | null;
+    assert.ok(tokenArg && tokenArg.condition !== undefined, `${name} must pin its token leg`);
+    // word 0 is the curve, and it is deliberately unpinnable: a new address per
+    // token, hundreds an hour. The file says so; this proves it still does.
+    assert.equal(p.args[0], null, `${name} cannot pin the curve, and must not pretend to`);
+  }
+});
+
+test("the native adapter is a spender, so it can pull the token it sells", () => {
+  const NATIVE = "0x00000000000000000000000000000000000000ee" as const;
+  assert.ok(allowedSpenders(false, false, undefined, undefined, NATIVE).includes(NATIVE));
+  // ...and is absent when not granted.
+  assert.equal(allowedSpenders(false, false).includes(NATIVE), false);
+});
+

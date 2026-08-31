@@ -220,3 +220,104 @@ contract MockReentrantCurve {
         return 0;
     }
 }
+
+/**
+ * A NATIVE-QUOTED curve: `pairToken()` is the zero address and the quote side is
+ * real ETH.
+ *
+ * The distinction that matters for PonsNativeTrade is that `sell` pays the
+ * RECIPIENT in native ETH directly — which is the whole reason that adapter can
+ * be non-payable, hold nothing, and need no `receive()`. This mock is what makes
+ * that testable rather than argued.
+ *
+ * Like its sibling it is a fixed ratio, not a curve, and says so: it is not
+ * trying to be a faithful bonding curve, only a faithful COUNTERPARTY.
+ */
+contract MockNativePonsCurve {
+    address public token;
+    address public pairToken; // stays address(0) — that is the point
+    bool public graduated;
+    uint256 public rateNum = 2;
+    uint256 public rateDen = 1;
+
+    constructor(address _token) {
+        token = _token;
+    }
+
+    function setGraduated(bool v) external { graduated = v; }
+    function setRate(uint256 n, uint256 d) external { rateNum = n; rateDen = d; }
+    /// @dev Pay this PERCENT of what it claims. Models the curve grading its own
+    /// homework: the slippage check below still passes on the CLAIMED figure
+    /// while the transfer is short. Only a balance check on the caller catches it.
+    uint256 public payPct = 100;
+    function setPayPct(uint256 p) external { payPct = p; }
+
+    function getReserves() external pure returns (uint256, uint256) {
+        return (1.68e18, 1e27);
+    }
+
+    /// @dev Payable, and `msg.value` must equal `quoteIn` exactly — the real
+    /// curve reverts NativeValueMismatch otherwise, takes no change, gives none.
+    function buy(uint256 quoteIn, uint256 minTokensOut, address recipient)
+        external
+        payable
+        returns (uint256)
+    {
+        require(msg.value == quoteIn, "NativeValueMismatch");
+        uint256 out = (quoteIn * rateNum) / rateDen;
+        require(out >= minTokensOut, "SlippageExceeded");
+        IERC20Like(token).transfer(recipient, out);
+        return out;
+    }
+
+    /// @dev Pulls tokens from its caller, pays the recipient in ETH DIRECTLY.
+    function sell(uint256 tokensIn, uint256 minQuoteOut, address recipient)
+        external
+        returns (uint256)
+    {
+        IERC20Like(token).transferFrom(msg.sender, address(this), tokensIn);
+        uint256 out = (tokensIn * rateNum) / rateDen;
+        require(out >= minQuoteOut, "SlippageExceeded");
+        (bool ok, ) = recipient.call{value: (out * payPct) / 100}("");
+        require(ok, "NativePayFailed");
+        return out;
+    }
+
+    /// @dev So a test can fund the quote side.
+    receive() external payable {}
+}
+
+/**
+ * A native curve that takes the tokens and pays NO ETH.
+ *
+ * The adapter's guarantee is that it measures the CALLER's own balance change
+ * rather than trusting the curve's return value. Without a counterparty willing
+ * to lie, that claim is untestable — and on this launchpad the counterparty is
+ * chosen by whoever launched the token.
+ */
+contract MockHostileNativeCurve {
+    address public token;
+    address public pairToken; // address(0)
+    bool public graduated;
+
+    constructor(address _token) {
+        token = _token;
+    }
+
+    function getReserves() external pure returns (uint256, uint256) {
+        return (1.68e18, 1e27);
+    }
+
+    function buy(uint256, uint256, address) external payable returns (uint256) {
+        // Keeps the ETH, delivers nothing.
+        return 0;
+    }
+
+    function sell(uint256 tokensIn, uint256, address) external returns (uint256) {
+        // Takes the tokens, pays nobody, and claims it went fine.
+        IERC20Like(token).transferFrom(msg.sender, address(this), tokensIn);
+        return 999;
+    }
+
+    receive() external payable {}
+}

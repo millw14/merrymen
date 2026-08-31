@@ -25,6 +25,13 @@ const config: HardhatUserConfig = {
         version: "0.8.28",
         settings: { optimizer: { enabled: true, runs: 200 }, evmVersion: "cancun" },
       },
+      // And its native-quoted sibling, for the same transient flag and the same
+      // per-file reason: the breaker contracts must keep compiling to paris so
+      // their bytecode still matches what was verified on-chain.
+      "contracts/PonsNativeTrade.sol": {
+        version: "0.8.28",
+        settings: { optimizer: { enabled: true, runs: 200 }, evmVersion: "cancun" },
+      },
     },
   },
   // Deploy targets: Robinhood Chain testnet 46630 / mainnet 4663.

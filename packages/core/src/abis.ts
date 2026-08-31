@@ -50,6 +50,53 @@ export const UNISWAP_SWAP_ROUTER_ABI = [
 ] as const;
 
 /**
+ * PonsNativeTrade — the native-quoted half of the same launchpad.
+ *
+ * Same all-static discipline as above, and the same absence of a recipient: it
+ * is msg.sender, in bytecode. What differs is what is MISSING from each
+ * signature, and it is missing on purpose.
+ *
+ * `sellForNative` has no `assetOut`, and `buyWithNative` has no `assetIn`,
+ * because the native side is implied by the SELECTOR. If either carried the
+ * native leg as an argument it would have to be `address(0)`, and pinning that
+ * would mean admitting a non-contract sentinel into a ONE_OF list the ERC-20
+ * adapter shares — weakening a bound on the other venue to describe this one.
+ * Two selectors cost nothing and keep the two asset lists honest.
+ *
+ * `buyWithNative` is PAYABLE and its size is `msg.value`, not an argument. That
+ * is why its permission is bounded by `valueLimit` rather than by a param
+ * condition, and why it is the one permission in this wall that can move native
+ * ETH at all.
+ */
+export const PONS_NATIVE_ABI = [
+  {
+    type: "function",
+    name: "sellForNative",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "curve", type: "address" },
+      { name: "token", type: "address" },
+      { name: "amountIn", type: "uint128" },
+      { name: "minNativeOut", type: "uint128" },
+      { name: "deadline", type: "uint256" },
+    ],
+    outputs: [{ name: "amountOut", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "buyWithNative",
+    stateMutability: "payable",
+    inputs: [
+      { name: "curve", type: "address" },
+      { name: "token", type: "address" },
+      { name: "minTokensOut", type: "uint128" },
+      { name: "deadline", type: "uint256" },
+    ],
+    outputs: [{ name: "amountOut", type: "uint256" }],
+  },
+] as const;
+
+/**
  * Permit2 — how Uniswap v4 takes tokens. The account approves Permit2 once, and
  * Permit2 grants a spender a bounded, EXPIRING allowance. `amount` is uint160 and
  * `expiration` uint48, both narrower than the usual uint256: silently truncating
