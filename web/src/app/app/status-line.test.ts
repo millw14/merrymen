@@ -57,6 +57,43 @@ test("NO MONEY AND NO GAS still gets the plain sentence", () => {
   assert.equal(l.tone, "waiting");
 });
 
+test("EVERY REQUEST FOR MONEY NAMES THE NETWORK", () => {
+  // A user sent ETH to his account address and it never showed. The address
+  // held 0.004268 ETH on ETHEREUM MAINNET; on Robinhood Chain it had never been
+  // touched (zero balance, nonce 0). He was given an address and no network, and
+  // an address is valid on every EVM chain — so the omission is the bug.
+  const asksForMoney: AgentSnapshot[] = [
+    { ...base, hasGas: false, cashUsdg: 15 }, // funded, ungassed
+    { ...base, hasGas: false, cashUsdg: 0 }, // empty, ungassed
+    { ...base, cashUsdg: 0 }, // live, no capital
+  ];
+  for (const s of asksForMoney) {
+    const l = statusLine(s);
+    assert.match(
+      l.next,
+      /Robinhood Chain/,
+      `asked for money without naming the network: ${l.next}`,
+    );
+  }
+});
+
+test("the wrong-chain warning is on the gas asks, where the mistake happens", () => {
+  // The observed failure was ETH on Ethereum, so the ETH asks say so outright.
+  for (const s of [
+    { ...base, hasGas: false, cashUsdg: 15 },
+    { ...base, hasGas: false, cashUsdg: 0 },
+  ]) {
+    assert.match(statusLine(s).next, /Ethereum/, "names the chain it actually lands on");
+  }
+});
+
+test("on the practice chain it does not say Robinhood Chain", () => {
+  // Rule 2: do not send somebody to mainnet from a testnet screen.
+  const l = statusLine({ ...base, testnet: true, hasGas: false, cashUsdg: 0 });
+  assert.match(l.next, /practice chain/);
+  assert.doesNotMatch(l.next, /Robinhood Chain/);
+});
+
 test("A STUCK AGENT SAYS SO, above everything else", () => {
   // The failure that hid a fleet-wide outage for hours: ten agents unable to
   // arm, every dashboard showing a calm page of stale numbers.

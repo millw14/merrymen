@@ -79,8 +79,27 @@ function firstSentence(s: string, max = 160): string {
   return cut.length > max ? `${cut.slice(0, max - 1).trimEnd()}…` : cut;
 }
 
+/**
+ * NAME THE NETWORK, EVERY TIME WE ASK FOR MONEY.
+ *
+ * A user sent ETH to his account address and reported it “appearing in the
+ * wallet”, then “topped up a wallet but nothing's showing”. His address held
+ * 0.004268 ETH — on ETHEREUM MAINNET. On Robinhood Chain it had never been
+ * touched: zero balance, zero USDG, nonce 0.
+ *
+ * He did nothing wrong. He was given an address and no network, and an
+ * address is valid on every EVM chain — which is exactly why naming one is
+ * not decoration. The funds are not lost (he controls the key) but they are
+ * on the wrong chain, and nothing in this app ever told him which chain it
+ * wanted.
+ */
+function network(testnet: boolean): string {
+  return testnet ? "the practice chain" : "Robinhood Chain";
+}
+
 export function statusLine(a: AgentSnapshot): StatusLine {
   const name = a.name || "Your agent";
+  const net = network(a.testnet);
 
   // ── Stuck: it cannot work, and no amount of waiting changes that ─────────
   //
@@ -126,12 +145,15 @@ export function statusLine(a: AgentSnapshot): StatusLine {
           next:
             "Your money is there. This chain charges fees in ETH, which is a separate thing from " +
             "the dollars you trade with, so the account needs a little of both. A few dollars of ETH " +
-            "covers many trades — send it to the same account address.",
+            `covers many trades — send it to the same account address, on ${net}. ETH sent on ` +
+            "Ethereum, Base or any other network will not arrive here.",
           tone: "waiting",
         }
       : {
           headline: `${name} can't trade yet — the account has no ETH for fees.`,
-          next: "Send a little ETH to the account address. A few dollars covers many trades.",
+          next:
+            `Send a little ETH to the account address, on ${net} — not Ethereum or Base, which is ` +
+            "where it most often ends up. A few dollars covers many trades.",
           tone: "waiting",
         };
   }
@@ -188,7 +210,7 @@ export function statusLine(a: AgentSnapshot): StatusLine {
   if (a.cashUsdg <= 0) {
     return {
       headline: `${name} is live but has nothing to trade with.`,
-      next: "Send USDG to the account address and it starts working.",
+      next: `Send USDG to the account address, on ${net}, and it starts working.`,
       tone: "waiting",
     };
   }
