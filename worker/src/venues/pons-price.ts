@@ -189,6 +189,97 @@ export function curvePrice(r: CurveReserves, quoteUsd8: bigint): CurvePrice | nu
  * and "no impact" must not be the same value to a caller deciding whether to
  * spend money.
  */
+/**
+ * THE CURVE'S OWN FEE, IN BASIS POINTS PER SIDE.
+ *
+ * A quote that ignores it is systematically optimistic, and a minAmountOut
+ * derived from an optimistic quote is a floor the honest case trips over: the
+ * trade reverts, the account pays gas, and nothing says why. Measured at ~99 bps
+ * by replaying the compiled adapter against a live USDG-quoted curve through
+ * eth_simulateV1 (10 USDG in, 3,050,001.54 tokens out) versus the frictionless
+ * constant product below.
+ *
+ * HARDCODED ON PURPOSE, and the activity tape VALIDATES it rather than sets it.
+ * pons-activity.ts:24-26 says outright that its eth_getLogs carries no address
+ * filter -- topic0 only -- so any contract on this chain can emit those topics
+ * with arbitrary data words. Deriving this constant from that tape would let an
+ * attacker move the number that sets every future slippage floor, for the cost of
+ * one contract, on a chain already producing hundreds of launches an hour. Any
+ * re-derivation must restrict itself to emitters that appear as curves in the
+ * FACTORY-FILTERED launch set (pons.ts:194).
+ */
+export const CURVE_FEE_BPS = 99n;
+
+/**
+ * How many tokens a quote-in buy actually returns, fee included. Raw units.
+ *
+ * WHY THIS EXISTS SEPARATELY FROM curveBuyImpactBps. That function computes
+ * `tokensOut` on its way to a bps figure and then throws the number away, and it
+ * was the only place in the repo the constant product was written down. So there
+ * was no function anywhere answering “given (curve, amountIn), how many tokens
+ * come back” -- which is the one input a minAmountOut needs, which is the one
+ * field standing between a curve buy and an unbounded loss.
+ *
+ * WHAT THIS IS NOT: an independent check on the curve. `r` is read from the
+ * curve's OWN getReserves(), so a hostile curve reports whatever reserves make
+ * its price look fair and this function faithfully agrees. The floor derived
+ * here bounds HONEST-WORKER SLIPPAGE -- the market moving between quote and
+ * fill -- and is never an answer to the hostile-curve risk. That risk is bounded
+ * elsewhere and only elsewhere: the wall's pinned asset legs, the amountIn-capped
+ * pull, the per-trade approve, and PonsSelfTrade's own measurement of the
+ * CALLER's balance delta. Nobody should later cite minAmountOut as the reason a
+ * strange curve is safe.
+ *
+ * Uses the FULL reserve including the virtual seed, for the reason spelled out
+ * on curveBuyImpactBps: the seed is what the curve itself prices against.
+ *
+ * Returns null, never 0, when it cannot be evaluated.
+ */
+export function curveBuyOut(r: CurveReserves, quoteInRaw: bigint): bigint | null {
+  if (r.quoteRaw <= 0n || r.tokenRaw <= 0n || quoteInRaw <= 0n) return null;
+  // The fee is taken on the way IN, which is why it is applied to the input
+  // rather than the output: a curve that skimmed the output would leave the
+  // invariant holding at a different k, and that is not what was measured.
+  const inAfterFee = (quoteInRaw * (10_000n - CURVE_FEE_BPS)) / 10_000n;
+  if (inAfterFee <= 0n) return null;
+  const k = r.quoteRaw * r.tokenRaw;
+  const newQuote = r.quoteRaw + inAfterFee;
+  const tokensOut = r.tokenRaw - k / newQuote;
+  return tokensOut > 0n ? tokensOut : null;
+}
+
+/**
+ * The sell twin: how much quote asset comes back for `tokenInRaw` tokens.
+ *
+ * Needed as early as the buy, because an entry whose exit cannot be quoted is an
+ * entry nobody can size. Same fee, same seed treatment, same null discipline,
+ * and the same warning as above about whose arithmetic this is.
+ */
+export function curveSellOut(r: CurveReserves, tokenInRaw: bigint): bigint | null {
+  if (r.quoteRaw <= 0n || r.tokenRaw <= 0n || tokenInRaw <= 0n) return null;
+  const inAfterFee = (tokenInRaw * (10_000n - CURVE_FEE_BPS)) / 10_000n;
+  if (inAfterFee <= 0n) return null;
+  const k = r.quoteRaw * r.tokenRaw;
+  const newToken = r.tokenRaw + inAfterFee;
+  const quoteOut = r.quoteRaw - k / newToken;
+  return quoteOut > 0n ? quoteOut : null;
+}
+
+/**
+ * A slippage floor for a curve trade: the quote, less `toleranceBps`.
+ *
+ * Kept beside the quote so the two can never be computed from different readings
+ * of a curve the repo's own prose says can move 1,546 bps at p99 over four
+ * minutes. The intent type already requires this (policy.ts) -- “carried on the
+ * intent rather than recomputed at execution time so the number the trade is
+ * judged against and the number the chain enforces cannot come from two
+ * different readings”.
+ */
+export function curveMinOut(quotedOutRaw: bigint, toleranceBps: number): bigint | null {
+  if (quotedOutRaw <= 0n || toleranceBps < 0 || toleranceBps >= 10_000) return null;
+  return (quotedOutRaw * BigInt(10_000 - toleranceBps)) / 10_000n;
+}
+
 export function curveBuyImpactBps(r: CurveReserves, quoteInRaw: bigint): number | null {
   if (r.quoteRaw <= 0n || r.tokenRaw <= 0n || quoteInRaw <= 0n) return null;
   // Constant product: tokensOut = tokenRaw - k/(quoteRaw + in)

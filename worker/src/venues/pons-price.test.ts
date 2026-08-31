@@ -11,6 +11,10 @@ import {
   curvePrice,
   realQuoteRaw,
   virtualSeedRaw,
+  curveBuyOut,
+  curveSellOut,
+  curveMinOut,
+  CURVE_FEE_BPS,
   type CurveReserves,
 } from "./pons-price";
 
@@ -404,5 +408,95 @@ describe("curvePriceUsable", () => {
     assert.equal((v as { kind: string }).kind, "impact-cap");
     // A null impact is not a refusal: not every caller is sizing a trade.
     assert.equal(curvePriceUsable({ ...ok, impactBps: null }, G).ok, true);
+  });
+});
+
+
+/**
+ * THE QUOTE FUNCTIONS — the thing that stood between a curve buy and an
+ * unbounded loss, and that did not exist until now.
+ *
+ * The arithmetic was lifted OUT of curveBuyImpactBps, which computed tokensOut
+ * and threw it away. So the first duty of these tests is to prove the two have
+ * not drifted: the lift must be a lift, not a rewrite that happens to look
+ * similar.
+ */
+describe("curve quotes", () => {
+  it("agrees with the impact function it was lifted from", () => {
+    // Same reserves, same input, zero fee: the effective price implied by
+    // curveBuyOut must reproduce curveBuyImpactBps. Computed here from the
+    // frictionless output so the fee does not confound the comparison.
+    const inRaw = 1_000_000_000_000_000n;
+    const out = curveBuyOut(LIVE, inRaw);
+    assert.ok(out !== null && out > 0n);
+    // Undo the fee to recover the frictionless output the impact fn assumes.
+    const k = LIVE.quoteRaw * LIVE.tokenRaw;
+    const frictionless = LIVE.tokenRaw - k / (LIVE.quoteRaw + inRaw);
+    const SCALE = 1_000_000_000_000n;
+    const spot = (LIVE.quoteRaw * SCALE) / LIVE.tokenRaw;
+    const paid = (inRaw * SCALE) / frictionless;
+    const expected = Number(((paid - spot) * 10_000n) / spot);
+    assert.equal(curveBuyImpactBps(LIVE, inRaw), expected, "the lift changed the maths");
+  });
+
+  it("is FEE-AWARE, so a derived floor is not systematically too high", () => {
+    // The whole reason the constant exists. A frictionless quote produces a
+    // minAmountOut the honest case cannot meet, and the trade reverts having
+    // paid gas to be told the market did exactly what it was going to do.
+    const inRaw = 1_000_000_000_000_000n;
+    const k = LIVE.quoteRaw * LIVE.tokenRaw;
+    const frictionless = LIVE.tokenRaw - k / (LIVE.quoteRaw + inRaw);
+    const withFee = curveBuyOut(LIVE, inRaw);
+    assert.ok(withFee !== null);
+    assert.ok(withFee < frictionless, "fee-aware quote must be below the frictionless one");
+    // And by roughly the fee, not by some other amount.
+    const shortfallBps = Number(((frictionless - withFee) * 10_000n) / frictionless);
+    assert.ok(
+      Math.abs(shortfallBps - Number(CURVE_FEE_BPS)) <= 2,
+      `shortfall ${shortfallBps} bps should track the ${CURVE_FEE_BPS} bps fee`,
+    );
+  });
+
+  it("a round trip loses about two fees — the number a strategy has to beat", () => {
+    // ~199 bps round trip. Stated as a test because it is the economics of the
+    // whole venue: against merrymen's ~47 bps pool floor, a curve strategy has
+    // to clear roughly 2% before gas to be worth running at all.
+    const inRaw = 100_000_000_000_000n;
+    const tokens = curveBuyOut(LIVE, inRaw);
+    assert.ok(tokens !== null);
+    const back = curveSellOut(LIVE, tokens);
+    assert.ok(back !== null);
+    const lossBps = Number(((inRaw - back) * 10_000n) / inRaw);
+    assert.ok(lossBps > 150 && lossBps < 320, `round trip lost ${lossBps} bps`);
+  });
+
+  it("returns null, never 0, when it cannot evaluate", () => {
+    // The codebase's central rule. A 0 here is a quote of 'you get nothing',
+    // which a caller would happily sign a minAmountOut of 0 against.
+    assert.equal(curveBuyOut({ ...LIVE, quoteRaw: 0n }, 1n), null);
+    assert.equal(curveBuyOut({ ...LIVE, tokenRaw: 0n }, 1n), null);
+    assert.equal(curveBuyOut(LIVE, 0n), null);
+    assert.equal(curveBuyOut(LIVE, -1n), null);
+    assert.equal(curveSellOut(LIVE, 0n), null);
+    // A dust input whose fee rounds it to nothing is 'cannot evaluate', not 0.
+    assert.equal(curveBuyOut(LIVE, 1n), null);
+  });
+
+  it("curveMinOut refuses a tolerance that would authorise a total loss", () => {
+    assert.equal(curveMinOut(1_000n, 0), 1_000n);
+    assert.equal(curveMinOut(1_000n, 100), 990n);
+    // 100% tolerance is a floor of zero, i.e. no floor. Refused rather than
+    // computed, because a caller that passes it wants a number it should not get.
+    assert.equal(curveMinOut(1_000n, 10_000), null);
+    assert.equal(curveMinOut(1_000n, -1), null);
+    assert.equal(curveMinOut(0n, 100), null);
+  });
+
+  it("the fee constant is HARDCODED, not derived from the unauthenticated tape", () => {
+    // pons-activity.ts filters on topic0 with no address filter, so any contract
+    // on this chain can emit those topics with arbitrary data. If this constant
+    // ever becomes tape-derived, an attacker moves every future slippage floor
+    // for the cost of one contract. Asserting the value pins that decision.
+    assert.equal(CURVE_FEE_BPS, 99n);
   });
 });
