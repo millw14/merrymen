@@ -609,6 +609,17 @@ export default function GrantPage() {
         .map(([label, now, was, unit]) => `${label} ${was}${unit && ` ${unit}`} → ${now}${unit && ` ${unit}`}`)
     : [];
   const capsEdited = capChanges.length > 0;
+  /**
+   * Every difference the re-sign would introduce, chain included.
+   *
+   * The chain move is the biggest change available on this panel and it was the
+   * one the notice did not mention — so it leads.
+   */
+  const allChanges =
+    grant && chainId !== grant.chainId
+      ? [`chain ${grant.chainId === MAINNET ? "mainnet" : "practice"} → ${chainId === MAINNET ? "mainnet" : "practice"}`, ...capChanges]
+      : capChanges;
+  const anyChange = allChanges.length > 0;
 
   const gasFunded = (funding?.gasWei ?? 0n) > 0n;
   const usdgFunded = (funding?.usdgUnits ?? 0n) > 0n;
@@ -1369,23 +1380,96 @@ export default function GrantPage() {
                     </label>
                   </div>
                   {/*
+                    MOVING A KEY BETWEEN CHAINS, as a first-class action.
+
+                    Testnet cannot trade anything. Every token and router address
+                    merrymen knows is a mainnet-4663 deployment (preflight.ts's
+                    chain guard says so in as many words), so a grant on 46630 is
+                    a rehearsal that can never become a performance. The only way
+                    off it was a control labelled "switch to another wallet",
+                    which is where the chain picker happens to live — a new user
+                    on a faucet asked "how to do leave testnet?" and could not
+                    find it, because nothing on the page is called that.
+
+                    Deliberately NOT a silent default. The mount effect pins the
+                    selector to the loaded grant precisely so a mainnet owner
+                    cannot click renew and land on the sandbox; this keeps that
+                    property by making the move an explicit, acknowledged choice
+                    with its own button, rather than a selector that could drift.
+                  */}
+                  <div className="chain-move" style={{ marginTop: 12 }}>
+                    <label className="ack-row">
+                      <input
+                        type="checkbox"
+                        checked={chainId !== grant.chainId}
+                        onChange={(e) => {
+                          setChainId(e.target.checked ? (grant.chainId === MAINNET ? TESTNET : MAINNET) : grant.chainId);
+                          setMainnetAck(false);
+                        }}
+                      />
+                      <span>
+                        {grant.chainId === MAINNET ? (
+                          <>Move this key to <b>practice (testnet {TESTNET})</b> — it will stop being able to trade.</>
+                        ) : (
+                          <>Move this key to <b>real money (mainnet {MAINNET})</b>. Practice mode cannot trade at all: every token merrymen knows is a mainnet deployment, so a testnet balance reads as zero and every route is refused.</>
+                        )}
+                      </span>
+                    </label>
+                  </div>
+                  {chainId === MAINNET && grant.chainId !== MAINNET && (
+                    <div className="mainnet-warning" style={{ marginTop: 10 }}>
+                      <b>This is real money.</b> Your owner &amp; session keys are stored in plain
+                      text in this browser — anyone with access to it controls the funds. There is
+                      no recovery service and no undo. The caps above are the seatbelt: start small.
+                      <br />
+                      <br />
+                      Your account address does not change, so anything already sitting at{" "}
+                      <span className="mono">{short(grant.smartAccount)}</span> on mainnet stays
+                      there. Practice balances stay behind on testnet, where they were never worth
+                      anything.
+                      <label className="ack-row" style={{ marginTop: 10 }}>
+                        <input
+                          type="checkbox"
+                          checked={mainnetAck}
+                          onChange={(e) => setMainnetAck(e.target.checked)}
+                        />
+                        <span>
+                          I understand — real funds, keys stored locally in plain text, and my caps
+                          are my protection.
+                        </span>
+                      </label>
+                    </div>
+                  )}
+                  {/*
                     Say what is about to change BEFORE it changes, and only when
                     something has. A re-sign that quietly moves a cap the owner
                     edited and forgot is the same class of surprise as one that
                     quietly keeps it.
                   */}
-                  {capsEdited && (
+                  {anyChange && (
                     <p className="field-lead" style={{ marginTop: 10 }}>
-                      Signing now also changes: {capChanges.join(" · ")}.
+                      Signing now also changes: {allChanges.join(" · ")}.
                     </p>
                   )}
+                  {/*
+                    Blocked, not hidden, when a chain move needs its
+                    acknowledgement. A button that vanishes leaves the reader
+                    wondering what they did wrong; a disabled one sits directly
+                    under the checkbox that enables it.
+                  */}
                   <button
                     className="grant-btn"
                     style={{ marginTop: 10, width: "100%" }}
                     onClick={() => void renewKey()}
-                    disabled={renewing}
+                    disabled={renewing || (chainId === MAINNET && grant.chainId !== MAINNET && !mainnetAck)}
                   >
-                    {renewing ? "re-signing…" : "re-sign this key (free)"}
+                    {renewing
+                      ? "re-signing…"
+                      : chainId !== grant.chainId
+                        ? chainId === MAINNET
+                          ? "move to real money & re-sign"
+                          : "move to practice & re-sign"
+                        : "re-sign this key (free)"}
                   </button>
                 </>
               ) : (
