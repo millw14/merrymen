@@ -61,10 +61,14 @@ export const relayUrl = (chainId: number) =>
 export function redact(e: unknown, ownerKey?: string): string {
   let msg = e instanceof Error ? e.message : String(e);
   if (ownerKey) msg = msg.split(ownerKey).join("<owner key>");
+  // NOT a blanket 64-hex replacement. That rule replaced the callData in the
+  // one error a user actually sent us — eating the function selector and
+  // leaving an unreadable smear of zeros — because calldata, hashes, and
+  // signatures are all long hex and none of them are secret. The only 32-byte
+  // secret in scope is the owner key, and it is replaced by VALUE above.
   return msg
     .replace(/apikey=[^&\s"']+/gi, "apikey=<redacted>")
-    .replace(/0x[0-9a-fA-F]{64}/g, "<32-byte value>")
-    .slice(0, 400);
+    .slice(0, 600);
 }
 
 /**

@@ -54,7 +54,15 @@ export async function chainFees(publicClient: PublicClient): Promise<UserOpFees>
  * chain's public client so it never depends on the bundler exposing a proprietary method.
  */
 export function userOpGasConfig(publicClient: PublicClient, bundlerUrl: string) {
-  const isPimlico = /pimlico\.io/i.test(bundlerUrl);
+  // Pimlico DIRECTLY, or through our own recovery relay — which forwards this
+  // exact method and nothing else that could substitute for it.
+  //
+  // Matching only the vendor hostname meant a relayed withdrawal silently
+  // skipped the oracle and priced itself from the chain, which Pimlico is then
+  // free to reject as underpriced. The whole reason this function exists is that
+  // a bundler accepts the fees IT quoted; routing through a proxy does not
+  // change whose bundler it is.
+  const isPimlico = /pimlico\.io/i.test(bundlerUrl) || /\/api\/bundler\//.test(bundlerUrl);
   return {
     estimateFeesPerGas: async ({ bundlerClient }: { bundlerClient: Client }): Promise<UserOpFees> => {
       if (isPimlico) {
