@@ -1176,6 +1176,12 @@ export default function SettingsPage() {
               <input type="text" placeholder="0x…" value={v("v4AdapterAddress")} onChange={set("v4AdapterAddress")} />
             </Field>
             <Field
+              label="Pons curve adapter contract"
+              hint="Deployed PonsSelfTrade address for THIS chain — it opens the Pons launchpad, where tokens trade on a bonding curve before they graduate to a pool. Does nothing until you re-sign the grant: the address is sealed into the signature, and sealing it also makes that contract an approved spender for every token in the grant."
+            >
+              <input type="text" placeholder="0x…" value={v("ponsAdapterAddress")} onChange={set("ponsAdapterAddress")} />
+            </Field>
+            <Field
               label="Rialto integrator key"
               hint="From Rialto's wallet-signed onboarding (docs.rialto.xyz). Enables real stock-token routing through their propAMMs."
             >

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { formatEther } from "viem";
+import { createPublicClient, formatEther, http } from "viem";
 import { Info } from "@/components/Info";
 import { LogoMark } from "@/components/Logo";
 import {
@@ -14,7 +14,7 @@ import {
   tokenCoverage,
   TRADEABLE_V2,
   uncoveredBasketSymbols,
-  type CustomToken,
+  type CustomToken,  PONS_SELFTRADE_ABI,
 } from "@merrymen/core";
 import {
   clearGrant,
@@ -133,6 +133,101 @@ const sameCaps = (a: GrantCaps, b: GrantCaps) =>
 
 const BACKUP_KEY = "merrymen.grant.backedup.v1";
 const TESTNET = robinhoodTestnet.id; // 46630 — the sandbox
+
+/**
+ * VERIFY AN ADAPTER ADDRESS BEFORE IT IS SEALED, not after.
+ *
+ * WHY THIS IS NOT PARANOIA. Sealing an adapter does two things, and the second
+ * is easy to miss: `allowedSpenders()` appends the address to the spender ONE_OF
+ * of EVERY approve permission in the grant (packages/core/src/wall.ts), and the
+ * non-USDG approves pass `null` as the amount condition — which wall.ts itself
+ * calls "a standing licence to move every share the agent holds". So one wrong
+ * or stale value typed into one dashboard field becomes an unbounded pull target
+ * across the whole token book, sealed into a signature, unseen.
+ *
+ * The worker already checks this — and too late. Its `eth_getCode` gate runs at
+ * ARM time, which is after the owner has signed, after the grant is stored, and
+ * after the only cheap moment to say no has passed. The cost of catching it
+ * there is a wasted re-sign; the cost of not catching it at all is the paragraph
+ * above.
+ *
+ * TWO CHECKS, because they fail differently:
+ *   1. code exists at the address on THIS chain — catches a typo, an address
+ *      from the other chain, an EOA pasted by mistake, and a contract that was
+ *      never actually deployed;
+ *   2. the code answers the shape we expect — `tradeExactIn` is present. Catches
+ *      a real, live, wrong contract, which check 1 waves straight through. The
+ *      deploy script performs the same ABI check for the same reason.
+ *
+ * REFUSES RATHER THAN SEALING SOMETHING UNVERIFIED. Returning `undefined` on
+ * failure would mint a grant with no curve route, quietly — the owner would
+ * think they had sealed it and find out at the first trade. Throwing puts the
+ * failure where the owner is already looking.
+ */
+async function verifiedAdapter(
+  address: `0x${string}` | undefined,
+  chainId: number,
+  onStatus: (s: string) => void,
+): Promise<`0x${string}` | undefined> {
+  if (!address) return undefined;
+  onStatus("checking the curve adapter before sealing it…");
+  const chain = chainId === robinhoodTestnet.id ? robinhoodTestnet : robinhoodChain;
+  const client = createPublicClient({ chain, transport: http() });
+
+  let code: string;
+  try {
+    code = (await client.getCode({ address })) ?? "0x";
+  } catch (e) {
+    throw new Error(
+      `Could not check the curve adapter ${address} on ${chain.name}: ${
+        e instanceof Error ? e.message : String(e)
+      }. Refusing to seal an address nobody has verified — it would become an approved spender for every token in this grant.`,
+    );
+  }
+  if (!code || code === "0x") {
+    throw new Error(
+      `No contract at ${address} on ${chain.name}. That is usually an address from the other chain, ` +
+        `a typo, or a deploy that never happened. Sealing it would make it an approved spender for every ` +
+        `token in this grant, so nothing is signed. Fix it at /settings and try again.`,
+    );
+  }
+
+  // SHAPE CHECK. A live contract at the right address on the right chain can
+  // still be the wrong contract entirely, and check 1 cannot tell.
+  try {
+    await client.readContract({
+      address,
+      abi: PONS_SELFTRADE_ABI,
+      functionName: "tradeExactIn",
+      args: [
+        "0x0000000000000000000000000000000000000000",
+        "0x0000000000000000000000000000000000000000",
+        "0x0000000000000000000000000000000000000000",
+        0n,
+        0n,
+        0n,
+      ],
+    });
+  } catch (e) {
+    // A REVERT IS A PASS. The call is deliberately invalid — zero addresses, zero
+    // amount, a deadline in 1970 — so the real adapter MUST reject it. What we
+    // are testing is that it rejected it as that function rather than failing to
+    // find one. viem reports a missing function differently from a revert, and
+    // only the former disqualifies the address.
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/does not exist|not found|returned no data|function.*selector/i.test(msg)) {
+      throw new Error(
+        `The contract at ${address} on ${chain.name} is not a PonsSelfTrade adapter — it has no ` +
+          `tradeExactIn function. Sealing it would make the wrong contract an approved spender for every ` +
+          `token in this grant, so nothing is signed.`,
+      );
+    }
+  }
+
+  onStatus("curve adapter verified.");
+  return address;
+}
+
 const MAINNET = robinhoodChain.id; // 4663 — real funds
 
 function short(a: string): string {
@@ -304,6 +399,7 @@ export default function GrantPage() {
   // The deployed V4SelfSwap for this install, read from /settings. Sealed into
   // the wall at signing — which is why it is read here and not at trade time.
   const [v4Adapter, setV4Adapter] = useState<`0x${string}` | undefined>(undefined);
+  const [ponsAdapter, setPonsAdapter] = useState<`0x${string}` | undefined>(undefined);
   // The basket matters here for the same reason: /settings offers every registry
   // symbol, but only the ones sealed into the signature can be sold.
   const [basketSymbols, setBasketSymbols] = useState<string[]>([]);
@@ -341,12 +437,14 @@ export default function GrantPage() {
       .catch(() => setSession(null));
     fetch("/api/settings")
       .then((r) => (r.ok ? r.json() : null))
-      .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[]; v4AdapterAddress?: string }; defaults?: { basketSymbols?: string[] } } | null) => {
+      .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[]; v4AdapterAddress?: string; ponsAdapterAddress?: string }; defaults?: { basketSymbols?: string[] } } | null) => {
         const list = (v?.values?.customTokens ?? []).filter(isValidCustomToken);
         setCustomTokens(list as CustomToken[]);
         setBasketSymbols(v?.values?.basketSymbols ?? v?.defaults?.basketSymbols ?? []);
         const a = v?.values?.v4AdapterAddress;
         setV4Adapter(typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) ? (a as `0x${string}`) : undefined);
+        const pa = v?.values?.ponsAdapterAddress;
+        setPonsAdapter(typeof pa === "string" && /^0x[0-9a-fA-F]{40}$/.test(pa) ? (pa as `0x${string}`) : undefined);
       })
       .catch(() => {
         setCustomTokens([]);
@@ -447,6 +545,7 @@ export default function GrantPage() {
         chainId,
         extraTokens: customTokens,
         v4AdapterAddress: v4Adapter,
+        ponsAdapterAddress: await verifiedAdapter(ponsAdapter, chainId, setStatus),
         hostedAs: session.hosted ? (session.address ?? undefined) : undefined,
       });
       setGrant(g);
@@ -497,6 +596,7 @@ export default function GrantPage() {
         chainId,
         extraTokens: customTokens,
         v4AdapterAddress: v4Adapter,
+        ponsAdapterAddress: await verifiedAdapter(ponsAdapter, chainId, setStatus),
         hostedAs: session?.hosted ? (session.address ?? undefined) : undefined,
       });
       // They just pasted the owner key, so it's demonstrably backed up — skip the
@@ -542,17 +642,21 @@ export default function GrantPage() {
       // they just added, with nothing failing until the first no-exit reject.
       let freshTokens = customTokens;
       let freshAdapter = v4Adapter;
+      let freshPons = ponsAdapter;
       try {
         const r = await fetch("/api/settings");
         if (r.ok) {
           const v = (await r.json()) as {
-            values?: { customTokens?: unknown[]; v4AdapterAddress?: string };
+            values?: { customTokens?: unknown[]; v4AdapterAddress?: string; ponsAdapterAddress?: string };
           };
           freshTokens = (v?.values?.customTokens ?? []).filter(isValidCustomToken) as CustomToken[];
           const a = v?.values?.v4AdapterAddress;
           freshAdapter = typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) ? (a as `0x${string}`) : undefined;
+          const pa = v?.values?.ponsAdapterAddress;
+          freshPons = typeof pa === "string" && /^0x[0-9a-fA-F]{40}$/.test(pa) ? (pa as `0x${string}`) : undefined;
           setCustomTokens(freshTokens);
           setV4Adapter(freshAdapter);
+          setPonsAdapter(freshPons);
         }
       } catch {
         /* unreachable settings: sign with what the page already had, as before */
@@ -568,6 +672,7 @@ export default function GrantPage() {
         chainId,
         extraTokens: freshTokens,
         v4AdapterAddress: freshAdapter,
+        ponsAdapterAddress: await verifiedAdapter(freshPons, chainId, setStatus),
         hostedAs: session?.hosted ? (session.address ?? undefined) : undefined,
       });
       setGrant(g);

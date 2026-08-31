@@ -231,7 +231,11 @@ export async function PUT(req: Request) {
   const stored = await readStored(tenant);
   const next: MerrymenSettings = { ...stored };
 
+  // Every settings key this request actually processed. Used at the end to
+  // name what was DROPPED — see the note above the `ignored` computation.
+  const touched = new Set<string>();
   const setOrClear = <K extends keyof MerrymenSettings>(key: K, value: MerrymenSettings[K] | undefined) => {
+    touched.add(key as string);
     if (value === undefined) delete next[key];
     else next[key] = value;
   };
@@ -375,6 +379,19 @@ export async function PUT(req: Request) {
       setOrClear("v4AdapterAddress", v.trim());
     else errors.push("v4AdapterAddress: must be a 0x… address");
   }
+  // THE PONS ADAPTER. Absent from this allowlist until now, which made the
+  // deploy script's own instruction ("paste the address into /settings") and
+  // docs/owner-runbook-pons.md impossible to follow: this handler is the only
+  // writer of the hosted tenant store, and an unknown key returned {ok:true}
+  // with the field silently dropped. See the unknown-key rejection below —
+  // silent success is why a documented-but-unwired field went unnoticed.
+  if ("ponsAdapterAddress" in body) {
+    const v = body.ponsAdapterAddress;
+    if (v === "" || v === null || v === undefined) setOrClear("ponsAdapterAddress", undefined);
+    else if (typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v.trim()))
+      setOrClear("ponsAdapterAddress", v.trim());
+    else errors.push("ponsAdapterAddress: must be a 0x… address");
+  }
   // $MERRYMEN holder wallet — a read-only address for the Merry Circle fee tier.
   if ("holderAddress" in body) {
     const v = body.holderAddress;
@@ -515,6 +532,30 @@ export async function PUT(req: Request) {
     }
   }
 
+  // NAME WHAT WE DROPPED, so a documented-but-unwired field cannot hide again.
+  //
+  // This handler is an allowlist with no else, and it is the ONLY writer of the
+  // hosted tenant store. A key it does not know about produced {ok:true} and
+  // vanished. Not hypothetical: deploy-ponsselftrade.ts and the Pons runbook both
+  // told the owner to save `ponsAdapterAddress` here, and for as long as that
+  // branch was missing the instruction was impossible to follow and said so to
+  // nobody.
+  //
+  // REPORTED, NOT REJECTED, deliberately. A 400 on unknown keys is the stricter
+  // fix and would break every client that round-trips a settings blob containing
+  // a field this build does not know — an older dashboard tab open against a
+  // newer server, every hosted tenant at once. Trading a silent drop for a
+  // fleet-wide save failure is a bad trade. Visibility is the property that was
+  // actually missing.
+  //
+  // A key that FAILED validation is not ignored — it is in `errors`, which is
+  // already loud — so those are excluded rather than reported twice.
+  const errored = new Set(errors.map((e) => e.split(":")[0]?.trim()).filter(Boolean));
+  const ignored = Object.keys(body).filter((k) => !touched.has(k) && !errored.has(k));
+  if (ignored.length > 0) {
+    console.warn(`[settings] ignored unknown keys: ${ignored.join(", ")}`);
+  }
+
   if (errors.length > 0) return NextResponse.json({ errors }, { status: 400 });
 
   if (tenant) {
@@ -529,5 +570,11 @@ export async function PUT(req: Request) {
     await writeFile(SETTINGS_FILE, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
     await chmod(SETTINGS_FILE, 0o600).catch(() => {});
   }
-  return NextResponse.json({ ok: true, appliesWithin: "one worker tick" });
+  return NextResponse.json({
+    ok: true,
+    appliesWithin: "one worker tick",
+    // Present only when something was dropped, so a caller can tell the
+    // difference between 'saved' and 'saved, minus the field you cared about'.
+    ...(ignored.length > 0 ? { ignored } : {}),
+  });
 }
