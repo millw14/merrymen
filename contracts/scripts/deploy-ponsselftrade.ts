@@ -25,6 +25,12 @@
  * verify — and the deployment one less thing to get wrong.
  */
 import hre from "hardhat";
+import { readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// ESM has no __dirname; deployments.json sits beside contracts/scripts.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /** The only chains this should ever touch. Anything else is a mistake. */
 const KNOWN_CHAINS: Record<number, string> = {
@@ -100,8 +106,38 @@ async function main() {
     throw new Error("tradeExactIn is not non-payable — do NOT use this deployment.");
   }
 
+  // PERSIST THE ADDRESS. This script only ever printed it, which is why the
+  // question "is the adapter deployed?" could not be answered from the repo, from
+  // git history on any branch, or from a running worker's home -- an audit had to
+  // conclude "there is no candidate address to even check". A deployment that
+  // exists only in a shell's scrollback is a deployment nobody can verify, and
+  // re-deploying to find out produces a DIFFERENT address that invalidates any
+  // grant already sealed against the old one.
+  //
+  // Keyed by chain id, because one flat value cannot serve two chains that
+  // produce different addresses and /grant offers a two-click chain switch.
+  const file = path.join(__dirname, "..", "deployments.json");
+  let book: Record<string, Record<string, { address: string; deployedAt: string; codeBytes: number }>> = {};
+  try {
+    book = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    /* first deployment on any chain */
+  }
+  const chainKey = String(chainId);
+  book[chainKey] = {
+    ...(book[chainKey] ?? {}),
+    PonsSelfTrade: {
+      address: adapter.address,
+      deployedAt: new Date().toISOString(),
+      codeBytes: (code.length - 2) / 2,
+    },
+  };
+  writeFileSync(file, JSON.stringify(book, null, 2) + "
+");
+
   console.log("");
   console.log(`✓ PonsSelfTrade deployed at ${adapter.address}`);
+  console.log(`  recorded in contracts/deployments.json under chain ${chainKey} — COMMIT THIS`);
   console.log(`  code : ${(code.length - 2) / 2} bytes`);
   console.log("");
   console.log("next steps:");
@@ -111,7 +147,7 @@ async function main() {
   console.log("  3. unset MERRYMEN_DEPLOYER_PRIVATE_KEY / close this shell");
   console.log("");
   console.log("what this does NOT unlock, so it is not a surprise later:");
-  console.log("  - native-ETH-quoted curves (53.6% of launches). The adapter is non-payable;");
+  console.log("  - native-ETH-quoted curves (~47% of launches, measured over 5,730 across four");
   console.log("    those need a different selector and a different threat model.");
   console.log("  - any curve whose token you have not added in /settings and re-signed for.");
 }
