@@ -66,6 +66,13 @@ jobs:
         working-directory: contracts
         run: npm install --no-audit --no-fund
 
+      # DEPLOY SCRIPTS ARE CHECKED TOO. The root tsconfig covers only the config
+      # and ./test, so scripts/ was never compiled by anything — and one shipped
+      # with a parse error, in a file whose job is to spend real gas on mainnet.
+      - name: Typecheck deploy scripts
+        working-directory: contracts
+        run: npm run typecheck:scripts
+
       - name: Test
         working-directory: contracts
         run: npm test

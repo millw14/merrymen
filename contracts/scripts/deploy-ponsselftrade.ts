@@ -132,8 +132,7 @@ async function main() {
       codeBytes: (code.length - 2) / 2,
     },
   };
-  writeFileSync(file, JSON.stringify(book, null, 2) + "
-");
+  writeFileSync(file, JSON.stringify(book, null, 2) + "\n");
 
   console.log("");
   console.log(`✓ PonsSelfTrade deployed at ${adapter.address}`);

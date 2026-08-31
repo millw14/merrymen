@@ -5,7 +5,8 @@
   "description": "On-chain drawdown breaker: BreakerRegistry + Kernel v3 policy adapter.",
   "scripts": {
     "build": "hardhat compile",
-    "test": "hardhat test"
+    "test": "hardhat test",
+    "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-viem": "^2.0.0",

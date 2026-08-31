@@ -1,0 +1,23 @@
+{
+  // DEPLOY SCRIPTS ARE TYPECHECKED, and until now they were not.
+  //
+  // The root tsconfig includes only `hardhat.config.ts` and `./test`, so nothing
+  // under `scripts/` was ever checked by anything — not locally, not in CI. A
+  // deploy script shipped with a literal newline inside a string, which is a
+  // parse error, and it was found by someone reading the file rather than by a
+  // tool. That script's job is to spend real gas on mainnet.
+  //
+  // A SEPARATE CONFIG rather than widening the root one: these run under
+  // Hardhat's ESM loader and use `import.meta.url`, which the root's
+  // `module: commonjs` rejects. Changing the root would alter how the tests and
+  // the Hardhat config compile to fix a problem that belongs to one directory.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "noEmit": true
+  },
+  // hardhat.config.ts is what registers the hardhat-viem type augmentation,
+  // so `hre.viem` only exists to the compiler when it is in the program.
+  "include": ["./hardhat.config.ts", "./scripts"]
+}
