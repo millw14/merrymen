@@ -3635,7 +3635,25 @@ async function main() {
         const px = paperPriceOf(p.token);
         const mul = mults.multipliers.get(p.symbol);
         if (!px || mul === undefined) {
-          missingPrice.push(p.symbol);
+          // UNPRICEABLE BY DESIGN IS NOT A MISSING PRICE, and conflating them
+          // freezes the tick.
+          //
+          // readPositions makes this split on the live path (positions.ts): a
+          // token with no Chainlink feed AT ALL — which is every memecoin, and
+          // every bonding-curve token — is `unpricedByDesign`, a structural gap
+          // that never resolves. `missingPrice` means the holding is known and
+          // the price is temporarily absent, and it HOLDS THE TICK on purpose,
+          // because valuing a book you cannot value is how a drawdown breaker
+          // fires on a number nobody computed.
+          //
+          // The paper path had no such split, so one simulated memecoin holding
+          // stopped the tick forever — equity, the breaker, and the strategy
+          // that would have SOLD it, all waiting on a price that is never
+          // coming. Practice mode is where an owner is meant to find out how
+          // this behaves, so it is the worst place to hang.
+          const known = watchTokens.find((t) => t.symbol === p.symbol);
+          if (known && known.chainlinkFeed === null) unpricedByDesign.push(p.symbol);
+          else missingPrice.push(p.symbol);
           continue;
         }
         // `shares` is split-invariant, so it IS the raw balance in 18dp terms and
