@@ -35,6 +35,28 @@ test("HIS EXACT SITUATION gets an answer, not a balance sheet", () => {
   assert.equal(l.tone, "good");
 });
 
+test("MONEY IN, NO GAS: it does not tell him his money is missing", () => {
+  // Verbatim from the group chat, $15 in the account:
+  //   “It says it can't trade” / “Because no ETH” / “But there is 15 bucks in it”
+  // The old line named only the missing asset, so a person who had just
+  // funded the account read it as a denial that he had.
+  const l = statusLine({ ...base, hasGas: false, cashUsdg: 15 });
+  assert.match(l.headline, /\$15/, "names the money he actually sent");
+  assert.match(l.headline, /no ETH to pay the fees/);
+  assert.match(l.next, /Your money is there/, "answers the objection before he makes it");
+  // The load-bearing explanation: two assets, not one.
+  assert.match(l.next, /separate thing from the dollars you trade with/);
+  assert.equal(l.tone, "waiting");
+});
+
+test("NO MONEY AND NO GAS still gets the plain sentence", () => {
+  // The empty-account case must not claim a balance that is not there.
+  const l = statusLine({ ...base, hasGas: false, cashUsdg: 0 });
+  assert.match(l.headline, /no ETH for fees/);
+  assert.doesNotMatch(l.next, /Your money is there/);
+  assert.equal(l.tone, "waiting");
+});
+
 test("A STUCK AGENT SAYS SO, above everything else", () => {
   // The failure that hid a fleet-wide outage for hours: ten agents unable to
   // arm, every dashboard showing a calm page of stale numbers.
@@ -83,9 +105,16 @@ test("practice is called practice, in words a person uses", () => {
 });
 
 test("no gas is distinguished from no capital — different problems, different fixes", () => {
+  // FUNDED but ungassed — the case the group chat hit. Names the money first,
+  // because the person reading it has already sent some.
   const noGas = statusLine({ ...base, hasGas: false });
-  assert.match(noGas.headline, /no ETH for fees/);
-  assert.match(noGas.next, /Send a little ETH/);
+  assert.match(noGas.headline, /no ETH to pay the fees/);
+  assert.match(noGas.next, /separate thing from the dollars you trade with/);
+
+  // EMPTY and ungassed — the plain sentence, claiming no balance it cannot see.
+  const bare = statusLine({ ...base, hasGas: false, cashUsdg: 0 });
+  assert.match(bare.headline, /no ETH for fees/);
+  assert.match(bare.next, /Send a little ETH/);
 
   const noCash = statusLine({ ...base, cashUsdg: 0 });
   assert.match(noCash.headline, /nothing to trade with/);
@@ -125,7 +154,12 @@ test("NO JARGON anywhere in any branch", () => {
   // a trailing unit on a number: "318.00 USDG" is what made a balance look like
   // telemetry.
   const banned = /equity|session key|steady-basket|weekend-gap|bps|wall|grant|positions/i;
-  const unitSuffix = /[d.,]s*USDG/;
+  // ESCAPES COLLAPSED HERE ONCE ALREADY. This read /[d.,]s*USDG/ -- a literal
+  // 'd', '.' or ',' followed by literal 's' characters -- so it matched none of
+  // the strings it exists to ban. "318.00 USDG", the exact example the comment
+  // above names, sailed through it. A guard that cannot fire is worse than no
+  // guard, because the suite reports it as passing.
+  const unitSuffix = /[\d.,]\s*USDG/;
   const cases: AgentSnapshot[] = [
     base,
     { ...base, mode: "paper" },

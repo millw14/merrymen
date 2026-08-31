@@ -105,12 +105,35 @@ export function statusLine(a: AgentSnapshot): StatusLine {
       tone: "stuck",
     };
   }
+  // NO GAS — and this branch has to survive the fact that the owner has
+  // usually ALREADY SENT MONEY.
+  //
+  // A user in the group chat, with $15 in the account: “It says it can't
+  // trade. Because no ETH. But there is 15 bucks in it.” Both statements
+  // were true. On this chain the money you TRADE with (USDG) and the money
+  // you pay FEES with (ETH) are different assets, and a sentence that names
+  // only the missing one reads as “your money is not there” to the person
+  // who just sent it. He is not confused about his balance; the screen is
+  // confused about what he already did.
+  //
+  // So when there IS cash, say so first and name the two-asset thing
+  // outright. Rule 2 still holds: this claims nothing it did not check —
+  // `cashUsdg` and `hasGas` are both read from the same snapshot.
   if (!a.hasGas) {
-    return {
-      headline: `${name} can't trade yet — the account has no ETH for fees.`,
-      next: "Send a little ETH to the account address. A few dollars covers many trades.",
-      tone: "waiting",
-    };
+    return a.cashUsdg > 0
+      ? {
+          headline: `${name} has ${money(a.cashUsdg)} to trade with, but no ETH to pay the fees.`,
+          next:
+            "Your money is there. This chain charges fees in ETH, which is a separate thing from " +
+            "the dollars you trade with, so the account needs a little of both. A few dollars of ETH " +
+            "covers many trades — send it to the same account address.",
+          tone: "waiting",
+        }
+      : {
+          headline: `${name} can't trade yet — the account has no ETH for fees.`,
+          next: "Send a little ETH to the account address. A few dollars covers many trades.",
+          tone: "waiting",
+        };
   }
 
   // ── Practice ─────────────────────────────────────────────────────────────
