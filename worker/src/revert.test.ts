@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { PATTERN_SOURCES, classifyRevert, suppressionKey } from "./revert";
+import test, { describe, it } from "node:test";
+import { readFileSync } from "node:fs";
+import { toFunctionSelector } from "viem";
+import { PATTERN_SOURCES, PONS_ERROR_SELECTORS, classifyRevert, suppressionKey } from "./revert";
 
 /**
  * The value of this table is entirely in what it REFUSES to claim, so most of
@@ -159,4 +161,105 @@ test("REGRESSION: no stray control characters in the pattern sources", () => {
     // eslint-disable-next-line no-control-regex
     assert.equal(/[\u0000-\u001F]/.test(p), false, `pattern ${JSON.stringify(p)} carries a control character`);
   }
+});
+
+
+/**
+ * PONS REVERTS — permanent conditions that used to look retryable.
+ *
+ * Before this, every curve failure fell to `unclassified`, which this file
+ * deliberately treats as retryable. So a graduated curve would be re-proposed
+ * every tick for the life of the arm: the 1,242-identical-rejections failure the
+ * header warns about, arriving through a venue the table had never heard of.
+ */
+describe("Pons adapter reverts", () => {
+  const revertData = (selector: string, args = "") => `execution reverted: ${selector}${args}`;
+
+  it("a graduated curve is permanent, not something to retry", () => {
+    const v = classifyRevert(revertData("0x025ac17e"));
+    assert.equal(v.rule, "curve-graduated");
+    assert.equal(v.retryable, false);
+    assert.match(v.detail, /graduated/);
+  });
+
+  it("shape refusals are permanent", () => {
+    for (const sel of [
+      "0xf51cd3d9", // NativeQuoteNotSupported
+      "0xe3716feb", // AssetsDoNotMatchCurve
+      "0x09ee12d5", // NotAContract
+      "0x5048bd62", // IdenticalAssets
+      "0x1f2a2005", // ZeroAmount
+      "0xed3ba6a6", // Reentrant
+    ]) {
+      const v = classifyRevert(revertData(sel));
+      assert.equal(v.rule, "curve-unsupported", sel);
+      assert.equal(v.retryable, false, sel);
+    }
+  });
+
+  it("InsufficientOutput is slippage and IS worth retrying", () => {
+    // The one transient member of the set. It is the adapter's floor firing
+    // against the account's own balance delta, which is the market moving.
+    const v = classifyRevert(revertData("0x2c19b8b8", "0000000000000000000000000000000000000000000000000000000000000001"));
+    assert.equal(v.rule, "slippage");
+    assert.equal(v.retryable, true);
+  });
+
+  it("NoOutput is NOT slippage — a curve that pays nothing is not a market", () => {
+    const v = classifyRevert(revertData("0x5a7cfa65"));
+    assert.equal(v.rule, "curve-unsupported");
+    assert.equal(v.retryable, false);
+  });
+
+  it("Expired is a deadline and retryable", () => {
+    const v = classifyRevert(revertData("0x203d82d8"));
+    assert.equal(v.rule, "deadline");
+    assert.equal(v.retryable, true);
+  });
+
+  it("matches whatever case the RPC hex-encodes with", () => {
+    assert.equal(classifyRevert(revertData("0x025AC17E")).rule, "curve-graduated");
+  });
+
+  it("PONS ITSELF still classifies unclassified, and that is deliberate", () => {
+    // A scoping pass reported Pons's SlippageExceeded as 0x71c4efed while
+    // deriving `SlippageExceeded()` gives 0x8199f5f3. The two disagree, so
+    // neither is evidence, and this file's rule is to add nothing from memory.
+    // Retryable-and-visible beats confidently-wrong.
+    assert.equal(classifyRevert(revertData("0x71c4efed")).rule, "unclassified");
+    assert.equal(classifyRevert(revertData("0x71c4efed")).retryable, true);
+  });
+
+  it("the selectors are four bytes and all distinct", () => {
+    // Cheap guard against a paste error turning two errors into one bucket.
+    for (const s of PONS_ERROR_SELECTORS) assert.match(s, /^0x[0-9a-f]{8}$/);
+    assert.equal(new Set(PONS_ERROR_SELECTORS).size, PONS_ERROR_SELECTORS.length);
+  });
+
+  it("EVERY error declared in PonsSelfTrade.sol is classified", () => {
+    // The drift guard that matters. Adding an error to the .sol without adding
+    // it here means a new permanent failure silently becomes retryable — which
+    // is precisely the bug this whole block exists to fix, one release later.
+    const sol = readFileSync(
+      new URL("../../contracts/contracts/PonsSelfTrade.sol", import.meta.url),
+      "utf8",
+    );
+    const declared = [...sol.matchAll(/^\s*error\s+(\w+)\s*\(([^)]*)\)\s*;/gm)].map((m) => {
+      const args = (m[2] ?? "")
+        .split(",")
+        .map((a) => a.trim().split(/\s+/)[0])
+        .filter(Boolean)
+        .join(",");
+      return `${m[1]}(${args})`;
+    });
+    assert.ok(declared.length >= 12, `expected the .sol to declare errors, found ${declared.length}`);
+    for (const sig of declared) {
+      const sel = toFunctionSelector(`function ${sig}`);
+      assert.notEqual(
+        classifyRevert(`execution reverted: ${sel}`).rule,
+        "unclassified",
+        `${sig} (${sel}) is declared in PonsSelfTrade.sol but classifies as unclassified`,
+      );
+    }
+  });
 });

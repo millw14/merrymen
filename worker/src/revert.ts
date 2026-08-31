@@ -48,6 +48,17 @@ export type RevertClass =
   | "no-liquidity"
   /** A deadline passed before inclusion. Transient by construction. */
   | "deadline"
+  /**
+   * The curve graduated. Its market has moved to a pool; this venue is done with
+   * that token forever. The most permanent condition in the taxonomy.
+   */
+  | "curve-graduated"
+  /**
+   * The adapter refused the trade's SHAPE — a native-quoted curve, assets that do
+   * not match the curve, a non-contract asset, identical legs, a zero size. None
+   * of these change by waiting, and all are decided before any money moves.
+   */
+  | "curve-unsupported"
   /** We do not recognise it. Retryable, deliberately — see the header. */
   | "unclassified";
 
@@ -73,7 +84,117 @@ export interface RevertVerdict {
  * Each entry names where its pattern comes from. An entry without a source is
  * an entry to delete.
  */
+/**
+ * PonsSelfTrade's custom-error selectors.
+ *
+ * COMPUTED, NOT REMEMBERED, per this file's own rule. The signatures were read
+ * out of contracts/contracts/PonsSelfTrade.sol:154-165 and the selectors derived
+ * from them with `toFunctionSelector`, so a rename in the .sol that is not
+ * mirrored here surfaces as an unclassified revert rather than as a confident
+ * misclassification.
+ *
+ * Solidity revert data is `selector ++ abi.encode(args)`, so matching the leading
+ * four bytes is exact and the arguments are ignored. Case-insensitive because
+ * different RPCs hex-encode with different case.
+ *
+ * WHAT IS DELIBERATELY ABSENT: the errors PONS ITSELF reverts with. Those come
+ * from a contract this repo does not own, so their signatures cannot be read out
+ * of source. A scoping pass suggested Pons's SlippageExceeded is 0x71c4efed;
+ * deriving `SlippageExceeded()` gives 0x8199f5f3, so the two disagree and neither
+ * is evidence. A selector guessed from a plausible name is exactly the
+ * confident-misclassification the header forbids, so Pons's own reverts classify
+ * `unclassified` — retryable, and visible — until one is observed on chain and
+ * added with the transaction that produced it.
+ */
+const PONS_ERR = {
+  Expired: "0x203d82d8",
+  ZeroAmount: "0x1f2a2005",
+  NotAContract: "0x09ee12d5",
+  Reentrant: "0xed3ba6a6",
+  NativeQuoteNotSupported: "0xf51cd3d9",
+  CurveGraduated: "0x025ac17e",
+  AssetsDoNotMatchCurve: "0xe3716feb",
+  IdenticalAssets: "0x5048bd62",
+  InsufficientOutput: "0x2c19b8b8",
+  NoOutput: "0x5a7cfa65",
+  TransferFailed: "0x90b8ec18",
+  ApprovalFailed: "0x8164f842",
+} as const;
+
+/** The selectors, for the test that asserts they are 4 bytes and all distinct. */
+export const PONS_ERROR_SELECTORS: readonly string[] = Object.values(PONS_ERR);
+
 const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; detail: string }[] = [
+  {
+    // ABOVE the generic entries. These are exact four-byte matches and cannot
+    // collide with a prose revert string, so specificity costs nothing.
+    re: new RegExp(PONS_ERR.CurveGraduated, "i"),
+    rule: "curve-graduated",
+    retryable: false,
+    detail:
+      "this token has graduated off its bonding curve — its market is a pool now, and the adapter " +
+      "refuses by name rather than trading at a price for a market that has moved. Retrying cannot " +
+      "undo a graduation; the position has to be routed through a pool venue instead.",
+  },
+  {
+    re: new RegExp(
+      [
+        PONS_ERR.NativeQuoteNotSupported,
+        PONS_ERR.AssetsDoNotMatchCurve,
+        PONS_ERR.NotAContract,
+        PONS_ERR.IdenticalAssets,
+        PONS_ERR.ZeroAmount,
+        PONS_ERR.Reentrant,
+      ].join("|"),
+      "i",
+    ),
+    rule: "curve-unsupported",
+    retryable: false,
+    detail:
+      "the adapter refused the shape of this trade before any money moved — a native-quoted curve, " +
+      "assets that do not belong to it, a non-contract asset, identical legs, or a zero size. None of " +
+      "these change by waiting, so the intent is suppressed rather than repeated every tick.",
+  },
+  {
+    // The adapter's own floor, measured against the ACCOUNT's balance delta
+    // rather than the curve's claim — so this fires on a real shortfall, not on a
+    // curve lying about what it paid. Genuinely transient: it is the venue moving
+    // between quote and fill, which is what a floor is for.
+    re: new RegExp(PONS_ERR.InsufficientOutput, "i"),
+    rule: "slippage",
+    retryable: true,
+    detail:
+      "the curve delivered less than the floor this operation was signed with, measured against the " +
+      "account's own balance rather than the curve's word for it. Nothing moved. Worth retrying at a " +
+      "fresh quote.",
+  },
+  {
+    // Zero delivered. NOT slippage — a curve that takes the input and pays
+    // nothing is broken or hostile, and retrying pays it again.
+    re: new RegExp(PONS_ERR.NoOutput, "i"),
+    rule: "curve-unsupported",
+    retryable: false,
+    detail:
+      "the curve delivered nothing at all. That is not the market moving; it is a curve that took the " +
+      "input and paid no output, which is what the adapter's balance-delta check exists to catch.",
+  },
+  {
+    re: new RegExp(PONS_ERR.Expired, "i"),
+    rule: "deadline",
+    retryable: true,
+    detail:
+      "the curve trade's deadline passed before it was included. Nothing moved, and the next tick " +
+      "builds a fresh one.",
+  },
+  {
+    re: new RegExp([PONS_ERR.TransferFailed, PONS_ERR.ApprovalFailed].join("|"), "i"),
+    rule: "allowance",
+    retryable: false,
+    detail:
+      "the adapter could not pull the input or approve the curve for it. merrymen batches the approve " +
+      "with the trade, so seeing this means the batch did not carry what it should have — a wiring " +
+      "fault, not a market one.",
+  },
   {
     // STF is TransferHelper.safeTransferFrom's revert string in v3-periphery,
     // and it fires when the INPUT token's transferFrom fails — insufficient

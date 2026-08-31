@@ -201,7 +201,7 @@ import {
   setTrenchEntry,
   upgradeTrenchEntry,
   setPositions,
-  type TradeRow,
+  type TradeRow,  knownCurves,
 } from "./store";
 
 const BREAKER_ABI = parseAbi(["function isTripped(address account) view returns (bool)"]);
@@ -417,7 +417,7 @@ async function main() {
       watchTokens = watchTokensFor(next.basketSymbols, next.customTokens);
       console.log(`[settings] strategy settings applied — ${strategy.name}, venue ${next.swapVenue}`);
       if (active) {
-        active.limits = limitsFromGrant(active.grant, watchTokens);
+        active.limits = limitsFromGrant(active.grant, watchTokens, (await knownCurves()) ?? undefined);
         await addEvent(active.agentId, "ok", `settings applied — strategy ${strategy.name}, venue ${next.swapVenue}`);
       }
       stratKey = nextStrat;
@@ -2045,7 +2045,10 @@ async function main() {
       // Agentic account exists and tools/list has been read, equity orders can
       // only paper-fill.
       orderExecutor: null,
-      limits: limitsFromGrant(grant, watchTokens),
+      // The provenance set for the curve-trade rule. Read once at arm time,
+      // alongside every other grant-derived bound, so a curve the agent never
+      // saw launch cannot be traded even though the wall cannot pin it.
+      limits: limitsFromGrant(grant, watchTokens, (await knownCurves()) ?? undefined),
       breakerLive,
       v4AdapterLive,
       ponsAdapterLive,
@@ -3431,11 +3434,20 @@ async function main() {
       // funded account), and a suppression outliving its reason is
       // indistinguishable from a strategy that simply stopped working.
       if (revertVerdict && !revertVerdict.retryable) {
-        const key = suppressionKey(
-          intent.kind,
-          intent.kind === "swap" ? intent.sellToken : undefined,
-          intent.kind === "swap" ? intent.buyToken : undefined,
-        );
+        // NAME THE TOKENS FOR EVERY KIND THAT HAS THEM.
+        //
+        // This passed tokens only for swaps, so every curve failure collapsed to
+        // the single key `curve-trade:->` and the first non-retryable one
+        // suppressed ALL curve trading for the rest of the arm — one graduated
+        // token taking the whole venue down with it. suppressionKey's own comment
+        // says the scope is the token PAIR precisely so that cannot happen.
+        const [supSell, supBuy] =
+          intent.kind === "swap"
+            ? [intent.sellToken, intent.buyToken]
+            : intent.kind === "curve-trade"
+              ? [intent.assetIn, intent.assetOut]
+              : [undefined, undefined];
+        const key = suppressionKey(intent.kind, supSell, supBuy);
         suppressedIntents.set(key, revertVerdict.rule);
         await addEvent(
           agentId,

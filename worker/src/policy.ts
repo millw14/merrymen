@@ -50,6 +50,36 @@ export interface AgentLimits {
    */
   sellableAssets?: readonly string[];
   /**
+   * Curve addresses this agent has SEEN LAUNCH, from a factory-filtered scan.
+   *
+   * The curve is the one argument the wall cannot pin -- a new address per
+   * token, hundreds an hour -- so wall.ts passes `null` for it and says so
+   * outright. That makes this the only place a curve can be constrained at all.
+   *
+   * What made a curve trustworthy before this was INCIDENTAL: the launch scan
+   * happens to filter on PONS_V2_FACTORY (pons.ts) and discovery copies the
+   * value through. Any future producer that sourced a curve from somewhere else
+   * -- an LLM proposal, a chat message, a poisoned tape -- would silently lose
+   * that property, and nothing would have noticed.
+   *
+   * Optional, like sellableAssets, for fixtures. Absent means the rule cannot
+   * run; it must never mean the rule passed.
+   */
+  knownCurves?: readonly string[];
+  /**
+   * The QUOTE side of the book: USDG and the tradeable stock tokens.
+   *
+   * `builtinGrantTargets(grant)` -- deliberately NOT sellableAssets, which also
+   * contains the owner's added extras and therefore the launched memecoins. The
+   * two lists differ by exactly the tokens a curve trade might be ENTERING, so
+   * using the wrong one turns the drawdown breaker's exit exemption into a
+   * blanket exemption for the venue.
+   *
+   * Optional for fixtures. Absent means the exit test falls back to cashToken
+   * alone -- narrower, which is the safe direction for an exemption.
+   */
+  quoteAssets?: readonly string[];
+  /**
    * Tickers the agent may trade on the brokerage rail — the broker analog of
    * allowedAssets, since an equity order has no address for that list to
    * check. Optional for fixtures only (the sellableAssets rule); on a live
@@ -252,6 +282,71 @@ export function checkPolicy(
     }
   }
 
+  // ── curve trades ────────────────────────────────────────────────────────
+  //
+  // THIS BLOCK EXISTS BECAUSE THE MIRROR WAS LOOSER THAN THE CHAIN.
+  //
+  // Every asset rule below used to sit inside `if (intent.kind === "swap")`,
+  // so a curve trade reached the bundler having passed no asset check at all.
+  // The chain would still refuse it -- wall.ts pins both legs ONE_OF the
+  // sealed list -- but limits.ts:27-41 records that the mirror going LOOSER
+  // than the chain is the one direction that is never safe, and the cost of
+  // discovering it on chain is a wasted UserOp and a `gas-unreadable` refusal
+  // that names nothing.
+  //
+  // GATED ON sellableAssets, NOT allowedAssets, and the distinction is the
+  // whole point. allowedAssets is [USDG, ...watchTokens] and watchTokens comes
+  // from SETTINGS (limits.ts:78), which hot-reload with no signature.
+  // sellableAssets comes from the GRANT (grant.ts:344), which is what the wall
+  // actually sealed. Checking the settings-derived list here would reproduce
+  // exactly the bug this block is closing: an owner adds a token in /settings,
+  // does not re-sign, and gets a curve buy that passes every off-chain check
+  // and reverts at the wall.
+  if (intent.kind === "curve-trade") {
+    // Positivity. equity-order has one of these; curve-trade did not, so a zero
+    // or negative size would sail through every cap below (they are all upper
+    // bounds) and be signed.
+    if (intent.amountInRaw <= 0n || intent.notionalUsdg <= 0n) {
+      return {
+        ok: false,
+        rule: "non-positive",
+        detail: `curve trade sized ${intent.amountInRaw} raw / ${intent.notionalUsdg} USDG is not a trade`,
+      };
+    }
+
+    if (limits.sellableAssets) {
+      const sellable = limits.sellableAssets.map(lc);
+      for (const token of [intent.assetIn, intent.assetOut]) {
+        if (!sellable.includes(lc(token))) {
+          return {
+            ok: false,
+            rule: "asset-allowlist",
+            detail:
+              `asset ${token} is not in the signed grant, so the wall will refuse this trade. ` +
+              `Add it at /settings and re-sign the grant at /grant to cover it.`,
+          };
+        }
+      }
+    }
+
+    // CURVE PROVENANCE. `intent.target` is the adapter and is covered by the
+    // target allowlist above; `intent.curve` is covered by nothing, on chain or
+    // off. This turns the incidental factory-filter property into an enforced
+    // one, before any producer exists that could source a curve elsewhere.
+    if (limits.knownCurves) {
+      if (!limits.knownCurves.map(lc).includes(lc(intent.curve))) {
+        return {
+          ok: false,
+          rule: "curve-provenance",
+          detail:
+            `curve ${intent.curve} was not seen in a factory-filtered launch, so nothing vouches ` +
+            `for it being a Pons curve at all. The wall cannot pin this argument, which is exactly ` +
+            `why it is checked here.`,
+        };
+      }
+    }
+  }
+
   if (intent.kind === "swap") {
     for (const token of [intent.sellToken, intent.buyToken]) {
       if (!limits.allowedAssets.map(lc).includes(lc(token))) {
@@ -409,9 +504,28 @@ export function checkPolicy(
     // into cash is. Leaving it out would have the breaker block the one
     // direction it should never block — getting out of a memecoin — while a
     // drawdown is in progress, which is precisely when it matters most.
+    // ANY curve trade out of the token and back into something the grant can
+    // sell is an exit, not just one into cash. 42.8% of curves are quoted in a
+    // stock token, so the cashToken-only test blocked the exit for nearly half
+    // the venue during a drawdown -- the exact lock-in the comment above says
+    // it prevents, for the positions most likely to be causing the drawdown.
+    // ANY curve trade back into the QUOTE side is an exit, not just one into
+    // cash. 42.8% of curves are quoted in a stock token, so a cashToken-only
+    // test blocked the exit for nearly half the venue during a drawdown --
+    // the exact lock-in the comment above says it prevents, for the positions
+    // most likely to be causing the drawdown.
+    //
+    // QUOTE SIDE, NOT sellableAssets. The wall pins BOTH legs ONE_OF the same
+    // sealed list, so `assetOut is sellable` is true of every curve trade ever
+    // built, including buys -- testing it would mark the whole venue exempt and
+    // switch the breaker off exactly where the risk is highest. The real
+    // discriminator is that sellableAssets = builtinGrantTargets u grantTokens
+    // (grant.ts:344): the launched memecoin arrives as an owner-added EXTRA,
+    // while USDG and the tradeable stock tokens are BUILT IN. So trading out
+    // into a builtin is an exit and trading out into an extra is an entry.
     (intent.kind === "curve-trade" &&
-      limits.cashToken !== undefined &&
-      lc(intent.assetOut) === lc(limits.cashToken));
+      ((limits.cashToken !== undefined && lc(intent.assetOut) === lc(limits.cashToken)) ||
+        (limits.quoteAssets !== undefined && limits.quoteAssets.map(lc).includes(lc(intent.assetOut)))));
 
   if (!isExit && state.highWaterMarkUsdg > 0n && state.equityKnown !== false) {
     const drawdownBps = Number(

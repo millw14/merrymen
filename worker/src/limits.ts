@@ -8,6 +8,7 @@ import {
   grantHasV4,
   grantV4Adapter,
   grantPonsAdapter,
+  builtinGrantTargets,
   sellableAssets,
   usdgUnits,
   type StockToken,
@@ -19,6 +20,17 @@ import type { AgentLimits } from "./policy";
 export function limitsFromGrant(
   grant: StoredGrant,
   watchTokens: readonly StockToken[] = STOCK_TOKENS,
+  /**
+   * Curves this agent has seen launch, from the FACTORY-FILTERED scan.
+   *
+   * Passed in rather than read here because this module is deliberately pure
+   * and grant-sourced; the caller owns the store. Defaulting to undefined —
+   * not [] — matters: undefined means the rule cannot run, [] would mean every
+   * curve is unknown and would refuse the venue outright. A check that did not
+   * run must never read as one that passed, and it must not silently become a
+   * blanket refusal either.
+   */
+  knownCurves?: readonly string[],
 ): AgentLimits {
   return {
     perTradeUsdg: usdgUnits(grant.caps.perTradeUsdg),
@@ -77,6 +89,10 @@ export function limitsFromGrant(
     ],
     allowedAssets: [CASH.USDG as `0x${string}`, ...watchTokens.map((token) => token.address)],
     sellableAssets: [...sellableAssets(grant)],
+    // The quote side only -- see AgentLimits.quoteAssets. sellableAssets minus
+    // this is the set of tokens a curve trade could be buying INTO.
+    quoteAssets: [...builtinGrantTargets(grant)],
+    knownCurves,
     // THE TRANSFER PERMISSION, MIRRORED. checkPolicy has always known how to
     // judge this — it was simply never told. A grant without the transfer
     // marker has NO USDG transfer permission in its call policy:

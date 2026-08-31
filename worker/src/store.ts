@@ -2293,6 +2293,43 @@ export async function clearTrenchEntry(agentId: string, mode: BasisMode, symbol:
 }
 
 /**
+ * Every curve this agent has recorded from a launch scan — the provenance set.
+ *
+ * WHY THIS EXISTS. The curve is the one argument the wall cannot pin: a new
+ * address per token, hundreds an hour, so wall.ts passes `null` for it and says
+ * so outright. Off-chain is therefore the ONLY place a curve can be constrained
+ * at all, and checkPolicy's `curve-provenance` rule is the constraint.
+ *
+ * What makes the set trustworthy is upstream, not here: `recordCandidate`'s only
+ * non-test callers are in the worker tick, and the launch scan that feeds them
+ * filters on PONS_V2_FACTORY (venues/pons.ts). So a row in this column is an
+ * address that appeared as the curve of a token launched by the real factory.
+ * That property was INCIDENTAL until the policy rule started depending on it —
+ * which is exactly why it is written down here.
+ *
+ * NOT age-windowed and NOT LIMIT-bounded, unlike `recentCandidates`. A position
+ * opened last week must still be exitable today, and an exit refused because the
+ * curve aged out of a recency window would be the worst possible time to
+ * discover that this list was the wrong shape.
+ *
+ * Returns null on failure, never []. Empty means "no curves known", which would
+ * refuse the whole venue; null means "could not ask", which leaves the rule
+ * unable to run rather than silently converting a database hiccup into a
+ * blanket refusal.
+ */
+export async function knownCurves(): Promise<string[] | null> {
+  try {
+    const rows = (await getDb()
+      .prepare(`SELECT DISTINCT curve FROM discovered_pools WHERE curve IS NOT NULL`)
+      .all()) as { curve: string | null }[];
+    return rows.map((r) => r.curve).filter((c): c is string => !!c).map((c) => c.toLowerCase());
+  } catch {
+    return null;
+  }
+}
+
+
+/**
  * Where a specific token trades on the launchpad — by address, not by recency.
  *
  * `recentCandidates` cannot serve this: it is age-windowed, LIMIT-bounded, and
