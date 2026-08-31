@@ -836,11 +836,11 @@ test("both native legs pin the token to the owner's own list", () => {
   for (const name of ["sellForNative", "buyWithNative"]) {
     const p = list.find((x) => x.functionName === name)!;
     // word 1 is the token on BOTH selectors, by construction — see PONS_NATIVE_ABI.
-    const tokenArg = p.args[1] as { condition?: unknown; value?: unknown } | null;
+    const tokenArg = p.args![1] as { condition?: unknown; value?: unknown } | null;
     assert.ok(tokenArg && tokenArg.condition !== undefined, `${name} must pin its token leg`);
     // word 0 is the curve, and it is deliberately unpinnable: a new address per
     // token, hundreds an hour. The file says so; this proves it still does.
-    assert.equal(p.args[0], null, `${name} cannot pin the curve, and must not pretend to`);
+    assert.equal(p.args![0], null, `${name} cannot pin the curve, and must not pretend to`);
   }
 });
 
@@ -879,7 +879,7 @@ test("a native leg CANNOT name the account's cash", () => {
   });
   for (const name of ["sellForNative", "buyWithNative"]) {
     const p = list.find((x) => x.functionName === name)!;
-    const pin = p.args[1] as { value: readonly string[] };
+    const pin = p.args![1] as { value: readonly string[] };
     const reachable = pin.value.map((a) => a.toLowerCase());
     assert.equal(
       reachable.includes(CASH.USDG.toLowerCase()),
@@ -901,7 +901,7 @@ test("a native leg cannot name a tradeable EQUITY either", () => {
     nativeAdapterAddress: NATIVE,
     extraTokens: [{ symbol: "PEPE", address: MEME, decimals: 18 }],
   });
-  const pin = list.find((x) => x.functionName === "sellForNative")!.args[1] as {
+  const pin = list.find((x) => x.functionName === "sellForNative")!.args![1] as {
     value: readonly string[];
   };
   const reachable = pin.value.map((a) => a.toLowerCase());
@@ -921,7 +921,7 @@ test("with no extra tokens, the native legs reach NOTHING", () => {
   // list — which is exactly how the drain got in.
   const NATIVE = "0x00000000000000000000000000000000000000ee" as const;
   const list = buildCallPermissions(CAPS, SELF, { nativeAdapterAddress: NATIVE });
-  const pin = list.find((x) => x.functionName === "sellForNative")!.args[1] as {
+  const pin = list.find((x) => x.functionName === "sellForNative")!.args![1] as {
     value: readonly string[];
   };
   assert.equal(pin.value.length, 0, "no extras means no reachable curve token");

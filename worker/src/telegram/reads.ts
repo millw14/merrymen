@@ -703,7 +703,7 @@ export function readLlmState(ctx: StatusContext): string {
  * key must never touch a chat app), so this is a signpost to the local dashboard
  * rather than a dead end.
  */
-export const WALLET_TEXT = [
+const WALLET_TEXT_LINES = [
   "🏹 <b>your wallet lives in the dashboard</b> — not in chat.",
   "",
   "Open <b>http://localhost:3100/grant</b> on the machine running merrymen:",
@@ -716,7 +716,57 @@ export const WALLET_TEXT = [
   "Heads-up: the address you funded is a <b>smart account</b>, not a MetaMask wallet — importing your owner key into MetaMask shows a different, empty address. That’s normal; your funds are safe at the account address.",
   "",
   "Why not here? Your owner key never touches chat — wallet actions stay on your machine.",
-].join("\n");
+];
+
+/** The signpost alone, for callers with no ledger to read. */
+export const WALLET_TEXT = WALLET_TEXT_LINES.join("\n");
+
+/**
+ * `/wallet`, leading with the ONE fact that resolves the confusion: the address.
+ *
+ * A user imported his owner key into MetaMask, saw an empty wallet, and told us
+ * “I don't see my money… which is not the wallet I've sent tokens to.” Every
+ * observable fact in that message is correct; only the conclusion is wrong.
+ *
+ * The explanation already existed — in the grant page, the recovery panel, the
+ * README, and the last line of the signpost below. He hit it anyway, and his own
+ * message shows why: he was holding two addresses and nothing put them side by
+ * side and said which was which. A paragraph about smart accounts does not
+ * answer “is MY money gone”. His own address, printed, does.
+ *
+ * So the address leads and the concept follows it, rather than the other way
+ * round. This is also why it became a function — the static export could not
+ * reach the ledger to know the address.
+ */
+export function readWallet(agentId?: string | null, dashboardUrl?: string): string {
+  const base = dashboardUrl ?? "http://localhost:3100";
+  const signpost = WALLET_TEXT_LINES.map((l) =>
+    l.split("http://localhost:3100").join(base),
+  );
+  const db = openRO();
+  if (!db) return signpost.join("\n");
+  let who: string | null = null;
+  try {
+    who = resolveAgent(db, agentId);
+  } catch {
+    /* pre-migration ledger — the signpost still stands on its own */
+  } finally {
+    db.close();
+  }
+  if (!who) return signpost.join("\n");
+  return [
+    "🏹 <b>your agent's account</b> — this is where your money is:",
+    `<code>${esc(who)}</code>`,
+    "",
+    "That address is a <b>smart account</b>. Your owner key CONTROLS it but is not",
+    "it — import the key into MetaMask and MetaMask shows the KEY's own address,",
+    "which is empty and always will be. Nothing is lost; there are two addresses",
+    "and that is the other one. Compare what MetaMask shows against the address",
+    "above.",
+    "",
+    ...signpost,
+  ].join("\n");
+}
 
 export const HELP_TEXT = [
   "🏹 <b>merryman — commands</b>",
