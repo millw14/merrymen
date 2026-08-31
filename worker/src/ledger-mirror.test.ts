@@ -23,11 +23,11 @@ import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
 
 const SRC = [
   "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, level TEXT, message TEXT, created_at INTEGER);",
-  "CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, target TEXT, sell_token TEXT, buy_token TEXT, amount_usdg REAL, user_op_hash TEXT, tx_hash TEXT, status TEXT, reject_rule TEXT, created_at INTEGER);",
+  "CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, target TEXT, sell_token TEXT, buy_token TEXT, amount_usdg REAL, user_op_hash TEXT, tx_hash TEXT, status TEXT, reject_rule TEXT, decision_id TEXT, fill_side TEXT, fill_qty_raw TEXT, fill_price_usd REAL, realized_pnl_usdg REAL, basis_source TEXT, gas_wei TEXT, created_at INTEGER);",
   "CREATE TABLE equity (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, eth_wei TEXT, cash_usdg REAL, vault_usdg REAL, equity_usdg REAL, at INTEGER);",
   "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, at INTEGER);",
   "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER);",
-  "CREATE TABLE positions (agent_id TEXT, symbol TEXT, token TEXT, raw_balance TEXT, ui_multiplier TEXT, price_usd REAL, price_stale INTEGER, value_usdg REAL, updated_at INTEGER, PRIMARY KEY (agent_id, symbol));",
+  "CREATE TABLE positions (agent_id TEXT, symbol TEXT, token TEXT, raw_balance TEXT, ui_multiplier TEXT, price_usd REAL, price_stale INTEGER, price_source TEXT DEFAULT 'chainlink', value_usdg REAL, updated_at INTEGER, PRIMARY KEY (agent_id, symbol));",
 ].join("\n");
 
 /** The destination, with the same shape a Postgres ledger has. */
@@ -51,7 +51,7 @@ const seedChild = () => {
       `INSERT INTO trades (agent_id, kind, target, amount_usdg, status, created_at) VALUES ('0xagent','swap','0xt',${i},'landed',${100 + i})`,
     );
   }
-  raw.exec("INSERT INTO positions VALUES ('0xagent','PEPE','0xp','1','1',2.0,0,10.0,9)");
+  raw.exec("INSERT INTO positions VALUES ('0xagent','PEPE','0xp','1','1',2.0,0,'curve',10.0,9)");
   raw.exec(
     "INSERT INTO decisions VALUES ('d1','0xagent','strategist',null,null,null,'PEPE','buy',5,'looked cheap',null,'{}',9)",
   );
@@ -64,6 +64,20 @@ const count = async (db: ReturnType<typeof mem>, table: string): Promise<number>
 };
 
 describe("the ledger mirror", () => {
+  it("carries price_source across — a curve mark must not arrive as an oracle", async () => {
+    // The positions SELECT omitted price_source, and the destination schema
+    // defaults it to 'chainlink'. So the weakest mark this system produces — a
+    // bonding-curve price — arrived in the shared ledger wearing an oracle's
+    // name and rendered on the dashboard as oracle-grade. The whole point of the
+    // column is that the three sources are NOT equally good evidence.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const row = (await shared.prepare("SELECT price_source FROM positions").get()) as {
+      price_source: string;
+    };
+    assert.equal(row.price_source, "curve");
+  });
+
   it("copies a child's ledger up", async () => {
     const shared = mem(DEST);
     const r = await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });

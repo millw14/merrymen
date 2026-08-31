@@ -57,6 +57,18 @@ const LOG_TABLES = [
       "tx_hash",
       "status",
       "reject_rule",
+      // THE EVIDENCE COLUMNS. This list was 11 columns and carried none of the
+      // fill or basis data, so everything the ledger knows about WHAT a trade
+      // actually filled at existed only in the child's local sqlite and never
+      // reached the shared database behind the dashboard. A proof that holds
+      // only where nobody can see it is not a proof.
+      "decision_id",
+      "fill_side",
+      "fill_qty_raw",
+      "fill_price_usd",
+      "realized_pnl_usdg",
+      "basis_source",
+      "gas_wei",
       "created_at",
     ],
   },
@@ -228,8 +240,14 @@ export async function mirrorTenant(args: {
 
       const positions = (await child
         .prepare(
+          // price_source IS LOAD-BEARING and was omitted. The shared schema
+          // defaults it to 'chainlink' (store.ts), so a pool mark — or a bonding
+          // curve mark, which is the weakest evidence this system produces —
+          // arrived in Postgres wearing an oracle's name and rendered on the
+          // dashboard as oracle-grade. The whole point of the column is that the
+          // three sources are NOT equally good evidence.
           `SELECT agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, price_stale,
-                  value_usdg, updated_at FROM positions`,
+                  price_source, value_usdg, updated_at FROM positions`,
         )
         .all()) as Record<string, unknown>[];
       await shared.tx(async (db) => {
@@ -240,13 +258,13 @@ export async function mirrorTenant(args: {
         }
         const ins = db.prepare(
           `INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd,
-                                  price_stale, value_usdg, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                  price_stale, price_source, value_usdg, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         );
         for (const p of positions) {
           await ins.run(
             p.agent_id, p.symbol, p.token, p.raw_balance, p.ui_multiplier, p.price_usd,
-            p.price_stale, p.value_usdg, p.updated_at,
+            p.price_stale, p.price_source, p.value_usdg, p.updated_at,
           );
         }
       });
