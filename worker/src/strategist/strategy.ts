@@ -33,6 +33,23 @@ export interface StrategistDecision {
 export interface LlmStrategistConfig {
   driver: ProposalDriver;
   universe: StrategistUniverse;
+  /**
+   * The curve legs available RIGHT NOW, re-read each decision.
+   *
+   * A function rather than a field because `universe` is built once at
+   * strategy construction while a curve leg carries this tick's RESERVES —
+   * the input a slippage floor is derived from. Freezing them at startup
+   * would size every future trade against a curve as it looked when the
+   * worker booted, on a venue whose p99 move over four minutes is 1,546 bps.
+   *
+   * Optional: absent means no curve venue, which is exactly how every
+   * existing caller behaves.
+   */
+  curveLegsNow?: () => {
+    legs: ReadonlyMap<string, import("./proposals").CurveLeg>;
+    tokens: ReadonlyMap<string, `0x${string}`>;
+    slippageBps: number;
+  } | null;
   /** Minimum ms between model calls — decisions are windows, ticks are not. */
   decisionIntervalMs: number;
   /** Injectable clock for tests. */
@@ -119,7 +136,17 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       const { actions, malformed } = parseProposals(raw);
       if (malformed > 0) note("warn", `strategist emitted ${malformed} malformed action(s) — dropped`);
 
-      const { intents, accepted, rejected } = proposalsToIntents(actions, cfg.universe, snap);
+      // Merged HERE, not at construction, so the reserves are this tick's.
+      const curve = cfg.curveLegsNow?.() ?? null;
+      const universeNow: StrategistUniverse = curve
+        ? {
+            ...cfg.universe,
+            curveLegs: curve.legs,
+            curveTokens: curve.tokens,
+            slippageBps: curve.slippageBps,
+          }
+        : cfg.universe;
+      const { intents, accepted, rejected } = proposalsToIntents(actions, universeNow, snap);
 
       // Journal the decision BEFORE the intent leaves for the policy wall: every
       // survivor gets a decisionId stamped onto its intent (so the resulting trade

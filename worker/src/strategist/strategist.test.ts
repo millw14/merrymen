@@ -322,3 +322,147 @@ describe("makeLlmStrategist — decision windows, not per-tick chatter", () => {
     assert.equal(driver.calls, 0);
   });
 });
+
+
+/**
+ * THE VENUE THE AGENT COULD NEVER PROPOSE.
+ *
+ * Every arm of proposalsToIntents constructed `kind: "swap"` against a single
+ * swapRouter over a symbol→token legs map, so no strategy — deterministic or
+ * LLM — could emit a curve trade no matter what else shipped. Meanwhile
+ * memecoin-scout already tells the model that coins launch on the Pons
+ * launchpad, so the model would name a curve coin and this boundary would
+ * answer "not in the tradable universe", forever.
+ */
+describe("the curve venue at the proposal boundary", () => {
+  const CURVE = "0x7777777777777777777777777777777777777777" as const;
+  const ADAPTER = "0x8888888888888888888888888888888888888888" as const;
+  const MEME = "0x9999999999999999999999999999999999999999" as const;
+
+  // A curve with real reserves: 2 units of quote against 3,000,000 tokens.
+  const reserves = {
+    quoteRaw: 2_000_000_000_000_000_000n,
+    tokenRaw: 3_000_000_000_000_000_000_000_000n,
+    quoteDecimals: 18,
+    tokenDecimals: 18,
+    graduationThresholdRaw: 5_000_000_000_000_000_000n,
+  };
+
+  const curveUniverse = (over: Partial<StrategistUniverse> = {}) =>
+    universe({
+      curveLegs: new Map([["PEPE", { curve: CURVE, quoteToken: USDG, adapter: ADAPTER, reserves }]]),
+      curveTokens: new Map([["PEPE", MEME]]),
+      slippageBps: 100,
+      ...over,
+    });
+
+  it("emits a curve-trade for a token that trades on a curve", () => {
+    const r = proposalsToIntents(
+      [{ action: "buy", symbol: "PEPE", sizeUsdg: 10, reason: "launchpad momentum" }],
+      curveUniverse(),
+      snap(),
+    );
+    assert.equal(r.intents.length, 1, r.rejected.join("; "));
+    const i = r.intents[0]!;
+    assert.equal(i.kind, "curve-trade");
+    if (i.kind !== "curve-trade") return;
+    // The TARGET is the adapter, never the curve — the curve is an argument the
+    // wall cannot pin, which is the whole reason the adapter exists.
+    assert.equal(i.target, ADAPTER);
+    assert.equal(i.curve, CURVE);
+    assert.equal(i.assetIn, USDG);
+    assert.equal(i.assetOut, MEME);
+    // And it carries a real floor, derived from the SAME reserves that sized it.
+    assert.ok(i.minAmountOutRaw > 0n, "a curve trade without a floor is unbounded");
+  });
+
+  it("a curve token is NOT rejected as 'not in the tradable universe'", () => {
+    // The specific failure a user would have hit: the pool-leg lookup rejects
+    // anything missing from `legs`, and a curve token is missing from `legs` by
+    // definition — it has no pool. Ordering is the fix and this pins it.
+    const r = proposalsToIntents(
+      [{ action: "buy", symbol: "PEPE", sizeUsdg: 10, reason: "x" }],
+      curveUniverse(),
+      snap(),
+    );
+    assert.equal(r.rejected.length, 0, r.rejected.join("; "));
+  });
+
+  it("refuses a native-quoted curve by name rather than by revert", () => {
+    // The adapter is non-payable and every wall permission carries valueLimit 0,
+    // so this can never work. ~47% of launches are native-quoted.
+    const r = proposalsToIntents(
+      [{ action: "buy", symbol: "PEPE", sizeUsdg: 10, reason: "x" }],
+      curveUniverse({
+        curveLegs: new Map([
+          [
+            "PEPE",
+            {
+              curve: CURVE,
+              quoteToken: "0x0000000000000000000000000000000000000000" as const,
+              adapter: ADAPTER,
+              reserves,
+            },
+          ],
+        ]),
+      }),
+      snap(),
+    );
+    assert.equal(r.intents.length, 0);
+    assert.match(r.rejected.join(" "), /native ETH/);
+  });
+
+  it("refuses a graduated curve — its market has moved to a pool", () => {
+    // Graduation is the TOKEN side emptying, not the quote side filling —
+    // PonsSelfTrade.sol describes exactly this shape: “quote side back at the
+    // virtual seed, token side empty”.
+    const graduated = { ...reserves, tokenRaw: 0n };
+    const r = proposalsToIntents(
+      [{ action: "buy", symbol: "PEPE", sizeUsdg: 10, reason: "x" }],
+      curveUniverse({
+        curveLegs: new Map([["PEPE", { curve: CURVE, quoteToken: USDG, adapter: ADAPTER, reserves: graduated }]]),
+      }),
+      snap(),
+    );
+    assert.equal(r.intents.length, 0);
+    assert.match(r.rejected.join(" "), /graduated/);
+  });
+
+  it("sells the WHOLE holding when the curve mark is unpriceable", () => {
+    // valueUsdg 0 is the normal state for a curve token the price guard refuses,
+    // and the right answer is to sell all of it rather than nothing. Refusing
+    // would strand the position exactly when it most needs an exit.
+    const r = proposalsToIntents(
+      [{ action: "sell", symbol: "PEPE", sizeUsdg: 10, reason: "x" }],
+      curveUniverse(),
+      snap({
+        // A real holding. 500 raw units against a 3e24 token reserve is dust: the
+        // quote rounds to zero and the trade is correctly refused, which would
+        // have made this test pass for the wrong reason.
+        holdings: new Map([["PEPE", { token: MEME, rawBalance: 500_000_000_000_000_000_000n, valueUsdg: 0n, priceStale: false }]]),
+      }),
+    );
+    assert.equal(r.intents.length, 1, r.rejected.join("; "));
+    const i = r.intents[0]!;
+    if (i.kind !== "curve-trade") throw new Error("expected a curve trade");
+    assert.equal(
+      i.amountInRaw,
+      500_000_000_000_000_000_000n,
+      "an unpriceable holding must still be fully sellable",
+    );
+    assert.equal(i.assetIn, MEME);
+    assert.equal(i.assetOut, USDG);
+  });
+
+  it("a universe with no curve legs behaves exactly as before", () => {
+    // The change must be additive — every existing caller and fixture passes no
+    // curve legs at all.
+    const r = proposalsToIntents(
+      [{ action: "buy", symbol: "AAPL", sizeUsdg: 10, reason: "x" }],
+      universe(),
+      snap(),
+    );
+    assert.equal(r.intents.length, 1);
+    assert.equal(r.intents[0]!.kind, "swap");
+  });
+});

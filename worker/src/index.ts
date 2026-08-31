@@ -4323,10 +4323,22 @@ async function main() {
     );
     if (!reserves) return `couldn't read ${symbol}'s curve just now — try again in a moment.`;
     if (curveGraduated(reserves)) {
-      return (
-        `${symbol} has graduated off its bonding curve — its market is a pool now, and the curve adapter ` +
-        `refuses a graduated curve by name. Nothing was sent.`
-      );
+      // GRADUATION IS AN EXIT PROBLEM, not just a refusal.
+      //
+      // The position is real and the venue it was bought on is gone. What must
+      // NOT happen here is a quiet fallback to the swap router: 16 of 17 sampled
+      // graduated tokens had no Uniswap v3 pool at any fee tier (pons-price.ts),
+      // so that builds an operation against a pool that does not exist and burns
+      // gas to find out. A graduated token's market is v4.
+      //
+      // So say which door is open. The v4 adapter is a SEPARATE owner opt-in
+      // (wall.ts) — a grant carrying the Pons adapter need not carry it — and the
+      // difference decides whether this is a re-sign or a sweep.
+      const v4 = grantV4Adapter(active.grant);
+      const base = `${symbol} has graduated off its bonding curve, so the curve adapter refuses it by name and its market has moved to a pool. Nothing was sent.`;
+      return v4
+        ? `${base} Its market is on Uniswap v4 now; routing a graduated position through the v4 adapter isn't wired yet, so for now sweep it with your owner key from /grant.`
+        : `${base} Exiting it needs the Uniswap v4 adapter, which this grant doesn't carry — add it in /settings and re-sign at /grant, or sweep the position with your owner key.`;
     }
 
     // IMPACT, on the thinnest-liquidity venue on the chain. cfg.maxImpactBps has

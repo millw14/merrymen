@@ -31,6 +31,18 @@ export function isCircleStrategy(name: string): boolean {
 }
 
 export interface StrategyBuildOpts {
+  /**
+   * The bonding-curve legs available right now, re-read per decision.
+   *
+   * Supplied by the host (the worker tick), because a curve leg carries THIS
+   * TICK’S reserves — the input a slippage floor is derived from. Optional, so
+   * a host that does not trade curves is unchanged.
+   */
+  curveLegsNow?: () => {
+    legs: ReadonlyMap<string, import("../strategist/proposals").CurveLeg>;
+    tokens: ReadonlyMap<string, `0x${string}`>;
+    slippageBps: number;
+  } | null;
   swapRouter: `0x${string}`;
   usdg6: (v: number) => bigint;
   basketSymbols: string[];
@@ -173,6 +185,9 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
         maxPerActionUsdg: opts.usdg6(opts.llm.maxActionUsdg),
         maxActionsPerTick: 4,
       },
+      // The curve venue, re-read per decision. Undefined when the host does
+      // not supply one, which keeps every existing strategy identical.
+      curveLegsNow: opts.curveLegsNow,
       decisionIntervalMs: opts.llm.intervalMin * 60_000,
       onNote: opts.onNote,
       onDecision: opts.llm.onDecision,
