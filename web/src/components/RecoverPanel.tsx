@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { listSavedWallets } from "@/lib/session";
+import { planFromBrowser, sweepFromBrowser, redact, type BrowserWallet } from "@/lib/recover-client";
 
 /**
  * "Get my money out" — the one-click counterpart to `merrymen recover`.
@@ -27,6 +29,10 @@ interface Ctx {
   /** Labels whose balance could not be READ. Never conflate with "not held". */
   unreadable?: string[];
   error?: string;
+  /** The server's explanation. Was returned, parsed, and never rendered. */
+  detail?: string;
+  /** Hosted: the server cannot sweep, the browser must. */
+  clientSide?: boolean;
 }
 interface PlanRes {
   smartAccount: string;
@@ -97,6 +103,95 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
     setLoadingCtx(false);
   }
 
+  /**
+   * HOSTED: the server holds no owner key and says so. Do the work here.
+   *
+   * The panel used to fetch that refusal, drop it on the floor, and fall
+   * through to a paste-a-key form whose button POSTed to a route that 403s
+   * before it even parses the body. A user with money in the account saw an
+   * empty form and one red line.
+   */
+  function browserWallet(): BrowserWallet | null {
+    const key = ownerKey.trim();
+    if (!isKey(key)) return null;
+    // Prefer the stored wallet, so grantTokens (and therefore the sweep list)
+    // comes from what the wall actually covers rather than the builtin floor.
+    const saved = (() => {
+      try {
+        return listSavedWallets().find(
+          (w) => (w.ownerKey ?? "").toLowerCase() === key.toLowerCase(),
+        );
+      } catch {
+        return undefined;
+      }
+    })();
+    if (!saved) return null;
+    return {
+      smartAccount: saved.smartAccount,
+      ownerKey: key as `0x${string}`,
+      chainId: saved.chainId ?? chainId,
+      grantTokens: (saved as { grantTokens?: string[] }).grantTokens,
+    };
+  }
+
+  async function checkInBrowser() {
+    setError(null);
+    const w = browserWallet();
+    if (!w) {
+      setError(
+        "this browser doesn't hold that wallet, so it can't withdraw here. Use `merrymen recover` on the machine with your key.",
+      );
+      return;
+    }
+    setBusy("checking");
+    try {
+      const b = await planFromBrowser(w);
+      setPlan({
+        smartAccount: b.smartAccount,
+        chainId: w.chainId,
+        balances: b.balances.map((x) => ({ symbol: x.symbol, amount: x.ui })),
+      } as unknown as PlanRes);
+      // The one thing that stops a sweep dead, said BEFORE they press it.
+      if (b.needsGas) {
+        setError(
+          `this account has no ETH, and a withdrawal is an on-chain operation it has to pay for. Send a little ETH to ${b.smartAccount} and try again — a few dollars is plenty.`,
+        );
+      }
+    } catch (e) {
+      setError(redact(e, w.ownerKey));
+    }
+    setBusy(null);
+  }
+
+  async function sweepInBrowser() {
+    setError(null);
+    if (!isAddr(to)) {
+      setError("enter a valid destination address (0x + 40 hex).");
+      return;
+    }
+    const w = browserWallet();
+    if (!w) {
+      setError("this browser doesn't hold that wallet.");
+      return;
+    }
+    const list = balances.map((b) => `${b.amount} ${b.symbol}`).join(", ") || "the balance";
+    if (
+      !window.confirm(
+        `Sweep ${list} to ${to.trim()}?\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.`,
+      )
+    ) {
+      return;
+    }
+    setBusy("sweeping");
+    try {
+      const r = await sweepFromBrowser(w, to.trim() as `0x${string}`);
+      setResult(r as unknown as SweepRes);
+    } catch (e) {
+      setError(redact(e, w.ownerKey));
+    }
+    setBusy(null);
+  }
+
   async function checkPasted() {
     setError(null);
     if (!isKey(ownerKey)) {
@@ -118,6 +213,10 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
     }
     setBusy(null);
   }
+
+  // HOSTED: the server told us it cannot sweep. Do it here instead of showing
+  // its refusal as though the user had done something wrong.
+  const clientSide = ctx?.clientSide === true;
 
   // Balances/addresses come from the pasted-key plan if present, else the GET ctx.
   const balances = plan?.balances ?? ctx?.balances ?? [];
@@ -228,8 +327,9 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
           {ctx && !ctx.hasStoredKey && !plan && (
             <>
               <p className="recover-sub">
-                No active agent on this machine, so paste the <b>owner key</b> you backed up when you
-                created the wallet. It stays on your machine — it&apos;s used once to sign the sweep.
+                {clientSide
+                  ? "Withdrawing happens right here in your browser — your owner key never leaves this device. It signs the withdrawal locally; this site only relays it to the network."
+                  : "No active agent on this machine, so paste the owner key you backed up when you created the wallet. It stays on your machine — it is used once to sign the sweep."}
               </p>
               <input
                 className="recover-input mono"
@@ -247,7 +347,7 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
                   <input type="radio" checked={chainId === TESTNET} onChange={() => setChainId(TESTNET)} /> testnet · 46630
                 </label>
               </div>
-              <button className="recover-btn" onClick={() => void checkPasted()} disabled={busy !== null}>
+              <button className="recover-btn" onClick={() => void (clientSide ? checkInBrowser() : checkPasted())} disabled={busy !== null}>
                 {busy === "checking" ? "reading the wallet…" : "check what's in it"}
               </button>
             </>
@@ -307,7 +407,7 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
                   />
                   <button
                     className="recover-btn go"
-                    onClick={() => void sweep()}
+                    onClick={() => void (clientSide ? sweepInBrowser() : sweep())}
                     disabled={busy !== null || !hasBundler || !isAddr(to)}
                   >
                     {busy === "sweeping" ? "signing & sending (up to a minute)…" : "recover funds →"}

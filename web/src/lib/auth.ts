@@ -109,6 +109,27 @@ function checkNonce(nonce: string, origin: string, now: number): { ok: true } | 
   return { ok: true };
 }
 
+/**
+ * Validate a challenge nonce and BURN it, for a caller that signs its own
+ * message text rather than the sign-in one.
+ *
+ * Recovery needs this: its challenge says something different (it is about
+ * withdrawing, not signing in) but the nonce discipline must be identical, or a
+ * captured signature becomes a permanent bearer credential. Exported rather than
+ * duplicated so there is exactly ONE definition of what makes a nonce valid —
+ * the origin binding, the HMAC, the expiry and the single-use set.
+ */
+export function consumeChallengeNonce(
+  nonce: string,
+  origin: string,
+  now = Date.now(),
+): { ok: true } | { ok: false; why: string } {
+  const gate = checkNonce(nonce, origin, now);
+  if (!gate.ok) return gate;
+  usedNonces.add(nonce);
+  return { ok: true };
+}
+
 // ── verify a signed challenge → tenant address ───────────────────────────────
 
 export type VerifyResult =
