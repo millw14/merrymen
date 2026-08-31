@@ -111,7 +111,29 @@ export function loadGrant(): Grant | null {
   }
 }
 
+/**
+ * Stop using this grant — WITHOUT destroying the only key that can recover it.
+ *
+ * This was a bare `removeItem`, and hosted that is irreversible fund loss.
+ * `mintGrant` omits `demoOwnerPrivateKey` from the copy it sends the server
+ * (see the hostedAs branch below), precisely so the server is never custodian
+ * of an owner key — which means this browser's localStorage holds the ONLY
+ * copy in existence. Three call sites removed it: the grant page's discard,
+ * BandSection, and the kill switch, whose own comment reads “server
+ * unreachable — still destroy the local key below”.
+ *
+ * So pressing KILL on the hosted service permanently destroyed the ability to
+ * ever withdraw, for anyone, and the UI said only “grant destroyed”. The
+ * funds stay on-chain and become unreachable by construction.
+ *
+ * ARCHIVE FIRST, exactly as minting already does. The helper existed and this
+ * path simply never called it. Killing an agent is about stopping it from
+ * TRADING; it was never meant to be about forfeiting the balance, and
+ * listSavedWallets already surfaces archived wallets so the key stays
+ * reachable from /grant and from the dashboard's recovery panel.
+ */
 export function clearGrant(): void {
+  archivePreviousGrant();
   localStorage.removeItem(STORAGE_KEY);
 }
 

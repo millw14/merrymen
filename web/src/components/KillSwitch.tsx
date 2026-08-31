@@ -21,7 +21,9 @@ export function KillSwitch() {
     try {
       await fetch("/api/grants", { method: "DELETE" });
     } catch {
-      // server unreachable — still destroy the local key below
+      // Server unreachable — still stand the agent down locally. The local
+      // grant is ARCHIVED rather than destroyed (see clearGrant): killing is
+      // about stopping the agent trading, not about forfeiting the balance.
     }
     clearGrant();
     setState("done");
@@ -34,7 +36,12 @@ export function KillSwitch() {
         <button className="killall" disabled>
           ✓ all agents killed
         </button>
-        <div className="killall-note">grant destroyed · worker halts on its next tick</div>
+        {/* Says what actually happened to the money, because the previous
+            wording implied the wallet was gone and the truth is the opposite. */}
+        <div className="killall-note">
+          grant revoked · worker halts on its next tick · your recovery key is kept, so you
+          can still withdraw
+        </div>
       </>
     );
   }
