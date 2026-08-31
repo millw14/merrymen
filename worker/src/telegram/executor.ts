@@ -48,6 +48,9 @@ export interface CommandDeps {
   grantHasTransfer: boolean;
   reads: {
     status(): string;
+    /** `/wallet` — leads with the account address. Optional so existing hosts and
+     *  fixtures that predate it keep the old static signpost. */
+    wallet?(): string;
     positions(): string;
     /** Liquidity depth for one ticker — a chain read, so always async. */
     depth(symbol: string): Promise<string>;
@@ -137,7 +140,11 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     // Static signpost — no state, no gating: it only tells you where the
     // dashboard is. Safe to answer even unlinked/read-only.
     case "wallet":
-      return WALLET_TEXT;
+      // Was the static signpost. It now leads with the account ADDRESS, because
+      // the question people actually arrive with is "where is my money", and the
+      // answer to that is a string they can compare against what MetaMask showed
+      // them — not a paragraph about smart accounts.
+      return deps.reads.wallet ? deps.reads.wallet() : WALLET_TEXT;
     case "status":
       return deps.reads.status();
     case "positions":

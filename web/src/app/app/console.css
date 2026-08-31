@@ -476,6 +476,48 @@
   font-family: var(--sans); font-size: 13px; line-height: 1.5;
   color: var(--text-dim); margin: 4px 0 0;
 }
+/* The account address — permanent, and one tap from the clipboard. */
+.acct { margin-bottom: 16px; }
+.acct-lab {
+  font-family: var(--sans);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.acct-copy {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+.acct-v {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.acct-i {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.acct-note {
+  font-family: var(--sans);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin: 8px 2px 0;
+}
+
 /* The prove-it button, sitting between the status line and the numbers. */
 .selftest { margin-bottom: 16px; }
 .st-btn {

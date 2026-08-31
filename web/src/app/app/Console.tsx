@@ -420,6 +420,12 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                   true. Any further down and the person who doubts it never
                   scrolls that far. */}
               <SelftestButton />
+              {/* Under the status line and the prove-it button: the three things
+                  someone opens this page to find are what it is doing, whether it
+                  works, and where their money is. */}
+              {status.grant?.smartAccount && (
+                <AccountAddress address={status.grant.smartAccount} />
+              )}
               <section className="hero">
                 <div className="equity">
                   <div className="kick">Total equity</div>
@@ -824,6 +830,55 @@ function SelftestButton() {
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * YOUR ACCOUNT ADDRESS, ALWAYS ON SCREEN AND ALWAYS ONE TAP FROM THE CLIPBOARD.
+ *
+ * It used to appear only in the onboarding FUND step and then vanish for good.
+ * So an owner who finished setup and later wanted to check where their money
+ * was had nowhere on the dashboard to look — and the place they went instead
+ * was MetaMask, which shows a DIFFERENT address and an empty balance.
+ *
+ * That is not hypothetical. A user imported his owner key, saw nothing, and
+ * said: “I don't see my money… which is not the wallet I've sent tokens to.”
+ * Every fact in that sentence was right. He was holding two addresses and
+ * nothing on any screen put them side by side and said which was which.
+ *
+ * The explanation already existed on /grant, in the recovery panel and in the
+ * README. It did not help, because by the time somebody is frightened about
+ * their money they are not reading a paragraph about ERC-4337 — they are trying
+ * to compare two strings. So this shows the string, labels what it is, and says
+ * in one line what MetaMask will show instead.
+ */
+function AccountAddress({ address }: { address: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <section className="acct">
+      <div className="acct-lab">Your agent&rsquo;s account &mdash; send funds here</div>
+      <button
+        type="button"
+        className="acct-copy"
+        onClick={async () => {
+          try {
+            await navigator.clipboard.writeText(address);
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1400);
+          } catch {
+            /* clipboard blocked — the address is still selectable */
+          }
+        }}
+      >
+        <span className="acct-v">{address}</span>
+        <span className="acct-i">{copied ? "copied ✓" : "copy"}</span>
+      </button>
+      <p className="acct-note">
+        This is a smart account, not a MetaMask wallet. Importing your owner key into
+        MetaMask shows a <b>different</b> address with nothing in it &mdash; that is normal, and
+        your money is here. To move funds out, use <b>recover</b> rather than MetaMask.
+      </p>
+    </section>
   );
 }
 
