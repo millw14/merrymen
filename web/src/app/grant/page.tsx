@@ -971,14 +971,25 @@ export default function GrantPage() {
                 the worker — the process a compromise owns. Saying so costs a sentence and is the
                 difference between a promise and a claim.
               */}
-              <b>What the chain itself enforces:</b> the per-trade cap, the number of trades, the
-              expiry, and the fact that value can only land back in your own account. Those the
-              agent cannot exceed no matter what happens to the software. The{" "}
-              <b>daily total</b> and the <b>drawdown breaker</b> are counters kept by merrymen on
-              your own machine, so an agent that had been tampered with could ignore them and still
-              reach <b>{caps.perTradeUsdg * caps.maxOpsPerDay} USDG</b> in a day before the chain
-              stopped it. If that is the number that matters to you, lower the per-trade cap or the
-              trades-per-day — not the daily figure.
+              <b>What the chain itself enforces:</b> the per-trade cap, the expiry, and the fact
+              that value can only land back in your own account. Those the agent cannot exceed no
+              matter what happens to the software. The <b>daily total</b>, the{" "}
+              <b>drawdown breaker</b> and the <b>trades-per-day</b> count are counters kept by
+              merrymen, so an agent that had been tampered with could ignore all three.
+              {/*
+                Trades-per-day was on the chain-enforced list until 2026-08-30. It
+                rested on ZeroDev's rate-limit policy, and eth_getCode shows that
+                contract has no bytecode on Robinhood Chain — mainnet or testnet —
+                while the timestamp and call policies both do. So the honest
+                chain-side ceiling is per-trade size until the key expires, and the
+                lever that shortens it is the expiry, not the op count.
+
+                Corrected in the README, WallPanel and Console at the time; this
+                copy was missed, which left the page most people read still
+                claiming the stronger version.
+              */}{" "}
+              The lever that bounds a compromised agent is therefore the{" "}
+              <b>per-trade cap</b> and a <b>short expiry</b> — not the daily figure.
             </div>
 
             {mode === "create" ? (
@@ -1115,13 +1126,27 @@ export default function GrantPage() {
                   ) : (
                     <><GI d="clock" size={13} /> <b>Your agent&apos;s key expires in {Math.max(1, Math.ceil(secsLeft / 86_400))} day{secsLeft > 86_400 ? "s" : ""}.</b></>
                   )}{" "}
-                  Renewing is free and instant — same wallet, same funds, fresh key under the same
-                  caps. Nothing is sent on-chain. The new key is signed against{" "}
-                  <b>today&apos;s wall</b>, so its permissions can differ from the old one&apos;s —
-                  the &ldquo;what this key carries&rdquo; panel lists them, and a key still holding
-                  the old Uniswap v4 pair loses it here, which is the point.
-                  <button className="grant-btn" style={{ marginTop: 10, width: "100%" }} onClick={() => void renewKey()} disabled={renewing}>
-                    {renewing ? "renewing…" : "renew the key (free)"}
+                  Re-signing is free and instant — same wallet, same funds, nothing sent
+                  on-chain. The new key is signed against <b>today&apos;s wall</b>, so its
+                  permissions can differ from the old one&apos;s.
+                  {/*
+                    SCROLLS, does not sign. This button used to call renewKey()
+                    directly with `disabled={renewing}` as its only guard — which
+                    became a hole the moment the panel below gained a chain move:
+                    tick "move to real money" down there, scroll up, press this,
+                    and you re-signed onto mainnet with no acknowledgement and no
+                    change diff, under a banner promising "the same caps".
+
+                    Duplicating the guard would work until the next guard is added
+                    to one copy and not the other. One signing control, one set of
+                    conditions, and everything else points at it.
+                  */}
+                  <button
+                    className="grant-btn"
+                    style={{ marginTop: 10, width: "100%" }}
+                    onClick={() => document.getElementById("resign")?.scrollIntoView({ behavior: "smooth", block: "center" })}
+                  >
+                    re-sign the key (free) →
                   </button>
                 </div>
               );
@@ -1226,14 +1251,24 @@ export default function GrantPage() {
               <div className="fund-ready mono">
                 {grantIsTestnet ? (
                   <>
-                    gas landed — run <b>merrymen start</b> and the band rides its <b>paper book</b>:
-                    live prices, simulated fills. testnet has no trading venues, so no real swap can
-                    route here, and the USDG line above stays blank whatever you send.
+                    gas landed —{" "}
+                    {session?.hosted ? (
+                      <>your band is <b>already riding</b></>
+                    ) : (
+                      <>run <b>merrymen start</b> and the band rides</>
+                    )}{" "}
+                    its <b>paper book</b>: live prices, simulated fills. testnet has no trading
+                    venues, so no real swap can route here, and the USDG line above stays blank
+                    whatever you send.
                   </>
                 ) : usdgFunded ? (
                   <>
-                    funded — run <b>merrymen start</b> and your band rides. balances refresh here
-                    every few seconds.
+                    {/* Hosted has nothing to start: the orchestrator spawns a worker
+                        per tenant on its own clock. Telling a hosted owner to run a
+                        CLI they never installed is the first instruction the product
+                        gives them, and it does not apply. */}
+                    funded — {session?.hosted ? <>your band is <b>already riding</b></> : <>run <b>merrymen start</b> and your band rides</>}. balances
+                    refresh here every few seconds.
                   </>
                 ) : (
                   <>
@@ -1336,7 +1371,7 @@ export default function GrantPage() {
               a re-sign that silently keeps the old numbers would send owners
               back through the side door for the other half of the job.
             */}
-            <div className="grant-summary" style={{ marginTop: 14 }}>
+            <div id="resign" className="grant-summary" style={{ marginTop: 14 }}>
               <b>Re-sign this key.</b> Free, instant, and nothing is sent on-chain — it is a
               signature, not a transaction. <b>Same wallet, same address, same funds:</b> your
               balances are held by the account, not by the key, so they do not move.
