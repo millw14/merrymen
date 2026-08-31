@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { listSavedWallets } from "@/lib/session";
+import { isAddr, normalizeAddr } from "@/lib/address";
 import { planFromBrowser, sweepFromBrowser, redact, type BrowserWallet } from "@/lib/recover-client";
 
 /**
@@ -59,7 +60,7 @@ interface SweepRes {
 }
 
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
-const isAddr = (v: string) => /^0x[0-9a-fA-F]{40}$/.test(v.trim());
+
 const isKey = (v: string) => /^0x[0-9a-fA-F]{64}$/.test(v.trim());
 const MAINNET = 4663;
 const TESTNET = 46630;
@@ -180,14 +181,14 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
     const list = balances.map((b) => `${b.amount} ${b.symbol}`).join(", ") || "the balance";
     if (
       !window.confirm(
-        `Sweep ${list} to ${to.trim()}?\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.`,
+        `Sweep ${list} to ${normalizeAddr(to)}?\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.`,
       )
     ) {
       return;
     }
     setBusy("sweeping");
     try {
-      const r = await sweepFromBrowser(w, to.trim() as `0x${string}`);
+      const r = await sweepFromBrowser(w, normalizeAddr(to) as `0x${string}`);
       setResult(r as unknown as SweepRes);
     } catch (e) {
       setError(redact(e, w.ownerKey));
@@ -251,12 +252,12 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
       return;
     }
     const list = balances.map((b) => `${b.amount} ${b.symbol}`).join(", ") || "the balance";
-    if (!window.confirm(`Sweep ${list} to ${to.trim()}?\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.`)) {
+    if (!window.confirm(`Sweep ${list} to ${normalizeAddr(to)}?\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.`)) {
       return;
     }
     setBusy("sweeping");
     try {
-      const body: Record<string, unknown> = { mode: "sweep", to: to.trim() };
+      const body: Record<string, unknown> = { mode: "sweep", to: normalizeAddr(to) };
       if (plan) {
         body.ownerKey = ownerKey.trim();
         body.chainId = chainId;
@@ -416,6 +417,17 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
                     onChange={(e) => setTo(e.target.value)}
                     autoComplete="off"
                   />
+                  {/* A DISABLED BUTTON THAT EXPLAINS ITSELF.
+                      Silence here cost a user his whole attempt: he had done
+                      everything right and the only feedback was a button that
+                      would not press. */}
+                  {to.trim().length > 0 && !isAddr(to) && (
+                    <p className="recover-warn">
+                      That doesn&rsquo;t look like an address yet — it should be 40 characters of
+                      hex, with or without the <code>0x</code>. Paste the receiving address from
+                      your wallet or exchange.
+                    </p>
+                  )}
                   <button
                     className="recover-btn go"
                     onClick={() => void (clientSide ? sweepInBrowser() : sweep())}
