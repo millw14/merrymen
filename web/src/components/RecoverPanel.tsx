@@ -58,12 +58,24 @@ const isKey = (v: string) => /^0x[0-9a-fA-F]{64}$/.test(v.trim());
 const MAINNET = 4663;
 const TESTNET = 46630;
 
-export function RecoverPanel() {
+/**
+ * @param initialOwnerKey The key this browser ALREADY holds, when it holds one.
+ *
+ * Asking a person to paste a key the page can read from its own localStorage is
+ * not security, it is friction — and friction on the exit is the worst place to
+ * put it. A user who could not find this flow imported his key into MetaMask
+ * instead, saw an empty address, and concluded his money was gone.
+ *
+ * Left optional and defaulting to empty so /home keeps working exactly as it
+ * did: that page is reachable while signed out and on a machine that never had
+ * the wallet, which is the case the paste field exists for.
+ */
+export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: string } = {}) {
   const [open, setOpen] = useState(false);
   const [ctx, setCtx] = useState<Ctx | null>(null);
   const [loadingCtx, setLoadingCtx] = useState(false);
 
-  const [ownerKey, setOwnerKey] = useState("");
+  const [ownerKey, setOwnerKey] = useState(initialOwnerKey);
   const [chainId, setChainId] = useState<number>(MAINNET);
   const [plan, setPlan] = useState<PlanRes | null>(null);
 

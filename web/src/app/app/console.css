@@ -518,6 +518,20 @@
   margin: 8px 2px 0;
 }
 
+/* Getting your money out, and taking your key with you. */
+.ways { margin-bottom: 16px; display: flex; flex-direction: column; gap: 10px; }
+.ways-key { display: flex; flex-direction: column; gap: 8px; }
+.ways-k {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  overflow-wrap: anywhere;
+}
+
 /* The prove-it button, sitting between the status line and the numbers. */
 .selftest { margin-bottom: 16px; }
 .st-btn {

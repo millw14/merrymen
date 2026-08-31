@@ -20,6 +20,8 @@ import type { AgentStatus } from "@/app/api/grants/route";
 import Onboarding, { type OnboardStep } from "./Onboarding";
 import { LogoMark } from "@/components/Logo";
 import { mascotMood } from "@/lib/mascot";
+import { RecoverPanel } from "@/components/RecoverPanel";
+import { listSavedWallets } from "@/lib/session";
 
 const usd = (n: number) =>
   n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -425,6 +427,9 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                   works, and where their money is. */}
               {status.grant?.smartAccount && (
                 <AccountAddress address={status.grant.smartAccount} />
+              )}
+              {status.grant?.smartAccount && (
+                <WaysOut smartAccount={status.grant.smartAccount} />
               )}
               <section className="hero">
                 <div className="equity">
@@ -878,6 +883,88 @@ function AccountAddress({ address }: { address: string }) {
         MetaMask shows a <b>different</b> address with nothing in it &mdash; that is normal, and
         your money is here. To move funds out, use <b>recover</b> rather than MetaMask.
       </p>
+    </section>
+  );
+}
+
+/**
+ * THE TWO WAYS OUT, on the page people actually live on.
+ *
+ * Both of these already existed and neither was reachable from here. Sweeping
+ * lived on /home behind a field asking you to paste a key this browser already
+ * holds; the key itself lived on /grant behind a saved-wallets list. So the
+ * dashboard could tell you your money was safe and offer you no way to touch it.
+ *
+ * What that produced: an owner who wanted his funds out imported his owner key
+ * into MetaMask, saw the key's own empty address, and concluded the money was
+ * gone. Every step of that was reasonable. The exit was three pages away.
+ *
+ * Read entirely from localStorage (listSavedWallets) — no server, no session —
+ * so it works even when the hosted side is having a bad day, which is exactly
+ * when somebody wants their money out.
+ */
+function WaysOut({ smartAccount }: { smartAccount: string }) {
+  const [wallet, setWallet] = useState<{ ownerKey?: string } | null>(null);
+  const [showKey, setShowKey] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    try {
+      const saved = listSavedWallets();
+      setWallet(
+        saved.find((w) => w.smartAccount.toLowerCase() === smartAccount.toLowerCase()) ?? null,
+      );
+    } catch {
+      // A browser that never held this wallet is the normal case on a second
+      // device, not an error. The sweep panel below still works from a paste.
+      setWallet(null);
+    }
+  }, [smartAccount]);
+
+  const key = wallet?.ownerKey;
+  return (
+    <section className="ways">
+      {/* Prefilled when this browser has the key, so nobody is asked to paste
+          something the page can already read. */}
+      <RecoverPanel initialOwnerKey={key ?? ""} />
+
+      {key && (
+        <div className="ways-key">
+          <button
+            type="button"
+            className="st-btn"
+            onClick={() => setShowKey((v) => !v)}
+          >
+            {showKey ? "hide my recovery key" : "show my recovery key"}
+          </button>
+          {showKey && (
+            <>
+              <div className="ways-k mono">{key}</div>
+              <button
+                type="button"
+                className="st-btn"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(key);
+                    setCopied(true);
+                    window.setTimeout(() => setCopied(false), 1400);
+                  } catch {
+                    /* clipboard blocked — the key is still selectable */
+                  }
+                }}
+              >
+                {copied ? "copied ✓" : "copy key"}
+              </button>
+              <p className="st-note st-bad">
+                This key controls the account and everything in it. Anyone who reads it can
+                take the funds. Save it somewhere private, and never paste it into a site
+                that asks for it. Importing it into MetaMask shows a different, empty
+                address &mdash; that is the key&rsquo;s own address, not your account.
+              </p>
+            </>
+          )}
+        </div>
+      )}
     </section>
   );
 }
