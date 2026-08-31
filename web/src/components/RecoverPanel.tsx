@@ -226,7 +226,15 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
   const smartAccount = plan?.smartAccount ?? ctx?.smartAccount;
   const explorer = plan?.explorer ?? ctx?.explorer;
   const activeChain = plan?.chainId ?? ctx?.chainId ?? chainId;
-  const hasBundler = ctx?.hasBundler ?? false;
+  // CAN THIS WITHDRAWAL BE SUBMITTED AT ALL?
+  //
+  // Hosted, the answer is always yes: the relay holds the house bundler key, and
+  // that is the entire reason it exists. `ctx.hasBundler` describes the SERVER’s
+  // own key, which hosted is deliberately absent — so reading it alone told a
+  // hosted owner to add a Pimlico key in settings, a field the hosted settings
+  // route silently strips, and then disabled the button so they could not proceed
+  // even if they ignored the advice. A dead end dressed as an instruction.
+  const canSubmit = clientSide || (ctx?.hasBundler ?? false);
   // Do we know what's in the account yet? (stored-key ctx, or a checked paste.)
   const known = !!(plan || (ctx?.hasStoredKey && ctx));
   // "Empty" is a CLAIM, and it may only be made when everything was actually
@@ -393,7 +401,7 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
                     ))}
                   </div>
 
-                  {!hasBundler && (
+                  {!canSubmit && (
                     <p className="recover-warn">
                       Recovery sends an on-chain transaction, so it needs your bundler key. Add a free
                       Pimlico key in <a href="/settings">settings</a>, then come back.
@@ -411,7 +419,7 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
                   <button
                     className="recover-btn go"
                     onClick={() => void (clientSide ? sweepInBrowser() : sweep())}
-                    disabled={busy !== null || !hasBundler || !isAddr(to)}
+                    disabled={busy !== null || !canSubmit || !isAddr(to)}
                   >
                     {busy === "sweeping" ? "signing & sending (up to a minute)…" : "recover funds →"}
                   </button>
