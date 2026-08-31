@@ -415,6 +415,11 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                   lastError: (feed?.events ?? []).find((e) => e.level === "err")?.message ?? null,
                 }}
               />
+              {/* Directly under the status line on purpose: the sentence says
+                  what it is doing, and this is how you check that sentence is
+                  true. Any further down and the person who doubts it never
+                  scrolls that far. */}
+              <SelftestButton />
               <section className="hero">
                 <div className="equity">
                   <div className="kick">Total equity</div>
@@ -603,6 +608,17 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                     <div className="cards">
                       {/* Said ONCE, above the grid — see DiscoveriesPayload.chain. */}
                       {chainGap(disc) && <div className="readfail">{chainGap(disc)}</div>}
+                      {/* THE ANSWER TO “why has it not bought anything”.
+                          Without this the page shows a wall of live coins and a busy
+                          agent and lets the owner conclude the agent is broken. It is
+                          not: there is nothing here it is able to buy. Say so. */}
+                      {disc.fresh.every((f) => (f.progressBps ?? 0) < 10_000) && (
+                        <div className="readfail">
+                          Your agent can&rsquo;t buy any of these yet — every one is still on its
+                          launch curve, and merrymen trades through Uniswap pools. There is
+                          nothing to change in settings; they become buyable if one graduates.
+                        </div>
+                      )}
                       {disc.fresh.map((f) => (
                         <FreshCard key={f.token} f={f} reachable={reach.has(f.token.toLowerCase())} />
                       ))}
@@ -636,6 +652,13 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                           {disc.verdictsWhy === "no-model"
                             ? "No model is wired up here, so nothing below has been looked at — these are the market’s numbers, not my opinion."
                             : "I tried to weigh these and the model turned me down, so no verdicts below. It retries on its own."}
+                        </div>
+                      )}
+                      {disc.rows.every((r) => r.onCurve) && (
+                        <div className="readfail">
+                          Your agent can&rsquo;t buy any of these yet — every one is still on its
+                          launch curve, so there is no pool to trade against. They become
+                          buyable if one graduates.
                         </div>
                       )}
                       {disc.rows.map((r) => (
@@ -706,6 +729,101 @@ function StatusBanner({ s }: { s: AgentSnapshot }) {
         <p className="sl-next">{line.next}</p>
       </div>
     </section>
+  );
+}
+
+/**
+ * PROVE IT CAN ACT — one real operation, for a fraction of a cent.
+ *
+ * The probe sends a policy-legal no-op through the whole pipeline: the bundler
+ * handshake, the session-key signature, the account contract's call policy, the
+ * EntryPoint prefund, account deployment, the receipt, the ledger row. It is
+ * the difference between an agent that LOOKS armed and one that has actually
+ * put a signed operation on-chain.
+ *
+ * Only reachable from a terminal until now (`merrymen selftest`), and hosted
+ * users have no terminal — which is how ten agents sat unable to arm for hours
+ * with nobody able to check.
+ *
+ * Three states, not two: queued and running look identical to somebody watching
+ * a spinner, and mean different things when it stops changing. Queued-forever is
+ * a worker that is not draining; running-forever is a probe that hung.
+ */
+function SelftestButton() {
+  const [state, setState] = useState<"idle" | "queued" | "running" | "done">("idle");
+  const [result, setResult] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Poll only while something is in flight. A dashboard that polls forever for
+  // a button nobody pressed is a cost with no reader.
+  useEffect(() => {
+    if (state !== "queued" && state !== "running") return;
+    let alive = true;
+    const tick = () =>
+      fetch("/api/selftest", { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (!alive || !d) return;
+          if (d.state === "done") {
+            setResult(d.result ?? "finished, with nothing to say");
+            setState("done");
+          } else if (d.state === "running" || d.state === "queued") {
+            setState(d.state);
+          }
+        })
+        .catch(() => {});
+    const t = setInterval(tick, 4_000);
+    tick();
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [state]);
+
+  async function run() {
+    setErr(null);
+    setResult(null);
+    setState("queued");
+    try {
+      const r = await fetch("/api/selftest", { method: "POST" });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setErr(d.error ?? "couldn’t queue it");
+        setState("idle");
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setState("idle");
+    }
+  }
+
+  const busy = state === "queued" || state === "running";
+  const passed = result?.startsWith("PASSED") ?? false;
+
+  return (
+    <div className="selftest">
+      <button className="st-btn" onClick={() => void run()} disabled={busy}>
+        {state === "queued"
+          ? "queued — waiting for your agent to pick it up…"
+          : state === "running"
+            ? "running one real operation…"
+            : "check it can actually trade"}
+      </button>
+      {state === "idle" && !err && !result && (
+        <p className="st-note">
+          Sends one tiny real operation — a fraction of a cent of gas — to prove the whole
+          path works before you trust it with more.
+        </p>
+      )}
+      {err && <p className="st-note st-bad">{err}</p>}
+      {result && (
+        <p className={`st-note ${passed ? "st-good" : "st-bad"}`}>
+          {passed
+            ? "It works. A signed operation reached the chain and the ledger recorded it. (This proves the approve step, not the swap itself.)"
+            : result}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -966,7 +1084,34 @@ function CoinArt({ logo, symbol }: { logo: string; symbol: string }) {
 }
 
 /** Whether the agent could act on this coin at all, as a badge. */
-function Reach({ ok }: { ok: boolean }) {
+/**
+ * CAN THE AGENT ACTUALLY BUY THIS COIN.
+ *
+ * There are TWO different noes here and they used to render as one. A coin
+ * missing from the grant says "not added", and the fix is real: add it, re-sign,
+ * done. A coin still on its bonding curve has NO POOL, and merrymen trades one
+ * venue -- Uniswap v3 `exactInputSingle`. `curve-trade` exists as a type in
+ * policy.ts and nothing in this repo has ever produced one, so there is no code
+ * path that buys a curve token at any size, under any grant.
+ *
+ * Showing "not added" on a curve coin therefore promised a fix that does not
+ * work: the owner adds the token, pays for a re-sign, and the agent still cannot
+ * touch it. That is the exact shape of failure the rest of this codebase keeps
+ * refusing -- a screen that looks like it is telling you what to do while being
+ * wrong about what would happen. So the curve case is checked FIRST and says the
+ * true thing, which is that waiting is the only option.
+ */
+function Reach({ ok, onCurve }: { ok: boolean; onCurve: boolean }) {
+  if (onCurve) {
+    return (
+      <span
+        className="badge out"
+        title="This coin still trades on its launch curve, so there is no pool to trade against. merrymen buys through Uniswap only. Adding it to the grant will not help until it graduates."
+      >
+        no pool yet
+      </span>
+    );
+  }
   return ok ? (
     <span className="badge in" title="This coin is named in the signature the agent holds — it can trade it.">
       in range
@@ -1001,7 +1146,7 @@ function FreshCard({ f, reachable }: { f: FreshRow; reachable: boolean }) {
             <span>{f.trades} trades</span>
           </div>
         </div>
-        <Reach ok={reachable} />
+        <Reach ok={reachable} onCurve={(f.progressBps ?? 0) < 10_000} />
       </header>
 
       {pct !== null && (
@@ -1103,7 +1248,7 @@ function MarketCard({ r, reachable }: { r: DiscoveryRow; reachable: boolean }) {
 
       <footer>
         <span className="soc mute">{r.venue}</span>
-        <Reach ok={reachable} />
+        <Reach ok={reachable} onCurve={r.onCurve} />
       </footer>
     </article>
   );

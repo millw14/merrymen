@@ -47,7 +47,10 @@ describe("hosted mode strips house keys so server env wins", () => {
     });
     assert.equal(c.bundlerApiKey, "server-bundler-key", "tenant bundler key ignored");
     assert.equal(c.rpcMainnet, "https://server/rpc", "tenant RPC ignored");
-    assert.equal(c.groqApiKey, "server-groq-key", "tenant LLM key ignored");
+    // A TENANT MAY BRING THEIR OWN LLM KEY, hosted or not. The house key is the
+    // default, not the ceiling — see HOUSE_KEY_FIELDS. The SSRF-shaped sibling
+    // (`llmBaseUrl`) is asserted below and still cannot survive.
+    assert.equal(c.groqApiKey, "tenant-groq-key", "a tenant may bring their own LLM key");
     // No server env for these → they resolve to nothing, NOT the tenant's value.
     assert.equal(c.bundlerUrl, undefined, "tenant bundler URL cannot survive");
     assert.equal(c.llmBaseUrl, undefined, "tenant LLM base URL (SSRF vector) cannot survive");

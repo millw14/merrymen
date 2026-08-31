@@ -476,6 +476,29 @@
   font-family: var(--sans); font-size: 13px; line-height: 1.5;
   color: var(--text-dim); margin: 4px 0 0;
 }
+/* The prove-it button, sitting between the status line and the numbers. */
+.selftest { margin-bottom: 16px; }
+.st-btn {
+  font-family: var(--sans);
+  font-size: 13px;
+  color: var(--text-dim);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 14px;
+  cursor: pointer;
+  width: 100%;
+}
+.st-note {
+  font-family: var(--sans);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin: 8px 2px 0;
+}
+.st-good { color: var(--green); }
+.st-bad { color: var(--red); }
+
 @media (max-width: 520px) {
   .sl-head { font-size: 14px; }
   .sl-next { font-size: 12.5px; }

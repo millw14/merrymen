@@ -290,7 +290,19 @@ export default function SettingsPage() {
   // One picker drives which key/model fields show. Groq & Anthropic reuse their
   // classic secret fields (old setups keep working); every other provider stores
   // its key in the generic llmApiKey.
-  const providers = view.llmProviders;
+  /**
+   * HOSTED, NOT EVERY PROVIDER IS OFFERABLE.
+   *
+   * `llmBaseUrl` stays in HOUSE_KEY_FIELDS, so a hosted tenant cannot point our
+   * egress anywhere -- which makes a custom endpoint a control that saves nothing,
+   * and a local model one our servers cannot reach at all. Listing either would be
+   * the same mistake as rendering thirty inert fields: an option that looks like it
+   * works. A KEY is offerable hosted because it is a credential the tenant pays
+   * with; an ADDRESS is not, because it is our SSRF.
+   */
+  const providers = view.llmProviders.filter(
+    (p) => hosted !== true || (p.id !== "custom" && p.needsKey !== false),
+  );
   const llmProviderVal = draft.llmProvider ?? view.values.llmProvider ?? "groq";
   const prov = providers.find((p) => p.id === llmProviderVal) ?? providers[0]!;
   const providerKeyField = prov.id === "groq" ? "groqApiKey" : prov.id === "anthropic" ? "anthropicApiKey" : "llmApiKey";
@@ -373,19 +385,25 @@ export default function SettingsPage() {
           {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
           <div className="settings-section mono">essentials</div>
           <div className="grant-fields settings-grid">
-            {/* THE HOUSE RUNS THE BRAIN AND THE BUNDLER ON THE HOSTED SERVICE.
-                Everything between here and the strategy picker is stripped from
-                every hosted PUT by the settings API -- provider, key, model,
-                base URL, bundler, RPC. Rendering them anyway asked the owner to
-                configure a model and then told them it saved. One honest line
-                beats thirty inert controls. */}
-            {hosted === false && (
+            {/* THE BRAIN IS BRING-YOUR-OWN IN BOTH MODES.
+                This block used to be self-hosted only, on the reasoning that the
+                house pays for inference. That held until the house budget ran out:
+                the shared key hit its daily cap and a tenant's chat died on a plan
+                he had no way to top up, because the field was stripped before it
+                reached the store. The house key is now the DEFAULT and a tenant's
+                own key OVERRIDES it. Still gated on a RESOLVED `hosted` -- rendering
+                before we know would flash the wrong set of controls. */}
+            {hosted !== null && (
               <>
             {/* ── AI provider · bring any key ──────────────────────────── */}
               <Field
-                label="AI provider · the brain"
+                label={hosted ? "AI provider · optional, for a smarter brain" : "AI provider · the brain"}
                 action={prov.keyUrl ? { href: prov.keyUrl, label: providerNeedsKey ? "get a key" : "install" } : undefined}
-                hint={`Powers plain-English chat and the AI strategist. ${prov.blurb} Built-in strategies need no key at all. Blank keeps the saved key.`}
+                hint={`Powers plain-English chat and the AI strategist. ${prov.blurb} ${
+                  hosted
+                    ? "We run a free model for you, so this is optional — bring your own key for a faster, smarter one on your own quota."
+                    : "Built-in strategies need no key at all."
+                } Blank keeps the saved key.`}
               >
                 <select value={llmProviderVal} onChange={set("llmProvider")}>
                   {providers.map((p) => (
@@ -403,7 +421,11 @@ export default function SettingsPage() {
                 <Field
                   label={`${prov.label} API key`}
                   action={prov.keyUrl ? { href: prov.keyUrl, label: "get a key" } : undefined}
-                  hint="Paste the key for the provider you picked above. Never leaves your machine. Blank keeps the saved key."
+                  hint={
+                    hosted
+                      ? "Paste your own key and your agent uses it instead of ours — your quota, your choice of model, no daily cap shared with anyone. Stored encrypted and never shown again. Blank keeps the saved key."
+                      : "Paste the key for the provider you picked above. Never leaves your machine. Blank keeps the saved key."
+                  }
                 >
                   <input
                     type="password"
@@ -418,7 +440,9 @@ export default function SettingsPage() {
                   )}
                 </Field>
               )}
-              {prov.id === "custom" && (
+              {/* SELF-HOSTED ONLY, and deliberately. See the providers filter above:
+                  the key is the tenant's money, the URL is our egress. */}
+              {hosted === false && prov.id === "custom" && (
                 <Field label="base URL" hint="Any OpenAI-compatible endpoint, e.g. https://your-host/v1">
                   <input type="text" placeholder="https://…/v1" value={v("llmBaseUrl")} onChange={set("llmBaseUrl")} />
                 </Field>
@@ -453,8 +477,8 @@ export default function SettingsPage() {
             )}
             {hosted === true && (
               <Field
-                label="brain &amp; bundler"
-                hint="On merrymen.dev these are run for you -- the model that powers chat and the strategist, and the bundler that puts trades on chain. There is nothing to paste and nothing to pay for. Self-host if you want to bring your own."
+                label="bundler"
+                hint="The piece that puts your trades on chain. On merrymen.dev it is run for you -- nothing to paste and nothing to pay for. Self-host if you want to bring your own."
               >
                 <div className="settings-subtle mono" style={{ padding: "6px 0" }}>
                   run by the house

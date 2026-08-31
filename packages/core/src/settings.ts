@@ -328,14 +328,26 @@ export const HOUSE_KEY_FIELDS = [
   "bundlerUrl",
   "rpcMainnet",
   "rpcTestnet",
-  "groqApiKey",
-  "groqModel",
-  "anthropicApiKey",
-  "llmProvider",
-  "llmApiKey",
+  // THE LLM KEYS ARE NOT HERE ANY MORE — a tenant may bring their own.
+  //
+  // They were house-owned because the house pays for inference. That reasoning
+  // held right up until the house budget ran out: on 2026-08-31 the shared Groq
+  // key hit its daily limit and a user's CHAT stopped working, on a plan he had
+  // no way to top up, because the field was stripped before it reached the store.
+  //
+  // Now the house key is the DEFAULT and a tenant's own key OVERRIDES it — which
+  // falls out of `str(file, env)` for free: the settings file wins, env is the
+  // fallback. Bring a key and you get your own quota and your own choice of model;
+  // bring nothing and you get ours.
+  //
+  // Storing it is safe by the same mechanism that already holds a tenant's
+  // Telegram bot token: the settings blob is sealed at rest under a DEK held by
+  // the web and the orchestrator and never by a child (settings-store.ts).
+  //
+  // `llmBaseUrl` DOES stay house-owned, and the distinction is the whole point:
+  // a key is a credential the tenant pays with, a base URL is an address OUR
+  // egress would connect to. One is their money, the other is our SSRF.
   "llmBaseUrl",
-  "llmProviderModel",
-  "llmModel",
   "rialtoApiKey",
   "rialtoApiKeyHeader",
   "bitqueryApiKey",
