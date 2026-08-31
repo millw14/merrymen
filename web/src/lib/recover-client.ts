@@ -34,7 +34,7 @@
 
 import { privateKeyToAccount } from "viem/accounts";
 import { robinhoodChain, robinhoodTestnet } from "@merrymen/core";
-import { planRecovery, recoverFunds } from "@merrymen/recover";
+import { planRecovery, recoverFunds, type RecoverPlan } from "@merrymen/recover";
 
 export interface BrowserWallet {
   smartAccount: `0x${string}`;
@@ -98,10 +98,16 @@ export async function getRecoveryTicket(w: BrowserWallet): Promise<void> {
   }
 }
 
-export interface BrowserPlan {
-  smartAccount: `0x${string}`;
-  gasWei: bigint;
-  balances: { symbol: string; address: `0x${string}`; raw: bigint; ui: string }[];
+/**
+ * The engine’s own plan, plus one derived flag.
+ *
+ * EXTENDS rather than redeclares, and the typecheck is what forced that: my
+ * first version listed the fields I happened to use and silently dropped
+ * `unreadable` — the field recover.ts keeps precisely so a blinking RPC cannot
+ * be reported as an empty account. Restating a type is how you lose the parts of
+ * it you were not thinking about.
+ */
+export interface BrowserPlan extends RecoverPlan {
   /** True when the account cannot pay for its own withdrawal. */
   needsGas: boolean;
 }
@@ -116,7 +122,7 @@ export async function planFromBrowser(w: BrowserWallet): Promise<BrowserPlan> {
     // fails loudly instead of sweeping a stranger's empty account.
     expectedSmartAccount: w.smartAccount,
     extraTokens: (w.grantTokens ?? []).map((address) => ({ address, symbol: "", decimals: 18 })),
-  })) as BrowserPlan;
+  })) as RecoverPlan;
   return { ...plan, needsGas: plan.gasWei === 0n };
 }
 

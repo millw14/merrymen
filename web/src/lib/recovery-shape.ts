@@ -142,7 +142,7 @@ export function isRecoveryShape(callData: Hex): ShapeVerdict {
 
   for (const leg of legs) {
     // The bare value transfer — at most one.
-    if (leg.data === "0x" || leg.data === "") {
+    if (leg.data === "0x") {
       if (nativeLeg) return { ok: false, why: "more than one native transfer in one operation" };
       if (leg.value === 0n) return { ok: false, why: "a value leg that moves nothing" };
       nativeLeg = true;

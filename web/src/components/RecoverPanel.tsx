@@ -149,7 +149,10 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
       setPlan({
         smartAccount: b.smartAccount,
         chainId: w.chainId,
-        balances: b.balances.map((x) => ({ symbol: x.symbol, amount: x.ui })),
+        // TokenBalance already carries the display string as `amount`, and the
+        // panel renders exactly that shape — so pass it through rather than
+        // rebuilding it and losing `note` along the way.
+        balances: b.balances,
       } as unknown as PlanRes);
       // The one thing that stops a sweep dead, said BEFORE they press it.
       if (b.needsGas) {
