@@ -1,0 +1,32 @@
+name: Foundry
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Pinned to a commit SHA (not a floating tag) and a released toolchain
+      # version: this repo's threat model treats contributor PRs as a
+      # supply-chain surface, so the installer must be immutable.
+      - name: Install Foundry (pinned)
+        uses: foundry-rs/foundry-toolchain@d7ccad9d60664e786f7a9782644bd853bedfe7a1
+        with:
+          version: v1.7.1
+
+      - name: Forge build
+        run: forge build
+
+      - name: Forge test
+        run: forge test -vvv
