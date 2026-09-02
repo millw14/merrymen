@@ -43,7 +43,7 @@
   display: flex;
   align-items: baseline;
   gap: var(--mm-4);
-  padding: var(--mm-5) 0 var(--mm-4);
+  padding: var(--mm-sec-y);
   border-bottom: 1px solid var(--mm-edge-2);
 }
 

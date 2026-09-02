@@ -11,7 +11,7 @@
  */
 .mm-tok-when,
 .mm-tok-holders {
-  padding: var(--mm-6) 0 var(--mm-5);
+  padding: var(--mm-sec-y);
 }
 
 /* ── the entry timeline ──────────────────────────────────────────────────── */
@@ -236,7 +236,7 @@
  * emits .mm-tok-flowbars, so this selector had been dead since it shipped.
  */
 .mm-tok-facts {
-  padding: var(--mm-5) 0;
+  padding: var(--mm-sec-y);
   border-bottom: 1px solid var(--mm-edge);
 }
 
@@ -408,7 +408,7 @@
 /* ── the oracle's series ─────────────────────────────────────────────────── */
 
 .mm-tok-chart {
-  padding: var(--mm-6) 0 var(--mm-5);
+  padding: var(--mm-sec-y);
 }
 
 .mm-priceline {

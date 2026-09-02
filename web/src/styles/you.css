@@ -55,7 +55,7 @@
 /* ── the hero ────────────────────────────────────────────────────────────── */
 
 .mm-hero {
-  padding: var(--mm-4) 0 var(--mm-5);
+  padding: var(--mm-sec-y);
   border-bottom: 1px solid var(--mm-edge);
 }
 
@@ -106,11 +106,14 @@
   margin: var(--mm-4) 0 0;
 }
 
+/*
+ * NO BOXES. Three bordered tiles under a hero is twelve edges separating
+ * three numbers the grid already separates — and this page is the one the
+ * audit called the pattern the others should copy. It should not be the one
+ * still drawing them.
+ */
 .mm-slice {
-  padding: var(--mm-3);
-  border: 1px solid var(--mm-edge);
-  border-radius: var(--mm-r-chip);
-  background: var(--mm-surface);
+  padding: 0;
 }
 
 .mm-slice dd {
@@ -126,7 +129,7 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--mm-6);
-  padding: var(--mm-5) 0;
+  padding: var(--mm-sec-y);
   border-bottom: 1px solid var(--mm-edge);
 }
 
@@ -141,8 +144,8 @@
   grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: var(--mm-2);
+  /* Space, not a rule: a tape of twenty rows drew twenty lines. */
   padding: 7px 0;
-  border-bottom: 1px solid var(--mm-edge);
   font-size: var(--mm-t-body);
   color: var(--mm-tx-2);
 }
@@ -173,7 +176,7 @@
 }
 
 .mm-money {
-  padding: var(--mm-5) 0;
+  padding: var(--mm-sec-y);
 }
 
 /* ── 860 ─────────────────────────────────────────────────────────────────── */

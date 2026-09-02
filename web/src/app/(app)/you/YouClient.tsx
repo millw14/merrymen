@@ -281,7 +281,16 @@ export function YouClient() {
                       {p.token ? <Link href={`/t/${p.token}`}>{p.symbol}</Link> : p.symbol}
                     </span>
                     <span className="a mono">{money(Number(p.value_usdg ?? 0))}</span>
-                    {p.price_stale ? <span className="mm-chip warn">stale</span> : <span />}
+                    {/* QUIET, NOT WARN. --mm-warn is the wall saying no, and a
+                        price nobody has refreshed is not something the wall
+                        did. The token page already chips this case quietly. */}
+                    {p.price_stale ? (
+                      <span className="mm-chip quiet" title="This mark has not been refreshed recently">
+                        stale
+                      </span>
+                    ) : (
+                      <span />
+                    )}
                     <span />
                   </li>
                 ))}

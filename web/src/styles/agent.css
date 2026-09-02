@@ -12,7 +12,7 @@
 /* Deliberately NOT --mm-warn. The wall band directly above is amber, and eight
    amber rows beneath it turn a masthead colour into a table treatment. */
 .mm-agent-lanes {
-  padding: var(--mm-4) 0 var(--mm-5);
+  padding: var(--mm-sec-y);
 }
 
 .mm-agent-lanes ul {
@@ -120,7 +120,7 @@
 }
 
 .mm-equity-wrap {
-  padding: var(--mm-6) 0 var(--mm-5);
+  padding: var(--mm-sec-y);
 }
 
 .mm-equity {
@@ -168,7 +168,7 @@
 
 .mm-holdings,
 .mm-agent-feed {
-  padding: var(--mm-5) 0;
+  padding: var(--mm-sec-y);
 }
 
 .mm-agent-feed {

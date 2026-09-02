@@ -147,6 +147,20 @@ body {
   --mm-band-h-sm: 132px;     /* the band on /, <860 */
   --mm-band-h-agent: 96px;   /* the still band on /a/<slug> */
 
+  /* ── vertical rhythm ───────────────────────────────────────────────────
+   *
+   * ONE SECTION SPACING, DEFINED ONCE.
+   *
+   * Eleven section rules across six sheets used six different paddings —
+   * 24/20, 20/20, 16/20, 16/16, 20/16, 12/16 — each chosen against whatever
+   * happened to sit above it. Read down a page they make the gaps look
+   * arbitrary, which is precisely what a rhythm is not.
+   *
+   * A shorthand in a custom property, so the sheets keep their own selectors
+   * and there is still exactly one place to change the spacing.
+   */
+  --mm-sec-y: var(--mm-6) 0 var(--mm-5);
+
   /* ── motion ──────────────────────────────────────────────────────────── */
   --mm-ease: cubic-bezier(0.2, 0.7, 0.3, 1);
   --mm-fast: 140ms;
