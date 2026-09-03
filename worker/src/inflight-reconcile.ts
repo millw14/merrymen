@@ -206,6 +206,17 @@ export async function findOrphanOps(opts: {
   /** Max blocks per getLogs call (adaptive-halved down from here on a range error). */
   maxSpan?: bigint;
   log?: (m: string) => void;
+  /**
+   * The raw logs this sweep actually used, handed out for comparison.
+   *
+   * PURELY OBSERVATIONAL. It is called after the fetch and before any decision,
+   * it cannot change what this function does, and a throw from it is not caught
+   * here because a shadow comparison that throws is a defect in the shadow, not
+   * in reconciliation. Exists so shadow mode can compare against the data the
+   * AUTHORITATIVE path really saw, rather than paying for a third scan of the
+   * same range and comparing against something merely similar.
+   */
+  onLogs?: (logs: readonly RawLog[], complete: boolean, scannedTo: bigint) => void;
 }): Promise<OrphanOp[]> {
   const { chain, smartAccount, usdgToken, knownOpHashes, lookbackBlocks } = opts;
   const head = await chain.getBlockNumber();
@@ -223,6 +234,8 @@ export async function findOrphanOps(opts: {
     opts.maxSpan ?? 10_000n,
     opts.log,
   );
+
+  opts.onLogs?.(logs.logs, logs.complete, logs.scannedTo);
 
   // INCOMPLETE COVERAGE IS SAID OUT LOUD. An orphan sweep that scanned half
   // its window and found nothing has not established that there are no orphans.

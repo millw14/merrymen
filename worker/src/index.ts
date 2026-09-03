@@ -23,6 +23,7 @@
 
 import { rmSync, writeFileSync } from "node:fs";
 import { countedHttp, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
+import { runShadowComparison, shadowEnabledFor, shadowLine } from "./reconcile-shadow";
 import {
   createPublicClient,
   encodeFunctionData,
@@ -802,6 +803,9 @@ async function main() {
       // hash. See resolveStrandedOps.
       await resolveStrandedOps(agentId, chain, smartAccount, lookbackBlocks);
       const known = await listOpHashes(agentId);
+      // What the AUTHORITATIVE sweep actually fetched, captured for the shadow
+      // comparison below. Observational: nothing here changes what it decides.
+      let authoritative: { logs: readonly RawLog[]; complete: boolean; scannedTo: bigint } | null = null;
       const orphans = await findOrphanOps({
         chain,
         smartAccount,
@@ -809,7 +813,44 @@ async function main() {
         knownOpHashes: known,
         lookbackBlocks,
         log: (m) => console.log(`[reconcile] ${m}`),
+        onLogs: (logs, complete, scannedTo) => {
+          authoritative = { logs, complete, scannedTo };
+        },
       });
+
+      // ── SHADOW MODE ──────────────────────────────────────────────────────
+      //
+      // The new shared fetcher runs beside the old sweep over the SAME range and
+      // its results are compared and then DISCARDED. Nothing below writes: the
+      // old path stays authoritative and this cannot change a ledger, a budget
+      // or an orphan.
+      //
+      // Off unless MERRYMEN_RECONCILE_SHADOW names this account, because it
+      // costs one extra scan of the same range — which is the price of the
+      // comparison, and the reason the canary is a small set.
+      //
+      // A FAILURE HERE MUST NOT FAIL AN ARM. Reconciliation is what stops the
+      // day's spend being under-counted; a defect in an observer must never be
+      // able to stop it running.
+      if (authoritative && shadowEnabledFor(smartAccount)) {
+        try {
+          const a = authoritative as { logs: readonly RawLog[]; complete: boolean; scannedTo: bigint };
+          const headNow = await chain.getBlockNumber();
+          const { verdict, newRequests } = await runShadowComparison({
+            chain,
+            smartAccount,
+            fromBlock: headNow > lookbackBlocks ? headNow - lookbackBlocks : 0n,
+            toBlock: headNow,
+            oldLogs: a.logs,
+            oldComplete: a.complete,
+            oldScannedTo: a.scannedTo,
+            log: (m) => console.log(`[shadow] ${m}`),
+          });
+          console.log(shadowLine(smartAccount, verdict, newRequests, a.logs.length));
+        } catch (e) {
+          console.warn(`[shadow] comparison failed, reconciliation unaffected: ${String(e).slice(0, 200)}`);
+        }
+      }
       if (orphans.length === 0) return;
 
       for (const o of orphans) {
