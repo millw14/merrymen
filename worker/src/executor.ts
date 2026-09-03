@@ -14,7 +14,7 @@
  */
 
 import { http, createPublicClient, type Chain, type Hex } from "viem";
-import { metered } from "./rpc-meter";
+import { countedHttp } from "./rpc-meter";
 import { createKernelAccountClient } from "@zerodev/sdk";
 import { SponsorRefused, assertBoundsHeld, type Sponsor } from "./paymaster";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
@@ -363,7 +363,7 @@ export async function createAgentExecutor(opts: {
    */
   sponsor?: Sponsor;
 }): Promise<AgentExecutor> {
-  const publicClient = createPublicClient({ chain: opts.chain, transport: metered(http(opts.rpcUrl), "read") });
+  const publicClient = createPublicClient({ chain: opts.chain, transport: countedHttp(opts.rpcUrl, "read", opts.chain.id) });
   const entryPoint = getEntryPoint("0.7");
 
   // NOT deserializePermissionAccount. That function silently drops the policy
@@ -390,7 +390,11 @@ export async function createAgentExecutor(opts: {
     // RPC, and it must never gain retry, queueing or dedupe: the send-edge
     // rules — persist the hash, send once, never re-send — are the whole reason
     // a lost operation is recoverable.
-    bundlerTransport: metered(http(opts.bundlerUrl), "bundler"),
+    // METERED, NEVER MANAGED — and now metered at BOTH layers, which is
+    // observation only. meteredFetch never re-issues, and metered() forwards
+    // reqOpts, so eth_sendUserOperation's per-call retryCount: 0 still reaches
+    // viem and this transport still sends exactly once.
+    bundlerTransport: countedHttp(opts.bundlerUrl, "bundler", opts.chain.id),
     ...(opts.sponsor
       ? { paymaster: opts.sponsor.paymaster, paymasterContext: opts.sponsor.paymasterContext }
       : {}),

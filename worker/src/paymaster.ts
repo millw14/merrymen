@@ -41,7 +41,7 @@
  * and drop everything else. A TypeScript return type is not a filter.
  */
 
-import { http } from "viem";
+import { countedHttp } from "./rpc-meter";
 import {
   createPaymasterClient,
   type GetPaymasterDataParameters,
@@ -110,9 +110,23 @@ export interface Sponsor {
   };
 }
 
-/** Build the sponsor. `url` is Pimlico's — the same endpoint as the bundler. */
-export function createSponsor(opts: { url: string; policyId?: string }): Sponsor {
-  const pm = createPaymasterClient({ transport: http(opts.url) });
+/**
+ * Build the sponsor. `url` is Pimlico's — the same endpoint as the bundler.
+ *
+ * COUNTED, because it was the one production transport nobody counted. It points
+ * at the SAME host as the bundler and fires on the send path once per sponsored
+ * operation, so while it went unmetered the "bundler" figures understated the
+ * Pimlico quota by exactly the sponsorship traffic. It is dormant today —
+ * sponsorGasEnabled defaults false, is a house key stripped from tenant settings
+ * hosted, and MERRYMEN_SPONSOR_GAS is unset — so this closes a hole before it
+ * opens rather than after.
+ *
+ * Its own label, not "bundler": the two carry different methods with different
+ * failure meanings, and merging them is the mistake this whole pass exists to
+ * undo. Observation only — nothing here queues, retries or delays a send.
+ */
+export function createSponsor(opts: { url: string; policyId?: string; chainId: number }): Sponsor {
+  const pm = createPaymasterClient({ transport: countedHttp(opts.url, "paymaster", opts.chainId) });
 
   const clamp = (label: string, v: bigint): bigint => {
     if (v > PAYMASTER_GAS_MAX) {

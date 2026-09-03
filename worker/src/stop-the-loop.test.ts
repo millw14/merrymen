@@ -218,15 +218,20 @@ describe("A4 — an unreadable market is not a stale feed", () => {
 
 describe("A5 — the meter is a seam, not a policy", () => {
   it("every transport goes through it", () => {
+    // paymaster.ts joined the list rather than being an exception to it: it
+    // pointed at the same Pimlico host as the bundler and was never counted, so
+    // while sponsorship is ever switched on the bundler figures understate the
+    // quota by exactly the sponsorship traffic.
     for (const [file, n] of [
       ["./snapshot.ts", 2],
       ["./index.ts", 1],
       ["./executor.ts", 2],
       ["./circle.ts", 1],
+      ["./paymaster.ts", 1],
     ] as const) {
       const code = strip(at(file));
       assert.equal(
-        (code.match(/metered\(http\(/g) ?? []).length,
+        (code.match(/countedHttp\(/g) ?? []).length,
         n,
         `${file} must route all ${n} transport(s) through the meter`,
       );
@@ -234,20 +239,43 @@ describe("A5 — the meter is a seam, not a policy", () => {
     }
   });
 
+  it("AND IT COUNTS BOTH LAYERS — logical operations AND provider HTTP attempts", () => {
+    // The first version wrapped the object http() returns, and viem builds its
+    // retry loop INSIDE that object, so one logical call could be four HTTP
+    // requests and the meter saw one. Measured: a 21-chunk sweep produced 22
+    // HTTP requests because a 429 was retried into a success, invisibly.
+    const code = strip(at("./rpc-meter.ts"));
+    assert.match(code, /fetchFn: meteredFetch\(target\)/, "the HTTP layer must be inside viem's retry loop");
+    assert.match(code, /logical_rpc_calls/, "and both counters must be named in the output");
+    assert.match(code, /provider_http_attempts/);
+    // The key must carry chain and provider, or a line describes two endpoints.
+    assert.match(code, /\$\{t\.label\}:\$\{t\.chainId\}:\$\{t\.provider\}/);
+  });
+
   it("THE BUNDLER IS METERED BUT NEVER MANAGED", () => {
     // It carries eth_sendUserOperation. The send-edge rules — persist the hash,
     // send once, never re-send — are why a lost operation is recoverable, and a
     // retrying transport underneath them would silently undo that.
     const code = strip(at("./executor.ts"));
-    assert.match(code, /bundlerTransport: metered\(http\(opts\.bundlerUrl\), "bundler"\)/);
+    assert.match(code, /bundlerTransport: countedHttp\(opts\.bundlerUrl, "bundler", opts\.chain\.id\)/);
     assert.doesNotMatch(code, /retryCount/, "no retry may be configured on any transport here");
+    // Observation is allowed on the send edge; management is not. The fetch
+    // layer calls fetch exactly once and owns no loop.
+    const meter = strip(at("./rpc-meter.ts"));
+    const fetchLayer = meter.slice(meter.indexOf("export function meteredFetch"), meter.indexOf("export function metered("));
+    assert.doesNotMatch(fetchLayer, /for \(|while \(|retry/i, "the fetch layer must contain no retry loop");
+    assert.match(meter, /\(args, reqOpts\)/, "reqOpts carries sendUserOperation's retryCount: 0 and must survive");
   });
 
   it("changes no behaviour: it forwards, counts, and rethrows", () => {
     const code = strip(at("./rpc-meter.ts"));
-    assert.match(code, /return await \(inner\.request/, "the result must be forwarded untouched");
+    assert.match(code, /\(inner\.request as/, "the result must be forwarded untouched");
     assert.match(code, /throw e;/, "the error must be rethrown, not swallowed");
     assert.doesNotMatch(code, /setTimeout|sleep|await new Promise/, "a meter must not delay anything");
+    // The body scan runs OFF the request path — the response is handed back
+    // first and the clone is read afterwards — so it cannot add latency to the
+    // call it is measuring.
+    assert.match(code, /void clone\s*\n?\s*\.text\(\)/, "the body scan must not be awaited inline");
   });
 });
 

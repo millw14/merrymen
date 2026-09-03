@@ -7,7 +7,7 @@
  */
 
 import { createPublicClient, http, parseAbi, type PublicClient } from "viem";
-import { metered } from "./rpc-meter";
+import { countedHttp } from "./rpc-meter";
 import {
   CASH,
   CHAINLINK_ABI,
@@ -26,11 +26,11 @@ const VAULT_READS = parseAbi([
   "function convertToAssets(uint256 shares) view returns (uint256)",
 ]);
 
-let mainnet = createPublicClient({ chain: robinhoodChain, transport: metered(http(), "read") });
+let mainnet = createPublicClient({ chain: robinhoodChain, transport: countedHttp(undefined, "read", robinhoodChain.id) });
 
 /** Point safety reads at a custom mainnet RPC (settings/env); undefined = chain default. */
 export function setMainnetRpc(url?: string): void {
-  mainnet = createPublicClient({ chain: robinhoodChain, transport: metered(http(url), "read") });
+  mainnet = createPublicClient({ chain: robinhoodChain, transport: countedHttp(url, "read", robinhoodChain.id) });
 }
 
 /**

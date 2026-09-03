@@ -22,7 +22,7 @@
  */
 
 import { rmSync, writeFileSync } from "node:fs";
-import { metered, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
+import { countedHttp, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
 import {
   createPublicClient,
   encodeFunctionData,
@@ -2127,6 +2127,7 @@ async function main() {
         ? createSponsor({
             url: pimlicoPaymasterUrl(grant.chainId, cfg.bundlerApiKey),
             policyId: cfg.sponsorshipPolicyId,
+            chainId: grant.chainId,
           })
         : undefined;
     const agentId = await ensureAgent(grant);
@@ -2225,7 +2226,7 @@ async function main() {
       );
     }
 
-    const client = createPublicClient({ chain, transport: metered(http(rpc), "read") });
+    const client = createPublicClient({ chain, transport: countedHttp(rpc, "read", chain.id) });
 
     // ── THE WALL'S OWN CONTRACTS MUST EXIST ──────────────────────────────
     // Same discipline as the breaker below, applied to the singletons the

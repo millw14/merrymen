@@ -9,7 +9,7 @@
  */
 
 import { createPublicClient, erc20Abi, http, type PublicClient } from "viem";
-import { metered } from "./rpc-meter";
+import { countedHttp } from "./rpc-meter";
 import {
   CIRCLE_TIERS,
   MERRYMEN_TOKEN,
@@ -38,7 +38,7 @@ export async function readHolderStatus(
   try {
     const client: PublicClient = createPublicClient({
       chain: robinhoodChain,
-      transport: metered(http(rpcMainnet), "read"),
+      transport: countedHttp(rpcMainnet, "read", robinhoodChain.id),
     });
     const raw = (await client.readContract({
       address: MERRYMEN_TOKEN.address,
