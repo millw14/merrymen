@@ -277,12 +277,38 @@ export interface SenderScanRequest {
  * delivered twice must produce one effect. That is a requirement on the
  * consumer, not a property of this module, and it is tested.
  */
-export const REORG_OVERLAP_SEC = 1800;
+export const REORG_OVERLAP_SEC_DEFAULT = 1800;
 
-/** Blocks of overlap for a chain whose observed block time is `secPerBlock`. */
-export function reorgOverlapBlocks(secPerBlock: number): bigint {
-  if (!Number.isFinite(secPerBlock) || secPerBlock <= 0) return 20_000n; // unknown → generous
-  return BigInt(Math.ceil(REORG_OVERLAP_SEC / secPerBlock));
+/**
+ * The margin, in SECONDS, and configurable.
+ *
+ * Time rather than blocks on purpose. A block count is a number somebody will
+ * eventually read as a property of the chain — "17,700 blocks is Robinhood
+ * Chain's reorg depth" — and it is not. It is 30 minutes divided by whatever the
+ * block time happened to be when it was measured, and it must move if the block
+ * time moves. Naming the constant in seconds and deriving blocks from an
+ * observed block time keeps the choice legible as a choice.
+ *
+ * Raise it via MERRYMEN_REORG_OVERLAP_SEC if this chain ever demonstrates a
+ * deeper reorg, which would be evidence we do not currently have.
+ */
+export function reorgOverlapSec(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.MERRYMEN_REORG_OVERLAP_SEC);
+  return Number.isFinite(raw) && raw > 0 ? raw : REORG_OVERLAP_SEC_DEFAULT;
+}
+
+/**
+ * Blocks of overlap for a chain whose observed block time is `secPerBlock`.
+ *
+ * NOT A FINALITY BOUND. See the three-part note above: this is category 3, the
+ * engineering margin, and it is the only one of the three that has a number.
+ */
+export function reorgOverlapBlocks(secPerBlock: number, sec = reorgOverlapSec()): bigint {
+  // An unknown block time gets the generous answer rather than a guess: the cost
+  // of over-reading is two requests, the cost of under-reading is an operation
+  // whose outcome is permanently invisible.
+  if (!Number.isFinite(secPerBlock) || secPerBlock <= 0) return 20_000n;
+  return BigInt(Math.ceil(sec / secPerBlock));
 }
 
 export interface SharedScanPlan {

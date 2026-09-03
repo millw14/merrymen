@@ -3,7 +3,8 @@ import test from "node:test";
 import type { Hex } from "viem";
 import {
   HASH_TOPIC_MAX,
-  REORG_OVERLAP_SEC,
+  REORG_OVERLAP_SEC_DEFAULT,
+  reorgOverlapSec,
   canonicalHashes,
   canonicalSenders,
   fetchByHashes,
@@ -359,7 +360,13 @@ test("THE FLEET CURSOR CAN ONLY WIDEN A SCAN, NEVER NARROW ONE", () => {
 test("the reorg overlap is an ENGINEERING CHOICE, expressed in time", () => {
   // Not derived from "we observed no reorgs" — that observation was not looking
   // for them, and no finality bound for this chain was established.
-  assert.equal(REORG_OVERLAP_SEC, 1800, "30 minutes of chain history");
+  assert.equal(REORG_OVERLAP_SEC_DEFAULT, 1800, "30 minutes of chain history");
+  // Named in SECONDS and configurable, so the derived block count can never
+  // read as a property of the chain rather than a choice we made.
+  assert.equal(reorgOverlapSec({} as NodeJS.ProcessEnv), 1800, "the default");
+  assert.equal(reorgOverlapSec({ MERRYMEN_REORG_OVERLAP_SEC: "3600" } as NodeJS.ProcessEnv), 3600, "configurable");
+  assert.equal(reorgOverlapSec({ MERRYMEN_REORG_OVERLAP_SEC: "nonsense" } as NodeJS.ProcessEnv), 1800, "garbage falls back");
+  assert.equal(reorgOverlapBlocks(0.1015, 3600), 35468n, "a raised margin widens the overlap");
   assert.equal(reorgOverlapBlocks(0.1015), 17_734n, "at the measured 4663 block time");
   assert.equal(reorgOverlapBlocks(0.17), 10_589n, "and it follows a slower chain");
   assert.equal(reorgOverlapBlocks(0), 20_000n, "an unknown block time gets the generous answer");
