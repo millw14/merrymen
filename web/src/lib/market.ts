@@ -9,7 +9,8 @@
  *  - Rialto /tokens (public): whether Rialto considers the token liquid.
  */
 
-import { createPublicClient, http } from "viem";
+import { createPublicClient } from "viem";
+import { rpcTransportFor } from "./rpc";
 import {
   CHAINLINK_ABI,
   RIALTO,
@@ -49,7 +50,13 @@ export interface MarketData {
   tokens: MarketToken[];
 }
 
-const client = createPublicClient({ chain: robinhoodChain, transport: http() });
+// MODULE-LEVEL AND DELIBERATELY SO: one client, one connection pool, reused for
+// the life of the process. Resolved through lib/rpc.ts so it honours
+// MERRYMEN_RPC_MAINNET instead of the chain default.
+const client = createPublicClient({
+  chain: robinhoodChain,
+  transport: rpcTransportFor(robinhoodChain.id, "market"),
+});
 
 const BLOCKSCOUT = "https://robinhoodchain.blockscout.com/api/v2";
 const LOGO_CDN = (address: string) =>

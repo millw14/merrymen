@@ -1,4 +1,5 @@
-import { createPublicClient, http } from "viem";
+import { createPublicClient } from "viem";
+import { rpcTransportFor, robinhoodChain } from "./rpc";
 import {
   fetchGeckoPoolsResult,
   screenPools,
@@ -261,7 +262,14 @@ async function rankForDisplay(
 
     let research: ReadonlyMap<string, ReturnType<typeof scoutFieldsFor>> | undefined;
     if (cfg.browserUrl && cfg.browserToken) {
-      const client = createPublicClient({ transport: http("https://rpc.mainnet.chain.robinhood.com") });
+      // WAS A HARD-CODED LITERAL, which meant no configuration could move it —
+      // not MERRYMEN_RPC_MAINNET, not a tenant's own endpoint, not a failover.
+      // It also carried no `chain`, so viem had no default to fall back to and
+      // the literal WAS the configuration.
+      const client = createPublicClient({
+        chain: robinhoodChain,
+        transport: rpcTransportFor(robinhoodChain.id, "research"),
+      });
       const found = await researchCoins(kept, {
         client: client as never,
         browser: { baseUrl: cfg.browserUrl, token: cfg.browserToken },
@@ -279,7 +287,11 @@ async function readFresh(): Promise<{ rows: FreshRow[]; chain: ChainStatus }> {
   // falses rather than three optimistic trues.
   const chain: ChainStatus = { launchpad: false, meta: false, facts: false, clock: false };
   try {
-    const client = createPublicClient({ transport: http("https://rpc.mainnet.chain.robinhood.com") });
+    // The second hard-coded literal. Same reasoning as the one above.
+    const client = createPublicClient({
+      chain: robinhoodChain,
+      transport: rpcTransportFor(robinhoodChain.id, "chain-status"),
+    });
     const W = MAX_ACTIVITY_BLOCKS;
     const [scan, activity] = await Promise.all([
       recentPonsLaunches(client as never, W),

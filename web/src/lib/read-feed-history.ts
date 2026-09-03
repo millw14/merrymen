@@ -15,10 +15,14 @@
  * from the index, which is a different source with different failure modes and
  * a per-token request this file deliberately avoids making.
  */
-import { createPublicClient, http } from "viem";
+import { createPublicClient } from "viem";
+import { rpcTransportFor } from "./rpc";
 import { CHAINLINK_ABI, robinhoodChain } from "@merrymen/core";
 
-const client = createPublicClient({ chain: robinhoodChain, transport: http() });
+const client = createPublicClient({
+  chain: robinhoodChain,
+  transport: rpcTransportFor(robinhoodChain.id, "feed-history"),
+});
 
 export interface FeedPoint {
   /** Unix seconds the round was written. */

@@ -1119,7 +1119,9 @@ async function main() {
   // watchTokens is read through a closure because the owner can change the watch
   // set mid-run — capturing the array once would freeze the universe.
   const depthReader = createDepthReader({
-    client: mainnetClient(),
+    // The GETTER, not its result. Capturing mainnetClient()'s return value left
+    // this reader permanently attached to the endpoint that existed at boot.
+    client: mainnetClient,
     tokens: () => watchTokens,
     cash: CASH.USDG as `0x${string}`,
     cashDecimals: USDG_DECIMALS,

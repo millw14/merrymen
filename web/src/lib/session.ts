@@ -43,7 +43,8 @@
  * is worker-enforced until the breaker contract ships (Phase 2).
  */
 
-import { createPublicClient, erc20Abi, http, parseAbi, type Address } from "viem";
+import { createPublicClient, erc20Abi, parseAbi, type Address } from "viem";
+import { rpcTransportFor } from "./rpc";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { createKernelAccount } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
@@ -196,7 +197,7 @@ async function mintGrant(
   // real on mainnet and inert on testnet, where those contracts don't exist
   // and swaps no-route by design.
   const chain = chainForId(chainId);
-  const publicClient = createPublicClient({ chain, transport: http() });
+  const publicClient = createPublicClient({ chain, transport: rpcTransportFor(chainId, "session") });
 
   const entryPoint = getEntryPoint("0.7");
   const kernelVersion = KERNEL_V3_3;
@@ -745,7 +746,7 @@ export async function previewOwnerAccount(
   chainId: number = robinhoodChain.id,
 ): Promise<OwnerPreview> {
   const chain = chainForId(chainId);
-  const publicClient = createPublicClient({ chain, transport: http() });
+  const publicClient = createPublicClient({ chain, transport: rpcTransportFor(chainId, "owner-preview") });
   const ownerAccount = privateKeyToAccount(ownerPrivateKey);
   const ecdsaValidator = await signerToEcdsaValidator(publicClient, {
     signer: ownerAccount,
@@ -769,7 +770,10 @@ export interface Funding {
 }
 
 export async function readFunding(smartAccount: Address, chainId: number = robinhoodChain.id): Promise<Funding> {
-  const publicClient = createPublicClient({ chain: chainForId(chainId), transport: http() });
+  const publicClient = createPublicClient({
+    chain: chainForId(chainId),
+    transport: rpcTransportFor(chainId, "funding"),
+  });
   const [gasWei, usdgUnits] = await Promise.all([
     publicClient.getBalance({ address: smartAccount }).catch(() => 0n),
     publicClient

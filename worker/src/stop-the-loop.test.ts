@@ -294,3 +294,30 @@ describe("A6 — the gas numbers reach a log", () => {
     assert.match(code, /"unreadable"/);
   });
 });
+
+describe("the depth reader must not outlive its endpoint", () => {
+  it("takes a GETTER, so a settings change reaches it", () => {
+    // index.ts captured mainnetClient()'s RESULT, and setMainnetRpc REBINDS
+    // snapshot's module-level client rather than mutating it — so after a
+    // connection-settings change every other consumer moved to the new endpoint
+    // and the depth reader kept talking to the old one for the life of the
+    // process. Right next door, index.ts resets the pool-price cache on that
+    // same change precisely because stale routes outlive the setting.
+    const idx = strip(at("./index.ts"));
+    // Scoped to the createDepthReader call. `client: mainnetClient()` is CORRECT
+    // at the thirteen per-call sites — they re-read the getter every time. The
+    // bug was specific to the one place that STORES it for the whole run.
+    const at0 = idx.indexOf("createDepthReader({");
+    const block = idx.slice(at0, idx.indexOf("});", at0));
+    assert.ok(at0 > 0, "the depth reader is where we think it is");
+    assert.match(block, /client: mainnetClient,/, "the getter, not its result");
+    assert.doesNotMatch(block, /mainnetClient\(\)/, "capturing the value is the bug");
+
+    const cache = strip(at("./venues/depth-cache.ts"));
+    assert.match(cache, /client: \(\) => PublicClient;/, "the option must be a thunk");
+    assert.match(cache, /args\.client\(\)/, "and it must be called per read");
+    // And the fix must NOT be "build a client per read" — the thunk returns
+    // snapshot's long-lived client, rebuilt only when the URL changes.
+    assert.doesNotMatch(cache, /createPublicClient/, "connection reuse must survive the fix");
+  });
+});

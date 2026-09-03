@@ -99,7 +99,23 @@ interface Entry {
 }
 
 export function createDepthReader(args: {
-  client: PublicClient;
+  /**
+   * READ THROUGH A CLOSURE, not captured once — for exactly the reason
+   * `tokens` below is.
+   *
+   * This took a PublicClient by value, and index.ts passed `mainnetClient()`,
+   * so the reader held whichever client existed when it was constructed.
+   * setMainnetRpc REBINDS snapshot.ts's module-level client rather than
+   * mutating it, so after a connection-settings change every other consumer
+   * moved to the new endpoint and this one kept talking to the old one, for the
+   * life of the process. Right next door, index.ts resets the pool-price cache
+   * on that same change precisely because stale routes outlive the setting.
+   *
+   * A thunk fixes it WITHOUT giving up connection reuse: the client it returns
+   * is snapshot's long-lived one, rebuilt only when the URL actually changes,
+   * so this re-reads a reference rather than opening a socket.
+   */
+  client: () => PublicClient;
   /** The watch set — resolved the same way trades resolve a symbol. */
   tokens: () => readonly StockToken[];
   cash: `0x${string}`;
@@ -122,13 +138,13 @@ export function createDepthReader(args: {
   const refresh = args.readOne ?? defaultRefresh;
 
   async function defaultRefresh(token: StockToken, atSec: number): Promise<TokenDepth | null> {
-    const best = await bestCashPool(args.client, {
+    const best = await bestCashPool(args.client(), {
       token: token.address as `0x${string}`,
       cash: args.cash,
     });
     if (!best) return null;
 
-    const d = await readPoolDepth(args.client, {
+    const d = await readPoolDepth(args.client(), {
       pool: best.pool,
       token: token.address as `0x${string}`,
       // Stock tokens are 18dp and the registry omits the field for them. Passing

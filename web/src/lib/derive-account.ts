@@ -1,4 +1,5 @@
-import { createPublicClient, http, type Address } from "viem";
+import { createPublicClient, type Address } from "viem";
+import { rpcTransportFor } from "./rpc";
 import { toAccount } from "viem/accounts";
 import { createKernelAccount } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
@@ -27,9 +28,10 @@ import { chainForId } from "@merrymen/core";
  */
 export async function deriveKernelAccountAddress(owner: Address, chainId: number): Promise<Address> {
   const chain = chainForId(chainId);
-  // http() with no URL uses the chain's built-in default RPC — the same transport
-  // the grants route already uses for balance reads.
-  const publicClient = createPublicClient({ chain, transport: http() });
+  // Resolved from configuration rather than from the chain's built-in default,
+  // so a house RPC change reaches this path too — and counted, so web's share of
+  // the provider's load is visible. See web/src/lib/rpc.ts.
+  const publicClient = createPublicClient({ chain, transport: rpcTransportFor(chainId, "derive") });
 
   const viewSigner = toAccount({
     address: owner,

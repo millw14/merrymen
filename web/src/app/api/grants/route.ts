@@ -10,7 +10,8 @@ import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@merrymen/home";
-import { createPublicClient, http, parseAbi } from "viem";
+import { createPublicClient, parseAbi } from "viem";
+import { rpcTransportFor } from "@/lib/rpc";
 import { CASH, MORPHO, carriesOwnerKey, chainForId, isHostedMode, type StoredGrant } from "@merrymen/core";
 import { requestOrigin, tenantOf, verifyGrantBinding } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
@@ -266,7 +267,7 @@ export async function GET(req: Request) {
   }
 
   const chain = chainForId(grant.chainId);
-  const client = createPublicClient({ chain, transport: http() });
+  const client = createPublicClient({ chain, transport: rpcTransportFor(chain.id, "grants") });
 
   const [ethWei, tokenReads] = await Promise.all([
     client.getBalance({ address: grant.smartAccount }).catch(() => 0n),

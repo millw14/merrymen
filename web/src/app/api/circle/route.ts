@@ -22,7 +22,8 @@ import {
   type CircleTier,
   type MerrymenSettings,
 } from "@merrymen/core";
-import { createPublicClient, erc20Abi, http } from "viem";
+import { createPublicClient, erc20Abi } from "viem";
+import { rpcTransportFor } from "@/lib/rpc";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -72,7 +73,14 @@ export async function GET() {
   }
 
   try {
-    const client = createPublicClient({ chain: robinhoodChain, transport: http(settings.rpcMainnet) });
+    // The one site that already read configuration. It goes through the same
+    // resolver so it gains the env fallback the others needed — hosted, the
+    // house strips rpcMainnet from a tenant's file, so the file value is absent
+    // and only the environment has it.
+    const client = createPublicClient({
+      chain: robinhoodChain,
+      transport: rpcTransportFor(robinhoodChain.id, "circle", settings),
+    });
     const raw = (await client.readContract({
       address: MERRYMEN_TOKEN.address,
       abi: erc20Abi,
