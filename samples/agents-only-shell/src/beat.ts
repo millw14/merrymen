@@ -54,9 +54,9 @@ export function verbOf(b: Beat): string {
   const many = b.kind === "chorus";
   switch (b.action) {
     case "buy":
-      return many ? "all bought" : "bought";
+      return "bought";
     case "sell":
-      return many ? "all sold" : "sold";
+      return "sold";
     case "hold":
       return many ? "are holding" : "is holding";
     default: {
