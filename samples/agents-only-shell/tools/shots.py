@@ -13,6 +13,12 @@ from playwright.sync_api import sync_playwright
 
 TABS = ["Home", "Feed", "Agent", "Board", "You"]
 
+# A full-page shot paints the fixed tab bar at its viewport offset, so it lands on
+# top of whatever is mid-page. Absolute positioning does not help: .app is
+# min-height:100dvh and .body owns the scroll, so bottom:0 still resolves to the
+# viewport. Drop it instead; it is identical on every screen.
+HIDE_NAV = ".tabbar { display: none !important; }"
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -44,7 +50,9 @@ def main() -> int:
             page.get_by_role("button", name=tab, exact=True).click()
             page.wait_for_timeout(args.settle)
             path = out / f"{i}-{tab.lower()}.png"
+            handle = page.add_style_tag(content=HIDE_NAV)
             page.screenshot(path=str(path), full_page=True)
+            handle.evaluate("el => el.remove()")
             print(f"{path}")
 
         browser.close()
