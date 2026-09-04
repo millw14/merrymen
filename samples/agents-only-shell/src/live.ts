@@ -1,6 +1,5 @@
 import { STOCK_TOKENS } from "../../../packages/core/src/tokens";
 import { FACE_SEEDS, SAMPLE_AGENTS, SAMPLE_CHAIN, SAMPLE_CHG, SAMPLE_MINE, SAMPLE_THESES, glanceOf } from "./sample";
-import { LIVE_THESES } from "./snap";
 import { parseStrategy, strategyLabel, type StrategyGlance } from "./strategy";
 import { whyLine } from "./why";
 
@@ -320,7 +319,7 @@ export async function loadLive(): Promise<LiveState> {
 }
 
 function fillGaps(state: LiveState): LiveState {
-  const theses = state.theses.length > 0 ? state.theses : LIVE_THESES.length > 0 ? LIVE_THESES : SAMPLE_THESES;
+  const theses = state.theses.length > 0 ? state.theses : SAMPLE_THESES;
   const sampleBySlug = new Map(SAMPLE_AGENTS.map((a) => [a.slug, a]));
   const sampleBySeed = new Map(
     Object.entries(FACE_SEEDS).flatMap(([name, seed]) => {
