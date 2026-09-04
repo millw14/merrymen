@@ -550,16 +550,6 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // the thread survives a restart, not just a process lifetime.
     let turnMemoryIds: string[] | undefined;
     if (!cmd) {
-      // Deterministic help — never hit the LLM for capability questions (no soul header needed).
-      // "what can you do / help / commands" must be HELP_TEXT, not a warm chat that echoes soul header.
-      const helpRe = /^\s*(what can you do|what do you do|what can u do|help(\s+me)?|commands|capabilities|what are you capable of|what can you help with)\s*[?!.]*\s*$/i;
-      const isPcHelp = /on my pc/i.test(msg.text);
-      if (helpRe.test(msg.text) && !isPcHelp) {
-        cmd = { kind: "help" } as Command;
-        await pushHistory(msg.chatId, "user", msg.text);
-      }
-    }
-    if (!cmd) {
       // Bare amount follow-up (e.g. "5" or "5usdg") after bot asked "how much?"
       // must not hit the LLM — it forces a 500-token reasoning dump ("Here's a thinking process…")
       // Capture it here before interpretWithLlm / narrateChat.
@@ -629,7 +619,15 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
             history: await historyFor(msg.chatId),
           };
           const fluent = await narrateChat(msg.text, chatCtx, llm);
-          const strippedFluent = fluent ? stripThinkingBlock(fluent) : "";
+          let strippedFluent = fluent ? stripThinkingBlock(fluent) : "";
+          // Deterministic de-duplication: never recite soul header verbatim unless they asked who/what you are
+          // (fixes repetitive "mr rex here — born 2026-07-30, and I've been riding with you for 36 days now." on every hi)
+          const isIdentityQuestion = /who\s+are\s+you|what('s| is)?\s+your\s+name|how\s+long.*known|who\s+am\s+i.*talking\s+to/i.test(msg.text);
+          if (!isIdentityQuestion && strippedFluent) {
+            const soulHeaderRe = /^\s*mr rex here\s*—\s*born\s+\d{4}-\d{2}-\d{2}[^.!?]*[.!?]\s*/i;
+            const withoutHeader = strippedFluent.replace(soulHeaderRe, "").trim();
+            if (withoutHeader && withoutHeader.length > 20) strippedFluent = withoutHeader;
+          }
           if (strippedFluent) cmd = { kind: "chat", reply: strippedFluent };
           else if (fluent && !strippedFluent) {
             // Whole reply was thinking — fall back to classifier's (already stripped) reply
