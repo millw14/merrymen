@@ -119,7 +119,9 @@ export function pctPts(n: number | null): string {
 
 export function pctBps(bps: number | null): string {
   if (bps === null) return "—";
-  return `${bps > 0 ? "+" : ""}${(bps / 100).toFixed(1)}%`;
+  const pct = bps / 100;
+  if (Math.abs(pct) < 0.05) return "0.0%";
+  return `${pct > 0 ? "+" : "\u2212"}${Math.abs(pct).toFixed(1)}%`;
 }
 
 export function money(n: number | null): string {

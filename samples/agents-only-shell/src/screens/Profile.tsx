@@ -1,17 +1,19 @@
 import { lede, pctBps, thesesForAgent, type LiveAgent, type LiveToken, type Thesis } from "../live";
-import { MoveTicket } from "../move";
-import { stampFor } from "../strategy";
-import { Coin, Face, Stamp } from "../ui";
+import { MoveWire } from "../move";
+import { strategyName } from "../strategy";
+import { Coin, Face, Spark, Stamp } from "../ui";
 import { isWhy } from "../why";
 
 export function Profile({
   agent,
+  agents,
   theses,
   tokens,
   onBack,
   onToken,
 }: {
   agent: LiveAgent;
+  agents: LiveAgent[];
   theses: Thesis[];
   tokens: LiveToken[];
   onBack: () => void;
@@ -31,13 +33,15 @@ export function Profile({
           <Face name={agent.name} slug={agent.slug} large />
           <div className="held-id">
             <strong>{agent.handle ?? agent.name}</strong>
-            <Stamp>{stampFor(agent.slug, agent.glance.id)}</Stamp>
+            <Stamp>{strategyName(agent.glance.id)}</Stamp>
           </div>
         </div>
         {agent.pnlBps != null && (
           <div className={`balance ${agent.pnlBps >= 0 ? "up" : "down"}`}>{pctBps(agent.pnlBps)}</div>
         )}
+        <p className="visit-count">{agent.landed} trades so far.</p>
         {take ? <p className="hero-said">{take}</p> : null}
+        {agent.curve.length > 1 && <Spark values={agent.curve} down={(agent.pnlBps ?? 0) < 0} />}
       </header>
 
       {held.length > 0 && (
@@ -54,9 +58,7 @@ export function Profile({
         </div>
       )}
 
-      {posts.slice(0, 8).map((t, i) => (
-        <MoveTicket key={`${t.head}-${i}`} t={t} tokens={tokens} hideWho onToken={onToken} />
-      ))}
+      <MoveWire posts={posts.slice(0, 10)} agents={agents} tokens={tokens} onToken={onToken} />
     </div>
   );
 }

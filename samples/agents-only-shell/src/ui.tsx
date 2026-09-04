@@ -65,6 +65,90 @@ export function Stamp({ children }: { children: ReactNode }) {
   return <i className="tag">{children}</i>;
 }
 
+/** fomo's convention: the caret is six points smaller than the figure, and zero is grey. */
+export function Delta({ value, suffix = "", size = 13 }: { value: number | null; suffix?: string; size?: number }) {
+  if (value === null || !Number.isFinite(value) || value === 0) {
+    return <span className="delta flat" style={{ fontSize: size }} />;
+  }
+  const tone = value > 0 ? "up" : "down";
+  return (
+    <span className={`delta ${tone}`} style={{ fontSize: size }}>
+      <i style={{ fontSize: Math.max(size - 6, 6) }}>{value > 0 ? "\u25B2" : "\u25BC"}</i>
+      {Math.abs(value)}
+      {suffix}
+    </span>
+  );
+}
+
+/** Replays on every text change, so a figure reads as having just moved. */
+export function Flip({ text, dir = "up" }: { text: string; dir?: "up" | "down" }) {
+  return (
+    <span className="flip-slot">
+      <span key={text} className={dir === "up" ? "flip" : "flip rev"}>
+        {text}
+      </span>
+    </span>
+  );
+}
+
+export function Empty({ title, action }: { title: string; action?: { label: string; onClick: () => void } }) {
+  return (
+    <div className="blank">
+      <strong>{title}</strong>
+      {action && (
+        <button type="button" className="fund solid" onClick={action.onClick}>
+          {action.label}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Identity first, the name it traded second. Rule zero, in a 40px square. */
+export function FaceOn({
+  name,
+  slug,
+  symbol,
+  logo,
+}: {
+  name: string;
+  slug?: string | null;
+  symbol: string;
+  logo: string;
+}) {
+  return (
+    <span className="stack">
+      <Face name={name} slug={slug} />
+      <span className="stack-badge">
+        <Coin symbol={symbol} logo={logo} />
+      </span>
+    </span>
+  );
+}
+
+export function FacesOn({
+  cast,
+  symbol,
+  logo,
+}: {
+  cast: { slug: string; name: string }[];
+  symbol: string;
+  logo: string;
+}) {
+  return (
+    <span className="stack">
+      <span className="faces">
+        {cast.slice(0, 3).map((a) => (
+          <Face key={a.slug} name={a.name} slug={a.slug} />
+        ))}
+      </span>
+      <span className="stack-badge">
+        <Coin symbol={symbol} logo={logo} />
+      </span>
+    </span>
+  );
+}
+
 export function ThesisBody({ text }: { text: string }) {
   return <p className="thesis-body">{text}</p>;
 }
@@ -123,7 +207,7 @@ export function Switch({
   );
 }
 
-export function Spark({ values, down }: { values: number[]; down?: boolean }) {
+export function Spark({ values, down, small }: { values: number[]; down?: boolean; small?: boolean }) {
   if (values.length < 2) return null;
   const min = Math.min(...values);
   const max = Math.max(...values);
@@ -136,8 +220,9 @@ export function Spark({ values, down }: { values: number[]; down?: boolean }) {
     const y = pad + (1 - (v - min) / span) * (h - pad * 2);
     return `${x},${y}`;
   });
+  const cls = ["chart", down ? "down" : "", small ? "sm" : ""].filter(Boolean).join(" ");
   return (
-    <svg className={down ? "chart down" : "chart"} viewBox={`0 0 ${w} ${h}`} aria-hidden>
+    <svg className={cls} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" aria-hidden>
       <path className="line" d={`M ${pts.join(" L ")}`} />
     </svg>
   );
@@ -154,15 +239,21 @@ export function TabIcon({ id }: { id: "home" | "feed" | "agent" | "board" | "you
     case "feed":
       return (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-          <path d="M5 7h14M5 12h14M5 17h9" />
+          <path d="M6 4v16" />
+          <circle cx="6" cy="8" r="1.9" fill="currentColor" stroke="none" />
+          <circle cx="6" cy="16" r="1.9" fill="currentColor" stroke="none" />
+          <path d="M11 8h8M11 16h6" />
         </svg>
       );
     case "agent":
       return <LogoMark size={15} />;
     case "board":
       return (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-          <path d="M6 18V10M12 18V6M18 18v-5" />
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+          <path d="M9.6 20V9.2h4.8V20" />
+          <path d="M3.4 20v-6.4h6.2" />
+          <path d="M14.4 13.6h6.2V20" />
+          <path d="M2.6 20h18.8" />
         </svg>
       );
     case "you":

@@ -95,20 +95,30 @@ export function App() {
             agents={live.agents}
             onToken={(id) => setScreen({ kind: "token", id })}
             onProfile={(slug) => setScreen({ kind: "profile", slug })}
+            onDesk={() => goTab("agent")}
           />
         )}
         {screen.kind === "tab" && screen.tab === "agent" && (
           <Agent
             mine={mine}
             tokens={live.tokens}
+            agents={live.agents}
+            theses={live.theses}
+            perTrade={perTrade}
+            perDay={perDay}
             onToken={(id) => setScreen({ kind: "token", id })}
+            onProfile={(slug) => setScreen({ kind: "profile", slug })}
             onDeposit={() => setScreen({ kind: "deposit" })}
+            onLimits={() => setScreen({ kind: "limits" })}
           />
         )}
         {screen.kind === "tab" && screen.tab === "board" && (
           <Board
             agents={live.agents}
+            tokens={live.tokens}
+            mine={mine}
             onProfile={(slug) => setScreen({ kind: "profile", slug })}
+            onDesk={() => goTab("agent")}
           />
         )}
         {screen.kind === "tab" && screen.tab === "you" && (
@@ -116,10 +126,14 @@ export function App() {
             onLimits={() => setScreen({ kind: "limits" })}
             onStop={() => setStopped((v) => !v)}
             onDesk={() => goTab("agent")}
+            onDeposit={() => setScreen({ kind: "deposit" })}
             stopped={stopped}
             perTrade={perTrade}
             perDay={perDay}
             mine={mine}
+            agents={live.agents}
+            tokens={live.tokens}
+            theses={live.theses}
             run={run}
             onRun={setRun}
           />
@@ -136,6 +150,7 @@ export function App() {
         {screen.kind === "profile" && agent && (
           <Profile
             agent={agent}
+            agents={live.agents}
             theses={live.theses}
             tokens={live.tokens}
             onBack={() => goTab(tab)}
