@@ -91,6 +91,25 @@ export function Flip({ text, dir = "up" }: { text: string; dir?: "up" | "down" }
   );
 }
 
+/** Arc shrinks clockwise as the slot runs out, so the figure beside it reads as counting down. */
+export function Dial({ left, size = 34 }: { left: number; size?: number }) {
+  const r = size / 2 - 3;
+  const c = 2 * Math.PI * r;
+  return (
+    <svg className="dial" width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden>
+      <circle className="dial-track" cx={size / 2} cy={size / 2} r={r} />
+      <circle
+        className="dial-run"
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        strokeDasharray={`${c * Math.min(1, Math.max(0, left))} ${c}`}
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+      />
+    </svg>
+  );
+}
+
 export function Empty({ title, action }: { title: string; action?: { label: string; onClick: () => void } }) {
   return (
     <div className="blank">

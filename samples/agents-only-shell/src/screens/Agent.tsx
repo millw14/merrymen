@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import { beatsOf, castOf, lanesOf, spellCast, type Actor, type Beat } from "../beat";
-import { cadenceWords, countdown, nextRun, useNow } from "../clock";
-import { BookBar } from "../glance";
+import { cadenceWords, countdown, nextRun, runLeft, useNow } from "../clock";
+import { BookBar, nextLeg } from "../glance";
 import { money, type LiveAgent, type LiveMine, type LiveToken, type Thesis } from "../live";
 import { strategyForSlug, strategyName } from "../strategy";
-import { Coin, Empty, Face, Flip, Stamp } from "../ui";
+import { Coin, Dial, Empty, Face, Flip, Stamp } from "../ui";
 import { isWhy, whyLine } from "../why";
 import { Wire } from "../wire";
 
@@ -51,6 +51,7 @@ export function Agent({
 
   const strategy = strategyForSlug(mine.slug ?? mine.name, mine.glance.id);
   const left = countdown(nextRun(strategy, now) - now);
+  const target = nextLeg(mine.glance);
   const spent = spentToday(mine, now);
 
   const send = (q: string) => {
@@ -73,10 +74,11 @@ export function Agent({
 
       <div className="wire-top">
         <div className="hero-fig">
+          <Dial left={runLeft(strategy, now)} />
           <Flip text={left.text} dir="down" />
         </div>
         <p className="hero-lede">
-          until {mine.name} buys again, {cadenceWords(strategy)}, at ${perTrade} a trade.
+          until {mine.name} buys {target ?? "again"}
         </p>
         <div className="cap-bar">
           <i style={{ width: `${Math.min(100, (spent / Math.max(1, Number(perDay))) * 100)}%` }} />
@@ -87,10 +89,13 @@ export function Agent({
           </span>
           <em>Change caps</em>
         </button>
+        <p className="cap-meta">
+          ${perTrade} a trade · {cadenceWords(strategy)}
+        </p>
       </div>
 
       <section className="strip">
-        <BookBar glance={mine.glance} />
+        <BookBar glance={mine.glance} target={target} />
       </section>
 
       {missed.length > 0 && (
@@ -109,10 +114,12 @@ export function Agent({
                     {m.cast.slice(0, 3).map((a) => (
                       <Face key={a.slug} name={a.name} slug={a.slug} small />
                     ))}
+                    <span className="face-out">
+                      <Face name={mine.name} slug={mine.slug} small />
+                    </span>
                   </span>
                   <span className="missed-said">
-                    <strong>{spellCast(m.cast.map((a) => a.handle))}</strong> bought {m.symbol}.
-                    <em> {mine.name} is not in it.</em>
+                    <strong>{spellCast(m.cast.map((a) => a.handle))}</strong> bought {m.symbol}
                   </span>
                   <Coin symbol={m.symbol} logo={tok?.logo ?? ""} />
                 </button>
@@ -201,7 +208,7 @@ function reply(mine: LiveMine, q: string, perDay: string, spent: number): string
   const g = mine.glance;
   const asked = q.toLowerCase();
   if (asked.includes("spend") || asked.includes("left") || asked.includes("cap")) {
-    return `${money(spent)} of $${perDay} today. ${money(Math.max(0, Number(perDay) - spent))} left before it stops.`;
+    return `${money(spent)} of $${perDay} today.`;
   }
   if (asked.includes("book") || asked.includes("hold") || asked.includes("own") || asked.includes("park")) {
     if (g.legs?.length) return `${g.legs.map((l) => `${l.symbol} ${l.weight}%`).join(", ")}.`;

@@ -22,8 +22,6 @@ interface Row {
   move: number;
 }
 
-type Mark = { label: string; note: string };
-
 export function Board({
   agents,
   tokens,
@@ -48,26 +46,11 @@ export function Board({
 
   const mineSlug = mine?.slug ?? "northstar";
   const top = rows[0]!;
-  const you = rows.find((r) => r.agent.slug === mineSlug);
-  const spread = you && top.ret != null && you.ret != null ? top.ret - you.ret : null;
 
   return (
     <div className="page board-page">
       <div className="wire-top">
-        <div className="hero-fig">{spread != null ? pctBps(spread) : pctBps(top.ret)}</div>
-        <p className="hero-lede">
-          {you && spread != null ? (
-            <>
-              between {top.agent.handle ?? top.agent.name} at the top and {you.agent.name}, yours.{" "}
-              {you.agent.name} is {ordinal(you.rank)} of {rows.length} over {win.toLowerCase()}.
-            </>
-          ) : (
-            <>
-              is what {top.agent.handle ?? top.agent.name} returned over {win.toLowerCase()}, ahead of{" "}
-              {rows.length - 1} other agents.
-            </>
-          )}
-        </p>
+        <div className="hero-fig">{pctBps(top.ret)}</div>
         <div className="wins">
           {WINDOWS.map((w) => (
             <button key={w.id} type="button" className={win === w.id ? "on" : ""} onClick={() => setWin(w.id)}>
@@ -86,9 +69,8 @@ export function Board({
           return (
             <Fragment key={r.agent.slug}>
               {mark && (
-                <div className="board-mark">
-                  <strong>{mark.label}</strong>
-                  <span>{mark.note}</span>
+                <div className="board-mid">
+                  <span>{mark}</span>
                 </div>
               )}
               <Rank
@@ -98,7 +80,6 @@ export function Board({
                 tier={i < 3 ? "podium" : i < 6 ? "chaser" : "plain"}
                 you={isYou}
                 gap={gap}
-                above={above?.agent.handle ?? above?.agent.name ?? null}
                 onProfile={onProfile}
               />
             </Fragment>
@@ -116,7 +97,6 @@ function Rank({
   tier,
   you,
   gap,
-  above,
   onProfile,
 }: {
   row: Row;
@@ -125,7 +105,6 @@ function Rank({
   tier: "podium" | "chaser" | "plain";
   you: boolean;
   gap: number | null;
-  above: string | null;
   onProfile: (slug: string) => void;
 }) {
   const a = row.agent;
@@ -138,6 +117,14 @@ function Rank({
 
   return (
     <div className={cls}>
+      {gap != null && (
+        <div className="rank-gapline">
+          <span>
+            <i>{"\u25B2"}</i>
+            {pctBps(gap).replace("+", "")}
+          </span>
+        </div>
+      )}
       <button type="button" className="rank-hit" onClick={() => onProfile(a.slug)}>
         <span className="n">{row.rank}</span>
         <Face name={a.name} slug={a.slug} large={podium} />
@@ -181,11 +168,6 @@ function Rank({
         </button>
       )}
 
-      {gap != null && above && (
-        <p className="rank-gap">
-          {pctBps(gap).replace("+", "")} behind {above}. Catch it and you move up one.
-        </p>
-      )}
     </div>
   );
 }
@@ -225,29 +207,14 @@ function rank(agents: LiveAgent[], win: WindowId): Row[] {
     .sort((a, b) => a.rank - b.rank);
 }
 
-/** Where the field breaks. Real cut lines, not decoration every N rows. */
-function marksOf(rows: Row[]): Map<number, Mark> {
-  const out = new Map<number, Mark>();
+/** The only cut a reader cannot get by counting: the median of the returns column. */
+function marksOf(rows: Row[]): Map<number, string> {
+  const out = new Map<number, string>();
   const rets = rows.map((r) => r.ret).filter((r): r is number => r != null);
-  if (rows.length > 3) {
-    out.set(3, { label: "the pack", note: `${rows.length - 3} agents chasing` });
-  }
   if (rets.length > 3) {
     const mid = rets[Math.floor(rets.length / 2)]!;
     const at = rows.findIndex((r) => r.ret != null && r.ret < mid);
-    if (at > 3) out.set(at, { label: "top half ends here", note: `${pctBps(mid)} is the middle` });
-  }
-  const under = rows.findIndex((r) => (r.ret ?? 0) < 0);
-  if (under > 0) {
-    const n = rows.length - under;
-    out.set(under, { label: "under water", note: `${n} ${n === 1 ? "agent is" : "agents are"} down` });
+    if (at > 3) out.set(at, pctBps(mid));
   }
   return out;
-}
-
-function ordinal(n: number): string {
-  const tens = n % 100;
-  if (tens >= 11 && tens <= 13) return `${n}th`;
-  const ones = n % 10;
-  return `${n}${ones === 1 ? "st" : ones === 2 ? "nd" : ones === 3 ? "rd" : "th"}`;
 }

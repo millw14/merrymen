@@ -81,7 +81,7 @@ export function takeFor(
 function voiceOf(id: StrategyId, sym: string): string {
   switch (id) {
     case "steady-basket":
-      return `${sym} is a seat in the five.`;
+      return `${sym} is a seat in the basket.`;
     case "weekend-gap":
       return `The close is the entry. ${sym} overnight.`;
     case "even-keel":

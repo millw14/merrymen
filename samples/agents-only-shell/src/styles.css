@@ -1473,6 +1473,14 @@ button.tag {
   white-space: nowrap;
 }
 
+.bookbar-track i.next {
+  background: var(--lime);
+}
+
+.bookbar-labs span.next {
+  color: var(--lime);
+}
+
 .bookbar-cash {
   margin: 0;
   color: var(--faint);
@@ -1853,13 +1861,70 @@ button.tag {
   line-height: 1.45;
 }
 
-.pace {
+.hero-fig .dial {
+  align-self: center;
+  margin-right: 12px;
+}
+
+.dial-track {
+  fill: none;
+  stroke: var(--raised);
+  stroke-width: 3;
+}
+
+.dial-run {
+  fill: none;
+  stroke: var(--lime);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke-dasharray 900ms linear;
+}
+
+.cap-meta {
   margin: 2px 0 0;
-  padding-left: 9px;
-  border-left: 2px solid var(--raised);
   color: var(--faint);
-  font-size: 12.5px;
-  line-height: 1.4;
+  font-size: 11.5px;
+}
+
+.pace {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.pace-row {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 22px;
+  align-items: center;
+  gap: 10px;
+}
+
+.pace-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--raised);
+}
+
+.pace-track i {
+  display: block;
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: var(--tx-2);
+}
+
+.pace-track i.mine {
+  background: var(--lime);
+}
+
+.pace-row b {
+  color: var(--tx-2);
+  font-family: var(--pixel);
+  font-size: 13px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .flip-slot {
@@ -2014,12 +2079,6 @@ button.tag {
   padding: 4px 0;
 }
 
-.wire-lull .wire-body {
-  color: var(--faint);
-  font-size: 11px;
-  font-style: italic;
-}
-
 .wire-lull::after {
   content: "";
   position: absolute;
@@ -2130,6 +2189,21 @@ button.tag {
 
 .wire-quiet .face {
   align-self: center;
+}
+
+.wire-beat.quiet .wire-why {
+  margin-left: 25px;
+}
+
+.wire-size .faces.crowd {
+  align-items: center;
+}
+
+.wire-size .faces.crowd em {
+  margin-left: 9px;
+  color: var(--faint);
+  font-style: normal;
+  font-size: 10.5px;
 }
 
 .wire-quiet strong {
@@ -2279,25 +2353,25 @@ button.tag {
   padding: 14px 0;
 }
 
-.board-mark {
+.board-mid {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 3px 8px;
-  padding: 18px 0 8px;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 0 10px;
 }
 
-.board-mark strong {
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
+.board-mid::before {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.board-mid span {
   color: var(--tx-2);
-}
-
-.board-mark span {
-  color: var(--faint);
-  font-size: 11px;
+  font-family: var(--pixel);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
 }
 
 .rank.you {
@@ -2427,10 +2501,36 @@ button.tag {
   opacity: 0.5;
 }
 
-.rank-gap {
-  margin: 7px 0 0 31px;
+.rank-gapline {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-bottom: 10px;
+}
+
+.rank-gapline::after {
+  content: "";
+  flex: 1;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--lime);
+  opacity: 0.45;
+}
+
+.rank-gapline span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   color: var(--lime);
-  font-size: 11.5px;
+  font-family: var(--pixel);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rank-gapline i {
+  font-family: var(--sans);
+  font-size: 8px;
+  font-style: normal;
 }
 
 .wins {
@@ -2527,6 +2627,12 @@ button.tag {
   font-variant-numeric: tabular-nums;
 }
 
+.cap .cap-cadence {
+  margin-top: 2px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
 .missed {
   display: flex;
   flex-direction: column;
@@ -2550,6 +2656,27 @@ button.tag {
 
 .missed-row .faces .face {
   box-shadow: 0 0 0 2px var(--bg);
+}
+
+.face-out {
+  position: relative;
+  display: flex;
+  margin-left: 9px;
+}
+
+.face-out .face {
+  opacity: 0.32;
+}
+
+.face-out::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 1px;
+  right: 1px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: var(--tx-2);
 }
 
 .missed-said {
@@ -2622,22 +2749,23 @@ button.tag {
 }
 
 .crew-cast em {
-  color: var(--faint);
-  font-style: normal;
-  font-size: 11.5px;
-}
-
-.crew-cast em b {
   color: var(--tx-2);
-  font-weight: 650;
+  font-style: normal;
+  font-family: var(--pixel);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
 }
 
-.crew-cast em b.up {
+.crew-cast em.up {
   color: var(--up);
 }
 
-.crew-cast em b.down {
+.crew-cast em.down {
   color: var(--down);
+}
+
+.crew-cast .faces {
+  margin-left: 4px;
 }
 
 .crew-cast .faces .face {

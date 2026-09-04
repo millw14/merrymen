@@ -1,5 +1,5 @@
 import { castOf, regretOf, verbOf, whoOf, type Beat, type Lane } from "./beat";
-import { elapsed, spellSpan } from "./clock";
+import { elapsed } from "./clock";
 import { money, pctPts, type LiveToken } from "./live";
 import { strategyName } from "./strategy";
 import { Face, FaceOn, FacesOn, Stamp } from "./ui";
@@ -46,10 +46,9 @@ export function Wire({
             );
           case "lull":
             return (
-              <div key={lane.id} className="wire-lull">
+              <div key={lane.id} className="wire-lull" aria-hidden>
                 <span className="wire-gut" />
-                <i className="wire-node lull" aria-hidden />
-                <div className="wire-body">nothing landed for {spellSpan(lane.ms)}</div>
+                <i className="wire-node lull" />
               </div>
             );
           case "beat": {
@@ -112,13 +111,15 @@ function BeatRow({
       <div className="wire-beat hold quiet">
         <span className="wire-gut">{live ? "now" : age.text}</span>
         <i className={live ? "wire-node beat now" : "wire-node beat"} aria-hidden />
-        <button type="button" className="wire-body wire-quiet" onClick={open}>
-          <Face name={beat.actor.name} slug={beat.actor.slug} small />
-          <span>
-            <strong>{beat.actor.handle}</strong> looked at {beat.symbol} and left it alone
-            {beat.reason ? ` — ${lower(beat.reason)}` : "."}
-          </span>
-        </button>
+        <div className="wire-body">
+          <button type="button" className="wire-quiet" onClick={open}>
+            <Face name={beat.actor.name} slug={beat.actor.slug} small />
+            <span>
+              <strong>{beat.actor.handle}</strong> held {beat.symbol}
+            </span>
+          </button>
+          {beat.reason ? <p className="wire-why">{beat.reason}</p> : null}
+        </div>
       </div>
     );
   }
@@ -146,7 +147,7 @@ function BeatRow({
             {beat.sizeUsd != null && (
               <span className="wire-size">
                 <b>{money(beat.sizeUsd)}</b>
-                {sideOf(beat, cast.length)}
+                {sideOf(beat)}
               </span>
             )}
           </span>
@@ -167,7 +168,7 @@ function BeatRow({
               <button
                 key={p.actor.slug}
                 type="button"
-                className="wire-part"
+                className="wire-part wire-voice"
                 onClick={() => onAgent?.(p.actor.slug)}
               >
                 <Face name={p.actor.name} slug={p.actor.slug} small />
@@ -180,29 +181,28 @@ function BeatRow({
           </div>
         )}
 
-        {big != null && <p className="wire-big">{big}× the size of a typical trade on the wire.</p>}
+        {big != null && <p className="wire-big">{big}× typical</p>}
 
-        {regret != null && (
-          <p className="wire-regret">
-            {beat.symbol} is {pctPts(regret)} since they sold.
-          </p>
-        )}
+        {regret != null && <p className="wire-regret">{pctPts(regret)} since they sold</p>}
       </div>
     </div>
   );
 }
 
 /** A dollar figure on its own says nothing, so it never ships without whichever context is true. */
-function sideOf(beat: Beat, cast: number) {
-  if (beat.kind === "chorus") return <em>across {cast}</em>;
+function sideOf(beat: Beat) {
+  if (beat.kind === "chorus") return null;
   if (beat.weight != null) return <em>at {beat.weight}% of its book</em>;
-  if (beat.action === "sell" && beat.crowd > 0) {
-    return <em>{beat.crowd} agents still in</em>;
+  const floor = beat.action === "sell" ? 0 : 1;
+  if (beat.crowd.length > floor) {
+    return (
+      <span className="faces crowd">
+        {beat.crowd.slice(0, 3).map((a) => (
+          <Face key={a.slug} name={a.name} slug={a.slug} small />
+        ))}
+        {beat.crowd.length > 3 ? <em>+{beat.crowd.length - 3}</em> : null}
+      </span>
+    );
   }
-  if (beat.crowd > 1) return <em>{beat.crowd} agents in it</em>;
   return null;
-}
-
-function lower(text: string): string {
-  return text.charAt(0).toLowerCase() + text.slice(1);
 }

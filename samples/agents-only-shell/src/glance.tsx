@@ -13,21 +13,37 @@ export function bookLegs(glance: StrategyGlance): { symbol: string; weight: numb
   );
 }
 
+/** The lightest seat is where a topping-up book puts its next dollar. */
+export function nextLeg(glance: StrategyGlance): string | null {
+  const legs = bookLegs(glance);
+  if (legs.length < 2) return null;
+  return legs.reduce((low, l) => ((l.weight || 1) < (low.weight || 1) ? l : low)).symbol;
+}
+
 /** One bar. Labels sit under their own segments. */
-export function BookBar({ glance }: { glance: StrategyGlance }) {
+export function BookBar({ glance, target }: { glance: StrategyGlance; target?: string | null }) {
   const legs = bookLegs(glance);
   if (legs.length === 0) return null;
   const total = legs.reduce((n, l) => n + (l.weight || 1), 0) || 1;
+  const hit = (symbol: string) => target != null && symbol.toUpperCase() === target.toUpperCase();
   return (
     <div className="bookbar">
       <div className="bookbar-track">
         {legs.map((l, i) => (
-          <i key={l.symbol} className={`seg-${i % 5}`} style={{ width: `${((l.weight || 1) / total) * 100}%` }} />
+          <i
+            key={l.symbol}
+            className={hit(l.symbol) ? `seg-${i % 5} next` : `seg-${i % 5}`}
+            style={{ width: `${((l.weight || 1) / total) * 100}%` }}
+          />
         ))}
       </div>
       <div className="bookbar-labs">
         {legs.map((l) => (
-          <span key={l.symbol} style={{ width: `${((l.weight || 1) / total) * 100}%` }}>
+          <span
+            key={l.symbol}
+            className={hit(l.symbol) ? "next" : undefined}
+            style={{ width: `${((l.weight || 1) / total) * 100}%` }}
+          >
             {l.symbol}
           </span>
         ))}

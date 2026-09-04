@@ -27,16 +27,6 @@ export function elapsed(at: number, now: number): Elapsed {
   return { value: d, unit: "d", text: `${d}d` };
 }
 
-/** Plain words, not `4h 30m`. Used where a stretch of quiet is the subject. */
-export function spellSpan(ms: number): string {
-  const m = Math.round(ms / 60000);
-  if (m < 60) return `${m} minutes`;
-  const h = Math.round(m / 60);
-  if (h < 48) return h === 1 ? "an hour" : `${h} hours`;
-  const d = Math.round(h / 24);
-  return d === 1 ? "a day" : `${d} days`;
-}
-
 export function countdown(ms: number): { text: string; unit: string } {
   const total = Math.max(0, Math.floor(ms / 1000));
   const h = Math.floor(total / 3600);
@@ -72,4 +62,9 @@ export function cadenceWords(id: StrategyId): string {
 export function nextRun(id: StrategyId, now: number): number {
   const step = CADENCE_MS[id];
   return Math.ceil((now + 1) / step) * step;
+}
+
+/** Share of the cadence still to run, 1 just after a slot and 0 at the next one. */
+export function runLeft(id: StrategyId, now: number): number {
+  return (nextRun(id, now) - now) / CADENCE_MS[id];
 }

@@ -29,7 +29,7 @@ interface Core {
   /** Share of the actor's book this name carries. A dollar figure alone says nothing. */
   weight: number | null;
   /** Agents holding this name right now, the actor included. */
-  crowd: number;
+  crowd: Actor[];
 }
 
 /**
@@ -71,10 +71,10 @@ export function whoOf(b: Beat): string {
   return spellCast(b.actors.map((a) => a.handle));
 }
 
+/** Home's form, so the two screens agree: three names, then a count. */
 export function spellCast(names: string[]): string {
-  if (names.length <= 1) return names[0] ?? "";
-  if (names.length <= 3) return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
-  return `${names[0]}, ${names[1]} and ${names.length - 2} more`;
+  const shown = names.slice(0, 3).join(", ");
+  return names.length > 3 ? `${shown} +${names.length - 3}` : shown;
 }
 
 /** A sell only stings if the name kept going. Real 24h change, sells only. */
@@ -106,25 +106,29 @@ function weightOf(agent: LiveAgent | undefined, symbol: string): number | null {
 }
 
 /** An agent is in a name until it sells: the newest action per agent per symbol decides. */
-function crowdsOf(theses: Thesis[]): Map<string, number> {
-  const last = new Map<string, "in" | "out">();
+function crowdsOf(theses: Thesis[], agents: Map<string, LiveAgent>): Map<string, Actor[]> {
+  const last = new Map<string, { state: "in" | "out"; actor: Actor }>();
   for (const t of [...theses].sort((a, b) => (a.at ?? 0) - (b.at ?? 0))) {
     if (!t.symbol || !t.slug) continue;
     if (t.action !== "buy" && t.action !== "sell" && t.action !== "hold") continue;
-    last.set(`${t.slug}|${t.symbol.toUpperCase()}`, t.action === "sell" ? "out" : "in");
+    const actor = actorOf(t, agents);
+    if (!actor) continue;
+    last.set(`${t.slug}|${t.symbol.toUpperCase()}`, { state: t.action === "sell" ? "out" : "in", actor });
   }
-  const crowds = new Map<string, number>();
-  for (const [key, state] of last) {
-    if (state === "out") continue;
+  const crowds = new Map<string, Actor[]>();
+  for (const [key, held] of last) {
+    if (held.state === "out") continue;
     const symbol = key.split("|")[1]!;
-    crowds.set(symbol, (crowds.get(symbol) ?? 0) + 1);
+    const list = crowds.get(symbol) ?? [];
+    list.push(held.actor);
+    crowds.set(symbol, list);
   }
   return crowds;
 }
 
 export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
   const bySlug = new Map(agents.map((a) => [a.slug, a]));
-  const crowds = crowdsOf(theses);
+  const crowds = crowdsOf(theses, bySlug);
   const parts: (Part & { action: Action; symbol: string })[] = [];
 
   for (const t of theses) {
@@ -172,7 +176,7 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
       symbol: head.symbol,
       sizeUsd,
       weight: head.weight,
-      crowd: crowds.get(head.symbol) ?? 0,
+      crowd: crowds.get(head.symbol) ?? [],
     };
     if (g.length === 1) {
       return { ...core, kind: "trade", actor: head.actor, reason: head.reason };

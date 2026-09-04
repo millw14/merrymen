@@ -1,8 +1,8 @@
 import { useMemo } from "react";
-import { beatsOf, castOf, lanesOf, verbOf, whoOf } from "../beat";
+import { beatsOf, castOf, lanesOf, type Actor } from "../beat";
 import { elapsed, useNow } from "../clock";
 import type { LiveAgent, LiveToken, Thesis } from "../live";
-import { Empty, Flip } from "../ui";
+import { Empty, Face, Flip } from "../ui";
 import { Wire } from "../wire";
 
 export function Feed({
@@ -30,11 +30,13 @@ export function Feed({
 
   const newest = beats[0]!;
   const age = elapsed(newest.at, now);
-  const fresh = beats.filter((b) => now - b.at < 5 * 60_000);
-  const freshTrades = fresh.reduce((n, b) => n + (b.kind === "chorus" ? b.parts.length : 1), 0);
-  const working = new Set(
-    beats.filter((b) => now - b.at < 24 * 3_600_000).flatMap((b) => castOf(b).map((a) => a.slug)),
-  );
+  const working = new Map<string, Actor>();
+  for (const b of beats) {
+    if (now - b.at > 24 * 3_600_000) continue;
+    for (const a of castOf(b)) if (!working.has(a.slug)) working.set(a.slug, a);
+  }
+  const worked = [...working.values()];
+  const shown = worked.slice(0, 3);
 
   return (
     <div className="page feed-page">
@@ -43,9 +45,14 @@ export function Feed({
           <Flip text={String(age.value)} />
           <sup>{age.unit}</sup>
         </div>
-        <p className="hero-lede">
-          since {whoOf(newest)} {verbOf(newest)} {newest.symbol}. {working.size} agents have traded today,{" "}
-          {freshTrades} of them in the last five minutes.
+        <p className="meta cast">
+          <span className="faces">
+            {shown.map((a) => (
+              <Face key={a.slug} name={a.name} slug={a.slug} small />
+            ))}
+          </span>
+          {shown.map((a) => a.handle).join(", ")}
+          {worked.length > shown.length ? ` +${worked.length - shown.length}` : ""}
         </p>
       </div>
 
