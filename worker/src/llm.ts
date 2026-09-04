@@ -146,13 +146,20 @@ export async function llmToolCall(
   // openai-compatible function calling (Groq, OpenAI, Gemini, xAI, DeepSeek, …)
   // Some reasoning models (gpt-oss-120b, deepseek-r1, qwen3-thinking, nemotron) dump chain-of-thought
   // into `content` or `reasoning_content`. We ignore that side-channel and only use tool_calls.
-  const body = {
+  // Universal: ask reasoning models not to put CoT into content — separate bank.
+  const body: Record<string, unknown> = {
     model: creds.model,
     max_tokens: opts.maxTokens ?? 1024,
     temperature: 0.2,
     messages: [{ role: "system", content: opts.system }, ...opts.messages],
     tools: [{ type: "function", function: { name: opts.tool.name, description: opts.tool.description, parameters: opts.tool.schema } }],
     tool_choice: { type: "function", function: { name: opts.tool.name } },
+    // Best-effort disable reasoning in content for openai-compatible reasoning models.
+    // Providers that don't support it ignore the field; providers that do keep reasoning
+    // in a separate channel (reasoning_content/reasoning) which we discard.
+    ...(creds.model.toLowerCase().includes("gpt-oss") || creds.model.toLowerCase().includes("deepseek-r1") || creds.model.toLowerCase().includes("qwen3-thinking") || creds.model.toLowerCase().includes("nemotron")
+      ? { reasoning_effort: "none" as const, extra_body: { include_reasoning: false } }
+      : {}),
   };
   // Servers validate tool arguments and the model is nondeterministic — a
   // malformed emission 400s. One retry usually lands; then we throw honestly.
@@ -253,19 +260,23 @@ export async function llmAgentTurn(
       for (const r of m.results) messages.push({ role: "tool", tool_call_id: r.id, content: r.output });
     }
   }
-  const body = {
+  const body: Record<string, unknown> = {
     model: creds.model,
     max_tokens: opts.maxTokens ?? 1500,
     temperature: 0.2,
     messages,
     tools: opts.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.schema } })),
+    ...(creds.model.toLowerCase().includes("gpt-oss") || creds.model.toLowerCase().includes("deepseek-r1") || creds.model.toLowerCase().includes("qwen3-thinking") || creds.model.toLowerCase().includes("nemotron")
+      ? { reasoning_effort: "none" as const, extra_body: { include_reasoning: false } }
+      : {}),
   };
   const r = await fetch(chatUrl(creds), { method: "POST", headers: openaiHeaders(creds), body: JSON.stringify(body) });
   if (!r.ok) throw new Error(`${creds.provider} ${r.status}: ${(await r.text()).slice(0, 200)}`);
   const j = (await r.json()) as {
-    choices?: { message?: { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] } }[];
+    choices?: { message?: { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[]; reasoning_content?: string; reasoning?: string } }[];
   };
-  const msg = j.choices?.[0]?.message;
+  const msg = j.choices?.[0]?.message as { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[]; reasoning_content?: string; reasoning?: string } | undefined;
+  // reasoning_content/reasoning is a separate bank — never merge into content (universal exclusion)
   const toolUses: AgentToolUse[] = (msg?.tool_calls ?? [])
     .map((tc, i) => {
       if (!tc.function?.name) return null;
@@ -341,11 +352,15 @@ export async function llmText(
     return t && t.type === "text" ? t.text.trim() : "";
   }
 
-  const body = {
+  const body: Record<string, unknown> = {
     model: creds.model,
     max_tokens: opts.maxTokens ?? 400,
     temperature: 0.6,
     messages: [{ role: "system", content: opts.system }, { role: "user", content: opts.prompt }],
+    // Best-effort disable reasoning in content for openai-compatible reasoning models.
+    ...(creds.model.toLowerCase().includes("gpt-oss") || creds.model.toLowerCase().includes("deepseek-r1") || creds.model.toLowerCase().includes("qwen3-thinking") || creds.model.toLowerCase().includes("nemotron")
+      ? { reasoning_effort: "none" as const, extra_body: { include_reasoning: false } }
+      : {}),
   };
   const r = await fetch(chatUrl(creds), {
     method: "POST",

@@ -30,94 +30,19 @@ const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
  * `content` (nemotron, deepseek-r1, qwen3-thinking, gpt-oss). Also handles
  * inline `<think>…</think>` blocks. Returns "" if the whole message was thinking.
  */
+/**
+ * Strip reasoning tags that some providers still inline as <think>…</think>.
+ * Universal thinking is now excluded at the provider layer (llm.ts separate
+ * reasoning bank, reasoning_effort none), so no prefix-list filtering is needed
+ * here — this is only a fallback for rogue inline tags.
+ */
 export function stripThinkingBlock(text: string): string {
   let out = (text ?? "").trim();
   if (!out) return "";
-  // Remove <think>…</think> and <|think|> blocks anywhere (multiline)
+  // Remove <think>…</think> and <|think|> blocks anywhere (multiline) — fallback only
   out = out.replace(/<\|?think\|?>([\s\S]*?)<\/\|?think\|?>/gi, "").trim();
   out = out.replace(/<think>([\s\S]*?)<\/think>/gi, "").trim();
-  if (!out) return "";
-  const lower = out.toLowerCase();
-  const prefixes = [
-    "here's a thinking process",
-    "here is a thinking process",
-    "1. **analyze",
-    "1. analyze",
-    "thought:",
-    "reasoning:",
-    "thinking:",
-    "let me think",
-    "my task:",
-    "**analysis",
-    "analysis:",
-    "the user is asking",
-    "the user is asking me to reply",
-    "let me analyze",
-    "let me analyze the situation",
-    "looking at the state",
-    "looking at the state:",
-  ];
-  // Generic CoT structure: contains analysis verbs + STATE ingestion + numbered list
-  const hasGenericThinkingMarker =
-    /let me analyze|the user is asking|looking at the state|analyze user input|determine the context/i.test(out);
-  const hasStructuredAnalysis =
-    /^\s*\d+\.\s+.*(i need to|the relationship|looking at)/m.test(out) ||
-    out.toLowerCase().includes("28 day(s) linked") ||
-    out.toLowerCase().includes("1-4 short sentences") ||
-    /mr rex.*days old/i.test(out);
-  const hit = prefixes.some((p) => lower.startsWith(p) || lower.startsWith(p.replace("'", "’"))) || (hasGenericThinkingMarker && hasStructuredAnalysis);
-  if (!hit) return out;
-  // Drop the thinking preamble: split on blank lines and return the first non-thinking chunk
-  const parts = out.split(/\n\s*\n/);
-  if (parts.length > 1) {
-    const isThinkingChunk = (s: string) => {
-      const t = s.trim().toLowerCase();
-      return (
-        t.startsWith("here's a thinking") ||
-        t.startsWith("here is a thinking") ||
-        t.startsWith("1.") ||
-        t.startsWith("2.") ||
-        t.startsWith("3.") ||
-        t.startsWith("thought:") ||
-        t.startsWith("reasoning:") ||
-        t.startsWith("- ") ||
-        t.startsWith("* ") ||
-        t.includes("analyze user input") ||
-        t.includes("determine the context") ||
-        t.includes("the user is asking") ||
-        t.includes("the user said") ||
-        t.includes("let me analyze") ||
-        t.includes("looking at the state") ||
-        t.includes("i need to reply") ||
-        t.includes("the relationship") ||
-        t.includes("28 day(s) linked") ||
-        t.includes("28 days linked") ||
-        t.includes("1-4 short sentences") ||
-        t.includes("mr rex is") ||
-        t.includes("old friend") ||
-        t.includes("equity:") ||
-        t.includes("positions:") ||
-        t.includes("born 2026-07-30")
-      );
-    };
-    for (let i = 1; i < parts.length; i++) {
-      const cand = parts.slice(i).join("\n\n").trim();
-      const part = (parts[i] ?? "").trim();
-      if (cand && !isThinkingChunk(cand) && !isThinkingChunk(part)) return cand;
-    }
-    // Fallback: return the last part that doesn't look like thinking (likely the actual answer)
-    for (let i = parts.length - 1; i >= 1; i--) {
-      const p = (parts[i] ?? "").trim();
-      if (p && !isThinkingChunk(p)) return p;
-    }
-    // All chunks look like thinking — truncated with no answer (500-token budget spent)
-    return "";
-  }
-  // No blank line — try to find first non-list line after 5 lines
-  const lines = out.split("\n");
-  const idx = lines.findIndex((l, i) => i > 5 && l.trim() && !/^\s*[-*]\s/.test(l) && !/^\s*\d+\./.test(l.trim()) && l.trim().length > 20);
-  if (idx > 0) return lines.slice(idx).join("\n").trim();
-  return "";
+  return out;
 }
 
 export type Command =
