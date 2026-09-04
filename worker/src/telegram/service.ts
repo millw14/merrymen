@@ -550,6 +550,16 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // the thread survives a restart, not just a process lifetime.
     let turnMemoryIds: string[] | undefined;
     if (!cmd) {
+      // Deterministic help — never hit the LLM for capability questions (no soul header needed).
+      // "what can you do / help / commands" must be HELP_TEXT, not a warm chat that echoes soul header.
+      const helpRe = /^\s*(what can you do|what do you do|what can u do|help(\s+me)?|commands|capabilities|what are you capable of|what can you help with)\s*[?!.]*\s*$/i;
+      const isPcHelp = /on my pc/i.test(msg.text);
+      if (helpRe.test(msg.text) && !isPcHelp) {
+        cmd = { kind: "help" } as Command;
+        await pushHistory(msg.chatId, "user", msg.text);
+      }
+    }
+    if (!cmd) {
       // Bare amount follow-up (e.g. "5" or "5usdg") after bot asked "how much?"
       // must not hit the LLM — it forces a 500-token reasoning dump ("Here's a thinking process…")
       // Capture it here before interpretWithLlm / narrateChat.
