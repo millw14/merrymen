@@ -1,8 +1,7 @@
 import { castOf, regretOf, verbOf, whoOf, type Beat, type Lane } from "./beat";
 import { elapsed } from "./clock";
 import { money, pctPts, type LiveToken } from "./live";
-import { strategyName } from "./strategy";
-import { Face, FaceOn, FacesOn, Stamp } from "./ui";
+import { Face, FaceOn, FacesOn } from "./ui";
 
 function logoOf(tokens: LiveToken[], symbol: string): LiveToken | undefined {
   return tokens.find((t) => t.symbol.toUpperCase() === symbol.toUpperCase());
@@ -19,7 +18,7 @@ export function Wire({
   lanes: Lane[];
   tokens: LiveToken[];
   now: number;
-  /** One agent's own rail: its rulebook is already stated above, so drop the stamp. */
+  /** One agent's own rail: every beat is theirs, so the agent count is noise. */
   solo?: boolean;
   onToken?: (id: string) => void;
   onAgent?: (slug: string) => void;
@@ -62,7 +61,6 @@ export function Wire({
                 tokens={tokens}
                 now={now}
                 live={live}
-                solo={solo}
                 onToken={onToken}
                 onAgent={onAgent}
               />
@@ -84,7 +82,6 @@ function BeatRow({
   tokens,
   now,
   live,
-  solo,
   onToken,
   onAgent,
 }: {
@@ -93,7 +90,6 @@ function BeatRow({
   tokens: LiveToken[];
   now: number;
   live?: boolean;
-  solo?: boolean;
   onToken?: (id: string) => void;
   onAgent?: (slug: string) => void;
 }) {
@@ -154,14 +150,7 @@ function BeatRow({
         </button>
 
         {beat.kind === "trade" ? (
-          <>
-            {!solo && (
-              <div className="wire-tag">
-                <Stamp>{strategyName(beat.actor.strategy)}</Stamp>
-              </div>
-            )}
-            {beat.reason ? <p className="wire-why">{beat.reason}</p> : null}
-          </>
+          beat.reason ? <p className="wire-why">{beat.reason}</p> : null
         ) : (
           <div className="wire-parts">
             {beat.parts.map((p) => (

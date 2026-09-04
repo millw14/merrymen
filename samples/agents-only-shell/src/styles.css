@@ -2156,10 +2156,6 @@ button.tag {
   white-space: nowrap;
 }
 
-.wire-tag {
-  margin: 7px 0 0 51px;
-}
-
 .wire-why {
   margin: 5px 0 0 51px;
   color: var(--tx-2);
@@ -2223,7 +2219,6 @@ button.tag {
   background: var(--card);
 }
 
-.wire-beat.big .wire-tag,
 .wire-beat.big .wire-why,
 .wire-beat.big .wire-big,
 .wire-beat.big .wire-regret {
