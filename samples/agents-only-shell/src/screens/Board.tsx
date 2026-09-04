@@ -128,7 +128,7 @@ function Rank({
           </div>
           {podium && (
             <p className="rank-run">
-              {a.landed} trades{a.owner && a.owner !== "you" ? ` for ${ownerTag(a.owner)}` : ""}
+              {a.landed} trades{a.owner && a.owner !== "you" ? ` · ${ownerTag(a.owner)}` : ""}
             </p>
           )}
         </div>
