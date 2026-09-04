@@ -34,6 +34,7 @@ import {
   type PublicClient,
 } from "viem";
 import {
+  isHostedMode,
   CASH,
   CIRCLE_TIERS,
   MORPHO,
@@ -98,6 +99,17 @@ import { archiveCurrentGrant, grantExpired, grantKey, loadGrantFile } from "./gr
 import { TRADEABLE_CHAIN_ID } from "./preflight";
 import { execModeOf, type ExecMode } from "./exec-mode";
 import { limitsFromGrant } from "./limits";
+import {
+  accountingLicence,
+  anchorLine,
+  doubt,
+  foldLicence,
+  INITIAL_CONTRIBUTION_TRUTH,
+  planFirstObservation,
+  readAnchor,
+  type AnchorVerdict,
+  type ContributionTruth,
+} from "./bootstrap-state";
 import { ensureHome, homePaths, merrymenHome } from "./home";
 import { resolveLlm } from "./llm";
 import { applyPaperIntent, type PaperPosition } from "./paper";
@@ -214,6 +226,7 @@ import {
   setPaperBook,
   setAgentName,
   setAgentXHandle,
+  setAgentEpoch,
   setAgentHwm,
   setAgentMode,
   setAgentStatus,
@@ -241,6 +254,17 @@ const VAULT_ABI = parseAbi([
 
 const usdg = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
 const usdgNum = (v: bigint) => Number(formatUnits(v, USDG_DECIMALS));
+
+/**
+ * How much cash may move across a downtime window before it stops being noise.
+ *
+ * 0.01 USDG. The durable columns are REAL, so a figure that made the round trip
+ * through Postgres and back can differ from the on-chain balance in the last
+ * decimal place without anything having happened. Below this the difference is
+ * storage precision; at or above it, something moved and the book must say it
+ * does not know what.
+ */
+const MATERIAL_DRIFT_USDG = 10_000n;
 const fmt = (v: bigint) => formatUnits(v, USDG_DECIMALS);
 
 function swapRouterFor(cfg: ResolvedConfig): `0x${string}` {
@@ -1038,30 +1062,79 @@ async function main() {
     const covered = scan ? await scanChainFlows(scan) : false;
 
     if (!covered && lastCashUsdg === null) {
-      // Nothing observed in THIS process yet. Two very different situations,
-      // and conflating them was a real bug:
+      // FIRST OBSERVATION OF THIS PROCESS. Everything hard about hosted
+      // accounting is in this branch, so it is worth being exact about what
+      // changed and why.
       //
-      //   • a genuinely new agent (no HWM) — the balance is the opening
-      //     deposit, booked as a flow so the ledger is complete from row one;
+      // THE OLD TEST WAS `equityUsdg > 0n && highWaterMarkUsdg === 0n`, read as
+      // "money is here and no peak is on record, so this money just arrived".
+      // In self-hosted mode that is sound: the database outlives the process, so
+      // an empty one really is a new agent. In HOSTED mode the child's SQLite
+      // lives in an ephemeral container directory, so a redeploy hands the
+      // worker an empty database and the test fires on an account that has been
+      // funded for weeks. The canary booked its 10 USDG as a brand-new
+      // contribution three separate times, once per deploy.
       //
-      //   • a RESTART of a funded agent (HWM persisted, so > 0) — here the old
-      //     code did nothing at all, because `lastCashUsdg` is a process-
-      //     lifetime variable that resets to null on every start. A top-up made
-      //     while the worker was stopped was therefore invisible: the next tick
-      //     handed the higher equity to accrueAboveHwm, which called it profit
-      //     and took a 10% performance fee on the owner's own capital, and
-      //     netContributions stayed understated forever.
+      // WHY NOBODY SAW IT. `record()` also raises the HWM by the same amount,
+      // so the phantom contribution and the phantom peak cancelled and no fee
+      // was wrongly charged. That cancellation is also why the fix cannot be
+      // "stop booking it": with the peak left at zero the next mark would hand
+      // the whole principal to accrueAboveHwm as profit. Both figures have to be
+      // restored together, which is what the anchor does (bootstrap-state.ts).
       //
-      // Stop worker → top up → start worker is the most natural thing a first-
-      // day owner does. Seeding from the last persisted cash reading closes it.
-      if (equityUsdg > 0n && highWaterMarkUsdg === 0n) {
-        await record(equityUsdg, "opening balance");
-      } else {
-        const prior = await lastKnownCashUsdg(agentId);
-        if (prior !== null) {
-          await record(cashUsdg - usdg(prior), "changed while the worker was stopped");
+      // WHAT REPLACES IT. The orchestrator holds DATABASE_URL and the child
+      // never will, so the parent derives the tenant's durable position from
+      // Postgres and writes it into the child's home. THE ANCHOR IS THE ONLY
+      // THING THAT LICENSES AN OPENING BALANCE, and it says so positively:
+      // `no-prior-accounting` means a query SUCCEEDED and found nothing, which
+      // is a claim only a process that can see durable state may make.
+      // THE DECISION IS PURE AND LIVES IN bootstrap-state.ts. Only the recording
+      // is here, so the rule that decides whether money is a contribution can be
+      // tested directly rather than inferred from the shape of this block.
+      const plan = planFirstObservation({
+        licence: accounting.openingBalanceLicence,
+        equityUsdg,
+        cashUsdg,
+        anchorCashUsdg,
+        materialDriftUsdg: MATERIAL_DRIFT_USDG,
+        why: accounting.why,
+      });
+      if (plan.action === "legacy-local") {
+        // SELF-HOSTED KEEPS THE ORIGINAL BEHAVIOUR, unchanged, because the
+        // premise it rests on is true here: the ledger is on a real disk that
+        // outlives the process, so an empty one is a new agent and a persisted
+        // cash reading really is where the account was left. The hosted arms
+        // below exist because that premise is false in a container, not because
+        // the reasoning was ever wrong on its own terms.
+        if (equityUsdg > 0n && highWaterMarkUsdg === 0n) {
+          await record(equityUsdg, "opening balance");
+        } else {
+          const prior = await lastKnownCashUsdg(agentId);
+          if (prior !== null) {
+            await record(cashUsdg - usdg(prior), "changed while the worker was stopped");
+          }
         }
+      } else if (plan.action === "book-opening-balance") {
+        // THE ONLY PATH THAT BOOKS A CONTRIBUTION HERE, and it runs only when
+        // the orchestrator READ durable state and found none.
+        if (plan.amountUsdg > 0n) await record(plan.amountUsdg, "opening balance");
+      } else if (plan.action === "resume-with-drift") {
+        doubtContributions(`cash moved across the downtime window and nothing could price it`);
+        await addEvent(
+          agentId,
+          "warn",
+          `cash moved ${plan.driftUsdg > 0n ? "+" : ""}${fmt(plan.driftUsdg)} USDG while the worker was stopped and ` +
+            `no chain scan covered the window — this is NOT booked as a contribution, because a balance change ` +
+            `across downtime cannot distinguish a deposit from a withdrawal from a trade that landed. ` +
+            `Contributions and P&L are marked unknown until a deposit scan can price it.`,
+        );
+      } else if (plan.action === "stand-down") {
+        // NO USABLE ANCHOR. The one thing that must not happen here is the old
+        // inference, so nothing is booked and the book says so.
+        doubtContributions(plan.why);
       }
+      // `resume-clean` is the remaining arm and it does nothing on purpose: a
+      // funded account came back with the cash the anchor said it had.
     } else if (!covered && lastCashUsdg !== null && ledgerWrites === ledgerWritesAtSnapshot) {
       await record(cashUsdg - lastCashUsdg, "no trade explains this");
     }
@@ -1075,6 +1148,177 @@ async function main() {
   // moved and NOTHING was written to the ledger in between, the money came from
   // outside. Deliberately narrow — see reconcileFlows.
   let lastCashUsdg: bigint | null = null;
+  /**
+   * WHAT THIS PROCESS IS ENTITLED TO CLAIM ABOUT THE OWNER'S CAPITAL.
+   *
+   * Set once, at arm, from the accounting anchor the orchestrator wrote (see
+   * bootstrap-state.ts). Kept beside `lastCashUsdg` because the two are read in
+   * the same breath and it is the pair that decides whether a balance is a
+   * contribution or just a balance.
+   *
+   * `openingBalanceLicence` is deliberately a licence rather than a guess:
+   *
+   *   new-account  durable state was READ and is empty — book the opening balance
+   *   resume       durable state exists — resume from it, book nothing
+   *   none         durable state could not be established — book nothing, and
+   *                say that contributions are unknown
+   *
+   * The third arm is the one that did not exist before. Its absence is the
+   * whole bug: with no way to express "I could not find out", the code had to
+   * pick one of the first two, and it picked the one that manufactures money.
+   */
+  const accounting: {
+    openingBalanceLicence: "new-account" | "resume" | "none" | "self-hosted-local";
+    contributionsKnown: boolean;
+    /** Once true, no later anchor read may set contributionsKnown back to true. */
+    contributionsDoubted: boolean;
+    /** Why, in one phrase, for the log line and the quality report. */
+    why: string;
+  } = {
+    openingBalanceLicence: "none",
+    contributionsKnown: false,
+    contributionsDoubted: false,
+    why: "not armed yet",
+  };
+  /** The believed truth about contributions, folded from every licence seen. */
+  let truth: ContributionTruth = INITIAL_CONTRIBUTION_TRUTH;
+  /** Cash at the anchor's newest durable observation. The downtime baseline. */
+  let anchorCashUsdg: bigint | null = null;
+  /** The peak the anchor says was already reached, restored into the local store. */
+  let anchorHwmUsdg: bigint | null = null;
+  /** The durable accounting epoch this child must file its rows under. */
+  let anchorEpoch: number | null = null;
+  /** One warning per process, not one per tick, when the fee is being suppressed. */
+  let feeSuppressionLogged = false;
+
+  /**
+   * Turn the anchor verdict into a licence. Runs once, at arm.
+   *
+   * THE HOSTED/SELF-HOSTED SPLIT IS THE HINGE. Self-hosted, the child's own
+   * SQLite lives on a real disk that outlives the process, so it IS the durable
+   * record and an empty one really does mean a new agent — the original
+   * inference was correct there and stays. Hosted, the same directory is
+   * discarded on every deploy, so emptiness means nothing at all and the only
+   * durable record is the one the parent can see. Getting this boundary wrong
+   * in either direction is a money bug, so it is drawn on `MERRYMEN_HOSTED`,
+   * which `childEnv` sets and nothing else does.
+   */
+  function applyAccountingAnchor(agentId: string, verdict: AnchorVerdict): void {
+    console.log(anchorLine(agentId, verdict));
+    const l = accountingLicence(verdict, { hosted: isHostedMode() });
+    accounting.openingBalanceLicence = l.licence;
+    anchorHwmUsdg = l.highWaterMarkUsdg;
+    anchorCashUsdg = l.lastObservedCashUsdg;
+    anchorEpoch = l.accountingEpoch;
+
+    // DOUBT IS STICKY FOR THE LIFE OF THE PROCESS.
+    //
+    // This function does not only run at startup. It runs inside `syncGrant`,
+    // which the tick re-enters whenever the grant changed or `active` is null —
+    // and a transient executor failure nulls `active`. So a plain assignment
+    // here would RESURRECT `contributionsKnown` on the next tick after something
+    // had already established that it was false.
+    //
+    // The asymmetry is what makes that fatal rather than untidy. The two places
+    // that clear the flag — `resume-with-drift` and `stand-down` — sit behind
+    // `lastCashUsdg === null`, so they can fire at most ONCE per process, while
+    // this runs every re-arm. One-way false against two-way true means the
+    // doubt always loses, and `contributionsKnown` is the sole gate on the
+    // performance fee: the fee would quietly come back at full rate on a book
+    // the code had already declared unknowable, with no second warning because
+    // `feeSuppressionLogged` is still set.
+    //
+    // Nothing an anchor can say lifts a doubt raised by observing the account.
+    // Clearing it needs evidence — a chain-scanned flow with a transaction —
+    // and that recovery does not exist yet, so the honest behaviour is to keep
+    // reporting unknown until the process restarts and re-derives.
+    // The fold is PURE and lives in bootstrap-state.ts so the asymmetry can be
+    // tested directly rather than inferred from the shape of this function — it
+    // had no coverage at all, and a mutation deleting it passed every test.
+    setTruth(foldLicence(truth, l));
+  }
+
+  /** The anchor verdict, read once. See `anchorOnce`. */
+  let anchorVerdict: AnchorVerdict | null = null;
+
+  /**
+   * READ THE ANCHOR EXACTLY ONCE PER PROCESS, at the first arm.
+   *
+   * It is a BOOTSTRAP contract — it describes the durable state the parent
+   * observed just before exec'ing this child — so the moment to read it is the
+   * moment the child starts, and re-reading it later is wrong in two separate
+   * ways that both showed up:
+   *
+   *   STALENESS. The parent writes the file once, in `spawnChild`. A child that
+   *   stays up longer than `BOOTSTRAP_MAX_AGE_SEC` and then re-arms — a grant
+   *   renewal, a transient executor failure that nulls `active` — would read its
+   *   OWN still-correct anchor as expired, fall closed, and permanently lose
+   *   both the peak restore and P&L on a healthy account.
+   *
+   *   FORGETTING. `syncGrant` re-enters on any re-arm, so a re-read handed the
+   *   licence a fresh chance to overwrite conclusions the process had already
+   *   drawn from watching the account.
+   *
+   * Reading once removes both. The age is measured against the instant the child
+   * started, which is seconds after the parent wrote the file, which is the only
+   * comparison the bound was ever meaningful for.
+   */
+  function anchorOnce(agentId: string): AnchorVerdict {
+    if (anchorVerdict === null) {
+      anchorVerdict = readAnchor(merrymenHome(), { tenantId: agentId });
+    }
+    return anchorVerdict;
+  }
+
+  /**
+   * Read the anchor and put the peak back, in that order, as one step.
+   *
+   * ONE FUNCTION because the two halves are not separable. The anchor is what
+   * knows the peak, and a restore that runs at a different point in the arm from
+   * the read is a window in which a funded account sits at a zero high-water
+   * mark. It is called immediately after `ensureAgent`, which is the first
+   * moment the row it writes to exists.
+   *
+   * `setAgentHwm` is `MAX(hwm_usdg, ?)` in SQL, a one-way door — so a restored
+   * peak can only ever be raised. Too high suppresses a fee; too low charges the
+   * owner for their own principal. Between those two the monotonic direction is
+   * the safe one, and the store already enforces it.
+   */
+  async function restoreAnchoredHighWaterMark(agentId: string): Promise<void> {
+    applyAccountingAnchor(agentId, anchorOnce(agentId));
+
+    // THE EPOCH COMES BACK FIRST, because every row this child is about to write
+    // is stamped with it.
+    //
+    // `ensureAgent` inserts only the grant columns, so a rebuilt container starts
+    // at the schema default of 1 while durable state may be on 2 — and nothing
+    // corrects it, because the bump is gated on pre-fix history that an empty
+    // database does not have. The child would then file its whole run under a
+    // closed epoch, invisible to the web's epoch-scoped readers AND to the next
+    // anchor derivation, which would read zero contributions and harden the fee
+    // gate on a healthy account.
+    if (anchorEpoch !== null) await setAgentEpoch(agentId, anchorEpoch);
+
+    if (anchorHwmUsdg === null || anchorHwmUsdg <= 0n) return;
+    const local = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+    if (anchorHwmUsdg > local) {
+      await setAgentHwm(agentId, usdgNum(anchorHwmUsdg));
+      console.log(`[anchor] restored high-water mark ${fmt(anchorHwmUsdg)} USDG (local was ${fmt(local)})`);
+    }
+  }
+
+  /** Raise a doubt that no later anchor read may lift. */
+  function doubtContributions(why: string): void {
+    setTruth(doubt(why));
+  }
+
+  /** One place that writes the three fields, so they cannot drift apart. */
+  function setTruth(t: ContributionTruth): void {
+    truth = t;
+    accounting.contributionsKnown = t.known;
+    accounting.contributionsDoubted = t.doubted;
+    accounting.why = t.why;
+  }
   /**
    * The block the deposit scan has read up to, for this process.
    *
@@ -2171,6 +2415,25 @@ async function main() {
           })
         : undefined;
     const agentId = await ensureAgent(grant);
+
+    // THE PEAK COMES BACK IMMEDIATELY AFTER THE ROW EXISTS, and before anything
+    // that can fail.
+    //
+    // `ensureAgent` creates the local `agents` row, and on a hosted child the
+    // SQLite is empty, so `hwm_usdg` takes its schema default of 0. Between that
+    // moment and the restore there must be nothing that can throw, return early,
+    // or get mirrored — every one of those leaves a funded account sitting at a
+    // zero peak, which is the state that charges a performance fee on the
+    // owner's own principal.
+    //
+    // It was originally placed beside the other arm-time reads, a dozen awaits
+    // and several network calls later. Any of those failing — a bundler key
+    // rotated, an RPC 5xx — would return before the restore ran, and the mirror
+    // would then carry the local zero up to the shared database as the new
+    // durable truth. (The mirror's own upsert is monotonic now, so that second
+    // half is closed too; this is the first half.)
+    await restoreAnchoredHighWaterMark(agentId);
+
     // The soul's name is the source of truth — mirror it onto the roster. The
     // configured name was reconciled into the soul above the short-circuit, so
     // by here `getName()` is already what the owner asked for.
@@ -2522,6 +2785,15 @@ async function main() {
           `(they predate flow tracking and receipt-derived fills, so they cannot be audited)`,
       );
     }
+    // WHAT THIS AGENT MAY CLAIM ABOUT ITS OWN CAPITAL, decided once, here.
+    //
+    // Read before the HWM, because in hosted mode the anchor is where the HWM
+    // comes from: the local `agents` row is in a container directory that a
+    // redeploy empties, so `getAgentFinancials` returns a confident zero for an
+    // account that has been funded for weeks.
+    // The anchor was read and the peak restored right after `ensureAgent`, above
+    // everything that can fail. Nothing to do here but pick the figure up.
+    //
     // HWM is persistent — a restart must not forget the peak, or the breaker
     // re-arms low and the fee ledger double-charges old profit.
     highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
@@ -4687,9 +4959,35 @@ async function main() {
           ? { chain: makeReconcileChain(client), smartAccount: grant.smartAccount as `0x${string}` }
           : undefined,
       );
+      // A PERFORMANCE FEE NEEDS TO KNOW WHAT WAS CONTRIBUTED.
+      //
+      // "Profit" here means equity above the peak, and the peak only means
+      // anything if every deposit that raised it was seen. When contributions
+      // are unknown — no usable accounting anchor, or cash that moved across a
+      // downtime window nothing could price — the difference between profit and
+      // the owner's own principal is exactly what is not established, so the
+      // fee is zeroed for this tick.
+      //
+      // THE HIGH-WATER MARK STILL RATCHETS, deliberately. Passing 0 bps rather
+      // than skipping the accrual keeps `newHwmUsdg` moving, because the peak
+      // is also what the drawdown breaker measures against: freezing it would
+      // make the breaker LESS likely to halt a falling book, which is the wrong
+      // direction to fail in. Refusing the money movement and keeping the safety
+      // signal is the split that matters.
+      const feeBpsThisTick = accounting.contributionsKnown ? effFeeBps : 0;
+      if (!accounting.contributionsKnown && effFeeBps > 0 && !feeSuppressionLogged) {
+        feeSuppressionLogged = true;
+        await addEvent(
+          agentId,
+          "warn",
+          `performance fee suppressed — contributions are not established (${accounting.why}), so equity above the ` +
+            `high-water mark cannot be distinguished from the owner's own capital. The peak still ratchets, so the ` +
+            `drawdown breaker is unaffected.`,
+        );
+      }
       // The Merry Circle discount is applied to the REAL fee here, so holders
       // actually accrue less — the perk is in the ledger, not just the marketing.
-      const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, effFeeBps);
+      const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, feeBpsThisTick);
       // A CURVE-VALUED POSITION MAY NOT RATCHET THE PEAK.
       //
       // `setAgentHwm` is MAX(hwm_usdg, ?) — a one-way door in SQL, with a real
@@ -4772,6 +5070,10 @@ async function main() {
         // The SAME total the fee and the breaker are judged against — the row
         // no longer re-derives its own, lower one.
         equityUsdg: usdgNum(equityUsdg),
+        // And the fourth term of that composition, so an auditor summing the
+        // parts closes on the total instead of finding a discrepancy exactly
+        // equal to the quarantined cost and having no way to name it.
+        quarantinedCostUsdg: usdgNum(quarantine.totalCostUsdg),
         // The prices this valuation was made at, journalled so the figure can
         // be re-derived rather than merely believed. `positions` carries these
         // but is overwritten every tick, so without this each snapshot destroyed

@@ -47,6 +47,8 @@ import { getSettingsStore } from "./settings-store";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
 import { isHostedMode, type MerrymenSettings } from "../../packages/core/src/index";
 import { makePgDb, translateSchema, type Db } from "./db";
+import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
+import { deriveBootstrapAccounting } from "./bootstrap-source";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { writePeersForChild } from "./peer-files";
@@ -210,9 +212,9 @@ function heartbeatAt(tenant: string): number | null {
 }
 
 /** Write the tenant's session-key-only grant into its child's grant.json. */
-async function writeGrantForChild(tenant: `0x${string}`): Promise<boolean> {
+async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` | null> {
   const grant = await getGrantStore().get(tenant);
-  if (!grant) return false;
+  if (!grant) return null;
 
   // BACKFILL THE PUBLIC ID.
   //
@@ -243,7 +245,11 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<boolean> {
   // so keep it owner-only. chmod is a POSIX no-op that throws on Windows — the
   // container is Linux, and self-hosted never runs the orchestrator.
   writeFileSync(path.join(home, "grant.json"), JSON.stringify(grant, null, 2), { encoding: "utf8", mode: 0o600 });
-  return true;
+  // The SMART ACCOUNT, returned rather than discarded: it is the key every
+  // ledger table is on, the caller needs it to derive the accounting anchor, and
+  // the grant is the only place the orchestrator can learn it without a second
+  // decrypting read.
+  return grant.smartAccount as `0x${string}`;
 }
 
 /**
@@ -276,6 +282,78 @@ async function writeSettingsForChild(
   }
 }
 
+/**
+ * Write the tenant's accounting anchor into its child's home.
+ *
+ * WHY THIS RUNS EVEN WHEN IT FAILS. The child's home survives a child restart
+ * but not a deploy, so a file left over from a previous pass can be both
+ * present and wrong. Writing the `unknown` arm on failure REPLACES that
+ * leftover with an explicit "the parent could not establish this", which the
+ * child fails closed on. Skipping the write on failure would leave the stale
+ * file in place and let a child resume from figures nobody re-verified — the
+ * strictly less safe of the two options, so the write is unconditional.
+ *
+ * Best-effort in the sense that it never throws and never blocks a spawn: an
+ * agent that cannot get an anchor still arms, still runs its risk controls and
+ * still reconciles. What it does not do is book contributions.
+ */
+async function writeBootstrapForChild(
+  tenant: `0x${string}`,
+  /**
+   * The tenant's SMART ACCOUNT — the key every ledger table is actually on, and
+   * the identity the child checks the file against. The tenant address names
+   * WHOSE anchor this is; the smart account names WHICH BOOK it describes, and
+   * they are not the same string.
+   */
+  smartAccount: `0x${string}`,
+  shared?: Db,
+): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  let accounting: TenantBootstrapState["accounting"];
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    // No shared database configured at all. That is a deployment fact, not a
+    // fact about the tenant, and it is reported as such rather than as an
+    // empty account.
+    accounting = { kind: "unknown", why: "no DATABASE_URL on the orchestrator", observedAt: now };
+  } else {
+    try {
+      accounting = await deriveBootstrapAccounting(shared ?? (await makePgDb(url)), smartAccount, now);
+    } catch (e) {
+      accounting = { kind: "unknown", why: e instanceof Error ? e.message : String(e), observedAt: now };
+    }
+  }
+
+  const state: TenantBootstrapState = {
+    schemaVersion: BOOTSTRAP_SCHEMA_VERSION,
+    // THE SMART ACCOUNT IS THE IDENTITY THE CHILD CHECKS, because it is the key
+    // the figures below were read under. Stamping the tenant here while the
+    // child compares against its smart account made every hosted anchor read as
+    // malformed — the mechanism was inert, and inert in the safe direction only
+    // by luck. The owner address rides along for provenance.
+    tenantId: smartAccount.toLowerCase(),
+    generatedAt: now,
+    accounting,
+    // `outstandingOps` is deliberately NOT written. The field is reserved in
+    // the schema so adding it later is not a break; populating it here would
+    // change which blocks a child scans, which is a different change.
+  };
+
+  try {
+    const home = childHome(tenant);
+    mkdirSync(home, { recursive: true });
+    writeFileSync(path.join(home, BOOTSTRAP_FILE), JSON.stringify(state, null, 2), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    if (accounting.kind === "unknown") {
+      log(`${tenant}: accounting anchor UNKNOWN — ${accounting.why} (child will not book contributions)`);
+    }
+  } catch (e) {
+    log(`${tenant}: could not write ${BOOTSTRAP_FILE} — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
   // The advisory lease is a precondition, taken by reconcile() before the FIRST
@@ -288,7 +366,8 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     log(`${tenant}: no healthy lease — not spawning (another replica may hold it)`);
     return;
   }
-  if (!(await writeGrantForChild(tenant))) {
+  const smartAccount = await writeGrantForChild(tenant);
+  if (!smartAccount) {
     log(`${tenant}: no grant in the store — not spawning`);
     return;
   }
@@ -296,6 +375,11 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   // patience to the tick that child will actually run. `tickSeconds` resolves
   // file-before-env (settings.ts), and the file is what we just wrote.
   const settings = await writeSettingsForChild(tenant);
+  // BEFORE spawn(), not after. The child reads its anchor while arming, and an
+  // anchor that lands a moment later would be read as absent — which fails
+  // closed, so the agent would run with contributions marked unknown for no
+  // reason other than a race.
+  await writeBootstrapForChild(tenant, smartAccount);
   const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
   const staleSec = staleThresholdSec(tickSeconds);
   const proc = spawn(

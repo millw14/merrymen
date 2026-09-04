@@ -98,16 +98,22 @@ const SQLITE_SCHEMA = `
     -- and positions.price_source. The three are not equally good evidence:
     --   'chain-log'       a Transfer log naming this account. Exact, has a tx.
     --   'transfer-intent' our own outbound transfer. Exact, has a tx.
+    --   'epoch-carry'     the closing equity of the epoch just closed, bridged
+    --                     forward as the new one's opening balance. No tx, but
+    --                     not guesswork either: it is a deterministic function of
+    --                     a figure already in the journal, and it is CHECKABLE
+    --                     against the prior epoch's final equity mark.
     --   'inferred'        a cash change no fill explains. Honest guesswork; only
     --                     ever recorded when NO trade ran in the interval, so it
     --                     cannot be confused with a fill, and it carries no tx.
-    -- An audit that needs a chain-verifiable figure keeps the first two.
+    -- An audit that needs a chain-verifiable figure keeps the first two. One that
+    -- needs a SUPPORTABLE figure keeps the first three; see accounting-scope.ts.
     CREATE TABLE IF NOT EXISTS flows (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       agent_id TEXT NOT NULL,
       direction TEXT NOT NULL,       -- 'in' | 'out'
       amount_usdg REAL NOT NULL,     -- always positive; direction carries the sign
-      tx_hash TEXT,                  -- null only when source = 'inferred'
+      tx_hash TEXT,                  -- null for 'inferred' and 'epoch-carry'
       block_number INTEGER,
       source TEXT NOT NULL,
       at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -722,6 +728,36 @@ export async function getAgentFinancials(
 }
 
 /** Ratchet the persisted HWM (monotonic — ignores values below the stored peak). */
+/**
+ * Adopt the durable accounting epoch on a child whose database was discarded.
+ *
+ * THE REGRESSION THIS CLOSES. `ensureAgent` inserts only the grant columns, so a
+ * hosted child rebuilt by a redeploy takes the schema DEFAULT of epoch 1 — while
+ * the shared `agents` row is on 2. The only bump path is gated by
+ * `hasEpochOneHistory`, which counts rows written before the accounting fix and
+ * is therefore false on an empty database, so nothing corrects it.
+ *
+ * The child then writes every trade, flow and equity row stamped epoch 1. The
+ * web's readers are epoch-scoped and the anchor derivation now is too, so those
+ * rows are invisible to BOTH: contributions and the evidenced total both read
+ * zero, and the fee gate hardens permanently on an account that is fine.
+ *
+ * MONOTONIC, like the peak. `MAX` rather than assignment, because an epoch is a
+ * one-way door — going backwards would readmit the quarantined rows the boundary
+ * exists to exclude, which is the failure the mirror's own upsert had.
+ */
+export async function setAgentEpoch(agentId: string, epoch: number): Promise<boolean> {
+  if (!Number.isInteger(epoch) || epoch < 1) return false;
+  try {
+    await getDb()
+      .prepare("UPDATE agents SET epoch = MAX(epoch, ?) WHERE smart_account = ?")
+      .run(epoch, agentId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function setAgentHwm(agentId: string, hwmUsdg: number): Promise<boolean> {
   try {
     await getDb()
@@ -943,9 +979,12 @@ export async function hasEpochOneHistory(agentId: string): Promise<boolean> {
  * what "reporting starts clean" has to mean — epoch 1's performance is
  * unmeasurable, which is precisely why it was quarantined.
  *
- * Booked 'inferred' because it is: a balance observed at a boundary, not a
- * transfer anybody witnessed. The flow ledger has that column so this kind of
- * row can never be mistaken for a receipt.
+ * Booked 'epoch-carry', which is its own source rather than 'inferred'. It is
+ * not a transfer anybody witnessed, so it is not a receipt — but it is also not
+ * guesswork: it is the closing equity of the epoch just closed, a figure already
+ * in the journal, and reconcileEpochCarry() checks it against that mark. Sharing
+ * a source with real inference made every agent that crossed a boundary
+ * permanently unable to evidence its contributions, with no recovery possible.
  */
 export async function openNextEpoch(agentId: string, openingBalanceUsdg?: number): Promise<number> {
   const next = (await getAgentEpoch(agentId)) + 1;
@@ -958,14 +997,22 @@ export async function openNextEpoch(agentId: string, openingBalanceUsdg?: number
       agentId,
       direction: "in",
       amountUsdg: openingBalanceUsdg,
-      source: "inferred",
+      // NOT 'inferred'. This is the closing equity of the epoch just closed,
+      // which is a figure already in the journal — a deterministic bridge, not a
+      // deduction from a balance nobody can point at. Sharing a source value with
+      // real inference condemned every agent that had ever crossed a boundary to
+      // permanent contributionsKnown=false, with no recovery that could exist:
+      // no deposit scan can retroactively give a bookkeeping entry a transaction
+      // hash it never had. A carry is checkable against the prior epoch's own
+      // closing mark instead — see reconcileEpochCarry in accounting-scope.ts.
+      source: "epoch-carry",
     });
   }
   return next;
 }
 
 /** How the ledger came to know about a flow. See the flows DDL — these are not equal evidence. */
-export type FlowSource = "chain-log" | "transfer-intent" | "inferred";
+export type FlowSource = "chain-log" | "epoch-carry" | "transfer-intent" | "inferred";
 
 export interface FlowRow {
   agentId: string;
@@ -1029,15 +1076,64 @@ export async function addFlow(flow: FlowRow): Promise<void> {
  * P&L at all rather than a confident wrong one.
  */
 export async function getNetContributionsUsdg(agentId: string): Promise<number | null> {
+  // EPOCH-SCOPED, and it was not.
+  //
+  // The boundary bridges two epochs by writing the closing equity of the old one
+  // as an opening balance in the new one (`openNextEpoch`). Summing across the
+  // boundary therefore counts the same capital twice — once as the original
+  // deposit, once as the bridge derived from it — so contributions double and
+  // P&L goes as negative as the deposit was large.
+  //
+  // It never fired because the only agents ever bumped were those with pre-fix
+  // rows, and pre-fix rows predate the flows table: epoch 1 held no flows, so a
+  // lifetime sum happened to equal the current epoch's. Fund an agent on today's
+  // code and bump it for any future reason and the accident stops holding.
+  //
+  // The web's identical query already carried the predicate (scoreboard
+  // route.ts). This is the reader that did not. See accounting-scope.ts.
+  const epoch = await epochOf(agentId);
   const row = await getDb()
     .prepare(
       `SELECT COUNT(*) AS n,
               COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-       FROM flows WHERE agent_id = ?`,
+       FROM flows WHERE agent_id = ? AND epoch = ?`,
     )
-    .get(agentId) as { n: number; net: number } | undefined;
+    .get(agentId, epoch) as { n: number; net: number } | undefined;
   if (!row || row.n === 0) return null;
   return row.net;
+}
+
+/**
+ * The evidence behind this epoch's contributions, so a caller can say whether
+ * the total is a receipt, a bridge, or an opinion.
+ *
+ * Returns counts by source rather than a verdict: deciding what counts as
+ * evidence is `accounting-scope.ts`'s job, and a store read that also judged
+ * would put the policy in two places.
+ */
+export async function getFlowEvidence(
+  agentId: string,
+): Promise<{ source: string; n: number; netUsdg: number }[]> {
+  const epoch = await epochOf(agentId);
+  return (await getDb()
+    .prepare(
+      `SELECT source,
+              COUNT(*) AS n,
+              COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS netUsdg
+       FROM flows WHERE agent_id = ? AND epoch = ? GROUP BY source`,
+    )
+    .all(agentId, epoch)) as unknown as { source: string; n: number; netUsdg: number }[];
+}
+
+/** The last equity figure recorded in a SPECIFIC epoch — what a carry must match. */
+export async function closingEquityOfEpoch(agentId: string, epoch: number): Promise<number | null> {
+  const row = (await getDb()
+    .prepare(
+      `SELECT equity_usdg FROM equity WHERE agent_id = ? AND epoch = ?
+       ORDER BY at DESC, id DESC LIMIT 1`,
+    )
+    .get(agentId, epoch)) as { equity_usdg: number } | undefined;
+  return row?.equity_usdg ?? null;
 }
 
 /**
@@ -1619,6 +1715,21 @@ export async function addEquity(
      */
     equityUsdg: number;
     /**
+     * The fourth term of that composition, recorded so the total can be CHECKED.
+     *
+     * `composeEquityUsdg` is cash + vault + positions + quarantinedCost, and the
+     * journal carried only the first three beside the total. That is enough to
+     * publish a number and not enough to verify one: an auditor summing what is
+     * written finds a discrepancy exactly equal to the quarantined cost and
+     * cannot tell it from a book that does not add up. Writing the term makes the
+     * identity closed.
+     *
+     * Optional because every mark written before this existed lacks it, and the
+     * verifier must treat those as UNCHECKABLE rather than as zero — assuming
+     * zero is how the missing term became invisible in the first place.
+     */
+    quarantinedCostUsdg?: number;
+    /**
      * The prices this valuation was made at, and how good each one is.
      *
      * Without them a historical equity figure cannot be re-derived by anyone,
@@ -1649,6 +1760,10 @@ export async function addEquity(
           symbol: m.symbol,
         })),
         positionsUsdg: b.positionsUsdg,
+        // Written only when the caller knows it, so an auditor can tell "there
+        // was none" from "nobody said". Undefined is dropped by JSON.stringify,
+        // which is exactly the distinction we want on the wire.
+        quarantinedCostUsdg: b.quarantinedCostUsdg,
         vaultUsdg: b.vaultUsdg,
       },
       async (db: Db) => {

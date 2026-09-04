@@ -487,9 +487,29 @@ export async function mirrorTenant(args: {
              expires_at = excluded.expires_at, mode = excluded.mode,
              beat_at = excluded.beat_at, sponsor_gas = excluded.sponsor_gas,
              x_handle = excluded.x_handle,
-             epoch = excluded.epoch,
-             hwm_usdg = excluded.hwm_usdg,
-             accrued_fee_usdg = excluded.accrued_fee_usdg`,
+             -- MONOTONIC, NOT OVERWRITTEN. These three are RATCHETS, and the
+             -- child that supplies them lives in a container whose database a
+             -- redeploy empties. A fresh child recreates its local agents row at
+             -- the schema defaults — epoch 1, hwm 0, fee 0 — and an unconditional
+             -- assignment here wrote those defaults straight over the durable
+             -- history: the peak the performance fee is measured against reset to
+             -- zero, the accounting epoch regressed to 1 (readmitting the very
+             -- epoch-1 rows the epoch mechanism exists to exclude), and the
+             -- accrued-fee total forgot what the house had earned.
+             --
+             -- The direction matters more than the loss. A peak that resets to 0
+             -- means the next mark hands the whole principal to accrueAboveHwm as
+             -- profit and charges a performance fee on the owner's own capital —
+             -- the exact failure the accounting anchor was built to prevent,
+             -- arriving through the mirror instead of through the worker.
+             --
+             -- CASE rather than MAX/GREATEST because this statement is written
+             -- once for both backends: MAX is scalar in sqlite and an aggregate
+             -- in Postgres, and GREATEST does not exist in sqlite.
+             epoch = CASE WHEN excluded.epoch > agents.epoch THEN excluded.epoch ELSE agents.epoch END,
+             hwm_usdg = CASE WHEN excluded.hwm_usdg > agents.hwm_usdg THEN excluded.hwm_usdg ELSE agents.hwm_usdg END,
+             accrued_fee_usdg = CASE WHEN excluded.accrued_fee_usdg > agents.accrued_fee_usdg
+                                     THEN excluded.accrued_fee_usdg ELSE agents.accrued_fee_usdg END`,
         );
         for (const a of agents) {
           await ins.run(
@@ -506,6 +526,7 @@ export async function mirrorTenant(args: {
             // means a pre-migration child rather than an absent value — fall back
             // to the same defaults the schema would have applied.
             a.epoch ?? 1, a.hwm_usdg ?? 0, a.accrued_fee_usdg ?? 0,
+
           );
         }
       });
