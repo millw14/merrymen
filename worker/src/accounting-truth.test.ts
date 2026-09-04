@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   accountingLicence,
+  anchorLine,
   BOOTSTRAP_MAX_AGE_SEC,
   BOOTSTRAP_SCHEMA_VERSION,
   classifyAnchor,
@@ -419,6 +420,44 @@ describe("P3c — a doubt raised by watching the account is never lifted by a fi
   });
 });
 
+describe("P3d — the operator line shows the EVIDENCED total, not just the claimed one", () => {
+  it("prints both totals and the unevidenced row count", () => {
+    // Fail-closed is the most important property this file has, and in
+    // production the only other place it surfaced was a fee-suppression event
+    // that needs a clean tick to fire. On a rate-limited fleet that can be hours
+    // away, so the line said "contributions 30000000" and stopped — the number
+    // the phantom bookings produced, with no hint that only a third of it is a
+    // receipt.
+    const line = anchorLine(
+      TENANT,
+      read(
+        anchorFile(
+          established({
+            netContributionsUsdg: "30000000",
+            anchoredContributionsUsdg: "10000000",
+            unanchoredFlowCount: 2,
+          }),
+        ),
+      ),
+    );
+    assert.match(line, /contributions 30000000/);
+    assert.match(line, /evidenced 10000000/, "the receipts-only total must be on the line");
+    assert.match(line, /unevidenced-rows 2/, "and how many rows are not receipts");
+  });
+
+  it("says so when the totals were never computed, rather than implying agreement", () => {
+    const line = anchorLine(
+      TENANT,
+      read(anchorFile(established({ anchoredContributionsUsdg: undefined, unanchoredFlowCount: undefined } as never))),
+    );
+    assert.match(line, /evidenced not-computed/);
+  });
+
+  it("carries a rejected epoch bridge onto the line", () => {
+    const line = anchorLine(TENANT, read(anchorFile(established({ carryNote: "opening balance does not match" } as never))));
+    assert.match(line, /epoch carry rejected: opening balance does not match/);
+  });
+});
 describe("P4 — self-hosted keeps the behaviour whose premise is true there", () => {
   it("a self-hosted worker takes the legacy local path, anchor or no anchor", () => {
     for (const raw of [null, anchorFile(established())]) {

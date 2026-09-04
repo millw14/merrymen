@@ -644,7 +644,23 @@ export function anchorLine(tenantId: string, v: AnchorVerdict): string {
   if (a.kind === "established") {
     return (
       `${head} ESTABLISHED — hwm ${a.highWaterMarkUsdg} contributions ${a.netContributionsUsdg} ` +
-      `cash ${a.lastObservedCashUsdg ?? "unknown"} epoch ${a.accountingEpoch} (micro-USDG)`
+      // THE EVIDENCED TOTAL, BESIDE THE CLAIMED ONE.
+      //
+      // Without these two the line said "contributions 30000000" and stopped —
+      // which is the number the phantom bookings produced, printed with no hint
+      // that only 10000000 of it is a receipt. Fail-closed is the single most
+      // important property this file has, and the only other place it surfaced
+      // was a fee-suppression event that needs a clean tick to fire. On a
+      // rate-limited fleet that event can be hours away, so the safety property
+      // was effectively invisible in production at the moment it mattered most.
+      //
+      // `evidenced` counts chain-log receipts and reconciling epoch bridges;
+      // `unevidenced` is everything else. They must agree for contributions to
+      // be believed, and now an operator can see at a glance whether they do.
+      `evidenced ${a.anchoredContributionsUsdg ?? "not-computed"} ` +
+      `unevidenced-rows ${a.unanchoredFlowCount ?? "?"} ` +
+      `cash ${a.lastObservedCashUsdg ?? "unknown"} epoch ${a.accountingEpoch} (micro-USDG)` +
+      (a.carryNote ? ` · epoch carry rejected: ${a.carryNote}` : "")
     );
   }
   if (a.kind === "no-prior-accounting") {
