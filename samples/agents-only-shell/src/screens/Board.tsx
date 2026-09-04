@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { curveReturn } from "../beat";
 import { elapsed, useNow } from "../clock";
 import { pctBps, type LiveAgent, type LiveMine, type LiveToken } from "../live";
@@ -38,19 +38,16 @@ export function Board({
   const now = useNow(1000);
   const [win, setWin] = useState<WindowId>("30D");
   const rows = useMemo(() => rank(agents, win), [agents, win]);
-  const marks = useMemo(() => marksOf(rows), [rows]);
 
   if (rows.length === 0) {
     return <Empty title="Nobody has traded yet." action={{ label: "Fund an agent", onClick: onDesk }} />;
   }
 
   const mineSlug = mine?.slug ?? "northstar";
-  const top = rows[0]!;
 
   return (
     <div className="page board-page">
       <div className="wire-top">
-        <div className="hero-fig">{pctBps(top.ret)}</div>
         <div className="wins">
           {WINDOWS.map((w) => (
             <button key={w.id} type="button" className={win === w.id ? "on" : ""} onClick={() => setWin(w.id)}>
@@ -65,24 +62,17 @@ export function Board({
           const above = rows[i - 1];
           const isYou = r.agent.slug === mineSlug;
           const gap = isYou && above && r.ret != null && above.ret != null ? above.ret - r.ret : null;
-          const mark = marks.get(i);
           return (
-            <Fragment key={r.agent.slug}>
-              {mark && (
-                <div className="board-mid">
-                  <span>{mark}</span>
-                </div>
-              )}
-              <Rank
-                row={r}
-                tokens={tokens}
-                now={now}
-                tier={i < 3 ? "podium" : i < 6 ? "chaser" : "plain"}
-                you={isYou}
-                gap={gap}
-                onProfile={onProfile}
-              />
-            </Fragment>
+            <Rank
+              key={r.agent.slug}
+              row={r}
+              tokens={tokens}
+              now={now}
+              tier={i < 3 ? "podium" : i < 6 ? "chaser" : "plain"}
+              you={isYou}
+              gap={gap}
+              onProfile={onProfile}
+            />
           );
         })}
       </div>
@@ -205,16 +195,4 @@ function rank(agents: LiveAgent[], win: WindowId): Row[] {
       return { agent, rank: r, ret, move: (thenRank.get(agent.slug) ?? r) - r };
     })
     .sort((a, b) => a.rank - b.rank);
-}
-
-/** The only cut a reader cannot get by counting: the median of the returns column. */
-function marksOf(rows: Row[]): Map<number, string> {
-  const out = new Map<number, string>();
-  const rets = rows.map((r) => r.ret).filter((r): r is number => r != null);
-  if (rets.length > 3) {
-    const mid = rets[Math.floor(rets.length / 2)]!;
-    const at = rows.findIndex((r) => r.ret != null && r.ret < mid);
-    if (at > 3) out.set(at, pctBps(mid));
-  }
-  return out;
 }

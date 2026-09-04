@@ -84,7 +84,7 @@ export function You({
               <span className="pace-track">
                 <i className="mine" style={{ width: `${(pace.yours / paceMax) * 100}%` }} />
               </span>
-              <b>{pace.yours}</b>
+              <b>{pace.yours} trades</b>
             </div>
             <div className="pace-row">
               <span className="faces">
@@ -95,8 +95,9 @@ export function You({
               <span className="pace-track">
                 <i style={{ width: `${(pace.others / paceMax) * 100}%` }} />
               </span>
-              <b>{pace.others}</b>
+              <b>{pace.others} trades</b>
             </div>
+            <span className="pace-cap">today</span>
           </div>
         )}
       </div>

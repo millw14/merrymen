@@ -1895,9 +1895,15 @@ button.tag {
 
 .pace-row {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) 22px;
+  grid-template-columns: 38px minmax(0, 1fr) 62px;
   align-items: center;
   gap: 10px;
+}
+
+.pace-cap {
+  align-self: flex-end;
+  color: var(--tx-2);
+  font-size: 12px;
 }
 
 .pace-track {
@@ -2351,27 +2357,6 @@ button.tag {
 
 .rank.podium {
   padding: 14px 0;
-}
-
-.board-mid {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 16px 0 10px;
-}
-
-.board-mid::before {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: var(--line);
-}
-
-.board-mid span {
-  color: var(--tx-2);
-  font-family: var(--pixel);
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
 }
 
 .rank.you {
