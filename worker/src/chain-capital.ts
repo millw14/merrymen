@@ -204,6 +204,12 @@ export async function scanFleetCapital(
           : {
               kind: "ambiguous",
               why: `the receipt for ${txHash} could not be read, so the other half of this transaction is unknown`,
+              evidence: {
+                counterparty: isOut ? toAddr : fromAddr,
+                direction: isOut ? "out" : "in",
+                txLegCount: 0,
+                rule: "not-this-account",
+              },
             };
         if (!readable) {
           entry.complete = false;

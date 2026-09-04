@@ -39,6 +39,14 @@ export type CapitalKind =
   /** A movement between accounts this system controls. Not external capital. */
   | "internal"
   /**
+   * A movement to or from chain infrastructure — an EntryPoint, Permit2, a
+   * deployer. Definitionally not capital and not a trade, and separated from
+   * `internal` because "another of our accounts" and "the 4337 EntryPoint" are
+   * different facts that a reader of an audit trail should not have to guess
+   * between.
+   */
+  | "protocol"
+  /**
    * The classifier could not decide.
    *
    * A distinct arm rather than a default, because the whole point is that an
@@ -67,8 +75,44 @@ export interface ClassifyInput {
   usdgToken: string;
   /** Addresses this system controls — other hosted smart accounts. */
   knownAccounts?: readonly string[];
-  /** Protocol addresses, used only as a fallback signal. */
+  /**
+   * Trading venues: routers, pools, launchpads.
+   *
+   * A weak signal on purpose. A venue here with NOTHING paired is `ambiguous`,
+   * never "trade" — see the fallback below.
+   */
   protocolAddresses?: readonly string[];
+  /**
+   * Chain INFRASTRUCTURE — EntryPoints, Permit2, deployers, multicall.
+   *
+   * Unlike a venue, these are definitionally not the owner's capital whatever
+   * else the transaction did, so a movement to one is `protocol` rather than
+   * ambiguous. Kept as a separate list because the two lists carry different
+   * amounts of authority and merging them would silently promote a router.
+   */
+  systemAddresses?: readonly string[];
+}
+
+/**
+ * Everything needed to explain the verdict without re-fetching the transaction.
+ *
+ * A classification an auditor cannot re-derive is an assertion, and this whole
+ * exercise exists because assertions got believed. Carried on every arm,
+ * including the ones that decided nothing.
+ */
+export interface ClassificationEvidence {
+  counterparty: string;
+  direction: "in" | "out" | "self" | "none";
+  /** How many ERC-20 Transfers the deciding transaction contained. */
+  txLegCount: number;
+  /** The rule that fired, so two verdicts can be compared without reading prose. */
+  rule:
+    | "paired-token-movement"
+    | "known-account"
+    | "system-address"
+    | "venue-without-pair"
+    | "no-pair-external"
+    | "not-this-account";
 }
 
 export interface Classification {
@@ -77,6 +121,7 @@ export interface Classification {
   why: string;
   /** The token that moved the other way, when this was a swap. */
   pairedToken?: string;
+  evidence: ClassificationEvidence;
 }
 
 const eq = (a: string | undefined, b: string | undefined) =>
@@ -103,10 +148,17 @@ export function classifyUsdgMovement(input: ClassifyInput): Classification {
       why: outbound
         ? "the account is both sender and recipient — a self-transfer says nothing about capital"
         : "the movement does not touch this account at all",
+      evidence: {
+        counterparty: outbound ? usdg.to : "none",
+        direction: outbound ? "self" : "none",
+        txLegCount: txLegs.length,
+        rule: "not-this-account",
+      },
     };
   }
 
   const counterparty = outbound ? usdg.to : usdg.from;
+  const base = { counterparty, direction: outbound ? ("out" as const) : ("in" as const), txLegCount: txLegs.length };
 
   // ── PRIMARY: did a DIFFERENT token move the other way in the same tx? ──────
   //
@@ -125,6 +177,7 @@ export function classifyUsdgMovement(input: ClassifyInput): Classification {
       why: outbound
         ? `the same transaction moved ${paired.token} INTO the account — this USDG bought something, it did not leave`
         : `the same transaction moved ${paired.token} OUT of the account — this USDG is sale proceeds, not a deposit`,
+      evidence: { ...base, rule: "paired-token-movement" },
     };
   }
 
@@ -133,10 +186,26 @@ export function classifyUsdgMovement(input: ClassifyInput): Classification {
     return {
       kind: "internal",
       why: `the counterparty ${counterparty} is another account this system controls`,
+      evidence: { ...base, rule: "known-account" },
     };
   }
 
-  // ── FALLBACK: a known protocol address with no paired leg. ────────────────
+  // ── Chain infrastructure is never the owner's capital. ───────────────────
+  //
+  // An EntryPoint or a Permit2 is not a person who could have deposited, so this
+  // is safe to decide on the address alone — unlike a VENUE, where the same
+  // reasoning would silently reclassify a trade the primary test could not see.
+  // The two lists are separate so that promoting a router into this one has to
+  // be a deliberate act rather than an append.
+  if (has(input.systemAddresses, counterparty)) {
+    return {
+      kind: "protocol",
+      why: `the counterparty ${counterparty} is chain infrastructure, which cannot be a source of capital`,
+      evidence: { ...base, rule: "system-address" },
+    };
+  }
+
+  // ── FALLBACK: a known trading venue with no paired leg. ───────────────────
   //
   // Deliberately AMBIGUOUS rather than "trade". A USDG movement to a venue with
   // nothing coming back is not a purchase that this function can see — it may be
@@ -149,6 +218,7 @@ export function classifyUsdgMovement(input: ClassifyInput): Classification {
       why:
         `the counterparty ${counterparty} is a known protocol address, but nothing moved the other way in ` +
         `this transaction — it cannot be read as either capital or a completed trade`,
+      evidence: { ...base, rule: "venue-without-pair" },
     };
   }
 
@@ -157,6 +227,7 @@ export function classifyUsdgMovement(input: ClassifyInput): Classification {
     why:
       `${outbound ? "sent to" : "received from"} ${counterparty}, an address outside this system, with no ` +
       `paired token movement — external capital`,
+    evidence: { ...base, rule: "no-pair-external" },
   };
 }
 
@@ -172,6 +243,8 @@ export interface CapitalTotals {
   ambiguous: number;
   tradeLegs: number;
   internal: number;
+  /** Movements to chain infrastructure. Never capital, never a trade. */
+  protocol: number;
 }
 
 /**
@@ -189,6 +262,7 @@ export function totalCapital(
   let ambiguous = 0;
   let tradeLegs = 0;
   let internal = 0;
+  let protocol = 0;
   for (const l of legs) {
     const amt = BigInt(l.amountRaw || "0");
     switch (l.classification.kind) {
@@ -205,6 +279,9 @@ export function totalCapital(
       case "internal":
         internal += 1;
         break;
+      case "protocol":
+        protocol += 1;
+        break;
       case "ambiguous":
         ambiguous += 1;
         break;
@@ -217,5 +294,6 @@ export function totalCapital(
     ambiguous,
     tradeLegs,
     internal,
+    protocol,
   };
 }

@@ -51,6 +51,8 @@ import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } f
 import { deriveBootstrapAccounting } from "./bootstrap-source";
 import { diagnoseAccounting, diagnosisLines } from "./accounting-diagnosis";
 import { planReconstruction, reconstructionLines } from "./accounting-reconstruction";
+import type { AccountPlan } from "./accounting-reconstruction";
+import { accountPreviewLines, parsePreviewRequest, rosterLines, runPreview } from "./accounting-preview";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
@@ -704,9 +706,61 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
   }
   try {
     const shared = await makePgDb(url);
-    const agents = (await shared
-      .prepare("SELECT smart_account, owner_address, epoch, mode, hwm_usdg FROM agents")
+    const ledgerAgents = (await shared
+      .prepare("SELECT smart_account, owner_address, epoch, mode, hwm_usdg, contributions_known FROM agents")
       .all()) as unknown as Record<string, unknown>[];
+
+    // THE ROSTER IS THE GRANT STORE, NOT THE LEDGER.
+    //
+    // The first dry run covered 22 of 24 tenants and could not say what happened
+    // to the other two, because it enumerated `agents` — a table a tenant only
+    // reaches once its child has armed AND mirrored. A tenant missing from the
+    // report is indistinguishable from a tenant the repair found nothing to do
+    // for, and "not in the mutation list" must never be read as "safe".
+    //
+    // So every tenant with a grant gets a plan row. One with no ledger row is
+    // synthesised from its grant and comes out of the planner as exactly what it
+    // is — no chain history, no rows to remove, nothing to do — recorded rather
+    // than absent.
+    const tenantByAccount = new Map<string, string>();
+    const byAccount = new Map<string, Record<string, unknown>>();
+    for (const a of ledgerAgents) byAccount.set(String(a.smart_account ?? "").toLowerCase(), a);
+
+    let rosterOnly = 0;
+    let rosterRead = true;
+    try {
+      const gs = getGrantStore();
+      for (const tenant of await gs.listTenants()) {
+        const g = await gs.get(tenant);
+        const acct = g?.smartAccount ? String(g.smartAccount) : null;
+        if (!acct) {
+          log(`recon| tenant ${tenant} holds a grant with no smart account — it cannot be planned`);
+          continue;
+        }
+        tenantByAccount.set(acct.toLowerCase(), tenant);
+        if (byAccount.has(acct.toLowerCase())) continue;
+        rosterOnly += 1;
+        byAccount.set(acct.toLowerCase(), {
+          smart_account: acct,
+          owner_address: g?.owner ?? null,
+          epoch: 1,
+          mode: null,
+          hwm_usdg: 0,
+          contributions_known: null,
+        });
+      }
+    } catch (e) {
+      // LOUD, and the run continues on the ledger roster alone — but the count
+      // below will then not add up to the fleet, which is the point of printing
+      // both halves rather than just the total.
+      rosterRead = false;
+      log(`recon| GRANT ROSTER UNREADABLE (${e instanceof Error ? e.message : String(e)}) — tenants may be missing`);
+    }
+    const agents = [...byAccount.values()];
+    log(
+      `recon| roster: ${agents.length} account(s) — ${ledgerAgents.length} from the ledger, ` +
+        `${rosterOnly} from the grant store with no ledger row · grant store read ${rosterRead}`,
+    );
     const flows = (await shared
       .prepare("SELECT id, agent_id, epoch, direction, amount_usdg, source, tx_hash, at FROM flows")
       .all()) as unknown as Record<string, unknown>[];
@@ -758,11 +812,46 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
       }
     }
 
-    const plans = planReconstruction({ agents, flows, equityByAccountEpoch, chain, onchainCash });
+    const plans = planReconstruction({ agents, flows, equityByAccountEpoch, chain, onchainCash, tenantByAccount });
     for (const line of reconstructionLines(plans)) log(`recon| ${line}`);
+
+    runPreviewIfAsked(plans);
   } catch (e) {
     log(`reconstruction dry run failed — ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+/**
+ * The preview, gated behind its own variable and read-only in the strongest
+ * sense available: the module it calls is never handed a database.
+ *
+ * Deliberately downstream of the plan rather than a separate entry point, so the
+ * preview is always of a plan just derived from the live database in this
+ * process — a stale preview is worse than none.
+ */
+function runPreviewIfAsked(plans: readonly AccountPlan[]): void {
+  // The clock is passed IN because parsePreviewRequest is pure and may not read
+  // one. Its default of 0 exists for the tests; leaving it to default here stamped
+  // every production run `run-1970-01-01T00-00-00-000Z`, which is precisely the
+  // property the id exists to provide.
+  const req = parsePreviewRequest(process.env, Date.now());
+  if (!req) return;
+  if (req.kind === "refused") {
+    log(`preview| REFUSED — ${req.why}`);
+    return;
+  }
+
+  log(`preview| run ${req.runId} · account ${req.account ?? "ALL"} · READ-ONLY (this build has no mutation path)`);
+  const previews = runPreview(plans, req);
+
+  // The selected account first and in full; then every tenant on one line, so
+  // the report can be read as "all N are accounted for".
+  for (const p of previews) {
+    if (!p.selected) continue;
+    const plan = plans.find((x) => x.smartAccount === p.account)!;
+    for (const line of accountPreviewLines(plan, p)) log(`preview| ${line}`);
+  }
+  for (const line of rosterLines(previews)) log(`preview| ${line}`);
 }
 
 

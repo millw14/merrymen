@@ -77,6 +77,16 @@ export interface AccountPlan {
   insert: ProposedFlowRow[];
   quarantine: ProposedQuarantine[];
 
+  /**
+   * What the ledger CURRENTLY claims about this account's capital, read from the
+   * durable `agents.contributions_known` flag rather than re-derived here.
+   *
+   * That flag is what the web tier publishes against, so it is the honest
+   * "before" figure — re-deriving it from the rows would produce a number that
+   * agrees with the repair's arithmetic while disagreeing with what an owner is
+   * actually being shown, which is the wrong half of the comparison to get right.
+   */
+  contributionsKnownBefore: boolean;
   contributionsAfterUsdg: number;
   contributionsKnownAfter: boolean;
   pnlPublishableAfter: boolean;
@@ -208,6 +218,10 @@ export function planReconstruction(args: {
       existingTotalUsdg: rows.reduce((s, f) => s + signed(f), 0),
       insert,
       quarantine,
+      // NULL is not false here — it is "the worker has never written a verdict"
+      // — but both mean the same thing to a reader: nothing on record licenses
+      // publishing a percentage. Only an explicit 1 counts as known.
+      contributionsKnownBefore: num(a.contributions_known) === 1,
       contributionsAfterUsdg: contributionsAfter,
       contributionsKnownAfter: known,
       // A PUBLISHABLE P&L NEEDS A DENOMINATOR, not just an evidenced one.
