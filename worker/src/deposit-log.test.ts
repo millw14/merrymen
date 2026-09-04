@@ -29,8 +29,11 @@ function transferLog(a: {
   txHash: string;
   blockNumber?: number;
   logIndex?: number;
+  /** The ERC-20 that moved. Defaults to USDG; a swap fixture names the other side. */
+  token?: string;
 }): RawLog {
   return {
+    ...(a.token === undefined ? {} : { address: a.token }),
     topics: [TRANSFER_TOPIC, addressTopic(a.from), addressTopic(a.to)],
     data: `0x${a.value.toString(16).padStart(64, "0")}` as Hex,
     transactionHash: a.txHash as Hex,
@@ -39,10 +42,30 @@ function transferLog(a: {
   };
 }
 
-/** A chain that serves a fixed log set, honouring the address and topic filter. */
-function fakeChain(logs: RawLog[], head = 1000n): ReconcileChain {
+/**
+ * A chain that serves a fixed log set, honouring the address and topic filter.
+ *
+ * `receiptExtra` carries the OTHER legs of a transaction — the ones a USDG-only
+ * `eth_getLogs` filter never returns. That distinction is the whole reason the
+ * scanner reads receipts: a swap's second leg is a different token, so it is
+ * invisible to the filter that found the first, and classifying on the filtered
+ * view alone books every purchase as a withdrawal.
+ */
+function fakeChain(logs: RawLog[], head = 1000n, receiptExtra: RawLog[] = []): ReconcileChain {
   return {
     getBlockNumber: async () => head,
+    async getReceiptLogs(txHash) {
+      const all = [...logs, ...receiptExtra].filter(
+        (l) => String(l.transactionHash).toLowerCase() === String(txHash).toLowerCase(),
+      );
+      return all.length
+        ? all.map((l) => ({
+            address: (l as { address?: string }).address ?? USDG,
+            topics: l.topics as string[],
+            data: l.data,
+          }))
+        : null;
+    },
     async getLogs(args) {
       return logs.filter((l) => {
         if (args.address.toLowerCase() !== USDG.toLowerCase()) return false;
@@ -54,7 +77,6 @@ function fakeChain(logs: RawLog[], head = 1000n): ReconcileChain {
         });
       });
     },
-    getReceiptLogs: async () => null,
   };
 }
 
@@ -212,5 +234,103 @@ describe("where the next scan starts", () => {
   it("never scans further back than the lookback allows", () => {
     // A long outage must not turn one tick into an unbounded historical scan.
     assert.equal(resumeFrom(10, 5_000n, 1_000n), 4_000n);
+  });
+});
+
+/**
+ * THE CANARY, AS THE CHAIN ACTUALLY HAS IT.
+ *
+ * Ground truth for 0x3E34E58e…: one 10.000000 USDG deposit, then four 1.666500
+ * USDG outflows to 0xf4acdaee… that are TSLA purchases, leaving 3.334000 in
+ * cash. `capital-classify.test.ts` already pins that the correct contributed
+ * capital is 10000000 raw and that the naive answer — netting every movement by
+ * direction — is 3_334_000. This asserts the SCANNER reaches the same answer,
+ * because the classifier being right is no use if the thing that writes rows
+ * does not consult it.
+ *
+ * The router is on NO list here, deliberately. Only transaction context
+ * separates a purchase from a withdrawal, and an address allowlist that is
+ * merely stale reclassifies trading as capital in exactly the direction that
+ * matters.
+ */
+describe("the canary's real movements", () => {
+  const ROUTER = "0xf4acdaee1234567890123456789012345678abcd";
+  const TSLA = "0x00000000000000000000000000000000000ee511";
+
+  /** One trade: USDG out to the router, TSLA back in, same transaction. */
+  const trade = (tx: string, block: number) => ({
+    usdg: transferLog({ from: ACCT, to: ROUTER, value: 1_666_500n, txHash: tx, blockNumber: block, logIndex: 0 }),
+    paired: transferLog({
+      from: ROUTER, to: ACCT, value: 4_420_417_000_000_000n, txHash: tx, blockNumber: block, logIndex: 1, token: TSLA,
+    }),
+  });
+
+  const TRADES = [trade("0xt1", 601), trade("0xt2", 602), trade("0xt3", 603), trade("0xt4", 604)];
+  const DEPOSIT = transferLog({
+    from: OTHER, to: ACCT, value: 10_000_000n, txHash: "0xfund", blockNumber: 600, logIndex: 0,
+  });
+
+  it("books the deposit and NONE of the four trade legs", async () => {
+    const flows = await findTransferFlows({
+      chain: fakeChain(
+        [DEPOSIT, ...TRADES.map((t) => t.usdg)],
+        1000n,
+        TRADES.map((t) => t.paired),
+      ),
+      smartAccount: ACCT,
+      usdgToken: USDG,
+      fromBlock: 0n,
+      toBlock: 1000n,
+      knownKeys: new Set<string>(),
+      // EMPTY. This is the set the old rule depended on entirely, and a redeploy
+      // empties it — so the fixture reproduces the state the fleet was actually
+      // in when the scanner would have been enabled.
+      tradeTxHashes: new Set<string>(),
+    });
+
+    assert.equal(flows.length, 1, "four purchases are not four withdrawals");
+    assert.equal(flows[0]!.txHash, "0xfund");
+    const net = flows.reduce((s, f) => s + (f.direction === "in" ? f.amountUsdg6 : -f.amountUsdg6), 0n);
+    assert.equal(net, 10_000_000n, "10.000000 USDG contributed");
+    assert.notEqual(net, 3_334_000n, "and NOT the cash balance, which is what direction-only netting gives");
+  });
+
+  it("refuses the whole pass when a receipt cannot be read", async () => {
+    // An unreadable receipt is not an absent second leg. Booking on the single
+    // log we can see is precisely the error above, so the pass refuses and the
+    // caller leaves its cursor where it was.
+    const blind: ReconcileChain = { ...fakeChain([TRADES[0]!.usdg]), getReceiptLogs: async () => null };
+    await assert.rejects(
+      () =>
+        findTransferFlows({
+          chain: blind,
+          smartAccount: ACCT,
+          usdgToken: USDG,
+          fromBlock: 0n,
+          toBlock: 1000n,
+          knownKeys: new Set<string>(),
+          tradeTxHashes: new Set<string>(),
+        }),
+      /receipt for 0xt1 could not be read/,
+    );
+  });
+
+  it("BLOCKS rather than guesses when a movement cannot be classified", async () => {
+    // A known venue with nothing coming back is neither a completed trade nor a
+    // deposit. Unknown means blocked, never "probably a contribution".
+    await assert.rejects(
+      () =>
+        findTransferFlows({
+          chain: fakeChain([TRADES[0]!.usdg]),
+          smartAccount: ACCT,
+          usdgToken: USDG,
+          fromBlock: 0n,
+          toBlock: 1000n,
+          knownKeys: new Set<string>(),
+          tradeTxHashes: new Set<string>(),
+          protocolAddresses: [ROUTER],
+        }),
+      /could not be classified/,
+    );
   });
 });

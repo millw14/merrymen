@@ -38,6 +38,29 @@
  */
 import { decodeEventLog, parseAbi, type Hex } from "viem";
 import { addressTopic, getLogsAdaptive, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+// The one rule that decides whether a USDG movement is the owner's capital or
+// the agent trading. Imported rather than restated so the scanner and the
+// accounting backfill cannot reach different answers about the same transfer.
+import { classifyUsdgMovement, type TransferLeg } from "../../packages/core/src/index";
+import type { ReceiptLog } from "./fills";
+
+/** Every ERC-20 Transfer in a receipt, as classification legs. */
+function legsFromReceiptLogs(logs: readonly ReceiptLog[]): TransferLeg[] {
+  const out: TransferLeg[] = [];
+  for (const l of logs) {
+    if ((l.topics?.[0] ?? "").toLowerCase() !== TRANSFER_TOPIC) continue;
+    // A Transfer has exactly three topics; ERC-721 has four and shares the
+    // signature's first word, so a token id would otherwise read as an amount.
+    if (l.topics.length !== 3) continue;
+    out.push({
+      token: l.address.toLowerCase(),
+      from: `0x${l.topics[1]!.slice(-40)}`.toLowerCase(),
+      to: `0x${l.topics[2]!.slice(-40)}`.toLowerCase(),
+      amountRaw: BigInt(l.data || "0x0").toString(),
+    });
+  }
+  return out;
+}
 
 /** The ERC-20 event. `value` is not indexed, so it is read from `data`. */
 const TRANSFER_ABI = parseAbi([
@@ -102,6 +125,12 @@ export async function findTransferFlows(opts: {
    * trade rows with transaction hashes.
    */
   tradeTxHashes: Set<string>;
+  /** Other accounts this system controls — a movement between them is internal. */
+  knownAccounts?: readonly string[];
+  /** Trading venues. A WEAK signal: a venue with no paired leg is ambiguous, never a trade. */
+  protocolAddresses?: readonly string[];
+  /** Chain infrastructure — EntryPoints, Permit2. Never a source of capital. */
+  systemAddresses?: readonly string[];
   maxSpan?: bigint;
   log?: (m: string) => void;
 }): Promise<TransferFlow[]> {
@@ -149,7 +178,8 @@ export async function findTransferFlows(opts: {
     );
   }
 
-  const out: TransferFlow[] = [];
+  /** A USDG movement that touches this account, before the receipt decides what it IS. */
+  const candidates: (TransferFlow & { from: string; to: string })[] = [];
   const seen = new Set<string>();
   for (const l of raw) {
     const blockNumber = num(l.blockNumber);
@@ -182,17 +212,104 @@ export async function findTransferFlows(opts: {
     // scans and would otherwise be booked as a deposit of its own size.
     if (from === to) continue;
     if (value === 0n) continue;
+    // A SECONDARY skip, kept because it is free and sometimes right, but it is
+    // no longer what decides the question. See the classification below.
     if (tradeTxHashes.has(l.transactionHash.toLowerCase())) continue;
 
     const mine = smartAccount.toLowerCase();
     if (to !== mine && from !== mine) continue; // neither leg is ours
-    out.push({
+    candidates.push({
       direction: to === mine ? "in" : "out",
       amountUsdg6: value,
       txHash: l.transactionHash,
       blockNumber,
       logIndex,
+      from,
+      to,
     });
+  }
+
+  // ── WHICH OF THESE IS ACTUALLY THE OWNER'S CAPITAL ────────────────────────
+  //
+  // THIS USED TO BE DECIDED BY LEDGER MEMBERSHIP, and that is not evidence. The
+  // only thing separating a contribution from a trade leg was whether the
+  // transaction hash appeared in `recentTradeTxHashes` — this worker's OWN
+  // sqlite, bounded by row recency rather than block range, living in an
+  // ephemeral container that a redeploy empties. Any trade that set missed —
+  // older than the bound, from a previous container, made by the owner's own
+  // wallet — had its USDG leg written as a `chain-log` flow, the highest-trust
+  // source in the schema, with the sign taken from direction alone.
+  //
+  // On the canary that is not hypothetical: its four 1.6665 USDG outflows to
+  // 0xf4acdaee… are TSLA purchases, and after the redeploys that emptied the
+  // child ledger nothing here could tell. They would have been booked as a
+  // 6.666 USDG withdrawal — contributed capital 3.334 instead of 10.000000,
+  // stamped chain-log, hash-chained into the journal and mirrored up. Strictly
+  // worse than the inferred rows this file exists to replace, because it would
+  // look authoritative.
+  //
+  // So the receipt decides. A swap moves two tokens in opposite directions
+  // within ONE transaction, and that test needs no address list and cannot go
+  // stale — see capital-classify.ts.
+  const out: TransferFlow[] = [];
+  const legsByTx = new Map<string, TransferLeg[]>();
+  for (const c of candidates) {
+    const k = c.txHash.toLowerCase();
+    if (legsByTx.has(k)) continue;
+    const receipt = await chain.getReceiptLogs(c.txHash as Hex).catch(() => null);
+    if (!receipt) {
+      // AN UNREADABLE RECEIPT IS NOT AN ABSENT SECOND LEG. Booking on the one
+      // log we can see is exactly the error above, so the whole pass refuses
+      // and the caller leaves the cursor where it is — the same handling a
+      // window nobody could read already gets.
+      throw new Error(
+        `deposit scan: the receipt for ${c.txHash} could not be read, so the other half of that transaction is ` +
+          `unknown — refusing to classify its USDG leg as capital`,
+      );
+    }
+    legsByTx.set(k, legsFromReceiptLogs(receipt));
+  }
+
+  for (const c of candidates) {
+    const legs = legsByTx.get(c.txHash.toLowerCase()) ?? [];
+    const usdgLeg: TransferLeg = {
+      token: usdgToken.toLowerCase(),
+      from: c.from,
+      to: c.to,
+      amountRaw: c.amountUsdg6.toString(),
+    };
+    const v = classifyUsdgMovement({
+      account: smartAccount,
+      usdg: usdgLeg,
+      txLegs: legs.length ? legs : [usdgLeg],
+      usdgToken: usdgToken.toLowerCase(),
+      knownAccounts: opts.knownAccounts,
+      protocolAddresses: opts.protocolAddresses,
+      systemAddresses: opts.systemAddresses,
+    });
+
+    if (v.kind === "capital-in" || v.kind === "capital-out") {
+      out.push({
+        direction: c.direction,
+        amountUsdg6: c.amountUsdg6,
+        txHash: c.txHash,
+        blockNumber: c.blockNumber,
+        logIndex: c.logIndex,
+      });
+      continue;
+    }
+
+    if (v.kind === "ambiguous") {
+      // UNKNOWN MEANS BLOCKED, never "probably a contribution". Refusing the
+      // whole pass leaves the cursor where it is, so an operator sees the same
+      // message every tick until they resolve it — which is the point. A
+      // permanently ambiguous movement should stop this scanner for this agent
+      // rather than quietly become a number in someone's P&L.
+      throw new Error(`deposit scan: ${c.txHash}#${c.logIndex} could not be classified — ${v.why}`);
+    }
+
+    // trade-in / trade-out / internal / protocol: real movements, not capital.
+    opts.log?.(`not capital: ${c.txHash.slice(0, 10)}…#${c.logIndex} is ${v.kind} — ${v.why}`);
   }
 
   // Chronological, so the flows are booked in the order they happened and the

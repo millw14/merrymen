@@ -964,7 +964,24 @@ async function main() {
       if (deltaUsdg === 0n) return;
       const inbound = deltaUsdg > 0n;
       const amount = inbound ? deltaUsdg : -deltaUsdg;
-      await addFlow({
+      // PAPER NEVER WRITES REAL CAPITAL. `paperActive()` is synchronous and
+      // always known here, which is why the authoritative answer is passed in
+      // rather than left to addFlow's fallback read of `agents.mode` — that
+      // column is written by the heartbeat and may not exist on the first tick,
+      // which is precisely the tick that books an opening balance.
+      const mode = paperActive() ? ("paper" as const) : ("live" as const);
+      if (mode === "paper" && !evidence) {
+        // Refused here as well as in the store so the HIGH-WATER MARK below is
+        // never moved by a simulated balance either: the flow and the peak are
+        // one decision, and letting the peak move on a refused flow would leave
+        // the pair in exactly the split state the anchor work existed to fix.
+        console.log(
+          `[flows] paper agent — not booking ${inbound ? "+" : "-"}${fmt(amount)} USDG as capital (${why}); ` +
+            `a simulated balance change is not a deposit`,
+        );
+        return;
+      }
+      const landed = await addFlow({
         agentId,
         direction: inbound ? "in" : "out",
         amountUsdg: usdgNum(amount),
@@ -972,7 +989,25 @@ async function main() {
         txHash: evidence?.txHash,
         blockNumber: evidence?.blockNumber,
         logIndex: evidence?.logIndex,
+        mode,
+        // The chain is left to addFlow's own read of `agents.chain_id`, which
+        // ensureAgent writes from the signed grant. That is the chain the grant
+        // authorises, so it is the chain any transaction touching this account
+        // is on — and reading it there means every writer gets it, not just
+        // the ones that remembered to pass it.
       });
+      if (!landed) {
+        // THE PEAK AND THE CONTRIBUTION MOVE TOGETHER OR NOT AT ALL.
+        //
+        // This used to run unconditionally against an addFlow that returned void
+        // and swallowed its own failures, so a transient insert error shifted the
+        // high-water mark by the full deposit with no row to explain it and no
+        // way to retry — the exact split the anchor design exists to prevent,
+        // reached silently. The caller now throws so the scan treats it as a
+        // failed pass and leaves its cursor where it is, which is what the
+        // RPC-failure path already does.
+        throw new Error(`flow not recorded for ${agentId} — refusing to move the high-water mark without it`);
+      }
       await adjustAgentHwm(agentId, usdgNum(deltaUsdg));
       highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
       await addEvent(
@@ -1143,6 +1178,35 @@ async function main() {
 
     lastCashUsdg = cashUsdg;
     ledgerWritesAtSnapshot = ledgerWrites;
+  };
+
+  /**
+   * The same reconciliation, with a failed WRITE treated exactly like a failed
+   * READ: retry it, do not paper over it.
+   *
+   * `record` now throws when the flow row did not land, because moving the peak
+   * for money the ledger has no record of is the split this whole design exists
+   * to prevent. That throw has to stop three things, and stopping it here stops
+   * all three at once: `chainScanCursor` is left where it was (the assignment
+   * that advances it is downstream of the throw), `lastCashUsdg` is not updated
+   * so the next tick sees the same unexplained delta and tries again, and the
+   * tick itself survives — an accounting write that failed is not a reason to
+   * take an armed agent down.
+   */
+  const reconcileFlowsOrRetry = async (
+    agentId: string,
+    cashUsdg: bigint,
+    equityUsdg: bigint,
+    scan?: { chain: ReconcileChain; smartAccount: `0x${string}` },
+  ): Promise<void> => {
+    try {
+      await reconcileFlows(agentId, cashUsdg, equityUsdg, scan);
+    } catch (e) {
+      console.log(
+        `[flows] reconcile aborted (${e instanceof Error ? e.message : String(e)}) — the scan cursor and the ` +
+          `cash baseline are left where they were, so the next tick retries the same window`,
+      );
+    }
   };
   let highWaterMarkUsdg = 0n;
   // Cash as of the last live snapshot, and how many rows the ledger had then.
@@ -4185,18 +4249,46 @@ async function main() {
       // profit home reads as a loss of precisely that size, and the drawdown
       // breaker eventually fires on it.
       if (intent.kind === "transfer") {
-        await addFlow({
+        const landed = await addFlow({
           agentId,
           direction: "out",
           amountUsdg: usdgNum(intent.amountUsdg),
           source: "transfer-intent",
           txHash,
+          // EXPLICIT, because this site is reached only on the live rail — an
+          // executed on-chain transfer. Left to the store's fallback read of
+          // `agents.mode` it would be judged by whatever the heartbeat last
+          // wrote, which on an agent that has just been switched to paper is
+          // the wrong answer about a transaction that really happened.
+          mode: "live",
         });
-        await adjustAgentHwm(agentId, -usdgNum(intent.amountUsdg));
-        highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
-        // The next tick's cash reading already reflects this, and it now has an
-        // explanation, so inference must not double-count it.
-        if (lastCashUsdg !== null) lastCashUsdg -= intent.amountUsdg;
+        // THE SECOND CALL SITE, and it has the same rule as the first.
+        //
+        // This block used to discard addFlow's answer and adjust the peak
+        // regardless — the exact split that the deposit-side fix above exists
+        // to prevent, in the withdrawal direction. It matters more here than it
+        // looks: lowering the peak for a withdrawal the ledger has no row for
+        // leaves net contributions permanently too high, so every P&L figure
+        // measured against them understates by the amount taken home, with no
+        // retry path.
+        if (landed) {
+          await adjustAgentHwm(agentId, -usdgNum(intent.amountUsdg));
+          highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+          // The next tick's cash reading already reflects this, and it now has
+          // an explanation, so inference must not double-count it.
+          if (lastCashUsdg !== null) lastCashUsdg -= intent.amountUsdg;
+        } else {
+          // Durable, not just stderr: the transfer LANDED on chain and the
+          // ledger does not know. That is a discrepancy an owner may notice
+          // before anyone else does, so it belongs on their event log.
+          await addEvent(
+            agentId,
+            "err",
+            `withdrawal of ${fmt(intent.amountUsdg)} USDG landed on chain (${txHash.slice(0, 10)}…) but its flow ` +
+              `row could not be written — the high-water mark was left where it was rather than moved for a ` +
+              `figure the ledger cannot show. Contributions will read high until this is reconciled.`,
+          ).catch(() => {});
+        }
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -4953,7 +5045,7 @@ async function main() {
       // it a transaction hash, instead of a balance change nobody can point at.
       // Off by default: it changes how CONTRIBUTIONS are counted, and every P&L
       // figure is measured against those.
-      await reconcileFlows(
+      await reconcileFlowsOrRetry(
         agentId,
         balances.cashUsdg,
         equityUsdg,

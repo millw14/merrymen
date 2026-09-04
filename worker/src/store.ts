@@ -13,6 +13,9 @@ import { wrapSqlite, makePgDb, type Db } from "./db";
 // The one definition of a flow's identity. Imported rather than restated so
 // the reader and the writer cannot disagree about what makes a flow unique.
 import { flowKey } from "./deposit-log";
+// The paper/live boundary. A rule rather than a convention, enforced at the one
+// function every flow writer passes through — see addFlow.
+import { admitCapitalFlow, tradingModeOf, type TradingMode } from "./paper-boundary";
 
 let driver: Db | null = null;
 
@@ -475,6 +478,38 @@ const SQLITE_ALTERS: string[] = [
     // Unix seconds of the assessment. A quality flag with no timestamp cannot be
     // told from a stale one, and stale quality is exactly what a redeploy leaves.
     "ALTER TABLE agents ADD COLUMN quality_at INTEGER",
+    // ── THE IDENTITY OF A CHAIN-DERIVED FLOW ─────────────────────────────
+    //
+    // A chain-log row's identity is the LOG that produced it, not the row: the
+    // same Transfer re-read by a second scan is the same deposit, and inserting
+    // it again doubles an owner's recorded capital. `flows` has no unique key at
+    // all — which is how the mirror's cursor rewind was able to re-copy a whole
+    // child ledger into it.
+    //
+    // The chain id is part of that identity because a tx hash is only unique
+    // WITHIN a chain, and this codebase runs mainnet 4663 and testnet 46630
+    // against the same schema.
+    //
+    // THE COLUMN AND THE NORMALISATION LAND FIRST, ALONE. The unique index that
+    // uses them arrives with the repair, deliberately one deploy later: an index
+    // built over rows that are still half-NULL and mixed-case would either fail
+    // to create — silently, since these DDLs are swallowed — or collapse rows
+    // that are not in fact the same log. By then every row here will have been
+    // written by the code below, which can produce neither shape.
+    "ALTER TABLE flows ADD COLUMN chain_id INTEGER",
+    // ── NORMALISE BEFORE CONSTRAINING, in this order and not the other ──────
+    //
+    // Rows written before the identity existed carry a NULL chain and whatever
+    // case the RPC happened to return the hash in. Both defeat the index — NULLs
+    // are distinct in a unique index on either engine, and 0xAB… is not 0xab… —
+    // so an old row and a new one naming the SAME log would sit side by side,
+    // both sourced 'chain-log', and the owner's deposit would be counted twice.
+    //
+    // The chain comes from the agent's own grant rather than from config,
+    // because that is the chain the transaction was actually on.
+    "UPDATE flows SET tx_hash = LOWER(tx_hash) WHERE tx_hash IS NOT NULL AND tx_hash <> LOWER(tx_hash)",
+    `UPDATE flows SET chain_id = (SELECT a.chain_id FROM agents a WHERE a.smart_account = flows.agent_id)
+       WHERE chain_id IS NULL AND tx_hash IS NOT NULL`,
     // HERE AND NOT IN SQLITE_SCHEMA, because `decision_id` is itself added by an
     // ALTER above — the base schema runs first, so an index on it there fails with
     // 'no such column' and takes every trade insert down with it.
@@ -927,6 +962,49 @@ export async function readJournal(agentId: string, epoch: number): Promise<Journ
   }
 }
 
+/**
+ * What the heartbeat last said this agent is doing — the BACKSTOP for the paper
+ * boundary, not its primary source.
+ *
+ * Null means the column has not been written yet, which is a genuinely different
+ * fact from "live" and is carried as such: `tradingModeOf` turns it into
+ * `unknown`, and an unknown mode admits the flow. That is deliberate. Refusing
+ * on unknown would silently drop a LIVE agent's opening balance during the
+ * window before its first heartbeat — trading one accounting bug for another —
+ * so the narrow window is closed at the call site instead, where the answer is
+ * known synchronously and never absent.
+ */
+async function modeOf(agentId: string): Promise<string | null> {
+  try {
+    const row = (await getDb().prepare("SELECT mode FROM agents WHERE smart_account = ?").get(agentId)) as
+      | { mode: string | null }
+      | undefined;
+    return row?.mode ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Which chain this agent's grant is on, for a flow that did not carry it.
+ *
+ * Read from `agents` rather than from config so it is the chain the GRANT was
+ * signed for, which is the chain any transaction touching this account is on.
+ * Null when the agent row is not there yet: a null chain_id is honest and merely
+ * leaves the identity index inert for that row, whereas guessing a chain would
+ * make two different chains' transactions collide under one identity.
+ */
+async function chainIdOf(agentId: string): Promise<number | null> {
+  try {
+    const row = (await getDb().prepare("SELECT chain_id FROM agents WHERE smart_account = ?").get(agentId)) as
+      | { chain_id: number | null }
+      | undefined;
+    return row?.chain_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** The epoch this agent writes into now — 1 if it has none yet. */
 async function epochOf(agentId: string): Promise<number> {
   try {
@@ -1046,13 +1124,74 @@ export interface FlowRow {
   blockNumber?: number;
   /** Position within the block. Set only for 'chain-log' — see the migration. */
   logIndex?: number;
+  /**
+   * What the agent is actually doing, when the caller knows.
+   *
+   * PASS IT. The fallback below reads `agents.mode`, which is written by the
+   * heartbeat and may not be there yet on an agent's first tick — and a paper
+   * agent's first tick is exactly when the simulated opening balance would be
+   * booked as a real contribution. The caller in index.ts knows synchronously
+   * and unambiguously (`paperActive()`), so it says so.
+   */
+  mode?: TradingMode;
+  /**
+   * WHICH CHAIN the transaction is on — the first component of a flow's identity.
+   *
+   * A tx hash is unique only WITHIN a chain, and this codebase runs mainnet 4663
+   * and testnet 46630 against one schema. Without it every row this function
+   * wrote carried chain_id NULL, and NULLs are distinct in a unique index on
+   * both SQLite and Postgres — so the identity index the repair relies on could
+   * never fire on a row written here, and the repair (which DOES set it) would
+   * insert a second chain-log row for the same log rather than conflicting with
+   * it. Populating it here, one deploy ahead of the constraint, is what makes
+   * that constraint safe to add.
+   */
+  chainId?: number;
 }
 
-/** Record money crossing the account boundary, and mirror it into the journal. */
-export async function addFlow(flow: FlowRow): Promise<void> {
+/**
+ * Record money crossing the account boundary, and mirror it into the journal.
+ *
+ * RETURNS WHETHER THE ROW LANDED, and the caller must act on it. This used to
+ * return void with a try/catch that only logged, while `record()` in index.ts
+ * went straight on to `adjustAgentHwm`. Any transient failure of the insert
+ * therefore moved the high-water mark by the full amount with NO flow row to
+ * explain it, advanced the scan cursor past the block, and left no way to
+ * retry — the peak and the contribution silently split apart, which is the one
+ * pairing the whole anchor design exists to keep together.
+ *
+ * REFUSES SIMULATED CAPITAL. See paper-boundary.ts: a paper agent's cash moves
+ * for simulated reasons, and every rule that reads a cash change as an external
+ * flow was written for an account where it could only have been the owner. The
+ * check lives here as well as at the call site because this is the one function
+ * every writer must pass through, so a future call site cannot reintroduce the
+ * bug by forgetting.
+ */
+export async function addFlow(flow: FlowRow): Promise<boolean> {
+  const mode = flow.mode ?? tradingModeOf(await modeOf(flow.agentId));
+  const admission = admitCapitalFlow({ mode, source: flow.source, txHash: flow.txHash });
+  if (!admission.admit) {
+    // Loud, and on the agent's own event log rather than only stderr: a refused
+    // flow means a figure the owner can see did NOT move, and the reason has to
+    // be somewhere they can find it.
+    console.error(`[flows] refused ${flow.source} ${flow.direction} ${flow.amountUsdg} — ${admission.why}`);
+    await addEvent(flow.agentId, "warn", `capital flow not recorded — ${admission.why}`).catch(() => {});
+    // FALSE, because the caller must not move the high-water mark for money the
+    // ledger has no record of. A refusal is a decision, not an error, but the
+    // pairing rule is the same either way.
+    return false;
+  }
   try {
     const epoch = await epochOf(flow.agentId);
     const amount = Math.abs(flow.amountUsdg);
+    // LOWERCASE, ALWAYS. A hash is a number, but it reaches here as a string and
+    // an RPC may return it in either case — and a case difference defeats both
+    // the unique index and the repair's read-back, so the same log written by
+    // the scanner and by the backfill would sit in the table twice, both stamped
+    // 'chain-log'. Normalising at the single write point is the only place the
+    // two writers can be made to agree.
+    const txHash = flow.txHash ? flow.txHash.toLowerCase() : null;
+    const chainId = flow.chainId ?? (await chainIdOf(flow.agentId));
     await journaled(
       flow.agentId,
       epoch,
@@ -1063,28 +1202,32 @@ export async function addFlow(flow: FlowRow): Promise<void> {
         direction: flow.direction,
         logIndex: flow.logIndex ?? null,
         source: flow.source,
-        txHash: flow.txHash ?? null,
+        txHash,
       },
       async (db: Db) => {
         await db
           .prepare(
-            `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT DO NOTHING`,
           )
           .run(
             flow.agentId,
             flow.direction,
             amount,
-            flow.txHash ?? null,
+            txHash,
             flow.blockNumber ?? null,
             flow.logIndex ?? null,
             flow.source,
             epoch,
+            chainId,
           );
       },
     );
+    return true;
   } catch (e) {
     console.error("[store] flow insert failed:", e);
+    return false;
   }
 }
 

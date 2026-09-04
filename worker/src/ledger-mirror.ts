@@ -101,9 +101,27 @@ const LOG_TABLES = [
   // is why hosted P&L was not merely wrong but permanently null: zero rows means
   // contributions are UNKNOWN, and equity.ts refuses to publish a number it
   // cannot back. Every hosted agent showed a dash, forever, by design.
+  //
+  // `chain_id` is carried because it is the first component of the flow's
+  // IDENTITY (`flows_chain_identity`), and a tx hash is unique only within a
+  // chain — this codebase runs 4663 and 46630 against one schema. Omitting it
+  // left every mirrored row with chain_id NULL, and NULLs are distinct in a
+  // unique index on both engines, so the constraint could never fire on the
+  // shared side no matter what the child wrote.
   {
     table: "flows",
-    cols: ["agent_id", "direction", "amount_usdg", "tx_hash", "block_number", "log_index", "source", "epoch", "at"],
+    cols: [
+      "agent_id",
+      "direction",
+      "amount_usdg",
+      "tx_hash",
+      "block_number",
+      "log_index",
+      "source",
+      "epoch",
+      "chain_id",
+      "at",
+    ],
   },
   // What the house actually accrued, per agent. Read straight off `agents` by
   // the scoreboard, but the per-accrual history is what makes a fee auditable.
@@ -302,8 +320,29 @@ export async function mirrorTenant(args: {
       // One transaction: the rows and the watermark that says they arrived.
       // Split them and a crash between the two duplicates the tape forever.
       await shared.tx(async (db) => {
+        // ON CONFLICT DO NOTHING, AND IT HAD TO LAND IN THE SAME CHANGE AS
+        // `flows.chain_id` — never after it.
+        //
+        // The watermark was this file's only exactly-once mechanism, which was
+        // safe precisely BECAUSE no unique constraint existed to violate: a
+        // re-copied row landed as a silent duplicate. That is how the canary's
+        // 10 USDG opening balance came to sit in Postgres three times.
+        //
+        // Populating chain_id makes `flows_chain_identity` bite, and the rebirth
+        // path above deliberately rewinds to id 0 after a redeploy — so the first
+        // re-copied flow would raise a unique violation, roll the whole batch
+        // back, and leave the watermark parked forever. `flows` would stop
+        // mirroring for that tenant while every other table kept moving: the
+        // exact silent stall documented forty lines up, which already cost this
+        // fleet its entire trade tape once.
+        //
+        // This does NOT weaken the watermark. A conflict can only occur on a row
+        // whose (chain_id, agent_id, tx_hash, log_index) is already present —
+        // the same log, the same account — which is by definition the row we
+        // already copied.
         const ins = db.prepare(
-          `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
+          `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})
+           ON CONFLICT DO NOTHING`,
         );
         for (const r of rows) await ins.run(...cols.map((c) => r[c] ?? null));
         await db

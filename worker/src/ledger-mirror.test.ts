@@ -25,7 +25,7 @@ const SRC = [
   "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, level TEXT, message TEXT, created_at INTEGER);",
   "CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, target TEXT, sell_token TEXT, buy_token TEXT, amount_usdg REAL, user_op_hash TEXT, tx_hash TEXT, status TEXT, reject_rule TEXT, decision_id TEXT, fill_side TEXT, fill_qty_raw TEXT, fill_price_usd REAL, realized_pnl_usdg REAL, basis_source TEXT, gas_wei TEXT, sponsored_gas_wei TEXT, gas_usdg REAL, fill_cash_usdg REAL, epoch INTEGER DEFAULT 1, created_at INTEGER);",
   "CREATE TABLE equity (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, eth_wei TEXT, cash_usdg REAL, vault_usdg REAL, positions_usdg REAL, equity_usdg REAL, epoch INTEGER DEFAULT 1, at INTEGER);",
-  "CREATE TABLE flows (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, direction TEXT, amount_usdg REAL, tx_hash TEXT, block_number INTEGER, log_index INTEGER, source TEXT, epoch INTEGER DEFAULT 1, at INTEGER);",
+  "CREATE TABLE flows (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, direction TEXT, amount_usdg REAL, tx_hash TEXT, block_number INTEGER, log_index INTEGER, source TEXT, epoch INTEGER DEFAULT 1, chain_id INTEGER, at INTEGER);",
   "CREATE TABLE fee_accruals (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, profit_usdg REAL, fee_usdg REAL, hwm_before_usdg REAL, hwm_after_usdg REAL, epoch INTEGER DEFAULT 1, at INTEGER);",
   "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, at INTEGER);",
   "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, sponsor_gas INTEGER, x_handle TEXT, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0, contributions_known INTEGER, contributions_why TEXT, gas_accounting TEXT, quality_at INTEGER);",
@@ -34,7 +34,15 @@ const SRC = [
 ].join("\n");
 
 /** The destination, with the same shape a Postgres ledger has. */
-const DEST = SRC + MIRROR_STATE_DDL;
+// The shared side carries the identity index the child does not: it is where
+// two writers meet — the mirror copying a child up, and the accounting repair
+// writing chain-derived rows directly — so it is where a duplicate log has to
+// be impossible rather than merely unlikely.
+const FLOW_IDENTITY =
+  "CREATE UNIQUE INDEX flows_chain_identity ON flows (chain_id, agent_id, tx_hash, log_index) " +
+  "WHERE tx_hash IS NOT NULL AND log_index IS NOT NULL;";
+
+const DEST = SRC + MIRROR_STATE_DDL + FLOW_IDENTITY;
 
 const mem = (ddl: string) => {
   const db = new DatabaseSync(":memory:");
@@ -478,6 +486,63 @@ describe("the ledger mirror", () => {
     const second = await mirrorTenant({ tenant: "0xten", child, shared });
     assert.equal(second.restarted, undefined, "an idle pass is not a rebuild");
     assert.equal(await count(shared, "trades"), 5, "and nothing was copied twice");
+  });
+
+  it("survives re-copying a flow row it already carried", async () => {
+    // THE TRAP THAT SITS ACROSS THE chain_id FIX.
+    //
+    // The watermark was the only exactly-once mechanism here, and that was safe
+    // precisely BECAUSE no unique constraint existed to violate — a re-copied
+    // row landed as a silent duplicate. Populating chain_id makes the identity
+    // index bite, and the rebirth path deliberately rewinds to id 0 after a
+    // redeploy. Without ON CONFLICT the first re-copied flow raises a unique
+    // violation, the whole batch rolls back, the watermark never moves, and
+    // `flows` stops mirroring for that tenant FOREVER while every other table
+    // keeps going — the same silent stall that already cost this fleet its
+    // entire trade tape once.
+    const raw = new DatabaseSync(":memory:");
+    raw.exec(SRC);
+    raw.exec(
+      `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at)
+       VALUES ('0xagent', 'in', 10, '0xdeposit', 100, 0, 'chain-log', 1, 4663, 1)`,
+    );
+    const child = wrapSqlite(raw);
+    const shared = mem(DEST);
+
+    const first = await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(first.copied["flows"], 1);
+    assert.equal(await count(shared, "flows"), 1);
+
+    // A REBIRTH: the child's ledger is rebuilt, the watermark's row is gone, and
+    // the mirror rewinds to 0 and re-reads the same log.
+    const rebornRaw = new DatabaseSync(":memory:");
+    rebornRaw.exec(SRC);
+    rebornRaw.exec(
+      `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at)
+       VALUES ('0xagent', 'in', 10, '0xdeposit', 100, 0, 'chain-log', 1, 4663, 1)`,
+    );
+    const second = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(rebornRaw), shared });
+
+    assert.equal(second.failed?.["flows"], undefined, "the batch must not fail");
+    assert.equal(await count(shared, "flows"), 1, "one deposit, copied twice, is still one deposit");
+  });
+
+  it("carries the chain a flow's transaction is on", async () => {
+    // A tx hash is unique only WITHIN a chain, and this codebase runs 4663 and
+    // 46630 against one schema. Dropping the column on the way up left every
+    // mirrored row's chain NULL, and NULLs are distinct in a unique index — so
+    // the constraint could never fire on the shared side no matter what the
+    // child wrote.
+    const raw = new DatabaseSync(":memory:");
+    raw.exec(SRC);
+    raw.exec(
+      `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at)
+       VALUES ('0xagent', 'in', 10, '0xdeposit', 100, 0, 'chain-log', 1, 4663, 1)`,
+    );
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: wrapSqlite(raw), shared });
+    const f = (await shared.prepare("SELECT chain_id FROM flows").get()) as { chain_id: number };
+    assert.equal(Number(f.chain_id), 4663);
   });
 
   it("carries the positions leg of the equity identity", async () => {
