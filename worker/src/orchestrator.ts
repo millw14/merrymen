@@ -45,11 +45,13 @@ import { getGrantStore } from "./grant-store";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
-import { isHostedMode, type MerrymenSettings } from "../../packages/core/src/index";
+import { CASH, isHostedMode, type MerrymenSettings } from "../../packages/core/src/index";
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
 import { diagnoseAccounting, diagnosisLines } from "./accounting-diagnosis";
+import { planReconstruction, reconstructionLines } from "./accounting-reconstruction";
+import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { writePeersForChild } from "./peer-files";
@@ -684,6 +686,86 @@ async function runAccountingDiagnosisIfAsked(): Promise<void> {
   }
 }
 
+/**
+ * The DRY RUN: chain truth joined to the ledger, and the exact mutation it
+ * implies. Read-only, off by default, and it writes nothing anywhere.
+ *
+ * It lives here rather than in the spike beside it for the same reason the
+ * diagnosis does — the shared Postgres answers only from inside Railway's
+ * private network — and because this half additionally needs the RPC, which the
+ * orchestrator already has configured.
+ */
+async function runReconstructionDryRunIfAsked(): Promise<void> {
+  if ((process.env.MERRYMEN_ACCOUNTING_RECONSTRUCT ?? "").trim() !== "1") return;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("reconstruction dry run asked for, but there is no DATABASE_URL");
+    return;
+  }
+  try {
+    const shared = await makePgDb(url);
+    const agents = (await shared
+      .prepare("SELECT smart_account, owner_address, epoch, mode, hwm_usdg FROM agents")
+      .all()) as unknown as Record<string, unknown>[];
+    const flows = (await shared
+      .prepare("SELECT id, agent_id, epoch, direction, amount_usdg, source, tx_hash, at FROM flows")
+      .all()) as unknown as Record<string, unknown>[];
+    const equityRows = (await shared
+      .prepare("SELECT agent_id, epoch, equity_usdg, at FROM equity ORDER BY agent_id, epoch, at DESC, id DESC")
+      .all()) as unknown as Record<string, unknown>[];
+    const equityByAccountEpoch = new Map<string, number>();
+    for (const e of equityRows) {
+      const k = `${String(e.agent_id).toLowerCase()}#${Number(e.epoch ?? 1)}`;
+      if (!equityByAccountEpoch.has(k)) equityByAccountEpoch.set(k, Number(e.equity_usdg ?? 0));
+    }
+
+    const accounts = agents.map((a) => String(a.smart_account)).filter((a) => a.startsWith("0x"));
+    const rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
+    let rpcId = 1;
+    const rpc = async (method: string, params: unknown[]): Promise<unknown> => {
+      const r = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method, params }),
+      });
+      const j = (await r.json()) as { result?: unknown; error?: { message?: string } };
+      if (j.error) throw new Error(j.error.message ?? "rpc error");
+      return j.result ?? null;
+    };
+
+    const usdgToken = String(CASH.USDG);
+    const head = BigInt((await rpc("eth_blockNumber", [])) as string);
+    log(`recon| scanning ${accounts.length} account(s) to block ${head}`);
+    const chain = await scanFleetCapital(rpc, {
+      accounts,
+      usdgToken,
+      fromBlock: 0n,
+      toBlock: head,
+      log: (m) => log(`recon| ${m}`),
+    });
+
+    // Current on-chain cash, one call each — the figure a NAV is built from.
+    const onchainCash = new Map<string, number>();
+    for (const a of accounts) {
+      try {
+        const hex = (await rpc("eth_call", [
+          { to: usdgToken, data: "0x70a08231" + a.toLowerCase().replace(/^0x/, "").padStart(64, "0") },
+          "latest",
+        ])) as string;
+        onchainCash.set(a.toLowerCase(), Number(BigInt(hex)) / 1e6);
+      } catch {
+        /* left absent, which renders as unknown rather than as zero */
+      }
+    }
+
+    const plans = planReconstruction({ agents, flows, equityByAccountEpoch, chain, onchainCash });
+    for (const line of reconstructionLines(plans)) log(`recon| ${line}`);
+  } catch (e) {
+    log(`reconstruction dry run failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+
 async function mirrorLedgers(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url || children.size === 0) return;
@@ -832,6 +914,7 @@ export async function runOrchestrator(): Promise<void> {
   }
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
   await runAccountingDiagnosisIfAsked();
+  await runReconstructionDryRunIfAsked();
 
   const stop = () => {
     stopping = true;
