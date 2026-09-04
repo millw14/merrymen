@@ -100,6 +100,29 @@ export function EquityLine({ agent }: { agent: AgentProfile }) {
     );
   }
 
+  // THE FLOWS THE INDEX DIVIDES OUT HAVE TO BE EVIDENCE.
+  //
+  // `funded` only says flow rows exist. The growth index subtracts each period's
+  // flow from the equity line, so a row inferred from a balance change — every
+  // phantom opening balance a redeploy wrote — moves the curve by an amount
+  // nothing actually deposited. This page published -4.1% that way while three
+  // lines above it correctly refused to publish a return at all, from the same
+  // data, at the same moment.
+  //
+  // The equity history is still real and still worth showing; what cannot be
+  // shown is a percentage derived from untrusted flows. So the line stays and
+  // the figure goes, which is the same fail-closed rule the return gate follows.
+  if (!paper && !agent.contributionsEvidenced) {
+    return (
+      <p className="mm-note">
+        The deposits and withdrawals on record for this agent are inferred from balance changes
+        rather than read from the chain, so they cannot be divided out of its equity — and a growth
+        figure computed over them would not be its doing. The balance history is above; the return
+        is not published until the capital behind it is evidenced.
+      </p>
+    );
+  }
+
   if (agent.growth.length < 2) {
     return <p className="mm-note">Not enough of a history to draw yet.</p>;
   }

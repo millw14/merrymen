@@ -210,8 +210,16 @@ export function planReconstruction(args: {
       quarantine,
       contributionsAfterUsdg: contributionsAfter,
       contributionsKnownAfter: known,
-      // A publishable P&L needs contributions AND a mark to measure against.
-      pnlPublishableAfter: known && (args.equityByAccountEpoch.get(`${key}#${epoch}`) ?? null) !== null,
+      // A PUBLISHABLE P&L NEEDS A DENOMINATOR, not just an evidenced one.
+      //
+      // This read `known && a mark exists`, and reported "PnL publishable true"
+      // for the paper accounts whose contributions go to ZERO — where the honest
+      // answer is that there is nothing to divide by. Production was never at
+      // risk (rankPnl refuses on `contributed <= 0`), but a preview that
+      // overstates what a repair unlocks is the same species of confident wrong
+      // number as the rows it is proposing to remove.
+      pnlPublishableAfter:
+        known && contributionsAfter > 0 && (args.equityByAccountEpoch.get(`${key}#${epoch}`) ?? null) !== null,
       blocked,
     });
   }

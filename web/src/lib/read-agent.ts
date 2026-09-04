@@ -106,6 +106,16 @@ export interface AgentProfile {
   gas: { usdg: number; unpricedTrades: number };
   /** Whether any deposit or withdrawal is on record at all. */
   funded: boolean;
+  /**
+   * Whether the flows behind that funding are EVIDENCE.
+   *
+   *  only says rows exist. The growth chart divides each period's flow
+   * out of the equity line, so rows that were inferred from a balance change —
+   * every phantom opening balance a redeploy wrote — distort the index and the
+   * percentage printed beside it. The canary published -4.1% that way while the
+   * same page correctly refused to publish a return.
+   */
+  contributionsEvidenced: boolean;
   /** How many flows carry a transaction, against how many there are. */
   flowsWithTx: number;
   flowsTotal: number;
@@ -490,6 +500,7 @@ export const readAgent = cache(async function readAgent(
       tokensTouched,
       gas: { usdg: gasUsdg, unpricedTrades },
       funded: contributed !== null,
+      contributionsEvidenced: contributionsKnown === true,
       flowsWithTx,
       flowsTotal,
       growth,
