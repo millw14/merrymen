@@ -1,0 +1,24 @@
+{
+  "name": "merrymen-agents-only-shell",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Reviewable merrymen prototype. Not wired into the live web app yet.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lightweight-charts": "^5.2.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  }
+}
