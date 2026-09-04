@@ -27,6 +27,7 @@ import { rankPnl, type UnrankedWhy } from "@/lib/rank-pnl";
 import { growthIndex, drawdownBps } from "@/lib/growth-index";
 import { PUBLISHABLE_STRATEGIES } from "@/lib/thesis";
 import { getIdentityStore } from "@merrymen/identity-store";
+import { isEvidencedFlow } from "@merrymen/core";
 import { getSettingsStore } from "@merrymen/settings-store";
 
 export interface Holding {
@@ -232,12 +233,21 @@ export const readAgent = cache(async function readAgent(
       }));
       contributed = rows.length === 0 ? null : flows.reduce((n, x) => n + x.signed, 0);
       flowsTotal = rows.length;
-      // 'inferred' is a cash change no fill explains — honest guesswork with no
-      // transaction behind it, and a new epoch's whole opening balance is
-      // written that way. The page publishes the SHAPE of that, never amounts.
-      flowsWithTx = rows.filter(
-        (r) => r.source === "chain-log" || r.source === "transfer-intent",
-      ).length;
+      // WHAT COUNTS AS EVIDENCE IS ONE RULE, AND IT LIVES IN THE WORKER.
+      //
+      // This counted ('chain-log','transfer-intent'), which disagreed with the
+      // worker's ('chain-log','epoch-carry') in BOTH directions — and the comment
+      // that used to sit here said a new epoch's opening balance is written
+      // 'inferred', which stopped being true when `openNextEpoch` got its own
+      // source. So an agent that had crossed a boundary was publicly told its
+      // bridged capital was guesswork while the anchor counted the same row as
+      // evidence, from the same database, at the same moment.
+      //
+      // A carry is not a receipt — it has no transaction and never can — but it
+      // is checkable against the prior epoch's own closing mark, which is a
+      // different and sufficient kind of support. The page publishes the SHAPE of
+      // the evidence, never amounts.
+      flowsWithTx = rows.filter((r) => isEvidencedFlow(String(r.source ?? ""))).length;
     } catch {
       /* flows arrives with a worker migration */
     }
@@ -436,7 +446,26 @@ export const readAgent = cache(async function readAgent(
     // the identical arithmetic without the landed > 0 refusal, so the profile
     // published a return the board was correctly refusing to rank — for the same
     // agent, on the same data, at the same moment.
-    const { pnlBps, unrankedWhy } = rankPnl({ contributed, latest, gasUsdg, landed });
+    // THE DENOMINATOR'S EVIDENCE, from the worker's own assessment.
+    //
+    // Read separately and defensively: the column arrives with a worker
+    // migration, and a missing column must cost a quality signal rather than the
+    // page. Null on failure, and null is "not assessed" — which rankPnl refuses
+    // on rather than treats as permission.
+    let contributionsKnown: boolean | null = null;
+    try {
+      const q = (await db
+        .prepare("SELECT contributions_known FROM agents WHERE LOWER(smart_account) = ?")
+        .get(account.toLowerCase())) as { contributions_known: number | null } | undefined;
+      contributionsKnown =
+        q?.contributions_known === null || q?.contributions_known === undefined
+          ? null
+          : Number(q.contributions_known) === 1;
+    } catch {
+      /* the column arrives with a worker migration; unknown until it does */
+    }
+
+    const { pnlBps, unrankedWhy } = rankPnl({ contributed, latest, gasUsdg, landed, contributionsKnown });
 
     return {
       slug: identity.slug,

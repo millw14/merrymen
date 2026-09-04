@@ -472,7 +472,8 @@ export async function mirrorTenant(args: {
         // they rendered as a confident zero.
         `SELECT smart_account, name, owner_address, session_key_address, chain_id, caps,
                 granted_at, expires_at, status, created_at, mode, beat_at, sponsor_gas, x_handle,
-                epoch, hwm_usdg, accrued_fee_usdg FROM agents`,
+                epoch, hwm_usdg, accrued_fee_usdg,
+                contributions_known, contributions_why, gas_accounting, quality_at FROM agents`,
       )
       .all()) as Record<string, unknown>[];
     if (agents.length) {
@@ -480,8 +481,9 @@ export async function mirrorTenant(args: {
         const ins = db.prepare(
           `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id,
                                caps, granted_at, expires_at, status, created_at, mode, beat_at,
-                               sponsor_gas, x_handle, epoch, hwm_usdg, accrued_fee_usdg)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               sponsor_gas, x_handle, epoch, hwm_usdg, accrued_fee_usdg,
+                               contributions_known, contributions_why, gas_accounting, quality_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (smart_account) DO UPDATE SET
              name = excluded.name, status = excluded.status, caps = excluded.caps,
              expires_at = excluded.expires_at, mode = excluded.mode,
@@ -509,7 +511,16 @@ export async function mirrorTenant(args: {
              epoch = CASE WHEN excluded.epoch > agents.epoch THEN excluded.epoch ELSE agents.epoch END,
              hwm_usdg = CASE WHEN excluded.hwm_usdg > agents.hwm_usdg THEN excluded.hwm_usdg ELSE agents.hwm_usdg END,
              accrued_fee_usdg = CASE WHEN excluded.accrued_fee_usdg > agents.accrued_fee_usdg
-                                     THEN excluded.accrued_fee_usdg ELSE agents.accrued_fee_usdg END`,
+                                     THEN excluded.accrued_fee_usdg ELSE agents.accrued_fee_usdg END,
+             -- DELIBERATELY NOT MONOTONIC, unlike the three above. Quality is a
+             -- CURRENT assessment, not a ratchet: a book that stops being
+             -- provable has to be able to say so. A high-water rule here would
+             -- pin an agent at a claim it can no longer support, which is the
+             -- same class of lie as the numbers this whole change is about.
+             contributions_known = excluded.contributions_known,
+             contributions_why = excluded.contributions_why,
+             gas_accounting = excluded.gas_accounting,
+             quality_at = excluded.quality_at`,
         );
         for (const a of agents) {
           await ins.run(
@@ -526,7 +537,12 @@ export async function mirrorTenant(args: {
             // means a pre-migration child rather than an absent value — fall back
             // to the same defaults the schema would have applied.
             a.epoch ?? 1, a.hwm_usdg ?? 0, a.accrued_fee_usdg ?? 0,
-
+            // NULL means NEVER ASSESSED, which is not the same as false. An agent
+            // that has not armed since quality shipped has made no claim about
+            // its own book, and a reader must render that as unknown rather than
+            // pick an answer on its behalf.
+            a.contributions_known ?? null, a.contributions_why ?? null,
+            a.gas_accounting ?? null, a.quality_at ?? null,
           );
         }
       });

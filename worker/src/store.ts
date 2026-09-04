@@ -452,6 +452,29 @@ const SQLITE_ALTERS: string[] = [
     // (settings-store.ts), and a public page must never decrypt a tenant to render
     // a name.
     "ALTER TABLE agents ADD COLUMN x_handle TEXT",
+    // ── WHAT THE BOOK IS ALLOWED TO CLAIM, MADE DURABLE ──────────────────
+    //
+    // `PortfolioQuality` existed only inside the worker's tick closure. Nothing
+    // wrote it anywhere, so no other tier could read it: the web computed five
+    // independent, disagreeing answers to "may I publish a P&L", none of which
+    // consulted whether the contributions underneath were evidence or guesswork.
+    // The one durable trace was an English sentence in an `events` row.
+    //
+    // These columns are that signal, on the table the mirror already carries to
+    // the shared database. NULL means never assessed, which is not the same as
+    // false — an agent that has not armed since this shipped has made no claim,
+    // and a reader must show unknown rather than assume either answer.
+    "ALTER TABLE agents ADD COLUMN contributions_known INTEGER",
+    // The one-phrase reason, so a surface can say WHY rather than just refusing.
+    "ALTER TABLE agents ADD COLUMN contributions_why TEXT",
+    // 'net' | 'gross' | 'unknown'. Gas leaves the account in ETH and never enters
+    // equity, so a P&L that could not price it is GROSS — and on a small book
+    // that is the difference between -0.13 and -6.65 USDG. A percentage printed
+    // without this qualification is not a performance figure.
+    "ALTER TABLE agents ADD COLUMN gas_accounting TEXT",
+    // Unix seconds of the assessment. A quality flag with no timestamp cannot be
+    // told from a stale one, and stale quality is exactly what a redeploy leaves.
+    "ALTER TABLE agents ADD COLUMN quality_at INTEGER",
     // HERE AND NOT IN SQLITE_SCHEMA, because `decision_id` is itself added by an
     // ALTER above — the base schema runs first, so an index on it there fails with
     // 'no such column' and takes every trade insert down with it.
@@ -1123,6 +1146,34 @@ export async function getFlowEvidence(
        FROM flows WHERE agent_id = ? AND epoch = ? GROUP BY source`,
     )
     .all(agentId, epoch)) as unknown as { source: string; n: number; netUsdg: number }[];
+}
+
+/**
+ * Persist what this agent may claim about its own book.
+ *
+ * WRITTEN BY THE WORKER, READ BY EVERYONE ELSE. The web tier cannot see the
+ * worker's process memory, and before this it had no way at all to learn that a
+ * contribution total rested on inference — so every percentage it published was
+ * computed as though the denominator were a receipt.
+ *
+ * Best-effort: a quality write that fails must never take a tick down. The cost
+ * of failure is a stale flag, and `quality_at` is what lets a reader notice.
+ */
+export async function setAgentQuality(
+  agentId: string,
+  q: { contributionsKnown: boolean; why: string; gasAccounting: "net" | "gross" | "unknown" },
+): Promise<boolean> {
+  try {
+    await getDb()
+      .prepare(
+        "UPDATE agents SET contributions_known = ?, contributions_why = ?, gas_accounting = ?, quality_at = ? " +
+          "WHERE smart_account = ?",
+      )
+      .run(q.contributionsKnown ? 1 : 0, q.why.slice(0, 500), q.gasAccounting, Math.floor(Date.now() / 1000), agentId);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** The last equity figure recorded in a SPECIFIC epoch — what a carry must match. */

@@ -49,6 +49,7 @@ import { isHostedMode, type MerrymenSettings } from "../../packages/core/src/ind
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
+import { diagnoseAccounting, diagnosisLines } from "./accounting-diagnosis";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { writePeersForChild } from "./peer-files";
@@ -656,6 +657,33 @@ async function fleetHealth(): Promise<void> {
   }
 }
 
+/**
+ * Dump the accounting diagnosis to the log, once, at boot, when asked.
+ *
+ * OFF BY DEFAULT and read-only. It exists because the shared Postgres is
+ * reachable only from inside Railway's private network — `DATABASE_URL` names
+ * `postgres.railway.internal` and there is no public proxy — so the spike script
+ * beside it cannot run from a laptop. This process is already in there.
+ *
+ * A fleet-wide financial dump is not something a routine boot should emit, hence
+ * the flag; and it must never be able to stop the fleet arming, hence the catch.
+ */
+async function runAccountingDiagnosisIfAsked(): Promise<void> {
+  if ((process.env.MERRYMEN_ACCOUNTING_DIAGNOSE ?? "").trim() !== "1") return;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("accounting diagnosis asked for, but there is no DATABASE_URL");
+    return;
+  }
+  try {
+    const shared = await makePgDb(url);
+    const all = await diagnoseAccounting(shared);
+    for (const line of diagnosisLines(all)) log(`diag| ${line}`);
+  } catch (e) {
+    log(`accounting diagnosis failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function mirrorLedgers(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url || children.size === 0) return;
@@ -803,6 +831,7 @@ export async function runOrchestrator(): Promise<void> {
     process.exit(1);
   }
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
+  await runAccountingDiagnosisIfAsked();
 
   const stop = () => {
     stopping = true;

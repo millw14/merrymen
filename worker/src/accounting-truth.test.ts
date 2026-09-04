@@ -15,6 +15,8 @@ import {
   type BootstrapAccounting,
 } from "./bootstrap-state";
 import { usdgRealToMicro } from "./bootstrap-source";
+import { ARITHMETIC_TOLERANCE_USDG, reconcile, type ReconstructedBook } from "./audit";
+import { guaranteeLines, pnlPublishable, UNKNOWN_QUALITY } from "./portfolio-quality";
 
 /**
  * THE REDEPLOY THAT KEPT BEING BOOKED AS A DEPOSIT, PINNED.
@@ -495,10 +497,11 @@ describe("P5 — no path converts uncertainty into a P&L figure", () => {
       const r = armHosted(raw, { equityUsdg: U(10), cashUsdg: U(10) });
       assert.equal(r.booked, 0n);
       assert.equal(r.contributionsKnown, false);
-      // The PUBLICATION half of this — a P&L surface refusing on the same
-      // signal — lands with the portfolio-truth change. Here the property is
-      // narrower and is the one that matters at runtime: nothing was booked,
-      // and the flag that gates the performance fee is false.
+      assert.equal(
+        pnlPublishable({ ...UNKNOWN_QUALITY, arithmetic: "verified", contributionsKnown: r.contributionsKnown }),
+        false,
+        "unknown contributions must make P&L unavailable, not approximate",
+      );
     }
   });
 
@@ -524,7 +527,184 @@ describe("P5 — no path converts uncertainty into a P&L figure", () => {
   });
 });
 
+describe("P6 — the audit gate can actually fail on arithmetic", () => {
+  const book = (over: Partial<ReconstructedBook> = {}): ReconstructedBook => ({
+    netContributionsUsdg: 10,
+    realizedPnlUsdg: 0,
+    gasWei: 0n,
+    gasUsdg: 0,
+    gasUnpricedFills: 0,
+    publishedEquityUsdg: 10,
+    publishedCashUsdg: 3.33,
+    publishedPositionsUsdg: 6.67,
+    publishedVaultUsdg: 0,
+    publishedQuarantinedCostUsdg: 0,
+    // One flow on record and real purchases visible — the two preconditions the
+    // envelope needs. Tests for the cases where they are ABSENT set them to 0
+    // explicitly, so the default cannot silently become the weaker claim.
+    flowCount: 1,
+    markCount: 1,
+    grossBuyNotionalUsdg: 6.67,
+    chainRefs: [],
+    unanchored: [],
+    ...over,
+  });
 
+  it("a sound book produces no arithmetic finding", () => {
+    assert.equal(reconcile(book()).findings.length, 0);
+  });
+
+  it("THE CANARY'S BOOK FAILS: contributions booked three times cannot be explained", () => {
+    // 30 contributed against 10 of equity implies a 20 USDG unrealized loss on
+    // positions that only ever cost 6.67. You cannot lose more on a position
+    // than it cost.
+    const r = reconcile(book({ netContributionsUsdg: 30 }));
+    assert.equal(r.findings.length, 1);
+    assert.equal(r.findings[0]!.check, "arithmetic");
+    assert.match(r.findings[0]!.detail, /contributions exceed what the record can support/);
+    assert.match(r.findings[0]!.detail, /more than once/);
+  });
+
+  it("equity that exceeds the whole value of what is held is money from nowhere", () => {
+    // Components kept consistent so the COMPOSITION check stays quiet and the
+    // envelope is the only thing under test.
+    const r = reconcile(
+      book({ netContributionsUsdg: 0, publishedEquityUsdg: 10, publishedCashUsdg: 9, publishedPositionsUsdg: 1 }),
+    );
+    assert.equal(r.findings.length, 1);
+    assert.match(r.findings[0]!.detail, /exceeds what the record can explain/);
+  });
+
+  it("the published equity must equal the components published beside it", () => {
+    const r = reconcile(book({ publishedCashUsdg: 1 }));
+    assert.ok(r.findings.some((f) => /does not equal the components/.test(f.detail)));
+  });
+
+  it("an ordinary open position is NOT a finding — the residual is expected to be non-zero", () => {
+    // The objection this check had to survive: a mark-to-market difference is
+    // not an error, so the bound is what makes the test meaningful.
+    for (const equity of [10, 12, 8, 4.5]) {
+      // Cash moves with equity so only the residual is varying.
+      const r = reconcile(book({ publishedEquityUsdg: equity, publishedCashUsdg: equity - 6.67 }));
+      assert.equal(r.findings.length, 0, `equity ${equity}: ${r.findings.map((f) => f.detail).join(" ")}`);
+    }
+  });
+
+  it("tolerance absorbs REAL-storage noise and nothing larger", () => {
+    assert.equal(reconcile(book({ publishedCashUsdg: 3.33 + ARITHMETIC_TOLERANCE_USDG / 2 })).findings.length, 0);
+    assert.ok(reconcile(book({ publishedCashUsdg: 3.33 + ARITHMETIC_TOLERANCE_USDG * 20 })).findings.length > 0);
+  });
+
+  it("A QUARANTINED POSITION IS NOT A DISCREPANCY", () => {
+    // The false positive this check shipped with. `composeEquityUsdg` is
+    // cash + vault + positions + quarantinedCost (equity.ts:46), but the mark
+    // payload carried only the first three beside the total — so any agent
+    // holding a scout position at cost would have had the quarantined amount
+    // reported as a book that does not add up.
+    //
+    // This codebase has already been bitten once by a re-derivation that
+    // dropped this exact term: addEquity used to compute cash + vault +
+    // positions while the fee ratcheted on a figure that included quarantine,
+    // so the published curve sat below the fee basis, permanently.
+    const held = book({
+      publishedCashUsdg: 1,
+      publishedPositionsUsdg: 6.539005,
+      publishedQuarantinedCostUsdg: 2.333995,
+      publishedEquityUsdg: 9.873,
+      netContributionsUsdg: 10,
+      grossBuyNotionalUsdg: 9,
+    });
+    const r = reconcile(held);
+    assert.equal(r.checked, true, "with every term present the identity can be closed");
+    assert.deepEqual(r.findings, [], "a quarantined holding is part of equity, not a hole in it");
+  });
+
+  it("a mark that predates the quarantine term is UNCHECKABLE, not wrong", () => {
+    // Absent must not be read as zero — reading it as zero is what made the
+    // missing term invisible in the first place.
+    const legacy = book({ publishedQuarantinedCostUsdg: null });
+    const r = reconcile(legacy);
+    assert.equal(r.checked, false, "the identity cannot be closed without every term");
+    assert.deepEqual(r.findings, [], "and an unclosable identity is not a failed one");
+  });
+
+  it("a book with no marks is not verified — it has not taken the check", () => {
+    const r = reconcile(book({ publishedEquityUsdg: null }));
+    assert.equal(r.residualUsdg, null);
+    assert.equal(r.findings.length, 0, "nothing was published, so nothing is wrong");
+    // And the quality field is what stops that being read as a pass.
+    assert.equal(UNKNOWN_QUALITY.arithmetic, "unknown");
+  });
+});
+
+describe("P7 — the gate reports three guarantees and never passes for work it skipped", () => {
+  it("NO RPC IS UNKNOWN, NOT CLEAN", () => {
+    const src = readFileSync(new URL("./audit-cli.ts", import.meta.url), "utf8");
+    // Exit 0 is reachable only after the indeterminate check has been made.
+    const soundAt = src.indexOf("CHECKED AND SOUND — all three guarantees held");
+    const indetAt = src.indexOf("const indeterminate =");
+    assert.ok(indetAt > 0 && soundAt > indetAt, "the sound verdict must come after the indeterminate test");
+    assert.match(src, /onchain: !rpcUrl \|\| onchainChecked === 0/);
+    assert.match(src, /not checked — no --rpc was given/);
+    // Three exit codes, so "wrong" and "unknown" cannot be confused.
+    assert.match(src, /process\.exit\(2\)/);
+  });
+
+  it("NOT CHECKED RENDERS AS UNKNOWN, NEVER AS FAILED", () => {
+    // The same defect as "no RPC means clean", pointed the other way, and it
+    // shipped: `onchain` was a boolean with the unknown-ness pushed into the
+    // adjacent detail string, and the renderer recovered it by comparing that
+    // string to the literal "not checked". The CLI writes "not checked — no
+    // --rpc was given, so nothing was refetched", the comparison missed, and an
+    // audit that never opened a socket announced that the chain contradicted
+    // the ledger.
+    //
+    // Driven through the REAL detail string the CLI emits, so a future edit to
+    // that wording cannot quietly resurrect it.
+    const realDetail = "not checked — no --rpc was given, so nothing was refetched";
+    const line = guaranteeLines({ ...UNKNOWN_QUALITY, onchainDetail: realDetail })[1]!;
+    assert.match(line, /UNKNOWN/);
+    assert.doesNotMatch(line, /FAILED/, "an unasked question is not a failed answer");
+
+    // And the three states are distinguishable, which is the property the
+    // boolean did not have.
+    const of = (onchain: "verified" | "failed" | "unknown") =>
+      guaranteeLines({ ...UNKNOWN_QUALITY, onchain, onchainDetail: "x" })[1]!;
+    assert.match(of("verified"), /HELD/);
+    assert.match(of("failed"), /FAILED/);
+    assert.match(of("unknown"), /UNKNOWN/);
+  });
+
+  it("the three guarantees are printed separately", () => {
+    const lines = guaranteeLines({
+      ...UNKNOWN_QUALITY,
+      arithmetic: "verified",
+      contributionsKnown: true,
+      onchainDetail: "not checked",
+      journalContinuity: "unrecoverable",
+      journalDetail: "the child journal was destroyed by a redeploy",
+    });
+    assert.equal(lines.length, 3);
+    assert.match(lines[0]!, /portfolio arithmetic truth\s+HELD/);
+    assert.match(lines[1]!, /on-chain verification\s+UNKNOWN/);
+    assert.match(lines[2]!, /journal-chain continuity\s+UNRECOVERABLE/);
+  });
+
+  it("an unknown never renders as good news", () => {
+    for (const line of guaranteeLines(UNKNOWN_QUALITY)) {
+      assert.doesNotMatch(line, /\bSOUND\b|✓/);
+    }
+  });
+
+  it("THE JOURNAL IS NOT ADDED TO THE MIRROR'S LOG_TABLES", () => {
+    // Journal continuity is a separate problem from carrying rows up. The
+    // journal is keyed on `seq`, the mirror addresses every table by `id`, and
+    // bolting it onto this list would copy rows under a key it does not have.
+    const src = readFileSync(new URL("./ledger-mirror.ts", import.meta.url), "utf8");
+    const list = src.slice(src.indexOf("const LOG_TABLES"), src.indexOf("] as const;"));
+    assert.doesNotMatch(list, /table: "journal"/);
+  });
+});
 
 describe("P8 — the bootstrap contract is versioned and its reserved field stays reserved", () => {
   it("carries money as exact integer strings, never floats", () => {

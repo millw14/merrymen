@@ -8,6 +8,7 @@ import { Sparkline } from "@/components/Sparkline";
 import { ThesisCard } from "@/components/ThesisCard";
 import { KillSwitch } from "@/components/KillSwitch";
 import { railNotices } from "@/lib/rail-notices";
+import { rankPnl, unrankedLabel } from "@/lib/rank-pnl";
 import { statusLine, type AgentSnapshot } from "@/lib/status-line";
 import { timeAgo } from "@/lib/time";
 import type { PublicThesis } from "@/lib/thesis";
@@ -52,6 +53,15 @@ interface FeedResponse {
   agent?: { name?: string; strategy?: string; basket?: string[] } | null;
   netContributionsUsdg?: number | null;
   gasUsdg?: number;
+  /** Landed fills whose gas could not be priced. Non-zero means GROSS of gas. */
+  gasUnpricedTrades?: number;
+  /** Fills that landed. Zero means there is no return to measure. */
+  landed?: number;
+  /**
+   * The worker's verdict on the denominator: true, false, or null for never
+   * assessed. Absent is treated as null — never as permission.
+   */
+  contributionsKnown?: boolean | null;
 }
 interface GrantsResponse {
   exists?: boolean;
@@ -166,11 +176,31 @@ export function YouClient() {
 
   const equity = feed?.equity ?? [];
   const curve = equity.map((e) => Number(e.equity_usdg)).filter(Number.isFinite);
-  const latest = curve.length ? curve[curve.length - 1]! : 0;
+  // NULL, NOT ZERO, when there is no equity history.
+  //
+  // This fell back to 0, and the P&L below divided by it — so an agent with a
+  // deposit and no equity rows rendered "-100.0% all time". A fabricated number
+  // out of an absence, on the owner's own dashboard.
+  const latest = curve.length ? curve[curve.length - 1]! : null;
   const contributed = feed?.netContributionsUsdg ?? null;
   const gas = feed?.gasUsdg ?? 0;
-  const pnl = contributed !== null && contributed > 0 ? latest - contributed - gas : null;
-  const pnlPct = pnl !== null && contributed ? (pnl / contributed) * 100 : null;
+
+  // THROUGH THE SHARED GATE, not a fifth copy of the formula.
+  //
+  // This computed its own P&L inline with no landed-trade guard — which is
+  // exactly the +2643.3% incident `rank-pnl.ts` was written about, on the one
+  // page whose reader owns the money. It also had no quality term, so a
+  // contribution total assembled from inference published a confident
+  // percentage over an unevidenced denominator.
+  const rank = rankPnl({
+    contributed,
+    latest,
+    gasUsdg: gas,
+    landed: feed?.landed ?? 0,
+    contributionsKnown: feed?.contributionsKnown ?? null,
+  });
+  const pnlPct = rank.pnlBps === null ? null : rank.pnlBps / 100;
+  const pnl = rank.pnlBps === null || contributed === null || latest === null ? null : latest - contributed - gas;
 
   const positions = feed?.positions ?? [];
   const trades = (feed?.trades ?? []).slice(0, 7);
@@ -263,11 +293,18 @@ export function YouClient() {
             </div>
             <div className="mm-hero-pnl">
               {pnlPct === null ? (
-                <span className="mono flat">no deposit on record</span>
+                // The REASON, not a guess at one. This said "no deposit on
+                // record" for every refusal, including the ones where a deposit
+                // is plainly on record and simply cannot be evidenced.
+                <span className="mono flat">{rank.unrankedWhy ? unrankedLabel(rank.unrankedWhy) : "unranked"}</span>
               ) : (
                 <span className={`mono ${tone}`}>
                   {pnlPct > 0 ? "+" : ""}
                   {pnlPct.toFixed(1)}% all time
+                  {/* GROSS OR NET, said rather than implied. On a small book the
+                      difference is most of the number: the canary's four fills
+                      read -0.13 gross and -6.65 net. */}
+                  {(feed?.gasUnpricedTrades ?? 0) > 0 ? ", gross of some gas" : ""}
                 </span>
               )}
             </div>

@@ -40,7 +40,12 @@ describe("a return is published under one rule, not two", () => {
     // it: the board called an agent unranked while its own profile published a
     // figure, for the same agent on the same data at the same moment.
     assert.match(READ, /import \{ rankPnl/);
-    assert.match(READ, /rankPnl\(\{ contributed, latest, gasUsdg, landed \}\)/);
+    assert.match(READ, /rankPnl\(\{ contributed, latest, gasUsdg, landed, contributionsKnown \}\)/);
+    // AND IT PASSES THE QUALITY TERM. Omitting it is not a compile error — the
+    // field is optional so pre-quality callers still build — so the pin is what
+    // stops the profile silently reverting to publishing over an unevidenced
+    // denominator while the board refuses to.
+    assert.match(READ, /contributionsKnown/);
   });
 
   it("no second copy of the P&L arithmetic survives", () => {
@@ -56,16 +61,28 @@ describe("a return is published under one rule, not two", () => {
     // It printed "no deposit on record" for every null, including for an agent
     // that had funded and simply never filled anything.
     assert.match(READ, /unrankedWhy/);
-    // Both arms must be reachable and distinguishable. The receiver's name is
-    // free to change; that BOTH reasons are branched on is the property.
-    assert.match(PAGE, /unrankedWhy === "no-deposit"/);
-    assert.match(PAGE, /unrankedWhy === "never-filled"/);
-    assert.match(PAGE, /no deposit on record/);
-    assert.match(PAGE, /nothing has filled yet/);
+    // THE WORDS COME FROM ONE EXHAUSTIVE FUNCTION, not an inline chain here.
+    //
+    // The page used to branch on each reason itself and fall through to the gas
+    // notes — so when the union grew two arms, neither of them broke anything:
+    // the new refusals silently rendered as gas prose. `unrankedLabel` has a
+    // `never` default, which makes a future arm a compile error at one site
+    // instead of a wrong word at two.
+    assert.match(PAGE, /unrankedLabel\(agent\.unrankedWhy\)/);
+    assert.ok(
+      !/unrankedWhy === "no-deposit"/.test(code(PAGE)),
+      "the page must not re-derive the words it is handed",
+    );
     assert.ok(
       !/pnlBps === null \? "no deposit on record"/.test(code(PAGE)),
-      "a fixed reason cannot be right for both refusals",
+      "a fixed reason cannot be right for four refusals",
     );
+
+    // And every arm of the union has distinct words to render.
+    const RANK = readFileSync(new URL("../../../../lib/rank-pnl.ts", import.meta.url), "utf8");
+    for (const why of ["no-deposit", "never-filled", "contributions-unevidenced", "quality-unknown"]) {
+      assert.ok(RANK.includes(`case "${why}":`), `unrankedLabel must handle ${why}`);
+    }
   });
 });
 

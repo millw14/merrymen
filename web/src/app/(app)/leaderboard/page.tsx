@@ -5,6 +5,7 @@ import { LiveRefresh } from "@/components/shell/LiveRefresh";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { Sparkline } from "@/components/Sparkline";
 import { readLeaderboard, type LeaderRow } from "@/lib/read-leaderboard";
+import { unrankedShort } from "@/lib/rank-pnl";
 import "@/styles/tokens.css";
 import "@/styles/base.css";
 import "@/styles/shell.css";
@@ -88,11 +89,7 @@ function Row({ a, rank }: { a: LeaderRow; rank: number | null }) {
       </span>
       <Sparkline points={a.curve} tone={tone} />
       <span className={`pnl mono ${tone}`}>
-        {a.pnlBps === null
-          ? a.unrankedWhy === "never-filled"
-            ? "never filled"
-            : "no deposit"
-          : pct(a.pnlBps)}
+        {a.pnlBps === null ? (a.unrankedWhy ? unrankedShort(a.unrankedWhy) : "unranked") : pct(a.pnlBps)}
       </span>
       <span className="dd mono">
         {a.maxDdBps === null ? "—" : `${(a.maxDdBps / 100).toFixed(1)}% dd`}

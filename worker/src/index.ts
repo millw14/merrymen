@@ -226,8 +226,10 @@ import {
   setPaperBook,
   setAgentName,
   setAgentXHandle,
+  getGasPaidUsdg,
   setAgentEpoch,
   setAgentHwm,
+  setAgentQuality,
   setAgentMode,
   setAgentStatus,
   clearTrenchEntry,
@@ -4974,6 +4976,31 @@ async function main() {
       // make the breaker LESS likely to halt a falling book, which is the wrong
       // direction to fail in. Refusing the money movement and keeping the safety
       // signal is the split that matters.
+      // PUBLISH THE QUALITY, not just act on it.
+      //
+      // This flag gated the fee and nothing else, and it lived in a process-local
+      // object — so the web tier, which is where every percentage an owner
+      // actually reads is computed, had no way to learn that a contribution total
+      // rested on inference. Five independent publishability rules across the web
+      // each answered "may I publish a P&L" from raw SQL columns, and none of
+      // them could see this.
+      //
+      // Written every tick rather than at arm, because `gasAccounting` is a
+      // property of the fills so far and changes as they land.
+      //
+      // GROSS vs NET IS NOT A ROUNDING DETAIL HERE. The canary burned 0.0026 ETH
+      // — about 6.52 USDG at the time — on a book that only ever deployed 6.67
+      // USDG of capital, so the same four trades read as −0.13 gross and −6.65
+      // net. A percentage published without saying which is not a performance
+      // figure, and a model comparing gross history against net future returns
+      // is comparing two different quantities.
+      const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
+      await setAgentQuality(agentId, {
+        contributionsKnown: accounting.contributionsKnown,
+        why: accounting.why,
+        gasAccounting:
+          gasCov.unpricedTrades > 0 ? "gross" : gasCov.usdg > 0 ? "net" : "unknown",
+      });
       const feeBpsThisTick = accounting.contributionsKnown ? effFeeBps : 0;
       if (!accounting.contributionsKnown && effFeeBps > 0 && !feeSuppressionLogged) {
         feeSuppressionLogged = true;

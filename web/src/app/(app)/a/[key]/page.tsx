@@ -11,6 +11,7 @@ import { readAgent, type AgentProfile, type Holding } from "@/lib/read-agent";
 import { readTheses } from "@/lib/read-theses";
 import { readWallTape, type WallTape } from "@/lib/read-wall-tape";
 import { rejectRuleLabel } from "@/lib/thesis";
+import { unrankedLabel } from "@/lib/rank-pnl";
 import { timeAgo } from "@/lib/time";
 import { WallBand } from "@/components/WallBand";
 import { SLUG_RE } from "@merrymen/identity-store";
@@ -375,11 +376,9 @@ function Stats({ agent, tape }: { agent: AgentProfile; tape: WallTape }) {
            own cost. The COUNT is published, never the dollars: a public row
            carries no absolute figure. */
         note={
-          agent.unrankedWhy === "no-deposit"
-            ? "no deposit on record"
-            : agent.unrankedWhy === "never-filled"
-              ? "nothing has filled yet"
-              : agent.gas.unpricedTrades > 0
+          agent.unrankedWhy !== null
+            ? unrankedLabel(agent.unrankedWhy)
+            : agent.gas.unpricedTrades > 0
                 ? `net of gas on ${agent.landed - agent.gas.unpricedTrades} fills; ${agent.gas.unpricedTrades} more had gas we could not price, so this is not the full cost`
                 : agent.gas.usdg > 0
                   ? "net of gas"
