@@ -12,7 +12,6 @@ import { readFileSync } from "node:fs";
 import {
   accountPreviewLines,
   previewRequested,
-  parsePreviewRequest,
   previewAccount,
   rosterLines,
   rosterOutcome,
@@ -92,39 +91,6 @@ const canaryPlan = () =>
     contributionsKnownAfter: true,
     pnlPublishableAfter: true,
   });
-
-// ── THE MODE ───────────────────────────────────────────────────────────────
-
-describe("what this build will accept", () => {
-  it("does nothing at all unless asked", () => {
-    assert.equal(parsePreviewRequest({}), null);
-    assert.equal(parsePreviewRequest({ MERRYMEN_REPAIR: "" }), null);
-  });
-
-  it("previews on dry-run", () => {
-    const r = parsePreviewRequest({ MERRYMEN_REPAIR: "dry-run" })!;
-    assert.equal(r.kind, "preview");
-  });
-
-  it("REFUSES a mutation rather than quietly downgrading it", () => {
-    // Silently turning commit into a dry run would leave an operator reading a
-    // preview while believing they had repaired production.
-    for (const mode of ["commit", "verify-only", "1", "true", "COMMIT"]) {
-      const r = parsePreviewRequest({ MERRYMEN_REPAIR: mode })!;
-      assert.equal(r.kind, "refused", `${mode} must be refused, not reinterpreted`);
-      assert.match(r.kind === "refused" ? r.why : "", /no mutation path/);
-    }
-  });
-
-  it("carries the selected account and a timestamped run id", () => {
-    const r = parsePreviewRequest(
-      { MERRYMEN_REPAIR: "dry-run", MERRYMEN_REPAIR_ACCOUNT: ` ${CANARY} ` },
-      0,
-    )!;
-    assert.equal(r.kind === "preview" ? r.account : null, CANARY);
-    assert.match(r.kind === "preview" ? r.runId : "", /^run-1970-01-01/);
-  });
-});
 
 // ── THE THREE OUTCOMES, TOTAL OVER EVERY ACCOUNT ───────────────────────────
 
@@ -286,20 +252,10 @@ describe("read-only by construction", () => {
   });
 });
 
-describe("the run id is a real timestamp in production", () => {
-  it("is not left at the pure-function default", () => {
-    // `parsePreviewRequest` may not read a clock, so its `now` defaults to 0 for
-    // the tests above. Leaving that default in place at the call site stamped
-    // every production run `run-1970-01-01T00-00-00-000Z` — the one property the
-    // id exists to provide, absent exactly where it was needed. The unit tests
-    // could not catch it because they pass `now` explicitly, so the pin is on
-    // the CALL SITE.
-    const src = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
-    const call = src.match(/parsePreviewRequest\([^)]*\)/);
-    assert.ok(call, "the orchestrator still calls parsePreviewRequest");
-    assert.match(call[0], /Date\.now\(\)/, "and hands it a clock");
-  });
-});
+// The run-id pin moved to accounting-repair.test.ts with the function it
+// guards: this build hands mode parsing to `parseRepairOptions`, so a test
+// asserting the orchestrator passes a clock to `parsePreviewRequest` would be
+// pinning a call site that no longer exists.
 
 describe("the report has to fit in the window you can read it in", () => {
   it("knows a preview was asked for before deciding how much else to print", () => {

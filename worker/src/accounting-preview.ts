@@ -12,9 +12,11 @@
  * derived from rows the orchestrator read. The plan is the only input; there is
  * no second source of truth to disagree with.
  *
- * The mutation that consumes these plans lands separately, and until it does
- * this build cannot repair anything at all — which is what `parsePreviewRequest`
- * says out loud when it is asked to.
+ * The mutation that consumes these plans lives in accounting-repair.ts, which
+ * also owns the mode parsing — one owner, so a mode this module rendered and a
+ * mode that module acted on can never be two different readings of the same
+ * variable. Rendering stays here precisely because it must never be able to
+ * write, whatever mode is in force.
  */
 import type { AccountPlan } from "./accounting-reconstruction";
 
@@ -25,54 +27,6 @@ import type { AccountPlan } from "./accounting-reconstruction";
  */
 export type RosterOutcome = "NO-CHAIN-HISTORY" | "EVIDENCE-BACKED-REPAIR" | "BLOCKED-AMBIGUOUS";
 
-export type PreviewRequest =
-  /** A dry run was asked for. There is no other kind in this build. */
-  | { kind: "preview"; account: string | null; runId: string }
-  /**
-   * Something this build cannot do was asked for.
-   *
-   * A DISTINCT ARM RATHER THAN A SILENT DOWNGRADE. Quietly turning
-   * `MERRYMEN_REPAIR=commit` into a dry run would leave an operator reading a
-   * preview while believing they had repaired production — the same class of
-   * confident-wrong-state this whole effort is about. It refuses and says why.
-   */
-  | { kind: "refused"; why: string };
-
-/**
- * Read the request off an environment. PURE.
- *
- * Environment rather than argv because this runs INSIDE the orchestrator: the
- * shared Postgres is on Railway's private network with no public proxy, so
- * nothing on a laptop can reach it and a command-line tool would have nothing to
- * connect to. The variable names mirror the eventual flags one-for-one:
- *
- *   MERRYMEN_REPAIR=dry-run              --dry-run   (the only mode here)
- *   MERRYMEN_REPAIR_ACCOUNT=0x…          --account <smartAccount>
- *   MERRYMEN_REPAIR_RUN_ID=…             --run-id
- */
-export function parsePreviewRequest(
-  env: Record<string, string | undefined>,
-  now = 0,
-): PreviewRequest | null {
-  const raw = (env.MERRYMEN_REPAIR ?? "").trim().toLowerCase();
-  if (!raw) return null;
-  if (raw !== "dry-run") {
-    return {
-      kind: "refused",
-      why:
-        `MERRYMEN_REPAIR=${raw} asks for something this build does not contain. There is no mutation path ` +
-        `here at all — no INSERT, no UPDATE, no DELETE — so nothing was written and nothing was previewed. ` +
-        `Use dry-run.`,
-    };
-  }
-  return {
-    kind: "preview",
-    account: (env.MERRYMEN_REPAIR_ACCOUNT ?? "").trim() || null,
-    // Timestamped rather than random so a preview can be placed in time from its
-    // own log line. `now` is injected because a pure function may not read a clock.
-    runId: (env.MERRYMEN_REPAIR_RUN_ID ?? "").trim() || `run-${new Date(now).toISOString().replace(/[:.]/g, "-")}`,
-  };
-}
 
 /**
  * Was a preview asked for at all?

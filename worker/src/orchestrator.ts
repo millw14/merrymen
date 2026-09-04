@@ -52,7 +52,8 @@ import { deriveBootstrapAccounting } from "./bootstrap-source";
 import { diagnoseAccounting, diagnosisLines } from "./accounting-diagnosis";
 import { planReconstruction, reconstructionLines } from "./accounting-reconstruction";
 import type { AccountPlan } from "./accounting-reconstruction";
-import { accountPreviewLines, parsePreviewRequest, previewRequested, rosterLines, runPreview } from "./accounting-preview";
+import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
+import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
@@ -830,43 +831,56 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     if (!previewRequested(process.env)) {
       for (const line of reconstructionLines(plans)) log(`recon| ${line}`);
     }
-    runPreviewIfAsked(plans);
+    await runRepairIfAsked(shared, plans);
   } catch (e) {
     log(`reconstruction dry run failed — ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
 /**
- * The preview, gated behind its own variable and read-only in the strongest
- * sense available: the module it calls is never handed a database.
+ * The preview, and — only when explicitly asked — the mutation.
  *
- * Deliberately downstream of the plan rather than a separate entry point, so the
- * preview is always of a plan just derived from the live database in this
- * process — a stale preview is worse than none.
+ * Deliberately downstream of the plan rather than a separate entry point, so
+ * whatever runs is acting on a plan just derived from the live database in this
+ * process. A stale preview is worse than none, and the repair's "the table
+ * changed since the plan was built" check needs an honest comparison.
  */
-function runPreviewIfAsked(plans: readonly AccountPlan[]): void {
-  // The clock is passed IN because parsePreviewRequest is pure and may not read
-  // one. Its default of 0 exists for the tests; leaving it to default here stamped
-  // every production run `run-1970-01-01T00-00-00-000Z`, which is precisely the
-  // property the id exists to provide.
-  const req = parsePreviewRequest(process.env, Date.now());
-  if (!req) return;
-  if (req.kind === "refused") {
-    log(`preview| REFUSED — ${req.why}`);
-    return;
-  }
+async function runRepairIfAsked(shared: Db, plans: readonly AccountPlan[]): Promise<void> {
+  const opts = parseRepairOptions(process.env);
+  if (!opts) return;
 
-  log(`preview| run ${req.runId} · account ${req.account ?? "ALL"} · READ-ONLY (this build has no mutation path)`);
-  const previews = runPreview(plans, req);
-
-  // The selected account first and in full; then every tenant on one line, so
-  // the report can be read as "all N are accounted for".
+  // THE PREVIEW IS ALWAYS PRINTED, in every mode. An operator reading a commit
+  // run's output should not have to go and find the dry run it corresponds to.
+  const previews = runPreview(plans, { account: opts.account ?? null });
+  log(
+    `preview| run ${opts.runId} · mode ${opts.mode} · account ${opts.account ?? "ALL"} · ` +
+      `resume ${opts.resume}`,
+  );
   for (const p of previews) {
     if (!p.selected) continue;
     const plan = plans.find((x) => x.smartAccount === p.account)!;
     for (const line of accountPreviewLines(plan, p)) log(`preview| ${line}`);
   }
   for (const line of rosterLines(previews)) log(`preview| ${line}`);
+
+  if (opts.mode === "dry-run") {
+    log("preview| dry run — nothing was written");
+    return;
+  }
+  if (opts.mode === "commit" && !opts.account) {
+    // The canary goes first, ALONE, and the fleet is a separate decision taken
+    // after it has survived a restart unchanged. Refusing here rather than
+    // trusting the operator to remember is the same fail-closed shape the rest
+    // of this accounting work is built from.
+    log("repair| refusing a fleet-wide commit — set MERRYMEN_REPAIR_ACCOUNT to repair one account at a time");
+    return;
+  }
+
+  const chainId = Number(process.env.MERRYMEN_CHAIN_ID ?? 4663);
+  const results = await runRepair(shared, plans, opts, chainId, (r) =>
+    log(`repair| ${r.account.slice(0, 10)} ${r.stage} — ${r.why}`),
+  );
+  for (const line of repairLines(opts.runId, opts.mode, results)) log(`repair| ${line}`);
 }
 
 

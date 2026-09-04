@@ -478,24 +478,18 @@ const SQLITE_ALTERS: string[] = [
     // Unix seconds of the assessment. A quality flag with no timestamp cannot be
     // told from a stale one, and stale quality is exactly what a redeploy leaves.
     "ALTER TABLE agents ADD COLUMN quality_at INTEGER",
-    // ── THE IDENTITY OF A CHAIN-DERIVED FLOW ─────────────────────────────
+    // ── CHAIN-DERIVED FLOWS CANNOT BE IMPORTED TWICE ─────────────────────
     //
     // A chain-log row's identity is the LOG that produced it, not the row: the
     // same Transfer re-read by a second scan is the same deposit, and inserting
     // it again doubles an owner's recorded capital. `flows` has no unique key at
     // all — which is how the mirror's cursor rewind was able to re-copy a whole
-    // child ledger into it.
+    // child ledger into it — so the repair and the scanner both need this before
+    // either may write.
     //
-    // The chain id is part of that identity because a tx hash is only unique
+    // The chain id is part of the identity because a tx hash is only unique
     // WITHIN a chain, and this codebase runs mainnet 4663 and testnet 46630
     // against the same schema.
-    //
-    // THE COLUMN AND THE NORMALISATION LAND FIRST, ALONE. The unique index that
-    // uses them arrives with the repair, deliberately one deploy later: an index
-    // built over rows that are still half-NULL and mixed-case would either fail
-    // to create — silently, since these DDLs are swallowed — or collapse rows
-    // that are not in fact the same log. By then every row here will have been
-    // written by the code below, which can produce neither shape.
     "ALTER TABLE flows ADD COLUMN chain_id INTEGER",
     // ── NORMALISE BEFORE CONSTRAINING, in this order and not the other ──────
     //
@@ -510,6 +504,60 @@ const SQLITE_ALTERS: string[] = [
     "UPDATE flows SET tx_hash = LOWER(tx_hash) WHERE tx_hash IS NOT NULL AND tx_hash <> LOWER(tx_hash)",
     `UPDATE flows SET chain_id = (SELECT a.chain_id FROM agents a WHERE a.smart_account = flows.agent_id)
        WHERE chain_id IS NULL AND tx_hash IS NOT NULL`,
+    // PARTIAL — AND NOT FOR THE REASON AN EARLIER DRAFT OF THIS COMMENT GAVE.
+    //
+    // It said a plain unique index here would "collapse every inferred row into
+    // one and silently delete the legacy history". That is wrong twice over, and
+    // the correct fact is stated eleven lines above: NULLs are DISTINCT in a
+    // unique index on both SQLite and Postgres. So a non-partial index over
+    // these columns creates cleanly over rows whose tx_hash is NULL, keeps every
+    // one of them, and still admits another identical row. And a unique index
+    // never deletes anything on creation in any case — it either builds or
+    // fails to build.
+    //
+    // WHAT THE PREDICATE ACTUALLY BUYS is therefore smaller and worth stating
+    // honestly: it keeps the index off rows that could never be constrained by
+    // it, and it makes the intent legible — this constraint is about LOGS. For
+    // the 363 rows in the hosted table it is behaviourally identical to no
+    // predicate at all.
+    //
+    // WHICH LEAVES A HOLE THIS MIGRATION DOES NOT CLOSE, and pretending
+    // otherwise is how the original comment came to be wrong. A row with no
+    // transaction has no identity, so NO index can dedupe it. The mirror rewinds
+    // its cursor to 0 when a child ledger is rebuilt beneath it (children have
+    // no volume, so a redeploy does exactly that) and re-copies whatever the
+    // reborn child holds. Quarantining an inferred row here does not stop an
+    // equivalent row arriving that way later. What stops it is upstream: the
+    // accounting anchor, so a reborn child does not re-book an opening balance,
+    // and the paper boundary, so a simulated balance never books one at all.
+    `CREATE UNIQUE INDEX IF NOT EXISTS flows_chain_identity
+       ON flows (chain_id, agent_id, tx_hash, log_index)
+       WHERE tx_hash IS NOT NULL AND log_index IS NOT NULL`,
+    // ── THE REVERSIBLE SIDE OF THE REPAIR ────────────────────────────────
+    //
+    // Legacy rows are MOVED here, never deleted. A wrong row is evidence of a
+    // bug and the only remaining record of what the fleet believed while it was
+    // live; there is no procedure that walks a DELETE back, and an owner may
+    // already have seen the number it produced. Everything needed to put a row
+    // back exactly as it was is carried, plus why it went and what replaced it.
+    `CREATE TABLE IF NOT EXISTS flows_quarantine (
+       original_id INTEGER NOT NULL,
+       agent_id TEXT NOT NULL,
+       epoch INTEGER,
+       direction TEXT,
+       amount_usdg REAL,
+       tx_hash TEXT,
+       block_number INTEGER,
+       log_index INTEGER,
+       source TEXT,
+       at INTEGER,
+       run_id TEXT NOT NULL,
+       quarantined_at INTEGER NOT NULL,
+       reason TEXT NOT NULL,
+       replaced_by TEXT,
+       PRIMARY KEY (run_id, original_id)
+     )`,
+    "CREATE INDEX IF NOT EXISTS flows_quarantine_agent ON flows_quarantine (agent_id)",
     // HERE AND NOT IN SQLITE_SCHEMA, because `decision_id` is itself added by an
     // ALTER above — the base schema runs first, so an index on it there fails with
     // 'no such column' and takes every trade insert down with it.
@@ -1140,11 +1188,9 @@ export interface FlowRow {
    * A tx hash is unique only WITHIN a chain, and this codebase runs mainnet 4663
    * and testnet 46630 against one schema. Without it every row this function
    * wrote carried chain_id NULL, and NULLs are distinct in a unique index on
-   * both SQLite and Postgres — so the identity index the repair relies on could
-   * never fire on a row written here, and the repair (which DOES set it) would
-   * insert a second chain-log row for the same log rather than conflicting with
-   * it. Populating it here, one deploy ahead of the constraint, is what makes
-   * that constraint safe to add.
+   * both SQLite and Postgres — so `flows_chain_identity` could never fire on a
+   * row written here, and the repair (which DOES set it) would insert a second
+   * chain-log row for the same log rather than conflicting with it.
    */
   chainId?: number;
 }
