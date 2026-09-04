@@ -1063,7 +1063,8 @@ h3 {
   letter-spacing: -0.02em;
 }
 
-.held-top > b {
+.held-top > b,
+.held-sub > b {
   flex-shrink: 0;
   font-size: 16px;
   font-weight: 650;
@@ -1073,26 +1074,10 @@ h3 {
 }
 
 .held.say .tick {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 17px;
+  color: var(--tx);
+  font-size: 15px;
   font-weight: 700;
   letter-spacing: -0.03em;
-}
-
-.held.say .held-id strong,
-.held.nested .held-by {
-  display: none;
-}
-
-.held-by {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 6px;
-  color: var(--faint);
-  font-size: 12px;
 }
 
 .held.nested {
@@ -1142,7 +1127,8 @@ button.tag {
   font-size: 12px;
 }
 
-.held-sub em {
+.held-sub em,
+.held-top > em {
   font-style: normal;
   font-weight: 650;
   font-size: 12px;

@@ -77,16 +77,15 @@ function Burst({
         <Face name={t.name} slug={t.slug} />
         <div className="held-who">
           <div className="held-top">
-            <strong className="tick">{tickers.join("  ")}</strong>
-            {size != null ? <b>{money(size)}×{items.length}</b> : null}
-          </div>
-          <div className="held-sub">
-            <span>{verb(parseWhy(t), strategy)}</span>
+            <div className="held-id">
+              <strong>{t.handle ?? t.name}</strong>
+              {slug ? <Stamp>{strategyName(strategy)}</Stamp> : null}
+            </div>
             {age ? <em>{age}</em> : null}
           </div>
-          <div className="held-by">
-            <span>{t.handle ?? t.name}</span>
-            {slug ? <Stamp>{strategyName(strategy)}</Stamp> : null}
+          <div className="held-sub">
+            <span>{verb(parseWhy(t), strategy)} <span className="tick">{tickers.join("  ")}</span></span>
+            {size != null ? <b>{money(size)}×{items.length}</b> : null}
           </div>
         </div>
       </button>
@@ -130,6 +129,11 @@ function Say({
   const take = takeFor(slug, sym ?? "", t.reason, agent?.thesis, strategy);
   const size = sizeOf(t);
   const age = ageOf(t);
+  const did = (
+    <>
+      {verb(w, strategy)} <span className="tick">{sym ?? "—"}</span>
+    </>
+  );
   return (
     <button
       type="button"
@@ -141,19 +145,27 @@ function Say({
     >
       <Face name={t.name} slug={t.slug} />
       <div className="held-who">
-        <div className="held-top">
-          <strong className="tick">{sym ?? "—"}</strong>
-          {size != null ? <b>{money(size)}</b> : null}
-        </div>
-        <div className="held-sub">
-          <span>{verb(w, strategy)}</span>
-          {age ? <em>{age}</em> : null}
-        </div>
-        {!nested && (
-          <div className="held-by">
-            <span>{t.handle ?? t.name}</span>
-            {slug ? <Stamp>{strategyName(strategy)}</Stamp> : null}
+        {nested ? (
+          <div className="held-top">
+            <div className="held-id">
+              <strong>{did}</strong>
+            </div>
+            {size != null ? <b>{money(size)}</b> : null}
           </div>
+        ) : (
+          <>
+            <div className="held-top">
+              <div className="held-id">
+                <strong>{t.handle ?? t.name}</strong>
+                {slug ? <Stamp>{strategyName(strategy)}</Stamp> : null}
+              </div>
+              {age ? <em>{age}</em> : null}
+            </div>
+            <div className="held-sub">
+              <span>{did}</span>
+              {size != null ? <b>{money(size)}</b> : null}
+            </div>
+          </>
         )}
         {take ? <p>{take}</p> : null}
       </div>
