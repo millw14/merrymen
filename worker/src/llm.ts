@@ -144,6 +144,8 @@ export async function llmToolCall(
   }
 
   // openai-compatible function calling (Groq, OpenAI, Gemini, xAI, DeepSeek, …)
+  // Some reasoning models (gpt-oss-120b, deepseek-r1, qwen3-thinking, nemotron) dump chain-of-thought
+  // into `content` or `reasoning_content`. We ignore that side-channel and only use tool_calls.
   const body = {
     model: creds.model,
     max_tokens: opts.maxTokens ?? 1024,
@@ -306,6 +308,22 @@ async function providerError(creds: LlmCreds, r: Response): Promise<string> {
   return `${creds.provider} ${r.status}${safe ? ` — ${safe.slice(0, 300)}` : ""}`;
 }
 
+/**
+ * Reasoning models (nemotron, deepseek-r1, qwen3-thinking, gpt-oss) may return
+ * chain-of-thought in `reasoning_content`, `reasoning`, or inline `<think>…</think>`
+ * blocks inside `content`. Strip that side-channel before returning to Telegram.
+ */
+function stripReasoningFromContent(content: string, reasoning?: string): string {
+  let out = content ?? "";
+  // reasoning_content/reasoning is a separate field — never append it; it's thinking.
+  // If content is empty and only reasoning exists, treat as no answer (caller throws).
+  if (!out.trim() && reasoning) return "";
+  // Remove <think>…</think> and <|think|>…<|/think|> blocks (multiline, case-insensitive)
+  out = out.replace(/<\|?think\|?>([\s\S]*?)<\/\|?think\|?>/gi, "");
+  out = out.replace(/<think>([\s\S]*?)<\/think>/gi, "");
+  return out;
+}
+
 export async function llmText(
   creds: LlmCreds,
   opts: { system: string; prompt: string; maxTokens?: number },
@@ -336,11 +354,12 @@ export async function llmText(
   });
   if (!r.ok) throw new Error(await providerError(creds, r));
   const j = (await r.json()) as {
-    choices?: { finish_reason?: string; message?: { content?: string } }[];
+    choices?: { finish_reason?: string; message?: { content?: string; reasoning_content?: string; reasoning?: string } }[];
     usage?: { completion_tokens_details?: { reasoning_tokens?: number } };
   };
   const choice = j.choices?.[0];
-  const text = (choice?.message?.content ?? "").trim();
+  const rawMsg = choice?.message as { content?: string; reasoning_content?: string; reasoning?: string } | undefined;
+  const text = stripReasoningFromContent(rawMsg?.content ?? "", rawMsg?.reasoning_content ?? rawMsg?.reasoning ?? "").trim();
   // AN EMPTY COMPLETION IS A FAILURE, NOT AN ANSWER.
   //
   // A reasoning model spends its completion budget on hidden reasoning before

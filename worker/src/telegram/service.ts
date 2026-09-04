@@ -30,7 +30,7 @@ import { esc, getFileUrl, getMe, getUpdates, sendMessage, type TgMessage } from 
 import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
-import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash } from "./interpreter";
+import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
 import { transcribeVoice } from "./voice";
 import { fmtReminders, fmtWatchers, parseWatchSpec, parseWhenSec } from "./watchers";
@@ -132,6 +132,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   // done?" shares no words with anything on disk, so without carrying the last
   // turn's ids forward the thread is lost the moment the topic isn't restated.
   const stickyIds = new Map<number, Set<string>>();
+  // Bare amount follow-up after "how much to buy? e.g. /buy NVDA 5" (executor asks amount)
+  const askAmountCtx = new Map<number, { side: "buy" | "sell"; symbol: string; address?: string }>();
   // One detached /agent task per chat; /agent stop flips the flag mid-run.
   const agentRuns = new Map<number, { stopped: boolean }>();
 
@@ -144,7 +146,10 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   const historyFor = async (chatId: number): Promise<{ role: "user" | "assistant"; content: string }[]> => {
     let h = history.get(chatId);
     if (!h) {
-      h = (await recentChatTurns(chatId, HISTORY_TURNS * 2)).map((t) => ({ role: t.role, content: t.content }));
+      h = (await recentChatTurns(chatId, HISTORY_TURNS * 2)).map((t) => {
+        const c = t.role === "assistant" ? stripThinkingBlock(t.content) : t.content;
+        return { role: t.role, content: c };
+      });
       history.set(chatId, h);
       // Restore the last turn's recalled ids too, so a pronoun sent right after
       // a restart still lands on whatever the merryman was just talking about.
@@ -545,6 +550,30 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // the thread survives a restart, not just a process lifetime.
     let turnMemoryIds: string[] | undefined;
     if (!cmd) {
+      // Bare amount follow-up (e.g. "5" or "5usdg") after bot asked "how much?"
+      // must not hit the LLM — it forces a 500-token reasoning dump ("Here's a thinking process…")
+      // Capture it here before interpretWithLlm / narrateChat.
+      const pendingAsk = askAmountCtx.get(msg.chatId);
+      const bareMatch = msg.text.trim().match(/^\s*(\d+(?:\.\d+)?)\s*(usdg|usd)?\s*$/i);
+      if (pendingAsk && bareMatch) {
+        const n = Number(bareMatch[1]);
+        if (Number.isFinite(n) && n > 0) {
+          cmd = { kind: pendingAsk.side, symbol: pendingAsk.symbol, usdg: n } as Command;
+          if (pendingAsk.address) (cmd as unknown as { to: string }).to = pendingAsk.address;
+          askAmountCtx.delete(msg.chatId);
+          await pushHistory(msg.chatId, "user", msg.text);
+        }
+      } else if (bareMatch) {
+        // Bare number with no pending ask — don't LLM it; it will reasoning-dump.
+        // Tell the user how to trade instead of echoing STATE.
+        const n = Number(bareMatch[1]);
+        if (Number.isFinite(n) && n > 0) {
+          cmd = { kind: "chat", reply: `to trade, tell me a ticker and a USDG amount, e.g. 'buy 10 of QQQ' — you sent just "${msg.text.trim()}"` };
+          await pushHistory(msg.chatId, "user", msg.text);
+        }
+      }
+    }
+    if (!cmd) {
       const llm = resolveLlm(cfg);
       if (llm) {
         const st = stateRef.get();
@@ -556,6 +585,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const routeCtx = { state: `SOUL:\n${identity}\n\n${liveState}`, history: await historyFor(msg.chatId) };
         const r = await interpretWithLlm(msg.text, routeCtx, llm);
         cmd = r.cmd;
+        // Strip any thinking dump that slipped through llmText (defense in depth)
+        if (cmd.kind === "chat" && typeof cmd.reply === "string") {
+          const stripped = stripThinkingBlock(cmd.reply);
+          if (stripped !== cmd.reply) cmd = { kind: "chat", reply: stripped || cmd.reply };
+        }
         // The get-to-know-you side-channel: the model proposes a fact, the
         // sanitizer disposes (drops addresses/keys/markup, dedupes, caps). Only the
         // OWNER may write it — else a group member could poison/evict owner memory.
@@ -585,7 +619,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
             history: await historyFor(msg.chatId),
           };
           const fluent = await narrateChat(msg.text, chatCtx, llm);
-          if (fluent) cmd = { kind: "chat", reply: fluent };
+          const strippedFluent = fluent ? stripThinkingBlock(fluent) : "";
+          if (strippedFluent) cmd = { kind: "chat", reply: strippedFluent };
+          else if (fluent && !strippedFluent) {
+            // Whole reply was thinking — fall back to classifier's (already stripped) reply
+          }
           // Carry what was surfaced into the next turn so a pronoun follow-up
           // ("is it done?") keeps the thread instead of losing it to zero word
           // overlap. Persisted on the turn below, so it survives a restart too.
@@ -595,7 +633,12 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       } else {
         cmd = { kind: "chat", reply: "pick an AI provider and paste its key in the dashboard (Settings → AI provider) to chat in plain English — Groq, Google and Cerebras are free, or run Ollama locally. For now, try /help." };
       }
-      await pushHistory(msg.chatId, "user", msg.text);
+      // Bare-amount path already pushed user history; avoid duplicate for LLM path
+      const hCheck = await historyFor(msg.chatId);
+      const lastUserCheck = [...hCheck].reverse().find((m) => m.role === "user");
+      if (!lastUserCheck || lastUserCheck.content !== msg.text.slice(0, 600)) {
+        await pushHistory(msg.chatId, "user", msg.text);
+      }
     }
 
     // Sender-level authz for state-changing commands. In a GROUP the chatId is a
@@ -635,8 +678,28 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       deps.note("warn", `Telegram: ${cmd.kind} failed — ${m}`);
       reply = `🚫 that ${cmd.kind} failed: ${esc(m.slice(0, 200))}`;
     }
-    if (!slash) await pushHistory(msg.chatId, "assistant", reply.replace(/<[^>]+>/g, ""), turnMemoryIds);
-    await sendMessage({ token }, msg.chatId, reply);
+    if (!slash) await pushHistory(msg.chatId, "assistant", stripThinkingBlock(reply.replace(/<[^>]+>/g, "")), turnMemoryIds);
+    // If the bot just asked for a ticker+amount, remember the context for a bare-number follow-up
+    // so "5" can become "buy QQQ 5" without hitting the LLM (which reasoning-models dump thinking for).
+    if (/tell me a ticker and a USDG amount/i.test(reply) || /how much.*\b(buy|sell)\b/i.test(reply)) {
+      const histForAsk = await historyFor(msg.chatId);
+      // Last user message before current one (history already contains current user)
+      const users = histForAsk.filter((m) => m.role === "user").map((m) => m.content);
+      const prevUser = users.length >= 2 ? users[users.length - 2] : users[users.length - 1] ?? msg.text;
+      const textForSym = prevUser || msg.text;
+      const side = /sell/i.test(textForSym) ? "sell" : /buy/i.test(textForSym) ? "buy" : null;
+      const symMatch = textForSym.match(/\b([A-Za-z]{1,6})\b/g);
+      const sym = symMatch?.map((s) => s.toUpperCase()).find((s) => /^[A-Z]{1,6}$/.test(s) && !["BUY", "SELL", "TELL", "ME", "A", "TICKER", "AND", "USDG", "AMOUNT"].includes(s));
+      if (side && sym) {
+        askAmountCtx.set(msg.chatId, { side: side as "buy" | "sell", symbol: sym });
+      }
+    } else if (cmd.kind === "buy" || cmd.kind === "sell" || cmd.kind === "transfer" || cmd.kind === "confirm" || cmd.kind === "cancel") {
+      // Successful trade-like command clears any pending amount ask
+      askAmountCtx.delete(msg.chatId);
+    }
+    // Strip any thinking that slipped into the deterministic reply (defense in depth)
+    const strippedReply = stripThinkingBlock(reply);
+    await sendMessage({ token }, msg.chatId, strippedReply || reply);
   };
 
   const pollOnce = async (): Promise<void> => {
