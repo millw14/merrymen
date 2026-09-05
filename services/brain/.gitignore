@@ -1,0 +1,5 @@
+.venv/
+.eval/
+*.jsonl
+__pycache__/
+*.egg-info/
