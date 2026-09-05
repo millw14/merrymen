@@ -1279,6 +1279,17 @@ async function main() {
     anchorHwmUsdg = l.highWaterMarkUsdg;
     anchorCashUsdg = l.lastObservedCashUsdg;
     anchorEpoch = l.accountingEpoch;
+    // THE DURABLE CONTRIBUTION FIGURE, kept for anything that has to describe
+    // this book to something outside the process.
+    //
+    // A hosted child's sqlite is wiped by every redeploy and the ledger mirror
+    // is one-way, so `getNetContributionsUsdg` reads the CHILD's empty table and
+    // answers null — for an account whose contributions are on record in the
+    // shared database and were just repaired to 10.000000 evidenced. The anchor
+    // is the only thing in this process that has seen durable state, which is
+    // exactly why it exists. The first shadow Brain run refused on
+    // "contributions unknown" for a book that knew perfectly well.
+    anchorNetContributionsUsdg = l.netContributionsUsdg;
 
     // DOUBT IS STICKY FOR THE LIFE OF THE PROCESS.
     //
@@ -1306,6 +1317,9 @@ async function main() {
     // had no coverage at all, and a mutation deleting it passed every test.
     setTruth(foldLicence(truth, l));
   }
+
+  /** Contributed capital as the ORCHESTRATOR read it from durable state. */
+  let anchorNetContributionsUsdg: bigint | null = null;
 
   /** The anchor verdict, read once. See `anchorOnce`. */
   let anchorVerdict: AnchorVerdict | null = null;
@@ -5267,7 +5281,16 @@ async function main() {
               quarantined: false,
             })),
             // NULL SURVIVES AS NULL all the way to Brain, which refuses on it.
-            netContributionsUsdg: netContrib === null ? null : Math.round(netContrib * 1e6),
+            // DURABLE FIRST, local second. The child ledger is ephemeral; the
+            // anchor is what the orchestrator read from Postgres. Falling back
+            // to the local sum keeps self-hosted working unchanged, where there
+            // is no anchor and the ledger IS the durable copy.
+            netContributionsUsdg:
+              anchorNetContributionsUsdg !== null
+                ? Number(anchorNetContributionsUsdg)
+                : netContrib === null
+                  ? null
+                  : Math.round(netContrib * 1e6),
             grossContributionsUsdg: null,
             grossWithdrawalsUsdg: null,
             gasUsdg: gasNow.unpricedTrades > 0 ? null : Math.round(gasNow.usdg * 1e6),
@@ -5304,15 +5327,15 @@ async function main() {
           const outcome = await runShadow(
             { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 90_000 },
             inputs,
-            (m) => console.log(`[${short}] ${m}`),
+            (m) => console.log(`[${short(agentId)}] ${m}`),
           );
-          if (!outcome.ran) console.log(`[${short}] [brain] asleep — ${outcome.why}`);
+          if (!outcome.ran) console.log(`[${short(agentId)}] [brain] asleep — ${outcome.why}`);
         }
       } catch (e) {
         // NEVER TAKES A TICK DOWN. Shadow thinking is the least important thing
         // happening in this loop, and the agent's accounting and risk controls
         // must not depend on a research service being reachable.
-        console.log(`[${short}] [brain] skipped (${e instanceof Error ? e.message : String(e)})`);
+        console.log(`[${short(agentId)}] [brain] skipped (${e instanceof Error ? e.message : String(e)})`);
       }
     }
 
