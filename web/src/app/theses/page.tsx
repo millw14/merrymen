@@ -8,5 +8,5 @@ import { redirect } from "next/navigation";
  * our own routing.
  */
 export default function ThesesRedirect() {
-  redirect("/");
+  redirect("/feed");
 }

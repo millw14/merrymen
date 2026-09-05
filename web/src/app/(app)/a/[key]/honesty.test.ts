@@ -28,7 +28,7 @@ const at = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
  */
 const code = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
-const PAGE = at("./page.tsx");
+const PAGE = at("../../../../terminal/screens/Profile.tsx");
 const READ = at("../../../../lib/read-agent.ts");
 const READ_CODE = code(READ);
 const GROWTH = at("../../../../lib/growth-index.ts");

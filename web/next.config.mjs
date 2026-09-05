@@ -1,5 +1,14 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  devIndicators: false,
+  distDir: process.env.NEXT_DIST_DIR || ".next",
+  async rewrites() {
+    return [
+      {source:"/robinhood/:path*",destination:"https://api.robinhood.com/rhj/:path*"},
+      {source:"/yahoo/:path*",destination:"https://query1.finance.yahoo.com/:path*"},
+      {source:"/blockscout/:path*",destination:"https://robinhoodchain.blockscout.com/api/v2/:path*"},
+    ];
+  },
   // core lives outside the web/ dir (packages/core, resolved via tsconfig
   // paths) — externalDir lets Next compile it. No workspace dep needed, which
   // is what makes `npm install -g merrymen` possible.

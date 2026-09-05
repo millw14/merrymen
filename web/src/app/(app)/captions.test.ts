@@ -17,7 +17,7 @@ import { describe, it } from "node:test";
 const at = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 
 describe("the leaderboard explains its two refusals", () => {
-  const PAGE = at("./leaderboard/page.tsx");
+  const PAGE = at("../../terminal/screens/Board.tsx");
 
   it("distinguishes no-deposit from never-filled in words", () => {
     // rank-pnl publishes "unranked" for two unrelated reasons and the board
@@ -38,14 +38,15 @@ describe("the leaderboard explains its two refusals", () => {
 });
 
 describe("the token page says how much of the book it is showing", () => {
-  const PAGE = at("./t/[token]/page.tsx");
+  const PAGE = at("../../terminal/screens/Token.tsx");
 
   it("publishes the count of agents who opted in, against the total", () => {
     // Holdings are opt-in per agent. Without this line a short list reads as
     // the whole one, which understates who is in a token and overstates how
     // much of it we can see.
-    assert.match(PAGE, /\{t\.holders\.length\} of \{total\}/);
-    assert.match(PAGE, /publishes its" : "publish their/);
+    assert.match(PAGE, /\{holderCoverage\.published\} of \{holderCoverage\.total\}/);
+    assert.match(PAGE, /published:data\.ledger\.holders\.length,total:data\.ledger\.holders\.length\+data\.ledger\.privateHolders/);
+    assert.match(PAGE, /publish their positions/);
   });
 });
 
@@ -70,7 +71,7 @@ describe("the oracle chart says what its axis is", () => {
 });
 
 describe("the agent profile says what its return is net of", () => {
-  const PAGE = at("./a/[key]/page.tsx");
+  const PAGE = at("../../terminal/screens/Profile.tsx");
 
   it("keeps the unpriced-gas caveat inline with the figure", () => {
     // A fill whose gas could not be priced contributes nothing to the sum and

@@ -25,7 +25,7 @@
 // a changed sw.js is picked up on the next navigation, and activate() below drops
 // every cache whose name doesn't carry the current VERSION — so the old
 // merrymen-shell-v1 / merrymen-assets-v1 are purged and the next load is fresh.
-const VERSION = "v2";
+const VERSION = "v3";
 const SHELL = `merrymen-shell-${VERSION}`;
 const ASSETS = `merrymen-assets-${VERSION}`;
 const OFFLINE_URL = "/offline.html";

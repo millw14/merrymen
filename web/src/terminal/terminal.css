@@ -1,0 +1,6665 @@
+:where(.terminal-host) .public-agent-page,
+:where(.terminal-host) .money-flow {
+  min-width: 0;
+}
+:where(.terminal-host) .flow-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+:where(.terminal-host) .flow-back {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  font-size: 20px;
+  color: var(--tx);
+}
+:where(.terminal-host) .flow-demo {
+  margin-left: auto;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 10px;
+}
+:where(.terminal-host) .public-agent-id {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 28px 0 32px;
+}
+:where(.terminal-host) .public-agent-id .face.lg {
+  width: 64px;
+  height: 64px;
+  flex-shrink: 0;
+  border-radius: 21px;
+}
+:where(.terminal-host) .public-agent-id h1 {
+  margin: 0;
+  font-size: 27px;
+  line-height: 1.15;
+  letter-spacing: -0.055em;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+:where(.terminal-host) .public-agent-id p {
+  margin: 7px 0 0;
+  font-size: 12px;
+  color: var(--tx-2);
+  overflow-wrap: anywhere;
+}
+:where(.terminal-host) .public-performance {
+  padding: 22px 20px 16px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--card);
+}
+:where(.terminal-host) .public-performance-numbers {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+:where(.terminal-host) .public-return {
+  display: block;
+  font-family: var(--pixel);
+  font-size: 43px;
+  font-weight: 400;
+  letter-spacing: -0.065em;
+  margin-top: 7px;
+}
+:where(.terminal-host) .public-trade-count {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 7px;
+}
+:where(.terminal-host) .public-trade-count strong {
+  font-family: var(--sans);
+  font-size: 20px;
+  font-weight: 400;
+}
+:where(.terminal-host) .public-trade-count span {
+  color: var(--tx-2);
+  font-size: 10px;
+}
+:where(.terminal-host) .public-chart {
+  margin-top: 18px;
+}
+:where(.terminal-host) .public-chart .spark {
+  display: block;
+  width: 100%;
+  height: 100px;
+  margin: 0;
+}
+:where(.terminal-host) .public-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  color: var(--tx-2);
+  font-size: 10px;
+  margin-top: 8px;
+}
+:where(.terminal-host) .public-strategy {
+  padding: 27px 0;
+}
+:where(.terminal-host) .public-section-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+:where(.terminal-host) .public-section-heading h2 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+}
+:where(.terminal-host) .public-section-heading > span {
+  font-size: 11px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .public-strategy .public-section-heading > span {
+  background: var(--raised);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+:where(.terminal-host) .public-strategy p {
+  border-left: 2px solid var(--lime);
+  padding-left: 14px;
+  margin: 17px 0 0;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .public-section {
+  border-top: 1px solid var(--line);
+  padding: 24px 0;
+}
+:where(.terminal-host) .public-section > .public-section-heading {
+  margin-bottom: 16px;
+}
+:where(.terminal-host) .public-position {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 0;
+  text-align: left;
+}
+:where(.terminal-host) .public-position .coin {
+  width: 34px;
+  height: 34px;
+}
+:where(.terminal-host) .public-position > span:nth-child(2) {
+  flex: 1;
+}
+:where(.terminal-host) .public-position strong,
+:where(.terminal-host) .public-position small {
+  display: block;
+}
+:where(.terminal-host) .public-position strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+:where(.terminal-host) .public-position small {
+  font-size: 11px;
+  color: var(--tx-2);
+  margin-top: 3px;
+}
+:where(.terminal-host) .public-position > span:nth-child(3) {
+  font-size: 12px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .public-position > span:nth-child(4) {
+  font-size: 11px;
+  color: var(--faint);
+}
+:where(.terminal-host) .public-empty {
+  color: var(--tx-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+:where(.terminal-host) .public-mentioned {
+  margin-top: 20px;
+}
+:where(.terminal-host) .public-mentioned > span {
+  font-size: 11px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .public-mentioned > div {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+:where(.terminal-host) .public-mentioned button {
+  padding: 9px 12px;
+  min-height: 40px;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+:where(.terminal-host) .public-event {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--line);
+}
+:where(.terminal-host) .public-event:first-child {
+  padding-top: 6px;
+}
+:where(.terminal-host) .public-event:last-child {
+  border-bottom: 0;
+  padding-bottom: 4px;
+}
+:where(.terminal-host) .public-event-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  background: var(--raised);
+  color: var(--tx-2);
+}
+:where(.terminal-host) .public-event-mark.buy {
+  background: #13251c;
+  color: var(--up);
+}
+:where(.terminal-host) .public-event-mark.sell {
+  background: #2d1920;
+  color: var(--down);
+}
+:where(.terminal-host) .public-event > div {
+  flex: 1;
+  min-width: 0;
+}
+:where(.terminal-host) .public-event-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+:where(.terminal-host) .public-event-heading strong {
+  font-weight: 600;
+}
+:where(.terminal-host) .public-event-heading > span {
+  font-family: var(--sans);
+  font-size: 12px;
+}
+:where(.terminal-host) .public-event-heading button {
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 4px;
+  min-height: 30px;
+}
+:where(.terminal-host) .public-event p {
+  margin: 7px 0 8px;
+  color: var(--tx-2);
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+:where(.terminal-host) .public-event small {
+  color: var(--tx-2);
+  font-size: 10px;
+}
+:where(.terminal-host) .public-more {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  min-height: 46px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-top: 22px;
+  font-size: 12px;
+}
+:where(.terminal-host) .money-flow {
+  min-height: calc(100dvh - 140px);
+}
+:where(.terminal-host) .flow-intro {
+  margin: 35px 0 27px;
+}
+:where(.terminal-host) .flow-intro h1 {
+  font-size: 29px;
+  line-height: 1.15;
+  font-weight: 600;
+  letter-spacing: -0.055em;
+  max-width: 300px;
+  margin: 0;
+}
+:where(.terminal-host) .flow-intro > p {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--tx-2);
+  margin: 12px 0 0;
+  max-width: 310px;
+}
+:where(.terminal-host) .fund-recipient {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+:where(.terminal-host) .fund-recipient > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+:where(.terminal-host) .fund-recipient > div:last-child {
+  margin-left: auto;
+  text-align: right;
+}
+:where(.terminal-host) .fund-recipient span {
+  font-size: 10px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .fund-recipient strong {
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+:where(.terminal-host) .fund-amount-label {
+  display: block;
+  font-size: 12px;
+  color: var(--tx-2);
+  text-align: center;
+  margin-top: 35px;
+}
+:where(.terminal-host) .fund-amount-input {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  margin: 12px auto 0;
+  max-width: 100%;
+  font-size: 56px;
+  font-family: var(--pixel);
+}
+:where(.terminal-host) .fund-amount-input > span {
+  color: var(--tx-2);
+}
+:where(.terminal-host) .fund-amount-input input {
+  width: 5ch;
+  min-width: 0;
+  max-width: calc(100% - 1.5ch);
+  padding: 4px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  letter-spacing: -0.06em;
+}
+:where(.terminal-host) .fund-form > .flow-hint,
+:where(.terminal-host) .fund-form > .flow-error {
+  text-align: center;
+}
+:where(.terminal-host) .flow-hint {
+  font-size: 11px;
+  color: var(--tx-2);
+  line-height: 1.5;
+}
+:where(.terminal-host) .flow-error {
+  font-size: 12px;
+  color: var(--down);
+  line-height: 1.5;
+}
+:where(.terminal-host) .fund-presets {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 22px 0 30px;
+}
+:where(.terminal-host) .fund-presets button {
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 13px;
+}
+:where(.terminal-host) .fund-presets button[aria-pressed="true"] {
+  border-color: var(--lime);
+  color: var(--lime);
+  background: #181f0f;
+}
+:where(.terminal-host) .flow-notice {
+  border-left: 2px solid var(--line);
+  padding: 2px 0 2px 14px;
+  margin: 25px 0;
+}
+:where(.terminal-host) .flow-notice strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+:where(.terminal-host) .flow-notice p {
+  font-size: 12px;
+  color: var(--tx-2);
+  line-height: 1.65;
+  margin: 7px 0 0;
+}
+:where(.terminal-host) .flow-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 34px;
+}
+:where(.terminal-host) .flow-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 50px;
+  padding: 14px 18px;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--lime);
+}
+:where(.terminal-host) .flow-secondary {
+  min-height: 44px;
+  font-size: 13px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .flow-actions > .flow-hint {
+  text-align: center;
+  margin: 3px 0;
+}
+:where(.terminal-host) .fund-review-amount {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin: 36px 0;
+}
+:where(.terminal-host) .fund-review-amount > span {
+  font-size: 12px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .fund-review-amount strong {
+  font-family: var(--pixel);
+  font-size: clamp(30px, 10vw, 48px);
+  font-weight: 400;
+  letter-spacing: -0.06em;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+:where(.terminal-host) .fund-review-amount button {
+  font-size: 11px;
+  color: var(--tx-2);
+  min-height: 36px;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+:where(.terminal-host) .fund-breakdown {
+  margin: 0;
+}
+:where(.terminal-host) .fund-breakdown > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 0;
+  font-size: 12px;
+}
+:where(.terminal-host) .fund-breakdown dt {
+  color: var(--tx-2);
+}
+:where(.terminal-host) .fund-breakdown dd {
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+:where(.terminal-host) .fund-breakdown .fund-result {
+  border-top: 1px solid var(--line);
+  margin-top: 6px;
+  padding-top: 20px;
+}
+:where(.terminal-host) .fund-result dd {
+  font-family: var(--sans);
+}
+:where(.terminal-host) .limit-field {
+  margin: 28px 0;
+}
+:where(.terminal-host) .limit-field label {
+  font-size: 14px;
+  font-weight: 600;
+}
+:where(.terminal-host) .limit-field > p {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--tx-2);
+  margin: 6px 0 12px;
+}
+:where(.terminal-host) .limit-field > .flow-error {
+  color: var(--down);
+}
+:where(.terminal-host) .limit-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  padding: 15px 18px;
+  font-family: var(--sans);
+  font-size: 24px;
+}
+:where(.terminal-host) .limit-input:focus-within {
+  border-color: var(--lime);
+}
+:where(.terminal-host) .limit-input > span {
+  color: var(--tx-2);
+}
+:where(.terminal-host) .limit-input input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+}
+:where(.terminal-host) .limit-input:has([aria-invalid="true"]) {
+  border-color: var(--down);
+}
+@media (hover: hover) {
+  :where(.terminal-host) .public-position:hover,
+  :where(.terminal-host) .public-more:hover,
+  :where(.terminal-host) .flow-back:hover,
+  :where(.terminal-host) .fund-presets button:hover {
+    background: var(--raised);
+  }
+  :where(.terminal-host) .public-event-heading button:hover {
+    color: var(--lime);
+  }
+}
+@media (max-width: 360px) {
+  :where(.terminal-host) .public-performance {
+    padding: 18px 14px;
+  }
+  :where(.terminal-host) .public-return {
+    font-size: 36px;
+  }
+  :where(.terminal-host) .public-agent-id h1 {
+    font-size: 24px;
+  }
+  :where(.terminal-host) .fund-recipient {
+    padding: 12px;
+    gap: 8px;
+  }
+}
+
+/* DM Sans handles text; Geist supplies tabular digits that DM Sans lacks. */
+@font-face {
+  font-family: "Geist Numerals";
+  src: url("/fonts/Geist-numerals.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0030-0039;
+}
+
+@font-face {
+  font-family: "DM Sans";
+  src: url("/fonts/DMSans-latin.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "DM Sans";
+  src: url("/fonts/DMSans-latin-ext.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "Geist Pixel";
+  src: url("/fonts/GeistPixel-latin.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Geist Pixel";
+  src: url("/fonts/GeistPixel-latin-ext.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+.terminal-host {
+  --bg: #070806;
+  --card: #12130f;
+  --raised: #1a1b16;
+  --tx: #ecece4;
+  --tx-2: #abada1;
+  --faint: #898c80;
+  --line: #24261e;
+  --up: #3dd68c;
+  --down: #ff5c71;
+  --lime: #a5ce1f;
+  --ink: #111;
+  --sans: "Geist Numerals", "DM Sans", system-ui, sans-serif;
+  --pixel: "Geist Pixel", ui-monospace, monospace;
+  --mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --nav: 76px;
+  --r: 16px;
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+:where(.terminal-host) *,
+:where(.terminal-host) *::before,
+:where(.terminal-host) *::after {
+  box-sizing: border-box;
+}
+
+.terminal-host,
+.terminal-host,
+.terminal-host {
+  min-height: 100%;
+  margin: 0;
+  background: #000;
+  color: var(--tx);
+  color-scheme: dark;
+  font-family: var(--sans);
+  font-optical-sizing: auto;
+  font-size: 15px;
+  line-height: 1.35;
+  -webkit-font-smoothing: antialiased;
+}
+
+:where(.terminal-host) button,
+:where(.terminal-host) input,
+:where(.terminal-host) textarea,
+:where(.terminal-host) select {
+  font: inherit;
+  color: inherit;
+}
+
+:where(.terminal-host) button {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+:where(.terminal-host) button:focus-visible,
+:where(.terminal-host) input:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
+}
+
+:where(.terminal-host) .app {
+  font-variant-numeric: lining-nums tabular-nums;
+  width: 100%;
+  max-width: 430px;
+  min-height: 100dvh;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+:where(.terminal-host) .body {
+  flex: 1;
+  overflow: auto;
+  padding: 18px 18px calc(var(--nav) + 32px);
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  scrollbar-width: none;
+}
+
+:where(.terminal-host) .body::-webkit-scrollbar {
+  display: none;
+}
+
+:where(.terminal-host) .up {
+  color: var(--up);
+}
+
+:where(.terminal-host) .down {
+  color: var(--down);
+}
+
+:where(.terminal-host) .meta {
+  margin: 2px 0 0;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+
+:where(.terminal-host) .lead {
+  margin: -8px 0 0;
+  color: var(--tx-2);
+  font-size: 14px;
+}
+
+:where(.terminal-host) .mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+:where(.terminal-host) .top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+:where(.terminal-host) .top-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.04em;
+}
+
+:where(.terminal-host) .top-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+:where(.terminal-host) .icon-btn {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  color: var(--tx);
+}
+
+:where(.terminal-host) .hero {
+  display: block;
+  width: 100%;
+  text-align: left;
+}
+
+:where(.terminal-host) .hero-who {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+:where(.terminal-host) .name-block strong {
+  display: block;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+:where(.terminal-host) .name-block .owned {
+  margin: 2px 0 0;
+}
+
+:where(.terminal-host) i.live {
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-radius: 999px;
+  background: var(--lime);
+  box-shadow: 0 0 0 4px rgb(165 206 31 / 0.14);
+}
+
+:where(.terminal-host) .hero-said {
+  margin: 14px 0 0;
+  color: var(--tx-2);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+:where(.terminal-host) .hero.empty h1 {
+  margin-bottom: 8px;
+}
+
+:where(.terminal-host) .balance {
+  font-family: var(--pixel);
+  font-size: 52px;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  line-height: 0.92;
+  white-space: nowrap;
+}
+
+:where(.terminal-host) .balance sup {
+  font-size: 22px;
+  color: var(--tx-2);
+}
+
+:where(.terminal-host) .chg-24 {
+  margin: 8px 0 0;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+:where(.terminal-host) .fund {
+  padding: 8px 14px;
+  min-height: 36px;
+  border-radius: 10px;
+  background: var(--raised);
+  color: var(--tx);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+:where(.terminal-host) .fund.solid {
+  background: var(--tx);
+  color: var(--ink);
+}
+
+:where(.terminal-host) .top-actions .fund {
+  min-height: 36px;
+  padding: 8px 14px;
+}
+
+:where(.terminal-host) .fund.full,
+:where(.terminal-host) .deposit.full {
+  width: 100%;
+  margin-top: 8px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--tx);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+:where(.terminal-host) h1 {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.04em;
+}
+
+:where(.terminal-host) h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .week-block {
+  margin: 4px 0 8px;
+}
+
+:where(.terminal-host) .week-label {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+:where(.terminal-host) .week {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  margin: 0 -18px;
+  padding: 0 18px 2px;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+}
+
+:where(.terminal-host) .week::-webkit-scrollbar {
+  display: none;
+}
+
+:where(.terminal-host) .week-card {
+  flex: 0 0 156px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 14px;
+  text-align: left;
+  background: var(--card);
+  border-radius: var(--r);
+  scroll-snap-align: start;
+}
+
+:where(.terminal-host) .week-who {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+}
+
+:where(.terminal-host) .week-card .face {
+  width: 16px;
+  height: 16px;
+  font-size: 7px;
+}
+
+:where(.terminal-host) .week-card strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+:where(.terminal-host) .week-card b {
+  font-family: var(--sans);
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+:where(.terminal-host) .week-card em {
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .owned {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+:where(.terminal-host) .thesis-body {
+  margin: 0;
+  white-space: pre-wrap;
+  color: var(--tx);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+:where(.terminal-host) .event .thesis-body {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--tx-2);
+}
+
+:where(.terminal-host) .pills {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+:where(.terminal-host) .pills.wrap {
+  flex-wrap: wrap;
+}
+
+:where(.terminal-host) .pill {
+  padding: 8px 13px;
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--tx-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .pill.on {
+  background: #ecece4;
+  color: #111;
+}
+
+:where(.terminal-host) .tok {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  min-height: 64px;
+  padding: 10px 0;
+  text-align: left;
+}
+
+:where(.terminal-host) .tok > div:nth-child(2) {
+  min-width: 0;
+}
+
+:where(.terminal-host) .tok strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:where(.terminal-host) .tok .px {
+  text-align: right;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+:where(.terminal-host) .tok .px small {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .cast {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+:where(.terminal-host) .faces {
+  display: flex;
+}
+
+:where(.terminal-host) .faces .face {
+  margin-right: -6px;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+:where(.terminal-host) .faces .face:last-child {
+  margin-right: 0;
+}
+
+:where(.terminal-host) .face,
+:where(.terminal-host) .coin {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  color: #0e0e10;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+:where(.terminal-host) .face img,
+:where(.terminal-host) .coin img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+:where(.terminal-host) .face {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+}
+
+:where(.terminal-host) .face.sm {
+  width: 16px;
+  height: 16px;
+  font-size: 7px;
+}
+
+:where(.terminal-host) .face.pin {
+  width: 22px;
+  height: 22px;
+  font-size: 8px;
+  border-radius: 50%;
+}
+
+:where(.terminal-host) .face.lg {
+  width: 48px;
+  height: 48px;
+  font-size: 16px;
+}
+
+:where(.terminal-host) .coin {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: #ecece4;
+}
+
+:where(.terminal-host) .tabbar {
+  position: fixed;
+  z-index: 2;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  width: calc(100% - 28px);
+  max-width: 402px;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  height: 52px;
+  background: rgb(18 19 15 / 0.92);
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: 26px;
+  backdrop-filter: blur(18px);
+}
+
+:where(.terminal-host) .tab {
+  display: grid;
+  place-items: center;
+  color: var(--faint);
+}
+
+:where(.terminal-host) .tab.on {
+  color: var(--tx);
+}
+
+:where(.terminal-host) .tab svg {
+  width: 24px;
+  height: 24px;
+}
+
+:where(.terminal-host) .tab svg.logo-mark {
+  width: 28px;
+  height: 19px;
+}
+
+:where(.terminal-host) .back {
+  color: var(--tx-2);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+:where(.terminal-host) .token {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+:where(.terminal-host) .token-top {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+:where(.terminal-host) .token-who {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+:where(.terminal-host) .token-top .coin {
+  width: 36px;
+  height: 36px;
+  font-size: 11px;
+}
+
+:where(.terminal-host) .token-top h1 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 17px;
+  letter-spacing: -0.03em;
+}
+
+:where(.terminal-host) .verified {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #3b82f6;
+  box-shadow: inset 0 0 0 1.5px #3b82f6;
+  position: relative;
+}
+
+:where(.terminal-host) .verified::after {
+  content: "";
+  position: absolute;
+  left: 3.5px;
+  top: 2.5px;
+  width: 4px;
+  height: 6px;
+  border-right: 1.6px solid #fff;
+  border-bottom: 1.6px solid #fff;
+  transform: rotate(40deg);
+}
+
+:where(.terminal-host) .token-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 0;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+:where(.terminal-host) .token-sub button {
+  color: var(--tx-2);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+:where(.terminal-host) .token-acts {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+:where(.terminal-host) .token-acts button {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  color: var(--tx-2);
+}
+
+:where(.terminal-host) .token-acts button.on {
+  color: var(--tx);
+}
+
+:where(.terminal-host) .token-hero {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 16px 0 14px;
+}
+
+:where(.terminal-host) .token-hero strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .token-mc {
+  text-align: right;
+}
+
+:where(.terminal-host) .token-mc b {
+  display: block;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+
+:where(.terminal-host) .token-mc span {
+  display: block;
+  margin-top: 3px;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+:where(.terminal-host) .token-plot {
+  margin: 0 -18px 8px;
+}
+
+:where(.terminal-host) .token-body {
+  position: relative;
+  padding-bottom: calc(var(--nav) + 40px);
+}
+
+:where(.terminal-host) .token-body::after {
+  content: "";
+  pointer-events: none;
+  position: fixed;
+  z-index: 1;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 430px;
+  height: 96px;
+  background: linear-gradient(180deg, rgb(7 8 6 / 0), var(--bg) 58%);
+}
+
+:where(.terminal-host) .row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+:where(.terminal-host) .row-start {
+  justify-content: flex-start;
+}
+
+:where(.terminal-host) .price {
+  font-family: var(--sans);
+  font-size: 44px;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  font-weight: 500;
+}
+
+:where(.terminal-host) .token-px strong {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .chart {
+  width: 100%;
+  height: 96px;
+  margin-top: 8px;
+}
+
+:where(.terminal-host) .chart path.line {
+  fill: none;
+  stroke: var(--up);
+  stroke-width: 1.8;
+}
+
+:where(.terminal-host) .chart.down path.line {
+  stroke: var(--down);
+}
+
+:where(.terminal-host) .feed-list,
+:where(.terminal-host) .tape {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+:where(.terminal-host) .slip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 10px 12px;
+  text-align: left;
+  background: var(--card);
+  border-radius: 14px;
+  border-left: 3px solid var(--line);
+}
+
+:where(.terminal-host) .slip.buy {
+  border-left-color: var(--up);
+}
+
+:where(.terminal-host) .slip.sell {
+  border-left-color: var(--down);
+}
+
+:where(.terminal-host) .slip.park,
+:where(.terminal-host) .slip.unpark {
+  border-left-color: var(--faint);
+}
+
+:where(.terminal-host) .slip.blocked {
+  border-style: solid;
+  border-left-style: dashed;
+  opacity: 0.72;
+}
+
+:where(.terminal-host) .slip-who {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+:where(.terminal-host) .slip-who .faces {
+  flex-shrink: 0;
+}
+
+:where(.terminal-host) .slip-who .name-block strong {
+  font-size: 13px;
+}
+
+:where(.terminal-host) .slip-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+:where(.terminal-host) .slip-mark {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+:where(.terminal-host) .slip-mark .coin {
+  width: 28px;
+  height: 28px;
+}
+
+:where(.terminal-host) .slip-mark strong {
+  display: block;
+  font-size: 13px;
+}
+
+:where(.terminal-host) .slip-mark b {
+  display: block;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+
+:where(.terminal-host) .slip-why {
+  margin: 0;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+
+:where(.terminal-host) .slip-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+:where(.terminal-host) .tally {
+  font-family: var(--sans);
+  font-size: 18px;
+  letter-spacing: -0.02em;
+  font-weight: 500;
+}
+
+:where(.terminal-host) .stamp {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--faint);
+  border: 1px solid var(--line);
+}
+
+:where(.terminal-host) .stamp.cap,
+:where(.terminal-host) .stamp.wall,
+:where(.terminal-host) .stamp.breaker,
+:where(.terminal-host) .stamp.blocked {
+  color: #d4a24a;
+  border-color: #d4a24a;
+}
+
+:where(.terminal-host) .stamp.paper {
+  color: var(--tx-2);
+}
+
+:where(.terminal-host) .ticks {
+  display: flex;
+  gap: 3px;
+}
+
+:where(.terminal-host) .ticks i {
+  width: 7px;
+  height: 7px;
+  background: var(--raised);
+  border-radius: 1px;
+}
+
+:where(.terminal-host) .ticks i.on {
+  background: var(--tx);
+}
+
+:where(.terminal-host) .vault {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: end center;
+  border: 1.5px solid var(--tx-2);
+  border-radius: 6px;
+  padding: 3px;
+}
+
+:where(.terminal-host) .vault i {
+  width: 100%;
+  background: var(--tx-2);
+  border-radius: 2px;
+}
+
+:where(.terminal-host) .vault.park i {
+  height: 70%;
+}
+
+:where(.terminal-host) .vault.unpark i {
+  height: 25%;
+}
+
+:where(.terminal-host) .holder {
+  display: block;
+  width: 100%;
+  padding: 14px 0;
+  text-align: left;
+}
+
+:where(.terminal-host) .tv {
+  position: relative;
+}
+
+:where(.terminal-host) .tv-ohlc {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  left: 18px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 0;
+  color: var(--tx-2);
+  font-family: var(--sans);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+:where(.terminal-host) .tv-box {
+  position: relative;
+  height: 220px;
+  overflow: hidden;
+}
+
+:where(.terminal-host) .tv-canvas {
+  height: 220px;
+}
+
+:where(.terminal-host) .tv-pins {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+:where(.terminal-host) .tv-pin {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px var(--bg);
+}
+
+:where(.terminal-host) .tv-last {
+  position: absolute;
+  z-index: 2;
+  transform: translate(calc(-100% - 8px), -50%);
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--raised);
+  font-family: var(--sans);
+  font-style: normal;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+  pointer-events: none;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.06);
+}
+
+:where(.terminal-host) .tv-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 12px;
+  padding: 6px 0 2px;
+}
+
+:where(.terminal-host) .tv-windows {
+  display: flex;
+  flex: 1;
+  gap: 2px;
+  margin: 0;
+  border: 0;
+}
+
+:where(.terminal-host) .tv-windows button {
+  flex: 1;
+  padding: 6px 0;
+  border-radius: 8px;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .tv-windows button.on {
+  background: var(--raised);
+  color: var(--tx);
+  box-shadow: none;
+}
+
+:where(.terminal-host) .tv-kinds {
+  display: flex;
+  gap: 2px;
+}
+
+:where(.terminal-host) .tv-kinds button {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  color: var(--faint);
+}
+
+:where(.terminal-host) .tv-kinds button.on {
+  color: var(--tx);
+}
+
+:where(.terminal-host) .held-sec {
+  padding-top: 22px;
+  padding-bottom: 24px;
+}
+
+:where(.terminal-host) .held-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+:where(.terminal-host) .held-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+:where(.terminal-host) .helds {
+  margin-top: 2px;
+}
+
+:where(.terminal-host) .held {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  width: 100%;
+  padding: 16px 0;
+  text-align: left;
+}
+
+:where(.terminal-host) .held.solo {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+:where(.terminal-host) .held.chorus {
+  grid-template-columns: 88px minmax(0, 1fr);
+}
+
+:where(.terminal-host) .held.dim {
+  opacity: 0.45;
+}
+
+:where(.terminal-host) .held-faces {
+  width: 88px;
+  overflow: hidden;
+}
+
+:where(.terminal-host) .held-faces .face {
+  width: 28px;
+  height: 28px;
+  margin-right: -8px;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+:where(.terminal-host) .held-id .live {
+  margin-left: 4px;
+}
+
+:where(.terminal-host) .held .face {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  font-size: 13px;
+}
+
+:where(.terminal-host) .held-who {
+  min-width: 0;
+}
+
+:where(.terminal-host) .held-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+:where(.terminal-host) .held-id {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+:where(.terminal-host) .held-id strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+:where(.terminal-host) .held-top > b {
+  flex-shrink: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+:where(.terminal-host) .tag {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 6px 2px;
+  border-radius: 2px;
+  background: #1c1d16;
+  color: var(--tx-2);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  line-height: 1;
+}
+
+:where(.terminal-host) button.tag {
+  cursor: pointer;
+}
+
+:where(.terminal-host) .tag.on {
+  background: #ecece4;
+  color: #111;
+}
+
+:where(.terminal-host) .held-sub {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 2px;
+}
+
+:where(.terminal-host) .held-sub span {
+  color: var(--faint);
+  font-size: 12px;
+}
+
+:where(.terminal-host) .held-sub em {
+  font-style: normal;
+  font-weight: 600;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+:where(.terminal-host) .held-who p {
+  margin: 10px 0 0;
+  color: var(--tx-2);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+:where(.terminal-host) .seg {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--card);
+  border-radius: 8px;
+}
+
+:where(.terminal-host) .seg button {
+  padding: 5px 10px;
+  border-radius: 6px;
+  color: var(--faint);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .seg button.on {
+  background: var(--raised);
+  color: var(--tx);
+}
+
+
+:where(.terminal-host) .holder:last-of-type {
+  border-bottom: 0;
+}
+
+:where(.terminal-host) .said {
+  margin: 8px 0 0;
+  color: var(--tx-2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+:where(.terminal-host) .toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--faint);
+}
+
+:where(.terminal-host) .toggle .on-lab {
+  color: var(--tx);
+}
+
+:where(.terminal-host) .switch {
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--raised);
+  position: relative;
+}
+
+:where(.terminal-host) .switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--tx-2);
+  transition: transform 140ms var(--ease);
+}
+
+:where(.terminal-host) .switch.on i {
+  transform: translateX(16px);
+  background: var(--lime);
+}
+
+:where(.terminal-host) .inst {
+  margin-top: 16px;
+  padding: 12px 0 0;
+}
+
+:where(.terminal-host) .inst.desk {
+  margin: 8px 0 0;
+  padding: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 132px;
+}
+
+:where(.terminal-host) .legs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+:where(.terminal-host) .leg {
+  min-width: 0;
+}
+
+:where(.terminal-host) .leg span {
+  display: block;
+  margin-bottom: 8px;
+  overflow: hidden;
+  color: var(--tx-2);
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+:where(.terminal-host) .leg i {
+  display: block;
+  height: 7px;
+  background: var(--raised);
+  border-radius: 99px;
+}
+
+:where(.terminal-host) .leg em {
+  display: block;
+  margin-top: 6px;
+  color: var(--tx);
+  font-family: var(--sans);
+  font-size: 14px;
+  font-style: normal;
+  letter-spacing: -0.02em;
+  font-weight: 500;
+}
+
+:where(.terminal-host) .leg i b {
+  display: block;
+  height: 100%;
+  background: var(--tx);
+  border-radius: inherit;
+}
+
+:where(.terminal-host) .inst-note {
+  margin: 10px 0 0;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+
+:where(.terminal-host) .gate {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+:where(.terminal-host) .gate i {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--faint);
+}
+
+:where(.terminal-host) .gate i.live {
+  background: var(--lime);
+  box-shadow: 0 0 0 4px rgb(165 206 31 / 0.14);
+}
+
+:where(.terminal-host) .gate i.rest {
+  background: var(--tx-2);
+}
+
+:where(.terminal-host) .deep {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+}
+
+:where(.terminal-host) .deep b {
+  font-size: 22px;
+  letter-spacing: -0.03em;
+}
+
+:where(.terminal-host) .deep span {
+  color: var(--tx-2);
+  font-size: 13px;
+}
+
+:where(.terminal-host) .seats {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+:where(.terminal-host) .seats .seat {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+:where(.terminal-host) .seats .seat b {
+  font-family: var(--sans);
+  font-size: 13px;
+}
+
+:where(.terminal-host) .seats .seat em {
+  font-style: normal;
+  font-weight: 700;
+}
+
+:where(.terminal-host) .seats .seat span {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+:where(.terminal-host) .glance {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+:where(.terminal-host) .stat {
+  padding: 14px;
+  background: var(--card);
+  border-radius: 14px;
+}
+
+:where(.terminal-host) .stat b {
+  display: block;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+
+:where(.terminal-host) .stat span {
+  display: block;
+  margin-top: 4px;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+
+:where(.terminal-host) .event {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+:where(.terminal-host) .event:last-child {
+  border-bottom: 0;
+}
+
+:where(.terminal-host) .event .when {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+:where(.terminal-host) .event strong {
+  display: block;
+  margin-top: 3px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .turns {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+:where(.terminal-host) .turn {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+:where(.terminal-host) .bubble {
+  max-width: 92%;
+}
+
+:where(.terminal-host) .bubble p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+:where(.terminal-host) .bubble.them p {
+  color: var(--tx);
+}
+
+:where(.terminal-host) .bubble.me {
+  align-self: flex-end;
+}
+
+:where(.terminal-host) .bubble.me p {
+  color: var(--tx-2);
+}
+
+:where(.terminal-host) .asks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+:where(.terminal-host) .ask-chip {
+  padding: 7px 11px;
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--tx-2);
+  font-size: 13px;
+}
+
+:where(.terminal-host) .bookbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+:where(.terminal-host) .bookbar-track {
+  display: flex;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: var(--raised);
+}
+
+:where(.terminal-host) .bookbar-track i {
+  height: 100%;
+}
+
+:where(.terminal-host) .bookbar-track .seg-0 {
+  background: #ecece4;
+}
+
+:where(.terminal-host) .bookbar-track .seg-1 {
+  background: #b8b8ac;
+}
+
+:where(.terminal-host) .bookbar-track .seg-2 {
+  background: #8a8a7e;
+}
+
+:where(.terminal-host) .bookbar-track .seg-3 {
+  background: #6e6e62;
+}
+
+:where(.terminal-host) .bookbar-track .seg-4 {
+  background: #4a4a40;
+}
+
+:where(.terminal-host) .bookbar-labs {
+  display: flex;
+  margin: 0;
+  color: var(--tx-2);
+  font-family: var(--sans);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
+:where(.terminal-host) .bookbar-labs span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:where(.terminal-host) .bookbar-track i.next {
+  background: var(--lime);
+}
+
+:where(.terminal-host) .bookbar-labs span.next {
+  color: var(--lime);
+}
+
+:where(.terminal-host) .bookbar-cash {
+  margin: 0;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+:where(.terminal-host) .crew {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  padding: 4px 0 8px;
+  text-align: left;
+}
+
+:where(.terminal-host) .desk-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  flex: 1;
+  min-height: 0;
+}
+
+:where(.terminal-host) .mine-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+:where(.terminal-host) .thesis {
+  margin: 0;
+  color: var(--tx-2);
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+:where(.terminal-host) .chat {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+:where(.terminal-host) .chat .who {
+  font-size: 12px;
+  color: var(--faint);
+  margin-bottom: 4px;
+}
+
+:where(.terminal-host) .chat p {
+  margin: 0;
+}
+
+:where(.terminal-host) .composer {
+  display: flex;
+  gap: 8px;
+  position: sticky;
+  bottom: 0;
+  padding-top: 12px;
+  background: linear-gradient(180deg, rgb(7 8 6 / 0), var(--bg) 18%);
+}
+
+:where(.terminal-host) .composer input,
+:where(.terminal-host) .search,
+:where(.terminal-host) .field input {
+  width: 100%;
+  background: var(--card);
+  border: 0;
+  border-radius: 14px;
+  padding: 13px 14px;
+}
+
+:where(.terminal-host) .talk .composer button {
+  padding: 0 14px;
+  border-radius: 14px;
+  background: var(--raised);
+  color: var(--faint);
+  font-weight: 600;
+}
+
+:where(.terminal-host) .search {
+  font-size: 16px;
+}
+
+:where(.terminal-host) .field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+:where(.terminal-host) .field span {
+  font-size: 13px;
+  color: var(--tx-2);
+}
+
+:where(.terminal-host) .btn {
+  padding: 10px 16px;
+  border-radius: 12px;
+  background: var(--raised);
+  font-weight: 600;
+}
+
+:where(.terminal-host) .btn.warn {
+  color: var(--down);
+}
+
+:where(.terminal-host) .board {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+:where(.terminal-host) .pub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 0;
+}
+
+:where(.terminal-host) .visit {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+:where(.terminal-host) .visit-who {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+:where(.terminal-host) .visit-who .held-id {
+  flex-wrap: wrap;
+}
+
+:where(.terminal-host) .visit .balance {
+  font-size: 52px;
+}
+
+:where(.terminal-host) .visit-page .back {
+  margin-bottom: 18px;
+}
+
+:where(.terminal-host) .book {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 16px;
+  padding: 4px 0 8px;
+}
+
+:where(.terminal-host) .book-coin {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  color: var(--tx-2);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .book-coin .coin {
+  width: 36px;
+  height: 36px;
+}
+
+:where(.terminal-host) .cap {
+  text-align: left;
+}
+
+:where(.terminal-host) .cap b {
+  display: block;
+  font-family: var(--sans);
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+:where(.terminal-host) .cap span {
+  display: block;
+  margin-top: 6px;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+
+:where(.terminal-host) .halt {
+  padding: 7px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--tx-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .halt.off {
+  border-color: var(--lime);
+  color: var(--lime);
+}
+
+:where(.terminal-host) .sheet .back {
+  margin-bottom: 28px;
+}
+
+:where(.terminal-host) .amt {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  font-family: var(--pixel);
+  font-size: 52px;
+  letter-spacing: -0.02em;
+  line-height: 0.92;
+}
+
+:where(.terminal-host) .amt.sm {
+  font-size: 40px;
+}
+
+:where(.terminal-host) .amt span {
+  color: var(--tx-2);
+}
+
+:where(.terminal-host) .amt input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: var(--tx);
+}
+
+:where(.terminal-host) .amt-lab {
+  margin: 6px 0 22px;
+  color: var(--tx-2);
+  font-size: 13px;
+}
+
+:where(.terminal-host) .find-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+:where(.terminal-host) .find-bar .search {
+  flex: 1;
+}
+
+:where(.terminal-host) .find .tok .face {
+  width: 40px;
+  height: 40px;
+}
+
+:where(.terminal-host) .rail {
+  display: flex;
+  gap: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+:where(.terminal-host) .rail button {
+  padding: 0 0 10px;
+  color: var(--faint);
+  font-weight: 600;
+}
+
+:where(.terminal-host) .rail button.on {
+  color: var(--tx);
+  box-shadow: inset 0 -2px 0 var(--lime);
+}
+
+/* ---- page furniture: every inner screen says what it is ---- */
+
+:where(.terminal-host) .page {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+:where(.terminal-host) .feed-page {
+  gap: 8px;
+}
+
+:where(.terminal-host) .feed-head,
+:where(.terminal-host) .board-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+:where(.terminal-host) .feed-head .icon-btn.on {
+  color: var(--lime);
+}
+
+:where(.terminal-host) .feed-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgb(0 0 0 / 0.52);
+}
+
+:where(.terminal-host) .feed-sheet {
+  width: 100%;
+  max-width: 430px;
+  max-height: min(88dvh, 760px);
+  display: flex;
+  flex-direction: column;
+  padding: 8px 18px calc(16px + env(safe-area-inset-bottom, 0px));
+  border-radius: 22px 22px 0 0;
+  background: var(--bg);
+  overscroll-behavior: contain;
+}
+
+:where(.terminal-host) .feed-grip {
+  display: block;
+  width: 36px;
+  height: 4px;
+  margin: 4px auto 14px;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+:where(.terminal-host) .feed-sheet h2 {
+  margin: 0 0 18px;
+  text-align: center;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+
+:where(.terminal-host) .feed-asset {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  color: var(--tx);
+  font-size: 15px;
+}
+
+:where(.terminal-host) .feed-asset-pick {
+  position: relative;
+}
+
+:where(.terminal-host) .feed-asset-pick > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--tx-2);
+  font-size: 15px;
+}
+
+:where(.terminal-host) .feed-asset-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 2;
+  min-width: 140px;
+  padding: 6px;
+  border-radius: 12px;
+  background: var(--raised);
+  box-shadow: 0 10px 32px rgb(0 0 0 / 0.5);
+}
+
+:where(.terminal-host) .feed-asset-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  text-align: left;
+  color: var(--tx-2);
+  font-size: 13px;
+}
+
+:where(.terminal-host) .feed-asset-menu button.on {
+  background: var(--card);
+  color: var(--tx);
+}
+
+:where(.terminal-host) .feed-clear {
+  align-self: flex-start;
+  margin: 10px 0 4px;
+  color: var(--lime);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .feed-topics {
+  flex: 1;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+:where(.terminal-host) .feed-topics button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 48px;
+  color: var(--tx);
+  font-size: 15px;
+}
+
+:where(.terminal-host) .feed-check {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 1.5px solid var(--faint);
+  border-radius: 6px;
+  color: var(--ink);
+}
+
+:where(.terminal-host) .feed-topics button.on .feed-check {
+  border-color: var(--tx);
+  background: var(--tx);
+}
+
+:where(.terminal-host) .feed-shut {
+  width: 100%;
+  margin-top: 12px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--raised);
+  color: var(--tx);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .you-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+:where(.terminal-host) .you-head strong {
+  flex: 1;
+  font-size: 14px;
+  letter-spacing: -0.02em;
+}
+
+:where(.terminal-host) .visit-count {
+  margin: 0;
+  color: var(--tx-2);
+  font-size: 13px;
+}
+
+:where(.terminal-host) .strip {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+:where(.terminal-host) .strip > h3 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .strip > h3 span {
+  color: var(--faint);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+:where(.terminal-host) .blank {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 28px 0;
+}
+
+:where(.terminal-host) .blank strong {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+:where(.terminal-host) .blank p {
+  margin: 0;
+  max-width: 30em;
+  color: var(--tx-2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+:where(.terminal-host) .blank .fund.solid {
+  margin-top: 6px;
+  padding: 11px 16px;
+}
+
+/* ---- the hero block: one pixel figure per screen, and it ticks ---- */
+
+:where(.terminal-host) .wire-top {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 4px;
+}
+
+:where(.terminal-host) .hero-fig {
+  display: flex;
+  align-items: baseline;
+  font-family: var(--pixel);
+  font-size: 54px;
+  line-height: 0.92;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+
+:where(.terminal-host) .hero-fig sup {
+  margin-left: 2px;
+  color: var(--faint);
+  font-size: 22px;
+  top: auto;
+  vertical-align: baseline;
+}
+
+:where(.terminal-host) .hero-lede {
+  margin: 0;
+  max-width: 34em;
+  color: var(--tx-2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+:where(.terminal-host) .hero-fig .dial {
+  align-self: center;
+  margin-right: 12px;
+}
+
+:where(.terminal-host) .dial-track {
+  fill: none;
+  stroke: var(--raised);
+  stroke-width: 3;
+}
+
+:where(.terminal-host) .dial-run {
+  fill: none;
+  stroke: var(--lime);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke-dasharray 900ms linear;
+}
+
+:where(.terminal-host) .cap-meta {
+  margin: 2px 0 0;
+  color: var(--faint);
+  font-size: 11.5px;
+}
+
+:where(.terminal-host) .pace {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+:where(.terminal-host) .pace-row {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 62px;
+  align-items: center;
+  gap: 10px;
+}
+
+:where(.terminal-host) .pace-cap {
+  align-self: flex-end;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+
+:where(.terminal-host) .pace-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--raised);
+}
+
+:where(.terminal-host) .pace-track i {
+  display: block;
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: var(--tx-2);
+}
+
+:where(.terminal-host) .pace-track i.mine {
+  background: var(--lime);
+}
+
+:where(.terminal-host) .pace-row b {
+  color: var(--tx-2);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+:where(.terminal-host) .flip-slot {
+  display: inline-block;
+  overflow: hidden;
+}
+
+:where(.terminal-host) .flip {
+  display: inline-block;
+  animation: flip-up 170ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+:where(.terminal-host) .flip.rev {
+  animation-name: flip-down;
+}
+
+@keyframes flip-up {
+  from {
+    transform: translateY(38%);
+    opacity: 0;
+  }
+}
+
+@keyframes flip-down {
+  from {
+    transform: translateY(-38%);
+    opacity: 0;
+  }
+}
+
+/* ---- the wire: faces sit on the rail ---- */
+
+:where(.terminal-host) .wire {
+  --mark: 22px;
+  --gap: 10px;
+  --rail: calc(var(--mark) / 2);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+:where(.terminal-host) .wire::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 10px;
+  left: var(--rail);
+  width: 1px;
+  opacity: 0.35;
+  background: linear-gradient(180deg, transparent, var(--line) 12%, var(--line) 88%, transparent);
+}
+
+:where(.terminal-host) .wire-lull,
+:where(.terminal-host) .wire-beat {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--mark) minmax(0, 1fr);
+  align-items: start;
+  column-gap: var(--gap);
+}
+
+:where(.terminal-host) .wire-mark {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding-top: 0;
+}
+
+:where(.terminal-host) .wire-mark .face {
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+:where(.terminal-host) .wire-lull {
+  padding: 4px 0;
+}
+
+:where(.terminal-host) .wire-lull::after {
+  content: "";
+  position: absolute;
+  left: var(--rail);
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  transform: translateX(-50%);
+  opacity: 0.35;
+  background: repeating-linear-gradient(180deg, var(--bg) 0 3px, var(--line) 3px 6px);
+}
+
+:where(.terminal-host) .wire-beat {
+  padding: 9px 0 11px;
+}
+
+:where(.terminal-host) .wire-beat.chorus {
+  align-items: start;
+}
+
+:where(.terminal-host) .wire-beat.chorus .wire-body {
+  padding-left: 16px;
+}
+
+:where(.terminal-host) .wire-hit {
+  display: block;
+  width: 100%;
+  padding-top: 3px;
+  text-align: left;
+}
+
+:where(.terminal-host) .wire-said {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+:where(.terminal-host) .wire-line {
+  min-width: 0;
+  color: var(--tx-2);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+:where(.terminal-host) .wire-line strong {
+  color: var(--tx);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+:where(.terminal-host) .wire-when {
+  margin-left: 6px;
+  color: var(--faint);
+  font-style: normal;
+  font-size: 11px;
+}
+
+:where(.terminal-host) .wire-size {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+:where(.terminal-host) .wire-size b {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+:where(.terminal-host) .wire-why {
+  margin: 5px 0 0;
+  color: var(--tx-2);
+  font-size: 12.5px;
+  line-height: 1.42;
+}
+
+:where(.terminal-host) .wire-beat .wire-why {
+  margin-bottom: 8px;
+}
+
+:where(.terminal-host) .wire-beat .wire-hit {
+  padding-bottom: 4px;
+}
+
+:where(.terminal-host) .wire-seat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--tx);
+  font-weight: 600;
+}
+
+:where(.terminal-host) .wire-seat .coin {
+  width: 16px;
+  height: 16px;
+  font-size: 7px;
+}
+
+:where(.terminal-host) .wire-parts {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 11px;
+  border-radius: 12px;
+  background: var(--card);
+}
+
+:where(.terminal-host) .wire-beat.buy .wire-parts {
+  box-shadow: inset 2px 0 0 var(--up);
+}
+
+:where(.terminal-host) .wire-beat.sell .wire-parts {
+  background: #14110f;
+  box-shadow: inset 2px 0 0 var(--down);
+}
+
+:where(.terminal-host) .wire-part {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  color: var(--tx-2);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+:where(.terminal-host) .wire-part-fig {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+:where(.terminal-host) .wire-part-fig b {
+  color: var(--tx);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+:where(.terminal-host) .stack {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-self: start;
+  height: var(--mark);
+}
+
+:where(.terminal-host) .stack .face {
+  width: 22px;
+  height: 22px;
+  font-size: 8px;
+}
+
+:where(.terminal-host) .stack .faces .face {
+  margin-right: -8px;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+:where(.terminal-host) .stack .faces .face:last-child {
+  margin-right: 0;
+}
+
+:where(.terminal-host) .stack-badge {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+}
+
+:where(.terminal-host) .stack-badge .coin {
+  width: 13px;
+  height: 13px;
+  font-size: 6px;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+:where(.terminal-host) .delta {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+:where(.terminal-host) .delta.up {
+  color: var(--up);
+}
+
+:where(.terminal-host) .delta.down {
+  color: var(--down);
+}
+
+:where(.terminal-host) .delta.flat {
+  color: var(--faint);
+}
+
+/* ---- leaderboard as a race ---- */
+
+:where(.terminal-host) .rank {
+  position: relative;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+:where(.terminal-host) .rank:last-child {
+  border-bottom: 0;
+}
+
+:where(.terminal-host) .rank.you {
+  padding-left: 12px;
+  margin-left: -12px;
+  border-left: 2px solid var(--lime);
+  border-radius: 2px;
+}
+
+:where(.terminal-host) .rank-hit {
+  display: grid;
+  grid-template-columns: 20px auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  text-align: left;
+}
+
+:where(.terminal-host) .rank .n {
+  font-size: 13px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+:where(.terminal-host) .rank-who {
+  min-width: 0;
+}
+
+:where(.terminal-host) .rank-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+:where(.terminal-host) .rank-name strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+:where(.terminal-host) .rank-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  min-width: 0;
+}
+
+:where(.terminal-host) .rank-trades {
+  color: var(--faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+:where(.terminal-host) .rank-nums {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+:where(.terminal-host) .rank-have {
+  color: var(--tx);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+:where(.terminal-host) .rank .chg {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+:where(.terminal-host) .wins {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--card);
+}
+
+:where(.terminal-host) .wins button {
+  padding: 5px 11px;
+  border-radius: 7px;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+:where(.terminal-host) .wins button.on {
+  background: var(--raised);
+  color: var(--tx);
+}
+
+/* ---- agent + you ---- */
+
+/* Two stacked bars in a row read as one control without a rule between them. */
+:where(.terminal-host) .agent-page .wire-top + .strip,
+:where(.terminal-host) .you-page .wire-top + .strip {
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+:where(.terminal-host) .agent-id {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+:where(.terminal-host) .agent-id .held-id strong {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+:where(.terminal-host) .agent-id .live {
+  margin: 0 0 0 2px;
+}
+
+:where(.terminal-host) .cap-bar {
+  height: 6px;
+  margin-top: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--raised);
+}
+
+:where(.terminal-host) .cap-bar i {
+  display: block;
+  height: 100%;
+  min-width: 3px;
+  border-radius: inherit;
+  background: var(--lime);
+  transition: width 400ms var(--ease);
+}
+
+:where(.terminal-host) .cap-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+
+:where(.terminal-host) .cap-line em {
+  color: var(--faint);
+  font-style: normal;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+:where(.terminal-host) .cap-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+:where(.terminal-host) .cap .mono-fig {
+  font-variant-numeric: tabular-nums;
+}
+
+:where(.terminal-host) .cap .cap-cadence {
+  margin-top: 2px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+:where(.terminal-host) .missed {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+:where(.terminal-host) .missed-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 0;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+
+:where(.terminal-host) .missed-row:last-child {
+  border-bottom: 0;
+}
+
+:where(.terminal-host) .missed-row .faces .face {
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+:where(.terminal-host) .face-out {
+  position: relative;
+  display: flex;
+  margin-left: 9px;
+}
+
+:where(.terminal-host) .face-out .face {
+  opacity: 0.32;
+}
+
+:where(.terminal-host) .face-out::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 1px;
+  right: 1px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: var(--tx-2);
+}
+
+:where(.terminal-host) .missed-said {
+  color: var(--tx-2);
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+:where(.terminal-host) .missed-said strong {
+  color: var(--tx);
+  font-weight: 600;
+}
+
+:where(.terminal-host) .missed-said em {
+  color: var(--faint);
+  font-style: normal;
+}
+
+:where(.terminal-host) .missed-row .coin {
+  width: 26px;
+  height: 26px;
+  font-size: 9px;
+}
+
+:where(.terminal-host) .you-page .balance {
+  font-size: 54px;
+}
+
+:where(.terminal-host) .you-page .book {
+  gap: 12px 18px;
+}
+
+:where(.terminal-host) .book-coin em {
+  color: var(--faint);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 500;
+}
+
+:where(.terminal-host) .crews {
+  display: flex;
+  flex-direction: column;
+}
+
+:where(.terminal-host) .crew-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+:where(.terminal-host) .crew-row:last-child {
+  border-bottom: 0;
+}
+
+:where(.terminal-host) .crew-who {
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+:where(.terminal-host) .crew-cast {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  grid-column: 1;
+}
+
+:where(.terminal-host) .crew-cast em {
+  color: var(--tx-2);
+  font-style: normal;
+  font-family: var(--sans);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+:where(.terminal-host) .crew-cast em.up {
+  color: var(--up);
+}
+
+:where(.terminal-host) .crew-cast em.down {
+  color: var(--down);
+}
+
+:where(.terminal-host) .crew-cast .faces {
+  margin-left: 4px;
+}
+
+:where(.terminal-host) .crew-cast .faces .face {
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+:where(.terminal-host) .crew-run {
+  grid-row: span 2;
+  align-self: center;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--tx);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .crew-row.on {
+  padding-left: 12px;
+  margin-left: -12px;
+  border-left: 2px solid var(--lime);
+}
+
+:where(.terminal-host) .crew-on {
+  grid-row: span 2;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--tx-2);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+:where(.terminal-host) .crew-on .live {
+  margin: 0;
+  width: 6px;
+  height: 6px;
+}
+
+:where(.terminal-host) .agent-page .composer {
+  position: static;
+  padding-top: 0;
+  background: none;
+}
+
+:where(.terminal-host) .agent-page .composer button {
+  padding: 0 16px;
+  border-radius: 14px;
+  background: var(--raised);
+  color: var(--tx-2);
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :where(.terminal-host) .switch i,
+  :where(.terminal-host) .cap-bar i {
+    transition: none;
+  }
+
+  :where(.terminal-host) .flip,
+  :where(.terminal-host) .agent-id .live {
+    animation: none;
+  }
+}
+
+/* Personal account and agent conversation share the existing shell palette. */
+:where(.terminal-host) .desk-page, :where(.terminal-host) .account-page { min-width: 0; }
+:where(.terminal-host) .desk-page { padding-bottom: 145px; display: flex; flex-direction: column; min-height: calc(100dvh - var(--nav) - 50px); gap: 22px; }
+:where(.terminal-host) .desk-header, :where(.terminal-host) .account-header, :where(.terminal-host) .account-person { display: flex; align-items: center; gap: 12px; }
+:where(.terminal-host) .desk-header h1, :where(.terminal-host) .account-header h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -.04em; }
+:where(.terminal-host) .desk-header p, :where(.terminal-host) .account-person p { margin: 3px 0 0; color: var(--tx-2); font-size: 12px; }
+:where(.terminal-host) .desk-status { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--tx-2); }
+:where(.terminal-host) .desk-status i { width: 6px; height: 6px; background: var(--up); border-radius: 50%; }
+:where(.terminal-host) .desk-status.paused i { background: var(--tx-2); }
+:where(.terminal-host) .desk-portfolio { border: 1px solid var(--line); border-radius: 18px; background: var(--card); }
+:where(.terminal-host) .desk-portfolio .portfolio-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 18px; cursor: pointer; width: 100%; text-align: left; }
+:where(.terminal-host) .desk-portfolio .portfolio-summary::-webkit-details-marker { display: none; }
+:where(.terminal-host) .desk-portfolio .portfolio-summary > div { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+:where(.terminal-host) .account-label { color: var(--tx-2); font-size: 12px; }
+:where(.terminal-host) .desk-equity { font-family: var(--pixel); font-weight: 400; font-size: 32px; letter-spacing: -.05em; }
+:where(.terminal-host) .portfolio-toggle { font-size: 11px; color: var(--tx-2); white-space: nowrap; }
+:where(.terminal-host) .portfolio-toggle > span { display: inline-block; margin-left: 5px; }
+:where(.terminal-host) .desk-portfolio.expanded .portfolio-toggle > span { transform: rotate(180deg); }
+:where(.terminal-host) .portfolio-body { border-top: 1px solid var(--line); padding: 0 16px 4px; }
+:where(.terminal-host) .desk-segments { display: flex; gap: 18px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
+:where(.terminal-host) .desk-segments button { min-height: 44px; font-size: 12px; color: var(--tx-2); border-bottom: 2px solid transparent; }
+:where(.terminal-host) .desk-segments button[aria-pressed="true"] { color: var(--tx); border-bottom-color: var(--lime); }
+:where(.terminal-host) .desk-position { width: 100%; display: flex; align-items: center; gap: 10px; padding: 12px 0; text-align: left; }
+:where(.terminal-host) .desk-position > span:nth-child(2) { flex: 1; }
+:where(.terminal-host) .desk-position strong, :where(.terminal-host) .desk-position small { display: block; }
+:where(.terminal-host) .desk-position strong { font-size: 13px; }
+:where(.terminal-host) .desk-position small { font-size: 11px; color: var(--tx-2); margin-top: 3px; }
+:where(.terminal-host) .desk-position > span:last-child { font-size: 11px; }
+:where(.terminal-host) .desk-position:disabled { cursor: default; }
+:where(.terminal-host) .desk-cash, :where(.terminal-host) .desk-text-button { display: flex; justify-content: space-between; gap: 10px; padding: 12px 0; font-size: 12px; border-top: 1px solid var(--line); }
+:where(.terminal-host) .desk-cash > span, :where(.terminal-host) .desk-text-button > span { color: var(--tx-2); }
+:where(.terminal-host) .desk-text-button { width: 100%; text-align: left; min-height: 44px; align-items: center; }
+:where(.terminal-host) .desk-trade { padding: 14px 0; border-bottom: 1px solid var(--line); }
+:where(.terminal-host) .desk-trade:last-child { border-bottom: 0; }
+:where(.terminal-host) .desk-trade > div { display: flex; justify-content: space-between; font-size: 13px; }
+:where(.terminal-host) .desk-trade p { font-size: 12px; color: var(--tx-2); line-height: 1.6; margin: 8px 0; }
+:where(.terminal-host) .desk-trade small { font-size: 10px; color: var(--tx-2); }
+:where(.terminal-host) .desk-muted { font-size: 12px; color: var(--tx-2); padding: 12px 0; }
+:where(.terminal-host) .desk-conversation { flex: 1; }
+:where(.terminal-host) .chat-divider { display: flex; align-items: center; justify-content: space-between; color: var(--tx-2); font-size: 11px; margin: 0 0 25px; }
+:where(.terminal-host) .chat-divider > span:last-child { font-size: 10px; border: 1px solid var(--line); padding: 4px 7px; border-radius: 5px; }
+:where(.terminal-host) .desk-reply { display: flex; align-items: flex-start; gap: 10px; }
+:where(.terminal-host) .desk-reply > .face { flex-shrink: 0; margin-top: 1px; }
+:where(.terminal-host) .desk-reply > div { min-width: 0; }
+:where(.terminal-host) .desk-reply strong { font-size: 12px; font-weight: 600; }
+:where(.terminal-host) .desk-reply p { margin: 8px 0 0; font-size: 14px; line-height: 1.75; color: var(--tx-2); overflow-wrap: anywhere; }
+:where(.terminal-host) .desk-reply blockquote { border-left: 2px solid var(--lime); margin: 17px 0 0; padding: 2px 0 2px 12px; font-size: 13px; line-height: 1.6; color: var(--tx); }
+:where(.terminal-host) .desk-turn { margin-top: 26px; }
+:where(.terminal-host) .desk-question { width: fit-content; max-width: 88%; margin: 0 0 22px auto; background: var(--raised); border-radius: 16px 16px 4px 16px; padding: 12px 16px; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+:where(.terminal-host) .desk-chat-bottom { position: fixed; z-index: 3; left: 50%; transform: translateX(-50%); width: calc(100% - 36px); max-width: 394px; bottom: calc(var(--nav) + 8px); background: var(--bg); padding: 12px 0 0; margin-top: 12px; box-shadow: 0 -12px 20px var(--bg); }
+:where(.terminal-host) .desk-prompts { display: flex; gap: 6px; overflow-x: auto; padding: 3px 2px 12px; scrollbar-width: none; }
+:where(.terminal-host) .desk-prompts button { flex-shrink: 0; min-height: 36px; padding: 8px 10px; font-size: 11px; border: 1px solid var(--line); border-radius: 10px; color: var(--tx-2); }
+:where(.terminal-host) .desk-composer { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); }
+:where(.terminal-host) .desk-composer:focus-within { border-color: var(--lime); }
+:where(.terminal-host) .desk-composer input { width: 100%; min-width: 0; padding: 8px; background: transparent; border: 0; font-size: 14px; }
+:where(.terminal-host) .desk-composer button { width: 38px; height: 38px; flex-shrink: 0; background: var(--lime); color: var(--ink); border-radius: 11px; font-size: 22px; }
+:where(.terminal-host) .desk-composer button:disabled { background: var(--raised); color: var(--faint); cursor: default; }
+:where(.terminal-host) .chat-note { text-align: center; color: var(--tx-2); font-size: 10px; margin: 9px 0 0; }
+:where(.terminal-host) .account-header { justify-content: space-between; }
+:where(.terminal-host) .account-demo { color: var(--tx-2); font-size: 10px; }
+:where(.terminal-host) .account-person { margin: 32px 0; }
+:where(.terminal-host) .account-avatar { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 18px; background: #252c19; color: var(--lime); font-family: var(--sans); font-size: 26px;
+  font-weight: 500;
+}
+:where(.terminal-host) .account-person h2 { margin: 0; font-size: 18px; font-weight: 600; text-transform: capitalize; overflow-wrap: anywhere; }
+:where(.terminal-host) .account-balance { padding-bottom: 30px; }
+:where(.terminal-host) .account-balance > strong { display: block; font-family: var(--pixel); font-weight: 400; font-size: 48px; letter-spacing: -.06em; margin: 8px 0; }
+:where(.terminal-host) .account-balance > p { font-size: 12px; margin: 0; }
+:where(.terminal-host) .account-fund { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 14px 18px; min-height: 48px; background: var(--lime); color: var(--ink); border-radius: 12px; font-weight: 600; margin-top: 24px; font-size: 13px; }
+:where(.terminal-host) .account-section { padding: 24px 0; border-top: 1px solid var(--line); }
+:where(.terminal-host) .account-section-title { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; }
+:where(.terminal-host) .account-section-title h2 { font-size: 14px; font-weight: 600; margin: 0; }
+:where(.terminal-host) .account-section-title > span { font-size: 10px; color: var(--tx-2); background: var(--raised); border-radius: 5px; padding: 2px 6px; }
+:where(.terminal-host) .account-agent { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; }
+:where(.terminal-host) .account-agent strong, :where(.terminal-host) .account-agent small { display: block; }
+:where(.terminal-host) .account-agent strong { font-size: 14px; font-weight: 600; }
+:where(.terminal-host) .account-agent small { font-size: 11px; color: var(--tx-2); margin-top: 5px; }
+:where(.terminal-host) .account-agent-value { margin-left: auto; text-align: right; }
+:where(.terminal-host) .account-agent-value > strong { font-variant-numeric: tabular-nums; }
+:where(.terminal-host) .account-agent-note { margin: 16px 0 0; font-size: 12px; line-height: 1.6; color: var(--tx-2); }
+:where(.terminal-host) .account-control { display: flex; justify-content: space-between; align-items: center; gap: 14px; width: 100%; text-align: left; min-height: 50px; }
+:where(.terminal-host) .account-control strong, :where(.terminal-host) .account-control small { display: block; }
+:where(.terminal-host) .account-control strong { font-size: 13px; font-weight: 500; }
+:where(.terminal-host) .account-control small { color: var(--tx-2); margin-top: 5px; font-size: 11px; line-height: 1.5; }
+:where(.terminal-host) .account-usage { margin: 16px 0 22px; padding-bottom: 24px; border-bottom: 1px solid var(--line); }
+:where(.terminal-host) .account-usage > div { display: flex; justify-content: space-between; color: var(--tx-2); font-size: 10px; margin-bottom: 10px; }
+:where(.terminal-host) .account-usage progress { display: block; width: 100%; height: 4px; border: 0; border-radius: 3px; overflow: hidden; background: var(--raised); accent-color: var(--lime); }
+:where(.terminal-host) .account-usage progress::-webkit-progress-bar { background: var(--raised); }
+:where(.terminal-host) .account-usage progress::-webkit-progress-value { background: var(--lime); }
+:where(.terminal-host) .account-usage progress::-moz-progress-bar { background: var(--lime); }
+:where(.terminal-host) .account-pause { padding: 10px 15px; min-height: 44px; border: 1px solid var(--line); border-radius: 10px; font-size: 12px; }
+:where(.terminal-host) .account-pause.is-paused { color: var(--lime); }
+:where(.terminal-host) .account-footnote { color: var(--tx-2); font-size: 10px; text-align: center; margin: 10px 0 0; }
+:where(.terminal-host) .desk-portfolio .portfolio-summary:focus-visible { outline: 2px solid var(--lime); outline-offset: 3px; border-radius: 18px; }
+@media (hover: hover) { :where(.terminal-host) .desk-prompts button:hover, :where(.terminal-host) .account-pause:hover { background: var(--raised); color: var(--tx); } :where(.terminal-host) .account-agent:hover, :where(.terminal-host) .account-control:hover { color: var(--lime); } }
+@media (max-width: 360px) { :where(.terminal-host) .desk-portfolio .portfolio-summary { padding: 14px; } :where(.terminal-host) .desk-equity { font-size: 28px; } :where(.terminal-host) .account-agent { gap: 8px; } }
+
+/* Extend the Home and Token visual language. Palette comes from styles.css. */
+:where(.terminal-host) .balance-figure {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+:where(.terminal-host) .figure-decimals {
+  font-size: 0.43em;
+  color: var(--tx-2);
+  vertical-align: super;
+  letter-spacing: -0.02em;
+}
+:where(.terminal-host) :is(.desk-page, .account-page, .public-agent-page, .money-flow) button {
+  -webkit-tap-highlight-color: transparent;
+}
+:where(.terminal-host) :is(.desk-page, .account-page, .public-agent-page, .money-flow) :focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 3px;
+}
+/* Agent header and balance follow Home's unboxed identity and figure. */
+:where(.terminal-host) .desk-header {
+  gap: 10px;
+}
+:where(.terminal-host) .desk-header > .face {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+:where(.terminal-host) .desk-header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+:where(.terminal-host) .desk-header p {
+  font-size: 11px;
+  margin-top: 3px;
+  color: var(--faint);
+}
+:where(.terminal-host) .desk-status {
+  font-size: 11px;
+  padding: 0;
+  border: 0;
+}
+:where(.terminal-host) .desk-status i {
+  background: var(--lime);
+}
+:where(.terminal-host) .desk-status.paused i {
+  background: var(--faint);
+}
+:where(.terminal-host) .desk-portfolio {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+:where(.terminal-host) .desk-portfolio .portfolio-summary {
+  padding: 0 0 10px;
+  width: 100%;
+  text-align: left;
+}
+:where(.terminal-host) .desk-portfolio .portfolio-summary > div {
+  gap: 8px;
+}
+:where(.terminal-host) .desk-portfolio .portfolio-summary .account-label {
+  display: none;
+}
+:where(.terminal-host) .desk-equity {
+  font-family: var(--pixel);
+  font-size: 52px;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  line-height: 0.98;
+}
+:where(.terminal-host) .desk-portfolio .portfolio-summary > div > .up,
+:where(.terminal-host) .desk-portfolio .portfolio-summary > div > .down {
+  font-size: 13px;
+  font-weight: 500;
+}
+:where(.terminal-host) .desk-page .portfolio-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  height: 36px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--raised);
+  font-size: 12px;
+  color: var(--tx);
+}
+:where(.terminal-host) .portfolio-toggle svg {
+  flex-shrink: 0;
+  transition: transform 180ms ease;
+}
+:where(.terminal-host) .desk-portfolio.expanded .portfolio-toggle svg {
+  transform: rotate(180deg);
+}
+:where(.terminal-host) .agent-portfolio-meta {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--faint);
+}
+:where(.terminal-host) .portfolio-body {
+  padding: 7px 0 0;
+  border: 0;
+}
+:where(.terminal-host) .desk-segments {
+  border: 0;
+  gap: 8px;
+  padding: 7px 0;
+}
+:where(.terminal-host) .desk-segments button {
+  padding: 8px 13px;
+  border: 0;
+  min-height: 36px;
+  border-radius: 999px;
+  background: var(--card);
+  font-size: 13px;
+  font-weight: 600;
+}
+:where(.terminal-host) .desk-segments button[aria-pressed="true"] {
+  color: var(--ink);
+  background: var(--tx);
+}
+:where(.terminal-host) .desk-position {
+  min-height: 60px;
+  gap: 12px;
+}
+:where(.terminal-host) .desk-position .coin {
+  width: 36px;
+  height: 36px;
+}
+:where(.terminal-host) .desk-position strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+:where(.terminal-host) .desk-position small {
+  font-size: 12px;
+}
+:where(.terminal-host) .desk-position > span:last-child {
+  font-size: 12px;
+}
+:where(.terminal-host) .desk-text-button > span {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+}
+:where(.terminal-host) .chat-divider {
+  font-size: 13px;
+  color: var(--tx);
+  margin-bottom: 20px;
+  font-weight: 600;
+}
+:where(.terminal-host) .chat-divider > span:last-child {
+  font-size: 10px;
+  color: var(--faint);
+  border: 0;
+  padding: 0;
+  font-weight: 400;
+}
+:where(.terminal-host) .desk-reply {
+  gap: 12px;
+}
+:where(.terminal-host) .desk-reply > .face {
+  width: 28px;
+  height: 28px;
+}
+:where(.terminal-host) .desk-reply strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+:where(.terminal-host) .desk-reply p {
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .desk-reply blockquote {
+  background: none;
+  border: 0;
+  margin: 14px 0 0;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
+:where(.terminal-host) .strategy-caption {
+  display: block;
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--faint);
+  margin-bottom: 7px;
+  font-weight: 500;
+}
+:where(.terminal-host) .conversation-trade {
+  margin-top: 15px;
+  padding: 0;
+  background: none;
+  border: 0;
+}
+:where(.terminal-host) .conversation-trade-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+:where(.terminal-host) .conversation-trade-top .coin {
+  width: 32px;
+  height: 32px;
+}
+:where(.terminal-host) .conversation-trade-top > div {
+  flex: 1;
+  min-width: 0;
+}
+:where(.terminal-host) .conversation-trade-top strong {
+  display: block;
+  font-size: 14px;
+}
+:where(.terminal-host) .conversation-trade-top span {
+  display: block;
+  font-size: 11px;
+  color: var(--faint);
+  margin-top: 3px;
+}
+:where(.terminal-host) .conversation-trade-top b {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+:where(.terminal-host) .desk-reply .conversation-trade > p {
+  padding: 0;
+  margin: 12px 0 7px;
+  line-height: 1.45;
+  font-size: 14px;
+}
+:where(.terminal-host) .conversation-trade > button:not(.trade-token-card) {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .desk-question {
+  border: 0;
+  background: var(--raised);
+  font-size: 14px;
+}
+:where(.terminal-host) .desk-prompts {
+  gap: 7px;
+}
+:where(.terminal-host) .desk-prompts button {
+  border: 0;
+  background: var(--card);
+  border-radius: 999px;
+  min-height: 36px;
+  padding: 8px 12px;
+  font-size: 11px;
+}
+:where(.terminal-host) .desk-composer {
+  border: 0;
+  background: var(--card);
+  border-radius: 14px;
+  min-height: 54px;
+}
+:where(.terminal-host) .desk-composer input {
+  font-size: 14px;
+}
+:where(.terminal-host) .desk-composer button {
+  display: grid;
+  place-items: center;
+  background: var(--tx);
+  color: var(--ink);
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+}
+:where(.terminal-host) .chat-note {
+  font-size: 10px;
+  color: var(--faint);
+}
+:where(.terminal-host) .body:has(> .desk-page) {
+  flex: none;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+  padding-bottom: calc(var(--nav) + 8px);
+  gap: 0;
+}
+:where(.terminal-host) .body > .desk-page {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  flex: none;
+  height: calc(100dvh - var(--nav) - 26px);
+  min-height: 0;
+  padding-bottom: 0;
+  gap: 22px;
+}
+:where(.terminal-host) .desk-page > .desk-header,
+:where(.terminal-host) .desk-page > .desk-portfolio {
+  flex-shrink: 0;
+}
+:where(.terminal-host) .desk-page > .desk-portfolio.expanded {
+  max-height: min(36dvh, 320px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+:where(.terminal-host) .desk-page > .desk-conversation {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 0 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+:where(.terminal-host) .desk-page > .desk-chat-bottom {
+  position: relative;
+  inset: auto;
+  flex-shrink: 0;
+  transform: none;
+  width: 100%;
+  max-width: none;
+  padding-top: 0;
+  margin-top: 0;
+  box-shadow: none;
+}
+/* Owner account: Home's balance treatment and Token's open rows. */
+:where(.terminal-host) .account-header h1 {
+  font-size: 17px;
+  font-weight: 600;
+}
+:where(.terminal-host) .account-demo {
+  font-size: 10px;
+  color: var(--faint);
+}
+:where(.terminal-host) .account-person {
+  margin: 24px 0 21px;
+  gap: 10px;
+}
+:where(.terminal-host) .account-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--raised);
+  color: var(--tx);
+  font-family: var(--sans);
+  font-size: 18px;
+  font-weight: 500;
+}
+:where(.terminal-host) .account-person h2 {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+:where(.terminal-host) .account-person p {
+  font-size: 11px;
+  color: var(--faint);
+}
+:where(.terminal-host) .account-balance {
+  padding: 0 0 24px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  margin: 0;
+}
+:where(.terminal-host) .account-balance > .account-label {
+  display: none;
+}
+:where(.terminal-host) .account-balance > strong {
+  font-family: var(--pixel);
+  font-size: 52px;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  line-height: 0.98;
+  margin: 0 0 8px;
+}
+:where(.terminal-host) .account-balance > p {
+  font-size: 14px;
+  font-weight: 500;
+}
+:where(.terminal-host) .account-fund {
+  width: auto;
+  min-height: 36px;
+  margin-top: 18px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  background: var(--tx);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  gap: 12px;
+}
+:where(.terminal-host) .account-section {
+  padding: 22px 0;
+  border: 0;
+}
+:where(.terminal-host) .account-section-title {
+  margin-bottom: 16px;
+}
+:where(.terminal-host) .account-section-title h2 {
+  font-size: 15px;
+  font-weight: 600;
+}
+:where(.terminal-host) .account-section-title > span {
+  color: var(--faint);
+  background: none;
+  padding: 0;
+  font-size: 12px;
+}
+:where(.terminal-host) .account-agent {
+  gap: 12px;
+}
+:where(.terminal-host) .account-agent > .face {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+}
+:where(.terminal-host) .account-agent strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+:where(.terminal-host) .account-agent small {
+  font-size: 12px;
+}
+:where(.terminal-host) .account-agent-note {
+  margin-left: 52px;
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+:where(.terminal-host) .account-control {
+  padding: 10px 0;
+}
+:where(.terminal-host) .account-control strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+:where(.terminal-host) .account-control small {
+  font-size: 12px;
+}
+:where(.terminal-host) .account-usage {
+  margin: 9px 0 16px;
+  padding: 0 0 17px;
+  border: 0;
+  background: none;
+}
+:where(.terminal-host) .account-usage > div {
+  font-size: 11px;
+}
+:where(.terminal-host) .account-pause {
+  background: var(--raised);
+  border: 0;
+  min-height: 36px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+:where(.terminal-host) .account-footnote {
+  color: var(--faint);
+}
+/* Public agent mirrors the token detail header, price and holder rows. */
+:where(.terminal-host) .public-agent-id {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 22px;
+}
+:where(.terminal-host) .profile-back {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  min-height: 36px;
+  color: var(--tx-2);
+  flex-shrink: 0;
+}
+:where(.terminal-host) .public-agent-id > .face {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+}
+:where(.terminal-host) .public-agent-id h1 {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+:where(.terminal-host) .public-agent-id p {
+  font-size: 11px;
+  color: var(--faint);
+  margin-top: 4px;
+}
+:where(.terminal-host) .public-performance {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+:where(.terminal-host) .public-performance-numbers {
+  align-items: flex-end;
+}
+:where(.terminal-host) .public-performance .account-label {
+  font-size: 12px;
+}
+:where(.terminal-host) .public-return {
+  font-family: var(--pixel);
+  font-size: 44px;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  margin-top: 7px;
+}
+:where(.terminal-host) .public-trade-count {
+  padding: 0;
+  border: 0;
+  gap: 3px;
+  align-items: flex-end;
+}
+:where(.terminal-host) .public-trade-count strong {
+  font-family: var(--sans);
+  font-size: 16px;
+  font-weight: 600;
+}
+:where(.terminal-host) .public-trade-count span {
+  font-size: 12px;
+  color: var(--faint);
+}
+:where(.terminal-host) .public-chart {
+  margin-top: 12px;
+}
+:where(.terminal-host) .studio-history {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+:where(.terminal-host) .history-grid {
+  stroke: var(--line);
+  stroke-width: 0.7;
+  stroke-dasharray: 2 5;
+}
+:where(.terminal-host) .public-chart-axis {
+  font-size: 11px;
+  color: var(--faint);
+  margin-top: 0;
+}
+:where(.terminal-host) .public-strategy {
+  padding: 22px 0;
+}
+:where(.terminal-host) .public-section-heading h2 {
+  font-size: 15px;
+  font-weight: 600;
+}
+:where(.terminal-host) .public-section-heading > span {
+  font-size: 12px;
+  color: var(--faint);
+}
+:where(.terminal-host) .public-strategy .public-section-heading > span {
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 3px 6px 2px;
+  border-radius: 2px;
+  background: #1c1d16;
+  color: var(--tx-2);
+  font-weight: 500;
+}
+:where(.terminal-host) .public-strategy p {
+  padding: 0;
+  border: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  margin-top: 10px;
+}
+:where(.terminal-host) .public-section {
+  border: 0;
+  padding: 18px 0;
+}
+:where(.terminal-host) .public-position {
+  min-height: 64px;
+  padding: 10px 0;
+  gap: 12px;
+}
+:where(.terminal-host) .public-position .coin {
+  width: 40px;
+  height: 40px;
+}
+:where(.terminal-host) .public-position strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+:where(.terminal-host) .public-position small {
+  font-size: 12px;
+}
+:where(.terminal-host) .public-position > span:nth-child(3) {
+  font-size: 12px;
+  font-weight: 600;
+}
+:where(.terminal-host) .public-position > span:nth-child(4) {
+  display: none;
+}
+:where(.terminal-host) .public-event {
+  border: 0;
+  padding: 16px 0;
+  gap: 12px;
+}
+:where(.terminal-host) .public-event-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: none;
+}
+:where(.terminal-host) .public-event-heading {
+  font-size: 15px;
+}
+:where(.terminal-host) .public-event-heading strong {
+  font-weight: 600;
+}
+:where(.terminal-host) .public-event-heading > span {
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 600;
+}
+:where(.terminal-host) .public-event p {
+  font-size: 14px;
+  line-height: 1.45;
+  margin-top: 10px;
+}
+:where(.terminal-host) .public-event small {
+  font-size: 11px;
+  color: var(--faint);
+}
+:where(.terminal-host) .public-more {
+  background: var(--card);
+  border: 0;
+  border-radius: 10px;
+  font-size: 13px;
+}
+:where(.terminal-host) .studio-allocation {
+  padding: 3px 0 10px;
+}
+:where(.terminal-host) .allocation-ribbon {
+  display: none;
+}
+:where(.terminal-host) .allocation-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 13px;
+}
+:where(.terminal-host) .allocation-key > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .allocation-key i {
+  display: none;
+}
+:where(.terminal-host) .allocation-key b {
+  font-weight: 600;
+  color: var(--faint);
+}
+/* Money flows retain validation and review, using Home's white controls. */
+:where(.terminal-host) .money-flow {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100svh - 70px);
+  padding: 0;
+}
+:where(.terminal-host) .flow-top {
+  font-size: 12px;
+}
+:where(.terminal-host) .flow-back {
+  border: 0;
+  background: none;
+  border-radius: 0;
+  width: 24px;
+  height: 36px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .flow-demo {
+  border: 0;
+  padding: 0;
+  font-size: 10px;
+  color: var(--faint);
+}
+:where(.terminal-host) .fund-steps {
+  display: flex;
+  gap: 18px;
+  list-style: none;
+  padding: 0;
+  margin: 22px 0 0;
+  font-size: 12px;
+  color: var(--faint);
+}
+:where(.terminal-host) .fund-steps li {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+:where(.terminal-host) .fund-steps li > span {
+  font-family: var(--sans);
+  font-weight: 500;
+}
+:where(.terminal-host) .fund-steps li[aria-current] {
+  color: var(--tx);
+}
+:where(.terminal-host) .flow-intro {
+  margin: 24px 0;
+}
+:where(.terminal-host) .flow-intro h1 {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+:where(.terminal-host) .flow-intro > p {
+  font-size: 13px;
+  line-height: 1.45;
+  margin-top: 8px;
+}
+:where(.terminal-host) .fund-recipient {
+  border: 0;
+  border-radius: 0;
+  background: none;
+  padding: 8px 0 18px;
+}
+:where(.terminal-host) .fund-recipient .face {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+}
+:where(.terminal-host) .fund-recipient strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+:where(.terminal-host) .fund-recipient span {
+  font-size: 11px;
+  color: var(--faint);
+}
+:where(.terminal-host) .fund-form,
+:where(.terminal-host) .limits-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+:where(.terminal-host) .fund-amount-label {
+  font-size: 12px;
+  margin-top: 26px;
+}
+:where(.terminal-host) .fund-amount-input {
+  font-family: var(--pixel);
+  font-size: 58px;
+  margin-top: 10px;
+  font-weight: 400;
+}
+:where(.terminal-host) .fund-amount-input input {
+  letter-spacing: -0.03em;
+}
+:where(.terminal-host) .fund-presets {
+  gap: 8px;
+  margin: 20px 0;
+}
+:where(.terminal-host) .fund-presets button {
+  border: 0;
+  border-radius: 999px;
+  background: var(--card);
+  font-size: 13px;
+  min-height: 38px;
+}
+:where(.terminal-host) .fund-presets button[aria-pressed="true"] {
+  background: var(--tx);
+  color: var(--ink);
+}
+:where(.terminal-host) .flow-notice {
+  border: 0;
+  padding: 0;
+  background: none;
+  margin: 20px 0;
+}
+:where(.terminal-host) .flow-notice strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+:where(.terminal-host) .flow-notice p {
+  font-size: 13px;
+  line-height: 1.45;
+  margin-top: 8px;
+}
+:where(.terminal-host) .flow-actions {
+  margin-top: auto;
+  padding-top: 24px;
+  gap: 7px;
+}
+:where(.terminal-host) .flow-primary {
+  background: var(--tx);
+  color: var(--ink);
+  border-radius: 12px;
+  min-height: 48px;
+  font-weight: 600;
+  font-size: 14px;
+}
+:where(.terminal-host) .flow-secondary {
+  font-size: 13px;
+}
+:where(.terminal-host) .flow-actions > .flow-hint {
+  font-size: 10px;
+  color: var(--faint);
+}
+:where(.terminal-host) .fund-review-amount {
+  margin: 28px 0;
+}
+:where(.terminal-host) .fund-review-amount strong {
+  font-family: var(--pixel);
+  font-size: 48px;
+  letter-spacing: -0.03em;
+}
+:where(.terminal-host) .fund-breakdown {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+:where(.terminal-host) .fund-breakdown > div {
+  padding: 13px 0;
+  font-size: 13px;
+}
+:where(.terminal-host) .fund-result dd {
+  font-family: var(--sans);
+  font-weight: 600;
+}
+:where(.terminal-host) .limit-field {
+  padding: 0;
+  margin: 18px 0;
+  border: 0;
+  background: none;
+  border-radius: 0;
+}
+:where(.terminal-host) .limit-field label {
+  font-size: 15px;
+  font-weight: 600;
+}
+:where(.terminal-host) .limit-field > p {
+  font-size: 12px;
+  line-height: 1.45;
+}
+:where(.terminal-host) .limit-input {
+  background: var(--card);
+  border: 1px solid transparent;
+  padding: 15px 16px;
+  border-radius: 12px;
+  font-family: var(--sans);
+  font-size: 30px;
+  font-weight: 500;
+}
+:where(.terminal-host) .limit-input:focus-within {
+  border-color: var(--lime);
+}
+:where(.terminal-host) .limit-input:has([aria-invalid="true"]) {
+  border-color: var(--down);
+}
+@media (max-height: 780px) {
+  :where(.terminal-host) .body > .desk-page {
+    gap: 17px;
+  }
+  :where(.terminal-host) .chat-divider {
+    margin-bottom: 14px;
+  }
+  :where(.terminal-host) .fund-steps {
+    margin-top: 14px;
+  }
+  :where(.terminal-host) .flow-intro {
+    margin: 18px 0;
+  }
+  :where(.terminal-host) .fund-amount-label {
+    margin-top: 18px;
+  }
+  :where(.terminal-host) .fund-amount-input {
+    font-size: 52px;
+  }
+  :where(.terminal-host) .funding-flow .flow-notice {
+    margin: 14px 0;
+  }
+  :where(.terminal-host) .flow-actions {
+    padding-top: 14px;
+  }
+}
+@media (max-width: 360px) {
+  :where(.terminal-host) .desk-equity,
+  :where(.terminal-host) .account-balance > strong {
+    font-size: 44px;
+  }
+  :where(.terminal-host) .public-return {
+    font-size: 38px;
+  }
+  :where(.terminal-host) .public-trade-count span {
+    font-size: 11px;
+  }
+  :where(.terminal-host) .fund-review-amount strong {
+    font-size: 40px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  :where(.terminal-host) .portfolio-toggle svg {
+    transition: none;
+  }
+}
+
+/* Token cards match the trade cards in the feed. */
+:where(.terminal-host) .trade-token-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 255px;
+  padding: 9px 11px;
+  border: 0;
+  border-left: 3px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  text-align: left;
+  color: var(--tx);
+  margin-top: 12px;
+  font-size: 12px;
+}
+:where(.terminal-host) .trade-token-card.buy {
+  border-left-color: var(--up);
+}
+:where(.terminal-host) .trade-token-card.sell {
+  border-left-color: var(--down);
+}
+:where(.terminal-host) .trade-token-card:disabled {
+  cursor: default;
+}
+:where(.terminal-host) .chat-trade-caption {
+  color: var(--faint);
+  font-size: 11px;
+  margin: 0 0 7px;
+}
+:where(.terminal-host) .conversation-trade > .trade-token-card {
+  margin-top: 0;
+}
+:where(.terminal-host) .desk-reply p,
+:where(.terminal-host) .desk-question {
+  white-space: pre-wrap;
+}
+:where(.terminal-host) .desk-reply > div {
+  flex: 1;
+}
+:where(.terminal-host) .desk-composer {
+  align-items: flex-end;
+}
+:where(.terminal-host) .desk-composer textarea {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  min-height: 38px;
+  max-height: 120px;
+  resize: none;
+  background: transparent;
+  color: var(--tx);
+  border: 0;
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  padding: 8px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+:where(.terminal-host) .desk-composer button {
+  flex-shrink: 0;
+  margin-bottom: 1px;
+}
+:where(.terminal-host) .desk-composer:focus-within {
+  border-color: var(--line);
+  outline: 1px solid var(--line);
+}
+:where(.terminal-host) .desk-page .desk-composer textarea:focus-visible {
+  outline: none;
+}
+:where(.terminal-host) .chat-jump {
+  position: absolute;
+  bottom: calc(100% + 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  box-shadow: 0 3px 12px #0005;
+  font-size: 11px;
+  white-space: nowrap;
+}
+:where(.terminal-host) .chat-message-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  color: var(--faint);
+  font-size: 11px;
+}
+:where(.terminal-host) .chat-message-actions button {
+  display: grid;
+  place-items: center;
+  min-width: 32px;
+  height: 32px;
+  border-radius: 6px;
+}
+:where(.terminal-host) .chat-message-actions button:hover {
+  color: var(--tx);
+  background: var(--raised);
+}
+:where(.terminal-host) .desk-turn {
+  margin-top: 30px;
+}
+
+:where(.terminal-host) .portfolio-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(402px, calc(100vw - 28px));
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--bg);
+  color: var(--tx);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+:where(.terminal-host) .portfolio-dialog::backdrop {
+  background: #0009;
+  backdrop-filter: blur(5px);
+}
+:where(.terminal-host) .portfolio-dialog-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px;
+  background: var(--bg);
+}
+:where(.terminal-host) .portfolio-dialog-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+:where(.terminal-host) .portfolio-dialog-header p {
+  margin: 6px 0 0;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+:where(.terminal-host) .portfolio-dialog-header button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--raised);
+}
+:where(.terminal-host) .portfolio-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 20px 18px;
+}
+:where(.terminal-host) .portfolio-actions button {
+  flex: 1;
+  padding: 11px;
+  border-radius: 10px;
+  background: var(--raised);
+  font-size: 13px;
+}
+:where(.terminal-host) .portfolio-actions button:first-child {
+  background: var(--tx);
+  color: var(--bg);
+}
+:where(.terminal-host) .portfolio-dialog .portfolio-body {
+  padding: 0 20px 16px;
+}
+
+:where(.terminal-host) .dither-figure {
+  margin: 12px 0 0;
+  width: 100%;
+  min-width: 0;
+  --chart-color: var(--up);
+}
+:where(.terminal-host) .dither-figure.is-down {
+  --chart-color: var(--down);
+}
+:where(.terminal-host) .dither-caption,
+:where(.terminal-host) .dither-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+:where(.terminal-host) .dither-caption {
+  margin-bottom: 6px;
+}
+:where(.terminal-host) .dither-caption > span:last-child {
+  color: var(--chart-color);
+  font-variant-numeric: tabular-nums;
+}
+:where(.terminal-host) .dither-plot {
+  position: relative;
+  height: var(--chart-height);
+  width: 100%;
+  cursor: crosshair;
+  touch-action: pan-y;
+  outline-offset: 5px;
+}
+:where(.terminal-host) .dither-plot:focus-visible {
+  outline: 1px solid var(--tx-2);
+}
+:where(.terminal-host) .dither-plot canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+:where(.terminal-host) .dither-axis {
+  margin-top: 6px;
+}
+:where(.terminal-host) .dither-crosshair {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed var(--tx-2);
+  pointer-events: none;
+}
+:where(.terminal-host) .dither-crosshair i {
+  position: absolute;
+  left: -4px;
+  width: 7px;
+  height: 7px;
+  background: var(--chart-color);
+  border: 1px solid var(--bg);
+  transform: translateY(-50%);
+}
+:where(.terminal-host) .dither-tooltip {
+  position: absolute;
+  top: 3px;
+  transform: translateX(-50%);
+  display: grid;
+  gap: 3px;
+  min-width: 120px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  pointer-events: none;
+  box-shadow: 0 3px 12px #0005;
+}
+:where(.terminal-host) .dither-tooltip strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tx);
+  font-variant-numeric: tabular-nums;
+}
+:where(.terminal-host) .dither-tooltip span {
+  font-size: 10px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .dither-empty {
+  color: var(--faint);
+  font-size: 11px;
+  margin: 20px 0;
+}
+:where(.terminal-host) .token-plot > .dither-figure {
+  margin-top: 8px;
+}
+:where(.terminal-host) .token-plot .dither-caption {
+  display: none;
+}
+:where(.terminal-host) .account-balance > .dither-figure {
+  margin-top: 14px;
+}
+:where(.terminal-host) .public-chart > .dither-figure {
+  margin-top: 0;
+}
+
+:where(.terminal-host) .token-plot .dither-axis {
+  padding-inline: 18px;
+}
+
+/* Balance charts stay secondary to the figure and the content below it. */
+:where(.terminal-host) .performance-chart {
+  display: flex;
+  flex-direction: column;
+}
+:where(.terminal-host) .performance-chart .dither-stage {
+  order: 0;
+}
+:where(.terminal-host) .performance-chart .dither-caption {
+  order: 1;
+  margin: 6px 0 0;
+}
+:where(.terminal-host) .performance-chart .dither-axis {
+  display: none;
+}
+
+:where(.terminal-host) .dither-stage {
+  position: relative;
+  height: var(--chart-height);
+}
+:where(.terminal-host) .dither-riders {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+:where(.terminal-host) .dither-rider {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  display: block;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 2px solid var(--bg);
+  border-radius: 50%;
+  background: var(--bg);
+}
+:where(.terminal-host) button.dither-rider {
+  pointer-events: auto;
+  cursor: pointer;
+}
+:where(.terminal-host) .dither-rider > .face.sm {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+}
+:where(.terminal-host) .dither-tooltip {
+  z-index: 20;
+}
+
+:where(.terminal-host) .desktop-board-columns {
+  display: none;
+}
+:where(.terminal-host) .desktop-home-table-wrap {
+  display: none;
+}
+:where(.terminal-host) .tv-ohlc:not(.is-hovered) {
+  display: none;
+}
+:where(.terminal-host) .token-market-strip,
+:where(.terminal-host) .holder-table-wrap {
+  display: none;
+}
+:where(.terminal-host) .desktop-header,
+:where(.terminal-host) .desktop-sidebar,
+:where(.terminal-host) .desktop-portfolio {
+  display: none;
+}
+@media (min-width: 1100px) {
+  .terminal-host,
+  .terminal-host,
+  .terminal-host {
+    height: 100%;
+    background: var(--bg);
+  }
+  :where(.terminal-host) .app {
+    --sidebar-width: 300px;
+    --portfolio-width: 280px;
+    max-width: none;
+    height: 100dvh;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(
+        --portfolio-width
+      );
+    grid-template-rows: 68px minmax(0, 1fr);
+    gap: 0;
+    padding: 0 12px 12px;
+  }
+  :where(.terminal-host) .desktop-header {
+    display: grid;
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(
+        --portfolio-width
+      );
+    grid-column: 1 / -1;
+    align-items: center;
+    gap: 0;
+  }
+  :where(.terminal-host) .desktop-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: fit-content;
+    font-size: 23px;
+    font-weight: 600;
+    letter-spacing: -1px;
+  }
+  :where(.terminal-host) .desktop-brand svg {
+    width: 34px;
+    height: 34px;
+  }
+  :where(.terminal-host) .desktop-search {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    color: var(--faint);
+    padding: 13px 16px;
+    margin: 0 22px;
+    text-align: left;
+    font-size: 15px;
+  }
+  :where(.terminal-host) .desktop-header-account {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 12px;
+  }
+  :where(.terminal-host) .desktop-header-account > span {
+    display: grid;
+    gap: 2px;
+    font-size: 14px;
+  }
+  :where(.terminal-host) .desktop-header-account small {
+    color: var(--faint);
+    font-size: 12px;
+  }
+  :where(.terminal-host) .desktop-fund {
+    padding: 9px 12px;
+    border-radius: 9px;
+    background: var(--tx);
+    color: var(--bg);
+    font-size: 13px;
+    font-weight: 600;
+  }
+  :where(.terminal-host) .desktop-header-account .face {
+    width: 30px;
+    height: 30px;
+  }
+  :where(.terminal-host) .desktop-sidebar {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 8px;
+  }
+  :where(.terminal-host) .desktop-market-heading,
+  :where(.terminal-host) .desktop-section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  :where(.terminal-host) .desktop-market-heading {
+    padding: 13px 8px 10px;
+  }
+  :where(.terminal-host) .desktop-market-heading h2,
+  :where(.terminal-host) .desktop-section-heading h2 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  :where(.terminal-host) .desktop-market-heading > span,
+  :where(.terminal-host) .desktop-section-heading > span {
+    font-size: 13px;
+    color: var(--faint);
+  }
+  :where(.terminal-host) .desktop-market-tabs {
+    display: flex;
+    gap: 8px;
+    padding: 9px 4px;
+  }
+  :where(.terminal-host) .desktop-market-tabs button {
+    font-size: 12px;
+    padding: 6px 9px;
+    border-radius: 7px;
+    color: var(--faint);
+  }
+  :where(.terminal-host) .desktop-market-tabs button[aria-pressed="true"] {
+    background: var(--raised);
+    color: var(--tx);
+  }
+  :where(.terminal-host) .desktop-market-list {
+    overflow-y: auto;
+    min-height: 0;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+  }
+  :where(.terminal-host) .desktop-market-row {
+    display: grid;
+    grid-template-columns: 30px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    text-align: left;
+    padding: 11px 7px;
+    border-radius: 9px;
+  }
+  :where(.terminal-host) .desktop-market-row.selected {
+    background: var(--raised);
+  }
+  :where(.terminal-host) .desktop-market-row:hover,
+  :where(.terminal-host) .desktop-position:hover {
+    background: var(--card);
+  }
+  :where(.terminal-host) .desktop-market-row .coin {
+    width: 30px;
+    height: 30px;
+  }
+  :where(.terminal-host) .desktop-market-row > span {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+  }
+  :where(.terminal-host) .desktop-market-row > span:last-child {
+    text-align: right;
+  }
+  :where(.terminal-host) .desktop-market-row strong {
+    font-size: 14px;
+    font-weight: 500;
+  }
+  :where(.terminal-host) .desktop-market-row small {
+    font-size: 12px;
+    color: var(--faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  :where(.terminal-host) .desktop-market-row small.up {
+    color: var(--up);
+  }
+  :where(.terminal-host) .desktop-market-row small.down {
+    color: var(--down);
+  }
+  :where(.terminal-host) .app > .body {
+    min-width: 0;
+    min-height: 0;
+    width: auto;
+    height: auto;
+    padding: 18px 22px 24px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+    gap: 28px;
+  }
+  :where(.terminal-host) .app > .body::-webkit-scrollbar {
+    display: block;
+    width: 4px;
+  }
+  :where(.terminal-host) .app > .tabbar {
+    display: none;
+  }
+  :where(.terminal-host) .desktop-portfolio {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+  }
+  :where(.terminal-host) .desktop-portfolio > section {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 18px;
+  }
+  :where(.terminal-host) .desktop-section-heading {
+    margin-bottom: 17px;
+  }
+  :where(.terminal-host) .desktop-running::before {
+    content: "";
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    background: var(--up);
+    border-radius: 50%;
+    margin-right: 5px;
+  }
+  :where(.terminal-host) .desktop-agent-id {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    text-align: left;
+    width: 100%;
+  }
+  :where(.terminal-host) .desktop-agent-id > span {
+    display: grid;
+    gap: 4px;
+  }
+  :where(.terminal-host) .desktop-agent-id > svg {
+    margin-left: auto;
+    color: var(--faint);
+  }
+  :where(.terminal-host) .desktop-agent-id strong {
+    font-size: 15px;
+  }
+  :where(.terminal-host) .desktop-agent-id small {
+    color: var(--faint);
+    font-size: 12px;
+  }
+  :where(.terminal-host) .desktop-agent-id .face {
+    width: 32px;
+    height: 32px;
+  }
+  :where(.terminal-host) .desktop-balance {
+    margin-top: 22px;
+    font-family: var(--pixel);
+    font-size: 42px;
+    line-height: 1;
+  }
+  :where(.terminal-host) .desktop-balance + p {
+    font-size: 13px;
+    margin: 9px 0 20px;
+  }
+  :where(.terminal-host) .desktop-money-actions {
+    display: flex;
+    gap: 7px;
+    margin-bottom: 18px;
+  }
+  :where(.terminal-host) .desktop-money-actions button {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    border-radius: 8px;
+    background: var(--raised);
+    padding: 10px 6px;
+    font-size: 13px;
+  }
+  :where(.terminal-host) .desktop-money-actions button:first-child {
+    color: var(--bg);
+    background: var(--tx);
+  }
+  :where(.terminal-host) .desktop-cash {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 13px;
+    margin-top: 12px;
+    color: var(--faint);
+  }
+  :where(.terminal-host) .desktop-cash strong {
+    font-weight: 500;
+    color: var(--tx);
+  }
+  :where(.terminal-host) .desktop-position {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 10px 0;
+    width: 100%;
+    text-align: left;
+  }
+  :where(.terminal-host) .desktop-position .coin {
+    width: 25px;
+    height: 25px;
+  }
+  :where(.terminal-host) .desktop-position strong {
+    font-size: 14px;
+    font-weight: 600;
+  }
+  :where(.terminal-host) .desktop-position > span:last-child {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--tx-2);
+  }
+  :where(.terminal-host) .desktop-chat-link {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    border-top: 1px solid var(--line);
+    padding-top: 17px;
+    margin-top: 18px;
+    font-size: 14px;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .top-row {
+    display: none;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .top {
+    padding: 0;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .hero {
+    max-width: none;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .performance-chart {
+    margin-top: 22px;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .week {
+    margin-inline: 0;
+    padding-inline: 0;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .week-card {
+    min-width: 140px;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .tok {
+    padding-block: 15px;
+  }
+  :where(.terminal-host) .app > .body.token-body {
+    padding: 12px 22px 24px;
+  }
+  :where(.terminal-host) .token-body::after {
+    display: none;
+  }
+  :where(.terminal-host) .token-plot {
+    margin-inline: 0;
+  }
+  :where(.terminal-host) .token-top {
+    padding: 0;
+  }
+  :where(.terminal-host) .token-hero {
+    margin: 24px 0;
+  }
+  :where(.terminal-host) .token .price {
+    font-size: 48px;
+  }
+  :where(.terminal-host) .tv-box,
+  :where(.terminal-host) .tv-canvas {
+    height: clamp(260px, 40dvh, 520px);
+  }
+  :where(.terminal-host) .token-plot .dither-figure {
+    --chart-height: clamp(260px, 40dvh, 520px) !important;
+  }
+  :where(.terminal-host) .tv-tools {
+    padding-inline: 0;
+    margin-top: 14px;
+  }
+  :where(.terminal-host) .tv-windows {
+    gap: 8px;
+  }
+  :where(.terminal-host) .tv-windows button {
+    min-width: 42px;
+  }
+  :where(.terminal-host) .held-sec {
+    margin-top: 28px;
+  }
+  :where(.terminal-host) .held {
+    padding: 18px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  :where(.terminal-host) .held-who p {
+    max-width: none;
+  }
+  :where(.terminal-host) .app > .body:has(> .desk-page) {
+    height: auto;
+    max-height: none;
+    padding: 18px 22px;
+    overflow: hidden;
+  }
+  :where(.terminal-host) .app > .body > .desk-page {
+    height: 100%;
+    width: 100%;
+    gap: 20px;
+    min-height: 0;
+  }
+  :where(.terminal-host) .desk-page .desk-conversation {
+    padding-top: 4px;
+  }
+  :where(.terminal-host) .desk-page .desk-chat-bottom {
+    max-width: 760px;
+    justify-self: center;
+  }
+  :where(.terminal-host) .desk-prompts {
+    flex-wrap: wrap;
+  }
+  :where(.terminal-host) .desk-reply {
+    max-width: 760px;
+  }
+  :where(.terminal-host) .desk-question {
+    max-width: 75%;
+  }
+  :where(.terminal-host) .trade-token-card {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .trade-token-card .wire-part-fig b {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .account-page,
+  :where(.terminal-host) .public-agent-page {
+    width: 100%;
+    max-width: 860px;
+    margin-inline: auto;
+  }
+  :where(.terminal-host) .account-person {
+    margin-block: 24px;
+  }
+  :where(.terminal-host) .public-performance {
+    padding-top: 20px;
+  }
+  :where(.terminal-host) .money-flow {
+    width: 100%;
+    max-width: 520px;
+    min-height: 100%;
+    margin-inline: auto;
+    padding-bottom: 0;
+  }
+  :where(.terminal-host) .flow-actions {
+    position: static;
+    width: 100%;
+    max-width: none;
+    transform: none;
+    margin-top: 30px;
+  }
+  :where(.terminal-host) .fund-form {
+    flex: 1;
+  }
+  :where(.terminal-host) .portfolio-dialog {
+    width: 460px;
+  }
+  :where(.terminal-host) .board-page,
+  :where(.terminal-host) .feed-page {
+    width: 100%;
+    min-width: 0;
+  }
+}
+@media (min-width: 1500px) {
+  :where(.terminal-host) .app {
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(
+        --portfolio-width
+      );
+    padding-inline: 22px;
+  }
+  :where(.terminal-host) .desktop-header {
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(
+        --portfolio-width
+      );
+  }
+  :where(.terminal-host) .app > .body {
+    padding-inline: 36px;
+  }
+  :where(.terminal-host) .desktop-market-row {
+    padding: 13px 10px;
+  }
+  :where(.terminal-host) .desktop-portfolio > section {
+    padding: 22px;
+  }
+}
+
+/* Terminal refinement: clearer type, less repeated chrome, aligned data. */
+@media (min-width: 1100px) {
+  :where(.terminal-host) .app {
+    --faint: #85877b;
+    --tx-2: #acafa1;
+    --line: #272a21;
+  }
+  :where(.terminal-host) .desktop-header .desktop-search {
+    width: min(100% - 44px, 620px);
+    justify-self: center;
+    padding-block: 11px;
+  }
+  :where(.terminal-host) .desktop-header-account small {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .desktop-market-row {
+    padding-block: 10px;
+  }
+  :where(.terminal-host) .desktop-market-row strong {
+    font-size: 15px;
+  }
+  :where(.terminal-host) .desktop-market-row small {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .desktop-market-tabs button {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .desktop-market-tabs {
+    align-items: center;
+    gap: 3px;
+  }
+  :where(.terminal-host) .desktop-market-tabs .desktop-sort {
+    margin-left: auto;
+    padding: 6px;
+    display: grid;
+    place-items: center;
+  }
+  :where(.terminal-host) .desktop-section-heading h2 {
+    font-size: 16px;
+  }
+  :where(.terminal-host) .desktop-section-heading {
+    margin-bottom: 13px;
+  }
+  :where(.terminal-host) .desktop-balance {
+    font-size: 34px;
+    margin-top: 16px;
+  }
+  :where(.terminal-host) .desktop-balance + p {
+    margin-bottom: 15px;
+    font-size: 14px;
+  }
+  :where(.terminal-host) .desktop-portfolio {
+    gap: 12px;
+  }
+  :where(.terminal-host) .desktop-portfolio > section {
+    padding: 17px;
+  }
+  :where(.terminal-host) .desktop-cash {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .desktop-cash strong.up {
+    color: var(--up);
+  }
+  :where(.terminal-host) .desktop-cash strong.down {
+    color: var(--down);
+  }
+  :where(.terminal-host) .desktop-money-actions button {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .desktop-position {
+    padding-block: 9px;
+  }
+  :where(.terminal-host) .desktop-position > span:last-child {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .desktop-position > span.up {
+    color: var(--up);
+  }
+  :where(.terminal-host) .desktop-position > span.down {
+    color: var(--down);
+  }
+  :where(.terminal-host) .desktop-running.paused::before {
+    background: var(--faint);
+  }
+  :where(.terminal-host) .desktop-token-context .coin {
+    width: 22px;
+    height: 22px;
+  }
+  :where(.terminal-host) .desktop-token-context > p {
+    color: var(--tx-2);
+    margin: 0 0 18px;
+    font-size: 15px;
+  }
+  :where(.terminal-host) .app > .body.token-body {
+    padding-top: 10px;
+  }
+  :where(.terminal-host) .token-top {
+    min-height: 44px;
+  }
+  :where(.terminal-host) .token-top .back {
+    display: none;
+  }
+  :where(.terminal-host) .token .token-hero {
+    display: none;
+  }
+  :where(.terminal-host) .token-market-strip {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    padding: 12px 0;
+    margin: 15px 0 12px;
+  }
+  :where(.terminal-host) .token-market-strip > div {
+    display: grid;
+    gap: 5px;
+    padding-left: 14px;
+    border-left: 1px solid var(--line);
+  }
+  :where(.terminal-host) .token-market-strip > div:first-child {
+    padding-left: 0;
+    border-left: 0;
+  }
+  :where(.terminal-host) .token-market-strip span {
+    color: var(--faint);
+    font-size: 13px;
+  }
+  :where(.terminal-host) .token-market-strip strong {
+    font-size: 17px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  :where(.terminal-host) .token-plot {
+    display: flex;
+    flex-direction: column;
+  }
+  :where(.terminal-host) .token-plot .tv-tools {
+    order: -1;
+    margin: 0 0 12px;
+    padding: 0;
+    gap: 10px;
+  }
+  :where(.terminal-host) .tv-windows {
+    flex: none;
+    gap: 4px;
+  }
+  :where(.terminal-host) .tv-windows button {
+    min-width: 36px;
+    padding: 6px 10px;
+    font-size: 14px;
+  }
+  :where(.terminal-host) .tv-kinds {
+    margin-left: auto;
+    gap: 5px;
+  }
+  :where(.terminal-host) .tv-kinds button {
+    width: 30px;
+    height: 30px;
+  }
+  :where(.terminal-host) .tv-ohlc {
+    position: static;
+    min-height: 16px;
+    margin: 0 0 8px;
+    padding-left: 0;
+    font-size: 13px;
+  }
+  :where(.terminal-host) .token .held-sec {
+    margin-top: 22px;
+  }
+  :where(.terminal-host) .held-sec > h3 {
+    font-size: 16px;
+    padding: 0 0 13px;
+    margin: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  :where(.terminal-host) .held-sec .helds {
+    display: none;
+  }
+  :where(.terminal-host) .holder-table-wrap {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+  :where(.terminal-host) .holder-table {
+    border-collapse: collapse;
+    width: 100%;
+    table-layout: fixed;
+    font-size: 14px;
+  }
+  :where(.terminal-host) .holder-table th {
+    text-align: left;
+    color: var(--faint);
+    font-weight: 400;
+    font-size: 13px;
+    padding: 11px 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  :where(.terminal-host) .holder-table th:first-child {
+    width: 26%;
+    padding-left: 0;
+  }
+  :where(.terminal-host) .holder-table th:nth-child(2) {
+    width: 14%;
+  }
+  :where(.terminal-host) .holder-table th:nth-child(3) {
+    width: 13%;
+  }
+  :where(.terminal-host) .holder-table th:nth-child(4) {
+    width: 15%;
+  }
+  :where(.terminal-host) .holder-table th button {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  :where(.terminal-host) .holder-table td {
+    vertical-align: top;
+    padding: 16px 8px;
+    border-bottom: 1px solid var(--line);
+    font-variant-numeric: tabular-nums;
+  }
+  :where(.terminal-host) .holder-table td:first-child {
+    padding-left: 0;
+  }
+  :where(.terminal-host) .holder-agent {
+    display: flex;
+    gap: 9px;
+    align-items: center;
+    text-align: left;
+  }
+  :where(.terminal-host) .holder-agent .face {
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+  }
+  :where(.terminal-host) .holder-agent > span {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+  }
+  :where(.terminal-host) .holder-agent strong {
+    font-size: 15px;
+    font-weight: 600;
+  }
+  :where(.terminal-host) .holder-agent small {
+    color: var(--faint);
+    font-size: 12px;
+  }
+  :where(.terminal-host) .holder-thesis {
+    color: var(--tx-2);
+    line-height: 1.5;
+  }
+  :where(.terminal-host) .holder-thesis p {
+    margin: 0;
+  }
+  :where(.terminal-host) .holder-table tr:hover td {
+    background: var(--card);
+  }
+  :where(.terminal-host) .app[data-screen="home"] .top {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) minmax(180px, 1fr);
+    align-items: end;
+    gap: 24px;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .top .performance-chart {
+    margin: 0 0 3px;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .hero .balance {
+    font-size: 48px;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .week-card {
+    min-width: 140px;
+    padding: 13px;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .week {
+    gap: 8px;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .tok {
+    padding-block: 13px;
+    border-bottom: 1px solid var(--line);
+  }
+  :where(.terminal-host) .app[data-screen="home"] .tok .px {
+    font-size: 18px;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .tok .meta {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .app[data-screen="you"] .desktop-portfolio > section:first-child,
+  :where(.terminal-host) .app[data-screen="agent"] .desktop-portfolio > section:first-child {
+    display: none;
+  }
+  :where(.terminal-host) .account-page {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 1fr);
+    column-gap: 32px;
+    align-content: start;
+    max-width: 980px;
+  }
+  :where(.terminal-host) .account-header,
+  :where(.terminal-host) .account-person,
+  :where(.terminal-host) .account-balance {
+    grid-column: 1 / -1;
+  }
+  :where(.terminal-host) .account-balance {
+    padding-bottom: 20px;
+  }
+  :where(.terminal-host) .account-page .account-section {
+    margin-top: 0;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+  }
+  :where(.terminal-host) .account-agent {
+    flex-wrap: wrap;
+  }
+  :where(.terminal-host) .account-agent-value {
+    margin-left: auto;
+  }
+  :where(.terminal-host) .account-control small {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .account-control {
+    gap: 12px;
+  }
+  :where(.terminal-host) .public-agent-page {
+    max-width: 980px;
+  }
+  :where(.terminal-host) .public-agent-page .public-performance {
+    padding-top: 10px;
+  }
+  :where(.terminal-host) .public-agent-page .public-position,
+  :where(.terminal-host) .public-agent-page .public-event {
+    padding-block: 15px;
+  }
+  :where(.terminal-host) .public-agent-page .public-strategy {
+    padding-block: 20px;
+  }
+  :where(.terminal-host) .feed-page {
+    max-width: 800px;
+    margin-inline: auto;
+  }
+  :where(.terminal-host) .board-page .rank-hit {
+    padding-block: 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  :where(.terminal-host) .desk-page > .desk-conversation {
+    padding-inline: max(0px, calc((100% - 780px) / 2));
+  }
+  :where(.terminal-host) .desk-page > .desk-chat-bottom {
+    max-width: 780px;
+  }
+  :where(.terminal-host) .desk-reply p,
+  :where(.terminal-host) .desk-question {
+    font-size: 16px;
+  }
+  :where(.terminal-host) .app > .body {
+    scrollbar-gutter: stable;
+  }
+}
+@media (min-width: 1500px) {
+  :where(.terminal-host) .app {
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(
+        --portfolio-width
+      );
+    padding-inline: 16px;
+  }
+  :where(.terminal-host) .desktop-header {
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(
+        --portfolio-width
+      );
+  }
+  :where(.terminal-host) .app > .body {
+    padding-inline: 24px;
+  }
+  :where(.terminal-host) .holder-table {
+    font-size: 15px;
+  }
+}
+
+@media (min-width: 1100px) {
+  :where(.terminal-host) .token-top {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  :where(.terminal-host) .token-acts {
+    justify-content: flex-end;
+  }
+  :where(.terminal-host) .tv .tv-ohlc {
+    display: flex;
+  }
+  :where(.terminal-host) .held-sec {
+    padding-top: 0;
+  }
+  :where(.terminal-host) .token-sub {
+    white-space: nowrap;
+  }
+}
+
+@media (min-width: 1100px) {
+  :where(.terminal-host) .home-mobile-market {
+    display: none;
+  }
+  :where(.terminal-host) .desktop-home-table-wrap {
+    display: block;
+    overflow-x: auto;
+  }
+  :where(.terminal-host) .desktop-home-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: 15px;
+  }
+  :where(.terminal-host) .desktop-home-table th {
+    padding: 11px 8px;
+    text-align: right;
+    color: var(--faint);
+    font-size: 13px;
+    font-weight: 400;
+    border-bottom: 1px solid var(--line);
+  }
+  :where(.terminal-host) .desktop-home-table th:first-child {
+    width: 25%;
+    text-align: left;
+    padding-left: 0;
+  }
+  :where(.terminal-host) .desktop-home-table th:nth-child(2) {
+    width: 36%;
+    text-align: left;
+  }
+  :where(.terminal-host) .desktop-home-table th:nth-child(3) {
+    width: 10%;
+  }
+  :where(.terminal-host) .desktop-home-table td {
+    padding: 16px 8px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    border-bottom: 1px solid var(--line);
+  }
+  :where(.terminal-host) .desktop-home-table td:first-child {
+    text-align: left;
+    padding-left: 0;
+  }
+  :where(.terminal-host) .desktop-home-table tr:hover td {
+    background: var(--card);
+  }
+  :where(.terminal-host) .home-token-link {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    text-align: left;
+  }
+  :where(.terminal-host) .home-token-link > .coin {
+    width: 30px;
+    height: 30px;
+  }
+  :where(.terminal-host) .home-token-link > span {
+    display: grid;
+    gap: 4px;
+  }
+  :where(.terminal-host) .home-token-link strong {
+    font-size: 15px;
+    font-weight: 600;
+  }
+  :where(.terminal-host) .home-token-link small {
+    font-size: 13px;
+    color: var(--faint);
+  }
+  :where(.terminal-host) .home-agent-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+  }
+  :where(.terminal-host) .home-agent-links button {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 13px;
+    color: var(--tx-2);
+  }
+  :where(.terminal-host) .home-agent-links button:hover {
+    color: var(--tx);
+  }
+  :where(.terminal-host) .home-agent-links .face.sm {
+    width: 18px;
+    height: 18px;
+  }
+}
+
+@media (min-width: 1100px) {
+  :where(.terminal-host) .board-page .board {
+    gap: 0;
+  }
+  :where(.terminal-host) .desktop-board-columns {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr) 180px 100px 95px;
+    gap: 12px;
+    align-items: center;
+    padding: 13px 0;
+    color: var(--faint);
+    font-size: 13px;
+    border-bottom: 1px solid var(--line);
+  }
+  :where(.terminal-host) .desktop-board-columns > span:nth-last-child(-n + 2) {
+    text-align: right;
+  }
+  :where(.terminal-host) .board-page .rank {
+    padding-block: 0;
+  }
+  :where(.terminal-host) .board-page .rank-hit {
+    grid-template-columns: 20px 32px minmax(0, 1fr) 207px;
+    gap: 12px;
+    padding-block: 16px;
+    border-bottom: 0;
+  }
+  :where(.terminal-host) .board-page .rank-who {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 180px;
+    align-items: center;
+    gap: 12px;
+  }
+  :where(.terminal-host) .board-page .rank-meta {
+    display: grid;
+    gap: 4px;
+    justify-items: start;
+    margin: 0;
+  }
+  :where(.terminal-host) .board-page .rank-nums {
+    display: grid;
+    grid-template-columns: 100px 95px;
+    gap: 12px;
+    text-align: right;
+  }
+  :where(.terminal-host) .board-page .rank-you {
+    background: var(--card);
+  }
+  :where(.terminal-host) .board-page .rank-hit:hover {
+    background: var(--card);
+  }
+  :where(.terminal-host) .app[data-screen="you"] .desktop-portfolio > section:last-child {
+    display: none;
+  }
+}
+@media (min-width: 1100px) and (max-width: 1399px) {
+  :where(.terminal-host) .desktop-board-columns {
+    grid-template-columns: 20px minmax(0, 1fr) 90px 90px 75px;
+  }
+  :where(.terminal-host) .board-page .rank-who {
+    grid-template-columns: minmax(0, 1fr) 90px;
+  }
+  :where(.terminal-host) .board-page .rank-hit {
+    grid-template-columns: 20px 28px minmax(0, 1fr) 177px;
+  }
+  :where(.terminal-host) .board-page .rank-nums {
+    grid-template-columns: 90px 75px;
+  }
+  :where(.terminal-host) .board-page .rank-meta .stamp {
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+/* Desktop: full navigation and a comfortably readable type scale. */
+@media (min-width: 1100px) {
+  :where(.terminal-host) .app {
+    --faint: #95978d;
+    --tx-2: #b5b7ac;
+    --line: #25281e;
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(
+        --portfolio-width
+      );
+    padding-inline: 16px;
+  }
+  :where(.terminal-host) .desktop-header {
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(
+        --portfolio-width
+      );
+  }
+  :where(.terminal-host) .desktop-brand {
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: -1.1px;
+  }
+  :where(.terminal-host) .desktop-header .desktop-search {
+    background: transparent;
+    border-color: var(--line);
+    border-radius: 999px;
+    font-size: 14px;
+  }
+  :where(.terminal-host) .desktop-header-account .desktop-fund {
+    font-size: 13px;
+    border-radius: 999px;
+    padding-inline: 16px;
+  }
+  :where(.terminal-host) .desktop-market-heading {
+    padding: 5px 12px 14px;
+  }
+  :where(.terminal-host) .desktop-market-heading h2 {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--tx-2);
+  }
+  :where(.terminal-host) .desktop-market-heading > span {
+    font-size: 12px;
+  }
+  :where(.terminal-host) .desktop-market-tabs {
+    padding: 12px 4px;
+  }
+  :where(.terminal-host) .desktop-market-tabs button {
+    font-size: 12px;
+    border-radius: 999px;
+  }
+  :where(.terminal-host) .desktop-market-tabs button[aria-pressed="true"] {
+    background: var(--raised);
+    color: var(--tx);
+  }
+  :where(.terminal-host) .desktop-market-row {
+    grid-template-columns: 32px minmax(0, 1fr) auto;
+    gap: 10px;
+    padding: 12px 9px;
+    border-radius: 10px;
+  }
+  :where(.terminal-host) .desktop-market-row .coin {
+    width: 32px;
+    height: 32px;
+  }
+  :where(.terminal-host) .desktop-market-row strong {
+    font-size: 14px;
+    font-weight: 600;
+  }
+  :where(.terminal-host) .desktop-market-row small {
+    font-size: 12px;
+  }
+  :where(.terminal-host) .desktop-market-row.selected {
+    background: #ffffff09;
+  }
+  :where(.terminal-host) .desktop-section-heading {
+    margin-bottom: 18px;
+  }
+  :where(.terminal-host) .desktop-section-heading h2 {
+    font-size: 16px;
+    font-weight: 600;
+  }
+  :where(.terminal-host) .desktop-section-heading > span {
+    font-size: 12px;
+  }
+  :where(.terminal-host) .desktop-agent-id strong {
+    font-size: 15px;
+    font-weight: 600;
+  }
+  :where(.terminal-host) .desktop-agent-id small {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .desktop-agent-id .face {
+    width: 36px;
+    height: 36px;
+  }
+  :where(.terminal-host) .desktop-balance {
+    margin-top: 20px;
+    font-size: 42px;
+  }
+  :where(.terminal-host) .desktop-balance + p {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .desktop-money-actions button {
+    border-radius: 999px;
+    font-size: 13px;
+    padding-block: 11px;
+  }
+  :where(.terminal-host) .desktop-position {
+    padding-block: 11px;
+  }
+  :where(.terminal-host) .desktop-position .coin {
+    width: 28px;
+    height: 28px;
+  }
+  :where(.terminal-host) .desktop-position strong {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .desktop-position > span:last-child {
+    font-size: 12px;
+  }
+  :where(.terminal-host) .desktop-cash {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .desktop-token-context > p {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .desktop-chat-link {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .app > .body {
+    padding-inline: 28px;
+  }
+  :where(.terminal-host) .app > .body.token-body {
+    padding-inline: 24px;
+  }
+  :where(.terminal-host) .top-title,
+  :where(.terminal-host) .account-header h1,
+  :where(.terminal-host) .public-agent-id h1 {
+    font-size: 24px;
+    font-weight: 600;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .week-card {
+    border: 1px solid var(--line);
+    padding: 16px;
+    flex-basis: 160px;
+    gap: 10px;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .week-card .face {
+    width: 26px;
+    height: 26px;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .week-card strong {
+    font-size: 15px;
+    font-weight: 500;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .week-card b {
+    font-size: 26px;
+  }
+  :where(.terminal-host) .app[data-screen="home"] .week-card em {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .week-label {
+    font-size: 16px;
+    font-weight: 600;
+  }
+  :where(.terminal-host) .desktop-home-table,
+  :where(.terminal-host) .holder-table {
+    font-size: 15px;
+  }
+  :where(.terminal-host) .desktop-home-table th,
+  :where(.terminal-host) .holder-table th {
+    font-size: 13px;
+    padding-block: 15px;
+  }
+  :where(.terminal-host) .desktop-home-table td,
+  :where(.terminal-host) .holder-table td {
+    border-color: var(--line);
+    padding-block: 17px;
+  }
+  :where(.terminal-host) .desktop-home-table td {
+    padding-inline: 10px;
+  }
+  :where(.terminal-host) .home-token-link strong,
+  :where(.terminal-host) .holder-agent strong {
+    font-size: 15px;
+  }
+  :where(.terminal-host) .home-token-link small,
+  :where(.terminal-host) .holder-agent small {
+    font-size: 12px;
+  }
+  :where(.terminal-host) .home-agent-links {
+    gap: 8px 12px;
+  }
+  :where(.terminal-host) .home-agent-links button {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .home-agent-links .face.sm {
+    width: 22px;
+    height: 22px;
+  }
+  :where(.terminal-host) .holder-agent .face {
+    width: 32px;
+    height: 32px;
+  }
+  :where(.terminal-host) .holder-thesis {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .desktop-board-columns {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .board-page .rank .rank-name strong {
+    font-size: 16px;
+    font-weight: 600;
+  }
+  :where(.terminal-host) .board-page .rank .rank-have,
+  :where(.terminal-host) .board-page .rank .chg {
+    font-size: 15px;
+    font-weight: 500;
+  }
+  :where(.terminal-host) .board-page .rank-trades,
+  :where(.terminal-host) .board-page .stamp {
+    font-size: 12px;
+  }
+  :where(.terminal-host) .token-top h1 {
+    font-size: 20px;
+  }
+  :where(.terminal-host) .token-sub,
+  :where(.terminal-host) .token-sub button {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .token-market-strip span {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .token-market-strip strong {
+    font-size: 18px;
+  }
+  :where(.terminal-host) .tv-windows button {
+    font-size: 13px;
+    border-radius: 999px;
+  }
+  :where(.terminal-host) .tv .tv-ohlc {
+    font-size: 12px;
+  }
+  :where(.terminal-host) .token .held-sec > h3 {
+    font-size: 17px;
+    font-weight: 600;
+  }
+  :where(.terminal-host) .desk-header h1,
+  :where(.terminal-host) .desk-reply strong {
+    font-size: 16px;
+    font-weight: 600;
+  }
+  :where(.terminal-host) .desk-header p,
+  :where(.terminal-host) .desk-status,
+  :where(.terminal-host) .agent-portfolio-meta {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .desk-page .portfolio-toggle {
+    font-size: 14px;
+    border-radius: 999px;
+    padding-inline: 16px;
+  }
+  :where(.terminal-host) .desk-page .desk-reply p,
+  :where(.terminal-host) .desk-page .desk-question {
+    font-size: 16px;
+    line-height: 1.65;
+  }
+  :where(.terminal-host) .desk-page .desk-composer textarea {
+    font-size: 16px;
+  }
+  :where(.terminal-host) .desk-prompts button {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .chat-trade-caption {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .conversation-trade > button:not(.trade-token-card) {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .chat-divider > span,
+  :where(.terminal-host) .chat-message-actions button {
+    font-size: 12px;
+  }
+  :where(.terminal-host) .feed-page {
+    max-width: 860px;
+  }
+  :where(.terminal-host) .feed-page .wire-line,
+  :where(.terminal-host) .feed-page .wire-line strong,
+  :where(.terminal-host) .feed-page .wire-why {
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  :where(.terminal-host) .feed-page .wire-part-fig b,
+  :where(.terminal-host) .feed-page .wire-seat {
+    font-size: 15px;
+  }
+  :where(.terminal-host) .feed-page .wire-part-fig small {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .account-person h2 {
+    font-size: 21px;
+  }
+  :where(.terminal-host) .account-person p,
+  :where(.terminal-host) .account-agent small,
+  :where(.terminal-host) .account-agent-note,
+  :where(.terminal-host) .account-control small {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .account-section-title h2,
+  :where(.terminal-host) .account-agent strong,
+  :where(.terminal-host) .account-control strong {
+    font-size: 16px;
+  }
+  :where(.terminal-host) .account-balance > p,
+  :where(.terminal-host) .account-usage > div {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .public-strategy > p,
+  :where(.terminal-host) .public-event p {
+    font-size: 15px;
+    line-height: 1.65;
+  }
+  :where(.terminal-host) .public-section-heading h2 {
+    font-size: 17px;
+  }
+  :where(.terminal-host) .public-position strong,
+  :where(.terminal-host) .public-event-heading {
+    font-size: 15px;
+  }
+  :where(.terminal-host) .public-position small,
+  :where(.terminal-host) .public-event small {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .public-position > span:last-child {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .dither-caption,
+  :where(.terminal-host) .dither-axis {
+    font-size: 12px;
+  }
+}
+@media (min-width: 1500px) {
+  :where(.terminal-host) .app {
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(
+        --portfolio-width
+      );
+    padding-inline: 20px;
+  }
+  :where(.terminal-host) .desktop-header {
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(
+        --portfolio-width
+      );
+  }
+  :where(.terminal-host) .app > .body {
+    padding-inline: 34px;
+  }
+  :where(.terminal-host) .desktop-market-row strong {
+    font-size: 15px;
+  }
+  :where(.terminal-host) .desktop-market-row small {
+    font-size: 13px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+}
+
+@media (min-width: 1100px) {
+  :where(.terminal-host) .feed-page .wire-when {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .feed-page .wire-line strong {
+    font-weight: 600;
+  }
+  :where(.terminal-host) .feed-page .wire-beat {
+    padding-block: 14px;
+  }
+  :where(.terminal-host) .desktop-market-row small,
+  :where(.terminal-host) .desktop-position > span:last-child {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .app[data-screen="agent"] .desktop-chat-link {
+    display: none;
+  }
+}
+
+/* Keep discovery in the left panel while the current workspace stays open. */
+@media (min-width: 1100px) {
+  :where(.terminal-host) .desktop-sidebar {
+    --sidebar-padding: 12px;
+    min-width: 0;
+    overflow: hidden;
+    padding: var(--sidebar-padding);
+  }
+  :where(.terminal-host) .desktop-nav {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 4px;
+  }
+  :where(.terminal-host) .desktop-nav button {
+    flex: 1;
+    min-height: 36px;
+    padding: 8px 6px;
+    border-radius: 8px;
+    color: var(--tx-2);
+    font-size: 14px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  :where(.terminal-host) .desktop-nav button:hover,
+  :where(.terminal-host) .desktop-nav button.selected {
+    background: var(--card);
+    color: var(--tx);
+  }
+  :where(.terminal-host) .desktop-explore-tabs {
+    display: flex;
+    flex: 0 0 auto;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 8px calc(-1 * var(--sidebar-padding)) 0;
+    padding-inline: calc(var(--sidebar-padding) + 4px);
+    border-bottom: 1px solid var(--line);
+  }
+  :where(.terminal-host) .desktop-explore-tabs button {
+    position: relative;
+    padding: 14px 0 13px;
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--faint);
+  }
+  :where(.terminal-host) .desktop-explore-tabs button:hover,
+  :where(.terminal-host) .desktop-explore-tabs button[aria-selected="true"] {
+    color: var(--tx);
+  }
+  :where(.terminal-host) .desktop-explore-tabs button[aria-selected="true"]::after {
+    content: "";
+    position: absolute;
+    inset: auto 0 -1px;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--tx);
+  }
+  :where(.terminal-host) .desktop-explore-panel {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+  :where(.terminal-host) .desktop-explore-panel[hidden] {
+    display: none;
+  }
+  :where(.terminal-host) .desktop-market-heading {
+    flex-shrink: 0;
+    padding: 18px 4px 8px;
+  }
+  :where(.terminal-host) .desktop-market-heading h2 {
+    font-size: 13px;
+    font-weight: 400;
+  }
+  :where(.terminal-host) .desktop-market-tabs {
+    flex-shrink: 0;
+    padding: 4px 0 12px;
+    gap: 6px;
+  }
+  :where(.terminal-host) .desktop-market-tabs button {
+    font-size: 13px;
+    padding: 7px 10px;
+  }
+  :where(.terminal-host) .desktop-market-list {
+    flex: 1;
+    padding-bottom: 4px;
+    overscroll-behavior-y: contain;
+  }
+  :where(.terminal-host) .desktop-market-row {
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+    gap: 12px;
+    padding: 14px 6px;
+  }
+  :where(.terminal-host) .desktop-market-row .coin {
+    width: 34px;
+    height: 34px;
+  }
+  :where(.terminal-host) .desktop-market-row strong {
+    font-size: 15px;
+  }
+  :where(.terminal-host) .desktop-market-row > span {
+    gap: 4px;
+  }
+  :where(.terminal-host) .desktop-sidebar .feed-page,
+  :where(.terminal-host) .desktop-sidebar .board-page {
+    height: 100%;
+    min-height: 0;
+    gap: 0;
+  }
+  :where(.terminal-host) .desktop-sidebar .feed-head,
+  :where(.terminal-host) .desktop-sidebar .board-head {
+    flex: 0 0 auto;
+    padding: 18px 4px 12px;
+  }
+  :where(.terminal-host) .desktop-sidebar .feed-head h2,
+  :where(.terminal-host) .desktop-sidebar .board-head h2 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--tx-2);
+  }
+  :where(.terminal-host) .sidebar-feed-filter {
+    border: 1px solid var(--line);
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--tx-2);
+  }
+  :where(.terminal-host) .sidebar-feed-filter:hover,
+  :where(.terminal-host) .sidebar-feed-filter.on {
+    color: var(--tx);
+    background: var(--raised);
+  }
+  :where(.terminal-host) .desktop-sidebar .feed-page > .wire,
+  :where(.terminal-host) .desktop-sidebar .board {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior-y: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+    padding: 0 4px 8px;
+  }
+  :where(.terminal-host) .desktop-sidebar .wire-beat {
+    padding-block: 18px;
+    border-bottom: 1px solid var(--line);
+  }
+  :where(.terminal-host) .desktop-sidebar .wire-beat:first-child {
+    padding-top: 8px;
+  }
+  :where(.terminal-host) .desktop-sidebar .wire-beat:last-child {
+    border-bottom: 0;
+  }
+  :where(.terminal-host) .desktop-sidebar .wire-lull {
+    display: none;
+  }
+  :where(.terminal-host) .desktop-sidebar .wire-line,
+  :where(.terminal-host) .desktop-sidebar .wire-line strong,
+  :where(.terminal-host) .desktop-sidebar .wire-seat,
+  :where(.terminal-host) .desktop-sidebar .wire-part-fig b {
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  :where(.terminal-host) .desktop-sidebar .wire-why {
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  :where(.terminal-host) .desktop-sidebar .wire-when {
+    font-size: 12px;
+  }
+  :where(.terminal-host) .desktop-sidebar .desktop-board-columns,
+  :where(.terminal-host) .desktop-sidebar .rank-meta .tag {
+    display: none;
+  }
+  :where(.terminal-host) .desktop-sidebar .wins button {
+    padding: 6px 9px;
+    font-size: 12px;
+  }
+  :where(.terminal-host) .desktop-sidebar .board-page .rank-hit {
+    grid-template-columns: 16px 30px minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 16px 2px;
+  }
+  :where(.terminal-host) .desktop-sidebar .rank-hit .face {
+    width: 30px;
+    height: 30px;
+  }
+  :where(.terminal-host) .desktop-sidebar .rank.you {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: 0;
+    border-radius: 8px;
+    background: var(--card);
+  }
+  :where(.terminal-host) .desktop-sidebar .board-page .rank-who {
+    display: block;
+  }
+  :where(.terminal-host) .desktop-sidebar .board-page .rank-meta {
+    display: flex;
+    margin-top: 4px;
+  }
+  :where(.terminal-host) .desktop-sidebar .board-page .rank-nums {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+  }
+  :where(.terminal-host) .desktop-sidebar .board-page .rank .rank-name strong {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .desktop-sidebar .rank-name .tag {
+    padding-inline: 4px;
+    font-size: 10px;
+  }
+  :where(.terminal-host) .desktop-sidebar .board-page .rank .rank-have {
+    font-size: 13px;
+  }
+  :where(.terminal-host) .desktop-sidebar .board-page .rank .chg {
+    font-size: 14px;
+  }
+}
+@media (min-width: 1100px) and (max-width: 1199px) {
+  :where(.terminal-host) .app {
+    --sidebar-width: 280px;
+    --portfolio-width: 260px;
+  }
+}
+@media (min-width: 1500px) {
+  :where(.terminal-host) .app {
+    --sidebar-width: 340px;
+    --portfolio-width: 310px;
+  }
+  :where(.terminal-host) .desktop-sidebar {
+    --sidebar-padding: 16px;
+  }
+}
+
+@media (min-width: 1100px) {
+  :where(.terminal-host) .desktop-explore-tabs {
+    margin-top: 0;
+    gap: 12px;
+  }
+  :where(.terminal-host) .desktop-explore-tabs button {
+    font-size: 14px;
+  }
+  :where(.terminal-host) .sidebar-agent {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 14px 4px;
+    text-align: left;
+    border-radius: 8px;
+  }
+  :where(.terminal-host) .sidebar-agent:hover {
+    background: var(--card);
+  }
+  :where(.terminal-host) .sidebar-agent .face {
+    width: 30px;
+    height: 30px;
+    flex-shrink: 0;
+  }
+  :where(.terminal-host) .sidebar-agent > span:not(.face) {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+  }
+  :where(.terminal-host) .sidebar-agent strong {
+    font-size: 14px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  :where(.terminal-host) .sidebar-agent small {
+    font-size: 12px;
+    color: var(--tx-2);
+  }
+  :where(.terminal-host) .sidebar-agent > span:nth-child(3) {
+    margin-left: auto;
+    text-align: right;
+    flex-shrink: 0;
+  }
+}
+
+@media (min-width: 1100px) {
+  :where(.terminal-host) .desktop-money-panel {
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+    align-self: start;
+    max-height: 100%;
+    padding: 17px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    scrollbar-width: thin;
+  }
+  :where(.terminal-host) .desktop-money-panel .money-flow {
+    min-height: 0;
+    max-width: none;
+  }
+  :where(.terminal-host) .desktop-money-panel .flow-top {
+    justify-content: space-between;
+    font-size: 15px;
+  }
+  :where(.terminal-host) .desktop-money-panel .flow-back {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-steps {
+    margin-top: 18px;
+  }
+  :where(.terminal-host) .desktop-money-panel .flow-intro {
+    margin: 22px 0;
+  }
+  :where(.terminal-host) .desktop-money-panel .flow-intro h1 {
+    font-size: 22px;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-recipient {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-recipient > div:last-child {
+    flex-basis: 100%;
+    text-align: left;
+    margin: 8px 0 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-form {
+    margin-top: 0;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-amount-label {
+    margin-top: 20px;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-amount-input {
+    font-size: 40px;
+    max-width: 100%;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-amount-input input {
+    min-width: 0;
+    max-width: calc(100% - 30px);
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-presets {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-presets button {
+    min-width: 0;
+  }
+  :where(.terminal-host) .desktop-money-panel .flow-actions {
+    margin-top: 20px;
+    padding-top: 0;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-review-amount {
+    margin: 24px 0;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-review-amount strong {
+    font-size: 36px;
+    overflow-wrap: anywhere;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-breakdown > div {
+    gap: 12px;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-breakdown dt {
+    max-width: 55%;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-breakdown dd {
+    text-align: right;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+}
+@media (min-width: 1100px) {
+  :where(.terminal-host) .desktop-money-panel .flow-top {
+    min-height: 28px;
+  }
+  :where(.terminal-host) .desktop-money-panel .flow-intro {
+    margin: 18px 0;
+  }
+  :where(.terminal-host) .desktop-money-panel .flow-intro > p {
+    margin-top: 8px;
+    line-height: 1.5;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-recipient > div:last-child {
+    flex-direction: row;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-recipient {
+    padding-bottom: 12px;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-presets {
+    margin: 16px 0 0;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-review-amount {
+    margin: 20px 0 12px;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-breakdown {
+    margin: 0;
+  }
+  :where(.terminal-host) .desktop-money-panel .fund-breakdown > div {
+    padding-block: 10px;
+  }
+}
+@media (min-width: 1100px) {
+  :where(.terminal-host) .desktop-money-panel .fund-review-amount {
+    gap: 6px;
+  }
+  :where(.terminal-host) .desktop-money-panel .flow-intro {
+    margin-block: 14px;
+  }
+}
+
+@media (min-width: 1100px) {
+  :where(.terminal-host) .sidebar-agent small.up {
+    color: var(--up);
+  }
+  :where(.terminal-host) .sidebar-agent small.down {
+    color: var(--down);
+  }
+}
+
+.terminal-host { min-height: 100svh; }
+.terminal-host .hosted-entry { padding: 20px; }
+.terminal-host .hosted-entry h2, .terminal-host .hosted-funding h2 { font-size: 22px; margin: 16px 0; }
+.terminal-host .hosted-entry p, .terminal-host .hosted-funding p { color: var(--tx-2); font-size: 14px; line-height: 1.6; margin: 16px 0; }
+.terminal-host .hosted-funding .flow-top { justify-content: space-between; }
+.terminal-host .hosted-funding .funding-address { overflow-wrap: anywhere; padding: 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--tx); user-select: all; }
+.terminal-host .recover-input { width: 100%; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--tx); margin: 12px 0; }
+.terminal-host .recover-btn { display: block; width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 10px 0; }
+.terminal-host .recover-btn.go { background: var(--tx); color: var(--ink); }
+.terminal-host .recover-err, .terminal-host .recover-warn { color: var(--down); }
+.terminal-host .recover-panel { min-width: 0; overflow-wrap: anywhere; }
+.terminal-host a.flow-primary { display: flex; text-decoration: none; }
+.terminal-host .hosted-account-links { display:flex; gap:16px; margin:16px 0; font-size:14px; }
+.terminal-host .create-agent { max-width: 560px; margin: 0 auto; padding: 4px 0 28px; }
+.terminal-host .create-heading { display:flex; align-items:center; gap:12px; color:var(--tx-2); font-size:14px; }
+.terminal-host .create-heading button { width:32px; height:32px; display:grid; place-items:center; }
+.terminal-host .create-steps { display:flex; gap:20px; padding:0; list-style:none; margin:28px 0; font-size:12px; color:var(--tx-2); }
+.terminal-host .create-steps li { display:flex; align-items:center; gap:6px; }
+.terminal-host .create-steps li > span { width:20px; height:20px; border:1px solid var(--line); border-radius:50%; display:grid; place-items:center; }
+.terminal-host .create-steps [aria-current] { color:var(--tx); }
+.terminal-host .create-steps [aria-current] > span { background:var(--tx); color:var(--ink); }
+.terminal-host .create-intro { margin:32px 0; }
+.terminal-host .create-intro .face { width:48px; height:48px; margin-bottom:16px; }
+.terminal-host .create-agent h1 { font-size:clamp(28px,3vw,36px); line-height:1.15; font-weight:600; letter-spacing:-.04em; margin:0 0 12px; }
+.terminal-host .create-agent p { font-size:14px; line-height:1.65; color:var(--tx-2); }
+.terminal-host .create-label, .terminal-host .create-limits label { display:block; font-size:13px; color:var(--tx-2); margin-bottom:10px; }
+.terminal-host .create-input { width:100%; padding:14px; color:var(--tx); background:var(--card); border:1px solid var(--line); border-radius:12px; font:inherit; margin:8px 0; }
+.terminal-host .create-strategies { border:0; padding:0; margin:28px 0; }
+.terminal-host .create-strategies legend, .terminal-host .create-mode legend { font-size:13px; color:var(--tx-2); margin-bottom:14px; }
+.terminal-host .create-strategies label { display:flex; gap:12px; align-items:center; cursor:pointer; padding:16px; margin:8px 0; border:1px solid var(--line); border-radius:12px; }
+.terminal-host .create-strategies label.selected { background:var(--card); border-color:var(--tx-2); }
+.terminal-host .create-strategies input { accent-color:var(--up); }
+.terminal-host .create-strategies strong { display:block; font-size:15px; font-weight:600; margin-bottom:6px; }
+.terminal-host .create-strategies small { display:block; font-size:13px; line-height:1.5; color:var(--tx-2); }
+.terminal-host .create-radio { margin-left:auto; width:18px; flex-shrink:0; color:var(--up); }
+.terminal-host .create-limits { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.terminal-host .create-mode { padding:0; border:0; margin:24px 0 12px; display:flex; gap:20px; }
+.terminal-host .create-mode label { display:flex; align-items:center; gap:8px; font-size:14px; }
+.terminal-host .create-check { display:flex; align-items:flex-start; gap:10px; font-size:14px; line-height:1.5; margin:22px 0; }
+.terminal-host .create-check input { margin-top:4px; accent-color:var(--up); }
+.terminal-host .create-secret { display:flex; gap:12px; align-items:center; padding:18px; background:var(--card); border:1px solid var(--line); border-radius:12px; }
+.terminal-host .create-secret code { overflow-wrap:anywhere; min-width:0; user-select:all; font-size:13px; line-height:1.8; }
+.terminal-host .create-secret button { flex-shrink:0; margin-left:auto; }
+.terminal-host .create-agent .flow-primary { gap:10px; margin-top:24px; }
+.terminal-host .create-agent .hosted-funding { margin:24px 0; padding:18px; border:1px solid var(--line); border-radius:14px; }
+.terminal-host .desktop-market-tabs { flex-wrap:wrap; }
+.terminal-host .account-balance .account-fund + .account-fund { margin-top:10px; background:var(--card); color:var(--tx); border:1px solid var(--line); }
+@media(max-width:600px) {
+  .terminal-host .create-steps { gap:12px; }
+  .terminal-host .create-agent { padding-bottom:30px; }
+}
+/* Account controls stay accessible from every desktop screen. */
+.terminal-host .desktop-settings-link {font-size:13px;color:var(--tx-2);padding:10px 0;white-space:nowrap;text-decoration:none;}
+.terminal-host .desktop-settings-link:hover {color:var(--tx);}
+.terminal-host .desktop-account-menu {position:relative;}
+.terminal-host .desktop-account-menu > summary {display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none;font-size:13px;white-space:nowrap;}
+.terminal-host .desktop-account-menu > summary::-webkit-details-marker {display:none;}
+.terminal-host .desktop-account-menu nav {position:absolute;right:0;top:calc(100% + 14px);z-index:100;width:210px;padding:7px;border:1px solid var(--line);border-radius:14px;background:var(--card);box-shadow:0 16px 40px #0006;}
+.terminal-host .desktop-account-menu nav a {display:block;padding:12px;border-radius:8px;font-size:14px;color:var(--tx);text-decoration:none;}
+.terminal-host .desktop-account-menu nav a:hover {background:var(--line);}
+.terminal-host .desktop-account-menu summary:focus-visible,.terminal-host .desktop-account-menu a:focus-visible,.terminal-host .desktop-settings-link:focus-visible {outline:2px solid var(--tx-2);outline-offset:3px;}
+@media(min-width:1100px){
+  .terminal-host .desktop-header {grid-template-columns:var(--sidebar-width) minmax(0,1fr) max-content;}
+  .terminal-host .desktop-header-account {gap:16px;white-space:nowrap;}
+  .terminal-host .desktop-header-account > * {flex-shrink:0;}
+}
+.terminal-host .ranking-help {margin:0 0 20px;color:var(--tx-2);font-size:12px;line-height:1.6;}
+.terminal-host .ranking-help summary {cursor:pointer;}
+.terminal-host .ranking-help p {margin:10px 0;}

@@ -1,0 +1,559 @@
+.public-agent-page,
+.money-flow {
+  min-width: 0;
+}
+.flow-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+.flow-back {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  font-size: 20px;
+  color: var(--tx);
+}
+.flow-demo {
+  margin-left: auto;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 10px;
+}
+.public-agent-id {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 28px 0 32px;
+}
+.public-agent-id .face.lg {
+  width: 64px;
+  height: 64px;
+  flex-shrink: 0;
+  border-radius: 21px;
+}
+.public-agent-id h1 {
+  margin: 0;
+  font-size: 27px;
+  line-height: 1.15;
+  letter-spacing: -0.055em;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.public-agent-id p {
+  margin: 7px 0 0;
+  font-size: 12px;
+  color: var(--tx-2);
+  overflow-wrap: anywhere;
+}
+.public-performance {
+  padding: 22px 20px 16px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--card);
+}
+.public-performance-numbers {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.public-return {
+  display: block;
+  font-family: var(--pixel);
+  font-size: 43px;
+  font-weight: 400;
+  letter-spacing: -0.065em;
+  margin-top: 7px;
+}
+.public-trade-count {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 7px;
+}
+.public-trade-count strong {
+  font-family: var(--sans);
+  font-size: 20px;
+  font-weight: 400;
+}
+.public-trade-count span {
+  color: var(--tx-2);
+  font-size: 10px;
+}
+.public-chart {
+  margin-top: 18px;
+}
+.public-chart .spark {
+  display: block;
+  width: 100%;
+  height: 100px;
+  margin: 0;
+}
+.public-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  color: var(--tx-2);
+  font-size: 10px;
+  margin-top: 8px;
+}
+.public-strategy {
+  padding: 27px 0;
+}
+.public-section-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.public-section-heading h2 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+}
+.public-section-heading > span {
+  font-size: 11px;
+  color: var(--tx-2);
+}
+.public-strategy .public-section-heading > span {
+  background: var(--raised);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+.public-strategy p {
+  border-left: 2px solid var(--lime);
+  padding-left: 14px;
+  margin: 17px 0 0;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--tx-2);
+}
+.public-section {
+  border-top: 1px solid var(--line);
+  padding: 24px 0;
+}
+.public-section > .public-section-heading {
+  margin-bottom: 16px;
+}
+.public-position {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 0;
+  text-align: left;
+}
+.public-position .coin {
+  width: 34px;
+  height: 34px;
+}
+.public-position > span:nth-child(2) {
+  flex: 1;
+}
+.public-position strong,
+.public-position small {
+  display: block;
+}
+.public-position strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+.public-position small {
+  font-size: 11px;
+  color: var(--tx-2);
+  margin-top: 3px;
+}
+.public-position > span:nth-child(3) {
+  font-size: 12px;
+  color: var(--tx-2);
+}
+.public-position > span:nth-child(4) {
+  font-size: 11px;
+  color: var(--faint);
+}
+.public-empty {
+  color: var(--tx-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.public-mentioned {
+  margin-top: 20px;
+}
+.public-mentioned > span {
+  font-size: 11px;
+  color: var(--tx-2);
+}
+.public-mentioned > div {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.public-mentioned button {
+  padding: 9px 12px;
+  min-height: 40px;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.public-event {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--line);
+}
+.public-event:first-child {
+  padding-top: 6px;
+}
+.public-event:last-child {
+  border-bottom: 0;
+  padding-bottom: 4px;
+}
+.public-event-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  background: var(--raised);
+  color: var(--tx-2);
+}
+.public-event-mark.buy {
+  background: #13251c;
+  color: var(--up);
+}
+.public-event-mark.sell {
+  background: #2d1920;
+  color: var(--down);
+}
+.public-event > div {
+  flex: 1;
+  min-width: 0;
+}
+.public-event-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+.public-event-heading strong {
+  font-weight: 600;
+}
+.public-event-heading > span {
+  font-family: var(--sans);
+  font-size: 12px;
+}
+.public-event-heading button {
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 4px;
+  min-height: 30px;
+}
+.public-event p {
+  margin: 7px 0 8px;
+  color: var(--tx-2);
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.public-event small {
+  color: var(--tx-2);
+  font-size: 10px;
+}
+.public-more {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  min-height: 46px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-top: 22px;
+  font-size: 12px;
+}
+.money-flow {
+  min-height: calc(100dvh - 140px);
+}
+.flow-intro {
+  margin: 35px 0 27px;
+}
+.flow-intro h1 {
+  font-size: 29px;
+  line-height: 1.15;
+  font-weight: 600;
+  letter-spacing: -0.055em;
+  max-width: 300px;
+  margin: 0;
+}
+.flow-intro > p {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--tx-2);
+  margin: 12px 0 0;
+  max-width: 310px;
+}
+.fund-recipient {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+.fund-recipient > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.fund-recipient > div:last-child {
+  margin-left: auto;
+  text-align: right;
+}
+.fund-recipient span {
+  font-size: 10px;
+  color: var(--tx-2);
+}
+.fund-recipient strong {
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.fund-amount-label {
+  display: block;
+  font-size: 12px;
+  color: var(--tx-2);
+  text-align: center;
+  margin-top: 35px;
+}
+.fund-amount-input {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  margin: 12px auto 0;
+  max-width: 100%;
+  font-size: 56px;
+  font-family: var(--pixel);
+}
+.fund-amount-input > span {
+  color: var(--tx-2);
+}
+.fund-amount-input input {
+  width: 5ch;
+  min-width: 0;
+  max-width: calc(100% - 1.5ch);
+  padding: 4px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  letter-spacing: -0.06em;
+}
+.fund-form > .flow-hint,
+.fund-form > .flow-error {
+  text-align: center;
+}
+.flow-hint {
+  font-size: 11px;
+  color: var(--tx-2);
+  line-height: 1.5;
+}
+.flow-error {
+  font-size: 12px;
+  color: var(--down);
+  line-height: 1.5;
+}
+.fund-presets {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 22px 0 30px;
+}
+.fund-presets button {
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 13px;
+}
+.fund-presets button[aria-pressed="true"] {
+  border-color: var(--lime);
+  color: var(--lime);
+  background: #181f0f;
+}
+.flow-notice {
+  border-left: 2px solid var(--line);
+  padding: 2px 0 2px 14px;
+  margin: 25px 0;
+}
+.flow-notice strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+.flow-notice p {
+  font-size: 12px;
+  color: var(--tx-2);
+  line-height: 1.65;
+  margin: 7px 0 0;
+}
+.flow-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 34px;
+}
+.flow-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 50px;
+  padding: 14px 18px;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--lime);
+}
+.flow-secondary {
+  min-height: 44px;
+  font-size: 13px;
+  color: var(--tx-2);
+}
+.flow-actions > .flow-hint {
+  text-align: center;
+  margin: 3px 0;
+}
+.fund-review-amount {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin: 36px 0;
+}
+.fund-review-amount > span {
+  font-size: 12px;
+  color: var(--tx-2);
+}
+.fund-review-amount strong {
+  font-family: var(--pixel);
+  font-size: clamp(30px, 10vw, 48px);
+  font-weight: 400;
+  letter-spacing: -0.06em;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+.fund-review-amount button {
+  font-size: 11px;
+  color: var(--tx-2);
+  min-height: 36px;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+.fund-breakdown {
+  margin: 0;
+}
+.fund-breakdown > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 0;
+  font-size: 12px;
+}
+.fund-breakdown dt {
+  color: var(--tx-2);
+}
+.fund-breakdown dd {
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.fund-breakdown .fund-result {
+  border-top: 1px solid var(--line);
+  margin-top: 6px;
+  padding-top: 20px;
+}
+.fund-result dd {
+  font-family: var(--sans);
+}
+.limit-field {
+  margin: 28px 0;
+}
+.limit-field label {
+  font-size: 14px;
+  font-weight: 600;
+}
+.limit-field > p {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--tx-2);
+  margin: 6px 0 12px;
+}
+.limit-field > .flow-error {
+  color: var(--down);
+}
+.limit-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  padding: 15px 18px;
+  font-family: var(--sans);
+  font-size: 24px;
+}
+.limit-input:focus-within {
+  border-color: var(--lime);
+}
+.limit-input > span {
+  color: var(--tx-2);
+}
+.limit-input input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+}
+.limit-input:has([aria-invalid="true"]) {
+  border-color: var(--down);
+}
+@media (hover: hover) {
+  .public-position:hover,
+  .public-more:hover,
+  .flow-back:hover,
+  .fund-presets button:hover {
+    background: var(--raised);
+  }
+  .public-event-heading button:hover {
+    color: var(--lime);
+  }
+}
+@media (max-width: 360px) {
+  .public-performance {
+    padding: 18px 14px;
+  }
+  .public-return {
+    font-size: 36px;
+  }
+  .public-agent-id h1 {
+    font-size: 24px;
+  }
+  .fund-recipient {
+    padding: 12px;
+    gap: 8px;
+  }
+}
