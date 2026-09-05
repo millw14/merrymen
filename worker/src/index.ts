@@ -5963,7 +5963,11 @@ async function main() {
     // fire; only an excess over it counts as a deposit.
     const autoConvertFreshMoney =
       lastGasWei !== null && latchAllowsFire(autoConvertLatch, lastGasWei, Date.now());
-    if (cfg.autoConvertEnabled || autoConvertDebugUntil > Date.now()) {
+    // The state line used to log on EVERY tick while the toggle was on —
+    // thousands of lines a day of nothing-happened. It now logs only inside
+    // the post-deposit debug window, next to the skip reasons: same
+    // diagnosability where it matters, silence everywhere else.
+    if (autoConvertDebugUntil > Date.now()) {
       console.log(
         `[auto-convert] state: enabled=${cfg.autoConvertEnabled} active=${!!active} ` +
           `chain=${chainCanTrade()} paper=${paperActive()} executor=${!!active?.executor} ` +
