@@ -45,7 +45,7 @@ import { getGrantStore } from "./grant-store";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
-import { CASH, isHostedMode, type MerrymenSettings } from "../../packages/core/src/index";
+import { CASH, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
@@ -62,6 +62,8 @@ import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { writePeersForChild } from "./peer-files";
+import { writeResearchForChild } from "./research-files";
+import { makeNewsDesk, type NewsDesk } from "./research-pass";
 import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
 import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
@@ -118,7 +120,20 @@ const ROOT = path.join(fileURLToPath(new URL(".", import.meta.url)), "..", "..")
  * grant database (the URL). Strip those; forward everything else so the child
  * still has PATH and the OS essentials node needs to run.
  */
-const CHILD_SECRET_STRIP = ["MERRYMEN_STORE_DEK", "MERRYMEN_SESSION_SECRET", "DATABASE_URL"] as const;
+const CHILD_SECRET_STRIP = [
+  "MERRYMEN_STORE_DEK",
+  "MERRYMEN_SESSION_SECRET",
+  "DATABASE_URL",
+  // THE NEWS PROVIDER TOKEN. A fourth kind of secret and it belongs here for a
+  // fourth reason: it is not what a child could misuse, it is what a child
+  // could LEAK. The whole point of fetching in the orchestrator is that the
+  // credential lives on one process that talks to one vendor; a child holding
+  // it could put it in a prompt, a decision row, a log line or a thesis, and
+  // any of those is a published key. Stripping it makes "the Brain service
+  // never sees this token" a fact about the process boundary rather than a
+  // claim about our own carefulness. See research-files.ts.
+  "MERRYMEN_MARKETAUX_API_KEY",
+] as const;
 
 /** Where a tenant's child keeps its own ~/.merrymen — isolated from every other. */
 export function childHome(tenant: string): string {
@@ -293,6 +308,11 @@ async function writeSettingsForChild(
     const home = childHome(tenant);
     mkdirSync(home, { recursive: true });
     writeFileSync(path.join(home, "settings.json"), JSON.stringify(settings, null, 2), { encoding: "utf8", mode: 0o600 });
+    // The universe this tenant may trade, kept for the news desk. Recorded here
+    // because this is the one place the orchestrator reads a tenant's settings,
+    // and it runs on every reconcile — so an owner who changes their basket
+    // changes what the desk asks about within a pass.
+    tenantWatchSymbols.set(tenant.toLowerCase(), equitySymbols(settings.basketSymbols));
     // Returned so the caller can size the watchdog to the tick THIS child will
     // read. Nothing else about the write changes.
     return settings;
@@ -1180,6 +1200,125 @@ async function runRepairIfAsked(shared: Db, plans: readonly AccountPlan[]): Prom
 }
 
 
+// ── THE NEWS DESK ──────────────────────────────────────────────────────────
+//
+// ONE DESK FOR THE WHOLE FLEET, living here rather than in the children, for
+// the reasons written out in research-files.ts. The short version is that the
+// worker is one process per tenant, so a cache in a child is a cache for one
+// agent, and the vendor allowance is measured in requests per day.
+
+/** Equity symbols each tenant is allowed to trade. Refreshed on every reconcile. */
+const tenantWatchSymbols = new Map<string, string[]>();
+/** Equity symbols each tenant actually holds. Read off the child ledger. */
+const tenantHeldSymbols = new Map<string, string[]>();
+/** Built on first use so a deployment with no token still logs why. */
+let fleetNewsDesk: NewsDesk | null = null;
+
+/**
+ * The equities among a list of symbols, deduped, order preserved.
+ *
+ * A MEMECOIN IS FILTERED OUT HERE AND THAT IS DELIBERATE. A news desk asked
+ * about a launchpad token returns either nothing or stories about an unrelated
+ * ticker that happens to collide, and both are worse than an honest absence.
+ * Instrument-specific desks are the rule; this is the rule's first enforcement
+ * point, before a request is spent rather than after.
+ */
+function equitySymbols(list: readonly unknown[] | undefined): string[] {
+  const known = new Set(STOCK_TOKENS.map((t) => t.symbol.toUpperCase()));
+  const out = new Set<string>();
+  for (const raw of list ?? []) {
+    const s = String(raw ?? "").trim().toUpperCase();
+    if (s && known.has(s)) out.add(s);
+  }
+  return [...out];
+}
+
+/** What this tenant holds, biggest position first. Best-effort and never throws. */
+async function heldEquitySymbols(db: Db): Promise<string[]> {
+  try {
+    const rows = (await db
+      .prepare("SELECT symbol FROM positions WHERE value_usdg > 0 ORDER BY value_usdg DESC")
+      .all()) as { symbol?: unknown }[];
+    return equitySymbols(rows.map((r) => r.symbol));
+  } catch {
+    // A child whose ledger predates the table, or is mid-rebuild. Its watch
+    // list still reaches the desk; only the held-first ordering is lost.
+    return [];
+  }
+}
+
+/**
+ * Refresh the fleet's news, then materialise each child's slice of it.
+ *
+ * NEVER FATAL AND NEVER BLOCKING. External research is additional evidence: a
+ * provider outage must leave the fleet trading exactly as it did before the
+ * feature existed, which is the same contract `writePeersFor` holds.
+ *
+ * The write happens on EVERY pass, not only when a fetch did. A child restarted
+ * by a deploy comes up with no research file at all, and the desk it would then
+ * report is "not-fetched" for everything — which is the honest answer to a
+ * question nobody asked, but the wrong one when the orchestrator has the answer
+ * sitting in memory.
+ */
+async function runNewsPass(): Promise<void> {
+  if (children.size === 0) return;
+  try {
+    if (!fleetNewsDesk) {
+      fleetNewsDesk = makeNewsDesk({
+        // Read here and nowhere else. CHILD_SECRET_STRIP removes it from every
+        // child's environment, so this process is the only one that holds it.
+        apiKey: process.env.MERRYMEN_MARKETAUX_API_KEY ?? "",
+        dailyLimit: Number(process.env.MERRYMEN_MARKETAUX_DAILY_LIMIT) || undefined,
+        articlesPerRequest: Number(process.env.MERRYMEN_MARKETAUX_LIMIT) || undefined,
+        // Unset by default: the derived window is chosen so the allowance lasts
+        // a whole day, and overriding it is how an operator on a paid tier buys
+        // a fresher desk — or how one on a shared key exhausts it.
+        windowSec: Number(process.env.MERRYMEN_MARKETAUX_WINDOW_SEC) || undefined,
+      });
+      log(`news: ${fleetNewsDesk.plan().why}`);
+    }
+
+    // HELD BEFORE WATCHED. "Should I trim what I own" is a question with a
+    // position behind it; "is this worth opening" is one of twenty-five
+    // candidates. When the allowance cannot cover both, the first wins.
+    const held: string[] = [];
+    const watch: string[] = [];
+    for (const tenant of children.keys()) {
+      const key = tenant.toLowerCase();
+      held.push(...(tenantHeldSymbols.get(key) ?? []));
+      watch.push(...(tenantWatchSymbols.get(key) ?? []));
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const r = await fleetNewsDesk.refresh([...held, ...watch], now);
+    if (r.log) log(r.log);
+
+    const state = fleetNewsDesk.state();
+    for (const tenant of children.keys()) {
+      const key = tenant.toLowerCase();
+      const mine = new Set([...(tenantHeldSymbols.get(key) ?? []), ...(tenantWatchSymbols.get(key) ?? [])]);
+      try {
+        writeResearchForChild(childHome(tenant), {
+          at: now,
+          news: {
+            // FILTERED TO THIS TENANT'S OWN UNIVERSE. A symbol this agent
+            // cannot trade is not evidence for it, and `asked` is filtered with
+            // the items so the desk's not-fetched/quiet distinction stays true
+            // per tenant rather than only fleet-wide.
+            asked: state.asked.filter((s) => mine.has(s)),
+            fetchedAt: state.fetchedAt,
+            failure: state.failure,
+            items: state.items.filter((it) => it.symbols.some((s) => mine.has(s))),
+          },
+        });
+      } catch (e) {
+        log(`news: ${tenant} write failed — ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  } catch (e) {
+    log(`news: pass failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function mirrorLedgers(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url || children.size === 0) return;
@@ -1206,6 +1345,10 @@ async function mirrorLedgers(): Promise<void> {
     if (!handle) continue;
     try {
       const r = await mirrorTenant({ tenant, child: handle.db, shared });
+      // Read while the handle is open, on the mirror's clock. The news desk
+      // asks about what the fleet holds before what it merely may buy, and this
+      // is the only place the orchestrator can see the difference.
+      tenantHeldSymbols.set(tenant.toLowerCase(), await heldEquitySymbols(handle.db));
       const n = Object.values(r.copied).reduce((a, b) => a + b, 0);
       // A FAILED TABLE IS LOUDER THAN A QUIET ONE.
       //
@@ -1389,6 +1532,10 @@ export async function runOrchestrator(): Promise<void> {
       await reconcile();
       watchdog();
       await mirrorLedgers();
+      // AFTER the mirror, because the mirror is what tells the desk which
+      // symbols the fleet actually holds. Its own TTL decides whether this
+      // costs a vendor request; most passes it costs a file write.
+      await runNewsPass();
       // AFTER THE MIRROR HAS SETTLED, NOT AT STARTUP, and once.
       //
       // The mirror REPLACES positions per agent, so between a child restarting

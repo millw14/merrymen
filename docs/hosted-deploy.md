@@ -111,6 +111,36 @@ Then on the **orchestrator**:
 > Raise `MERRYMEN_LLM_INTERVAL_MIN` with it — the scout consumed an entire
 > day's shared token allowance on 2026-08-31 and took user chat down with it.
 
+### The news desk (optional)
+
+External news for the equity instruments the fleet holds and watches. The
+orchestrator fetches, caches and materialises it into each child's home; a child
+never calls the provider and never holds the token.
+
+| Var | Value |
+|---|---|
+| `MERRYMEN_MARKETAUX_API_KEY` | the provider token — **orchestrator only** |
+| `MERRYMEN_MARKETAUX_DAILY_LIMIT` *(optional)* | requests the plan allows per day, default `100` |
+| `MERRYMEN_MARKETAUX_LIMIT` *(optional)* | articles one request may return, default `3` (the free tier's ceiling) |
+| `MERRYMEN_MARKETAUX_WINDOW_SEC` *(optional)* | refresh interval; derived from the allowance when unset |
+
+> **Put the key on the orchestrator and nowhere else.** `CHILD_SECRET_STRIP`
+> removes it at fork, alongside the DEK, the session secret and `DATABASE_URL`,
+> so no tenant worker and no Brain prompt can contain it. Setting it on `web` or
+> on the Brain service does nothing except create a credential that did not need
+> to exist.
+>
+> The refresh window is DERIVED from the allowance so it lasts a whole day —
+> at `100`/day that is roughly a sixteen-minute desk. Setting
+> `MERRYMEN_MARKETAUX_WINDOW_SEC` overrides that and is the one way to spend the
+> allowance before the day ends; the desk then reports `budget-exhausted` rather
+> than quietly reporting no news.
+>
+> `MERRYMEN_MARKETAUX_LIMIT` also caps how many symbols one request may name,
+> and that is deliberate: asking about eight symbols on a tier that returns three
+> stories means five symbols come back empty, and a symbol we could not hear
+> about must be reported as *not asked*, never as *quiet*.
+
 ## 5. Create the two services
 Both build from the same repo + `Dockerfile`. The image is role-by-variable: its
 `CMD` runs `npm run ${MERRYMEN_START:-start:web}`, and `railway.json` sets no

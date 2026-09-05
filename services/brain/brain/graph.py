@@ -489,9 +489,16 @@ def _lenses_for(instrument_class: str) -> list[str]:
     a memecoin has liquidity and a crowd. Running an earnings analyst on a
     memecoin produces confident text about nothing.
     """
+    #
+    # `news-sentiment` is its own lens and not a paragraph inside `news`. The
+    # two answer different questions — what happened, and how a data provider
+    # scored the tone of the reporting — and an analyst handed them together
+    # cannot separate the observation from somebody else's verdict about it.
+    # It sits beside `sentiment`, which on this fleet is what other Merrymen
+    # published; those are also different things and are also not merged.
     return {
-        "equity-token": ["technical", "news", "sentiment", "fundamentals"],
-        "crypto-native": ["technical", "onchain", "news", "sentiment"],
+        "equity-token": ["technical", "news", "news-sentiment", "sentiment", "fundamentals"],
+        "crypto-native": ["technical", "onchain", "news", "news-sentiment", "sentiment"],
         "memecoin": ["technical", "onchain", "social", "liquidity"],
         "stablecoin": ["peg", "liquidity", "reserve"],
     }.get(instrument_class, ["technical", "news"])

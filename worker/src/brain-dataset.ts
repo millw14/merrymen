@@ -214,6 +214,26 @@ export function datasetLines(runs: readonly RunView[]): string[] {
       `— blind means EVERY lens returned no-data, which is not a considered hold`,
   );
   out.push(`lens verdicts  ${JSON.stringify(lensDirs)}`);
+
+  // PER-LENS COVERAGE, which is the question the research programme is actually
+  // being judged on. `lens verdicts` above says how many readings were no-data;
+  // it cannot say WHICH DESK was empty, and "the technical lens now reads and
+  // the news lens still does not" is the entire difference between research
+  // that landed and research that was merely added.
+  const coverage = new Map<string, { read: number; total: number }>();
+  for (const r of runs) {
+    for (const l of r.lenses) {
+      const c = coverage.get(l.lens) ?? { read: 0, total: 0 };
+      c.total += 1;
+      if (l.direction !== "no-data") c.read += 1;
+      coverage.set(l.lens, c);
+    }
+  }
+  const byLens = [...coverage.entries()]
+    .sort((a, b) => b[1].read / b[1].total - a[1].read / a[1].total || a[0].localeCompare(b[0]))
+    .map(([lens, c]) => `${lens} ${c.read}/${c.total} (${pct(c.read, c.total)})`)
+    .join(" · ");
+  out.push(`lens coverage  ${byLens || "no lens recorded a reading"}`);
   out.push(
     `confidence     median ${median.toFixed(2)} · min ${(conf[0] ?? 0).toFixed(2)} · max ${(conf[conf.length - 1] ?? 0).toFixed(2)}`,
   );

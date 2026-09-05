@@ -96,6 +96,8 @@ import { runShadow, type ShadowInputs } from "./brain-shadow";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { readFeedHistory } from "./read-feed-history";
 import { buildTechnical, renderTechnical } from "./research/technical";
+import { newsDesk } from "./research/news";
+import { readResearch } from "./research-files";
 import { STEADY_SWAP_GAS_UNITS, expectedTradeGasUsdg } from "./execution-cost";
 import { chooseFocus, focusLabel } from "./brain-focus";
 import { shadowBrainEnabledFor } from "./brain-enabled";
@@ -5401,6 +5403,26 @@ async function main() {
           const brainPeers = wire.theses;
           const brainOwn = wire.own ?? [];
           const sentiment = sentimentLine(brainPeers, focus.symbol);
+
+          // ── THE NEWS DESK ────────────────────────────────────────────────
+          //
+          // Materialised by the orchestrator, which holds the provider token
+          // this process deliberately does not have (CHILD_SECRET_STRIP). Read
+          // as a file for the same four reasons `peer-files.ts` gives, and
+          // filtered to `publishedAt <= now` inside `newsDesk` so a fetch that
+          // landed after this moment cannot reach a decision dated before it.
+          //
+          // `coverage` is the honesty field: "we asked and the tape was quiet"
+          // and "nobody ever asked" are both no-data to an analyst and are
+          // completely different facts about us.
+          const research = readResearch(merrymenHome());
+          const desk = newsDesk({
+            symbol: focus.symbol,
+            asOf: Math.floor(Date.now() / 1000),
+            asked: research.news.asked,
+            failure: research.news.failure,
+            items: research.news.items,
+          });
           const inputs: ShadowInputs = {
             agentId,
             now: Math.floor(Date.now() / 1000),
@@ -5491,6 +5513,21 @@ async function main() {
                 technical: technicalSeries
                   ? `${renderTechnical(technicalSeries)}\n${positionContext(focusView)}`
                   : technicalLine(focusView),
+                // REAL HEADLINES, with a publisher and a timestamp, or nothing.
+                //
+                // Omitted when the desk has nothing to say, so the service
+                // answers NO DATA AVAILABLE — the established discipline. The
+                // one exception is a genuinely quiet window, which `newsDesk`
+                // states in a sentence, because "we asked and there was no
+                // news" is evidence and silence about it is not.
+                ...(desk.news ? { news: desk.news } : {}),
+                // NEWS SENTIMENT IS A SEPARATE INPUT from the news itself,
+                // even though one provider supplies both. A headline is an
+                // observation; a sentiment score is a data company's verdict
+                // about that observation, and merged they would arrive wearing
+                // each other's authority. The key is `news-sentiment` and the
+                // block says in its first line that it is not social sentiment.
+                ...(desk.newsSentiment ? { "news-sentiment": desk.newsSentiment } : {}),
                 // The only genuine sentiment this fleet has: what other
                 // Merrymen actually published. OMITTED ENTIRELY when nobody
                 // said anything — an empty section reads as "we looked and
@@ -5526,7 +5563,16 @@ async function main() {
               : history.read
                 ? "no rounds published for this feed"
                 : "the feed history could not be read";
-            console.log(`[${short(agentId)}] [brain] about ${focusLabel(focus)} · technical: ${series}`);
+            // WHICH KIND OF NOTHING, in the line an operator actually reads.
+            // `not-fetched` is our own gap and must never be quietly reported
+            // as an absence of news; the age says whether a "quiet window" was
+            // measured minutes or hours ago.
+            const fetched = research.news.fetchedAt;
+            const newsAge = fetched > 0 ? `${Math.round((Date.now() / 1000 - fetched) / 60)}m old` : "never fetched";
+            console.log(
+              `[${short(agentId)}] [brain] about ${focusLabel(focus)} · technical: ${series} · ` +
+                `news: ${desk.coverage} (${desk.itemCount} story/stories, ${newsAge})`,
+            );
           }
         }
       } catch (e) {
