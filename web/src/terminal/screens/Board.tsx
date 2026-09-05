@@ -130,7 +130,7 @@ function Rank({
             {you && <i className="tag on">you</i>}
           </div>
           <div className="rank-meta">
-            <Stamp>{strategyName(a.glance.id)}</Stamp>
+            <Stamp>{a.glance.known === false ? "Strategy not published" : strategyName(a.glance.id)}</Stamp>
             <span className="rank-trades">{a.landed} trades</span>
           </div>
         </div>

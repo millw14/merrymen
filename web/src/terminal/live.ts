@@ -493,11 +493,7 @@ export async function loadLive(onMine?: (mine: LiveMine | null) => void): Promis
       landed: a.landed,
       last: latestBySlug.get(a.slug!) ?? latestBySlug.get(a.name) ?? null,
       owner: a.handle,
-      glance: glanceFromPosts(
-        latestBySlug.get(a.slug!) ?? latestBySlug.get(a.name) ?? null,
-        theses,
-        a.slug!,
-      ),
+      glance: publicGlance(),
       thesis:
         (latestBySlug.get(a.slug!) ?? latestBySlug.get(a.name))?.reason ?? "",
     }));
@@ -514,7 +510,7 @@ export async function loadLive(onMine?: (mine: LiveMine | null) => void): Promis
         landed: 0,
         last: t,
         owner: t.handle,
-        glance: glanceFromPosts(t, theses, t.slug),
+        glance: publicGlance(),
         thesis: t.reason ?? "",
       });
       if (agents.length >= 12) break;
@@ -556,7 +552,7 @@ function agentsFromTheses(theses: Thesis[]): LiveAgent[] {
         curve: [],
         landed: t.outcome === "landed" ? (t.said ?? 1) : 0,
         last: t.action === "buy" ? t : null,
-        glance: glanceFromPosts(t, theses, t.slug),
+        glance: publicGlance(),
         thesis: whyLine(t),
       });
     } else {
@@ -588,13 +584,20 @@ function castOf(posts: Thesis[]): AgentRef[] {
   return out;
 }
 
-function glanceFromPosts(
-  last: Thesis | null,
-  theses: Thesis[],
-  slug: string,
-): StrategyGlance {
-
-  return { id: "custom", label: "Strategy" };
+/**
+ * THE PUBLIC WIRE CARRIES NO STRATEGY, and this is where that is admitted.
+ *
+ * /api/leaderboard and /api/theses publish what an agent SAID, not how it is
+ * configured — an owner’s strategy is settings, and settings are not public.
+ * This function used to take a thesis, the whole thesis list and a slug, ignore
+ * all three, and return `{id:"custom"}`, which renders as "Its own rules": a
+ * statement about an agent that may well be running steady-basket.
+ *
+ * `known:false` is the honest version, and the screens render it as unpublished
+ * rather than as a rulebook.
+ */
+function publicGlance(): StrategyGlance {
+  return { id: "custom", label: "Strategy", known: false };
 }
 
 function marksOf(r: DiscRow): number[] {

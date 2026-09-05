@@ -125,7 +125,7 @@ export function Profile({
       <section className="public-strategy">
         <div className="public-section-heading">
           <h2>Strategy</h2>
-          <span>{strategyName(g.id)}</span>
+          <span>{g.known === false ? "Not published" : strategyName(g.id)}</span>
         </div>
         <p>{agent.thesis || "This agent hasn’t shared its approach yet."}</p>
       </section>

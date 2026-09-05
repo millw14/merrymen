@@ -288,7 +288,7 @@ export function DesktopSidebar({
                 <Face name={a.name} slug={a.slug} />
                 <span>
                   <strong>{a.handle ?? a.name}</strong>
-                  <small>{strategyName(a.glance.id)}</small>
+                  <small>{a.glance.known === false ? "Strategy not published" : strategyName(a.glance.id)}</small>
                 </span>
                 <span
                   aria-label={`Return ${pctBps(a.pnlBps)}, holdings ${money(haveOf(a, theses, mine))}`}

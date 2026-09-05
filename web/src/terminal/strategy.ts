@@ -35,6 +35,17 @@ export interface DipWatch {
 
 export interface StrategyGlance {
   id: StrategyId;
+  /**
+   * IS THAT ACTUALLY THIS AGENT’S RULEBOOK, or just the default we fell back to?
+   *
+   * The public wire carries no strategy — /api/leaderboard and /api/theses
+   * publish what an agent SAID, not how it is configured. The terminal filled
+   * the gap with `{id:"custom"}`, and "custom" renders as "Its own rules",
+   * which is a claim: an agent running steady-basket was published as running
+   * its own. Absent when the value is real (the owner’s own agent, read from
+   * settings); false when nobody told us.
+   */
+  known?: boolean;
   /** Short, human. Shown next to the agent's name. */
   label: string;
   legs?: BasketLeg[];
@@ -119,13 +130,19 @@ export function stampFor(slug: string, glance?: StrategyId | null): string {
   return strategyName(strategyForSlug(slug, glance));
 }
 
-/** One strategy per agent. Do not collapse everyone onto the schedule. */
-export function strategyForSlug(slug: string, glance?: StrategyId | null): StrategyId {
-
-  if (glance && glance !== "custom") return glance;
-  let h = 2166136261;
-  for (let i = 0; i < slug.length; i++) h = Math.imul(h ^ slug.charCodeAt(i), 16777619);
-  return STRATEGY_IDS[(h >>> 0) % STRATEGY_IDS.length]!;
+/**
+ * The strategy we were told this agent runs, or "custom" when we were told
+ * nothing.
+ *
+ * IT USED TO HASH THE SLUG. With no strategy on the public wire the `glance`
+ * argument was always "custom", so the guard never fired and every public agent
+ * was assigned one of the seven rulebooks by FNV-1a of its slug — stable,
+ * plausible, and unrelated to anything it actually runs. Nothing rendered it at
+ * the time, which is the only reason this was not a published lie; leaving a
+ * fabrication one `{actor.strategy}` away from a screen is not a defence.
+ */
+export function strategyForSlug(_slug: string, glance?: StrategyId | null): StrategyId {
+  return glance ?? "custom";
 }
 
 export function ownerTag(handle: string | null | undefined): string {
