@@ -13,3 +13,8 @@ export * from "./safe-url";
 export * from "./robinhood-oauth";
 export * from "./flow-evidence";
 export * from "./capital-classify";
+
+// THE CANONICAL PORTFOLIO SNAPSHOT. One type, one builder, four consumers —
+// worker, web, social and Brain. Exported from core precisely so none of them
+// can grow its own NAV or P&L implementation.
+export * from "./portfolio-snapshot";
