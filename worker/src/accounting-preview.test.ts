@@ -11,6 +11,7 @@ import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
 import {
   accountPreviewLines,
+  previewRequested,
   parsePreviewRequest,
   previewAccount,
   rosterLines,
@@ -297,5 +298,39 @@ describe("the run id is a real timestamp in production", () => {
     const call = src.match(/parsePreviewRequest\([^)]*\)/);
     assert.ok(call, "the orchestrator still calls parsePreviewRequest");
     assert.match(call[0], /Date\.now\(\)/, "and hands it a clock");
+  });
+});
+
+describe("the report has to fit in the window you can read it in", () => {
+  it("knows a preview was asked for before deciding how much else to print", () => {
+    // `railway logs` is a 503-line snapshot, not a stream, and the ledger mirror
+    // alone writes ~200 lines a minute. The per-account dump was ~12 lines each —
+    // 288 for a 24-tenant fleet — and the preview then added its own on top, so
+    // the combined burst pushed itself out of the window and neither could be
+    // read. This is what lets the caller print one report instead of two.
+    assert.equal(previewRequested({}), false);
+    assert.equal(previewRequested({ MERRYMEN_REPAIR: "" }), false);
+    assert.equal(previewRequested({ MERRYMEN_REPAIR: "   " }), false);
+    assert.equal(previewRequested({ MERRYMEN_REPAIR: "dry-run" }), true);
+    // A REFUSED request still counts as asked, so the refusal is not buried
+    // under three hundred lines of something nobody wanted.
+    assert.equal(previewRequested({ MERRYMEN_REPAIR: "commit" }), true);
+  });
+
+  it("bounds the fleet report to one line per tenant plus one block", () => {
+    // The roster is the fleet answer; the four-part block is the account answer.
+    // 24 tenants scoped to one account is 24 + 1 + ~20 lines, which fits.
+    const plans = Array.from({ length: 24 }, (_, i) =>
+      i === 0 ? canaryPlan() : plan({ smartAccount: `0x${i.toString(16).padStart(40, "0")}` }),
+    );
+    const previews = runPreview(plans, { account: CANARY });
+    const roster = rosterLines(previews);
+    const blocks = previews.filter((p) => p.selected).flatMap((p) => {
+      const pl = plans.find((x) => x.smartAccount === p.account)!;
+      return accountPreviewLines(pl, p);
+    });
+    assert.equal(roster.length, 25, "one line per tenant, plus the total");
+    assert.equal(previews.filter((p) => p.selected).length, 1, "only the named account gets a block");
+    assert.ok(roster.length + blocks.length < 100, `report is ${roster.length + blocks.length} lines, well inside 503`);
   });
 });

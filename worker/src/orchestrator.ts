@@ -52,7 +52,7 @@ import { deriveBootstrapAccounting } from "./bootstrap-source";
 import { diagnoseAccounting, diagnosisLines } from "./accounting-diagnosis";
 import { planReconstruction, reconstructionLines } from "./accounting-reconstruction";
 import type { AccountPlan } from "./accounting-reconstruction";
-import { accountPreviewLines, parsePreviewRequest, rosterLines, runPreview } from "./accounting-preview";
+import { accountPreviewLines, parsePreviewRequest, previewRequested, rosterLines, runPreview } from "./accounting-preview";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
@@ -813,8 +813,23 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     }
 
     const plans = planReconstruction({ agents, flows, equityByAccountEpoch, chain, onchainCash, tenantByAccount });
-    for (const line of reconstructionLines(plans)) log(`recon| ${line}`);
 
+    // ONE REPORT, NOT TWO — AND IT HAS TO FIT IN THE WINDOW YOU CAN READ IT IN.
+    //
+    // `railway logs` is a 503-line snapshot rather than a stream (measured: it
+    // returns 503 lines and does not grow), and the ledger mirror alone writes
+    // ~200 lines a minute. The old dump was ~12 lines per account unconditionally
+    // — 288 for this fleet — and the preview then added its own on top, so the
+    // combined burst pushed itself out of the window and nobody could read
+    // either. A report that cannot be retrieved is not a report.
+    //
+    // So when a preview is asked for, IT is the report: one roster line per
+    // tenant plus the four-part block for the account under examination. The
+    // older per-account dump stays for a bare reconstruction with no preview,
+    // which is the only caller that still wants it.
+    if (!previewRequested(process.env)) {
+      for (const line of reconstructionLines(plans)) log(`recon| ${line}`);
+    }
     runPreviewIfAsked(plans);
   } catch (e) {
     log(`reconstruction dry run failed — ${e instanceof Error ? e.message : String(e)}`);

@@ -74,6 +74,18 @@ export function parsePreviewRequest(
   };
 }
 
+/**
+ * Was a preview asked for at all?
+ *
+ * Separate from parsing it, because the caller needs the answer BEFORE it
+ * decides how much else to print — and a refused request still counts as asked,
+ * so the refusal is not buried under three hundred lines of something nobody
+ * wanted.
+ */
+export function previewRequested(env: Record<string, string | undefined>): boolean {
+  return (env.MERRYMEN_REPAIR ?? "").trim() !== "";
+}
+
 /** Which of the three outcomes this account falls into. Total over every plan. */
 export function rosterOutcome(plan: AccountPlan): RosterOutcome {
   // BLOCKED FIRST. An account the classifier could not resolve must not be
