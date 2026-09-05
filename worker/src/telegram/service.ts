@@ -26,7 +26,7 @@ import { PC_CAPABILITIES } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { ensureHome, homePaths } from "../home";
 import { loadGrantFile } from "../grant";
-import { esc, getFileUrl, getMe, getUpdates, sendMessage, type TgMessage } from "./api";
+import { esc, getFileUrl, getMe, getUpdates, sendMessage, setMyCommands, publicBotCommands, type TgMessage } from "./api";
 import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
@@ -117,6 +117,11 @@ const HISTORY_TURNS = 6; // user+assistant pairs kept per chat for follow-ups
 /** Start the poll loop. Returns a stop() handle. */
 export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   let stopped = false;
+  /** Fingerprint (token + allowlist) whose "/" command menus are live — avoids
+   * re-setting every poll and re-pushes when /link grows the allowlist. */
+  let commandsRegisteredKey = "";
+  /** One warn per config fingerprint until a clean menu push (no per-poll spam). */
+  let menuWarned = false;
   const stateRef = deps.stateRef;
   let warnedUnreachable = false;
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
@@ -643,6 +648,35 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     const cfg = deps.getCfg();
     if (!cfg.telegramEnabled || !cfg.telegramBotToken) return; // idle until enabled
     stateRef.set(ensureLinkCode(stateRef.get(), cfg.telegramBotToken));
+
+    // Push the "/" command menus whenever the token or allowlist changed
+    // (enable-after-start, /link growing the allowlist). Two scopes: a trimmed
+    // safe menu for every private chat — strangers get signposts, not an
+    // advertisement of the remote-control surface — and the FULL menu for each
+    // allowlisted chat, so owners keep discoverability (/run, /type, /agent…).
+    // The fingerprint is stored only after a clean pass, so one transient
+    // network failure at startup retries on the next poll instead of silently
+    // dropping the menu until a restart. Best-effort — never breaks the poll.
+    if (cfg.telegramBotToken) {
+      const key = `${cfg.telegramBotToken}:${[...cfg.telegramAllowlist].sort((a, b) => a - b).join(",")}`;
+      if (key !== commandsRegisteredKey) {
+        const token = cfg.telegramBotToken;
+        let firstFail: string | null = null;
+        const pub = await setMyCommands({ token }, publicBotCommands, { type: "all_private_chats" });
+        if (!pub.ok) firstFail = firstFail ?? pub.reason ?? "public menu failed";
+        for (const chatId of cfg.telegramAllowlist) {
+          const r = await setMyCommands({ token }, undefined, { type: "chat", chat_id: chatId });
+          if (!r.ok) firstFail = firstFail ?? `chat ${chatId} — ${r.reason ?? "full menu failed"}`;
+        }
+        if (!firstFail) {
+          commandsRegisteredKey = key;
+          menuWarned = false;
+        } else if (!menuWarned) {
+          menuWarned = true; // retried on every poll until it lands — but logged once
+          deps.note("warn", `Telegram: command menu — ${firstFail}`);
+        }
+      }
+    }
 
     const { messages, nextOffset, reason } = await getUpdates({ token: cfg.telegramBotToken }, stateRef.get().offset);
     if (reason) {
