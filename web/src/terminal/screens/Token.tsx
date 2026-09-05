@@ -18,6 +18,7 @@ import {
   type LiveAgent,
   type LiveToken,
   type Thesis,
+  deltaClass,
 } from "../live";
 import { TvChart } from "../tv";
 import { Coin, Face } from "../ui";
@@ -387,7 +388,7 @@ export function Token({
                       </button>
                     </td>
                     <td>{money(seat.position)}</td>
-                    <td className={(seat.pnlBps ?? 0) < 0 ? "down" : "up"}>
+                    <td className={deltaClass(seat.pnlBps)}>
                       {pctBps(seat.pnlBps)}
                     </td>
                     <td>{coinPrice(seat.avgEntry || null)}</td>

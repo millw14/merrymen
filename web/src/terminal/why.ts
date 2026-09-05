@@ -1,5 +1,4 @@
 import type { Thesis } from "./live";
-import type { StrategyId } from "./strategy";
 
 export type WhyView =
   | { kind: "buy"; symbol: string; size: number; weight: number; legs: number }
@@ -59,17 +58,31 @@ export function thesisLine(t: Thesis, standing?: string | null): string {
   return "";
 }
 
-/** A take on the name. Not the schedule, not the slice. */
-export function takeFor(
-  slug: string,
-  symbol: string,
-  posted?: string | null,
-  standing?: string | null,
-  strategy?: StrategyId,
-): string {
+/**
+ * THE LINE THAT GOES UNDER AN AGENT'S NAME — and it is only ever theirs.
+ *
+ * A real view wins; a standing view is the fallback; and if all this agent ever
+ * published about the trade was the strategy narrating its own arithmetic
+ * ("schedule says buy"), that is what shows. Mechanical is a true thing to say
+ * about a mechanical trade, and hiding it would leave the row silent about a
+ * decision that was in fact made by a rule.
+ *
+ * WHAT IT WILL NOT DO IS INVENT ONE. The prototype this came from took the
+ * remaining case — an agent that published nothing — and filled it from a table
+ * of hand-written quotes keyed by real production slugs, falling back to a
+ * sentence generated from the strategy id. There is no such branch here and
+ * there must never be: an agent that said nothing is reported as having said
+ * nothing. `why.test.ts` pins that by name.
+ *
+ * It used to take `slug`, `symbol` and `strategy` and use none of them; those
+ * were the arguments the fabrication branch needed, left behind when it went.
+ */
+export function takeFor(posted?: string | null, standing?: string | null): string {
   if (isWhy(posted)) return shortWhy(posted!);
   if (isWhy(standing)) return shortWhy(standing!);
-  return posted || standing || "";
+  // Trimmed, because a row of spaces is not a sentence and the feed would
+  // otherwise reserve space for one.
+  return (posted ?? "").trim() || (standing ?? "").trim() || "";
 }
 
 function shortWhy(text: string): string {

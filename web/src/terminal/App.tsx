@@ -66,6 +66,22 @@ function subscribeDesktop(onChange: () => void) {
 export function App() {
   const bodyRef = useRef<HTMLDivElement>(null);
   const [live, setLive] = useState<LiveState>(seedLive);
+  /**
+   * HAS THE MARKET LIST COME BACK YET?
+   *
+   * Without this the shell cannot tell three different facts apart, and it told
+   * the worst of them: `live` starts as an empty seed, so every token screen
+   * rendered "We could not load this token" for the whole of the first fetch —
+   * a definitive claim of failure made about a request that was still in
+   * flight. The token page for TSLA said it while the sidebar beside it showed
+   * TSLA at $355.48.
+   *
+   * The three states are: still loading, the load failed, and the load
+   * succeeded and this address is not on the list. They have different remedies
+   * — wait, retry, and check the address — and a screen that renders one of them
+   * for all three is guessing on the user's behalf.
+   */
+  const [liveLoaded, setLiveLoaded] = useState(false);
   const router = useRouter();
   const pathname = usePathname() ?? "/";
   const requestedScreen = useMemo(()=>screenForPath(pathname),[pathname]);
@@ -122,9 +138,14 @@ export function App() {
         if (!alive) return;
         loaded = data;
         setLive(data);
+        setLiveLoaded(true);
         void refreshChanges(data.tokens);
       })
-      .catch((error) => {if(alive)setLoadError(error.message);});
+      // SET ON BOTH ARMS, deliberately. "The fetch finished" is what the screens
+      // need to know; whether it finished well is `loadError`'s job. Setting it
+      // only on success would leave a failed load looking identical to one that
+      // is still running, which is the same conflation one level down.
+      .catch((error) => {if(alive){setLoadError(error.message);setLiveLoaded(true);}});
     const refresh = async () => {
       if (!loaded || refreshing || document.hidden) return;
       refreshing = true;
@@ -300,7 +321,24 @@ export function App() {
             mine={mine}
           />
         )}
-        {screen.kind === "token" && !token && <section className="hosted-entry"><h1>Token unavailable</h1><p role="status">We could not load this token.</p><button onClick={refreshAccount}>Try again</button><button onClick={()=>goTab("home")}>Back to markets</button></section>}
+        {/* THREE STATES, NOT ONE — see `liveLoaded`. Waiting is not failing, and
+            a market list that came back without this address is a fact about the
+            address rather than a fact about the request. */}
+        {screen.kind === "token" && !token && !liveLoaded && (
+          <section className="hosted-entry"><p role="status">Loading token…</p></section>
+        )}
+        {screen.kind === "token" && !token && liveLoaded && (
+          <section className="hosted-entry">
+            <h1>{loadError ? "Token unavailable" : "Token not listed"}</h1>
+            <p role="status">
+              {loadError
+                ? "We could not load the market list, so we cannot show this token."
+                : "The market list came back without this token. Check the address, or it may not be tradable here."}
+            </p>
+            {loadError && <button onClick={refreshAccount}>Try again</button>}
+            <button onClick={()=>goTab("home")}>Back to markets</button>
+          </section>
+        )}
         {screen.kind === "token" && token && (
           <Token
             key={token.id}

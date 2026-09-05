@@ -699,6 +699,11 @@
   color: var(--down);
 }
 
+/* A change we could not read. Not green, not red — see `deltaClass` in live.ts. */
+:where(.terminal-host) .flat {
+  color: var(--faint);
+}
+
 :where(.terminal-host) .meta {
   margin: 2px 0 0;
   color: var(--tx-2);

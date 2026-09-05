@@ -96,7 +96,7 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
       actor,
       at: t.at,
       sizeUsd: sizeOf(t),
-      reason: takeFor(actor.slug, t.symbol, t.reason, bySlug.get(actor.slug)?.thesis, actor.strategy),
+      reason: takeFor(t.reason, bySlug.get(actor.slug)?.thesis),
       action,
       symbol,
     });

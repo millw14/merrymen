@@ -35,8 +35,17 @@ export interface LiveToken {
   change24hPct: number | null;
   fdvUsd: number | null;
   holders: number | null;
-  agents: number;
-  buys: number;
+  /**
+   * How many agents hold it, and how many bought it in the window.
+   *
+   * NULL UNTIL THE LEDGER ANSWERS. These shipped as a literal `0` on the seeded
+   * row while `holders` beside them was correctly null, so an unloaded market
+   * table stated "0 agents hold this" about twenty-five real listed instruments
+   * — and then stated exactly the same thing once the ledger came back and the
+   * answer really was zero. Two different facts, one rendering.
+   */
+  agents: number | null;
+  buys: number | null;
   kind: "stock" | "etf" | "memecoin";
   marks: number[];
   cast: AgentRef[];
@@ -140,6 +149,23 @@ export function pctPts(n: number | null): string {
   return `${n > 0 ? "+" : ""}${n.toFixed(n >= 100 || n <= -100 ? 0 : 2)}%`;
 }
 
+/**
+ * WHICH COLOUR A CHANGE GETS — and the one that says "we do not know".
+ *
+ * Every call site used to be written `(n ?? 0) < 0 ? "down" : "up"`, which
+ * coalesces an UNKNOWN change to zero and then paints it green. The text beside
+ * it correctly rendered "—", so the screen said "we don't know" in words and
+ * "it went up" in colour, and colour is what a reader takes in first on a table
+ * of twenty-five tokens. Green is a claim.
+ *
+ * `flat` is the third answer and the palette already had it (`.delta.flat`);
+ * it just was not reachable from anything but the delta chip.
+ */
+export function deltaClass(n: number | null | undefined): "up" | "down" | "flat" {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "flat";
+  return n < 0 ? "down" : "up";
+}
+
 export function pctBps(bps: number | null): string {
   if (bps === null) return "—";
   const pct = bps / 100;
@@ -197,8 +223,8 @@ function robinhoodFallback(): LiveToken[] {
     change24hPct: null,
     fdvUsd: null,
     holders: null,
-    agents: 0,
-    buys: 0,
+    agents: null,
+    buys: null,
     kind: t.kind,
     marks: [],
     cast: [],
@@ -465,12 +491,29 @@ function mineOf(feed: Feed | null, theses: Thesis[]): LiveMine | null {
   };
 }
 
+/**
+ * A token by address or by symbol, CASE-INSENSITIVELY ON BOTH.
+ *
+ * The lowercase on the address is the whole bug fix. `t.id` is
+ * `address.toLowerCase()` by construction, but the id this is called with comes
+ * out of the URL — and every link anybody actually shares carries the EIP-55
+ * checksummed form, because that is what a wallet, a block explorer and this
+ * app's own `STOCK_TOKENS` table all write. `t.id === id` therefore never
+ * matched a pasted link, the symbol fallback could not match an address either,
+ * and the shell rendered "Token unavailable" for TSLA while the sidebar beside
+ * it showed TSLA at $355.48.
+ *
+ * It survived review because the market list passes `t.id`, already lowercased,
+ * so every click worked and only shared links were broken — which is the half of
+ * the surface a local review never exercises.
+ */
 export function tokenById(
   tokens: LiveToken[],
   id: string,
 ): LiveToken | undefined {
+  const want = id.trim().toLowerCase();
   return tokens.find(
-    (t) => t.id === id || t.symbol.toLowerCase() === id.toLowerCase(),
+    (t) => t.id.toLowerCase() === want || t.symbol.toLowerCase() === want,
   );
 }
 

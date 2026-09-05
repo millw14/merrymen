@@ -22,6 +22,7 @@ import {
   type LiveToken,
   type Screen,
   type Tab,
+  deltaClass,
 } from "./live";
 import { positionsOf } from "./account";
 import { BalanceFigure } from "./studio";
@@ -219,7 +220,7 @@ export function DesktopSidebar({
               </span>
               <span>
                 <strong title={quoteTitle(t)}>{coinPrice(t.priceUsd)}</strong>
-                <small className={(t.change24hPct ?? 0) < 0 ? "down" : "up"}>
+                <small className={deltaClass(t.change24hPct)}>
                   {pctPts(t.change24hPct)}
                 </small>
               </span>
@@ -363,7 +364,7 @@ export function DesktopPortfolio({
         <div className="desktop-balance">
           <BalanceFigure value={mine.equity} />
         </div>
-        <p className={(mine.chg24 ?? 0) < 0 ? "down" : "up"}>
+        <p className={deltaClass(mine.chg24)}>
           {mine.chg24 == null
             ? "—"
             : `${mine.chg24 < 0 ? "−" : "+"}${money(Math.abs(mine.chg24))} today`}
@@ -403,7 +404,7 @@ export function DesktopPortfolio({
           <div className="desktop-cash">
             <span>Session change</span>
             <strong
-              className={(selectedToken.change24hPct ?? 0) < 0 ? "down" : "up"}
+              className={deltaClass(selectedToken.change24hPct)}
             >
               {pctPts(selectedToken.change24hPct)}
             </strong>

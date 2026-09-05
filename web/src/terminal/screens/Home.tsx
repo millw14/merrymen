@@ -13,6 +13,7 @@ import {
   type LiveToken,
   type Thesis,
   type TokenTab,
+  deltaClass,
 } from "../live";
 import { Coin, Face, NameBlock, Pill, TopBar } from "../ui";
 
@@ -43,16 +44,20 @@ export function Home({
   onSearch: () => void;
   onDesk: () => void;
 }) {
+  // A count we do not have sorts last and filters out — it is not a zero, but
+  // it is also not evidence that anybody bought anything, so an unread row does
+  // not get to sit at the top of "most bought".
+  const count = (n: number | null) => n ?? 0;
   const list =
     tokenTab === "buys"
       ? [...tokens]
-          .filter((t) => t.buys > 0 || t.cast.length > 0)
-          .sort((a, b) => b.buys - a.buys)
+          .filter((t) => count(t.buys) > 0 || t.cast.length > 0)
+          .sort((a, b) => count(b.buys) - count(a.buys))
       : [...tokens]
-          .filter((t) => t.agents > 0 || t.cast.length > 0)
+          .filter((t) => count(t.agents) > 0 || t.cast.length > 0)
           .sort(
             (a, b) =>
-              b.agents - a.agents || (b.holders ?? 0) - (a.holders ?? 0),
+              count(b.agents) - count(a.agents) || (b.holders ?? 0) - (a.holders ?? 0),
           );
   const shown =
     list.length > 0
@@ -176,9 +181,11 @@ export function Home({
                       ))}
                     </div>
                   </td>
-                  <td>{t.agents}</td>
+                  {/* "—" until the ledger answers. Zero agents and an unread
+                      ledger are different facts about a listed instrument. */}
+                  <td>{t.agents ?? "—"}</td>
                   <td title={quoteTitle(t)}>{coinPrice(t.priceUsd)}</td>
-                  <td className={(t.change24hPct ?? 0) < 0 ? "down" : "up"}>
+                  <td className={deltaClass(t.change24hPct)}>
                     {pctPts(t.change24hPct)}
                   </td>
                 </tr>
