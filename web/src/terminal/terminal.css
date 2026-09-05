@@ -630,8 +630,6 @@
   box-sizing: border-box;
 }
 
-.terminal-host,
-.terminal-host,
 .terminal-host {
   min-height: 100%;
   margin: 0;
@@ -5238,11 +5236,13 @@
 
 /* Terminal refinement: clearer type, less repeated chrome, aligned data. */
 @media (min-width: 1100px) {
-  :where(.terminal-host) .app {
-    --faint: #85877b;
-    --tx-2: #acafa1;
-    --line: #272a21;
-  }
+  /* THE THREE TOKENS THAT USED TO SIT HERE WERE DEAD.
+     A second `@media (min-width: 1100px)` block further down this file sets
+     --faint, --tx-2 and --line on the same selector to DIFFERENT values
+     (#95978d / #b5b7ac / #25281e), and later source order wins at equal
+     specificity — so these were overridden on every desktop viewport, always.
+     Two sets of desktop greys, one of them unreachable, is how a palette starts
+     drifting; the surviving block is the one with the comment explaining it. */
   :where(.terminal-host) .desktop-header .desktop-search {
     width: min(100% - 44px, 620px);
     justify-self: center;

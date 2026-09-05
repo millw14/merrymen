@@ -12,7 +12,7 @@ import {
   resample,
 } from "./vendor/dither-kit/dither-paint";
 import { seedOfColor } from "./vendor/dither-kit/palette";
-import { pctPts } from "./live";
+import { money, pctPts } from "./live";
 
 export type ChartRider = { name: string; slug: string | null; index: number };
 
@@ -244,7 +244,16 @@ export function PerformanceChart({
   const points = useMemo(() => {
     const clean = values.filter(Number.isFinite);
     const first = clean[0];
-    if (!first || first <= 0) return [];
+    if (first === undefined || clean.length < 2) return [];
+    // THE `first > 0` GUARD BELONGS TO THE PERCENTAGE MODE ONLY.
+    //
+    // It exists because the index divides by the opening value, and dividing by
+    // zero is not a smaller version of a return. But it was applied to BOTH
+    // modes, and the balance mode divides by nothing — so a real, complete
+    // balance history that opens at $0.00, which is every account between being
+    // created and being funded, was thrown away and the caller rendered
+    // "Performance history isn't available yet." about a series it was holding.
+    if (!balance && first <= 0) return [];
     return clean.map((value, i) => ({
       value: balance ? value : (value / first - 1) * 100,
       label:
@@ -260,7 +269,10 @@ export function PerformanceChart({
       points={points}
       label={balance ? "Portfolio balance" : "Performance history"}
       className="performance-chart"
-      format={balance ? (v)=>`$${v.toFixed(2)}` : pctPts}
+      // `money`, not a local toFixed — the balance printed directly above this
+      // chart uses it, and the two disagreed above $1,000 ("$1234.50" against
+      // "$1,234.50") for the same number on the same screen.
+      format={balance ? money : pctPts}
       height={height}
     />
   );

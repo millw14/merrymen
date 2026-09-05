@@ -1,8 +1,17 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   devIndicators: false,
-  // Lets a production build write somewhere other than the dev server's .next,
-  // so the two do not clobber each other mid-run. Nothing else reads it.
+  // A production build can be sent somewhere other than the dev server's
+  // `.next`, so the two do not clobber each other mid-run — which is a real
+  // problem here, because `npm run build` and `npm run dev:web` in the same
+  // checkout will fight over the directory and leave the dev server serving
+  // half-written chunks.
+  //
+  // IT IS A LOCAL CONVENIENCE AND NOTHING MORE. `package.json#files` ships
+  // `web/` with `!web/.next/cache`, the CLI serves from `.next`, and nothing in
+  // the image or the packaging reads NEXT_DIST_DIR — so setting it for a
+  // release build produces an artifact none of them can find. Use it for a
+  // concurrent local build; never for one you intend to ship.
   distDir: process.env.NEXT_DIST_DIR || ".next",
   // THERE ARE NO REWRITES HERE, AND THAT IS LOAD-BEARING.
   //

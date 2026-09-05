@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { beatsOf, lanesOf, type Beat } from "../beat";
 import type { LiveAgent, LiveToken, ReadState, Thesis } from "../live";
 import { Empty, ReadEmpty } from "../ui";
@@ -83,6 +83,7 @@ export function Feed({
   onDesk: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const sheet = useRef<HTMLDivElement>(null);
   const [pick, setPick] = useState(false);
   const [asset, setAsset] = useState<Asset>("all");
   const [on, setOn] = useState(allTopics);
@@ -107,8 +108,47 @@ export function Feed({
       setPick(false);
       return;
     }
+    /**
+     * THE SHEET SAYS `aria-modal="true"`, SO IT HAS TO BE ONE.
+     *
+     * That attribute tells assistive technology to ignore everything outside
+     * this element. It was set while focus stayed wherever it was, Tab walked
+     * straight out into the page behind, and nothing came back on close — so a
+     * screen-reader user was told the rest of the page did not exist while a
+     * keyboard user was still moving through it. Either the claim goes or the
+     * behaviour arrives; a filter sheet should be modal, so: the behaviour.
+     */
+    const opener = document.activeElement as HTMLElement | null;
+    const focusable = (): HTMLElement[] => {
+      const found = sheet.current?.querySelectorAll<HTMLElement>(
+        "a[href], button:not([disabled]), input, select, textarea, [tabindex]",
+      );
+      return [...(found ?? [])].filter(
+        (el) => el.tabIndex >= 0 && el.offsetParent !== null,
+      );
+    };
+    focusable()[0]?.focus();
     const hide = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") {
+        setOpen(false);
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const items = focusable();
+      if (!items.length) return;
+      const first = items[0]!;
+      const last = items[items.length - 1]!;
+      // Wrap at both ends rather than letting focus leave the dialog.
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      } else if (sheet.current && !sheet.current.contains(document.activeElement)) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     const scroller = document.querySelector(".body");
     const prev = scroller instanceof HTMLElement ? scroller.style.overflow : "";
@@ -117,6 +157,9 @@ export function Feed({
     return () => {
       if (scroller instanceof HTMLElement) scroller.style.overflow = prev;
       document.removeEventListener("keydown", hide);
+      // Focus goes back where it came from, so closing the sheet does not drop a
+      // keyboard user at the top of the document.
+      opener?.focus?.();
     };
   }, [open]);
 
@@ -165,6 +208,7 @@ export function Feed({
         <div className="feed-scrim" onClick={() => setOpen(false)}>
           <div
             className="feed-sheet"
+            ref={sheet}
             role="dialog"
             aria-modal="true"
             aria-label="Filters"
