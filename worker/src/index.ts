@@ -91,6 +91,8 @@ import { takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
 import { claimCommandFile, writeCommandResult } from "./command-files";
 import { bookGaps, composeEquityUsdg } from "./equity";
+import { runShadow, type ShadowInputs } from "./brain-shadow";
+import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus } from "./circle";
@@ -227,6 +229,7 @@ import {
   setAgentName,
   setAgentXHandle,
   getGasPaidUsdg,
+  getNetContributionsUsdg,
   setAgentEpoch,
   setAgentHwm,
   setAgentQuality,
@@ -5221,6 +5224,97 @@ async function main() {
         valueUsdg: usdgNum(p.valueUsdg),
       })),
     );
+
+    // ── SHADOW BRAIN ─────────────────────────────────────────────────────
+    //
+    // A Merryman thinks. NOTHING HAPPENS. There is no path from here to
+    // proposalsToIntents, checkPolicy, simulate or the executor — brain-shadow
+    // does not import them, so connecting execution later is an ADDED import
+    // somebody has to review rather than a flag somebody can flip.
+    //
+    // Guarded three ways, each of which alone would be enough to keep it off:
+    // the house must have configured a Brain, the agent must be named in
+    // MERRYMEN_BRAIN_SHADOW, and the trigger must say something changed. The
+    // allowlist is what keeps this at ONE agent while we learn what it costs.
+    //
+    // Everything after the guard is best-effort. A Brain that is slow, refuses,
+    // or is unreachable must not delay or fail a tick — it produces no thought
+    // this time, and the trigger will wake it again.
+    if (shadowBrainEnabledFor(agentId) && cfg.brainUrl && cfg.brainToken && !bookIncomplete) {
+      try {
+        const epochNow = await getAgentEpoch(agentId);
+        const netContrib = await getNetContributionsUsdg(agentId);
+        const gasNow = await getGasPaidUsdg(agentId, epochNow);
+        // THE BIGGEST HOLDING IS WHAT THIS RUN IS ABOUT. One instrument per run
+        // keeps the question answerable and the bill bounded; a Brain asked
+        // about a whole book at once produces a paragraph, not a decision.
+        const focus = [...positions].sort((a, b) => Number(b.valueUsdg - a.valueUsdg))[0];
+        if (focus) {
+          const inputs: ShadowInputs = {
+            agentId,
+            now: Math.floor(Date.now() / 1000),
+            epoch: epochNow,
+            cashUsdg: Number(balances.cashUsdg),
+            vaultUsdg: Number(balances.vaultUsdg),
+            quarantinedUsdg: Number(quarantine.totalCostUsdg),
+            positions: positions.map((pp) => ({
+              instrumentId: `merrymen:${pp.symbol.toLowerCase()}`,
+              symbol: pp.symbol,
+              qtyRaw: String(pp.rawBalance),
+              valueUsdg: Number(pp.valueUsdg),
+              costBasisUsdg: null,
+              priceSource: pp.priceSource === "pool" ? "pool" : "chainlink",
+              quarantined: false,
+            })),
+            // NULL SURVIVES AS NULL all the way to Brain, which refuses on it.
+            netContributionsUsdg: netContrib === null ? null : Math.round(netContrib * 1e6),
+            grossContributionsUsdg: null,
+            grossWithdrawalsUsdg: null,
+            gasUsdg: gasNow.unpricedTrades > 0 ? null : Math.round(gasNow.usdg * 1e6),
+            quality: {
+              auditPassed: false,
+              epoch: epochNow,
+              contributionsKnown: accounting.contributionsKnown,
+              equityComplete: !bookIncomplete,
+              gasAccounting: undefined,
+              gasBasis: gasNow.unpricedTrades > 0 ? "gross" : gasNow.usdg > 0 ? "net" : "unknown",
+              positionHistoryAvailable: false,
+              quarantinedAssetsPresent: quarantine.totalCostUsdg > 0n,
+              assessedAt: Math.floor(Date.now() / 1000),
+            } as never,
+            market: {
+              instrumentId: `merrymen:${focus.symbol.toLowerCase()}`,
+              symbol: focus.symbol,
+              instrumentClass: "equity-token",
+              priceUsd: (Number(focus.price8) / 1e8).toFixed(4),
+              // WHAT THE WORKER CAN HONESTLY SEE, and nothing more. A lens with
+              // no data is OMITTED rather than filled with a plausible sentence
+              // — Brain answers NO DATA AVAILABLE for what is missing, which is
+              // the truthful input and the one the fixtures were built against.
+              signals: {
+                technical:
+                  `Price ${(Number(focus.price8) / 1e8).toFixed(4)} USD from ${focus.priceSource}` +
+                  `${focus.priceStale ? " (STALE)" : ""}. Position value ` +
+                  `${usdgNum(focus.valueUsdg).toFixed(6)} USDG of a ${usdgNum(equityUsdg).toFixed(6)} USDG book.`,
+              },
+            },
+            persona: cfg.agentName ? `You are ${cfg.agentName}, a Merryman.` : "",
+            memory: [],
+          };
+          const outcome = await runShadow(
+            { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 90_000 },
+            inputs,
+            (m) => console.log(`[${short}] ${m}`),
+          );
+          if (!outcome.ran) console.log(`[${short}] [brain] asleep — ${outcome.why}`);
+        }
+      } catch (e) {
+        // NEVER TAKES A TICK DOWN. Shadow thinking is the least important thing
+        // happening in this loop, and the agent's accounting and risk controls
+        // must not depend on a research service being reachable.
+        console.log(`[${short}] [brain] skipped (${e instanceof Error ? e.message : String(e)})`);
+      }
+    }
 
     // On-chain breaker check — the contract is the authority once deployed;
     // this read stops the worker from wasting ops the chain would refuse.

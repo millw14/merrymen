@@ -59,6 +59,22 @@ export interface MerrymenSettings {
    */
   browserUrl?: string;
   browserToken?: string;
+  /**
+   * HOW A MERRYMAN THINKS — one shared Brain service, reached over Railway
+   * private networking, same shape as the browser and the bundler.
+   *
+   * HOUSE-OWNED on both counts: the URL is an address our egress connects to,
+   * and the token is a credential for a service whose inference bill the house
+   * pays. Unlike llmApiKey there is no version of this a tenant brings — a
+   * tenant who could set either would be repointing our egress or spending our
+   * model budget.
+   *
+   * ABSENT MEANS BRAIN DOES NOT RUN. Not "falls back to the local strategist":
+   * a missing Brain is a missing Brain, and quietly substituting a different
+   * reasoner would make the feed claim a thesis came from something it did not.
+   */
+  brainUrl?: string;
+  brainToken?: string;
   /** Rialto integrator key — enables the full quote→swap leg. */
   rialtoApiKey?: string;
   /** Header name the Rialto API expects the key in (their docs say). */
@@ -416,6 +432,15 @@ export const HOUSE_KEY_FIELDS = [
   "telegramTranscribeBase",
   "browserUrl",
   "browserToken",
+  // BRAIN IS THE HOUSE'S, on both counts the split above draws.
+  //
+  // The URL is an address OUR egress connects to on the private network, so it
+  // is the SSRF half. The token is a credential the HOUSE issued for a service
+  // the house pays the inference bill for — a tenant who could set either would
+  // be pointing our egress somewhere of their choosing, or spending our model
+  // budget. Unlike llmApiKey, there is no version of this a tenant brings.
+  "brainUrl",
+  "brainToken",
 ] as const;
 
 /**

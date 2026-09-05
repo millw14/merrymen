@@ -558,6 +558,20 @@ const SQLITE_ALTERS: string[] = [
        PRIMARY KEY (run_id, original_id)
      )`,
     "CREATE INDEX IF NOT EXISTS flows_quarantine_agent ON flows_quarantine (agent_id)",
+    // ── WHAT BRAIN ALREADY THOUGHT ABOUT, so a restart cannot forget ──────
+    //
+    // The accounting work spent weeks on one bug shape: a redeploy wipes the
+    // child ledger, the child forgets, and it books the same thing again. An AI
+    // budget has exactly that failure available to it — a child that forgot its
+    // cooldowns would re-fire every trigger reason on every deploy.
+    //
+    // One row per agent. Baselines live here too, because a cooldown with no
+    // baseline still lets the next tick read an old price move as a new one.
+    `CREATE TABLE IF NOT EXISTS brain_trigger_state (
+       agent_id TEXT PRIMARY KEY,
+       state_json TEXT NOT NULL,
+       updated_at INTEGER NOT NULL
+     )`,
     // HERE AND NOT IN SQLITE_SCHEMA, because `decision_id` is itself added by an
     // ALTER above — the base schema runs first, so an index on it there fails with
     // 'no such column' and takes every trade insert down with it.
@@ -2918,5 +2932,45 @@ export async function curveFor(
     return { curve: row.curve, quoteToken: row.quote_token, graduationThresholdRaw: threshold };
   } catch {
     return null;
+  }
+}
+
+/**
+ * WHAT BRAIN ALREADY THOUGHT ABOUT — durable, so a restart cannot forget.
+ *
+ * The accounting work spent weeks on one bug shape: a redeploy wipes the child
+ * ledger, the child forgets, and it books the same thing again. An AI budget has
+ * exactly that failure available to it, and it is worse in one respect — a
+ * forgotten contribution is a wrong number, a forgotten cooldown is a bill.
+ *
+ * Best-effort on both sides: a trigger-state read or write that fails must never
+ * take a tick down. A failed READ degrades to a cold start, which the caller
+ * seeds conservatively; a failed WRITE costs at most one extra run.
+ */
+export async function loadTriggerState(agentId: string): Promise<Record<string, unknown> | null> {
+  try {
+    const row = (await getDb()
+      .prepare("SELECT state_json FROM brain_trigger_state WHERE agent_id = ?")
+      .get(agentId)) as { state_json: string } | undefined;
+    if (!row?.state_json) return null;
+    return JSON.parse(row.state_json) as Record<string, unknown>;
+  } catch {
+    // A cold start is the safe reading of "I cannot tell": the caller seeds
+    // cooldowns as though Brain just ran, so an unreadable row delays thinking
+    // rather than repeating it.
+    return null;
+  }
+}
+
+export async function saveTriggerState(agentId: string, state: unknown): Promise<void> {
+  try {
+    await getDb()
+      .prepare(
+        `INSERT INTO brain_trigger_state (agent_id, state_json, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(agent_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at`,
+      )
+      .run(agentId, JSON.stringify(state), Math.floor(Date.now() / 1000));
+  } catch (e) {
+    console.error("[brain] trigger state write failed:", e);
   }
 }
