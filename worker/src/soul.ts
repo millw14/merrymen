@@ -434,6 +434,21 @@ export function identityBlock(linkedAt: number | null, messageCount: number, now
 }
 
 /**
+ * Narrator identity — name + stage + tone, no numbers that get recited.
+ *
+ * For chat narration the model must be warm, not verbatim. Born date,
+ * exact age in days, linked-day count and message count are the tokens
+ * that become "mr rex here — born 2026-07-30, and I've been riding with
+ * you for 36 days now." on every hi. The classifier and /soul keep the
+ * full block; the narrator gets only stage and toneGuide.
+ */
+export function narratorIdentityBlock(linkedAt: number | null, messageCount: number, nowSec?: number): string {
+  ensureSoul(nowSec);
+  const rel = relationship(linkedAt, messageCount, nowSec);
+  return [`YOUR IDENTITY: You are ${getName()}, a merryman — ${rel.stage}.`, `TONE: ${rel.toneGuide}`].join("\n");
+}
+
+/**
  * What the merryman recalls, chosen for THIS message — the half only the
  * narrator gets.
  *
