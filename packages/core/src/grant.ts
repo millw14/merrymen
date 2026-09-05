@@ -35,6 +35,25 @@ export function grantHasV4(grant: Pick<StoredGrant, "grantFeatures"> | null | un
 }
 
 /**
+ * grantFeatures marker meaning "this signature can swap NATIVE ETH → an
+ * allowlisted asset" (the auto-convert flow: exactInputSingle with WETH as
+ * tokenIn and msg.value attached).
+ *
+ * The wall carries this only since nativeSwapValueLimitWei existed — every key
+ * signed before it has valueLimit 0n on the router rule, so a convert from one
+ * reverts at the wall. The worker and /grant check for this marker rather than
+ * attempting the op and reading the failure.
+ */
+export const GRANT_NATIVE_SWAP = "native-swap";
+
+/** Can this signature actually run the native-ETH auto-convert swap? */
+export function grantHasNativeSwap(
+  grant: Pick<StoredGrant, "grantFeatures"> | null | undefined,
+): boolean {
+  return grant?.grantFeatures?.includes(GRANT_NATIVE_SWAP) ?? false;
+}
+
+/**
  * grantFeatures marker meaning "this signature can execute a MULTI-HOP swap".
  *
  * A route through WETH is not the same call as a direct one: the router takes

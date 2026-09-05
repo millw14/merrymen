@@ -36,6 +36,13 @@ export const homePaths = {
   virtuals: () => path.join(merrymenHome(), "virtuals.json"),
   /** Pause marker — present = trading halted (toggled from Telegram/dashboard). */
   paused: () => path.join(merrymenHome(), "paused"),
+  /**
+   * Auto-convert latch — the worker's private memory of what it already
+   * converted: last fire time + the balance it left behind. Worker-private
+   * (like telegram.json), NOT a setting: it is derived state the owner never
+   * edits, and the web tier reads fires from the event feed instead.
+   */
+  autoConvert: () => path.join(merrymenHome(), "auto-convert.json"),
   /** Scratch dir for transient PC-control artifacts (screenshots, voice notes). */
   scratch: () => path.join(merrymenHome(), "scratch"),
   /**

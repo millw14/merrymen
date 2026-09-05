@@ -53,6 +53,14 @@ export interface ResolvedConfig {
   xHandle: string | undefined;
   v4AdapterAddress: `0x${string}` | undefined;
   ponsAdapterAddress: `0x${string}` | undefined;
+  autoConvertEnabled: boolean;
+  autoConvertReservePct: number;
+  /** Manual one-shot swap handoff from the /swap page (wei string + id).
+   * Consumed and cleared by the worker tick; validated again at consume time.
+   * Tenant-writable by design — it is the owner's explicit spend instruction,
+   * still bounded by the grant, the reserve and the wall. */
+  manualSwapWei: string | undefined;
+  manualSwapId: string | undefined;
   paperTradingEnabled: boolean;
   paperStartUsdg: number;
   /** Builtin name, or a user strategy filename (strategies/<name>.ts). */
@@ -276,6 +284,13 @@ export function mergeSettings(
     xHandle,
     v4AdapterAddress,
     ponsAdapterAddress,
+    autoConvertEnabled: bool(file.autoConvertEnabled, env.MERRYMEN_AUTO_CONVERT, d.autoConvertEnabled),
+    autoConvertReservePct: num(file.autoConvertReservePct, env.MERRYMEN_AUTO_CONVERT_RESERVE_PCT, d.autoConvertReservePct, 1, 50),
+    // Handoff fields: file only, no env (an env var that spends gas on every
+    // boot is a footgun), no default (absent = no request). Shape-checked at
+    // consume time by parseManualSwap, not here.
+    manualSwapWei: str(file.manualSwapWei, undefined),
+    manualSwapId: str(file.manualSwapId, undefined),
     paperTradingEnabled: bool(file.paperTradingEnabled, env.MERRYMEN_PAPER_TRADING, d.paperTradingEnabled),
     paperStartUsdg: num(file.paperStartUsdg, env.MERRYMEN_PAPER_START_USDG, d.paperStartUsdg, 1, 10_000_000),
     // Any sane token is a valid strategy name — builtins resolve directly,

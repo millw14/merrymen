@@ -79,6 +79,7 @@ import {
   GRANT_V4,
   GRANT_V4_ADAPTER,
   GRANT_PONS_ADAPTER,
+  GRANT_NATIVE_SWAP,
   bindingMessage,
   TRADEABLE_V2,
   USDG_DECIMALS,
@@ -317,6 +318,11 @@ async function mintGrant(
     // address rides with it because the marker alone is a claim, not evidence.
     grantFeatures: [
       TRADEABLE_V2,
+      // Minted unconditionally: the wall's router rule now carries the WETH
+      // tokenIn pin and a non-zero valueLimit by default, so every key this
+      // signer issues CAN run the native-ETH convert. Marker and permission
+      // move together — the lockstep rule GRANT_V4 established.
+      GRANT_NATIVE_SWAP,
       ...(allowUniswapV4 ? [GRANT_V4] : []),
       ...(v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
       ...(ponsAdapterAddress ? [GRANT_PONS_ADAPTER] : []),

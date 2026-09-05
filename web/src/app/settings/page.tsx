@@ -76,6 +76,7 @@ export default function SettingsPage() {
   const [scoutEnabled, setScoutEnabled] = useState<boolean | null>(null);
   const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
   const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
+  const [autoConvertEnabled, setAutoConvertEnabled] = useState<boolean | null>(null);
   const [allowlist, setAllowlist] = useState<number[] | null>(null);
   const [tgTest, setTgTest] = useState<string | null>(null);
   // PC control: master + capability set + string allowlists (also can't ride `draft`).
@@ -231,6 +232,7 @@ export default function SettingsPage() {
     if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
     if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
     if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
+    if (autoConvertEnabled !== null) body.autoConvertEnabled = autoConvertEnabled;
     if (allowlist !== null) body.telegramAllowlist = allowlist;
     if (pcEnabled !== null) body.telegramPcControlEnabled = pcEnabled;
     if (caps !== null) body.telegramCapabilities = caps;
@@ -261,6 +263,7 @@ export default function SettingsPage() {
       setVirtualsEnabled(null);
       setScoutEnabled(null);
       setDiscoveryEnabled(null);
+      setAutoConvertEnabled(null);
       setAllowlist(null);
       setPcEnabled(null);
       setCaps(null);
@@ -332,6 +335,7 @@ export default function SettingsPage() {
   const scoutEnabledVal = scoutEnabled ?? view.values.scoutEnabled ?? d.scoutEnabled;
   const discoveryEnabledVal = discoveryEnabled ?? view.values.discoveryEnabled ?? d.discoveryEnabled;
   const trencherLiveVal = trencherLive ?? view.values.trencherLiveEnabled ?? d.trencherLiveEnabled;
+  const autoConvertVal = autoConvertEnabled ?? (view.values as { autoConvertEnabled?: boolean }).autoConvertEnabled ?? (d as { autoConvertEnabled?: boolean }).autoConvertEnabled ?? false;
   const allowlistVal = allowlist ?? view.values.telegramAllowlist ?? [];
   const pcEnabledVal = pcEnabled ?? view.values.telegramPcControlEnabled ?? d.telegramPcControlEnabled;
   const agentEnabledVal = agentEnabled ?? view.values.telegramAgentEnabled ?? d.telegramAgentEnabled;
@@ -546,6 +550,44 @@ export default function SettingsPage() {
                   </option>
                 ))}
               </select>
+            </Field>
+            <label className="field settings-field">
+              <span className="field-label">Fund with ETH — auto-convert to USDG</span>
+              <span className="field-input">
+                <input
+                  type="checkbox"
+                  checked={autoConvertVal}
+                  onChange={(e) => setAutoConvertEnabled(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="field-unit">{autoConvertVal ? "surplus ETH → USDG, gas kept" : "off"}</span>
+              </span>
+              <span className="field-hint">
+                Send ETH — we&apos;ll swap surplus to USDG and keep a gas reserve. Off by default. Also accepts USDG directly on the same address.
+                Fires once per deposit: the same funds never convert twice, even across a restart.
+              </span>
+            </label>
+            <Field
+              label="gas reserve"
+              hint="Percent of the ETH balance kept as gas; the rest converts to USDG. The bot always keeps at least one trade's worth of gas, even at 1%. One conversion per deposit, at most one per hour."
+            >
+              <input
+                type="number"
+                min={1}
+                max={50}
+                placeholder={String(d.autoConvertReservePct)}
+                value={v("autoConvertReservePct")}
+                onChange={set("autoConvertReservePct")}
+              />
+              <span className="field-unit">%</span>
+            </Field>
+            <Field
+              label="manual swap"
+              hint="Convert ETH to USDG right now, by hand — same permission, same quote, same reserve. A manual swap counts as a fire, so auto-convert won't re-eat the leftover."
+            >
+              <Link href="/swap" className="mm-btn primary">
+                Swap ETH → USDG {autoConvertVal ? "· auto-convert on" : "· auto-convert off"} →
+              </Link>
             </Field>
           </div>
 

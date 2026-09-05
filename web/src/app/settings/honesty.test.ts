@@ -93,19 +93,22 @@ describe("every control survives the restyle", () => {
   it("keeps the measured control census", () => {
     // A number that moves is not necessarily wrong — but it must be noticed,
     // and a class rename is never the reason for one.
+    // 11→12 checkboxes: the auto-convert toggle (dev/auto-convert branch).
     const count = (re: RegExp) => (SRC.match(re) ?? []).length;
-    assert.equal(count(/type="checkbox"/g), 11, "checkboxes");
-    assert.equal(count(/type="number"/g), 12, "number inputs");
+    assert.equal(count(/type="checkbox"/g), 12, "checkboxes");
+    // 12→13 number inputs: the auto-convert gas reserve % (dev/auto-convert branch).
+    assert.equal(count(/type="number"/g), 13, "number inputs");
     assert.equal(count(/type="password"/g), 8, "password inputs");
     assert.equal(count(/type="text"/g), 12, "text inputs");
     assert.equal(count(/type="url"/g), 3, "url inputs");
     assert.equal(count(/<select/g), 5, "selects");
   });
 
-  it("sends exactly the 17 fields save() guards", () => {
+  it("sends exactly the 18 fields save() guards", () => {
     // Every guard is "the user did not touch this, so do not overwrite it".
     // One dropped guard silently resets a setting to whatever the form had.
-    assert.equal((code.match(/!== null\)/g) ?? []).length, 17);
+    // 17→18: the autoConvertEnabled guard (dev/auto-convert branch).
+    assert.equal((code.match(/!== null\)/g) ?? []).length, 18);
   });
 });
 

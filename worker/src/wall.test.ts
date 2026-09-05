@@ -16,6 +16,9 @@ import {
   buildCallPermissions,
   buildWallPolicies,
   grantHasMultihop,
+  grantHasNativeSwap,
+  GRANT_NATIVE_SWAP,
+  NATIVE_SWAP_VALUE_LIMIT_WEI,
   WALL_POLICY_FLAG,
   usableExtraTokens,
   type GrantCaps,
@@ -300,8 +303,29 @@ test("the wall carries exactly the expected permission set — no more, no less"
   assert.equal(withXfer.length, list.length + 1);
   assert.equal(withRialto.length, list.length + 1);
   assert.equal(withV4.length, list.length + 2, "v4 is a PAIR — Permit2 approve plus UniversalRouter execute");
-  // Nothing may authorise sending native value.
-  for (const p of list) assert.equal(p.valueLimit, 0n, `${p.target} must not be allowed to move native ETH`);
+  // Nothing may authorise sending native value — EXCEPT the router rule, the
+  // wall's one deliberate exception. Auto-convert is a native-input swap, and
+  // a native-input swap without msg.value does not exist. The ceiling is the
+  // sealed NATIVE_SWAP_VALUE_LIMIT_WEI, not an open gate.
+  for (const p of list) {
+    if (p.target.toLowerCase() === UNISWAP.swapRouter02.toLowerCase()) {
+      assert.equal(p.valueLimit, NATIVE_SWAP_VALUE_LIMIT_WEI, "the router rule carries exactly the sealed native-value ceiling");
+    } else {
+      assert.equal(p.valueLimit, 0n, `${p.target} must not be allowed to move native ETH`);
+    }
+  }
+  // ...and the router rule's tokenIn admits WETH (how a native-input swap is
+  // recognized) while tokenOut stays the plain asset set.
+  const [routerRule] = find(UNISWAP.swapRouter02, "exactInputSingle");
+  const legs = routerRule!.args as unknown as { value: string[] }[];
+  assert.ok(
+    legs[0]!.value.map((a) => a.toLowerCase()).includes(CASH.WETH.toLowerCase()),
+    "tokenIn must admit WETH — the native-input marker",
+  );
+  assert.ok(
+    !legs[1]!.value.map((a) => a.toLowerCase()).includes(CASH.WETH.toLowerCase()),
+    "tokenOut must NOT admit WETH beyond the asset set — converts only ever produce allowlisted assets",
+  );
 });
 
 test("the wall carries a hard expiry and a call policy — and NO rate limit", () => {
@@ -376,7 +400,19 @@ test("the swap recipient is pinned to our own account, at the RIGHT calldata off
   }
   // The two legs are built from the SAME list the approve permissions use, so
   // what a key may approve and what it may swap into cannot drift apart.
-  assert.deepEqual(legs[0]!.value, legs[1]!.value, "both legs share one allowlist");
+  // The two legs DELIBERATELY differ by one entry: tokenIn adds WETH, the
+  // marker a native-input auto-convert swap carries (msg.value + tokenIn =
+  // WETH). tokenOut stays the plain asset set — a convert only ever produces
+  // an allowlisted asset, so the widen is on what may be spent, never received.
+  const tokenIn = new Set(legs[0]!.value.map((a) => a.toLowerCase()));
+  const tokenOut = new Set(legs[1]!.value.map((a) => a.toLowerCase()));
+  assert.ok(tokenIn.has(CASH.WETH.toLowerCase()), "tokenIn admits WETH for the native-input convert");
+  assert.ok(!tokenOut.has(CASH.WETH.toLowerCase()), "tokenOut must not admit WETH");
+  assert.deepEqual(
+    [...tokenIn].filter((a) => a !== CASH.WETH.toLowerCase()).sort(),
+    [...tokenOut].sort(),
+    "minus WETH, tokenIn must be exactly tokenOut — the widen is one entry, not a new set",
+  );
   for (const i of [2, 4, 5, 6]) assert.equal(args[i], null, `arg ${i} must stay unconstrained`);
 
   // AND PROVE THE OFFSET, against viem's encoder rather than against the
@@ -741,11 +777,25 @@ test("the swap's pinned asset set IS the approve set — they cannot drift", () 
     const legs = swap.args as unknown as { condition: number; value: string[] }[];
     for (const i of [0, 1] as const) {
       const pinned = new Set(legs[i]!.value.map((a) => a.toLowerCase()));
+      // tokenIn (leg 0) deliberately adds WETH — the native-input auto-convert
+      // marker. tokenOut (leg 1) must remain EXACTLY the approve set.
+      const expected = i === 0 ? [...approved, CASH.WETH.toLowerCase()] : [...approved];
       assert.deepEqual(
         [...pinned].sort(),
-        [...approved].sort(),
-        `leg ${i} must be exactly the set of tokens this grant can approve`,
+        expected.sort(),
+        `leg ${i} must be the approve set${i === 0 ? " plus WETH" : ""} and nothing else`,
       );
     }
   }
+});
+
+test("the native-swap marker is minted only when the wall can actually convert", () => {
+  // Marker and permission move together — the GRANT_V4 lockstep rule. The new
+  // wall carries the WETH pin + valueLimit by default, so the signer mints
+  // GRANT_NATIVE_SWAP unconditionally; the reader is grantHasNativeSwap.
+  assert.equal(grantHasNativeSwap({ grantFeatures: [GRANT_NATIVE_SWAP] }), true);
+  assert.equal(grantHasNativeSwap({ grantFeatures: [] }), false);
+  assert.equal(grantHasNativeSwap(null), false);
+  // And a pre-change grant (no marker) is exactly what the worker gates on.
+  assert.equal(grantHasNativeSwap({ grantFeatures: ["tradeable-v2"] }), false);
 });

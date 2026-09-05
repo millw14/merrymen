@@ -280,7 +280,37 @@ export interface WallOptions {
    * covers.
    */
   ponsAdapterAddress?: Address;
+  /**
+   * Native value the SwapRouter02 rule may carry, in wei. Default
+   * NATIVE_SWAP_VALUE_LIMIT_WEI (0.5 ETH) so every newly signed wall can run
+   * auto-convert; 0n restores the old no-native wall exactly.
+   *
+   * WHY THIS EXISTS. The auto-convert flow swaps NATIVE ETH → USDG in one
+   * exactInputSingle call, and a native-input swap only works when the call
+   * carries `msg.value`. Every other rule in this wall keeps valueLimit 0n —
+   * a paymaster settles with the EntryPoint directly and the account never
+   * hands ETH to anyone — so this is the ONE deliberate exception, and it is
+   * bounded by a sealed constant rather than left open.
+   *
+   * WHAT IT EXPOSES, said plainly: a session key carrying this wall may attach
+   * up to this much native ETH to ANY exactInputSingle call it is otherwise
+   * allowed to make — the token legs are pinned ONE_OF the same asset set, the
+   * recipient is pinned to the account, so the worst case is a bad-price swap
+   * of ≤ this much ETH into an allowlisted asset the account itself receives.
+   * That is the same exposure the auto-convert flow was signed for, not a
+   * wider one.
+   */
+  nativeSwapValueLimitWei?: bigint;
 }
+
+/**
+ * The ceiling on native value one exactInputSingle call may carry — the bound
+ * that makes the auto-convert flow (native ETH → USDG) expressible at all.
+ * 0.5 ETH is far above any conversion a sane reserve split produces and far
+ * below "the account's whole balance" for anything but a dust account, where
+ * the worker's own reserve arithmetic never proposes the op anyway.
+ */
+export const NATIVE_SWAP_VALUE_LIMIT_WEI = 500_000_000_000_000_000n; // 0.5 ETH
 
 /**
  * Owner-added tokens that are safe to seal into a policy.
@@ -345,6 +375,11 @@ export function buildCallPermissions(
     }
     ponsAdapter = opts.ponsAdapterAddress.toLowerCase() as Address;
   }
+  // Native value the router rule may carry. Sealed at signing: this is the
+  // security ceiling for auto-convert, deliberately NOT a settings knob — the
+  // owner's live knob is the reserve PERCENTAGE in settings, which decides how
+  // much converts but can never lift what one op may attach.
+  const nativeSwapValueLimit = opts.nativeSwapValueLimitWei ?? NATIVE_SWAP_VALUE_LIMIT_WEI;
   const spenders = allowedSpenders(opts.allowRialto, opts.allowUniswapV4, adapter, ponsAdapter);
   const extras = usableExtraTokens(opts.extraTokens);
   // Every asset this signature may hold a leg in: USDG plus everything the
@@ -358,6 +393,15 @@ export function buildCallPermissions(
     ),
     ...extras.map((t) => t.address as Address),
   ];
+  // tokenIn for the router rule adds WETH, and WETH only. The auto-convert flow
+  // swaps NATIVE ETH → USDG, and SwapRouter02 identifies a native-input swap by
+  // `tokenIn` being the WETH address with `msg.value` attached (it wraps and
+  // refunds excess internally) — so without WETH here, no key could ever run a
+  // convert, and every pre-existing grant must RE-SIGN to gain it. tokenOut
+  // stays the plain asset set on purpose: a convert only ever PRODUCES an
+  // allowlisted asset, so the widen is on what may be spent, never on what may
+  // be received.
+  const swapInAssets: Address[] = [...adapterAssets, CASH.WETH as Address];
   const self = { condition: ParamCondition.EQUAL, value: smartAccount } as const;
   // Deduped and lowercased so a list with the same address twice doesn't bloat
   // the on-chain policy, and a case difference can't read as a second address.
@@ -482,11 +526,14 @@ export function buildCallPermissions(
       // default 15-address list is ~960 bytes of extra enable-data, paid once
       // on the first UserOp of each session key.
       target: UNISWAP.swapRouter02 as Address,
-      valueLimit: 0n,
+      // The ONE rule in this wall that may carry native value — see
+      // WallOptions.nativeSwapValueLimitWei. Auto-convert is a native-input
+      // swap, and a native-input swap without msg.value simply does not exist.
+      valueLimit: nativeSwapValueLimit,
       abi: UNISWAP_SWAP_ROUTER_ABI,
       functionName: "exactInputSingle",
       args: [
-        { condition: ParamCondition.ONE_OF, value: adapterAssets },
+        { condition: ParamCondition.ONE_OF, value: swapInAssets },
         { condition: ParamCondition.ONE_OF, value: adapterAssets },
         null,
         self,

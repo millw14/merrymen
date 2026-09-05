@@ -6,6 +6,7 @@ import {
   divergenceBps,
   meanTick,
   poolPriceUsable,
+  readExecutionPoolPrice,
   scalePrice,
   sqrtPriceX96ToPrice8,
   tickToPrice8,
