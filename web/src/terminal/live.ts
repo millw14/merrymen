@@ -60,7 +60,31 @@ export interface LiveAgent {
   handle: string | null;
   owner: string | null;
   pnlBps: number | null;
+  /**
+   * The series a chart may draw — AND WHICH QUANTITY IT IS.
+   *
+   * Two different numbers shared this field. The public profile fills it from
+   * `AgentProfile.growth`, the growth index with deposits divided out; the
+   * leaderboard fills it from `LeaderRow.curve`, which is raw `equity_usdg`.
+   * `read-agent.ts` deletes the raw field on purpose and says why: equity steps
+   * up the moment the owner funds the account, and a new epoch's whole opening
+   * balance is written as one inbound flow — so drawn raw it shows a book
+   * springing into existence at full value.
+   *
+   * A failed profile fetch fell back to the leaderboard row, and the chart drew
+   * exactly that under the label "Performance history". So the kind now travels
+   * with the numbers, and the chart draws nothing else.
+   */
   curve: number[];
+  curveKind?: "growth" | "equity";
+  /**
+   * Whether the flows divided out of that index were read from the chain.
+   *
+   * `EquityLine.tsx` refuses to draw without this and explains at length. The
+   * terminal profile dropped the field, so the gate was unreachable on the only
+   * surface that still draws the curve.
+   */
+  contributionsEvidenced?: boolean;
   publicBook?: boolean;
   holdingsUsd?: number | null;
   landed: number;
@@ -80,8 +104,33 @@ export interface Thesis {
   paper: boolean;
   head: string;
   when?: string;
-  outcome?: "landed" | "refused" | "reverted" | "pending" | null;
+  /**
+   * WHAT HAPPENED TO THE DECISION — the whole union, not the convenient half.
+   *
+   * `"dropped"`, `"view"` and `"shadow"` were missing, so every surface that
+   * switched on this field fell through to its past-tense default and reported
+   * a decision nothing came of as a completed trade. See `shadow` below.
+   */
+  outcome?: "landed" | "refused" | "reverted" | "dropped" | "pending" | "view" | "shadow" | null;
   outcomeText?: string | null;
+  /**
+   * THE AGENT SAID THIS; NOTHING COULD HAVE COME OF IT.
+   *
+   * A shadow row is a real row with a real action, a real symbol and a real
+   * size — `worker/src/thesis-policy.ts` says it is "indistinguishable, to
+   * every gate below, from a real buy" — and that is exactly why the publisher
+   * bakes the conditional into `head` ("would buy TSLA 5.00 USDG") and sets
+   * this flag beside it.
+   *
+   * The terminal declared neither, so `verbOf` in beat.ts printed
+   * "@robin bought TSLA" for a decision that never reached an executor, on the
+   * public feed. Kept as its own boolean rather than `outcome === "shadow"`
+   * because a renderer that has not learned the new outcome arm still has to
+   * answer this question — and because they are different facts: `outcome` is
+   * what happened to the decision, `shadow` is whether anything was connected
+   * that could have made something happen.
+   */
+  shadow?: boolean;
   said?: number;
   at?: number;
 }
@@ -112,6 +161,22 @@ export interface LiveState {
   agents: LiveAgent[];
   theses: Thesis[];
   mine: LiveMine | null;
+  /**
+   * WHETHER EACH READ ACTUALLY HAPPENED — carried beside the data, not instead
+   * of it.
+   *
+   * Every empty array above has two possible meanings and the screens have to
+   * be able to tell them apart before they say a word about the world. "Quiet."
+   * is a claim; "we could not read the ledger" is a confession, and rendering
+   * the first when the second is true is the incident `prerender.test.ts`
+   * exists to remember.
+   */
+  reads: {
+    market: ReadState;
+    board: ReadState;
+    theses: ReadState;
+    mine: ReadState;
+  };
 }
 
 const LOGO = (addr: string) =>
@@ -204,12 +269,51 @@ export function sizeOf(t: Thesis): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/**
+ * A ledger timestamp, in seconds, read as the UTC it actually is.
+ *
+ * `fmtEpoch` in lib/ledger.ts writes `new Date(sec*1000).toISOString().slice(0,19).replace("T"," ")`
+ * — so "2026-09-05 12:34:56", a UTC instant with the marker filed off.
+ * `Date.parse` of a space-separated string with no zone is LOCAL time in every
+ * engine, so every age on the feed and the whole daily-spend gauge were wrong
+ * by the viewer's offset: an hour out in London, five in New York, and enough
+ * to move a trade across midnight and out of "today".
+ */
+export function ledgerSeconds(raw: string): number {
+  const t = Date.parse(/\dZ?$/.test(raw) && raw.includes(" ") ? `${raw.replace(" ", "T")}Z` : raw);
+  return Number.isFinite(t) ? t / 1000 : 0;
+}
+
+/**
+ * What happened to a trade — an ALLOW-LIST, because the ledger has more states
+ * than this screen knows about.
+ *
+ * It was written as a negation: anything not 'rejected' and not 'reverted' was
+ * published as "landed". `trades.status` is genuinely written 'submitted' while
+ * an operation is in flight — ledger-mirror.ts keys its resolution on
+ * `AND status = 'submitted'` — and `/api/feed` selects the column with no WHERE
+ * clause, so unresolved rows reach the browser and were reported as filled.
+ * A trade the chain has not confirmed is `pending`, and so is any status added
+ * after this line was written.
+ */
+export function tradeOutcome(status: string): NonNullable<Thesis["outcome"]> {
+  if (status === "landed" || status === "paper") return "landed";
+  if (status === "rejected") return "refused";
+  if (status === "reverted") return "reverted";
+  return "pending";
+}
+
 export function seedLive(): LiveState {
   return ({
     tokens: robinhoodFallback(),
     agents: [],
     theses: [],
     mine: null,
+    // NOBODY HAS ASKED YET. The seed exists so the shell has a market list to
+    // draw before the first fetch returns; every empty array beside it is an
+    // absence of a request, and a screen that reads them as an absence of
+    // activity is asserting something nobody has checked.
+    reads: { market: "unread", board: "unread", theses: "unread", mine: "unread" },
   });
 }
 
@@ -231,6 +335,27 @@ function robinhoodFallback(): LiveToken[] {
   }));
 }
 
+/**
+ * DID WE GET AN ANSWER, AND WAS THE ANSWER READABLE?
+ *
+ * Three states, not two, and the third is the one this product is built on.
+ *
+ *   unread      nobody has asked yet — the seed
+ *   unreadable  we asked and could not be told: the request failed, or it
+ *               succeeded carrying `source: "none"`, which every reader in
+ *               web/src/lib publishes to mean "the ledger could not be read"
+ *   ok          we asked and were told, and the answer may legitimately be
+ *               nothing at all
+ *
+ * `getJson` used to swallow all of that into `null`, and every consumer wrote
+ * `?? []` after it — so a database outage arrived at the screens as an empty
+ * array and rendered as "Quiet." and "Nobody has traded yet.". The old Feed
+ * component's header names this exact incident: "an empty ledger and an
+ * UNREADABLE one look identical to a reader unless the page says which it is",
+ * and prerender.test.ts memorialises the deploy where it shipped.
+ */
+export type ReadState = "unread" | "unreadable" | "ok";
+
 async function getJson<T>(url: string): Promise<T | null> {
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(20000) });
@@ -241,11 +366,21 @@ async function getJson<T>(url: string): Promise<T | null> {
   }
 }
 
+/**
+ * What a read amounted to. A body carrying `source: "none"` is UNREADABLE even
+ * though the request returned 200 — that shape is the reader's way of saying it
+ * could not open the ledger, and treating it as data is the whole bug.
+ */
+export function readStateOf(body: { source?: string } | null | undefined): ReadState {
+  if (body == null) return "unreadable";
+  return body.source === "none" ? "unreadable" : "ok";
+}
+
 export async function loadLive(onMine?: (mine: LiveMine | null) => void): Promise<LiveState> {
   const [market, board, thesesRes, feed, quotes, disc] = await Promise.all([
-    getJson<{ tokens: MarketTok[] }>("/api/market"),
-    getJson<{ agents: BoardRow[] }>("/api/leaderboard"),
-    getJson<{ theses: Thesis[] }>("/api/theses"),
+    getJson<{ tokens: MarketTok[]; source?: string }>("/api/market"),
+    getJson<{ agents: BoardRow[]; source?: string }>("/api/leaderboard"),
+    getJson<{ theses: Thesis[]; source?: string }>("/api/theses"),
     getJson<Feed>("/api/feed").then(feed=>{onMine?.(mineOf(feed,[]));return feed;}),
     loadTokenQuotes(),
     getJson<Disc>("/api/discoveries"),
@@ -352,6 +487,9 @@ export async function loadLive(onMine?: (mine: LiveMine | null) => void): Promis
       pnlBps: a.pnlBps,
       unrankedWhy: a.unrankedWhy,
       curve: a.curve ?? [],
+      // RAW EQUITY from the leaderboard read — never a growth index, and the
+      // profile chart refuses to draw it.
+      curveKind: "equity" as const,
       landed: a.landed,
       last: latestBySlug.get(a.slug!) ?? latestBySlug.get(a.name) ?? null,
       owner: a.handle,
@@ -390,6 +528,16 @@ export async function loadLive(onMine?: (mine: LiveMine | null) => void): Promis
     agents,
     theses,
     mine,
+    // WHETHER EACH READ HAPPENED, carried alongside what it returned. A body
+    // that arrived with `source: "none"` counts as unreadable even though the
+    // request succeeded: that shape IS the reader telling us it could not open
+    // the ledger. See `readStateOf`.
+    reads: {
+      market: readStateOf(market),
+      board: readStateOf(board),
+      theses: readStateOf(thesesRes),
+      mine: readStateOf(feed),
+    },
   });
 }
 
@@ -480,7 +628,22 @@ function mineOf(feed: Feed | null, theses: Thesis[]): LiveMine | null {
     moves: (feed.trades ?? []).map(t=>{
       const buy=STOCK_TOKENS.find(s=>s.address.toLowerCase()===t.buy_token?.toLowerCase());
       const sell=STOCK_TOKENS.find(s=>s.address.toLowerCase()===t.sell_token?.toLowerCase());
-      return {slug,name,handle:null,action:buy ? "buy" as const : sell ? "sell" as const : null,symbol:buy?.symbol ?? sell?.symbol ?? null,sizeUsdg:t.amount_usdg,reason:null,paper:t.status==="paper",head:t.kind,at:Date.parse(t.created_at)/1000,outcome:t.status==="rejected" ? "refused" as const : t.status==="reverted" ? "reverted" as const : "landed" as const};
+      return {
+        slug,name,handle:null,
+        action:buy ? "buy" as const : sell ? "sell" as const : null,
+        symbol:buy?.symbol ?? sell?.symbol ?? null,
+        sizeUsdg:t.amount_usdg,
+        reason:null,
+        paper:t.status==="paper",
+        head:t.kind,
+        at:ledgerSeconds(t.created_at),
+        outcome:tradeOutcome(t.status),
+        // THE RULE THAT STOPPED IT, which was on the wire and dropped on the
+        // floor. `/api/feed` selects `reject_rule` deliberately; without it
+        // every refused trade of the owner's own rendered "No explanation
+        // available", which is a statement about us and not about the wall.
+        outcomeText:t.reject_rule ?? null,
+      };
     }),
     glance: {
       id: parseStrategy(mode), label: strategyLabel(parseStrategy(mode)),
@@ -549,7 +712,7 @@ export function thesesForAgent(
 export async function chainHolders(addr: string): Promise<ChainHolder[]> {
   const d = await getJson<{
     items?: { address?: { hash?: string }; value?: string }[];
-  }>(`/blockscout/tokens/${addr}/holders`);
+  }>(`/api/venue?desk=holders&token=${encodeURIComponent(addr)}`);
   const rows = (d?.items ?? []).slice(0, 8).map((h) => {
     const hash = h.address?.hash ?? "";
     return {
@@ -574,14 +737,34 @@ export function lede(text: string | null | undefined): string {
   return (line ?? text).trim();
 }
 
+/**
+ * The one-line summary of an agent's most recent decision.
+ *
+ * PREFERS `head`, WHICH IS THE PUBLISHER'S OWN SENTENCE. `publishableThesis`
+ * builds it precisely so surfaces that are not React components do not have to
+ * reassemble one — and it is where the shadow conditional lives, as
+ * "would buy TSLA 5.00 USDG". Rebuilding the line from `action` threw that away
+ * and printed "Bought TSLA" for a decision nothing came of; the same mistake
+ * `peer-view.ts` made once and is now pinned against in
+ * worker/src/brain-disconnected.test.ts.
+ *
+ * The reconstruction survives only as the fallback for a row with no head at
+ * all, and it carries the conditional too.
+ */
 export function lastLine(t: Thesis | null): string {
   if (!t) return "";
+  if (t.head) return t.head;
   if (t.action && t.symbol) {
+    const shadow = t.shadow === true || t.outcome === "shadow";
     const verb =
-      t.action === "buy" ? "Bought" : t.action === "sell" ? "Sold" : "Holding";
+      t.action === "buy"
+        ? shadow ? "Would buy" : "Bought"
+        : t.action === "sell"
+          ? shadow ? "Would sell" : "Sold"
+          : shadow ? "Would hold" : "Holding";
     return `${verb} ${t.symbol}`;
   }
-  return t.head || t.reason || "";
+  return t.reason || "";
 }
 
 interface MarketTok {
@@ -626,8 +809,29 @@ interface Disc {
 }
 
 interface Feed {
+  /** "none" means the ledger could not be read — see readStateOf. */
+  source?: string;
   agent?: { name?: string; strategy?: string; slug?: string | null } | null;
-  trades?: {kind:string;buy_token:string|null;sell_token:string|null;amount_usdg:number;status:string;created_at:string}[];
+  trades?: {
+    kind: string;
+    buy_token: string | null;
+    sell_token: string | null;
+    amount_usdg: number;
+    /**
+     * The ledger's own word, NOT a narrowed union.
+     *
+     * `/api/feed` declares it as `"landed" | "reverted" | "rejected" | "paper"`
+     * and selects the column with no WHERE clause — but the ledger genuinely
+     * writes `'submitted'` for an operation still in flight. Typing it `string`
+     * here is what forces `tradeOutcome` to be an allow-list instead of a
+     * negation, which is how an unconfirmed trade stopped being published as
+     * a fill.
+     */
+    status: string;
+    /** The rule the wall refused it under. Selected by the route, was dropped here. */
+    reject_rule?: string | null;
+    created_at: string;
+  }[];
   equity?: { equity_usdg: number; cash_usdg?: number; vault_usdg?: number; at?: string }[];
   positions?: {symbol:string; value_usdg:number; price_stale?:number}[];
 }

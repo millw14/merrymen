@@ -23,6 +23,7 @@ import {
   type Screen,
   type Tab,
   deltaClass,
+  type LiveState,
 } from "./live";
 import { positionsOf } from "./account";
 import { BalanceFigure } from "./studio";
@@ -104,7 +105,10 @@ export function DesktopSidebar({
   onSection,
   onScreen,
   onTab,
+  reads,
 }: Actions & {
+  /** Whether each read happened — an empty list is not automatically a quiet one. */
+  reads: LiveState["reads"];
   tokens: LiveToken[];
   agents: LiveAgent[];
   theses: Thesis[];
@@ -226,7 +230,24 @@ export function DesktopSidebar({
               </span>
             </button>
           ))}
-          {!list.length && <p className="meta">{filter === "watch" ? "Watch a token to find it here." : filter === "held" ? "No tokens held yet." : "Markets are unavailable right now."}</p>}
+          {/* "Markets are unavailable" is a claim about the venue; "we have not
+              asked yet" and "we asked and could not be told" are claims about
+              us. The list is seeded from the canonical registry, so an empty
+              one under the "all" filter really does mean a failed read — but it
+              still has to say which kind. */}
+          {!list.length && (
+            <p className="meta">
+              {filter === "watch"
+                ? "Watch a token to find it here."
+                : filter === "held"
+                  ? "No tokens held yet."
+                  : reads.market === "unread"
+                    ? "Loading markets…"
+                    : reads.market === "unreadable"
+                      ? "Couldn’t read the market list just now."
+                      : "No tokens are listed."}
+            </p>
+          )}
         </div>
       </section>
       <section
@@ -300,6 +321,7 @@ export function DesktopSidebar({
       >
         <Feed
           compact
+          read={reads.theses}
           theses={theses}
           tokens={tokens}
           agents={agents}
@@ -317,6 +339,7 @@ export function DesktopSidebar({
       >
         <Board
           compact
+          read={reads.board}
           agents={agents}
           theses={theses}
           mine={mine}

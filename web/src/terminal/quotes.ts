@@ -26,7 +26,7 @@ async function json<T>(url: string): Promise<T> {
 async function assets(): Promise<Asset[]> {
   if (assetsCache && assetsCache.expires > Date.now())
     return assetsCache.assets;
-  const data = await json<{ assets: Asset[] }>("/robinhood/assets");
+  const data = await json<{ assets: Asset[] }>("/api/venue?desk=quotes&doc=assets");
   if (!Array.isArray(data.assets)) throw new Error("Missing asset metadata");
   assetsCache = { assets: data.assets, expires: Date.now() + 300_000 };
   return data.assets;
@@ -43,7 +43,7 @@ export function loadTokenQuotes(): Promise<Map<string, TokenQuote>> {
     try {
       const [metadata, data] = await Promise.all([
         assets(),
-        json<{ quotes: Quote[] }>("/robinhood/prices"),
+        json<{ quotes: Quote[] }>("/api/venue?desk=quotes&doc=prices"),
       ]);
       const multipliers = new Map<string, number>();
       for (const asset of metadata) {
@@ -122,7 +122,7 @@ export async function loadSessionChanges(
               result?: { meta?: { regularMarketChangePercent?: number } }[];
             };
           }>(
-            `/yahoo/v8/finance/chart/${encodeURIComponent(token.symbol)}?interval=1d&range=5d`,
+            `/api/venue?desk=chart&symbol=${encodeURIComponent(token.symbol)}&window=5D`,
           );
           const change =
             data.chart?.result?.[0]?.meta?.regularMarketChangePercent;

@@ -111,10 +111,11 @@ export function Dial({ left, size = 34 }: { left: number; size?: number }) {
   );
 }
 
-export function Empty({ title, action }: { title: string; action?: { label: string; onClick: () => void } }) {
+export function Empty({ title, action, note }: { title: string; action?: { label: string; onClick: () => void }; note?: string }) {
   return (
     <div className="blank">
       <strong>{title}</strong>
+      {note && <p className="blank-note">{note}</p>}
       {action && (
         <button type="button" className="fund solid" onClick={action.onClick}>
           {action.label}
@@ -122,6 +123,41 @@ export function Empty({ title, action }: { title: string; action?: { label: stri
       )}
     </div>
   );
+}
+
+/**
+ * THE THREE ANSWERS AN EMPTY LIST CAN HAVE, and the two that are not "nothing
+ * happened".
+ *
+ * A screen holding an empty array knows one of three things: nobody has asked
+ * yet, we asked and could not be told, or we asked and the answer really was
+ * nothing. Only the third is a fact about the world, and only the third may be
+ * said out loud. The other two are facts about US.
+ *
+ * The old `components/Feed.tsx` did this and its header explains why: "an empty
+ * ledger and an UNREADABLE one look identical to a reader unless the page says
+ * which it is". It was not ported; this is where the distinction lives now, in
+ * one place, so every list can reach it.
+ */
+export function ReadEmpty({
+  state,
+  title,
+  action,
+}: {
+  state: "unread" | "unreadable" | "ok";
+  /** What to say when the read succeeded and there was genuinely nothing. */
+  title: string;
+  action?: { label: string; onClick: () => void };
+}) {
+  if (state === "unread") return <Empty title="Loading…" />;
+  if (state === "unreadable")
+    return (
+      <Empty
+        title="Couldn’t read the ledger just now."
+        note="So this is what we don’t know, not a quiet hour. It will fill in when the read succeeds."
+      />
+    );
+  return <Empty title={title} action={action} />;
 }
 
 export function FaceOn({

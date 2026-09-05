@@ -89,7 +89,27 @@ export function Profile({
         </div>
         {agent.pnlBps == null && <p className="public-empty">{agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : "Return unavailable."}</p>}
         {agent.pnlBps != null && agent.gas && <p className="public-empty">Net of {money(agent.gas.usdg)} in priced gas.{agent.gas.unpricedTrades > 0 && <> {agent.gas.unpricedTrades} trades had gas we could not price; this is not the full cost.</>}</p>}
-        {agent.curve.length > 1 ? (
+        {/* THE GATE, BEFORE THE DRAW.
+            Two things have to be true before a line goes under the words
+            "Performance history": it must be the growth index (deposits divided
+            out) and not raw equity, and the flows divided out of it must have
+            been read from the chain rather than inferred from balance changes.
+            `EquityLine.tsx` has refused on the second for months; this screen
+            replaced it without carrying the refusal, so a failed profile fetch
+            fell back to the leaderboard's raw `equity_usdg` and drew a book
+            springing into existence at full value. */}
+        {agent.curveKind !== "growth" ? (
+          <p className="public-empty">
+            Performance history isn’t available yet.
+          </p>
+        ) : agent.contributionsEvidenced === false ? (
+          <p className="public-empty">
+            The deposits and withdrawals on record for this agent are inferred from balance changes
+            rather than read from the chain, so they cannot be divided out of its equity — and a
+            growth figure computed over them would not be its doing. The return is not published
+            until the capital behind it is evidenced.
+          </p>
+        ) : agent.curve.length > 1 ? (
           <div
             className="public-chart"
             aria-label={`Performance history. Reported return ${pctBps(agent.pnlBps)}.`}

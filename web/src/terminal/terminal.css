@@ -2597,6 +2597,15 @@
   padding: 28px 0;
 }
 
+/* The second line of an empty state: which kind of nothing this is. */
+:where(.terminal-host) .blank-note {
+  margin: 0;
+  max-width: 48ch;
+  color: var(--tx-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 :where(.terminal-host) .blank strong {
   font-size: 17px;
   font-weight: 600;
@@ -6612,6 +6621,18 @@
 .terminal-host .recover-panel { min-width: 0; overflow-wrap: anywhere; }
 .terminal-host a.flow-primary { display: flex; text-decoration: none; }
 .terminal-host .hosted-account-links { display:flex; gap:16px; margin:16px 0; font-size:14px; }
+/* A page that rendered, saying which part of it did not. Not an error state —
+   the content below it is real — so it reads as a caveat, not a failure. */
+.terminal-host .hosted-note {
+  margin: 0 20px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--faint);
+  border-radius: 8px;
+  color: var(--tx-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
 .terminal-host .create-agent { max-width: 560px; margin: 0 auto; padding: 4px 0 28px; }
 .terminal-host .create-heading { display:flex; align-items:center; gap:12px; color:var(--tx-2); font-size:14px; }
 .terminal-host .create-heading button { width:32px; height:32px; display:grid; place-items:center; }

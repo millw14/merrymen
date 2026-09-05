@@ -1,14 +1,24 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   devIndicators: false,
+  // Lets a production build write somewhere other than the dev server's .next,
+  // so the two do not clobber each other mid-run. Nothing else reads it.
   distDir: process.env.NEXT_DIST_DIR || ".next",
-  async rewrites() {
-    return [
-      {source:"/robinhood/:path*",destination:"https://api.robinhood.com/rhj/:path*"},
-      {source:"/yahoo/:path*",destination:"https://query1.finance.yahoo.com/:path*"},
-      {source:"/blockscout/:path*",destination:"https://robinhoodchain.blockscout.com/api/v2/:path*"},
-    ];
-  },
+  // THERE ARE NO REWRITES HERE, AND THAT IS LOAD-BEARING.
+  //
+  // Three arrived with the terminal redesign, proxying /robinhood/:path*,
+  // /yahoo/:path* and /blockscout/:path* straight to those hosts. Because a
+  // rewrite is same-origin, the browser attached the reader's session cookie —
+  // `httpOnly, secure, sameSite:"strict", path:"/"` — to every one of those
+  // requests, and Next forwarded it upstream: a live merrymen session posted to
+  // Yahoo on every chart view. `sameSite:"strict"` offers nothing here, because
+  // this IS the site. They were also unauthenticated open proxies at any path
+  // the caller chose, outside middleware.ts, which guards only /api/.
+  //
+  // The replacement is `app/api/venue/route.ts` plus `lib/venue.ts`: an
+  // allow-list of documents, symbols and windows, a request BUILT rather than
+  // forwarded, a timeout, a byte cap and an edge cache. `web/src/lib/venue.test.ts`
+  // fails if a rewrite is ever added back.
   // core lives outside the web/ dir (packages/core, resolved via tsconfig
   // paths) — externalDir lets Next compile it. No workspace dep needed, which
   // is what makes `npm install -g merrymen` possible.

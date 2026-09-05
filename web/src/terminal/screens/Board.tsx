@@ -6,10 +6,11 @@ import {
   sizeOf,
   type LiveAgent,
   type LiveMine,
+  type ReadState,
   type Thesis,
 } from "../live";
 import { strategyName } from "../strategy";
-import { Empty, Face, Stamp } from "../ui";
+import { Empty, ReadEmpty, Face, Stamp } from "../ui";
 import { unrankedLabel, unrankedShort } from "@/lib/rank-pnl";
 
 type WindowId = "24H" | "7D" | "30D" | "ALL";
@@ -33,8 +34,11 @@ export function Board({
   mine,
   onProfile,
   onDesk,
+  read = "ok",
 }: {
   compact?: boolean;
+  /** Whether the leaderboard read happened at all — see ReadEmpty. */
+  read?: ReadState;
   agents: LiveAgent[];
   theses: Thesis[];
   mine: LiveMine | null;
@@ -71,7 +75,8 @@ export function Board({
       <details className="ranking-help"><summary>How returns are measured</summary><p>No deposit means no capital to measure a return against. No completed trades means no return to measure. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
 
       {rows.length === 0 ? (
-        <Empty
+        <ReadEmpty
+          state={read}
           title="Nobody has traded yet."
           action={{ label: "Fund an agent", onClick: onDesk }}
         />

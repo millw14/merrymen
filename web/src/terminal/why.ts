@@ -94,14 +94,23 @@ function shortWhy(text: string): string {
 /** One line for the feed. Book weight is not a thesis — use thesisLine for that. */
 export function whyLine(t: Thesis): string {
   const w = parseWhy(t);
+  // Only reached when the row published no usable reason, so this is the
+  // fallback sentence — and a fallback still may not claim a trade happened.
+  const shadow = t.shadow === true || t.outcome === "shadow";
   switch (w.kind) {
     case "buy":
       if (w.legs) return `${w.weight}% of a ${w.legs}-name book`;
-      return t.reason && t.reason.length < 80 ? t.reason : `Bought ${w.symbol}`;
+      return t.reason && t.reason.length < 80
+        ? t.reason
+        : `${shadow ? "Would buy" : "Bought"} ${w.symbol}`;
     case "sell":
-      return t.reason && t.reason.length < 80 ? t.reason : `Sold ${w.symbol}`;
+      return t.reason && t.reason.length < 80
+        ? t.reason
+        : `${shadow ? "Would sell" : "Sold"} ${w.symbol}`;
     case "hold":
-      return t.reason && t.reason.length < 80 ? t.reason : `Holding ${w.symbol}`;
+      return t.reason && t.reason.length < 80
+        ? t.reason
+        : `${shadow ? "Would hold" : "Holding"} ${w.symbol}`;
     case "park":
       return "Parking idle cash";
     case "unpark":
@@ -116,6 +125,11 @@ export function whyLine(t: Thesis): string {
 }
 
 export function stampOf(t: Thesis): string | null {
+  // FIRST, BEFORE EVERY OTHER ARM. A shadow row carries a real action and a
+  // real size, so any check below it would classify it as something that
+  // happened. `thesis-badge.ts` orders its own check the same way and says why:
+  // otherwise a shadow buy renders as "BUYING".
+  if (t.shadow === true || t.outcome === "shadow") return "shadow";
   if (t.outcome === "refused" || t.outcome === "reverted") {
     const x = (t.outcomeText ?? "").toLowerCase();
     if (x.includes("drawdown")) return "breaker";

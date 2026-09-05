@@ -213,7 +213,7 @@ export function App() {
     let alive=true;
     requestJson<import("@/lib/read-agent").AgentProfile>(`/api/agents/${encodeURIComponent(profileSlug)}`).then(p=>{
       if(!alive)return;
-      setProfile({slug:p.slug,name:p.name,handle:p.handle,owner:p.handle,pnlBps:p.pnlBps,unrankedWhy:p.unrankedWhy,gas:p.gas,holdingsRead:p.holdingsRead,curve:p.growth.map(v=>v.g),landed:p.landed,last:null,publicBook:p.publicBook,holdingsUsd:p.publicBook && p.holdingsRead ? p.holdings.reduce((sum,h)=>sum+h.valueUsdg,0) : null,thesis:"",glance:{id:"custom",label:"Strategy",legs:p.publicBook ? p.holdings.map(h=>({symbol:h.symbol,weight:(h.shareBps??0)/100})) : undefined}});
+      setProfile({slug:p.slug,name:p.name,handle:p.handle,owner:p.handle,pnlBps:p.pnlBps,unrankedWhy:p.unrankedWhy,gas:p.gas,holdingsRead:p.holdingsRead,curve:p.growth.map(v=>v.g),curveKind:"growth" as const,contributionsEvidenced:p.contributionsEvidenced,landed:p.landed,last:null,publicBook:p.publicBook,holdingsUsd:p.publicBook && p.holdingsRead ? p.holdings.reduce((sum,h)=>sum+h.valueUsdg,0) : null,thesis:"",glance:{id:"custom",label:"Strategy",legs:p.publicBook ? p.holdings.map(h=>({symbol:h.symbol,weight:(h.shareBps??0)/100})) : undefined}});
     }).catch(e=>{if(alive)setProfileError(e.message);});
     return()=>{alive=false;};
   },[profileSlug]);
@@ -231,6 +231,7 @@ export function App() {
       <DesktopHeader hasAgent={!!mine} mine={displayMine} onScreen={openScreen} onTab={goTab} />
       {desktop && (
         <DesktopSidebar
+          reads={live.reads}
           mine={displayMine}
           hasAgent={!!mine}
           tokens={live.tokens}
@@ -270,6 +271,7 @@ export function App() {
         )}
         {screen.kind === "tab" && screen.tab === "feed" && (
           <Feed
+            read={live.reads.theses}
             theses={live.theses}
             tokens={live.tokens}
             agents={live.agents}
@@ -297,6 +299,7 @@ export function App() {
         )}
         {screen.kind === "tab" && screen.tab === "board" && (
           <Board
+            read={live.reads.board}
             agents={live.agents}
             theses={live.theses}
             mine={mine}
@@ -350,6 +353,19 @@ export function App() {
           />
         )}
         {screen.kind === "profile" && !agent && <section className="hosted-entry"><p role="status">{profileError || "Loading agent…"}</p>{profileError && <button onClick={()=>goTab("agent")}>Back to agents</button>}</section>}
+        {/* THE FAILURE IS SAID EVEN WHEN THERE IS SOMETHING TO SHOW.
+            `agent = profile ?? listedAgent` means a failed profile fetch is
+            invisible whenever the agent also happens to be on the leaderboard —
+            the page renders, from a different and much thinner read, with no
+            indication that the thing it was asked for did not arrive. The
+            leaderboard row is worth showing; passing it off as the profile is
+            not. */}
+        {screen.kind === "profile" && agent && profileError && (
+          <p role="status" className="hosted-note">
+            Some of this agent’s profile could not be loaded ({profileError}). What is shown comes
+            from the leaderboard read, and its performance history is not published from that.
+          </p>
+        )}
         {screen.kind === "profile" && agent && (
           <Profile
             key={agent.slug}

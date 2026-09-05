@@ -24,7 +24,7 @@ import { TvChart } from "../tv";
 import { Coin, Face } from "../ui";
 import { useWatchlist } from "../watchlist";
 
-const WINDOWS: WindowId[] = ["1H", "4H", "1D", "7D", "1M", "ALL"];
+const WINDOWS: WindowId[] = ["1H", "4H", "1D", "5D", "1M", "ALL"];
 
 export function Token({
   token,

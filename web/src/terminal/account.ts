@@ -17,7 +17,13 @@ export function spentToday(mine: LiveMine, now: number): number {
   start.setHours(0, 0, 0, 0);
   return mine.moves.reduce((total, move) => {
     if (move.action !== "buy" && move.action !== "sell") return total;
-    if (move.outcome && move.outcome !== "landed") return total;
+    // AN ALLOW-LIST, because this number is the answer to "how much of today's
+    // budget is gone". It was `move.outcome && move.outcome !== "landed"`,
+    // which counted a move with NO outcome — and until `tradeOutcome` became an
+    // allow-list of its own, an unconfirmed 'submitted' trade arrived here
+    // wearing `outcome: "landed"` and was spent against the day before the
+    // chain had agreed it happened.
+    if (move.outcome !== "landed") return total;
     if (move.at == null || move.at * 1000 < start.getTime() || move.at * 1000 > now)
       return total;
     return total + Math.max(0, move.sizeUsdg ?? 0);

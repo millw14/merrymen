@@ -24,6 +24,18 @@ interface Core {
   action: Action;
   symbol: string;
   sizeUsd: number | null;
+  /**
+   * NOTHING CAME OF IT, AND NOTHING COULD HAVE.
+   *
+   * Carried onto the beat because the rail renders a sentence and the verb is
+   * the part that makes the claim. A shadow decision is a real row with a real
+   * action and a real size — thesis-policy.ts calls it "indistinguishable, to
+   * every gate below, from a real buy" — so a rail reading only `action`
+   * published "@robin bought TSLA" about a decision that never reached an
+   * executor. worker/src/brain-disconnected.test.ts pins this as a product
+   * invariant, not a wording preference.
+   */
+  shadow: boolean;
 }
 
 /**
@@ -43,8 +55,20 @@ export function castOf(b: Beat): Actor[] {
   return b.kind === "chorus" ? b.actors : [b.actor];
 }
 
+/**
+ * The verb, and the conditional that has to survive into it.
+ *
+ * "would buy" and "bought" are the difference between a stated intention and a
+ * trade, and this is the one string on the rail that decides which a reader
+ * sees. The publisher already bakes the conditional into `head` for exactly
+ * this reason; the rail lays the facts out itself, so it has to make the same
+ * distinction rather than inherit it.
+ */
 export function verbOf(b: Beat): string {
   const many = b.kind === "chorus";
+  // The conditional is the same for one agent or twenty: "would buy" already
+  // says nothing happened, and there is no plural of it that says less.
+  if (b.shadow) return `would ${b.action}`;
   switch (b.action) {
     case "buy":
       return "bought";
@@ -83,7 +107,7 @@ function actorOf(t: Thesis, agents: Map<string, LiveAgent>): Actor | null {
 
 export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
   const bySlug = new Map(agents.map((a) => [a.slug, a]));
-  const parts: (Part & { action: Action; symbol: string })[] = [];
+  const parts: (Part & { action: Action; symbol: string; shadow: boolean })[] = [];
 
   for (const t of theses) {
     const action = t.action;
@@ -99,6 +123,10 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
       reason: takeFor(t.reason, bySlug.get(actor.slug)?.thesis),
       action,
       symbol,
+      // Carried from the published row. `shadow` is set by the publisher; the
+      // `outcome` check is the belt to it, for a row written before the flag
+      // existed.
+      shadow: t.shadow === true || t.outcome === "shadow",
     });
   }
 
@@ -110,6 +138,7 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
     action: p.action,
     symbol: p.symbol,
     sizeUsd: p.sizeUsd,
+    shadow: p.shadow,
     kind: "trade" as const,
     actor: p.actor,
     reason: p.reason,

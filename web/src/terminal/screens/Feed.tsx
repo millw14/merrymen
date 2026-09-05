@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { beatsOf, lanesOf, type Beat } from "../beat";
-import type { LiveAgent, LiveToken, Thesis } from "../live";
-import { Empty } from "../ui";
+import type { LiveAgent, LiveToken, ReadState, Thesis } from "../live";
+import { Empty, ReadEmpty } from "../ui";
 import { Wire } from "../wire";
 
 type Asset = "all" | "stock" | "etf";
@@ -70,8 +70,11 @@ export function Feed({
   onToken,
   onProfile,
   onDesk,
+  read = "ok",
 }: {
   compact?: boolean;
+  /** Whether the theses read happened at all — see ReadEmpty. */
+  read?: ReadState;
   theses: Thesis[];
   tokens: LiveToken[];
   agents: LiveAgent[];
@@ -143,7 +146,8 @@ export function Feed({
             action={{ label: "Clear filters", onClick: reset }}
           />
         ) : (
-          <Empty
+          <ReadEmpty
+            state={read}
             title="Quiet."
             action={{ label: "Fund an agent", onClick: onDesk }}
           />
