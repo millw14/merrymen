@@ -25,7 +25,26 @@ import type { AccountPlan } from "./accounting-reconstruction";
  * one — the report is meant to be read as "all 24 are accounted for", which it
  * cannot be if an account can fall through.
  */
-export type RosterOutcome = "NO-CHAIN-HISTORY" | "EVIDENCE-BACKED-REPAIR" | "BLOCKED-AMBIGUOUS";
+export type RosterOutcome =
+  | "NO-CHAIN-HISTORY"
+  | "EVIDENCE-BACKED-REPAIR"
+  | "BLOCKED-AMBIGUOUS"
+  /**
+   * NOT LOOKED AT THIS RUN — which is not the same as "has a problem".
+   *
+   * A scoped repair scans only the accounts it is repairing, so every other
+   * account has no chain result and the planner marks it blocked. Reporting
+   * that as BLOCKED-AMBIGUOUS was wrong in the way that matters: it reads as
+   * "this account is in trouble" when the truth is "nobody asked about it", and
+   * it dragged the already-repaired canary into the blocked column with a
+   * `contributions 10.000000 -> 0.000000` line derived from evidence that was
+   * never gathered. An operator reading that would think the repair had undone
+   * itself.
+   *
+   * The roster still enumerates all 24 — the point was never that every account
+   * is examined every run, it was that none disappears.
+   */
+  | "NOT-EXAMINED";
 
 
 /**
@@ -41,8 +60,12 @@ export function previewRequested(env: Record<string, string | undefined>): boole
 }
 
 /** Which of the three outcomes this account falls into. Total over every plan. */
-export function rosterOutcome(plan: AccountPlan): RosterOutcome {
-  // BLOCKED FIRST. An account the classifier could not resolve must not be
+export function rosterOutcome(plan: AccountPlan, examined = true): RosterOutcome {
+  // NOT EXAMINED FIRST. An account outside a scoped run's selection was never
+  // scanned, so every verdict below would be an opinion about evidence nobody
+  // collected.
+  if (!examined) return "NOT-EXAMINED";
+  // BLOCKED NEXT. An account the classifier could not resolve must not be
   // reported as a repair merely because it also has rows to insert.
   if (plan.blocked !== null) return "BLOCKED-AMBIGUOUS";
   if (plan.insert.length > 0) return "EVIDENCE-BACKED-REPAIR";
@@ -86,22 +109,29 @@ export function previewAccount(plan: AccountPlan, selected: readonly string[]): 
     if (r.direction === "in") grossIn += r.amountUsdg;
     else grossOut += r.amountUsdg;
   }
+  const isSelected = selected.length === 0 || selected.includes(plan.smartAccount.toLowerCase());
+  const outcome = rosterOutcome(plan, isSelected);
+  // AN UNEXAMINED ACCOUNT REPORTS NO "AFTER". Every after-figure is computed
+  // from chain evidence, and for an account nobody scanned there is none — so
+  // the honest answer is the figure it already has, not a zero derived from an
+  // empty scan.
+  const unexamined = outcome === "NOT-EXAMINED";
   return {
     account: plan.smartAccount,
     tenant: plan.tenant,
-    outcome: rosterOutcome(plan),
-    selected: selected.length === 0 || selected.includes(plan.smartAccount.toLowerCase()),
+    outcome,
+    selected: isSelected,
     isPaper: plan.isPaper,
     epoch: plan.epoch,
     inserts: plan.insert.length,
     quarantines: plan.quarantine.length,
     contributionsBeforeUsdg: round6(plan.existingTotalUsdg),
-    contributionsAfterUsdg: round6(plan.contributionsAfterUsdg),
+    contributionsAfterUsdg: round6(unexamined ? plan.existingTotalUsdg : plan.contributionsAfterUsdg),
     contributionsKnownBefore: plan.contributionsKnownBefore,
-    contributionsKnownAfter: plan.contributionsKnownAfter,
+    contributionsKnownAfter: unexamined ? plan.contributionsKnownBefore : plan.contributionsKnownAfter,
     grossContributionsAfterUsdg: round6(grossIn),
     grossWithdrawalsAfterUsdg: round6(grossOut),
-    blocked: plan.blocked,
+    blocked: unexamined ? null : plan.blocked,
   };
 }
 
@@ -118,6 +148,7 @@ export function rosterLines(previews: readonly AccountPreview[]): string[] {
     "NO-CHAIN-HISTORY": 0,
     "EVIDENCE-BACKED-REPAIR": 0,
     "BLOCKED-AMBIGUOUS": 0,
+    "NOT-EXAMINED": 0,
   };
   for (const p of previews) {
     tally[p.outcome] += 1;
@@ -133,7 +164,8 @@ export function rosterLines(previews: readonly AccountPreview[]): string[] {
     `ROSTER TOTAL ${previews.length} account(s) — ` +
       `NO-CHAIN-HISTORY ${tally["NO-CHAIN-HISTORY"]} · ` +
       `EVIDENCE-BACKED-REPAIR ${tally["EVIDENCE-BACKED-REPAIR"]} · ` +
-      `BLOCKED-AMBIGUOUS ${tally["BLOCKED-AMBIGUOUS"]}`,
+      `BLOCKED-AMBIGUOUS ${tally["BLOCKED-AMBIGUOUS"]} · ` +
+      `NOT-EXAMINED ${tally["NOT-EXAMINED"]}`,
   );
   return L;
 }

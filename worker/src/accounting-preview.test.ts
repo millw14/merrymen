@@ -139,14 +139,16 @@ describe("every tenant is classified", () => {
     assert.equal(previews.length, plans.length, "no account is dropped from the roster");
   });
 
-  it("classifies an account --account did not select, rather than omitting it", () => {
-    // "Not in the mutation list" must never be readable as "safe".
+  it("keeps an account --account did not select on the roster, rather than omitting it", () => {
+    // "Not in the mutation list" must never be readable as "safe" — but it must
+    // not be readable as "broken" either. An unselected account is NOT-EXAMINED:
+    // present, counted, and honest about the fact that nobody looked at it.
     const previews = runPreview([canaryPlan(), plan({ smartAccount: PAPER, isPaper: true })], {
       accounts: [CANARY.toLowerCase()],
     });
     assert.equal(previews.length, 2);
     assert.equal(previews[1]!.selected, false);
-    assert.equal(previews[1]!.outcome, "NO-CHAIN-HISTORY");
+    assert.equal(previews[1]!.outcome, "NOT-EXAMINED");
   });
 });
 
@@ -288,5 +290,57 @@ describe("the report has to fit in the window you can read it in", () => {
     assert.equal(roster.length, 25, "one line per tenant, plus the total");
     assert.equal(previews.filter((p) => p.selected).length, 1, "only the named account gets a block");
     assert.ok(roster.length + blocks.length < 100, `report is ${roster.length + blocks.length} lines, well inside 503`);
+  });
+});
+
+describe("an account nobody looked at is not an account with a problem", () => {
+  it("reports NOT-EXAMINED rather than BLOCKED-AMBIGUOUS", () => {
+    // A scoped repair scans only what it repairs, so every other account has no
+    // chain result and the planner marks it blocked. Reporting that as BLOCKED
+    // reads as "this account is in trouble" when the truth is "nobody asked".
+    const outside = plan({
+      smartAccount: PAPER,
+      blocked: "no chain scan result for this account",
+      existingTotalUsdg: 10,
+      contributionsKnownBefore: true,
+      contributionsAfterUsdg: 0,
+      contributionsKnownAfter: false,
+    });
+    const p = previewAccount(outside, [CANARY.toLowerCase()]);
+    assert.equal(p.selected, false);
+    assert.equal(p.outcome, "NOT-EXAMINED");
+    assert.equal(p.blocked, null, "it is not blocked, it is unread");
+  });
+
+  it("does not invent an 'after' from a scan that never ran", () => {
+    // The line that made this urgent: the already-repaired canary appeared as
+    // `contributions 10.000000 -> 0.000000 · known false -> false`, derived
+    // entirely from evidence nobody gathered. An operator reading that would
+    // conclude the repair had undone itself.
+    const repaired = plan({
+      smartAccount: CANARY,
+      blocked: "no chain scan result for this account",
+      existingTotalUsdg: 10,
+      contributionsKnownBefore: true,
+      contributionsAfterUsdg: 0,
+      contributionsKnownAfter: false,
+    });
+    const p = previewAccount(repaired, ["0xsomeoneelse"]);
+    assert.equal(p.contributionsAfterUsdg, 10, "unchanged, because nothing was examined");
+    assert.equal(p.contributionsKnownAfter, true, "and its known-state is not downgraded either");
+  });
+
+  it("still counts every tenant, which was always the point", () => {
+    const plans = [
+      canaryPlan(),
+      plan({ smartAccount: PAPER, blocked: "no chain scan result for this account" }),
+      plan({ smartAccount: "0xccc", blocked: "no chain scan result for this account" }),
+    ];
+    const previews = runPreview(plans, { accounts: [CANARY.toLowerCase()] });
+    const total = rosterLines(previews).find((l) => l.startsWith("ROSTER TOTAL"))!;
+    assert.match(total, /3 account\(s\)/);
+    assert.match(total, /EVIDENCE-BACKED-REPAIR 1/);
+    assert.match(total, /NOT-EXAMINED 2/);
+    assert.match(total, /BLOCKED-AMBIGUOUS 0/, "not looked at is not blocked");
   });
 });
