@@ -70,7 +70,14 @@ def _dotenv() -> dict[str, str]:
     path = Path(__file__).resolve().parent.parent / ".env"
     out: dict[str, str] = {}
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
+        # utf-8-SIG, not utf-8. PowerShell's Set-Content and > both write a
+        # UTF-8 BOM by default, and with plain utf-8 that BOM becomes part of
+        # the FIRST KEY — so the file parses, contains what looks like the right
+        # line, and yields nothing. A credential file that silently reads as
+        # empty is the worst possible failure here: it looks like "no key set"
+        # and sends someone back to the fleet key. utf-8-sig strips a BOM when
+        # present and is identical to utf-8 when not.
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
