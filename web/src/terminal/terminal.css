@@ -6660,3 +6660,6 @@
   .terminal-host .desktop-header-account {gap:16px;white-space:nowrap;}
   .terminal-host .desktop-header-account > * {flex-shrink:0;}
 }
+.terminal-host .ranking-help {margin:0 0 20px;color:var(--tx-2);font-size:12px;line-height:1.6;}
+.terminal-host .ranking-help summary {cursor:pointer;}
+.terminal-host .ranking-help p {margin:10px 0;}

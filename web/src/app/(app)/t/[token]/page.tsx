@@ -6,3 +6,4 @@ export async function generateMetadata({params}:{params:Promise<{token:string}>}
   return {title:`${market.symbol ?? market.coin?.name ?? "Token"} — merrymen`};
 }
 export default function TokenRoute() {return null;}
+export const dynamic = "force-dynamic";

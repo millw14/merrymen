@@ -10,6 +10,7 @@ import {
 } from "../live";
 import { strategyName } from "../strategy";
 import { Empty, Face, Stamp } from "../ui";
+import { unrankedLabel, unrankedShort } from "@/lib/rank-pnl";
 
 type WindowId = "24H" | "7D" | "30D" | "ALL";
 
@@ -67,6 +68,7 @@ export function Board({
           </div>
         )}
       </header>
+      <details className="ranking-help"><summary>How returns are measured</summary><p>No deposit means no capital to measure a return against. No completed trades means no return to measure. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
 
       {rows.length === 0 ? (
         <Empty
@@ -115,7 +117,7 @@ function Rank({
         className="rank-hit"
         onClick={() => onProfile(a.slug)}
       >
-        <span className="n">{row.rank}</span>
+        <span className="n">{row.ret == null ? "—" : row.rank}</span>
         <Face name={a.name} slug={a.slug} />
         <div className="rank-who">
           <div className="rank-name">
@@ -129,8 +131,8 @@ function Rank({
         </div>
         <div className="rank-nums">
           <span className="rank-have">{money(row.have)}</span>
-          <span className={`chg ${(row.ret ?? 0) >= 0 ? "up" : "down"}`}>
-            {pctBps(row.ret)}
+          <span title={a.unrankedWhy ? unrankedLabel(a.unrankedWhy) : undefined} className={`chg ${row.ret == null ? "" : row.ret >= 0 ? "up" : "down"}`}>
+            {row.ret == null ? a.unrankedWhy ? unrankedShort(a.unrankedWhy) : "Unranked" : pctBps(row.ret)}
           </span>
         </div>
       </button>

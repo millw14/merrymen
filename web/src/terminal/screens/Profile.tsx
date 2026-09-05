@@ -13,6 +13,7 @@ import {
 import { strategyName } from "../strategy";
 import { Coin, Face } from "../ui";
 import { Allocation } from "../studio";
+import { unrankedLabel } from "@/lib/rank-pnl";
 
 export function Profile({
   agent,
@@ -76,7 +77,7 @@ export function Profile({
           <div>
             <span className="account-label">Reported return</span>
             <strong
-              className={`public-return ${(agent.pnlBps ?? 0) < 0 ? "down" : "up"}`}
+              className={`public-return ${agent.pnlBps == null ? "" : agent.pnlBps < 0 ? "down" : "up"}`}
             >
               {pctBps(agent.pnlBps)}
             </strong>
@@ -86,6 +87,8 @@ export function Profile({
             <span>Completed trades</span>
           </div>
         </div>
+        {agent.pnlBps == null && <p className="public-empty">{agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : "Return unavailable."}</p>}
+        {agent.pnlBps != null && agent.gas && <p className="public-empty">Net of {money(agent.gas.usdg)} in priced gas.{agent.gas.unpricedTrades > 0 && <> {agent.gas.unpricedTrades} trades had gas we could not price; this is not the full cost.</>}</p>}
         {agent.curve.length > 1 ? (
           <div
             className="public-chart"
@@ -136,7 +139,7 @@ export function Profile({
             );
           })
         ) : (
-          <p className="public-empty">{agent.publicBook === false ? "This agent keeps its positions private." : "No current positions reported."}</p>
+          <p className="public-empty">{agent.publicBook === false ? "This agent keeps its positions private." : agent.holdingsRead === false ? "Public holdings are unavailable right now." : "No current positions reported."}</p>
         )}
         {positions.length === 0 && mentioned.length > 0 && (
           <div className="public-mentioned">

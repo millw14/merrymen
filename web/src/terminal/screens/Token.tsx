@@ -51,11 +51,15 @@ export function Token({
   const [sortDescending, setSortDescending] = useState(true);
   const [seats,setSeats]=useState<Seat[]>([]);
   const [holderError,setHolderError]=useState("");
+  const [holderCoverage,setHolderCoverage]=useState<{published:number;total:number}|null>(null);
+  const [symbolClash,setSymbolClash]=useState(false);
   useEffect(()=>{
-    let alive=true;setSeats([]);setHolderError("");
+    let alive=true;setSeats([]);setHolderError("");setHolderCoverage(null);setSymbolClash(false);
     fetch(`/api/tokens/${encodeURIComponent(token.id)}`).then(r=>{if(!r.ok)throw new Error("Could not load public holdings.");return r.json();}).then((data:{ledger:import("@/lib/read-token").TokenRead;market:{symbolClash:boolean}})=>{
       if(!alive)return;
+      setSymbolClash(data.market.symbolClash);
       if(!data.ledger.fillsRead){setHolderError("Public holdings are unavailable right now.");return;}
+      setHolderCoverage({published:data.ledger.holders.length,total:data.ledger.holders.length+data.ledger.privateHolders});
       setSeats(data.ledger.holders.filter(h=>h.slug).map(h=>({slug:h.slug!,name:h.name,handle:h.handle,owner:null,strategy:"",strategyId:"custom",position:h.valueUsdg,pnlBps:h.pnlBps,avgEntry:h.entryPriceUsd ?? 0,thesis:data.market.symbolClash ? "" : theses.find(t=>t.slug===h.slug && t.symbol?.toUpperCase()===token.symbol.toUpperCase())?.reason ?? "",time:h.enteredAt ?? 0,price:h.entryPriceUsd ?? 0})));
     }).catch(e=>{if(alive)setHolderError(e.message);});
     return()=>{alive=false;};
@@ -309,6 +313,8 @@ export function Token({
       <section className="held-sec">
         {holderError && <p role="status">{holderError}</p>}
         <h3>Holders{seats.length ? ` (${seats.length})` : ""}</h3>
+        {holderCoverage && <p className="meta">{holderCoverage.published} of {holderCoverage.total} agents publish their positions.</p>}
+        {symbolClash && <p className="meta">Token symbols disagree, so agent reasoning cannot be matched to this token.</p>}
         {seats.length > 0 && (
           <div className="holder-table-wrap">
             <table className="holder-table">

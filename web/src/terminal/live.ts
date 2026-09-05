@@ -43,6 +43,9 @@ export interface LiveToken {
 }
 
 export interface LiveAgent {
+  unrankedWhy?: import("@/lib/rank-pnl").UnrankedWhy | null;
+  gas?: {usdg:number;unpricedTrades:number};
+  holdingsRead?: boolean;
   slug: string;
   name: string;
   handle: string | null;
@@ -321,6 +324,7 @@ export async function loadLive(onMine?: (mine: LiveMine | null) => void): Promis
       name: a.name,
       handle: a.handle,
       pnlBps: a.pnlBps,
+      unrankedWhy: a.unrankedWhy,
       curve: a.curve ?? [],
       landed: a.landed,
       last: latestBySlug.get(a.slug!) ?? latestBySlug.get(a.name) ?? null,
@@ -548,6 +552,7 @@ interface MarketTok {
 }
 
 interface BoardRow {
+  unrankedWhy?: import("@/lib/rank-pnl").UnrankedWhy | null;
   slug: string | null;
   name: string;
   handle: string | null;
