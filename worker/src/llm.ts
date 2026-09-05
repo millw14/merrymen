@@ -123,6 +123,34 @@ function chatUrl(creds: LlmCreds): string {
  * One forced tool call → the validated arguments object. Throws on transport
  * error (callers wrap and degrade). The model MUST answer via the tool.
  */
+/**
+ * ASK A REASONING MODEL NOT TO PUT ITS THINKING IN `content`.
+ *
+ * Two halves, and only one of them is universal.
+ *
+ * THE UNIVERSAL HALF is the response side: whatever a provider sends, this code
+ * reads `content` and discards `reasoning_content` / `reasoning` entirely.
+ * That needs no model list and cannot be wrong.
+ *
+ * THIS is the other half — a REQUEST hint, and it is a model list, because
+ * there is no portable way to ask. It is best-effort by construction: a
+ * provider that does not know `reasoning_effort` ignores it.
+ *
+ * `extra_body` IS NOT A WIRE FIELD. It is a python-SDK convenience that the SDK
+ * unwraps before sending; posted as JSON it is just an unknown key, so
+ * `include_reasoning: false` inside it was never sent anywhere. Worse, it was
+ * being added to the CLASSIFIER's request too, where an unknown key is one
+ * strict-schema provider away from a 400 that takes the whole natural-language
+ * surface down. Sent at the top level, where the field actually lives.
+ */
+const REASONING_MODELS = ["gpt-oss", "deepseek-r1", "qwen3-thinking", "nemotron"] as const;
+
+export function quietReasoning(creds: LlmCreds): Record<string, unknown> {
+  const model = creds.model.toLowerCase();
+  if (!REASONING_MODELS.some((m) => model.includes(m))) return {};
+  return { reasoning_effort: "none", include_reasoning: false };
+}
+
 export async function llmToolCall(
   creds: LlmCreds,
   opts: { system: string; messages: ChatMsg[]; tool: ToolSpec; maxTokens?: number },
@@ -144,13 +172,19 @@ export async function llmToolCall(
   }
 
   // openai-compatible function calling (Groq, OpenAI, Gemini, xAI, DeepSeek, …)
-  const body = {
+  // Some reasoning models (gpt-oss-120b, deepseek-r1, qwen3-thinking, nemotron) dump chain-of-thought
+  // into `content` or `reasoning_content`. We ignore that side-channel and only use tool_calls.
+  // Universal: ask reasoning models not to put CoT into content — separate bank.
+  const body: Record<string, unknown> = {
     model: creds.model,
     max_tokens: opts.maxTokens ?? 1024,
     temperature: 0.2,
     messages: [{ role: "system", content: opts.system }, ...opts.messages],
     tools: [{ type: "function", function: { name: opts.tool.name, description: opts.tool.description, parameters: opts.tool.schema } }],
     tool_choice: { type: "function", function: { name: opts.tool.name } },
+    // Best-effort disable reasoning in content for openai-compatible reasoning models.
+    // Providers that don't support it ignore the field; providers that do keep reasoning
+    ...quietReasoning(creds),
   };
   // Servers validate tool arguments and the model is nondeterministic — a
   // malformed emission 400s. One retry usually lands; then we throw honestly.
@@ -251,19 +285,21 @@ export async function llmAgentTurn(
       for (const r of m.results) messages.push({ role: "tool", tool_call_id: r.id, content: r.output });
     }
   }
-  const body = {
+  const body: Record<string, unknown> = {
     model: creds.model,
     max_tokens: opts.maxTokens ?? 1500,
     temperature: 0.2,
     messages,
     tools: opts.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.schema } })),
+    ...quietReasoning(creds),
   };
   const r = await fetch(chatUrl(creds), { method: "POST", headers: openaiHeaders(creds), body: JSON.stringify(body) });
   if (!r.ok) throw new Error(`${creds.provider} ${r.status}: ${(await r.text()).slice(0, 200)}`);
   const j = (await r.json()) as {
-    choices?: { message?: { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] } }[];
+    choices?: { message?: { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[]; reasoning_content?: string; reasoning?: string } }[];
   };
-  const msg = j.choices?.[0]?.message;
+  const msg = j.choices?.[0]?.message as { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[]; reasoning_content?: string; reasoning?: string } | undefined;
+  // reasoning_content/reasoning is a separate bank — never merge into content (universal exclusion)
   const toolUses: AgentToolUse[] = (msg?.tool_calls ?? [])
     .map((tc, i) => {
       if (!tc.function?.name) return null;
@@ -306,6 +342,22 @@ async function providerError(creds: LlmCreds, r: Response): Promise<string> {
   return `${creds.provider} ${r.status}${safe ? ` — ${safe.slice(0, 300)}` : ""}`;
 }
 
+/**
+ * Reasoning models (nemotron, deepseek-r1, qwen3-thinking, gpt-oss) may return
+ * chain-of-thought in `reasoning_content`, `reasoning`, or inline `<think>…</think>`
+ * blocks inside `content`. Strip that side-channel before returning to Telegram.
+ */
+function stripReasoningFromContent(content: string, reasoning?: string): string {
+  let out = content ?? "";
+  // reasoning_content/reasoning is a separate field — never append it; it's thinking.
+  // If content is empty and only reasoning exists, treat as no answer (caller throws).
+  if (!out.trim() && reasoning) return "";
+  // Remove <think>…</think> and <|think|>…<|/think|> blocks (multiline, case-insensitive)
+  out = out.replace(/<\|?think\|?>([\s\S]*?)<\/\|?think\|?>/gi, "");
+  out = out.replace(/<think>([\s\S]*?)<\/think>/gi, "");
+  return out;
+}
+
 export async function llmText(
   creds: LlmCreds,
   opts: { system: string; prompt: string; maxTokens?: number },
@@ -323,11 +375,12 @@ export async function llmText(
     return t && t.type === "text" ? t.text.trim() : "";
   }
 
-  const body = {
+  const body: Record<string, unknown> = {
     model: creds.model,
     max_tokens: opts.maxTokens ?? 400,
     temperature: 0.6,
     messages: [{ role: "system", content: opts.system }, { role: "user", content: opts.prompt }],
+    ...quietReasoning(creds),
   };
   const r = await fetch(chatUrl(creds), {
     method: "POST",
@@ -336,11 +389,12 @@ export async function llmText(
   });
   if (!r.ok) throw new Error(await providerError(creds, r));
   const j = (await r.json()) as {
-    choices?: { finish_reason?: string; message?: { content?: string } }[];
+    choices?: { finish_reason?: string; message?: { content?: string; reasoning_content?: string; reasoning?: string } }[];
     usage?: { completion_tokens_details?: { reasoning_tokens?: number } };
   };
   const choice = j.choices?.[0];
-  const text = (choice?.message?.content ?? "").trim();
+  const rawMsg = choice?.message as { content?: string; reasoning_content?: string; reasoning?: string } | undefined;
+  const text = stripReasoningFromContent(rawMsg?.content ?? "", rawMsg?.reasoning_content ?? rawMsg?.reasoning ?? "").trim();
   // AN EMPTY COMPLETION IS A FAILURE, NOT AN ANSWER.
   //
   // A reasoning model spends its completion budget on hidden reasoning before
