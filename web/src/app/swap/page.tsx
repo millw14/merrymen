@@ -4,6 +4,11 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatEther } from "viem";
 import { LogoMark } from "@/components/Logo";
+import "@/styles/tokens.css";
+import "@/styles/shell.css";
+import "@/styles/legacy.css";
+import "@/styles/legacy-console.css";
+import "./swap.css";
 
 interface SwapQuote {
   ok: boolean;
@@ -36,6 +41,12 @@ interface SwapStatus {
   line?: string | null;
 }
 
+type Stage = "edit" | "review" | "tracking" | "done";
+
+/** localStorage keys — the pending flow survives refresh and nav, no URL. */
+const LS_AMOUNT = "merrymen.swap.amount";
+const LS_TRACK = "merrymen.swap.trackId";
+
 /** Decimal ETH string → wei bigint. Returns null when not a valid amount. */
 function ethToWei(s: string): bigint | null {
   const t = s.trim();
@@ -63,6 +74,7 @@ export default function SwapPage() {
   const [amount, setAmount] = useState("");
   const [quote, setQuote] = useState<SwapQuote | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
+  const [stage, setStage] = useState<Stage>("edit");
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [trackId, setTrackId] = useState<string | null>(null);
   const [status, setStatus] = useState<SwapStatus | null>(null);
@@ -70,11 +82,13 @@ export default function SwapPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const wei = ethToWei(amount);
+  const stopPoll = useCallback(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = null;
+  }, []);
+  useEffect(() => stopPoll, [stopPoll]);
+
   const refreshQuote = useCallback(async (weiStr: string) => {
-    if (!weiStr) {
-      setQuote(null);
-      return;
-    }
     setQuoteLoading(true);
     try {
       const r = await fetch(`/api/swap/quote?wei=${weiStr}`);
@@ -85,6 +99,36 @@ export default function SwapPage() {
       setQuoteLoading(false);
     }
   }, []);
+
+  // Restore an in-flight swap after refresh/nav — the pending flow lives
+  // here, not in the URL, so coming back resumes instead of losing it.
+  useEffect(() => {
+    try {
+      const savedAmount = localStorage.getItem(LS_AMOUNT);
+      const savedTrack = localStorage.getItem(LS_TRACK);
+      if (savedAmount) setAmount(savedAmount);
+      if (savedTrack) {
+        setTrackId(savedTrack);
+        setStage("tracking");
+      }
+    } catch {
+      /* private mode — the page still works, just without resume */
+    }
+  }, []);
+
+  // Amount edits invalidate the review, not the tracking: typing a new
+  // amount while a swap is tracked starts a fresh quote, the old one keeps
+  // polling underneath until it settles.
+  const onAmount = (v: string) => {
+    setAmount(v);
+    try {
+      localStorage.setItem(LS_AMOUNT, v);
+    } catch {
+      /* ignore */
+    }
+    setStage((s) => (s === "review" ? "edit" : s));
+    setSubmitError(null);
+  };
 
   // Debounced preview as the amount is typed.
   useEffect(() => {
@@ -112,33 +156,44 @@ export default function SwapPage() {
       .catch(() => {});
   }, []);
 
-  const stopPoll = () => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = null;
-  };
-  useEffect(() => stopPoll, []);
-
-  const pollStatus = useCallback((id: string) => {
-    stopPoll();
-    const tick = async () => {
-      try {
-        const r = await fetch(`/api/swap/status?id=${id}`);
-        const s = (await r.json()) as SwapStatus;
-        setStatus(s);
-        if (s.state === "done") stopPoll();
-      } catch {
-        /* keep polling */
-      }
-    };
-    void tick();
-    pollRef.current = setInterval(tick, 5000);
-    // Give up polling after ~6 minutes: the worker is likely stopped, and the
-    // request itself is harmless sitting in settings until it runs.
-    setTimeout(() => {
+  const pollStatus = useCallback(
+    (id: string) => {
       stopPoll();
-      setStatus((s) => (s?.state === "done" ? s : { state: "running", id }));
-    }, 360_000);
-  }, []);
+      const tick = async () => {
+        try {
+          const r = await fetch(`/api/swap/status?id=${id}`);
+          const s = (await r.json()) as SwapStatus;
+          setStatus(s);
+          if (s.state === "done") {
+            stopPoll();
+            setStage("done");
+            try {
+              localStorage.removeItem(LS_TRACK);
+            } catch {
+              /* ignore */
+            }
+          }
+        } catch {
+          /* keep polling */
+        }
+      };
+      void tick();
+      pollRef.current = setInterval(tick, 5000);
+      // Give up polling after ~6 minutes: the worker is likely stopped, and
+      // the request itself sits harmlessly in settings until it runs.
+      setTimeout(() => {
+        stopPoll();
+        setStatus((s) => (s?.state === "done" ? s : { state: "running", id }));
+      }, 360_000);
+    },
+    [stopPoll],
+  );
+
+  // Resume a track that outlived a refresh or a trip to Settings.
+  useEffect(() => {
+    if (trackId && stage === "tracking") pollStatus(trackId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trackId]);
 
   const submit = async () => {
     setSubmitError(null);
@@ -159,155 +214,199 @@ export default function SwapPage() {
       return;
     }
     setTrackId(id);
+    setStage("tracking");
+    try {
+      localStorage.setItem(LS_TRACK, id);
+    } catch {
+      /* ignore */
+    }
     pollStatus(id);
   };
 
   const surplus = quote?.ok && quote.surplusWei ? BigInt(quote.surplusWei) : null;
   const grantReady = quote?.grantReady;
-  const tracking = trackId && status && status.state !== "done";
+  const quoted = quote?.ok && quote.quote && quote.amountWei && BigInt(quote.amountWei) > 0n;
+  const tracking = stage === "tracking";
+  const stepIdx = !status || status.state === "queued" ? 0 : status.state === "running" ? 1 : 2;
 
   return (
-    <main className="page">
-      <header className="page-head">
-        <Link href="/" className="brand">
+    <main className="sw sc-root">
+      <header className="sw-head">
+        <Link href="/" aria-label="Home">
           <LogoMark />
         </Link>
         <h1>Swap ETH → USDG</h1>
       </header>
-      <p className="page-sub">
+      <p className="sw-sub">
         A manual one-shot conversion for trading funds. The worker picks it up on its next tick, keeps the gas
         reserve, and reports back here. Same permission, same quote and same limits as auto-convert — and a manual
         swap counts as a fire, so auto-convert won&apos;t re-eat the leftover.
       </p>
 
       {quote && !quote.ok && (
-        <div className="card">
+        <div className="sw-result warn">
           {quote.reason === "no-grant" && (
-            <p>
+            <span>
               No grant on file. <Link href="/grant">Sign a grant</Link> first.
-            </p>
+            </span>
           )}
-          {quote.reason === "wrong-chain" && <p>This swap only runs on the live trading chain.</p>}
+          {quote.reason === "wrong-chain" && <span>This swap only runs on the live trading chain.</span>}
         </div>
       )}
 
       {quote?.ok && grantReady === false && (
-        <div className="card warn">
-          <p>
+        <div className="sw-result err">
+          <span>
             This key was signed before the ETH→USDG permission existed. <Link href="/grant">Re-sign at /grant</Link>,
             then come back — submits until then are cancelled, never silently held.
-          </p>
+          </span>
         </div>
       )}
 
-      <div className="card">
-        <label className="field">
-          <span className="field-label">Amount (ETH)</span>
-          <span className="field-input row">
-            <input
-              inputMode="decimal"
-              placeholder="0.01"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              disabled={!!tracking}
-            />
-            <button
-              type="button"
-              className="btn-ghost"
-              disabled={surplus === null || surplus <= 0n || !!tracking}
-              onClick={() => surplus !== null && setAmount(formatEther(surplus))}
-            >
-              MAX
-            </button>
+      {quote?.ok && (
+        <div className="sw-caps">
+          <span className="sw-cap">
+            balance <b>{formatEther(BigInt(quote.ethWei ?? "0"))} ETH</b>
           </span>
-          <span className="field-hint">
-            {quote?.ok ? (
-              <>
-                Balance {formatEther(BigInt(quote.ethWei ?? "0"))} ETH · reserve kept{" "}
-                {formatEther(BigInt(quote.reserveWei ?? "0"))} ETH · convertible{" "}
-                {formatEther(BigInt(quote.surplusWei ?? "0"))} ETH
-              </>
-            ) : (
-              "Type an amount for a live quote."
-            )}
+          <span className="sw-cap">
+            reserve kept <b>{formatEther(BigInt(quote.reserveWei ?? "0"))} ETH</b>
           </span>
-        </label>
+          <span className="sw-cap">
+            convertible <b>{formatEther(BigInt(quote.surplusWei ?? "0"))} ETH</b>
+          </span>
+        </div>
+      )}
 
-        {quoteLoading && <p className="muted">Quoting…</p>}
-
-        {quote?.ok && quote.amountWei && BigInt(quote.amountWei) > 0n && quote.quote && (
-          <div className="quote">
-            <div className="quote-row">
-              <span>You get (est.)</span>
-              <strong>~{fmtUsdg(quote.quote.expectedOut)} USDG</strong>
-            </div>
-            <div className="quote-row">
-              <span>Minimum after slippage</span>
-              <span>{fmtUsdg(quote.quote.minOut)} USDG</span>
-            </div>
-            <div className="quote-row">
-              <span>Pool fee</span>
-              <span>{(quote.quote.fee / 10_000).toFixed(2)}%</span>
-            </div>
-            <div className="quote-row">
-              <span>Price source</span>
-              <span>
-                {quote.quote.source === "twap" ? "15-min average" : "live spot (fresh pool — no average yet)"}
-              </span>
-            </div>
-            {quote.quote.divergenceBps > 500 && (
-              <p className="warn-text">
-                Heads up: the live price is {((quote.quote.divergenceBps / 100).toFixed(1))}% away from the average —
-                the pool may be moving right now. The worker still applies your slippage guard.
-              </p>
-            )}
-            {quote.capped && (
-              <p className="warn-text">
-                Capped to the convertible surplus — the rest stays as your gas reserve.
-              </p>
-            )}
-          </div>
-        )}
-
-        {quote?.ok && quote.amountWei === "0" && wei !== null && wei > 0n && (
-          <p className="warn-text">Nothing convertible at this balance — the whole amount is the gas reserve.</p>
-        )}
-
-        {submitError && <p className="error">{submitError}</p>}
-
-        <button
-          type="button"
-          className="btn-primary"
-          disabled={
-            !!tracking ||
-            wei === null ||
-            wei <= 0n ||
-            !quote?.ok ||
-            grantReady !== true ||
-            !quote.quote ||
-            BigInt(quote.amountWei ?? "0") <= 0n
-          }
-          onClick={submit}
-        >
-          {tracking ? "Swap queued — waiting on the worker…" : "Swap"}
-        </button>
-
-        {status && status.state !== "done" && trackId && (
-          <p className="muted">
-            {status.state === "queued"
-              ? "Queued — the worker picks it up on its next tick."
-              : "Claimed — the worker is executing it."}
-          </p>
-        )}
-        {status?.state === "done" && (
-          <p className={status.ok ? "ok-text" : "error"}>{status.line ?? "Finished."}</p>
-        )}
+      <div className="sw-field">
+        <span className="sw-field-label">Amount (ETH)</span>
+        <div className="sw-amount-row">
+          <input
+            inputMode="decimal"
+            placeholder="0.01"
+            value={amount}
+            onChange={(e) => onAmount(e.target.value)}
+            disabled={tracking}
+            aria-label="Amount in ETH"
+          />
+          <button
+            type="button"
+            className="sw-max"
+            disabled={surplus === null || surplus <= 0n || tracking}
+            onClick={() => surplus !== null && onAmount(formatEther(surplus))}
+          >
+            MAX
+          </button>
+        </div>
+        <span className="sw-hint">
+          {quote?.ok
+            ? `Balance ${formatEther(BigInt(quote.ethWei ?? "0"))} ETH · the worker keeps ${formatEther(BigInt(quote.reserveWei ?? "0"))} ETH for gas.`
+            : "Type an amount for a live quote."}{" "}
+          <Link href="/settings">Auto-convert lives in Settings</Link>.
+        </span>
       </div>
 
+      {quoteLoading && <p className="sw-note">Quoting…</p>}
+
+      {quoted && quote?.quote && (
+        <div className="sw-quote">
+          <div className="sw-quote-row">
+            <span>You get (est.)</span>
+            <strong>~{fmtUsdg(quote.quote.expectedOut)} USDG</strong>
+          </div>
+          <div className="sw-quote-row">
+            <span>Minimum after slippage</span>
+            <span>{fmtUsdg(quote.quote.minOut)} USDG</span>
+          </div>
+          <div className="sw-quote-row">
+            <span>Pool fee</span>
+            <span>{(quote.quote.fee / 10_000).toFixed(2)}%</span>
+          </div>
+          <div className="sw-quote-row">
+            <span>Price source</span>
+            <span>{quote.quote.source === "twap" ? "15-min average" : "live spot (fresh pool)"}</span>
+          </div>
+          {quote.quote.divergenceBps > 500 && (
+            <p className="sw-note warn-text">
+              Heads up: the live price is {(quote.quote.divergenceBps / 100).toFixed(1)}% away from the average —
+              the pool may be moving right now. Your slippage guard still applies.
+            </p>
+          )}
+          {quote.capped && (
+            <p className="sw-note warn-text">Capped to the convertible surplus — the rest stays as gas.</p>
+          )}
+        </div>
+      )}
+
+      {quote?.ok && quote.amountWei === "0" && wei !== null && wei > 0n && (
+        <p className="sw-note warn-text">Nothing convertible at this balance — the whole amount is the gas reserve.</p>
+      )}
+
+      {submitError && <p className="sw-error">{submitError}</p>}
+
+      {stage === "edit" && (
+        <button
+          type="button"
+          className="sw-btn"
+          disabled={!quoted || grantReady !== true}
+          onClick={() => setStage("review")}
+        >
+          Review quote
+        </button>
+      )}
+
+      {stage === "review" && quoted && quote?.quote && (
+        <>
+          <button type="button" className="sw-btn confirm" onClick={submit}>
+            Confirm swap {formatEther(BigInt(quote.amountWei ?? "0"))} ETH → ~{fmtUsdg(quote.quote.expectedOut)} USDG
+          </button>
+          <button type="button" className="sw-back" onClick={() => setStage("edit")}>
+            ← back to edit
+          </button>
+        </>
+      )}
+
+      {tracking && (
+        <>
+          <div className="sw-steps" aria-live="polite">
+            {(["Queued", "Claimed", "Done"] as const).map((label, i) => (
+              <div key={label} className={`sw-step${i < stepIdx ? " done" : i === stepIdx ? " on" : ""}`}>
+                <i>{label}</i>
+              </div>
+            ))}
+          </div>
+          <p className="sw-note">
+            {!status || status.state === "queued"
+              ? "Queued — the worker picks it up on its next tick. You can leave this page; it resumes here."
+              : "Claimed — the worker is executing it."}
+          </p>
+        </>
+      )}
+
+      {stage === "done" && status?.state === "done" && (
+        <div className={`sw-result ${status.ok ? "ok" : "err"}`}>
+          {status.ok ? <b>Swapped. </b> : <b>Didn&apos;t land. </b>}
+          <span className="mono">{status.line ?? "Finished."}</span>
+        </div>
+      )}
+
+      {stage === "done" && (
+        <button
+          type="button"
+          className="sw-btn"
+          onClick={() => {
+            setStage("edit");
+            setStatus(null);
+            setTrackId(null);
+          }}
+        >
+          Swap again
+        </button>
+      )}
+
       {history.length > 0 && (
-        <div className="card">
+        <div className="sw-history">
           <h2>Recent conversions</h2>
-          <ul className="history">
+          <ul>
             {history.map((e, i) => (
               <li key={i} className={e.level}>
                 {e.message}
@@ -317,7 +416,7 @@ export default function SwapPage() {
         </div>
       )}
 
-      <p className="muted">
+      <p className="sw-foot">
         <Link href="/settings">Settings</Link> · <Link href="/grant">Grant</Link>
         {quote?.autoConvertEnabled && " · auto-convert is on — it fires only on new deposits now."}
       </p>

@@ -1,0 +1,77 @@
+/**
+ * Swap page — scoped (.sw) styles in the grant.css idiom.
+ *
+ * No new tokens and nothing global: every value below already exists in
+ * tokens.css / the legacy palette the grant money-flow uses. A restyle of the
+ * app shell changes this page only by changing those tokens.
+ */
+
+.sw { display: flex; flex-direction: column; gap: 14px; max-width: 640px; margin: 0 auto; padding: 20px 16px 48px; }
+
+.sw-head { display: flex; align-items: center; gap: 12px; }
+.sw-head h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; margin: 0; }
+.sw-sub { font-size: 13px; color: var(--dim); line-height: 1.6; margin: 0; }
+
+/* balance strip — the .cap chip pattern from the grant wall caps */
+.sw-caps { display: flex; gap: 8px; flex-wrap: wrap; }
+.sw-cap { font-family: var(--mono); font-size: 11.5px; color: var(--dim); background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px; }
+.sw-cap b { color: var(--tx); }
+
+/* amount field — the .gw .field-input pattern */
+.sw-field { display: flex; flex-direction: column; gap: 6px; }
+.sw-field-label { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+.sw-amount-row { display: flex; align-items: center; gap: 8px; background: var(--ground-2); border: 1px solid var(--line-2); border-radius: 9px; padding: 3px 6px 3px 12px; }
+.sw-amount-row:focus-within { border-color: color-mix(in srgb, var(--lime) 45%, var(--line-2)); }
+.sw-amount-row input { flex: 1; min-width: 0; background: none; border: none; color: var(--tx); font-family: var(--mono); font-size: 18px; padding: 9px 0; outline: none; }
+.sw-max { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--tx-2); padding: 8px 13px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line-2); cursor: pointer; transition: border-color .15s, color .15s; flex: none; }
+.sw-max:hover { color: var(--lime); border-color: color-mix(in srgb, var(--lime) 35%, var(--line-2)); }
+.sw-max:disabled { opacity: .45; cursor: default; }
+.sw-hint { font-size: 12px; color: var(--faint); line-height: 1.55; }
+.sw-hint a { color: var(--lime); }
+
+/* quote card — the .gw .grant-result box pattern */
+.sw-quote { background: var(--ground-2); border: 1px solid var(--line); border-radius: 11px; padding: 14px 16px; display: flex; flex-direction: column; gap: 9px; }
+.sw-quote-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 13px; color: var(--dim); }
+.sw-quote-row strong { font-family: var(--mono); font-size: 16px; color: var(--tx); }
+.sw-quote-row span:last-child { font-family: var(--mono); color: var(--tx-2); }
+
+/* staged action — the .gw .grant-btn pattern */
+.sw-btn { display: block; width: 100%; text-align: center; font-family: var(--sans); font-weight: 700; font-size: 15px; padding: 13px 20px; border-radius: 11px; background: var(--lime); color: #14210a; border: 1px solid var(--lime); cursor: pointer; transition: transform .12s, background .16s; margin-top: 2px; }
+.sw-btn:hover { transform: translateY(-1px); background: var(--lime-dim); }
+.sw-btn:disabled { opacity: .5; cursor: default; transform: none; background: var(--panel-2); color: var(--dim); border-color: var(--line-2); }
+.sw-btn.confirm { background: color-mix(in srgb, var(--mint) 22%, var(--panel)); color: var(--mint); border-color: color-mix(in srgb, var(--mint) 45%, var(--line)); }
+.sw-btn.confirm:hover { background: color-mix(in srgb, var(--mint) 30%, var(--panel)); }
+.sw-back { background: none; border: none; color: var(--faint); font-size: 12.5px; cursor: pointer; padding: 6px 0 0; align-self: flex-start; }
+.sw-back:hover { color: var(--tx-2); }
+
+/* progress stepper — three stages, the current one lit */
+.sw-steps { display: flex; align-items: center; gap: 0; margin-top: 4px; }
+.sw-step { flex: 1; display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--faint); }
+.sw-step i { font-style: normal; font-family: var(--mono); letter-spacing: 0.04em; text-transform: uppercase; }
+.sw-step::after { content: ""; height: 3px; border-radius: 2px; background: var(--line-2); }
+.sw-step.on { color: var(--lime); }
+.sw-step.on::after { background: var(--lime); }
+.sw-step.done { color: var(--dim); }
+.sw-step.done::after { background: color-mix(in srgb, var(--lime) 55%, var(--line-2)); }
+
+/* result boxes + notices */
+.sw-result { border-radius: 10px; padding: 12px 15px; font-size: 12.5px; line-height: 1.55; margin-top: 4px; }
+.sw-result.ok { background: color-mix(in srgb, var(--mint) 8%, var(--panel)); border: 1px solid color-mix(in srgb, var(--mint) 28%, var(--line)); color: var(--tx-2); }
+.sw-result.ok b { color: var(--mint); }
+.sw-result.warn { background: color-mix(in srgb, var(--lime) 7%, var(--panel)); border: 1px solid color-mix(in srgb, var(--lime) 30%, var(--line)); color: var(--tx-2); }
+.sw-result.err { background: color-mix(in srgb, var(--rose) 7%, var(--panel)); border: 1px solid color-mix(in srgb, var(--rose) 30%, var(--line)); color: var(--tx-2); }
+.sw-result .mono { font-family: var(--mono); }
+.sw-note { font-size: 12px; color: var(--faint); line-height: 1.6; }
+.sw-note.warn-text { color: var(--lime); }
+.sw-error { color: var(--rose); font-family: var(--mono); font-size: 12.5px; }
+
+/* recent conversions */
+.sw-history { background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 14px 16px; }
+.sw-history h2 { font-size: 13px; font-weight: 700; margin: 0 0 10px; color: var(--tx-2); }
+.sw-history ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.sw-history li { font-size: 12.5px; line-height: 1.5; color: var(--dim); border-left: 2px solid var(--line-2); padding-left: 10px; }
+.sw-history li.ok { border-color: var(--mint); }
+.sw-history li.warn, .sw-history li.err { border-color: var(--rose); }
+
+.sw-foot { font-size: 12px; color: var(--faint); }
+.sw-foot a { color: var(--lime); }

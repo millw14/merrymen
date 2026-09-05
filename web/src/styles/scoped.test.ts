@@ -132,7 +132,7 @@ describe("the new stylesheets are scoped, provably", () => {
     assert.ok(files.length > 0, "no .css under web/src/styles");
   });
 
-  it("the quarantined sheets are only reachable from the two pages that want them", () => {
+  it("the quarantined sheets are only reachable from the pages that want them", () => {
     // The exclusion above is only safe while nothing else imports them. If a
     // third page picks one up, the old palette and its fixed background photo
     // are back on a surface that was moved off them deliberately.
@@ -157,9 +157,12 @@ describe("the new stylesheets are scoped, provably", () => {
     walk(web);
     assert.deepEqual(
       importers.map((p) => p.split(path.sep).join("/")).sort(),
-      // /settings migrated to the new system; /grant is the last one left,
-      // and it is deliberately not being restyled until its guards are pinned.
-      ["app/grant/page.tsx"],
+      // /settings migrated to the new system; /grant is deliberately not
+      // being restyled until its guards are pinned — and /swap is the same
+      // money-flow world as /grant (same permission, same wall), so it
+      // carries the same .sc-root tokens on purpose. A fourth importer is
+      // the one that needs to justify itself, not this one.
+      ["app/grant/page.tsx", "app/swap/page.tsx"],
     );
   });
 
