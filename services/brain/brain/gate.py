@@ -30,6 +30,12 @@ from .schemas import PortfolioState
 
 Verdict = Literal["proceed", "downgrade-to-hold", "refuse"]
 
+#: THE SAME FLOOR packages/core uses in `computePnl`. Epoch 1 predates auditable
+#: flows by construction; its rows are kept for forensics and are never presented
+#: as measured. If core changes this, this changes — it is one rule with two
+#: homes, and the homes must not drift.
+MIN_AUDITABLE_EPOCH = 2
+
 
 @dataclass(frozen=True)
 class GateResult:
@@ -43,15 +49,19 @@ class GateResult:
         return self.verdict == "proceed"
 
 
-def assess(portfolio: PortfolioState, *, min_epoch: int = 1) -> GateResult:
+def assess(portfolio: PortfolioState, *, min_epoch: int = MIN_AUDITABLE_EPOCH) -> GateResult:
     """
     Decide what this book supports. PURE.
 
-    `min_epoch` defaults to 1 rather than 2 so the gate is usable during the
-    accounting repair; production raises it once every agent has crossed into a
-    measured epoch. Stating it as a parameter rather than a constant keeps the
-    two facts — "epoch 1 is unauditable by design" and "we are still in it" —
-    from being conflated in code.
+    `min_epoch` MATCHES CORE. It defaulted to 1 while the accounting repair was
+    still running, and the 36-scenario ablation caught what that cost:
+    `epoch_one` returned BUY on a book that packages/core reports as
+    unpublishable. Two epoch rules is exactly the second accounting
+    implementation the canonical snapshot exists to prevent — and the local one
+    was the LENIENT half, which is the dangerous direction to drift in.
+
+    It stays a parameter so a caller can state a different floor deliberately,
+    but the default now agrees with `computePnl`.
     """
     q = portfolio.quality
     caveats: list[str] = []

@@ -156,3 +156,27 @@ def test_an_ordinary_add_to_a_working_position_does_not_escalate():
     )
     assert not v.escalate
     assert v.primary == "no-escalation"
+
+
+def test_brains_epoch_floor_agrees_with_core():
+    # The 36-scenario ablation caught this: the local gate defaulted to an epoch
+    # floor of 1 while packages/core reports anything below 2 as unpublishable,
+    # so `epoch_one` returned BUY on a book core calls unmeasurable. Two epoch
+    # rules is a second accounting implementation, and the local one was the
+    # LENIENT half — the dangerous direction to drift in.
+    from brain.gate import MIN_AUDITABLE_EPOCH
+    from brain.schemas import PortfolioQuality, PortfolioState
+
+    assert MIN_AUDITABLE_EPOCH == 2, "must match computePnl in packages/core"
+
+    epoch_one = PortfolioState(
+        snapshot_id="s", as_of=1, cash_usdg=300_000_000, equity_usdg=300_000_000,
+        net_contributions_usdg=300_000_000,
+        quality=PortfolioQuality(
+            audit_passed=True, epoch=1, contributions_known=True, equity_complete=True,
+            gas_basis="net", position_history_available=True,
+        ),
+    )
+    g = gate_assess(epoch_one)
+    assert g.verdict == "refuse"
+    assert not g.may_size, "epoch 1 is forensic; nothing may be sized against it"

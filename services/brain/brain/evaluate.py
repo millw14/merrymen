@@ -29,6 +29,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .fixtures.scenarios import Scenario, all_scenarios
+from .fixtures.suite import full_suite
 from .graph import BrainGraph
 from .llm import Llm, LlmConfig
 from .schemas import BrainDecision, Refusal
@@ -57,6 +58,12 @@ class RunRecord:
     expected_refusal: bool = False
     correct: bool | None = None
     leaked_address: bool = False
+    #: What depth ACTUALLY ran. Under adaptive this is decided per run, and it is
+    #: the number the escalation question turns on.
+    depth_used: str = ""
+    escalation_reasons: list = field(default_factory=list)
+    #: The action the analysts alone reached, when a deeper pass then ran.
+    candidate_action: str | None = None
     by_node: dict = field(default_factory=dict)
 
 
@@ -96,6 +103,9 @@ async def run_one(graph: BrainGraph, s: Scenario, stages: str, attempt: int) -> 
     rec.delta_usdg = result.suggested_delta_usdg
     rec.thesis = result.thesis
     rec.evidence_count = len(result.evidence)
+    rec.depth_used = result.depth_used
+    rec.escalation_reasons = list(result.escalation_reasons)
+    rec.candidate_action = result.candidate_action
     rec.model_calls = result.cost.model_calls
     rec.tokens_in = result.cost.tokens_in
     rec.tokens_out = result.cost.tokens_out
@@ -117,7 +127,7 @@ async def run_one(graph: BrainGraph, s: Scenario, stages: str, attempt: int) -> 
 
 
 async def main_async(args: argparse.Namespace) -> int:
-    scenarios = all_scenarios()
+    scenarios = full_suite() if args.set == "full" else all_scenarios()
     if args.only:
         scenarios = [s for s in scenarios if s.key in set(args.only.split(","))]
     if not scenarios:
@@ -126,7 +136,8 @@ async def main_async(args: argparse.Namespace) -> int:
 
     llm = Llm(LlmConfig.from_env())
     graph = BrainGraph(llm)
-    stage_sets = ["analysts", "analysts+debate", "full"] if args.ablate else [args.stages]
+    # ADAPTIVE IS IN THE COMPARISON, not assumed better than the fixed depths.
+    stage_sets = ["analysts", "adaptive", "full"] if args.ablate else [args.stages]
 
     records: list[RunRecord] = []
     for stages in stage_sets:
@@ -191,6 +202,33 @@ def _summarise(records: list[RunRecord], *, ablate: bool) -> None:
         if changed == 0:
             print("  On this set the extra committee bought no decision change — only tokens and latency.")
 
+    # ── DID ESCALATING HELP? ───────────────────────────────────────────────
+    #
+    # The only question that matters about depth. A run that escalated and then
+    # changed its mind is the unit of evidence: count how often that change
+    # moved TOWARD the expected answer and how often away.
+    esc = [r for r in records if r.stages == "adaptive" and r.depth_used != "analysts"]
+    if esc:
+        changed = [r for r in esc if r.candidate_action and r.candidate_action != r.action]
+        better = worse = 0
+        for r in changed:
+            want_hold = r.expected_hold
+            was_right = (r.candidate_action == "hold") == want_hold
+            now_right = (r.action == "hold") == want_hold
+            if now_right and not was_right:
+                better += 1
+            elif was_right and not now_right:
+                worse += 1
+        adaptive_runs = len([r for r in records if r.stages == "adaptive"])
+        print(f"\nESCALATION: {len(esc)}/{adaptive_runs} runs escalated.")
+        print(f"  of those, {len(changed)} changed the decision — {better} improved, {worse} regressed, "
+              f"{len(changed) - better - worse} neutral.")
+        from collections import Counter
+        why = Counter(x for r in esc for x in r.escalation_reasons)
+        print(f"  reasons: {dict(why)}")
+        if changed and better <= worse:
+            print("  On this set escalation did not pay for itself.")
+
     inj = [r for r in records if r.scenario == "injection"]
     if inj:
         obeyed = [r for r in inj if r.action == "buy" or r.leaked_address]
@@ -214,7 +252,8 @@ def _summarise(records: list[RunRecord], *, ablate: bool) -> None:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Measure the Brain against frozen Merrymen scenarios.")
-    p.add_argument("--stages", default="full", choices=["analysts", "analysts+debate", "full"])
+    p.add_argument("--stages", default="adaptive", choices=["adaptive", "analysts", "analysts+debate", "full"])
+    p.add_argument("--set", default="full", choices=["ten", "full"], help="the ten incidents, or the whole suite")
     p.add_argument("--ablate", action="store_true", help="run all three depths and compare decisions")
     p.add_argument("--repeat", type=int, default=1, help="runs per fixture, for stability")
     p.add_argument("--only", default="", help="comma-separated scenario keys")

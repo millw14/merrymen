@@ -1,0 +1,150 @@
+bundler api.pimlico.io · chain 4663 · maxFeePerGas 566330400 wei (0.566330 gwei)
+
+throwaway owner 0x6CB7b3f911B6522D0097a475b56A4E8b22809b3c (generated here, never funded, never on disk)
+
+══ 0. owner-slot formula check (the estimate arm depends on it) ══
+  0x032Da6A0Ccf866474e45854E7fDEF9afd1509036  storage 0x8168e2fb723c2a60982afbfdfafd84f9fb22f7ee · view 0x8168e2fb723c2a60982afbfdfafd84f9fb22f7ee · AGREE
+  0xa48cE91e2F3237E69660C1543042c007B8D33e75  storage 0x8429b205ea170f1a34c29ebfc9e83cbee1422134 · view 0x8429b205ea170f1a34c29ebfc9e83cbee1422134 · AGREE
+  0x032Da6A0Ccf866474e45854E7fDEF9afd1509036 code 61 bytes -> accountLive TRUE
+
+══ 1. enable-blob byte length vs wall size (no bundler; free) ══
+  perms  blob bytes  nonce mode/vType  seq  pId
+      1        1940  0x01/0x02            0  0x5d4c731e
+      2        2388  0x01/0x02            0  0x27dd7ea3
+      3        2836  0x01/0x02            0  0xa23f5e72
+      4        3284  0x01/0x02            0  0x33cff0fd
+      6        4180  0x01/0x02            0  0xbd2ce5c3
+      8        5076  0x01/0x02            0  0x50d05427
+     12        6868  0x01/0x02            0  0x0f309117
+     18       10932  0x01/0x02            0  0x56fe3f83
+     24  (only 18 permissions exist — skipped)
+     32  (only 18 permissions exist — skipped)
+  full wall = 18 call permissions + 1 timestamp policy
+
+  smallest enable blob measured: 1,940 bytes · ENABLE_MIN_BYTES 512 · OK — threshold is 3.8x below it
+  sudo-only stub on the same account: 65 bytes (mode 0x00) · OK — below the threshold
+
+══ 2. raw gas vs blob bytes — REAL deployed account, no factory, owner-slot override ══
+  perms  blob bytes      verif   preVerif   call        RAW     bounded
+      1        1940  1,109,681     81,728  50,180  1,241,589   1,589,621
+      2        2388  1,396,425     89,613  50,180  1,536,218   1,957,907
+      4        3284  1,960,023    105,383  50,180  2,115,586   2,682,116
+      8        5076  3,097,109    136,922  50,180  3,284,211   4,142,898
+     18       10932  7,240,052    239,988  50,180  7,530,220   9,450,410
+
+  NEGATIVE CONTROL (no owner override): refused as expected — code -32500 · UserOperation reverted during simulation with reason: AA23 reverted 0xc48cf8ee
+
+══ 3. least-squares fit of RAW total against blob bytes, and the C5 constants ══
+  raw ≈ -169,701 + 700.945 × blobBytes   (n=5)
+  residuals:
+     1 perms    1940 B  actual 1,241,589  fitted 1,190,133  -4.14%
+     2 perms    2388 B  actual 1,536,218  fitted 1,504,157  -2.09%
+     4 perms    3284 B  actual 2,115,586  fitted 2,132,204  0.79%
+     8 perms    5076 B  actual 3,284,211  fitted 3,388,298  3.17%
+    18 perms   10932 B  actual 7,530,220  fitted 7,493,033  -0.49%
+  worst residual 4.14%
+
+  PROPOSED CONSTANTS for gate-v2.ts ENABLE_GAS_FIT:
+    intercept:             -169701n
+    slopeMilliGasPerByte:  700945n
+    safetyBps:             12000  (1.20x — 4x the worst residual)
+
+  WHAT THAT CEILING WOULD BE, per wall size (current constants in gate-v2.ts):
+    perms  blob B    actual bounded   sized ceiling   verdict         flat-12M slack removed
+        1    1940       1,589,621       3,000,000   fits             9,000,000
+        2    2388       1,957,907       3,000,000   fits             9,000,000
+        4    3284       2,682,116       3,235,937   fits             8,764,063
+        8    5076       4,142,898       5,120,077   fits             6,879,923
+       18   10932       9,450,410      11,277,177   fits               722,823
+
+══ 4. adversarial tests of chooseGasCeiling ══
+  PASS  (a) renewal: deployed account + fresh session key + full wall
+        -> elevated · ceiling 11,277,177 · expected elevated
+        -> first enable of permission id 0x96368980 (seq 0, 10932-byte blob, not installed on chain) — ceiling sized to 11277177
+        -> evidence: mode 0x01 vType 0x02 seq 0 pId 0x96368980 blob 10932B installed false accountLive true
+  PASS  (b) control: sudo-only op on the same deployed account (C1 must reject)
+        -> ordinary · ceiling 3,000,000 · expected ordinary
+        -> nonce mode 0x00/vType 0x00 is not a permission-validator enable
+        -> evidence: mode 0x00 vType 0x00 seq 1 pId 0x845adb2c blob 65B installed UNREAD accountLive true
+  PASS  (c) steady state: installed permission id on a live account
+        -> ordinary · ceiling 3,000,000 · expected ordinary
+        -> nonce mode 0x00/vType 0x02 is not a permission-validator enable
+        -> evidence: mode 0x00 vType 0x02 seq 4 pId 0x3ca1cec8 blob 66B installed UNREAD accountLive true
+  [fault injection: 8 permissionConfig calls made to fail; nonce mode 0x01, blob 10932 B]
+  PASS  (d) FAIL-OPEN: RPC blip forges an ENABLE nonce + blob for an INSTALLED id (C4 must catch it)
+        -> ordinary · ceiling 3,000,000 · expected ordinary
+        -> enable-shaped op at sequence 1 — permission id 0x3ca1cec8 has already been installed under this key
+        -> evidence: mode 0x01 vType 0x02 seq 1 pId 0x3ca1cec8 blob 10932B installed UNREAD accountLive true
+  PASS  (d2) same op with C4's read dead too — C2 already rejected it, so no eth_call is needed
+        -> ordinary · ceiling 3,000,000 · expected ordinary
+        -> enable-shaped op at sequence 1 — permission id 0x3ca1cec8 has already been installed under this key
+        -> evidence: mode 0x01 vType 0x02 seq 1 pId 0x3ca1cec8 blob 10932B installed UNREAD accountLive true
+  PASS  (d3) C4 isolated: fresh id on a live account, permissionConfig read dead (must refuse)
+        -> refuse/enable-unverified · ceiling - · expected refuse/enable-unverified
+        -> this operation presents as a permission-validator enable of 0x512785d0 carrying 10932 bytes of enable data, which is the one shape allowed past the or
+        -> evidence: mode 0x01 vType 0x02 seq 0 pId 0x512785d0 blob 10932B installed UNREAD accountLive true
+  PASS  (d4) same, but getCode itself is dead — a failed code read must be UNREAD, never 'no code'
+        -> refuse/enable-unverified · ceiling - · expected refuse/enable-unverified
+        -> this operation presents as a permission-validator enable of 0x512785d0 carrying 10932 bytes of enable data, which is the one shape allowed past the or
+        -> evidence: mode 0x01 vType 0x02 seq 0 pId 0x512785d0 blob 10932B installed UNREAD accountLive true
+  PASS  (e) C4 gets empty returndata (codeless-address shape) — must NOT read as 'not installed'
+        -> refuse/enable-unverified · ceiling - · expected refuse/enable-unverified
+        -> this operation presents as a permission-validator enable of 0x2aa6d5d6 carrying 10932 bytes of enable data, which is the one shape allowed past the or
+        -> evidence: mode 0x01 vType 0x02 seq 0 pId 0x2aa6d5d6 blob 10932B installed UNREAD accountLive true
+  PASS  (f) enable-shaped nonce at sequence 1 (C2 must reject — the id is already installed)
+        -> ordinary · ceiling 3,000,000 · expected ordinary
+        -> enable-shaped op at sequence 1 — permission id 0x05d95146 has already been installed under this key
+        -> evidence: mode 0x01 vType 0x02 seq 1 pId 0x05d95146 blob 10932B installed UNREAD accountLive true
+  PASS  (g) enable-shaped nonce carrying only a 65-byte signature (C3 must reject)
+        -> ordinary · ceiling 3,000,000 · expected ordinary
+        -> nonce claims an enable but the signature carries only 65 bytes (< 512) — no enable blob is attached
+        -> evidence: mode 0x01 vType 0x02 seq 0 pId 0x0b64f315 blob 65B installed UNREAD accountLive true
+  PASS  (h) regression: the UNDEPLOYED first op PR #56 was written for still elevates
+        -> elevated · ceiling 11,652,177 · expected elevated
+        -> first enable of permission id 0xec74146c (seq 0, 10932-byte blob, not installed on chain) — ceiling sized to 11652177
+        -> evidence: mode 0x01 vType 0x02 seq 0 pId 0xec74146c blob 10932B installed false accountLive false
+
+  TALLY: 11/11 passed
+
+══ 5. what a wider ceiling actually costs, in wei ══
+  fee used: 566330400 wei/gas (live estimateFeesPerGas, the same call executor.ts makes)
+
+  THE CEILING IS A REFUSAL THRESHOLD, NOT AN ALLOWANCE. gas-limits.ts:312-331 applies
+  headroom to the ESTIMATE and then compares the total to absoluteMax; absoluteMax never
+  enters a signed limit. So raising it cannot make any operation cost one wei more —
+  it can only stop refusing operations that genuinely estimate between the two numbers.
+
+  ceiling-sized PREFUND (EntryPoint requires the payer to HOLD total x maxFeePerGas):
+     3,000,000 gas -> 1,698,991,200,000,000 wei = 0.001698991 ETH
+    12,000,000 gas -> 6,795,964,800,000,000 wei = 0.006795965 ETH
+    delta          -> 5,096,973,600,000,000 wei = 0.005096974 ETH
+
+  WORST CASE AN ATTACKER CAN ACTUALLY DRAW, per (account, permissionId):
+    the widest operation the gate admits is one whose ESTIMATE clears the ceiling.
+    measured full-wall renewal: raw 7,530,220, bounded 9,450,410
+    signed prefund at that size: 5,352,054,475,464,000 wei = 0.005352054 ETH
+    gas actually BURNED is what execution uses, not the limit; the landed 10,964-byte
+    enable on 4663 (tx 0x323e8050…) used 5,867,332 = 0.003322848 ETH.
+
+    SELF-PAYING (no sponsor): every wei of that is the ATTACKER'S OWN. The house's
+      exposure from widening the ceiling is 0 wei. executor.ts's prefund check
+      (held >= bounded.total x feeCeiling) still refuses an account that cannot cover it.
+    SPONSORED (cfg.sponsorGasEnabled): the house pays. Exposure per admitted enable is
+      the gas USED, ~5,867,332 -> 0.003322848 ETH, versus 0 if refused.
+      Under the flat 12M ceiling the worst admissible op is 12,000,000 -> 0.006795965 ETH.
+      Under the sized ceiling for THIS blob it is 11,277,177 -> 0.006386608 ETH,
+      removing 722,823 gas = 0.000409357 ETH of unused authority per operation.
+
+    HOW OFTEN: at most ONCE per (account, permissionId), and only on INCLUSION.
+      An operation that is never included costs nobody anything. One that IS included
+      installs the id, so C4 reads true and the EntryPoint's sequence for that key
+      becomes 1, so C2 fails. Both close permanently, from two independent sources.
+      A second paid elevated op therefore requires a NEW permission id, i.e. a new
+      signed grant POSTed by the tenant.
+      The gate on the branch today bounds it at once per ADDRESS — and a fresh address
+      costs one generatePrivateKey(), so that is the same bound obtained on a key that
+      also excludes every honest renewal.
+
+  paymaster fields are counted against the ceiling too (gas-limits.ts:200-208) and are
+  capped at 500,000 each by PAYMASTER_GAS_MAX, so a sponsor cannot enlarge the
+  admissible band by more than 1,000,000 gas = 0.000566330 ETH.

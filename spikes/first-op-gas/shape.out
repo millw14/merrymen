@@ -1,0 +1,165 @@
+METHOD C — SHAPE, NOT COST.  READ-ONLY: eth_call / eth_getCode only.
+Nothing signed. Nothing broadcast. No grant touched. No account funded.
+
+permissionConfig(bytes4) selector = 0xc3e58978
+signer.signerContractAddress      = 0x6A6F069E2a08c2468e7724Ab3250CdBFBA14D4FF  (read off a real toECDSASigner)
+
+── 1. REAL DEPLOYED ACCOUNTS + A FRESH PERMISSION VALIDATOR ─────────────────
+
+0x032da6a0ccf866474e45854e7fdef9afd1509036  (merrymen's own account, kernel v3.3, deployed block 51207025)
+  code: 61 bytes   isDeployed() would return: TRUE
+  full wall, session key A                       pId 0x454fb2c7  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  full wall, session key A (repeat, identical)   pId 0x454fb2c7  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  full wall, session key B                       pId 0x916351c6  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  SAME key A, grant 1 second later               pId 0x70358760  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  wall +1 custom token, key A                    pId 0x3644fe5c  perms 19  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  wall +5 custom tokens, key A                   pId 0x11b6e68d  perms 23  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  wall +20 custom tokens, key A                  pId 0xdfbd740e  perms 38  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+
+0x26e1b523189ec668654680178ad7ab07ff2c71ae  (kernel v3.3, deployed block 52240294)
+  code: 61 bytes   isDeployed() would return: TRUE
+  full wall, session key A                       pId 0x79995181  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  full wall, session key A (repeat, identical)   pId 0x79995181  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  full wall, session key B                       pId 0x8068610f  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  SAME key A, grant 1 second later               pId 0xd47a68c0  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  wall +1 custom token, key A                    pId 0x60846d1e  perms 19  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  wall +5 custom tokens, key A                   pId 0x138baf9b  perms 23  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  wall +20 custom tokens, key A                  pId 0xc4bad0e9  perms 38  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+
+0x4460f7926eb4979b27f171464691cf8374f02240  (kernel v3.3, deployed block 52456590)
+  code: 61 bytes   isDeployed() would return: TRUE
+  full wall, session key A                       pId 0xcdb54ae1  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  full wall, session key A (repeat, identical)   pId 0xcdb54ae1  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  full wall, session key B                       pId 0x29a5dbe2  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  SAME key A, grant 1 second later               pId 0x64e72580  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  wall +1 custom token, key A                    pId 0x4f02410a  perms 19  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  wall +5 custom tokens, key A                   pId 0x7c7de88d  perms 23  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  wall +20 custom tokens, key A                  pId 0xbb794fd3  perms 38  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+
+0xfd58500678406d33293ecad9976c6c5ee653eca1  (kernel v3.3, deployed block 51367467)
+  code: 61 bytes   isDeployed() would return: TRUE
+  full wall, session key A                       pId 0xba7cbcc8  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  full wall, session key A (repeat, identical)   pId 0xba7cbcc8  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  full wall, session key B                       pId 0xeb79b302  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  SAME key A, grant 1 second later               pId 0xb4d799c8  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  wall +1 custom token, key A                    pId 0x15472475  perms 19  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  wall +5 custom tokens, key A                   pId 0x74e393f3  perms 23  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  wall +20 custom tokens, key A                  pId 0xec571ae6  perms 38  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+
+── 1b. CONTROL: a counterfactual (undeployed) account, same shapes ──────────
+
+0x58F09daB46aC5f63e7036594E266E29252FCf4A9  (counterfactual — derived, never deployed)
+  code: 0 bytes   isDeployed() would return: FALSE
+  full wall, session key A                       pId 0x23f1093a  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable true   ceiling 12,000,000
+  full wall, session key B                       pId 0x27db3e29  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable true   ceiling 12,000,000
+
+── 2. THE CONVERSE — permission validator ALREADY INSTALLED ─────────────────
+   (steady state: the case the 3,000,000 ceiling actually exists for)
+
+   Method: toPermissionValidator accepts an explicit `permissionId`
+   (toPermissionValidator.ts:71-73 short-circuits getPermissionId), so we can
+   point a validator at a pId this account PROVABLY installed and let the SDK
+   decide the mode by its own on-chain read. The signer contract still has to
+   match — isEnabled compares permissionConfig(pId).signer against
+   ECDSA_SIGNER_CONTRACT — so this is not a rubber stamp.
+
+0xa48ce91e2f3237e69660c1543042c007b8d33e75  pId 0x3ca1cec8  (kernel v3.3, enable landed block 51847124)
+  code: 61 bytes   isDeployed() would return: TRUE
+  permissionConfig(0x3ca1cec8): flag 0x0002 signer 0x6a6f069e2a08c2468e7724ab3250cdbfba14d4ff  -> INSTALLED (signer == ECDSA_SIGNER_CONTRACT)
+  INSTALLED pId (steady state)                   pId 0x3ca1cec8  perms 18  mode 0x00 vType 0x02  DEFAULT  permissionConfig calls 1  isFirstEnable false  PR#56 firstEnable false  ceiling 3,000,000
+  CONTROL: bogus pId 0xdeadbeef                  pId 0xdeadbeef  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  CONTROL: fresh key, derived pId (renewal)      pId 0x4a0050b2  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+
+0x26e1b523189ec668654680178ad7ab07ff2c71ae  pId 0xad16ecaa  (kernel v3.3, enable landed block 52240294)
+  code: 61 bytes   isDeployed() would return: TRUE
+  permissionConfig(0xad16ecaa): flag 0x0000 signer 0x6a6f069e2a08c2468e7724ab3250cdbfba14d4ff  -> INSTALLED (signer == ECDSA_SIGNER_CONTRACT)
+  INSTALLED pId (steady state)                   pId 0xad16ecaa  perms 18  mode 0x00 vType 0x02  DEFAULT  permissionConfig calls 1  isFirstEnable false  PR#56 firstEnable false  ceiling 3,000,000
+  CONTROL: bogus pId 0xdeadbeef                  pId 0xdeadbeef  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  CONTROL: fresh key, derived pId (renewal)      pId 0x8068610f  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+
+0xd535491c7cf0e72ac9151b94a1feebd3942d8af7  pId 0x39c384a8  (kernel v3.3, enable landed block 46988297)
+  code: 61 bytes   isDeployed() would return: TRUE
+  permissionConfig(0x39c384a8): flag 0x0000 signer 0x6a6f069e2a08c2468e7724ab3250cdbfba14d4ff  -> INSTALLED (signer == ECDSA_SIGNER_CONTRACT)
+  INSTALLED pId (steady state)                   pId 0x39c384a8  perms 18  mode 0x00 vType 0x02  DEFAULT  permissionConfig calls 1  isFirstEnable false  PR#56 firstEnable false  ceiling 3,000,000
+  CONTROL: bogus pId 0xdeadbeef                  pId 0xdeadbeef  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  CONTROL: fresh key, derived pId (renewal)      pId 0x282af8d7  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+
+0x4986995b4ca6fdc838a01a61967daa50d2b854e9  pId 0xecd39ec5  (kernel v3.1, enable landed block 53045103 (most recent on chain))
+  code: 61 bytes   isDeployed() would return: TRUE
+  permissionConfig(0xecd39ec5): flag 0x0000 signer 0x6a6f069e2a08c2468e7724ab3250cdbfba14d4ff  -> INSTALLED (signer == ECDSA_SIGNER_CONTRACT)
+  INSTALLED pId (steady state)                   pId 0xecd39ec5  perms 18  mode 0x00 vType 0x02  DEFAULT  permissionConfig calls 1  isFirstEnable false  PR#56 firstEnable false  ceiling 3,000,000
+  CONTROL: bogus pId 0xdeadbeef                  pId 0xdeadbeef  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+  CONTROL: fresh key, derived pId (renewal)      pId 0x6116684c  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+
+── 3. THE ON-CHAIN CALL, AND WHAT HAPPENS WHEN IT FAILS ─────────────────────
+
+   SOURCE (node_modules/@zerodev/sdk/accounts/utils/toKernelPluginManager.ts:390-393):
+     const validatorMode = !regular || (await isPluginEnabled(...)) ? DEFAULT : ENABLE
+   :175-180  isEnabled = (await regular_.isEnabled(...)) || (await isPluginInitialized(...))
+   node_modules/@zerodev/permissions/toPermissionValidator.ts:137-156
+     isEnabled: try { readContract permissionConfig(pId) … } catch (error) { return false }
+   toPermissionValidator.ts:86  address: zeroAddress   -> the isPluginInitialized
+     disjunct calls a codeless address, throws, and is caught to false as well
+     (isPluginInitialized.ts:11-23).
+   => BOTH disjuncts collapse to FALSE on any error, so a FAILED READ YIELDS ENABLE.
+
+   Subject: 0xa48ce91e2f3237e69660c1543042c007b8d33e75 (installed pId 0x3ca1cec8, deployed: true).
+   This account's steady-state nonce is mode 0x00 (section 2). Now break ONLY
+   its permissionConfig read — locally, inside our own transport, before the
+   request leaves the process — and read the nonce again.
+
+  3a healthy RPC                                 pId 0x3ca1cec8  perms 18  mode 0x00 vType 0x02  DEFAULT  permissionConfig calls 1  isFirstEnable false  PR#56 firstEnable false  ceiling 3,000,000
+      ^ permissionConfig calls = 1 -> isPluginEnabled DOES hit the chain (yes, a real eth_call)
+  3b permissionConfig read FAILS                 pId 0x3ca1cec8  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+      ^ VERDICT: a failed read makes the SDK claim ENABLE (0x01). FAIL-TOWARD-ENABLE.
+  3b' RENEWAL + permissionConfig read FAILS      pId 0x4a0050b2  perms 18  mode 0x01 vType 0x02  ENABLE   permissionConfig calls 1  isFirstEnable true   PR#56 firstEnable false  ceiling 3,000,000
+      ^ a renewal is ENABLE either way, so an RPC blip can never REFUSE one on this path.
+        The blip only ever moves a STEADY-STATE op from DEFAULT to ENABLE (3b).
+   3c WHOLE RPC down: account.getNonce() THREW — An unknown RPC error occurred.
+      ^ so a total outage is loud (the executor's estimate would fail anyway).
+        The dangerous case is 3b: the EntryPoint getNonce read succeeds while the
+        permissionConfig read fails, which is one flaky call, not an outage.
+
+── 3d. DOES MERRYMEN HAVE A DEPLOYED ACCOUNT WITH A LIVE WALL? ──────────────
+
+   NO — and the section-2 subjects are therefore other people's accounts, not ours.
+   merrymen's own account 0x032da6a0…9036 has executed exactly ONE UserOperation in
+   its life: mode 0x00 / vType 0x00 (SUDO, DEFAULT), seq 0, block 51207025, success.
+   Source: per-sender UserOperationEvent scan over all 2,208 ZeroDev-factory accounts
+   on 4663 (spikes/first-op-gas/perm-ops.json, 0 accounts unreadable) — that account
+   appears exactly once and never with vType 0x02.
+   So no merrymen wall has ever been installed on chain, and the steady-state DEFAULT
+   branch is demonstrated on the closest available subjects: real Kernel v3.3 accounts
+   on the same chain whose permission validators DID land. That is a property of the
+   Kernel/SDK mechanism, not of who owns the account.
+
+── 4. WHAT worker/src/executor.ts ON fix/first-enable-gas COMPUTES ──────────
+   const accountLive = await isDeployed();            // executor.ts:389
+   const nonce       = await account.getNonce();      // executor.ts:390
+   const firstEnable = !accountLive && isFirstEnable(nonce);  // :391
+   const bounds      = firstEnable ? FIRST_ENABLE_GAS_BOUNDS : GAS_BOUNDS;  // :392
+   (the tables above already print every one of those four values per case)
+
+   ALSO NOTE executor.ts ~:325 — the estimate's stateOverride balance is
+   `bounds.absoluteMax * feeCeiling * 2n`, i.e. sized FROM the chosen ceiling.
+   So the 3,000,000 branch also hands the bundler too little imaginary ETH,
+   and the refusal arrives as `gas-unreadable` (AA21) rather than `gas-absurd`.
+
+── 5. boundGas()'s VERDICT — the repo's own function, run here ──────────────
+
+   Gas inputs are the MEASURED walled first op on 4663, Pimlico, 2026-09-03
+   (spikes/first-op-gas/renewal-override.ts): verif 7,418,031 · preVerif 243,380 · call 50,180.
+   A deployed re-enable is the same op minus a ~360k deploy, so it is if anything
+   SMALLER — the verdict below does not depend on that difference.
+
+  undeployed first op -> FIRST_ENABLE_GAS_BOUNDS       ACCEPTED  signed total 9,677,123
+  renewal, estimate SUCCEEDS -> GAS_BOUNDS             REFUSED   rule "gas-absurd"
+      this operation wants 9677123 gas, past the 3000000 ceiling. Refused before signing — nothing was spent. A ceiling is crossed either because the operation is not the one it is meant to be, or because it genuinely needs more than we are willing to sign for; both are reasons to stop rather than to sign
+  renewal, override too small -> estimate null         REFUSED   rule "gas-unreadable"
+      the bundler would not estimate gas for this operation. That is a refusal to quote, not a quote of zero — submitting with limits we invented would risk paying for an operation that runs out of gas inside the EntryPoint.
+  steady-state op (mode 0x00) -> GAS_BOUNDS            ACCEPTED  signed total 1,016,385
+
+   (the steady-state row uses verificationGasLimit 657,108 — the SIGNED value on
+    0xa48ce91e…'s post-enable ops, tx 0x66e4f2d6…, decoded from handleOps calldata.
+    It is comfortably inside 3,000,000, which is what that ceiling is sized for.)
+
