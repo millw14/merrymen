@@ -18,6 +18,15 @@ candidate, and escalate only when the candidate shows one of the specific
 conditions where a second opinion has something to work with. Everything else
 finishes at analyst depth.
 
+DISAGREEMENT IS COMPUTED FROM FIELDS, NOT FROM PROSE. The first version scanned
+analyst text for bullish and bearish words and fired ZERO times across 36
+scenarios, including ones built to disagree. Analysts write carefully: a bear
+case opens "the breakout is real, but…" and scores bullish. The words describe
+the evidence, not the verdict, and no keyword list recovers the verdict. Each
+analyst now returns its direction and conviction as fields (analyst.py) and the
+comparison is arithmetic — with no extra model call, because the analyst was
+already being asked.
+
 THE CONDITIONS ARE ABOUT THE INPUT, NOT THE OUTPUT. "The model said it was
 unsure" is a weak signal — a model's stated confidence is the least reliable
 number it produces. What is checkable: the analysts disagreed with each other,
@@ -31,9 +40,11 @@ help?" is answerable from the data rather than argued from taste.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
+
 from typing import Literal
+
+from .analyst import Disagreement
 
 EscalationReason = Literal[
     "analysts-disagree",
@@ -55,36 +66,33 @@ class EscalationVerdict:
         return self.reasons[0] if self.reasons else "no-escalation"
 
 
+#: ── WHAT THE MEASUREMENT SAID, and what it cost these two rules ───────────
+#:
+#: Across 36 scenarios, escalation fired 12 times and changed 7 decisions:
+#: ONE improved and SIX regressed. Every single change went the same way —
+#: trade → hold, 7 times out of 7 — and six of those setups genuinely warranted
+#: the trade:
+#:
+#:   strong_bear            sell -> hold   REGRESSED  [large-relative-to-book]
+#:   agree_bull_ordinary    buy  -> hold   REGRESSED  [opening-a-position]
+#:   agree_bull_whole-book  buy  -> hold   REGRESSED  [large, opening]
+#:   conflicting            buy  -> hold   IMPROVED   [opening-a-position]
+#:
+#: That is not noise, it is a direction. The debate-and-risk stack has a
+#: systematic bias toward inaction: asked to stress-test a decision to act, it
+#: finds a reason not to, whether or not one exists. So these two rules are OFF.
+#: They are kept, with their thresholds, because the finding is about the stack
+#: they escalate INTO rather than about the conditions themselves — if the
+#: committee prompts stop talking the desk out of trades, these become worth
+#: re-measuring rather than worth reinventing.
+SIZE_AND_OPENING_RULES_ENABLED = False
+
 #: A candidate wanting more than this share of equity is a big enough bet that a
-#: second opinion is cheap by comparison.
+#: second opinion would be cheap by comparison — IF the second opinion helped.
 LARGE_TRADE_FRACTION = 0.25
 #: Below this the model is telling us it is guessing. Weak on its own, which is
 #: why it never escalates alone — see `assess`.
 LOW_CONFIDENCE = 0.45
-
-_BULLISH = re.compile(r"\b(bullish|buy|upside|strong|positive|breakout|golden cross|beat)\b", re.I)
-_BEARISH = re.compile(r"\b(bearish|sell|downside|weak|negative|breakdown|miss|resign|delayed)\b", re.I)
-
-
-def analysts_disagree(reports: list[str]) -> bool:
-    """
-    Did the lenses point in different directions?
-
-    Crude on purpose: a keyword split over the analyst text. The alternative is
-    another model call to judge disagreement, which costs exactly what
-    escalating costs and therefore cannot be the thing that decides whether to
-    escalate. A cheap signal that is right most of the time is the correct tool
-    for a gate whose whole job is avoiding an expensive call.
-    """
-    bull = bear = 0
-    for r in reports:
-        b, s = len(_BULLISH.findall(r)), len(_BEARISH.findall(r))
-        if b > s:
-            bull += 1
-        elif s > b:
-            bear += 1
-    return bull > 0 and bear > 0
-
 
 def assess(
     *,
@@ -93,7 +101,7 @@ def assess(
     delta_usdg: int,
     equity_usdg: int,
     holds_position: bool,
-    analyst_reports: list[str],
+    disagree: Disagreement,
 ) -> EscalationVerdict:
     """
     Decide whether this candidate is worth a second opinion. PURE.
@@ -108,17 +116,18 @@ def assess(
     if action == "hold":
         return EscalationVerdict(False, [], "a hold costs nothing to be wrong about in the short run")
 
-    if analysts_disagree(analyst_reports):
+    if disagree.present:
         reasons.append("analysts-disagree")
 
-    if equity_usdg > 0 and abs(delta_usdg) > equity_usdg * LARGE_TRADE_FRACTION:
-        reasons.append("large-relative-to-book")
+    if SIZE_AND_OPENING_RULES_ENABLED:
+        if equity_usdg > 0 and abs(delta_usdg) > equity_usdg * LARGE_TRADE_FRACTION:
+            reasons.append("large-relative-to-book")
 
-    if action == "buy" and not holds_position:
-        # Opening is the asymmetric one: a new position can be wrong in a way
-        # that adding to a working one cannot, and there is no prior thesis to
-        # have been tested by events.
-        reasons.append("opening-a-position")
+        if action == "buy" and not holds_position:
+            # Opening is the asymmetric one: a new position can be wrong in a way
+            # that adding to a working one cannot, and there is no prior thesis
+            # to have been tested by events. Sound reasoning; measured harmful.
+            reasons.append("opening-a-position")
 
     if confidence < LOW_CONFIDENCE and reasons:
         # NEVER ALONE. A model's stated confidence is the least reliable number

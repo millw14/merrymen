@@ -18,7 +18,8 @@ import pytest
 
 from brain.budget import RunBudget, TIERS
 from brain.credential import CredentialRefused, resolve
-from brain.escalation import analysts_disagree, assess as escalate
+from brain.analyst import AnalystView, disagreement, parse_view
+from brain.escalation import assess as escalate
 from brain.gate import assess as gate_assess
 from brain.graph import BrainGraph
 from brain.schemas import DecideRequest
@@ -116,27 +117,72 @@ def test_a_hold_never_escalates():
     # available.
     v = escalate(
         action="hold", confidence=0.2, delta_usdg=0, equity_usdg=1_000_000,
-        holds_position=False, analyst_reports=["bullish", "bearish"],
+        holds_position=False, disagree=disagreement([]),
     )
     assert not v.escalate
 
 
+def _view(lens: str, direction: str, conf: float) -> AnalystView:
+    return AnalystView(lens=lens, direction=direction, confidence=conf, evidence_strength=0.7, note="")
+
+
+def test_disagreement_is_computed_from_fields_not_prose():
+    # The keyword scan this replaces fired ZERO times across 36 scenarios,
+    # including ones built to disagree. Analysts write carefully — a bear case
+    # opens "the breakout is real, but…" and scores bullish.
+    two_sided = disagreement([_view("technical", "buy", 0.72), _view("news", "sell", 0.66)])
+    assert two_sided.present
+    assert disagreement([_view("technical", "buy", 0.8), _view("news", "buy", 0.7)]).present is False
+
+
+def test_a_hedge_is_not_a_side():
+    # Two analysts who each half-believe opposite things are not in conflict.
+    # They are both saying they do not know, which is agreement about the
+    # evidence — and paying 45 calls for it is the false positive that would
+    # make escalation worthless.
+    weak = disagreement([_view("technical", "buy", 0.72), _view("news", "sell", 0.30)])
+    assert weak.present is False
+    assert "no two-sided conviction" in weak.detail
+
+
+def test_an_unparseable_analyst_is_no_data_not_a_guess():
+    assert parse_view("news", "not json at all").direction == "no-data"
+    assert parse_view("news", "").direction == "no-data"
+    good = parse_view("technical", '{"direction":"buy","confidence":0.7,"evidence_strength":0.6,"note":"n"}')
+    assert good.direction == "buy" and good.confidence == 0.7
+
+
 def test_disagreeing_analysts_escalate():
-    assert analysts_disagree(["strong breakout, bullish", "auditor resigned, bearish"])
-    assert not analysts_disagree(["bullish beat", "positive upside"])
     v = escalate(
         action="buy", confidence=0.8, delta_usdg=1_000, equity_usdg=1_000_000,
-        holds_position=True, analyst_reports=["strong bullish breakout", "weak, negative, breakdown"],
+        holds_position=True, disagree=disagreement([_view("technical", "buy", 0.8), _view("news", "sell", 0.7)]),
     )
     assert v.escalate and "analysts-disagree" in v.reasons
 
 
-def test_a_large_bet_escalates():
-    v = escalate(
+def test_the_size_and_opening_rules_are_off_because_they_measured_harmful():
+    # 36 scenarios: escalation changed 7 decisions, 1 improved and 6 regressed,
+    # and every change went trade -> hold. The debate stack has a systematic bias
+    # toward inaction, so escalating a trade candidate reliably kills it.
+    from brain.escalation import SIZE_AND_OPENING_RULES_ENABLED
+
+    assert SIZE_AND_OPENING_RULES_ENABLED is False
+    big = escalate(
         action="buy", confidence=0.9, delta_usdg=400_000, equity_usdg=1_000_000,
-        holds_position=True, analyst_reports=["bullish"],
+        holds_position=False, disagree=disagreement([]),
     )
-    assert v.escalate and "large-relative-to-book" in v.reasons
+    assert not big.escalate, "a large opening bet no longer buys a committee"
+
+
+def test_genuine_two_sided_disagreement_still_escalates():
+    # The one rule kept: it has a principled case and it never fired on the set
+    # where the others did harm, so nothing measured argues against it.
+    v = escalate(
+        action="buy", confidence=0.8, delta_usdg=1_000, equity_usdg=1_000_000,
+        holds_position=True,
+        disagree=disagreement([_view("technical", "buy", 0.8), _view("news", "sell", 0.7)]),
+    )
+    assert v.escalate and v.reasons == ["analysts-disagree"]
 
 
 def test_low_confidence_never_escalates_on_its_own():
@@ -144,7 +190,7 @@ def test_low_confidence_never_escalates_on_its_own():
     # escalated alone, every hedged answer would buy itself a committee.
     v = escalate(
         action="buy", confidence=0.05, delta_usdg=1_000, equity_usdg=1_000_000,
-        holds_position=True, analyst_reports=["bullish and positive"],
+        holds_position=True, disagree=disagreement([]),
     )
     assert not v.escalate, "low confidence sharpens an existing case, it does not make one"
 
@@ -152,7 +198,7 @@ def test_low_confidence_never_escalates_on_its_own():
 def test_an_ordinary_add_to_a_working_position_does_not_escalate():
     v = escalate(
         action="buy", confidence=0.7, delta_usdg=10_000, equity_usdg=1_000_000,
-        holds_position=True, analyst_reports=["bullish beat", "positive upside"],
+        holds_position=True, disagree=disagreement([]),
     )
     assert not v.escalate
     assert v.primary == "no-escalation"

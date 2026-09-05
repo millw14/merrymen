@@ -252,7 +252,11 @@ def extended_scenarios() -> list[Scenario]:
             symbol="NVDA", klass="equity-token", price="212.40", signals=BULLISH,
             cash=300.0, equity=300.0, contributions=300.0,
             quality=PortfolioQuality(**{**GOOD_QUALITY.model_dump(), "epoch": 1}),
-            expect_hold=True,
+            # REFUSAL, not hold. Epoch 1 is forensic by construction, so there
+            # is no book to reason about at all — and a refusal costs nothing,
+            # which a hold does not. The fixture said hold while the gate said
+            # refuse, and the gate was right.
+            expect_refusal=True,
         ),
         _case(
             "contributions_unknown_but_bullish",

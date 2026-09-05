@@ -36,6 +36,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
+from .analyst import AnalystView, STRUCTURED_SUFFIX, disagreement, parse_view
 from .budget import BudgetExceeded, RunBudget, TIERS
 from .escalation import EscalationVerdict, assess as assess_escalation
 from .gate import GateResult, assess
@@ -84,19 +85,37 @@ class BrainGraph:
 
     # ── the nodes ───────────────────────────────────────────────────────────
 
-    async def _analyst(self, req: DecideRequest, budget: RunBudget, lens: str, material: str) -> NodeOutput:
+    async def _analyst(
+        self, req: DecideRequest, budget: RunBudget, lens: str, material: str
+    ) -> tuple[NodeOutput, AnalystView]:
+        """
+        One lens, answering in prose AND in fields.
+
+        Both, not one: the prose is what the manager reasons over and what the
+        thesis is built from, and the fields are what the escalation gate can
+        compare. Asking for the verdict as a field costs nothing extra — the
+        call was already being made — and it replaces a keyword scan that fired
+        zero times across 36 scenarios.
+        """
         text = await self.llm.complete(
             node=f"analyst:{lens}",
             budget=budget,
             system=f"{HOUSE_RULES}\n\nYou are the {lens} analyst. Report only what your lens can see.",
             user=(
                 f"Instrument: {req.market.symbol} ({req.market.instrument_class})\n"
-                f"As of: {req.market.as_of}\n\n{material}\n\n"
-                f"In at most 120 words: what does the {lens} evidence say, and how strongly? "
-                f"If your lens has no usable data, say NO DATA AVAILABLE and stop."
+                f"As of: {req.market.as_of}\n\n{material}\n" + STRUCTURED_SUFFIX
             ),
+            json_schema={"type": "object"},
         )
-        return NodeOutput(f"analyst:{lens}", text)
+        view = parse_view(lens, text)
+        # The dossier carries the NOTE when one parsed, and the raw text when it
+        # did not — a lens whose JSON was malformed still said something, and
+        # discarding it would lose evidence over a formatting failure.
+        readable = view.note or text
+        return (
+            NodeOutput(f"analyst:{lens}", f"[{view.direction} conf={view.confidence:.2f}] {readable}"),
+            view,
+        )
 
     async def _debater(self, req: DecideRequest, budget: RunBudget, side: str, reports: str, opposing: str) -> NodeOutput:
         text = await self.llm.complete(
@@ -244,10 +263,13 @@ class BrainGraph:
         # ceiling before any of them checked.
         lenses = _lenses_for(req.market.instrument_class)
         reports: list[NodeOutput] = []
+        views: list[AnalystView] = []
         for lens in lenses:
             material = req.market.signals.get(lens)
             block = _fence(lens, material) if material else "NO DATA AVAILABLE for this lens."
-            reports.append(await self._analyst(req, budget, lens, block))
+            out, view = await self._analyst(req, budget, lens, block)
+            reports.append(out)
+            views.append(view)
 
         dossier = "ANALYST REPORTS\n" + "\n\n".join(f"[{r.node}]\n{r.text}" for r in reports)
 
@@ -271,7 +293,11 @@ class BrainGraph:
                 holds_position=any(
                     p.instrument_id == req.market.instrument_id for p in req.portfolio.positions
                 ),
-                analyst_reports=[r.text for r in reports],
+                # THE FIELDS, not the prose.  used to scan
+                # text for bullish and bearish words and fired zero times across
+                # 36 scenarios — analysts write carefully, and their words are
+                # about the evidence rather than about their verdict.
+                disagree=disagreement(views),
             )
             if not escalation.escalate:
                 # Finish here. The candidate IS the decision — no second pass,
