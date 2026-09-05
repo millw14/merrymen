@@ -1,0 +1,1077 @@
+/* Extend the Home and Token visual language. Palette comes from styles.css. */
+.balance-figure {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.figure-decimals {
+  font-size: 0.43em;
+  color: var(--tx-2);
+  vertical-align: super;
+  letter-spacing: -0.02em;
+}
+:is(.desk-page, .account-page, .public-agent-page, .money-flow) button {
+  -webkit-tap-highlight-color: transparent;
+}
+:is(.desk-page, .account-page, .public-agent-page, .money-flow) :focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 3px;
+}
+/* Agent header and balance follow Home's unboxed identity and figure. */
+.desk-header {
+  gap: 10px;
+}
+.desk-header > .face {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+.desk-header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.desk-header p {
+  font-size: 11px;
+  margin-top: 3px;
+  color: var(--faint);
+}
+.desk-status {
+  font-size: 11px;
+  padding: 0;
+  border: 0;
+}
+.desk-status i {
+  background: var(--lime);
+}
+.desk-status.paused i {
+  background: var(--faint);
+}
+.desk-portfolio {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.desk-portfolio .portfolio-summary {
+  padding: 0 0 10px;
+  width: 100%;
+  text-align: left;
+}
+.desk-portfolio .portfolio-summary > div {
+  gap: 8px;
+}
+.desk-portfolio .portfolio-summary .account-label {
+  display: none;
+}
+.desk-equity {
+  font-family: var(--pixel);
+  font-size: 52px;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  line-height: 0.98;
+}
+.desk-portfolio .portfolio-summary > div > .up,
+.desk-portfolio .portfolio-summary > div > .down {
+  font-size: 13px;
+  font-weight: 500;
+}
+.desk-page .portfolio-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  height: 36px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--raised);
+  font-size: 12px;
+  color: var(--tx);
+}
+.portfolio-toggle svg {
+  flex-shrink: 0;
+  transition: transform 180ms ease;
+}
+.desk-portfolio.expanded .portfolio-toggle svg {
+  transform: rotate(180deg);
+}
+.agent-portfolio-meta {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--faint);
+}
+.portfolio-body {
+  padding: 7px 0 0;
+  border: 0;
+}
+.desk-segments {
+  border: 0;
+  gap: 8px;
+  padding: 7px 0;
+}
+.desk-segments button {
+  padding: 8px 13px;
+  border: 0;
+  min-height: 36px;
+  border-radius: 999px;
+  background: var(--card);
+  font-size: 13px;
+  font-weight: 600;
+}
+.desk-segments button[aria-pressed="true"] {
+  color: var(--ink);
+  background: var(--tx);
+}
+.desk-position {
+  min-height: 60px;
+  gap: 12px;
+}
+.desk-position .coin {
+  width: 36px;
+  height: 36px;
+}
+.desk-position strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+.desk-position small {
+  font-size: 12px;
+}
+.desk-position > span:last-child {
+  font-size: 12px;
+}
+.desk-text-button > span {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+}
+.chat-divider {
+  font-size: 13px;
+  color: var(--tx);
+  margin-bottom: 20px;
+  font-weight: 600;
+}
+.chat-divider > span:last-child {
+  font-size: 10px;
+  color: var(--faint);
+  border: 0;
+  padding: 0;
+  font-weight: 400;
+}
+.desk-reply {
+  gap: 12px;
+}
+.desk-reply > .face {
+  width: 28px;
+  height: 28px;
+}
+.desk-reply strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.desk-reply p {
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--tx-2);
+}
+.desk-reply blockquote {
+  background: none;
+  border: 0;
+  margin: 14px 0 0;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.strategy-caption {
+  display: block;
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--faint);
+  margin-bottom: 7px;
+  font-weight: 500;
+}
+.conversation-trade {
+  margin-top: 15px;
+  padding: 0;
+  background: none;
+  border: 0;
+}
+.conversation-trade-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.conversation-trade-top .coin {
+  width: 32px;
+  height: 32px;
+}
+.conversation-trade-top > div {
+  flex: 1;
+  min-width: 0;
+}
+.conversation-trade-top strong {
+  display: block;
+  font-size: 14px;
+}
+.conversation-trade-top span {
+  display: block;
+  font-size: 11px;
+  color: var(--faint);
+  margin-top: 3px;
+}
+.conversation-trade-top b {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.desk-reply .conversation-trade > p {
+  padding: 0;
+  margin: 12px 0 7px;
+  line-height: 1.45;
+  font-size: 14px;
+}
+.conversation-trade > button:not(.trade-token-card) {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--tx-2);
+}
+.desk-question {
+  border: 0;
+  background: var(--raised);
+  font-size: 14px;
+}
+.desk-prompts {
+  gap: 7px;
+}
+.desk-prompts button {
+  border: 0;
+  background: var(--card);
+  border-radius: 999px;
+  min-height: 36px;
+  padding: 8px 12px;
+  font-size: 11px;
+}
+.desk-composer {
+  border: 0;
+  background: var(--card);
+  border-radius: 14px;
+  min-height: 54px;
+}
+.desk-composer input {
+  font-size: 14px;
+}
+.desk-composer button {
+  display: grid;
+  place-items: center;
+  background: var(--tx);
+  color: var(--ink);
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+}
+.chat-note {
+  font-size: 10px;
+  color: var(--faint);
+}
+.body:has(> .desk-page) {
+  flex: none;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+  padding-bottom: calc(var(--nav) + 8px);
+  gap: 0;
+}
+.body > .desk-page {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  flex: none;
+  height: calc(100dvh - var(--nav) - 26px);
+  min-height: 0;
+  padding-bottom: 0;
+  gap: 22px;
+}
+.desk-page > .desk-header,
+.desk-page > .desk-portfolio {
+  flex-shrink: 0;
+}
+.desk-page > .desk-portfolio.expanded {
+  max-height: min(36dvh, 320px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.desk-page > .desk-conversation {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 0 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+.desk-page > .desk-chat-bottom {
+  position: relative;
+  inset: auto;
+  flex-shrink: 0;
+  transform: none;
+  width: 100%;
+  max-width: none;
+  padding-top: 0;
+  margin-top: 0;
+  box-shadow: none;
+}
+/* Owner account: Home's balance treatment and Token's open rows. */
+.account-header h1 {
+  font-size: 17px;
+  font-weight: 600;
+}
+.account-demo {
+  font-size: 10px;
+  color: var(--faint);
+}
+.account-person {
+  margin: 24px 0 21px;
+  gap: 10px;
+}
+.account-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--raised);
+  color: var(--tx);
+  font-family: var(--sans);
+  font-size: 18px;
+  font-weight: 500;
+}
+.account-person h2 {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.account-person p {
+  font-size: 11px;
+  color: var(--faint);
+}
+.account-balance {
+  padding: 0 0 24px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  margin: 0;
+}
+.account-balance > .account-label {
+  display: none;
+}
+.account-balance > strong {
+  font-family: var(--pixel);
+  font-size: 52px;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  line-height: 0.98;
+  margin: 0 0 8px;
+}
+.account-balance > p {
+  font-size: 14px;
+  font-weight: 500;
+}
+.account-fund {
+  width: auto;
+  min-height: 36px;
+  margin-top: 18px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  background: var(--tx);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  gap: 12px;
+}
+.account-section {
+  padding: 22px 0;
+  border: 0;
+}
+.account-section-title {
+  margin-bottom: 16px;
+}
+.account-section-title h2 {
+  font-size: 15px;
+  font-weight: 600;
+}
+.account-section-title > span {
+  color: var(--faint);
+  background: none;
+  padding: 0;
+  font-size: 12px;
+}
+.account-agent {
+  gap: 12px;
+}
+.account-agent > .face {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+}
+.account-agent strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+.account-agent small {
+  font-size: 12px;
+}
+.account-agent-note {
+  margin-left: 52px;
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.account-control {
+  padding: 10px 0;
+}
+.account-control strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.account-control small {
+  font-size: 12px;
+}
+.account-usage {
+  margin: 9px 0 16px;
+  padding: 0 0 17px;
+  border: 0;
+  background: none;
+}
+.account-usage > div {
+  font-size: 11px;
+}
+.account-pause {
+  background: var(--raised);
+  border: 0;
+  min-height: 36px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+.account-footnote {
+  color: var(--faint);
+}
+/* Public agent mirrors the token detail header, price and holder rows. */
+.public-agent-id {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 22px;
+}
+.profile-back {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  min-height: 36px;
+  color: var(--tx-2);
+  flex-shrink: 0;
+}
+.public-agent-id > .face {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+}
+.public-agent-id h1 {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+.public-agent-id p {
+  font-size: 11px;
+  color: var(--faint);
+  margin-top: 4px;
+}
+.public-performance {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+.public-performance-numbers {
+  align-items: flex-end;
+}
+.public-performance .account-label {
+  font-size: 12px;
+}
+.public-return {
+  font-family: var(--pixel);
+  font-size: 44px;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  margin-top: 7px;
+}
+.public-trade-count {
+  padding: 0;
+  border: 0;
+  gap: 3px;
+  align-items: flex-end;
+}
+.public-trade-count strong {
+  font-family: var(--sans);
+  font-size: 16px;
+  font-weight: 600;
+}
+.public-trade-count span {
+  font-size: 12px;
+  color: var(--faint);
+}
+.public-chart {
+  margin-top: 12px;
+}
+.studio-history {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.history-grid {
+  stroke: var(--line);
+  stroke-width: 0.7;
+  stroke-dasharray: 2 5;
+}
+.public-chart-axis {
+  font-size: 11px;
+  color: var(--faint);
+  margin-top: 0;
+}
+.public-strategy {
+  padding: 22px 0;
+}
+.public-section-heading h2 {
+  font-size: 15px;
+  font-weight: 600;
+}
+.public-section-heading > span {
+  font-size: 12px;
+  color: var(--faint);
+}
+.public-strategy .public-section-heading > span {
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 3px 6px 2px;
+  border-radius: 2px;
+  background: #1c1d16;
+  color: var(--tx-2);
+  font-weight: 500;
+}
+.public-strategy p {
+  padding: 0;
+  border: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  margin-top: 10px;
+}
+.public-section {
+  border: 0;
+  padding: 18px 0;
+}
+.public-position {
+  min-height: 64px;
+  padding: 10px 0;
+  gap: 12px;
+}
+.public-position .coin {
+  width: 40px;
+  height: 40px;
+}
+.public-position strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+.public-position small {
+  font-size: 12px;
+}
+.public-position > span:nth-child(3) {
+  font-size: 12px;
+  font-weight: 600;
+}
+.public-position > span:nth-child(4) {
+  display: none;
+}
+.public-event {
+  border: 0;
+  padding: 16px 0;
+  gap: 12px;
+}
+.public-event-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: none;
+}
+.public-event-heading {
+  font-size: 15px;
+}
+.public-event-heading strong {
+  font-weight: 600;
+}
+.public-event-heading > span {
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 600;
+}
+.public-event p {
+  font-size: 14px;
+  line-height: 1.45;
+  margin-top: 10px;
+}
+.public-event small {
+  font-size: 11px;
+  color: var(--faint);
+}
+.public-more {
+  background: var(--card);
+  border: 0;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.studio-allocation {
+  padding: 3px 0 10px;
+}
+.allocation-ribbon {
+  display: none;
+}
+.allocation-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 13px;
+}
+.allocation-key > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--tx-2);
+}
+.allocation-key i {
+  display: none;
+}
+.allocation-key b {
+  font-weight: 600;
+  color: var(--faint);
+}
+/* Money flows retain validation and review, using Home's white controls. */
+.money-flow {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100svh - 70px);
+  padding: 0;
+}
+.flow-top {
+  font-size: 12px;
+}
+.flow-back {
+  border: 0;
+  background: none;
+  border-radius: 0;
+  width: 24px;
+  height: 36px;
+  color: var(--tx-2);
+}
+.flow-demo {
+  border: 0;
+  padding: 0;
+  font-size: 10px;
+  color: var(--faint);
+}
+.fund-steps {
+  display: flex;
+  gap: 18px;
+  list-style: none;
+  padding: 0;
+  margin: 22px 0 0;
+  font-size: 12px;
+  color: var(--faint);
+}
+.fund-steps li {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.fund-steps li > span {
+  font-family: var(--sans);
+  font-weight: 500;
+}
+.fund-steps li[aria-current] {
+  color: var(--tx);
+}
+.flow-intro {
+  margin: 24px 0;
+}
+.flow-intro h1 {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+.flow-intro > p {
+  font-size: 13px;
+  line-height: 1.45;
+  margin-top: 8px;
+}
+.fund-recipient {
+  border: 0;
+  border-radius: 0;
+  background: none;
+  padding: 8px 0 18px;
+}
+.fund-recipient .face {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+}
+.fund-recipient strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.fund-recipient span {
+  font-size: 11px;
+  color: var(--faint);
+}
+.fund-form,
+.limits-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+.fund-amount-label {
+  font-size: 12px;
+  margin-top: 26px;
+}
+.fund-amount-input {
+  font-family: var(--pixel);
+  font-size: 58px;
+  margin-top: 10px;
+  font-weight: 400;
+}
+.fund-amount-input input {
+  letter-spacing: -0.03em;
+}
+.fund-presets {
+  gap: 8px;
+  margin: 20px 0;
+}
+.fund-presets button {
+  border: 0;
+  border-radius: 999px;
+  background: var(--card);
+  font-size: 13px;
+  min-height: 38px;
+}
+.fund-presets button[aria-pressed="true"] {
+  background: var(--tx);
+  color: var(--ink);
+}
+.flow-notice {
+  border: 0;
+  padding: 0;
+  background: none;
+  margin: 20px 0;
+}
+.flow-notice strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+.flow-notice p {
+  font-size: 13px;
+  line-height: 1.45;
+  margin-top: 8px;
+}
+.flow-actions {
+  margin-top: auto;
+  padding-top: 24px;
+  gap: 7px;
+}
+.flow-primary {
+  background: var(--tx);
+  color: var(--ink);
+  border-radius: 12px;
+  min-height: 48px;
+  font-weight: 600;
+  font-size: 14px;
+}
+.flow-secondary {
+  font-size: 13px;
+}
+.flow-actions > .flow-hint {
+  font-size: 10px;
+  color: var(--faint);
+}
+.fund-review-amount {
+  margin: 28px 0;
+}
+.fund-review-amount strong {
+  font-family: var(--pixel);
+  font-size: 48px;
+  letter-spacing: -0.03em;
+}
+.fund-breakdown {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+.fund-breakdown > div {
+  padding: 13px 0;
+  font-size: 13px;
+}
+.fund-result dd {
+  font-family: var(--sans);
+  font-weight: 600;
+}
+.limit-field {
+  padding: 0;
+  margin: 18px 0;
+  border: 0;
+  background: none;
+  border-radius: 0;
+}
+.limit-field label {
+  font-size: 15px;
+  font-weight: 600;
+}
+.limit-field > p {
+  font-size: 12px;
+  line-height: 1.45;
+}
+.limit-input {
+  background: var(--card);
+  border: 1px solid transparent;
+  padding: 15px 16px;
+  border-radius: 12px;
+  font-family: var(--sans);
+  font-size: 30px;
+  font-weight: 500;
+}
+.limit-input:focus-within {
+  border-color: var(--lime);
+}
+.limit-input:has([aria-invalid="true"]) {
+  border-color: var(--down);
+}
+@media (max-height: 780px) {
+  .body > .desk-page {
+    gap: 17px;
+  }
+  .chat-divider {
+    margin-bottom: 14px;
+  }
+  .fund-steps {
+    margin-top: 14px;
+  }
+  .flow-intro {
+    margin: 18px 0;
+  }
+  .fund-amount-label {
+    margin-top: 18px;
+  }
+  .fund-amount-input {
+    font-size: 52px;
+  }
+  .funding-flow .flow-notice {
+    margin: 14px 0;
+  }
+  .flow-actions {
+    padding-top: 14px;
+  }
+}
+@media (max-width: 360px) {
+  .desk-equity,
+  .account-balance > strong {
+    font-size: 44px;
+  }
+  .public-return {
+    font-size: 38px;
+  }
+  .public-trade-count span {
+    font-size: 11px;
+  }
+  .fund-review-amount strong {
+    font-size: 40px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .portfolio-toggle svg {
+    transition: none;
+  }
+}
+
+/* Token cards match the trade cards in the feed. */
+.trade-token-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 255px;
+  padding: 9px 11px;
+  border: 0;
+  border-left: 3px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  text-align: left;
+  color: var(--tx);
+  margin-top: 12px;
+  font-size: 12px;
+}
+.trade-token-card.buy {
+  border-left-color: var(--up);
+}
+.trade-token-card.sell {
+  border-left-color: var(--down);
+}
+.trade-token-card:disabled {
+  cursor: default;
+}
+.chat-trade-caption {
+  color: var(--faint);
+  font-size: 11px;
+  margin: 0 0 7px;
+}
+.conversation-trade > .trade-token-card {
+  margin-top: 0;
+}
+.desk-reply p,
+.desk-question {
+  white-space: pre-wrap;
+}
+.desk-reply > div {
+  flex: 1;
+}
+.desk-composer {
+  align-items: flex-end;
+}
+.desk-composer textarea {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  min-height: 38px;
+  max-height: 120px;
+  resize: none;
+  background: transparent;
+  color: var(--tx);
+  border: 0;
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  padding: 8px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.desk-composer button {
+  flex-shrink: 0;
+  margin-bottom: 1px;
+}
+.desk-composer:focus-within {
+  border-color: var(--line);
+  outline: 1px solid var(--line);
+}
+.desk-page .desk-composer textarea:focus-visible {
+  outline: none;
+}
+.chat-jump {
+  position: absolute;
+  bottom: calc(100% + 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  box-shadow: 0 3px 12px #0005;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.chat-message-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  color: var(--faint);
+  font-size: 11px;
+}
+.chat-message-actions button {
+  display: grid;
+  place-items: center;
+  min-width: 32px;
+  height: 32px;
+  border-radius: 6px;
+}
+.chat-message-actions button:hover {
+  color: var(--tx);
+  background: var(--raised);
+}
+.desk-turn {
+  margin-top: 30px;
+}
+
+.portfolio-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(402px, calc(100vw - 28px));
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--bg);
+  color: var(--tx);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.portfolio-dialog::backdrop {
+  background: #0009;
+  backdrop-filter: blur(5px);
+}
+.portfolio-dialog-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px;
+  background: var(--bg);
+}
+.portfolio-dialog-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+.portfolio-dialog-header p {
+  margin: 6px 0 0;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+.portfolio-dialog-header button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--raised);
+}
+.portfolio-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 20px 18px;
+}
+.portfolio-actions button {
+  flex: 1;
+  padding: 11px;
+  border-radius: 10px;
+  background: var(--raised);
+  font-size: 13px;
+}
+.portfolio-actions button:first-child {
+  background: var(--tx);
+  color: var(--bg);
+}
+.portfolio-dialog .portfolio-body {
+  padding: 0 20px 16px;
+}

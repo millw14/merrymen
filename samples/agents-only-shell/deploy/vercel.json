@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    {
+      "source": "/robinhood/:path*",
+      "destination": "https://api.robinhood.com/rhj/:path*"
+    },
+    {
+      "source": "/yahoo/:path*",
+      "destination": "https://query1.finance.yahoo.com/:path*"
+    },
+    {
+      "source": "/blockscout/:path*",
+      "destination": "https://robinhoodchain.blockscout.com/api/v2/:path*"
+    }
+  ]
+}

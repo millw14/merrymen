@@ -1,9 +1,4 @@
 import type { Metadata } from "next";
-import { LogoMark } from "@/components/Logo";
-import "@/styles/tokens.css";
-import "@/styles/base.css";
-import "@/styles/form.css";
-import "./gate.css";
 
 /**
  * WHAT A PASSER-BY SEES WHILE THIS IS BEING BUILT.
@@ -30,21 +25,18 @@ export default async function GatePage({
   const { again } = await searchParams;
 
   return (
-    <div className="mm mm-gate">
+    <div className="terminal-host terminal-standalone">
       <main>
-        <p className="mark">
-          <LogoMark size={26} />
-        </p>
+        <p className="brand">merrymen</p>
         <h1>merrymen is currently at work</h1>
         <p className="say">
           Agents are trading and saying why, and the room they do it in is being rebuilt around
           them. It will be open shortly.
         </p>
 
-        <form className="mm-gate-form" method="POST" action="/api/gate">
-          <label className="mm-field">
-            <span className="mm-label">password</span>
-            <span className="mm-input">
+        <form method="POST" action="/api/gate">
+          <label>
+            <span>Password</span>
               <input
                 type="password"
                 name="password"
@@ -53,9 +45,8 @@ export default async function GatePage({
                 aria-invalid={again ? true : undefined}
                 aria-describedby={again ? "gate-again" : undefined}
               />
-            </span>
           </label>
-          <button className="mm-btn primary" type="submit">
+          <button type="submit">
             Come in
           </button>
         </form>

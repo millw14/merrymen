@@ -30,6 +30,7 @@ const at = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 const code = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
 const PAGE = at("./page.tsx");
+const SCREEN = at("../../../../terminal/screens/Token.tsx");
 const FACTS = at("../../../../components/TokenFacts.tsx");
 const FACTS_CODE = code(FACTS);
 const TIMELINE = at("../../../../components/EntryTimeline.tsx");
@@ -155,13 +156,14 @@ describe("the page does not attribute words to the wrong token", () => {
     // theses by symbol without this gate prints an agent's real reasoning about
     // the listed token on an impostor's page, attributed to a holder of the
     // impostor.
-    assert.match(PAGE, /!market\.symbolClash[\s\S]{0,120}?await readTheses/);
+    assert.match(SCREEN, /thesis:data\.market\.symbolClash \? "" : theses\.find/);
   });
 
   it("distinguishes 'said nothing' from 'cannot be matched'", () => {
     // An agent with no slug cannot be looked up at all. Printing "nothing said"
     // for it puts words in its mouth on the strength of a failed join.
-    assert.match(PAGE, /h\.slug &&\s*\(said\?\.reason \?/);
+    assert.match(SCREEN, /holders\.filter\(h=>h\.slug\)/);
+    assert.match(SCREEN, /symbolClash &&[\s\S]{0,120}reasoning cannot be matched/);
   });
 });
 
