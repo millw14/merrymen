@@ -774,7 +774,30 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
       if (!equityByAccountEpoch.has(k)) equityByAccountEpoch.set(k, Number(e.equity_usdg ?? 0));
     }
 
-    const accounts = agents.map((a) => String(a.smart_account)).filter((a) => a.startsWith("0x"));
+    // SCAN ONLY WHAT IS BEING REPAIRED.
+    //
+    // A scoped run — MERRYMEN_REPAIR_ACCOUNT naming one account — was still
+    // sweeping the chain for all 24, which is both pointless and actively
+    // harmful: the sweep shares an RPC with 24 live children, and the extra
+    // load is what earns the rate limits that mark coverage short. The canary's
+    // first commit attempt fail-closed for exactly that reason — the repair
+    // refused to write because a window it did not need had gone unread.
+    //
+    // Narrowing the scan is not a shortcut around the completeness rule. It
+    // makes the rule easier to satisfy honestly: one account is two getLogs
+    // calls rather than a fleet sweep, so the answer for the account under
+    // repair no longer depends on windows belonging to accounts nobody asked
+    // about. The ROSTER still enumerates every tenant from the plan, so a
+    // scoped run still reports 24/24 — the accounts outside the scope simply
+    // carry no chain evidence and say so.
+    const scopeTo = (process.env.MERRYMEN_REPAIR_ACCOUNT ?? "").trim().toLowerCase();
+    const allAccounts = agents.map((a) => String(a.smart_account)).filter((a) => a.startsWith("0x"));
+    const accounts = scopeTo
+      ? allAccounts.filter((a) => a.toLowerCase() === scopeTo)
+      : allAccounts;
+    if (scopeTo && accounts.length === 0) {
+      log(`recon| MERRYMEN_REPAIR_ACCOUNT=${scopeTo} matches no account in the roster — nothing to scan`);
+    }
     const rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
     let rpcId = 1;
     const rpc = async (method: string, params: unknown[]): Promise<unknown> => {
@@ -790,7 +813,10 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
 
     const usdgToken = String(CASH.USDG);
     const head = BigInt((await rpc("eth_blockNumber", [])) as string);
-    log(`recon| scanning ${accounts.length} account(s) to block ${head}`);
+    log(
+      `recon| scanning ${accounts.length} of ${allAccounts.length} account(s) to block ${head}` +
+        (scopeTo ? ` — scoped to ${scopeTo}` : ""),
+    );
     const chain = await scanFleetCapital(rpc, {
       accounts,
       usdgToken,
