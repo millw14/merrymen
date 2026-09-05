@@ -1,0 +1,63 @@
+/**
+ * Swap — scoped (.sw) styles on the mm system. See styles/form.css for the
+ * field pattern and grant.css for the flow this replaces (staged action,
+ * progress rail, result boxes), translated onto --mm-* tokens.
+ *
+ * Semantics follow the system rule — colour means something: up = landed,
+ * down = failed, warn = refused/turned back, wire = link and focus. Nothing
+ * here invents a token or paints outside .sw.
+ */
+
+.sw { display: flex; flex-direction: column; gap: var(--mm-4); }
+
+.sw-sub { margin: 0; font-size: var(--mm-t-body); color: var(--mm-dim); line-height: 1.6; }
+
+/* balance figures — panel rows: dim label, mono figure, never shouted */
+.sw-figs { display: flex; flex-direction: column; }
+.sw-fig { display: flex; justify-content: space-between; align-items: baseline; padding: var(--mm-2) 0; border-bottom: 1px solid var(--mm-edge); font-size: var(--mm-t-body); color: var(--mm-dim); }
+.sw-fig:last-child { border-bottom: none; }
+.sw-fig b { font-family: var(--mm-mono); font-weight: 600; color: var(--mm-tx); }
+
+/* amount field — the mm-input pattern: the box is the control */
+.sw-max { flex: none; }
+
+/* quote panel */
+.sw-quote { display: flex; flex-direction: column; gap: var(--mm-2); }
+.sw-quote-row { display: flex; justify-content: space-between; align-items: baseline; gap: var(--mm-3); font-size: var(--mm-t-body); color: var(--mm-dim); }
+.sw-quote-row strong { font-family: var(--mm-mono); font-size: var(--mm-t-lead); color: var(--mm-tx); }
+.sw-quote-row span:last-child { font-family: var(--mm-mono); color: var(--mm-tx); }
+
+/* staged action */
+.sw-btn-row { display: flex; gap: var(--mm-2); }
+.sw-btn-row .mm-btn { flex: 1; }
+.sw-back { background: none; border: none; color: var(--mm-faint); font-size: var(--mm-t-body); cursor: pointer; padding: var(--mm-2) 0 0; align-self: flex-start; }
+.sw-back:hover { color: var(--mm-tx); }
+
+/* progress steps — kicker labels + rule segments, mm idiom */
+.sw-steps { display: flex; gap: var(--mm-2); margin-top: var(--mm-1); }
+.sw-step { flex: 1; display: flex; flex-direction: column; gap: 5px; font-family: var(--mm-mono); font-size: var(--mm-t-micro); letter-spacing: 0.09em; text-transform: uppercase; color: var(--mm-faint); }
+.sw-step::after { content: ""; height: 3px; border-radius: 2px; background: var(--mm-edge-2); }
+.sw-step.on { color: var(--mm-wire); }
+.sw-step.on::after { background: var(--mm-wire); }
+.sw-step.done { color: var(--mm-dim); }
+.sw-step.done::after { background: var(--mm-edge); }
+
+/* result + notices — system semantics only */
+.sw-note { margin: var(--mm-2) 0 0; font-size: var(--mm-t-body); line-height: 1.6; color: var(--mm-dim); }
+.sw-note a { color: var(--mm-wire); }
+.sw-result { border-radius: var(--mm-r-card); padding: var(--mm-3) var(--mm-4); font-size: var(--mm-t-body); line-height: 1.55; border: 1px solid var(--mm-edge-2); background: var(--mm-surface); }
+.sw-result b { font-weight: 700; }
+.sw-result.ok { border-color: color-mix(in srgb, var(--mm-up) 30%, transparent); }
+.sw-result.ok b { color: var(--mm-up); }
+.sw-result.warn { border-color: color-mix(in srgb, var(--mm-warn) 32%, transparent); }
+.sw-result.err { border-color: color-mix(in srgb, var(--mm-down) 32%, transparent); }
+.sw-result.err b { color: var(--mm-down); }
+.sw-result .mono { font-family: var(--mm-mono); }
+.sw-note-warn { color: var(--mm-warn); }
+.sw-error { color: var(--mm-down); font-family: var(--mm-mono); font-size: var(--mm-t-body); }
+
+/* recent conversions — feed-row shape */
+.sw-history ul { list-style: none; margin: var(--mm-2) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--mm-2); }
+.sw-history li { font-size: var(--mm-t-body); line-height: 1.5; color: var(--mm-dim); border-left: 2px solid var(--mm-edge-2); padding-left: var(--mm-3); }
+.sw-history li.ok { border-color: var(--mm-up); }
+.sw-history li.warn, .sw-history li.err { border-color: var(--mm-down); }

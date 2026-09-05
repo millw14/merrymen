@@ -564,8 +564,7 @@ export default function SettingsPage() {
               </span>
               <span className="field-hint">
                 Send ETH — we&apos;ll swap surplus to USDG and keep a gas reserve. Off by default. Also accepts USDG directly on the same address.
-                Fires once per deposit: the same funds never convert twice, even across a restart. Prefer to convert by hand?{" "}
-                <Link href="/swap">Swap ETH → USDG</Link>.
+                Fires once per deposit: the same funds never convert twice, even across a restart.
               </span>
             </label>
             <Field
@@ -581,6 +580,14 @@ export default function SettingsPage() {
                 onChange={set("autoConvertReservePct")}
               />
               <span className="field-unit">%</span>
+            </Field>
+            <Field
+              label="manual swap"
+              hint="Convert ETH to USDG right now, by hand — same permission, same quote, same reserve. A manual swap counts as a fire, so auto-convert won't re-eat the leftover."
+            >
+              <Link href="/swap" className="mm-btn primary">
+                Swap ETH → USDG {autoConvertVal ? "· auto-convert on" : "· auto-convert off"} →
+              </Link>
             </Field>
           </div>
 

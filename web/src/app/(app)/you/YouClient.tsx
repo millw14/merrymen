@@ -384,6 +384,9 @@ export function YouClient() {
             The wallet, the caps, withdrawal and the kill switch all live where the keys do.
           </p>
           <p style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Link href="/swap" className="mm-btn primary">
+              Swap ETH → USDG
+            </Link>
             <Link href="/grant" className="mm-btn">
               Wallet &amp; permissions
             </Link>
