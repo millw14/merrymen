@@ -79,7 +79,7 @@ export interface AccountPreview {
 const round6 = (n: number) => Number(n.toFixed(6));
 
 /** What a repair would do to one account. PURE — it is handed a plan, not a database. */
-export function previewAccount(plan: AccountPlan, selectedAccount: string | null): AccountPreview {
+export function previewAccount(plan: AccountPlan, selected: readonly string[]): AccountPreview {
   let grossIn = 0;
   let grossOut = 0;
   for (const r of plan.insert) {
@@ -90,7 +90,7 @@ export function previewAccount(plan: AccountPlan, selectedAccount: string | null
     account: plan.smartAccount,
     tenant: plan.tenant,
     outcome: rosterOutcome(plan),
-    selected: !selectedAccount || selectedAccount.toLowerCase() === plan.smartAccount.toLowerCase(),
+    selected: selected.length === 0 || selected.includes(plan.smartAccount.toLowerCase()),
     isPaper: plan.isPaper,
     epoch: plan.epoch,
     inserts: plan.insert.length,
@@ -195,7 +195,7 @@ export function accountPreviewLines(plan: AccountPlan, p: AccountPreview): strin
 /** Preview every account. PURE, and the fleet total is part of the answer. */
 export function runPreview(
   plans: readonly AccountPlan[],
-  req: { account: string | null },
+  req: { accounts: readonly string[] },
 ): AccountPreview[] {
-  return plans.map((p) => previewAccount(p, req.account));
+  return plans.map((p) => previewAccount(p, req.accounts));
 }

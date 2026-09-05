@@ -130,7 +130,7 @@ describe("every tenant is classified", () => {
       plan({ smartAccount: "0xbbb", blocked: "ambiguous" }),
       plan({ smartAccount: "0xccc" }),
     ];
-    const previews = runPreview(plans, { account: null });
+    const previews = runPreview(plans, { accounts: [] });
     const total = rosterLines(previews).find((l) => l.startsWith("ROSTER TOTAL"))!;
     assert.match(total, /4 account\(s\)/);
     assert.match(total, /NO-CHAIN-HISTORY 2/);
@@ -142,7 +142,7 @@ describe("every tenant is classified", () => {
   it("classifies an account --account did not select, rather than omitting it", () => {
     // "Not in the mutation list" must never be readable as "safe".
     const previews = runPreview([canaryPlan(), plan({ smartAccount: PAPER, isPaper: true })], {
-      account: CANARY,
+      accounts: [CANARY.toLowerCase()],
     });
     assert.equal(previews.length, 2);
     assert.equal(previews[1]!.selected, false);
@@ -153,7 +153,7 @@ describe("every tenant is classified", () => {
 // ── THE CANARY'S NUMBERS ───────────────────────────────────────────────────
 
 describe("the canary preview", () => {
-  const p = previewAccount(canaryPlan(), CANARY);
+  const p = previewAccount(canaryPlan(), [CANARY.toLowerCase()]);
 
   it("reports the ledger's 30 USDG as what is there now, unevidenced", () => {
     assert.equal(p.contributionsBeforeUsdg, 30);
@@ -213,7 +213,7 @@ describe("a funded-then-withdrawn account", () => {
         contributionsAfterUsdg: 0,
         contributionsKnownAfter: true,
       }),
-      null,
+      [],
     );
     assert.equal(p.grossContributionsAfterUsdg, 1010);
     assert.equal(p.grossWithdrawalsAfterUsdg, 1010);
@@ -279,7 +279,7 @@ describe("the report has to fit in the window you can read it in", () => {
     const plans = Array.from({ length: 24 }, (_, i) =>
       i === 0 ? canaryPlan() : plan({ smartAccount: `0x${i.toString(16).padStart(40, "0")}` }),
     );
-    const previews = runPreview(plans, { account: CANARY });
+    const previews = runPreview(plans, { accounts: [CANARY.toLowerCase()] });
     const roster = rosterLines(previews);
     const blocks = previews.filter((p) => p.selected).flatMap((p) => {
       const pl = plans.find((x) => x.smartAccount === p.account)!;

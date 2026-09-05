@@ -92,7 +92,7 @@ const plan = (over: Partial<AccountPlan> & { smartAccount: string }): AccountPla
   ...over,
 });
 
-const COMMIT: RepairOptions = { mode: "commit", runId: "test-run", resume: false };
+const COMMIT: RepairOptions = { mode: "commit", runId: "test-run", resume: false, accounts: [] };
 
 const countFlows = async (db: Db, account: string) =>
   Number(((await db.prepare("SELECT COUNT(*) AS n FROM flows WHERE agent_id = ?").get(account)) as { n: number }).n);
@@ -244,7 +244,14 @@ test("a restart midway leaves finished accounts done and untouched accounts unto
   assert.equal(await netOf(db, B), 40, "B still holds its untouched legacy row");
 
   // The new process re-runs the WHOLE fleet with --resume.
-  const results = await runRepair(db, [pa, pb], { ...COMMIT, resume: true, runId: "r2" }, CHAIN);
+  const results = await runRepair(
+    db,
+    [pa, pb],
+    // BOTH NAMED. A commit with no named accounts is refused, so a fleet pass
+    // spells out what it is repairing — including on a resume.
+    { ...COMMIT, resume: true, runId: "r2", accounts: [A.toLowerCase(), B.toLowerCase()] },
+    CHAIN,
+  );
   assert.equal(results[0]!.inserted, 0, "A's evidence was already there");
   assert.equal(results[1]!.inserted, 1, "B is picked up where the crash left it");
   assert.equal(await netOf(db, A), 10);
@@ -402,9 +409,25 @@ test("the default is read-only and mutation must be spelled out", async () => {
   assert.equal(parseRepairOptions({ MERRYMEN_REPAIR: "true" })!.mode, "dry-run");
   assert.equal(parseRepairOptions({ MERRYMEN_REPAIR: "COMMIT " })!.mode, "commit");
   assert.equal(parseRepairOptions({ MERRYMEN_REPAIR: "verify-only" })!.mode, "verify-only");
-  assert.equal(
-    parseRepairOptions({ MERRYMEN_REPAIR: "dry-run", MERRYMEN_REPAIR_ACCOUNT: " 0xabc " })!.account,
-    "0xabc",
+  // A LIST, normalised once. Whitespace, case and stray commas are the
+  // operator's, not the comparison's — every downstream check reads a
+  // lower-cased array and never has to remember to trim.
+  assert.deepEqual(
+    parseRepairOptions({ MERRYMEN_REPAIR: "dry-run", MERRYMEN_REPAIR_ACCOUNT: " 0xABC " })!.accounts,
+    ["0xabc"],
+  );
+  assert.deepEqual(
+    parseRepairOptions({
+      MERRYMEN_REPAIR: "commit",
+      MERRYMEN_REPAIR_ACCOUNT: "0xAAA, 0xbbb ,,0xCcC,",
+    })!.accounts,
+    ["0xaaa", "0xbbb", "0xccc"],
+  );
+  // Anything that is not an address is dropped rather than silently becoming a
+  // selector that matches nothing.
+  assert.deepEqual(
+    parseRepairOptions({ MERRYMEN_REPAIR: "commit", MERRYMEN_REPAIR_ACCOUNT: "all, everything" })!.accounts,
+    [],
   );
   assert.equal(parseRepairOptions({ MERRYMEN_REPAIR: "commit", MERRYMEN_REPAIR_RESUME: "1" })!.resume, true);
   assert.equal(parseRepairOptions({ MERRYMEN_REPAIR: "commit" })!.resume, false);
@@ -422,7 +445,7 @@ test("a dry run writes nothing", async () => {
       insert: [row({ txHash: TX, logIndex: 1 })],
       quarantine: [{ id, direction: "in", amountUsdg: 1000, source: "inferred", reason: "superseded" }],
     }),
-    { mode: "dry-run", runId: "r", resume: false },
+    { mode: "dry-run", runId: "r", resume: false, accounts: [] },
     CHAIN,
   );
   assert.match(r.why, /^dry run: would insert 1 and quarantine 1/);
@@ -437,7 +460,7 @@ test("--account limits the mutation to one smart account", async () => {
   const pa = plan({ smartAccount: A, insert: [row({ agentId: A, txHash: TX, logIndex: 1 })] });
   const pb = plan({ smartAccount: B, insert: [row({ agentId: B, txHash: TX2, logIndex: 1 })] });
 
-  const results = await runRepair(db, [pa, pb], { ...COMMIT, account: A.toLowerCase() }, CHAIN);
+  const results = await runRepair(db, [pa, pb], { ...COMMIT, accounts: [A.toLowerCase()] }, CHAIN);
   assert.equal(results[0]!.stage, "recomputed");
   assert.equal(results[1]!.stage, "skipped-not-selected");
   assert.equal(await countFlows(db, A), 1);

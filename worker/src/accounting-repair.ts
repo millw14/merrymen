@@ -34,8 +34,18 @@ export type RepairMode = "dry-run" | "verify-only" | "commit";
 export interface RepairOptions {
   /** DRY RUN IS THE DEFAULT. Mutation requires saying so. */
   mode: RepairMode;
-  /** Limit to one smart account. The canary goes first, alone. */
-  account?: string;
+  /**
+   * WHICH ACCOUNTS THIS RUN MAY TOUCH. Lower-cased, and never empty in commit
+   * mode.
+   *
+   * A list rather than a single account because the alternative — one account
+   * per deploy — made a 24-tenant repair into two hours of restarts, and an
+   * operator restarting production twenty-three times makes a mistake somewhere
+   * around the eighth. What it is NOT is a way to say "everything": an empty
+   * list still refuses to commit, so the accounts being repaired are always
+   * named by someone rather than defaulted into.
+   */
+  accounts: string[];
   /** Groups every row this run moved, so one run can be undone as a unit. */
   runId: string;
   /**
@@ -170,8 +180,8 @@ export async function repairAccount(
     why: "",
   };
 
-  if (opts.account && opts.account.toLowerCase() !== plan.smartAccount.toLowerCase()) {
-    return { ...base, stage: "skipped-not-selected", why: "not the selected account" };
+  if (opts.accounts.length > 0 && !opts.accounts.includes(plan.smartAccount.toLowerCase())) {
+    return { ...base, stage: "skipped-not-selected", why: "not in the selected set" };
   }
   if (plan.blocked) {
     // A blocked account is not a failure — it is the tool declining to guess.
@@ -351,10 +361,15 @@ export function parseRepairOptions(env: Record<string, string | undefined>, now 
   const raw = (env.MERRYMEN_REPAIR ?? "").trim().toLowerCase();
   if (!raw) return null;
   const mode: RepairMode = raw === "commit" ? "commit" : raw === "verify-only" ? "verify-only" : "dry-run";
-  const account = (env.MERRYMEN_REPAIR_ACCOUNT ?? "").trim() || undefined;
+  // Comma-separated, whitespace-tolerant, lower-cased once here so no
+  // comparison downstream has to remember to do it.
+  const accounts = (env.MERRYMEN_REPAIR_ACCOUNT ?? "")
+    .split(",")
+    .map((a) => a.trim().toLowerCase())
+    .filter((a) => a.startsWith("0x"));
   return {
     mode,
-    account,
+    accounts,
     // A generated id is timestamped rather than random so the run that moved a
     // row can be placed in time from the quarantine table alone.
     runId: (env.MERRYMEN_REPAIR_RUN_ID ?? "").trim() || `run-${new Date(now).toISOString().replace(/[:.]/g, "-")}`,
@@ -411,6 +426,26 @@ export async function runRepair(
   // guarantee is an application-side check across a network — which is exactly
   // what the requirement rules out — so it refuses rather than proceeding on a
   // promise it cannot keep. A dry run is still allowed: it writes nothing.
+  if (opts.mode === "commit" && opts.accounts.length === 0) {
+    // NAMED, OR NOT AT ALL. The rule was "the canary goes first, alone"; now
+    // that it has gone and survived a restart, the rule that remains is that
+    // the accounts being mutated are always spelled out. A run that repairs
+    // whatever it happens to find is one nobody approved.
+    return [
+      {
+        account: "*",
+        stage: "failed",
+        inserted: 0,
+        insertsAlreadyPresent: 0,
+        quarantined: 0,
+        contributionsBeforeUsdg: 0,
+        contributionsAfterUsdg: 0,
+        contributionsKnownAfter: false,
+        why: "commit requires MERRYMEN_REPAIR_ACCOUNT to name the accounts to repair",
+      },
+    ];
+  }
+
   if (opts.mode === "commit" && !(await hasChainIdentityIndex(db))) {
     return [
       {
@@ -433,6 +468,12 @@ export async function runRepair(
     const r = await repairAccount(db, plan, opts, chainId);
     out.push(r);
     onResult?.(r);
+    // A FAILURE stops the batch; a BLOCKED account does not. Blocked means the
+    // tool declined to guess about one account, which says nothing about the
+    // next one — and stopping there would make a single flaky chain read cost
+    // the whole run. A FAILED account is different: something went wrong that
+    // nobody has read yet, and twenty-three further mutations after it is not
+    // throughput, it is a bigger incident.
     if (r.stage === "failed") break;
   }
   return out;

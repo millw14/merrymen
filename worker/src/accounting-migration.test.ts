@@ -260,7 +260,7 @@ describe("the migration, against the rows that are actually there", () => {
     const results = await runRepair(
       db,
       [plan],
-      { mode: "commit", runId: "r", resume: false, account: CANARY },
+      { mode: "commit", runId: "r", resume: false, accounts: [CANARY.toLowerCase()] },
       CHAIN,
     );
     assert.equal(results[0]!.stage, "failed");
@@ -272,7 +272,7 @@ describe("the migration, against the rows that are actually there", () => {
   it("still allows a DRY RUN without the index, because a dry run writes nothing", async () => {
     const { db } = await preMigration();
     await seedAgents(db);
-    const results = await runRepair(db, [], { mode: "dry-run", runId: "r", resume: false }, CHAIN);
+    const results = await runRepair(db, [], { mode: "dry-run", runId: "r", resume: false, accounts: [] }, CHAIN);
     assert.deepEqual(results, []);
   });
 });

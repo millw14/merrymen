@@ -790,13 +790,24 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     // about. The ROSTER still enumerates every tenant from the plan, so a
     // scoped run still reports 24/24 — the accounts outside the scope simply
     // carry no chain evidence and say so.
-    const scopeTo = (process.env.MERRYMEN_REPAIR_ACCOUNT ?? "").trim().toLowerCase();
+    const scopeTo = new Set(
+      (process.env.MERRYMEN_REPAIR_ACCOUNT ?? "")
+        .split(",")
+        .map((a) => a.trim().toLowerCase())
+        .filter((a) => a.startsWith("0x")),
+    );
     const allAccounts = agents.map((a) => String(a.smart_account)).filter((a) => a.startsWith("0x"));
-    const accounts = scopeTo
-      ? allAccounts.filter((a) => a.toLowerCase() === scopeTo)
-      : allAccounts;
-    if (scopeTo && accounts.length === 0) {
-      log(`recon| MERRYMEN_REPAIR_ACCOUNT=${scopeTo} matches no account in the roster — nothing to scan`);
+    const accounts = scopeTo.size ? allAccounts.filter((a) => scopeTo.has(a.toLowerCase())) : allAccounts;
+    if (scopeTo.size && accounts.length === 0) {
+      log("recon| MERRYMEN_REPAIR_ACCOUNT matches no account in the roster — nothing to scan");
+    }
+    if (scopeTo.size > accounts.length) {
+      // LOUD. A named account that is not in the roster will silently do
+      // nothing, and an operator reading "repaired 5" after naming 6 has no
+      // way to tell which one never existed.
+      log(
+        `recon| WARNING: ${scopeTo.size} account(s) named but only ${accounts.length} found in the roster`,
+      );
     }
     const rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
     let rpcId = 1;
@@ -815,7 +826,7 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     const head = BigInt((await rpc("eth_blockNumber", [])) as string);
     log(
       `recon| scanning ${accounts.length} of ${allAccounts.length} account(s) to block ${head}` +
-        (scopeTo ? ` — scoped to ${scopeTo}` : ""),
+        (scopeTo.size ? ` — scoped to ${accounts.length} named account(s)` : ""),
     );
     const chain = await scanFleetCapital(rpc, {
       accounts,
@@ -877,10 +888,10 @@ async function runRepairIfAsked(shared: Db, plans: readonly AccountPlan[]): Prom
 
   // THE PREVIEW IS ALWAYS PRINTED, in every mode. An operator reading a commit
   // run's output should not have to go and find the dry run it corresponds to.
-  const previews = runPreview(plans, { account: opts.account ?? null });
+  const previews = runPreview(plans, { accounts: opts.accounts });
   log(
-    `preview| run ${opts.runId} · mode ${opts.mode} · account ${opts.account ?? "ALL"} · ` +
-      `resume ${opts.resume}`,
+    `preview| run ${opts.runId} · mode ${opts.mode} · ` +
+      `accounts ${opts.accounts.length ? opts.accounts.length : "ALL"} · resume ${opts.resume}`,
   );
   for (const p of previews) {
     if (!p.selected) continue;
@@ -893,12 +904,11 @@ async function runRepairIfAsked(shared: Db, plans: readonly AccountPlan[]): Prom
     log("preview| dry run — nothing was written");
     return;
   }
-  if (opts.mode === "commit" && !opts.account) {
-    // The canary goes first, ALONE, and the fleet is a separate decision taken
-    // after it has survived a restart unchanged. Refusing here rather than
-    // trusting the operator to remember is the same fail-closed shape the rest
-    // of this accounting work is built from.
-    log("repair| refusing a fleet-wide commit — set MERRYMEN_REPAIR_ACCOUNT to repair one account at a time");
+  if (opts.mode === "commit" && opts.accounts.length === 0) {
+    // The accounts being mutated are always named. runRepair refuses this too;
+    // saying it here as well means the log shows WHY nothing happened rather
+    // than just showing nothing happening.
+    log("repair| refusing a commit with no named accounts — set MERRYMEN_REPAIR_ACCOUNT");
     return;
   }
 
