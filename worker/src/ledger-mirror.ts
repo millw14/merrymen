@@ -77,6 +77,10 @@ const LOG_TABLES = [
       // fill as unpriceable, so `gasQualifier` stamped 'this is not the full
       // cost' on every book — a warning about our own missing column.
       "gas_usdg",
+      // THE PRICE-INDEPENDENT HALF of the cost. Without it a hosted split of
+      // setup versus steady-state gas has to infer units from wei, and inherits
+      // every base-fee move as if it were extra work done.
+      "gas_units",
       "fill_cash_usdg",
       // WHICH RUN this row belongs to. Everything below depends on it; see the
       // note on the agents upsert.
@@ -101,9 +105,27 @@ const LOG_TABLES = [
   // is why hosted P&L was not merely wrong but permanently null: zero rows means
   // contributions are UNKNOWN, and equity.ts refuses to publish a number it
   // cannot back. Every hosted agent showed a dash, forever, by design.
+  //
+  // `chain_id` is carried because it is the first component of the flow's
+  // IDENTITY (`flows_chain_identity`), and a tx hash is unique only within a
+  // chain — this codebase runs 4663 and 46630 against one schema. Omitting it
+  // left every mirrored row with chain_id NULL, and NULLs are distinct in a
+  // unique index on both engines, so the constraint could never fire on the
+  // shared side no matter what the child wrote.
   {
     table: "flows",
-    cols: ["agent_id", "direction", "amount_usdg", "tx_hash", "block_number", "log_index", "source", "epoch", "at"],
+    cols: [
+      "agent_id",
+      "direction",
+      "amount_usdg",
+      "tx_hash",
+      "block_number",
+      "log_index",
+      "source",
+      "epoch",
+      "chain_id",
+      "at",
+    ],
   },
   // What the house actually accrued, per agent. Read straight off `agents` by
   // the scoreboard, but the per-accrual history is what makes a fee auditable.
@@ -302,8 +324,29 @@ export async function mirrorTenant(args: {
       // One transaction: the rows and the watermark that says they arrived.
       // Split them and a crash between the two duplicates the tape forever.
       await shared.tx(async (db) => {
+        // ON CONFLICT DO NOTHING, AND IT HAD TO LAND IN THE SAME CHANGE AS
+        // `flows.chain_id` — never after it.
+        //
+        // The watermark was this file's only exactly-once mechanism, which was
+        // safe precisely BECAUSE no unique constraint existed to violate: a
+        // re-copied row landed as a silent duplicate. That is how the canary's
+        // 10 USDG opening balance came to sit in Postgres three times.
+        //
+        // Populating chain_id makes `flows_chain_identity` bite, and the rebirth
+        // path above deliberately rewinds to id 0 after a redeploy — so the first
+        // re-copied flow would raise a unique violation, roll the whole batch
+        // back, and leave the watermark parked forever. `flows` would stop
+        // mirroring for that tenant while every other table kept moving: the
+        // exact silent stall documented forty lines up, which already cost this
+        // fleet its entire trade tape once.
+        //
+        // This does NOT weaken the watermark. A conflict can only occur on a row
+        // whose (chain_id, agent_id, tx_hash, log_index) is already present —
+        // the same log, the same account — which is by definition the row we
+        // already copied.
         const ins = db.prepare(
-          `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
+          `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})
+           ON CONFLICT DO NOTHING`,
         );
         for (const r of rows) await ins.run(...cols.map((c) => r[c] ?? null));
         await db
@@ -349,7 +392,7 @@ export async function mirrorTenant(args: {
       .prepare(
         `SELECT agent_id, user_op_hash, tx_hash, status, reject_rule, decision_id,
                 fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                gas_wei, sponsored_gas_wei, gas_usdg, fill_cash_usdg
+                gas_wei, sponsored_gas_wei, gas_usdg, gas_units, fill_cash_usdg
            FROM trades
           WHERE user_op_hash IS NOT NULL AND status <> 'submitted' AND created_at > ?
           ORDER BY id DESC LIMIT ?`,
@@ -362,7 +405,7 @@ export async function mirrorTenant(args: {
           `UPDATE trades SET tx_hash = ?, status = ?, reject_rule = ?, decision_id = ?,
                              fill_side = ?, fill_qty_raw = ?, fill_price_usd = ?,
                              realized_pnl_usdg = ?, basis_source = ?, gas_wei = ?,
-                             sponsored_gas_wei = ?, gas_usdg = ?, fill_cash_usdg = ?
+                             sponsored_gas_wei = ?, gas_usdg = ?, gas_units = ?, fill_cash_usdg = ?
             WHERE agent_id = ? AND user_op_hash = ? AND status = 'submitted'`,
         );
         for (const r of resolved) {
@@ -370,7 +413,7 @@ export async function mirrorTenant(args: {
             r.tx_hash ?? null, r.status, r.reject_rule ?? null, r.decision_id ?? null,
             r.fill_side ?? null, r.fill_qty_raw ?? null, r.fill_price_usd ?? null,
             r.realized_pnl_usdg ?? null, r.basis_source ?? null, r.gas_wei ?? null,
-            r.sponsored_gas_wei ?? null, r.gas_usdg ?? null, r.fill_cash_usdg ?? null,
+            r.sponsored_gas_wei ?? null, r.gas_usdg ?? null, r.gas_units ?? null, r.fill_cash_usdg ?? null,
             r.agent_id, r.user_op_hash,
           );
           // RunResult.changes is part of the Db contract — node:sqlite reports
@@ -396,8 +439,9 @@ export async function mirrorTenant(args: {
   // to read `ORDER BY at DESC LIMIT 500` with no cursor, so a child that wrote
   // more than a batch between two passes lost the overflow PERMANENTLY. That
   // was tolerable while a decision was only dashboard furniture. It stopped
-  // being tolerable when theses became the thing other agents read — a dropped
-  // decision is now a peer input that silently never arrives.
+  // being tolerable when agents began reading each other: a dropped decision is
+  // now a peer input that silently never arrives, and the agent it never reached
+  // has no way to know it was missing.
   //
   // Watermarked on `at` rather than on an id, because the id is a uuid and has
   // no order. `at` is not unique, so the cursor opens 300s BEHIND itself: ties
@@ -471,7 +515,8 @@ export async function mirrorTenant(args: {
         // they rendered as a confident zero.
         `SELECT smart_account, name, owner_address, session_key_address, chain_id, caps,
                 granted_at, expires_at, status, created_at, mode, beat_at, sponsor_gas, x_handle,
-                epoch, hwm_usdg, accrued_fee_usdg FROM agents`,
+                epoch, hwm_usdg, accrued_fee_usdg,
+                contributions_known, contributions_why, gas_accounting, quality_at FROM agents`,
       )
       .all()) as Record<string, unknown>[];
     if (agents.length) {
@@ -479,16 +524,46 @@ export async function mirrorTenant(args: {
         const ins = db.prepare(
           `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id,
                                caps, granted_at, expires_at, status, created_at, mode, beat_at,
-                               sponsor_gas, x_handle, epoch, hwm_usdg, accrued_fee_usdg)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               sponsor_gas, x_handle, epoch, hwm_usdg, accrued_fee_usdg,
+                               contributions_known, contributions_why, gas_accounting, quality_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (smart_account) DO UPDATE SET
              name = excluded.name, status = excluded.status, caps = excluded.caps,
              expires_at = excluded.expires_at, mode = excluded.mode,
              beat_at = excluded.beat_at, sponsor_gas = excluded.sponsor_gas,
              x_handle = excluded.x_handle,
-             epoch = excluded.epoch,
-             hwm_usdg = excluded.hwm_usdg,
-             accrued_fee_usdg = excluded.accrued_fee_usdg`,
+             -- MONOTONIC, NOT OVERWRITTEN. These three are RATCHETS, and the
+             -- child that supplies them lives in a container whose database a
+             -- redeploy empties. A fresh child recreates its local agents row at
+             -- the schema defaults — epoch 1, hwm 0, fee 0 — and an unconditional
+             -- assignment here wrote those defaults straight over the durable
+             -- history: the peak the performance fee is measured against reset to
+             -- zero, the accounting epoch regressed to 1 (readmitting the very
+             -- epoch-1 rows the epoch mechanism exists to exclude), and the
+             -- accrued-fee total forgot what the house had earned.
+             --
+             -- The direction matters more than the loss. A peak that resets to 0
+             -- means the next mark hands the whole principal to accrueAboveHwm as
+             -- profit and charges a performance fee on the owner's own capital —
+             -- the exact failure the accounting anchor was built to prevent,
+             -- arriving through the mirror instead of through the worker.
+             --
+             -- CASE rather than MAX/GREATEST because this statement is written
+             -- once for both backends: MAX is scalar in sqlite and an aggregate
+             -- in Postgres, and GREATEST does not exist in sqlite.
+             epoch = CASE WHEN excluded.epoch > agents.epoch THEN excluded.epoch ELSE agents.epoch END,
+             hwm_usdg = CASE WHEN excluded.hwm_usdg > agents.hwm_usdg THEN excluded.hwm_usdg ELSE agents.hwm_usdg END,
+             accrued_fee_usdg = CASE WHEN excluded.accrued_fee_usdg > agents.accrued_fee_usdg
+                                     THEN excluded.accrued_fee_usdg ELSE agents.accrued_fee_usdg END,
+             -- DELIBERATELY NOT MONOTONIC, unlike the three above. Quality is a
+             -- CURRENT assessment, not a ratchet: a book that stops being
+             -- provable has to be able to say so. A high-water rule here would
+             -- pin an agent at a claim it can no longer support, which is the
+             -- same class of lie as the numbers this whole change is about.
+             contributions_known = excluded.contributions_known,
+             contributions_why = excluded.contributions_why,
+             gas_accounting = excluded.gas_accounting,
+             quality_at = excluded.quality_at`,
         );
         for (const a of agents) {
           await ins.run(
@@ -505,6 +580,12 @@ export async function mirrorTenant(args: {
             // means a pre-migration child rather than an absent value — fall back
             // to the same defaults the schema would have applied.
             a.epoch ?? 1, a.hwm_usdg ?? 0, a.accrued_fee_usdg ?? 0,
+            // NULL means NEVER ASSESSED, which is not the same as false. An agent
+            // that has not armed since quality shipped has made no claim about
+            // its own book, and a reader must render that as unknown rather than
+            // pick an answer on its behalf.
+            a.contributions_known ?? null, a.contributions_why ?? null,
+            a.gas_accounting ?? null, a.quality_at ?? null,
           );
         }
       });

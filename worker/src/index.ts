@@ -22,6 +22,8 @@
  */
 
 import { rmSync, writeFileSync } from "node:fs";
+import { metered, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
+import { runShadowComparison, shadowEnabledFor, shadowLine } from "./reconcile-shadow";
 import {
   createPublicClient,
   encodeFunctionData,
@@ -32,6 +34,8 @@ import {
   type PublicClient,
 } from "viem";
 import {
+  isHostedMode,
+  instrumentClassOf,
   CASH,
   CIRCLE_TIERS,
   MORPHO,
@@ -60,8 +64,13 @@ import {
 } from "../../packages/core/src/index";
 import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { impactBps, judgeImpact, probeAmountIn } from "./impact";
+import { checkV3SwapCalls } from "./final-fence";
+import { readPeers } from "./peer-files";
+import { peerLabel, peerView } from "./strategist/peer-view";
+import { SHADOW_SOURCES, type PublicThesis } from "./thesis-policy";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
+  NotRecorded,
   createAgentExecutor,
   GasRefused,
   UserOpReverted,
@@ -83,6 +92,13 @@ import { takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
 import { claimCommandFile, writeCommandResult } from "./command-files";
 import { bookGaps, composeEquityUsdg } from "./equity";
+import { runShadow, type ShadowInputs } from "./brain-shadow";
+import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
+import { readFeedHistory } from "./read-feed-history";
+import { buildTechnical, renderTechnical } from "./research/technical";
+import { STEADY_SWAP_GAS_UNITS, expectedTradeGasUsdg } from "./execution-cost";
+import { chooseFocus, focusLabel } from "./brain-focus";
+import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus } from "./circle";
@@ -91,6 +107,17 @@ import { archiveCurrentGrant, grantExpired, grantKey, loadGrantFile } from "./gr
 import { TRADEABLE_CHAIN_ID } from "./preflight";
 import { execModeOf, type ExecMode } from "./exec-mode";
 import { limitsFromGrant } from "./limits";
+import {
+  accountingLicence,
+  anchorLine,
+  doubt,
+  foldLicence,
+  INITIAL_CONTRIBUTION_TRUTH,
+  planFirstObservation,
+  readAnchor,
+  type AnchorVerdict,
+  type ContributionTruth,
+} from "./bootstrap-state";
 import { ensureHome, homePaths, merrymenHome } from "./home";
 import { resolveLlm } from "./llm";
 import { applyPaperIntent, type PaperPosition } from "./paper";
@@ -192,6 +219,7 @@ import {
   recentTradeTxHashes,
   getAgentEpoch,
   getAgentFinancials,
+  accountingHistoryAuditable,
   hasEpochOneHistory,
   lastKnownEquityUsdg,
   lastKnownCashUsdg,
@@ -207,7 +235,11 @@ import {
   setPaperBook,
   setAgentName,
   setAgentXHandle,
+  getGasPaidUsdg,
+  getNetContributionsUsdg,
+  setAgentEpoch,
   setAgentHwm,
+  setAgentQuality,
   setAgentMode,
   setAgentStatus,
   clearTrenchEntry,
@@ -234,6 +266,17 @@ const VAULT_ABI = parseAbi([
 
 const usdg = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
 const usdgNum = (v: bigint) => Number(formatUnits(v, USDG_DECIMALS));
+
+/**
+ * How much cash may move across a downtime window before it stops being noise.
+ *
+ * 0.01 USDG. The durable columns are REAL, so a figure that made the round trip
+ * through Postgres and back can differ from the on-chain balance in the last
+ * decimal place without anything having happened. Below this the difference is
+ * storage precision; at or above it, something moved and the book must say it
+ * does not know what.
+ */
+const MATERIAL_DRIFT_USDG = 10_000n;
 const fmt = (v: bigint) => formatUnits(v, USDG_DECIMALS);
 
 function swapRouterFor(cfg: ResolvedConfig): `0x${string}` {
@@ -279,6 +322,23 @@ interface ActiveAgent {
    */
   orderExecutor: OrderExecutor | null;
   limits: AgentLimits;
+  /**
+   * This signature seals a policy contract with no bytecode on its chain.
+   *
+   * Read once at arm and carried, because it is a property of a frozen
+   * signature: it cannot change while this grant is active, and re-deriving it
+   * per-tick would parse the serialized permission set sixty times a minute to
+   * get the same answer.
+   */
+  deadPolicy: boolean;
+  /**
+   * Does the smart account have bytecode on the grant chain?
+   *
+   * `false` is the ordinary state of an account that has never operated, and
+   * `null` means the read did not land — which is not the same and must never
+   * be rendered as one.
+   */
+  accountDeployed: boolean | null;
   /** True only when breakerAddress has CODE on the grant chain — otherwise the
    * on-chain read would silently fail open (.catch → "not tripped"). */
   breakerLive: boolean;
@@ -288,6 +348,12 @@ interface ActiveAgent {
    *  a grant may carry either, both or neither. */
   ponsAdapterLive: boolean;
 }
+
+/**
+ * A token address as a person reads it. Only ever a LABEL — every comparison in
+ * this file is against the full address, so a collision here is cosmetic.
+ */
+const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
 async function main() {
   await initStore();
@@ -363,6 +429,7 @@ async function main() {
       executor: !!active?.executor,
       chainId: active?.grant.chainId ?? 0,
       cashUsdg: lastCashUsdg,
+      deadPolicy: active?.deadPolicy ?? false,
       paperTradingEnabled: cfg.paperTradingEnabled,
     });
   const paperActive = () => execMode().mode === "paper";
@@ -435,7 +502,17 @@ async function main() {
                 // all day and never know.
                 recall: async () => {
                   if (!active) return "nothing yet — this is your first look at the book";
-                  const rows = await recentDecisions(active.agentId, 6);
+                  // ANOTHER REASONER'S THINKING IS NOT THIS ONE'S MEMORY.
+                  //
+                  // Brain writes shadow decisions into the same table under the
+                  // same agent_id, and this tool tells the strategist it is
+                  // looking at "what you proposed, what the wall did with it".
+                  // Unfiltered, the canary's desk read Brain's buy as its own
+                  // and could then publish a strategist-sourced thesis about a
+                  // trade nobody made — which passes the publication gate with
+                  // no shadow marking, because by then the row really is a
+                  // strategist row.
+                  const rows = await recentDecisions(active.agentId, 6, SHADOW_SOURCES);
                   if (rows.length === 0) return "nothing yet — this is your first look at the book";
                   return rows
                     .map((d) => {
@@ -492,6 +569,22 @@ async function main() {
                     sig.excerpt,
                     "  --- end of quoted page ---",
                   ].join("\n");
+                },
+                // ── THE WIRE ────────────────────────────────────────────
+                //
+                // The desks this owner wired in, read from a file the
+                // ORCHESTRATOR materialised. The worker never fetches this: a
+                // tool whose target is configuration is an egress channel, and
+                // the whole shape of this object exists to deny the model one.
+                // See peer-files.ts for the four reasons.
+                //
+                // Offered BY INDEX, exactly like read_link. The label list is
+                // the entire boundary between "read my peers" and "read
+                // arbitrary agent N".
+                peers: () => peerTheses.map((t) => ({ label: peerLabel(t) })),
+                readPeer: async (i: number) => {
+                  const t = peerTheses[i];
+                  return t ? peerView(t) : "no such peer";
                 },
               },
             }
@@ -756,6 +849,9 @@ async function main() {
       // hash. See resolveStrandedOps.
       await resolveStrandedOps(agentId, chain, smartAccount, lookbackBlocks);
       const known = await listOpHashes(agentId);
+      // What the AUTHORITATIVE sweep actually fetched, captured for the shadow
+      // comparison below. Observational: nothing here changes what it decides.
+      let authoritative: { logs: readonly RawLog[]; complete: boolean; scannedTo: bigint } | null = null;
       const orphans = await findOrphanOps({
         chain,
         smartAccount,
@@ -763,7 +859,44 @@ async function main() {
         knownOpHashes: known,
         lookbackBlocks,
         log: (m) => console.log(`[reconcile] ${m}`),
+        onLogs: (logs, complete, scannedTo) => {
+          authoritative = { logs, complete, scannedTo };
+        },
       });
+
+      // ── SHADOW MODE ──────────────────────────────────────────────────────
+      //
+      // The new shared fetcher runs beside the old sweep over the SAME range and
+      // its results are compared and then DISCARDED. Nothing below writes: the
+      // old path stays authoritative and this cannot change a ledger, a budget
+      // or an orphan.
+      //
+      // Off unless MERRYMEN_RECONCILE_SHADOW names this account, because it
+      // costs one extra scan of the same range — which is the price of the
+      // comparison, and the reason the canary is a small set.
+      //
+      // A FAILURE HERE MUST NOT FAIL AN ARM. Reconciliation is what stops the
+      // day's spend being under-counted; a defect in an observer must never be
+      // able to stop it running.
+      if (authoritative && shadowEnabledFor(smartAccount)) {
+        try {
+          const a = authoritative as { logs: readonly RawLog[]; complete: boolean; scannedTo: bigint };
+          const headNow = await chain.getBlockNumber();
+          const { verdict, newRequests } = await runShadowComparison({
+            chain,
+            smartAccount,
+            fromBlock: headNow > lookbackBlocks ? headNow - lookbackBlocks : 0n,
+            toBlock: headNow,
+            oldLogs: a.logs,
+            oldComplete: a.complete,
+            oldScannedTo: a.scannedTo,
+            log: (m) => console.log(`[shadow] ${m}`),
+          });
+          console.log(shadowLine(smartAccount, verdict, newRequests, a.logs.length));
+        } catch (e) {
+          console.warn(`[shadow] comparison failed, reconciliation unaffected: ${String(e).slice(0, 200)}`);
+        }
+      }
       if (orphans.length === 0) return;
 
       for (const o of orphans) {
@@ -851,7 +984,24 @@ async function main() {
       if (deltaUsdg === 0n) return;
       const inbound = deltaUsdg > 0n;
       const amount = inbound ? deltaUsdg : -deltaUsdg;
-      await addFlow({
+      // PAPER NEVER WRITES REAL CAPITAL. `paperActive()` is synchronous and
+      // always known here, which is why the authoritative answer is passed in
+      // rather than left to addFlow's fallback read of `agents.mode` — that
+      // column is written by the heartbeat and may not exist on the first tick,
+      // which is precisely the tick that books an opening balance.
+      const mode = paperActive() ? ("paper" as const) : ("live" as const);
+      if (mode === "paper" && !evidence) {
+        // Refused here as well as in the store so the HIGH-WATER MARK below is
+        // never moved by a simulated balance either: the flow and the peak are
+        // one decision, and letting the peak move on a refused flow would leave
+        // the pair in exactly the split state the anchor work existed to fix.
+        console.log(
+          `[flows] paper agent — not booking ${inbound ? "+" : "-"}${fmt(amount)} USDG as capital (${why}); ` +
+            `a simulated balance change is not a deposit`,
+        );
+        return;
+      }
+      const landed = await addFlow({
         agentId,
         direction: inbound ? "in" : "out",
         amountUsdg: usdgNum(amount),
@@ -859,7 +1009,25 @@ async function main() {
         txHash: evidence?.txHash,
         blockNumber: evidence?.blockNumber,
         logIndex: evidence?.logIndex,
+        mode,
+        // The chain is left to addFlow's own read of `agents.chain_id`, which
+        // ensureAgent writes from the signed grant. That is the chain the grant
+        // authorises, so it is the chain any transaction touching this account
+        // is on — and reading it there means every writer gets it, not just
+        // the ones that remembered to pass it.
       });
+      if (!landed) {
+        // THE PEAK AND THE CONTRIBUTION MOVE TOGETHER OR NOT AT ALL.
+        //
+        // This used to run unconditionally against an addFlow that returned void
+        // and swallowed its own failures, so a transient insert error shifted the
+        // high-water mark by the full deposit with no row to explain it and no
+        // way to retry — the exact split the anchor design exists to prevent,
+        // reached silently. The caller now throws so the scan treats it as a
+        // failed pass and leaves its cursor where it is, which is what the
+        // RPC-failure path already does.
+        throw new Error(`flow not recorded for ${agentId} — refusing to move the high-water mark without it`);
+      }
       await adjustAgentHwm(agentId, usdgNum(deltaUsdg));
       highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
       await addEvent(
@@ -951,30 +1119,79 @@ async function main() {
     const covered = scan ? await scanChainFlows(scan) : false;
 
     if (!covered && lastCashUsdg === null) {
-      // Nothing observed in THIS process yet. Two very different situations,
-      // and conflating them was a real bug:
+      // FIRST OBSERVATION OF THIS PROCESS. Everything hard about hosted
+      // accounting is in this branch, so it is worth being exact about what
+      // changed and why.
       //
-      //   • a genuinely new agent (no HWM) — the balance is the opening
-      //     deposit, booked as a flow so the ledger is complete from row one;
+      // THE OLD TEST WAS `equityUsdg > 0n && highWaterMarkUsdg === 0n`, read as
+      // "money is here and no peak is on record, so this money just arrived".
+      // In self-hosted mode that is sound: the database outlives the process, so
+      // an empty one really is a new agent. In HOSTED mode the child's SQLite
+      // lives in an ephemeral container directory, so a redeploy hands the
+      // worker an empty database and the test fires on an account that has been
+      // funded for weeks. The canary booked its 10 USDG as a brand-new
+      // contribution three separate times, once per deploy.
       //
-      //   • a RESTART of a funded agent (HWM persisted, so > 0) — here the old
-      //     code did nothing at all, because `lastCashUsdg` is a process-
-      //     lifetime variable that resets to null on every start. A top-up made
-      //     while the worker was stopped was therefore invisible: the next tick
-      //     handed the higher equity to accrueAboveHwm, which called it profit
-      //     and took a 10% performance fee on the owner's own capital, and
-      //     netContributions stayed understated forever.
+      // WHY NOBODY SAW IT. `record()` also raises the HWM by the same amount,
+      // so the phantom contribution and the phantom peak cancelled and no fee
+      // was wrongly charged. That cancellation is also why the fix cannot be
+      // "stop booking it": with the peak left at zero the next mark would hand
+      // the whole principal to accrueAboveHwm as profit. Both figures have to be
+      // restored together, which is what the anchor does (bootstrap-state.ts).
       //
-      // Stop worker → top up → start worker is the most natural thing a first-
-      // day owner does. Seeding from the last persisted cash reading closes it.
-      if (equityUsdg > 0n && highWaterMarkUsdg === 0n) {
-        await record(equityUsdg, "opening balance");
-      } else {
-        const prior = await lastKnownCashUsdg(agentId);
-        if (prior !== null) {
-          await record(cashUsdg - usdg(prior), "changed while the worker was stopped");
+      // WHAT REPLACES IT. The orchestrator holds DATABASE_URL and the child
+      // never will, so the parent derives the tenant's durable position from
+      // Postgres and writes it into the child's home. THE ANCHOR IS THE ONLY
+      // THING THAT LICENSES AN OPENING BALANCE, and it says so positively:
+      // `no-prior-accounting` means a query SUCCEEDED and found nothing, which
+      // is a claim only a process that can see durable state may make.
+      // THE DECISION IS PURE AND LIVES IN bootstrap-state.ts. Only the recording
+      // is here, so the rule that decides whether money is a contribution can be
+      // tested directly rather than inferred from the shape of this block.
+      const plan = planFirstObservation({
+        licence: accounting.openingBalanceLicence,
+        equityUsdg,
+        cashUsdg,
+        anchorCashUsdg,
+        materialDriftUsdg: MATERIAL_DRIFT_USDG,
+        why: accounting.why,
+      });
+      if (plan.action === "legacy-local") {
+        // SELF-HOSTED KEEPS THE ORIGINAL BEHAVIOUR, unchanged, because the
+        // premise it rests on is true here: the ledger is on a real disk that
+        // outlives the process, so an empty one is a new agent and a persisted
+        // cash reading really is where the account was left. The hosted arms
+        // below exist because that premise is false in a container, not because
+        // the reasoning was ever wrong on its own terms.
+        if (equityUsdg > 0n && highWaterMarkUsdg === 0n) {
+          await record(equityUsdg, "opening balance");
+        } else {
+          const prior = await lastKnownCashUsdg(agentId);
+          if (prior !== null) {
+            await record(cashUsdg - usdg(prior), "changed while the worker was stopped");
+          }
         }
+      } else if (plan.action === "book-opening-balance") {
+        // THE ONLY PATH THAT BOOKS A CONTRIBUTION HERE, and it runs only when
+        // the orchestrator READ durable state and found none.
+        if (plan.amountUsdg > 0n) await record(plan.amountUsdg, "opening balance");
+      } else if (plan.action === "resume-with-drift") {
+        doubtContributions(`cash moved across the downtime window and nothing could price it`);
+        await addEvent(
+          agentId,
+          "warn",
+          `cash moved ${plan.driftUsdg > 0n ? "+" : ""}${fmt(plan.driftUsdg)} USDG while the worker was stopped and ` +
+            `no chain scan covered the window — this is NOT booked as a contribution, because a balance change ` +
+            `across downtime cannot distinguish a deposit from a withdrawal from a trade that landed. ` +
+            `Contributions and P&L are marked unknown until a deposit scan can price it.`,
+        );
+      } else if (plan.action === "stand-down") {
+        // NO USABLE ANCHOR. The one thing that must not happen here is the old
+        // inference, so nothing is booked and the book says so.
+        doubtContributions(plan.why);
       }
+      // `resume-clean` is the remaining arm and it does nothing on purpose: a
+      // funded account came back with the cash the anchor said it had.
     } else if (!covered && lastCashUsdg !== null && ledgerWrites === ledgerWritesAtSnapshot) {
       await record(cashUsdg - lastCashUsdg, "no trade explains this");
     }
@@ -982,12 +1199,226 @@ async function main() {
     lastCashUsdg = cashUsdg;
     ledgerWritesAtSnapshot = ledgerWrites;
   };
+
+  /**
+   * The same reconciliation, with a failed WRITE treated exactly like a failed
+   * READ: retry it, do not paper over it.
+   *
+   * `record` now throws when the flow row did not land, because moving the peak
+   * for money the ledger has no record of is the split this whole design exists
+   * to prevent. That throw has to stop three things, and stopping it here stops
+   * all three at once: `chainScanCursor` is left where it was (the assignment
+   * that advances it is downstream of the throw), `lastCashUsdg` is not updated
+   * so the next tick sees the same unexplained delta and tries again, and the
+   * tick itself survives — an accounting write that failed is not a reason to
+   * take an armed agent down.
+   */
+  const reconcileFlowsOrRetry = async (
+    agentId: string,
+    cashUsdg: bigint,
+    equityUsdg: bigint,
+    scan?: { chain: ReconcileChain; smartAccount: `0x${string}` },
+  ): Promise<void> => {
+    try {
+      await reconcileFlows(agentId, cashUsdg, equityUsdg, scan);
+    } catch (e) {
+      console.log(
+        `[flows] reconcile aborted (${e instanceof Error ? e.message : String(e)}) — the scan cursor and the ` +
+          `cash baseline are left where they were, so the next tick retries the same window`,
+      );
+    }
+  };
   let highWaterMarkUsdg = 0n;
   // Cash as of the last live snapshot, and how many rows the ledger had then.
   // Together they are the whole basis for inferring an external flow: if cash
   // moved and NOTHING was written to the ledger in between, the money came from
   // outside. Deliberately narrow — see reconcileFlows.
   let lastCashUsdg: bigint | null = null;
+  /**
+   * WHAT THIS PROCESS IS ENTITLED TO CLAIM ABOUT THE OWNER'S CAPITAL.
+   *
+   * Set once, at arm, from the accounting anchor the orchestrator wrote (see
+   * bootstrap-state.ts). Kept beside `lastCashUsdg` because the two are read in
+   * the same breath and it is the pair that decides whether a balance is a
+   * contribution or just a balance.
+   *
+   * `openingBalanceLicence` is deliberately a licence rather than a guess:
+   *
+   *   new-account  durable state was READ and is empty — book the opening balance
+   *   resume       durable state exists — resume from it, book nothing
+   *   none         durable state could not be established — book nothing, and
+   *                say that contributions are unknown
+   *
+   * The third arm is the one that did not exist before. Its absence is the
+   * whole bug: with no way to express "I could not find out", the code had to
+   * pick one of the first two, and it picked the one that manufactures money.
+   */
+  const accounting: {
+    openingBalanceLicence: "new-account" | "resume" | "none" | "self-hosted-local";
+    contributionsKnown: boolean;
+    /** Once true, no later anchor read may set contributionsKnown back to true. */
+    contributionsDoubted: boolean;
+    /** Why, in one phrase, for the log line and the quality report. */
+    why: string;
+  } = {
+    openingBalanceLicence: "none",
+    contributionsKnown: false,
+    contributionsDoubted: false,
+    why: "not armed yet",
+  };
+  /** The believed truth about contributions, folded from every licence seen. */
+  let truth: ContributionTruth = INITIAL_CONTRIBUTION_TRUTH;
+  /** Cash at the anchor's newest durable observation. The downtime baseline. */
+  let anchorCashUsdg: bigint | null = null;
+  /** The peak the anchor says was already reached, restored into the local store. */
+  let anchorHwmUsdg: bigint | null = null;
+  /** The durable accounting epoch this child must file its rows under. */
+  let anchorEpoch: number | null = null;
+  /** One warning per process, not one per tick, when the fee is being suppressed. */
+  let feeSuppressionLogged = false;
+
+  /**
+   * Turn the anchor verdict into a licence. Runs once, at arm.
+   *
+   * THE HOSTED/SELF-HOSTED SPLIT IS THE HINGE. Self-hosted, the child's own
+   * SQLite lives on a real disk that outlives the process, so it IS the durable
+   * record and an empty one really does mean a new agent — the original
+   * inference was correct there and stays. Hosted, the same directory is
+   * discarded on every deploy, so emptiness means nothing at all and the only
+   * durable record is the one the parent can see. Getting this boundary wrong
+   * in either direction is a money bug, so it is drawn on `MERRYMEN_HOSTED`,
+   * which `childEnv` sets and nothing else does.
+   */
+  function applyAccountingAnchor(agentId: string, verdict: AnchorVerdict): void {
+    console.log(anchorLine(agentId, verdict));
+    const l = accountingLicence(verdict, { hosted: isHostedMode() });
+    accounting.openingBalanceLicence = l.licence;
+    anchorHwmUsdg = l.highWaterMarkUsdg;
+    anchorCashUsdg = l.lastObservedCashUsdg;
+    anchorEpoch = l.accountingEpoch;
+    // THE DURABLE CONTRIBUTION FIGURE, kept for anything that has to describe
+    // this book to something outside the process.
+    //
+    // A hosted child's sqlite is wiped by every redeploy and the ledger mirror
+    // is one-way, so `getNetContributionsUsdg` reads the CHILD's empty table and
+    // answers null — for an account whose contributions are on record in the
+    // shared database and were just repaired to 10.000000 evidenced. The anchor
+    // is the only thing in this process that has seen durable state, which is
+    // exactly why it exists. The first shadow Brain run refused on
+    // "contributions unknown" for a book that knew perfectly well.
+    anchorNetContributionsUsdg = l.netContributionsUsdg;
+
+    // DOUBT IS STICKY FOR THE LIFE OF THE PROCESS.
+    //
+    // This function does not only run at startup. It runs inside `syncGrant`,
+    // which the tick re-enters whenever the grant changed or `active` is null —
+    // and a transient executor failure nulls `active`. So a plain assignment
+    // here would RESURRECT `contributionsKnown` on the next tick after something
+    // had already established that it was false.
+    //
+    // The asymmetry is what makes that fatal rather than untidy. The two places
+    // that clear the flag — `resume-with-drift` and `stand-down` — sit behind
+    // `lastCashUsdg === null`, so they can fire at most ONCE per process, while
+    // this runs every re-arm. One-way false against two-way true means the
+    // doubt always loses, and `contributionsKnown` is the sole gate on the
+    // performance fee: the fee would quietly come back at full rate on a book
+    // the code had already declared unknowable, with no second warning because
+    // `feeSuppressionLogged` is still set.
+    //
+    // Nothing an anchor can say lifts a doubt raised by observing the account.
+    // Clearing it needs evidence — a chain-scanned flow with a transaction —
+    // and that recovery does not exist yet, so the honest behaviour is to keep
+    // reporting unknown until the process restarts and re-derives.
+    // The fold is PURE and lives in bootstrap-state.ts so the asymmetry can be
+    // tested directly rather than inferred from the shape of this function — it
+    // had no coverage at all, and a mutation deleting it passed every test.
+    setTruth(foldLicence(truth, l));
+  }
+
+  /** Contributed capital as the ORCHESTRATOR read it from durable state. */
+  let anchorNetContributionsUsdg: bigint | null = null;
+
+  /** The anchor verdict, read once. See `anchorOnce`. */
+  let anchorVerdict: AnchorVerdict | null = null;
+
+  /**
+   * READ THE ANCHOR EXACTLY ONCE PER PROCESS, at the first arm.
+   *
+   * It is a BOOTSTRAP contract — it describes the durable state the parent
+   * observed just before exec'ing this child — so the moment to read it is the
+   * moment the child starts, and re-reading it later is wrong in two separate
+   * ways that both showed up:
+   *
+   *   STALENESS. The parent writes the file once, in `spawnChild`. A child that
+   *   stays up longer than `BOOTSTRAP_MAX_AGE_SEC` and then re-arms — a grant
+   *   renewal, a transient executor failure that nulls `active` — would read its
+   *   OWN still-correct anchor as expired, fall closed, and permanently lose
+   *   both the peak restore and P&L on a healthy account.
+   *
+   *   FORGETTING. `syncGrant` re-enters on any re-arm, so a re-read handed the
+   *   licence a fresh chance to overwrite conclusions the process had already
+   *   drawn from watching the account.
+   *
+   * Reading once removes both. The age is measured against the instant the child
+   * started, which is seconds after the parent wrote the file, which is the only
+   * comparison the bound was ever meaningful for.
+   */
+  function anchorOnce(agentId: string): AnchorVerdict {
+    if (anchorVerdict === null) {
+      anchorVerdict = readAnchor(merrymenHome(), { tenantId: agentId });
+    }
+    return anchorVerdict;
+  }
+
+  /**
+   * Read the anchor and put the peak back, in that order, as one step.
+   *
+   * ONE FUNCTION because the two halves are not separable. The anchor is what
+   * knows the peak, and a restore that runs at a different point in the arm from
+   * the read is a window in which a funded account sits at a zero high-water
+   * mark. It is called immediately after `ensureAgent`, which is the first
+   * moment the row it writes to exists.
+   *
+   * `setAgentHwm` is `MAX(hwm_usdg, ?)` in SQL, a one-way door — so a restored
+   * peak can only ever be raised. Too high suppresses a fee; too low charges the
+   * owner for their own principal. Between those two the monotonic direction is
+   * the safe one, and the store already enforces it.
+   */
+  async function restoreAnchoredHighWaterMark(agentId: string): Promise<void> {
+    applyAccountingAnchor(agentId, anchorOnce(agentId));
+
+    // THE EPOCH COMES BACK FIRST, because every row this child is about to write
+    // is stamped with it.
+    //
+    // `ensureAgent` inserts only the grant columns, so a rebuilt container starts
+    // at the schema default of 1 while durable state may be on 2 — and nothing
+    // corrects it, because the bump is gated on pre-fix history that an empty
+    // database does not have. The child would then file its whole run under a
+    // closed epoch, invisible to the web's epoch-scoped readers AND to the next
+    // anchor derivation, which would read zero contributions and harden the fee
+    // gate on a healthy account.
+    if (anchorEpoch !== null) await setAgentEpoch(agentId, anchorEpoch);
+
+    if (anchorHwmUsdg === null || anchorHwmUsdg <= 0n) return;
+    const local = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+    if (anchorHwmUsdg > local) {
+      await setAgentHwm(agentId, usdgNum(anchorHwmUsdg));
+      console.log(`[anchor] restored high-water mark ${fmt(anchorHwmUsdg)} USDG (local was ${fmt(local)})`);
+    }
+  }
+
+  /** Raise a doubt that no later anchor read may lift. */
+  function doubtContributions(why: string): void {
+    setTruth(doubt(why));
+  }
+
+  /** One place that writes the three fields, so they cannot drift apart. */
+  function setTruth(t: ContributionTruth): void {
+    truth = t;
+    accounting.contributionsKnown = t.known;
+    accounting.contributionsDoubted = t.doubted;
+    accounting.why = t.why;
+  }
   /**
    * The block the deposit scan has read up to, for this process.
    *
@@ -1006,6 +1437,19 @@ async function main() {
    */
   let deskLinks: { label: string; url: string; token: `0x${string}` }[] = [];
   let deskLinksAt = 0;
+  /**
+   * The desks this owner follows, as the orchestrator last materialised them.
+   *
+   * Read from a FILE, never fetched. The worker has no path to shared Postgres —
+   * children have DATABASE_URL stripped — and a tool whose target is
+   * configuration would be an egress channel steered by whoever wrote the
+   * config. See peer-files.ts for the argument in full.
+   *
+   * Re-read each window rather than cached at arm, because the orchestrator
+   * rewrites it on its own clock and a peer that posted five minutes ago should
+   * be readable now.
+   */
+  let peerTheses: PublicThesis[] = [];
   const DESK_LINKS_EVERY_MS = 10 * 60_000;
   const browserCfg = () =>
     cfg.browserUrl && cfg.browserToken
@@ -1096,6 +1540,34 @@ async function main() {
    */
   let ethPriceCache: { price8: bigint; atSec: number } | null = null;
   const ETH_PRICE_TTL_SEC = 300;
+  /**
+   * What a unit of gas costs right now, in wei. Null when the chain would not say.
+   *
+   * FORWARD-LOOKING ON PURPOSE. The alternative is averaging what past
+   * operations paid, and the canary's four landed ops ranged 0.330–0.610 gwei —
+   * so a historical average mostly measures which blocks happened to be busy.
+   * The question a decision actually has is what the NEXT trade will cost.
+   *
+   * Cached on the same TTL as the ETH price, because the two are multiplied
+   * together and a fresh reading of one against a stale reading of the other is
+   * a number that was never true at any moment.
+   */
+  let gasPriceCache: { wei: bigint; atSec: number } | null = null;
+  async function currentGasPriceWei(): Promise<bigint | null> {
+    const now = Math.floor(Date.now() / 1000);
+    if (gasPriceCache && now - gasPriceCache.atSec < ETH_PRICE_TTL_SEC) return gasPriceCache.wei;
+    try {
+      const wei = await mainnetClient().getGasPrice();
+      if (wei <= 0n) return null;
+      gasPriceCache = { wei, atSec: now };
+      return wei;
+    } catch {
+      // An unreadable gas price is UNKNOWN, and unknown must not reach a
+      // decision wearing a zero — a zero would read as "trading is free".
+      return null;
+    }
+  }
+
   async function ethPrice8(): Promise<{ price8: bigint | null; reason?: string }> {
     const now = Math.floor(Date.now() / 1000);
     if (ethPriceCache && now - ethPriceCache.atSec < ETH_PRICE_TTL_SEC) {
@@ -2071,6 +2543,25 @@ async function main() {
           })
         : undefined;
     const agentId = await ensureAgent(grant);
+
+    // THE PEAK COMES BACK IMMEDIATELY AFTER THE ROW EXISTS, and before anything
+    // that can fail.
+    //
+    // `ensureAgent` creates the local `agents` row, and on a hosted child the
+    // SQLite is empty, so `hwm_usdg` takes its schema default of 0. Between that
+    // moment and the restore there must be nothing that can throw, return early,
+    // or get mirrored — every one of those leaves a funded account sitting at a
+    // zero peak, which is the state that charges a performance fee on the
+    // owner's own principal.
+    //
+    // It was originally placed beside the other arm-time reads, a dozen awaits
+    // and several network calls later. Any of those failing — a bundler key
+    // rotated, an RPC 5xx — would return before the restore ran, and the mirror
+    // would then carry the local zero up to the shared database as the new
+    // durable truth. (The mirror's own upsert is monotonic now, so that second
+    // half is closed too; this is the first half.)
+    await restoreAnchoredHighWaterMark(agentId);
+
     // The soul's name is the source of truth — mirror it onto the roster. The
     // configured name was reconciled into the soul above the short-circuit, so
     // by here `getName()` is already what the owner asked for.
@@ -2166,7 +2657,7 @@ async function main() {
       );
     }
 
-    const client = createPublicClient({ chain, transport: http(rpc) });
+    const client = createPublicClient({ chain, transport: metered(http(rpc), "read") });
 
     // ── THE WALL'S OWN CONTRACTS MUST EXIST ──────────────────────────────
     // Same discipline as the breaker below, applied to the singletons the
@@ -2190,7 +2681,8 @@ async function main() {
     //
     // Said once per arm, as an err, because the alternative is an owner
     // watching every trade fail with a validation error that names nothing.
-    if (grantHasDeadRateLimit(grant.serialized)) {
+    const deadPolicy = grantHasDeadRateLimit(grant.serialized);
+    if (deadPolicy) {
       console.log(`[worker] grant predates the rate-limit removal — cannot transact until re-signed`);
       await addEvent(
         agentId,
@@ -2250,6 +2742,46 @@ async function main() {
         "warn",
         `couldn't check the wall's contracts this time (${uncheckedPolicyContracts.join(", ")}) — the chain did not answer. ` +
           `This says nothing about whether they are there; it retries on the next arm.`,
+      );
+    }
+
+    // HAS THIS ACCOUNT EVER EXISTED?
+    //
+    // Nothing in merrymen has ever asked. Every `getCode` in the repo is aimed
+    // at a policy contract, a breaker, an adapter or a token — never at the
+    // account itself — so "is the wall deployed" was answerable and "is the
+    // thing the wall protects deployed" was not.
+    //
+    // It matters more than it looks. A 4337 account is counterfactual until its
+    // first operation, so absence here is NORMAL and not an error. What absence
+    // means is that no EVM has ever evaluated this grant: every claim about what
+    // the wall enforces is, until this reads back bytecode, a claim about
+    // calldata that was built and signed and never submitted.
+    //
+    // Three-way, for the same reason as the loop above: a throw is not an
+    // absence. `null` is "could not look".
+    let accountDeployed: boolean | null = null;
+    try {
+      const code = await client.getCode({ address: grant.smartAccount as `0x${string}` });
+      accountDeployed = code !== undefined && code !== "0x";
+    } catch {
+      accountDeployed = null;
+    }
+    if (accountDeployed === false) {
+      console.log(`[worker] smart account ${grant.smartAccount} is not deployed yet — the first op deploys it`);
+      await addEvent(
+        agentId,
+        "warn",
+        `this account does not exist on chain ${chain.id} yet. That is normal — it deploys itself with ` +
+          `its first operation — but it means the first operation costs more than the ones after it, ` +
+          `and that no chain has yet checked the permissions this key was signed under.`,
+      );
+    } else if (accountDeployed === null) {
+      await addEvent(
+        agentId,
+        "warn",
+        `couldn't check whether this account is deployed — the chain did not answer. This says nothing ` +
+          `about whether it is; it retries on the next arm.`,
       );
     }
 
@@ -2340,6 +2872,10 @@ async function main() {
       // alongside every other grant-derived bound, so a curve the agent never
       // saw launch cannot be traded even though the wall cannot pin it.
       limits: limitsFromGrant(grant, watchTokens, (await knownCurves()) ?? undefined),
+      // Read once here, with every other grant-derived bound, because deciding
+      // it per-tick would re-parse a serialized signature that cannot change.
+      deadPolicy,
+      accountDeployed,
       breakerLive,
       v4AdapterLive,
       ponsAdapterLive,
@@ -2377,6 +2913,15 @@ async function main() {
           `(they predate flow tracking and receipt-derived fills, so they cannot be audited)`,
       );
     }
+    // WHAT THIS AGENT MAY CLAIM ABOUT ITS OWN CAPITAL, decided once, here.
+    //
+    // Read before the HWM, because in hosted mode the anchor is where the HWM
+    // comes from: the local `agents` row is in a container directory that a
+    // redeploy empties, so `getAgentFinancials` returns a confident zero for an
+    // account that has been funded for weeks.
+    // The anchor was read and the peak restored right after `ensureAgent`, above
+    // everything that can fail. Nothing to do here but pick the figure up.
+    //
     // HWM is persistent — a restart must not forget the peak, or the breaker
     // re-arms low and the fee ledger double-charges old profit.
     highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
@@ -3098,18 +3643,21 @@ async function main() {
             decision_id,
             ...sim,
           });
-          // A failed write here is not fatal — the op is already sent and the
-          // outcome path still records it. It IS worth saying, because the
-          // protection this hook exists to provide is the thing that just
-          // failed, and the next crash would be unrecoverable in the old way.
+          // A FAILED WRITE NOW STOPS THE OPERATION, and that is only possible
+          // because this hook moved ahead of the send. It used to run after,
+          // where the honest note was that a failed write "is not fatal — the
+          // op is already sent": the money was committed and the best available
+          // answer was to say so and hope. Now nothing has been broadcast, so
+          // the cheaper answer is on the table.
+          //
+          // Refusing is the right call rather than the cautious one. This row is
+          // what every reconciliation path keys on — resolveStrandedOps selects
+          // status='submitted' AND user_op_hash IS NOT NULL, and inflight-reconcile
+          // only sweeps ops that succeeded — so an operation sent without it is
+          // one that no sweep can ever resolve. A skipped tick costs nothing; an
+          // unreconcilable spend costs the notional and the ability to find out.
           submittedRow = wrote;
-          if (!wrote) {
-            void addEvent(
-              agentId,
-              "err",
-              `couldn't record ${userOpHash} before broadcast — this op is in flight with no durable row`,
-            );
-          }
+          if (!wrote) throw new NotRecorded(userOpHash);
         },
       };
       const send = (calls: Call[]) => executor.execute(calls, submitHooks);
@@ -3290,6 +3838,53 @@ async function main() {
           minAmountOut: minOut,
           deadline: Math.floor(Date.now() / 1000) + 300,
         });
+
+        // ── THE FINAL FENCE ─────────────────────────────────────────────
+        //
+        // Read the bytes about to be signed and check they say what this trade
+        // decided. Every other guard on this path judges the INTENT — the wall's
+        // mirror judges a notional, the impact guard judges a probe, the gas
+        // bounds judge an estimate — and none of them has ever looked at the
+        // calldata.
+        //
+        // The v3 lane only. A v4 quote goes through a different builder with a
+        // structurally pinned recipient, and a decoder returning "fine" for a
+        // shape it does not understand would be worse than no decoder: see the
+        // scope note in final-fence.ts. Reimplemented from Vex's final-request
+        // guard with its author's permission.
+        if (!quote.v4) {
+          const fence = checkV3SwapCalls(calls, {
+            router: UNISWAP.swapRouter02 as `0x${string}`,
+            tokenIn: intent.sellToken,
+            tokenOut: intent.buyToken,
+            recipient: executor.address,
+            amountIn: intent.sellAmountRaw,
+            minOut,
+          });
+          if (!fence.ok) {
+            // Pre-broadcast, so it books like a policy refusal rather than a
+            // revert: nothing signed, nothing spent, and the rule comes from a
+            // fixed vocabulary so the loop can suppress on it.
+            releaseBudget();
+            await addEvent(
+              agentId,
+              "err",
+              `refused to sign a ${intent.kind}: ${fence.detail}. Nothing was sent. This is a merrymen ` +
+                `fault — the calldata did not match the trade that was approved.`,
+            );
+            await recordTrade({
+              agent_id: agentId,
+              kind: intent.kind,
+              target: intent.target,
+              ...tokenLegs(intent),
+              amount_usdg: usdgNum(notional),
+              status: "rejected",
+              reject_rule: `fence-${fence.rule}`,
+              ...sim,
+            });
+            return;
+          }
+        }
         exec = await send(calls);
         const venue = quote.v4
           ? active.v4AdapterLive && grantV4Adapter(active.grant)
@@ -3577,6 +4172,50 @@ async function main() {
       console.log(`[execute] ${intent.kind} landed: ${txHash}`);
       await addEvent(agentId, "ok", `${intent.kind} landed (${fmt(notional)} USDG): ${txHash}`);
 
+      // ── DID IT ACTUALLY ARRIVE? ──────────────────────────────────────────
+      //
+      // BEFORE the decode, and gated only on "did this operation acquire an
+      // ERC-20", because that is the only precondition the question has.
+      //
+      // It used to sit three gates deep — inside `if (fillPair)`, inside
+      // `if (measured)`, inside `if (side === "buy")` — and `fillPair` is
+      // assigned only in the Uniswap branch, under `sellIsUsdg !== buyIsUsdg`,
+      // under `if (symbol)`. So curve trades, Rialto swaps and stock-to-stock
+      // swaps got no delivery check at all. Curve is where honeypots live: it is
+      // the venue where a token is minted by whoever wants it minted, and it was
+      // the one lane with nothing watching.
+      //
+      // The other two gates were wrong for a subtler reason. `measured` is a
+      // RECEIPT DECODE, and this check exists precisely because receipt logs are
+      // contract-authored — a token that fabricates a Transfer log is exactly the
+      // token whose decode you should not be trusting to decide whether to look.
+      // Vex computes delivery before the decode for this reason.
+      //
+      // See delivery.ts for why it is exact-zero-only, why a failed read is
+      // 'unknown' rather than a zero, and why it can never fail the trade.
+      const acquired: { token: `0x${string}`; label: string } | null =
+        intent.kind === "swap" && intent.buyToken.toLowerCase() !== (CASH.USDG as string).toLowerCase()
+          ? { token: intent.buyToken, label: fillPair?.symbol ?? short(intent.buyToken) }
+          : intent.kind === "curve-trade" &&
+              intent.assetOut.toLowerCase() !== (CASH.USDG as string).toLowerCase()
+            ? { token: intent.assetOut, label: short(intent.assetOut) }
+            : null;
+      if (acquired) {
+        const delivery = await checkDelivery({
+          balanceOf: () =>
+            chainClient.readContract({
+              address: acquired.token,
+              abi: erc20Abi,
+              functionName: "balanceOf",
+              args: [executor.address],
+            }) as Promise<bigint>,
+        });
+        const note = describeDelivery(acquired.label, delivery);
+        // "delivered" says nothing, deliberately — a tape of non-events is
+        // noise, and this runs on every acquisition.
+        if (note) await addEvent(agentId, delivery.kind === "undelivered" ? "err" : "warn", note);
+      }
+
       // ── what the chain says actually moved ───────────────────────────────
       // Prefer the receipt over the quote. The quote is what we hoped for; the
       // receipt is what happened, and only the receipt's quantity matches the
@@ -3599,37 +4238,19 @@ async function main() {
           const receivedOut = measured.side === "buy" ? measured.qtyRaw : measured.cashUsdg;
           slippageBps = slippageBpsAgainst(fillPair.quotedOut, receivedOut);
 
-          // ── DID IT ACTUALLY ARRIVE? ────────────────────────────────────────
-          // Everything above this line was read from logs the token contract
-          // wrote. On a buy that is the whole basis, so ask the chain the one
-          // question a fabricated log cannot answer. See delivery.ts for why
-          // this is exact-zero-only, why a failed read is not a zero, and why
-          // it can never fail the trade.
+          // THE FLOOR IS A DIFFERENT QUESTION FROM DELIVERY, and it is the one
+          // that genuinely needs the decode: it compares the SETTLED output
+          // against the minOut this operation was signed with. A settled output
+          // below that floor cannot come from a well-behaved router — it would
+          // have reverted — so it is the signature of a token taking a cut on
+          // transfer. Delivery moved above, where it needs no decode.
           if (measured.side === "buy") {
-            const delivery = await checkDelivery({
-              balanceOf: () =>
-                chainClient.readContract({
-                  address: fillPair.stockToken,
-                  abi: erc20Abi,
-                  functionName: "balanceOf",
-                  args: [executor.address],
-                }) as Promise<bigint>,
-            });
-            const note = describeDelivery(fillPair.symbol, delivery);
-            // "delivered" says nothing, deliberately — a tape of non-events is
-            // noise, and this runs on every buy.
-            if (note) await addEvent(agentId, delivery.kind === "undelivered" ? "err" : "warn", note);
-
-            // And the floor, which is a different question from the quote. A
-            // settled output BELOW the minOut we signed cannot come from a
-            // well-behaved router — it would have reverted — so it is the
-            // signature of a token that takes a cut on transfer.
-            const short = belowFloorBps(fillPair.floorOut, receivedOut);
-            if (short !== null) {
+            const shortBps = belowFloorBps(fillPair.floorOut, receivedOut);
+            if (shortBps !== null) {
               await addEvent(
                 agentId,
                 "warn",
-                `${fillPair.symbol}: settled ${short} bps BELOW the minOut this op was signed with. A router cannot pay out less than the floor it accepted, so the shortfall happened on transfer — treat this as a fee-on-transfer token.`,
+                `${fillPair.symbol}: settled ${shortBps} bps BELOW the minOut this op was signed with. A router cannot pay out less than the floor it accepted, so the shortfall happened on transfer — treat this as a fee-on-transfer token.`,
               );
             }
           }
@@ -3678,6 +4299,11 @@ async function main() {
               // cost was incurred then, and re-valuing it later would make a past
               // trade's P&L drift with the ETH price.
               ...(gasCost.usdg === null ? {} : { gas_usdg: usdgNum(gasCost.usdg) }),
+              // THE PRICE-INDEPENDENT HALF. Omitted rather than zeroed when the
+              // bundler reported nothing: 0 units reads as a free operation, and
+              // this decomposition exists precisely because a plausible wrong
+              // number does more damage than a missing one.
+              ...(exec.gasUnits > 0n ? { gas_units: exec.gasUnits.toString() } : {}),
             }),
         ...(slippageBps === null ? {} : { fill_slippage_bps: slippageBps }),
         status: "landed",
@@ -3690,18 +4316,46 @@ async function main() {
       // profit home reads as a loss of precisely that size, and the drawdown
       // breaker eventually fires on it.
       if (intent.kind === "transfer") {
-        await addFlow({
+        const landed = await addFlow({
           agentId,
           direction: "out",
           amountUsdg: usdgNum(intent.amountUsdg),
           source: "transfer-intent",
           txHash,
+          // EXPLICIT, because this site is reached only on the live rail — an
+          // executed on-chain transfer. Left to the store's fallback read of
+          // `agents.mode` it would be judged by whatever the heartbeat last
+          // wrote, which on an agent that has just been switched to paper is
+          // the wrong answer about a transaction that really happened.
+          mode: "live",
         });
-        await adjustAgentHwm(agentId, -usdgNum(intent.amountUsdg));
-        highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
-        // The next tick's cash reading already reflects this, and it now has an
-        // explanation, so inference must not double-count it.
-        if (lastCashUsdg !== null) lastCashUsdg -= intent.amountUsdg;
+        // THE SECOND CALL SITE, and it has the same rule as the first.
+        //
+        // This block used to discard addFlow's answer and adjust the peak
+        // regardless — the exact split that the deposit-side fix above exists
+        // to prevent, in the withdrawal direction. It matters more here than it
+        // looks: lowering the peak for a withdrawal the ledger has no row for
+        // leaves net contributions permanently too high, so every P&L figure
+        // measured against them understates by the amount taken home, with no
+        // retry path.
+        if (landed) {
+          await adjustAgentHwm(agentId, -usdgNum(intent.amountUsdg));
+          highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+          // The next tick's cash reading already reflects this, and it now has
+          // an explanation, so inference must not double-count it.
+          if (lastCashUsdg !== null) lastCashUsdg -= intent.amountUsdg;
+        } else {
+          // Durable, not just stderr: the transfer LANDED on chain and the
+          // ledger does not know. That is a discrepancy an owner may notice
+          // before anyone else does, so it belongs on their event log.
+          await addEvent(
+            agentId,
+            "err",
+            `withdrawal of ${fmt(intent.amountUsdg)} USDG landed on chain (${txHash.slice(0, 10)}…) but its flow ` +
+              `row could not be written — the high-water mark was left where it was rather than moved for a ` +
+              `figure the ledger cannot show. Contributions will read high until this is reconciled.`,
+          ).catch(() => {});
+        }
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -3730,6 +4384,37 @@ async function main() {
       // The rule string is a literal from gas-limits.ts, so it joins the
       // vocabulary the notifier and the dashboard already read rather than
       // becoming another free-form sentence in reject_rule.
+      // NOTHING WAS SENT, because nothing could have found it afterwards.
+      // The pre-broadcast row is what every reconciliation path keys on, so an
+      // operation whose row could not be written is one that no sweep can ever
+      // resolve. Refusing costs a tick; sending would have cost the notional
+      // with no way to learn what became of it.
+      //
+      // A sibling of GasRefused directly below: pre-broadcast, nothing signed,
+      // nothing spent, and a `rule` from a fixed vocabulary rather than free
+      // text — so it never reaches the generic branch that writes 'reverted'.
+      if (e instanceof NotRecorded) {
+        releaseBudget();
+        await addEvent(
+          agentId,
+          "err",
+          `refused to broadcast a ${intent.kind}: the ledger would not accept the row that has to exist ` +
+            `before an operation goes out, so it was not sent. Nothing was spent. This is a merrymen ` +
+            `fault, not a configuration one.`,
+        );
+        await recordTrade({
+          agent_id: agentId,
+          kind: intent.kind,
+          target: tradeTarget,
+          ...tokenLegs(intent),
+          amount_usdg: usdgNum(notional),
+          status: "rejected",
+          reject_rule: "not-recorded",
+          ...sim,
+        });
+        return;
+      }
+
       if (e instanceof GasRefused) {
         releaseBudget();
         await addEvent(agentId, "warn", `${intent.kind} refused before signing: ${msg.slice(0, 300)}`);
@@ -3815,10 +4500,43 @@ async function main() {
         return;
       }
 
-      // Roll back the optimistic reservation — the money didn't move. The
-      // 'reverted' row written below goes through recordTrade, which would
-      // release it anyway; doing it here keeps the counters honest for the
-      // window in between, and releaseBudget is idempotent.
+      // ── AN OPERATION THAT WENT OUT IS NOT A FAILED ONE ──────────────────
+      //
+      // `submittedRow` is set by the durable pre-broadcast write, which now
+      // happens BEFORE the send. So if it is set and this is not a typed
+      // on-chain revert, an operation reached the bundler — possibly landed —
+      // and something AFTER it threw: the receipt's fill read, the gas pricing,
+      // a ledger write, an addFlow.
+      //
+      // The old code booked that as `reverted`. Two things wrong with it, and
+      // the second is worse than the first. It asserts a chain outcome nobody
+      // observed; and with no hash to resolve on, `addTrade` INSERTS rather than
+      // resolving in place, so the same operation ends up as two rows — one
+      // 'submitted' that the resolver will later settle, and one 'reverted' that
+      // is simply false. A landed trade could be booked as a revert beside
+      // itself.
+      //
+      // Treated as unresolved instead, exactly like the receipt-read failure
+      // above: the pre-broadcast row stands, the charge stays counted, and the
+      // stranded-op resolver settles it from the chain. The budget must NOT be
+      // released here, which is why this sits above the rollback.
+      if (submittedRow) {
+        await refreshBudget(agentId);
+        releaseBudget();
+        await addEvent(
+          agentId,
+          "err",
+          `${intent.kind} was submitted, and then something after it failed: ${msg.slice(0, 200)}. ` +
+            `This is NOT a revert — the operation may have landed. It stays counted against today's ` +
+            `caps and the resolver will settle it from the chain.`,
+        );
+        return;
+      }
+
+      // Roll back the optimistic reservation — the money didn't move. The row
+      // written below goes through recordTrade, which would release it anyway;
+      // doing it here keeps the counters honest for the window in between, and
+      // releaseBudget is idempotent.
       releaseBudget();
       // A genuine on-chain revert vs a failure BEFORE submission (bundler, RPC,
       // gas), so the user isn't told "reverted on-chain" for something that
@@ -3887,7 +4605,15 @@ async function main() {
         // Resolves the pre-broadcast row in place when there is one — a revert
         // has a hash; a failure before submit does not, and inserts.
         ...(onChain ? { user_op_hash: e.userOpHash } : {}),
-        status: "reverted",
+        // REVERTED MEANS THE CHAIN REVERTED IT. Everything reaching this line
+        // without `onChain` never got there: no operation was submitted (the
+        // branch above returns when one was), so this is a build, an encode or a
+        // pre-flight that threw. Calling that 'reverted' put words in the
+        // chain's mouth, and the ledger is the one place in this product that
+        // must never do that — `rejected` is the vocabulary for "we did not
+        // send it", and it is what every other pre-broadcast refusal on this
+        // path already writes.
+        status: onChain ? "reverted" : "rejected",
         reject_rule: reason,
         // KEEP the simulation. This row is the single most informative one in
         // the ledger — the trade we quoted, sized and submitted, that the chain
@@ -3912,7 +4638,21 @@ async function main() {
     }
   }
 
-  function heartbeat(blockNumber: bigint) {
+  /**
+   * LIVENESS, WHICH IS NOT THE SAME QUESTION AS "DID THE CHAIN ANSWER".
+   *
+   * The block number is optional now, and that is the whole fix. This used to
+   * be called once per tick, AFTER `readMarketSafety()` — so a rate-limited
+   * `eth_getBlockByNumber` threw out of the tick one line before the beat, the
+   * file went stale, and the orchestrator SIGKILLed a process that was working
+   * perfectly. 14.6% of ticks died that way, and each death fed the restart
+   * loop that caused the rate limiting in the first place.
+   *
+   * A heartbeat answers "is this process alive". That is true whether or not a
+   * third party answered an HTTP request, and conflating the two let a provider
+   * outage read as a dead worker.
+   */
+  function heartbeat(blockNumber?: bigint) {
     const at = Math.floor(Date.now() / 1000);
     const mode = paperActive() ? "paper" : active?.executor ? "live" : "idle";
     // WHO PAYS, reported rather than guessed. Only this process resolves it
@@ -3924,7 +4664,10 @@ async function main() {
       ensureHome();
       writeFileSync(
         homePaths.heartbeat(),
-        JSON.stringify({ at, block: blockNumber.toString(), mode, sponsorGas }),
+        // `block` is omitted rather than zeroed when the chain was not read:
+        // a zero here would be a claim about chain height, and the dashboard
+        // would render it. Absent means absent.
+        JSON.stringify({ at, ...(blockNumber === undefined ? {} : { block: blockNumber.toString() }), mode, sponsorGas }),
         "utf8",
       );
     } catch {
@@ -3942,16 +4685,61 @@ async function main() {
     if (active) void setAgentMode(active.agentId, mode, at, sponsorGas);
   }
 
+  /**
+   * One line per RPC provider, per tick, then the counters reset.
+   *
+   * Printed at the END of the tick and in a `finally`, so a tick that returns
+   * early — an unreadable market, an unread book, a disarmed agent — still
+   * reports what it spent. A measurement that only appears on the happy path
+   * would miss exactly the ticks worth measuring.
+   */
+  function reportRpc() {
+    for (const line of rpcSummaryLines()) console.log(line);
+    resetRpcMeters();
+  }
+
   async function tick() {
+    // BEAT FIRST, BEFORE ANY NETWORK CALL. See heartbeat() for why this line
+    // moved: everything below can fail on somebody else’s rate limit, and none
+    // of it changes whether this process is alive.
+    heartbeat();
+
     await refreshConfig();
     const armed = await syncGrant();
 
     const market = await readMarketSafety();
-    heartbeat(market.blockNumber);
+    // Beat again WITH the height once the chain has answered, so the file still
+    // carries block number whenever it is genuinely known.
+    heartbeat(market.blockNumber ?? undefined);
     console.log(
-      `[tick] mainnet block ${market.blockNumber} · sequencer ${market.sequencerUp ? "up" : "DOWN"} · ` +
-        `${market.pausedTokens.size} paused · ${market.staleFeeds.size} stale feeds`,
+      `[tick] mainnet block ${market.blockNumber ?? "unread"} · sequencer ${market.sequencerUp ? "up" : "DOWN"} · ` +
+        `${market.pausedTokens.size} paused · ${market.staleFeeds.size} stale · ${market.unread.length} unread`,
     );
+
+    // ── FAIL CLOSED ON AN UNKNOWN MARKET ────────────────────────────────
+    //
+    // This tick used to end here by THROWING, which is why the heartbeat above
+    // never got written and the orchestrator killed the process. It ends by
+    // RETURNING now, with the beat already recorded and the reason named.
+    //
+    // No trading decision changes: an unreadable market produced no trade
+    // before and produces no trade now. What changes is that the worker stays
+    // alive and says which reads failed, instead of dying and saying nothing.
+    if (market.unreadable) {
+      console.log(
+        `[tick] market unreadable (${market.unread.slice(0, 6).join(", ")}${market.unread.length > 6 ? "…" : ""}) — ` +
+          `no trading this tick. A fact about our reads, not about the market.`,
+      );
+      if (active) {
+        await addEvent(
+          active.agentId,
+          "warn",
+          `the market could not be read this tick (${market.unread.length} read(s) failed) — nothing was traded. ` +
+            `This says nothing about prices or liquidity; it retries on the next tick.`,
+        );
+      }
+      return;
+    }
 
     if (active && market.sequencerUp !== lastSequencerUp) {
       await addEvent(
@@ -4324,7 +5112,7 @@ async function main() {
       // it a transaction hash, instead of a balance change nobody can point at.
       // Off by default: it changes how CONTRIBUTIONS are counted, and every P&L
       // figure is measured against those.
-      await reconcileFlows(
+      await reconcileFlowsOrRetry(
         agentId,
         balances.cashUsdg,
         equityUsdg,
@@ -4332,9 +5120,60 @@ async function main() {
           ? { chain: makeReconcileChain(client), smartAccount: grant.smartAccount as `0x${string}` }
           : undefined,
       );
+      // A PERFORMANCE FEE NEEDS TO KNOW WHAT WAS CONTRIBUTED.
+      //
+      // "Profit" here means equity above the peak, and the peak only means
+      // anything if every deposit that raised it was seen. When contributions
+      // are unknown — no usable accounting anchor, or cash that moved across a
+      // downtime window nothing could price — the difference between profit and
+      // the owner's own principal is exactly what is not established, so the
+      // fee is zeroed for this tick.
+      //
+      // THE HIGH-WATER MARK STILL RATCHETS, deliberately. Passing 0 bps rather
+      // than skipping the accrual keeps `newHwmUsdg` moving, because the peak
+      // is also what the drawdown breaker measures against: freezing it would
+      // make the breaker LESS likely to halt a falling book, which is the wrong
+      // direction to fail in. Refusing the money movement and keeping the safety
+      // signal is the split that matters.
+      // PUBLISH THE QUALITY, not just act on it.
+      //
+      // This flag gated the fee and nothing else, and it lived in a process-local
+      // object — so the web tier, which is where every percentage an owner
+      // actually reads is computed, had no way to learn that a contribution total
+      // rested on inference. Five independent publishability rules across the web
+      // each answered "may I publish a P&L" from raw SQL columns, and none of
+      // them could see this.
+      //
+      // Written every tick rather than at arm, because `gasAccounting` is a
+      // property of the fills so far and changes as they land.
+      //
+      // GROSS vs NET IS NOT A ROUNDING DETAIL HERE. The canary burned 0.0026 ETH
+      // — about 6.52 USDG at the time — on a book that only ever deployed 6.67
+      // USDG of capital, so the same four trades read as −0.13 gross and −6.65
+      // net. A percentage published without saying which is not a performance
+      // figure, and a model comparing gross history against net future returns
+      // is comparing two different quantities.
+      const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
+      await setAgentQuality(agentId, {
+        contributionsKnown: accounting.contributionsKnown,
+        why: accounting.why,
+        gasAccounting:
+          gasCov.unpricedTrades > 0 ? "gross" : gasCov.usdg > 0 ? "net" : "unknown",
+      });
+      const feeBpsThisTick = accounting.contributionsKnown ? effFeeBps : 0;
+      if (!accounting.contributionsKnown && effFeeBps > 0 && !feeSuppressionLogged) {
+        feeSuppressionLogged = true;
+        await addEvent(
+          agentId,
+          "warn",
+          `performance fee suppressed — contributions are not established (${accounting.why}), so equity above the ` +
+            `high-water mark cannot be distinguished from the owner's own capital. The peak still ratchets, so the ` +
+            `drawdown breaker is unaffected.`,
+        );
+      }
       // The Merry Circle discount is applied to the REAL fee here, so holders
       // actually accrue less — the perk is in the ledger, not just the marketing.
-      const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, effFeeBps);
+      const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, feeBpsThisTick);
       // A CURVE-VALUED POSITION MAY NOT RATCHET THE PEAK.
       //
       // `setAgentHwm` is MAX(hwm_usdg, ?) — a one-way door in SQL, with a real
@@ -4417,6 +5256,10 @@ async function main() {
         // The SAME total the fee and the breaker are judged against — the row
         // no longer re-derives its own, lower one.
         equityUsdg: usdgNum(equityUsdg),
+        // And the fourth term of that composition, so an auditor summing the
+        // parts closes on the total instead of finding a discrepancy exactly
+        // equal to the quarantined cost and having no way to name it.
+        quarantinedCostUsdg: usdgNum(quarantine.totalCostUsdg),
         // The prices this valuation was made at, journalled so the figure can
         // be re-derived rather than merely believed. `positions` carries these
         // but is overwritten every tick, so without this each snapshot destroyed
@@ -4428,7 +5271,8 @@ async function main() {
           stale: p.priceStale,
         })),
         // The block the balances were read at — where an auditor re-reads from.
-        blockNumber: market.blockNumber,
+        // Non-null by construction: an unreadable market returned above.
+        blockNumber: market.blockNumber ?? undefined,
       });
     }
     await setPositions(
@@ -4444,6 +5288,254 @@ async function main() {
         valueUsdg: usdgNum(p.valueUsdg),
       })),
     );
+
+    // ── SHADOW BRAIN ─────────────────────────────────────────────────────
+    //
+    // A Merryman thinks. NOTHING HAPPENS. There is no path from here to
+    // proposalsToIntents, checkPolicy, simulate or the executor — brain-shadow
+    // does not import them, so connecting execution later is an ADDED import
+    // somebody has to review rather than a flag somebody can flip.
+    //
+    // Guarded three ways, each of which alone would be enough to keep it off:
+    // the house must have configured a Brain, the agent must be named in
+    // MERRYMEN_BRAIN_SHADOW, and the trigger must say something changed. The
+    // allowlist is what keeps this at ONE agent while we learn what it costs.
+    //
+    // Everything after the guard is best-effort. A Brain that is slow, refuses,
+    // or is unreachable must not delay or fail a tick — it produces no thought
+    // this time, and the trigger will wake it again.
+    if (shadowBrainEnabledFor(agentId) && cfg.brainUrl && cfg.brainToken && !bookIncomplete) {
+      try {
+        const epochNow = await getAgentEpoch(agentId);
+        const netContrib = await getNetContributionsUsdg(agentId);
+        const gasNow = await getGasPaidUsdg(agentId, epochNow);
+        // Asked once per run, from the ledger this agent actually has.
+        const historyAuditable = await accountingHistoryAuditable(agentId, epochNow);
+        // WHAT THE NEXT TRADE COSTS — not what the last ones did.
+        //
+        // 5.51M of the canary's first operation's 6.02M gas was the account
+        // deployment and the session-key permission wall: paid once, already
+        // paid, SUNK. Handing Brain the historical average (1.74 USDG a trade,
+        // on trades of 1.67) would talk it out of every future trade over a
+        // cost it will never pay again. Handing it the marginal figure lets it
+        // weigh an edge against a cost, which is the only version of the
+        // question that can be answered.
+        const [gasPriceWei, ethNow] = await Promise.all([currentGasPriceWei(), ethPrice8()]);
+        const expectedTradeGasMicro = expectedTradeGasUsdg({
+          gasUnits: STEADY_SWAP_GAS_UNITS,
+          gasPriceWei: gasPriceWei ?? 0n,
+          ethPrice8: ethNow.price8,
+        });
+        // ONE INSTRUMENT PER RUN — a Brain asked about a whole book at once
+        // produces a paragraph, not a decision — but not necessarily a HELD one.
+        //
+        // This was "the biggest holding", which quietly meant Brain was only
+        // ever asked whether to keep or trim what it already had. An all-cash
+        // agent has no biggest holding, so the sort returned undefined and the
+        // agent was never asked anything. Measured on the fleet: 24 agents, one
+        // shadowable, three more with evidenced capital and no holdings sitting
+        // silent. The question whose answer is a BUY is exactly the one an
+        // empty book poses.
+        // THE ORACLE'S OWN HISTORY, for whatever this run is about.
+        //
+        // 400 published rounds in ONE multicall — about two months for a stock
+        // or ETF token, and the only price history this product can honestly
+        // draw. `read: false` means the chain would not answer, which is a
+        // different fact from a feed with no history, and neither becomes a
+        // series of invented points.
+        //
+        // Best-effort: a research read must never be the reason a tick fails.
+        const feedFor = (token: string): `0x${string}` | null =>
+          STOCK_TOKENS.find((t) => t.address.toLowerCase() === token.toLowerCase())?.chainlinkFeed ?? null;
+
+        const focus = chooseFocus({
+          agentId,
+          positions: positions.map((p) => ({
+            symbol: p.symbol,
+            token: p.token,
+            valueUsdg: Number(p.valueUsdg),
+            price8: p.price8,
+            priceStale: p.priceStale,
+            priceSource: p.priceSource,
+          })),
+          universe: watchTokens.map((t) => ({ symbol: t.symbol, address: t.address })),
+          prices: market.prices,
+          paused: market.pausedTokens,
+        });
+        if (focus) {
+          // The orchestrator materialises both of these from shared Postgres,
+          // through the publication gate, into a file this child can read.
+          // `readPeers` never throws: absent, unreadable and malformed all mean
+          // "nothing this window", which is a correct state and not a fault.
+          const wire = readPeers(merrymenHome());
+
+          const focusView = {
+            symbol: focus.symbol,
+            priceUsd: (Number(focus.price8) / 1e8).toFixed(4),
+            priceSource: focus.priceSource,
+            priceStale: focus.priceStale,
+            valueUsdg: focus.heldUsdg,
+            held: focus.held,
+            equityUsdg: Number(equityUsdg),
+            cashUsdg: Number(balances.cashUsdg),
+            positionCount: positions.length,
+          };
+
+          // The series, or null when this instrument has no feed to walk and
+          // the one-sentence fallback is the honest answer.
+          const history = await readFeedHistory(feedFor(focus.token), mainnetClient()).catch(() => ({
+            points: [],
+            read: false,
+          }));
+          const technicalSeries =
+            history.read && history.points.length > 0
+              ? buildTechnical({
+                  symbol: focus.symbol,
+                  asOf: Math.floor(Date.now() / 1000),
+                  price: Number(focus.price8) / 1e8,
+                  priceSource: focus.priceSource,
+                  stale: focus.priceStale,
+                  points: history.points.map((p) => ({ at: p.at, priceUsd: p.px })),
+                })
+              : null;
+          const brainPeers = wire.theses;
+          const brainOwn = wire.own ?? [];
+          const sentiment = sentimentLine(brainPeers, focus.symbol);
+          const inputs: ShadowInputs = {
+            agentId,
+            now: Math.floor(Date.now() / 1000),
+            epoch: epochNow,
+            cashUsdg: Number(balances.cashUsdg),
+            vaultUsdg: Number(balances.vaultUsdg),
+            quarantinedUsdg: Number(quarantine.totalCostUsdg),
+            positions: positions.map((pp) => ({
+              instrumentId: `merrymen:${pp.symbol.toLowerCase()}`,
+              symbol: pp.symbol,
+              qtyRaw: String(pp.rawBalance),
+              valueUsdg: Number(pp.valueUsdg),
+              costBasisUsdg: null,
+              priceSource: pp.priceSource === "pool" ? "pool" : "chainlink",
+              quarantined: false,
+            })),
+            // NULL SURVIVES AS NULL all the way to Brain, which refuses on it.
+            // DURABLE FIRST, local second. The child ledger is ephemeral; the
+            // anchor is what the orchestrator read from Postgres. Falling back
+            // to the local sum keeps self-hosted working unchanged, where there
+            // is no anchor and the ledger IS the durable copy.
+            netContributionsUsdg:
+              anchorNetContributionsUsdg !== null
+                ? Number(anchorNetContributionsUsdg)
+                : netContrib === null
+                  ? null
+                  : Math.round(netContrib * 1e6),
+            grossContributionsUsdg: null,
+            grossWithdrawalsUsdg: null,
+            gasUsdg: gasNow.unpricedTrades > 0 ? null : Math.round(gasNow.usdg * 1e6),
+            // NO `as never`. It used to carry one, which made this literal
+            // completely unchecked against core's interface — it even held a
+            // `gasAccounting` field that exists on the WORKER's unrelated
+            // PortfolioQuality and not on this one. A snapshot's quality object
+            // is the thing every downstream refusal is decided from; typing it
+            // as `never` meant core could add, rename or remove a field and
+            // nothing here would fail to compile.
+            quality: {
+              auditPassed: false,
+              epoch: epochNow,
+              // THE PROPERTY, ASKED DIRECTLY, replacing the `epoch >= 2` proxy.
+              // Null when the ledger could not be read, and core refuses on
+              // null rather than assuming a clean history.
+              currentAccountingHistoryAuditable: historyAuditable,
+              contributionsKnown: accounting.contributionsKnown,
+              equityComplete: !bookIncomplete,
+              gasBasis: gasNow.unpricedTrades > 0 ? "gross" : gasNow.usdg > 0 ? "net" : "unknown",
+              positionHistoryAvailable: false,
+              quarantinedAssetsPresent: quarantine.totalCostUsdg > 0n,
+              assessedAt: Math.floor(Date.now() / 1000),
+            },
+            market: {
+              instrumentId: `merrymen:${focus.symbol.toLowerCase()}`,
+              symbol: focus.symbol,
+              // FROM THE TOKEN, not from an assumption.
+              //
+              // This was hardcoded `"equity-token"`, which was true only because
+              // the shadow cohort was one agent holding TSLA. Any agent holding a
+              // discovered token would have been handed the equity desk —
+              // technical, news, sentiment and FUNDAMENTALS — and a fundamentals
+              // analyst asked about a launchpad memecoin produces confident text
+              // about nothing, which is worse than no analyst: it arrives looking
+              // like evidence.
+              instrumentClass: instrumentClassOf(focus.token),
+              priceUsd: (Number(focus.price8) / 1e8).toFixed(4),
+              priceStale: focus.priceStale,
+              // WHAT THE WORKER CAN HONESTLY SEE, and nothing more. A lens with
+              // no data is OMITTED rather than filled with a plausible sentence
+              // — Brain answers NO DATA AVAILABLE for what is missing, which is
+              // the truthful input and the one the fixtures were built against.
+              //
+              // `news` and `fundamentals` are absent for exactly that reason:
+              // this chain has no honest source for either yet. Every early
+              // production decision said so in its own words, and the answer to
+              // that is a real source, not a filler sentence.
+              signals: {
+                // A REAL SERIES, not one sentence about one price.
+                //
+                // 106 of 120 analyst readings came back no-data and the
+                // analysts were right: the technical lens was handed a single
+                // spot price, usually stale, and correctly reported that it had
+                // nothing. The oracle keeps every round it ever wrote, so 400
+                // of them — one multicall, measured at ~710ms — is roughly two
+                // months of real observations for any stock or ETF token.
+                //
+                // `technicalLine` remains the fallback for an instrument with
+                // no feed to walk, and it says so rather than going quiet.
+                technical: technicalSeries
+                  ? `${renderTechnical(technicalSeries)}\n${positionContext(focusView)}`
+                  : technicalLine(focusView),
+                // The only genuine sentiment this fleet has: what other
+                // Merrymen actually published. OMITTED ENTIRELY when nobody
+                // said anything — an empty section reads as "we looked and
+                // there was nothing", and the truth is that nobody spoke.
+                ...(sentiment ? { sentiment } : {}),
+              },
+            },
+            expectedTradeGasUsdg: expectedTradeGasMicro === null ? null : Number(expectedTradeGasMicro),
+            persona: cfg.agentName ? `You are ${cfg.agentName}, a Merryman.` : "",
+            // ITS OWN PUBLISHED THESES, and what came of them. Read from the
+            // peer file rather than the child's `decisions` table because that
+            // table is wiped by every redeploy — an agent reading memory from
+            // it would permanently be having its first thought.
+            memory: memoryLines(brainOwn, Math.floor(Date.now() / 1000)),
+          };
+          const outcome = await runShadow(
+            { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 90_000 },
+            inputs,
+            (m) => console.log(`[${short(agentId)}] ${m}`),
+          );
+          if (!outcome.ran) console.log(`[${short(agentId)}] [brain] asleep — ${outcome.why}`);
+          // WHICH QUESTION WAS ASKED. "Should I trim what I hold" and "is this
+          // worth opening" produce the same words in a decision row and are
+          // entirely different observations, so the trace has to say which.
+          else {
+            // WHAT IT WAS ASKED, AND WHAT IT HAD TO ANSWER WITH. A run that
+            // reports no-data because the oracle refused and one that reports
+            // it because nobody asked look identical in a decision row, and
+            // they are the two states this whole exercise exists to separate.
+            const series = technicalSeries
+              ? `${technicalSeries.series.points} rounds over ` +
+                `${Math.round(technicalSeries.series.spanSec / 3600)}h`
+              : history.read
+                ? "no rounds published for this feed"
+                : "the feed history could not be read";
+            console.log(`[${short(agentId)}] [brain] about ${focusLabel(focus)} · technical: ${series}`);
+          }
+        }
+      } catch (e) {
+        // NEVER TAKES A TICK DOWN. Shadow thinking is the least important thing
+        // happening in this loop, and the agent's accounting and risk controls
+        // must not depend on a research service being reachable.
+        console.log(`[${short(agentId)}] [brain] skipped (${e instanceof Error ? e.message : String(e)})`);
+      }
+    }
 
     // On-chain breaker check — the contract is the authority once deployed;
     // this read stops the worker from wasting ops the chain would refuse.
@@ -4550,6 +5642,15 @@ async function main() {
     // decisions table and nowhere else — never onto the TradeIntent, because
     // policy.ts is explicit that nothing the wall inspects may carry a string
     // that originated outside it.
+    // WHO THIS OWNER FOLLOWS, as of the orchestrator's last pass.
+    //
+    // Re-read every window and never cached across one: the file is rewritten on
+    // the orchestrator's clock, and a peer who posted a minute ago should be
+    // readable now. `readPeers` never throws — absent, unreadable, malformed and
+    // empty all mean the same thing here, which is that there is nothing from
+    // peers this window, and the desk tool is simply not registered.
+    peerTheses = cfg.deskEnabled ? readPeers(merrymenHome()).theses : [];
+
     // WHAT THE DESK MAY READ THIS WINDOW. Refreshed on its own slow clock and
     // wrapped whole: a metadata read that fails is a window with no pages to
     // offer, never a tick that stops trading.
@@ -5079,7 +6180,12 @@ async function main() {
   const runLoop = () => {
     tick()
       .catch((e) => console.error("[tick]", e))
-      .finally(() => setTimeout(runLoop, cfg.tickSeconds * 1000));
+      // In the finally so a tick that threw still reports what it spent — the
+      // ticks that fail are exactly the ones whose RPC cost matters most.
+      .finally(() => {
+        reportRpc();
+        setTimeout(runLoop, cfg.tickSeconds * 1000);
+      });
   };
   runLoop();
 }

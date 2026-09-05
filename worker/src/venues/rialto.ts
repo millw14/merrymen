@@ -15,6 +15,7 @@
 
 import { isAddress, isHex, parseAbi, type PublicClient } from "viem";
 import { RIALTO } from "../../../packages/core/src/index";
+import { readBoundedJson } from "../bounded-read";
 
 const REGISTRY_ABI = parseAbi(["function ownerOf(uint256 id) view returns (address)"]);
 
@@ -93,10 +94,20 @@ export function parseRialtoQuote(
   return { quote: { to: to as `0x${string}`, data: data as `0x${string}`, value, buyAmountRaw } };
 }
 
+/**
+ * Widened to what a Response actually is, because the body is now read through
+ * bounded-read.ts rather than by calling `json()` — which needs the headers to
+ * consult content-length and `text()` for the no-stream fallback. A narrower
+ * double than the real thing would have let this compile while the production
+ * path took a branch no test could reach.
+ */
 export type FetchLike = (url: string, init?: { headers?: Record<string, string> }) => Promise<{
   ok: boolean;
   status: number;
+  headers: { get(name: string): string | null };
+  body?: unknown;
   json(): Promise<unknown>;
+  text(): Promise<string>;
 }>;
 
 export interface RialtoClientOpts {
@@ -139,11 +150,11 @@ export async function fetchRialtoQuote(
   }
   if (!res.ok) return { quote: null, reason: `quote API returned ${res.status}` };
 
-  let body: unknown;
-  try {
-    body = await res.json();
-  } catch {
-    return { quote: null, reason: "quote response is not JSON" };
-  }
+  // Bounded — see bounded-read.ts. Both failure modes read the same way to
+  // this caller: no quote, and a reason saying why rather than a null pretending
+  // the venue had nothing.
+  const read = await readBoundedJson<unknown>(res);
+  if (!read.ok) return { quote: null, reason: `quote response unusable: ${read.detail.slice(0, 160)}` };
+  const body: unknown = read.value;
   return parseRialtoQuote(body, args.expectedRouter);
 }

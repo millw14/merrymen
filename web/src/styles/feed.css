@@ -188,6 +188,28 @@
   color: var(--mm-warn);
 }
 
+/* NOTHING WAS EVEN ATTEMPTED. A shadow decision is the agent saying what it
+   would do; the machinery that would have done it is not connected.
+
+   Dotted rather than `sim`'s dashed, and the distinction is worth a line: a
+   paper fill DID happen, against pretend money, so a dashed edge says "real
+   event, fake capital". This is a rung below that — no event at all — so the
+   line is lighter still, and the figure is quiet because it is a proposal
+   rather than an amount anybody moved. Not struck through: `turned` earns that
+   by having been refused, and a decision nobody asked the wall about was not
+   refused. */
+.mm-trade.shadow {
+  border-style: dotted;
+  border-color: color-mix(in srgb, var(--mm-edge) 80%, transparent);
+  background: none;
+}
+
+.mm-trade.shadow .sym,
+.mm-trade.shadow .amt {
+  color: var(--mm-tx-2);
+  font-weight: 500;
+}
+
 .mm-said {
   margin: var(--mm-2) 0 0;
   font-size: var(--mm-t-meta);

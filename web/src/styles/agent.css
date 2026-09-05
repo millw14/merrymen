@@ -319,3 +319,40 @@
     display: none;
   }
 }
+
+/*
+ * THE WIRE CONTROL.
+ *
+ * Deliberately quiet: it is a button and two sentences, and the sentences are
+ * the point. A follow here is an input to a decision rather than a trigger for
+ * one, and the copy says so on the surface rather than in a tooltip.
+ */
+.mm-wire {
+  padding: var(--mm-sec-y);
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+.mm-wire .row {
+  display: flex;
+  align-items: center;
+  gap: var(--mm-3);
+  margin: 0 0 var(--mm-2);
+}
+
+/* A prompt has a context window, and nobody caps bookmarks — the denominator
+   is the clearest statement in the product that this is wiring. */
+.mm-wire .budget {
+  font-size: var(--mm-t-meta);
+  color: var(--mm-faint);
+}
+
+.mm-wire .mm-btn.on {
+  border-color: var(--mm-wire);
+  color: var(--mm-wire);
+}
+
+.mm-wire .mm-note.quiet {
+  margin-top: var(--mm-2);
+  color: var(--mm-faint);
+  font-size: var(--mm-t-meta);
+}

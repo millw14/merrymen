@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { LogoMark } from "@/components/Logo";
 import { RailAlerts } from "./RailAlerts";
+import { WiredProvider } from "@/components/WiredProvider";
 import { Ticker } from "./Ticker";
 import { NAV, activeHref } from "./nav";
 
@@ -36,6 +37,7 @@ export function AppShell({
     // live on /grant and /settings while these pages use the new system — so
     // without this class the whole design system is inert and the page renders
     // in the old palette on the old background.
+    <WiredProvider>
     <div className={`mm mm-app${context ? "" : " no-context"}`}>
       <nav className="mm-rail" aria-label="Main">
         <Link href="/" className="mm-brand">
@@ -90,6 +92,7 @@ export function AppShell({
         ))}
       </nav>
     </div>
+    </WiredProvider>
   );
 }
 

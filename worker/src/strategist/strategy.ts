@@ -12,7 +12,7 @@ import type { TradeIntent } from "../policy";
 import type { Snapshot, Strategy } from "../strategies/types";
 import { parseProposals, proposalsToIntents, type StrategistUniverse } from "./proposals";
 import type { ProposalDriver, Signals } from "./driver";
-import { runDesk, type DeskLink, type DeskWorld } from "./desk";
+import { runDesk, type DeskLink, type DeskPeer, type DeskWorld } from "./desk";
 import type { LlmCreds } from "../llm";
 
 /** A decision the strategist made this window — survivor (linked to an intent via
@@ -84,6 +84,9 @@ export interface LlmStrategistConfig {
     basisFor?: (symbol: string) => Promise<string | null>;
     /** Pages the model may ask for BY INDEX. Re-read each window. */
     links?: () => DeskLink[];
+    /** Desks this owner wired in. Absent or empty hides the tool entirely. */
+    peers?: () => DeskPeer[];
+    readPeer?: (index: number) => Promise<string>;
     /** Fetch one offered link. Index-addressed; never a model-supplied URL. */
     readLink?: (index: number) => Promise<string>;
     maxSteps?: number;
@@ -190,12 +193,14 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
           },
           recall: desk.recall,
           ...(desk.readLink ? { readLink: desk.readLink } : {}),
+          ...(desk.readPeer ? { readPeer: desk.readPeer } : {}),
         };
         const r = await runDesk({
           creds: desk.creds,
           signals,
           world,
           links: desk.links?.(),
+          peers: desk.peers?.(),
           maxSteps: desk.maxSteps,
           note,
         });

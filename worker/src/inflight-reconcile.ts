@@ -37,6 +37,7 @@
  * like the Postgres store: this file is correct by test, proven by that run.
  */
 import { decodeEventLog, parseAbi, type Hex } from "viem";
+import { backoffMs, classifyRpcError } from "./rpc-error";
 import { netTokenDeltas, type ReceiptLog } from "./fills";
 import { ENTRYPOINT } from "../../packages/core/src/index";
 
@@ -105,9 +106,25 @@ export function addressTopic(addr: string): Hex {
  *
  * EXPORTED AND ADDRESS-AGNOSTIC because the deposit scanner needs exactly this
  * behaviour against the USDG token rather than the EntryPoint. Writing a second
- * halving loop is how the two drift: this one already knows that a failure at
- * span 1 is a bad block to step over rather than a range error to halve again.
+ * halving loop is how the two drift.
+ *
+ * RETURNS COVERAGE, NOT JUST LOGS. `complete: false` means the window was not
+ * fully scanned and the caller must not treat the absence of a log as evidence
+ * that no such log exists.
  */
+export interface AdaptiveLogs {
+  logs: RawLog[];
+  /** Did the scan actually cover fromBlock..toBlock? */
+  complete: boolean;
+  /** The last block genuinely scanned. Equals toBlock when complete. */
+  scannedTo: bigint;
+}
+
+/** Retries of one span before the sweep gives up and reports short coverage. */
+const MAX_RETRIES_PER_SPAN = 4;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export async function getLogsAdaptive(
   chain: ReconcileChain,
   filter: { address: `0x${string}`; topics: (Hex | Hex[] | null)[] },
@@ -115,10 +132,11 @@ export async function getLogsAdaptive(
   toBlock: bigint,
   maxSpan: bigint,
   log?: (m: string) => void,
-): Promise<RawLog[]> {
+): Promise<AdaptiveLogs> {
   const out: RawLog[] = [];
   let cursor = fromBlock;
   let span = maxSpan;
+  let attempt = 0;
   while (cursor <= toBlock) {
     const end = cursor + span - 1n < toBlock ? cursor + span - 1n : toBlock;
     try {
@@ -130,18 +148,48 @@ export async function getLogsAdaptive(
       });
       out.push(...logs);
       cursor = end + 1n;
+      // A clean pass earns the retry budget back, so one blip mid-sweep does
+      // not doom the rest of a long window.
+      attempt = 0;
     } catch (e) {
-      // Almost always "block range too large" — halve and retry the same start.
-      if (span <= 1n) {
-        log?.(`getLogs failed on a single block ${cursor}, skipping it: ${e instanceof Error ? e.message : String(e)}`);
-        cursor += 1n;
-        span = maxSpan;
+      // A RATE LIMIT IS NOT A RANGE ERROR, and reading it as one was a fault
+      // that could not terminate. The old code halved the span on EVERY
+      // failure: under a sustained 429 it walked 10,000 -> 1 in fourteen
+      // requests (times four again, because viem retries 429 by default),
+      // advanced the cursor by ONE BLOCK, reset the span, and did it again.
+      // Traversing 200,000 blocks that way is millions of requests, and the
+      // requests were themselves the reason for the rate limit.
+      //
+      // Worse than the cost: at span 1 it STEPPED OVER the block. This sweep
+      // exists so a landed operation cannot go unreconciled and under-count the
+      // day’s spend, so silently skipping blocks broke the one property it is
+      // for.
+      const v = classifyRpcError(e);
+
+      if (v.kind === "range-too-large" && span > 1n) {
+        span = span / 2n;
         continue;
       }
-      span = span / 2n;
+
+      if (v.retryable && attempt < MAX_RETRIES_PER_SPAN) {
+        // Same span, same cursor. Nothing about the question was wrong.
+        const wait = v.retryAfterMs ?? backoffMs(attempt);
+        attempt += 1;
+        log?.(`getLogs ${v.kind} at ${cursor}..${end} — retrying the same span in ${wait}ms (${v.detail})`);
+        await sleep(wait);
+        continue;
+      }
+
+      // Out of retries, or a failure retrying cannot fix. STOP, and say the
+      // coverage is short. A caller that believes it saw every log in a window
+      // it did not actually cover is the failure mode; an explicit gap is not.
+      log?.(
+        `getLogs gave up at ${cursor} (${v.kind}: ${v.detail}) — scanned ${fromBlock}..${cursor - 1n} of ${fromBlock}..${toBlock}`,
+      );
+      return { logs: out, complete: false, scannedTo: cursor - 1n };
     }
   }
-  return out;
+  return { logs: out, complete: true, scannedTo: toBlock };
 }
 
 /**
@@ -158,6 +206,17 @@ export async function findOrphanOps(opts: {
   /** Max blocks per getLogs call (adaptive-halved down from here on a range error). */
   maxSpan?: bigint;
   log?: (m: string) => void;
+  /**
+   * The raw logs this sweep actually used, handed out for comparison.
+   *
+   * PURELY OBSERVATIONAL. It is called after the fetch and before any decision,
+   * it cannot change what this function does, and a throw from it is not caught
+   * here because a shadow comparison that throws is a defect in the shadow, not
+   * in reconciliation. Exists so shadow mode can compare against the data the
+   * AUTHORITATIVE path really saw, rather than paying for a third scan of the
+   * same range and comparing against something merely similar.
+   */
+  onLogs?: (logs: readonly RawLog[], complete: boolean, scannedTo: bigint) => void;
 }): Promise<OrphanOp[]> {
   const { chain, smartAccount, usdgToken, knownOpHashes, lookbackBlocks } = opts;
   const head = await chain.getBlockNumber();
@@ -176,9 +235,20 @@ export async function findOrphanOps(opts: {
     opts.log,
   );
 
+  opts.onLogs?.(logs.logs, logs.complete, logs.scannedTo);
+
+  // INCOMPLETE COVERAGE IS SAID OUT LOUD. An orphan sweep that scanned half
+  // its window and found nothing has not established that there are no orphans.
+  if (!logs.complete) {
+    opts.log?.(
+      `findOrphanOps covered only ${from}..${logs.scannedTo} of ${from}..${head} — ` +
+        `any op outside that range is still unreconciled`,
+    );
+  }
+
   const orphans: OrphanOp[] = [];
   const seen = new Set<string>(); // guard against the same op appearing twice in a window
-  for (const raw of logs) {
+  for (const raw of logs.logs) {
     let userOpHash: string;
     let success: boolean;
     try {
@@ -273,11 +343,13 @@ export async function resolveSubmittedOps(opts: {
       opts.maxSpan ?? 10_000n,
       opts.log,
     );
-    if (logs.length === 0) continue; // not found is NOT "reverted" — leave it be
+    // NOT FOUND IS NOT "REVERTED" — and a scan that did not finish has not even
+    // established "not found". Both leave the op exactly as it was.
+    if (!logs.complete || logs.logs.length === 0) continue;
 
     let decoded: { success: boolean } | null = null;
     let txHash = "";
-    for (const raw of logs) {
+    for (const raw of logs.logs) {
       try {
         const d = decodeEventLog({
           abi: ENTRYPOINT_ABI,

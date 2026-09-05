@@ -97,6 +97,17 @@ export function verifyChain(entries: readonly ExportedEntry[]): AuditFinding[] {
   return findings;
 }
 
+/**
+ * How far two USDG figures may differ before the difference means something.
+ *
+ * One hundredth of a cent. The ledger stores USDG as SQLite REAL and prices are
+ * floats, so exact equality between a total and the sum of its parts is not
+ * available; anything below this is the storage format talking. It is small
+ * enough that the failures this catches — a whole contribution booked twice —
+ * clear it by four orders of magnitude.
+ */
+export const ARITHMETIC_TOLERANCE_USDG = 0.0001;
+
 export interface ReconstructedBook {
   /** Σ flows in − Σ flows out, 6dp USDG as a float (the ledger is REAL). */
   netContributionsUsdg: number;
@@ -110,6 +121,40 @@ export interface ReconstructedBook {
   gasUnpricedFills: number;
   /** The last published equity figure, for comparison. */
   publishedEquityUsdg: number | null;
+  /**
+   * The components published in the SAME breath as that equity figure.
+   *
+   * Kept because a scalar equity is an assertion and these are what it is
+   * asserted to be the sum of. Checking one against the others is the cheapest
+   * real arithmetic check there is, and it needs no chain and no prices.
+   */
+  publishedCashUsdg: number | null;
+  publishedPositionsUsdg: number | null;
+  publishedVaultUsdg: number | null;
+  /**
+   * The FOURTH term of the composition — quarantined holdings at cost.
+   *
+   * `composeEquityUsdg` is cash + vault + positions + quarantinedCost, and the
+   * journal used to carry only the first three beside the total. Null here means
+   * the mark did not say, which is NOT the same as zero: assuming zero would
+   * make every book holding a quarantined asset look like it does not add up,
+   * and this codebase has already been bitten once by a re-derivation that
+   * dropped this exact term.
+   */
+  publishedQuarantinedCostUsdg: number | null;
+  /** How many flow records were seen. Zero means no capital movement is on record. */
+  flowCount: number;
+  /** How many marks were seen. Zero means there is nothing to reconcile against. */
+  markCount: number;
+  /**
+   * Every USDG ever spent ACQUIRING something, this epoch, gross of later sales.
+   *
+   * This is the bound on how much unrealized LOSS the open positions can carry:
+   * you cannot be down more on a position than you paid for it. Gross rather
+   * than net of disposals on purpose — the looser bound is the conservative one
+   * here, because it can only reduce the number of findings, never invent one.
+   */
+  grossBuyNotionalUsdg: number;
   /** Fills and flows that name a transaction — what an RPC check would refetch. */
   chainRefs: { kind: string; txHash: string; seq: number }[];
   /** Records that move money but name NO transaction. */
@@ -132,6 +177,13 @@ export function reconstruct(entries: readonly ExportedEntry[]): ReconstructedBoo
     gasUsdg: 0,
     gasUnpricedFills: 0,
     publishedEquityUsdg: null,
+    publishedCashUsdg: null,
+    publishedPositionsUsdg: null,
+    publishedVaultUsdg: null,
+    publishedQuarantinedCostUsdg: null,
+    flowCount: 0,
+    markCount: 0,
+    grossBuyNotionalUsdg: 0,
     chainRefs: [],
     unanchored: [],
   };
@@ -145,6 +197,7 @@ export function reconstruct(entries: readonly ExportedEntry[]): ReconstructedBoo
     }
 
     if (e.kind === "flow") {
+      book.flowCount += 1;
       const amount = Number(p.amountUsdg ?? 0);
       book.netContributionsUsdg += p.direction === "in" ? amount : -amount;
       if (typeof p.txHash === "string" && p.txHash) {
@@ -161,6 +214,14 @@ export function reconstruct(entries: readonly ExportedEntry[]): ReconstructedBoo
     if (e.kind === "fill") {
       const realized = p.realizedPnlUsdg;
       if (typeof realized === "number") book.realizedPnlUsdg += realized;
+      // What was actually paid, preferring the receipt-derived cash leg over
+      // the intended notional — the two differ by slippage, and the bound this
+      // feeds should be built from what left the account.
+      if (p.fillSide === "buy" && p.status !== "rejected") {
+        const cash = typeof p.fillCashUsdg === "number" ? p.fillCashUsdg : null;
+        const notional = typeof p.amountUsdg === "number" ? p.amountUsdg : 0;
+        book.grossBuyNotionalUsdg += cash ?? notional;
+      }
       if (typeof p.gasWei === "string" && p.gasWei) {
         try {
           book.gasWei += BigInt(p.gasWei);
@@ -188,7 +249,18 @@ export function reconstruct(entries: readonly ExportedEntry[]): ReconstructedBoo
 
     if (e.kind === "mark") {
       const eq = p.equityUsdg;
-      if (typeof eq === "number") book.publishedEquityUsdg = eq;
+      if (typeof eq === "number") {
+        book.markCount += 1;
+        book.publishedEquityUsdg = eq;
+        // Taken from the SAME entry as the equity, never from a different mark:
+        // components from one tick against a total from another would produce a
+        // difference that is just time passing.
+        book.publishedCashUsdg = typeof p.cashUsdg === "number" ? p.cashUsdg : null;
+        book.publishedPositionsUsdg = typeof p.positionsUsdg === "number" ? p.positionsUsdg : null;
+        book.publishedVaultUsdg = typeof p.vaultUsdg === "number" ? p.vaultUsdg : null;
+        book.publishedQuarantinedCostUsdg =
+          typeof p.quarantinedCostUsdg === "number" ? p.quarantinedCostUsdg : null;
+      }
     }
   }
   return book;
@@ -363,9 +435,55 @@ function fmtUsdg(units: bigint): string {
 export function reconcile(book: ReconstructedBook): {
   residualUsdg: number | null;
   note: string;
+  /**
+   * Whether the checks actually RAN.
+   *
+   * False when a term the equity identity needs was not published, so the
+   * arithmetic was not established — a different state from established and
+   * sound, and the caller must not render it as the latter. An empty `findings`
+   * with `checked: false` means "nothing was wrong because nothing was asked",
+   * the same shape of honesty the on-chain guarantee needs.
+   */
+  checked: boolean;
+  /**
+   * WHAT THE RESIDUAL ACTUALLY PROVES, as findings a gate can fail on.
+   *
+   * For a long time this function returned a number and a paragraph, and the
+   * paragraph said — correctly — that a non-zero residual is expected while a
+   * position is open. That was true and it was also a hole: `AuditFinding.check`
+   * declared an `'arithmetic'` arm that NO SITE EMITTED, so the arithmetic could
+   * not fail an audit no matter what it said. An audit that cannot fail on its
+   * own headline number is a report, not a check.
+   *
+   * The two tests below are the ones that survive the "expected non-zero"
+   * objection, because each is bounded by a figure the journal already carries:
+   *
+   *   COMPOSITION  the published equity must equal the components published
+   *                beside it. No prices, no chain, no interpretation.
+   *
+   *   ENVELOPE     the residual is unrealized mark-to-market, so it cannot be
+   *                more positive than the entire marked value of the open
+   *                positions (that would be money from nowhere) and cannot be
+   *                more negative than everything ever paid to acquire them
+   *                (you cannot lose more on a position than it cost).
+   *
+   * The envelope is what catches an over-booked contribution: booking the same
+   * opening balance on three deploys triples the denominator, and the residual
+   * goes far below anything the purchases can account for.
+   */
+  findings: AuditFinding[];
 } {
   if (book.publishedEquityUsdg === null) {
-    return { residualUsdg: null, note: "no mark recorded — nothing to reconcile against" };
+    return {
+      residualUsdg: null,
+      checked: false,
+      note: "no mark recorded — nothing to reconcile against",
+      // NOT a finding. Nothing was published, so nothing is being claimed, and
+      // an empty book is not a wrong one. The CALLER decides whether "no marks"
+      // is acceptable for its purposes; see PortfolioQuality.arithmetic, which is
+      // "unknown" here because nothing was verified.
+      findings: [],
+    };
   }
   // Gas left the account in ETH, so it never touched published equity — it is
   // not part of what equity has to explain, and subtracting it here would
@@ -373,8 +491,120 @@ export function reconcile(book: ReconstructedBook): {
   // separately (see pnlUsdg), which is a different question from this one.
   const explained = book.netContributionsUsdg + book.realizedPnlUsdg;
   const residual = book.publishedEquityUsdg - explained;
+  const findings: AuditFinding[] = [];
+
+  // COMPOSITION. Only checked when EVERY term of the composition was published.
+  //
+  // `composeEquityUsdg` is cash + vault + positions + quarantinedCost. Marks
+  // written before the fourth term was journalled carry only three, and summing
+  // those three against the total finds a discrepancy exactly equal to the
+  // quarantined cost — indistinguishable, from inside this function, from a book
+  // that genuinely does not add up. So a missing term SKIPS the check rather
+  // than failing it, and `quarantineKnown` is what the caller reads to see that
+  // the arithmetic was not established rather than established and sound.
+  //
+  // Treating the absent term as zero is precisely the mistake that produced the
+  // bug this file is auditing: index.ts once judged fees against a total
+  // including quarantined cost while addEquity re-derived a lower one without it,
+  // and the curve everybody read sat below the number the fee ratcheted on.
+  const { publishedCashUsdg: cash, publishedPositionsUsdg: pos, publishedVaultUsdg: vault } = book;
+  const quarantine = book.publishedQuarantinedCostUsdg;
+  const quarantineKnown = quarantine !== null;
+
+  // A JOURNAL THAT RECORDS NO CAPITAL ENTERING CANNOT BOUND WHAT IS IN THE BOOK.
+  //
+  // Three ordinary, correct books look like this, and the envelope check would
+  // have called all three fraudulent:
+  //
+  //   A HOSTED CHILD THAT RESUMED. It books nothing on restart by design — that
+  //   is the entire point of the accounting anchor — so its fresh journal has
+  //   equity and zero flow records. The canary itself, after the fix.
+  //   A PAPER AGENT. Its starting capital is granted, never booked as a flow.
+  //   A NEW EPOCH before its opening balance is carried across.
+  //
+  // In each case `netContributionsUsdg` is 0 while equity is real, so the
+  // residual is the whole book and trivially exceeds what the positions are
+  // marked at — reported as "money is unaccounted for" when the truth is that
+  // the contributions are recorded somewhere this file cannot see.
+  //
+  // The distinction is between a book that says something wrong and a book that
+  // does not say. This is the second, so the checks do not run and the caller
+  // gets `checked: false`.
+  const contributionsRecorded = book.flowCount > 0;
+
+  // AND THE LOSS BOUND NEEDS TO SEE WHAT WAS PAID.
+  //
+  // `grossBuyNotionalUsdg` is this epoch's purchases. A position carried across
+  // an epoch boundary was bought in the PREVIOUS one, so its cost is not in this
+  // journal: the floor would be −0 while the position legitimately sits below
+  // what someone paid for it, and an ordinary drawdown would read as a
+  // double-booked contribution.
+  //
+  // Requiring at least one purchase on record is the narrow, honest guard — it
+  // covers the whole-book carry-over that actually happens at an epoch bump. A
+  // book that mixes carried and freshly-bought positions still has a partially
+  // understated floor; that limit is real and is not papered over here, it is
+  // simply smaller than the bug it replaces.
+  const basisVisible = book.grossBuyNotionalUsdg > 0 || (pos ?? 0) <= ARITHMETIC_TOLERANCE_USDG;
+  if (cash !== null && pos !== null && vault !== null && quarantineKnown) {
+    const parts = cash + pos + vault + quarantine;
+    if (Math.abs(book.publishedEquityUsdg - parts) > ARITHMETIC_TOLERANCE_USDG) {
+      findings.push({
+        seq: 0,
+        check: "arithmetic",
+        detail:
+          `published equity ${book.publishedEquityUsdg.toFixed(6)} does not equal the components published with it ` +
+          `(cash ${cash.toFixed(6)} + positions ${pos.toFixed(6)} + vault ${vault.toFixed(6)} + quarantined ` +
+          `${quarantine.toFixed(6)} = ${parts.toFixed(6)}, off by ${(book.publishedEquityUsdg - parts).toFixed(6)}). ` +
+          `One of the five figures is wrong.`,
+      });
+    }
+  }
+
+  // ENVELOPE. The marked value of what is HELD bounds the gain side; what was
+  // paid for it bounds the loss side.
+  //
+  // Quarantined cost sits inside equity too, so it belongs in the ceiling — an
+  // agent holding a scout position at cost has that much more equity to explain,
+  // and leaving it out would report the quarantine itself as money from nowhere.
+  // Absent means unknown, and an unknown term makes the bound unusable rather
+  // than smaller, so the check is skipped exactly as the composition one is.
+  if (pos !== null && quarantineKnown && contributionsRecorded && basisVisible) {
+    const ceiling = pos + quarantine + ARITHMETIC_TOLERANCE_USDG;
+    const floor = -book.grossBuyNotionalUsdg - ARITHMETIC_TOLERANCE_USDG;
+    if (residual > ceiling) {
+      findings.push({
+        seq: 0,
+        check: "arithmetic",
+        detail:
+          `equity exceeds what the record can explain by ${(residual - pos - quarantine).toFixed(6)} USDG: ` +
+          `contributions ${book.netContributionsUsdg.toFixed(6)} + realized ${book.realizedPnlUsdg.toFixed(6)} leaves ` +
+          `a residual of ${residual.toFixed(6)}, but what is held is marked at only ${pos.toFixed(6)}` +
+          (quarantine > 0 ? ` (+ ${quarantine.toFixed(6)} quarantined at cost)` : "") +
+          `. Unrealized gain cannot exceed the whole value of what is held, so money is unaccounted for — most ` +
+          `likely a contribution that was never booked, or a mark that is too high.`,
+      });
+    } else if (residual < floor) {
+      findings.push({
+        seq: 0,
+        check: "arithmetic",
+        detail:
+          `contributions exceed what the record can support by ${Math.abs(residual - floor).toFixed(6)} USDG: ` +
+          `contributions ${book.netContributionsUsdg.toFixed(6)} + realized ${book.realizedPnlUsdg.toFixed(6)} against ` +
+          `equity ${book.publishedEquityUsdg.toFixed(6)} implies an unrealized LOSS of ${Math.abs(residual).toFixed(6)}, ` +
+          `but only ${book.grossBuyNotionalUsdg.toFixed(6)} was ever spent acquiring positions — you cannot lose more ` +
+          `on a position than it cost. The usual cause is the same capital being booked as a contribution more than ` +
+          `once (see bootstrap-state.ts).`,
+      });
+    }
+  }
+
   return {
     residualUsdg: residual,
+    findings,
+    // Both checks need every term of the composition; neither ran without them.
+    checked:
+      quarantineKnown && cash !== null && pos !== null && vault !== null && contributionsRecorded && basisVisible,
     note:
       "residual = published equity − (contributions + realized). It is the unrealized " +
       "mark-to-market on open positions, and is expected to be non-zero while any position is open. " +

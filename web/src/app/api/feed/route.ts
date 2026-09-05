@@ -95,6 +95,10 @@ export interface FeedResponse {
    */
   gasUsdg: number;
   gasUnpricedTrades: number;
+  /** Fills that actually landed. Zero means there is no return to measure. */
+  landed: number;
+  /** The worker's verdict on the denominator: true, false, or null for never assessed. */
+  contributionsKnown: boolean | null;
 }
 
 type Identity = { strategy: string; basket: string[]; agentName: string | null };
@@ -188,6 +192,8 @@ async function emptyFeed(tenant: `0x${string}` | null = null): Promise<FeedRespo
     netContributionsUsdg: null,
     gasUsdg: 0,
     gasUnpricedTrades: 0,
+    landed: 0,
+    contributionsKnown: null,
   };
 }
 
@@ -393,6 +399,35 @@ export async function GET(req: Request) {
     } catch {
       /* gas_usdg arrives with a worker migration */
     }
+    // WHAT THE BOOK MAY CLAIM, carried to the one page the owner reads.
+    //
+    // The /you dashboard computed its own P&L inline with no landed-trade guard
+    // and no quality term — a fifth independent copy of the formula. It needs
+    // both of these to route through the shared gate instead.
+    let landed = 0;
+    let contributionsKnown: boolean | null = null;
+    try {
+      const row = (await db
+        .prepare(
+          `SELECT SUM(CASE WHEN status = 'landed' THEN 1 ELSE 0 END) AS landed
+             FROM trades WHERE agent_id = ?${epochWhere}`,
+        )
+        .get(scope, ...epochArg)) as { landed: number | null } | undefined;
+      landed = Number(row?.landed ?? 0);
+    } catch {
+      /* older ledger */
+    }
+    try {
+      const row = (await db
+        .prepare("SELECT contributions_known FROM agents WHERE smart_account = ?")
+        .get(scope)) as { contributions_known: number | null } | undefined;
+      contributionsKnown =
+        row?.contributions_known === null || row?.contributions_known === undefined
+          ? null
+          : Number(row.contributions_known) === 1;
+    } catch {
+      /* the column arrives with a worker migration; unknown until it does */
+    }
     return NextResponse.json({
       source: "sqlite",
       events,
@@ -404,6 +439,8 @@ export async function GET(req: Request) {
       netContributionsUsdg,
       gasUsdg,
       gasUnpricedTrades,
+      landed,
+      contributionsKnown,
     } satisfies FeedResponse);
   });
 }

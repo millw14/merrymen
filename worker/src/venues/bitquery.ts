@@ -27,6 +27,7 @@
  */
 
 import { MERRYMEN_GATEWAY_ORIGIN } from "../../../packages/core/src/index";
+import { readBoundedJson } from "../bounded-read";
 
 /** Bitquery's V2 (streaming) GraphQL endpoint — the one carrying EVM(network:). */
 export const BITQUERY_DEFAULT_ENDPOINT = "https://streaming.bitquery.io/graphql";
@@ -154,7 +155,11 @@ export async function bitqueryQuery<T = unknown>(
             : "";
       return { ok: false, error: `bitquery HTTP ${res.status}${hint}` };
     }
-    const json = (await res.json()) as { data?: T; errors?: { message?: string }[] };
+    // Bounded — see bounded-read.ts. An over-long answer is reported as an
+    // unusable response, which is what it is; it is never read as no data.
+    const read = await readBoundedJson<{ data?: T; errors?: { message?: string }[] }>(res);
+    if (!read.ok) return { ok: false, error: `bitquery: ${read.detail.slice(0, 200)}` };
+    const json = read.value;
     if (json.errors?.length) {
       return { ok: false, error: `bitquery: ${json.errors.map((e) => e.message ?? "?").join("; ").slice(0, 300)}` };
     }

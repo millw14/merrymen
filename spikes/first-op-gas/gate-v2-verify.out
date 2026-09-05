@@ -1,0 +1,35 @@
+══ CLAIM 1 — the EntryPoint's own counters, read directly (no SDK) ══
+  account 0xa48cE91e2F3237E69660C1543042c007B8D33e75, permission id 0x3ca1cec8 (its enable landed at block 51,847,124)
+    ENABLE  key (mode 0x01, vType 0x02)  key 0x01023ca1cec8000000000000000000000000000000000000
+      -> sequence 1
+    DEFAULT key (mode 0x00, vType 0x02)  key 0x00023ca1cec8000000000000000000000000000000000000
+      -> sequence 4
+  and a permission id that has NEVER been used on that account, as a control:
+    ENABLE key for 0xdeadbeef -> sequence 0
+  merrymen's own account, which has executed exactly one op ever (a sudo deploy):
+    SUDO/DEFAULT key -> sequence 1   (1 = the deploy landed)
+    a never-used ENABLE key -> sequence 0
+
+  READING: an enable that LANDED leaves its enable key at 1 and moves the traffic
+  to the default key. An enable that never landed leaves its key at 0. So C2's
+  "sequence must be 0" refuses exactly the enable-shaped operations whose id has
+  already been installed — operations that revert AA23 0xc48cf8ee if sent.
+
+══ CLAIM 2 — permissionConfig is per-(account, permissionId), and codeless is its own case ══
+  0xa48cE91e2F3237E69660C1543042c007B8D33e75  0x3ca1cec8
+    code 61 bytes · INSTALLED signer 0x6a6f069e2a08c2468e7724ab3250cdbfba14d4ff flag 0x0000   (the id this account really installed)
+  0xa48cE91e2F3237E69660C1543042c007B8D33e75  0xdeadbeef
+    code 61 bytes · not installed signer 0x0000000000000000000000000000000000000000 flag 0x0000   (control: an id it never installed)
+  0x032Da6A0Ccf866474e45854E7fDEF9afd1509036  0x3ca1cec8
+    code 61 bytes · not installed signer 0x0000000000000000000000000000000000000000 flag 0x0000   (control: the SAME id, on a different live account)
+  0x00000000000000000000000000000000000c0de5  0x3ca1cec8
+    code NONE · EMPTY RETURNDATA   (control: an address with no code)
+
+  READING: the same permission id reads INSTALLED on one live account and
+  "not installed" on another, so the read is genuinely keyed by the pair. And a
+  codeless address answers with EMPTY RETURNDATA, not with a zero signer — which
+  is why permissionIdInstalled() must branch on getCode first: parsing that reply
+  as "not installed" is correct only because the account cannot hold anything,
+  and treating an unparseable reply from a CODED account the same way would hand
+  the elevated ceiling to any truncated response.
+

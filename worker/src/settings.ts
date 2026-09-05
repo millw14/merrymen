@@ -83,6 +83,9 @@ export interface ResolvedConfig {
   deskMaxSteps: number;
   browserUrl: string | undefined;
   browserToken: string | undefined;
+  /** The shared Brain service. Absent = shadow Brain does not run, ever. */
+  brainUrl: string | undefined;
+  brainToken: string | undefined;
   scoutEnabled: boolean;
   /** Max USDG of COST that may sit in unpriceable positions at once. */
   scoutBudgetUsdg: number;
@@ -303,6 +306,8 @@ export function mergeSettings(
     deskMaxSteps: num(file.deskMaxSteps, env.MERRYMEN_DESK_MAX_STEPS, d.deskMaxSteps, 1, 12),
     browserUrl: str(file.browserUrl, env.MERRYMEN_BROWSER_URL),
     browserToken: str(file.browserToken, env.MERRYMEN_BROWSER_TOKEN),
+    brainUrl: str(file.brainUrl, env.MERRYMEN_BRAIN_URL),
+    brainToken: str(file.brainToken, env.MERRYMEN_BRAIN_TOKEN),
     scoutEnabled: bool(file.scoutEnabled, env.MERRYMEN_SCOUT_ENABLED, d.scoutEnabled),
     scoutBudgetUsdg: num(file.scoutBudgetUsdg, env.MERRYMEN_SCOUT_BUDGET_USDG, d.scoutBudgetUsdg, 0, 1_000_000),
     scoutPerTokenUsdg: num(file.scoutPerTokenUsdg, env.MERRYMEN_SCOUT_PER_TOKEN_USDG, d.scoutPerTokenUsdg, 0, 1_000_000),

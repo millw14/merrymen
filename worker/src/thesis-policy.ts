@@ -2,10 +2,18 @@
  * WHAT AN AGENT MAY SAY IN PUBLIC.
  *
  * WHY THIS LIVES UNDER worker/ AND NOT web/lib. It was in web/src/lib, which
- * was right while a browser was the only reader. The orchestrator is now a
- * second one: it materialises each child's followed theses into a file the
- * agent's desk reads, and what it writes must be EXACTLY what the public feed
- * publishes — same allowlist, same address backstop, same fail-closed default.
+ * was right while a browser was the only reader. The move anticipates a second:
+ * the orchestrator is to materialise each child's followed theses into a file
+ * the agent's desk reads, and what it writes must be EXACTLY what the public
+ * feed publishes — same allowlist, same address backstop, same fail-closed
+ * default.
+ *
+ * THAT SECOND READER NOW EXISTS: peer-theses.ts queries followed agents on the
+ * orchestrator's side and every row leaves through the gate below, which is what
+ * makes "a peer file can only contain what the public feed publishes" a property
+ * rather than a promise. It did not exist for the three weeks this paragraph
+ * described it in the present tense — the failure mode the rest of this module
+ * exists to prevent, committed in a comment about it.
  * The worker cannot import from web/src (imports.test.ts forbids @merrymen/*
  * under worker/src, and web/src is not aliased inward at all), so the choice
  * was to move the module or keep a second copy. A second copy of a PUBLICATION
@@ -124,8 +132,18 @@ export interface PublicThesis {
    * came of it" — a failure sentence for the one case that is not a failure.
    * The same was true of an explicit hold. A hold is an answer.
    */
-  outcome: "landed" | "reverted" | "refused" | "dropped" | "pending" | "view";
+  outcome: "landed" | "reverted" | "refused" | "dropped" | "pending" | "view" | "shadow";
   outcomeText: string;
+  /**
+   * The agent said this; nothing could have come of it.
+   *
+   * A separate boolean rather than `outcome === "shadow"` alone, because a
+   * renderer that forgets the new outcome arm still has to answer this
+   * question, and because the two facts are genuinely different: `outcome` is
+   * what happened to the decision, `shadow` is whether the machinery that would
+   * have made something happen was connected at all.
+   */
+  shadow: boolean;
   reason: string | null;
   /** How many times this exact thesis was said in the window. */
   said: number;
@@ -154,12 +172,54 @@ export const PUBLISHABLE_STRATEGIES = [
 const SOURCE_POLICY: Readonly<Record<string, "strategy" | "model">> = Object.freeze({
   // The model's own words. Capped and address-checked before they are shown.
   strategist: "model",
+  // Brain, running in shadow. Its words are a model's words and are treated as
+  // such; what makes it different is not the trust level but the TENSE — see
+  // SHADOW_SOURCES.
+  "brain-shadow": "model",
   ...Object.fromEntries(PUBLISHABLE_STRATEGIES.map((s) => [`strategy:${s}`, "strategy" as const])),
   // NOT here, and each for its own reason:
   //   chat     — carries a counterparty address by template
   //   selftest — a dust probe, not a market view; it says so itself
   //   strategy:<a tenant's own file> — a string we did not write
 });
+
+/**
+ * SOURCES WHOSE DECISIONS CANNOT REACH A TRADE.
+ *
+ * Brain is wired to think and to nothing else: there is no path from a
+ * `BrainDecision` into `proposalsToIntents` or the executor, and a test proves
+ * the absence by reading the imports rather than by trusting this comment.
+ *
+ * That absence has to survive the trip to a public page, and it very nearly did
+ * not. A shadow row arrives with `action: "buy"`, a symbol, a size and a NULL
+ * status — which is indistinguishable, to every gate below, from a real buy
+ * whose trade has not landed yet. It would have been published as
+ * `outcome: "pending"`, and the feed's badge function turns a pending buy into
+ * the word "BUYING". An agent that cannot trade would have announced that it
+ * was trading, in its own voice, on a page anybody can read.
+ *
+ * So a shadow source gets its own outcome arm and its own head, and both say
+ * the conditional out loud: "would buy TSLA 5.00 USDG · a stated intention".
+ * The reader is never left to infer from a missing status that nothing happened
+ * — the post says so.
+ *
+ * WHEN EXECUTION IS CONNECTED, a source moves OUT of this set rather than the
+ * set being deleted. The three states the feed then has to distinguish —
+ * THESIS, INTENT, EXECUTED — are exactly the distinction this set draws, and
+ * they do not collapse into one just because one agent graduated.
+ */
+export const SHADOW_SOURCES = ["brain-shadow"] as const;
+const IS_SHADOW: ReadonlySet<string> = new Set<string>(SHADOW_SOURCES);
+
+/**
+ * Every source a reader may put in a `WHERE source IN (…)`.
+ *
+ * Exported so the two SQL callers derive their list from the policy instead of
+ * keeping their own copy of it. The SQL narrowing is an OPTIMISATION and this
+ * module is the rule — but a hand-maintained second list is how the optimisation
+ * silently becomes the rule for anything the policy later admits.
+ */
+export const PUBLISHABLE_SOURCES: readonly string[] = Object.freeze(Object.keys(SOURCE_POLICY));
 
 /**
  * Anything that looks like an on-chain identifier.
@@ -280,13 +340,25 @@ export function outcomeOf(
   return { outcome: "refused", text: known ?? "the wall turned it back" };
 }
 
-/** "buy AAPL 16.66 USDG" — built structurally, never from prose. */
-function headOf(row: ThesisRow): string {
+/**
+ * "buy AAPL 16.66 USDG" — built structurally, never from prose.
+ *
+ * A shadow decision reads "would buy AAPL 16.66 USDG". The conditional is put
+ * in the HEAD rather than left to a badge because the head is the one string
+ * every surface renders: a share card, a feed row, a peer file the desk reads
+ * back to another agent. Only one of those three is a React component, so a
+ * claim that is only made conditional by CSS is not made conditional.
+ */
+function headOf(row: ThesisRow, shadow: boolean): string {
   const size =
     typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg)
       ? `${row.size_usdg.toFixed(2)} USDG`
       : null;
-  return [row.action, row.symbol, size].filter(Boolean).join(" ");
+  // A hold is already the conditional's answer — "would hold" is not English an
+  // agent would speak, and there is nothing to disclaim.
+  const verb =
+    shadow && (row.action === "buy" || row.action === "sell") ? `would ${row.action}` : row.action;
+  return [verb, row.symbol, size].filter(Boolean).join(" ");
 }
 
 /**
@@ -318,7 +390,19 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     reason = classifyDrop(row.dropped_rule);
   }
 
-  const head = headOf(row);
+  // ── shadow ────────────────────────────────────────────────────────────────
+  // Resolved before the outcome chain, because every arm of that chain assumes
+  // the decision was at least ALLOWED to become a trade, and this one was not.
+  const shadow = IS_SHADOW.has(row.source!);
+
+  // A shadow decision that carries a wall verdict or a trade status is a
+  // CONTRADICTION, not a post: either the disconnection failed, or a source was
+  // added to SHADOW_SOURCES that does reach the executor. Both are bugs, and
+  // neither is disclosed on a public feed — the row is dropped and the
+  // disconnection test is the thing that should have caught it.
+  if (shadow && (row.status || row.dropped_rule || row.reject_rule)) return null;
+
+  const head = headOf(row, shadow);
 
   // DECIDED, versus FAILED TO HAPPEN.
   //
@@ -332,13 +416,19 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // and reports what actually happened.
   const isView = !row.action && !row.symbol && !row.dropped_rule && !row.status;
   const isHold = row.action === "hold" && !row.status;
-  const { outcome, text } = isView
-    ? ({ outcome: "view", text: "a view, no trade" } as const)
-    : isHold
-      ? ({ outcome: "view", text: "held — no trade, by choice" } as const)
-      : row.dropped_rule && !row.status
-        ? ({ outcome: "dropped", text: "dropped before it reached the wall" } as const)
-        : outcomeOf(row.status, row.reject_rule);
+  const { outcome, text } = shadow
+    ? row.action === "hold" || !row.action
+      ? // A shadow hold and a live hold are the same event — nothing happened,
+        // on purpose — so it keeps the sentence a reader already understands.
+        ({ outcome: "shadow", text: "held — no trade, by choice" } as const)
+      : ({ outcome: "shadow", text: "a stated intention — not traded" } as const)
+    : isView
+      ? ({ outcome: "view", text: "a view, no trade" } as const)
+      : isHold
+        ? ({ outcome: "view", text: "held — no trade, by choice" } as const)
+        : row.dropped_rule && !row.status
+          ? ({ outcome: "dropped", text: "dropped before it reached the wall" } as const)
+          : outcomeOf(row.status, row.reject_rule);
 
   // A post with neither a head nor a reason says nothing at all.
   if (!head && !reason) return null;
@@ -376,6 +466,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
       typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg) ? row.size_usdg : null,
     outcome,
     outcomeText: text,
+    shadow,
     reason,
     said: Math.max(1, Number(row.said ?? 1)),
     at: Number(row.last_at ?? 0),

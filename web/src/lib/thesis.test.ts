@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { PUBLISHABLE_STRATEGIES, classifyDrop, publishableThesis, type ThesisRow } from "./thesis";
+import {
+  PUBLISHABLE_SOURCES,
+  PUBLISHABLE_STRATEGIES,
+  SHADOW_SOURCES,
+  classifyDrop,
+  publishableThesis,
+  type ThesisRow,
+} from "./thesis";
 
 /**
  * This guard is the only thing between the decisions table and a page anybody
@@ -261,5 +268,126 @@ describe("the policy cannot drift from the strategies", () => {
       .replace(/(^|[^:])\/\/.*$/gm, "$1");
     assert.ok(!/signals_json/.test(src), "signals_json must never be selected");
     assert.ok(!/tenantOf/.test(src), "a public route must not read a session");
+  });
+});
+
+/**
+ * A MERRYMAN THAT CANNOT TRADE MUST NOT SAY IT IS TRADING.
+ *
+ * Brain runs in shadow: it thinks, its decision is persisted, and there is no
+ * path from it into `proposalsToIntents` or the executor — a separate test
+ * proves that absence by reading the imports. These tests are about the trip
+ * from that decision to a public page, which is where the disconnection nearly
+ * failed to survive.
+ *
+ * A shadow row is a buy, with a symbol, a size, and a NULL status. That is
+ * indistinguishable — to every gate written before Brain existed — from a real
+ * buy whose trade has not landed yet. It resolves to `outcome: "pending"`, and
+ * the feed's badge turns a pending buy into the word "BUYING".
+ */
+describe("shadow decisions say the conditional out loud", () => {
+  const shadow = (over: Partial<ThesisRow> = {}): ThesisRow =>
+    ok({
+      source: "brain-shadow",
+      action: "buy",
+      symbol: "TSLA",
+      size_usdg: 5,
+      reason: "momentum is intact and the position is small relative to the book",
+      status: null,
+      ...over,
+    });
+
+  it("never renders as a trade that happened, or is about to", () => {
+    const t = publishableThesis(shadow())!;
+    assert.equal(t.shadow, true);
+    assert.equal(t.outcome, "shadow");
+    assert.equal(t.head, "would buy TSLA 5.00 USDG");
+    assert.match(t.outcomeText, /not traded/);
+    // The three outcomes that assert something reached the chain, and the one
+    // that asserts it is on its way. A shadow decision is none of them.
+    assert.ok(!["landed", "reverted", "pending", "refused"].includes(t.outcome));
+  });
+
+  it("says 'would sell' rather than 'sell'", () => {
+    const t = publishableThesis(shadow({ action: "sell" }))!;
+    assert.equal(t.head, "would sell TSLA 5.00 USDG");
+  });
+
+  it("leaves a hold alone — there is nothing to disclaim", () => {
+    // "would hold" is not English an agent would speak, and a hold in shadow and
+    // a hold in production are the same event: nothing happened, on purpose.
+    const t = publishableThesis(shadow({ action: "hold", size_usdg: 0 }))!;
+    assert.equal(t.head, "hold TSLA 0.00 USDG");
+    assert.equal(t.outcome, "shadow");
+    assert.match(t.outcomeText, /by choice/);
+  });
+
+  it("drops the post entirely if a shadow decision ever carries a wall verdict", () => {
+    // Either the disconnection failed or a source that DOES reach the executor
+    // was added to SHADOW_SOURCES. Both are bugs, and a public feed is not
+    // where either gets disclosed.
+    for (const contradiction of [
+      { status: "landed" },
+      { status: "rejected", reject_rule: "per-trade-cap" },
+      { dropped_rule: "#0 TSLA: nothing held to sell" },
+    ]) {
+      assert.equal(publishableThesis(shadow(contradiction)), null, JSON.stringify(contradiction));
+    }
+  });
+
+  it("still applies every gate that applies to any other model prose", () => {
+    // Being marked shadow buys no trust. The address backstop is the one that
+    // matters most here: Brain is handed news and social text, and its thesis is
+    // the field it writes freely.
+    assert.equal(
+      publishableThesis(shadow({ reason: "rotating into 0xdeadbeefcafe, depth looks real" })),
+      null,
+      "an address in a shadow thesis drops the post, exactly as anywhere else",
+    );
+    const long = publishableThesis(shadow({ reason: "x".repeat(9000) }))!;
+    assert.ok(long.reason!.length <= 220, "model prose is capped whatever its source");
+  });
+
+  it("a source nobody classified still publishes nothing", () => {
+    // The fail-closed default is not weakened by the existence of a shadow arm.
+    assert.equal(publishableThesis(shadow({ source: "brain-live" })), null);
+    assert.equal(publishableThesis(shadow({ source: "brain" })), null);
+  });
+
+  it("marks non-shadow rows false, so the flag means something", () => {
+    assert.equal(publishableThesis(ok())!.shadow, false);
+  });
+});
+
+describe("the two SQL readers cannot disagree with the policy", () => {
+  it("neither keeps its own list of publishable sources", () => {
+    // The SQL narrowing is an optimisation and `publishableThesis` is the rule.
+    // A second hand-maintained list inverts that: a source added to the policy
+    // but not to the query is invisible on the feed and looks like a bug in the
+    // gate, and a source removed from the policy but left in the query is worse.
+    for (const f of [
+      path.join(process.cwd(), "web", "src", "lib", "read-theses.ts"),
+      path.join(process.cwd(), "worker", "src", "peer-theses.ts"),
+    ]) {
+      const src = readFileSync(f, "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/(^|[^:])\/\/.*$/gm, "$1");
+      assert.match(src, /PUBLISHABLE_SOURCES/, `${f} must derive its source list`);
+      assert.ok(
+        !/\[\s*"strategist"\s*,/.test(src),
+        `${f} still builds its own source list — it will drift from the policy`,
+      );
+    }
+  });
+
+  it("every shadow source is a publishable source", () => {
+    // A shadow source outside SOURCE_POLICY would be dropped for being
+    // unclassified, and the shadow arm would be dead code that reads as live.
+    for (const s of SHADOW_SOURCES) {
+      assert.ok(
+        PUBLISHABLE_SOURCES.includes(s),
+        `${s} is marked shadow but nothing classified it for publication`,
+      );
+    }
   });
 });

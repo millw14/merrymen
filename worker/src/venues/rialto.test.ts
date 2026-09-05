@@ -53,7 +53,14 @@ describe("fetchRialtoQuote", () => {
     const f: FetchLike & { lastUrl?: string; lastHeaders?: Record<string, string> } = async (url, init) => {
       f.lastUrl = url;
       f.lastHeaders = init?.headers;
-      return { ok: status < 400, status, json: async () => body };
+      const text = JSON.stringify(body);
+      return {
+        ok: status < 400,
+        status,
+        headers: { get: () => null },
+        json: async () => body,
+        text: async () => text,
+      };
     };
     return f;
   }

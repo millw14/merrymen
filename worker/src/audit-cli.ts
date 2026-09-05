@@ -25,6 +25,12 @@ import {
   type FetchedReceipt,
 } from "./audit";
 import { gasQualifier, pnlUsdg } from "./equity";
+import {
+  guaranteeLines,
+  qualityGaps,
+  UNKNOWN_QUALITY,
+  type PortfolioQuality,
+} from "./portfolio-quality";
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -190,6 +196,20 @@ async function doVerify(): Promise<void> {
     );
     console.log(`  residual:     ${r.residualUsdg?.toFixed(2) ?? "—"} USDG — unrealized on open positions`);
   }
+  if (r.findings.length > 0) {
+    console.log("");
+    console.log(`  ✗ ${r.findings.length} arithmetic problem(s) — the book does not add up:`);
+    for (const f of r.findings) console.log(`      ${f.detail}`);
+  } else if (book.markCount > 0 && r.checked) {
+    console.log(
+      `  ✓ the published figures are internally consistent and the residual is within what the book can explain`,
+    );
+  } else if (book.markCount > 0) {
+    console.log(
+      `  ! the arithmetic could NOT be checked — the latest mark does not carry every term of the equity ` +
+        `identity (quarantined cost was added to the journal later), so the sum cannot be closed. UNKNOWN, not sound.`,
+    );
+  }
 
   // ── 3. the chain of custody ───────────────────────────────────────────
   console.log("");
@@ -197,6 +217,8 @@ async function doVerify(): Promise<void> {
   const rpcUrl = rpcFlag >= 0 ? args[rpcFlag + 1] : undefined;
   const onchain: AuditFinding[] = [];
   let unreachable = 0;
+  /** How many transactions were actually refetched. Zero is not a pass. */
+  let onchainChecked = 0;
 
   if (!rpcUrl) {
     console.log(`  ${book.chainRefs.length} record(s) name a transaction and can be checked on-chain`);
@@ -211,7 +233,7 @@ async function doVerify(): Promise<void> {
     } else {
       console.log(`  checking ${book.chainRefs.length} transaction(s) against ${new URL(rpcUrl).host}…`);
       const byTx = new Map(entries.map((e) => [e.seq, e]));
-      let checked = 0;
+
       for (const ref of book.chainRefs) {
         const entry = byTx.get(ref.seq);
         if (!entry) continue;
@@ -231,7 +253,7 @@ async function doVerify(): Promise<void> {
           console.log(`      seq ${ref.seq}: RPC error — ${e instanceof Error ? e.message : String(e)} (not checked)`);
           continue;
         }
-        checked++;
+        onchainChecked++;
         onchain.push(
           ...compareRecord({ seq: ref.seq, kind: entry.kind, payload, receipt, account, usdgToken }),
         );
@@ -239,14 +261,14 @@ async function doVerify(): Promise<void> {
       if (onchain.length > 0) {
         console.log(`  ✗ ${onchain.length} record(s) disagree with the chain:`);
         for (const f of onchain) console.log(`      seq ${f.seq}: ${f.detail}`);
-      } else if (checked > 0) {
-        console.log(`  ✓ ${checked} transaction(s) match the chain — amounts and direction confirmed`);
+      } else if (onchainChecked > 0) {
+        console.log(`  ✓ ${onchainChecked} transaction(s) match the chain — amounts and direction confirmed`);
       }
-      if (checked < book.chainRefs.length) {
+      if (onchainChecked < book.chainRefs.length) {
         // NEVER a green tick for work that did not happen. A verifier whose
         // failure mode is a pass is worse than no verifier, because it launders
         // "we couldn't look" into "we looked and it was fine".
-        unreachable = book.chainRefs.length - checked;
+        unreachable = book.chainRefs.length - onchainChecked;
         console.log(`  ! ${unreachable} of ${book.chainRefs.length} could not be fetched — UNKNOWN, not verified`);
       }
     }
@@ -262,14 +284,103 @@ async function doVerify(): Promise<void> {
     console.log(`    Drop these and recompute if you want a chain-verifiable figure only.`);
   }
 
+  // ── 4. the three guarantees, reported separately ──────────────────────
+  //
+  // THEY FAIL INDEPENDENTLY, SO THEY ARE REPORTED INDEPENDENTLY. Collapsing
+  // them into one boolean is what let this command print a clean bill of health
+  // for a run that never opened a socket: with no `--rpc` there were no on-chain
+  // findings, no on-chain findings meant nothing was wrong, and nothing wrong
+  // meant exit 0. "We did not look" and "we looked and it was fine" produced the
+  // same output, which is the worst property a verifier can have.
+  const chainFindings = findings.filter((f) => f.check === "chain" || f.check === "gap");
+  const arithmetic = r.findings;
+
+  const lowestSeq = entries.length ? Math.min(...entries.map((e) => e.seq)) : null;
+  const quality: PortfolioQuality = {
+    ...UNKNOWN_QUALITY,
+    epoch: Number(header.epoch ?? 0) || 0,
+    // Arithmetic is VERIFIED only when there was something to verify. A book
+    // with no marks has not passed this check; it has not taken it.
+    // THREE STATES. `r.checked` is false when a term of the equity identity was
+    // missing from the mark, and an unrun check is neither a pass nor a failure.
+    arithmetic: arithmetic.length > 0 ? "failed" : book.markCount > 0 && r.checked ? "verified" : "unknown",
+    // The journal alone cannot say whether a contribution is missing, only
+    // whether what is recorded is self-consistent. The envelope check above is
+    // what would have caught the over-booking, so a clean envelope with marks
+    // present is the strongest claim available from an export.
+    contributionsKnown:
+      arithmetic.length === 0 && book.markCount > 0 && r.checked && book.unanchored.length === 0,
+    costBasisComplete: book.unanchored.filter((u) => u.kind === "fill").length === 0,
+    marksComplete: book.markCount > 0,
+    gasAccounting: book.gasUnpricedFills > 0 ? "gross" : book.gasWei > 0n ? "net" : "unknown",
+    // THREE STATES, DECIDED HERE where the facts are, not recovered later from
+    // a sentence. "We refetched nothing" is UNKNOWN; only a real disagreement
+    // or a real gap in coverage is a failure.
+    onchain: !rpcUrl || onchainChecked === 0
+      ? "unknown"
+      : onchain.length > 0 || unreachable > 0
+        ? "failed"
+        : "verified",
+    onchainDetail: !rpcUrl
+      ? "not checked — no --rpc was given, so nothing was refetched"
+      : onchain.length > 0
+        ? `${onchain.length} record(s) disagree with the chain`
+        : unreachable > 0
+          ? `${unreachable} of ${book.chainRefs.length} could not be fetched`
+          : onchainChecked === 0
+            ? "not checked — no record in this export names a transaction"
+            : `${onchainChecked} transaction(s) refetched and matched`,
+    journalContinuity:
+      chainFindings.length > 0 ? "partial" : lowestSeq === null ? "unknown" : lowestSeq === 1 ? "verified" : "partial",
+    journalDetail:
+      chainFindings.length > 0
+        ? `${chainFindings.length} break(s) in the hash chain`
+        : lowestSeq === null
+          ? "no records in this export"
+          : lowestSeq === 1
+            ? "unbroken from the first record"
+            : `this export begins at seq ${lowestSeq}, so everything before it is outside the chain verified here. ` +
+              `A hosted child's journal lives in an ephemeral container directory and is destroyed by a redeploy; ` +
+              `if that is what happened, the earlier rows are GONE and no continuity can be established for them.`,
+  };
+
   console.log("");
-  // Exit 0 means CHECKED AND SOUND. An unreachable RPC is neither, so it is
-  // not a pass — the caller asked for an on-chain check and did not get one.
-  const clean = findings.length === 0 && onchain.length === 0 && unreachable === 0;
-  if (!clean && findings.length === 0 && onchain.length === 0) {
-    console.log('  verdict: INDETERMINATE — the record is internally sound but could not be checked against the chain.');
+  console.log("  ── guarantees ────────────────────────────────────────────");
+  for (const line of guaranteeLines(quality)) console.log(`  ${line}`);
+
+  console.log("");
+  // THREE OUTCOMES, THREE EXIT CODES.
+  //
+  //   0  every guarantee HELD — checked, and sound
+  //   1  something FAILED — the record is wrong
+  //   2  INDETERMINATE — nothing failed, but at least one guarantee was never
+  //      established. A gate wanting certainty requires 0; one that only cares
+  //      about detected wrongness can accept 2. Neither can mistake one for the
+  //      other, which is the whole point of not sharing a code with 0.
+  const failed = chainFindings.length + arithmetic.length + onchain.length > 0;
+  const unknowns = qualityGaps(quality);
+  // EVERY GAP COUNTS, not just the three headline guarantees.
+  //
+  // The first version tested only the three guarantee fields, so a book whose
+  // contributions could not be established — flows with no transaction behind
+  // them, the exact corruption this branch is about — reported CHECKED AND SOUND
+  // and exited 0, while the line above it said P&L was unavailable. A verdict
+  // that contradicts the report printed two inches higher is worse than no
+  // verdict. `qualityGaps` already enumerates every unknown; the exit code now
+  // reads the same list the operator does.
+  const indeterminate = unknowns.length > 0;
+
+  if (failed) {
+    console.log("  verdict: FAILED — the record does not hold up. See the findings above.");
+    process.exit(1);
   }
-  process.exit(clean ? 0 : 1);
+  if (indeterminate) {
+    console.log("  verdict: INDETERMINATE — nothing checked was wrong, and not everything was checked:");
+    for (const g of unknowns) console.log(`    · ${g}`);
+    process.exit(2);
+  }
+  console.log("  verdict: CHECKED AND SOUND — all three guarantees held.");
+  process.exit(0);
 }
 
 if (cmd === "export") {

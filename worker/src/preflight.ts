@@ -89,6 +89,32 @@ export interface PreflightInput {
    * nothing about the contracts and must never read as "absent".
    */
   missingPolicyContracts: string[] | null;
+  /**
+   * Does THIS grant seal the dead rate-limit policy?
+   *
+   * A DIFFERENT QUESTION FROM THE ONE ABOVE, and the gap between them is why
+   * this command reported a healthy install for a grant that could never
+   * validate. `missingPolicyContracts` probes the three singletons this code
+   * seals TODAY. It cannot see what an OLDER signature sealed — and a signature
+   * is frozen, so the only grants that carry the dead policy are exactly the
+   * ones no probe of current addresses will ever look at.
+   *
+   * Passed as data rather than computed here, like the probe above:
+   * `grantHasDeadRateLimit` lives in `session-account.ts`, which imports the
+   * whole ZeroDev SDK, and this module's entire value is being pure enough to
+   * test without a chain.
+   */
+  deadPolicy: boolean;
+  /**
+   * Does the smart account have code on the grant chain? `null` = not probed.
+   *
+   * Not a blocker in either direction: an account with no code is the normal
+   * state of one that has never traded, and 4337 deploys it with the first
+   * operation. It is here because it changes what the FIRST operation costs and
+   * because it is the only observable that distinguishes "the wall is signed"
+   * from "the wall has been evaluated by a chain".
+   */
+  accountDeployed: boolean | null;
 }
 
 const ok = (id: string, title: string): Check => ({ id, level: "ok", title });
@@ -184,6 +210,40 @@ export function preflight(input: PreflightInput): Check[] {
     });
   } else {
     out.push(ok("policy-contracts", "the wall's validator contracts are deployed"));
+  }
+
+  // THE ONE CONDITION NO AMOUNT OF SETUP CAN CLEAR.
+  //
+  // Ahead of expiry, funding and sizing, because it invalidates every one of
+  // them: an owner who reads "fund 50 USDG" and does it has spent real money on
+  // an account whose every operation will still fail validation. Measured
+  // 2026-08-30 — RATE_LIMIT_POLICY_CONTRACT has zero bytes on 4663 AND 46630.
+  if (input.deadPolicy) {
+    out.push({
+      id: "dead-policy",
+      level: "blocker",
+      title: "this key was signed before a wall fix and CANNOT trade",
+      detail:
+        "It seals a rate-limit policy whose contract has no code on this chain, so Kernel has " +
+        "nothing to call and every operation fails validation. A signature is frozen: no deploy, " +
+        "no funding and no setting fixes it. Re-signing is free and instant — open the wallet page " +
+        "and use 're-sign this key'. Your funds are untouched, and practice mode still works.",
+    });
+  }
+
+  if (input.accountDeployed === false) {
+    out.push({
+      id: "account",
+      level: "warn",
+      title: "this account has never operated",
+      detail:
+        "A smart account is counterfactual until its first operation deploys it, so this is normal " +
+        "for a new install. Two consequences worth knowing before you fund it: the first operation " +
+        "costs meaningfully more than the ones after it, and no chain has yet evaluated the " +
+        "permissions this key was signed under.",
+    });
+  } else if (input.accountDeployed === true) {
+    out.push(ok("account", "the account is deployed"));
   }
 
   const secsLeft = g.expiresAt - input.nowSec;

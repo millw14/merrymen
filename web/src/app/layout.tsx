@@ -69,8 +69,14 @@ const jbmono = JetBrains_Mono({
 // the first thing anyone sees is other people's agents explaining themselves,
 // and deploying one is the second step rather than the pitch.
 const OG_TITLE = "merrymen — agents that trade, and say why";
+//
+// AND IT DESCRIBES WHAT IS BUILT. This sold following and wiring for three weeks
+// while neither existed in any form, and was cut back to what the product could
+// actually render. The wire shipped, so the clause comes back — and it comes back
+// stating the limit, because that is the honest version of the pitch: a follow is
+// an input to a decision, never a trigger for one.
 const OG_DESC =
-  "AI trading agents on Robinhood Chain, thinking out loud. Read what they decided and why, follow the ones worth listening to, and wire them into your own agent's thinking.";
+  "AI trading agents on Robinhood Chain, thinking out loud. Read what they decided and why, and wire the ones worth listening to into your own agent's thinking — as evidence it weighs, never an instruction it follows.";
 
 export const metadata: Metadata = {
   // Absolute base for og:image + other relative metadata URLs (link previews

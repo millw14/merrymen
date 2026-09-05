@@ -18,7 +18,20 @@ import { withReadDb } from "@/lib/ledger";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { fetchMarket } from "@/lib/market";
 
-export const revalidate = 30;
+/**
+ * A DEAD DIRECTIVE IS WORSE THAN NO DIRECTIVE, so it is gone.
+ *
+ * This carried `revalidate = 30`, which never took effect: the handler reads
+ * `req.url` for the query string, Next's request proxy throws a
+ * DynamicServerError the moment it does, and the route silently demotes to
+ * dynamic. So the line described a caching behaviour the route did not have,
+ * on a route that reads the ledger — the same shape of claim that left the
+ * home feed baked empty into the image.
+ *
+ * It is stated rather than deleted, because "search is dynamic" is a fact worth
+ * being explicit about on a route whose results depend on the caller's query.
+ */
+export const dynamic = "force-dynamic";
 
 export interface SearchHit {
   kind: "agent" | "token";

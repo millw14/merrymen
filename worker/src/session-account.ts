@@ -169,6 +169,28 @@ export class PermissionIdMismatch extends Error {
 }
 
 /**
+ * The grant's own initCode does not deploy the address the grant claims.
+ *
+ * Named, like PermissionIdMismatch, because "refusing to arm" with a bare
+ * Error is what an owner sees, and the two failures mean different things: a
+ * mismatched id is a wall we rebuilt wrongly, a mismatched address is a grant
+ * whose two halves disagree about which account they are for.
+ */
+export class AccountAddressMismatch extends Error {
+  constructor(
+    readonly signed: `0x${string}`,
+    readonly derived: `0x${string}`,
+  ) {
+    super(
+      `this grant says it is for account ${signed}, but its own factory data deploys ${derived}. ` +
+        "The two halves of the blob disagree about which account they belong to, so nothing here " +
+        "can be trusted to sign for either. Refusing to arm — nothing was signed.",
+    );
+    this.name = "AccountAddressMismatch";
+  }
+}
+
+/**
  * `deserializePermissionAccount`, plus the flag.
  *
  * Signature deliberately mirrors the package's so the two can be read side by
@@ -235,7 +257,48 @@ export async function deserializeFlaggedPermissionAccount(
     ...params.validityData,
   } as never);
 
-  const account = await createKernelAccount(client as never, {
+  // SECOND, INDEPENDENT CHECK — AND, AGAIN, WITHOUT THE ANSWER.
+  //
+  // This check used to run against an account built WITH
+  // `address: params.accountParams.accountAddress`, and createKernelAccount is
+  // `accountAddress = address ?? (…derive…)` (createKernelAccount.ts:263): hand
+  // it the address and the derivation is skipped entirely, so the comparison
+  // below compared the signed address with itself and could not fail. The same
+  // trap the id check twenty lines up was deliberately written to avoid, walked
+  // into by the check that claimed to be independent of it.
+  //
+  // So derive it. Omitting `address` sends createKernelAccount down the CREATE2
+  // path — getFactoryArgs() over the grant's own initCode-derived
+  // validatorInitData, index and useMetaFactory, then getSenderAddress against
+  // the EntryPoint — which is the address this grant's factory data actually
+  // deploys, computed from the grant rather than read off it.
+  //
+  // WHAT IT COSTS: one eth_call at ARM time, and this function is no longer
+  // offline. That is the price of the check being real; it was free before
+  // because it was doing nothing.
+  //
+  // WHAT IT CATCHES: an accountAddress that does not match the initCode sitting
+  // beside it in the same blob. Kernel's own enable-signature check would also
+  // refuse such a grant on chain (measured on 4663: AA23 reverted 0xc48cf8ee),
+  // but only after arming, mirroring, showing the owner a live agent, and
+  // spending a signature — and it would present as an opaque bundler code.
+  const derived = await createKernelAccount(client as never, {
+    entryPoint,
+    kernelVersion,
+    plugins,
+    index,
+    useMetaFactory,
+    eip7702Auth: params.eip7702Auth,
+  } as never);
+
+  if (derived.address.toLowerCase() !== params.accountParams.accountAddress.toLowerCase()) {
+    throw new AccountAddressMismatch(params.accountParams.accountAddress, derived.address);
+  }
+
+  // Now pass it, matching the package — same shape as the id above, and for the
+  // same reason: the stored value is authoritative, we have just proved ours
+  // equals it.
+  return createKernelAccount(client as never, {
     entryPoint,
     kernelVersion,
     plugins,
@@ -244,16 +307,4 @@ export async function deserializeFlaggedPermissionAccount(
     useMetaFactory,
     eip7702Auth: params.eip7702Auth,
   } as never);
-
-  // SECOND, INDEPENDENT CHECK. The id proves the validator; this proves the
-  // account it was installed into. They can fail separately — a correct
-  // validator attached to the wrong address would sign operations for an
-  // account the owner never funded.
-  if (account.address.toLowerCase() !== params.accountParams.accountAddress.toLowerCase()) {
-    throw new Error(
-      `rebuilt account ${account.address} is not the signed account ${params.accountParams.accountAddress} — refusing to arm`,
-    );
-  }
-
-  return account;
 }

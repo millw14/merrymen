@@ -37,7 +37,7 @@
  * sheet — is not in the SELECT at all: absent, rather than filtered.
  */
 import { withReadDb } from "@/lib/ledger";
-import { PUBLISHABLE_STRATEGIES, publishableThesis, type PublicThesis, type ThesisRow } from "@/lib/thesis";
+import { PUBLISHABLE_SOURCES, publishableThesis, type PublicThesis, type ThesisRow } from "@/lib/thesis";
 import { getIdentityStore } from "@merrymen/identity-store";
 
 /** How far back a post can be and still be news. */
@@ -46,7 +46,12 @@ export const WINDOW_SEC = 24 * 3600;
 const SCAN = 90;
 const SHOW = 40;
 
-const SOURCES = ["strategist", ...PUBLISHABLE_STRATEGIES.map((s) => `strategy:${s}`)];
+// DERIVED, never listed again here. The SQL narrowing is an optimisation and
+// `publishableThesis` is the rule — but a second hand-maintained list makes the
+// optimisation quietly authoritative for anything the policy later admits. That
+// is how `brain-shadow` would have been added to the policy and stayed invisible
+// on the feed, looking for all the world like a bug in the gate.
+const SOURCES: readonly string[] = PUBLISHABLE_SOURCES;
 
 export interface ThesesRead {
   /** "none" means the ledger could not be read — NOT that nobody said anything. */

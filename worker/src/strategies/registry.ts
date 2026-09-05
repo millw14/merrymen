@@ -71,6 +71,9 @@ export interface StrategyBuildOpts {
       basisFor?: (symbol: string) => Promise<string | null>;
       links?: () => { label: string; url: string }[];
       readLink?: (index: number) => Promise<string>;
+      /** Desks this owner wired in. Absent or empty hides the tool entirely. */
+      peers?: () => { label: string }[];
+      readPeer?: (index: number) => Promise<string>;
       maxSteps?: number;
     };
   };

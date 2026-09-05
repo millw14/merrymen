@@ -20,6 +20,22 @@ export interface Badge {
 }
 
 export function badgeOf(t: PublicThesis): Badge {
+  // SHADOW IS CHECKED FIRST, and the ordering is the whole safety property.
+  //
+  // A shadow decision arrives as a buy with a size and no status, which every
+  // test below reads as "a buy that has not landed yet" — and the buy arm turns
+  // that into the word "BUYING". Brain has no path to the executor at all, so
+  // that badge would be an agent announcing a trade it cannot make, in its own
+  // voice, on a page anybody can read.
+  //
+  // The conditional is already in `t.head` ("would buy TSLA 5.00 USDG"), which
+  // is what the non-React surfaces render. This is the same claim, in the one
+  // place a reader looks first.
+  if (t.shadow) {
+    if (t.action === "buy") return { label: "would buy", kind: "thesis" };
+    if (t.action === "sell") return { label: "would sell", kind: "thesis" };
+    return { label: "thesis", kind: "thesis" };
+  }
   if (t.outcome === "refused" || t.outcome === "reverted") {
     return { label: "turned back", kind: "turned" };
   }
@@ -42,5 +58,14 @@ export function badgeOf(t: PublicThesis): Badge {
  * biggest visual difference between the two kinds of card.
  */
 export function hasTrade(t: PublicThesis): boolean {
+  // A SHADOW POST KEEPS ITS STRIP, even though its badge is a thesis badge.
+  //
+  // The first cut hid it, on the reasoning that a thesis's words are the post.
+  // That is backwards here: the strip is where `outcomeText` renders, and for a
+  // shadow post that text is the disclaimer — "a stated intention — not
+  // traded". Hiding the strip left a card reading "would buy" with no name, no
+  // size, and nothing at all saying the trade did not happen. The qualifier
+  // belongs beside the number it qualifies, not in a caption somewhere else.
+  if (t.shadow) return t.symbol !== null || t.sizeUsdg !== null;
   return badgeOf(t).kind !== "thesis" && (t.symbol !== null || t.sizeUsdg !== null);
 }

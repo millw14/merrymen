@@ -45,16 +45,58 @@ import { getGrantStore } from "./grant-store";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
-import { isHostedMode, type MerrymenSettings } from "../../packages/core/src/index";
+import { CASH, isHostedMode, type MerrymenSettings } from "../../packages/core/src/index";
 import { makePgDb, translateSchema, type Db } from "./db";
+import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
+import { deriveBootstrapAccounting } from "./bootstrap-source";
+import { diagnoseAccounting, diagnosisLines } from "./accounting-diagnosis";
+import { planReconstruction, reconstructionLines } from "./accounting-reconstruction";
+import type { AccountPlan } from "./accounting-reconstruction";
+import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
+import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
+import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
+import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
+import { datasetLines, viewRun } from "./brain-dataset";
+import { replayLines, scoreDecision, type Observation, type PricedDecision } from "./replay";
+import { scanFleetCapital } from "./chain-capital";
+import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
-import { applyLedgerSchema } from "./store";
+import { writePeersForChild } from "./peer-files";
+import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
+import type { PublicThesis } from "./thesis-policy";
+import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
 import { drainCommandResults, writeCommand } from "./command-files";
 
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
-/** A child with no fresh heartbeat for this many seconds is wedged → SIGKILL. */
-const WATCHDOG_STALE_SEC = 180;
+/**
+ * Mirror passes to wait before the cohort report runs.
+ *
+ * A child restarted by this deploy needs one tick (240s) to repopulate its
+ * positions and one mirror cycle to push them up. At 15s a pass this is a
+ * little over five minutes, comfortably past both.
+ */
+const COHORT_VET_AFTER_PASSES = 20;
+let cohortPasses = 0;
+/**
+ * FLOOR for the staleness threshold. The real one is DERIVED per child — see
+ * `staleThresholdSec`.
+ *
+ * A CONSTANT HERE WAS A BUG, AND IT WAS ARITHMETIC RATHER THAN A RACE. The
+ * heartbeat is written once per tick, so the minimum possible gap between two
+ * beats is the tick period. With `MERRYMEN_TICK_SECONDS=240` on the hosted
+ * fleet and this fixed at 180, every child was SIGKILLed at ~185s — before its
+ * SECOND TICK EVER RAN. Measured: all 71 observed `heartbeat stale` events
+ * landed in a 181-196s band, which is exactly 180 plus one 15s poll interval.
+ *
+ * That killed the fleet in a loop: kill → re-arm → a 200,000-block getLogs
+ * sweep → rate limits → a tick that dies before writing its beat → kill again.
+ * Nothing about it required a slow RPC; the numbers alone guaranteed it.
+ *
+ * So the threshold is now computed from the tick this child actually runs, and
+ * this value is only the lower bound for a fast one.
+ */
+const WATCHDOG_STALE_FLOOR_SEC = 180;
 /** Don't watchdog a child until it's had a chance to write its first beat. */
 const WATCHDOG_GRACE_SEC = 90;
 /** Cap a child's heap well below the container so an OOM kills the offender, not the box. */
@@ -126,6 +168,30 @@ interface Child {
   tenant: `0x${string}`;
   startedAt: number;
   restarts: number;
+  /**
+   * Seconds without a heartbeat before this child is considered wedged.
+   *
+   * Per child rather than global, because `tickSeconds` is per tenant: the
+   * settings file the orchestrator writes for a child can override the fleet
+   * env var (settings.ts resolves file BEFORE env), so one global number cannot
+   * be correct for every child at once.
+   */
+  staleSec: number;
+}
+
+/**
+ * How long to wait for a beat from a child whose tick is `tickSeconds`.
+ *
+ * TWO TICKS PLUS THE GRACE PERIOD. One tick is the floor by definition — a beat
+ * cannot arrive sooner — so one tick of margin allows a single slow or failed
+ * pass without declaring the process dead, and the grace absorbs the watchdog's
+ * own 15s polling granularity. Below that, a healthy agent on a slow RPC is
+ * indistinguishable from a wedged one.
+ *
+ * Exported for the test that pins the invariant this replaced.
+ */
+export function staleThresholdSec(tickSeconds: number): number {
+  return Math.max(WATCHDOG_STALE_FLOOR_SEC, Math.ceil(tickSeconds) * 2 + WATCHDOG_GRACE_SEC);
 }
 
 const children = new Map<string, Child>();
@@ -166,9 +232,9 @@ function heartbeatAt(tenant: string): number | null {
 }
 
 /** Write the tenant's session-key-only grant into its child's grant.json. */
-async function writeGrantForChild(tenant: `0x${string}`): Promise<boolean> {
+async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` | null> {
   const grant = await getGrantStore().get(tenant);
-  if (!grant) return false;
+  if (!grant) return null;
 
   // BACKFILL THE PUBLIC ID.
   //
@@ -199,7 +265,11 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<boolean> {
   // so keep it owner-only. chmod is a POSIX no-op that throws on Windows — the
   // container is Linux, and self-hosted never runs the orchestrator.
   writeFileSync(path.join(home, "grant.json"), JSON.stringify(grant, null, 2), { encoding: "utf8", mode: 0o600 });
-  return true;
+  // The SMART ACCOUNT, returned rather than discarded: it is the key every
+  // ledger table is on, the caller needs it to derive the accounting anchor, and
+  // the grant is the only place the orchestrator can learn it without a second
+  // decrypting read.
+  return grant.smartAccount as `0x${string}`;
 }
 
 /**
@@ -210,18 +280,97 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<boolean> {
  * tick, and mergeSettings strips house keys + forces the RCE flags off, so what
  * the tenant stored can only ever be their own legitimate configuration.
  */
-async function writeSettingsForChild(tenant: `0x${string}`, seenBotTokens?: Set<string>): Promise<void> {
+async function writeSettingsForChild(
+  tenant: `0x${string}`,
+  seenBotTokens?: Set<string>,
+): Promise<MerrymenSettings | null> {
   try {
     const settings = await getSettingsStore().get(tenant);
-    if (!settings) return;
+    if (!settings) return null;
     if (seenBotTokens && settings.telegramBotToken && dedupeBotToken(settings, seenBotTokens)) {
       log(`${tenant}: telegram bot token already claimed by another tenant — telegram disabled for this child`);
     }
     const home = childHome(tenant);
     mkdirSync(home, { recursive: true });
     writeFileSync(path.join(home, "settings.json"), JSON.stringify(settings, null, 2), { encoding: "utf8", mode: 0o600 });
+    // Returned so the caller can size the watchdog to the tick THIS child will
+    // read. Nothing else about the write changes.
+    return settings;
   } catch {
     /* best-effort — the child falls back to defaults */
+    return null;
+  }
+}
+
+/**
+ * Write the tenant's accounting anchor into its child's home.
+ *
+ * WHY THIS RUNS EVEN WHEN IT FAILS. The child's home survives a child restart
+ * but not a deploy, so a file left over from a previous pass can be both
+ * present and wrong. Writing the `unknown` arm on failure REPLACES that
+ * leftover with an explicit "the parent could not establish this", which the
+ * child fails closed on. Skipping the write on failure would leave the stale
+ * file in place and let a child resume from figures nobody re-verified — the
+ * strictly less safe of the two options, so the write is unconditional.
+ *
+ * Best-effort in the sense that it never throws and never blocks a spawn: an
+ * agent that cannot get an anchor still arms, still runs its risk controls and
+ * still reconciles. What it does not do is book contributions.
+ */
+async function writeBootstrapForChild(
+  tenant: `0x${string}`,
+  /**
+   * The tenant's SMART ACCOUNT — the key every ledger table is actually on, and
+   * the identity the child checks the file against. The tenant address names
+   * WHOSE anchor this is; the smart account names WHICH BOOK it describes, and
+   * they are not the same string.
+   */
+  smartAccount: `0x${string}`,
+  shared?: Db,
+): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  let accounting: TenantBootstrapState["accounting"];
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    // No shared database configured at all. That is a deployment fact, not a
+    // fact about the tenant, and it is reported as such rather than as an
+    // empty account.
+    accounting = { kind: "unknown", why: "no DATABASE_URL on the orchestrator", observedAt: now };
+  } else {
+    try {
+      accounting = await deriveBootstrapAccounting(shared ?? (await makePgDb(url)), smartAccount, now);
+    } catch (e) {
+      accounting = { kind: "unknown", why: e instanceof Error ? e.message : String(e), observedAt: now };
+    }
+  }
+
+  const state: TenantBootstrapState = {
+    schemaVersion: BOOTSTRAP_SCHEMA_VERSION,
+    // THE SMART ACCOUNT IS THE IDENTITY THE CHILD CHECKS, because it is the key
+    // the figures below were read under. Stamping the tenant here while the
+    // child compares against its smart account made every hosted anchor read as
+    // malformed — the mechanism was inert, and inert in the safe direction only
+    // by luck. The owner address rides along for provenance.
+    tenantId: smartAccount.toLowerCase(),
+    generatedAt: now,
+    accounting,
+    // `outstandingOps` is deliberately NOT written. The field is reserved in
+    // the schema so adding it later is not a break; populating it here would
+    // change which blocks a child scans, which is a different change.
+  };
+
+  try {
+    const home = childHome(tenant);
+    mkdirSync(home, { recursive: true });
+    writeFileSync(path.join(home, BOOTSTRAP_FILE), JSON.stringify(state, null, 2), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    if (accounting.kind === "unknown") {
+      log(`${tenant}: accounting anchor UNKNOWN — ${accounting.why} (child will not book contributions)`);
+    }
+  } catch (e) {
+    log(`${tenant}: could not write ${BOOTSTRAP_FILE} — ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -237,17 +386,28 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     log(`${tenant}: no healthy lease — not spawning (another replica may hold it)`);
     return;
   }
-  if (!(await writeGrantForChild(tenant))) {
+  const smartAccount = await writeGrantForChild(tenant);
+  if (!smartAccount) {
     log(`${tenant}: no grant in the store — not spawning`);
     return;
   }
-  await writeSettingsForChild(tenant);
+  // The settings the child will actually read, so the watchdog can size its
+  // patience to the tick that child will actually run. `tickSeconds` resolves
+  // file-before-env (settings.ts), and the file is what we just wrote.
+  const settings = await writeSettingsForChild(tenant);
+  // BEFORE spawn(), not after. The child reads its anchor while arming, and an
+  // anchor that lands a moment later would be read as absent — which fails
+  // closed, so the agent would run with contributions marked unknown for no
+  // reason other than a race.
+  await writeBootstrapForChild(tenant, smartAccount);
+  const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
+  const staleSec = staleThresholdSec(tickSeconds);
   const proc = spawn(
     process.execPath,
     [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
     { cwd: ROOT, env: childEnv(tenant), stdio: ["ignore", "pipe", "pipe"] },
   );
-  const child: Child = { proc, tenant, startedAt: Date.now(), restarts };
+  const child: Child = { proc, tenant, startedAt: Date.now(), restarts, staleSec };
   children.set(tenant, child);
   const tag = `[${tenant.slice(0, 8)}]`;
   const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
@@ -261,7 +421,17 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   pipe(proc.stderr, process.stderr);
 
   proc.on("exit", (code) => {
-    children.delete(tenant);
+    // ONLY IF THIS ENTRY IS STILL OURS.
+    //
+    // `children.delete(tenant)` unconditionally was a double-spawn generator.
+    // The watchdog deletes, SIGKILLs, and spawns a replacement which installs a
+    // NEW entry under the same key — and then this handler, running for the
+    // corpse, deleted the replacement. A second later the `!children.has`
+    // guard below was true and a SECOND child spawned. The first replacement
+    // was orphaned: still ticking, still hitting the RPC, invisible to the
+    // watchdog, never mirrored, sharing one home and one sqlite file with its
+    // own replacement. Measured: 105 spawns against 61 exits in one window.
+    if (children.get(tenant) === child) children.delete(tenant);
     if (stopping) return;
     log(`${tenant} exited (${code})`);
     // A long healthy run that then dies is a fresh incident, not a crash loop.
@@ -277,10 +447,25 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       if (!stopping && !children.has(tenant)) void spawnChild(tenant, freshRestarts);
     }, delay);
   });
-  log(`${tenant} spawned (pid ${proc.pid})`);
+  log(`${tenant} spawned (pid ${proc.pid}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
 }
 
-/** Stop a child hard. SIGTERM first for a clean exit, then SIGKILL — a wedged tick only the OS can reclaim. */
+/** The fleet-wide tick, for a tenant whose own settings do not name one. */
+function envTickSeconds(): number {
+  const raw = Number(process.env.MERRYMEN_TICK_SECONDS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 60;
+}
+
+/**
+ * Stop a child hard. SIGTERM first for a clean exit, then SIGKILL — a wedged
+ * tick only the OS can reclaim.
+ *
+ * The delete below is now load-bearing in the way this function always claimed:
+ * the exit handler compares identity, so removing our entry first genuinely
+ * does mark the exit as intentional. Before that comparison existed, this
+ * survived only because `releaseLease` happened to win a race against the
+ * handler's 1s respawn timer.
+ */
 function killChild(tenant: string): void {
   const child = children.get(tenant);
   if (!child) return;
@@ -491,6 +676,510 @@ async function fleetHealth(): Promise<void> {
   }
 }
 
+/**
+ * Dump the accounting diagnosis to the log, once, at boot, when asked.
+ *
+ * OFF BY DEFAULT and read-only. It exists because the shared Postgres is
+ * reachable only from inside Railway's private network — `DATABASE_URL` names
+ * `postgres.railway.internal` and there is no public proxy — so the spike script
+ * beside it cannot run from a laptop. This process is already in there.
+ *
+ * A fleet-wide financial dump is not something a routine boot should emit, hence
+ * the flag; and it must never be able to stop the fleet arming, hence the catch.
+ */
+async function runAccountingDiagnosisIfAsked(): Promise<void> {
+  if ((process.env.MERRYMEN_ACCOUNTING_DIAGNOSE ?? "").trim() !== "1") return;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("accounting diagnosis asked for, but there is no DATABASE_URL");
+    return;
+  }
+  try {
+    const shared = await makePgDb(url);
+    const all = await diagnoseAccounting(shared);
+    for (const line of diagnosisLines(all)) log(`diag| ${line}`);
+  } catch (e) {
+    log(`accounting diagnosis failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * The DRY RUN: chain truth joined to the ledger, and the exact mutation it
+ * implies. Read-only, off by default, and it writes nothing anywhere.
+ *
+ * It lives here rather than in the spike beside it for the same reason the
+ * diagnosis does — the shared Postgres answers only from inside Railway's
+ * private network — and because this half additionally needs the RPC, which the
+ * orchestrator already has configured.
+ */
+/**
+ * WHERE THE GAS WENT, for one or more named accounts. READ ONLY.
+ *
+ * `MERRYMEN_GAS_AUDIT=0xabc,0xdef` (or `all`). Only SELECTs, and the module it
+ * calls has no database handle at all — it is handed rows and returns strings,
+ * which is the same shape `accounting-preview` uses and for the same reason:
+ * a reporting path that cannot write cannot be argued with.
+ *
+ * Named accounts rather than a fleet default because this prints per-operation
+ * evidence, and `railway logs` is a 503-line snapshot shared with a mirror that
+ * writes ~200 lines a minute. A report that does not fit is not a report.
+ */
+async function runGasAuditIfAsked(): Promise<void> {
+  const want = (process.env.MERRYMEN_GAS_AUDIT ?? "").trim();
+  if (!want) return;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("gas audit asked for, but there is no DATABASE_URL");
+    return;
+  }
+  try {
+    const shared = await makePgDb(url);
+    const wanted = want
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    const all = wanted.includes("all");
+
+    const agents = (await shared
+      .prepare("SELECT smart_account, COALESCE(epoch, 1) AS epoch FROM agents")
+      .all()) as unknown as { smart_account: string; epoch: number }[];
+
+    for (const a of agents) {
+      const account = String(a.smart_account ?? "");
+      const key = account.toLowerCase();
+      if (!all && !wanted.some((w) => key.startsWith(w))) continue;
+      const epoch = Number(a.epoch ?? 1);
+
+      // OLDEST FIRST, and that ordering is load-bearing: "the first landed op"
+      // is where any account-deployment cost lands, and a descending sort would
+      // attribute it to the most recent trade instead.
+      const rows = (await shared
+        .prepare(
+          `SELECT id, kind, target, amount_usdg, status, user_op_hash, tx_hash,
+                  gas_wei, sponsored_gas_wei, gas_usdg, gas_units, epoch, created_at
+             FROM trades
+            WHERE LOWER(agent_id) = ? AND epoch = ?
+            ORDER BY created_at ASC, id ASC`,
+        )
+        .all(key, epoch)) as unknown as Record<string, unknown>[];
+
+      const ops: GasOp[] = rows.map((r) => ({
+        id: Number(r.id ?? 0),
+        kind: String(r.kind ?? ""),
+        target: String(r.target ?? ""),
+        amountUsdg: Number(r.amount_usdg ?? 0),
+        status: String(r.status ?? ""),
+        userOpHash: r.user_op_hash === null || r.user_op_hash === undefined ? null : String(r.user_op_hash),
+        txHash: r.tx_hash === null || r.tx_hash === undefined ? null : String(r.tx_hash),
+        gasWei: r.gas_wei === null || r.gas_wei === undefined ? null : String(r.gas_wei),
+        gasUnits: r.gas_units === null || r.gas_units === undefined ? null : String(r.gas_units),
+        sponsoredGasWei:
+          r.sponsored_gas_wei === null || r.sponsored_gas_wei === undefined ? null : String(r.sponsored_gas_wei),
+        gasUsdg: r.gas_usdg === null || r.gas_usdg === undefined ? null : Number(r.gas_usdg),
+        epoch: Number(r.epoch ?? 1),
+        createdAt: Number(r.created_at ?? 0),
+      }));
+
+      if (ops.length === 0) {
+        log(`gas| ${account} epoch ${epoch} — no operations recorded`);
+        continue;
+      }
+      for (const line of gasAuditLines(decomposeGas(account, epoch, ops))) log(`gas| ${line}`);
+    }
+  } catch (e) {
+    log(`gas audit failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * WHICH AGENTS ARE WORTH SHADOWING. READ ONLY.
+ *
+ * `MERRYMEN_COHORT_VET=1`. Prints one block per agent so a cohort is chosen
+ * from evidence rather than from balances — see cohort-vetting.ts for why the
+ * balance is the wrong signal.
+ */
+async function runCohortVettingIfAsked(): Promise<void> {
+  if ((process.env.MERRYMEN_COHORT_VET ?? "").trim() !== "1") return;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("cohort vetting asked for, but there is no DATABASE_URL");
+    return;
+  }
+  try {
+    const shared = await makePgDb(url);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const agents = (await shared
+      .prepare(
+        `SELECT smart_account, name, COALESCE(epoch, 1) AS epoch, mode, beat_at, contributions_known
+           FROM agents WHERE smart_account NOT LIKE 'rh:%'`,
+      )
+      .all()) as unknown as Record<string, unknown>[];
+
+    const verdicts: CandidateVerdictDetail[] = [];
+    for (const a of agents) {
+      const account = String(a.smart_account ?? "");
+      const key = account.toLowerCase();
+      const epoch = Number(a.epoch ?? 1);
+
+      const flows = (await shared
+        .prepare(
+          `SELECT COUNT(*) AS n,
+                  COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+             FROM flows WHERE LOWER(agent_id) = ? AND epoch = ?`,
+        )
+        .get(key, epoch)) as { n: number; net: number } | undefined;
+
+      // The same evidence `legacyRowsInEpoch` uses, asked of the shared copy.
+      const legacy = (await shared
+        .prepare(
+          `SELECT (SELECT COUNT(*) FROM trades WHERE LOWER(agent_id) = ? AND epoch = ? AND created_at < ?)
+                + (SELECT COUNT(*) FROM equity WHERE LOWER(agent_id) = ? AND epoch = ? AND at < ?) AS n`,
+        )
+        .get(key, epoch, ACCOUNTING_FIXED_AT, key, epoch, ACCOUNTING_FIXED_AT)) as { n: number } | undefined;
+
+      const pos = (await shared
+        .prepare(
+          `SELECT symbol, token, value_usdg, price_stale, price_source, updated_at
+             FROM positions WHERE LOWER(agent_id) = ?`,
+        )
+        .all(key)) as unknown as Record<string, unknown>[];
+
+      // The newest equity row still carries the positions total, so an empty
+      // book can be told from one the mirror has not repopulated yet.
+      const eq = (await shared
+        .prepare(`SELECT positions_usdg FROM equity WHERE LOWER(agent_id) = ? ORDER BY at DESC LIMIT 1`)
+        .get(key)) as { positions_usdg: number } | undefined;
+
+      const fills = (await shared
+        .prepare(`SELECT COUNT(*) AS n FROM trades WHERE LOWER(agent_id) = ? AND status = 'landed'`)
+        .get(key)) as { n: number } | undefined;
+      const decisions = (await shared
+        .prepare(`SELECT COUNT(*) AS n FROM decisions WHERE LOWER(agent_id) = ?`)
+        .get(key)) as { n: number } | undefined;
+
+      verdicts.push(
+        vetCandidate(
+          {
+            account,
+            name: String(a.name ?? ""),
+            epoch,
+            mode: a.mode === null || a.mode === undefined ? null : String(a.mode),
+            beatAt: a.beat_at === null || a.beat_at === undefined ? null : Number(a.beat_at),
+            // NO ROWS IS ZERO; NO ANSWER IS NULL. An agent nobody funded has
+            // contributed nothing, which is knowledge. A query that came back
+            // with nothing at all is a question we failed to ask, and the two
+            // must not collapse — one blocks the candidate, the other says we
+            // do not know whether to.
+            netContributionsUsdg: flows === undefined ? null : Number(flows.net ?? 0),
+            legacyRows: Number(legacy?.n ?? 0),
+            positions: pos.map((p) => ({
+              symbol: String(p.symbol ?? ""),
+              token: String(p.token ?? ""),
+              valueUsdg: Number(p.value_usdg ?? 0),
+              // Postgres gives a boolean, sqlite an integer. Both are truthy the
+              // same way, and neither may be read as "fresh" by accident.
+              priceStale: p.price_stale === true || Number(p.price_stale ?? 0) === 1,
+              priceSource: String(p.price_source ?? "unknown"),
+              updatedAt: Number(p.updated_at ?? 0),
+            })),
+            lastEquityPositionsUsdg: eq === undefined ? null : Number(eq.positions_usdg ?? 0),
+            landedTrades: Number(fills?.n ?? 0),
+            decisions: Number(decisions?.n ?? 0),
+          },
+          nowSec,
+        ),
+      );
+    }
+
+    // Best candidates first, so the top of the report is the answer.
+    const rank: Record<string, number> = {
+      READY: 0,
+      "READY-WHEN-MARKET-OPENS": 1,
+      "READY-CANDIDATE-ONLY": 2,
+    };
+    verdicts.sort((x, y) => (rank[x.verdict] ?? 9) - (rank[y.verdict] ?? 9) || y.equityUsdg - x.equityUsdg);
+    for (const line of cohortLines(verdicts)) log(`cohort| ${line}`);
+  } catch (e) {
+    log(`cohort vetting failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * THE SHADOW DATASET. READ ONLY. `MERRYMEN_BRAIN_DATASET=1`.
+ *
+ * Every field is already persisted; this is the only way to read it back.
+ * Shared Postgres is private-network-only and `railway logs` is a 503-line
+ * snapshot a 24-child fleet fills in about a minute, so a cohort collected over
+ * an afternoon is durable in the database and invisible to anyone looking.
+ */
+async function runBrainDatasetIfAsked(): Promise<void> {
+  if ((process.env.MERRYMEN_BRAIN_DATASET ?? "").trim() !== "1") return;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("brain dataset asked for, but there is no DATABASE_URL");
+    return;
+  }
+  try {
+    const shared = await makePgDb(url);
+    const rows = (await shared
+      .prepare(
+        `SELECT d.agent_id, COALESCE(a.name, '') AS name, d.at, d.symbol, d.action, d.size_usdg,
+                d.id, d.reason, d.signals_json
+           FROM decisions d
+           LEFT JOIN agents a ON a.smart_account = d.agent_id
+          WHERE d.source = 'brain-shadow'
+          ORDER BY d.at ASC`,
+      )
+      .all()) as unknown as Record<string, unknown>[];
+
+    const views = rows.map((r) => {
+      let signals: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(String(r.signals_json ?? "{}")) as unknown;
+        if (parsed && typeof parsed === "object") signals = parsed as Record<string, unknown>;
+      } catch {
+        // A row whose blob will not parse is still a decision that happened.
+        // Dropping it would quietly shrink the denominator of every rate below.
+      }
+      return viewRun({
+        agentId: String(r.agent_id ?? ""),
+        agentName: String(r.name ?? ""),
+        at: Number(r.at ?? 0),
+        symbol: r.symbol === null || r.symbol === undefined ? null : String(r.symbol),
+        action: r.action === null || r.action === undefined ? null : String(r.action),
+        sizeUsdg: r.size_usdg === null || r.size_usdg === undefined ? null : Number(r.size_usdg),
+        thesis: r.reason === null || r.reason === undefined ? null : String(r.reason),
+        signals,
+      });
+    });
+    for (const line of datasetLines(views)) log(`data| ${line}`);
+  } catch (e) {
+    log(`brain dataset failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+async function runReconstructionDryRunIfAsked(): Promise<void> {
+  if ((process.env.MERRYMEN_ACCOUNTING_RECONSTRUCT ?? "").trim() !== "1") return;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("reconstruction dry run asked for, but there is no DATABASE_URL");
+    return;
+  }
+  try {
+    const shared = await makePgDb(url);
+    const ledgerAgents = (await shared
+      .prepare("SELECT smart_account, owner_address, epoch, mode, hwm_usdg, contributions_known FROM agents")
+      .all()) as unknown as Record<string, unknown>[];
+
+    // THE ROSTER IS THE GRANT STORE, NOT THE LEDGER.
+    //
+    // The first dry run covered 22 of 24 tenants and could not say what happened
+    // to the other two, because it enumerated `agents` — a table a tenant only
+    // reaches once its child has armed AND mirrored. A tenant missing from the
+    // report is indistinguishable from a tenant the repair found nothing to do
+    // for, and "not in the mutation list" must never be read as "safe".
+    //
+    // So every tenant with a grant gets a plan row. One with no ledger row is
+    // synthesised from its grant and comes out of the planner as exactly what it
+    // is — no chain history, no rows to remove, nothing to do — recorded rather
+    // than absent.
+    const tenantByAccount = new Map<string, string>();
+    const byAccount = new Map<string, Record<string, unknown>>();
+    for (const a of ledgerAgents) byAccount.set(String(a.smart_account ?? "").toLowerCase(), a);
+
+    let rosterOnly = 0;
+    let rosterRead = true;
+    try {
+      const gs = getGrantStore();
+      for (const tenant of await gs.listTenants()) {
+        const g = await gs.get(tenant);
+        const acct = g?.smartAccount ? String(g.smartAccount) : null;
+        if (!acct) {
+          log(`recon| tenant ${tenant} holds a grant with no smart account — it cannot be planned`);
+          continue;
+        }
+        tenantByAccount.set(acct.toLowerCase(), tenant);
+        if (byAccount.has(acct.toLowerCase())) continue;
+        rosterOnly += 1;
+        byAccount.set(acct.toLowerCase(), {
+          smart_account: acct,
+          owner_address: g?.owner ?? null,
+          epoch: 1,
+          mode: null,
+          hwm_usdg: 0,
+          contributions_known: null,
+        });
+      }
+    } catch (e) {
+      // LOUD, and the run continues on the ledger roster alone — but the count
+      // below will then not add up to the fleet, which is the point of printing
+      // both halves rather than just the total.
+      rosterRead = false;
+      log(`recon| GRANT ROSTER UNREADABLE (${e instanceof Error ? e.message : String(e)}) — tenants may be missing`);
+    }
+    const agents = [...byAccount.values()];
+    log(
+      `recon| roster: ${agents.length} account(s) — ${ledgerAgents.length} from the ledger, ` +
+        `${rosterOnly} from the grant store with no ledger row · grant store read ${rosterRead}`,
+    );
+    const flows = (await shared
+      .prepare("SELECT id, agent_id, epoch, direction, amount_usdg, source, tx_hash, at FROM flows")
+      .all()) as unknown as Record<string, unknown>[];
+    const equityRows = (await shared
+      .prepare("SELECT agent_id, epoch, equity_usdg, at FROM equity ORDER BY agent_id, epoch, at DESC, id DESC")
+      .all()) as unknown as Record<string, unknown>[];
+    const equityByAccountEpoch = new Map<string, number>();
+    for (const e of equityRows) {
+      const k = `${String(e.agent_id).toLowerCase()}#${Number(e.epoch ?? 1)}`;
+      if (!equityByAccountEpoch.has(k)) equityByAccountEpoch.set(k, Number(e.equity_usdg ?? 0));
+    }
+
+    // SCAN ONLY WHAT IS BEING REPAIRED.
+    //
+    // A scoped run — MERRYMEN_REPAIR_ACCOUNT naming one account — was still
+    // sweeping the chain for all 24, which is both pointless and actively
+    // harmful: the sweep shares an RPC with 24 live children, and the extra
+    // load is what earns the rate limits that mark coverage short. The canary's
+    // first commit attempt fail-closed for exactly that reason — the repair
+    // refused to write because a window it did not need had gone unread.
+    //
+    // Narrowing the scan is not a shortcut around the completeness rule. It
+    // makes the rule easier to satisfy honestly: one account is two getLogs
+    // calls rather than a fleet sweep, so the answer for the account under
+    // repair no longer depends on windows belonging to accounts nobody asked
+    // about. The ROSTER still enumerates every tenant from the plan, so a
+    // scoped run still reports 24/24 — the accounts outside the scope simply
+    // carry no chain evidence and say so.
+    const scopeTo = new Set(
+      (process.env.MERRYMEN_REPAIR_ACCOUNT ?? "")
+        .split(",")
+        .map((a) => a.trim().toLowerCase())
+        .filter((a) => a.startsWith("0x")),
+    );
+    const allAccounts = agents.map((a) => String(a.smart_account)).filter((a) => a.startsWith("0x"));
+    const accounts = scopeTo.size ? allAccounts.filter((a) => scopeTo.has(a.toLowerCase())) : allAccounts;
+    if (scopeTo.size && accounts.length === 0) {
+      log("recon| MERRYMEN_REPAIR_ACCOUNT matches no account in the roster — nothing to scan");
+    }
+    if (scopeTo.size > accounts.length) {
+      // LOUD. A named account that is not in the roster will silently do
+      // nothing, and an operator reading "repaired 5" after naming 6 has no
+      // way to tell which one never existed.
+      log(
+        `recon| WARNING: ${scopeTo.size} account(s) named but only ${accounts.length} found in the roster`,
+      );
+    }
+    const rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
+    let rpcId = 1;
+    const rpc = async (method: string, params: unknown[]): Promise<unknown> => {
+      const r = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method, params }),
+      });
+      const j = (await r.json()) as { result?: unknown; error?: { message?: string } };
+      if (j.error) throw new Error(j.error.message ?? "rpc error");
+      return j.result ?? null;
+    };
+
+    const usdgToken = String(CASH.USDG);
+    const head = BigInt((await rpc("eth_blockNumber", [])) as string);
+    log(
+      `recon| scanning ${accounts.length} of ${allAccounts.length} account(s) to block ${head}` +
+        (scopeTo.size ? ` — scoped to ${accounts.length} named account(s)` : ""),
+    );
+    const chain = await scanFleetCapital(rpc, {
+      accounts,
+      usdgToken,
+      fromBlock: 0n,
+      toBlock: head,
+      log: (m) => log(`recon| ${m}`),
+    });
+
+    // Current on-chain cash, one call each — the figure a NAV is built from.
+    const onchainCash = new Map<string, number>();
+    for (const a of accounts) {
+      try {
+        const hex = (await rpc("eth_call", [
+          { to: usdgToken, data: "0x70a08231" + a.toLowerCase().replace(/^0x/, "").padStart(64, "0") },
+          "latest",
+        ])) as string;
+        onchainCash.set(a.toLowerCase(), Number(BigInt(hex)) / 1e6);
+      } catch {
+        /* left absent, which renders as unknown rather than as zero */
+      }
+    }
+
+    const plans = planReconstruction({ agents, flows, equityByAccountEpoch, chain, onchainCash, tenantByAccount });
+
+    // ONE REPORT, NOT TWO — AND IT HAS TO FIT IN THE WINDOW YOU CAN READ IT IN.
+    //
+    // `railway logs` is a 503-line snapshot rather than a stream (measured: it
+    // returns 503 lines and does not grow), and the ledger mirror alone writes
+    // ~200 lines a minute. The old dump was ~12 lines per account unconditionally
+    // — 288 for this fleet — and the preview then added its own on top, so the
+    // combined burst pushed itself out of the window and nobody could read
+    // either. A report that cannot be retrieved is not a report.
+    //
+    // So when a preview is asked for, IT is the report: one roster line per
+    // tenant plus the four-part block for the account under examination. The
+    // older per-account dump stays for a bare reconstruction with no preview,
+    // which is the only caller that still wants it.
+    if (!previewRequested(process.env)) {
+      for (const line of reconstructionLines(plans)) log(`recon| ${line}`);
+    }
+    await runRepairIfAsked(shared, plans);
+  } catch (e) {
+    log(`reconstruction dry run failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * The preview, and — only when explicitly asked — the mutation.
+ *
+ * Deliberately downstream of the plan rather than a separate entry point, so
+ * whatever runs is acting on a plan just derived from the live database in this
+ * process. A stale preview is worse than none, and the repair's "the table
+ * changed since the plan was built" check needs an honest comparison.
+ */
+async function runRepairIfAsked(shared: Db, plans: readonly AccountPlan[]): Promise<void> {
+  const opts = parseRepairOptions(process.env);
+  if (!opts) return;
+
+  // THE PREVIEW IS ALWAYS PRINTED, in every mode. An operator reading a commit
+  // run's output should not have to go and find the dry run it corresponds to.
+  const previews = runPreview(plans, { accounts: opts.accounts });
+  log(
+    `preview| run ${opts.runId} · mode ${opts.mode} · ` +
+      `accounts ${opts.accounts.length ? opts.accounts.length : "ALL"} · resume ${opts.resume}`,
+  );
+  for (const p of previews) {
+    if (!p.selected) continue;
+    const plan = plans.find((x) => x.smartAccount === p.account)!;
+    for (const line of accountPreviewLines(plan, p)) log(`preview| ${line}`);
+  }
+  for (const line of rosterLines(previews)) log(`preview| ${line}`);
+
+  if (opts.mode === "dry-run") {
+    log("preview| dry run — nothing was written");
+    return;
+  }
+  if (opts.mode === "commit" && opts.accounts.length === 0) {
+    // The accounts being mutated are always named. runRepair refuses this too;
+    // saying it here as well means the log shows WHY nothing happened rather
+    // than just showing nothing happening.
+    log("repair| refusing a commit with no named accounts — set MERRYMEN_REPAIR_ACCOUNT");
+    return;
+  }
+
+  const chainId = Number(process.env.MERRYMEN_CHAIN_ID ?? 4663);
+  const results = await runRepair(shared, plans, opts, chainId, (r) =>
+    log(`repair| ${r.account.slice(0, 10)} ${r.stage} — ${r.why}`),
+  );
+  for (const line of repairLines(opts.runId, opts.mode, results)) log(`repair| ${line}`);
+}
+
+
 async function mirrorLedgers(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url || children.size === 0) return;
@@ -556,6 +1245,72 @@ async function mirrorLedgers(): Promise<void> {
     } finally {
       handle.close();
     }
+    // ── THE WIRE ────────────────────────────────────────────────────────────
+    //
+    // Materialise the theses of the agents this owner follows into the child's
+    // own home, beside grant.json and settings.json. Runs on the mirror's clock
+    // rather than on its own, for two reasons: the shared handle is already open
+    // here (one connection, not two), and the rows being read were written by
+    // the pass immediately above, so a peer's newest thinking is at most one
+    // cycle old rather than two.
+    //
+    // AFTER the mirror and outside its try, deliberately. A tenant whose mirror
+    // stalled should still receive peers, and a peer write that fails must not
+    // be mistaken for a mirror failure — they have different remedies and the
+    // log lines say different things.
+    // `children` is keyed by the grant store's own tenant list, which is
+    // 0x-shaped by construction — the same cast writeSettingsForChild takes.
+    await writePeersFor(tenant as `0x${string}`, shared);
+  }
+}
+
+/**
+ * Write one child's peers.json. Best-effort, and silent when there is nothing.
+ *
+ * An owner with no follows gets an EMPTY FILE rather than no file. The desk's
+ * tool registration keys on whether peers exist, so "nobody wired in" and "the
+ * orchestrator has not run yet" have to be distinguishable — and only one of
+ * them should hide the tool.
+ */
+async function writePeersFor(tenant: `0x${string}`, shared: Db): Promise<void> {
+  try {
+    const edges = await getFollowStore().following(tenant);
+    const theses = await peerThesesForSlugs(
+      shared,
+      edges.slice(0, MAX_FOLLOWS).map((e) => e.target),
+    );
+
+    // THE AGENT'S OWN THESES, from the durable copy.
+    //
+    // The child holds a `decisions` table and could read this itself. It must
+    // not: that sqlite is wiped by every redeploy, so an agent reading its own
+    // memory from it is permanently having its first thought. Shared Postgres
+    // is the durable copy and the child cannot reach it — `CHILD_SECRET_STRIP`
+    // removes `DATABASE_URL` on purpose — so it is materialised here, through
+    // the same gate, the same file and the same atomic write as the peers.
+    //
+    // `readPeerTheses` is reused rather than re-queried: memory and publication
+    // must not be able to disagree about what this agent said.
+    let own: PublicThesis[] = [];
+    try {
+      const id = await getIdentityStore().get(tenant);
+      if (id?.accounts.length) own = await readPeerTheses(shared, id.accounts);
+    } catch {
+      // An agent with no identity yet has no published theses to remember, and
+      // a peer file is still worth writing without them.
+    }
+
+    writePeersForChild(childHome(tenant), { at: Math.floor(Date.now() / 1000), theses, own });
+    if (theses.length > 0 || own.length > 0) {
+      log(
+        `wire: ${tenant} +${theses.length} peer thesis/theses from ${edges.length} follow(s), ` +
+          `+${own.length} of its own`,
+      );
+    }
+  } catch (e) {
+    // Never fatal. The wire is additional evidence; a child with a stale or
+    // absent peer file trades exactly as it did before the feature existed.
+    log(`wire: ${tenant} failed — ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -566,9 +1321,11 @@ export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
     const ageSec = (Date.now() - child.startedAt) / 1000;
     if (ageSec < WATCHDOG_GRACE_SEC) continue; // give it time to write its first beat
     const beat = heartbeatAt(tenant);
-    const stale = beat === null || nowSec - beat > WATCHDOG_STALE_SEC;
+    const stale = beat === null || nowSec - beat > child.staleSec;
     if (stale) {
-      log(`${tenant} heartbeat stale (${beat === null ? "never beat" : `${nowSec - beat}s`}) — SIGKILL + restart`);
+      log(
+        `${tenant} heartbeat stale (${beat === null ? "never beat" : `${nowSec - beat}s`} > ${child.staleSec}s) — SIGKILL + restart`,
+      );
       const restarts = child.restarts;
       children.delete(tenant);
       try {
@@ -596,6 +1353,13 @@ export async function runOrchestrator(): Promise<void> {
     process.exit(1);
   }
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
+  await runAccountingDiagnosisIfAsked();
+  await runReconstructionDryRunIfAsked();
+  await runGasAuditIfAsked();
+  // The cohort report is NOT here. It reads `positions`, which the mirror
+  // empties and refills per agent, so at startup it would be reading a table
+  // this very deploy just cleared. It runs from the loop instead — see
+  // COHORT_VET_AFTER_PASSES.
 
   const stop = () => {
     stopping = true;
@@ -625,6 +1389,18 @@ export async function runOrchestrator(): Promise<void> {
       await reconcile();
       watchdog();
       await mirrorLedgers();
+      // AFTER THE MIRROR HAS SETTLED, NOT AT STARTUP, and once.
+      //
+      // The mirror REPLACES positions per agent, so between a child restarting
+      // and its first tick the shared table is empty for an agent that plainly
+      // has holdings. Run at startup — where this used to be — every reading
+      // was of a table the mirror had just emptied, and the report announced
+      // that the fleet held nothing. It is worth more late than wrong early.
+      cohortPasses += 1;
+      if (cohortPasses === COHORT_VET_AFTER_PASSES) {
+        await runCohortVettingIfAsked();
+        await runBrainDatasetIfAsked();
+      }
       await ferryCommands2();
       await fleetHealth();
     }

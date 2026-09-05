@@ -28,7 +28,7 @@
  */
 import { TRADEABLE_CHAIN_ID } from "./preflight";
 
-export type RefuseRule = "not-armed" | "no-executor" | "wrong-chain" | "no-cash";
+export type RefuseRule = "not-armed" | "dead-policy" | "no-executor" | "wrong-chain" | "no-cash";
 
 export type ExecMode =
   | { mode: "paper" }
@@ -50,6 +50,22 @@ export interface ExecInputs {
    * only a read zero counts.
    */
   cashUsdg: bigint | null;
+  /**
+   * Does the signature seal a policy contract with no bytecode on this chain?
+   *
+   * A GRANT CAN BE DEAD ON ARRIVAL, AND NOTHING DOWNSTREAM CAN TELL. Every key
+   * signed before 2026-08-30 installed a rate-limit policy whose contract has
+   * zero bytes on 4663 and 46630 alike. Kernel calls `checkUserOpPolicy`
+   * expecting a uint256; a call to a codeless address succeeds with empty
+   * returndata, so validation fails — every operation, forever.
+   *
+   * This is the only leg here that funding, a bundler key and a chain switch all
+   * fail to fix, because a signature is frozen. It is also the only one that was
+   * previously detected and then ignored: the arm path wrote one `err` and
+   * carried on, so the agent armed, priced, and refused every trade for a reason
+   * that named nothing.
+   */
+  deadPolicy: boolean;
   /** Permission to simulate. NOT a request to: it never moves a working agent. */
   paperTradingEnabled: boolean;
 }
@@ -57,7 +73,9 @@ export interface ExecInputs {
 /** Could this agent put a real order on-chain right now? */
 export function canTradeForReal(a: ExecInputs): boolean {
   const readAsBroke = a.cashUsdg !== null && a.cashUsdg === 0n;
-  return a.armed && a.executor && a.chainId === TRADEABLE_CHAIN_ID && !readAsBroke;
+  return (
+    a.armed && a.executor && a.chainId === TRADEABLE_CHAIN_ID && !readAsBroke && !a.deadPolicy
+  );
 }
 
 /**
@@ -79,9 +97,12 @@ export function execModeOf(a: ExecInputs): ExecMode {
   // the owner has allowed it — that is the whole point of paper.
   if (a.paperTradingEnabled) return { mode: "paper" };
 
-  // Paper is off, so say which leg failed. Ordered most-fundamental first: a
-  // missing signer cannot be fixed by funding, and a dead chain cannot be fixed
-  // by either.
+  // Paper is off, so say which leg failed. Ordered most-fundamental first, by
+  // what the remedy costs: a dead policy is fixable ONLY by re-signing — not by
+  // funding, not by a bundler key, not by switching chain — so it is named
+  // ahead of all three. A missing signer cannot be fixed by funding, and a dead
+  // chain cannot be fixed by either.
+  if (a.deadPolicy) return { mode: "refuse", rule: "dead-policy" };
   if (!a.executor) return { mode: "refuse", rule: "no-executor" };
   if (a.chainId !== TRADEABLE_CHAIN_ID) return { mode: "refuse", rule: "wrong-chain" };
   return { mode: "refuse", rule: "no-cash" };

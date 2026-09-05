@@ -28,6 +28,8 @@
  * its own — never in the trading tick.
  */
 
+import { readBoundedJson } from "../bounded-read";
+
 const GECKO_BASE = "https://api.geckoterminal.com/api/v2";
 
 /** The network slug for Robinhood Chain (4663) in GeckoTerminal's namespace. */
@@ -273,7 +275,12 @@ export async function fetchGeckoPoolsResult(
       signal: controller.signal,
     });
     if (!res.ok) return { pools: [], failed: true };
-    const body = (await res.json()) as { data?: unknown[] };
+    // Bounded: an unbounded read hands a third party this worker's memory
+    // ceiling. A refusal reads as `failed`, which is already the "we could not
+    // learn anything" branch — never as an empty market.
+    const read = await readBoundedJson<{ data?: unknown[] }>(res);
+    if (!read.ok) return { pools: [], failed: true };
+    const body = read.value;
     // A body with no `data` array is a shape we do not understand, not an empty
     // market. An empty `data` array IS an empty market, and reads as one.
     if (!Array.isArray(body?.data)) return { pools: [], failed: true };

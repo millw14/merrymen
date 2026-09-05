@@ -13,6 +13,9 @@ import { wrapSqlite, makePgDb, type Db } from "./db";
 // The one definition of a flow's identity. Imported rather than restated so
 // the reader and the writer cannot disagree about what makes a flow unique.
 import { flowKey } from "./deposit-log";
+// The paper/live boundary. A rule rather than a convention, enforced at the one
+// function every flow writer passes through — see addFlow.
+import { admitCapitalFlow, tradingModeOf, type TradingMode } from "./paper-boundary";
 
 let driver: Db | null = null;
 
@@ -98,16 +101,22 @@ const SQLITE_SCHEMA = `
     -- and positions.price_source. The three are not equally good evidence:
     --   'chain-log'       a Transfer log naming this account. Exact, has a tx.
     --   'transfer-intent' our own outbound transfer. Exact, has a tx.
+    --   'epoch-carry'     the closing equity of the epoch just closed, bridged
+    --                     forward as the new one's opening balance. No tx, but
+    --                     not guesswork either: it is a deterministic function of
+    --                     a figure already in the journal, and it is CHECKABLE
+    --                     against the prior epoch's final equity mark.
     --   'inferred'        a cash change no fill explains. Honest guesswork; only
     --                     ever recorded when NO trade ran in the interval, so it
     --                     cannot be confused with a fill, and it carries no tx.
-    -- An audit that needs a chain-verifiable figure keeps the first two.
+    -- An audit that needs a chain-verifiable figure keeps the first two. One that
+    -- needs a SUPPORTABLE figure keeps the first three; see accounting-scope.ts.
     CREATE TABLE IF NOT EXISTS flows (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       agent_id TEXT NOT NULL,
       direction TEXT NOT NULL,       -- 'in' | 'out'
       amount_usdg REAL NOT NULL,     -- always positive; direction carries the sign
-      tx_hash TEXT,                  -- null only when source = 'inferred'
+      tx_hash TEXT,                  -- null for 'inferred' and 'epoch-carry'
       block_number INTEGER,
       source TEXT NOT NULL,
       at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -375,6 +384,12 @@ const SQLITE_ALTERS: string[] = [
     // NET of it. NULL means the ETH price was refused at the time — unpriced,
     // which is a different fact from free, and reported as such.
     "ALTER TABLE trades ADD COLUMN gas_usdg REAL",
+    // Gas UNITS the EntryPoint charged. wei = units x price, and the two move
+    // for different reasons: an op costs more because it did more work, or
+    // because the block was busy. The canary saw 0.330-0.610 gwei across four
+    // ops, so a setup-vs-steady split derived from wei alone would read a
+    // doubling of the base fee as an expensive operation. Units are stable.
+    "ALTER TABLE trades ADD COLUMN gas_units TEXT",
     // Where a Pons launch actually trades. A pre-graduation token has NO pool
     // at all — it lives on its own bonding curve — so without this the token is
     // recorded and then unreachable: there is no tier-scan fallback the way
@@ -446,6 +461,123 @@ const SQLITE_ALTERS: string[] = [
     // (settings-store.ts), and a public page must never decrypt a tenant to render
     // a name.
     "ALTER TABLE agents ADD COLUMN x_handle TEXT",
+    // ── WHAT THE BOOK IS ALLOWED TO CLAIM, MADE DURABLE ──────────────────
+    //
+    // `PortfolioQuality` existed only inside the worker's tick closure. Nothing
+    // wrote it anywhere, so no other tier could read it: the web computed five
+    // independent, disagreeing answers to "may I publish a P&L", none of which
+    // consulted whether the contributions underneath were evidence or guesswork.
+    // The one durable trace was an English sentence in an `events` row.
+    //
+    // These columns are that signal, on the table the mirror already carries to
+    // the shared database. NULL means never assessed, which is not the same as
+    // false — an agent that has not armed since this shipped has made no claim,
+    // and a reader must show unknown rather than assume either answer.
+    "ALTER TABLE agents ADD COLUMN contributions_known INTEGER",
+    // The one-phrase reason, so a surface can say WHY rather than just refusing.
+    "ALTER TABLE agents ADD COLUMN contributions_why TEXT",
+    // 'net' | 'gross' | 'unknown'. Gas leaves the account in ETH and never enters
+    // equity, so a P&L that could not price it is GROSS — and on a small book
+    // that is the difference between -0.13 and -6.65 USDG. A percentage printed
+    // without this qualification is not a performance figure.
+    "ALTER TABLE agents ADD COLUMN gas_accounting TEXT",
+    // Unix seconds of the assessment. A quality flag with no timestamp cannot be
+    // told from a stale one, and stale quality is exactly what a redeploy leaves.
+    "ALTER TABLE agents ADD COLUMN quality_at INTEGER",
+    // ── CHAIN-DERIVED FLOWS CANNOT BE IMPORTED TWICE ─────────────────────
+    //
+    // A chain-log row's identity is the LOG that produced it, not the row: the
+    // same Transfer re-read by a second scan is the same deposit, and inserting
+    // it again doubles an owner's recorded capital. `flows` has no unique key at
+    // all — which is how the mirror's cursor rewind was able to re-copy a whole
+    // child ledger into it — so the repair and the scanner both need this before
+    // either may write.
+    //
+    // The chain id is part of the identity because a tx hash is only unique
+    // WITHIN a chain, and this codebase runs mainnet 4663 and testnet 46630
+    // against the same schema.
+    "ALTER TABLE flows ADD COLUMN chain_id INTEGER",
+    // ── NORMALISE BEFORE CONSTRAINING, in this order and not the other ──────
+    //
+    // Rows written before the identity existed carry a NULL chain and whatever
+    // case the RPC happened to return the hash in. Both defeat the index — NULLs
+    // are distinct in a unique index on either engine, and 0xAB… is not 0xab… —
+    // so an old row and a new one naming the SAME log would sit side by side,
+    // both sourced 'chain-log', and the owner's deposit would be counted twice.
+    //
+    // The chain comes from the agent's own grant rather than from config,
+    // because that is the chain the transaction was actually on.
+    "UPDATE flows SET tx_hash = LOWER(tx_hash) WHERE tx_hash IS NOT NULL AND tx_hash <> LOWER(tx_hash)",
+    `UPDATE flows SET chain_id = (SELECT a.chain_id FROM agents a WHERE a.smart_account = flows.agent_id)
+       WHERE chain_id IS NULL AND tx_hash IS NOT NULL`,
+    // PARTIAL — AND NOT FOR THE REASON AN EARLIER DRAFT OF THIS COMMENT GAVE.
+    //
+    // It said a plain unique index here would "collapse every inferred row into
+    // one and silently delete the legacy history". That is wrong twice over, and
+    // the correct fact is stated eleven lines above: NULLs are DISTINCT in a
+    // unique index on both SQLite and Postgres. So a non-partial index over
+    // these columns creates cleanly over rows whose tx_hash is NULL, keeps every
+    // one of them, and still admits another identical row. And a unique index
+    // never deletes anything on creation in any case — it either builds or
+    // fails to build.
+    //
+    // WHAT THE PREDICATE ACTUALLY BUYS is therefore smaller and worth stating
+    // honestly: it keeps the index off rows that could never be constrained by
+    // it, and it makes the intent legible — this constraint is about LOGS. For
+    // the 363 rows in the hosted table it is behaviourally identical to no
+    // predicate at all.
+    //
+    // WHICH LEAVES A HOLE THIS MIGRATION DOES NOT CLOSE, and pretending
+    // otherwise is how the original comment came to be wrong. A row with no
+    // transaction has no identity, so NO index can dedupe it. The mirror rewinds
+    // its cursor to 0 when a child ledger is rebuilt beneath it (children have
+    // no volume, so a redeploy does exactly that) and re-copies whatever the
+    // reborn child holds. Quarantining an inferred row here does not stop an
+    // equivalent row arriving that way later. What stops it is upstream: the
+    // accounting anchor, so a reborn child does not re-book an opening balance,
+    // and the paper boundary, so a simulated balance never books one at all.
+    `CREATE UNIQUE INDEX IF NOT EXISTS flows_chain_identity
+       ON flows (chain_id, agent_id, tx_hash, log_index)
+       WHERE tx_hash IS NOT NULL AND log_index IS NOT NULL`,
+    // ── THE REVERSIBLE SIDE OF THE REPAIR ────────────────────────────────
+    //
+    // Legacy rows are MOVED here, never deleted. A wrong row is evidence of a
+    // bug and the only remaining record of what the fleet believed while it was
+    // live; there is no procedure that walks a DELETE back, and an owner may
+    // already have seen the number it produced. Everything needed to put a row
+    // back exactly as it was is carried, plus why it went and what replaced it.
+    `CREATE TABLE IF NOT EXISTS flows_quarantine (
+       original_id INTEGER NOT NULL,
+       agent_id TEXT NOT NULL,
+       epoch INTEGER,
+       direction TEXT,
+       amount_usdg REAL,
+       tx_hash TEXT,
+       block_number INTEGER,
+       log_index INTEGER,
+       source TEXT,
+       at INTEGER,
+       run_id TEXT NOT NULL,
+       quarantined_at INTEGER NOT NULL,
+       reason TEXT NOT NULL,
+       replaced_by TEXT,
+       PRIMARY KEY (run_id, original_id)
+     )`,
+    "CREATE INDEX IF NOT EXISTS flows_quarantine_agent ON flows_quarantine (agent_id)",
+    // ── WHAT BRAIN ALREADY THOUGHT ABOUT, so a restart cannot forget ──────
+    //
+    // The accounting work spent weeks on one bug shape: a redeploy wipes the
+    // child ledger, the child forgets, and it books the same thing again. An AI
+    // budget has exactly that failure available to it — a child that forgot its
+    // cooldowns would re-fire every trigger reason on every deploy.
+    //
+    // One row per agent. Baselines live here too, because a cooldown with no
+    // baseline still lets the next tick read an old price move as a new one.
+    `CREATE TABLE IF NOT EXISTS brain_trigger_state (
+       agent_id TEXT PRIMARY KEY,
+       state_json TEXT NOT NULL,
+       updated_at INTEGER NOT NULL
+     )`,
     // HERE AND NOT IN SQLITE_SCHEMA, because `decision_id` is itself added by an
     // ALTER above — the base schema runs first, so an index on it there fails with
     // 'no such column' and takes every trade insert down with it.
@@ -637,6 +769,12 @@ export interface TradeRow {
   basis_source?: "receipt" | "paper" | "quote";
   /** Gas actually paid, wei, as a decimal string. Real cost; not in equity_usdg. */
   gas_wei?: string;
+  /**
+   * Gas UNITS charged, as a decimal string — the price-independent half of the
+   * cost. Absent on rows written before it was captured, which is why every
+   * reader treats it as optional rather than defaulting it to zero.
+   */
+  gas_units?: string;
   /** That gas in USDG at the price when it was burned. NULL = unpriced, NOT free. */
   gas_usdg?: number;
   /** Measured execution quality: how far the fill landed from the quote, in bps (+ is worse). */
@@ -722,6 +860,36 @@ export async function getAgentFinancials(
 }
 
 /** Ratchet the persisted HWM (monotonic — ignores values below the stored peak). */
+/**
+ * Adopt the durable accounting epoch on a child whose database was discarded.
+ *
+ * THE REGRESSION THIS CLOSES. `ensureAgent` inserts only the grant columns, so a
+ * hosted child rebuilt by a redeploy takes the schema DEFAULT of epoch 1 — while
+ * the shared `agents` row is on 2. The only bump path is gated by
+ * `hasEpochOneHistory`, which counts rows written before the accounting fix and
+ * is therefore false on an empty database, so nothing corrects it.
+ *
+ * The child then writes every trade, flow and equity row stamped epoch 1. The
+ * web's readers are epoch-scoped and the anchor derivation now is too, so those
+ * rows are invisible to BOTH: contributions and the evidenced total both read
+ * zero, and the fee gate hardens permanently on an account that is fine.
+ *
+ * MONOTONIC, like the peak. `MAX` rather than assignment, because an epoch is a
+ * one-way door — going backwards would readmit the quarantined rows the boundary
+ * exists to exclude, which is the failure the mirror's own upsert had.
+ */
+export async function setAgentEpoch(agentId: string, epoch: number): Promise<boolean> {
+  if (!Number.isInteger(epoch) || epoch < 1) return false;
+  try {
+    await getDb()
+      .prepare("UPDATE agents SET epoch = MAX(epoch, ?) WHERE smart_account = ?")
+      .run(epoch, agentId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function setAgentHwm(agentId: string, hwmUsdg: number): Promise<boolean> {
   try {
     await getDb()
@@ -868,6 +1036,49 @@ export async function readJournal(agentId: string, epoch: number): Promise<Journ
   }
 }
 
+/**
+ * What the heartbeat last said this agent is doing — the BACKSTOP for the paper
+ * boundary, not its primary source.
+ *
+ * Null means the column has not been written yet, which is a genuinely different
+ * fact from "live" and is carried as such: `tradingModeOf` turns it into
+ * `unknown`, and an unknown mode admits the flow. That is deliberate. Refusing
+ * on unknown would silently drop a LIVE agent's opening balance during the
+ * window before its first heartbeat — trading one accounting bug for another —
+ * so the narrow window is closed at the call site instead, where the answer is
+ * known synchronously and never absent.
+ */
+async function modeOf(agentId: string): Promise<string | null> {
+  try {
+    const row = (await getDb().prepare("SELECT mode FROM agents WHERE smart_account = ?").get(agentId)) as
+      | { mode: string | null }
+      | undefined;
+    return row?.mode ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Which chain this agent's grant is on, for a flow that did not carry it.
+ *
+ * Read from `agents` rather than from config so it is the chain the GRANT was
+ * signed for, which is the chain any transaction touching this account is on.
+ * Null when the agent row is not there yet: a null chain_id is honest and merely
+ * leaves the identity index inert for that row, whereas guessing a chain would
+ * make two different chains' transactions collide under one identity.
+ */
+async function chainIdOf(agentId: string): Promise<number | null> {
+  try {
+    const row = (await getDb().prepare("SELECT chain_id FROM agents WHERE smart_account = ?").get(agentId)) as
+      | { chain_id: number | null }
+      | undefined;
+    return row?.chain_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** The epoch this agent writes into now — 1 if it has none yet. */
 async function epochOf(agentId: string): Promise<number> {
   try {
@@ -907,22 +1118,58 @@ export async function getAgentEpoch(agentId: string): Promise<number> {
 export const ACCOUNTING_FIXED_AT = 1_787_704_075;
 
 /**
+ * Does this agent's CURRENT epoch contain rows written before the accounting
+ * was fixed? The evidence behind `PortfolioQuality.currentAccountingHistoryAuditable`.
+ *
+ * NULL MEANS COULD-NOT-ASK, and it is a distinct answer from `false`. A caller
+ * deciding whether a return may be published must refuse on null; a caller
+ * deciding whether to open a new epoch must do nothing on it. Same evidence,
+ * opposite defaults — see the two wrappers below.
+ */
+export async function legacyRowsInEpoch(agentId: string, epoch: number): Promise<boolean | null> {
+  try {
+    const row = (await getDb()
+      .prepare(
+        `SELECT (SELECT COUNT(*) FROM trades WHERE agent_id = ? AND epoch = ? AND created_at < ?)
+              + (SELECT COUNT(*) FROM equity WHERE agent_id = ? AND epoch = ? AND at < ?) AS n`,
+      )
+      .get(agentId, epoch, ACCOUNTING_FIXED_AT, agentId, epoch, ACCOUNTING_FIXED_AT)) as
+      | { n: number }
+      | undefined;
+    if (row === undefined) return null;
+    return Number(row.n ?? 0) > 0;
+  } catch {
+    // A ledger with no `trades` table yet is a read we could not make, not an
+    // account we have cleared.
+    return null;
+  }
+}
+
+/**
+ * CAN THIS EPOCH'S HISTORY BE AUDITED? The property, for the publication gate.
+ *
+ * Replaces `epoch >= 2`, which was a proxy for exactly this and gave the wrong
+ * answer for every agent minted after the cutover — those write good rows into
+ * epoch 1, never trip the boundary, and were therefore permanently unpublishable.
+ *
+ * FAILS CLOSED: null propagates, and `computePnl` refuses on it.
+ */
+export async function accountingHistoryAuditable(agentId: string, epoch: number): Promise<boolean | null> {
+  const legacy = await legacyRowsInEpoch(agentId, epoch);
+  return legacy === null ? null : !legacy;
+}
+
+/**
  * Does this agent have rows from BEFORE the audit work? Used once, at the first
  * arm, to decide whether an epoch boundary is needed. A brand-new agent has
  * nothing to quarantine and stays in epoch 1.
+ *
+ * FAILS OPEN, deliberately and differently from `accountingHistoryAuditable`:
+ * a read failure here must not manufacture an epoch boundary, because opening
+ * one writes an opening-balance flow and is not something to do on a guess.
  */
 export async function hasEpochOneHistory(agentId: string): Promise<boolean> {
-  try {
-    const row = await getDb()
-      .prepare(
-        `SELECT (SELECT COUNT(*) FROM trades WHERE agent_id = ? AND epoch = 1 AND created_at < ?)
-              + (SELECT COUNT(*) FROM equity WHERE agent_id = ? AND epoch = 1 AND at < ?) AS n`,
-      )
-      .get(agentId, ACCOUNTING_FIXED_AT, agentId, ACCOUNTING_FIXED_AT) as { n: number } | undefined;
-    return (row?.n ?? 0) > 0;
-  } catch {
-    return false;
-  }
+  return (await legacyRowsInEpoch(agentId, 1)) === true;
 }
 
 /**
@@ -943,9 +1190,12 @@ export async function hasEpochOneHistory(agentId: string): Promise<boolean> {
  * what "reporting starts clean" has to mean — epoch 1's performance is
  * unmeasurable, which is precisely why it was quarantined.
  *
- * Booked 'inferred' because it is: a balance observed at a boundary, not a
- * transfer anybody witnessed. The flow ledger has that column so this kind of
- * row can never be mistaken for a receipt.
+ * Booked 'epoch-carry', which is its own source rather than 'inferred'. It is
+ * not a transfer anybody witnessed, so it is not a receipt — but it is also not
+ * guesswork: it is the closing equity of the epoch just closed, a figure already
+ * in the journal, and reconcileEpochCarry() checks it against that mark. Sharing
+ * a source with real inference made every agent that crossed a boundary
+ * permanently unable to evidence its contributions, with no recovery possible.
  */
 export async function openNextEpoch(agentId: string, openingBalanceUsdg?: number): Promise<number> {
   const next = (await getAgentEpoch(agentId)) + 1;
@@ -958,14 +1208,22 @@ export async function openNextEpoch(agentId: string, openingBalanceUsdg?: number
       agentId,
       direction: "in",
       amountUsdg: openingBalanceUsdg,
-      source: "inferred",
+      // NOT 'inferred'. This is the closing equity of the epoch just closed,
+      // which is a figure already in the journal — a deterministic bridge, not a
+      // deduction from a balance nobody can point at. Sharing a source value with
+      // real inference condemned every agent that had ever crossed a boundary to
+      // permanent contributionsKnown=false, with no recovery that could exist:
+      // no deposit scan can retroactively give a bookkeeping entry a transaction
+      // hash it never had. A carry is checkable against the prior epoch's own
+      // closing mark instead — see reconcileEpochCarry in accounting-scope.ts.
+      source: "epoch-carry",
     });
   }
   return next;
 }
 
 /** How the ledger came to know about a flow. See the flows DDL — these are not equal evidence. */
-export type FlowSource = "chain-log" | "transfer-intent" | "inferred";
+export type FlowSource = "chain-log" | "epoch-carry" | "transfer-intent" | "inferred";
 
 export interface FlowRow {
   agentId: string;
@@ -976,13 +1234,72 @@ export interface FlowRow {
   blockNumber?: number;
   /** Position within the block. Set only for 'chain-log' — see the migration. */
   logIndex?: number;
+  /**
+   * What the agent is actually doing, when the caller knows.
+   *
+   * PASS IT. The fallback below reads `agents.mode`, which is written by the
+   * heartbeat and may not be there yet on an agent's first tick — and a paper
+   * agent's first tick is exactly when the simulated opening balance would be
+   * booked as a real contribution. The caller in index.ts knows synchronously
+   * and unambiguously (`paperActive()`), so it says so.
+   */
+  mode?: TradingMode;
+  /**
+   * WHICH CHAIN the transaction is on — the first component of a flow's identity.
+   *
+   * A tx hash is unique only WITHIN a chain, and this codebase runs mainnet 4663
+   * and testnet 46630 against one schema. Without it every row this function
+   * wrote carried chain_id NULL, and NULLs are distinct in a unique index on
+   * both SQLite and Postgres — so `flows_chain_identity` could never fire on a
+   * row written here, and the repair (which DOES set it) would insert a second
+   * chain-log row for the same log rather than conflicting with it.
+   */
+  chainId?: number;
 }
 
-/** Record money crossing the account boundary, and mirror it into the journal. */
-export async function addFlow(flow: FlowRow): Promise<void> {
+/**
+ * Record money crossing the account boundary, and mirror it into the journal.
+ *
+ * RETURNS WHETHER THE ROW LANDED, and the caller must act on it. This used to
+ * return void with a try/catch that only logged, while `record()` in index.ts
+ * went straight on to `adjustAgentHwm`. Any transient failure of the insert
+ * therefore moved the high-water mark by the full amount with NO flow row to
+ * explain it, advanced the scan cursor past the block, and left no way to
+ * retry — the peak and the contribution silently split apart, which is the one
+ * pairing the whole anchor design exists to keep together.
+ *
+ * REFUSES SIMULATED CAPITAL. See paper-boundary.ts: a paper agent's cash moves
+ * for simulated reasons, and every rule that reads a cash change as an external
+ * flow was written for an account where it could only have been the owner. The
+ * check lives here as well as at the call site because this is the one function
+ * every writer must pass through, so a future call site cannot reintroduce the
+ * bug by forgetting.
+ */
+export async function addFlow(flow: FlowRow): Promise<boolean> {
+  const mode = flow.mode ?? tradingModeOf(await modeOf(flow.agentId));
+  const admission = admitCapitalFlow({ mode, source: flow.source, txHash: flow.txHash });
+  if (!admission.admit) {
+    // Loud, and on the agent's own event log rather than only stderr: a refused
+    // flow means a figure the owner can see did NOT move, and the reason has to
+    // be somewhere they can find it.
+    console.error(`[flows] refused ${flow.source} ${flow.direction} ${flow.amountUsdg} — ${admission.why}`);
+    await addEvent(flow.agentId, "warn", `capital flow not recorded — ${admission.why}`).catch(() => {});
+    // FALSE, because the caller must not move the high-water mark for money the
+    // ledger has no record of. A refusal is a decision, not an error, but the
+    // pairing rule is the same either way.
+    return false;
+  }
   try {
     const epoch = await epochOf(flow.agentId);
     const amount = Math.abs(flow.amountUsdg);
+    // LOWERCASE, ALWAYS. A hash is a number, but it reaches here as a string and
+    // an RPC may return it in either case — and a case difference defeats both
+    // the unique index and the repair's read-back, so the same log written by
+    // the scanner and by the backfill would sit in the table twice, both stamped
+    // 'chain-log'. Normalising at the single write point is the only place the
+    // two writers can be made to agree.
+    const txHash = flow.txHash ? flow.txHash.toLowerCase() : null;
+    const chainId = flow.chainId ?? (await chainIdOf(flow.agentId));
     await journaled(
       flow.agentId,
       epoch,
@@ -993,28 +1310,32 @@ export async function addFlow(flow: FlowRow): Promise<void> {
         direction: flow.direction,
         logIndex: flow.logIndex ?? null,
         source: flow.source,
-        txHash: flow.txHash ?? null,
+        txHash,
       },
       async (db: Db) => {
         await db
           .prepare(
-            `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT DO NOTHING`,
           )
           .run(
             flow.agentId,
             flow.direction,
             amount,
-            flow.txHash ?? null,
+            txHash,
             flow.blockNumber ?? null,
             flow.logIndex ?? null,
             flow.source,
             epoch,
+            chainId,
           );
       },
     );
+    return true;
   } catch (e) {
     console.error("[store] flow insert failed:", e);
+    return false;
   }
 }
 
@@ -1029,15 +1350,92 @@ export async function addFlow(flow: FlowRow): Promise<void> {
  * P&L at all rather than a confident wrong one.
  */
 export async function getNetContributionsUsdg(agentId: string): Promise<number | null> {
+  // EPOCH-SCOPED, and it was not.
+  //
+  // The boundary bridges two epochs by writing the closing equity of the old one
+  // as an opening balance in the new one (`openNextEpoch`). Summing across the
+  // boundary therefore counts the same capital twice — once as the original
+  // deposit, once as the bridge derived from it — so contributions double and
+  // P&L goes as negative as the deposit was large.
+  //
+  // It never fired because the only agents ever bumped were those with pre-fix
+  // rows, and pre-fix rows predate the flows table: epoch 1 held no flows, so a
+  // lifetime sum happened to equal the current epoch's. Fund an agent on today's
+  // code and bump it for any future reason and the accident stops holding.
+  //
+  // The web's identical query already carried the predicate (scoreboard
+  // route.ts). This is the reader that did not. See accounting-scope.ts.
+  const epoch = await epochOf(agentId);
   const row = await getDb()
     .prepare(
       `SELECT COUNT(*) AS n,
               COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-       FROM flows WHERE agent_id = ?`,
+       FROM flows WHERE agent_id = ? AND epoch = ?`,
     )
-    .get(agentId) as { n: number; net: number } | undefined;
+    .get(agentId, epoch) as { n: number; net: number } | undefined;
   if (!row || row.n === 0) return null;
   return row.net;
+}
+
+/**
+ * The evidence behind this epoch's contributions, so a caller can say whether
+ * the total is a receipt, a bridge, or an opinion.
+ *
+ * Returns counts by source rather than a verdict: deciding what counts as
+ * evidence is `accounting-scope.ts`'s job, and a store read that also judged
+ * would put the policy in two places.
+ */
+export async function getFlowEvidence(
+  agentId: string,
+): Promise<{ source: string; n: number; netUsdg: number }[]> {
+  const epoch = await epochOf(agentId);
+  return (await getDb()
+    .prepare(
+      `SELECT source,
+              COUNT(*) AS n,
+              COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS netUsdg
+       FROM flows WHERE agent_id = ? AND epoch = ? GROUP BY source`,
+    )
+    .all(agentId, epoch)) as unknown as { source: string; n: number; netUsdg: number }[];
+}
+
+/**
+ * Persist what this agent may claim about its own book.
+ *
+ * WRITTEN BY THE WORKER, READ BY EVERYONE ELSE. The web tier cannot see the
+ * worker's process memory, and before this it had no way at all to learn that a
+ * contribution total rested on inference — so every percentage it published was
+ * computed as though the denominator were a receipt.
+ *
+ * Best-effort: a quality write that fails must never take a tick down. The cost
+ * of failure is a stale flag, and `quality_at` is what lets a reader notice.
+ */
+export async function setAgentQuality(
+  agentId: string,
+  q: { contributionsKnown: boolean; why: string; gasAccounting: "net" | "gross" | "unknown" },
+): Promise<boolean> {
+  try {
+    await getDb()
+      .prepare(
+        "UPDATE agents SET contributions_known = ?, contributions_why = ?, gas_accounting = ?, quality_at = ? " +
+          "WHERE smart_account = ?",
+      )
+      .run(q.contributionsKnown ? 1 : 0, q.why.slice(0, 500), q.gasAccounting, Math.floor(Date.now() / 1000), agentId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The last equity figure recorded in a SPECIFIC epoch — what a carry must match. */
+export async function closingEquityOfEpoch(agentId: string, epoch: number): Promise<number | null> {
+  const row = (await getDb()
+    .prepare(
+      `SELECT equity_usdg FROM equity WHERE agent_id = ? AND epoch = ?
+       ORDER BY at DESC, id DESC LIMIT 1`,
+    )
+    .get(agentId, epoch)) as { equity_usdg: number } | undefined;
+  return row?.equity_usdg ?? null;
 }
 
 /**
@@ -1051,9 +1449,30 @@ export async function getNetContributionsUsdg(agentId: string): Promise<number |
  * Joined to the trade the decision caused, because 'I proposed a buy' and 'the
  * wall turned it back' are different memories and only the second is useful.
  */
+/**
+ * What this agent decided lately.
+ *
+ * `excludeSources` EXISTS BECAUSE TWO REASONERS SHARE ONE TABLE AND ONE
+ * agent_id. Brain writes its shadow decisions into `decisions` under exactly
+ * the same `agent_id` the strategist uses, so an unfiltered read hands one
+ * reasoner the other's thinking as its own — and the desk's `recall` tool
+ * frames what it returns as "what you proposed, what the wall did with it".
+ *
+ * On the canary, where both are enabled, that produced:
+ *
+ *     - buy TSLA 5 USDG: no trade came of it — you said: <Brain's thesis>
+ *
+ * Three separate lies in one line. Nothing was proposed by the strategist;
+ * "no trade came of it" says something tried and failed rather than that
+ * nothing was ever wired to try; and the strategist could then publish a
+ * `strategist`-sourced thesis about a buy it believed it had made — which
+ * passes the publication gate with no shadow marking at all, because by then
+ * the row genuinely is a strategist row. A laundering path, not a display bug.
+ */
 export async function recentDecisions(
   agentId: string,
   limit = 6,
+  excludeSources: readonly string[] = [],
 ): Promise<
   {
     at: number;
@@ -1067,6 +1486,7 @@ export async function recentDecisions(
   }[]
 > {
   try {
+    const holes = excludeSources.map(() => "?").join(", ");
     return (await getDb()
       .prepare(
         `SELECT d.at AS at, d.action AS action, d.symbol AS symbol, d.size_usdg AS size_usdg,
@@ -1074,11 +1494,11 @@ export async function recentDecisions(
                 t.status AS status, t.reject_rule AS reject_rule
            FROM decisions d
            LEFT JOIN trades t ON t.id = (SELECT MAX(id) FROM trades WHERE decision_id = d.id)
-          WHERE d.agent_id = ?
+          WHERE d.agent_id = ?${excludeSources.length ? ` AND d.source NOT IN (${holes})` : ""}
           ORDER BY d.at DESC
           LIMIT ?`,
       )
-      .all(agentId, limit)) as never;
+      .all(agentId, ...excludeSources, limit)) as never;
   } catch {
     // A ledger without the decisions table yet is an agent with no memory,
     // which is the honest answer for its first window.
@@ -1486,7 +1906,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
                     status = ?, reject_rule = ?, sim_quote_out = ?, sim_min_out = ?, sim_fee_tier = ?,
                     sim_gas = ?, decision_id = ?, fill_side = ?, fill_qty_raw = ?, fill_price_usd = ?,
                     realized_pnl_usdg = ?, basis_source = ?, order_id = ?, settlement_status = ?,
-                    gas_wei = ?, fill_slippage_bps = ?, fill_cash_usdg = ?, gas_usdg = ?
+                    gas_wei = ?, fill_slippage_bps = ?, fill_cash_usdg = ?, gas_usdg = ?, gas_units = ?
               WHERE agent_id = ? AND user_op_hash = ? AND status = 'submitted'`,
           )
           .run(
@@ -1514,6 +1934,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
             row.fill_slippage_bps ?? null,
             row.fill_cash_usdg ?? null,
             row.gas_usdg ?? null,
+            row.gas_units ?? null,
             row.agent_id,
             row.user_op_hash,
           );
@@ -1527,8 +1948,8 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
         `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, reject_rule,
                              sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, decision_id,
                              fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                             order_id, settlement_status, gas_wei, fill_slippage_bps, epoch, fill_cash_usdg, gas_usdg)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             order_id, settlement_status, gas_wei, fill_slippage_bps, epoch, fill_cash_usdg, gas_usdg, gas_units)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.agent_id,
@@ -1558,6 +1979,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
         epoch,
         row.fill_cash_usdg ?? null,
         row.gas_usdg ?? null,
+        row.gas_units ?? null,
       );
     };
     if (!moved) {
@@ -1619,6 +2041,21 @@ export async function addEquity(
      */
     equityUsdg: number;
     /**
+     * The fourth term of that composition, recorded so the total can be CHECKED.
+     *
+     * `composeEquityUsdg` is cash + vault + positions + quarantinedCost, and the
+     * journal carried only the first three beside the total. That is enough to
+     * publish a number and not enough to verify one: an auditor summing what is
+     * written finds a discrepancy exactly equal to the quarantined cost and
+     * cannot tell it from a book that does not add up. Writing the term makes the
+     * identity closed.
+     *
+     * Optional because every mark written before this existed lacks it, and the
+     * verifier must treat those as UNCHECKABLE rather than as zero — assuming
+     * zero is how the missing term became invisible in the first place.
+     */
+    quarantinedCostUsdg?: number;
+    /**
      * The prices this valuation was made at, and how good each one is.
      *
      * Without them a historical equity figure cannot be re-derived by anyone,
@@ -1649,6 +2086,10 @@ export async function addEquity(
           symbol: m.symbol,
         })),
         positionsUsdg: b.positionsUsdg,
+        // Written only when the caller knows it, so an auditor can tell "there
+        // was none" from "nobody said". Undefined is dropped by JSON.stringify,
+        // which is exactly the distinction we want on the wire.
+        quarantinedCostUsdg: b.quarantinedCostUsdg,
         vaultUsdg: b.vaultUsdg,
       },
       async (db: Db) => {
@@ -2563,5 +3004,45 @@ export async function curveFor(
     return { curve: row.curve, quoteToken: row.quote_token, graduationThresholdRaw: threshold };
   } catch {
     return null;
+  }
+}
+
+/**
+ * WHAT BRAIN ALREADY THOUGHT ABOUT — durable, so a restart cannot forget.
+ *
+ * The accounting work spent weeks on one bug shape: a redeploy wipes the child
+ * ledger, the child forgets, and it books the same thing again. An AI budget has
+ * exactly that failure available to it, and it is worse in one respect — a
+ * forgotten contribution is a wrong number, a forgotten cooldown is a bill.
+ *
+ * Best-effort on both sides: a trigger-state read or write that fails must never
+ * take a tick down. A failed READ degrades to a cold start, which the caller
+ * seeds conservatively; a failed WRITE costs at most one extra run.
+ */
+export async function loadTriggerState(agentId: string): Promise<Record<string, unknown> | null> {
+  try {
+    const row = (await getDb()
+      .prepare("SELECT state_json FROM brain_trigger_state WHERE agent_id = ?")
+      .get(agentId)) as { state_json: string } | undefined;
+    if (!row?.state_json) return null;
+    return JSON.parse(row.state_json) as Record<string, unknown>;
+  } catch {
+    // A cold start is the safe reading of "I cannot tell": the caller seeds
+    // cooldowns as though Brain just ran, so an unreadable row delays thinking
+    // rather than repeating it.
+    return null;
+  }
+}
+
+export async function saveTriggerState(agentId: string, state: unknown): Promise<void> {
+  try {
+    await getDb()
+      .prepare(
+        `INSERT INTO brain_trigger_state (agent_id, state_json, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(agent_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at`,
+      )
+      .run(agentId, JSON.stringify(state), Math.floor(Date.now() / 1000));
+  } catch (e) {
+    console.error("[brain] trigger state write failed:", e);
   }
 }

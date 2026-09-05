@@ -16,7 +16,9 @@ import { AgentAvatar } from "@/components/AgentAvatar";
  * THE CARD IS NOT A LINK. There is no per-thesis id anywhere — decisions are
  * grouped by content over a 24h window, so a post is a group and not a row —
  * and faking a permalink would produce a URL that resolves to something else
- * tomorrow. Three real targets only: the agent, the token, and the wire.
+ * tomorrow. ONE real target: the agent. The token would need an address on
+ * PublicThesis, which carries only a symbol; the wire would need a follow graph,
+ * which is not built. This comment claimed all three.
  */
 
 const money = (n: number) =>
@@ -82,7 +84,9 @@ export function ThesisCard({
 
         {/* Subordinate. A thesis has none of this — its words are the post. */}
         {trade && (
-          <div className={`mm-trade${turned ? " turned" : ""}${t.paper ? " sim" : ""}`}>
+          <div
+            className={`mm-trade${turned ? " turned" : ""}${t.paper ? " sim" : ""}${t.shadow ? " shadow" : ""}`}
+          >
             {t.symbol && <span className="sym mono">{t.symbol}</span>}
             {t.sizeUsdg !== null && <span className="amt mono">{money(t.sizeUsdg)}</span>}
             {t.outcomeText && <span className="out mono">{t.outcomeText}</span>}

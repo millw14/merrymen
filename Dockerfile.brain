@@ -1,0 +1,54 @@
+# Brain — a FOURTH image, and a Python one.
+#
+# The main Dockerfile builds a Node image that runs either the dashboard or the
+# orchestrator, chosen by MERRYMEN_START. Brain does not belong in it, for the
+# same reasons the browser does not:
+#
+#   - it is Python, and putting a Python runtime into the Node image would make
+#     every web and orchestrator deploy carry an interpreter neither role uses;
+#   - it is SHARED. The orchestrator spawns one worker child per tenant, and a
+#     Brain reachable from inside the worker would otherwise become a Brain per
+#     tenant — 24 model clients, 24 budgets, and no way to see the total.
+#
+# So: one Brain, one service, over Railway's private network, addressed by
+# RAILWAY_PRIVATE_DOMAIN and never given a public domain.
+#
+# WHAT THIS IMAGE MUST NOT CONTAIN, and does not: the worker, the wall, the
+# signers, the executor, or anything that can construct calldata. Brain computes
+# and answers; Merrymen owns the money and the database. The image is the first
+# place that boundary is enforced — code that is not here cannot be called by
+# accident.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Deps first, for layer caching. Only the service's own pyproject — this image
+# has no reason to see the Node lockfile.
+COPY services/brain/pyproject.toml ./
+RUN pip install --no-cache-dir \
+      "fastapi>=0.115" "uvicorn[standard]>=0.32" "httpx>=0.27" "pydantic>=2.9"
+
+# The service, and nothing else from the monorepo.
+COPY services/brain/brain ./brain
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Railway injects PORT. Bind :: so the private network can reach it; there is no
+# public domain and there should never be one.
+EXPOSE 8080
+
+# CONSERVATIVE CONCURRENCY, DELIBERATELY.
+#
+# One worker process, because the budget and the per-agent concurrency lock live
+# in process memory — a second worker would hold a second set of both, and two
+# runs for one agent could then proceed in parallel against a shared model
+# allowance while producing decisions that disagree.
+#
+# --timeout-keep-alive is short because the caller (the worker's Brain client)
+# sets its own AbortController above the server's timeout, and a socket held
+# open longer than the caller will wait is a socket doing nothing.
+#
+# NO --reload, NO worker recycling on request count: a Brain run can take tens of
+# seconds and recycling mid-decision would spend the tokens and return nothing.
+CMD ["sh", "-c", "uvicorn brain.server:app --host :: --port ${PORT:-8080} --workers 1 --timeout-keep-alive 15 --limit-concurrency 8 --no-access-log"]

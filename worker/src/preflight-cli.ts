@@ -10,6 +10,7 @@
 import { readFileSync } from "node:fs";
 import { homePaths } from "./home";
 import { loadGrantFile } from "./grant";
+import { grantHasDeadRateLimit } from "./session-account";
 import { preflight, rank, verdict, type Check, type PreflightInput } from "./preflight";
 import { resolveConfig } from "./settings";
 import { CASH, WALL_POLICY_CONTRACTS, chainForId } from "../../packages/core/src/index";
@@ -84,6 +85,23 @@ async function missingPolicyContracts(url: string): Promise<string[] | null> {
 }
 
 /**
+ * Does the smart account have code on this chain?
+ *
+ * `null` on any read failure, like the probe above — "we could not look" and
+ * "it is not there" have different remedies, and for an account that is
+ * counterfactual by design the second is not even a fault.
+ */
+async function hasCode(url: string, account: string): Promise<boolean | null> {
+  try {
+    const code = (await rpc(url, "eth_getCode", [account, "latest"])) as string | null;
+    if (typeof code !== "string") return null;
+    return code !== "0x" && code !== "";
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Does the bundler answer?
  *
  * doctor probes only when a full `bundlerUrl` was pasted, so the common path —
@@ -142,11 +160,12 @@ async function main(): Promise<void> {
     (chainId === 46630 ? settings.rpcTestnet : settings.rpcMainnet) ??
     chain.rpcUrls.default.http[0]!;
 
-  const [usdg, ethWei, bundlerReachable, missingPolicy] = await Promise.all([
+  const [usdg, ethWei, bundlerReachable, missingPolicy, accountDeployed] = await Promise.all([
     grant ? usdgBalance(rpcUrl, grant.smartAccount) : Promise.resolve(null),
     grant ? ethBalance(rpcUrl, grant.smartAccount) : Promise.resolve(null),
     bundlerAnswers(settings, chainId),
     missingPolicyContracts(rpcUrl),
+    grant ? hasCode(rpcUrl, grant.smartAccount) : Promise.resolve(null),
   ]);
 
   // Resolved through the worker's OWN resolver rather than by re-reading the
@@ -167,6 +186,12 @@ async function main(): Promise<void> {
       ethWei,
       bundlerReachable,
       missingPolicyContracts: missingPolicy,
+      // Asked of the SIGNATURE, not of the chain — the probe above reads the
+      // addresses this code seals today and can never see what an older key
+      // sealed. Absent a grant there is nothing to judge, and the no-grant
+      // blocker above has already fired.
+      deadPolicy: grant ? grantHasDeadRateLimit(grant.serialized) : false,
+      accountDeployed,
     }),
   );
   for (const c of checks) render(c);

@@ -8,7 +8,10 @@
  *      before this there was none — PublicThesis deliberately omits agent_id,
  *      and the feed page hashes the agent's NAME for its avatar colour because
  *      the route has nothing else to send. There was literally nothing a follow
- *      could target.
+ *      could target — which is why this exists. The edge itself lives in
+ *      follow-store.ts, keyed on the TENANT for the same reason this table is:
+ *      a re-grant mints a new account, and an edge on the account would dangle
+ *      every time somebody re-signed.
  *
  *   2. Which social account signed in? (Privy.) That half is declared here and
  *      wired later; it lives in this record because a DID resolves to a TENANT,

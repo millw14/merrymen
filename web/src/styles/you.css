@@ -54,6 +54,49 @@
 
 /* ── the hero ────────────────────────────────────────────────────────────── */
 
+/*
+ * The rail's own warnings. A LIST, not a banner: the messages that matter here
+ * arrive together — no bundler key, an account that has never deployed, a grant
+ * on the wrong chain — and each one names a different missing thing.
+ *
+ * --mm-warn earns its place. The strict reading of that token is "the wall said
+ * no", and these are not the wall; but every message in this block is the rail
+ * declining to carry a trade, which is the same news to the person reading it,
+ * and .mm-status.waiting already spends the token this way one section above.
+ */
+.mm-notices {
+  padding: var(--mm-sec-y);
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+.mm-notices ul {
+  display: grid;
+  gap: var(--mm-2);
+  margin-top: var(--mm-2);
+}
+
+.mm-notices li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--mm-3);
+  padding-left: var(--mm-3);
+  border-left: 2px solid var(--mm-warn);
+}
+
+.mm-notices li p {
+  flex: 1;
+  margin: 0;
+  font-size: var(--mm-t-body);
+  line-height: 1.55;
+  color: var(--mm-tx-2);
+}
+
+.mm-notices li span {
+  flex: none;
+  font-size: var(--mm-t-meta);
+  color: var(--mm-faint);
+}
+
 .mm-hero {
   padding: var(--mm-sec-y);
   border-bottom: 1px solid var(--mm-edge);

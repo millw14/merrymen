@@ -76,7 +76,12 @@ export async function readLeaderboard(): Promise<LeaderboardRead> {
       /* rows render unlinked */
     }
 
-    let rows: { smart_account: string; name: string; x_handle: string | null; epoch: number }[] = [];
+    let rows: {
+      smart_account: string;
+      name: string;
+      x_handle: string | null;
+      epoch: number;
+    }[] = [];
     try {
       rows = (await db
         .prepare(
@@ -156,7 +161,28 @@ export async function readLeaderboard(): Promise<LeaderboardRead> {
           /* older ledger */
         }
 
-        const { pnlBps, unrankedWhy } = rankPnl({ contributed, latest, gasUsdg, landed });
+        // THE DENOMINATOR'S EVIDENCE, straight from the worker.
+        //
+        // Read separately and defensively, like `flows` above: the column
+        // arrives with a worker migration, and folding it into the agents SELECT
+        // would make a pre-migration ledger throw into the catch that returns an
+        // EMPTY BOARD. A missing column must cost a quality signal, not the page.
+        //
+        // Either way the value is null on failure, and null is "not assessed" —
+        // which rankPnl treats as unknown rather than as permission.
+        let contributionsKnown: boolean | null = null;
+        try {
+          const q = (await db
+            .prepare("SELECT contributions_known FROM agents WHERE smart_account = ?")
+            .get(account)) as { contributions_known: number | null } | undefined;
+          contributionsKnown =
+            q?.contributions_known === null || q?.contributions_known === undefined
+              ? null
+              : Number(q.contributions_known) === 1;
+        } catch {
+          /* the column arrives with a worker migration; unknown until it does */
+        }
+        const { pnlBps, unrankedWhy } = rankPnl({ contributed, latest, gasUsdg, landed, contributionsKnown });
 
         const maxDdBps = drawdownBps(curve);
 

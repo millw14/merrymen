@@ -45,7 +45,7 @@
     "prepublishOnly": "node cli/prepublish.mjs",
     "dev:web": "cd web && next dev -p 3100 -H 127.0.0.1",
     "dev:worker": "tsx worker/src/index.ts",
-    "test": "tsx --test \"worker/src/**/*.test.ts\" \"web/src/**/*.test.ts\"",
+    "test": "tsx --test \"worker/src/**/*.test.ts\" \"web/src/**/*.test.ts\" \"packages/*/src/**/*.test.ts\"",
     "test:contracts": "cd contracts && npm test",
     "typecheck": "tsc --noEmit -p worker && tsc --noEmit -p web && tsc --noEmit -p browser"
   },

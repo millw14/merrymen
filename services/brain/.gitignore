@@ -1,0 +1,9 @@
+.venv/
+.eval/
+*.jsonl
+__pycache__/
+*.egg-info/
+# The Brain credential lives here and must never be committed. It is a
+# DIFFERENT key from the fleet house key by design — see credential.py.
+.env
+.env.*

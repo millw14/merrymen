@@ -26,6 +26,7 @@
  */
 
 import { safeFetchUrl } from "../../../packages/core/src/index";
+import { readBoundedJson } from "../bounded-read";
 import { sanitizeMeta } from "./pons-meta";
 
 export interface PageRead {
@@ -88,8 +89,15 @@ export async function readPage(cfg: BrowserConfig | null, rawUrl: string): Promi
       const detail = await r.text().catch(() => "");
       return { ok: false, url, failure: "browser-error", detail: detail.slice(0, 200) };
     }
-    const page = (await r.json()) as PageRead;
-    return { ok: true, url, page };
+    // THE ADVERSARIAL LANE. `read_link` fetches a page an attacker chose, so
+    // this is the one read where an enormous body is a plausible act rather than
+    // a broken server. Bounded like the rest, and reported as a browser failure
+    // rather than as a page with no content.
+    const read = await readBoundedJson<PageRead>(r);
+    if (!read.ok) {
+      return { ok: false, url, failure: "browser-error", detail: read.detail.slice(0, 200) };
+    }
+    return { ok: true, url, page: read.value };
   } catch (e) {
     return { ok: false, url, failure: "unreachable", detail: String((e as Error)?.message ?? e).slice(0, 200) };
   } finally {

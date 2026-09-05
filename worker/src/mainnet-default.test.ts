@@ -42,6 +42,8 @@ function freshInstall(over: Partial<PreflightInput> = {}): PreflightInput {
     ethWei: 10n ** 16n,
     bundlerReachable: true,
     missingPolicyContracts: [],
+    deadPolicy: false,
+    accountDeployed: true,
     ...over,
   };
 }

@@ -210,3 +210,61 @@ describe("the new stylesheets are scoped, provably", () => {
     assert.deepEqual(selectorsOf(css).flatMap(parts), [".mm-x"]);
   });
 });
+
+describe("one sheet owns each component class", () => {
+  /**
+   * A CLASS DEFINED IN TWO SHEETS IS A COLLISION NOBODY GETS TOLD ABOUT.
+   *
+   * This test exists because it happened, in this repo, while adding the block
+   * that renders the worker's warnings: `.mm-rail` was already the navigation
+   * rail in shell.css, and a second definition in you.css silently reset the
+   * nav's padding, its border and its `ul` layout on every page. CSS has no
+   * error for it; load order decides, and the loser is whichever sheet imports
+   * first. The page still rendered, which is why it nearly shipped.
+   *
+   * Two exceptions, both deliberate: `.mm` is the scope root every sheet nests
+   * under by design, and `.mm-btn` is a shared control three sheets extend.
+   */
+  const SHARED = new Set([".mm", ".mm-btn"]);
+
+  it("no component class is defined at the top level of two sheets", () => {
+    const owners = new Map<string, Set<string>>();
+    for (const file of readdirSync(DIR).filter((f) => f.endsWith(".css") && !QUARANTINED.has(f))) {
+      const css = readFileSync(path.join(DIR, file), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+      for (const m of css.matchAll(/^(\.[A-Za-z0-9_-]+)[^{}]*\{/gm)) {
+        const cls = m[1]!;
+        if (SHARED.has(cls)) continue;
+        if (!owners.has(cls)) owners.set(cls, new Set());
+        owners.get(cls)!.add(file);
+      }
+    }
+    const collisions = [...owners]
+      .filter(([, files]) => files.size > 1)
+      .map(([cls, files]) => `${cls} in ${[...files].join(" and ")}`);
+    assert.deepEqual(
+      collisions,
+      [],
+      `two sheets define the same class, so load order decides which wins:\n  ${collisions.join("\n  ")}`,
+    );
+  });
+
+  it("catches a collision when there is one", () => {
+    // The checker's own regression guard, same as the unscoped test above: a
+    // matcher that finds nothing passes forever.
+    const owners = new Map<string, Set<string>>();
+    for (const [file, css] of [
+      ["a.css", ".mm-x { color: red }"],
+      ["b.css", ".mm-x { color: blue }\n.mm-y { color: green }"],
+    ] as const) {
+      for (const m of css.matchAll(/^(\.[A-Za-z0-9_-]+)[^{}]*\{/gm)) {
+        const cls = m[1]!;
+        if (!owners.has(cls)) owners.set(cls, new Set());
+        owners.get(cls)!.add(file);
+      }
+    }
+    assert.deepEqual(
+      [...owners].filter(([, f]) => f.size > 1).map(([c]) => c),
+      [".mm-x"],
+    );
+  });
+});

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { avatarGradient, initialsOf } from "@/lib/agent-avatar";
+import { useWired } from "@/components/WiredProvider";
 
 /**
  * An agent's face. SQUIRCLE, always — a token logo is a circle, and that shape
@@ -38,10 +39,24 @@ export function AgentAvatar({
   wired?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
+  // THE RING COMES FROM THE VIEWER, NOT FROM THE PAGE.
+  //
+  // Which agents you read is per-viewer, and the feed is server-rendered with
+  // revalidate = 30 — read-theses.ts records that its response is byte-identical
+  // for every visitor BY CONSTRUCTION, and that a session read in that path
+  // turns the caching into a leak. So the page stays cacheable and the ring is
+  // applied here, in a leaf that was already a client component.
+  //
+  // OR-ed with the prop rather than replacing it: a caller that knows (a
+  // profile page rendering its own subject) keeps its answer, and the context
+  // fills in everywhere else. A signed-out viewer has an empty set and sees no
+  // rings, which is correct — they have no agent to wire with.
+  const { wired: mine } = useWired();
+  const on = wired || (slug !== null && mine.includes(slug));
 
   return (
     <span
-      className={`mm-av${wired ? " wired" : ""}`}
+      className={`mm-av${on ? " wired" : ""}`}
       aria-hidden
       style={{
         width: size,

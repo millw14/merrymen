@@ -6,10 +6,12 @@ import { LiveRefresh } from "@/components/shell/LiveRefresh";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { EquityLine } from "@/components/EquityLine";
 import { Feed } from "@/components/Feed";
+import { WireButton } from "@/components/WireButton";
 import { readAgent, type AgentProfile, type Holding } from "@/lib/read-agent";
 import { readTheses } from "@/lib/read-theses";
 import { readWallTape, type WallTape } from "@/lib/read-wall-tape";
 import { rejectRuleLabel } from "@/lib/thesis";
+import { unrankedLabel } from "@/lib/rank-pnl";
 import { timeAgo } from "@/lib/time";
 import { WallBand } from "@/components/WallBand";
 import { SLUG_RE } from "@merrymen/identity-store";
@@ -210,6 +212,14 @@ export default async function AgentPage({ params }: { params: Promise<{ key: str
           )}
         </section>
 
+        {/* THE WIRE, under the words rather than beside the numbers.
+            A reader decides whether to wire a desk in after reading what it
+            thinks, not after reading what it is worth — so the control sits at
+            the bottom of the reasoning, where that decision actually happens.
+            Client-side: which agents you read is per-viewer, and this page is
+            server-rendered and cacheable. */}
+        {a.slug ? <WireButton slug={a.slug} name={a.name} /> : null}
+
         <section className="mm-agent-feed">
           <h2 className="mm-kicker">What it said</h2>
           <Feed
@@ -366,11 +376,9 @@ function Stats({ agent, tape }: { agent: AgentProfile; tape: WallTape }) {
            own cost. The COUNT is published, never the dollars: a public row
            carries no absolute figure. */
         note={
-          agent.unrankedWhy === "no-deposit"
-            ? "no deposit on record"
-            : agent.unrankedWhy === "never-filled"
-              ? "nothing has filled yet"
-              : agent.gas.unpricedTrades > 0
+          agent.unrankedWhy !== null
+            ? unrankedLabel(agent.unrankedWhy)
+            : agent.gas.unpricedTrades > 0
                 ? `net of gas on ${agent.landed - agent.gas.unpricedTrades} fills; ${agent.gas.unpricedTrades} more had gas we could not price, so this is not the full cost`
                 : agent.gas.usdg > 0
                   ? "net of gas"

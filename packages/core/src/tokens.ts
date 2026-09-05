@@ -302,3 +302,60 @@ export function priceSourceNote(source: string): string {
       return "";
   }
 }
+
+/**
+ * The four research desks Brain can run. Merrymen decides this, never the model.
+ *
+ * A desk is a set of analyst lenses: an equity has earnings, a memecoin has
+ * liquidity and a crowd. Running a fundamentals analyst on a memecoin produces
+ * confident text about nothing, which is worse than no analyst at all — it
+ * arrives looking like evidence.
+ */
+export type InstrumentClass = "equity-token" | "crypto-native" | "memecoin" | "stablecoin";
+
+/**
+ * Which desk this token gets, from what the token actually IS.
+ *
+ * THE RULE IS THE TABLE. `STOCK_TOKENS` is the issuer-backed set: Chainlink
+ * feeds, ERC-8056 multipliers, and a price that updates 24/5 because the
+ * underlying market is open 24/5. Anything else on this chain arrived from
+ * discovery — no feed, no multiplier, priced from a DEX pool, and trading
+ * around the clock. That distinction is not a taxonomy preference; it decides
+ * whether "the price is stale" means "the market is shut" or "something is
+ * wrong".
+ *
+ * WHY ADDRESS AND NOT SYMBOL. A discovered token may call itself AAPL. The
+ * address is the identity, and matching on the name would let a launchpad token
+ * pick its own research desk.
+ *
+ * Unknown address ⇒ `memecoin`, which is the CAUTIOUS arm rather than the
+ * lenient one: it routes to liquidity and on-chain lenses and away from
+ * fundamentals, which is the right treatment for something nobody has verified.
+ */
+export function instrumentClassOf(address: string): InstrumentClass {
+  const a = address.trim().toLowerCase();
+  const known = STOCK_TOKENS.find((t) => t.address.toLowerCase() === a);
+  if (!known) return "memecoin";
+  switch (known.kind) {
+    case "stock":
+    case "etf":
+      return "equity-token";
+    case "memecoin":
+      return "memecoin";
+  }
+}
+
+/**
+ * Does this instrument's price come from a market that closes?
+ *
+ * A tokenised equity tracks a 24/5 Chainlink feed, so outside US market hours
+ * its price is legitimately hours old and `staleFeeds` says so. A pool-priced
+ * token trades continuously and a stale reading there means the POOL stopped
+ * being readable — a fault, not a weekend.
+ *
+ * The same flag, two entirely different facts. Anything reasoning about
+ * staleness has to know which one it is looking at.
+ */
+export function tradesAroundTheClock(address: string): boolean {
+  return instrumentClassOf(address) !== "equity-token";
+}

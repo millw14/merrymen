@@ -24,6 +24,7 @@ const base: ExecInputs = {
   executor: true,
   chainId: TRADEABLE_CHAIN_ID,
   cashUsdg: 100_000_000n,
+  deadPolicy: false,
   paperTradingEnabled: true,
 };
 
@@ -99,6 +100,17 @@ test("paper OFF refuses — it does not fall through to the live rail", () => {
     rule: "no-cash",
   });
   assert.deepEqual(execModeOf({ ...base, armed: false }), { mode: "refuse", rule: "not-armed" });
+  // Named ahead of no-executor, no-cash and wrong-chain, because it is the only
+  // one of the five that funding, a bundler key and a chain switch all fail to
+  // fix. A signature is frozen; only re-signing clears it.
+  assert.deepEqual(execModeOf({ ...base, deadPolicy: true, paperTradingEnabled: false }), {
+    mode: "refuse",
+    rule: "dead-policy",
+  });
+  assert.deepEqual(
+    execModeOf({ ...base, deadPolicy: true, executor: false, paperTradingEnabled: false }),
+    { mode: "refuse", rule: "dead-policy" },
+  );
 });
 
 test("the refusal names the most fundamental broken leg first", () => {
@@ -123,17 +135,31 @@ test("every input lands in exactly one mode — there is no fourth state", () =>
     for (const executor of [true, false]) {
       for (const chainId of [TRADEABLE_CHAIN_ID, 46630]) {
         for (const cashUsdg of [100_000_000n, 0n, null]) {
-          for (const paperTradingEnabled of [true, false]) {
-            const a: ExecInputs = { armed, executor, chainId, cashUsdg, paperTradingEnabled };
-            const m = execModeOf(a);
-            assert.ok(
-              m.mode === "paper" || m.mode === "live" || m.mode === "refuse",
-              "unreachable mode",
-            );
-            // live and canTradeForReal are the same claim; if they ever part,
-            // the fork's executor invariant becomes reachable at runtime.
-            assert.equal(m.mode === "live", canTradeForReal(a));
-            modes.add(m.mode);
+          for (const deadPolicy of [false, true]) {
+            for (const paperTradingEnabled of [true, false]) {
+              const a: ExecInputs = {
+                armed,
+                executor,
+                chainId,
+                cashUsdg,
+                deadPolicy,
+                paperTradingEnabled,
+              };
+              const m = execModeOf(a);
+              assert.ok(
+                m.mode === "paper" || m.mode === "live" || m.mode === "refuse",
+                "unreachable mode",
+              );
+              // live and canTradeForReal are the same claim; if they ever part,
+              // the fork's executor invariant becomes reachable at runtime.
+              assert.equal(m.mode === "live", canTradeForReal(a));
+              // A DEAD POLICY IS NEVER LIVE, whatever else is true. This is the
+              // whole point of the field: the grant that carries it arms, prices
+              // and looks healthy, and every operation it signs fails validation
+              // against an address with no code.
+              if (deadPolicy) assert.notEqual(m.mode, "live", "a dead policy cannot trade");
+              modes.add(m.mode);
+            }
           }
         }
       }

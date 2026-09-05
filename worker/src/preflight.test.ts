@@ -21,6 +21,8 @@ function ready(over: Partial<PreflightInput> = {}): PreflightInput {
     ethWei: 10n ** 16n, // 0.01 ETH
     bundlerReachable: true,
     missingPolicyContracts: [],
+    deadPolicy: false,
+    accountDeployed: true,
     ...over,
   };
 }
@@ -55,6 +57,26 @@ describe("preflight — the things that stop a trade", () => {
     const chain = preflight(input).find((c) => c.id === "chain")!;
     assert.equal(chain.level, "blocker");
     assert.match(chain.detail!, /practice only/i);
+  });
+
+  it("A DEAD POLICY IS A BLOCKER, and it is not the same check as the contract probe", () => {
+    // The gap this closes. `missingPolicyContracts` probes the addresses this
+    // code seals TODAY, and every one of them is deployed — so a grant carrying
+    // the removed rate-limit policy passed preflight green while being unable to
+    // land a single UserOperation. Measured 2026-08-30: RATE_LIMIT_POLICY_CONTRACT
+    // has zero bytes on 4663 AND 46630.
+    //
+    // Both facts are asserted together on purpose: the contracts check must stay
+    // `ok` here, because that is exactly the shape that fooled the command.
+    const input = ready({ deadPolicy: true });
+    const checks = preflight(input);
+    const dead = checks.find((c) => c.id === "dead-policy")!;
+    assert.equal(dead.level, "blocker");
+    assert.equal(checks.find((c) => c.id === "policy-contracts")!.level, "ok");
+    assert.equal(verdict(checks).ready, false);
+    // The remedy is the whole value of the message: an owner who reads a
+    // funding instruction and acts on it has spent money on a dead account.
+    assert.match(dead.detail!, /re-sign/i);
   });
 
   it("an expired grant is a blocker", () => {
