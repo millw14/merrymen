@@ -25,6 +25,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { validAmount } from "./amount";
+import { barInterval, withGaps } from "./bars";
 import { dailyChange, spentToday } from "./account";
 import { elapsed, countdown } from "./clock";
 import {
@@ -271,5 +272,53 @@ describe("strategy identity survives a round trip", () => {
       assert.ok(strategyLabel(id).length > 0, id);
       assert.ok(!strategyLabel(id).includes("-"), `${id} label still reads like an id`);
     }
+  });
+});
+
+describe("the chart leaves holes as holes", () => {
+  const bar = (time: number, close = 100) => ({ time, open: close, high: close, low: close, close });
+
+  it("finds the usual spacing from the median, not the mean", () => {
+    // One long weekend must not set the interval for the whole series.
+    const bars = [bar(0), bar(300), bar(600), bar(900), bar(900 + 250_000)];
+    assert.equal(barInterval(bars), 300);
+    assert.equal(barInterval([bar(0)]), 0, "one bar has no spacing");
+    assert.equal(barInterval([]), 0);
+  });
+
+  it("REGRESSION: a hole is padded with blank slots, not drawn across", () => {
+    // lightweight-charts places bars at CONSECUTIVE slots, so an unpadded
+    // series renders a 63-hour hole as zero horizontal distance and draws a
+    // straight line through prices that never existed. CandleChart calls this
+    // "THE LARGEST HONESTY DEFECT IN THE FIRST VERSION"; the terminal's chart
+    // reintroduced it by calling setData on the raw bars.
+    const { data, truncated } = withGaps([bar(0), bar(300), bar(1_500)]);
+    assert.equal(truncated, false);
+    assert.deepEqual(
+      data.map((d) => d.time),
+      [0, 300, 600, 900, 1200, 1500],
+      "the missing slots are present and empty",
+    );
+    for (const slot of data.filter((d) => ![0, 300, 1500].includes(d.time))) {
+      assert.equal(slot.close, undefined, "a padded slot carries no price");
+    }
+  });
+
+  it("a contiguous series is returned untouched", () => {
+    const bars = [bar(0), bar(300), bar(600)];
+    const { data, truncated } = withGaps(bars);
+    assert.equal(truncated, false);
+    assert.deepEqual(data, bars);
+  });
+
+  it("one enormous hole is capped rather than swamping the real bars", () => {
+    const { data, truncated } = withGaps([bar(0), bar(300), bar(300 + 300 * 5_000)]);
+    assert.equal(truncated, true, "the cap is reported, not hidden");
+    assert.ok(data.length <= 503, `padded to ${data.length} slots`);
+  });
+
+  it("a series too short to have an interval is left alone", () => {
+    assert.deepEqual(withGaps([bar(0)]).data, [bar(0)]);
+    assert.deepEqual(withGaps([]).data, []);
   });
 });

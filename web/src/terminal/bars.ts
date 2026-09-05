@@ -135,3 +135,82 @@ async function yahooBars(symbol: string, window: WindowId): Promise<Bar[]> {
     return [];
   }
 }
+
+/**
+ * A cap on how many blank slots one hole may consume.
+ *
+ * The same 500 CandleChart uses. A pool that published four bars in a year
+ * would otherwise pad tens of thousands of empty slots and the real bars would
+ * be a smudge at the right-hand edge.
+ */
+const MAX_WHITESPACE = 500;
+
+/**
+ * The venue's bar size, in seconds — the MODE of the gaps, not the median.
+ *
+ * The interval is a property of the request ("give me 5-minute bars"), so the
+ * right estimate of it is the spacing that occurs most often, not the middle
+ * one. A median is wrong here in exactly the case that matters: a series of
+ * five-minute bars with one weekend in it has gaps [300, 300, …, 250000], and
+ * on a short series the median lands between the two — 750 seconds of nothing
+ * anybody asked for, which then pads the hole at the wrong resolution.
+ *
+ * Ties go to the smaller gap, because bars cannot be closer together than the
+ * resolution: the smallest spacing observed is an upper bound on the bar size.
+ */
+export function barInterval(bars: readonly Bar[]): number {
+  if (bars.length < 2) return 0;
+  const seen = new Map<number, number>();
+  for (let i = 1; i < bars.length; i += 1) {
+    const d = bars[i]!.time - bars[i - 1]!.time;
+    if (d > 0) seen.set(d, (seen.get(d) ?? 0) + 1);
+  }
+  let best = 0;
+  let bestCount = 0;
+  for (const [gap, count] of [...seen.entries()].sort((a, b) => a[0] - b[0])) {
+    if (count > bestCount) {
+      best = gap;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+/**
+ * THE BARS, WITH THE HOLES LEFT AS HOLES.
+ *
+ * lightweight-charts places bars at CONSECUTIVE time-scale slots, so it does
+ * not matter that the timestamps are hours apart: handed the bars alone, a
+ * 63-hour hole renders as zero horizontal distance and the line is drawn
+ * straight across it. `components/CandleChart.tsx` calls that "THE LARGEST
+ * HONESTY DEFECT IN THE FIRST VERSION" and measured it on a real pool — 421
+ * bars over 792 hours, 47% of the range missing, the longest run 63 hours.
+ *
+ * The terminal's chart reintroduced it by calling `setData(bars.map(...))`
+ * directly. Whitespace entries are the library's own mechanism for this, and it
+ * belongs in the renderer rather than the reader: the read returns facts, the
+ * renderer decides spacing.
+ *
+ * PriceLine's caption says what a viewer is looking at — "the hours the feed
+ * published nothing are left out rather than drawn across, which is what the
+ * breaks are" — and that is still the promise this keeps.
+ */
+export function withGaps(
+  bars: readonly Bar[],
+): { data: ({ time: number } & Partial<Omit<Bar, "time">>)[]; truncated: boolean } {
+  const interval = barInterval(bars);
+  const out: ({ time: number } & Partial<Omit<Bar, "time">>)[] = [];
+  let padded = 0;
+  for (let i = 0; i < bars.length; i += 1) {
+    const bar = bars[i]!;
+    const prev = bars[i - 1];
+    if (prev && interval > 0) {
+      for (let t = prev.time + interval; t < bar.time && padded < MAX_WHITESPACE; t += interval) {
+        out.push({ time: t });
+        padded += 1;
+      }
+    }
+    out.push(bar);
+  }
+  return { data: out, truncated: padded >= MAX_WHITESPACE };
+}

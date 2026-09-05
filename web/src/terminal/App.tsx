@@ -220,7 +220,11 @@ export function App() {
   useEffect(()=>{if(pathname==="/feed")setSidebarSection("feed");else if(pathname==="/leaderboard")setSidebarSection("board");else if(pathname==="/agent")setSidebarSection("agents");},[pathname]);
   const agent=profile ?? listedAgent;
   const mine = account?.status.exists && live.mine ? {...live.mine, statusLabel: account.status.mode === "paper" ? "Paper trading" : account.status.mode === "live" ? "Running" : account.status.mode === "idle" ? "Idle" : "Waiting for worker"} : null;
-  const emptyMine = {name:"Your agent",slug:null,handle:null,owner:null,equity:0,chg24:null,mode:null,thesis:null,moves:[],glance:{id:"custom" as const,label:"",cashUsd:0}};
+  // THE SHELL FOR A VISITOR WITH NO AGENT — and every figure on it is unknown,
+  // not zero. `equity:0, cashUsd:0` rendered "$0.00" in the header and the
+  // sidebar for somebody who has no account at all, which is a balance we have
+  // never read for a book that does not exist.
+  const emptyMine = {name:"Your agent",slug:null,handle:null,owner:null,equity:null,chg24:null,mode:null,thesis:null,moves:[],glance:{id:"custom" as const,label:"",cashUsd:undefined}};
   const displayMine = mine ?? emptyMine;
 
   return (

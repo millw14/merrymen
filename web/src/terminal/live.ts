@@ -606,6 +606,36 @@ function marksOf(r: DiscRow): number[] {
     : [];
 }
 
+/** A day in seconds. The window "today's change" actually means. */
+const DAY_SEC = 86_400;
+
+/**
+ * The book's value twenty-four hours before `nowSec`, or null.
+ *
+ * Null is the answer whenever the series does not reach back a full day — a
+ * change measured over six hours is not a smaller version of a daily one, it is
+ * a different number with a day's name on it. Exported for the test.
+ */
+export function equityDayAgo(
+  points: readonly { equity_usdg: number; at?: string }[],
+  nowSec: number,
+): number | null {
+  const stamped = points
+    .map((p) => ({ at: p.at ? ledgerSeconds(p.at) : 0, v: p.equity_usdg }))
+    .filter((p) => p.at > 0 && Number.isFinite(p.v))
+    .sort((a, b) => a.at - b.at);
+  if (stamped.length < 2) return null;
+  const cutoff = nowSec - DAY_SEC;
+  // The series has to START at or before the cutoff, or it does not cover a day.
+  if (stamped[0]!.at > cutoff) return null;
+  let best: number | null = null;
+  for (const p of stamped) {
+    if (p.at <= cutoff) best = p.v;
+    else break;
+  }
+  return best;
+}
+
 function mineOf(feed: Feed | null, theses: Thesis[]): LiveMine | null {
   if (!feed?.agent?.name && !feed?.equity?.length) return null;
   const name = feed.agent?.name ?? "Your agent";
@@ -613,8 +643,27 @@ function mineOf(feed: Feed | null, theses: Thesis[]): LiveMine | null {
   const curve = (feed.equity ?? [])
     .map((e) => e.equity_usdg)
     .filter(Number.isFinite);
-  const latest = curve.at(-1) ?? 0;
-  const dayAgo = null;
+  /**
+   * NULL, NOT ZERO. `curve.at(-1) ?? 0` turned "this book has no equity
+   * history" into "this book holds nothing" — and `money()` renders that as a
+   * definite $0.00, which is a statement about an account nobody has read.
+   */
+  const latest = curve.at(-1) ?? null;
+  /**
+   * WHAT THE BOOK WAS WORTH A DAY AGO — or null, because a shorter history has
+   * no daily change in it.
+   *
+   * This was `const dayAgo = null`, hard-coded, so `chg24` was permanently null
+   * and every "today" figure on the product was dead code. The prototype filled
+   * it from `curve[0]` — the OLDEST point — which is the change since the series
+   * began wearing the name of a daily one; on a week-old book those differ by an
+   * order of magnitude.
+   *
+   * So: the last point at or before twenty-four hours ago, and nothing when the
+   * series does not reach back that far. The same rule research/technical.ts
+   * applies to a return window, for the same reason.
+   */
+  const dayAgo = equityDayAgo(feed.equity ?? [], Date.now() / 1000);
   const mode = feed.agent?.strategy ?? null;
   const slug = feed.agent?.slug ?? null;
   return {
@@ -650,8 +699,11 @@ function mineOf(feed: Feed | null, theses: Thesis[]): LiveMine | null {
     }),
     glance: {
       id: parseStrategy(mode), label: strategyLabel(parseStrategy(mode)),
-      cashUsd: feed.equity?.at(-1)?.cash_usdg ?? 0,
-      vaultUsd: feed.equity?.at(-1)?.vault_usdg ?? 0,
+      // NULL WHEN THE ROW DID NOT CARRY IT. `?? 0` published "you have no
+      // uncommitted cash" for a snapshot that simply did not include the
+      // column, and the header prints it in dollars beside an Add-funds button.
+      cashUsd: feed.equity?.at(-1)?.cash_usdg ?? undefined,
+      vaultUsd: feed.equity?.at(-1)?.vault_usdg ?? undefined,
       legs: (feed.positions ?? []).filter(p => p.value_usdg > 0).map(p => ({symbol:p.symbol, weight:latest && latest > 0 ? Math.round(p.value_usdg / latest * 100) : 0})),
     },
   };

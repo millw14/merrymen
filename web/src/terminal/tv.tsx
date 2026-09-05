@@ -8,7 +8,7 @@ import {
   type ISeriesApi,
   type UTCTimestamp,
 } from "lightweight-charts";
-import type { Bar, ChartKind, Seat } from "./bars";
+import { withGaps, type Bar, type ChartKind, type Seat } from "./bars";
 import { coinPrice } from "./live";
 import { Face } from "./ui";
 
@@ -87,19 +87,31 @@ export function TvChart({
             lastValueVisible: false,
             priceLineVisible: false,
           });
+    // THE HOLES STAY HOLES. lightweight-charts places bars at consecutive
+    // slots, so handing it the bars alone draws a straight line across every
+    // hour the venue published nothing. See withGaps in bars.ts.
+    const { data: spaced } = withGaps(bars);
     if (kind === "line") {
       series.setData(
-        bars.map((b) => ({ time: b.time as UTCTimestamp, value: b.close })),
+        spaced.map((b) =>
+          b.close === undefined
+            ? { time: b.time as UTCTimestamp }
+            : { time: b.time as UTCTimestamp, value: b.close },
+        ),
       );
     } else {
       series.setData(
-        bars.map((b) => ({
-          time: b.time as UTCTimestamp,
-          open: b.open,
-          high: b.high,
-          low: b.low,
-          close: b.close,
-        })),
+        spaced.map((b) =>
+          b.open === undefined
+            ? { time: b.time as UTCTimestamp }
+            : {
+                time: b.time as UTCTimestamp,
+                open: b.open,
+                high: b.high!,
+                low: b.low!,
+                close: b.close!,
+              },
+        ),
       );
     }
     chartRef.current = chart;
