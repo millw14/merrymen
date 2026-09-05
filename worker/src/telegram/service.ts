@@ -60,6 +60,7 @@ import {
   setName as setSoulName,
   soulPromptBlock,
   identityBlock,
+  narratorIdentityBlock,
   recallForPrompt,
 } from "../soul";
 import { appendChatTurn, clearChatTurns, lastChatTurnAt, recentChatTurns } from "../store";
@@ -606,9 +607,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           // Read BEFORE this turn is written, so it's the gap since they last
           // spoke rather than zero.
           const gap = describeGap(await lastChatTurnAt(msg.chatId), now());
+          // Hermes-style tiering: stable identity (name+stage+tone, no numbers) in system,
+          // volatile (gap+recalled+liveState) in user STATE — so model follows role, doesn't narrate it.
+          const narratorIdentity = narratorIdentityBlock(st.linkedAt, st.messageCount, now());
           const chatCtx = {
             state: [
-              `SOUL:\n${identity}`,
               gap ? `TIME SINCE THEIR LAST MESSAGE: ${gap}` : "",
               recalled.block,
               "",
@@ -617,17 +620,10 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
               .filter(Boolean)
               .join("\n"),
             history: await historyFor(msg.chatId),
-          };
-          const fluent = await narrateChat(msg.text, chatCtx, llm);
+            narratorIdentity,
+          } as unknown as { state: string; history: { role: "user" | "assistant"; content: string }[] };
+          const fluent = await narrateChat(msg.text, chatCtx as never, llm);
           let strippedFluent = fluent ? stripThinkingBlock(fluent) : "";
-          // Deterministic de-duplication: never recite soul header verbatim unless they asked who/what you are
-          // (fixes repetitive "mr rex here — born 2026-07-30, and I've been riding with you for 36 days now." on every hi)
-          const isIdentityQuestion = /who\s+are\s+you|what('s| is)?\s+your\s+name|how\s+long.*known|who\s+am\s+i.*talking\s+to/i.test(msg.text);
-          if (!isIdentityQuestion && strippedFluent) {
-            const soulHeaderRe = /^\s*mr rex here\s*—\s*born\s+\d{4}-\d{2}-\d{2}[^.!?]*[.!?]\s*/i;
-            const withoutHeader = strippedFluent.replace(soulHeaderRe, "").trim();
-            if (withoutHeader && withoutHeader.length > 20) strippedFluent = withoutHeader;
-          }
           if (strippedFluent) cmd = { kind: "chat", reply: strippedFluent };
           else if (fluent && !strippedFluent) {
             // Whole reply was thinking — fall back to classifier's (already stripped) reply

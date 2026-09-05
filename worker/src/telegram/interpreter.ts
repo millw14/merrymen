@@ -613,7 +613,11 @@ You're talking with your owner in plain language. Reply AS YOURSELF:
  * (the caller then falls back to the classifier's terse reply). Reuses the same
  * llmText path as narrateWhy/narrateJournal.
  */
-export async function narrateChat(userText: string, ctx: LlmContext, creds: LlmCreds): Promise<string> {
+export async function narrateChat(
+  userText: string,
+  ctx: LlmContext & { narratorIdentity?: string },
+  creds: LlmCreds,
+): Promise<string> {
   try {
     const history = (ctx.history ?? [])
       .slice(-8)
@@ -627,7 +631,10 @@ export async function narrateChat(userText: string, ctx: LlmContext, creds: LlmC
     ]
       .filter(Boolean)
       .join("\n\n");
-    const out = await llmText(creds, { system: CHAT_SYSTEM, prompt, maxTokens: 500 });
+    const system = (ctx as unknown as { narratorIdentity?: string }).narratorIdentity
+      ? `${CHAT_SYSTEM}\n\n${(ctx as unknown as { narratorIdentity: string }).narratorIdentity}`
+      : CHAT_SYSTEM;
+    const out = await llmText(creds, { system, prompt, maxTokens: 500 });
     return stripThinkingBlock(out.trim());
   } catch {
     return ""; // caller falls back to the classifier reply
