@@ -334,18 +334,29 @@ export function App() {
         {screen.kind === "token" && !token && !liveLoaded && (
           <section className="hosted-entry"><p role="status">Loading token…</p></section>
         )}
-        {screen.kind === "token" && !token && liveLoaded && (
-          <section className="hosted-entry">
-            <h1>{loadError ? "Token unavailable" : "Token not listed"}</h1>
-            <p role="status">
-              {loadError
-                ? "We could not load the market list, so we cannot show this token."
-                : "The market list came back without this token. Check the address, or it may not be tradable here."}
-            </p>
-            {loadError && <button onClick={refreshAccount}>Try again</button>}
-            <button onClick={()=>goTab("home")}>Back to markets</button>
-          </section>
-        )}
+        {screen.kind === "token" && !token && liveLoaded && (() => {
+          // WHICH READ WOULD HAVE HAD IT. Every listed equity comes from the
+          // registry seed and /api/market; every coin comes from the launchpad
+          // sweep. So an unreachable index means the coins are simply absent
+          // from the list, and "check the address" would be publishing OUR
+          // outage as a fact about the instrument. The three arms are ordered
+          // unreadable-before-absent, which is the ordering the whole product
+          // uses.
+          const unreadable =
+            !!loadError || live.reads.market === "unreadable" || live.reads.discoveries === "unreadable";
+          return (
+            <section className="hosted-entry">
+              <h1>{unreadable ? "Token unavailable" : "Token not listed"}</h1>
+              <p role="status">
+                {unreadable
+                  ? "We could not read the market list, so we cannot tell you about this token. That is a gap on our side, not a statement about the token."
+                  : "The market list came back without this token. Check the address, or it may not be tradable here."}
+              </p>
+              {unreadable && <button onClick={refreshAccount}>Try again</button>}
+              <button onClick={()=>goTab("home")}>Back to markets</button>
+            </section>
+          );
+        })()}
         {screen.kind === "token" && token && (
           <Token
             key={token.id}

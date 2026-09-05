@@ -102,6 +102,7 @@ export function Token({
       ? ((last.close - first.open) / first.open) * 100
       : null;
   const winDol = first && last ? last.close - first.open : null;
+  // `down` still drives the chart’s own colour, where a null has to pick one.
   const down = (winPct ?? 0) < 0;
 
   useEffect(() => {
@@ -213,7 +214,11 @@ export function Token({
         </div>
         <div>
           <span>{span} change</span>
-          <strong className={down ? "down" : "up"}>{pctPts(winPct)}</strong>
+          {/* The TEXT of the change gets the third colour. `down` above is a
+              boolean the chart needs; a percentage nobody measured is neither
+              up nor down, and printing "—" in green is the bug live.ts documents
+              at deltaClass. */}
+          <strong className={deltaClass(winPct)}>{pctPts(winPct)}</strong>
         </div>
         <div>
           <span>{span} high</span>

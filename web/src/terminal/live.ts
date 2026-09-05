@@ -173,6 +173,17 @@ export interface LiveState {
    */
   reads: {
     market: ReadState;
+    /**
+     * The launchpad sweep, which is where every memecoin on the list comes
+     * from — and whose failure was swallowed into an empty array.
+     *
+     * A refused discoveries read therefore dropped every coin from the market
+     * list, and the token screen then announced "The market list came back
+     * without this token. Check the address" about a coin the chain has: our
+     * outage published as a fact about the instrument, which is precisely what
+     * the unread-before-absent ordering exists to prevent.
+     */
+    discoveries: ReadState;
     board: ReadState;
     theses: ReadState;
     mine: ReadState;
@@ -313,7 +324,7 @@ export function seedLive(): LiveState {
     // draw before the first fetch returns; every empty array beside it is an
     // absence of a request, and a screen that reads them as an absence of
     // activity is asserting something nobody has checked.
-    reads: { market: "unread", board: "unread", theses: "unread", mine: "unread" },
+    reads: { market: "unread", discoveries: "unread", board: "unread", theses: "unread", mine: "unread" },
   });
 }
 
@@ -530,6 +541,7 @@ export async function loadLive(onMine?: (mine: LiveMine | null) => void): Promis
     // the ledger. See `readStateOf`.
     reads: {
       market: readStateOf(market),
+      discoveries: readStateOf(disc),
       board: readStateOf(board),
       theses: readStateOf(thesesRes),
       mine: readStateOf(feed),
@@ -853,6 +865,8 @@ interface DiscRow {
 }
 
 interface Disc {
+  /** "none" when the index could not be reached — see readStateOf. */
+  source?: string;
   rows?: DiscRow[];
   fresh?: {
     token: string;
