@@ -56,6 +56,27 @@ def assess(portfolio: PortfolioState, *, min_epoch: int = 1) -> GateResult:
     q = portfolio.quality
     caveats: list[str] = []
 
+    # ── CORE HAS THE LAST WORD ON PUBLISHABILITY ────────────────────────────
+    #
+    # When a canonical snapshot supplied a verdict, it is the verdict. Brain may
+    # decide what it will REASON about, but it does not get a second opinion on
+    # whether a book's performance can be stated — that is accounting, it lives
+    # in packages/core, and two implementations of it is the failure this whole
+    # snapshot exists to prevent.
+    if portfolio.pnl_publishable is False:
+        why = (portfolio.pnl_unavailable or "unknown").replace("-", " ")
+        if portfolio.net_contributions_usdg is None or not q.contributions_known:
+            return GateResult(
+                verdict="refuse",
+                why=f"core reports performance unmeasurable: {why}",
+                caveats=[],
+            )
+        return GateResult(
+            verdict="downgrade-to-hold",
+            why=f"core reports performance is not publishable ({why}), so nothing may be sized against it",
+            caveats=[f"core: performance not publishable — {why}"],
+        )
+
     # ── REFUSE: no denominator at all ────────────────────────────────────────
     #
     # Contributions UNKNOWN is not contributions ZERO. Equity minus zero is the

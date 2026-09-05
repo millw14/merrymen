@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 
 from .budget import RunBudget
+from .credential import Credential, CredentialRefused, resolve as resolve_credential
 
 
 class ProviderError(RuntimeError):
@@ -49,11 +50,19 @@ class LlmConfig:
 
     @staticmethod
     def from_env() -> LlmConfig:
+        """
+        Build the config, or refuse.
+
+        The key comes from credential.resolve, which will not accept the fleet's
+        house key — the earlier version of this function fell back to
+        GROQ_API_KEY, which is precisely the variable the 24 live agents read.
+        A Brain evaluation on that credential spends their quota.
+        """
         base = os.getenv("BRAIN_LLM_BASE_URL", "https://api.groq.com/openai/v1")
-        key = os.getenv("BRAIN_LLM_API_KEY") or os.getenv("GROQ_API_KEY") or ""
+        cred = resolve_credential()
         return LlmConfig(
             base_url=base.rstrip("/"),
-            api_key=key,
+            api_key=cred.key,
             provider=os.getenv("BRAIN_LLM_PROVIDER", "groq"),
             deep_model=os.getenv("BRAIN_DEEP_MODEL", "openai/gpt-oss-120b"),
             quick_model=os.getenv("BRAIN_QUICK_MODEL", "openai/gpt-oss-20b"),

@@ -155,6 +155,15 @@ class BrainDecision(BaseModel):
     changed_view: ChangedView | None = None
 
     tier: Tier
+    #: What depth this decision actually ran at, which under `adaptive` is
+    #: decided per-run rather than configured. Recorded because "did escalating
+    #: help?" cannot be answered from a setting, only from what happened.
+    depth_used: Literal["analysts", "analysts+debate", "full"] = "analysts"
+    #: Why it escalated, or why it did not. Empty when no decision was needed.
+    escalation_reasons: list[str] = Field(default_factory=list)
+    #: The action the analysts alone arrived at, when a deeper pass then ran.
+    #: This is the whole measurement: escalation only matters where these differ.
+    candidate_action: Action | None = None
     cost: Cost
     models: list[ModelUse] = Field(default_factory=list)
 
@@ -236,6 +245,15 @@ class PortfolioState(BaseModel):
     net_contributions_usdg: int | None = None  # None = UNKNOWN, not zero
     positions: list[Position] = Field(default_factory=list)
     quality: PortfolioQuality = Field(default_factory=PortfolioQuality)
+    #: CORE'S VERDICT ON PUBLISHABILITY, carried not re-derived.
+    #:
+    #: packages/core decides this once, for the worker, the web tier, social and
+    #: Brain. Re-deriving it here would be a second accounting implementation —
+    #: the exact thing the canonical snapshot exists to prevent — and it would
+    #: drift the moment either side changed a rule. None means no canonical
+    #: snapshot was supplied and the local gate must decide alone.
+    pnl_publishable: bool | None = None
+    pnl_unavailable: str | None = None
 
 
 class MarketState(BaseModel):
@@ -271,8 +289,17 @@ class DecideRequest(BaseModel):
     memory: list[str] = Field(default_factory=list)
 
     tier: Tier = "research"
-    # Ablation control: which stages of the committee actually run.
-    stages: Literal["analysts", "analysts+debate", "full"] = "full"
+    # WHICH STAGES RUN — and the default is `adaptive`, not `full`.
+    #
+    # Measured on the first ten scenarios: analysts-only scored 10/10 at 45
+    # calls, the full committee 9/10 at 90. The committee cost 2.3x the tokens
+    # and changed two decisions, both for the worse. Defaulting to it would be
+    # paying double for a measured regression.
+    #
+    # `adaptive` runs the analysts, forms a candidate, and escalates only when
+    # the situation gives an adversarial pass something to work with. The three
+    # fixed depths remain, for ablation.
+    stages: Literal["adaptive", "analysts", "analysts+debate", "full"] = "adaptive"
 
 
 class Refusal(BaseModel):

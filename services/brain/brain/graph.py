@@ -37,6 +37,7 @@ import uuid
 from dataclasses import dataclass
 
 from .budget import BudgetExceeded, RunBudget, TIERS
+from .escalation import EscalationVerdict, assess as assess_escalation
 from .gate import GateResult, assess
 from .llm import Llm, ProviderError, extract_json
 from .schemas import (
@@ -250,14 +251,45 @@ class BrainGraph:
 
         dossier = "ANALYST REPORTS\n" + "\n\n".join(f"[{r.node}]\n{r.text}" for r in reports)
 
+        # ── ADAPTIVE DEPTH ──────────────────────────────────────────────────
+        #
+        # Form a candidate from the analysts alone, then decide whether the
+        # situation is one where a second opinion has anything to work with.
+        # The candidate costs one call; the committee costs forty-five, so
+        # asking first is cheap even when the answer is yes.
+        stages = req.stages
+        candidate_action: str | None = None
+        escalation = EscalationVerdict(False, [], "fixed depth, no escalation decision taken")
+        if stages == "adaptive":
+            candidate = await self._decide(req, budget, gate, dossier)
+            candidate_action = str(candidate.get("action", "hold")).lower()
+            escalation = assess_escalation(
+                action=candidate_action,
+                confidence=float(candidate.get("confidence") or 0.0),
+                delta_usdg=int(candidate.get("suggested_delta_usdg") or 0),
+                equity_usdg=req.portfolio.equity_usdg,
+                holds_position=any(
+                    p.instrument_id == req.market.instrument_id for p in req.portfolio.positions
+                ),
+                analyst_reports=[r.text for r in reports],
+            )
+            if not escalation.escalate:
+                # Finish here. The candidate IS the decision — no second pass,
+                # no second bill.
+                return self._assemble(
+                    req, budget, gate, candidate, bull="", bear="",
+                    depth_used="analysts", escalation=escalation, candidate_action=candidate_action,
+                )
+            stages = "full"
+
         bull = bear = ""
-        if req.stages in ("analysts+debate", "full"):
+        if stages in ("analysts+debate", "full"):
             b1 = await self._debater(req, budget, "bull", dossier, "")
             b2 = await self._debater(req, budget, "bear", dossier, b1.text)
             bull, bear = b1.text, b2.text
             dossier += f"\n\nBULL CASE\n{bull}\n\nBEAR CASE\n{bear}"
 
-        if req.stages == "full":
+        if stages == "full":
             plan = dossier[-4000:]
             for stance in ("aggressive", "conservative", "neutral"):
                 r = await self._risk(req, budget, stance, plan)
@@ -267,7 +299,25 @@ class BrainGraph:
             dossier += "\n\nWHAT THIS AGENT THOUGHT BEFORE\n" + "\n".join(f"- {m}" for m in req.memory[:6])
 
         data = await self._decide(req, budget, gate, dossier)
+        return self._assemble(
+            req, budget, gate, data, bull=bull, bear=bear,
+            depth_used="full" if stages == "full" else "analysts+debate",
+            escalation=escalation, candidate_action=candidate_action,
+        )
 
+    def _assemble(
+        self,
+        req: DecideRequest,
+        budget: RunBudget,
+        gate: GateResult,
+        data: dict,
+        *,
+        bull: str,
+        bear: str,
+        depth_used: str,
+        escalation: EscalationVerdict,
+        candidate_action: str | None,
+    ) -> BrainDecision:
         # ── THE GATE WINS, whatever the model said ──────────────────────────
         #
         # Applied after parsing rather than trusted to the prompt. A model told
@@ -317,6 +367,13 @@ class BrainGraph:
             time_horizon=str(data.get("time_horizon") or "")[:120],
             changed_view=None,
             tier=req.tier,
+            depth_used=depth_used,  # type: ignore[arg-type]
+            escalation_reasons=list(escalation.reasons),
+            # Only meaningful when a deeper pass followed — that is exactly the
+            # comparison the escalation question needs.
+            candidate_action=(
+                candidate_action if (candidate_action and depth_used != "analysts") else None
+            ),  # type: ignore[arg-type]
             cost=budget.cost(),
             models=budget.models,
         )
