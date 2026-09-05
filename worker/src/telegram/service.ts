@@ -148,8 +148,13 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     let h = history.get(chatId);
     if (!h) {
       h = (await recentChatTurns(chatId, HISTORY_TURNS * 2)).map((t) => {
-        const c = t.role === "assistant" ? stripThinkingBlock(t.content) : t.content;
-        return { role: t.role, content: c };
+        let c = t.role === "assistant" ? stripThinkingBlock(t.content) : t.content;
+        // Scrub stored soul header that was echoed verbatim before tiering fix
+        // so history stops teaching the new-identity-in-system model to recite it.
+        if (t.role === "assistant") {
+          c = c.replace(/^\s*mr rex here\s*[—-]\s*born\s+\d{4}[\-\u2010\u2011\u2012\u2013\u2014\u2212]\d{2}[\-\u2010\u2011\u2012\u2013\u2014\u2212]\d{2}[^.!?]*[.!?]\s*/i, "").trim();
+        }
+        return { role: t.role, content: c || t.content.replace(/^\s*mr rex here\s*[—-]\s*born\s+[^\n]*\n?/i, "").trim() || t.content };
       });
       history.set(chatId, h);
       // Restore the last turn's recalled ids too, so a pronoun sent right after
