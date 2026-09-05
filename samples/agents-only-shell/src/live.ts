@@ -1,5 +1,13 @@
+import { loadTokenQuotes, applyTokenQuotes } from "./quotes";
 import { STOCK_TOKENS } from "../../../packages/core/src/tokens";
-import { FACE_SEEDS, SAMPLE_AGENTS, SAMPLE_CHAIN, SAMPLE_CHG, SAMPLE_MINE, SAMPLE_THESES, glanceOf } from "./sample";
+import {
+  FACE_SEEDS,
+  SAMPLE_AGENTS,
+  SAMPLE_CHAIN,
+  SAMPLE_MINE,
+  SAMPLE_THESES,
+  glanceOf,
+} from "./sample";
 import { parseStrategy, strategyLabel, type StrategyGlance } from "./strategy";
 import { whyLine } from "./why";
 
@@ -10,6 +18,7 @@ export type Screen =
   | { kind: "token"; id: string }
   | { kind: "profile"; slug: string }
   | { kind: "deposit" }
+  | { kind: "withdraw" }
   | { kind: "search" }
   | { kind: "limits" };
 
@@ -25,6 +34,9 @@ export interface LiveToken {
   name: string;
   logo: string;
   priceUsd: number | null;
+  priceUpdatedAt?: number;
+  priceSource?: string;
+  uiMultiplier?: number;
   change24hPct: number | null;
   fdvUsd: number | null;
   holders: number | null;
@@ -94,7 +106,8 @@ const LOGO = (addr: string) =>
   `https://cdn.robinhood.com/ncw_assets/logos/${addr.toLowerCase()}.png`;
 
 /** Company mark. The NCW CDN is the same Robinhood feather for every listed token. */
-const COMPANY = (symbol: string) => `https://financialmodelingprep.com/image-stock/${symbol}.png`;
+const COMPANY = (symbol: string) =>
+  `https://financialmodelingprep.com/image-stock/${symbol}.png`;
 
 export function compactUsd(n: number | null): string {
   if (n === null || !Number.isFinite(n)) return "—";
@@ -108,8 +121,15 @@ export function coinPrice(n: number | null): string {
   if (n === null || !Number.isFinite(n)) return "—";
   if (n === 0) return "$0";
   if (n < 0.01) return `$${n.toPrecision(3)}`;
-  if (n >= 100) return `$${n.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+  if (n >= 100)
+    return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   return `$${n.toFixed(n >= 1 ? 2 : 4)}`;
+}
+
+export function quoteTitle(token: LiveToken): string | undefined {
+  if (token.priceSource !== "robinhood" || !token.priceUpdatedAt)
+    return undefined;
+  return `Robinhood bid/ask midpoint · ${new Date(token.priceUpdatedAt * 1000).toLocaleString()}`;
 }
 
 export function pctPts(n: number | null): string {
@@ -156,7 +176,12 @@ export function sizeOf(t: Thesis): number | null {
 }
 
 export function seedLive(): LiveState {
-  return fillGaps({ tokens: robinhoodFallback(), agents: [], theses: [], mine: null });
+  return fillGaps({
+    tokens: robinhoodFallback(),
+    agents: [],
+    theses: [],
+    mine: null,
+  });
 }
 
 function robinhoodFallback(): LiveToken[] {
@@ -179,7 +204,7 @@ function robinhoodFallback(): LiveToken[] {
 
 async function getJson<T>(url: string): Promise<T | null> {
   try {
-    const r = await fetch(url);
+    const r = await fetch(url, { signal: AbortSignal.timeout(6000) });
     if (!r.ok) return null;
     return (await r.json()) as T;
   } catch {
@@ -188,11 +213,12 @@ async function getJson<T>(url: string): Promise<T | null> {
 }
 
 export async function loadLive(): Promise<LiveState> {
-  const [market, board, thesesRes, feed] = await Promise.all([
+  const [market, board, thesesRes, feed, quotes] = await Promise.all([
     getJson<{ tokens: MarketTok[] }>("/api/market"),
     getJson<{ agents: BoardRow[] }>("/api/leaderboard"),
     getJson<{ theses: Thesis[] }>("/api/theses"),
     getJson<Feed>("/api/feed"),
+    loadTokenQuotes(),
   ]);
   const disc = null as Disc | null;
 
@@ -216,7 +242,8 @@ export async function loadLive(): Promise<LiveState> {
       id,
       symbol: t.symbol,
       name: t.name,
-      logo: t.kind === "memecoin" ? t.logo || LOGO(t.address) : COMPANY(t.symbol),
+      logo:
+        t.kind === "memecoin" ? t.logo || LOGO(t.address) : COMPANY(t.symbol),
       priceUsd: t.priceUsd,
       change24hPct: null,
       fdvUsd: null,
@@ -262,7 +289,9 @@ export async function loadLive(): Promise<LiveState> {
       id,
       symbol,
       name: f.name || symbol,
-      logo: f.logo ? `/api/coin-image?uri=${encodeURIComponent(f.logo)}` : (prev?.logo ?? ""),
+      logo: f.logo
+        ? `/api/coin-image?uri=${encodeURIComponent(f.logo)}`
+        : (prev?.logo ?? ""),
       priceUsd: prev?.priceUsd ?? null,
       change24hPct: prev?.change24hPct ?? null,
       fdvUsd: prev?.fdvUsd ?? null,
@@ -292,8 +321,13 @@ export async function loadLive(): Promise<LiveState> {
       landed: a.landed,
       last: latestBySlug.get(a.slug!) ?? latestBySlug.get(a.name) ?? null,
       owner: a.handle,
-      glance: glanceFromPosts(latestBySlug.get(a.slug!) ?? latestBySlug.get(a.name) ?? null, theses, a.slug!),
-      thesis: (latestBySlug.get(a.slug!) ?? latestBySlug.get(a.name))?.reason ?? "",
+      glance: glanceFromPosts(
+        latestBySlug.get(a.slug!) ?? latestBySlug.get(a.name) ?? null,
+        theses,
+        a.slug!,
+      ),
+      thesis:
+        (latestBySlug.get(a.slug!) ?? latestBySlug.get(a.name))?.reason ?? "",
     }));
 
   if (agents.length === 0) {
@@ -317,7 +351,12 @@ export async function loadLive(): Promise<LiveState> {
 
   const mine = mineOf(feed, theses);
 
-  return fillGaps({ tokens: [...tokens.values()], agents, theses, mine });
+  return fillGaps({
+    tokens: applyTokenQuotes([...tokens.values()], quotes),
+    agents,
+    theses,
+    mine,
+  });
 }
 
 function fillGaps(state: LiveState): LiveState {
@@ -333,10 +372,14 @@ function fillGaps(state: LiveState): LiveState {
     const sample = sampleBySlug.get(a.slug) ?? sampleBySeed.get(a.slug);
     return {
       ...a,
-      last: a.last ?? theses.find((t) => t.slug === a.slug) ?? sample?.last ?? null,
+      last:
+        a.last ?? theses.find((t) => t.slug === a.slug) ?? sample?.last ?? null,
       owner: a.owner ?? sample?.owner ?? a.handle,
       pnlBps: a.pnlBps ?? sample?.pnlBps ?? null,
-      glance: a.glance?.id && a.glance.id !== "custom" ? a.glance : (sample?.glance ?? a.glance),
+      glance:
+        a.glance?.id && a.glance.id !== "custom"
+          ? a.glance
+          : (sample?.glance ?? a.glance),
       thesis: a.thesis || sample?.thesis || a.last?.reason || "",
     };
   };
@@ -345,13 +388,17 @@ function fillGaps(state: LiveState): LiveState {
       ? state.agents.map(dress)
       : theses.some((t) => t.said)
         ? agentsFromTheses(theses).map(dress)
-        : SAMPLE_AGENTS.map((a) => dress({
-            ...a,
-            last: theses.find((t) => t.slug === a.slug) ?? a.last,
-          }));
+        : SAMPLE_AGENTS.map((a) =>
+            dress({
+              ...a,
+              last: theses.find((t) => t.slug === a.slug) ?? a.last,
+            }),
+          );
   const mine = state.mine ?? SAMPLE_MINE;
   const tokens = state.tokens.map((t) => {
-    const posts = theses.filter((th) => (th.symbol ?? "").toUpperCase() === t.symbol);
+    const posts = theses.filter(
+      (th) => (th.symbol ?? "").toUpperCase() === t.symbol,
+    );
     const agentsN = t.agents || uniqueAgents(posts);
     const buys = t.buys || posts.filter((p) => p.action === "buy").length;
     return {
@@ -359,7 +406,7 @@ function fillGaps(state: LiveState): LiveState {
       agents: agentsN,
       buys,
       cast: t.cast.length > 0 ? t.cast : castOf(posts),
-      change24hPct: t.change24hPct ?? SAMPLE_CHG[t.symbol] ?? null,
+      change24hPct: t.change24hPct,
     };
   });
   return { tokens, agents, theses, mine };
@@ -378,7 +425,7 @@ function agentsFromTheses(theses: Thesis[]): LiveAgent[] {
         owner: null,
         pnlBps: null,
         curve: [],
-        landed: t.outcome === "landed" ? t.said ?? 1 : 0,
+        landed: t.outcome === "landed" ? (t.said ?? 1) : 0,
         last: t.action === "buy" ? t : null,
         glance: glanceFromPosts(t, theses, t.slug),
         thesis: whyLine(t),
@@ -412,10 +459,19 @@ function castOf(posts: Thesis[]): AgentRef[] {
   return out;
 }
 
-function glanceFromPosts(last: Thesis | null, theses: Thesis[], slug: string): StrategyGlance {
+function glanceFromPosts(
+  last: Thesis | null,
+  theses: Thesis[],
+  slug: string,
+): StrategyGlance {
   const sample = SAMPLE_AGENTS.find((a) => a.slug === slug);
   if (sample) return sample.glance;
-  const held = theses.filter((t) => (t.slug === slug || t.name === last?.name) && t.symbol && t.action !== "sell");
+  const held = theses.filter(
+    (t) =>
+      (t.slug === slug || t.name === last?.name) &&
+      t.symbol &&
+      t.action !== "sell",
+  );
   if (held.length === 0) return glanceOf(parseStrategy(null));
   const weight = Math.round(100 / held.length);
   return {
@@ -426,14 +482,18 @@ function glanceFromPosts(last: Thesis | null, theses: Thesis[], slug: string): S
 }
 
 function marksOf(r: DiscRow): number[] {
-  return typeof r.priceUsd === "number" && Number.isFinite(r.priceUsd) ? [r.priceUsd] : [];
+  return typeof r.priceUsd === "number" && Number.isFinite(r.priceUsd)
+    ? [r.priceUsd]
+    : [];
 }
 
 function mineOf(feed: Feed | null, theses: Thesis[]): LiveMine | null {
   if (!feed?.agent?.name && !feed?.equity?.length) return null;
   const name = feed.agent?.name ?? "Your agent";
   const mineTheses = theses.filter((t) => t.name === name);
-  const curve = (feed.equity ?? []).map((e) => e.equity_usdg).filter(Number.isFinite);
+  const curve = (feed.equity ?? [])
+    .map((e) => e.equity_usdg)
+    .filter(Number.isFinite);
   const latest = curve.at(-1) ?? null;
   const dayAgo = curve.length > 1 ? curve[0]! : null;
   const mode = feed.agent?.strategy ?? null;
@@ -448,15 +508,25 @@ function mineOf(feed: Feed | null, theses: Thesis[]): LiveMine | null {
     mode,
     thesis: mineTheses[0]?.reason ?? null,
     moves: mineTheses.slice(0, 8),
-    glance: slug ? glanceFromPosts(mineTheses[0] ?? null, theses, slug) : glanceOf(parseStrategy(mode)),
+    glance: slug
+      ? glanceFromPosts(mineTheses[0] ?? null, theses, slug)
+      : glanceOf(parseStrategy(mode)),
   };
 }
 
-export function tokenById(tokens: LiveToken[], id: string): LiveToken | undefined {
-  return tokens.find((t) => t.id === id || t.symbol.toLowerCase() === id.toLowerCase());
+export function tokenById(
+  tokens: LiveToken[],
+  id: string,
+): LiveToken | undefined {
+  return tokens.find(
+    (t) => t.id === id || t.symbol.toLowerCase() === id.toLowerCase(),
+  );
 }
 
-export function agentBySlug(agents: LiveAgent[], slug: string): LiveAgent | undefined {
+export function agentBySlug(
+  agents: LiveAgent[],
+  slug: string,
+): LiveAgent | undefined {
   return agents.find((a) => a.slug === slug);
 }
 
@@ -474,14 +544,18 @@ export function thesesForSymbol(theses: Thesis[], symbol: string): Thesis[] {
   return out;
 }
 
-export function thesesForAgent(theses: Thesis[], slug: string, name: string): Thesis[] {
+export function thesesForAgent(
+  theses: Thesis[],
+  slug: string,
+  name: string,
+): Thesis[] {
   return theses.filter((t) => t.slug === slug || t.name === name).slice(0, 12);
 }
 
 export async function chainHolders(addr: string): Promise<ChainHolder[]> {
-  const d = await getJson<{ items?: { address?: { hash?: string }; value?: string }[] }>(
-    `/blockscout/tokens/${addr}/holders`,
-  );
+  const d = await getJson<{
+    items?: { address?: { hash?: string }; value?: string }[];
+  }>(`/blockscout/tokens/${addr}/holders`);
   const rows = (d?.items ?? []).slice(0, 8).map((h) => {
     const hash = h.address?.hash ?? "";
     return {
@@ -492,25 +566,25 @@ export async function chainHolders(addr: string): Promise<ChainHolder[]> {
   return rows.length ? rows : SAMPLE_CHAIN;
 }
 
-const FACE_SEED = /^[0-9a-hjkmnp-tv-z]{16}$/;
-
 export function faceSrc(slug: string | null): string | null {
   if (!slug) return null;
   const seed = FACE_SEEDS[slug] ?? slug;
-  if (!FACE_SEED.test(seed)) return null;
-  return `/api/agent-face?seed=${encodeURIComponent(seed)}`;
+  return `https://robohash.org/${encodeURIComponent(seed)}.png?set=set1&size=160x160`;
 }
 
 export function lede(text: string | null | undefined): string {
   if (!text) return "";
-  const line = text.split("\n").find((l) => l.trim() && !l.trim().startsWith("-"));
+  const line = text
+    .split("\n")
+    .find((l) => l.trim() && !l.trim().startsWith("-"));
   return (line ?? text).trim();
 }
 
 export function lastLine(t: Thesis | null): string {
   if (!t) return "";
   if (t.action && t.symbol) {
-    const verb = t.action === "buy" ? "Bought" : t.action === "sell" ? "Sold" : "Holding";
+    const verb =
+      t.action === "buy" ? "Bought" : t.action === "sell" ? "Sold" : "Holding";
     return `${verb} ${t.symbol}`;
   }
   return t.head || t.reason || "";
@@ -547,7 +621,13 @@ interface DiscRow {
 
 interface Disc {
   rows?: DiscRow[];
-  fresh?: { token: string; symbol: string; name: string; logo: string; trades: number }[];
+  fresh?: {
+    token: string;
+    symbol: string;
+    name: string;
+    logo: string;
+    trades: number;
+  }[];
 }
 
 interface Feed {

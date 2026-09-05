@@ -7,6 +7,11 @@ export default defineConfig({
     port: 4173,
     strictPort: true,
     proxy: {
+      "/robinhood": {
+        target: "https://api.robinhood.com",
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/robinhood/, "/rhj"),
+      },
       "/api": "http://127.0.0.1:3100",
       "/blockscout": {
         target: "https://robinhoodchain.blockscout.com/api/v2",

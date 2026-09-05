@@ -1,5 +1,4 @@
 import { beatsOf, lanesOf } from "./beat";
-import { useNow } from "./clock";
 import type { LiveAgent, LiveToken, Thesis } from "./live";
 import { Wire } from "./wire";
 
@@ -17,8 +16,7 @@ export function MoveWire({
   onToken?: (id: string) => void;
   onAgent?: (slug: string) => void;
 }) {
-  const now = useNow(1000);
-  const lanes = lanesOf(beatsOf(posts, agents), now);
+  const lanes = lanesOf(beatsOf(posts, agents));
   if (lanes.length === 0) return null;
-  return <Wire lanes={lanes} tokens={tokens} now={now} solo onToken={onToken} onAgent={onAgent} />;
+  return <Wire lanes={lanes} tokens={tokens} onToken={onToken} onAgent={onAgent} />;
 }

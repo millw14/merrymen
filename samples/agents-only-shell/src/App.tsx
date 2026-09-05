@@ -1,4 +1,23 @@
-import { useEffect, useState } from "react";
+import {
+  applyTokenQuotes,
+  loadTokenQuotes,
+  loadSessionChanges,
+} from "./quotes";
+import {
+  DesktopHeader,
+  DesktopSidebar,
+  DesktopPortfolio,
+  type SidebarSection,
+} from "./Desktop";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import type { ChatTurn } from "./account";
+import "./profile-flow.css";
 import {
   loadLive,
   seedLive,
@@ -30,37 +49,116 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "you", label: "You" },
 ];
 
+const HOME_SCREEN: Screen = { kind: "tab", tab: "home" };
+const desktopSnapshot = () => window.matchMedia("(min-width: 1100px)").matches;
+function subscribeDesktop(onChange: () => void) {
+  const media = window.matchMedia("(min-width: 1100px)");
+  media.addEventListener("change", onChange);
+  return () => media.removeEventListener("change", onChange);
+}
+
 export function App() {
+  const bodyRef = useRef<HTMLDivElement>(null);
   const [live, setLive] = useState<LiveState>(seedLive);
-  const [screen, setScreen] = useState<Screen>({ kind: "tab", tab: "home" });
+  const [requestedScreen, setScreen] = useState<Screen>(HOME_SCREEN);
+  const [sidebarSection, setSidebarSection] =
+    useState<SidebarSection>("markets");
+  const desktop = useSyncExternalStore(subscribeDesktop, desktopSnapshot);
+  const [moneyMode, setMoneyMode] = useState<"deposit" | "withdraw" | null>(
+    null,
+  );
+  const screen: Screen =
+    moneyMode && !desktop
+      ? { kind: moneyMode }
+      : desktop &&
+          requestedScreen.kind === "tab" &&
+          (requestedScreen.tab === "feed" || requestedScreen.tab === "board")
+        ? HOME_SCREEN
+        : requestedScreen;
   const [tab, setTab] = useState<Tab>("home");
   const [tokenTab, setTokenTab] = useState<TokenTab>("buys");
-  const [run, setRun] = useState<StrategyId>("steady-basket");
+  const [run] = useState<StrategyId>("steady-basket");
   const [perTrade, setPerTrade] = useState("25");
   const [perDay, setPerDay] = useState("200");
   const [stopped, setStopped] = useState(false);
+  const [chatDraft, setChatDraft] = useState("");
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
+
+  useLayoutEffect(() => {
+    window.scrollTo(0, 0);
+    if (bodyRef.current) bodyRef.current.scrollTop = 0;
+  }, [screen]);
 
   useEffect(() => {
     let alive = true;
+    let refreshing = false;
+    let loaded: LiveState | undefined;
+    const refreshChanges = async (tokens: LiveState["tokens"]) => {
+      const changes = await loadSessionChanges(tokens);
+      if (alive && changes.size)
+        setLive((previous) => ({
+          ...previous,
+          tokens: previous.tokens.map((t) =>
+            changes.has(t.id) ? { ...t, change24hPct: changes.get(t.id)! } : t,
+          ),
+        }));
+    };
     void loadLive()
-      .then((d) => {
-        if (alive) setLive(d);
+      .then((data) => {
+        if (!alive) return;
+        loaded = data;
+        setLive(data);
+        void refreshChanges(data.tokens);
       })
-      .catch((err) => {
-        console.error("loadLive", err);
-      });
+      .catch((error) => console.error("loadLive", error));
+    const refresh = async () => {
+      if (!loaded || refreshing || document.hidden) return;
+      refreshing = true;
+      try {
+        const quotes = await loadTokenQuotes();
+        if (alive && quotes.size)
+          setLive((previous) => ({
+            ...previous,
+            tokens: applyTokenQuotes(previous.tokens, quotes),
+          }));
+        await refreshChanges(loaded.tokens);
+      } finally {
+        refreshing = false;
+      }
+    };
+    const timer = window.setInterval(() => void refresh(), 60_000);
+    const onVisible = () => {
+      if (!document.hidden) void refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       alive = false;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
 
+  const openScreen = (next: Screen) => {
+    if (next.kind === "deposit" || next.kind === "withdraw") {
+      setMoneyMode(next.kind);
+      return;
+    }
+    setMoneyMode(null);
+    setScreen(next);
+  };
   const goTab = (next: Tab) => {
+    setMoneyMode(null);
+    if (next === "feed" || next === "board") setSidebarSection(next);
     setTab(next);
     setScreen({ kind: "tab", tab: next });
   };
   const activeTab = tab;
-  const token = screen.kind === "token" ? tokenById(live.tokens, screen.id) : undefined;
-  const agent = screen.kind === "profile" ? live.agents.find((a) => a.slug === screen.slug) : undefined;
+  const token =
+    screen.kind === "token" ? tokenById(live.tokens, screen.id) : undefined;
+  const agent =
+    screen.kind === "profile"
+      ? live.agents.find((a) => a.slug === screen.slug)
+      : undefined;
   const drafted = mineFor(run);
   const mine = live.mine
     ? {
@@ -74,17 +172,40 @@ export function App() {
     : drafted;
 
   return (
-    <div className="app">
-      <div className={screen.kind === "token" ? "body token-body" : "body"}>
+    <div
+      className="app"
+      data-screen={screen.kind === "tab" ? screen.tab : screen.kind}
+    >
+      <DesktopHeader mine={mine} onScreen={openScreen} onTab={goTab} />
+      {desktop && (
+        <DesktopSidebar
+          mine={mine}
+          tokens={live.tokens}
+          agents={live.agents}
+          theses={live.theses}
+          screen={screen}
+          section={sidebarSection}
+          onSection={setSidebarSection}
+          onScreen={openScreen}
+          onTab={goTab}
+        />
+      )}
+      <div
+        ref={bodyRef}
+        className={screen.kind === "token" ? "body token-body" : "body"}
+      >
         {screen.kind === "tab" && screen.tab === "home" && (
           <Home
             tokens={live.tokens}
+            agents={live.agents}
+            theses={live.theses}
             mine={mine}
             tokenTab={tokenTab}
             onTokenTab={setTokenTab}
-            onToken={(id) => setScreen({ kind: "token", id })}
-            onDeposit={() => setScreen({ kind: "deposit" })}
-            onSearch={() => setScreen({ kind: "search" })}
+            onToken={(id) => openScreen({ kind: "token", id })}
+            onAgent={(slug) => openScreen({ kind: "profile", slug })}
+            onDeposit={() => openScreen({ kind: "deposit" })}
+            onSearch={() => openScreen({ kind: "search" })}
             onDesk={() => goTab("agent")}
           />
         )}
@@ -93,8 +214,8 @@ export function App() {
             theses={live.theses}
             tokens={live.tokens}
             agents={live.agents}
-            onToken={(id) => setScreen({ kind: "token", id })}
-            onProfile={(slug) => setScreen({ kind: "profile", slug })}
+            onToken={(id) => openScreen({ kind: "token", id })}
+            onProfile={(slug) => openScreen({ kind: "profile", slug })}
             onDesk={() => goTab("agent")}
           />
         )}
@@ -102,69 +223,80 @@ export function App() {
           <Agent
             mine={mine}
             tokens={live.tokens}
-            agents={live.agents}
-            theses={live.theses}
+            stopped={stopped}
+            turns={turns}
+            draft={chatDraft}
+            onDraft={setChatDraft}
+            onTurn={(turn) => setTurns((previous) => [...previous, turn])}
             perTrade={perTrade}
             perDay={perDay}
-            onToken={(id) => setScreen({ kind: "token", id })}
-            onProfile={(slug) => setScreen({ kind: "profile", slug })}
-            onDeposit={() => setScreen({ kind: "deposit" })}
-            onLimits={() => setScreen({ kind: "limits" })}
+            onToken={(id) => openScreen({ kind: "token", id })}
+            onDeposit={() => openScreen({ kind: "deposit" })}
+            onWithdraw={() => openScreen({ kind: "withdraw" })}
+            onLimits={() => openScreen({ kind: "limits" })}
           />
         )}
         {screen.kind === "tab" && screen.tab === "board" && (
           <Board
             agents={live.agents}
-            tokens={live.tokens}
+            theses={live.theses}
             mine={mine}
-            onProfile={(slug) => setScreen({ kind: "profile", slug })}
+            onProfile={(slug) => openScreen({ kind: "profile", slug })}
             onDesk={() => goTab("agent")}
           />
         )}
         {screen.kind === "tab" && screen.tab === "you" && (
           <You
-            onLimits={() => setScreen({ kind: "limits" })}
+            history={
+              live.agents.find((a) => a.slug === mine?.slug)?.curve ?? []
+            }
+            onLimits={() => openScreen({ kind: "limits" })}
             onStop={() => setStopped((v) => !v)}
             onDesk={() => goTab("agent")}
-            onDeposit={() => setScreen({ kind: "deposit" })}
+            onDeposit={() => openScreen({ kind: "deposit" })}
             stopped={stopped}
             perTrade={perTrade}
             perDay={perDay}
             mine={mine}
-            agents={live.agents}
-            tokens={live.tokens}
-            theses={live.theses}
-            run={run}
-            onRun={setRun}
           />
         )}
         {screen.kind === "token" && token && (
           <Token
+            key={token.id}
             token={token}
             theses={live.theses}
             agents={live.agents}
             onBack={() => goTab(tab)}
-            onProfile={(slug) => setScreen({ kind: "profile", slug })}
+            onProfile={(slug) => openScreen({ kind: "profile", slug })}
           />
         )}
         {screen.kind === "profile" && agent && (
           <Profile
+            key={agent.slug}
             agent={agent}
-            agents={live.agents}
             theses={live.theses}
             tokens={live.tokens}
             onBack={() => goTab(tab)}
-            onToken={(id) => setScreen({ kind: "token", id })}
+            onToken={(id) => openScreen({ kind: "token", id })}
           />
         )}
-        {screen.kind === "deposit" && <Deposit onBack={() => goTab("home")} />}
+        {screen.kind === "withdraw" && (
+          <Deposit
+            mode="withdraw"
+            mine={mine}
+            onBack={() => setMoneyMode(null)}
+          />
+        )}
+        {screen.kind === "deposit" && (
+          <Deposit mine={mine} onBack={() => setMoneyMode(null)} />
+        )}
         {screen.kind === "search" && (
           <Search
             tokens={live.tokens}
             agents={live.agents}
             onBack={() => goTab(tab)}
-            onToken={(id) => setScreen({ kind: "token", id })}
-            onProfile={(slug) => setScreen({ kind: "profile", slug })}
+            onToken={(id) => openScreen({ kind: "token", id })}
+            onProfile={(slug) => openScreen({ kind: "profile", slug })}
           />
         )}
         {screen.kind === "limits" && (
@@ -174,25 +306,54 @@ export function App() {
             onSave={(trade, day) => {
               setPerTrade(trade);
               setPerDay(day);
-              goTab("you");
+              goTab(tab);
             }}
-            onBack={() => goTab("you")}
+            onBack={() => goTab(tab)}
           />
         )}
       </div>
-      <nav className="tabbar">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            className={activeTab === t.id ? "tab on" : "tab"}
-            aria-label={t.label}
-            onClick={() => goTab(t.id)}
-          >
-            <TabIcon id={t.id} />
-          </button>
-        ))}
-      </nav>
+      {desktop && moneyMode ? (
+        <aside
+          className="desktop-money-panel"
+          aria-label={moneyMode === "withdraw" ? "Withdraw funds" : "Add funds"}
+        >
+          <Deposit
+            key={moneyMode}
+            mode={moneyMode}
+            mine={mine}
+            compact
+            onBack={() => setMoneyMode(null)}
+          />
+        </aside>
+      ) : (
+        <DesktopPortfolio
+          selectedToken={token}
+          mine={mine}
+          tokens={live.tokens}
+          stopped={stopped}
+          perTrade={perTrade}
+          perDay={perDay}
+          onScreen={openScreen}
+          onTab={goTab}
+        />
+      )}
+      {screen.kind !== "deposit" &&
+        screen.kind !== "withdraw" &&
+        screen.kind !== "limits" && (
+          <nav className="tabbar">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                className={activeTab === t.id ? "tab on" : "tab"}
+                aria-label={t.label}
+                onClick={() => goTab(t.id)}
+              >
+                <TabIcon id={t.id} />
+              </button>
+            ))}
+          </nav>
+        )}
     </div>
   );
 }

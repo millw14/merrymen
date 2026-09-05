@@ -10,6 +10,7 @@ import { SETTINGS_DEFAULTS, isHostedMode, type MerrymenSettings } from "@merryme
 import { getSettingsStore } from "@merrymen/settings-store";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
+import { getIdentityStore } from "@merrymen/identity-store";
 import { hostedAgentFor } from "@/lib/agent-for";
 
 // The basket the WORKER actually defaults to when none is configured.
@@ -66,6 +67,7 @@ export interface AgentFinancials {
 /** Live identity: the user-given name (soul, mirrored into the agents table by
  * the worker) + the strategy/basket actually configured in settings.json. */
 export interface AgentIdentity {
+  slug?: string | null;
   name: string;
   strategy: string;
   basket: string[];
@@ -169,7 +171,8 @@ function resolveAgentName(configured: string | null, fromLedger: string): string
 /** Name + strategy + basket, with the configured name preferred. */
 async function identityOf(fromLedger: string, tenant: `0x${string}` | null): Promise<AgentIdentity> {
   const { agentName, ...rest } = await readIdentitySettings(tenant);
-  return { name: resolveAgentName(agentName, fromLedger), ...rest };
+  const identity = tenant ? await getIdentityStore().get(tenant).catch(()=>null) : null;
+  return { name: resolveAgentName(agentName, fromLedger), slug: identity?.slug ?? null, ...rest };
 }
 
 /**

@@ -1,20 +1,13 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono, Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
+import { Geist, Geist_Mono } from "next/font/google";
 import localFont from "next/font/local";
-/**
- * The design system, and ONLY the design system.
- *
- * This used to import globals.css, which meant 1,324 lines of the old shell —
- * its palette, its fixed background photo, its element-scoped rules — applied
- * to every route in the product whether or not the route wanted them. The two
- * pages that still want them import them directly now; see styles/legacy.css.
- */
-import "@/styles/tokens.css";
-import "@/styles/base.css";
+// All routed screens share the terminal design. Standalone offline and desktop
+// startup documents keep their styles inline so they work without the app.
+import "@/terminal/terminal.css";
+import "@/terminal/forms.css";
+import "@/terminal/root.css";
 import { RegisterSW } from "@/components/RegisterSW";
 
-// The merrymen.dev typefaces — used on the setup/settings screens (.setup-look)
-// so onboarding feels like the website; the trading terminal keeps its own fonts.
 /**
  * THE PRODUCT'S FACES.
  *
@@ -39,28 +32,6 @@ const geistPixel = localFont({
   // Arial is a poor stand-in for a pixel face, so hold the fallback tight
   // rather than letting a wildly different metric flash and reflow the hero.
   adjustFontFallback: false,
-});
-
-/**
- * THE LEGACY FACES, kept alive for /grant and /settings only.
- *
- * legacy.css and legacy-console.css resolve --font-hanken and --font-jbmono, and
- * those two pages are deliberately not being restyled. `preload: false` because
- * no other route uses them: without it every visitor to the feed pays a
- * preload for two faces that never render.
- */
-const hanken = Hanken_Grotesk({
-  subsets: ["latin"],
-  variable: "--font-hanken",
-  weight: ["400", "500", "600", "700", "800"],
-  display: "swap",
-  preload: false,
-});
-const jbmono = JetBrains_Mono({
-  subsets: ["latin"],
-  variable: "--font-jbmono",
-  display: "swap",
-  preload: false,
 });
 
 // WHAT A PASTED LINK SAYS THIS IS.
@@ -133,9 +104,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html
       lang="en"
-      className={`${geist.variable} ${geistMono.variable} ${geistPixel.variable} ${hanken.variable} ${jbmono.variable}`}
+      className={`${geist.variable} ${geistMono.variable} ${geistPixel.variable}`}
     >
-      <body>
+      <body style={{margin:0}}>
         {children}
         <RegisterSW />
       </body>

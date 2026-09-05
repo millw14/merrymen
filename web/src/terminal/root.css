@@ -1,0 +1,11 @@
+html {color-scheme:dark;background:#080905;}
+body {margin:0;background:#080905;color:#e9e9e1;}
+.terminal-standalone {min-height:100svh;display:grid;place-items:center;padding:24px;box-sizing:border-box;}
+.terminal-standalone main {width:100%;max-width:440px;}
+.terminal-standalone h1 {font-size:36px;line-height:1.15;letter-spacing:-.04em;margin:28px 0 16px;}
+.terminal-standalone p {font-size:15px;line-height:1.7;color:var(--tx-2);}
+.terminal-standalone form {display:grid;gap:14px;margin-top:28px;}
+.terminal-standalone label {font-size:13px;display:grid;gap:10px;}
+.terminal-standalone input {padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--tx);font:inherit;}
+.terminal-standalone button,.terminal-standalone .standalone-action {display:inline-flex;justify-content:center;padding:14px 20px;border-radius:12px;background:var(--tx);color:var(--ink);font:inherit;font-weight:600;border:0;margin-top:10px;}
+.terminal-standalone .brand {font-size:23px;font-weight:600;letter-spacing:-.04em;color:var(--tx);}

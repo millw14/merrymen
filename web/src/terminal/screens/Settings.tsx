@@ -2,20 +2,15 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { AppShell } from "@/components/shell/AppShell";
-import { PageHeader } from "@/components/shell/PageHeader";
+import { CircleHelp } from "lucide-react";
+import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import { MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
-import SetupChecklist from "./SetupChecklist";
+import SetupChecklist from "../SetupChecklist";
 // QUARANTINED alongside /grant. A settings form is not a surface anybody shares
 // from a phone, and its ~30 fields are styled against the old sheet — so it
 // keeps it, and the sheet no longer reaches anything else.
-import "@/styles/tokens.css";
-import "@/styles/base.css";
-import "@/styles/shell.css";
-import "@/styles/feed.css";
-import "@/styles/form.css";
 
 type Draft = Record<string, string>;
 
@@ -27,7 +22,8 @@ function Field(props: {
   children: React.ReactNode;
 }) {
   return (
-    <label className="mm-field">
+    <div className="mm-field setting-field">
+    <label>
       <span className="mm-labelrow">
         <span className="mm-label">{props.label}</span>
         {props.action && (
@@ -37,13 +33,16 @@ function Field(props: {
         )}
       </span>
       <span className="mm-input">{props.children}</span>
-      {props.hint && <span className="mm-hint">{props.hint}</span>}
     </label>
+    {props.hint && <details className="setting-help"><summary aria-label={`About ${props.label}`}><CircleHelp size={15}/></summary><div className="mm-hint">{props.hint}</div></details>}
+    </div>
   );
 }
 
-export default function SettingsPage() {
+export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const [view, setView] = useState<SettingsView | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [draft, setDraft] = useState<Draft>({});
   const [symbols, setSymbols] = useState<string[] | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -113,15 +112,17 @@ export default function SettingsPage() {
       /* no grant, or unreadable — the basket just won't annotate */
     }
     void (async () => {
+      setLoadError(false);
       try {
         const res = await fetch("/api/settings");
-        if (res.ok) setView((await res.json()) as SettingsView);
+        if (!res.ok) throw new Error("Settings unavailable");
+        setView((await res.json()) as SettingsView);
       } catch {
-        /* page shows loading state */
+        setLoadError(true);
       }
       void loadTelegram();
     })();
-  }, []);
+  }, [loadAttempt]);
 
   // Debounced model fetch — triggers when provider, key, or custom URL changes.
   useEffect(() => {
@@ -284,7 +285,7 @@ export default function SettingsPage() {
       <AppShell>
         <PageHeader title="Settings" />
         <div className="mm-wrap">
-          <p className="mm-note mono">loading settings…</p>
+          {loadError ? <><p role="alert" className="mm-note">Could not load your settings.</p><button className="mm-btn" onClick={()=>setLoadAttempt(x=>x+1)}>Try again</button></> : <p role="status" className="mm-note">Loading settings…</p>}
         </div>
       </AppShell>
     );
@@ -380,18 +381,15 @@ export default function SettingsPage() {
 
       <div className="mm-wrap">
         <p className="mm-note">
-            The handful of things you need to get riding are up top; everything else lives under{" "}
-            <b>Advanced</b>. Stored locally in <code>~/.merrymen/settings.json</code> and picked up
-            by the worker within one tick — no restarts. Keys never leave your machine; leave a key
-            blank to keep what&apos;s saved.
+            Choose how your agent trades and stays in touch. Leave a key blank to keep the saved one.
         </p>
 
         {/* Setup steps live here after the /app muster is done — a quiet, honest
             status strip read from real state, and a fast way back to fund or re-key. */}
-        <SetupChecklist />
+        <SetupChecklist onFund={onFund} paper={view.values.paperTradingEnabled ?? view.defaults.paperTradingEnabled}/>
 
           {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
-          <div className="mm-section">essentials</div>
+          <div className="mm-section">Agent settings</div>
           <div className="mm-grid">
             {/* THE BRAIN IS BRING-YOUR-OWN IN BOTH MODES.
                 This block used to be self-hosted only, on the reasoning that the
@@ -405,7 +403,7 @@ export default function SettingsPage() {
               <>
             {/* ── AI provider · bring any key ──────────────────────────── */}
               <Field
-                label={hosted ? "AI provider · optional, for a smarter brain" : "AI provider · the brain"}
+                label="AI provider"
                 action={prov.keyUrl ? { href: prov.keyUrl, label: providerNeedsKey ? "get a key" : "install" } : undefined}
                 hint={`Powers plain-English chat and the AI strategist. ${prov.blurb} ${
                   hosted
@@ -457,7 +455,7 @@ export default function SettingsPage() {
               )}
               <Field
                 label="model"
-                hint={`Which model to run. Blank uses the provider default${prov.defaultModel ? ` (${prov.defaultModel})` : ""}.${modelsError ? ` Could not list models: ${modelsError}` : ""}`}
+                hint={`Leave blank to use the provider default${prov.defaultModel ? ` (${prov.defaultModel})` : ""}.`}
               >
                 {modelsLoading ? (
                   <span className="mm-loading">listing models…</span>
@@ -518,7 +516,7 @@ export default function SettingsPage() {
                 the only way was a Telegram command -- which is why every hosted
                 agent is called Robin. */}
             <Field
-              label="name your merryman"
+              label="Agent name"
               hint="What you call your agent. It signs its own messages with this, and it is how it refers to itself in chat. Letters, numbers, spaces, up to 24 characters."
             >
               <input
@@ -530,7 +528,7 @@ export default function SettingsPage() {
               />
             </Field>
             <Field
-              label="strategy"
+              label="Strategy"
               hint="steady-basket = DCA + vault sweep · weekend-gap = trade the close→open gap · llm-strategist = Claude proposes, policy disposes · trencher = enters newly launched tokens on chain-read signals and exits on a stop, a target, or liquidity leaving (PAPER MODE ONLY for now). Your own bots from strategies/ appear below the line."
             >
               <select value={v("strategy") || d.strategy} onChange={set("strategy")}>
@@ -549,7 +547,8 @@ export default function SettingsPage() {
             </Field>
           </div>
 
-          <div className="mm-subtle mono">basket · equal-weighted</div>
+          {modelsError && <p role="status" className="mm-danger">Could not load AI models. Check your provider and key, or enter a model name.</p>}
+          <div className="mm-section">Trading basket</div>
           <div className="mm-chips">
             {/* Owner-added tokens sit alongside the registry ones. Selecting is
                 still an explicit act: adding a token means "know about this",
@@ -590,7 +589,7 @@ export default function SettingsPage() {
               Adding one here does NOT make it tradable — the tradable list is
               sealed into the signed key — so the /grant re-sign is spelled out
               rather than left to be discovered as a reverted trade. */}
-          <div className="mm-subtle mono">your own tokens · memecoins &amp; anything else on 4663</div>
+          <details className="settings-group"><summary>Custom tokens & discovery</summary>
           {activeTokens.length > 0 && (
             <div className="mm-rows">
               {activeTokens.map((t) => (
@@ -811,13 +810,10 @@ export default function SettingsPage() {
             )}
           </div>
 
-          {/* ── TELEGRAM (essentials: token + enable) ──────────────────── */}
-          <div id="telegram" className="mm-section">telegram · chat with your merryman</div>
+          </details>
+          <details className="settings-group" id="telegram"><summary>Telegram</summary>
           <p className="mm-hint" style={{ marginTop: 0 }}>
-            Create a bot with <b>@BotFather</b> in Telegram (send <code>/newbot</code>), paste its
-            token below, enable, and hit <b>test</b>. Then message your bot <code>/link {tg?.linkCode ?? "……"}</code> to
-            claim it. Commands and natural-language chat run inside the same policy wall — Telegram can
-            never exceed your signed grant.
+            Create a bot with @BotFather, add its token, then send <code>/link {tg?.linkCode ?? "……"}</code> to connect it.
           </p>
           <div className="mm-grid">
             <Field
@@ -854,11 +850,13 @@ export default function SettingsPage() {
             </label>
           </div>
 
+          </details>
+
           {/* ── ADVANCED (collapsed by default) ────────────────────────── */}
           <details className="mm-advanced">
-            <summary>⚙ Advanced — Telegram controls · remote PC control · RPC / fees / cadence / LLM</summary>
+            <summary>Advanced settings</summary>
 
-            <div className="mm-section">telegram · controls &amp; transfers</div>
+            <div className="mm-section">Telegram controls</div>
             <div className="mm-grid">
             <label className="mm-field">
               <span className="mm-label">allow control commands</span>
@@ -973,7 +971,7 @@ export default function SettingsPage() {
           </div>
 
           {/* ── remote control · your PC (OpenClaw-style) ─────────────────── */}
-          <div className="mm-section">🖥️ remote control · your PC</div>
+          <div className="mm-section">Computer access</div>
           <div className="mm-danger" style={{ marginBottom: 12 }}>
             <b>This lets Telegram touch this computer.</b> With it on, an allowlisted chat can take
             screenshots, open apps, browse a folder you pick, and — if you enable them — run
@@ -1168,7 +1166,7 @@ export default function SettingsPage() {
             <span className="mm-hint">Names /open may launch. Full https:// URLs open without an allowlist.</span>
           </div>
 
-          <div className="mm-section">execution &amp; keys</div>
+          <div className="mm-section">Connections</div>
           <div className="mm-grid">
             <Field
               label="mainnet RPC override"
@@ -1224,7 +1222,7 @@ export default function SettingsPage() {
             </Field>
           </div>
 
-          <div className="mm-section">virtuals terminal</div>
+          <div className="mm-section">Virtuals</div>
           <div className="mm-grid">
             <label className="mm-field">
               <span className="mm-label">stream to Virtuals</span>
@@ -1290,7 +1288,7 @@ export default function SettingsPage() {
             </Field>
           </div>
 
-          <div className="mm-section">trading knobs</div>
+          <div className="mm-section">Trading preferences</div>
           <div className="mm-grid">
             <Field label="swap venue" hint="uniswap = permissionless v3 (QQQ has liquidity today) · rialto = meta-router (needs the Rialto key above for full execution).">
               <select value={v("swapVenue") || d.swapVenue} onChange={set("swapVenue")}>
@@ -1338,7 +1336,7 @@ export default function SettingsPage() {
           </details>
 
           <button className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…"}>
-            {status ?? "save settings"}
+            {status ?? "Save changes"}
           </button>
           {errors.length > 0 && (
             <div className="mm-danger mono">
@@ -1348,11 +1346,7 @@ export default function SettingsPage() {
             </div>
           )}
 
-        <p className="mm-note">
-          precedence: these settings → environment variables → defaults. the worker re-reads this
-          file every tick; connection changes re-arm the executor automatically. keys live only in
-          ~/.merrymen/settings.json on this machine.
-        </p>
+        <p className="mm-note">Saved changes take effect when your agent next checks its settings.</p>
       </div>
     </AppShell>
   );

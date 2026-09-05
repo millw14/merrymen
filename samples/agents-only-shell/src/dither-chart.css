@@ -1,0 +1,156 @@
+.dither-figure {
+  margin: 12px 0 0;
+  width: 100%;
+  min-width: 0;
+  --chart-color: var(--up);
+}
+.dither-figure.is-down {
+  --chart-color: var(--down);
+}
+.dither-caption,
+.dither-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.dither-caption {
+  margin-bottom: 6px;
+}
+.dither-caption > span:last-child {
+  color: var(--chart-color);
+  font-variant-numeric: tabular-nums;
+}
+.dither-plot {
+  position: relative;
+  height: var(--chart-height);
+  width: 100%;
+  cursor: crosshair;
+  touch-action: pan-y;
+  outline-offset: 5px;
+}
+.dither-plot:focus-visible {
+  outline: 1px solid var(--tx-2);
+}
+.dither-plot canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+.dither-axis {
+  margin-top: 6px;
+}
+.dither-crosshair {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed var(--tx-2);
+  pointer-events: none;
+}
+.dither-crosshair i {
+  position: absolute;
+  left: -4px;
+  width: 7px;
+  height: 7px;
+  background: var(--chart-color);
+  border: 1px solid var(--bg);
+  transform: translateY(-50%);
+}
+.dither-tooltip {
+  position: absolute;
+  top: 3px;
+  transform: translateX(-50%);
+  display: grid;
+  gap: 3px;
+  min-width: 120px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  pointer-events: none;
+  box-shadow: 0 3px 12px #0005;
+}
+.dither-tooltip strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tx);
+  font-variant-numeric: tabular-nums;
+}
+.dither-tooltip span {
+  font-size: 10px;
+  color: var(--tx-2);
+}
+.dither-empty {
+  color: var(--faint);
+  font-size: 11px;
+  margin: 20px 0;
+}
+.token-plot > .dither-figure {
+  margin-top: 8px;
+}
+.token-plot .dither-caption {
+  display: none;
+}
+.account-balance > .dither-figure {
+  margin-top: 14px;
+}
+.public-chart > .dither-figure {
+  margin-top: 0;
+}
+
+.token-plot .dither-axis {
+  padding-inline: 18px;
+}
+
+/* Balance charts stay secondary to the figure and the content below it. */
+.performance-chart {
+  display: flex;
+  flex-direction: column;
+}
+.performance-chart .dither-stage {
+  order: 0;
+}
+.performance-chart .dither-caption {
+  order: 1;
+  margin: 6px 0 0;
+}
+.performance-chart .dither-axis {
+  display: none;
+}
+
+.dither-stage {
+  position: relative;
+  height: var(--chart-height);
+}
+.dither-riders {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.dither-rider {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  display: block;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 2px solid var(--bg);
+  border-radius: 50%;
+  background: var(--bg);
+}
+button.dither-rider {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.dither-rider > .face.sm {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+}
+.dither-tooltip {
+  z-index: 20;
+}

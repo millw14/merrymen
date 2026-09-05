@@ -28,7 +28,11 @@ export interface Seat {
   price: number;
 }
 
-export function windowSpec(id: WindowId): { interval: string; range: string; cut?: number } {
+export function windowSpec(id: WindowId): {
+  interval: string;
+  range: string;
+  cut?: number;
+} {
   switch (id) {
     case "1H":
       return { interval: "1m", range: "1d", cut: 3600 };
@@ -49,31 +53,41 @@ export function windowSpec(id: WindowId): { interval: string; range: string; cut
   }
 }
 
-export async function loadBars(token: LiveToken, window: WindowId): Promise<Bar[]> {
-  const bars =
-    token.kind !== "memecoin"
-      ? await yahooBars(token.symbol, window).then((live) => (live.length > 2 ? live : walkBars(token, window)))
-      : walkBars(token, window);
-  const last = bars[bars.length - 1];
-  const now = token.priceUsd;
-  if (last && now && now > 0) {
-    last.close = now;
-    last.high = Math.max(last.high, now);
-    last.low = Math.min(last.low, now);
-  }
-  return bars;
+export async function loadBars(
+  token: LiveToken,
+  window: WindowId,
+): Promise<Bar[]> {
+  if (token.kind === "memecoin") return [];
+  const bars = await yahooBars(token.symbol, window);
+  const multiplier = token.uiMultiplier ?? 1;
+  return bars.map((bar) => ({
+    ...bar,
+    open: bar.open * multiplier,
+    high: bar.high * multiplier,
+    low: bar.low * multiplier,
+    close: bar.close * multiplier,
+  }));
 }
 
 async function yahooBars(symbol: string, window: WindowId): Promise<Bar[]> {
   const { interval, range } = windowSpec(window);
   try {
-    const r = await fetch(`/yahoo/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}`);
+    const r = await fetch(
+      `/yahoo/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}`,
+    );
     if (!r.ok) return [];
     const j = (await r.json()) as {
       chart?: {
         result?: {
           timestamp?: number[];
-          indicators?: { quote?: { open?: (number | null)[]; high?: (number | null)[]; low?: (number | null)[]; close?: (number | null)[] }[] };
+          indicators?: {
+            quote?: {
+              open?: (number | null)[];
+              high?: (number | null)[];
+              low?: (number | null)[];
+              close?: (number | null)[];
+            }[];
+          };
         }[];
       };
     };
@@ -87,8 +101,19 @@ async function yahooBars(symbol: string, window: WindowId): Promise<Bar[]> {
       const high = q.high?.[i];
       const low = q.low?.[i];
       const close = q.close?.[i];
-      if (![open, high, low, close].every((n) => typeof n === "number" && Number.isFinite(n))) continue;
-      out.push({ time: ts[i]!, open: open!, high: high!, low: low!, close: close! });
+      if (
+        ![open, high, low, close].every(
+          (n) => typeof n === "number" && Number.isFinite(n),
+        )
+      )
+        continue;
+      out.push({
+        time: ts[i]!,
+        open: open!,
+        high: high!,
+        low: low!,
+        close: close!,
+      });
     }
     const cut = windowSpec(window).cut;
     if (cut && out.length) {
@@ -99,51 +124,6 @@ async function yahooBars(symbol: string, window: WindowId): Promise<Bar[]> {
   } catch {
     return [];
   }
-}
-
-function walkSpec(id: WindowId): { n: number; step: number } {
-  switch (id) {
-    case "1H":
-      return { n: 60, step: 60 };
-    case "4H":
-      return { n: 48, step: 300 };
-    case "1D":
-      return { n: 78, step: 300 };
-    case "7D":
-      return { n: 84, step: 900 };
-    case "1M":
-      return { n: 120, step: 3600 };
-    case "ALL":
-      return { n: 160, step: 86400 };
-    default: {
-      const _x: never = id;
-      return _x;
-    }
-  }
-}
-
-function walkBars(token: LiveToken, window: WindowId): Bar[] {
-  const last = token.priceUsd ?? token.marks.at(-1) ?? 100;
-  const { n, step } = walkSpec(window);
-  const end = Math.floor(Date.now() / 1000);
-  const start = end - n * step;
-  const state = { n: seed(token.symbol + window) };
-  const marks = token.marks.length > 4 ? token.marks : null;
-  const out: Bar[] = [];
-  let px = last * 0.985;
-  for (let i = 0; i < n; i++) {
-    const t = start + i * step;
-    const target = marks ? marks[Math.min(marks.length - 1, Math.floor((i / n) * marks.length))]! : last;
-    const drift = (target - px) * 0.08 + (rand(state) - 0.5) * last * 0.004;
-    const open = px;
-    const close = Math.max(0.0001, px + drift);
-    const high = Math.max(open, close) * (1 + rand(state) * 0.003);
-    const low = Math.min(open, close) * (1 - rand(state) * 0.003);
-    out.push({ time: t, open, high, low, close });
-    px = close;
-  }
-  if (out.length) out[out.length - 1]!.close = last;
-  return out;
 }
 
 export function seatsOf(
@@ -175,7 +155,10 @@ export function seatsOf(
       strategy: strategyName(strategyId),
       strategyId,
       position,
-      pnlBps: avg > 0 && now > 0 ? Math.round(((now - avg) / avg) * 10_000) : agent?.pnlBps ?? null,
+      pnlBps:
+        avg > 0 && now > 0
+          ? Math.round(((now - avg) / avg) * 10_000)
+          : (agent?.pnlBps ?? null),
       avgEntry: avg,
       thesis: takeFor(slug, token.symbol, t.reason, agent?.thesis),
       time: bar?.time ?? 0,
@@ -205,11 +188,7 @@ function pickBar(bars: Bar[], slug: string, at?: number): Bar | undefined {
 
 function seed(s: string): number {
   let h = 2166136261;
-  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  for (let i = 0; i < s.length; i++)
+    h = Math.imul(h ^ s.charCodeAt(i), 16777619);
   return h >>> 0;
-}
-
-function rand(state: { n: number }): number {
-  state.n = (Math.imul(state.n, 1664525) + 1013904223) >>> 0;
-  return state.n / 2 ** 32;
 }

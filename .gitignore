@@ -2,6 +2,7 @@ node_modules/
 .data/
 .claude/
 .next/
+.next-build/
 .env
 .env.local
 .env*.local

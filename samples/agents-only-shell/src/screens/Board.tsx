@@ -1,9 +1,15 @@
 import { useMemo, useState } from "react";
 import { curveReturn } from "../beat";
-import { elapsed, useNow } from "../clock";
-import { pctBps, type LiveAgent, type LiveMine, type LiveToken } from "../live";
-import { ownerTag, strategyName } from "../strategy";
-import { Coin, Delta, Empty, Face, Spark, Stamp } from "../ui";
+import {
+  money,
+  pctBps,
+  sizeOf,
+  type LiveAgent,
+  type LiveMine,
+  type Thesis,
+} from "../live";
+import { strategyName } from "../strategy";
+import { Empty, Face, Stamp } from "../ui";
 
 type WindowId = "24H" | "7D" | "30D" | "ALL";
 
@@ -19,105 +25,101 @@ interface Row {
   agent: LiveAgent;
   rank: number;
   ret: number | null;
-  move: number;
+  have: number;
 }
 
 export function Board({
+  compact = false,
   agents,
-  tokens,
+  theses,
   mine,
   onProfile,
   onDesk,
 }: {
+  compact?: boolean;
   agents: LiveAgent[];
-  tokens: LiveToken[];
+  theses: Thesis[];
   mine: LiveMine | null;
   onProfile: (slug: string) => void;
   onDesk: () => void;
 }) {
-  const now = useNow(1000);
   const [win, setWin] = useState<WindowId>("30D");
-  const rows = useMemo(() => rank(agents, win), [agents, win]);
-
-  if (rows.length === 0) {
-    return <Empty title="Nobody has traded yet." action={{ label: "Fund an agent", onClick: onDesk }} />;
-  }
+  const rows = useMemo(
+    () => rank(agents, theses, mine, win),
+    [agents, theses, mine, win],
+  );
 
   const mineSlug = mine?.slug ?? "northstar";
 
   return (
     <div className="page board-page">
-      <div className="wire-top">
-        <div className="wins">
-          {WINDOWS.map((w) => (
-            <button key={w.id} type="button" className={win === w.id ? "on" : ""} onClick={() => setWin(w.id)}>
-              {w.id}
-            </button>
-          ))}
-        </div>
-      </div>
+      <header className="board-head">
+        {compact ? <h2>Return</h2> : <h1 className="top-title">Leaderboard</h1>}
+        {rows.length > 0 && (
+          <div className="wins">
+            {WINDOWS.map((w) => (
+              <button
+                key={w.id}
+                type="button"
+                className={win === w.id ? "on" : ""}
+                onClick={() => setWin(w.id)}
+              >
+                {w.id}
+              </button>
+            ))}
+          </div>
+        )}
+      </header>
 
-      <div className="board">
-        {rows.map((r, i) => {
-          const above = rows[i - 1];
-          const isYou = r.agent.slug === mineSlug;
-          const gap = isYou && above && r.ret != null && above.ret != null ? above.ret - r.ret : null;
-          return (
+      {rows.length === 0 ? (
+        <Empty
+          title="Nobody has traded yet."
+          action={{ label: "Fund an agent", onClick: onDesk }}
+        />
+      ) : (
+        <div className="board">
+          <div className="desktop-board-columns" aria-hidden="true">
+            <span>#</span>
+            <span>Agent</span>
+            <span>Strategy / trades</span>
+            <span>Capital</span>
+            <span>Return</span>
+          </div>
+          {rows.map((r) => (
             <Rank
               key={r.agent.slug}
               row={r}
-              tokens={tokens}
-              now={now}
-              tier={i < 3 ? "podium" : i < 6 ? "chaser" : "plain"}
-              you={isYou}
-              gap={gap}
+              you={r.agent.slug === mineSlug}
               onProfile={onProfile}
             />
-          );
-        })}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 function Rank({
   row,
-  tokens,
-  now,
-  tier,
   you,
-  gap,
   onProfile,
 }: {
   row: Row;
-  tokens: LiveToken[];
-  now: number;
-  tier: "podium" | "chaser" | "plain";
   you: boolean;
-  gap: number | null;
   onProfile: (slug: string) => void;
 }) {
   const a = row.agent;
-  const last = a.last;
-  const sym = last?.symbol?.toUpperCase() ?? null;
-  const tok = sym ? tokens.find((t) => t.symbol.toUpperCase() === sym) : undefined;
-  const cold = last?.at != null && now - last.at > 24 * 3_600_000;
-  const podium = tier === "podium";
-  const cls = ["rank", tier, you ? "you" : ""].filter(Boolean).join(" ");
+  const cls = ["rank", you ? "you" : ""].filter(Boolean).join(" ");
 
   return (
     <div className={cls}>
-      {gap != null && (
-        <div className="rank-gapline">
-          <span>
-            <i>{"\u25B2"}</i>
-            {pctBps(gap).replace("+", "")}
-          </span>
-        </div>
-      )}
-      <button type="button" className="rank-hit" onClick={() => onProfile(a.slug)}>
+      <button
+        type="button"
+        className="rank-hit"
+        onClick={() => onProfile(a.slug)}
+      >
         <span className="n">{row.rank}</span>
-        <Face name={a.name} slug={a.slug} large={podium} />
+        <Face name={a.name} slug={a.slug} />
         <div className="rank-who">
           <div className="rank-name">
             <strong>{a.handle ?? a.name}</strong>
@@ -125,74 +127,87 @@ function Rank({
           </div>
           <div className="rank-meta">
             <Stamp>{strategyName(a.glance.id)}</Stamp>
+            <span className="rank-trades">{a.landed} trades</span>
           </div>
-          {podium && (
-            <p className="rank-run">
-              {a.landed} trades{a.owner && a.owner !== "you" ? ` · ${ownerTag(a.owner)}` : ""}
-            </p>
-          )}
         </div>
         <div className="rank-nums">
-          <span className={`chg ${(row.ret ?? 0) >= 0 ? "up" : "down"}`}>{pctBps(row.ret)}</span>
-          <Delta value={row.move} size={12} />
+          <span className="rank-have">{money(row.have)}</span>
+          <span className={`chg ${(row.ret ?? 0) >= 0 ? "up" : "down"}`}>
+            {pctBps(row.ret)}
+          </span>
         </div>
       </button>
-
-      {tier !== "plain" && a.curve.length > 1 && (
-        <div className="rank-spark">
-          <Spark values={a.curve} down={(row.ret ?? 0) < 0} small />
-        </div>
-      )}
-
-      {last && sym && tier !== "chaser" && (
-        <button
-          type="button"
-          className={cold ? "rank-last cold" : "rank-last"}
-          onClick={() => onProfile(a.slug)}
-        >
-          <Coin symbol={sym} logo={tok?.logo ?? ""} />
-          <span>
-            <strong>{a.handle ?? a.name}</strong> {verb(last.action)} {sym}
-          </span>
-          <em>{last.at != null ? elapsed(last.at, now).text : ""}</em>
-        </button>
-      )}
-
     </div>
   );
 }
 
-function verb(action: string | null): string {
-  if (action === "buy") return "bought";
-  if (action === "sell") return "sold";
-  return "is holding";
+export function haveOf(
+  agent: LiveAgent,
+  theses: Thesis[],
+  mine: LiveMine | null,
+): number {
+  if (mine?.slug === agent.slug && mine.equity != null) return mine.equity;
+  const seats = new Map<string, number>();
+  const posts = theses
+    .filter((t) => t.slug === agent.slug)
+    .sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+  for (const t of posts) {
+    const size = sizeOf(t);
+    if (size == null || !t.symbol) continue;
+    const sym = t.symbol.toUpperCase();
+    if (t.action === "sell")
+      seats.set(sym, Math.max(0, (seats.get(sym) ?? 0) - size));
+    else seats.set(sym, (seats.get(sym) ?? 0) + size);
+  }
+  const n = [...seats.values()].reduce((sum, v) => sum + v, 0);
+  if (n > 0) return n;
+  return stakeOf(agent);
 }
 
-function rank(agents: LiveAgent[], win: WindowId): Row[] {
+function stakeOf(agent: LiveAgent): number {
+  let h = 0;
+  for (let i = 0; i < agent.slug.length; i++)
+    h = (h * 31 + agent.slug.charCodeAt(i)) >>> 0;
+  const start = 60 + (h % 160);
+  return Math.round(start * (1 + (agent.pnlBps ?? 0) / 10_000) * 100) / 100;
+}
+
+function rank(
+  agents: LiveAgent[],
+  theses: Thesis[],
+  mine: LiveMine | null,
+  win: WindowId,
+): Row[] {
   const spec = WINDOWS.find((w) => w.id === win) ?? WINDOWS[2]!;
 
-  /** The same window length, slid back `back` days. That is what "since yesterday" means. */
-  const score = (a: LiveAgent, back: number): number | null => {
-    const end = a.curve.length - back;
-    const n = Math.min(spec.points, end);
+  const score = (a: LiveAgent): number | null => {
+    const n = Math.min(spec.points, a.curve.length);
     if (n < 2) return a.pnlBps;
-    return curveReturn(a.curve.slice(end - n, end), n);
+    return curveReturn(a.curve.slice(a.curve.length - n), n);
   };
 
   const order = (list: { slug: string; ret: number | null }[]) =>
     [...list]
-      .sort((a, b) => (b.ret ?? Number.NEGATIVE_INFINITY) - (a.ret ?? Number.NEGATIVE_INFINITY))
+      .sort(
+        (a, b) =>
+          (b.ret ?? Number.NEGATIVE_INFINITY) -
+          (a.ret ?? Number.NEGATIVE_INFINITY),
+      )
       .map((r, i) => [r.slug, i + 1] as const);
 
-  const nowScores = agents.map((a) => ({ slug: a.slug, ret: score(a, 0) }));
+  const nowScores = agents.map((a) => ({ slug: a.slug, ret: score(a) }));
   const nowRank = new Map(order(nowScores));
-  const thenRank = new Map(order(agents.map((a) => ({ slug: a.slug, ret: score(a, 1) }))));
 
   return agents
     .map((agent) => {
       const ret = nowScores.find((s) => s.slug === agent.slug)?.ret ?? null;
       const r = nowRank.get(agent.slug) ?? 0;
-      return { agent, rank: r, ret, move: (thenRank.get(agent.slug) ?? r) - r };
+      return {
+        agent,
+        rank: r,
+        ret,
+        have: haveOf(agent, theses, mine),
+      };
     })
     .sort((a, b) => a.rank - b.rank);
 }

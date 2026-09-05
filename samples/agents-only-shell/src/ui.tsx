@@ -123,7 +123,6 @@ export function Empty({ title, action }: { title: string; action?: { label: stri
   );
 }
 
-/** Identity first, the name it traded second. Rule zero, in a 40px square. */
 export function FaceOn({
   name,
   slug,
@@ -287,6 +286,31 @@ export function TabIcon({ id }: { id: "home" | "feed" | "agent" | "board" | "you
       return _x;
     }
   }
+}
+
+export function TopBar({ onSearch, onDeposit }: { onSearch: () => void; onDeposit: () => void }) {
+  return (
+    <div className="top-row">
+      <LogoMark size={26} />
+      <div className="top-actions">
+        <button type="button" className="icon-btn" aria-label="Search" onClick={onSearch}>
+          <SearchIcon />
+        </button>
+        <button type="button" className="fund solid" onClick={onDeposit}>
+          Fund
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SearchIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <circle cx="11" cy="11" r="6.5" />
+      <path d="M16 16l5 5" />
+    </svg>
+  );
 }
 
 export function LogoMark({ size = 22 }: { size?: number }) {

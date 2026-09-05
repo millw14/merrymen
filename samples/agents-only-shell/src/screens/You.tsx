@@ -1,10 +1,9 @@
-import { useMemo } from "react";
-import { cadenceWords, nextRun, countdown, useNow } from "../clock";
-import { bookLegs } from "../glance";
-import { money, type LiveAgent, type LiveMine, type LiveToken, type Thesis } from "../live";
-import { SAMPLE_RUNS } from "../sample";
-import { strategyForSlug, strategyName, type StrategyId } from "../strategy";
-import { Coin, Empty, Face, Flip } from "../ui";
+import { PerformanceChart } from "../DitherChart";
+import { dailyChange, spentToday } from "../account";
+import { money, pctPts, type LiveMine } from "../live";
+import { strategyName } from "../strategy";
+import { Empty, Face } from "../ui";
+import { BalanceFigure } from "../studio";
 
 export function You({
   onLimits,
@@ -15,11 +14,7 @@ export function You({
   perTrade,
   perDay,
   mine,
-  agents,
-  tokens,
-  theses,
-  run,
-  onRun,
+  history,
 }: {
   onLimits: () => void;
   onStop: () => void;
@@ -29,195 +24,118 @@ export function You({
   perTrade: string;
   perDay: string;
   mine: LiveMine | null;
-  agents: LiveAgent[];
-  tokens: LiveToken[];
-  theses: Thesis[];
-  run: StrategyId;
-  onRun: (id: StrategyId) => void;
+  history: number[];
 }) {
-  const now = useNow(1000);
-  const crews = useMemo(() => crewsOf(agents), [agents]);
-  const pace = useMemo(() => paceOf(theses, mine?.slug ?? null, now), [theses, mine, now]);
-
-  if (!mine) {
-    return <Empty title="Nothing running." action={{ label: "Fund an agent", onClick: onDeposit }} />;
-  }
-
-  const eq = mine.equity;
-  const chg = mine.chg24;
-  const [whole, frac] = money(eq).replace("$", "").split(".");
-  const pct = eq && eq !== 0 && chg != null ? (chg / eq) * 100 : null;
-  const spent = spentToday(mine, now);
-  const cap = Math.max(1, Number(perDay) || 1);
-  const paceMax = Math.max(1, pace.yours, pace.others);
-  const legs = bookLegs(mine.glance);
-  const total = legs.reduce((n, l) => n + (l.weight || 1), 0) || 1;
-  const left = countdown(nextRun(run, now) - now);
-
+  if (!mine)
+    return (
+      <Empty
+        title="Your agents belong here."
+        action={{ label: "Fund an agent", onClick: onDeposit }}
+      />
+    );
+  const owner = mine.owner ?? "You";
+  const ownerLabel =
+    owner.startsWith("0x") && owner.length > 16
+      ? `${owner.slice(0, 6)}…${owner.slice(-4)}`
+      : owner;
+  const spent = spentToday(mine, Date.now());
+  const change = dailyChange(mine);
   return (
-    <div className="page you-page">
-      <header className="you-head">
-        <Face name={mine.name} slug={mine.slug} small />
-        <strong>{mine.name}</strong>
-        <button type="button" className={stopped ? "halt off" : "halt"} onClick={onStop}>
-          {stopped ? "Resume" : "Stop"}
-        </button>
+    <div className="account-page">
+      <header className="account-header">
+        <h1>Your profile</h1>
       </header>
-
-      <div className="wire-top">
-        <div className="balance">
-          ${whole}
-          {frac !== undefined && <sup>.{frac}</sup>}
+      <div className="account-person">
+        <span className="account-avatar" aria-hidden>
+          {owner.startsWith("0x") ? "◎" : owner.slice(0, 1).toUpperCase()}
+        </span>
+        <div>
+          <h2>{ownerLabel}</h2>
+          <p>1 agent · {stopped ? "Paused" : "Running"}</p>
         </div>
-        {chg != null && (
-          <p className={`chg-24 ${chg < 0 ? "down" : "up"}`}>
-            {chg < 0 ? "\u2212" : "+"}${Math.abs(chg).toFixed(2)}
-            {pct != null ? ` (${pct > 0 ? "+" : ""}${pct.toFixed(1)}%)` : ""} today
-          </p>
-        )}
-        {pace.others > 0 && (
-          <div className="pace">
-            <div className="pace-row">
-              <span className="faces">
-                <Face name={mine.name} slug={mine.slug} small />
-              </span>
-              <span className="pace-track">
-                <i className="mine" style={{ width: `${(pace.yours / paceMax) * 100}%` }} />
-              </span>
-              <b>{pace.yours} trades</b>
-            </div>
-            <div className="pace-row">
-              <span className="faces">
-                {pace.cast.slice(0, 3).map((a) => (
-                  <Face key={a.slug} name={a.name} slug={a.slug} small />
-                ))}
-              </span>
-              <span className="pace-track">
-                <i style={{ width: `${(pace.others / paceMax) * 100}%` }} />
-              </span>
-              <b>{pace.others} trades</b>
-            </div>
-            <span className="pace-cap">today</span>
-          </div>
-        )}
       </div>
-
-      <section className="strip">
-        <div className="cap-bar">
-          <i style={{ width: `${Math.min(100, (spent / cap) * 100)}%` }} />
-        </div>
-        <div className="cap-grid">
-          <button type="button" className="cap" onClick={onLimits}>
-            <b>${perTrade}</b>
-            <span>most per trade</span>
-          </button>
-          <button type="button" className="cap" onClick={onLimits}>
-            <b>{money(spent)}</b>
-            <span>of ${perDay} spent today</span>
-          </button>
-          <button type="button" className="cap" onClick={onDesk}>
-            <b className="mono-fig">{stopped ? "—" : <Flip text={left.text} dir="down" />}</b>
-            <span>{stopped ? "stopped by you" : "until it trades again"}</span>
-            {!stopped && <span className="cap-cadence">{cadenceWords(run)}</span>}
-          </button>
-        </div>
+      <section className="account-balance" aria-label="Account balance">
+        <span className="account-label">Your balance</span>
+        <strong>
+          <BalanceFigure value={mine.equity} />
+        </strong>
+        <p className={(mine.chg24 ?? 0) < 0 ? "down" : "up"}>
+          {mine.chg24 == null
+            ? "Daily change unavailable"
+            : `${mine.chg24 < 0 ? "−" : "+"}${money(Math.abs(mine.chg24))}${change == null ? "" : ` (${pctPts(change)})`} today`}
+        </p>
+        <PerformanceChart values={history} height={68} />
+        <button type="button" className="account-fund" onClick={onDeposit}>
+          Add funds <span aria-hidden>↗</span>
+        </button>
       </section>
-
-      <section className="strip">
-        <div className="book">
-          {legs.map((l) => {
-            const tok = tokens.find((t) => t.symbol.toUpperCase() === l.symbol.toUpperCase());
-            return (
-              <div key={l.symbol} className="book-coin">
-                <Coin symbol={l.symbol} logo={tok?.logo ?? ""} />
-                <span>{l.symbol}</span>
-                <em>{Math.round(((l.weight || 1) / total) * 100)}%</em>
-              </div>
-            );
-          })}
+      <section className="account-section account-agent-section">
+        <div className="account-section-title">
+          <h2>Your agent</h2>
+          <span>1</span>
         </div>
+        <button type="button" className="account-agent" onClick={onDesk}>
+          <Face name={mine.name} slug={mine.slug} />
+          <span>
+            <strong>{mine.name}</strong>
+            <small>{strategyName(mine.glance.id)}</small>
+          </span>
+          <span className="account-agent-value">
+            <strong>{money(mine.equity)}</strong>
+            <small>{stopped ? "Paused" : "Running"} ↗</small>
+          </span>
+        </button>
+        <p className="account-agent-note">
+          {stopped
+            ? "Trading is paused. Your positions remain open."
+            : "View positions, recent trades, and chat with your agent."}
+        </p>
       </section>
-
-      <section className="strip">
-        <div className="crews">
-          {SAMPLE_RUNS.map((id) => {
-            const crew = crews.get(id) ?? [];
-            const best = crew.find((a) => a.pnlBps != null);
-            const rest = crew.filter((a) => a !== best);
-            const on = run === id;
-            return (
-              <div key={id} className={on ? "crew-row on" : "crew-row"}>
-                <strong className="crew-who">{strategyName(id)}</strong>
-                <div className="crew-cast">
-                  {best ? (
-                    <>
-                      <Face name={best.name} slug={best.slug} small />
-                      <em className={best.pnlBps! < 0 ? "down" : "up"}>
-                        {best.pnlBps! < 0 ? "\u2212" : "+"}
-                        {(Math.abs(best.pnlBps!) / 100).toFixed(1)}%
-                      </em>
-                    </>
-                  ) : null}
-                  {rest.length > 0 && (
-                    <span className="faces">
-                      {rest.slice(0, 3).map((a) => (
-                        <Face key={a.slug} name={a.name} slug={a.slug} small />
-                      ))}
-                    </span>
-                  )}
-                </div>
-                {on ? (
-                  <span className="crew-on">
-                    <i className="live" aria-hidden />
-                    running
-                  </span>
-                ) : (
-                  <button type="button" className="crew-run" onClick={() => onRun(id)}>
-                    Run this
-                  </button>
-                )}
-              </div>
-            );
-          })}
+      <section className="account-section">
+        <div className="account-section-title">
+          <h2>Trading controls</h2>
+        </div>
+        <button type="button" className="account-control" onClick={onLimits}>
+          <span>
+            <strong>Trading limits</strong>
+            <small>
+              {money(Number(perTrade))} per trade · {money(Number(perDay))} per
+              day
+            </small>
+          </span>
+          <span aria-hidden>↗</span>
+        </button>
+        <div className="account-usage">
+          <div>
+            <span>Used today</span>
+            <span>
+              {money(spent)} / {money(Number(perDay))}
+            </span>
+          </div>
+          <progress
+            aria-label="Daily trading limit used"
+            max={Math.max(1, Number(perDay) || 1)}
+            value={Math.min(spent, Math.max(1, Number(perDay) || 1))}
+          />
+        </div>
+        <div className="account-control">
+          <span>
+            <strong>{stopped ? "Resume trading" : "Pause trading"}</strong>
+            <small>
+              {stopped
+                ? "Allow your agent to trade again"
+                : "Keep positions, pause new trades"}
+            </small>
+          </span>
+          <button
+            type="button"
+            className={`account-pause ${stopped ? "is-paused" : ""}`}
+            onClick={onStop}
+          >
+            {stopped ? "Resume" : "Pause"}
+          </button>
         </div>
       </section>
     </div>
   );
-}
-
-function crewsOf(agents: LiveAgent[]): Map<StrategyId, LiveAgent[]> {
-  const by = new Map<StrategyId, LiveAgent[]>();
-  for (const a of agents) {
-    const id = strategyForSlug(a.slug, a.glance.id);
-    const list = by.get(id) ?? [];
-    list.push(a);
-    by.set(id, list);
-  }
-  for (const list of by.values()) list.sort((a, b) => (b.pnlBps ?? 0) - (a.pnlBps ?? 0));
-  return by;
-}
-
-function paceOf(theses: Thesis[], slug: string | null, now: number) {
-  let yours = 0;
-  let others = 0;
-  const cast = new Map<string, { slug: string; name: string }>();
-  for (const t of theses) {
-    if (t.action !== "buy" && t.action !== "sell") continue;
-    if (t.at == null || now - t.at > 24 * 3_600_000) continue;
-    if (t.slug && t.slug === slug) {
-      yours += 1;
-      continue;
-    }
-    others += 1;
-    if (t.slug && !cast.has(t.slug)) cast.set(t.slug, { slug: t.slug, name: t.name });
-  }
-  return { yours, others, cast: [...cast.values()] };
-}
-
-function spentToday(mine: LiveMine, now: number): number {
-  return mine.moves.reduce((n, t) => {
-    if (t.action !== "buy" && t.action !== "sell") return n;
-    if (t.at == null || now - t.at > 24 * 3_600_000) return n;
-    return n + (t.sizeUsdg ?? 0);
-  }, 0);
 }
