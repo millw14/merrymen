@@ -43,6 +43,25 @@ RUN npm install --no-save --ignore-scripts pg@8
 # Full source. .dockerignore keeps node_modules / .next / local state out.
 COPY . .
 
+# NEXT_PUBLIC_* IS INLINED AT BUILD TIME, NOT READ AT RUNTIME.
+#
+# That is the whole point of the prefix: Next substitutes the literal value into
+# the browser bundle during `next build`. A variable set on the Railway service
+# arrives at RUNTIME, which is far too late — the bundle has already been
+# written with an empty string, and the feature it gates is off with nothing in
+# the logs to say so. That is exactly how the Privy login shipped, deployed
+# green, and still drew "Sign in with wallet".
+#
+# Railway exposes service variables to a Dockerfile build only where an ARG
+# declares them, so each one has to be named here. These are PUBLIC by
+# definition — an app id and a boolean — and nothing secret may ever be added
+# to this list: an ARG is baked into the image layer and readable by anyone who
+# can pull it. Every secret stays a runtime variable (see the CMD below).
+ARG NEXT_PUBLIC_PRIVY_APP_ID=""
+ARG NEXT_PUBLIC_MERRYMEN_PRIVY_BETA=""
+ENV NEXT_PUBLIC_PRIVY_APP_ID=$NEXT_PUBLIC_PRIVY_APP_ID
+ENV NEXT_PUBLIC_MERRYMEN_PRIVY_BETA=$NEXT_PUBLIC_MERRYMEN_PRIVY_BETA
+
 # Build the dashboard (the web service serves it; the orchestrator ignores it).
 RUN npm run build
 

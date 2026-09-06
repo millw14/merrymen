@@ -204,6 +204,58 @@ describe("an escape that collapsed into a control character", () => {
   });
 });
 
+
+describe("a NEXT_PUBLIC_ variable reaches the build that inlines it", () => {
+  /**
+   * NEXT_PUBLIC_* IS SUBSTITUTED DURING `next build`, NOT READ AT RUNTIME.
+   *
+   * A variable set on the Railway service arrives at runtime, which is too
+   * late: the browser bundle has already been written with an empty string.
+   * The feature it gates is simply off, the deploy is green, and nothing in
+   * any log mentions it. The Privy login shipped exactly that way.
+   *
+   * Railway exposes service variables to a Dockerfile build only where an ARG
+   * declares them, so every NEXT_PUBLIC_ name the code reads must appear as an
+   * ARG before `npm run build`.
+   */
+  it("every NEXT_PUBLIC_ the web app reads is declared as a build ARG", () => {
+    const wanted = new Set<string>();
+    const walk = (dir: string) => {
+      for (const e of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+        const rel = `${dir}/${e.name}`;
+        if (e.isDirectory()) walk(rel);
+        else if (/.tsx?$/.test(e.name) && !/.test.tsx?$/.test(e.name)) {
+          for (const m of read(rel).matchAll(/process.env.(NEXT_PUBLIC_[A-Z0-9_]+)/g)) wanted.add(m[1]!);
+        }
+      }
+    };
+    walk("web/src");
+    const docker = read("Dockerfile");
+    const buildStage = docker.slice(0, docker.indexOf("RUN npm run build"));
+    // A plain substring, deliberately. The obvious spelling here is a RegExp
+    // with a word boundary — and `\b` inside a template literal is the
+    // BACKSPACE escape, not a word boundary, so that version silently matches
+    // nothing. This suite already guards the tree against that collapse; it
+    // happened once more while writing this very line.
+    const missing = [...wanted].filter((v) => !buildStage.includes(`ARG ${v}`));
+    assert.deepEqual(
+      missing,
+      [],
+      `these are read in the browser bundle but never reach the build, so they inline as "": ${missing.join(", ")}`,
+    );
+  });
+
+  it("no ARG in the build stage carries a secret", () => {
+    // An ARG is baked into the image layer and readable by anyone who can pull
+    // it. Only genuinely public values may be declared here.
+    const docker = read("Dockerfile");
+    const buildStage = docker.slice(0, docker.indexOf("RUN npm run build"));
+    const args = [...buildStage.matchAll(/^ARG ([A-Z0-9_]+)/gm)].map((m) => m[1]!);
+    const secretish = args.filter((a) => !a.startsWith("NEXT_PUBLIC_"));
+    assert.deepEqual(secretish, [], `build args must be public by construction: ${secretish.join(", ")}`);
+  });
+});
+
 describe("the two signers refuse the same things", () => {
   /**
    * The phone and the dashboard seal the SAME wall — worker/src/wall.test.ts
