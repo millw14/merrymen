@@ -45,6 +45,9 @@
       "@merrymen/wall-battery": ["../worker/src/wall-battery.ts"],
       "@merrymen/strategies/*": ["../worker/src/strategies/*"],
       "@merrymen/pnl-card": ["../worker/src/pnl-card.ts"]
+      "@merrymen/pool-price": ["../worker/src/venues/pool-price.ts"],
+      "@merrymen/convert-reserve": ["../worker/src/convert-reserve.ts"],
+      "@merrymen/strategies/*": ["../worker/src/strategies/*"]
     }
   },
   "include": [
