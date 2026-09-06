@@ -194,6 +194,28 @@ const SQLITE_SCHEMA = `
     -- it: its leading column is agent_id, so filtering on time alone has to scan.
     -- The public thesis page is the first reader that is not scoped to one agent.
     CREATE INDEX IF NOT EXISTS decisions_time ON decisions (at DESC);
+    -- Convert latch: once-per-deposit memory for the ETH→USDG convert.
+    -- A STATE row, not a log: one per agent, replaced in place. It must live
+    -- here (mirrored, survives redeploys) rather than in a home-dir JSON file
+    -- (wiped with the child on hosted deploys — the latch would forget and
+    -- the reserve would convert again). See convert-latch.ts for the rules;
+    -- this table is only the durability.
+    CREATE TABLE IF NOT EXISTS convert_state (
+      agent_id TEXT PRIMARY KEY,
+      -- ms epoch of the last fire (auto or manual). 0 = never fired.
+      fired_at_ms INTEGER NOT NULL DEFAULT 0,
+      -- Balance (wei, decimal text — sqlite has no bigint) left behind by the
+      -- last fire. Only an excess over this may fire again (a deposit).
+      considered_wei TEXT NOT NULL DEFAULT '0',
+      -- Manual swap ids already honoured: JSON array, newest last, bounded at
+      -- 50 by the writer. Claimed BEFORE submit (write-ahead): a crash between
+      -- submit and settle burns the id instead of replaying the spend.
+      completed_ids TEXT NOT NULL DEFAULT '[]',
+      -- ms epoch of the last write. The mirror's freshness guard: a reborn
+      -- child starts with no row, and absence must never overwrite durable
+      -- state — the sync only flows toward newer updated_at_ms.
+      updated_at_ms INTEGER NOT NULL DEFAULT 0
+    );
     -- Conversation turns, so the merryman doesn't lose the thread on restart.
     -- Lives in sqlite rather than a json file because the db is already open and
     -- single-writer; a file would need its own read-modify-write and would race
@@ -1778,6 +1800,67 @@ export async function latestCommand(  agentId: string,
     };
   } catch {
     return null;
+  }
+}
+/**
+ * Convert latch persistence — the durability half of convert-latch.ts (the
+ * rules live there; this file only reads and writes the row).
+ *
+ * One row per agent, replaced in place, mirrored as snapshot state. Best
+ * effort like the heartbeat: a latch write that fails must never take the
+ * tick down with it — the in-memory latch still gates, and the next tick
+ * retries the write.
+ */
+export interface ConvertStateRow {
+  firedAtMs: number;
+  consideredWei: string;
+  completedIds: string;
+  updatedAtMs: number;
+}
+
+/** Read this agent's latch row, or null when it never fired here. */
+export async function getConvertState(agentId: string): Promise<ConvertStateRow | null> {
+  try {
+    const r = (await getDb()
+      .prepare(
+        `SELECT fired_at_ms, considered_wei, completed_ids, updated_at_ms FROM convert_state
+          WHERE agent_id = ?`,
+      )
+      .get(agentId)) as Record<string, unknown> | undefined;
+    if (!r) return null;
+    return {
+      firedAtMs: Number(r.fired_at_ms ?? 0),
+      consideredWei: typeof r.considered_wei === "string" ? r.considered_wei : "0",
+      completedIds: typeof r.completed_ids === "string" ? r.completed_ids : "[]",
+      updatedAtMs: Number(r.updated_at_ms ?? 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Replace this agent's latch row. The worker is the single writer of its own
+ * row and never writes a zeroed one (empty latch only exists in memory before
+ * the first read), so last write wins without a guard — and stays that way
+ * for both backends (no dialect-specific clauses). Returns true when written.
+ */
+export async function putConvertState(agentId: string, row: ConvertStateRow): Promise<boolean> {
+  try {
+    await getDb()
+      .prepare(
+        `INSERT INTO convert_state (agent_id, fired_at_ms, considered_wei, completed_ids, updated_at_ms)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT (agent_id) DO UPDATE SET
+            fired_at_ms = excluded.fired_at_ms,
+            considered_wei = excluded.considered_wei,
+            completed_ids = excluded.completed_ids,
+            updated_at_ms = excluded.updated_at_ms`,
+      )
+      .run(agentId, row.firedAtMs, row.consideredWei, row.completedIds, row.updatedAtMs);
+    return true;
+  } catch {
+    return false;
   }
 }
 /**
