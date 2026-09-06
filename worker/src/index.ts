@@ -161,7 +161,6 @@ import { readPage, signalsFrom } from "./venues/research";
 import { readTokenMeta } from "./venues/pons-meta";
 import { createDepthReader } from "./venues/depth-cache";
 import { ensureSoul, getName, setName } from "./soul";
-import { readsAsBroke } from "./reads-as-broke";
 import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
 import {
