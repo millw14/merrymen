@@ -122,6 +122,19 @@ function collisions(pairs: { key: string; tenant: string }[]): Map<string, strin
 
 export interface IdentityAudit {
   lines: string[];
+  /**
+   * THE WHOLE ANSWER ON ONE LINE.
+   *
+   * The first run of this audit printed twelve lines into an orchestrator whose
+   * twenty-two children write about five hundred lines every three minutes, and
+   * eleven of them were dropped before they reached the log store. A report that
+   * survives partially is worse than one that does not print at all: the line
+   * that did arrive said "22 identity rows" and looked like a clean result.
+   *
+   * So every count the rollout decision depends on is also emitted as ONE
+   * record, which either arrives whole or not at all.
+   */
+  summary: string;
   /** True only when every one-to-one relationship already holds. */
   safeToConstrain: boolean;
   /** Accounts already sealed at 0x0 by the bug the mint-time guard now stops. */
@@ -312,8 +325,26 @@ export function auditIdentity(rows: IdentityRowLite[], claims: GrantClaimLite[])
       : "VERDICT: DO NOT ADD THE CONSTRAINT. Resolve the collisions above by hand first; " +
           "deduplicating them automatically would pick an owner for an agent, which is not a migration's call",
   );
+  const summary = [
+    `rows=${rows.length}`,
+    `tenants=${tenants.size}`,
+    `grants=${claims.length}`,
+    `dupCurrentAccount=${current.size}`,
+    `dupAccountHistory=${historical.size}`,
+    `dupPrivyDid=${dids.size}`,
+    `dupProviderSubject=${subjects.size}`,
+    `dupInstalledGrant=${claimed.size}`,
+    `zeroAddressResidue=${zeroed.length}`,
+    `ownerIsTenant=${sameKey.length}/${ownersKnown}`,
+    `emptyIdentityKeys=${emptyKeys.length}`,
+    `unknownBindingVersions=${unknownVersions.reduce((n, [, count]) => n + count, 0)}`,
+    `storeDrift=${drifted.length}`,
+    `safeToConstrain=${safeToConstrain}`,
+  ].join(" ");
+
   return {
     lines,
+    summary,
     safeToConstrain,
     zeroAddressResidue: zeroed.length,
     sameKeyOwners: sameKey.length,

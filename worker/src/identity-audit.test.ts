@@ -216,6 +216,39 @@ describe("the audit refuses to guess", () => {
     assert.match(verdict, /store disagreement\(s\) above would be frozen in place/);
   });
 
+  it("THE SUMMARY CARRIES EVERY COUNT, on one line", () => {
+    // The first production run emitted twelve lines into a stream twenty-two
+    // children were flooding, and eleven were dropped. The one that survived
+    // read as a clean result. A report that can arrive in pieces is worse than
+    // one that does not arrive.
+    const r = auditIdentity(
+      [row({ tenant: T1, accounts: [A] }), row({ tenant: T2, accounts: [A] })],
+      [{ tenant: T1, smartAccount: A, owner: T1 }],
+    );
+    for (const key of [
+      "rows=",
+      "tenants=",
+      "grants=",
+      "dupCurrentAccount=",
+      "dupAccountHistory=",
+      "dupPrivyDid=",
+      "dupProviderSubject=",
+      "dupInstalledGrant=",
+      "zeroAddressResidue=",
+      "ownerIsTenant=",
+      "emptyIdentityKeys=",
+      "unknownBindingVersions=",
+      "storeDrift=",
+      "safeToConstrain=",
+    ]) {
+      assert.ok(r.summary.includes(key), `summary is missing ${key}`);
+    }
+    assert.ok(!r.summary.includes("|"), "the summary must survive as one log record");
+    assert.match(r.summary, /dupCurrentAccount=1/);
+    assert.match(r.summary, /ownerIsTenant=1\/1/);
+    assert.match(r.summary, /safeToConstrain=false/);
+  });
+
   it("an empty fleet is clean", () => {
     const r = auditIdentity([], []);
     assert.equal(r.safeToConstrain, true);

@@ -1049,7 +1049,13 @@ async function runIdentityAuditIfAsked(): Promise<void> {
           r.binding_version === null || r.binding_version === undefined ? null : String(r.binding_version),
       }));
 
-    for (const line of auditIdentity(rows, claims).lines) log(`identity| ${line}`);
+    const audit = auditIdentity(rows, claims);
+    // THE SUMMARY FIRST, AND ON ITS OWN. Twenty-two children fill this stream
+    // fast enough that a multi-line burst is partially dropped, and a report
+    // that arrives in pieces reads as a clean result. One record carries every
+    // count the decision needs; the detail lines below are a convenience.
+    log(`identity| SUMMARY ${audit.summary}`);
+    for (const line of audit.lines) log(`identity| ${line}`);
   } catch (e) {
     log(`identity audit failed — ${e instanceof Error ? e.message : String(e)}`);
   }
