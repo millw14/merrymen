@@ -20,6 +20,35 @@ import { Coin, Empty, Face } from "../ui";
 import { BalanceFigure } from "../studio";
 import { TradeTokenCard } from "../TradeTokenCard";
 
+/**
+ * How many recent moves the agent is shown.
+ *
+ * The whole tape used to go, which on its own overran the prompt's state
+ * budget before the positions were even added — so the clamp downstream cut it
+ * mid-object. Eight is what fits comfortably and is what a person means by
+ * "recently".
+ */
+const TAPE_SHOWN = 8;
+
+/**
+ * The newest moves, reduced to what the model can actually use.
+ *
+ * `at` travels so the agent can tell last month's refusal from this morning's.
+ * Without it, a tape of stale rejections reads as the present tense — which is
+ * exactly how a tester's agent came to report a months-old `no-gas` as its
+ * current state. `movesShown`/`movesTotal` go beside it so the agent can say
+ * "the last 8 of 30" rather than implying it saw everything.
+ */
+const tapeFor = (moves: LiveMine["moves"]) =>
+  moves.slice(-TAPE_SHOWN).map((m) => ({
+    at: m.at,
+    action: m.action,
+    symbol: m.symbol,
+    sizeUsdg: m.sizeUsdg,
+    outcome: m.outcome,
+    outcomeText: m.outcomeText,
+  }));
+
 const ASKS = [
   "How am I doing?",
   "What do you hold?",
@@ -130,7 +159,7 @@ export function Agent({
     follow.current = true;
     try {
       const settings = await fetch("/api/settings", {signal:AbortSignal.timeout(5000)}).then(r=>r.ok?r.json():null).catch(()=>null);
-      const response = await fetch("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},signal:AbortSignal.timeout(45000),body:JSON.stringify({message:question.trim(),state:JSON.stringify({name:mine.name,equity:mine.equity,strategy:settings?.values?.strategy ?? settings?.defaults?.strategy ?? mine.glance.id,paperTradingEnabled:settings?.values?.paperTradingEnabled ?? settings?.defaults?.paperTradingEnabled ?? null,workerStatus:mine.statusLabel ?? "Unknown",positions:mine.glance,moves:mine.moves,perTrade,perDay,stopped}),history:turns.flatMap(t=>[{role:"user",content:t.question},{role:"assistant",content:t.answer}]).slice(-8)})});
+      const response = await fetch("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},signal:AbortSignal.timeout(45000),body:JSON.stringify({message:question.trim(),state:JSON.stringify({name:mine.name,equity:mine.equity,strategy:settings?.values?.strategy ?? settings?.defaults?.strategy ?? mine.glance.id,paperTradingEnabled:settings?.values?.paperTradingEnabled ?? settings?.defaults?.paperTradingEnabled ?? null,workerStatus:mine.statusLabel ?? "Unknown",positions:mine.glance,moves:tapeFor(mine.moves),movesShown:Math.min(mine.moves.length,TAPE_SHOWN),movesTotal:mine.moves.length,perTrade,perDay,stopped}),history:turns.flatMap(t=>[{role:"user",content:t.question},{role:"assistant",content:t.answer}]).slice(-8)})});
       const data = await response.json();
       if(!response.ok || !data.reply) throw new Error(response.status===401 ? "Sign in again to chat with your agent." : data.why === "no-llm" ? "Chat is not configured yet. Open Settings to connect an AI provider." : "Your agent could not reply. Try sending again.");
       onTurn({question:question.trim(),answer:data.reply});

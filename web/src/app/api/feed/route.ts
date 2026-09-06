@@ -19,6 +19,22 @@ import { hostedAgentFor } from "@/lib/agent-for";
 // agent traded three.
 const DEFAULT_BASKET = [...SETTINGS_DEFAULTS.basketSymbols];
 
+/**
+ * HOW FAR BACK THE TAPE REACHES.
+ *
+ * The trades select was `LIMIT 30` with no window at all, so for an agent that
+ * has done nothing lately the newest thirty rows are simply its last thirty
+ * refusals — however old. The chat sends this tape to a model, the system
+ * prompt tells the model to ground itself in it, and the rows carry no
+ * timestamp the model can reason about. A tester's agent therefore narrated
+ * months-old `no-gas` and `per-trade-cap` refusals in the present tense, and
+ * was believed, because it was reading its own ledger faithfully.
+ *
+ * The window bounds RECENCY and the limit bounds SIZE. Neither substitutes for
+ * the other, so both stay.
+ */
+const TAPE_WINDOW_SEC = 7 * 24 * 3600;
+
 export const dynamic = "force-dynamic";
 
 export interface FeedEvent {
@@ -367,9 +383,13 @@ export async function GET(req: Request) {
         .prepare(
           `SELECT kind, sell_token, buy_token, amount_usdg, tx_hash, status, reject_rule,
                   sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, created_at
-           FROM trades WHERE agent_id = ?${epochWhere} ORDER BY created_at DESC, id DESC LIMIT 30`,
+           FROM trades WHERE agent_id = ?${epochWhere} AND created_at > ?
+           ORDER BY created_at DESC, id DESC LIMIT 30`,
         )
-        .all(scope, ...epochArg)) as (Omit<TradeRecord, "created_at"> & { created_at: number })[];
+        .all(scope, ...epochArg, Math.floor(Date.now() / 1000) - TAPE_WINDOW_SEC)) as (Omit<
+        TradeRecord,
+        "created_at"
+      > & { created_at: number })[];
       trades = rows.map((r) => ({ ...r, created_at: fmtEpoch(r.created_at) }));
     } catch {
       /* table not created yet */
