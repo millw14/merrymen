@@ -24,7 +24,6 @@ interface Row {
   agent: LiveAgent;
   rank: number;
   ret: number | null;
-  have: number | null;
 }
 
 export function Board({
@@ -130,12 +129,18 @@ function Rank({
             {you && <i className="tag on">you</i>}
           </div>
           <div className="rank-meta">
-            <Stamp>{a.glance.known === false ? "Strategy not published" : strategyName(a.glance.id)}</Stamp>
-            <span className="rank-trades">{a.landed} trades</span>
+            {a.glance.known === false ? null : <Stamp>{strategyName(a.glance.id)}</Stamp>}
+            <span className="rank-trades">{tradeLine(a)}</span>
           </div>
         </div>
         <div className="rank-nums">
-          <span className="rank-have">{money(row.have)}</span>
+          {/*
+            NO HOLDINGS COLUMN. `holdingsUsd` is declared on LiveAgent and set
+            by nothing — haveOf falls back to it for every agent but your own,
+            so the column rendered one figure and five long dashes, and no
+            amount of waiting would have filled them. A column that cannot be
+            filled is not an empty column, it is a promise the page cannot keep.
+          */}
           <span title={a.unrankedWhy ? unrankedLabel(a.unrankedWhy) : undefined} className={`chg ${row.ret == null ? "" : row.ret >= 0 ? "up" : "down"}`}>
             {row.ret == null ? a.unrankedWhy ? unrankedShort(a.unrankedWhy) : "Unranked" : pctBps(row.ret)}
           </span>
@@ -145,8 +150,27 @@ function Rank({
   );
 }
 
-export function haveOf(agent: LiveAgent, theses: Thesis[], mine: LiveMine | null): number | null {
-  return mine?.slug === agent.slug ? mine.equity : agent.holdingsUsd ?? null;
+/**
+ * WHAT THIS AGENT HAS ACTUALLY DONE — the one line about it that is true.
+ *
+ * The row used to read "Strategy not published", which is not a fact about the
+ * agent at all: `publicGlance()` takes no arguments and hard-codes it, so six
+ * agents printed one constant six times and nothing could ever change it. The
+ * public wire has never carried a strategy and is not going to — an owner's
+ * configuration is theirs — so the honest move is to stop putting a blank
+ * where a fact goes and print a fact the wire DOES carry.
+ *
+ * LANDED AND PAPER STAY APART, as read-agent.ts insists: the page once read
+ * "filled 0" beside ten posts saying "filled on paper", and folding them
+ * together is what re-arms that. A simulated fill is a real thing to have
+ * done, and it is not a trade.
+ */
+export function tradeLine(agent: LiveAgent): string {
+  const landed = agent.landed ?? 0;
+  if (landed > 0) return `${landed} trade${landed === 1 ? "" : "s"}`;
+  const paper = agent.filledPaper ?? 0;
+  if (paper > 0) return `${paper} on paper`;
+  return "No trades yet";
 }
 
 function rank(
@@ -179,7 +203,6 @@ function rank(
         agent,
         rank: r,
         ret,
-        have: haveOf(agent, theses, mine),
       };
     })
     .sort((a, b) => a.rank - b.rank);

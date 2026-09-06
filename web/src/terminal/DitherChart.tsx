@@ -27,6 +27,7 @@ export function DitherChart({
   className = "",
   riders = [],
   onRider,
+  restate = true,
 }: {
   points: ChartPoint[];
   label: string;
@@ -35,6 +36,16 @@ export function DitherChart({
   className?: string;
   riders?: ChartRider[];
   onRider?: (slug: string) => void;
+  /**
+   * Print the latest value in the caption.
+   *
+   * OFF WHERE THE SAME NUMBER IS ALREADY THE HEADLINE. On /you the balance was
+   * printed three times in one viewport — the big figure, this caption, and
+   * the agent row — and repetition on a page about somebody's money reads as
+   * three facts rather than one. The caption keeps its label either way: the
+   * chart still has to say what it is a chart of.
+   */
+  restate?: boolean;
 }) {
   const data = useMemo(
     () => points.filter((p) => Number.isFinite(p.value)),
@@ -95,7 +106,7 @@ export function DitherChart({
     >
       <figcaption className="dither-caption">
         <span>{label}</span>
-        <span>{format(last.value)}</span>
+        {restate ? <span>{format(last.value)}</span> : null}
       </figcaption>
       <div className="dither-stage">
         <div
@@ -236,10 +247,13 @@ export function PerformanceChart({
   values,
   balance = false,
   height = 68,
+  restate = true,
 }: {
   values: number[];
   balance?: boolean;
   height?: number;
+  /** See DitherChart — off where the figure is already printed above. */
+  restate?: boolean;
 }) {
   const points = useMemo(() => {
     const clean = values.filter(Number.isFinite);
@@ -274,6 +288,7 @@ export function PerformanceChart({
       // "$1,234.50") for the same number on the same screen.
       format={balance ? money : pctPts}
       height={height}
+      restate={restate}
     />
   );
 }

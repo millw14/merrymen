@@ -29,7 +29,7 @@ import { positionsOf } from "./account";
 import { BalanceFigure } from "./studio";
 import { strategyName } from "./strategy";
 import { Feed } from "./screens/Feed";
-import { Board, haveOf } from "./screens/Board";
+import { Board, tradeLine } from "./screens/Board";
 
 export type SidebarSection = "markets" | "agents" | "feed" | "board";
 const SECTIONS: { id: SidebarSection; label: string }[] = [
@@ -288,11 +288,15 @@ export function DesktopSidebar({
                 <Face name={a.name} slug={a.slug} />
                 <span>
                   <strong>{a.handle ?? a.name}</strong>
-                  <small>{a.glance.known === false ? "Strategy not published" : strategyName(a.glance.id)}</small>
+                  {/*
+                    WHAT IT HAS DONE, not what we cannot tell you. This read
+                    "Strategy not published" on every row — one hard-coded
+                    constant (publicGlance) printed once per agent, which no
+                    change to any agent could ever alter. See tradeLine.
+                  */}
+                  <small>{tradeLine(a)}</small>
                 </span>
-                <span
-                  aria-label={`Return ${pctBps(a.pnlBps)}, holdings ${money(haveOf(a, theses, mine))}`}
-                >
+                <span aria-label={`Return ${pctBps(a.pnlBps)}, ${tradeLine(a)}`}>
                   <strong
                     className={
                       a.pnlBps == null
@@ -306,7 +310,6 @@ export function DesktopSidebar({
                   >
                     {pctBps(a.pnlBps)}
                   </strong>
-                  <small>{money(haveOf(a, theses, mine))}</small>
                 </span>
               </button>
             ))}

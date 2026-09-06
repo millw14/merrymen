@@ -66,7 +66,7 @@ export function You({
             ? "Daily change unavailable"
             : `${mine.chg24 < 0 ? "−" : "+"}${money(Math.abs(mine.chg24))}${change == null ? "" : ` (${pctPts(change)})`} today`}
         </p>
-        <PerformanceChart balance values={history} height={68} />
+        <PerformanceChart balance values={history} height={68} restate={false} />
         <button type="button" className="account-fund" onClick={onDeposit}>
           Add funds <span aria-hidden>↗</span>
         </button>

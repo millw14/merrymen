@@ -307,3 +307,79 @@ describe("must-have before a public UI", () => {
     }
   });
 });
+
+/**
+ * A FIFTH INVARIANT, from the first screenshot a tester sent of the fleet page:
+ * six agents, each captioned "Strategy not published", each with a long dash
+ * where a number goes. Both were structural, not slow — one hard-coded
+ * constant printed once per agent, and a field nothing in the tree ever sets.
+ *
+ * A blank that will never fill is worse than an absent column: it reads as
+ * data still loading, so a reader waits for something that is not coming.
+ */
+describe("a screen may not promise what it can never show", () => {
+  it("THE AGENT ROWS DO NOT PRINT A CONSTANT ONCE PER AGENT", () => {
+    // `publicGlance()` takes no arguments and hard-codes `known:false`, so
+    // "Strategy not published" was one fact about the product rendered as six
+    // facts about six agents. The wire has never carried a strategy and is not
+    // going to — an owner's configuration is theirs.
+    for (const f of ["./Desktop.tsx", "./screens/Board.tsx"]) {
+      assert.ok(
+        !code(at(f)).includes("Strategy not published"),
+        `${f} still prints the unpublishable-strategy constant on every row`,
+      );
+    }
+  });
+
+  it("and they print something they can actually know", () => {
+    // `landed` and `filledPaper` are on the wire for every agent.
+    assert.match(code(at("./Desktop.tsx")), /tradeLine\(a\)/);
+    assert.match(code(at("./screens/Board.tsx")), /tradeLine\(a\)/);
+  });
+
+  it("A SIMULATED FILL IS NOT A TRADE, in the one line that counts them", async () => {
+    // read-agent.ts refuses to fold these together and records why: the page
+    // once read "filled 0" beside ten posts saying "filled on paper".
+    const { tradeLine } = await import("./screens/Board");
+    const agent = (over: Partial<LiveAgent>) =>
+      ({ slug: "a", name: "A", handle: null, pnlBps: null, curve: [], landed: 0, ...over }) as LiveAgent;
+    assert.equal(tradeLine(agent({ landed: 3 })), "3 trades");
+    assert.equal(tradeLine(agent({ landed: 1 })), "1 trade");
+    assert.equal(tradeLine(agent({ landed: 0, filledPaper: 7 })), "7 on paper");
+    assert.equal(tradeLine(agent({ landed: 0 })), "No trades yet");
+    // A landed fill is never described as paper, even when both exist.
+    assert.equal(tradeLine(agent({ landed: 2, filledPaper: 9 })), "2 trades");
+  });
+
+  it("no row renders a holdings figure nothing sets", () => {
+    // `holdingsUsd` is declared on LiveAgent and assigned by nothing, so the
+    // column showed your own equity and a dash for everybody else.
+    const setters = code(at("./live.ts")).match(/holdingsUsd\s*:/g) ?? [];
+    assert.equal(setters.length, 0, "if something now sets holdingsUsd, the column may come back");
+    for (const f of ["./Desktop.tsx", "./screens/Board.tsx"]) {
+      assert.ok(!code(at(f)).includes("haveOf("), `${f} still renders the unfillable holdings figure`);
+    }
+  });
+
+  it("THE DAILY CHANGE WINDOW CAN ACTUALLY REACH A DAY", () => {
+    // "Daily change unavailable" was honest about what the browser held and
+    // wrong about why: chg24 needs a point 24h old, and the feed returned the
+    // newest 288 equity rows — 19.2 hours at the production tick of 240s. An
+    // honest label over a window bug is the most expensive kind of correct.
+    const route = at("../app/api/feed/route.ts");
+    const m = route.match(/ORDER BY at DESC, id DESC LIMIT (\d+)/);
+    assert.ok(m, "the equity window must still be bounded");
+    const rows = Number(m![1]);
+    const worstTickSec = 240;
+    assert.ok(
+      (rows * worstTickSec) / 3600 > 24,
+      `${rows} rows at ${worstTickSec}s a row spans ${((rows * worstTickSec) / 3600).toFixed(1)}h — a daily change cannot exist`,
+    );
+  });
+
+  it("the balance is not restated under the figure that already prints it", () => {
+    assert.match(code(at("./screens/You.tsx")), /restate=\{false\}/);
+    // And the chart still says what it is a chart OF.
+    assert.match(code(at("./DitherChart.tsx")), /<span>\{label\}<\/span>/);
+  });
+});

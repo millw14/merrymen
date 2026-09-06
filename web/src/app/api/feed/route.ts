@@ -305,10 +305,26 @@ export async function GET(req: Request) {
       /* table not created yet */
     }
     try {
+      /**
+       * ENOUGH ROWS TO REACH BACK A DAY, WHATEVER THE CADENCE.
+       *
+       * This was 288, which is twenty-four hours only if a row lands every
+       * five minutes. Production ticks every 240s (MERRYMEN_TICK_SECONDS), so
+       * 288 rows spans 19.2 hours — and `chg24` needs a point at or before
+       * twenty-four hours ago (terminal/live.ts, equityDayAgo). It never
+       * found one. "Daily change unavailable" on a working, funded account was
+       * not the agent being new: the window the browser was handed could not
+       * reach that far, and the honest label made a window bug look like an
+       * honest silence, which is the most expensive kind of correct.
+       *
+       * 900 rows is 60 hours at the production cadence and 75 at the default
+       * one, so the daily figure survives a slower tick, a gap in the series,
+       * and the fail-closed paths that skip an equity row entirely.
+       */
       const rows = (await db
         .prepare(
           `SELECT cash_usdg, vault_usdg, equity_usdg, at
-           FROM (SELECT * FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 288)
+           FROM (SELECT * FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 900)
            ORDER BY at ASC, id ASC`,
         )
         .all(scope, ...epochArg)) as { cash_usdg: number; vault_usdg: number; equity_usdg: number; at: number }[];

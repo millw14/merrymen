@@ -112,9 +112,23 @@ describe("the prototype's fixtures cannot come back", () => {
     // running steady-basket.
     const live = FILES.find(([n]) => n === "live.ts")![1];
     assert.match(live, /known: false/, "the public glance must mark itself unknown");
+    // PER CALL SITE, not per file. The owner's OWN agent has a real strategy —
+    // it is read from their settings — so a blanket "this file must mention
+    // the guard" is both too weak (one guard anywhere satisfies it) and too
+    // strong (a file that names no public strategy at all fails it). What must
+    // hold is narrower: every strategyName() applied to a PUBLIC row is
+    // guarded, and a screen that simply stops naming one is safer still.
     for (const screen of ["screens/Board.tsx", "screens/Profile.tsx", "Desktop.tsx"]) {
       const src = FILES.find(([n]) => n === screen)![1];
-      assert.match(src, /known === false/, `${screen} must not print a rulebook nobody published`);
+      for (const line of src.split(/\r?\n/)) {
+        // A public row is `a`/`agent`; the owner's is `mine`.
+        if (!/strategyName\(\s*(a|agent)\.glance/.test(line)) continue;
+        assert.match(
+          line,
+          /known === false/,
+          `${screen} prints a rulebook nobody published: ${line.trim().slice(0, 90)}`,
+        );
+      }
     }
   });
 });
