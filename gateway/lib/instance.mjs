@@ -34,7 +34,10 @@ export function getGateway() {
     secret: SECRET,
     upstreamUrl: process.env.MERRYMEN_GATEWAY_UPSTREAM || "https://api.groq.com/openai/v1/chat/completions",
     upstreamKey: UPSTREAM_KEY,
-    model: process.env.MERRYMEN_GATEWAY_MODEL || "llama-3.3-70b-versatile",
+    // THE SAME DEFAULT AS server.mjs, and it has to stay the same: this is the
+    // serverless path (gateway/api/*), so fixing only server.mjs leaves the
+    // Vercel deploy answering 404 for every completion.
+    model: process.env.MERRYMEN_GATEWAY_MODEL || "qwen/qwen3.8-27b",
     domain: process.env.MERRYMEN_GATEWAY_DOMAIN || "merrymen.dev",
     minTokens: BigInt(process.env.MERRYMEN_GATEWAY_MIN_TOKENS || "10000"),
     tokenAddress: TOKEN_ADDRESS,

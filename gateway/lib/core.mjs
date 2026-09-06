@@ -273,6 +273,27 @@ export function createGateway(cfg) {
     return { status: 200, json: { token: issueToken(address), expiresInDays: T.TOKEN_TTL_SEC / 86400, model: brandModel } };
   }
 
+  /**
+   * The one model this gateway will ever use, as a list.
+   *
+   * Not a menu — a fact. `clampPayload` forces `model` server-side, which is
+   * the whole point of the proxy, so a client cannot pick anything else. This
+   * exists only because every OpenAI-compatible client asks: merrymen's own
+   * settings page fetches `<baseUrl>/models` for any openai-transport provider,
+   * got the catch-all 404, and printed "Could not load AI models. Check your
+   * provider and key" beside a key that was perfectly good. Two testers
+   * reported it as a broken key.
+   *
+   * Unauthenticated on purpose. It discloses the brand name a caller must send
+   * back, which is already in llm-providers.ts and on the claim page.
+   */
+  function models() {
+    return {
+      status: 200,
+      json: { object: "list", data: [{ id: brandModel, object: "model", owned_by: "merrymen" }] },
+    };
+  }
+
   async function chat({ token, body, ip }) {
     const addr = verifyToken(token);
     if (!addr) return { status: 401, json: { error: { message: "invalid or expired Merrymen AI token — re-claim at /claim" } } };
@@ -287,8 +308,22 @@ export function createGateway(cfg) {
         body: JSON.stringify(body),
       });
       const raw = await upstream.text();
-      // Pass the model name back as our brand, not the upstream's.
-      const text = raw.replace(new RegExp(`"model"\\s*:\\s*"${model}"`, "g"), `"model":"${brandModel}"`);
+      // THE BRAND SUBSTITUTION HAS TO COVER FAILURES TOO.
+      //
+      // This matched only `"model":"<upstream>"`, which is the shape of a
+      // SUCCESS body. An upstream error names the model in prose instead —
+      // "The model `<id>` does not exist" — so for the whole time the forced
+      // model was dead, every caller was told the upstream model id in an
+      // error string. That is the one fact this proxy exists to withhold,
+      // leaking on exactly the path nobody tests.
+      //
+      // Replace the name wherever it appears, in any body, on any status. The
+      // status itself passes through untouched: the strategist has to be able
+      // to tell 429 from 404, or it retries a permanent failure forever.
+      const text = raw
+        .replace(new RegExp(`"model"\\s*:\\s*"${model}"`, "g"), `"model":"${brandModel}"`)
+        .split(model)
+        .join(brandModel);
       return { status: upstream.status, text, contentType: "application/json" };
     } catch {
       return { status: 502, json: { error: { message: "upstream unavailable" } } };
@@ -527,6 +562,7 @@ export function createGateway(cfg) {
     nonce,
     claim,
     chat,
+    models,
     bitquery,
     memescope,
     bitqueryQueries: () => Object.keys(BITQUERY_QUERIES),

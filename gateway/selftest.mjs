@@ -241,3 +241,49 @@ assert.equal((await capped.memescope({ ip: "9.9.9.6" })).status, 429, "the publi
 
 console.log("[gateway] selftest OK — /bitquery: named queries only, no raw GraphQL, key-gated, own rate bucket");
 console.log("[gateway] selftest OK — /memescope: public, one shared query per TTL, single-flight under load, serves stale over blank");
+
+// ── /v1/models, and the model name that must never leave ─────────────────────
+//
+// The forced model is the one fact this proxy exists to withhold from a caller.
+// The brand rewrite used to match only `"model":"<id>"` — the shape of a
+// SUCCESS body — so while the forced model was dead (Groq retired the whole
+// Llama 3.x line and this gateway kept naming one), every caller read the
+// upstream id straight out of the 404 error string.
+{
+  const list = gw.models();
+  assert.equal(list.status, 200, "the models route answers");
+  assert.equal(list.json.data.length, 1, "one model, because the gateway forces it");
+  assert.equal(list.json.data[0].id, DEFAULTS.BRAND_MODEL ?? "merrymen-fast", "the list names the BRAND, never the upstream");
+
+  const realFetch2 = globalThis.fetch;
+  const holder = createGateway({
+    ...baseCfg,
+    secret: SECRET,
+    store,
+    model: "upstream-secret-model-id",
+    publicClient: { readContract: async () => 10n ** 30n },
+  });
+  const tok = holder._tokens.issueToken(ADDR);
+
+  // A SUCCESS body still gets the brand.
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ model: "upstream-secret-model-id", choices: [] }), { status: 200 });
+  const ok = await holder.chat({ token: tok, body: { messages: [] }, ip: "8.8.8.1" });
+  assert.equal(ok.status, 200);
+  assert.ok(!ok.text.includes("upstream-secret-model-id"), "a success body must not name the upstream model");
+
+  // AND SO DOES A FAILURE — this is the case that leaked.
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({ error: { message: "The model `upstream-secret-model-id` does not exist", code: "model_not_found" } }),
+      { status: 404 },
+    );
+  const bad = await holder.chat({ token: tok, body: { messages: [] }, ip: "8.8.8.2" });
+  assert.equal(bad.status, 404, "the status passes through — a caller must tell 429 from 404");
+  assert.ok(!bad.text.includes("upstream-secret-model-id"), "AN ERROR BODY MUST NOT NAME THE UPSTREAM MODEL EITHER");
+  assert.ok(bad.text.includes("does not exist"), "and the caller still learns what went wrong");
+
+  globalThis.fetch = realFetch2;
+}
+
+console.log("[gateway] selftest OK — /v1/models lists the brand; the upstream model name leaks on no status");

@@ -25,7 +25,13 @@ const PORT = Number(process.env.PORT || 8787);
 const UPSTREAM_URL = process.env.MERRYMEN_GATEWAY_UPSTREAM || "https://api.groq.com/openai/v1/chat/completions";
 const UPSTREAM_KEY = process.env.MERRYMEN_GATEWAY_UPSTREAM_KEY; // REQUIRED — the real key, server-only
 const BITQUERY_KEY = process.env.MERRYMEN_GATEWAY_BITQUERY_KEY; // optional — enables /bitquery for holders
-const MODEL = process.env.MERRYMEN_GATEWAY_MODEL || "llama-3.3-70b-versatile"; // forced server-side
+// FORCED SERVER-SIDE, and it must be a model that still exists. Groq retired
+// the whole Llama 3.x chat line; see packages/core/src/llm-providers.ts for
+// the trace. That fix landed for the groq provider and missed this file, so
+// every completion through the merrymen provider 404'd — chat answered
+// nothing and the strategist silently proposed nothing, for weeks.
+// Pinned against SETTINGS_DEFAULTS.groqModel by packages/core/src/gateway-model.test.ts.
+const MODEL = process.env.MERRYMEN_GATEWAY_MODEL || "qwen/qwen3.8-27b";
 const SECRET = process.env.MERRYMEN_GATEWAY_SECRET; // REQUIRED — HMAC token-signing secret (32+ random bytes)
 const RPC = process.env.MERRYMEN_GATEWAY_RPC; // REQUIRED — Robinhood Chain RPC for balanceOf
 const MIN_TOKENS = BigInt(process.env.MERRYMEN_GATEWAY_MIN_TOKENS || "10000"); // whole $MERRYMEN to qualify
@@ -160,6 +166,10 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && pathname === "/healthz") return respond(res, gw.health());
     if (req.method === "GET" && (pathname === "/" || pathname === "/claim")) return respond(res, gw.serveClaimPage(CLAIM_HTML));
     if (req.method === "GET" && pathname === "/nonce") return respond(res, await gw.nonce({ address: url.searchParams.get("address"), ip }));
+    // The list every OpenAI-compatible client asks for before it will show a
+    // model picker. Without it the catch-all below answered 404 and merrymen's
+    // own settings page blamed the user's key.
+    if (req.method === "GET" && (pathname === "/v1/models" || pathname === "/models")) return respond(res, gw.models());
 
     if (req.method === "POST" && pathname === "/claim") {
       let body;
