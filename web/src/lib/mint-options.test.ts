@@ -23,7 +23,7 @@ import { refusalMessage } from "./session";
  */
 
 const SESSION_SRC = readFileSync(new URL("./session.ts", import.meta.url), "utf8");
-const GRANT_PAGE_SRC = readFileSync(new URL("../app/grant/page.tsx", import.meta.url), "utf8");
+const GRANT_PAGE_SRC = readFileSync(new URL("../terminal/screens/Wallet.tsx", import.meta.url), "utf8");
 
 describe("mint entry points take NAMED options", () => {
   it("createAgentWallet and restoreAgentWallet take an options object", () => {

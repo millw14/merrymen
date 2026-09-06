@@ -119,7 +119,7 @@ describe("trencher goes live only when the owner says so", () => {
   it("the remedy is reachable from the settings page", () => {
     // The flag had an API branch and no input, so the one action that would fix
     // it could not be taken. Same class as ponsAdapterAddress.
-    const page = readFileSync(new URL("../../web/src/app/settings/page.tsx", import.meta.url), "utf8");
+    const page = readFileSync(new URL("../../web/src/terminal/screens/Settings.tsx", import.meta.url), "utf8");
     assert.match(page, /trencherLiveEnabled/, "no control means no remedy");
   });
 

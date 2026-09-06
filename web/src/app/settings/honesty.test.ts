@@ -22,7 +22,7 @@ import { describe, it } from "node:test";
  * that never fired.
  */
 
-const SRC = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
+const SRC = readFileSync(new URL("../../terminal/screens/Settings.tsx", import.meta.url), "utf8");
 
 /**
  * The same source with comments removed.
@@ -70,11 +70,11 @@ const FIELDS = [
   "merry circle token",
   "minimum pool depth (USD)",
   "model",
-  "name your merryman",
+  "Agent name",
   "performance fee",
   "scout budget (USDG)",
   "step budget",
-  "strategy",
+  "Strategy",
   "swap venue",
   "symbol",
   "testnet RPC override",

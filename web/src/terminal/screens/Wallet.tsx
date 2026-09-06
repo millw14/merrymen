@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import { verifiedAdapter } from "@/lib/verified-adapter";
 import { useCallback, useEffect, useState } from "react";
 import { createPublicClient, formatEther, http } from "viem";
 import { Info } from "@/components/Info";
-import { AppShell } from "@/components/shell/AppShell";
-import { PageHeader } from "@/components/shell/PageHeader";
+import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import {
   explorerFor,
   grantHasV4,
@@ -38,11 +38,6 @@ import { canStart } from "@/lib/can-start";
 // and is 1,750 lines of signature and recovery logic — the last place to
 // restyle during a redesign. It keeps the sheets it was written against, and
 // they no longer reach anything else.
-import "@/styles/tokens.css";
-import "@/styles/shell.css";
-import "@/styles/legacy.css";
-import "@/styles/legacy-console.css";
-import "./grant.css";
 
 const DEFAULTS: GrantCaps = {
   perTradeUsdg: 50,
@@ -173,69 +168,6 @@ const TESTNET = robinhoodTestnet.id; // 46630 — the sandbox
  * think they had sealed it and find out at the first trade. Throwing puts the
  * failure where the owner is already looking.
  */
-async function verifiedAdapter(
-  address: `0x${string}` | undefined,
-  chainId: number,
-  onStatus: (s: string) => void,
-): Promise<`0x${string}` | undefined> {
-  if (!address) return undefined;
-  onStatus("checking the curve adapter before sealing it…");
-  const chain = chainId === robinhoodTestnet.id ? robinhoodTestnet : robinhoodChain;
-  const client = createPublicClient({ chain, transport: http() });
-
-  let code: string;
-  try {
-    code = (await client.getCode({ address })) ?? "0x";
-  } catch (e) {
-    throw new Error(
-      `Could not check the curve adapter ${address} on ${chain.name}: ${
-        e instanceof Error ? e.message : String(e)
-      }. Refusing to seal an address nobody has verified — it would become an approved spender for every token in this grant.`,
-    );
-  }
-  if (!code || code === "0x") {
-    throw new Error(
-      `No contract at ${address} on ${chain.name}. That is usually an address from the other chain, ` +
-        `a typo, or a deploy that never happened. Sealing it would make it an approved spender for every ` +
-        `token in this grant, so nothing is signed. Fix it at /settings and try again.`,
-    );
-  }
-
-  // SHAPE CHECK. A live contract at the right address on the right chain can
-  // still be the wrong contract entirely, and check 1 cannot tell.
-  try {
-    await client.readContract({
-      address,
-      abi: PONS_SELFTRADE_ABI,
-      functionName: "tradeExactIn",
-      args: [
-        "0x0000000000000000000000000000000000000000",
-        "0x0000000000000000000000000000000000000000",
-        "0x0000000000000000000000000000000000000000",
-        0n,
-        0n,
-        0n,
-      ],
-    });
-  } catch (e) {
-    // A REVERT IS A PASS. The call is deliberately invalid — zero addresses, zero
-    // amount, a deadline in 1970 — so the real adapter MUST reject it. What we
-    // are testing is that it rejected it as that function rather than failing to
-    // find one. viem reports a missing function differently from a revert, and
-    // only the former disqualifies the address.
-    const msg = e instanceof Error ? e.message : String(e);
-    if (/does not exist|not found|returned no data|function.*selector/i.test(msg)) {
-      throw new Error(
-        `The contract at ${address} on ${chain.name} is not a PonsSelfTrade adapter — it has no ` +
-          `tradeExactIn function. Sealing it would make the wrong contract an approved spender for every ` +
-          `token in this grant, so nothing is signed.`,
-      );
-    }
-  }
-
-  onStatus("curve adapter verified.");
-  return address;
-}
 
 const MAINNET = robinhoodChain.id; // 4663 — real funds
 
@@ -396,7 +328,7 @@ export default function GrantPage() {
   const [savedWallets, setSavedWallets] = useState<SavedWallet[]>([]);
   const [reArming, setReArming] = useState(false);
   // ── restore: bring an already-funded wallet back with its owner key ──────
-  const [mode, setMode] = useState<"create" | "restore">("create");
+  const [mode, setMode] = useState<"create" | "restore">("restore");
   const [restoreKey, setRestoreKey] = useState("");
   const [preview, setPreview] = useState<OwnerPreview | null>(null);
   const [previewFunding, setPreviewFunding] = useState<Funding | null>(null);
@@ -437,6 +369,7 @@ export default function GrantPage() {
       .then((r) => (r.ok ? r.json() : { exists: false }))
       .then((s: { exists?: boolean; gasSponsored?: boolean | null }) => {
         setServerArmed(!!s.exists);
+        if(s.exists && !stored) setMode("restore");
         setGasSponsored(s.gasSponsored === true);
       })
       .catch(() => setServerArmed(null));
@@ -542,6 +475,10 @@ export default function GrantPage() {
 
   async function onCreate() {
     setError(null);
+    if (!grant && !switching) {
+      window.location.href = "/create";
+      return;
+    }
     // Refuse rather than mint something the server will throw away. /grant is
     // reachable directly — the connect step lives in the /app rail — so someone
     // can land here signed out, and hosted binding needs a wallet AND a session.
@@ -795,7 +732,7 @@ export default function GrantPage() {
   // phases below — presentation only, no logic changed. -1 = the desync recovery
   // panel (its own screen, off the numbered track).
   const wizStep = desynced ? -1 : !grant || switching ? 0 : !backedUp ? 1 : 2;
-  const RAIL = ["Choose", "Back up", "Fund", "Ride"] as const;
+  const RAIL = ["Wallet", "Backup", "Funds", "Ready"] as const;
   const KICKS = ["Step one · set the wall", "Step two · back up the key", "Step three · fund the account"];
 
   return (
@@ -813,7 +750,7 @@ export default function GrantPage() {
      */
     <AppShell>
       <PageHeader
-        title="Grant"
+        title="Wallet & permissions"
         /* THE CHAIN INDICATOR MOVES, IT DOES NOT GO. Its markup and its
            classes are exactly as they were; only its parent changed. On a
            page that seals spending caps, which chain they are being sealed
@@ -940,8 +877,7 @@ export default function GrantPage() {
                 type="button"
                 className={`mode-tab ${mode === "create" ? "on" : ""}`}
                 onClick={() => {
-                  setMode("create");
-                  setError(null);
+                  window.location.href = "/create";
                 }}
               >
                 new wallet
@@ -977,11 +913,8 @@ export default function GrantPage() {
                 </>
               ) : (
                 <>
-                  Already funded a merrymen wallet? Paste its <b>owner key</b> and the very same
-                  account comes back{" "}
+                  Enter your <b>recovery key</b> to restore your wallet with updated trading limits.{" "}
                   <Info>Your smart-account address is derived from the owner key, so the same key always reproduces the same account — with the funds still in it. Restoring signs a fresh session key; it moves nothing on-chain.</Info>{" "}
-                  — same address, same funds — armed with a fresh session key under the caps you set
-                  below. This is the way back in after a kill switch or a new machine.
                 </>
               )}
             </p>
@@ -994,9 +927,7 @@ export default function GrantPage() {
               >
                 <span className="chain-card-title"><GI d="tree" size={16} /> Practice (testnet)</span>
                 <span className="chain-card-body">
-                  Your band trades a simulated book at real live prices. Nothing routes on-chain and
-                  USDG sent here won&apos;t show up — so don&apos;t fund it. Best place to watch it
-                  work before risking anything.
+                  Simulated trading at live prices. No real deposits needed.
                 </span>
               </button>
               <button
@@ -1013,10 +944,7 @@ export default function GrantPage() {
 
             {isMainnet && (
               <div className="mainnet-warning">
-                <b>This is real money.</b> Your owner &amp; session keys are generated and stored in
-                plain text on <b>this machine</b> (~/.merrymen and this browser) — anyone with
-                access to it controls the funds. There is no recovery service and no undo. Your
-                caps below are the seatbelt: start small, raise them as trust grows.
+                This permission allows trading with real funds. Keep your recovery key private and choose limits you’re comfortable with.
                 <label className="ack-row" style={{ marginTop: 10 }}>
                   <input
                     type="checkbox"

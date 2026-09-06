@@ -25,7 +25,7 @@
 // a changed sw.js is picked up on the next navigation, and activate() below drops
 // every cache whose name doesn't carry the current VERSION — so the old
 // merrymen-shell-v1 / merrymen-assets-v1 are purged and the next load is fresh.
-const VERSION = "v2";
+const VERSION = "v4";
 const SHELL = `merrymen-shell-${VERSION}`;
 const ASSETS = `merrymen-assets-${VERSION}`;
 const OFFLINE_URL = "/offline.html";
@@ -34,7 +34,14 @@ self.addEventListener("install", (event) => {
   event.waitUntil(
     (async () => {
       const cache = await caches.open(SHELL);
-      await cache.addAll([OFFLINE_URL, "/icon-192.png", "/manifest.webmanifest"]);
+      // THE OFFLINE PAGE’S OWN TYPEFACE.
+      //
+      // offline.html declares @font-face for /fonts/DMSans-latin.woff2, and the
+      // one moment it renders is the moment the network is gone — so a font
+      // that is not precached is a font that never loads, and the screen we
+      // rebuilt to look like the product falls back to system-ui. Adding it
+      // costs 62KB once, on install.
+      await cache.addAll([OFFLINE_URL, "/icon-192.png", "/manifest.webmanifest", "/fonts/DMSans-latin.woff2"]);
       await self.skipWaiting();
     })(),
   );

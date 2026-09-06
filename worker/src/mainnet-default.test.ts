@@ -52,7 +52,7 @@ const ids = (i: PreflightInput, level: string) =>
   preflight(i).filter((c) => c.level === level).map((c) => c.id);
 
 test("the shipped chain default is one preflight calls tradeable", () => {
-  const src = readFileSync("web/src/app/grant/page.tsx", "utf8");
+  const src = readFileSync("web/src/terminal/screens/Wallet.tsx", "utf8");
   assert.match(src, /useState<number>\(MAINNET\)/, "the grant page must open on mainnet");
   assert.equal(
     /useState<number>\(TESTNET\)/.test(src),
@@ -75,7 +75,7 @@ test("the caps default is the scout, sized for an account with nothing in it yet
   // Caps are sealed BEFORE funding, so the default cannot be sized to capital
   // nobody has deposited. The outlaw's 50 x 48 is a four-figure ceiling to hand
   // someone who has not seen the thing trade once.
-  const src = readFileSync("web/src/app/grant/page.tsx", "utf8");
+  const src = readFileSync("web/src/terminal/screens/Wallet.tsx", "utf8");
   assert.match(src, /useState<GrantCaps>\(PRESETS\[0\]!\.caps\)/);
   assert.equal(/useState<GrantCaps>\(DEFAULTS\)/.test(src), false);
 });
@@ -97,7 +97,7 @@ test("nothing in web/ still falls back to testnet when a chain is unknown", () =
 test("practice is still reachable — simplification is not removal", () => {
   // The owner's decision was to fix paper and KEEP practice, not to delete it.
   // A user who wants to watch before risking anything must still be able to.
-  const src = readFileSync("web/src/app/grant/page.tsx", "utf8");
+  const src = readFileSync("web/src/terminal/screens/Wallet.tsx", "utf8");
   assert.match(src, /setChainId\(TESTNET\)/, "the practice card must still be clickable");
   assert.match(src, /Practice \(testnet\)/);
 });
@@ -106,7 +106,7 @@ test("the real-money acknowledgement survives the flip", () => {
   // Mainnet-by-default makes this MORE load-bearing, not less: it is now the
   // first thing standing between a new user and a real-funds wall. Deleting it
   // and calling that "one less step" would be trading a warning for a metric.
-  const src = readFileSync("web/src/app/grant/page.tsx", "utf8");
+  const src = readFileSync("web/src/terminal/screens/Wallet.tsx", "utf8");
   assert.match(src, /const createBlocked = isMainnet && !mainnetAck;/);
   assert.match(src, /acknowledge the real-funds warning above first/);
 });

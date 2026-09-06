@@ -1,43 +1,37 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>Can't reach your merryman</title>
-    <style>
-      :root { color-scheme: dark; }
-      body {
-        margin: 0; min-height: 100dvh; display: grid; place-items: center;
-        background: #0d1512; color: #e9f2ec; padding: 32px;
-        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-        line-height: 1.6; text-align: center;
-      }
-      .wrap { max-width: 46ch; }
-      h1 { font-size: 22px; margin: 0 0 14px; letter-spacing: -0.02em; }
-      p { color: #94a89e; font-size: 15px; margin: 0 0 12px; }
-      code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; color: #e9f2ec; }
-      .note { color: #647a70; font-size: 13px; margin-top: 22px; }
-      button {
-        margin-top: 20px; padding: 11px 20px; border-radius: 8px; cursor: pointer;
-        background: #34d399; color: #08120e; border: 0; font: inherit; font-weight: 600;
-      }
-    </style>
-  </head>
-  <body>
-    <div class="wrap">
-      <h1>Can't reach your merryman</h1>
-      <p>
-        The dashboard is installed, but nothing answered. That usually means the agent isn't running,
-        or this device isn't on the same network as the machine it runs on.
-      </p>
-      <p>Start it with <code>merrymen start</code>, or open the desktop app.</p>
-      <button onclick="location.reload()">Try again</button>
-      <!-- Deliberately no cached numbers on this screen. A trading UI that shows
-           a remembered balance while offline is lying about the present. -->
-      <p class="note">
-        Nothing is shown from cache here on purpose — your balances and positions are only ever read
-        live, so an offline screen has no figures to give you rather than stale ones.
-      </p>
-    </div>
-  </body>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#080905" />
+  <title>Connection unavailable — merrymen</title>
+  <style>
+    @font-face {font-family:"DM Sans";src:url("/fonts/DMSans-latin.woff2") format("woff2");font-weight:100 1000;font-display:swap;}
+    :root {color-scheme:dark;}
+    * {box-sizing:border-box;}
+    body {margin:0;min-height:100svh;display:grid;place-items:center;padding:24px;background:#080905;color:#e9e9e1;font-family:"DM Sans",system-ui,-apple-system,sans-serif;}
+    main {width:100%;max-width:440px;}
+    .brand {color:inherit;font-size:23px;font-weight:600;letter-spacing:-.04em;text-decoration:none;}
+    h1 {font-size:36px;line-height:1.15;letter-spacing:-.04em;margin:28px 0 16px;font-weight:600;}
+    p {font-size:15px;line-height:1.7;color:#92958a;margin:0 0 24px;}
+    .actions {display:flex;align-items:center;flex-wrap:wrap;gap:20px;}
+    button {padding:14px 20px;border-radius:12px;background:#e9e9e1;color:#080905;font:inherit;font-weight:600;border:0;cursor:pointer;}
+    .actions a {color:#e9e9e1;font-size:14px;text-underline-offset:4px;}
+    details {margin-top:32px;border-top:1px solid #272920;padding-top:18px;font-size:13px;color:#92958a;}
+    summary {cursor:pointer;padding:6px 0;}
+    details p {font-size:13px;margin:12px 0 0;}
+    code {color:#e9e9e1;overflow-wrap:anywhere;}
+    :focus-visible {outline:2px solid #92958a;outline-offset:5px;}
+    @media(max-width:480px){h1{font-size:30px;}}
+  </style>
+</head>
+<body>
+  <main>
+    <a class="brand" href="/">merrymen</a>
+    <h1>We couldn’t connect.</h1>
+    <p>The app couldn’t reach the server. Check your connection, then try again.</p>
+    <div class="actions"><button type="button" onclick="if(location.pathname==='/offline.html'){location.assign('/')}else{location.reload()}">Try again</button><a href="/">Back to markets</a></div>
+    <details><summary>Running merrymen yourself?</summary><p>Open the desktop app or run <code>merrymen start</code> on the machine hosting your agent. If you’re using another device, check that it can reach that machine.</p></details>
+  </main>
+</body>
 </html>

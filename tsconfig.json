@@ -7,6 +7,14 @@
     "noEmit": true,
     "baseUrl": ".",
     "paths": {
+      // THE WEB ALIAS, so `tsx --test` can load a web module that uses it.
+      //
+      // `web/tsconfig.json` has had `@/*` since the beginning, but the runner
+      // resolves against THIS file, so any web source importing `@/…` at
+      // runtime was untestable — it failed at import with "Cannot find module".
+      // Type-only `@/` imports were fine, which is why nothing noticed until a
+      // terminal module needed a value from web/src/lib.
+      "@/*": ["web/src/*"],
       "@merrymen/core": ["packages/core/src/index.ts"],
       "@merrymen/thesis": ["worker/src/thesis-policy.ts"],
       "@merrymen/identity-store": ["worker/src/identity-store.ts"]
