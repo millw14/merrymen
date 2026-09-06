@@ -438,6 +438,8 @@ async function main() {
   const paperActive = () => execMode().mode === "paper";
   /** The last leg that blocked the live rail, so the event fires on change only. */
   let lastLiveBlocker: RefuseRule | null | undefined;
+  /** The last reason a tick proposed nothing, so THAT fires on change only too. */
+  let lastIdleReason: string | null = null;
   /**
    * Is somebody else paying the gas?
    *
@@ -5771,7 +5773,28 @@ async function main() {
       }
     }
 
-    const { intents: proposed, why: proposedWhy } = takeTick(await strategy.tick(snap));
+    const { intents: proposed, why: proposedWhy, idle } = takeTick(await strategy.tick(snap));
+
+    // ── AND WHY IT PROPOSED NOTHING ─────────────────────────────────────
+    //
+    // An empty intent list is what a healthy quiet tick looks like AND what a
+    // strategy that cannot act looks like. Over one weekend that ambiguity
+    // read, to every owner of a basket agent, as "no trading is being done" —
+    // when in fact all 24 equity feeds were stale and the strategy was
+    // correctly refusing to buy without a reference price.
+    //
+    // ONCE PER CHANGE, not once per tick: a stale weekend is 360 ticks, and
+    // this repo already carries the incident where 1,242 identical rows told
+    // nobody anything. The same de-duplication the live-rail blocker uses.
+    const idleNow = idle ? renderWhy(idle) : null;
+    if (idleNow !== lastIdleReason) {
+      lastIdleReason = idleNow;
+      if (idleNow) {
+        console.log(`[tick] idle — ${idleNow}`);
+        await addEvent(agentId, "ok", idleNow);
+      }
+    }
+
     for (const [proposedAt, intent] of proposed.entries()) {
       // The LLM strategist already journaled + stamped its survivors; this covers
       // deterministic strategies so every trade still links to a decision.

@@ -49,10 +49,22 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   // Positionally paired with `intents` — see Tick. Pushed together, always.
   const why: (Why | null)[] = [];
 
+  // Counted so the tick can say WHY it bought nothing. An empty intent list
+  // reads identically whether the schedule declined, the feeds were stale, or
+  // the cash was short — and only this function can tell them apart.
+  let skippedStale = 0;
+  let skippedPaused = 0;
+
   if (snap.cashUsdg >= cfg.buyPerTickUsdg) {
     for (const leg of cfg.legs) {
-      if (snap.pausedTokens.has(leg.token.toLowerCase())) continue;
-      if (snap.staleFeeds.has(leg.symbol)) continue; // no reference price → no trade
+      if (snap.pausedTokens.has(leg.token.toLowerCase())) {
+        skippedPaused += 1;
+        continue;
+      }
+      if (snap.staleFeeds.has(leg.symbol)) {
+        skippedStale += 1;
+        continue; // no reference price → no trade
+      }
       const legAmount = (cfg.buyPerTickUsdg * BigInt(leg.weightBps)) / 10_000n;
       if (legAmount === 0n) continue;
       intents.push({
@@ -102,5 +114,20 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
     }
   }
 
-  return { intents, why };
+  // NOTHING BOUGHT, AND THE FEEDS ARE WHY.
+  //
+  // Only reported when the schedule genuinely wanted to buy — cash was
+  // sufficient and there were legs — and every one of them was skipped. A tick
+  // that bought nothing because it had no cash is a different silence with a
+  // different remedy, and saying "the feeds are stale" about it would be
+  // wrong. A sweep to the vault is not a buy, so this still fires beside one:
+  // over a weekend that sweep is the only thing an agent does, and its owner is
+  // still owed the sentence about why.
+  const bought = intents.some((i) => i.kind === "swap");
+  const idle: Why | undefined =
+    !bought && snap.cashUsdg >= cfg.buyPerTickUsdg && skippedStale + skippedPaused === cfg.legs.length && cfg.legs.length > 0
+      ? { code: "all-legs-stale", legs: cfg.legs.length, paused: skippedPaused }
+      : undefined;
+
+  return idle ? { intents, why, idle } : { intents, why };
 }

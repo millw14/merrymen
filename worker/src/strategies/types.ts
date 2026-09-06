@@ -96,6 +96,21 @@ export interface Snapshot {
 export interface Tick {
   intents: TradeIntent[];
   why: (Why | null)[];
+  /**
+   * WHY THIS TICK PROPOSED NOTHING — unpaired, because there is no intent to
+   * pair it with.
+   *
+   * `why` is positionally paired with `intents`, so a tick that produces no
+   * intents can carry no reason at all, and an empty tick is exactly what a
+   * healthy quiet tick looks like too. That silence cost a weekend: every
+   * basket agent skipped every leg on a stale feed and reported nothing, and
+   * the owners read it as a broken product.
+   *
+   * Only the strategy knows WHY it proposed nothing; the caller can see the
+   * empty array and nothing else. Optional, so every existing strategy and
+   * fixture is unchanged.
+   */
+  idle?: Why;
 }
 
 export interface Strategy {

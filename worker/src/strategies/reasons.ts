@@ -82,6 +82,16 @@ export type Why =
   | { code: "park"; usdgRaw: bigint; floorRaw: bigint; clamped: boolean }
   /** Pulling cash back because a buy could not be funded. */
   | { code: "unpark"; usdgRaw: bigint; needRaw: bigint }
+  /**
+   * NOTHING TO BUY, and it is the feeds, not the market.
+   *
+   * A basket tick that skips every leg returns an empty intent list,
+   * which is indistinguishable from a healthy quiet tick — so 34 agents
+   * spent a weekend doing nothing and saying nothing, and their owners
+   * reported it as "no trading is being done". Carries counts only, so
+   * it stays publishable by the same rule as every other reason here.
+   */
+  | { code: "all-legs-stale"; legs: number; paused: number }
   /** The market is shut and the token keeps trading. */
   | { code: "gap-enter"; symbol: string; usdgRaw: bigint }
   /** The market reopened; the gap trade is over. */
@@ -126,6 +136,13 @@ export function renderWhy(w: Why): string {
             `parking what today's budget still allows`
         : `${usdg(w.usdgRaw)} USDG idle above the ${usdg(w.floorRaw)} floor — ` +
             `parking it in the vault until the next buy`;
+    case "all-legs-stale":
+      return (
+        `nothing bought — ${w.legs === 1 ? "the price feed for the only leg is" : `all ${w.legs} legs' price feeds are`} ` +
+        `stale, so there is no reference price to buy against` +
+        (w.paused > 0 ? `, and ${w.paused} of them ${w.paused === 1 ? "is" : "are"} paused` : "") +
+        `. This is a fact about the feeds, not about the market`
+      );
     case "unpark":
       return (
         `cash is under one tick's buy — pulling ${usdg(w.usdgRaw)} USDG back from the vault ` +
