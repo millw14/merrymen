@@ -10,8 +10,9 @@
  * the account, and carries the wall's only non-zero `valueLimit`.
  *
  * Pricing: a WETH→USDG quote IS the ETH→USDG price — the pool is the same one
- * the router will fill — so callers quote with bestRoute() and thread the fee
- * and minOut straight through, exactly like a token trade.
+ * the router will fill. Callers quote TWAP-only (readPoolPrice + poolPriceUsable:
+ * no spot fallback — a pool with no TWAP history has no quote) and thread the
+ * fee and minOut straight through, exactly like a token trade.
  */
 
 import { encodeFunctionData } from "viem";
