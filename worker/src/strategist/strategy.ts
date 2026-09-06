@@ -153,7 +153,41 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       if (lastDecisionAt !== null && t - lastDecisionAt < cfg.decisionIntervalMs) return [];
       lastDecisionAt = t;
 
-      const signals = buildSignals(snap, cfg.universe, new Date(t));
+      // ── THE UNIVERSE THIS WINDOW ACTUALLY HAS ───────────────────────
+      //
+      // Built HERE, above the driver call, and used for BOTH halves. It used to
+      // be assembled after the model had already answered, which made it
+      // decorative twice over:
+      //
+      //   THE CEILING. `cfg.universe.maxPerActionUsdg` comes from settings
+      //   (llmMaxActionUsdg, default 50) while the wall enforces the per-trade
+      //   cap sealed into the SIGNATURE (default preset: 10). So the model was
+      //   told it could spend 50, proposed 50, and every action died at
+      //   `per-trade-cap` — on every agent minted with the default preset, on
+      //   every window, for the life of the grant. Settings cannot fix it: the
+      //   cap is in the signature. `min()` can only ever TIGHTEN, so this needs
+      //   no re-signing and cannot raise what anybody may spend.
+      //
+      //   THE CURVE LEGS. `buildSignals` derives `tradableSymbols` and `prices`
+      //   from `universe.legs`, so a curve symbol merged in afterwards was
+      //   never offered to the model at all — the proposal it could not have
+      //   made was then dropped as "not in the tradable universe".
+      //
+      // Merged per window rather than at construction because the reserves are
+      // this tick's; see the curve note on curveLegsNow.
+      const curve = cfg.curveLegsNow?.() ?? null;
+      const universeNow: StrategistUniverse = {
+        ...cfg.universe,
+        maxPerActionUsdg:
+          cfg.universe.maxPerActionUsdg < snap.perTradeCapUsdg
+            ? cfg.universe.maxPerActionUsdg
+            : snap.perTradeCapUsdg,
+        ...(curve
+          ? { curveLegs: curve.legs, curveTokens: curve.tokens, slippageBps: curve.slippageBps }
+          : {}),
+      };
+
+      const signals = buildSignals(snap, universeNow, new Date(t));
 
       // THE VIEW, when the desk ran. Empty on the one-shot path, and empty
       // whenever the desk failed to finish — an unfinished session is not a
@@ -221,16 +255,6 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
         if (malformed > 0) note("warn", `strategist emitted ${malformed} malformed action(s) — dropped`);
       }
 
-      // Merged HERE, not at construction, so the reserves are this tick's.
-      const curve = cfg.curveLegsNow?.() ?? null;
-      const universeNow: StrategistUniverse = curve
-        ? {
-            ...cfg.universe,
-            curveLegs: curve.legs,
-            curveTokens: curve.tokens,
-            slippageBps: curve.slippageBps,
-          }
-        : cfg.universe;
       const { intents, accepted, rejected } = proposalsToIntents(actions, universeNow, snap);
 
       // Journal the decision BEFORE the intent leaves for the policy wall: every
