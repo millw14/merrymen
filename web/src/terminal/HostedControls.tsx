@@ -6,6 +6,8 @@ import { findInjectedProvider, requestAccount } from "@/lib/wallet";
 import { RecoverPanel } from "@/components/RecoverPanel";
 import { loadGrant } from "@/lib/session";
 import { X } from "lucide-react";
+import { PrivySignIn } from "@/terminal/PrivySignIn";
+import { privyEnabled } from "@/lib/privy-client";
 
 export interface AccountState {
   session: {hosted: boolean; address: string | null};
@@ -17,7 +19,24 @@ export async function requestJson<T>(url: string, init?: RequestInit): Promise<T
   if (!response.ok) throw new Error(data.error || data.errors?.join(" ") || data.why || `Request failed (${response.status})`);
   return data as T;
 }
+/**
+ * WHICH SIGN-IN THE DEPLOYMENT OFFERS.
+ *
+ * Inlined at build time by Next. Present means Privy is configured, and X is
+ * the primary route; absent means this deployment falls back to the injected
+ * wallet login exactly as before. One flag, one fork, and the legacy path is
+ * never removed — it is what an existing owner still uses to prove possession
+ * of their tenant before linking a DID to it.
+ */
+export const PRIVY_BETA = privyEnabled();
+
 export function SignIn({onDone}:{onDone:()=>void}) {
+  if (PRIVY_BETA) return <PrivySignIn onDone={onDone}/>;
+  return <WalletSignIn onDone={onDone}/>;
+}
+
+/** The original injected-wallet login. Still the ONLY way an existing owner proves their tenant. */
+export function WalletSignIn({onDone}:{onDone:()=>void}) {
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState("");
   async function signIn() {
