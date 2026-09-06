@@ -22,7 +22,7 @@
  */
 
 import { rmSync, writeFileSync } from "node:fs";
-import { metered, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
+import { chainRead, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
 import { runShadowComparison, shadowEnabledFor, shadowLine } from "./reconcile-shadow";
 import {
   createPublicClient,
@@ -2611,6 +2611,21 @@ async function main() {
           bundlerUrl,
           rpcUrl: rpc,
           sponsor,
+          // SAID OUT LOUD, ONCE PER ARM. The re-derivation is a defence in
+          // depth, and when the chain will not answer it we arm anyway rather
+          // than strand the agent — but the owner is entitled to know that the
+          // belt was checked and the braces were not.
+          onUnverified: (why) => {
+            console.log(`[worker] armed WITHOUT the account re-derivation check — ${why}`);
+            void addEvent(
+              agentId,
+              "warn",
+              `this agent armed without one safety check: its account could not be re-derived from ` +
+                `the grant, because the chain would not answer (${why.slice(0, 160)}). Nothing about the ` +
+                `grant is known to be wrong, and the chain still refuses a mismatched key by itself. ` +
+                `The check retries on the next arm.`,
+            );
+          },
         });
         console.log(
           `[worker] executor live — smart account ${executor.address} on chain ${chain.id}` +
@@ -2659,7 +2674,7 @@ async function main() {
       );
     }
 
-    const client = createPublicClient({ chain, transport: metered(http(rpc), "read") });
+    const client = createPublicClient({ chain, transport: chainRead(rpc) });
 
     // ── THE WALL'S OWN CONTRACTS MUST EXIST ──────────────────────────────
     // Same discipline as the breaker below, applied to the singletons the

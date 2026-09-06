@@ -65,7 +65,12 @@ import { toCallPolicy, toRateLimitPolicy, toTimestampPolicy } from "@zerodev/per
 import { createKernelAccount } from "@zerodev/sdk";
 import { toKernelPluginManager } from "@zerodev/sdk/accounts";
 import { KERNEL_V3_3 } from "@zerodev/sdk/constants";
-import { assertDerivedAccount } from "../../packages/core/src/index";
+import {
+  assertDerivedAccount,
+  derivationOf,
+  derivationUnreachable,
+  type Derivation,
+} from "../../packages/core/src/index";
 
 /**
  * The serialized blob's shape (serializePermissionAccount.ts:54-63).
@@ -203,6 +208,14 @@ export async function deserializeFlaggedPermissionAccount(
   kernelVersion: typeof KERNEL_V3_3,
   serialized: string,
   flag: `0x${string}`,
+  /**
+   * Told when the re-derivation could not be completed, with the reason.
+   *
+   * A callback rather than a return value because every caller of this
+   * function wants the ACCOUNT; the verdict is a side channel, and one that
+   * must not be droppable by being ignored in a destructuring.
+   */
+  onUnverified?: (why: string) => void,
 ) {
   const params = decodeParams(serialized);
   if (!params.privateKey) {
@@ -283,24 +296,63 @@ export async function deserializeFlaggedPermissionAccount(
   // refuse such a grant on chain (measured on 4663: AA23 reverted 0xc48cf8ee),
   // but only after arming, mirroring, showing the owner a live agent, and
   // spending a signature — and it would present as an opaque bundler code.
-  const derived = await createKernelAccount(client as never, {
-    entryPoint,
-    kernelVersion,
-    plugins,
-    index,
-    useMetaFactory,
-    eip7702Auth: params.eip7702Auth,
-  } as never);
+  // AND IT CAN THROW, which is how it took the fleet down. The derivation is
+  // an eth_call, the SDK's own error path assumes any RpcRequestError carries
+  // revert data, and a rate-limited node returns one that does not — so a busy
+  // endpoint arrives here as `Cannot read properties of undefined (reading
+  // 'match')` rather than as a refusal to answer. A network failure must not
+  // be able to leave this function by a route the caller reads as a verdict.
+  let check: Derivation;
+  try {
+    const derived = await createKernelAccount(client as never, {
+      entryPoint,
+      kernelVersion,
+      plugins,
+      index,
+      useMetaFactory,
+      eip7702Auth: params.eip7702Auth,
+    } as never);
+    check = derivationOf(derived.address);
+  } catch (e) {
+    check = derivationUnreachable(e instanceof Error ? e.message : String(e));
+  }
 
-  // A ZERO DERIVATION IS NOT AN ADDRESS. createKernelAccount answers the zero
-  // address when the factory does not respond on this chain, and it throws
-  // nothing. If the grant blob also carried a zero accountAddress the equality
-  // below would PASS and the worker would arm against nothing.
-  assertDerivedAccount(derived.address, "the account could not be re-derived from this grant");
+  // THE GRANT'S OWN CLAIM IS CHECKED WHATEVER THE CHAIN DID. A blob carrying a
+  // zero or malformed accountAddress is refused here and always — that failure
+  // needs no network to see, and it is the half of the check that cannot be
+  // taken away by somebody else's rate limit.
   assertDerivedAccount(params.accountParams.accountAddress, "this grant carries no usable account address");
 
-  if (derived.address.toLowerCase() !== params.accountParams.accountAddress.toLowerCase()) {
-    throw new AccountAddressMismatch(params.accountParams.accountAddress, derived.address);
+  if (check.ok) {
+    if (check.address !== params.accountParams.accountAddress.toLowerCase()) {
+      throw new AccountAddressMismatch(params.accountParams.accountAddress, check.address);
+    }
+  } else {
+    // ── A CHECK THAT COULD NOT RUN IS NOT A CHECK THAT FAILED ───────────
+    //
+    // This is the distinction the rest of the repo is built on, arriving at
+    // the one place that had not been told: "we asked and the answer was
+    // wrong" and "we never got an answer" had the same consequence here, and
+    // the consequence was permanent. On 2026-09-06 twelve of thirty-two hosted
+    // agents sat at status `error` with `CANNOT ARM — Cannot read properties
+    // of undefined (reading 'match')` — a TypeError thrown inside the SDK's
+    // own error path (@zerodev/sdk getSenderAddress, which assumes any
+    // RpcRequestError carries revert data) when the chain RPC refused the call
+    // this derivation makes. The fleet was being rate-limited into paralysis
+    // at the time; the agents were not broken, the endpoint was busy.
+    //
+    // So an unverifiable derivation now REPORTS instead of refusing. That is
+    // not a hole opened here: it is exactly the behaviour merrymen had before
+    // this check existed, and Kernel's own enable-signature check still
+    // refuses a genuinely mismatched grant on chain (measured on 4663: AA23
+    // reverted 0xc48cf8ee). What is lost is one round of early warning; what
+    // was being lost instead was every agent whose arm coincided with a 429.
+    //
+    // It is deliberately LOUD rather than silent — the caller writes it where
+    // the owner can see it — because an unverified arm is a real weakening of
+    // a real check, and a weakening nobody is told about is how the next
+    // incident starts.
+    onUnverified?.(check.why);
   }
 
   // Now pass it, matching the package — same shape as the id above, and for the

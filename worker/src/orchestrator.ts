@@ -703,6 +703,45 @@ async function fleetHealth(): Promise<void> {
     // The word BROKEN is in the line only when it is true, so grepping for it
     // is a working alert with no extra infrastructure.
     log(`fleet: ${total} agent(s) — ${parts}${broken > 0 ? ` — BROKEN ${broken}` : ""}`);
+
+    // ── AND WHICH ONES, AND WHY ─────────────────────────────────────────
+    //
+    // The line above is the alert this function was written to be, and on its
+    // own it is the same shape as the incident it was written about: it said
+    // BROKEN 12 for hours and named nobody, so finding out which twelve meant
+    // reading container logs by hand — exactly what the header promises this
+    // replaced. A count tells an operator that something is wrong; only the
+    // names tell them whether it is their canary or twelve strangers, and only
+    // the reason tells them whether to act.
+    //
+    // Bounded, read-only and best-effort, like the count. Twelve rows and one
+    // event each is nothing beside the mirror's own writes, and the cap means a
+    // fleet that is wholly broken reports a readable summary rather than
+    // several hundred lines that push everything else out of the log window.
+    if (broken > 0) {
+      const worst = (await shared
+        .prepare(
+          `SELECT smart_account, name FROM agents WHERE status = 'error' ORDER BY name LIMIT 12`,
+        )
+        .all()) as { smart_account: string; name: string }[];
+      for (const a of worst) {
+        const why = (await shared
+          .prepare(
+            `SELECT message FROM events
+              WHERE LOWER(agent_id) = ? AND level = 'err'
+              ORDER BY created_at DESC LIMIT 1`,
+          )
+          .get(String(a.smart_account ?? "").toLowerCase())) as { message?: string } | undefined;
+        // "no recorded reason" is a DIFFERENT fact from a reason we can quote,
+        // and it points somewhere else: an agent marked broken with nothing
+        // written beside it was marked by something that did not say why.
+        log(
+          `fleet| BROKEN ${String(a.smart_account ?? "?").slice(0, 10)}… ${String(a.name ?? "?").slice(0, 16).padEnd(16)} ` +
+            `${why?.message ? why.message.slice(0, 160) : "no recorded reason — nothing wrote an err event for this agent"}`,
+        );
+      }
+      if (broken > worst.length) log(`fleet| …and ${broken - worst.length} more not listed`);
+    }
   } catch {
     // A health read that fails is not a fleet that is down. Say nothing rather
     // than raise a false alarm, and never take the loop with it.

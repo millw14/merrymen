@@ -20,7 +20,7 @@
  * It is also the seam. When the limiter arrives it goes here, and no call site
  * changes.
  */
-import type { Transport } from "viem";
+import { http, type Transport } from "viem";
 import { classifyRpcError, type RpcErrorKind } from "./rpc-error";
 
 interface MethodStat {
@@ -102,6 +102,54 @@ export function metered(transport: Transport, label: string): Transport {
       },
     };
   }) as Transport;
+}
+
+/**
+ * HOW MANY LOGICAL CALLS TRAVEL IN ONE HTTP REQUEST.
+ *
+ * Kept small on purpose. The cap is not about the node's patience with long
+ * bodies — it is that a batch fails as a unit: one 429 refuses every call
+ * riding in it. Twenty keeps a refusal cheap while still collapsing a
+ * multicall-shaped tick into a handful of requests.
+ */
+const BATCH_SIZE = 20;
+
+/** How long to hold a request open for others to join it. */
+const BATCH_WAIT_MS = 20;
+
+/**
+ * THE READ TRANSPORT FOR THIS CHAIN — the one place it is built.
+ *
+ * The header above says the limiter goes here, and the measurement it asked
+ * for has now happened. From a hosted child, on 2026-09-06:
+ *
+ *   [rpc:read] 103 calls in 248s (0.42/s) · 81 err · 81 rate-limited ·
+ *              peak concurrency 81 · eth_call 100/79err [rate-limited:79]
+ *
+ * and a tick that ends, over and over, "market unreadable — no trading this
+ * tick". Thirty-two children, each holding its own `http()` with no options,
+ * all pointed at one keyless public endpoint, all waking on the same cadence.
+ * Nothing was wrong with the agents; they could not see the chain.
+ *
+ * The first fix is not a queue, it is BATCHING, because the traffic is already
+ * the right shape for it: viem's `multicall` fans out per-token reads that are
+ * issued together and awaited together, which is exactly the window a JSON-RPC
+ * batch collects. Measured against rpc.mainnet.chain.robinhood.com the node
+ * answers a batch correctly (three calls, three results, one request), and the
+ * same tick then costs a handful of requests instead of eighty.
+ *
+ * WHAT THIS DOES NOT DO. It does not retry, dedupe, cache or reorder, and it
+ * must not: the meter's own note is that a transport which changed an outcome
+ * would be measuring itself. Batching changes how many HTTP requests carry the
+ * calls, not which calls are made or what any of them returns.
+ *
+ * NOT FOR THE BUNDLER. `eth_sendUserOperation` lives under the send-edge rules
+ * — persist the hash, send once, never re-send — and a batch that fails as a
+ * unit is the wrong shape for an operation that must not be silently retried
+ * alongside somebody else's read.
+ */
+export function chainRead(url: string | undefined, label = "read"): Transport {
+  return metered(http(url, { batch: { wait: BATCH_WAIT_MS, batchSize: BATCH_SIZE } }), label);
 }
 
 /** One line per meter: totals, peak concurrency, and the busiest methods. */

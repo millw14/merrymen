@@ -14,7 +14,7 @@
  */
 
 import { http, createPublicClient, type Chain, type Hex } from "viem";
-import { metered } from "./rpc-meter";
+import { chainRead, metered } from "./rpc-meter";
 import { createKernelAccountClient } from "@zerodev/sdk";
 import { SponsorRefused, assertBoundsHeld, type Sponsor } from "./paymaster";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
@@ -376,8 +376,15 @@ export async function createAgentExecutor(opts: {
    * self-hosted owner still does unless they wire their own.
    */
   sponsor?: Sponsor;
+  /**
+   * Told when the grant's account could not be RE-DERIVED — a check that could
+   * not run, which is a different thing from a check that failed. Passed on to
+   * the owner rather than swallowed: arming unverified is a real, if narrow,
+   * weakening, and one nobody is told about is how the next incident starts.
+   */
+  onUnverified?: (why: string) => void;
 }): Promise<AgentExecutor> {
-  const publicClient = createPublicClient({ chain: opts.chain, transport: metered(http(opts.rpcUrl), "read") });
+  const publicClient = createPublicClient({ chain: opts.chain, transport: chainRead(opts.rpcUrl) });
   const entryPoint = getEntryPoint("0.7");
 
   // NOT deserializePermissionAccount. That function silently drops the policy
@@ -390,6 +397,7 @@ export async function createAgentExecutor(opts: {
     KERNEL_V3_3,
     opts.serializedGrant,
     WALL_POLICY_FLAG,
+    opts.onUnverified,
   );
 
   // WHO PAYS, and nothing else. A paymaster settles with the EntryPoint

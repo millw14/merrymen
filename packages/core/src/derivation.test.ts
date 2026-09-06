@@ -177,8 +177,15 @@ describe("every derivation call site routes through the guard", () => {
       // derive-account.ts returns the result itself rather than asserting.
       if (src.includes("return derivationOf(account.address)")) continue;
       const derivations = [...src.matchAll(/await createKernelAccount\(/g)].length;
-      const asserts = [...src.matchAll(/assertDerivedAccount\(/g)].length;
-      if (asserts < derivations) unguarded.push(`${f} (${derivations} derivations, ${asserts} asserts)`);
+      // TWO WAYS TO GUARD ONE ADDRESS, and the invariant is not that failure is
+      // always fatal — it is that a derived address is never USED without being
+      // classified first. `assertDerivedAccount` throws; `derivationOf` returns
+      // a result the caller must open before it can reach `.address`. Both make
+      // a zero unreachable as an address, which is the whole property. Counting
+      // only the throwing one would force every site to brick on a busy RPC.
+      const asserts =
+        [...src.matchAll(/assertDerivedAccount\(/g)].length + [...src.matchAll(/derivationOf\(/g)].length;
+      if (asserts < derivations) unguarded.push(`${f} (${derivations} derivations, ${asserts} guards)`);
     }
     // Non-vacuity: a walk that finds nothing would pass silently, which is the
     // failure mode of every enumerating test.
@@ -207,7 +214,36 @@ describe("every derivation call site routes through the guard", () => {
 
   it("the worker refuses to arm against a zero, on both sides of its own equality", () => {
     const src = read("worker/src/session-account.ts");
-    assert.match(src, /assertDerivedAccount\(derived\.address/);
+    // THE CLAIMED SIDE, unconditionally and with no network. A blob carrying a
+    // zero or malformed accountAddress is refused whatever the chain did.
     assert.match(src, /assertDerivedAccount\(params\.accountParams\.accountAddress/);
+    // THE DERIVED SIDE, classified rather than asserted. The equality lives
+    // inside `check.ok`, so a zero or a malformed answer cannot reach it — the
+    // property this test was written for — while a derivation the chain refused
+    // to answer no longer takes the agent down with it.
+    assert.match(src, /check = derivationOf\(derived\.address\)/);
+    const guard = src.indexOf("if (check.ok) {");
+    const mismatch = src.indexOf("throw new AccountAddressMismatch(");
+    assert.ok(guard > 0, "the derived address must be opened before it is compared");
+    assert.ok(mismatch > guard, "the equality must sit INSIDE the ok branch, where a zero cannot reach it");
+  });
+
+  it("A CHECK THAT COULD NOT RUN IS NOT A CHECK THAT FAILED", () => {
+    // Twelve of thirty-two hosted agents sat at status `error` on 2026-09-06
+    // with `CANNOT ARM — Cannot read properties of undefined (reading 'match')`
+    // — a TypeError from inside the SDK's own error path when the chain RPC
+    // refused the eth_call this derivation makes. A busy endpoint was being
+    // recorded as a permanently broken grant.
+    const src = read("worker/src/session-account.ts");
+    const tryAt = src.indexOf("  try {");
+    const derive = src.indexOf("await createKernelAccount(client as never, {");
+    const rescue = src.indexOf("check = derivationUnreachable(");
+    assert.ok(tryAt > 0 && derive > tryAt, "the derivation must sit inside a try");
+    assert.ok(rescue > derive, "a throw from the derivation must become a verdict, not an escape");
+    // And the owner is told. An unverified arm is a real weakening; a silent
+    // one is how the next incident starts.
+    assert.match(src, /onUnverified\?\.\(check\.why\)/);
+    assert.match(read("worker/src/executor.ts"), /opts\.onUnverified,/);
+    assert.match(read("worker/src/index.ts"), /onUnverified: \(why\) => \{/);
   });
 });

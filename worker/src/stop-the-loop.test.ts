@@ -218,6 +218,10 @@ describe("A4 — an unreadable market is not a stale feed", () => {
 
 describe("A5 — the meter is a seam, not a policy", () => {
   it("every transport goes through it", () => {
+    // TWO SPELLINGS, ONE SEAM. `chainRead` IS `metered(http(...))` with
+    // batching — see rpc-meter.ts — so a call site using it is metered. The
+    // property is that no transport reaches the chain unmeasured, not that
+    // every site spells the wrapper out.
     for (const [file, n] of [
       ["./snapshot.ts", 2],
       ["./index.ts", 1],
@@ -225,13 +229,27 @@ describe("A5 — the meter is a seam, not a policy", () => {
       ["./circle.ts", 1],
     ] as const) {
       const code = strip(at(file));
-      assert.equal(
-        (code.match(/metered\(http\(/g) ?? []).length,
-        n,
-        `${file} must route all ${n} transport(s) through the meter`,
-      );
+      const metered = (code.match(/metered\(http\(/g) ?? []).length + (code.match(/chainRead\(/g) ?? []).length;
+      assert.equal(metered, n, `${file} must route all ${n} transport(s) through the meter`);
       assert.doesNotMatch(code, /transport: http\(/, `${file} still has a bare transport`);
     }
+  });
+
+  it("AND THE READ TRANSPORT BATCHES, because one request per call blinded the fleet", () => {
+    // 2026-09-06, a hosted child: 103 calls in 248s, 81 rate-limited, peak
+    // concurrency 81, and a tick that ended "market unreadable — no trading
+    // this tick" over and over. Thirty-two children, each with its own
+    // optionless http(), all pointed at one keyless public endpoint. The
+    // agents were not refusing to trade; they could not see the chain.
+    const meter = strip(at("./rpc-meter.ts"));
+    assert.match(meter, /export function chainRead\(/);
+    assert.match(meter, /metered\(http\(url, \{ batch:/, "chainRead must be metered AND batched");
+    // The send edge is deliberately not batched: a batch fails as a unit, and
+    // eth_sendUserOperation must never be refused alongside somebody's read.
+    assert.ok(
+      !/bundlerTransport: chainRead/.test(strip(at("./executor.ts"))),
+      "the bundler must not ride the batched read transport",
+    );
   });
 
   it("THE BUNDLER IS METERED BUT NEVER MANAGED", () => {
