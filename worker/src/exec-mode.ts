@@ -28,7 +28,7 @@
  */
 import { TRADEABLE_CHAIN_ID } from "./preflight";
 
-export type RefuseRule = "not-armed" | "dead-policy" | "no-executor" | "wrong-chain" | "no-cash";
+export type RefuseRule = "not-armed" | "dead-policy" | "no-executor" | "wrong-chain" | "no-gas" | "no-cash";
 
 export type ExecMode =
   /**
@@ -78,6 +78,23 @@ export interface ExecInputs {
    * that named nothing.
    */
   deadPolicy: boolean;
+  /**
+   * The account's ETH, or null when it has not been read yet.
+   *
+   * NULL IS NOT ZERO, the same rule `cashUsdg` follows. A worker's first tick
+   * has read nothing, and treating that silence as an empty tank would put
+   * every agent on paper for its opening window.
+   */
+  gasWei: bigint | null;
+  /**
+   * Is somebody else paying the fee?
+   *
+   * A sponsored account never handles ETH — the paymaster settles with the
+   * EntryPoint directly — so a zero balance says nothing about whether it can
+   * trade. This term is what keeps the sponsored fleet on the live rail, and
+   * dropping it is the most damaging single edit available to this file.
+   */
+  gasSponsored: boolean;
   /** Permission to simulate. NOT a request to: it never moves a working agent. */
   paperTradingEnabled: boolean;
 }
@@ -85,8 +102,31 @@ export interface ExecInputs {
 /** Could this agent put a real order on-chain right now? */
 export function canTradeForReal(a: ExecInputs): boolean {
   const readAsBroke = a.cashUsdg !== null && a.cashUsdg === 0n;
+  // GAS IS A LEG, and it was the one missing.
+  //
+  // An operation that cannot pay its fee never reaches the chain, so an account
+  // with no ETH is exactly as unable to trade as one with no signer — and the
+  // rule lived 2,100 lines downstream, in the gas pre-flight, AFTER the paper
+  // fork had already been taken. So an armed, USDG-funded, zero-ETH agent was
+  // routed live and refused every tick forever, while its owner had paper
+  // selected and the product said "Paper trading". Production carried several:
+  // `eth 0 · cash 1000 USDG`, refusing on `no-gas`, indefinitely.
+  //
+  // SPONSORSHIP FIRST. A sponsored agent trades with zero ETH by design — the
+  // paymaster settles with the EntryPoint and the account never handles ETH at
+  // all. Dropping this term sends every sponsored agent in the fleet to paper,
+  // which is the single most dangerous thing this function could get wrong.
+  //
+  // And only a READ zero counts, mirroring `readAsBroke`: null is "not yet
+  // observed", and unknown is not unfunded.
+  const readAsGasless = !a.gasSponsored && a.gasWei !== null && a.gasWei === 0n;
   return (
-    a.armed && a.executor && a.chainId === TRADEABLE_CHAIN_ID && !readAsBroke && !a.deadPolicy
+    a.armed &&
+    a.executor &&
+    a.chainId === TRADEABLE_CHAIN_ID &&
+    !readAsBroke &&
+    !readAsGasless &&
+    !a.deadPolicy
   );
 }
 
@@ -133,6 +173,12 @@ export function liveBlocker(a: ExecInputs): RefuseRule {
   if (a.deadPolicy) return "dead-policy";
   if (!a.executor) return "no-executor";
   if (a.chainId !== TRADEABLE_CHAIN_ID) return "wrong-chain";
+  // GAS BEFORE CASH. Both are fixed by sending money, so the tie-break is
+  // REACH: with no ETH nothing at all can be submitted, including the exit;
+  // with no USDG only a buy is blocked and a sell still works. Naming the
+  // narrower problem first would send an owner to buy USDG for an account that
+  // could not have spent it.
+  if (!a.gasSponsored && a.gasWei !== null && a.gasWei === 0n) return "no-gas";
   return "no-cash";
 }
 
@@ -152,6 +198,8 @@ export function liveBlockerText(rule: RefuseRule): string {
       return "no bundler is configured, so nothing can be submitted to the chain";
     case "wrong-chain":
       return "this key is for a different network than the one trading happens on";
+    case "no-gas":
+      return "the account holds no ETH, and every operation has to pay a fee before it reaches the chain";
     case "no-cash":
       return "the account holds no USDG to trade with";
   }

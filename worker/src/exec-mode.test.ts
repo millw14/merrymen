@@ -24,6 +24,8 @@ const base: ExecInputs = {
   executor: true,
   chainId: TRADEABLE_CHAIN_ID,
   cashUsdg: 100_000_000n,
+  gasWei: 10_000_000_000_000n,
+  gasSponsored: false,
   deadPolicy: false,
   paperTradingEnabled: true,
 };
@@ -39,6 +41,49 @@ test("THE REGRESSION THAT MATTERED: a funded mainnet agent trades for real", () 
   // direction. First in the file because it is the one that must never break.
   assert.deepEqual(execModeOf(base), { mode: "live" });
   assert.equal(isPaper(base), false);
+});
+
+test("A SPONSORED AGENT WITH ZERO ETH TRADES FOR REAL", () => {
+  // The most dangerous line in this file. Sponsorship means the paymaster
+  // settles with the EntryPoint and the account never handles ETH at all, so a
+  // zero balance is the NORMAL state of a sponsored agent — not a fault. Drop
+  // `gasSponsored` from the predicate and every sponsored agent in the fleet
+  // goes to paper at once, silently, while its owner watches it stop trading.
+  assert.deepEqual(execModeOf({ ...base, gasWei: 0n, gasSponsored: true }), { mode: "live" });
+});
+
+test("an account read as gasless is paper — an unpaid operation never reaches the chain", () => {
+  // The leg that was missing. It lived 2,100 lines downstream in the gas
+  // pre-flight, AFTER the paper fork had been taken, so an armed, USDG-funded,
+  // zero-ETH agent was routed live and refused every tick forever while its
+  // owner had paper selected and the product said "Paper trading".
+  assert.equal(isPaper({ ...base, gasWei: 0n }), true);
+  assert.deepEqual(execModeOf({ ...base, gasWei: 0n, paperTradingEnabled: false }), {
+    mode: "refuse",
+    rule: "no-gas",
+  });
+});
+
+test("UNKNOWN IS NOT UNFUNDED — for gas as well as for cash", () => {
+  // lastGasWei is null until a read lands. If null counted as empty, every
+  // worker would spend its opening window simulating.
+  assert.equal(isPaper({ ...base, gasWei: null }), false);
+});
+
+test("GAS IS NAMED BEFORE CASH, because it blocks the exit too", () => {
+  // Both are fixed by sending money, so the tie-break is reach: with no ETH
+  // nothing at all can be submitted, including a sell; with no USDG only a buy
+  // is blocked. Naming the narrower problem first would send an owner to buy
+  // USDG for an account that could not have spent it.
+  assert.deepEqual(
+    execModeOf({ ...base, gasWei: 0n, cashUsdg: 0n, paperTradingEnabled: false }),
+    { mode: "refuse", rule: "no-gas" },
+  );
+  // And still after the legs that funding cannot fix at all.
+  assert.deepEqual(
+    execModeOf({ ...base, gasWei: 0n, chainId: 46630, paperTradingEnabled: false }),
+    { mode: "refuse", rule: "wrong-chain" },
+  );
 });
 
 test("a testnet grant is paper, whatever the bundler key says", () => {
@@ -135,13 +180,17 @@ test("every input lands in exactly one mode — there is no fourth state", () =>
     for (const executor of [true, false]) {
       for (const chainId of [TRADEABLE_CHAIN_ID, 46630]) {
         for (const cashUsdg of [100_000_000n, 0n, null]) {
-          for (const deadPolicy of [false, true]) {
-            for (const paperTradingEnabled of [true, false]) {
+          for (const gasWei of [1_000_000n, 0n, null]) {
+           for (const gasSponsored of [false, true]) {
+            for (const deadPolicy of [false, true]) {
+             for (const paperTradingEnabled of [true, false]) {
               const a: ExecInputs = {
                 armed,
                 executor,
                 chainId,
                 cashUsdg,
+                gasWei,
+                gasSponsored,
                 deadPolicy,
                 paperTradingEnabled,
               };
@@ -158,8 +207,20 @@ test("every input lands in exactly one mode — there is no fourth state", () =>
               // and looks healthy, and every operation it signs fails validation
               // against an address with no code.
               if (deadPolicy) assert.notEqual(m.mode, "live", "a dead policy cannot trade");
+              // A SPONSORED AGENT'S ETH NEVER DECIDES ANYTHING. The paymaster
+              // settles with the EntryPoint; the account does not handle ETH,
+              // so its balance says nothing about whether it can trade.
+              if (gasSponsored) {
+                assert.equal(
+                  m.mode,
+                  execModeOf({ ...a, gasWei: 10n ** 18n }).mode,
+                  "a sponsored agent's mode must not move with its ETH balance",
+                );
+              }
               modes.add(m.mode);
+             }
             }
+           }
           }
         }
       }

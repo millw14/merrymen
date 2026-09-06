@@ -432,6 +432,11 @@ async function main() {
       executor: !!active?.executor,
       chainId: active?.grant.chainId ?? 0,
       cashUsdg: lastCashUsdg,
+      // Read on BOTH rails now — see the note at the assignment. Live-only made
+      // this a latch, and a latch on a leg of the rail predicate is an agent
+      // that can never come back.
+      gasWei: lastGasWei,
+      gasSponsored: gasSponsored(),
       deadPolicy: active?.deadPolicy ?? false,
       paperTradingEnabled: cfg.paperTradingEnabled,
     });
