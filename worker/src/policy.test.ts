@@ -761,3 +761,41 @@ describe("drawdown breaker and curve exits", () => {
     assert.equal((v as { rule: string }).rule, "drawdown-breaker");
   });
 });
+
+describe("convertPolicyLimits", () => {
+  it("admits WETH plumbing and lifts exposure caps, keeps everything else", async () => {
+    const { convertPolicyLimits } = await import("./policy");
+    const { CASH } = await import("../../packages/core/src/index");
+    const cl = convertPolicyLimits(limits());
+    assert.ok(cl.allowedAssets.map((a) => a.toLowerCase()).includes(CASH.WETH.toLowerCase()));
+    assert.ok(cl.allowedAssets.map((a) => a.toLowerCase()).includes(USDG.toLowerCase()));
+    assert.equal(cl.perTradeUsdg, 10n ** 30n);
+    assert.equal(cl.dailyUsdg, 10n ** 30n);
+    assert.equal(cl.maxOpsPerDay, 48);
+    assert.equal(cl.expiresAt, NOW + 86_400);
+    assert.deepEqual(cl.allowedTargets, [ROUTER, VAULT, USDG]);
+  });
+
+  it("a large convert passes the lifted caps but expiry still bites", async () => {
+    const { convertPolicyLimits, checkPolicy } = await import("./policy");
+    const { CASH } = await import("../../packages/core/src/index");
+    const big = swap({
+      target: ROUTER,
+      sellToken: CASH.WETH as `0x${string}`,
+      buyToken: USDG,
+      sellAmountRaw: 500_000_000_000_000_000n, // 0.5 ETH
+      notionalUsdg: 1_200_000_000n, // ~$1200 — 24x the default per-trade cap
+    });
+    const st = state();
+    // Unmodified policy refuses on caps (the misfire the helper exists for).
+    const plain = checkPolicy(big, limits(), st);
+    assert.equal(plain.ok, false);
+    // Scoped policy passes...
+    const scoped = checkPolicy(big, convertPolicyLimits(limits()), st);
+    assert.equal(scoped.ok, true);
+    // ...but an expired key still converts nothing.
+    const expired = checkPolicy(big, { ...convertPolicyLimits(limits()), expiresAt: NOW - 1 }, st);
+    assert.equal(expired.ok, false);
+    assert.equal((expired as { ok: false; rule: string }).rule, "expiry");
+  });
+});

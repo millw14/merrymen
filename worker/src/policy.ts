@@ -25,6 +25,7 @@
  */
 
 import { scoutAllows, type ScoutLimits } from "./quarantine";
+import { CASH } from "../../packages/core/src/index";
 
 export interface AgentLimits {
   /** USDG (6dp) ceiling for a single trade. */
@@ -537,4 +538,38 @@ export function checkPolicy(
   }
 
   return { ok: true };
+}
+
+/**
+ * Limits for the ETH→USDG convert leg (auto + manual): checkPolicy with the
+ * market-exposure caps lifted, everything else enforced.
+ *
+ * WHY NOT checkPolicy UNMODIFIED. Two of its swap-kind rules judge TRADING
+ * exposure and misfire on funding: per-trade/daily caps (a 0.5 ETH convert is
+ * ~$1,000+ against a $50 default cap — every meaningful deposit would refuse
+ * with a "per-trade-cap" event nobody could act on) and the WETH leg (WETH is
+ * plumbing, not a watched asset, so it is not always in allowedAssets).
+ *
+ * WHAT STAYS ENFORCED: expiry (dead keys convert nothing), target-allowlist
+ * (the router must be allowed), ops-cap (no op flood), the no-exit rule
+ * (buyToken USDG must be sellable), and the breaker — which treats a swap
+ * into cash as an exit and never blocks it. Funding into one's own account is
+ * not market exposure: the recipient is pinned self, there is no transfer
+ * permission, and the wall's sealed valueLimit bounds the size on-chain. The
+ * caps are lifted to just under 2^200 (finite — bigint has no Infinity — and
+ * orders of magnitude above any balance this flow will ever see) rather than
+ * removed, so the shape of the check is unchanged and a future reader sees a
+ * number, not a hole.
+ */
+export function convertPolicyLimits(limits: AgentLimits): AgentLimits {
+  const weth = CASH.WETH as `0x${string}`;
+  const allowed = limits.allowedAssets.map((a) => a.toLowerCase());
+  return {
+    ...limits,
+    allowedAssets: (allowed.includes(weth.toLowerCase())
+      ? [...limits.allowedAssets]
+      : [...limits.allowedAssets, weth]) as readonly `0x${string}`[],
+    perTradeUsdg: 10n ** 30n,
+    dailyUsdg: 10n ** 30n,
+  };
 }
