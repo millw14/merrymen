@@ -1263,9 +1263,19 @@ async function recentlyReasonedSymbols(shared: Db): Promise<string[]> {
   try {
     const rows = (await shared
       .prepare(
-        `SELECT symbol FROM decisions
+        // DISTINCT SYMBOLS BY RECENCY, NOT ROWS BY RECENCY.
+        //
+        // Rows are written per decision, and a deterministic agent writes
+        // thousands where a shadow agent writes one an hour — Gary alone has
+        // 4,441. Taking the most recent 200 ROWS therefore returns whatever the
+        // noisiest agents last touched, and the cohort this list exists to
+        // serve is crowded out of its own query. Production showed it: the desk
+        // asked about MU, SPCX and USAR while three agents were reasoning about
+        // TSLA and NVDA.
+        `SELECT symbol, MAX(at) AS last_at FROM decisions
           WHERE symbol IS NOT NULL AND at > ?
-          ORDER BY at DESC LIMIT 200`,
+          GROUP BY symbol
+          ORDER BY last_at DESC LIMIT 50`,
       )
       .all(Math.floor(Date.now() / 1000) - 86_400)) as { symbol?: unknown }[];
     return equitySymbols(rows.map((r) => r.symbol));
