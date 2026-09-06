@@ -1002,7 +1002,11 @@ async function runIdentityAuditIfAsked(): Promise<void> {
       .prepare("SELECT tenant, slug, accounts, privy_did, provider, subject FROM agent_identity")
       .all()) as unknown as Record<string, unknown>[];
     const grantRows = (await shared
-      .prepare("SELECT tenant, grant_json->>'smartAccount' AS smart_account FROM grants")
+      // `owner` is read for the residue questions only — was an account ever
+      // sealed at 0x0, and is any owner key also its own login wallet. It is an
+      // ADDRESS, never key material; the grant store refuses to hold a key at
+      // all (packages/core hosted.ts, and a 422 at the intake).
+      .prepare("SELECT tenant, grant_json->>'smartAccount' AS smart_account, grant_json->>'owner' AS owner FROM grants")
       .all()) as unknown as Record<string, unknown>[];
 
     const rows: IdentityRowLite[] = idRows.map((r) => {
@@ -1027,9 +1031,17 @@ async function runIdentityAuditIfAsked(): Promise<void> {
         subject: r.subject === null || r.subject === undefined ? null : String(r.subject),
       };
     });
+    // NULL means the key is absent from the JSON; an empty string means it is
+    // present and empty, which a UNIQUE index treats as an ordinary value. Only
+    // the first is dropped — the second is exactly the row that would break a
+    // constraint the audit had blessed.
     const claims: GrantClaimLite[] = grantRows
-      .filter((r) => r.smart_account)
-      .map((r) => ({ tenant: String(r.tenant ?? ""), smartAccount: String(r.smart_account) }));
+      .filter((r) => r.smart_account !== null && r.smart_account !== undefined)
+      .map((r) => ({
+        tenant: String(r.tenant ?? ""),
+        smartAccount: String(r.smart_account),
+        owner: r.owner === null || r.owner === undefined ? null : String(r.owner),
+      }));
 
     for (const line of auditIdentity(rows, claims).lines) log(`identity| ${line}`);
   } catch (e) {
@@ -1674,6 +1686,7 @@ export async function runOrchestrator(): Promise<void> {
       if (cohortPasses === COHORT_VET_AFTER_PASSES) {
         await runCohortVettingIfAsked();
         await runBrainDatasetIfAsked();
+        await runIdentityAuditIfAsked();
       }
       await ferryCommands2();
       await fleetHealth();

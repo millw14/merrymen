@@ -140,6 +140,82 @@ describe("the audit refuses to guess", () => {
     assert.equal(r.safeToConstrain, false);
   });
 
+  it("REPORTS RESIDUE: an account already sealed at the zero address", () => {
+    // The guard this PR adds is mint-time. Whether the bug already happened is
+    // a question about production, and the audit is the only thing that reads it.
+    const ZERO = "0x0000000000000000000000000000000000000000";
+    const r = auditIdentity([row({ tenant: T1, accounts: [ZERO] })], [{ tenant: T1, smartAccount: ZERO }]);
+    assert.equal(r.zeroAddressResidue, 2, "the history entry and the installed grant are both residue");
+    assert.ok(r.lines.some((l) => /INSTALLED GRANT on the zero address/.test(l)));
+  });
+
+  it("says so plainly when there is no zero residue", () => {
+    const r = auditIdentity([row({ tenant: T1, accounts: [A] })], [{ tenant: T1, smartAccount: A }]);
+    assert.equal(r.zeroAddressResidue, 0);
+    assert.ok(r.lines.some((l) => /no account was ever sealed at 0x0/.test(l)));
+  });
+
+  it("COUNTS the users the new one-proof refusal would bar, rather than assuming there are none", () => {
+    const r = auditIdentity(
+      [row({ tenant: T1, accounts: [A] }), row({ tenant: T2, accounts: [B] })],
+      [
+        { tenant: T1, smartAccount: A, owner: T1 },
+        { tenant: T2, smartAccount: B, owner: "0x00000000000000000000000000000000000000c3" },
+      ],
+    );
+    assert.equal(r.sameKeyOwners, 1);
+    assert.ok(r.lines.some((l) => /owns its account with its own login key/.test(l)));
+  });
+
+  it("distinguishes 'no same-key owners' from 'nobody exposed an owner'", () => {
+    const known = auditIdentity([], [{ tenant: T1, smartAccount: A, owner: B }]);
+    assert.equal(known.sameKeyOwners, 0);
+    assert.ok(known.lines.some((l) => /every owner key is separate/.test(l)));
+
+    const unknown = auditIdentity([], [{ tenant: T1, smartAccount: A }]);
+    assert.ok(unknown.lines.some((l) => /not checked/.test(l)), "an unread column is not a clean result");
+  });
+
+  it("a DID is fingerprinted in the report, never printed", () => {
+    const did = "did:privy:clx0secret0identifier";
+    const r = auditIdentity(
+      [row({ tenant: T1, accounts: [A], privyDid: did }), row({ tenant: T2, accounts: [B], privyDid: did })],
+      [],
+    );
+    const text = r.lines.join(" | ");
+    assert.ok(!text.includes(did), "a DID beside a tenant address joins a login to an on-chain identity");
+    assert.match(text, /privy did\s+1 COLLISION/);
+    assert.match(text, /#[0-9a-f]{8} held by/);
+  });
+
+  it("DIDs and subjects are compared case-SENSITIVELY, like the index that will enforce them", () => {
+    const r = auditIdentity(
+      [
+        row({ tenant: T1, accounts: [A], privyDid: "did:privy:AbC" }),
+        row({ tenant: T2, accounts: [B], privyDid: "did:privy:abc" }),
+      ],
+      [],
+    );
+    assert.equal(r.safeToConstrain, true, "folding case would block a constraint that applies cleanly");
+  });
+
+  it("an empty-string smart account is a VALUE, and collides", () => {
+    // Postgres indexes lower('') like any other key; a truthiness filter would
+    // drop these and bless a table the index rejects.
+    const r = auditIdentity([], [
+      { tenant: T1, smartAccount: "" },
+      { tenant: T2, smartAccount: "" },
+    ]);
+    assert.equal(r.safeToConstrain, false);
+  });
+
+  it("a clean verdict still names store drift rather than reading as an all-clear", () => {
+    const r = auditIdentity([row({ tenant: T1, accounts: [A] })], [{ tenant: T1, smartAccount: B }]);
+    assert.equal(r.safeToConstrain, true);
+    const verdict = r.lines.find((l) => l.startsWith("VERDICT:"))!;
+    assert.match(verdict, /store disagreement\(s\) above would be frozen in place/);
+  });
+
   it("an empty fleet is clean", () => {
     const r = auditIdentity([], []);
     assert.equal(r.safeToConstrain, true);

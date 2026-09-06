@@ -277,7 +277,12 @@ export async function verifyGrantBinding(args: {
   // never equal a tenant — `privy-did-owner-v1` allows exactly that, and gets
   // its authentication from a verified token instead.
   if (!args.walletSignature) {
-    return { ok: false, why: "this grant is missing the login signature" };
+    return {
+      ok: false,
+      // The route used to refuse this with an instruction. Moving the check
+      // into the validator must not cost the user the remedy.
+      why: "this grant is missing the login signature — create it again from a signed-in browser",
+    };
   }
 
   const message = bindingMessage({
@@ -313,9 +318,14 @@ export async function verifyGrantBinding(args: {
   if (ownerSigner.toLowerCase() === walletSigner.toLowerCase()) {
     return {
       ok: false,
+      // SAY WHAT IS TRUE AND WHAT TO DO. It is not that possession is
+      // unproven — one key signing twice does prove possession of that key.
+      // It is that this version's two proofs collapsed into one, because the
+      // agent is owned by the very key used to sign in.
       why:
-        "this claim carries only one proof: the login signature and the owner co-signature " +
-        "came from the same key, so nothing independently proves the owner key is held here",
+        "the key that owns this agent is the same key you sign in with, so this claim carries " +
+        "one proof where it needs two. A hosted agent needs its own generated owner key — create " +
+        "a new agent and sweep the old one from the recovery panel",
     };
   }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
@@ -34,13 +34,23 @@ describe("a derived account address is a result, not a string", () => {
     assert.equal(d.ok === false && d.failure, "zero");
   });
 
-  it("checksummed zero, uppercase zero and the padded form are all refused", () => {
-    for (const z of [
-      UNDERIVED_ADDRESS,
-      UNDERIVED_ADDRESS.toUpperCase().replace("0X", "0x"),
-      "0x0000000000000000000000000000000000000000",
-    ]) {
-      assert.equal(derivationOf(z).ok, false, z);
+  it("every spelling of nothing is refused, and each under the right arm", () => {
+    // The first version of this test looped over three byte-identical strings,
+    // because zero has no letters and so no checksummed variant — it proved
+    // none of the three things it named. These genuinely differ.
+    const zeroLike: [unknown, "zero" | "malformed"][] = [
+      [UNDERIVED_ADDRESS, "zero"],
+      ["0x" + "0".repeat(40), "zero"],
+      ["0X" + "0".repeat(40), "malformed"], // capital X fails the shape test
+      ["0x" + "0".repeat(64), "malformed"], // a 32-byte word, not an address
+      ["0x0", "malformed"],
+      ["0", "malformed"],
+      [" " + UNDERIVED_ADDRESS, "malformed"], // not trimmed on the way in
+    ];
+    for (const [value, arm] of zeroLike) {
+      const d = derivationOf(value);
+      assert.equal(d.ok, false, String(value));
+      assert.equal(d.ok === false && d.failure, arm, String(value));
     }
   });
 
@@ -144,6 +154,38 @@ describe("every derivation call site routes through the guard", () => {
     assert.match(src, /if \(!derived\.ok\) return NextResponse\.json\(\{ error: derived\.why \}/);
   });
 
+  it("EVERY createKernelAccount in the tree is followed by an assert", () => {
+    // Hand-listing the files is what let the phone signer ship unguarded while
+    // this suite stayed green. Enumerate instead.
+    const roots = ["web/src", "worker/src", "packages/core/src", "mobile/src"];
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+        const rel = `${dir}/${e.name}`;
+        if (e.isDirectory()) walk(rel);
+        else if (/\.tsx?$/.test(e.name) && !/\.test\.tsx?$/.test(e.name)) files.push(rel);
+      }
+    };
+    for (const r of roots) walk(r);
+
+    const unguarded: string[] = [];
+    let examined = 0;
+    for (const f of files) {
+      const src = read(f);
+      if (!src.includes("createKernelAccount(")) continue;
+      examined += 1;
+      // derive-account.ts returns the result itself rather than asserting.
+      if (src.includes("return derivationOf(account.address)")) continue;
+      const derivations = [...src.matchAll(/await createKernelAccount\(/g)].length;
+      const asserts = [...src.matchAll(/assertDerivedAccount\(/g)].length;
+      if (asserts < derivations) unguarded.push(`${f} (${derivations} derivations, ${asserts} asserts)`);
+    }
+    // Non-vacuity: a walk that finds nothing would pass silently, which is the
+    // failure mode of every enumerating test.
+    assert.ok(examined >= 4, `expected several derivation sites, examined ${examined}`);
+    assert.deepEqual(unguarded, [], `these derive an account without asserting it: ${unguarded.join(", ")}`);
+  });
+
   it("the browser signer asserts the account before the wall is pinned to it", () => {
     const src = read("web/src/lib/session.ts");
     const guard = src.indexOf("assertDerivedAccount(sudoOnlyAccount.address");
@@ -151,6 +193,16 @@ describe("every derivation call site routes through the guard", () => {
     assert.ok(guard > 0, "the sudo-only derivation must be asserted");
     assert.ok(wall > 0);
     assert.ok(guard < wall, "the assert must come BEFORE the wall pins value to that address");
+  });
+
+  it("all four of session.ts's derivations are asserted, not just the first", () => {
+    const src = read("web/src/lib/session.ts");
+    assert.match(src, /assertDerivedAccount\(sudoOnlyAccount\.address/);
+    assert.match(src, /assertDerivedAccount\(account\.address, "the permissioned account/);
+    assert.match(src, /assertDerivedAccount\(account\.address, "that owner key does not derive/);
+    // And the preview keeps EIP-55 casing rather than the lowercase the guard
+    // normalises to — it is rendered beside addresses that are checksummed.
+    assert.match(src, /return \{ smartAccount: account\.address, owner: ownerAccount\.address \};/);
   });
 
   it("the worker refuses to arm against a zero, on both sides of its own equality", () => {

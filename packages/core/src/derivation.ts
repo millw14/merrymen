@@ -62,8 +62,11 @@ export type Derivation =
 /**
  * Read whatever the SDK handed back as a derivation result.
  *
- * The zero address is checked BEFORE the shape, because zero is a well-formed
- * address and would otherwise pass every syntactic test there is.
+ * SHAPE FIRST, THEN ZERO. The order is not the interesting part — the two
+ * checks are disjoint, and any encoding of zero that is not exactly forty hex
+ * characters is refused by the shape test as `malformed` rather than by the
+ * zero test. What matters is that zero IS a well-formed address, so it passes
+ * every syntactic test there is and needs a check of its own.
  */
 export function derivationOf(value: unknown): Derivation {
   if (typeof value !== "string" || !ADDRESS_RE.test(value)) {

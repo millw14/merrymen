@@ -112,7 +112,12 @@ test("ONE KEY SIGNING TWICE IS NOT TWO PROOFS", async () => {
   assert.equal(claim.walletSignature, claim.ownerSignature);
   const r = await verifyGrantBinding(claim);
   assert.equal(r.ok, false);
-  assert.match(r.ok === false ? r.why : "", /only one proof/);
+  const why = r.ok === false ? r.why : "";
+  assert.match(why, /one proof where it needs two/);
+  // And it says what to DO. A refusal on a fund-access path that only describes
+  // the cause leaves the user with a permanently unusable agent and no next
+  // step — which is how a correct check becomes an outage.
+  assert.match(why, /create a new agent and sweep the old one/);
 });
 
 test("a legacy claim with no wallet signature is refused, not treated as a privy claim", async () => {

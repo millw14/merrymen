@@ -772,10 +772,11 @@ export async function previewOwnerAccount(
   });
   // The restore flow shows this address and then funds it. A zero here would
   // invite a deposit to an account nobody controls.
-  return {
-    smartAccount: assertDerivedAccount(account.address, "that owner key does not derive an account"),
-    owner: ownerAccount.address,
-  };
+  // Assert, then return the ORIGINAL casing. assertDerivedAccount normalises
+  // to lowercase, and this value is rendered next to addresses everywhere else
+  // in the app, which show EIP-55.
+  assertDerivedAccount(account.address, "that owner key does not derive an account");
+  return { smartAccount: account.address, owner: ownerAccount.address };
 }
 
 /** Live on-chain balances of the account address — for the "fund it" step. */

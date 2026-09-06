@@ -33,6 +33,8 @@
  * PURE. Handed rows, returns strings.
  */
 
+import { UNDERIVED_ADDRESS } from "../../packages/core/src/index";
+
 export interface IdentityRowLite {
   tenant: string;
   slug: string;
@@ -47,15 +49,59 @@ export interface IdentityRowLite {
 export interface GrantClaimLite {
   tenant: string;
   smartAccount: string;
+  /**
+   * The key the account derives from. Read because two questions can only be
+   * answered from it, and both are about grants that already exist:
+   * whether any account was sealed at the zero address, and whether any owner
+   * is also its own tenant. See the residue section below.
+   */
+  owner?: string | null;
 }
 
+/** Addresses are case-insensitive; the chain says so and every store lowercases. */
 const lc = (s: string) => s.trim().toLowerCase();
+
+/**
+ * A DID and a provider subject are NOT case-insensitive.
+ *
+ * The indexes that will actually enforce these are plain `UNIQUE` over `text`,
+ * which is case-SENSITIVE. Folding case here would report two legitimately
+ * distinct identifiers as one collision and block a constraint that would have
+ * applied cleanly — an audit that is stricter than the index it is checking is
+ * just as wrong as one that is laxer.
+ */
+const exact = (s: string) => s.trim();
+
+/**
+ * A one-way fingerprint, for keys that must be COUNTED in a log but not READ.
+ *
+ * A Privy DID printed next to a tenant address joins a person's social login to
+ * their on-chain identity, in a log the whole fleet writes to. The audit's job
+ * is to say THAT two tenants collide and WHICH tenants they are — the tenant
+ * addresses are already public and already logged. The identifier itself is not
+ * needed to act on the finding, so it does not get printed.
+ *
+ * Not a secret-strength hash and not trying to be: it exists so two lines about
+ * the same DID are recognisably about the same DID.
+ */
+function fingerprint(value: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < value.length; i += 1) {
+    h ^= value.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `#${h.toString(16).padStart(8, "0")}`;
+}
 
 /** Keys held by more than one tenant, with the tenants that hold them. */
 function collisions(pairs: { key: string; tenant: string }[]): Map<string, string[]> {
   const by = new Map<string, Set<string>>();
   for (const p of pairs) {
-    if (!p.key) continue;
+    // NO TRUTHINESS SKIP. An empty string is a value Postgres indexes like any
+    // other, so two rows carrying one would violate a UNIQUE index while a
+    // `if (!p.key) continue` here quietly blessed them. Deciding what counts as
+    // ABSENT belongs to each caller, which knows the difference between a NULL
+    // column and a present-but-empty one; this function only counts keys.
     const set = by.get(p.key) ?? new Set<string>();
     set.add(p.tenant);
     by.set(p.key, set);
@@ -69,6 +115,10 @@ export interface IdentityAudit {
   lines: string[];
   /** True only when every one-to-one relationship already holds. */
   safeToConstrain: boolean;
+  /** Accounts already sealed at 0x0 by the bug the mint-time guard now stops. */
+  zeroAddressResidue: number;
+  /** Grants whose owner key is also their login wallet. See the residue section. */
+  sameKeyOwners: number;
 }
 
 export function auditIdentity(rows: IdentityRowLite[], claims: GrantClaimLite[]): IdentityAudit {
@@ -90,28 +140,40 @@ export function auditIdentity(rows: IdentityRowLite[], claims: GrantClaimLite[])
     rows.flatMap((r) => r.accounts.map((a) => ({ key: lc(a), tenant: lc(r.tenant) }))),
   );
   const dids = collisions(
-    rows.filter((r) => r.privyDid).map((r) => ({ key: lc(r.privyDid!), tenant: lc(r.tenant) })),
+    rows.filter((r) => r.privyDid).map((r) => ({ key: exact(r.privyDid!), tenant: lc(r.tenant) })),
   );
   const subjects = collisions(
     rows
       .filter((r) => r.provider && r.subject)
-      .map((r) => ({ key: `${lc(r.provider!)}/${lc(r.subject!)}`, tenant: lc(r.tenant) })),
+      .map((r) => ({ key: `${exact(r.provider!)}/${exact(r.subject!)}`, tenant: lc(r.tenant) })),
   );
-  const claimed = collisions(claims.map((c) => ({ key: lc(c.smartAccount), tenant: lc(c.tenant) })));
+  // AN EMPTY STRING IS A VALUE, NOT AN ABSENCE. Postgres indexes lower('') like
+  // any other key, so two grants carrying an empty smartAccount would collide
+  // under the constraint — while a JS truthiness filter drops them and the
+  // audit blesses a table the index will reject.
+  const claimed = collisions(
+    claims
+      .filter((c) => c.smartAccount !== null && c.smartAccount !== undefined)
+      .map((c) => ({ key: lc(c.smartAccount), tenant: lc(c.tenant) })),
+  );
 
-  const report = (label: string, found: Map<string, string[]>) => {
+  const report = (label: string, found: Map<string, string[]>, hide = false) => {
     if (found.size === 0) {
       lines.push(`${label.padEnd(22)} clean`);
       return;
     }
     lines.push(`${label.padEnd(22)} ${found.size} COLLISION(S) — nothing was changed`);
-    for (const [key, holders] of found) lines.push(`  ${key} held by ${holders.join(" and ")}`);
+    for (const [key, holders] of found) {
+      lines.push(`  ${hide ? fingerprint(key) : key} held by ${holders.join(" and ")}`);
+    }
   };
 
   report("current account", current);
   report("account history", historical);
-  report("privy did", dids);
-  report("provider+subject", subjects);
+  // Fingerprinted: a DID beside a tenant address joins a social login to an
+  // on-chain identity, and the fleet's logs are not the place for that join.
+  report("privy did", dids, true);
+  report("provider+subject", subjects, true);
   report("installed grants", claimed);
 
   // A grant whose account the identity row does not list at all means the two
@@ -136,14 +198,62 @@ export function auditIdentity(rows: IdentityRowLite[], claims: GrantClaimLite[])
     for (const d of drifted) lines.push(`  ${d}`);
   }
 
+  // ── RESIDUE: did the bug this PR fixes already happen? ───────────────────
+  //
+  // The guard is mint-time. It stops a NEW grant being sealed at the zero
+  // address; it says nothing about whether an old one already was. That is the
+  // question a read of production exists to answer, and it would be strange to
+  // ship the audit without asking it.
+  const zeroed: string[] = [];
+  for (const r of rows) {
+    for (const a of r.accounts) {
+      if (lc(a) === UNDERIVED_ADDRESS) zeroed.push(`${lc(r.tenant)} lists the zero address in its history`);
+    }
+  }
+  for (const c of claims) {
+    if (lc(c.smartAccount) === UNDERIVED_ADDRESS) {
+      zeroed.push(`${lc(c.tenant)} has an INSTALLED GRANT on the zero address`);
+    }
+  }
+  lines.push(
+    zeroed.length === 0
+      ? `${"zero-address residue".padEnd(22)} none — no account was ever sealed at 0x0`
+      : `${"zero-address residue".padEnd(22)} ${zeroed.length} FOUND`,
+  );
+  for (const z of zeroed) lines.push(`  ${z}`);
+
+  // ── RESIDUE: is anyone using their login wallet as the owner key? ────────
+  //
+  // `restoreAgentWallet` accepts any 64-hex key, so a user could have pasted
+  // the private key of the wallet they sign in with. The legacy binding arm now
+  // refuses a claim whose two signatures come from one key, which would bar
+  // exactly those users from re-arming. Whether that population is EMPTY is a
+  // fact about production, not something to believe — so count it here rather
+  // than assert it in a comment.
+  const sameKey = claims
+    .filter((c) => c.owner && lc(c.owner) === lc(c.tenant))
+    .map((c) => `${lc(c.tenant)} owns its account with its own login key`);
+  const ownersKnown = claims.filter((c) => c.owner).length;
+  lines.push(
+    ownersKnown === 0
+      ? `${"owner is tenant".padEnd(22)} not checked — no grant exposed an owner`
+      : sameKey.length === 0
+        ? `${"owner is tenant".padEnd(22)} none of ${ownersKnown} — every owner key is separate from its login`
+        : `${"owner is tenant".padEnd(22)} ${sameKey.length} of ${ownersKnown} FOUND — these cannot re-arm`,
+  );
+  for (const s of sameKey) lines.push(`  ${s}`);
+
   const safeToConstrain =
     current.size === 0 && historical.size === 0 && dids.size === 0 && subjects.size === 0 && claimed.size === 0;
 
   lines.push(
     safeToConstrain
-      ? "VERDICT: every one-to-one relationship already holds — a UNIQUE index would apply cleanly"
+      ? `VERDICT: every one-to-one relationship already holds — a UNIQUE index would apply cleanly` +
+          (drifted.length > 0
+            ? `, but ${drifted.length} store disagreement(s) above would be frozen in place by it. Read those first.`
+            : "")
       : "VERDICT: DO NOT ADD THE CONSTRAINT. Resolve the collisions above by hand first; " +
           "deduplicating them automatically would pick an owner for an agent, which is not a migration's call",
   );
-  return { lines, safeToConstrain };
+  return { lines, safeToConstrain, zeroAddressResidue: zeroed.length, sameKeyOwners: sameKey.length };
 }

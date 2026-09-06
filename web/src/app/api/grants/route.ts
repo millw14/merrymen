@@ -139,6 +139,16 @@ export async function POST(req: Request) {
         { status: 403 },
       );
     }
+    // A CLAIM MAY NOT CARRY EVIDENCE ITS OWN VERSION DOES NOT USE. `did` is
+    // only meaningful under `privy-did-owner-v1`; arriving on a legacy claim it
+    // is unverified client text that would be persisted verbatim and read back
+    // later as though the server had checked it.
+    if (binding.did !== undefined && binding.version !== "privy-did-owner-v1") {
+      return NextResponse.json(
+        { error: "this grant carries an identity its binding version does not verify" },
+        { status: 400 },
+      );
+    }
     const bound = await verifyGrantBinding({
       origin: requestOrigin(req),
       tenant,
@@ -148,6 +158,14 @@ export async function POST(req: Request) {
       chainId: grant.chainId,
       walletSignature: binding.walletSignature,
       ownerSignature: binding.ownerSignature,
+      // PASSED THROUGH UNVALIDATED, ON PURPOSE. verifyGrantBinding is the one
+      // place that decides which security model a claim was made under, and it
+      // refuses anything it does not recognise. Omitting this — which an
+      // earlier revision of this file did — makes the whole dispatch
+      // unreachable: every claim resolves to the default, so a grant declaring
+      // `privy-did-owner-v1` would be verified under LEGACY rules instead of
+      // refused, which is precisely the downgrade the versioning exists to stop.
+      version: binding.version,
     });
     if (!bound.ok) {
       return NextResponse.json({ error: bound.why }, { status: 403 });
