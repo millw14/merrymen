@@ -1458,6 +1458,14 @@ async function main() {
    */
   let peerTheses: PublicThesis[] = [];
   const DESK_LINKS_EVERY_MS = 10 * 60_000;
+  /**
+   * How often a SIMULATING agent re-reads its real ETH balance.
+   *
+   * This number only moves when a human sends a transaction, so a slow
+   * clock is not a compromise — it is the right cadence. One getBalance per
+   * agent per five minutes across the fleet is noise beside a tick.
+   */
+  const REAL_GAS_READ_EVERY_MS = 5 * 60_000;
   const browserCfg = () =>
     cfg.browserUrl && cfg.browserToken
       ? { baseUrl: cfg.browserUrl, token: cfg.browserToken }
@@ -1495,6 +1503,8 @@ async function main() {
   // only one nothing checked: the failure arrived as a raw bundler exception,
   // truncated to 80 characters, in the reject_rule column, retried every tick.
   let lastGasWei: bigint | null = null; // feeds the low-gas alert AND the pre-flight refusal
+  /** When the paper rail last looked at the account's REAL ETH. See the note at the assignment. */
+  let lastRealGasReadAt = 0;
   let notifierHandle: ReturnType<typeof startNotifier> | null = null;
 
   // Uniswap TWAPs for tokens with no Chainlink feed. Cached across ticks — the
@@ -5701,7 +5711,43 @@ async function main() {
     // real ETH balance, and the gas pre-flight refuses on exactly that value.
     // Same rule the cash balance already follows: unknown is not zero, so leave
     // it null and let the pre-flight decline to judge.
-    if (!paper) lastGasWei = balances.ethWei;
+    // ── THE RAIL MUST KEEP WATCHING THE REAL ACCOUNT ────────────────────
+    //
+    // `balances.ethWei` is 0n on the paper rail by construction — honest for a
+    // simulated book, which holds no ETH — and copying THAT here would publish
+    // a fabricated zero as the account's real balance, which the gas pre-flight
+    // refuses on. That is why this was live-only.
+    //
+    // But live-only makes it a LATCH. `lastGasWei` is the rail's only view of
+    // the account's gas, so once an agent is simulating it stops observing its
+    // own ETH — and can never notice the owner topping it up. Today that costs
+    // a stale alert; the moment gas becomes a leg of `canTradeForReal` it costs
+    // the agent its way back to the live rail, permanently, until the process
+    // restarts.
+    //
+    // So: on paper, read the REAL account instead of the paper book's zero, on
+    // a slow clock — this only moves when a human funds the wallet, so once
+    // every few minutes is ample and it costs one getBalance per agent.
+    // The live arm needs no unread guard of its own: `unreadBook` already
+    // returned this tick if the ETH read failed, so reaching here means
+    // `balances.ethWei` is an observation and not a placeholder.
+    //
+    // The cash leg has the same latch and is NOT fixed here. `lastCashUsdg` is
+    // written by the flow reconciler, whose null branch is the
+    // first-observation-of-this-process path — the one that booked the canary's
+    // 10 USDG as a new contribution three times. Refreshing it from a second
+    // site means touching flow accounting, which is its own change.
+    if (!paper) {
+      lastGasWei = balances.ethWei;
+    } else if (active && Date.now() - lastRealGasReadAt > REAL_GAS_READ_EVERY_MS) {
+      lastRealGasReadAt = Date.now();
+      try {
+        lastGasWei = await active.client.getBalance({ address: active.grant.smartAccount as `0x${string}` });
+      } catch {
+        // A refused read is not a zero balance. Leave the last observation
+        // standing rather than replace it with a guess.
+      }
+    }
     // Fresh feed prices → the notifier's price alerts (evaluated off-tick).
     notifierHandle?.publishPrices(market.prices);
 

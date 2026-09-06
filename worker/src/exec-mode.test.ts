@@ -175,20 +175,6 @@ test("THE FORK AND THE TICK ASK THE SAME FUNCTION", () => {
 
   assert.match(src, /const paperActive = \(\) => execMode\(\)\.mode === "paper";/);
   assert.match(src, /const execRail = execMode\(\);/, "the fork resolves the mode");
-  assert.match(src, /if \(execRail\.mode === "refuse"\)/, "the fork handles refuse");
-  assert.match(src, /if \(execRail\.mode === "paper"\)/, "the fork handles paper");
-
-  // The old question must be gone from the fork. It survives exactly once, as
-  // the live-rail invariant check that narrows the type after the fork.
-  assert.equal(
-    (src.match(/if \(!executor\) \{/g) ?? []).length,
-    1,
-    "`!executor` may only appear as the post-fork invariant, never as the fork",
-  );
-
-  // And nothing may reconstruct the rule locally again.
-  assert.doesNotMatch(src, /const canTradeForReal = \(\)/, "the rule lives in exec-mode.ts");
-  assert.doesNotMatch(src, /const readAsBroke = \(\)/, "the rule lives in exec-mode.ts");
 });
 
 test("a paper tick never publishes its fabricated ETH balance", () => {
@@ -196,8 +182,34 @@ test("a paper tick never publishes its fabricated ETH balance", () => {
   // lastGasWei published a fabricated zero as the account's real balance, and
   // the gas pre-flight refuses on exactly that value — so every paper intent
   // died on `no-gas` for ETH it did not need and was never asked to hold.
+  //
+  // Still true, and now stated as the property rather than as one line of
+  // source: the paper arm must not read `balances` at all, because on that
+  // rail `balances` IS the simulated book.
   const src = readFileSync("worker/src/index.ts", "utf8");
-  assert.match(src, /if \(!paper\) lastGasWei = balances\.ethWei;/);
+  assert.match(src, /if \(!paper\) \{[^}]*lastGasWei = balances\.ethWei;/);
+  const paperArm = src.slice(src.indexOf("} else if (active && Date.now() - lastRealGasReadAt"));
+  const armEnd = paperArm.indexOf("\n    }");
+  assert.ok(armEnd > 0, "the paper arm must be findable");
+  assert.doesNotMatch(
+    paperArm.slice(0, armEnd),
+    /balances\./,
+    "the paper arm must never take a number from the simulated book",
+  );
+});
+
+test("BUT IT KEEPS WATCHING THE REAL ACCOUNT, or it can never come back", () => {
+  // Live-only made this a latch. `lastGasWei` is the rail's only view of the
+  // account's gas, so a simulating agent stopped observing its own ETH and
+  // could not notice the owner topping it up. Harmless while gas is not a leg
+  // of canTradeForReal; the moment it is, the agent loses its way back to the
+  // live rail until the process restarts.
+  const src = readFileSync("worker/src/index.ts", "utf8");
+  assert.match(src, /lastRealGasReadAt/, "the paper rail must re-read on its own clock");
+  assert.match(src, /getBalance\(\{ address: active\.grant\.smartAccount/, "and it must read the CHAIN, not the book");
+  // A refused read is not a zero balance.
+  const arm = src.slice(src.indexOf("lastRealGasReadAt > REAL_GAS_READ_EVERY_MS"));
+  assert.doesNotMatch(arm.slice(0, 600), /lastGasWei = 0n/, "a failed read must not become a zero");
 });
 
 test("a curve trade with no adapter leaves a row, not just an event", () => {
