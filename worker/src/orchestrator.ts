@@ -117,6 +117,8 @@ const MAX_RESTARTS = 8;
 
 /** The worker entrypoint each child runs — the same main() the CLI supervises. */
 const WORKER_ENTRY = path.join(fileURLToPath(new URL(".", import.meta.url)), "index.ts");
+/** Convert-latch seed filename in a child's home — consumed once at arm. */
+const CONVERT_SEED_FILE = "convert-seed.json";
 /** Repo root (…/worker/src → up two), the cwd children need to resolve tsx + deps. */
 const ROOT = path.join(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
 
@@ -403,6 +405,61 @@ async function writeBootstrapForChild(
   }
 }
 
+/**
+ * Hand the child its convert-latch seed: the durable once-per-deposit memory
+ * from the shared database, written as a file the worker consumes once at arm.
+ *
+ * WHY A SEED FILE and not a row the child reads. Children have DATABASE_URL
+ * stripped (custody), so a hosted child cannot query shared Postgres — the
+ * orchestrator, which holds both the shared database and every child's home,
+ * ferries. And why not write the child's sqlite directly: openChildLedger is
+ * deliberately read-only, and a writer here would race the worker's own ticks.
+ * Files are the existing ferry (grants, settings, commands); this is the same
+ * shape. The worker adopts the seed only when its local table has no row, then
+ * deletes it — so a stale seed can never regress live state, and a crash
+ * between spawn and arm simply re-adopts on the next boot.
+ *
+ * Self-hosted there is no shared database and the worker's own sqlite IS the
+ * truth: no-op, like everything else here that only matters hosted. Best
+ * effort throughout — a child that arms without a seed starts an empty latch,
+ * which may convert once more than ideal, never less safely.
+ */
+async function writeConvertSeedForChild(
+  tenant: `0x${string}`,
+  smartAccount: `0x${string}`,
+): Promise<void> {
+  const url = process.env.DATABASE_URL;
+  if (!url) return; // self-hosted: the worker reads its own sqlite directly
+  try {
+    const shared = await makePgDb(url);
+    const row = (await shared
+      .prepare(
+        `SELECT fired_at_ms, considered_wei, completed_ids, updated_at_ms FROM convert_state
+          WHERE agent_id = ?`,
+      )
+      .get(smartAccount)) as Record<string, unknown> | undefined;
+    if (!row) return; // never fired — nothing to seed
+    const home = childHome(tenant);
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      path.join(home, CONVERT_SEED_FILE),
+      JSON.stringify(
+        {
+          firedAtMs: Number(row.fired_at_ms ?? 0),
+          consideredWei: typeof row.considered_wei === "string" ? row.considered_wei : "0",
+          completedIds: typeof row.completed_ids === "string" ? row.completed_ids : "[]",
+          updatedAtMs: Number(row.updated_at_ms ?? 0),
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+  } catch (e) {
+    log(`${tenant}: could not seed convert latch — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
   // The advisory lease is a precondition, taken by reconcile() before the FIRST
@@ -429,6 +486,10 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   // closed, so the agent would run with contributions marked unknown for no
   // reason other than a race.
   await writeBootstrapForChild(tenant, smartAccount);
+  // Same ordering reason as the anchor: the latch seed must be in the home
+  // before the child arms, or a redeployed child starts an empty latch and
+  // converts funds the pre-deploy run already converted.
+  await writeConvertSeedForChild(tenant, smartAccount);
   const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
   const staleSec = staleThresholdSec(tickSeconds);
   const proc = spawn(
