@@ -23,10 +23,25 @@
 export const PRIVY_APP_ID = (process.env.NEXT_PUBLIC_PRIVY_APP_ID ?? "").trim();
 
 /**
+ * THE BETA SWITCH, SEPARATE FROM THE CREDENTIALS ON PURPOSE.
+ *
+ * The app id being present means Privy CAN work here; this means it SHOULD.
+ * Keeping them apart is what lets the code ship to production with the login
+ * unchanged, and lets the rollout be one variable rather than one deploy —
+ * me, then three to five testers, then twenty, with a way back that does not
+ * involve reverting a merge.
+ *
+ * NEXT_PUBLIC_ because the browser decides which button to draw, and the
+ * decision has to be the same one the provider makes or a button renders with
+ * no provider above it.
+ */
+const BETA = (process.env.NEXT_PUBLIC_MERRYMEN_PRIVY_BETA ?? "").trim() === "1";
+
+/**
  * Privy app ids are lowercase alphanumeric, ~25 characters. Deliberately loose
  * on length — this exists to catch "unset", "changeme" and a pasted URL, not to
  * validate Privy's id scheme, which is theirs to change.
  */
 export function privyEnabled(): boolean {
-  return /^[a-z0-9]{18,40}$/.test(PRIVY_APP_ID);
+  return BETA && /^[a-z0-9]{18,40}$/.test(PRIVY_APP_ID);
 }

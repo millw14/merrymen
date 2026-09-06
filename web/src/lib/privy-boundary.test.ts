@@ -187,6 +187,23 @@ describe("the identity a session is minted for comes from a verified token", () 
   });
 });
 
+describe("the beta flag is separate from the credentials", () => {
+  it("privy stays off until the beta switch is on, even with a valid app id", () => {
+    // Shipping the code and enabling the login are two decisions. Merging must
+    // not change what a user sees; one variable must.
+    const src = codeOf("web/src/lib/privy-client.ts");
+    assert.match(src, /NEXT_PUBLIC_MERRYMEN_PRIVY_BETA/);
+    assert.match(src, /return BETA && /, "both the switch AND a well-formed id");
+  });
+
+  it("the provider and the button ask the same question", () => {
+    // If they ever disagreed, the button renders, calls usePrivy(), and throws
+    // because no provider is above it.
+    assert.match(codeOf("web/src/terminal/Providers.tsx"), /privyEnabled()/);
+    assert.match(codeOf("web/src/terminal/HostedControls.tsx"), /PRIVY_BETA = privyEnabled()/);
+  });
+});
+
 describe("the client picks the embedded wallet deliberately", () => {
   it("it never indexes into useWallets()", () => {
     const src = codeOf("web/src/terminal/PrivySignIn.tsx");
