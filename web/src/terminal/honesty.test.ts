@@ -23,6 +23,7 @@ import { readFileSync } from "node:fs";
 import { beatsOf, verbOf } from "./beat";
 import { lastLine, ledgerSeconds, readStateOf, seedLive, tradeOutcome, type LiveAgent, type Thesis } from "./live";
 import { stampOf, whyLine } from "./why";
+import { entryCaveat } from "./bars";
 
 const at = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 /** Source with comments removed — these files describe at length what they will not do. */
@@ -243,5 +244,66 @@ describe("a growth curve is not raw equity", () => {
       /screen\.kind === "profile" && agent && profileError/,
       "the failure must be said even when something rendered",
     );
+  });
+});
+
+/**
+ * THE FOUR THE PRE-MERGE GATE CLASSIFIED AS MUST-HAVE.
+ *
+ * Everything else in docs/terminal-port-debt.md can follow the launch. These
+ * four could not, because each one either states something untrue about money
+ * on a public page, or takes the whole product down.
+ */
+describe("must-have before a public UI", () => {
+  it("a paper or quoted entry is never rendered as a settled fill", () => {
+    // read-token.ts carries `paper` and `basisSource` and states the rule —
+    // "a pretend fill must not look like a real one" — and the port dropped
+    // both, so every marker on the public token chart read as somebody's money.
+    assert.equal(entryCaveat({ paper: true, basisSource: "paper" }), " — on paper, not a real fill");
+    assert.equal(entryCaveat({ paper: false, basisSource: "quote" }), " — an estimate, not a settled fill");
+    assert.equal(entryCaveat({ paper: false, basisSource: null }), " — entry price unrecorded");
+    assert.equal(entryCaveat({ paper: false, basisSource: "receipt" }), "", "a settled fill needs no caveat");
+  });
+
+  it("INVARIANT: both render sites carry it", () => {
+    // The chart pin and the holder table are two different surfaces showing the
+    // same fact; marking one and not the other is the same omission.
+    assert.match(at("./tv.tsx"), /entryCaveat\(seat\)/, "the chart pin's label");
+    assert.match(at("./screens/Token.tsx"), /entryCaveat\(seat\)/, "the holder table's chip");
+    assert.match(at("./bars.ts"), /paper: boolean;/, "and Seat carries the fields at all");
+  });
+
+  it("INVARIANT: the public profile shows paper fills beside landed ones", () => {
+    // `landed` alone published "0 Completed trades" for an agent with ten
+    // simulated fills. read-agent.ts keeps the counters apart on purpose —
+    // folding them would re-arm the +2643.3% incident — so both must show.
+    const src = at("./screens/Profile.tsx");
+    const landed = src.indexOf("Completed trades");
+    const paper = src.indexOf("filledPaper");
+    assert.ok(landed > 0 && paper > 0, "both counters must be rendered");
+    assert.match(src, /simulated, not real money/, "and the paper one says what it is");
+  });
+
+  it("INVARIANT: the price axis cannot render a real price as $0.00", () => {
+    // A coin here trades at 2.8e-6. The axis was switched on for desktop with
+    // no formatter, so the library's default rendered that as "$0.00" — a real
+    // number displayed as nothing.
+    const src = at("./tv.tsx");
+    const scale = src.indexOf("rightPriceScale");
+    const fmt = src.indexOf("priceFormatter");
+    assert.ok(fmt > 0, "the axis needs the same formatter the text readout has");
+    assert.ok(fmt > scale, "declared with the scale it formats");
+    assert.match(src, /coinPrice\(v\)/, "and it is the app's own formatter, not a second one");
+  });
+
+  it("INVARIANT: a chart that cannot draw does not unmount the product", () => {
+    // App.tsx mounts eleven screens in one tree with no lazy and no Suspense,
+    // and the chart is a third-party renderer driven from an effect with no
+    // try. CandleChart learned this once: "A chart that will not load must not
+    // take the page with it."
+    assert.match(at("./Boundary.tsx"), /getDerivedStateFromError/);
+    for (const screen of ["./screens/Token.tsx", "./screens/Profile.tsx"]) {
+      assert.match(at(screen), /<Boundary label=/, `${screen} must wrap its chart`);
+    }
   });
 });

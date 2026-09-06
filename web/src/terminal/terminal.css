@@ -6689,3 +6689,30 @@
 .terminal-host .ranking-help {margin:0 0 20px;color:var(--tx-2);font-size:12px;line-height:1.6;}
 .terminal-host .ranking-help summary {cursor:pointer;}
 .terminal-host .ranking-help p {margin:10px 0;}
+
+/* An entry that is not a settled fill — a paper book or a pre-trade estimate.
+   read-token.ts: "a pretend fill must not look like a real one". */
+:where(.terminal-host) .tag.unsettled {
+  margin-left: 6px;
+  border: 1px dashed var(--faint);
+  color: var(--faint);
+  font-style: normal;
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+:where(.terminal-host) .dither-rider[data-basis="unsettled"],
+:where(.terminal-host) .tv-pin[data-basis="unsettled"] {
+  opacity: 0.72;
+  outline: 1px dashed var(--faint);
+  outline-offset: 1px;
+  border-radius: 50%;
+}
+/* The paper count under a public profile's landed-trade figure. */
+:where(.terminal-host) .public-paper-count {
+  display: block;
+  margin-top: 4px;
+  color: var(--tx-2);
+  font-size: 12px;
+  line-height: 1.4;
+}

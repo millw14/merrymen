@@ -12,6 +12,39 @@ specification before the implementation exists. So they stay, the debt is
 written down here, and `web/src/mounted.test.ts` fails if the list of vacuous
 guards ever grows.
 
+
+## Pre-merge classification — 2026-09-06
+
+Classified before the terminal shipped, against one rule: anything touching
+financial or risk disclosure, actual execution state, wallet authority, or
+misleading buy/sell status is MUST HAVE. Everything else follows.
+
+**MUST HAVE — fixed before the merge, all four:**
+
+1. **Holder entries dropped `paper` and `basisSource`** (`EntryTimeline` debt) —
+   simulated books and pre-trade estimates rendered as settled fills on the
+   public token chart and in the holder table. *Misleading buy/sell status.*
+2. **The public profile showed `landed` alone** — an agent with ten paper fills
+   published "0 Completed trades". *Misleading execution state.*
+3. **The desktop price axis had no formatter** — a coin at 2.8e-6 rendered as
+   `$0.00`, a real number shown as nothing. *Financial disclosure.*
+4. **No error boundary anywhere** — one throw from the chart renderer unmounted
+   the entire terminal. *Unsafe public experience.*
+
+**CAN FOLLOW — everything else below.** None of it states something untrue about
+money on a page a stranger can open:
+
+- `PriceLine` oracle series, `EquityLine` drawdown figure, `Feed.tsx` deletion
+- `WallBand`/`WallPanel` successor — wallet authority IS disclosed, on `/grant`
+  and in `LimitsPanel` (caps, addresses, expiry); the band was a summary of it
+- `YouClient` rail notices — refusal reasons now reach the screen via
+  `reject_rule`
+- `TokensClient` screening disclosures and the `shown` fallback
+- `LimitsPanel` rendering "—" for three states — it conflates, but it asserts
+  nothing false, and it is the owner’s own screen rather than a public one
+- `/tokens` alias, `Search` partial list, `attributionLogo`, `truncated`,
+  the dynamic import, dead CSS and fonts
+
 ## How to retire an entry
 
 For each component, in this order:

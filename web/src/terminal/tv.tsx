@@ -10,6 +10,7 @@ import {
 } from "lightweight-charts";
 import { withGaps, type Bar, type ChartKind, type Seat } from "./bars";
 import { coinPrice } from "./live";
+import { entryCaveat } from "./bars";
 import { Face } from "./ui";
 
 export function TvChart({
@@ -149,6 +150,25 @@ export function TvChart({
         layout: { fontSize: desktop ? 13 : 11 },
         height: el.clientHeight || 220,
         rightPriceScale: { visible: desktop },
+        // THE AXIS NEEDS THE SAME FORMATTER THE TEXT ALREADY HAS.
+        //
+        // A coin here trades at 2.8e-6, and the library’s default formatter
+        // renders that as "$0.00" — a real number displayed as nothing, which
+        // is the same failure as showing a null as zero. The O/H/L/C readout
+        // goes through coinPrice and is fine; the axis was turned on for
+        // desktop with no formatter at all, so the guard only held by accident
+        // on viewports under 1100px.
+        //
+        // The scale computes gridlines by arithmetic, so its bottom line lands
+        // on a floating-point crumb like -1.73e-18. Anything below a hundredth
+        // of a cent on this axis is zero, and a negative gridline is not a price.
+        localization: {
+          priceFormatter: (v: number) => {
+            if (!Number.isFinite(v) || Math.abs(v) < 1e-12) return "$0";
+            if (v < 0) return "";
+            return coinPrice(v);
+          },
+        },
         timeScale: {
           visible: desktop,
           timeVisible: true,
@@ -248,7 +268,8 @@ export function TvChart({
               type="button"
               className="tv-pin"
               style={{ left: x, top: y, zIndex: z }}
-              aria-label={`${seat.name} entered at ${coinPrice(seat.price)}`}
+              aria-label={`${seat.name} entered at ${coinPrice(seat.price)}${entryCaveat(seat)}`}
+              data-basis={seat.paper || seat.basisSource !== "receipt" ? "unsettled" : "receipt"}
               onClick={() => onAgent(seat.slug)}
             >
               <Face name={seat.name} slug={seat.slug} pin />

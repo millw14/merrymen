@@ -1,5 +1,6 @@
 import { ChartArea, RotateCcw, ArrowDown } from "lucide-react";
 import { DitherChart } from "../DitherChart";
+import { Boundary } from "../Boundary";
 import { useEffect, useMemo, useState } from "react";
 import {
   loadBars,
@@ -7,6 +8,7 @@ import {
   type ChartKind,
   type Seat,
   type WindowId,
+  entryCaveat,
 } from "../bars";
 import {
   coinPrice,
@@ -61,7 +63,7 @@ export function Token({
       setSymbolClash(data.market.symbolClash);
       if(!data.ledger.fillsRead){setHolderError("Public holdings are unavailable right now.");return;}
       setHolderCoverage({published:data.ledger.holders.length,total:data.ledger.holders.length+data.ledger.privateHolders});
-      setSeats(data.ledger.holders.filter(h=>h.slug).map(h=>({slug:h.slug!,name:h.name,handle:h.handle,owner:null,strategy:"",strategyId:"custom",position:h.valueUsdg,pnlBps:h.pnlBps,avgEntry:h.entryPriceUsd ?? 0,thesis:data.market.symbolClash ? "" : theses.find(t=>t.slug===h.slug && t.symbol?.toUpperCase()===token.symbol.toUpperCase())?.reason ?? "",time:h.enteredAt ?? 0,price:h.entryPriceUsd ?? 0})));
+      setSeats(data.ledger.holders.filter(h=>h.slug).map(h=>({paper:h.paper,basisSource:h.basisSource,slug:h.slug!,name:h.name,handle:h.handle,owner:null,strategy:"",strategyId:"custom",position:h.valueUsdg,pnlBps:h.pnlBps,avgEntry:h.entryPriceUsd ?? 0,thesis:data.market.symbolClash ? "" : theses.find(t=>t.slug===h.slug && t.symbol?.toUpperCase()===token.symbol.toUpperCase())?.reason ?? "",time:h.enteredAt ?? 0,price:h.entryPriceUsd ?? 0})));
     }).catch(e=>{if(alive)setHolderError(e.message);});
     return()=>{alive=false;};
   },[token.id,token.symbol,theses]);
@@ -243,7 +245,7 @@ export function Token({
       </div>
         <div className="token-plot">
           {bars.length === 0 ? <p className="meta" role="status">{loading ? "Loading the chart…" : "Price history unavailable. Try another timeframe."}</p> : kind === "line" ? (
-            <DitherChart
+            <Boundary label="token-chart"><DitherChart
               key={`${token.id}-${span}-${chartRevision}`}
               riders={seats.filter(seat=>seat.time >= bars[0]!.time && seat.time <= bars[bars.length-1]!.time && seat.price>0).map((seat) => ({
                 name: seat.name,
@@ -262,16 +264,16 @@ export function Token({
               label={`${token.symbol} price history`}
               format={coinPrice}
               height={250}
-            />
+            /></Boundary>
           ) : (
-            <TvChart
+            <Boundary label="token-chart"><TvChart
               key={chartRevision}
               bars={bars}
               seats={seats.filter(s=>s.time>0 && s.price>0)}
               kind={kind}
               down={down}
               onAgent={onProfile}
-            />
+            /></Boundary>
           )}
           <div className="tv-tools">
             <div className="tv-windows">
@@ -387,7 +389,7 @@ export function Token({
                       >
                         <Face name={seat.name} slug={seat.slug} />
                         <span>
-                          <strong>{seat.name}</strong>
+                          <strong>{seat.name}{entryCaveat(seat) && <i className="tag unsettled">{seat.paper ? "paper" : "estimate"}</i>}</strong>
                           <small>{seat.strategy}</small>
                         </span>
                       </button>

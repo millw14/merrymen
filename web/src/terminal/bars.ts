@@ -23,6 +23,18 @@ export interface Bar {
 }
 
 export interface Seat {
+  /**
+   * A PRETEND FILL MUST NOT LOOK LIKE A REAL ONE.
+   *
+   * `paper` is a simulated book; `basisSource` says how the entry price was
+   * obtained — 'receipt' off a settled transaction, 'paper' exact but
+   * simulated, 'quote' a pre-trade estimate. read-token.ts carries both and
+   * says why: "Travels with the price because a pretend fill must not look like
+   * a real one." The port dropped them, so every marker on the public token
+   * chart read as somebody’s money.
+   */
+  paper: boolean;
+  basisSource: "receipt" | "paper" | "quote" | null;
   slug: string;
   name: string;
   handle: string | null;
@@ -213,4 +225,21 @@ export function withGaps(
     out.push(bar);
   }
   return { data: out, truncated: padded >= MAX_WHITESPACE };
+}
+
+/**
+ * WHY THIS ENTRY PRICE IS NOT A SETTLED FILL — or "" when it is.
+ *
+ * Three different things reach the token page's holder list and the chart's
+ * entry markers: a receipt read off a settled transaction, a paper fill that is
+ * exact but simulated, and a pre-trade quote that is an estimate of a price
+ * nothing traded at. `read-token.ts` carries the distinction and states the
+ * rule — "a pretend fill must not look like a real one" — and the port dropped
+ * it, so all three rendered as somebody's money on a public page.
+ */
+export function entryCaveat(seat: Pick<Seat, "paper" | "basisSource">): string {
+  if (seat.paper) return " — on paper, not a real fill";
+  if (seat.basisSource === "quote") return " — an estimate, not a settled fill";
+  if (seat.basisSource === null) return " — entry price unrecorded";
+  return "";
 }

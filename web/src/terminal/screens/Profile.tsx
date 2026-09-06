@@ -1,4 +1,5 @@
 import { PerformanceChart } from "../DitherChart";
+import { Boundary } from "../Boundary";
 import { useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import {
@@ -82,9 +83,20 @@ export function Profile({
               {pctBps(agent.pnlBps)}
             </strong>
           </div>
+          {/* BOTH COUNTERS, because `landed` alone is not "how much this agent
+              has done". read-agent.ts keeps them apart deliberately — folding
+              paper into landed would re-arm the +2643.3% incident — but showing
+              only landed published "0 Completed trades" for an agent with ten
+              simulated fills, which is the same omission wearing the other
+              face. */}
           <div className="public-trade-count">
             <strong>{agent.landed}</strong>
             <span>Completed trades</span>
+            {!!agent.filledPaper && (
+              <small className="public-paper-count">
+                {agent.filledPaper} more filled on paper — simulated, not real money
+              </small>
+            )}
           </div>
         </div>
         {agent.pnlBps == null && <p className="public-empty">{agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : "Return unavailable."}</p>}
@@ -114,7 +126,7 @@ export function Profile({
             className="public-chart"
             aria-label={`Performance history. Reported return ${pctBps(agent.pnlBps)}.`}
           >
-            <PerformanceChart values={agent.curve} height={88} />
+            <Boundary label="profile-chart"><PerformanceChart values={agent.curve} height={88} /></Boundary>
           </div>
         ) : (
           <p className="public-empty">

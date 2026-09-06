@@ -88,6 +88,16 @@ export interface LiveAgent {
   publicBook?: boolean;
   holdingsUsd?: number | null;
   landed: number;
+  /**
+   * Trades that filled ON PAPER, kept apart from `landed` on purpose.
+   *
+   * read-agent.ts refuses to fold them together and records why: the page once
+   * read "filled 0" beside ten posts saying "filled on paper", and widening
+   * `landed` would re-arm the +2643.3% incident. So both travel, and the
+   * profile shows both — it was showing only the first, so an agent with ten
+   * simulated fills published "0 Completed trades".
+   */
+  filledPaper?: number;
   last: Thesis | null;
   glance: StrategyGlance;
   thesis: string;
