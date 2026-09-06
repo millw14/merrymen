@@ -253,7 +253,95 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * opinion — "nothing has been vetted" is the honest answer there, not
  * "everything looks fine".
  */
+/**
+ * THE HOUSE PAYS FOR THIS ONE, so the house has to bound it.
+ *
+ * The worker's scout is gated on `scoutEnabled` (worker/src/index.ts), pinned
+ * by scout-budget.test.ts, after an incident whose numbers are in that file:
+ * a shared Groq key, a 200,000-token daily allowance, 195,881 spent, by a
+ * ranking pass running per tenant every ten minutes — "and the first person to
+ * notice was a user whose chat stopped working".
+ *
+ * This is the same shape and it is NOT the same fix. The worker's gate says
+ * "do not pay to rank what you cannot buy", and it costs nothing because a
+ * scouted coin genuinely could not be bought. Here the ranking IS the product:
+ * it is the verdict every viewer reads on the coins page. Gating it on a
+ * per-tenant TRADING permission would empty the panel for everyone, which is
+ * gating a display on an authority it has nothing to do with.
+ *
+ * So: a house switch, defaulting OFF, and a daily ceiling counted in-process.
+ * Off or over, the page renders the `no-model` path it already has — which
+ * says "nothing has been vetted" rather than "nothing looked good". That
+ * distinction is already built; this just adds another producer of it.
+ */
+const DISPLAY_SCOUT_ENABLED = ["1", "true", "yes"].includes(
+  (process.env.MERRYMEN_DISPLAY_SCOUT_ENABLED ?? "").trim().toLowerCase(),
+);
+
+/** Model calls a single web process may spend on display verdicts in a day. */
+const DISPLAY_SCOUT_DAILY_MAX = Number(process.env.MERRYMEN_DISPLAY_SCOUT_DAILY_MAX ?? "60") || 60;
+
+/**
+ * A VERDICT OUTLIVES A PAYLOAD, and used to be thrown away with it.
+ *
+ * The payload memo is 120 seconds because the tape moves — prices, volume,
+ * whether a pool is still there. A judgement about which coins are worth
+ * looking at does not move on that clock, and re-deriving it every two minutes
+ * is the whole of the spend: roughly 30 model calls an hour per replica,
+ * regardless of whether anybody was reading.
+ *
+ * Fifteen minutes cuts that by 7.5x on its own, before the switch above is
+ * even consulted.
+ */
+const VERDICT_TTL_MS = 15 * 60_000;
+
+type Verdicts = Awaited<ReturnType<typeof rankUncached>>;
+let verdictMemo:
+  | { at: number; ranked: ReadonlySet<string>; result: Verdicts }
+  | null = null;
+let spentToday = { day: "", calls: 0 };
+
+/** The UTC day, so the ceiling resets on a boundary a person can predict. */
+const dayKey = () => new Date().toISOString().slice(0, 10);
+
 async function rankForDisplay(
+  kept: readonly GeckoPool[],
+  nowSec: number,
+): Promise<Verdicts> {
+  if (!kept.length) return { picks: [] };
+
+  // REUSE ONLY WHEN THE CACHE SAW EVERY COIN ON THE PAGE.
+  //
+  // A cached verdict set that predates a new listing would give that coin
+  // `verdict: null`, and null on this page means "the scout looked and passed"
+  // — a considered opinion about a coin nobody looked at. So the memo is
+  // reused only when the screened set is a SUBSET of what was actually ranked,
+  // which on a stable market is almost always, and stops being true exactly
+  // when a fresh judgement is worth paying for.
+  const want = kept.map((p) => p.tokenAddress.toLowerCase());
+  if (
+    verdictMemo &&
+    Date.now() - verdictMemo.at < VERDICT_TTL_MS &&
+    want.every((t) => verdictMemo!.ranked.has(t))
+  ) {
+    return verdictMemo.result;
+  }
+
+  if (!DISPLAY_SCOUT_ENABLED) return { picks: [], why: "no-model" };
+
+  const today = dayKey();
+  if (spentToday.day !== today) spentToday = { day: today, calls: 0 };
+  if (spentToday.calls >= DISPLAY_SCOUT_DAILY_MAX) return { picks: [], why: "no-model" };
+  spentToday.calls += 1;
+
+  const result = await rankUncached(kept, nowSec);
+  // Cached even on failure: a provider that is down stays down for a while, and
+  // retrying it every 120 seconds is how a failure becomes a spend.
+  verdictMemo = { at: Date.now(), ranked: new Set(want), result };
+  return result;
+}
+
+async function rankUncached(
   kept: readonly GeckoPool[],
   nowSec: number,
 ): Promise<{
