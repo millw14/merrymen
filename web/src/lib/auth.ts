@@ -262,6 +262,20 @@ export async function verifyGrantBinding(args: {
    * the other.
    */
   version?: unknown;
+  /**
+   * The DID the grant CLAIMS, echoed so the signed text can be rebuilt.
+   * UNTRUSTED — it is compared against `verifiedDid` and is never an identity.
+   */
+  did?: unknown;
+  /**
+   * The DID the ROUTE verified out of a Privy access token.
+   *
+   * This function performs no token verification of its own and holds no Privy
+   * credential; it is handed the result. The privy arm refuses outright when
+   * there is none, so a caller that forgot to verify gets a refusal rather than
+   * a binding checked with its authentication half missing.
+   */
+  verifiedDid?: string | null;
   now?: number;
 }): Promise<BindingResult> {
   // ── WHICH SECURITY MODEL, DECIDED ONCE AND OUT LOUD ──────────────────────
@@ -279,18 +293,66 @@ export async function verifyGrantBinding(args: {
   if (!isBindingVersion(version)) {
     return { ok: false, why: "this grant's binding version is not one this deployment verifies" };
   }
+  const now = args.now ?? Date.now();
+
   if (version === "privy-did-owner-v1") {
-    // PR B implements this arm. Refusing is the correct behaviour until then:
-    // a deployment that cannot verify a Privy binding must not fall back to
-    // verifying it as a legacy one, which would read a single owner signature
-    // as if it were two independent proofs.
-    return {
-      ok: false,
-      why: "privy bindings are not enabled on this deployment yet",
-    };
+    // ── privy-did-owner-v1: A VERIFIED TOKEN AND ONE SIGNATURE ─────────────
+    //
+    // Still two proofs, made of different evidence. Authentication is the
+    // access token the ROUTE verified — this function never sees a token and
+    // never decides whether one is valid; it is handed the DID that came out
+    // of one, and refuses if the caller has none. Owner authority is a
+    // signature over a challenge whose text CONTAINS that DID, so a signature
+    // captured under one identity cannot be replayed under another.
+    if (!args.verifiedDid) {
+      // The route did not verify a token. Refusing is the only safe reading:
+      // accepting would make the owner signature the sole proof, and that is
+      // the legacy model with its authentication half removed.
+      return { ok: false, why: "this claim needs a verified privy identity and none was supplied" };
+    }
+    if (typeof args.did !== "string" || args.did !== args.verifiedDid) {
+      // The grant echoes the DID so the signed text can be reconstructed. It is
+      // never an identity — it is compared to the verified one and any
+      // difference is a refusal.
+      return { ok: false, why: "this grant names a different identity than the one that signed in" };
+    }
+    // THE EMBEDDED WALLET IS BOTH THE LOGIN AND THE OWNER, and that is the
+    // model — not an accident to be tolerated. It is why this version exists
+    // separately: the legacy arm's premise is two keys, and asserting that here
+    // would refuse every Privy grant. What must hold instead is that the owner
+    // is the tenant the DID resolved to, or a verified login could install a
+    // grant on an owner it does not control.
+    if (args.owner.toLowerCase() !== args.tenant.toLowerCase()) {
+      return {
+        ok: false,
+        why: "this agent's owner is not the wallet you signed in with",
+      };
+    }
+    const privyGate = checkNonce(args.nonce, args.origin, now);
+    if (!privyGate.ok) return { ok: false, why: privyGate.why };
+
+    const privyMessage = bindingMessage({
+      version: "privy-did-owner-v1",
+      origin: args.origin,
+      nonce: args.nonce,
+      owner: args.owner,
+      smartAccount: args.smartAccount,
+      chainId: args.chainId,
+      did: args.verifiedDid,
+    });
+    let privyOwner: `0x${string}`;
+    try {
+      privyOwner = await recoverMessageAddress({ message: privyMessage, signature: args.ownerSignature });
+    } catch {
+      return { ok: false, why: "binding signature did not recover" };
+    }
+    if (privyOwner.toLowerCase() !== args.owner.toLowerCase()) {
+      return { ok: false, why: "the agent wallet did not sign — its owner key is not held here" };
+    }
+    usedNonces.add(args.nonce);
+    return { ok: true, tenant: args.tenant.toLowerCase() as `0x${string}` };
   }
 
-  const now = args.now ?? Date.now();
   const gate = checkNonce(args.nonce, args.origin, now);
   if (!gate.ok) return { ok: false, why: gate.why };
 

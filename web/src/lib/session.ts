@@ -43,7 +43,7 @@
  * is worker-enforced until the breaker contract ships (Phase 2).
  */
 
-import { createPublicClient, erc20Abi, http, parseAbi, type Address } from "viem";
+import { createPublicClient, erc20Abi, http, parseAbi, type Address, type LocalAccount } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { createKernelAccount } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
@@ -153,8 +153,47 @@ const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
  * the same owner key always reproduces the same smart account, so an existing
  * funded wallet can be re-armed with a brand-new session key.
  */
+/**
+ * WHO OWNS A MERRYMAN'S KERNEL ACCOUNT.
+ *
+ * This used to be a private key, because there was only one kind of owner: a
+ * keypair generated in this browser and kept in localStorage. Privy adds a
+ * second — an embedded wallet whose key merrymen never sees and cannot export
+ * — so the parameter had to become the thing both actually are, which is a
+ * SIGNER. The Kernel derivation, the wall and the session key are untouched by
+ * the change; only where the signature comes from differs.
+ *
+ * `binding` is carried alongside because the two owners prove themselves
+ * differently, and which model applies is never inferred: a browser key
+ * co-signs beside the login wallet, an embedded wallet signs once and its
+ * authentication is a verified access token.
+ */
+export type OwnerSigner =
+  | {
+      /**
+       * A viem LocalAccount. `privateKeyToAccount` for a browser-held key,
+       * `toViemAccount({ wallet })` for a Privy embedded wallet — Privy returns
+       * a LocalAccount precisely so it drops into code like this one.
+       *
+       * NOT an EIP-1193 provider. ZeroDev's `toSigner` resolves a provider's
+       * address with `Promise.any([eth_requestAccounts, eth_accounts])` and
+       * takes [0] — whichever RPC answers first. The owner address decides the
+       * ACCOUNT address, so that race would decide which Merryman you get.
+       */
+      account: LocalAccount;
+      binding: "legacy-wallet-owner-v1";
+      /** The key that controls the funds. Present ONLY for a browser-generated owner. */
+      privateKey: `0x${string}`;
+    }
+  | {
+      account: LocalAccount;
+      binding: "privy-did-owner-v1";
+      /** The verified DID this owner signs under. Appears in the signed text. */
+      did: string;
+    };
+
 async function mintGrant(
-  ownerPrivateKey: `0x${string}`,
+  ownerSigner: OwnerSigner,
   caps: GrantCaps,
   onStatus: (status: string) => void,
   chainId: number,
@@ -202,7 +241,7 @@ async function mintGrant(
   const entryPoint = getEntryPoint("0.7");
   const kernelVersion = KERNEL_V3_3;
 
-  const ownerAccount = privateKeyToAccount(ownerPrivateKey);
+  const ownerAccount = ownerSigner.account;
   const owner = ownerAccount.address;
 
   onStatus("deriving your smart account…");
@@ -350,7 +389,12 @@ async function mintGrant(
     // custodian of a single owner key. The owner key still lives in this
     // browser's localStorage below, which is what makes client-side recovery
     // work with no server involvement.
-    ...(hostedAs ? {} : { demoOwnerPrivateKey: ownerPrivateKey }),
+    // ONLY A BROWSER-GENERATED OWNER HAS A KEY TO OMIT. A Privy owner has none
+    // to carry in the first place, which is the point: there is no copy of it
+    // anywhere in merrymen to leak, back up, or forget to strip.
+    ...(hostedAs || ownerSigner.binding !== "legacy-wallet-owner-v1"
+      ? {}
+      : { demoOwnerPrivateKey: ownerSigner.privateKey }),
   };
 
   // HOSTED: prove this account belongs to the signed-in wallet before offering
@@ -363,7 +407,7 @@ async function mintGrant(
       owner,
       smartAccount: account.address,
       chainId,
-      ownerAccount,
+      ownerSigner,
       tenant: hostedAs,
     });
     grant.binding = binding;
@@ -385,7 +429,10 @@ async function mintGrant(
   // a named local so it can be returned as well as stored -- the UI needs the
   // copy with the key, and reading it back off localStorage to find that out
   // was the bug.
-  const localGrant: Grant = { ...grant, demoOwnerPrivateKey: ownerPrivateKey };
+  const localGrant: Grant =
+    ownerSigner.binding === "legacy-wallet-owner-v1"
+      ? { ...grant, demoOwnerPrivateKey: ownerSigner.privateKey }
+      : { ...grant };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(localGrant));
 
   // Hand the grant to the worker. Self-hosted: a localhost file handoff.
@@ -419,7 +466,7 @@ async function signBinding(args: {
   owner: Address;
   smartAccount: Address;
   chainId: number;
-  ownerAccount: ReturnType<typeof privateKeyToAccount>;
+  ownerSigner: OwnerSigner;
   /** The wallet the session belongs to — what the server will check against. */
   tenant: Address;
 }): Promise<NonNullable<Grant["binding"]>> {
@@ -427,6 +474,36 @@ async function signBinding(args: {
     if (!r.ok) throw new Error("couldn't start the account link — please sign in again.");
     return r.json();
   })) as { origin: string; nonce: string };
+
+  // ── privy-did-owner-v1: ONE SIGNATURE, AND THE DID IS IN THE TEXT ────────
+  //
+  // No injected provider is consulted, and that is the fix for the error this
+  // path used to throw: it compared the browser wallet's ACTIVE account against
+  // the session, which under Privy is an embedded wallet MetaMask has never
+  // heard of. The comparison was right for a model where the login is an
+  // injected wallet, and simply does not apply to this one.
+  //
+  // Authentication here is the access token the server verifies at intake; this
+  // signature is the owner half. The DID is inside the signed bytes, so a
+  // signature captured under one identity cannot be replayed under another.
+  if (args.ownerSigner.binding === "privy-did-owner-v1") {
+    const did = args.ownerSigner.did;
+    const privyMessage = bindingMessage({
+      version: "privy-did-owner-v1",
+      origin: ch.origin,
+      nonce: ch.nonce,
+      owner: args.owner,
+      smartAccount: args.smartAccount,
+      chainId: args.chainId,
+      did,
+    });
+    return {
+      version: "privy-did-owner-v1",
+      nonce: ch.nonce,
+      ownerSignature: await args.ownerSigner.account.signMessage({ message: privyMessage }),
+      did,
+    };
+  }
 
   const message = bindingMessage({
     origin: ch.origin,
@@ -460,9 +537,9 @@ async function signBinding(args: {
   })) as `0x${string}`;
 
   // Local, no popup: the generated owner key vouches for itself.
-  const ownerSignature = await args.ownerAccount.signMessage({ message });
+  const ownerSignature = await args.ownerSigner.account.signMessage({ message });
 
-  return { nonce: ch.nonce, walletSignature, ownerSignature };
+  return { version: "legacy-wallet-owner-v1", nonce: ch.nonce, walletSignature, ownerSignature };
 }
 
 /** Where a superseded grant is parked, keyed by the account it controls. */
@@ -605,11 +682,32 @@ export function refusalMessage(status: number, serverError?: string): string {
   }
 }
 
+/**
+ * How the browser proves a Privy identity when handing over a grant.
+ *
+ * Set by the Privy sign-in once, read here. The access token is NOT stored —
+ * this is a getter, so the token is fetched fresh at the moment it is needed
+ * and Privy refreshes it near expiry. Holding one would mean holding a
+ * credential past the moment it was useful.
+ */
+let privyTokenSource: (() => Promise<string | null>) | null = null;
+export function setPrivyTokenSource(fn: (() => Promise<string | null>) | null): void {
+  privyTokenSource = fn;
+}
+
 async function postGrant(grant: Grant): Promise<GrantHandoff> {
   try {
+    // A PRIVY BINDING CARRIES ITS TOKEN. The server cannot verify the identity
+    // half of that binding without one, and it refuses rather than falling back
+    // to the legacy check — so a missing header is a 401, not a downgrade.
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (grant.binding?.version === "privy-did-owner-v1" && privyTokenSource) {
+      const token = await privyTokenSource();
+      if (token) headers.Authorization = `Bearer ${token}`;
+    }
     const res = await fetch("/api/grants", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       credentials: "same-origin",
       body: JSON.stringify(grant),
     });
@@ -660,8 +758,44 @@ export interface MintOptions {
 
 export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
   o.onStatus("minting your agent's owner key…");
+  const key = generatePrivateKey();
   return mintGrant(
-    generatePrivateKey(),
+    { account: privateKeyToAccount(key), binding: "legacy-wallet-owner-v1", privateKey: key },
+    o.caps,
+    o.onStatus,
+    o.chainId ?? robinhoodChain.id,
+    o.extraTokens ?? [],
+    o.v4AdapterAddress,
+    o.ponsAdapterAddress,
+    o.hostedAs,
+  );
+}
+
+/**
+ * CREATE A MERRYMAN OWNED BY A PRIVY EMBEDDED WALLET.
+ *
+ * Everything downstream is the SAME code the browser-key path runs: the same
+ * Kernel v3.3 derivation, the same permission wall, the same session key, the
+ * same serialization. Only the owner differs, and only in where its signature
+ * comes from. There is no second smart-account implementation, no alternative
+ * executor, and no Privy account abstraction anywhere in the path.
+ *
+ * WHAT IS GONE, DELIBERATELY: `demoOwnerPrivateKey`. A Privy owner has no key
+ * for merrymen to hold, back up, strip at the boundary, or lose — which
+ * removes the localStorage custody this file's header has always flagged as
+ * the weak point, and replaces it with Privy's own recovery. The consequence
+ * to be honest about is the mirror image: merrymen cannot sweep this account
+ * from a backed-up key, because there is no such key. Recovery for a
+ * Privy-owned Merryman is signer-based and is NOT yet built.
+ */
+export async function createPrivyOwnedWallet(
+  owner: LocalAccount,
+  did: string,
+  o: MintOptions,
+): Promise<MintedGrant> {
+  o.onStatus("deriving your smart account…");
+  return mintGrant(
+    { account: owner, binding: "privy-did-owner-v1", did },
     o.caps,
     o.onStatus,
     o.chainId ?? robinhoodChain.id,
@@ -689,7 +823,11 @@ export async function restoreAgentWallet(
 ): Promise<MintedGrant> {
   o.onStatus("re-deriving your smart account from the owner key…");
   return mintGrant(
-    ownerPrivateKey,
+    {
+      account: privateKeyToAccount(ownerPrivateKey),
+      binding: "legacy-wallet-owner-v1",
+      privateKey: ownerPrivateKey,
+    },
     o.caps,
     o.onStatus,
     o.chainId ?? robinhoodChain.id,
