@@ -438,7 +438,6 @@ async function main() {
    * deadlock-blocked the auto-convert that would have produced real cash —
    * the convert refuses to run in paper mode, so "no cash → paper → no
    * convert → still no cash" looped forever. Broke means NO cash AND NO gas.
-   * See readsAsBroke for the pure form and its tests.
    */
   let lastPrices: Map<string, PriceQuote> = new Map();
   /**
