@@ -1,7 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { homePaths } from "@merrymen/home";
-import { llmProviderById, type MerrymenSettings } from "@merrymen/core";
+import { getSettingsStore } from "@merrymen/settings-store";
+import { isHostedMode, llmProviderById, type MerrymenSettings } from "@merrymen/core";
+import { tenantOf } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -11,7 +13,26 @@ interface FetchModelsBody {
   baseUrl?: string;
 }
 
-async function readSavedSettings(): Promise<MerrymenSettings> {
+/**
+ * THE SAME SETTINGS THE REST OF THE PRODUCT READS.
+ *
+ * This read only ~/.merrymen/settings.json — a file that does not exist on the
+ * hosted deploy, where a tenant's settings live in the per-tenant encrypted
+ * store and the global file belongs to nobody. So `saved` came back empty for
+ * every hosted tenant, the saved Groq key was never attached, and the request
+ * went to the provider with no Authorization header at all. Groq answered 401,
+ * and the settings page printed "Could not load AI models. Check your provider
+ * and key" — beside a key field showing dots, which is to say beside the key it
+ * had just declined to use. Reported by two testers as showing "all the time,
+ * but everything is set". It was.
+ *
+ * Mirrors readStored in /api/settings exactly, including the refusal to fall
+ * back to the global file when hosted: those settings are not this tenant's,
+ * and reading somebody else's key here would be worse than not reading one.
+ */
+async function readSavedSettings(req: Request): Promise<MerrymenSettings> {
+  const tenant = isHostedMode() ? tenantOf(req) : null;
+  if (isHostedMode()) return tenant ? ((await getSettingsStore().get(tenant)) ?? {}) : {};
   try {
     return JSON.parse(
       (await readFile(homePaths.settings(), "utf8")).replace(/^﻿/, ""),
@@ -38,7 +59,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
   }
 
-  const saved = await readSavedSettings();
+  const saved = await readSavedSettings(req);
   const providerId = body.provider || saved.llmProvider;
   if (!providerId) {
     return NextResponse.json({ error: "no provider specified and none saved" }, { status: 400 });

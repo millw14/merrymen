@@ -101,6 +101,10 @@ describe("the questions testers actually asked are answerable", () => {
     "why does it say would buy",
     "what is a session key",
     "why is my feed quiet",
+    // Asked in the beta group on 2026-09-06, in these words.
+    "How to switch from paper mode to real trading? Agent is funded with ETH and USDG",
+    "so how do I get it to actually start trading?",
+    "on settings page it shows could not load ai models",
   ];
 
   for (const question of asked) {

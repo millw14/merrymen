@@ -107,7 +107,7 @@ import { readHolderStatus } from "./circle";
 import { accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadGrantFile } from "./grant";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
-import { execModeOf, type ExecMode } from "./exec-mode";
+import { execModeOf, liveBlockerText, type ExecMode, type RefuseRule } from "./exec-mode";
 import { limitsFromGrant } from "./limits";
 import {
   accountingLicence,
@@ -436,6 +436,8 @@ async function main() {
       paperTradingEnabled: cfg.paperTradingEnabled,
     });
   const paperActive = () => execMode().mode === "paper";
+  /** The last leg that blocked the live rail, so the event fires on change only. */
+  let lastLiveBlocker: RefuseRule | null | undefined;
   /**
    * Is somebody else paying the gas?
    *
@@ -4701,6 +4703,32 @@ async function main() {
     // a child is wedged, and it must keep beating even when the database is
     // unreachable — otherwise a database blip gets a healthy worker SIGKILLed.
     if (active) void setAgentMode(active.agentId, mode, at, sponsorGas);
+
+    // ── AND SAY WHY IT IS NOT LIVE ──────────────────────────────────────
+    //
+    // A tester funded an agent with ETH and USDG, set their key, watched it
+    // run, saw "Paper trading", and asked where the switch to real trading
+    // was. There is no switch, and there should not be: paper is PERMISSION to
+    // simulate, not a request to — execModeOf asks canTradeForReal first, so a
+    // working agent goes live on its own. What was missing was the sentence.
+    //
+    // Once per CHANGE, not once per tick: the same line sixty times an hour
+    // teaches an owner to scroll past it, and this repo already carries the
+    // incident where 1,242 identical rejections told nobody anything.
+    const verdict = execMode();
+    const blocking = verdict.mode === "live" ? null : verdict.rule;
+    if (active && blocking !== lastLiveBlocker) {
+      lastLiveBlocker = blocking;
+      void addEvent(
+        active.agentId,
+        blocking === null ? "ok" : "warn",
+        blocking === null
+          ? "trading for real — every leg of the live rail is available"
+          : `NOT trading for real yet: ${liveBlockerText(blocking)}. ` +
+            `Fills below are simulated at live prices until that is fixed. There is no ` +
+            `paper/live switch to find — your agent goes live by itself once this clears.`,
+      );
+    }
   }
 
   /**

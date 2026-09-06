@@ -31,7 +31,19 @@ import { TRADEABLE_CHAIN_ID } from "./preflight";
 export type RefuseRule = "not-armed" | "dead-policy" | "no-executor" | "wrong-chain" | "no-cash";
 
 export type ExecMode =
-  | { mode: "paper" }
+  /**
+   * WHY, EVEN HERE. `rule` is the leg that stopped the live rail, and on paper
+   * it is never absent: `canTradeForReal` is asked first, so reaching this
+   * branch means something blocked it.
+   *
+   * It used to be omitted, and that omission is what a tester ran into —
+   * funded with ETH and USDG, key set, agent running, and the product saying
+   * "Paper trading" with no way to find out why or any control to change it.
+   * They went looking for a switch. There is no switch: paper is PERMISSION TO
+   * SIMULATE, not a request to, and it never moves a working agent. The thing
+   * they needed was the sentence this field carries.
+   */
+  | { mode: "paper"; rule: RefuseRule }
   | { mode: "refuse"; rule: RefuseRule }
   | { mode: "live" };
 
@@ -93,17 +105,54 @@ export function execModeOf(a: ExecInputs): ExecMode {
 
   if (canTradeForReal(a)) return { mode: "live" };
 
-  // Something is wrong with the live rail. Simulating is the better answer when
-  // the owner has allowed it — that is the whole point of paper.
-  if (a.paperTradingEnabled) return { mode: "paper" };
+  // Something is wrong with the live rail, and whichever answer we give — a
+  // simulated fill or a refusal — the owner is owed the same sentence about
+  // which leg it was. Naming it only in the refusal branch is what made paper
+  // an unexplained dead end.
+  const blocker = liveBlocker(a);
 
-  // Paper is off, so say which leg failed. Ordered most-fundamental first, by
-  // what the remedy costs: a dead policy is fixable ONLY by re-signing — not by
-  // funding, not by a bundler key, not by switching chain — so it is named
-  // ahead of all three. A missing signer cannot be fixed by funding, and a dead
-  // chain cannot be fixed by either.
-  if (a.deadPolicy) return { mode: "refuse", rule: "dead-policy" };
-  if (!a.executor) return { mode: "refuse", rule: "no-executor" };
-  if (a.chainId !== TRADEABLE_CHAIN_ID) return { mode: "refuse", rule: "wrong-chain" };
-  return { mode: "refuse", rule: "no-cash" };
+  // Simulating is the better answer when the owner has allowed it — that is the
+  // whole point of paper.
+  if (a.paperTradingEnabled) return { mode: "paper", rule: blocker };
+  return { mode: "refuse", rule: blocker };
+}
+
+/**
+ * Which leg of the live rail failed.
+ *
+ * Ordered most-fundamental first, by what the remedy costs: a dead policy is
+ * fixable ONLY by re-signing — not by funding, not by a bundler key, not by
+ * switching chain — so it is named ahead of all three. A missing signer cannot
+ * be fixed by funding, and a dead chain cannot be fixed by either.
+ *
+ * Only ever called where `canTradeForReal` has already answered false, so it
+ * always has something to name.
+ */
+export function liveBlocker(a: ExecInputs): RefuseRule {
+  if (!a.armed) return "not-armed";
+  if (a.deadPolicy) return "dead-policy";
+  if (!a.executor) return "no-executor";
+  if (a.chainId !== TRADEABLE_CHAIN_ID) return "wrong-chain";
+  return "no-cash";
+}
+
+/**
+ * The same leg, in words an owner can act on.
+ *
+ * Lives here rather than in the UI because the remedy is a property of the
+ * rule, and two surfaces already render this (the dashboard and the chat).
+ */
+export function liveBlockerText(rule: RefuseRule): string {
+  switch (rule) {
+    case "not-armed":
+      return "your trading key is not active yet — the agent has no permission to trade with";
+    case "dead-policy":
+      return "this trading key was signed before a fix and cannot reach the chain; re-signing it is free and instant";
+    case "no-executor":
+      return "no bundler is configured, so nothing can be submitted to the chain";
+    case "wrong-chain":
+      return "this key is for a different network than the one trading happens on";
+    case "no-cash":
+      return "the account holds no USDG to trade with";
+  }
 }
