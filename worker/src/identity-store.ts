@@ -60,6 +60,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { merrymenHome } from "./home";
+import { planClaims, socialIdentityProblem, type AccountClaim, type ClaimPlan } from "./account-claim";
 
 /**
  * Crockford base32, lowercased: no i, l, o or u, so a slug read aloud or
@@ -177,6 +178,16 @@ export class FileIdentityStore implements IdentityStore {
     }
   }
   async ensure(tenant: `0x${string}`, account: `0x${string}`): Promise<PublicIdentity> {
+    // ONE IDENTITY PER ACCOUNT, on this backend too. Single-process and
+    // single-writer, so a scan is the whole enforcement — but the RULE has to
+    // be the same one, or a self-hosted install permits what hosted refuses.
+    const a = account.toLowerCase();
+    for (const other of await this.all()) {
+      if (other.tenant.toLowerCase() === tenant.toLowerCase()) continue;
+      if (other.accounts.some((x) => x.toLowerCase() === a)) {
+        throw new AccountAlreadyClaimed(a, other.tenant.toLowerCase());
+      }
+    }
     const existing = await this.get(tenant);
     const rec: PublicIdentity = existing
       ? { ...existing, accounts: withAccount(existing.accounts, account), updatedAt: now() }
@@ -215,6 +226,10 @@ export class FileIdentityStore implements IdentityStore {
     return (await this.all()).find((r) => r.social?.did === did) ?? null;
   }
   async linkSocial(tenant: `0x${string}`, social: SocialIdentity): Promise<boolean> {
+    // Same boundary rule as the Postgres backend. The two must refuse the same
+    // inputs or a self-hosted install accepts what the hosted one rejects.
+    const problem = socialIdentityProblem(social);
+    if (problem) throw new Error(`refusing to link a social identity: ${problem}`);
     const holder = await this.byDid(social.did);
     if (holder && holder.tenant.toLowerCase() !== tenant.toLowerCase()) return false;
     const rec = await this.get(tenant);
@@ -292,8 +307,104 @@ function fromRow(r: Row): PublicIdentity {
  * NO requireDek(). See the header: nothing in this record is a secret, and
  * needing the money key to render a public page would be the wrong dependency.
  */
+export class AccountAlreadyClaimed extends Error {
+  constructor(
+    readonly account: string,
+    readonly holder: string,
+  ) {
+    super(`the smart account ${account} is already claimed by a different login`);
+    this.name = "AccountAlreadyClaimed";
+  }
+}
+
+/**
+ * Bring every account any identity has ever held into the claim table, or
+ * refuse. IDEMPOTENT: re-running it against a database it has already been
+ * applied to inserts nothing and reports no conflict.
+ *
+ * Reads three sources, because the invariant has to hold across all of them:
+ * the whole `accounts` HISTORY of every identity (not merely the current one —
+ * the ledger rows under a superseded address are permanent), every installed
+ * grant's `smartAccount`, and whatever the claim table already holds.
+ */
+async function backfillClaims(c: PgClientLike): Promise<ClaimState> {
+  const observed: AccountClaim[] = [];
+
+  const { rows: idRows } = await c.query(`SELECT tenant, accounts FROM agent_identity`);
+  for (const r of idRows) {
+    const raw = (r as { accounts?: unknown }).accounts;
+    let accounts: unknown[] = [];
+    if (Array.isArray(raw)) accounts = raw;
+    else if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (Array.isArray(parsed)) accounts = parsed;
+      } catch {
+        // An unreadable history is not a claim we can vouch for. Skipping it
+        // cannot create a false conflict; it can only leave an address
+        // unclaimed, which the next successful write repairs.
+      }
+    }
+    for (const a of accounts) {
+      observed.push({ account: String(a), tenant: String(r.tenant ?? ""), source: "identity-history" });
+    }
+  }
+
+  try {
+    const { rows: grantRows } = await c.query(
+      `SELECT tenant, grant_json->>'smartAccount' AS smart_account FROM grants`,
+    );
+    for (const r of grantRows) {
+      const acc = (r as { smart_account?: unknown }).smart_account;
+      if (acc === null || acc === undefined) continue;
+      observed.push({ account: String(acc), tenant: String(r.tenant ?? ""), source: "installed-grant" });
+    }
+  } catch {
+    // The grants table lives in the same database but is owned by another
+    // store, and a deployment that has not created it yet is a fresh install
+    // with nothing to backfill.
+  }
+
+  const { rows: claimRows } = await c.query(`SELECT smart_account, tenant FROM agent_account`);
+  const existing: AccountClaim[] = claimRows.map((r) => ({
+    account: String(r.smart_account ?? ""),
+    tenant: String(r.tenant ?? ""),
+    source: "existing-claim" as const,
+  }));
+
+  const plan = planClaims(observed, existing);
+  if (!plan.ok) return plan;
+
+  // ONE TRANSACTION FOR THE WHOLE BACKFILL. A partial backfill would leave the
+  // table looking complete while some addresses were still unclaimed.
+  await c.query("BEGIN");
+  try {
+    for (const row of plan.insert) {
+      await c.query(
+        `INSERT INTO agent_account (smart_account, tenant, claimed_at)
+         VALUES ($1, $2, $3) ON CONFLICT (smart_account) DO NOTHING`,
+        [row.account, row.tenant, Math.floor(Date.now() / 1000)],
+      );
+    }
+    await c.query("COMMIT");
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    throw e;
+  }
+  if (plan.insert.length > 0) {
+    console.log(
+      `[identity] claimed ${plan.insert.length} account(s); ${plan.alreadyHeld} already held`,
+    );
+  }
+  return plan;
+}
+
+type ClaimState = ClaimPlan;
+
 export class PgIdentityStore implements IdentityStore {
   private ready: Promise<PgClientLike> | null = null;
+  /** Set by the backfill. `ok: false` makes every new claim refuse. */
+  private claims: ClaimState = { ok: true, insert: [], alreadyHeld: 0 };
   constructor(private url: string) {}
   private async client(): Promise<PgClientLike> {
     if (!this.ready) {
@@ -326,6 +437,27 @@ export class PgIdentityStore implements IdentityStore {
           `CREATE UNIQUE INDEX IF NOT EXISTS agent_identity_subject
              ON agent_identity (provider, subject) WHERE provider IS NOT NULL`,
         );
+        // AN ACCOUNT BELONGS TO ONE IDENTITY, EVER. See account-claim.ts for
+        // why this is a table rather than a unique index over the newest entry
+        // in the history array.
+        await c.query(
+          `CREATE TABLE IF NOT EXISTS agent_account (
+             smart_account TEXT PRIMARY KEY,
+             tenant TEXT NOT NULL,
+             claimed_at BIGINT NOT NULL
+           )`,
+        );
+        await c.query(`CREATE INDEX IF NOT EXISTS agent_account_tenant ON agent_account (tenant)`);
+        this.claims = await backfillClaims(c);
+        if (this.claims.ok === false) {
+          // LOUD, AND READS STAY UP. A public page must still render; what must
+          // not happen is a new claim landing on top of a dispute nobody has
+          // resolved. `ensure` refuses while this is set.
+          console.error(`[identity] ACCOUNT CLAIM CONFLICT — ${this.claims.why}`);
+          for (const c2 of this.claims.conflicts) {
+            console.error(`[identity]   ${c2.account} claimed by ${c2.tenants.join(" and ")} (${c2.sources.join(", ")})`);
+          }
+        }
         return c;
       })();
     }
@@ -338,37 +470,101 @@ export class PgIdentityStore implements IdentityStore {
     ]);
     return rows[0] ? fromRow(rows[0] as unknown as Row) : null;
   }
+  /**
+   * Claim the account and update the identity IN ONE TRANSACTION.
+   *
+   * The claim and the history write cannot be two statements with a gap between
+   * them — that is the read-then-write race this table exists to remove. So the
+   * order inside a single transaction is: insert the claim, read back who holds
+   * it, and only proceed if it is us.
+   *
+   * A CONCURRENT SECOND TENANT LOSES DETERMINISTICALLY. Both open a
+   * transaction; the first INSERT takes a row lock on the primary key, the
+   * second blocks on it until the first commits, then its ON CONFLICT DO
+   * NOTHING writes nothing and the read-back returns the first tenant. There is
+   * no interleaving in which both proceed, and no ordering in which the loser
+   * silently overwrites.
+   */
   async ensure(tenant: `0x${string}`, account: `0x${string}`): Promise<PublicIdentity> {
     const c = await this.client();
     const t = tenant.toLowerCase();
-    const existing = await this.get(tenant);
-    if (existing) {
-      const accounts = withAccount(existing.accounts, account);
-      await c.query(`UPDATE agent_identity SET accounts = $2, updated_at = $3 WHERE tenant = $1`, [
-        t,
-        JSON.stringify(accounts),
-        now(),
-      ]);
-      return { ...existing, accounts, updatedAt: now() };
+    const a = account.toLowerCase();
+    if (this.claims.ok === false) {
+      // The backfill found an address held by two tenants. Reads stay up — a
+      // public page must still render — but nothing new is claimed on top of a
+      // dispute nobody has resolved.
+      throw new Error(`refusing to claim an account: ${this.claims.why}`);
     }
-    // A slug collision at 80 bits is theoretical, but a retry turns a 500 into
-    // a no-op and costs nothing on the path that never collides.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const slug = mintSlug();
-      try {
-        const { rows } = await c.query(
-          `INSERT INTO agent_identity (tenant, slug, accounts, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $4)
-           ON CONFLICT (tenant) DO UPDATE SET accounts = EXCLUDED.accounts, updated_at = EXCLUDED.updated_at
-           RETURNING *`,
-          [t, slug, JSON.stringify([account.toLowerCase()]), now()],
-        );
-        if (rows[0]) return fromRow(rows[0] as unknown as Row);
-      } catch (e) {
-        if (attempt === 2) throw e;
+
+    await c.query("BEGIN");
+    try {
+      await c.query(
+        `INSERT INTO agent_account (smart_account, tenant, claimed_at)
+         VALUES ($1, $2, $3) ON CONFLICT (smart_account) DO NOTHING`,
+        [a, t, now()],
+      );
+      const { rows: held } = await c.query(`SELECT tenant FROM agent_account WHERE smart_account = $1`, [a]);
+      const holder = held[0] ? String(held[0].tenant).toLowerCase() : null;
+      if (holder && holder !== t) {
+        // NOT AN ERROR TO SWALLOW. Every ledger table keys on this address, so
+        // letting a second tenant through would merge two books.
+        await c.query("ROLLBACK");
+        throw new AccountAlreadyClaimed(a, holder);
       }
+
+      const existing = await this.getWithin(c, tenant);
+      if (existing) {
+        const accounts = withAccount(existing.accounts, account);
+        await c.query(`UPDATE agent_identity SET accounts = $2, updated_at = $3 WHERE tenant = $1`, [
+          t,
+          JSON.stringify(accounts),
+          now(),
+        ]);
+        await c.query("COMMIT");
+        return { ...existing, accounts, updatedAt: now() };
+      }
+
+      // A slug collision at 80 bits is theoretical, but a retry turns a 500
+      // into a no-op and costs nothing on the path that never collides.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const slug = mintSlug();
+        try {
+          const { rows } = await c.query(
+            `INSERT INTO agent_identity (tenant, slug, accounts, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $4)
+             ON CONFLICT (tenant) DO UPDATE SET accounts = EXCLUDED.accounts, updated_at = EXCLUDED.updated_at
+             RETURNING *`,
+            [t, slug, JSON.stringify([a]), now()],
+          );
+          if (rows[0]) {
+            await c.query("COMMIT");
+            return fromRow(rows[0] as unknown as Row);
+          }
+        } catch (e) {
+          // A failed statement poisons the transaction, so the retry needs a
+          // savepoint rather than another attempt on a dead one.
+          if (attempt === 2) throw e;
+          await c.query("ROLLBACK");
+          await c.query("BEGIN");
+          await c.query(
+            `INSERT INTO agent_account (smart_account, tenant, claimed_at)
+             VALUES ($1, $2, $3) ON CONFLICT (smart_account) DO NOTHING`,
+            [a, t, now()],
+          );
+        }
+      }
+      await c.query("ROLLBACK");
+      throw new Error("could not mint a public id");
+    } catch (e) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw e;
     }
-    throw new Error("could not mint a public id");
+  }
+
+  /** `get`, but inside a transaction already in progress. */
+  private async getWithin(c: PgClientLike, tenant: `0x${string}`): Promise<PublicIdentity | null> {
+    const { rows } = await c.query(`SELECT * FROM agent_identity WHERE tenant = $1`, [tenant.toLowerCase()]);
+    return rows[0] ? fromRow(rows[0] as unknown as Row) : null;
   }
   async all(): Promise<PublicIdentity[]> {
     const c = await this.client();
@@ -399,6 +595,15 @@ export class PgIdentityStore implements IdentityStore {
    * the same pair still updates its own row and returns true.
    */
   async linkSocial(tenant: `0x${string}`, social: SocialIdentity): Promise<boolean> {
+    // REJECTED AT THE BOUNDARY, not by the index. A partial unique index
+    // (`WHERE provider IS NOT NULL`) does not exclude the empty string, so two
+    // rows carrying one collide under a constraint that looks as though it
+    // tolerates missing data. An empty provider id is not a valid identity
+    // whoever sent it, and widening the index until it fits solves the wrong
+    // problem. Throws rather than returning false: `false` means "somebody else
+    // holds this", and a malformed request is a different fact.
+    const problem = socialIdentityProblem(social);
+    if (problem) throw new Error(`refusing to link a social identity: ${problem}`);
     const c = await this.client();
     let rowCount: number | null | undefined;
     try {

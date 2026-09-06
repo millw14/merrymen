@@ -28,24 +28,30 @@ import {
 } from "@merrymen/core";
 
 /**
- * IS THE LEGACY TWO-PROOF PREMISE ENFORCED YET?
+ * IS THE LEGACY TWO-PROOF PREMISE ENFORCED? YES — AFTER IT WAS MEASURED.
  *
  * `legacy-wallet-owner-v1` claims that authentication and owner authority come
  * from two different keys. One key signing twice satisfies the arithmetic while
- * proving only half of that — so the check below is correct, and it is OFF.
+ * proving only half of that, so the check below is correct — but correct was
+ * never the question. `restoreAgentWallet` accepts any 64-hex key, so somebody
+ * could have pasted the private key of the wallet they sign in with, and
+ * switching the rule on before counting them would have those people discover
+ * it at RE-ARM time: an agent that stops working, with no warning and no
+ * migration.
  *
- * MEASURED FIRST, THEN ENFORCED. `restoreAgentWallet` accepts any 64-hex key,
- * so a user may have pasted the private key of the wallet they sign in with.
- * That is a custody pattern nobody has measured, not a broken account, and
- * switching the rule on before counting it would have those users discover it
- * at re-arm time — an agent that stops working, with no warning and no
- * migration path. The census is in worker/src/identity-audit.ts
- * (`owner is tenant`); this becomes `true` when it reports zero.
+ * So it shipped OFF, and the census ran first. Production, 2026-09-06:
+ *
+ *   owner is tenant   none of 22 — every owner key is separate from its login
+ *
+ * Twenty-two installed grants, twenty-two owner keys read, zero matches. Note
+ * the denominator: the audit distinguishes "checked and found none" from "could
+ * not check", because those look identical in a log and only one of them
+ * licenses this line. It said the former, so this is `true`.
  *
  * Same shape as ENFORCE_TRADE_ECONOMICS in worker/src/execution-cost.ts, and
  * for the same reason: a rule worth enforcing is worth observing first.
  */
-export const ENFORCE_LEGACY_TWO_PROOF = false;
+export const ENFORCE_LEGACY_TWO_PROOF = true;
 
 /** Challenge nonces live this long. Long enough to sign, short enough to not linger. */
 const CHALLENGE_TTL_MS = 5 * 60_000;

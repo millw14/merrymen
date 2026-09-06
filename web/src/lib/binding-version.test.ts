@@ -101,25 +101,37 @@ test("a privy binding is refused until the deployment can verify one", async () 
   assert.match(r.ok === false ? r.why : "", /privy bindings are not enabled/);
 });
 
-test("ONE KEY SIGNING TWICE IS MEASURED, NOT YET REFUSED", async () => {
-  // The rule is right and it is switched off, on purpose. `restoreAgentWallet`
-  // accepts any 64-hex key, so somebody may have pasted the private key of the
-  // wallet they sign in with — a custody pattern nobody has counted. Enforcing
-  // before counting would have those users find out at RE-ARM time, which is
-  // the worst possible moment and offers them no migration.
+test("ONE KEY SIGNING TWICE IS NOT TWO PROOFS", async () => {
+  // Enforced only after it was counted. Production, 2026-09-06: twenty-two
+  // installed grants, twenty-two owner keys read, zero of them equal to their
+  // own tenant. So this refusal invalidates no custody pattern anybody is
+  // actually using — which is the whole reason the census came first.
   //
-  // The census is `owner is tenant` in worker/src/identity-audit.ts. When it
-  // reports zero, ENFORCE_LEGACY_TWO_PROOF becomes true and this test flips to
-  // asserting the refusal.
-  assert.equal(ENFORCE_LEGACY_TWO_PROOF, false, "measure first, then enforce");
+  // Note what is NOT asserted here: there is no global rule that an owner may
+  // never equal a tenant. `privy-did-owner-v1` allows exactly that, and takes
+  // its authentication from a verified access token instead.
+  assert.equal(ENFORCE_LEGACY_TWO_PROOF, true, "the census reported zero, so this is on");
 
   const both = privateKeyToAccount(generatePrivateKey());
   const claim = await legacyClaim(both, both);
   // One key signing the same text twice produces the SAME signature, which is
-  // what makes the condition detectable at all.
+  // what makes the condition detectable at all — and what makes the two
+  // recoveries agree while proving half of what the model claims.
   assert.equal(claim.walletSignature, claim.ownerSignature);
   const r = await verifyGrantBinding(claim);
-  assert.equal(r.ok, true, "an existing same-key account must keep working until it is counted");
+  assert.equal(r.ok, false);
+  const why = r.ok === false ? r.why : "";
+  assert.match(why, /one proof where it needs two/);
+  // And it says what to DO. A refusal on a fund-access path that only describes
+  // the cause leaves the user with an unusable agent and no next step.
+  assert.match(why, /sweep the old one from the recovery panel/);
+});
+
+test("two DIFFERENT keys still verify — the rule is about proofs, not addresses", async () => {
+  const wallet = privateKeyToAccount(generatePrivateKey());
+  const owner = privateKeyToAccount(generatePrivateKey());
+  const r = await verifyGrantBinding(await legacyClaim(wallet, owner));
+  assert.equal(r.ok, true, r.ok === false ? r.why : "");
 });
 
 test("the refusal exists, is gated on the flag, and names a remedy", () => {
