@@ -5,6 +5,7 @@ import {
   type GeckoBucket,
   type GeckoPool,
   type GeckoWindow,
+  type PoolFeed,
 } from "../../../worker/src/venues/geckoterminal";
 import { recentPonsLaunches } from "../../../worker/src/venues/pons";
 import {
@@ -59,6 +60,29 @@ const LIMITS = { minReserveUsd: 25_000, minVolume24hUsd: 50_000, minBuyers24h: 1
 /** GeckoTerminal's venue slugs for the two halves of the Pons launchpad. */
 const GRADUATED = "pons-v2-dex";
 const ON_CURVE = "pons-v2";
+
+/**
+ * The three lists, in the order they are walked.
+ *
+ * `new_pools` is second rather than last on purpose: it is the only one of the
+ * three carrying coins minutes old, and the walk below is the thing most likely
+ * to be cut off partway.
+ */
+const FEEDS = ["trending_pools", "new_pools", "pools"] as const satisfies readonly PoolFeed[];
+
+/**
+ * How deep to walk each feed.
+ *
+ * Four pages is 12 requests per sweep, and a sweep happens at most once every
+ * two minutes for every viewer at once (see the memo below). Measured against
+ * the keyless quota on 2026-09-06: five consecutive page reads earned a 429, so
+ * this is deliberately short of what the API will serve — the ceiling here is
+ * politeness, not the market. Raising it needs a key, not a bigger number.
+ */
+const FEED_PAGES = 4;
+
+/** Spacing between page requests. Somebody else's rate limit is being spent. */
+const PAGE_GAP_MS = 250;
 
 export interface DiscoveryRow {
   token: string;
@@ -364,6 +388,16 @@ export interface Payload {
    * the page must not render that as a considered pass.
    */
   verdictsWhy: "no-model" | "model-failed" | null;
+  /**
+   * The index cut the sweep short, so `rows` is a PREFIX of the market rather
+   * than the market.
+   *
+   * The distinction this whole file is built on, one level up: an incomplete
+   * list and a small one render identically, and only one of them means there
+   * is nothing more to see. GeckoTerminal is keyless and rate-limits by IP, so
+   * this is a routine outcome, not an error.
+   */
+  truncated: boolean;
   degraded: boolean;
 }
 
@@ -443,6 +477,8 @@ interface Pools {
   all: GeckoPool[];
   asked: number;
   reached: number;
+  /** The walk was cut short by the index, so this list is SHORT, not complete. */
+  truncated: boolean;
   nowSec: number;
 }
 
@@ -478,51 +514,120 @@ export function sharedPools(): Promise<Pools> {
   return poolsInFlight;
 }
 
+/**
+ * WALK THE FEEDS, PAGE BY PAGE, BREADTH FIRST.
+ *
+ * This read page 1 of each feed and stopped — which is 20 pools a feed, and was
+ * never a deliberate ceiling: it is what `?page=` defaults to. Measured on
+ * 2026-09-06, page 1 of the three feeds yields about 25 distinct tokens of
+ * which 19 clear the screen, and walking four pages yields 86 of which 83
+ * clear it. The market was several times larger than the panel the whole time,
+ * and nothing said so, because a truncated list and a small market render
+ * identically.
+ *
+ * Breadth first — page 1 of every feed, then page 2 of every feed — because the
+ * budget is shared and the walk WILL be cut off some of the time. Taken
+ * depth-first that costs whole feeds, and the one it would cost is whichever
+ * sits last in the list.
+ *
+ * Takes its fetch so the walk can be tested without a network: the rules it
+ * encodes are all about what a REFUSAL means, and a refusal is the one thing an
+ * integration test cannot ask a third party for on demand.
+ */
+export async function walkFeeds(
+  fetchPage: (feed: PoolFeed, page: number) => Promise<{ pools: GeckoPool[]; failed: boolean }>,
+  onPool: (p: GeckoPool) => void,
+  opts: { pages?: number; gapMs?: number } = {},
+): Promise<{ asked: number; reached: number; truncated: boolean }> {
+  const pages = opts.pages ?? FEED_PAGES;
+  let asked = 0;
+  let reached = 0;
+  let truncated = false;
+  // Feeds still worth another page. A feed leaves when it runs out of coins or
+  // when the index stops answering, and those are different exits.
+  const walking = new Set<PoolFeed>(FEEDS);
+
+  for (let page = 1; page <= pages && walking.size > 0; page += 1) {
+    for (const feed of FEEDS) {
+      if (!walking.has(feed)) continue;
+      const r = await fetchPage(feed, page);
+      // ASKED AND REACHED COUNT FEEDS, NOT PAGES, deliberately. They decide
+      // `indexUnreachable`, which means "the index would not talk to us at
+      // all" — a fact about page 1. A rate limit four pages deep is a shorter
+      // list, not an unreachable index, and must not be reported as one.
+      if (page === 1) {
+        asked++;
+        if (!r.failed) reached++;
+      }
+      if (r.failed) {
+        // A refusal, not an ending. Deeper in, that is the rate limit, and the
+        // list being held is therefore SHORT — a fact the payload carries
+        // rather than one it hides behind a plausible-looking page.
+        walking.delete(feed);
+        if (page > 1) truncated = true;
+        continue;
+      }
+      // An empty page IS the end of the feed, and this is the one place the two
+      // outcomes are told apart. `fetchGeckoPoolsResult` is what makes that
+      // possible: a body it cannot parse comes back `failed`, never as [].
+      if (r.pools.length === 0) {
+        walking.delete(feed);
+        continue;
+      }
+      for (const p of r.pools) onPool(p);
+      // Spaced, because the limit being respected here is somebody else's and
+      // this walk is the largest thing merrymen asks of them.
+      const gap = opts.gapMs ?? PAGE_GAP_MS;
+      if (gap > 0 && walking.size > 0) await new Promise((resolve) => setTimeout(resolve, gap));
+    }
+  }
+  return { asked, reached, truncated };
+}
+
 async function readPools(): Promise<Pools> {
   const nowSec = Math.floor(Date.now() / 1000);
   const byPool = new Map<string, GeckoPool>();
+
+  // Deduped by TOKEN and kept at its BUSIEST venue — the same coin appears in
+  // several feeds and often on several venues, and a reader cares about the
+  // coin.
+  //
+  // Ranked on volume, with reserve only as a tiebreak. Deepest-reserve picked
+  // the wrong pool to describe a token by: a live pool here carries $27.0M of
+  // reserve against $4,506 of daily volume, so the row a reader saw was the one
+  // nobody trades. The screened set is unaffected — it already floors at $50k
+  // of volume.
+  const keep = (p: GeckoPool): void => {
+    const prev = byPool.get(p.tokenAddress);
+    const better =
+      !prev ||
+      (p.volume24hUsd ?? 0) > (prev.volume24hUsd ?? 0) ||
+      ((p.volume24hUsd ?? 0) === (prev.volume24hUsd ?? 0) &&
+        (p.reserveUsd ?? 0) > (prev.reserveUsd ?? 0));
+    if (better) byPool.set(p.tokenAddress, p);
+  };
+
   // Every feed refused is a different fact from every feed being empty, and
   // only one of them means the market is quiet. This API is keyless and
   // rate-limited, so the refusal is routine — and a page that renders it as
   // "nothing clearing the floor" states something false while looking normal.
-  let asked = 0;
-  let reached = 0;
-  for (const feed of ["trending_pools", "new_pools", "pools"] as const) {
-    const r = await fetchGeckoPoolsResult(feed);
-    asked++;
-    if (!r.failed) reached++;
-    for (const p of r.pools) {
-      // Deduped by TOKEN and kept at its BUSIEST venue — the same coin appears
-      // in several feeds and often on several venues, and a reader cares about
-      // the coin.
-      //
-      // Ranked on volume, with reserve only as a tiebreak. Deepest-reserve
-      // picked the wrong pool to describe a token by: a live pool here carries
-      // $27.0M of reserve against $4,506 of daily volume, so the row a reader
-      // saw was the one nobody trades. The screened set is unaffected — it
-      // already floors at $50k of volume.
-      const prev = byPool.get(p.tokenAddress);
-      const better =
-        !prev ||
-        (p.volume24hUsd ?? 0) > (prev.volume24hUsd ?? 0) ||
-        ((p.volume24hUsd ?? 0) === (prev.volume24hUsd ?? 0) &&
-          (p.reserveUsd ?? 0) > (prev.reserveUsd ?? 0));
-      if (better) byPool.set(p.tokenAddress, p);
-    }
-  }
+  const { asked, reached, truncated } = await walkFeeds(
+    (feed, page) => fetchGeckoPoolsResult(feed, { page }),
+    keep,
+  );
 
   const all = [...byPool.values()];
   const byToken = new Map<string, DiscoveryRow>();
   for (const p of all) {
     byToken.set(p.tokenAddress.toLowerCase(), { ...toRow(p, nowSec), verdict: null });
   }
-  return { byToken, all, asked, reached, nowSec };
+  return { byToken, all, asked, reached, truncated, nowSec };
 }
 
 async function build(): Promise<Shared> {
   // The feeds, shared with every token page. The only await the two paths
   // still have in common.
-  const { byToken, all, asked, reached, nowSec } = await sharedPools();
+  const { byToken, all, asked, reached, truncated, nowSec } = await sharedPools();
   const { rows: fresh, chain } = await readFresh();
   const { kept } = screenPools(all, LIMITS);
 
@@ -605,6 +710,7 @@ async function build(): Promise<Shared> {
     // correct answer. A value means it could not look at all — and that must
     // not read on the page as a considered pass.
     verdictsWhy,
+    truncated,
     degraded,
   };
   return { payload, unscreened };
