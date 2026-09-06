@@ -101,6 +101,27 @@ const VAULT_ABI = parseAbi([
 
 export type Grant = StoredGrant;
 
+/**
+ * IS THIS ACCOUNT OWNED BY A PRIVY EMBEDDED WALLET?
+ *
+ * The distinction the backup screens need, and it is not "is the key missing".
+ * A missing key has two completely different meanings:
+ *
+ *   legacy grant, no key    something went wrong. The key WAS generated in this
+ *                           browser and should be here. Do not fund this
+ *                           account; tell somebody.
+ *   privy grant, no key     nothing went wrong. There is no key for merrymen to
+ *                           hold, which is the point of the design.
+ *
+ * Reading absence alone conflates them, and the screens then told a Privy user
+ * their key was unreadable and warned them off funding an account that was
+ * working perfectly. The binding version is the durable signal, sealed into the
+ * grant at signing time, so it cannot drift from what the account actually is.
+ */
+export function isPrivyOwned(grant: Pick<Grant, "binding"> | null | undefined): boolean {
+  return grant?.binding?.version === "privy-did-owner-v1";
+}
+
 const STORAGE_KEY = "merrymen.grant.v1";
 
 export function loadGrant(): Grant | null {

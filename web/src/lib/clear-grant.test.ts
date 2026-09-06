@@ -110,3 +110,39 @@ test("the kill switch does not tell the user their wallet is gone", () => {
   );
   assert.match(kill, /recovery key is kept/, "and must say the money is still reachable");
 });
+
+test("AN ABSENT KEY IS NOT AN UNREADABLE KEY — the screens tell each truth", () => {
+  // A tester with a working Privy account was shown "recovery key is only a
+  // bunch of dots", then "couldn't read your owner key — don't fund this
+  // account, and tell us". Nothing had gone wrong. A Privy-owned account HAS
+  // no key here by design, and reading its absence as a failure warned
+  // somebody off funding an account that was fine — on the screen where being
+  // wrong costs the most.
+  //
+  // The binding version is the durable signal, sealed into the grant at
+  // signing time, so it cannot drift from what the account actually is.
+  // Same URL-relative form the rest of this file uses.
+  const create = readFileSync(new URL("../terminal/screens/CreateAgent.tsx", import.meta.url), "utf8");
+  const wallet = readFileSync(new URL("../terminal/screens/Wallet.tsx", import.meta.url), "utf8");
+
+  for (const [name, src] of [["CreateAgent", create], ["Wallet", wallet]] as const) {
+    assert.match(src, /isPrivyOwned\(/, `${name} must distinguish the two owner models`);
+  }
+
+  // The unreadable-key warning may still exist — it is correct for a legacy
+  // grant — but it must be unreachable for a privy-owned one.
+  // Anchored on the row itself, not the first mention of the phrase.
+  const rowAt = wallet.indexOf("<span className=\"rk\">owner key</span>");
+  assert.notEqual(rowAt, -1, "the owner-key row must exist");
+  const keyRow = wallet.slice(rowAt, rowAt + 1800);
+  assert.ok(
+    keyRow.indexOf("isPrivyOwned(grant)") < keyRow.indexOf("couldn't read your owner key"),
+    "the privy branch must be taken BEFORE the unreadable-key fallback",
+  );
+
+  // And the privy backup step must not ask somebody to confirm they saved
+  // something that does not exist.
+  const privyStep = create.slice(create.indexOf("isPrivyOwned(grant)"), create.indexOf("!isPrivyOwned(grant)"));
+  assert.ok(!/saved my recovery key/.test(privyStep), "nothing was shown, so nothing can be saved");
+  assert.match(privyStep, /merrymen cannot recover these funds/, "the real trade-off must be stated instead");
+});

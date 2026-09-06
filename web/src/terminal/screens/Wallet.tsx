@@ -22,6 +22,7 @@ import {
   createAgentWallet,
   FAUCET_URL,
   listSavedWallets,
+  isPrivyOwned,
   loadGrant,
   previewOwnerAccount,
   readFunding,
@@ -1164,16 +1165,27 @@ export default function GrantPage() {
                       screen just had the server-shaped grant that omits it. A
                       wrong explanation on a backup screen is worse than an
                       honest admission that something is off. */}
-                  {reveal
-                    ? (grant.demoOwnerPrivateKey ??
-                      "couldn't read your owner key — don't fund this account, and tell us")
-                    : "•".repeat(40)}
+                  {/* ABSENCE MEANS TWO DIFFERENT THINGS, and the warning
+                      below is only true of one of them. A Privy-owned account
+                      HAS no key here by design; telling its owner we could not
+                      read it — and to stop funding — describes a failure that
+                      did not happen, on the screen where being wrong costs the
+                      most. */}
+                  {isPrivyOwned(grant)
+                    ? "held by your Privy login — merrymen never sees it"
+                    : reveal
+                      ? (grant.demoOwnerPrivateKey ??
+                        "couldn't read your owner key — don't fund this account, and tell us")
+                      : "•".repeat(40)}
                 </span>
               </div>
               <div className="key-actions">
-                <button className="copy-btn" onClick={() => setReveal((r) => !r)}>
-                  {reveal ? "hide" : "reveal"}
-                </button>
+                {/* Nothing to reveal when there is nothing held here. */}
+                {!isPrivyOwned(grant) && (
+                  <button className="copy-btn" onClick={() => setReveal((r) => !r)}>
+                    {reveal ? "hide" : "reveal"}
+                  </button>
+                )}
                 {grant.demoOwnerPrivateKey && (
                   <CopyBtn value={grant.demoOwnerPrivateKey} label="copy key" />
                 )}
