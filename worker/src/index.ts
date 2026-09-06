@@ -3147,9 +3147,27 @@ async function main() {
    * Returns undefined for non-swaps, so vault moves and transfers are untouched.
    */
   async function scoutContextFor(intent: TradeIntent): Promise<ScoutContext | undefined> {
-    if (intent.kind !== "swap" || !active) return undefined;
-    const symbol = symbolOfToken(intent.buyToken);
-    const buyUnpriceable = lastUnpriceable.has(intent.buyToken.toLowerCase());
+    // ── BOTH VENUES, NOT JUST THE POOL ONE ────────────────────────────────
+    //
+    // This returned undefined for anything that was not a swap, and the scout
+    // block in policy.ts sat inside `if (intent.kind === "swap")` — so a
+    // curve trade skipped the scout budget entirely. That was survivable only
+    // because the sole producer of a curve trade was an owner typing one into
+    // chat: a person spending their own money, deliberately, one at a time.
+    //
+    // The moment the strategist can emit one, that becomes an AUTONOMOUS,
+    // UNBUDGETED buy path into the least priceable asset class on the chain —
+    // and the drawdown breaker cannot be the backstop either, because a curve
+    // mark is barred from ratcheting the high-water mark, so the breaker
+    // measures that book from a lower reference. The scout budget is the only
+    // wall an unpriceable asset has. It has to cover the venue where nothing
+    // else does.
+    if (!active) return undefined;
+    const buyToken =
+      intent.kind === "swap" ? intent.buyToken : intent.kind === "curve-trade" ? intent.assetOut : null;
+    if (!buyToken) return undefined;
+    const symbol = symbolOfToken(buyToken);
+    const buyUnpriceable = lastUnpriceable.has(buyToken.toLowerCase());
     return {
       limits: {
         enabled: cfg.scoutEnabled,

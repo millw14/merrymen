@@ -380,27 +380,41 @@ export function checkPolicy(
       }
     }
 
-    // BUYING SOMETHING NOBODY CAN PRICE.
-    //
-    // A token the tick couldn't value is one whose worth is genuinely unknown:
-    // its pool is too new or too thin for a TWAP anyone should trust. The
-    // drawdown breaker cannot protect that money, because protecting it would
-    // mean believing the price it just refused. So the scout BUDGET is the only
-    // control there is, and it has to bite here — before the position exists.
-    //
-    // Sells are untouched: this whole branch only ever inspects buyToken, so
-    // getting OUT of an unpriceable position is never blocked by it.
-    if (scout?.buyUnpriceable) {
-      const verdict = scoutAllows(
-        {
-          spendUsdg: intent.notionalUsdg,
-          existingCostUsdg: scout.existingCostUsdg,
-          quarantinedUsdg: scout.quarantinedUsdg,
-        },
-        scout.limits,
-      );
-      if (!verdict.ok) return { ok: false, rule: "scout-budget", detail: verdict.reason };
-    }
+  }
+
+  // BUYING SOMETHING NOBODY CAN PRICE — AT EITHER VENUE.
+  //
+  // A token the tick couldn't value is one whose worth is genuinely unknown:
+  // its pool is too new or too thin for a TWAP anyone should trust. The
+  // drawdown breaker cannot protect that money, because protecting it would
+  // mean believing the price it just refused. So the scout BUDGET is the only
+  // control there is, and it has to bite here — before the position exists.
+  //
+  // OUT OF THE SWAP BRANCH, where it used to live. A curve trade skipped it
+  // entirely, which was survivable only while the sole producer of one was an
+  // owner typing it into chat — a person spending their own money, deliberately.
+  // The moment the strategist can emit one, this is the difference between a
+  // budgeted buy and an autonomous unbudgeted buy into the least priceable
+  // assets on the chain. A curve mark is also barred from ratcheting the
+  // high-water mark, so the breaker measures that book from a lower reference
+  // and cannot be the backstop instead.
+  //
+  // Sells are untouched at both venues: the caller only ever reports
+  // `buyUnpriceable` about the asset being ACQUIRED, so getting out of an
+  // unpriceable position is never blocked by this.
+  // The two venues that ACQUIRE an asset. Named explicitly rather than relying
+  // on `scout` being undefined elsewhere: a vault movement has no notional to
+  // judge, and a future kind that does should have to opt in here on purpose.
+  if (scout?.buyUnpriceable && (intent.kind === "swap" || intent.kind === "curve-trade")) {
+    const verdict = scoutAllows(
+      {
+        spendUsdg: intent.notionalUsdg,
+        existingCostUsdg: scout.existingCostUsdg,
+        quarantinedUsdg: scout.quarantinedUsdg,
+      },
+      scout.limits,
+    );
+    if (!verdict.ok) return { ok: false, rule: "scout-budget", detail: verdict.reason };
   }
 
   if (intent.kind === "transfer") {

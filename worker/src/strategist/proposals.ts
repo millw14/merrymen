@@ -116,6 +116,23 @@ export function proposalsToIntents(
     }
     const size = usdg6(p.sizeUsdg);
 
+    // ── THE CEILING, ABOVE BOTH VENUES ────────────────────────────────────
+    //
+    // This used to sit below the curve branch's `continue`, so it applied to
+    // pool swaps and to nothing else. A curve trade — the least priceable asset
+    // class on this chain — was the one venue with no per-action ceiling at all.
+    // Nothing exercised that, because no production caller has ever supplied
+    // curve legs; the moment one does, the gap becomes an unbounded proposal
+    // size into exactly the assets that are hardest to value.
+    //
+    // Venue-agnostic by construction now: it reads `size`, computed once above,
+    // and it is the last thing between a number the model chose and a number
+    // that reaches the wall.
+    if (size > universe.maxPerActionUsdg) {
+      rejected.push(`#${i} ${p.symbol}: ${p.sizeUsdg} USDG exceeds strategist ceiling`);
+      continue;
+    }
+
     // ── the curve venue ───────────────────────────────────────────────────
     //
     // THE STAGE THAT MAKES THE AGENT ABLE TO PROPOSE ONE AT ALL. Every arm below
@@ -224,11 +241,6 @@ export function proposalsToIntents(
     }
     if (snap.pausedTokens.has(token.toLowerCase())) {
       rejected.push(`#${i} ${p.symbol}: token is paused`);
-      continue;
-    }
-
-    if (size > universe.maxPerActionUsdg) {
-      rejected.push(`#${i} ${p.symbol}: ${p.sizeUsdg} USDG exceeds strategist ceiling`);
       continue;
     }
 
