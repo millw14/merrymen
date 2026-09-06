@@ -75,6 +75,8 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const [scoutEnabled, setScoutEnabled] = useState<boolean | null>(null);
   const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
   const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
+  // Auto-convert is a boolean, so it can't ride the string `draft`.
+  const [autoConvertEnabled, setAutoConvertEnabled] = useState<boolean | null>(null);
   const [allowlist, setAllowlist] = useState<number[] | null>(null);
   const [tgTest, setTgTest] = useState<string | null>(null);
   // PC control: master + capability set + string allowlists (also can't ride `draft`).
@@ -232,6 +234,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
     if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
     if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
     if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
+    if (autoConvertEnabled !== null) body.autoConvertEnabled = autoConvertEnabled;
     if (allowlist !== null) body.telegramAllowlist = allowlist;
     if (pcEnabled !== null) body.telegramPcControlEnabled = pcEnabled;
     if (caps !== null) body.telegramCapabilities = caps;
@@ -333,6 +336,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const scoutEnabledVal = scoutEnabled ?? view.values.scoutEnabled ?? d.scoutEnabled;
   const discoveryEnabledVal = discoveryEnabled ?? view.values.discoveryEnabled ?? d.discoveryEnabled;
   const trencherLiveVal = trencherLive ?? view.values.trencherLiveEnabled ?? d.trencherLiveEnabled;
+  const autoConvertVal = autoConvertEnabled ?? view.values.autoConvertEnabled ?? d.autoConvertEnabled;
   const allowlistVal = allowlist ?? view.values.telegramAllowlist ?? [];
   const pcEnabledVal = pcEnabled ?? view.values.telegramPcControlEnabled ?? d.telegramPcControlEnabled;
   const agentEnabledVal = agentEnabled ?? view.values.telegramAgentEnabled ?? d.telegramAgentEnabled;
@@ -1331,6 +1335,25 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               <input type="number" min={1} placeholder={String(d.llmMaxActionUsdg)} value={v("llmMaxActionUsdg")} onChange={set("llmMaxActionUsdg")} />
               <span className="mm-unit">USDG</span>
             </Field>
+            <label className="mm-field">
+              <span className="mm-label">fund with ETH — auto-convert to USDG</span>
+              <span className="mm-input">
+                <input type="checkbox" checked={autoConvertVal} onChange={(e) => setAutoConvertEnabled(e.target.checked)} style={{ width: "auto" }} />
+                <span className="mm-unit">{autoConvertVal ? "surplus ETH → USDG, gas kept" : "off"}</span>
+              </span>
+              <span className="mm-hint">Send ETH and surplus converts to USDG with a gas reserve kept. Saving this preference now; the worker conversion lands in the follow-up.</span>
+            </label>
+            <Field label="gas reserve" hint="Percent of the ETH balance kept as gas when converting; the worker always keeps at least one trade's worth, even at 1%.">
+              <input type="number" min={1} max={50} placeholder={String(d.autoConvertReservePct)} value={v("autoConvertReservePct")} onChange={set("autoConvertReservePct")} />
+              <span className="mm-unit">%</span>
+            </Field>
+            <div className="mm-field">
+              <span className="mm-label">manual swap</span>
+              <Link href="/swap" className="mm-btn primary">
+                Swap ETH → USDG →
+              </Link>
+              <span className="mm-hint">Convert by hand with a live quote — same permission, same reserve.</span>
+            </div>
           </div>
 
           </details>

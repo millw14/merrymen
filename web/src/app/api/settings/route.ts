@@ -164,6 +164,11 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   idleFloorUsdg: [0, 1_000_000],
   gapEnterBudgetUsdg: [1, 1_000_000],
   paperStartUsdg: [1, 10_000_000],
+  // Auto-convert gas reserve, percent of the ETH balance. Clamped to the same
+  // 1–50 the worker enforces — a duplicate enforcement point for one rule, on
+  // purpose: the web PUT and the worker resolver disagreeing would mean the
+  // stored value and the acting value diverge silently.
+  autoConvertReservePct: [1, 50],
   llmIntervalMin: [1, 1_440],
   llmMaxActionUsdg: [1, 100_000],
   telegramMaxActionUsdg: [1, 100_000],
@@ -183,6 +188,7 @@ const NUM_FIELDS: Record<string, [number, number]> = {
 };
 const BOOL_FIELDS = [
   "paperTradingEnabled",
+  "autoConvertEnabled",
   "telegramEnabled",
   "telegramControlEnabled",
   "telegramTransferEnabled",
@@ -477,6 +483,28 @@ export async function PUT(req: Request) {
     } else if (v === "" || v === null || v === undefined) setOrClear("telegramTranscribeBase", undefined);
     else if (typeof v === "string" && /^https?:\/\/.+/.test(v.trim())) setOrClear("telegramTranscribeBase", v.trim());
     else errors.push("telegramTranscribeBase: must be an http(s) URL");
+  }
+
+  // ── manual one-shot swap handoff (written by the /swap page) ────────────
+  // Digits-only wei + a tight id shape, validated again at consume time.
+  // Rejected here with an error (not silently dropped) so a malformed submit
+  // is visible instead of quietly ignored. Upper bound 1,000 ETH in wei.
+  if ("manualSwapWei" in body || "manualSwapId" in body) {
+    const w = body.manualSwapWei;
+    const id = body.manualSwapId;
+    if (w === "" || w === null || w === undefined || id === "" || id === null || id === undefined) {
+      setOrClear("manualSwapWei", undefined);
+      setOrClear("manualSwapId", undefined);
+    } else if (typeof w !== "string" || !/^\d{1,30}$/.test(w)) {
+      errors.push("manualSwapWei: must be a whole number of wei (digits only)");
+    } else if (BigInt(w) <= 0n || BigInt(w) > 1_000_000_000_000_000_000_000n) {
+      errors.push("manualSwapWei: must be between 1 wei and 1,000 ETH");
+    } else if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
+      errors.push("manualSwapId: must be 1–128 letters, numbers, dashes or underscores");
+    } else if (!errors.length) {
+      setOrClear("manualSwapWei", w);
+      setOrClear("manualSwapId", id);
+    }
   }
 
   // ── booleans (telegram toggles) ─────────────────────────────────────────
