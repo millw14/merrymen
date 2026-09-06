@@ -79,7 +79,7 @@ describe("convert latch — once per deposit", () => {
     assert.deepEqual(back.completedSwapIds, ["x"]);
     // Corrupt fields degrade toward "never fired" (safe: may convert) rather
     // than toward "already fired" (which would silently skip a deposit).
-    const bad = latchFromRow({ fired_at_ms: "soon", considered_wei: "much", completed_ids: "{", updated_at_ms: -1 });
+    const bad = latchFromRow({ firedAtMs: "soon", consideredWei: "much", completedIds: "{", updatedAtMs: -1 });
     assert.equal(bad.firedAtMs, 0);
     assert.equal(bad.consideredWei, 0n);
     assert.deepEqual(bad.completedSwapIds, []);

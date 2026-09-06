@@ -57,21 +57,24 @@ function toWei(s: string | undefined): bigint {
   }
 }
 
-/** Row codec — sqlite has no bigint and no arrays. */
+/** Row codec — the store row carries decimal text and JSON (sqlite has
+ * no bigint and no arrays); the latch carries bigints and a string list.
+ * Corrupt fields degrade toward "never fired" (safe: may convert) rather
+ * than toward "already fired" (which would silently skip a deposit). */
 export function latchFromRow(row: {
-  fired_at_ms: unknown;
-  considered_wei: unknown;
-  completed_ids: unknown;
-  updated_at_ms: unknown;
+  firedAtMs: unknown;
+  consideredWei: unknown;
+  completedIds: unknown;
+  updatedAtMs: unknown;
 }): ConvertLatch {
   const latch = emptyLatch();
-  if (typeof row.fired_at_ms === "number" && Number.isFinite(row.fired_at_ms) && row.fired_at_ms >= 0) {
-    latch.firedAtMs = Math.floor(row.fired_at_ms);
+  if (typeof row.firedAtMs === "number" && Number.isFinite(row.firedAtMs) && row.firedAtMs >= 0) {
+    latch.firedAtMs = Math.floor(row.firedAtMs);
   }
-  latch.consideredWei = toWei(typeof row.considered_wei === "string" ? row.considered_wei : undefined);
-  if (typeof row.completed_ids === "string") {
+  latch.consideredWei = toWei(typeof row.consideredWei === "string" ? row.consideredWei : undefined);
+  if (typeof row.completedIds === "string") {
     try {
-      const ids = JSON.parse(row.completed_ids) as unknown;
+      const ids = JSON.parse(row.completedIds) as unknown;
       if (Array.isArray(ids)) {
         latch.completedSwapIds = ids
           .filter((id): id is string => typeof id === "string" && id.length > 0)
@@ -81,23 +84,23 @@ export function latchFromRow(row: {
       /* corrupt ids — treat as none honoured, never as all honoured */
     }
   }
-  if (typeof row.updated_at_ms === "number" && Number.isFinite(row.updated_at_ms) && row.updated_at_ms >= 0) {
-    latch.updatedAtMs = Math.floor(row.updated_at_ms);
+  if (typeof row.updatedAtMs === "number" && Number.isFinite(row.updatedAtMs) && row.updatedAtMs >= 0) {
+    latch.updatedAtMs = Math.floor(row.updatedAtMs);
   }
   return latch;
 }
 
 export function latchToRow(latch: ConvertLatch): {
-  fired_at_ms: number;
-  considered_wei: string;
-  completed_ids: string;
-  updated_at_ms: number;
+  firedAtMs: number;
+  consideredWei: string;
+  completedIds: string;
+  updatedAtMs: number;
 } {
   return {
-    fired_at_ms: latch.firedAtMs,
-    considered_wei: latch.consideredWei.toString(),
-    completed_ids: JSON.stringify(latch.completedSwapIds.slice(-MAX_COMPLETED_IDS)),
-    updated_at_ms: latch.updatedAtMs,
+    firedAtMs: latch.firedAtMs,
+    consideredWei: latch.consideredWei.toString(),
+    completedIds: JSON.stringify(latch.completedSwapIds.slice(-MAX_COMPLETED_IDS)),
+    updatedAtMs: latch.updatedAtMs,
   };
 }
 
