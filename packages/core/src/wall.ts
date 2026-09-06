@@ -280,7 +280,35 @@ export interface WallOptions {
    * covers.
    */
   ponsAdapterAddress?: Address;
+  /**
+   * Native value the SwapRouter02 NATIVE-INPUT rule may carry, in wei. Default
+   * NATIVE_SWAP_VALUE_LIMIT_WEI (0.5 ETH) so every newly signed wall can run
+   * the ETH→USDG convert; an explicit 0n omits the native rule entirely,
+   * restoring the old no-native wall exactly.
+   *
+   * WHY A SECOND RULE, not a valueLimit on the general one. The general
+   * exactInputSingle rule pins both token legs ONE_OF the asset set with
+   * valueLimit 0n. Hanging native value on it would let the key attach up to
+   * the ceiling to ANY exactInputSingle it may otherwise make — including ones
+   * where the ETH is not the input at all and simply stays with the router.
+   * The native rule instead pins tokenIn EQUAL WETH: it matches exactly the
+   * call shape that needs msg.value (native ETH in, WETH tokenIn, the router
+   * wraps internally), and nothing else. The ceiling bounds a compromised key
+   * to forced bad-price swaps into the account's own holdings — the recipient
+   * is pinned self and there is no transfer permission, so value cannot leave,
+   * only be swapped badly.
+   */
+  nativeSwapValueLimitWei?: bigint;
 }
+
+/**
+ * The ceiling on native value the native-input exactInputSingle rule may
+ * carry — the bound that makes the ETH→USDG convert expressible at all.
+ * 0.5 ETH is far above any conversion a sane reserve split produces and far
+ * below "the account's whole balance" for anything but a dust account, where
+ * the worker's own reserve arithmetic never proposes the op anyway.
+ */
+export const NATIVE_SWAP_VALUE_LIMIT_WEI = 500_000_000_000_000_000n; // 0.5 ETH
 
 /**
  * Owner-added tokens that are safe to seal into a policy.
@@ -359,6 +387,12 @@ export function buildCallPermissions(
     ...extras.map((t) => t.address as Address),
   ];
   const self = { condition: ParamCondition.EQUAL, value: smartAccount } as const;
+  // The native-input ceiling, defaulting to the sealed constant. An explicit
+  // 0n omits the native rule below — the "0n restores the old wall" escape
+  // hatch, and it must stay STRUCTURAL (rule absent) rather than a 0n limit
+  // on a present rule, so old and new walls differ visibly in the permission
+  // list a test can read.
+  const nativeSwapValueLimit = opts.nativeSwapValueLimitWei ?? NATIVE_SWAP_VALUE_LIMIT_WEI;
   // Deduped and lowercased so a list with the same address twice doesn't bloat
   // the on-chain policy, and a case difference can't read as a second address.
   const withdrawals = [
@@ -495,6 +529,30 @@ export function buildCallPermissions(
         null,
       ],
     },
+    // NATIVE-INPUT exactInputSingle — the wall's ONLY non-zero valueLimit, and
+    // deliberately a SECOND rule rather than a limit on the general one above.
+    // tokenIn EQUAL WETH matches exactly the call shape that needs msg.value;
+    // a separate rule means the ceiling can never ride along on a swap whose
+    // ETH is not the input. Omitted entirely when the limit is 0n.
+    ...(nativeSwapValueLimit > 0n
+      ? [
+          {
+            target: UNISWAP.swapRouter02 as Address,
+            valueLimit: nativeSwapValueLimit,
+            abi: UNISWAP_SWAP_ROUTER_ABI,
+            functionName: "exactInputSingle",
+            args: [
+              { condition: ParamCondition.EQUAL, value: CASH.WETH as Address },
+              { condition: ParamCondition.ONE_OF, value: adapterAssets },
+              null,
+              self,
+              null,
+              null,
+              null,
+            ],
+          },
+        ]
+      : []),
     // MULTI-HOP (`exactInput`) IS GONE, and it cannot come back in this shape.
     //
     // It used to sit here with `args: [null, null, self]` — the recipient
@@ -750,6 +808,13 @@ export function buildWallPolicies(args: {
         allowUniswapV4: args.allowUniswapV4,
         v4AdapterAddress: args.v4AdapterAddress,
         ponsAdapterAddress: args.ponsAdapterAddress,
+        // Forwarded, never defaulted here: buildCallPermissions owns the
+        // default, and a second default here would let the two disagree
+        // silently — the exact "silent drop" shape this forwarding exists to
+        // prevent. An explicit 0n omits the native rule (old wall, exactly).
+        ...(args.nativeSwapValueLimitWei !== undefined
+          ? { nativeSwapValueLimitWei: args.nativeSwapValueLimitWei }
+          : {}),
       }) as never,
     }),
   ];
