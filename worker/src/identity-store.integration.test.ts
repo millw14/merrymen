@@ -30,6 +30,14 @@ const ALICE = "0x00000000000000000000000000000000000000a1" as const;
 const BOB = "0x00000000000000000000000000000000000000b2" as const;
 const ACCT_1 = "0x1111111111111111111111111111111111111111" as const;
 const ACCT_2 = "0x2222222222222222222222222222222222222222" as const;
+// ONE ACCOUNT PER TENANT, in fixtures too. These tests used to hand ACCT_1 to
+// two different tenants for convenience — the exact state agent_account now
+// forbids, because every ledger table keys on smart_account and two identities
+// holding one address write into one partition. Distinct addresses here are not
+// cosmetic: reusing one would have the fixture assert the invariant is broken.
+const ACCT_3 = "0x3333333333333333333333333333333333333333" as const;
+const ACCT_4 = "0x4444444444444444444444444444444444444444" as const;
+const ACCT_5 = "0x5555555555555555555555555555555555555555" as const;
 
 describe("the slug itself", () => {
   it("is 16 characters of Crockford base32, and never i l o or u", () => {
@@ -83,7 +91,7 @@ describe("FileIdentityStore", () => {
 
   it("gives different tenants different slugs", async () => {
     const a = await store.get(ALICE);
-    const b = await store.ensure(BOB, ACCT_1);
+    const b = await store.ensure(BOB, ACCT_3);
     assert.notEqual(a!.slug, b.slug);
   });
 
@@ -119,8 +127,50 @@ describe("linking a social account", () => {
   const CAROL = "0x00000000000000000000000000000000000000c3" as const;
   const DAVE = "0x00000000000000000000000000000000000000d4" as const;
 
+  it("AN ACCOUNT BELONGS TO ONE IDENTITY, and the second tenant loses", async () => {
+    // Every per-agent ledger table keys on smart_account, so two identities
+    // holding one address do not merely disagree about a label — they write
+    // into one partition and neither one's history means anything afterward.
+    const SHARED = "0x00000000000000000000000000000000000000e5" as const;
+    const EVE = "0x00000000000000000000000000000000000000e6" as const;
+    const MAL = "0x00000000000000000000000000000000000000e7" as const;
+    await store.ensure(EVE, SHARED);
+    await assert.rejects(
+      () => store.ensure(MAL, SHARED),
+      /already claimed by a different login/,
+      "the second tenant must be refused, not merged",
+    );
+    // And the first holder is untouched — a refusal never reassigns.
+    const eve = await store.get(EVE);
+    assert.ok(eve!.accounts.includes(SHARED));
+    assert.equal(await store.get(MAL), null);
+  });
+
+  it("re-claiming your OWN account is idempotent, not a conflict", async () => {
+    const SELF = "0x00000000000000000000000000000000000000f8" as const;
+    const FRANK = "0x00000000000000000000000000000000000000f9" as const;
+    const first = await store.ensure(FRANK, SELF);
+    const again = await store.ensure(FRANK, SELF);
+    assert.equal(again.slug, first.slug, "a re-grant must never re-mint the slug");
+    assert.deepEqual(again.accounts, [SELF]);
+  });
+
+  it("a social identity with an empty provider id is refused at the boundary", async () => {
+    // Not left to a partial index, which does not exclude the empty string.
+    const G = "0x00000000000000000000000000000000000000fa" as const;
+    await store.ensure(G, "0x00000000000000000000000000000000000000fb");
+    await assert.rejects(
+      () => store.linkSocial(G, { did: "did:privy:g", provider: "twitter", subject: "  " }),
+      /no provider user id/,
+    );
+    await assert.rejects(
+      () => store.linkSocial(G, { did: "", provider: "twitter", subject: "1" }),
+      /no DID/,
+    );
+  });
+
   it("binds a DID to a tenant", async () => {
-    await store.ensure(CAROL, ACCT_1);
+    await store.ensure(CAROL, ACCT_4);
     assert.equal(
       await store.linkSocial(CAROL, {
         did: "did:privy:carol",
@@ -138,7 +188,7 @@ describe("linking a social account", () => {
     // Otherwise signing in with somebody else's X account would hand you their
     // agent. Structurally the same guard the grant intake uses on a smart
     // account, and it fails in the same direction: closed.
-    await store.ensure(DAVE, ACCT_2);
+    await store.ensure(DAVE, ACCT_5);
     assert.equal(
       await store.linkSocial(DAVE, {
         did: "did:privy:carol",
