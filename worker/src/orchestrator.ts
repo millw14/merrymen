@@ -1211,6 +1211,13 @@ async function runRepairIfAsked(shared: Db, plans: readonly AccountPlan[]): Prom
 const tenantWatchSymbols = new Map<string, string[]>();
 /** Equity symbols each tenant actually holds. Read off the child ledger. */
 const tenantHeldSymbols = new Map<string, string[]>();
+/**
+ * Symbols the fleet reasoned about in the last day, newest first.
+ *
+ * Refreshed by the mirror pass, which already holds a shared connection — one
+ * query on its clock rather than a second connection on the news desk's.
+ */
+let fleetReasonedSymbols: string[] = [];
 /** Built on first use so a deployment with no token still logs why. */
 let fleetNewsDesk: NewsDesk | null = null;
 
@@ -1231,6 +1238,40 @@ function equitySymbols(list: readonly unknown[] | undefined): string[] {
     if (s && known.has(s)) out.add(s);
   }
   return [...out];
+}
+
+/**
+ * Symbols the fleet has actually been REASONING about lately, newest first.
+ *
+ * The held list alone is not enough, and the first live fetch proved it: a
+ * deploy rebuilds every child's sqlite, so `positions` is empty for a few
+ * minutes and `heldEquitySymbols` returns nothing. With no held names to put
+ * first, the desk fell through to the watch universe — twenty-five listed
+ * tokens, capped at three per request — and rotated onto AAPL, MU and SPCX
+ * while the whole shadow cohort was thinking about TSLA and NVDA.
+ *
+ * A decision row names the instrument its agent looked at, which is precisely
+ * the question the desk should be answering. It comes from shared Postgres, so
+ * it survives the redeploy that empties the thing above it — the same reason
+ * the accounting anchor and the peer wire read from here rather than from a
+ * child.
+ *
+ * Best-effort: an unreadable table means the held and watch tiers decide, which
+ * is the behaviour that existed before this.
+ */
+async function recentlyReasonedSymbols(shared: Db): Promise<string[]> {
+  try {
+    const rows = (await shared
+      .prepare(
+        `SELECT symbol FROM decisions
+          WHERE symbol IS NOT NULL AND at > ?
+          ORDER BY at DESC LIMIT 200`,
+      )
+      .all(Math.floor(Date.now() / 1000) - 86_400)) as { symbol?: unknown }[];
+    return equitySymbols(rows.map((r) => r.symbol));
+  } catch {
+    return [];
+  }
 }
 
 /** What this tenant holds, biggest position first. Best-effort and never throws. */
@@ -1288,8 +1329,14 @@ async function runNewsPass(): Promise<void> {
       held.push(...(tenantHeldSymbols.get(key) ?? []));
       watch.push(...(tenantWatchSymbols.get(key) ?? []));
     }
+    // THINKING ABOUT IT BEATS MERELY BEING ALLOWED TO TRADE IT. Held names
+    // first because a position is a live question; then the instruments the
+    // fleet has actually reasoned about in the last day, which is what a
+    // shadow cohort spends its time on and what survives a redeploy; then the
+    // rest of the watch universe, which is only a list of what is permitted.
+    const reasoned = fleetReasonedSymbols;
     const now = Math.floor(Date.now() / 1000);
-    const r = await fleetNewsDesk.refresh([...held, ...watch], now);
+    const r = await fleetNewsDesk.refresh([...held, ...reasoned, ...watch], now);
     if (r.log) log(r.log);
 
     const state = fleetNewsDesk.state();
@@ -1405,6 +1452,12 @@ async function mirrorLedgers(): Promise<void> {
     // 0x-shaped by construction — the same cast writeSettingsForChild takes.
     await writePeersFor(tenant as `0x${string}`, shared);
   }
+
+  // What the fleet has been thinking about, for the news desk to prioritise.
+  // Read here because the shared handle is already open and because this table
+  // is the one thing that survives the redeploy which empties every child's
+  // positions — see recentlyReasonedSymbols.
+  fleetReasonedSymbols = await recentlyReasonedSymbols(shared);
 }
 
 /**
