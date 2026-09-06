@@ -646,6 +646,42 @@ export async function mirrorTenant(args: {
         }
       });
       copied.cost_basis = basis.length;
+
+      // ── convert latch: upsert by agent, newer wins ─────────────────────
+      // The once-per-deposit marker (convert_state) is STATE, not a log: one
+      // row per agent, replaced in place. Freshness is by updated_at_ms, not
+      // by presence — a reborn child starts with NO row (skipped below, never
+      // mirrored as empty), and a lagging pass carrying an older row must not
+      // regress a newer one. Same shape as the agents ratchets above, minus
+      // the monotonic columns: recency is the whole rule here.
+      try {
+        const latches = (await child
+          .prepare(
+            `SELECT agent_id, fired_at_ms, considered_wei, completed_ids, updated_at_ms FROM convert_state`,
+          )
+          .all()) as Record<string, unknown>[];
+        await shared.tx(async (db) => {
+          const ins = db.prepare(
+            `INSERT INTO convert_state (agent_id, fired_at_ms, considered_wei, completed_ids, updated_at_ms)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (agent_id) DO UPDATE SET
+               fired_at_ms = excluded.fired_at_ms,
+               considered_wei = excluded.considered_wei,
+               completed_ids = excluded.completed_ids,
+               updated_at_ms = excluded.updated_at_ms
+             WHERE excluded.updated_at_ms > convert_state.updated_at_ms`,
+          );
+          for (const l of latches) {
+            await ins.run(l.agent_id, l.fired_at_ms, l.considered_wei, l.completed_ids, l.updated_at_ms);
+          }
+        });
+        copied.convert_state = latches.length;
+      } catch (e) {
+        // Old child without the migration: absent table, not a failure worth
+        // stalling the report over — the next pass retries after its worker
+        // boots new code and creates it.
+        failed.convert_state = e instanceof Error ? e.message : String(e);
+      }
     }
   } catch (e) {
     failed.snapshots = e instanceof Error ? e.message : String(e);

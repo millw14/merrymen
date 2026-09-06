@@ -73,7 +73,7 @@ describe("convert latch — once per deposit", () => {
     const latch = emptyLatch();
     recordFire(latch, 12345, 777n);
     recordSwapId(latch, "x", 12345);
-    const back = latchFromRow(latchToRow(latch) as unknown as Parameters<typeof latchFromRow>[0]);
+    const back = latchFromRow(latchToRow(latch));
     assert.equal(back.firedAtMs, 12345);
     assert.equal(back.consideredWei, 777n);
     assert.deepEqual(back.completedSwapIds, ["x"]);
