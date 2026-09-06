@@ -24,7 +24,7 @@
  * without a chain and a database.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
@@ -117,6 +117,20 @@ describe("the identity audit observes and does not repair", () => {
     assert.match(audit, /function fingerprint\(/);
   });
 
+  it("does not share a pass with the reports that would drown it", () => {
+    // Two production runs lost the audit entirely: its lines sat at the tail of
+    // the same burst as the shadow dataset's several hundred, and the log store
+    // dropped them. Nothing errored. A report whose absence is indistinguishable
+    // from a clean fleet is worse than no report at all.
+    const src = read("worker/src/orchestrator.ts");
+    assert.match(src, /IDENTITY_AUDIT_AFTER_PASSES/, "the audit needs a pass of its own");
+    const auditPass = Number(/const IDENTITY_AUDIT_AFTER_PASSES = (\d+);/.exec(src)?.[1]);
+    const cohortPass = Number(/const COHORT_VET_AFTER_PASSES = (\d+);/.exec(src)?.[1]);
+    assert.ok(Number.isFinite(auditPass) && Number.isFinite(cohortPass));
+    assert.notEqual(auditPass, cohortPass, "the audit must not run in the reports' pass");
+    assert.ok(auditPass < cohortPass, "and it should run first, while the stream is quiet");
+  });
+
   it("reports every census the rollout decision depends on", () => {
     const audit = read("worker/src/identity-audit.ts");
     for (const census of [
@@ -132,6 +146,61 @@ describe("the identity audit observes and does not repair", () => {
     ]) {
       assert.ok(audit.includes(`"${census}"`), `the audit must report: ${census}`);
     }
+  });
+});
+
+
+describe("an escape that collapsed into a control character", () => {
+  /**
+   * THE SAME ACCIDENT, THREE TIMES IN THIS REPO.
+   *
+   * A word-boundary escape written through one escaping layer too few becomes
+   * the literal byte it names. The source still LOOKS right in an editor, the
+   * regex compiles, and it quietly requires a control character beside the word
+   * — so it matches nothing. web/src/lib/status-line.test.ts lost five of its
+   * eight banned words that way, and its own comment records that the same
+   * thing had already happened to it once before. worker/src/revert.ts carries
+   * a comment ABOUT the trap that fell into it.
+   *
+   * No source file has a legitimate reason to contain a raw control byte, so
+   * this is a cheap permanent guard over the whole tree.
+   */
+  /**
+   * Files that contain a control byte ON PURPOSE, each with the reason.
+   *
+   * Shrink-only, like mounted.test.ts KNOWN_DEBT: an entry here is a claim that
+   * the byte is test DATA rather than a collapsed escape, and it has to be true.
+   */
+  const DELIBERATE: Record<string, string> = {
+    // A prompt-injection fixture whose whole point is that the nasty string
+    // carries a real control character, plus a character-class range written
+    // with literal bytes. Both are input to a sanitiser, not escapes that lost
+    // a backslash.
+    "worker/src/venues/pons-meta.test.ts": "control bytes are the injection fixture",
+  };
+
+  it("no source file contains a raw control character", () => {
+    const roots = ["web/src", "worker/src", "packages/core/src", "mobile/src"];
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+        const rel = `${dir}/${e.name}`;
+        if (e.isDirectory()) walk(rel);
+        else if (/.tsx?$/.test(e.name)) {
+          const src = read(rel);
+          // Tab, newline and carriage return are the only ones that belong.
+          const bad = [...src].filter((ch) => {
+            const c = ch.charCodeAt(0);
+            return (c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) || c === 0x7f;
+          });
+          if (bad.length && !(rel in DELIBERATE)) {
+            offenders.push(`${rel} (${bad.map((b) => `0x${b.charCodeAt(0).toString(16)}`).join(", ")})`);
+          }
+        }
+      }
+    };
+    for (const r of roots) walk(r);
+    assert.deepEqual(offenders, [], `a collapsed escape leaves a control byte: ${offenders.join("; ")}`);
   });
 });
 

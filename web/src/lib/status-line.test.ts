@@ -190,7 +190,7 @@ test("NO JARGON anywhere in any branch", () => {
   // because confusing them wastes somebody an afternoon. What IS banned is USDG as
   // a trailing unit on a number: "318.00 USDG" is what made a balance look like
   // telemetry.
-  const banned = /equity|session key|steady-basket|weekend-gap|bps|wall|grant|positions/i;
+  const banned = /\bequity\b|\bsession key\b|steady-basket|weekend-gap|\bbps\b|\bwall\b|\bgrant\b|\bpositions\b/i;
   // ESCAPES COLLAPSED HERE ONCE ALREADY. This read /[d.,]s*USDG/ -- a literal
   // 'd', '.' or ',' followed by literal 's' characters -- so it matched none of
   // the strings it exists to ban. "318.00 USDG", the exact example the comment

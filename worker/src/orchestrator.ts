@@ -80,6 +80,14 @@ const RECONCILE_MS = 15_000;
  * little over five minutes, comfortably past both.
  */
 const COHORT_VET_AFTER_PASSES = 20;
+/**
+ * Earlier than the cohort report, and deliberately not the same pass.
+ *
+ * Eight passes of separation is about two minutes — long enough that the
+ * audit is never queued behind the dataset's several hundred lines, and still
+ * late enough that the ledger mirror has settled.
+ */
+const IDENTITY_AUDIT_AFTER_PASSES = 12;
 let cohortPasses = 0;
 /**
  * FLOOR for the staleness threshold. The real one is DERIVED per child — see
@@ -1695,10 +1703,19 @@ export async function runOrchestrator(): Promise<void> {
       // was of a table the mirror had just emptied, and the report announced
       // that the fleet held nothing. It is worth more late than wrong early.
       cohortPasses += 1;
+      // ON ITS OWN PASS, EARLIER, AND ALONE.
+      //
+      // The identity audit first ran in the same pass as the cohort report and
+      // the shadow dataset. The dataset alone is several hundred lines, and the
+      // audit's lines sat at the tail of that burst: the first run lost eleven
+      // of twelve, the second lost all twelve. Nothing errored — the log store
+      // simply dropped them, and a report whose absence looks identical to a
+      // clean fleet is not a report. A separate pass puts it in its own quiet
+      // moment, where only the routine mirror lines share the stream.
+      if (cohortPasses === IDENTITY_AUDIT_AFTER_PASSES) await runIdentityAuditIfAsked();
       if (cohortPasses === COHORT_VET_AFTER_PASSES) {
         await runCohortVettingIfAsked();
         await runBrainDatasetIfAsked();
-        await runIdentityAuditIfAsked();
       }
       await ferryCommands2();
       await fleetHealth();

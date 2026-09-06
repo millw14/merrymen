@@ -303,7 +303,7 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
  */
 /**
  * The raw regex sources, for the test that asserts none of them carries a
- * control character. `` written through one escaping layer too few becomes
+ * control character. `\b` written through one escaping layer too few becomes
  * U+0008 BACKSPACE — which reads as a word boundary in a diff and matches
  * nothing a revert string contains. That happened here.
  */
