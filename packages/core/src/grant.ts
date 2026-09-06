@@ -35,6 +35,21 @@ export function grantHasV4(grant: Pick<StoredGrant, "grantFeatures"> | null | un
 }
 
 /**
+ * grantFeatures marker meaning "this signature can swap NATIVE ETH → an
+ * allowlisted asset" (the convert flow: exactInputSingle with WETH as
+ * tokenIn and msg.value attached). Read-only surface for now — the wall rule
+ * and worker execution land in the follow-up; no grant mints this yet.
+ */
+export const GRANT_NATIVE_SWAP = "native-swap";
+
+/** Can this signature actually run the native-ETH convert swap? */
+export function grantHasNativeSwap(
+  grant: Pick<StoredGrant, "grantFeatures"> | null | undefined,
+): boolean {
+  return grant?.grantFeatures?.includes(GRANT_NATIVE_SWAP) ?? false;
+}
+
+/**
  * grantFeatures marker meaning "this signature can execute a MULTI-HOP swap".
  *
  * A route through WETH is not the same call as a direct one: the router takes

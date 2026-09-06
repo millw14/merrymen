@@ -43,6 +43,8 @@
       "@merrymen/limits": ["../worker/src/limits.ts"],
       "@merrymen/playground-api": ["../worker/src/playground-api.ts"],
       "@merrymen/wall-battery": ["../worker/src/wall-battery.ts"],
+      "@merrymen/pool-price": ["../worker/src/venues/pool-price.ts"],
+      "@merrymen/convert-reserve": ["../worker/src/convert-reserve.ts"],
       "@merrymen/strategies/*": ["../worker/src/strategies/*"]
     }
   },
