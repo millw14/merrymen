@@ -90,15 +90,110 @@ test("A VERSION THIS DEPLOYMENT DOES NOT KNOW IS REFUSED, never best-guessed", a
   }
 });
 
-test("a privy binding is refused until the deployment can verify one", async () => {
-  // The failure direction that matters: an unimplemented arm must NOT fall back
-  // to the legacy one, which would read a single owner signature as if it were
-  // two independent proofs.
+test("A PRIVY BINDING WITHOUT A VERIFIED TOKEN IS REFUSED", async () => {
+  // The validator holds no Privy credential and verifies no token — it is
+  // HANDED the DID by the route that did. So a caller that forgot to verify
+  // gets a refusal, never a binding checked with its authentication half
+  // missing. That is the failure direction that matters: the privy arm must
+  // not degrade into "one owner signature was enough".
   const wallet = privateKeyToAccount(generatePrivateKey());
   const owner = privateKeyToAccount(generatePrivateKey());
-  const r = await verifyGrantBinding(await legacyClaim(wallet, owner, "privy-did-owner-v1"));
+  const r = await verifyGrantBinding({
+    ...(await legacyClaim(wallet, owner, "privy-did-owner-v1")),
+    did: "did:privy:someone",
+    // verifiedDid deliberately absent — the route did not verify a token.
+  });
   assert.equal(r.ok, false);
-  assert.match(r.ok === false ? r.why : "", /privy bindings are not enabled/);
+  assert.match(r.ok === false ? r.why : "", /needs a verified privy identity/);
+});
+
+test("a privy binding whose claimed DID differs from the verified one is refused", async () => {
+  // The grant echoes the DID so the signed text can be rebuilt. It is never an
+  // identity — it is compared, and any difference is a refusal.
+  const wallet = privateKeyToAccount(generatePrivateKey());
+  const owner = privateKeyToAccount(generatePrivateKey());
+  const r = await verifyGrantBinding({
+    ...(await legacyClaim(wallet, owner, "privy-did-owner-v1")),
+    did: "did:privy:attacker",
+    verifiedDid: "did:privy:victim",
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.ok === false ? r.why : "", /different identity than the one that signed in/);
+});
+
+test("a privy binding whose owner is not the signed-in tenant is refused", async () => {
+  // Under this version the embedded wallet is BOTH the login and the owner —
+  // that is the model, and it is why the version exists separately. What must
+  // hold is that the owner IS the tenant the DID resolved to, or a verified
+  // login could install a grant on an owner it does not control.
+  const wallet = privateKeyToAccount(generatePrivateKey());
+  const owner = privateKeyToAccount(generatePrivateKey());
+  const did = "did:privy:same";
+  const r = await verifyGrantBinding({
+    ...(await legacyClaim(wallet, owner, "privy-did-owner-v1")),
+    did,
+    verifiedDid: did,
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.ok === false ? r.why : "", /not the wallet you signed in with/);
+});
+
+test("A COMPLETE PRIVY BINDING VERIFIES — token, matching DID, owner-is-tenant", async () => {
+  const embedded = privateKeyToAccount(generatePrivateKey());
+  const did = "did:privy:clbeta0001";
+  const nonce = issueChallengeNonce(ORIGIN);
+  const message = bindingMessage({
+    version: "privy-did-owner-v1",
+    origin: ORIGIN,
+    nonce,
+    owner: embedded.address,
+    smartAccount: SMART,
+    chainId: CHAIN,
+    did,
+  });
+  const r = await verifyGrantBinding({
+    origin: ORIGIN,
+    // tenant IS the embedded wallet: what the auth route minted the session for.
+    tenant: embedded.address.toLowerCase() as `0x${string}`,
+    nonce,
+    owner: embedded.address,
+    smartAccount: SMART,
+    chainId: CHAIN,
+    ownerSignature: await embedded.signMessage({ message }),
+    version: "privy-did-owner-v1",
+    did,
+    verifiedDid: did,
+  });
+  assert.equal(r.ok, true, r.ok === false ? r.why : "");
+});
+
+test("a privy signature cannot be replayed under a different identity", async () => {
+  // The DID is INSIDE the signed bytes, so a signature made under one identity
+  // reconstructs to different text under another and fails to recover.
+  const embedded = privateKeyToAccount(generatePrivateKey());
+  const nonce = issueChallengeNonce(ORIGIN);
+  const signedUnder = bindingMessage({
+    version: "privy-did-owner-v1",
+    origin: ORIGIN,
+    nonce,
+    owner: embedded.address,
+    smartAccount: SMART,
+    chainId: CHAIN,
+    did: "did:privy:first",
+  });
+  const r = await verifyGrantBinding({
+    origin: ORIGIN,
+    tenant: embedded.address.toLowerCase() as `0x${string}`,
+    nonce,
+    owner: embedded.address,
+    smartAccount: SMART,
+    chainId: CHAIN,
+    ownerSignature: await embedded.signMessage({ message: signedUnder }),
+    version: "privy-did-owner-v1",
+    did: "did:privy:second",
+    verifiedDid: "did:privy:second",
+  });
+  assert.equal(r.ok, false);
 });
 
 test("ONE KEY SIGNING TWICE IS NOT TWO PROOFS", async () => {

@@ -23,6 +23,7 @@ import {
   type StoredGrant,
 } from "@merrymen/core";
 import { requestOrigin, tenantOf, verifyGrantBinding } from "@/lib/auth";
+import { privyTokenOf, verifyPrivyToken } from "@/lib/privy";
 import { withReadDb } from "@/lib/ledger";
 import { getGrantStore } from "@merrymen/grant-store";
 import { getIdentityStore } from "@merrymen/identity-store";
@@ -143,12 +144,32 @@ export async function POST(req: Request) {
     // only meaningful under `privy-did-owner-v1`; arriving on a legacy claim it
     // is unverified client text that would be persisted verbatim and read back
     // later as though the server had checked it.
+    if (binding.version === "privy-did-owner-v1" && typeof binding.did !== "string") {
+      return NextResponse.json(
+        { error: "this grant claims a privy binding but names no identity" },
+        { status: 400 },
+      );
+    }
     if (binding.did !== undefined && binding.version !== "privy-did-owner-v1") {
       return NextResponse.json(
         { error: "this grant carries an identity its binding version does not verify" },
         { status: 400 },
       );
     }
+    // ── the privy arm needs a VERIFIED token, and this is where it is read ──
+    //
+    // verifyGrantBinding holds no Privy credential and does no token
+    // verification: it is handed the DID or it refuses. So a grant declaring
+    // `privy-did-owner-v1` must arrive with its access token, and a deployment
+    // that cannot verify one cannot accept the binding — which is the correct
+    // failure, not a fallback to the legacy check.
+    let verifiedDid: string | null = null;
+    if (binding.version === "privy-did-owner-v1") {
+      const token = await verifyPrivyToken(privyTokenOf(req));
+      if (!token.ok) return NextResponse.json({ error: token.why }, { status: 401 });
+      verifiedDid = token.identity.did;
+    }
+
     const bound = await verifyGrantBinding({
       origin: requestOrigin(req),
       tenant,
@@ -166,6 +187,8 @@ export async function POST(req: Request) {
       // `privy-did-owner-v1` would be verified under LEGACY rules instead of
       // refused, which is precisely the downgrade the versioning exists to stop.
       version: binding.version,
+      did: binding.did,
+      verifiedDid,
     });
     if (!bound.ok) {
       return NextResponse.json({ error: bound.why }, { status: 403 });

@@ -108,8 +108,12 @@ describe("the backup gate gets the copy with the key", () => {
     assert.match(SESSION_SRC, /local: Grant;/);
     assert.match(SESSION_SRC, /return \{ grant, local: localGrant, handoff:/);
     // And the server copy still omits the key when hosted — the property that
-    // made them different in the first place, and worth keeping.
-    assert.match(SESSION_SRC, /\.\.\.\(hostedAs \? \{\} : \{ demoOwnerPrivateKey: ownerPrivateKey \}\)/);
+    // made them different in the first place, and worth keeping. The condition
+    // gained a second arm: a PRIVY owner has no key to omit, because merrymen
+    // never holds one. Both arms must be present, or a Privy grant would try to
+    // attach a `privateKey` field that does not exist on its signer.
+    assert.match(SESSION_SRC, /hostedAs \|\| ownerSigner\.binding !== "legacy-wallet-owner-v1"/);
+    assert.match(SESSION_SRC, /demoOwnerPrivateKey: ownerSigner\.privateKey/);
   });
 
   it("every mint call site takes `local`, never the server copy", () => {
