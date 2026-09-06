@@ -229,6 +229,18 @@ export class FileIdentityStore implements IdentityStore {
 
 // ── postgres backend ─────────────────────────────────────────────────────────
 
+/**
+ * A Postgres unique-violation, whatever driver shape it arrives in.
+ *
+ * SQLSTATE 23505. Matched on the code rather than the message so a translated
+ * or reworded server error still lands here, and narrow enough that a genuine
+ * outage never reads as "already claimed".
+ */
+function isUniqueViolation(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null)?.code;
+  return code === "23505" || code === 23505;
+}
+
 interface PgClientLike {
   query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount?: number | null }>;
 }
@@ -374,11 +386,23 @@ export class PgIdentityStore implements IdentityStore {
     const { rows } = await c.query(`SELECT * FROM agent_identity WHERE privy_did = $1`, [did]);
     return rows[0] ? fromRow(rows[0] as unknown as Row) : null;
   }
+  /**
+   * FIRST CLAIM WINS, DECIDED BY THE DATABASE.
+   *
+   * This used to read `byDid` and then write, which is first-claim-wins only if
+   * nothing runs concurrently. Two logins racing the same DID both saw no
+   * holder, both wrote, and the second either won (two identities, one login)
+   * or died on the unique index as a 500 — neither of which is "false".
+   *
+   * There is no pre-read now. The UNIQUE index on `privy_did` IS the guard, and
+   * a unique violation is translated to the refusal it always meant. Re-linking
+   * the same pair still updates its own row and returns true.
+   */
   async linkSocial(tenant: `0x${string}`, social: SocialIdentity): Promise<boolean> {
-    const holder = await this.byDid(social.did);
-    if (holder && holder.tenant.toLowerCase() !== tenant.toLowerCase()) return false;
     const c = await this.client();
-    const { rowCount } = await c.query(
+    let rowCount: number | null | undefined;
+    try {
+      ({ rowCount } = await c.query(
       `UPDATE agent_identity
           SET privy_did = $2, provider = $3, subject = $4, handle = $5,
               display_name = $6, avatar_url = $7, updated_at = $8
@@ -393,7 +417,15 @@ export class PgIdentityStore implements IdentityStore {
         social.avatarUrl ?? null,
         now(),
       ],
-    );
+      ));
+    } catch (e) {
+      // 23505 = unique_violation. Either `privy_did` or `(provider, subject)`
+      // is already held by a different tenant, which is precisely the
+      // already-claimed case this returns false for. Anything else propagates —
+      // a refusal must never stand in for a store that is broken.
+      if (isUniqueViolation(e)) return false;
+      throw e;
+    }
     return (rowCount ?? 0) > 0;
   }
   async remove(tenant: `0x${string}`): Promise<void> {

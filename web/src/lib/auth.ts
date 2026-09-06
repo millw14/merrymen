@@ -19,7 +19,13 @@
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { recoverMessageAddress } from "viem";
-import { bindingMessage, sessionSecret } from "@merrymen/core";
+import {
+  DEFAULT_BINDING_VERSION,
+  bindingMessage,
+  isBindingVersion,
+  sessionSecret,
+  type BindingVersion,
+} from "@merrymen/core";
 
 /** Challenge nonces live this long. Long enough to sign, short enough to not linger. */
 const CHALLENGE_TTL_MS = 5 * 60_000;
@@ -220,15 +226,62 @@ export async function verifyGrantBinding(args: {
   owner: `0x${string}`;
   smartAccount: `0x${string}`;
   chainId: number;
-  walletSignature: `0x${string}`;
+  /** Required by `legacy-wallet-owner-v1`; absent under `privy-did-owner-v1`. */
+  walletSignature?: `0x${string}`;
   ownerSignature: `0x${string}`;
+  /**
+   * Whatever the grant claimed. UNTRUSTED — an unrecognised value is refused
+   * rather than resolved to a default, because the two versions accept
+   * different evidence and guessing wrong is a downgrade in one direction or
+   * the other.
+   */
+  version?: unknown;
   now?: number;
 }): Promise<BindingResult> {
+  // ── WHICH SECURITY MODEL, DECIDED ONCE AND OUT LOUD ──────────────────────
+  //
+  // Absent resolves to legacy because the field did not exist when those grants
+  // were signed and the two-signature model was the only one there was — that
+  // is history, not a fallback. Anything else that is not a version we know is
+  // refused here, before a signature is recovered.
+  const version: BindingVersion =
+    args.version === undefined || args.version === null
+      ? DEFAULT_BINDING_VERSION
+      : isBindingVersion(args.version)
+        ? args.version
+        : ("unrecognised" as BindingVersion);
+  if (!isBindingVersion(version)) {
+    return { ok: false, why: "this grant's binding version is not one this deployment verifies" };
+  }
+  if (version === "privy-did-owner-v1") {
+    // PR B implements this arm. Refusing is the correct behaviour until then:
+    // a deployment that cannot verify a Privy binding must not fall back to
+    // verifying it as a legacy one, which would read a single owner signature
+    // as if it were two independent proofs.
+    return {
+      ok: false,
+      why: "privy bindings are not enabled on this deployment yet",
+    };
+  }
+
   const now = args.now ?? Date.now();
   const gate = checkNonce(args.nonce, args.origin, now);
   if (!gate.ok) return { ok: false, why: gate.why };
 
+  // ── legacy-wallet-owner-v1: TWO KEYS, TWO SIGNATURES ─────────────────────
+  //
+  // This version's whole content is that authentication and owner authority
+  // come from DIFFERENT keys. One key signing twice satisfies both recoveries
+  // arithmetically while proving only half of what the model claims, so the
+  // arm asserts its own premise. This is not a global rule that an owner may
+  // never equal a tenant — `privy-did-owner-v1` allows exactly that, and gets
+  // its authentication from a verified token instead.
+  if (!args.walletSignature) {
+    return { ok: false, why: "this grant is missing the login signature" };
+  }
+
   const message = bindingMessage({
+    version: "legacy-wallet-owner-v1",
     origin: args.origin,
     nonce: args.nonce,
     owner: args.owner,
@@ -252,6 +305,18 @@ export async function verifyGrantBinding(args: {
   }
   if (ownerSigner.toLowerCase() !== args.owner.toLowerCase()) {
     return { ok: false, why: "the agent wallet did not co-sign — its owner key is not held here" };
+  }
+  // THE SECOND PROOF MUST BE A SECOND PROOF. Under this version the owner key
+  // is minted in the browser and cannot be the login wallet, so two recoveries
+  // landing on one address means one key signed twice — the co-signature that
+  // makes this claim unforgeable was never made. Refuse rather than count it.
+  if (ownerSigner.toLowerCase() === walletSigner.toLowerCase()) {
+    return {
+      ok: false,
+      why:
+        "this claim carries only one proof: the login signature and the owner co-signature " +
+        "came from the same key, so nothing independently proves the owner key is held here",
+    };
   }
 
   usedNonces.add(args.nonce);

@@ -65,6 +65,7 @@ import { toCallPolicy, toRateLimitPolicy, toTimestampPolicy } from "@zerodev/per
 import { createKernelAccount } from "@zerodev/sdk";
 import { toKernelPluginManager } from "@zerodev/sdk/accounts";
 import { KERNEL_V3_3 } from "@zerodev/sdk/constants";
+import { assertDerivedAccount } from "../../packages/core/src/index";
 
 /**
  * The serialized blob's shape (serializePermissionAccount.ts:54-63).
@@ -290,6 +291,13 @@ export async function deserializeFlaggedPermissionAccount(
     useMetaFactory,
     eip7702Auth: params.eip7702Auth,
   } as never);
+
+  // A ZERO DERIVATION IS NOT AN ADDRESS. createKernelAccount answers the zero
+  // address when the factory does not respond on this chain, and it throws
+  // nothing. If the grant blob also carried a zero accountAddress the equality
+  // below would PASS and the worker would arm against nothing.
+  assertDerivedAccount(derived.address, "the account could not be re-derived from this grant");
+  assertDerivedAccount(params.accountParams.accountAddress, "this grant carries no usable account address");
 
   if (derived.address.toLowerCase() !== params.accountParams.accountAddress.toLowerCase()) {
     throw new AccountAddressMismatch(params.accountParams.accountAddress, derived.address);

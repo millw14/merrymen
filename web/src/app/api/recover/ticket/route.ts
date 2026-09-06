@@ -85,9 +85,16 @@ export async function POST(req: Request) {
   // Owner ADDRESS only. deriveKernelAccountAddress builds a view-only signer
   // whose signing methods throw, so this path cannot handle key material even
   // by accident.
+  //
+  // A FAILED DERIVATION MUST NOT MINT A TICKET. The zero address is what this
+  // call returns when the Kernel factory does not answer, and a ticket naming
+  // 0x0000...0000 would send a recovery sweep at an account nobody owns — the
+  // relay's `sender === ticket.smartAccount` check would even pass for it.
   let smartAccount: `0x${string}`;
   try {
-    smartAccount = (await deriveKernelAccountAddress(owner, chainId)) as `0x${string}`;
+    const derived = await deriveKernelAccountAddress(owner, chainId);
+    if (!derived.ok) return NextResponse.json({ error: derived.why }, { status: 502 });
+    smartAccount = derived.address;
   } catch {
     return NextResponse.json({ error: "could not derive the account for that owner" }, { status: 502 });
   }
