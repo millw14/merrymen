@@ -32,11 +32,12 @@ than paragraphs away.
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass
 
-from .analyst import AnalystView, STRUCTURED_SUFFIX, disagreement, parse_view
+from .analyst import AnalystView, FAILURE_DIRECTIONS, STRUCTURED_SUFFIX, disagreement, parse_view
 from .budget import BudgetExceeded, RunBudget, TIERS
 from .escalation import EscalationVerdict, assess as assess_escalation, judge_economics
 from .gate import GateResult, assess
@@ -50,6 +51,8 @@ from .schemas import (
     Refusal,
     SCHEMA_VERSION,
 )
+
+log = logging.getLogger(__name__)
 
 # ── The one instruction every node gets ────────────────────────────────────
 HOUSE_RULES = """You are one voice on a trading desk called Merrymen.
@@ -98,17 +101,51 @@ class BrainGraph:
         call was already being made — and it replaces a keyword scan that fired
         zero times across 36 scenarios.
         """
-        text = await self.llm.complete(
-            node=f"analyst:{lens}",
-            budget=budget,
-            system=f"{HOUSE_RULES}\n\nYou are the {lens} analyst. Report only what your lens can see.",
-            user=(
-                f"Instrument: {req.market.symbol} ({req.market.instrument_class})\n"
-                f"As of: {req.market.as_of}\n\n{material}\n" + STRUCTURED_SUFFIX
-            ),
-            json_schema={"type": "object"},
-        )
+        # ONE LENS'S FAILURE IS ONE LENS'S FAILURE.
+        #
+        # A ProviderError here used to propagate out of `_think` and refuse the
+        # whole run, so a rate limit on the fundamentals call threw away a
+        # perfectly good technical read that had already been paid for. The
+        # budget errors still propagate — those are a deliberate stop — but a
+        # provider fault is recorded against the lens it happened to and the
+        # remaining lenses are still asked.
+        try:
+            text = await self.llm.complete(
+                node=f"analyst:{lens}",
+                budget=budget,
+                system=f"{HOUSE_RULES}\n\nYou are the {lens} analyst. Report only what your lens can see.",
+                user=(
+                    f"Instrument: {req.market.symbol} ({req.market.instrument_class})\n"
+                    f"As of: {req.market.as_of}\n\n{material}\n" + STRUCTURED_SUFFIX
+                ),
+                json_schema={"type": "object"},
+            )
+        except ProviderError as e:
+            view = AnalystView(
+                lens=lens,
+                direction="provider-failed",
+                confidence=0.0,
+                evidence_strength=0.0,
+                note=str(e)[:200],
+            )
+            return (NodeOutput(f"analyst:{lens}", f"[provider-failed] {view.note}"), view)
+
         view = parse_view(lens, text)
+        # BOUNDED DIAGNOSTICS, and only when something went wrong. Enough to
+        # tell the seven failure shapes apart — empty, prose, malformed JSON,
+        # wrong enum, provider fault — without putting the prompt, the material,
+        # the memory or a credential anywhere near a log line. Shape only: how
+        # long, whether a brace was present, and the first sixty characters.
+        if view.direction in FAILURE_DIRECTIONS:
+            head = text[:60].replace("\n", " ")
+            log.warning(
+                "analyst %s: %s (chars=%d brace=%s head=%r)",
+                lens,
+                view.direction,
+                len(text),
+                "{" in text,
+                head,
+            )
         # The dossier carries the NOTE when one parsed, and the raw text when it
         # did not — a lens whose JSON was malformed still said something, and
         # discarding it would lose evidence over a formatting failure.

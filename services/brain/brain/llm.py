@@ -33,6 +33,17 @@ class ProviderError(RuntimeError):
     pass
 
 
+#: Families that emit chain-of-thought unless told not to. Substring match on
+#: the model id, because providers prefix and suffix these freely
+#: ("openai/gpt-oss-120b", "deepseek-r1-distill-llama-70b").
+_REASONING_FAMILIES = ("gpt-oss", "deepseek-r1", "qwen3-thinking", "nemotron", "-thinking")
+
+
+def _is_reasoning_model(model: str) -> bool:
+    m = (model or "").lower()
+    return any(f in m for f in _REASONING_FAMILIES)
+
+
 @dataclass(frozen=True)
 class LlmConfig:
     base_url: str
@@ -121,6 +132,21 @@ class Llm:
             payload["temperature"] = self.cfg.temperature
         if json_schema is not None:
             payload["response_format"] = {"type": "json_object"}
+
+        # ASK A REASONING MODEL TO PUT ITS ANSWER IN `content`.
+        #
+        # The configured models ARE reasoning models — gpt-oss-120b and -20b —
+        # and this payload had no opinion about that. So the model spent its
+        # completion budget thinking, `content` came back empty or as prose, and
+        # every analyst's verdict parsed as nothing. Five lenses reported "I
+        # have nothing" while the technical one held 400 oracle rounds.
+        #
+        # Best effort by construction: a provider that does not know the field
+        # ignores it. It is not the correctness fix — that is `parse_view`
+        # naming the failure instead of calling it `no-data` — it is the fix
+        # that stops the failure happening.
+        if _is_reasoning_model(model):
+            payload["reasoning_effort"] = "none"
 
         client = await self._http()
         last: Exception | None = None

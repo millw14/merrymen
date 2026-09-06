@@ -39,8 +39,30 @@ export interface ShadowRun {
   signals: Record<string, unknown>;
 }
 
-/** How much the analysts actually had to work with. */
-export type Visibility = "blind" | "thin" | "informed";
+/**
+ * How much the analysts actually had to work with — and whether we could read
+ * what they said.
+ *
+ * `broken` is the fourth arm and it is the one that had to be added. Brain now
+ * distinguishes an analyst that looked and found nothing (`no-data`) from one
+ * whose answer never arrived or would not parse (`parse-failed`,
+ * `empty-output`, `invalid-output`, `provider-failed`). Without this arm those
+ * failures would have counted as READINGS here — a run where every lens broke
+ * would have scored "informed", which is the same lie the split was made to
+ * end, inverted.
+ */
+export type Visibility = "blind" | "thin" | "informed" | "broken";
+
+/** Directions that mean the pipeline failed. Mirrors brain/analyst.py. */
+const FAILURE_DIRECTIONS: ReadonlySet<string> = new Set([
+  "parse-failed",
+  "invalid-output",
+  "empty-output",
+  "provider-failed",
+]);
+
+/** Everything that is not a reading: a failure, or an honest absence of evidence. */
+const NON_VERDICT: ReadonlySet<string> = new Set([...FAILURE_DIRECTIONS, "no-data"]);
 
 export interface RunView {
   agentId: string;
@@ -91,8 +113,22 @@ export function viewRun(r: ShadowRun): RunView {
   // A run where every lens returned `no-data` did not decide to hold; it had
   // nothing to decide with, and counting it as a considered hold would credit
   // the reasoner for a failure of the pipeline in front of it.
-  const withData = lenses.filter((l) => l.direction !== "no-data").length;
-  const visibility: Visibility = lenses.length === 0 || withData === 0 ? "blind" : withData === 1 ? "thin" : "informed";
+  const withData = lenses.filter((l) => !NON_VERDICT.has(l.direction)).length;
+  const broken = lenses.filter((l) => FAILURE_DIRECTIONS.has(l.direction)).length;
+  // BROKEN OUTRANKS BLIND. "Every lens said it had nothing" and "no lens
+  // managed to answer" are different facts about different components, and a
+  // run reported as blind sends somebody looking for missing research when the
+  // research was there and the parser was not.
+  const visibility: Visibility =
+    lenses.length === 0
+      ? "blind"
+      : broken === lenses.length
+        ? "broken"
+        : withData === 0
+          ? "blind"
+          : withData === 1
+            ? "thin"
+            : "informed";
 
   const escalationReasons = Array.isArray(s.escalation_reasons) ? (s.escalation_reasons as string[]) : [];
   const delta = num(s.suggested_delta_usdg);
@@ -225,7 +261,7 @@ export function datasetLines(runs: readonly RunView[]): string[] {
     for (const l of r.lenses) {
       const c = coverage.get(l.lens) ?? { read: 0, total: 0 };
       c.total += 1;
-      if (l.direction !== "no-data") c.read += 1;
+      if (!NON_VERDICT.has(l.direction)) c.read += 1;
       coverage.set(l.lens, c);
     }
   }

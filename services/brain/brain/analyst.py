@@ -30,7 +30,36 @@ import json
 from dataclasses import dataclass
 from typing import Literal
 
-Direction = Literal["buy", "sell", "hold", "no-data"]
+#: What a lens concluded, or why it concluded nothing.
+#:
+#: THE LAST FOUR ARE NOT OPINIONS. `no-data` means the analyst looked and had
+#: nothing usable — a real answer, and often the right one. The others mean WE
+#: failed. They exist because the two were the same value until 2026-09-06, and
+#: the difference is the whole point:
+#:
+#:   Brain runs on gpt-oss, a reasoning model. It spends its completion budget
+#:   on chain-of-thought, `llm.complete` reads only `content`, and `parse_view`
+#:   found no JSON in what came back — so it returned `no-data`. Five lenses
+#:   reported "I have nothing" while the technical one was holding 400 published
+#:   oracle rounds over 748 hours. An infrastructure failure was published as an
+#:   investment opinion and nothing downstream could tell the difference.
+Direction = Literal[
+    "buy",
+    "sell",
+    "hold",
+    "no-data",
+    "parse-failed",
+    "invalid-output",
+    "empty-output",
+    "provider-failed",
+]
+
+#: The arms that mean the pipeline broke rather than the evidence being thin.
+#: A run whose lenses are all in here has not formed a view; it has failed, and
+#: the trace, the dataset and the gate all need to be able to say so.
+FAILURE_DIRECTIONS: frozenset[str] = frozenset(
+    {"parse-failed", "invalid-output", "empty-output", "provider-failed"}
+)
 
 #: Below this an analyst is hedging, and a hedge is not a side in a disagreement.
 #: Two analysts who each half-believe opposite things are not in conflict; they
@@ -60,29 +89,56 @@ def parse_view(lens: str, raw: str) -> AnalystView:
     """
     Read an analyst's answer. NEVER raises.
 
-    A lens that returned something unparseable has told us nothing, and the
-    honest reading of nothing is `no-data` — not a guess at its direction from
-    whatever prose came back, which is the mistake this module exists to undo.
+    A lens that returned something unparseable has told us nothing — but that is
+    OUR failure, not a reading of the evidence, and it no longer wears the same
+    word. `no-data` is reserved for an analyst that answered and said it had
+    nothing; a missing, malformed or unusable answer gets its own arm, so a
+    broken provider can never be read as a considered shrug.
     """
     text = (raw or "").strip()
-    direction: Direction = "no-data"
     confidence = 0.0
     strength = 0.0
-    note = text[:400]
 
+    if not text:
+        # THE REASONING-MODEL CASE. The whole completion went to a channel we do
+        # not read, so `content` came back empty. That is not an opinion about
+        # the market; it is the absence of one.
+        return AnalystView(
+            lens=lens, direction="empty-output", confidence=0.0, evidence_strength=0.0, note=""
+        )
+
+    note = text[:400]
     try:
         start = text.find("{")
         end = text.rfind("}")
-        if start >= 0 and end > start:
-            d = json.loads(text[start : end + 1])
-            raw_dir = str(d.get("direction", "no-data")).strip().lower()
-            if raw_dir in ("buy", "sell", "hold", "no-data"):
-                direction = raw_dir  # type: ignore[assignment]
-            confidence = max(0.0, min(1.0, float(d.get("confidence") or 0.0)))
-            strength = max(0.0, min(1.0, float(d.get("evidence_strength") or 0.0)))
-            note = str(d.get("note") or "")[:400]
+        if start < 0 or end <= start:
+            # Prose came back where a JSON object was asked for.
+            return AnalystView(
+                lens=lens, direction="parse-failed", confidence=0.0, evidence_strength=0.0, note=note
+            )
+        d = json.loads(text[start : end + 1])
+        raw_dir = str(d.get("direction", "")).strip().lower()
+        if raw_dir in ("buy", "sell", "hold", "no-data"):
+            direction: Direction = raw_dir  # type: ignore[assignment]
+        else:
+            # It parsed, and the shape was wrong. A different failure from a
+            # different cause, so a different name — and the numbers beside it
+            # are dropped: a confidence of 0.8 attached to a direction nothing
+            # can read is not a weak opinion, it is no opinion wearing one.
+            return AnalystView(
+                lens=lens,
+                direction="invalid-output",
+                confidence=0.0,
+                evidence_strength=0.0,
+                note=str(d.get("note") or "")[:400] or note,
+            )
+        confidence = max(0.0, min(1.0, float(d.get("confidence") or 0.0)))
+        strength = max(0.0, min(1.0, float(d.get("evidence_strength") or 0.0)))
+        note = str(d.get("note") or "")[:400]
     except (ValueError, TypeError, AttributeError):
-        pass
+        return AnalystView(
+            lens=lens, direction="parse-failed", confidence=0.0, evidence_strength=0.0, note=note
+        )
 
     return AnalystView(lens=lens, direction=direction, confidence=confidence, evidence_strength=strength, note=note)
 

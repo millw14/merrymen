@@ -126,7 +126,20 @@ class AnalystSignal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     lens: str = Field(max_length=40)
-    direction: Literal["buy", "sell", "hold", "no-data"]
+    #: Includes the failure arms deliberately: a persisted signal that says
+    #: "parse-failed" is the record that this lens produced nothing usable, and
+    #: collapsing that back to "no-data" on the way to disk would re-hide the
+    #: thing the split exists to show. See analyst.Direction.
+    direction: Literal[
+        "buy",
+        "sell",
+        "hold",
+        "no-data",
+        "parse-failed",
+        "invalid-output",
+        "empty-output",
+        "provider-failed",
+    ]
     confidence: float = Field(ge=0.0, le=1.0)
     #: How much the lens had to work with, as distinct from how sure it is. A
     #: confident read of thin evidence and a confident read of thick evidence
