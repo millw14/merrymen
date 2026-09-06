@@ -15,7 +15,8 @@ export type Screen =
   | { kind: "create" }
   | { kind: "settings" }
   | { kind: "grant" }
-  | { kind: "limits" };
+  | { kind: "limits" }
+  | { kind: "swap" };
 
 export interface AgentRef {
   slug: string;

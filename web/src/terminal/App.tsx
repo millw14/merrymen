@@ -42,6 +42,7 @@ import Wallet from "./screens/Wallet";
 
 import { Profile } from "./screens/Profile";
 import { Search } from "./screens/Search";
+import { Swap } from "./screens/Swap";
 import { Token } from "./screens/Token";
 import { You } from "./screens/You";
 import { TabIcon } from "./ui";
@@ -322,6 +323,7 @@ export function App() {
             onDesk={() => goTab("agent")}
             onDeposit={() => openScreen({ kind: "deposit" })}
             onWithdraw={() => openScreen({ kind: "withdraw" })}
+            onSwap={() => openScreen({ kind: "swap" })}
             stopped={stopped}
             perTrade={perTrade}
             perDay={perDay}
@@ -407,6 +409,7 @@ export function App() {
         {screen.kind === "limits" && (
           <LimitsPanel account={account} onClose={()=>goTab(tab)}/>
         )}
+        {screen.kind === "swap" && <Swap />}
       </div>
       {desktop && moneyMode ? (
         <aside
@@ -455,11 +458,13 @@ function screenForPath(path: string): Screen {
   if(path==="/settings") return {kind:"settings"};
   if(path==="/grant") return {kind:"grant"};
   if(path==="/limits") return {kind:"limits"};
+  if(path==="/swap") return {kind:"swap"};
   return {kind:"tab",tab:path==="/agent"?"agent":path==="/you"?"you":path==="/feed"?"feed":path==="/leaderboard"?"board":"home"};
 }
 function pathForScreen(screen: Screen): string {
   if(screen.kind==="token") return `/t/${encodeURIComponent(screen.id)}`;
   if(screen.kind==="profile") return `/a/${encodeURIComponent(screen.slug)}`;
+  if(screen.kind==="swap") return "/swap";
   if(screen.kind==="tab") return ({home:"/",agent:"/agent",you:"/you",feed:"/feed",board:"/leaderboard"})[screen.tab];
   return `/${screen.kind}`;
 }

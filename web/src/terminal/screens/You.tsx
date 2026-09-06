@@ -11,6 +11,7 @@ export function You({
   onDesk,
   onDeposit,
   onWithdraw,
+  onSwap,
   stopped,
   perTrade,
   perDay,
@@ -22,6 +23,7 @@ export function You({
   onDesk: () => void;
   onDeposit: () => void;
   onWithdraw: () => void;
+  onSwap: () => void;
   stopped: boolean;
   perTrade: string;
   perDay: string;
@@ -69,6 +71,9 @@ export function You({
         <PerformanceChart balance values={history} height={68} />
         <button type="button" className="account-fund" onClick={onDeposit}>
           Add funds <span aria-hidden>↗</span>
+        </button>
+        <button type="button" className="account-fund" onClick={onSwap}>
+          Swap ETH → USDG <span aria-hidden>↗</span>
         </button>
         <button type="button" className="account-fund" onClick={onWithdraw}>
           Withdraw <span aria-hidden>↗</span>
