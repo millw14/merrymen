@@ -44,6 +44,26 @@ def _is_reasoning_model(model: str) -> bool:
     return any(f in m for f in _REASONING_FAMILIES)
 
 
+#: The field that asks a reasoning model to put its answer in `content`.
+REASONING_FIELD = "reasoning_effort"
+
+#: Base URLs observed to REJECT that field rather than ignore it. Learned at
+#: runtime from a 400 and remembered for the life of the process, so an endpoint
+#: that refuses the hint pays for it once instead of on every call.
+_REASONING_HINT_REFUSED: set[str] = set()
+
+
+def _rejects_reasoning_field(body: str) -> bool:
+    """
+    Is this 400 about the reasoning hint, or about our prompt?
+
+    Narrow on purpose. A 400 that does not name the field is a real error and
+    must stay one — silently retrying every bad request without the hint would
+    hide malformed payloads behind a second call that fails the same way.
+    """
+    return REASONING_FIELD in (body or "")[:4000]
+
+
 @dataclass(frozen=True)
 class LlmConfig:
     base_url: str
@@ -145,12 +165,13 @@ class Llm:
         # ignores it. It is not the correctness fix — that is `parse_view`
         # naming the failure instead of calling it `no-data` — it is the fix
         # that stops the failure happening.
-        if _is_reasoning_model(model):
-            payload["reasoning_effort"] = "none"
+        if _is_reasoning_model(model) and self.cfg.base_url not in _REASONING_HINT_REFUSED:
+            payload[REASONING_FIELD] = "none"
 
         client = await self._http()
         last: Exception | None = None
-        for attempt in range(max_attempts):
+        attempt = 0
+        while attempt < max_attempts:
             # EVERY ATTEMPT IS A CALL. Counting only successes is how a
             # rate-limited run comes in "under budget" while costing more.
             if attempt:
@@ -161,16 +182,36 @@ class Llm:
                     headers={"Authorization": f"Bearer {self.cfg.api_key}"},
                     json=payload,
                 )
+                # THE HINT MUST NOT BE ABLE TO BREAK THE CALL IT IMPROVES.
+                #
+                # `reasoning_effort` is best effort: some providers ignore an
+                # unknown field, and some reject the request outright. If this
+                # one rejects it, sending it would turn a working lens into
+                # `provider-failed` on every single call — the fix causing a
+                # worse version of the fault it was written for. So: drop it,
+                # remember that this endpoint refuses it, and try again. The
+                # retry is free of the attempt budget because the first request
+                # never reached the model.
+                if (
+                    r.status_code == 400
+                    and REASONING_FIELD in payload
+                    and _rejects_reasoning_field(r.text)
+                ):
+                    _REASONING_HINT_REFUSED.add(self.cfg.base_url)
+                    payload.pop(REASONING_FIELD, None)
+                    continue
                 if r.status_code == 429:
                     last = ProviderError("rate limited")
                     # Bounded, and only if the budget still allows it.
                     await asyncio.sleep(1.5 * (attempt + 1))
+                    attempt += 1
                     continue
                 r.raise_for_status()
                 body = r.json()
             except httpx.HTTPError as e:
                 last = ProviderError(f"{type(e).__name__}: {e}")
-                if attempt + 1 >= max_attempts:
+                attempt += 1
+                if attempt >= max_attempts:
                     break
                 await asyncio.sleep(1.0)
                 continue

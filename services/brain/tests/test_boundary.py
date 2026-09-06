@@ -744,3 +744,113 @@ def test_one_lens_failing_cannot_downgrade_another():
     assert "chars=%d" in src and "head=%r" in src
     for leak in ("material", "system=", "req.portfolio", "api_key"):
         assert f"{leak}," not in src.split("log.warning")[1][:400], f"{leak} must not be logged"
+
+
+def test_the_reasoning_hint_cannot_break_the_call_it_improves():
+    """
+    A best-effort hint must be best-effort in BOTH directions.
+
+    `reasoning_effort` is sent so a gpt-oss model puts its answer in `content`
+    instead of spending the budget on chain-of-thought. Some endpoints ignore an
+    unknown field; some reject the whole request. On one that rejects it, sending
+    it unconditionally would turn every working lens into `provider-failed` — the
+    repair producing a broader version of the fault it was written for.
+
+    So the 400 is read, the field is dropped, and the call is made again. The
+    retry does not spend the attempt budget, because the first request never
+    reached a model.
+    """
+    import asyncio
+
+    import httpx
+
+    from brain.budget import RunBudget, TIERS
+    from brain.llm import Llm, LlmConfig, REASONING_FIELD, _REASONING_HINT_REFUSED
+
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body)
+        if REASONING_FIELD in body:
+            return httpx.Response(
+                400,
+                json={"error": {"message": f"'{REASONING_FIELD}' is not supported for this model"}},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"direction":"buy","confidence":0.7}'}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+        )
+
+    cfg = LlmConfig(
+        base_url="https://provider.invalid/v1",
+        api_key="test-not-a-real-key",
+        deep_model="openai/gpt-oss-120b",
+        quick_model="openai/gpt-oss-20b",
+    )
+    _REASONING_HINT_REFUSED.discard(cfg.base_url)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    llm = Llm(cfg, client=client)
+
+    async def go():
+        budget = RunBudget(run_id="r", agent_id="0xa", tier="research", limits=TIERS["research"])
+        first = await llm.complete(node="analyst:technical", budget=budget, system="s", user="u")
+        # And a SECOND call must not repeat the rejected request: the endpoint
+        # said no once and this process is expected to have learned it.
+        second = await llm.complete(node="analyst:news", budget=budget, system="s", user="u")
+        await client.aclose()
+        return first, second
+
+    first, second = asyncio.run(go())
+
+    assert '"direction":"buy"' in first, "the answer survives an endpoint that refuses the hint"
+    assert '"direction":"buy"' in second
+    assert [REASONING_FIELD in b for b in seen] == [True, False, False], seen
+    assert cfg.base_url in _REASONING_HINT_REFUSED
+    _REASONING_HINT_REFUSED.discard(cfg.base_url)
+
+
+def test_a_400_that_is_not_about_the_hint_stays_an_error():
+    """
+    The retry is narrow on purpose.
+
+    A 400 that does not name the field is a real error — a malformed payload, a
+    prompt over the context limit — and retrying every one of them without the
+    hint would hide the actual fault behind a second call that fails identically.
+    """
+    import asyncio
+
+    import httpx
+
+    from brain.budget import RunBudget, TIERS
+    from brain.llm import Llm, LlmConfig, ProviderError, _REASONING_HINT_REFUSED
+
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(400, json={"error": {"message": "context length exceeded"}})
+
+    cfg = LlmConfig(
+        base_url="https://strict.invalid/v1",
+        api_key="test-not-a-real-key",
+        deep_model="openai/gpt-oss-120b",
+        quick_model="openai/gpt-oss-20b",
+    )
+    _REASONING_HINT_REFUSED.discard(cfg.base_url)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    llm = Llm(cfg, client=client)
+
+    async def go():
+        budget = RunBudget(run_id="r", agent_id="0xa", tier="research", limits=TIERS["research"])
+        with pytest.raises(ProviderError):
+            await llm.complete(node="analyst:technical", budget=budget, system="s", user="u")
+        await client.aclose()
+
+    asyncio.run(go())
+    assert calls == 2, "the ordinary bounded retry, and no extra hint-dropping attempt"
+    assert cfg.base_url not in _REASONING_HINT_REFUSED
