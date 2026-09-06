@@ -1713,6 +1713,284 @@ async function main() {
   let lastTierId = holderTier.id;
   let circleBlockedNoted = false; // so the "hold to unlock" note isn't spammed each tick
   let lastSequencerUp = true;
+  // Manual one-shot swap from the /swap screen (settings handoff fields
+  // manualSwapWei/manualSwapId). Same wall, same reserve, same latch as
+  // auto-convert — and a manual fire IS a fire: it sets the latch
+  // marker+clock so auto-convert cannot re-eat the leftover later.
+  //
+  // Fail-fast and at-most-once: every terminal outcome (success, skip,
+  // error) clears the request and records the id. A failed spend is an
+  // event the owner reads and a button they press again — never a silent
+  // retry of an explicit instruction, and never a replay of a resurrected
+  // settings file (the id record survives in the latch row).
+  const runManualSwap = async (): Promise<void> => {
+    if (!active) return;
+    const agentId = active.agentId;
+    const manualSwap = parseManualSwap(cfg);
+    if (!manualSwap) return;
+    if (active.grant.chainId !== TRADEABLE_CHAIN_ID || paperActive() || lastGasWei === null || convertInFlight) return;
+    const manualTag = `manual-swap ${manualSwap.id}`;
+    const clearManualSwap = () => {
+      try {
+        patchSettingsFile({ manualSwapWei: undefined, manualSwapId: undefined });
+      } catch {
+        // The next tick retries the clear; the completed-id record already
+        // guards against a double execute.
+      }
+    };
+    // Settle: record the id (write-ahead — claimed even on failure paths
+    // below), persist, clear the handoff, emit the outcome. At-most-once by
+    // construction: the id is in the durable row before anything spends.
+    const settleManualSwap = async (ok: boolean, line: string) => {
+      recordSwapId(convertLatch, manualSwap.id, Date.now());
+      persistLatch();
+      clearManualSwap();
+      await addEvent(agentId, ok ? "ok" : "warn", line).catch(() => {});
+    };
+    if (swapIdCompleted(convertLatch, manualSwap.id)) {
+      clearManualSwap();
+      return;
+    }
+    if (!active.executor) {
+      await settleManualSwap(false, `${manualTag} cancelled — no live executor (no bundler key), so nothing can be signed.`);
+      return;
+    }
+    if (!grantHasNativeSwap(active.grant)) {
+      await settleManualSwap(
+        false,
+        `${manualTag} cancelled — this key was signed before the ETH→USDG permission existed. Re-sign at /grant, then submit again.`,
+      );
+      return;
+    }
+    try {
+      console.log(`[${manualTag}] fetching gas price`);
+      const manualGasPrice = await mainnetClient().getGasPrice().catch(() => null);
+      if (manualGasPrice === null) {
+        // A read that fails is unknown, never zero: a zero gas price would
+        // erase the reserve floor it protects. Refuse, loudly.
+        await settleManualSwap(false, `${manualTag} cancelled — gas price unreadable right now. Nothing was spent; submit again later.`);
+        return;
+      }
+      const manualReady = await ensureDeployedForConvert({
+        agentId,
+        balanceWei: lastGasWei,
+        gasPrice: manualGasPrice,
+        tag: manualTag,
+      });
+      if (manualReady.blocked) {
+        await settleManualSwap(
+          false,
+          `${manualTag} cancelled — balance is below the one-time account setup cost. Top up first, then submit again.`,
+        );
+        return;
+      }
+      const { reserve: manualReserve, surplus: manualSurplus } = convertReserve(
+        lastGasWei,
+        manualGasPrice,
+        manualReady.deployed,
+        cfg.autoConvertReservePct,
+        gasSponsored(),
+      );
+      console.log(
+        `[${manualTag}] economics: sponsored=${gasSponsored()} reserve=${manualReserve} ` +
+          `balance=${lastGasWei} surplus=${manualSurplus} requested=${manualSwap.wei}`,
+      );
+      const manualAmount = manualSwap.wei < manualSurplus ? manualSwap.wei : manualSurplus;
+      if (manualAmount <= 0n) {
+        await settleManualSwap(
+          false,
+          `${manualTag} cancelled — ${formatUnits(manualSwap.wei, 18)} ETH leaves nothing above the gas reserve (${formatUnits(manualReserve, 18)} ETH kept). Lower the amount or top up.`,
+        );
+        return;
+      }
+      const leg = await quoteConvertLeg(active.client, manualAmount, manualTag);
+      if (!leg) {
+        await settleManualSwap(false, `${manualTag} failed — no guarded TWAP price for ${formatUnits(manualAmount, 18)} ETH right now. Nothing was spent; submit again later.`);
+        return;
+      }
+      const policy = await convertPolicyCheck(agentId, manualAmount, leg.expect6);
+      if (!policy.ok) {
+        await settleManualSwap(false, `${manualTag} cancelled — ${policy.line}.`);
+        return;
+      }
+      await submitConvertLeg({
+        client: active.client,
+        executor: active.executor,
+        agentId,
+        amountEth: manualAmount,
+        expect6: leg.expect6,
+        minOut: leg.minOut,
+        fee: leg.fee,
+        tag: manualTag,
+      });
+      recordFire(convertLatch, Date.now(), lastGasWei - manualAmount);
+      await settleManualSwap(true, `${manualTag} settled — marker advanced, auto-convert will not re-eat the leftover.`);
+    } catch (err) {
+      await settleManualSwap(
+        false,
+        `${manualTag} failed — ${err instanceof Error ? err.message : String(err)}. Nothing else will retry it; submit again when ready.`,
+      );
+    }
+  };
+  // Auto-convert: surplus ETH → USDG when enabled, once per deposit. The gate
+  // is the toggle + live rail + fresh money (balance above the durable marker)
+  // + hourly cooldown — a restart re-fires nothing, only a deposit does.
+  const runAutoConvert = async (): Promise<void> => {
+    if (!active) return;
+    const agentId = active.agentId;
+    const autoConvertReady = Date.now() - convertLatch.firedAtMs >= AUTO_CONVERT_COOLDOWN_MS;
+    const autoConvertFreshMoney =
+      lastGasWei !== null && latchAllowsFire(convertLatch, lastGasWei, Date.now());
+    if (cfg.autoConvertEnabled || autoConvertDebugUntil > Date.now()) {
+      console.log(
+        `[auto-convert] state: enabled=${cfg.autoConvertEnabled} active=${!!active} ` +
+          `chain=${active.grant.chainId === TRADEABLE_CHAIN_ID} paper=${paperActive()} executor=${!!active?.executor} ` +
+          `gasRead=${lastGasWei !== null} grant=${!!active && grantHasNativeSwap(active.grant)} ` +
+          `cooldownReady=${autoConvertReady}`,
+      );
+    }
+    if (
+      !cfg.autoConvertEnabled ||
+      !active ||
+      active.grant.chainId !== TRADEABLE_CHAIN_ID ||
+      paperActive() ||
+      lastGasWei === null ||
+      !autoConvertReady ||
+      !autoConvertFreshMoney ||
+      convertInFlight
+    ) {
+      if (cfg.autoConvertEnabled && autoConvertDebugUntil > Date.now()) {
+        console.log(
+          `[auto-convert] NOT converting: gate failed (active=${!!active}, chain=${active?.grant.chainId === TRADEABLE_CHAIN_ID}, ` +
+            `paper=${paperActive()}, gasRead=${lastGasWei !== null}, cooldownReady=${autoConvertReady}, freshMoney=${autoConvertFreshMoney})`,
+        );
+      }
+      return;
+    }
+    // The marker is minted BY the wall that can do this. A grant signed
+    // before nativeSwapValueLimitWei existed would only fail at the chain —
+    // say so once, clearly, instead of burning gas reading a revert.
+    if (!grantHasNativeSwap(active.grant)) {
+      if (!autoConvertSignNoteShown) {
+        autoConvertSignNoteShown = true;
+        await addEvent(
+          agentId,
+          "warn",
+          "auto-convert is on but this key was signed before the ETH→USDG permission existed — re-sign at /grant to use it. Until then, send USDG directly.",
+        );
+      }
+      return;
+    }
+    autoConvertAttempt: {
+      try {
+        console.log(`[auto-convert] fetching gas price`);
+        const gasPrice = await mainnetClient().getGasPrice().catch(() => null);
+        if (gasPrice === null) {
+          // A read that fails is unknown, never zero: a zero gas price would
+          // erase the reserve floor AND skip the deployment-affordability
+          // check — the failure mode is "convert everything including the gas
+          // we needed to convert it". Refuse, back off an hour, say so.
+          convertLatch.firedAtMs = Date.now();
+          persistLatch();
+          await addEvent(agentId, "warn", "auto-convert skipped — gas price unreadable right now, refusing rather than sizing a reserve from zero. Retries in an hour.");
+          break autoConvertAttempt;
+        }
+        let deployed: boolean;
+        try {
+          const ready = await ensureDeployedForConvert({
+            agentId,
+            balanceWei: lastGasWei,
+            gasPrice,
+            tag: "auto-convert",
+          });
+          if (ready.blocked) {
+            // Below the one-time setup cost: mark THESE funds considered
+            // WITHOUT starting the clock — a later top-up exceeds the marker
+            // and fires at once, instead of waiting out an hour it did
+            // nothing to earn.
+            convertLatch.consideredWei = lastGasWei;
+            persistLatch();
+            break autoConvertAttempt;
+          }
+          deployed = ready.deployed;
+        } catch (probeErr) {
+          // One attempt per cooldown window: a failing deploy retried every
+          // tick would spam the event log with the same refusal. The marker
+          // is untouched, so a genuinely new deposit still counts as new —
+          // only the clock holds the retry off.
+          convertLatch.firedAtMs = Date.now();
+          persistLatch();
+          throw probeErr;
+        }
+        // Prefund sizing, ON TOP OF the swap's msg.value — both leave the
+        // account in the SAME operation, at the executor's headroom. Shared
+        // with manual swaps via convertReserve so the two paths cannot
+        // disagree on "gas kept".
+        const { reserve, surplus: surplusEth } = convertReserve(
+          lastGasWei,
+          gasPrice,
+          deployed,
+          cfg.autoConvertReservePct,
+          gasSponsored(),
+        );
+        console.log(
+          `[auto-convert] economics: sponsored=${gasSponsored()} gasPrice=${gasPrice} reserve=${reserve} ` +
+            `balance=${lastGasWei} surplus=${surplusEth}`,
+        );
+        if (surplusEth <= 0n || !active.executor) {
+          if (autoConvertDebugUntil > Date.now()) {
+            console.log(
+              !active.executor
+                ? `[auto-convert] NOT converting: no live executor`
+                : `[auto-convert] NOT converting: surplus ${formatUnits(surplusEth, 18)} ETH is not above the gas reserve`,
+            );
+          }
+          break autoConvertAttempt;
+        }
+        const leg = await quoteConvertLeg(active.client, surplusEth, "auto-convert");
+        if (!leg) {
+          if (autoConvertDebugUntil > Date.now()) {
+            console.log(`[auto-convert] NOT converting: no guarded TWAP price for ${formatUnits(surplusEth, 18)} ETH`);
+          }
+          break autoConvertAttempt;
+        }
+        const policy = await convertPolicyCheck(agentId, surplusEth, leg.expect6);
+        if (!policy.ok) {
+          // Back off an hour like any refusal: the event names the rule, and
+          // retrying every tick would spam it. The marker is untouched.
+          convertLatch.firedAtMs = Date.now();
+          persistLatch();
+          await addEvent(agentId, "warn", `auto-convert skipped — ${policy.line}.`);
+          break autoConvertAttempt;
+        }
+        await submitConvertLeg({
+          client: active.client,
+          executor: active.executor,
+          agentId,
+          amountEth: surplusEth,
+          expect6: leg.expect6,
+          minOut: leg.minOut,
+          fee: leg.fee,
+          tag: "auto-convert",
+        });
+        // THE LATCH: the marker becomes what was left behind, so these exact
+        // funds can never refire — not next tick, not after a restart, not
+        // after a redeploy. Only a balance ABOVE this fires again (a deposit).
+        recordFire(convertLatch, Date.now(), lastGasWei - surplusEth);
+        persistLatch();
+      } catch (err) {
+        // Never into the tick's own path: a failed convert (wall refusal,
+        // bundler error, re-sign needed) must not stall trading. Neither clock
+        // nor marker moves here — the same funds retry next tick, and a probe
+        // failure carries the hourly backoff set above.
+        await addEvent(
+          agentId,
+          "warn",
+          `auto-convert skipped — ${err instanceof Error ? err.message : String(err)}. If this says the wall refused, re-sign at /grant: keys signed before the ETH→USDG permission was added cannot convert.`,
+        ).catch(() => {});
+      }
+    }
+  };
   // One re-sign notice per arm, not per tick — a warn event every minute is
   // noise, and the event log is the owner's record.
   let autoConvertSignNoteShown = false;
@@ -5944,6 +6222,12 @@ async function main() {
     // Same rule the cash balance already follows: unknown is not zero, so leave
     // it null and let the pre-flight decline to judge.
     if (!paper) lastGasWei = balances.ethWei;
+    // Ratchet the latch marker down when funds leave without a fire (gas,
+    // trades, an off-worker withdrawal) — otherwise a spend followed by a
+    // smaller deposit would sit forever under a stale-high marker. A rise is
+    // never ratcheted: only an excess over the marker may fire. Live ticks
+    // only: the paper tick's hardcoded zero is not a balance.
+    if (!paper && ratchetMarkerDown(convertLatch, balances.ethWei)) persistLatch();
     // Fresh feed prices → the notifier's price alerts (evaluated off-tick).
     notifierHandle?.publishPrices(market.prices);
 
@@ -5965,6 +6249,15 @@ async function main() {
     // Pause marker (toggled from Telegram/dashboard): keep reading state, but
     // the strategy stops proposing trades until resumed.
     if (isPaused()) return;
+
+    // ── converts run BELOW the kill switch, never above it ──────────────
+    // Both blocks below submit on-chain only after this pause check has
+    // passed, and both pass a scoped policy gate first. A paused worker
+    // converts nothing — pause is the control an owner reaches for when
+    // something is wrong, and a path that spends above it isn't paused.
+    await runManualSwap();
+    await runAutoConvert();
+
 
     // Merry Circle strategies run only for holders (Merry Man+). A non-holder may
     // select one, but it stays idle with a one-time note until they hold $MERRYMEN.
