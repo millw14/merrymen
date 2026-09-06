@@ -1757,8 +1757,7 @@ export async function finishCommand(id: string, result: string): Promise<void> {
 }
 
 /** The most recent command for this agent, for the dashboard to poll. */
-export async function latestCommand(
-  agentId: string,
+export async function latestCommand(  agentId: string,
 ): Promise<{ id: string; kind: string; createdAt: number; claimedAt: number | null; doneAt: number | null; result: string | null } | null> {
   try {
     const r = (await getDb()
