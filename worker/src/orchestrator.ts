@@ -57,6 +57,7 @@ import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair"
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
 import { datasetLines, viewRun } from "./brain-dataset";
+import { auditIdentity, type GrantClaimLite, type IdentityRowLite } from "./identity-audit";
 import { replayLines, scoreDecision, type Observation, type PricedDecision } from "./replay";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
@@ -978,6 +979,82 @@ async function runBrainDatasetIfAsked(): Promise<void> {
   }
 }
 
+/**
+ * THE IDENTITY AUDIT. READ ONLY. `MERRYMEN_IDENTITY_AUDIT=1`.
+ *
+ * Runs before any uniqueness constraint is added, because a UNIQUE index over a
+ * table that already violates it fails inside the store's lazy bootstrap — and
+ * every public read awaits that bootstrap, so the failure presents as the site
+ * going dark rather than as a migration error. Nothing here writes, and nothing
+ * here deduplicates: two rows claiming one account is a question about which
+ * person owns an agent.
+ */
+async function runIdentityAuditIfAsked(): Promise<void> {
+  if ((process.env.MERRYMEN_IDENTITY_AUDIT ?? "").trim() !== "1") return;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("identity audit asked for, but there is no DATABASE_URL");
+    return;
+  }
+  try {
+    const shared = await makePgDb(url);
+    const idRows = (await shared
+      .prepare("SELECT tenant, slug, accounts, privy_did, provider, subject FROM agent_identity")
+      .all()) as unknown as Record<string, unknown>[];
+    const grantRows = (await shared
+      // `owner` is read for the residue questions only — was an account ever
+      // sealed at 0x0, and is any owner key also its own login wallet. It is an
+      // ADDRESS, never key material; the grant store refuses to hold a key at
+      // all (packages/core hosted.ts, and a 422 at the intake).
+      .prepare(
+        "SELECT tenant, grant_json->>'smartAccount' AS smart_account, " +
+          "grant_json->>'owner' AS owner, " +
+          "grant_json->'binding'->>'version' AS binding_version FROM grants",
+      )
+      .all()) as unknown as Record<string, unknown>[];
+
+    const rows: IdentityRowLite[] = idRows.map((r) => {
+      let accounts: string[] = [];
+      const raw = r.accounts;
+      if (Array.isArray(raw)) accounts = raw.map((a) => String(a));
+      else if (typeof raw === "string") {
+        try {
+          const parsed = JSON.parse(raw) as unknown;
+          if (Array.isArray(parsed)) accounts = parsed.map((a) => String(a));
+        } catch {
+          // An unreadable accounts blob is a row we cannot vouch for. Leave it
+          // empty rather than guessing — it shows up as store disagreement.
+        }
+      }
+      return {
+        tenant: String(r.tenant ?? ""),
+        slug: String(r.slug ?? ""),
+        accounts,
+        privyDid: r.privy_did === null || r.privy_did === undefined ? null : String(r.privy_did),
+        provider: r.provider === null || r.provider === undefined ? null : String(r.provider),
+        subject: r.subject === null || r.subject === undefined ? null : String(r.subject),
+      };
+    });
+    // NULL means the key is absent from the JSON; an empty string means it is
+    // present and empty, which a UNIQUE index treats as an ordinary value. Only
+    // the first is dropped — the second is exactly the row that would break a
+    // constraint the audit had blessed.
+    const claims: GrantClaimLite[] = grantRows
+      .filter((r) => r.smart_account !== null && r.smart_account !== undefined)
+      .map((r) => ({
+        tenant: String(r.tenant ?? ""),
+        smartAccount: String(r.smart_account),
+        owner: r.owner === null || r.owner === undefined ? null : String(r.owner),
+        bindingVersion:
+          r.binding_version === null || r.binding_version === undefined ? null : String(r.binding_version),
+      }));
+
+    for (const line of auditIdentity(rows, claims).lines) log(`identity| ${line}`);
+  } catch (e) {
+    log(`identity audit failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function runReconstructionDryRunIfAsked(): Promise<void> {
   if ((process.env.MERRYMEN_ACCOUNTING_RECONSTRUCT ?? "").trim() !== "1") return;
   const url = process.env.DATABASE_URL;
@@ -1615,6 +1692,7 @@ export async function runOrchestrator(): Promise<void> {
       if (cohortPasses === COHORT_VET_AFTER_PASSES) {
         await runCohortVettingIfAsked();
         await runBrainDatasetIfAsked();
+        await runIdentityAuditIfAsked();
       }
       await ferryCommands2();
       await fleetHealth();

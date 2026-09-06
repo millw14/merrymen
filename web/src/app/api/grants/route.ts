@@ -11,7 +11,17 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@merrymen/home";
 import { createPublicClient, http, parseAbi } from "viem";
-import { CASH, MORPHO, carriesOwnerKey, chainForId, isHostedMode, type StoredGrant } from "@merrymen/core";
+import {
+  CASH,
+  MORPHO,
+  accountsMatch,
+  carriesOwnerKey,
+  chainForId,
+  derivationUnreachable,
+  isHostedMode,
+  type Derivation,
+  type StoredGrant,
+} from "@merrymen/core";
 import { requestOrigin, tenantOf, verifyGrantBinding } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
 import { getGrantStore } from "@merrymen/grant-store";
@@ -120,10 +130,23 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "grant owner is not an address" }, { status: 400 });
     }
     const binding = grant.binding;
-    if (!binding?.nonce || !binding.walletSignature || !binding.ownerSignature) {
+    // Version-agnostic presence check. WHICH signatures a claim needs is the
+    // validator's decision, not this route's — demanding a walletSignature here
+    // would hard-code the legacy model into a route that is about to serve two.
+    if (!binding?.nonce || !binding.ownerSignature) {
       return NextResponse.json(
         { error: "this grant isn't linked to your login — create it again from a signed-in browser" },
         { status: 403 },
+      );
+    }
+    // A CLAIM MAY NOT CARRY EVIDENCE ITS OWN VERSION DOES NOT USE. `did` is
+    // only meaningful under `privy-did-owner-v1`; arriving on a legacy claim it
+    // is unverified client text that would be persisted verbatim and read back
+    // later as though the server had checked it.
+    if (binding.did !== undefined && binding.version !== "privy-did-owner-v1") {
+      return NextResponse.json(
+        { error: "this grant carries an identity its binding version does not verify" },
+        { status: 400 },
       );
     }
     const bound = await verifyGrantBinding({
@@ -135,6 +158,14 @@ export async function POST(req: Request) {
       chainId: grant.chainId,
       walletSignature: binding.walletSignature,
       ownerSignature: binding.ownerSignature,
+      // PASSED THROUGH UNVALIDATED, ON PURPOSE. verifyGrantBinding is the one
+      // place that decides which security model a claim was made under, and it
+      // refuses anything it does not recognise. Omitting this — which an
+      // earlier revision of this file did — makes the whole dispatch
+      // unreachable: every claim resolves to the default, so a grant declaring
+      // `privy-did-owner-v1` would be verified under LEGACY rules instead of
+      // refused, which is precisely the downgrade the versioning exists to stop.
+      version: binding.version,
     });
     if (!bound.ok) {
       return NextResponse.json({ error: bound.why }, { status: 403 });
@@ -171,20 +202,27 @@ export async function POST(req: Request) {
     // Fail CLOSED: if derivation can't be verified (bad chain id, RPC hiccup),
     // refuse rather than trust the client — a rejected honest grant is retried, a
     // trusted dishonest one is not undoable.
-    let derived: `0x${string}`;
+    //
+    // THE COMPARISON TAKES THE RESULT, NOT THE ADDRESS. The derivation is a
+    // live eth_call that can answer 0x0000...0000 without throwing, and if the
+    // browser answered the same zero the two would MATCH — the fault would make
+    // this check pass rather than fail. accountsMatch refuses a failed
+    // derivation before any equality is computed. See packages/core/derivation.
+    let derived: Derivation;
     try {
       derived = await deriveKernelAccountAddress(grant.owner as `0x${string}`, grant.chainId);
-    } catch {
-      return NextResponse.json(
-        { error: "couldn't verify the account derivation — please try again" },
-        { status: 503 },
-      );
+    } catch (e) {
+      derived = derivationUnreachable(e instanceof Error ? e.message : String(e));
     }
-    if (derived.toLowerCase() !== grant.smartAccount.toLowerCase()) {
-      return NextResponse.json(
-        { error: "this smart account does not derive from the signed-in wallet" },
-        { status: 403 },
-      );
+    if (!derived.ok) {
+      // `zero` and `malformed` are the chain answering wrongly, not the client
+      // claiming wrongly — 503 so an honest grant is retried rather than told
+      // its account is a forgery.
+      return NextResponse.json({ error: derived.why }, { status: 503 });
+    }
+    const match = accountsMatch(derived, grant.smartAccount);
+    if (!match.ok) {
+      return NextResponse.json({ error: match.why }, { status: 403 });
     }
 
     // Persist to the per-tenant store, keyed on the authenticated tenant. The

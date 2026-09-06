@@ -30,6 +30,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { createKernelAccount, createKernelAccountClient } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
+import { assertDerivedAccount } from "../../packages/core/src/index";
 import {
   CASH,
   MORPHO,
@@ -233,6 +234,9 @@ export async function planRecovery(opts: {
     plugins: { sudo: ecdsaValidator },
   });
 
+  // A sweep aimed at the zero address would be a signed transaction to nothing.
+  assertDerivedAccount(account.address, "that owner key does not derive an account");
+
   if (
     opts.expectedSmartAccount &&
     account.address.toLowerCase() !== opts.expectedSmartAccount.toLowerCase()
@@ -426,6 +430,7 @@ export async function recoverFunds(opts: {
     kernelVersion: KERNEL_V3_3,
     plugins: { sudo: ecdsaValidator },
   });
+  assertDerivedAccount(account.address, "that owner key does not derive an account");
   const client = createKernelAccountClient({
     account,
     chain: opts.chain,

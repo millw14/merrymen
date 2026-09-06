@@ -14,6 +14,7 @@ import {
   WALL_POLICY_FLAG,
   robinhoodChain,
   usableExtraTokens,
+  assertDerivedAccount,
   type CustomToken,
   type GrantCaps,
   type StoredGrant,
@@ -129,6 +130,15 @@ export async function signGrant(args: {
     plugins: { sudo: ecdsaValidator },
   });
 
+  // BEFORE THE WALL PINS VALUE TO IT. createKernelAccount resolves this with a
+  // live getSenderAddress eth_call and answers the zero address, without
+  // throwing, when the Kernel factory does not respond on this chain. The wall
+  // below would then pin its swap recipient and vault receiver to zero, the
+  // assertion further down would be satisfied by two zeros, and the phone would
+  // seal a grant for an account nobody owns. Identical guard to
+  // web/src/lib/session.ts - the two signers must refuse the same things.
+  assertDerivedAccount(sudoOnlyAccount.address, "the smart account could not be derived");
+
   say("assembling the wall");
   // Uniswap v4 is OFF — see WallOptions.allowUniswapV4. Kept in lockstep with
   // the GRANT_V4 marker below, and identical to web/src/lib/session.ts: the
@@ -166,6 +176,7 @@ export async function signGrant(args: {
   // Same premise check the dashboard makes: the wall's recipient pins are only
   // correct while the permission plugin leaves the address alone. Fail before
   // sealing, never after.
+  assertDerivedAccount(account.address, "the permissioned account could not be derived");
   if (account.address.toLowerCase() !== sudoOnlyAccount.address.toLowerCase()) {
     throw new Error(
       `refusing to sign: the permission plugin changed the account address ` +

@@ -3,7 +3,7 @@ import { toAccount } from "viem/accounts";
 import { createKernelAccount } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
-import { chainForId } from "@merrymen/core";
+import { chainForId, derivationOf, type Derivation } from "@merrymen/core";
 
 /**
  * Recompute the ERC-4337 smart-account address a given OWNER controls, from the
@@ -25,7 +25,11 @@ import { chainForId } from "@merrymen/core";
  * smart_account, so an unverified address lets one tenant write under another's
  * partition.
  */
-export async function deriveKernelAccountAddress(owner: Address, chainId: number): Promise<Address> {
+export async function deriveKernelAccountAddress(owner: Address, chainId: number): Promise<Derivation> {
+  // A malformed owner cannot derive anything, and letting it through would ask
+  // the SDK to build enable-data out of it. Refuse here rather than downstream.
+  const o = derivationOf(owner);
+  if (!o.ok) return { ok: false, failure: "malformed", why: `the owner address is not usable: ${o.why}` };
   const chain = chainForId(chainId);
   // http() with no URL uses the chain's built-in default RPC — the same transport
   // the grants route already uses for balance reads.
@@ -56,5 +60,10 @@ export async function deriveKernelAccountAddress(owner: Address, chainId: number
     plugins: { sudo: ecdsaValidator },
   });
 
-  return account.address;
+  // NOT `return account.address`. The SDK resolves this with a live
+  // getSenderAddress eth_call and, when the factory does not answer, carries on
+  // with the zero address and throws nothing. Returning it here would make the
+  // caller's equality test pass whenever BOTH sides failed the same way — see
+  // packages/core/src/derivation.ts for why that is worse than an error.
+  return derivationOf(account.address);
 }

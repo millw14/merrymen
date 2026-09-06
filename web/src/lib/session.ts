@@ -82,6 +82,7 @@ import {
   bindingMessage,
   TRADEABLE_V2,
   USDG_DECIMALS,
+  assertDerivedAccount,
   type CustomToken,
   type GrantCaps,
   type StoredGrant,
@@ -227,6 +228,16 @@ async function mintGrant(
     plugins: { sudo: ecdsaValidator },
   });
 
+  // BEFORE THE WALL IS PINNED TO IT. createKernelAccount resolves this address
+  // with a live getSenderAddress eth_call and, when the Kernel factory does not
+  // answer on this chain, returns 0x0000...0000 and throws nothing. Everything
+  // below would then be built around the zero address: the wall's swap
+  // recipient, the vault receiver, the assertion further down (which two zeros
+  // satisfy), and the smartAccount the server is asked to verify — which, if it
+  // derived the same zero, would MATCH. Refuse here, where it is still just a
+  // failed derivation rather than a sealed grant.
+  assertDerivedAccount(sudoOnlyAccount.address, "the smart account could not be derived");
+
   // THE WALL now lives in packages/core/src/wall.ts, so the phone app signs the
   // IDENTICAL permission set rather than a second copy that could drift from this
   // one with nothing failing when it did. worker/src/wall.test.ts pins its shape.
@@ -272,6 +283,7 @@ async function mintGrant(
   // being true, every pin would point at an account that doesn't exist and the
   // agent would be unable to trade — or worse, at someone else's. Fail here,
   // loudly, before a grant is sealed, rather than discovering it on-chain.
+  assertDerivedAccount(account.address, "the permissioned account could not be derived");
   if (account.address.toLowerCase() !== sudoOnlyAccount.address.toLowerCase()) {
     throw new Error(
       `refusing to seal this grant: the permission plugin changed the account address ` +
@@ -758,6 +770,12 @@ export async function previewOwnerAccount(
     kernelVersion: KERNEL_V3_3,
     plugins: { sudo: ecdsaValidator },
   });
+  // The restore flow shows this address and then funds it. A zero here would
+  // invite a deposit to an account nobody controls.
+  // Assert, then return the ORIGINAL casing. assertDerivedAccount normalises
+  // to lowercase, and this value is rendered next to addresses everywhere else
+  // in the app, which show EIP-55.
+  assertDerivedAccount(account.address, "that owner key does not derive an account");
   return { smartAccount: account.address, owner: ownerAccount.address };
 }
 

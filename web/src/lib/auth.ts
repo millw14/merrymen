@@ -19,7 +19,33 @@
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { recoverMessageAddress } from "viem";
-import { bindingMessage, sessionSecret } from "@merrymen/core";
+import {
+  DEFAULT_BINDING_VERSION,
+  bindingMessage,
+  isBindingVersion,
+  sessionSecret,
+  type BindingVersion,
+} from "@merrymen/core";
+
+/**
+ * IS THE LEGACY TWO-PROOF PREMISE ENFORCED YET?
+ *
+ * `legacy-wallet-owner-v1` claims that authentication and owner authority come
+ * from two different keys. One key signing twice satisfies the arithmetic while
+ * proving only half of that — so the check below is correct, and it is OFF.
+ *
+ * MEASURED FIRST, THEN ENFORCED. `restoreAgentWallet` accepts any 64-hex key,
+ * so a user may have pasted the private key of the wallet they sign in with.
+ * That is a custody pattern nobody has measured, not a broken account, and
+ * switching the rule on before counting it would have those users discover it
+ * at re-arm time — an agent that stops working, with no warning and no
+ * migration path. The census is in worker/src/identity-audit.ts
+ * (`owner is tenant`); this becomes `true` when it reports zero.
+ *
+ * Same shape as ENFORCE_TRADE_ECONOMICS in worker/src/execution-cost.ts, and
+ * for the same reason: a rule worth enforcing is worth observing first.
+ */
+export const ENFORCE_LEGACY_TWO_PROOF = false;
 
 /** Challenge nonces live this long. Long enough to sign, short enough to not linger. */
 const CHALLENGE_TTL_MS = 5 * 60_000;
@@ -220,15 +246,67 @@ export async function verifyGrantBinding(args: {
   owner: `0x${string}`;
   smartAccount: `0x${string}`;
   chainId: number;
-  walletSignature: `0x${string}`;
+  /** Required by `legacy-wallet-owner-v1`; absent under `privy-did-owner-v1`. */
+  walletSignature?: `0x${string}`;
   ownerSignature: `0x${string}`;
+  /**
+   * Whatever the grant claimed. UNTRUSTED — an unrecognised value is refused
+   * rather than resolved to a default, because the two versions accept
+   * different evidence and guessing wrong is a downgrade in one direction or
+   * the other.
+   */
+  version?: unknown;
   now?: number;
 }): Promise<BindingResult> {
+  // ── WHICH SECURITY MODEL, DECIDED ONCE AND OUT LOUD ──────────────────────
+  //
+  // Absent resolves to legacy because the field did not exist when those grants
+  // were signed and the two-signature model was the only one there was — that
+  // is history, not a fallback. Anything else that is not a version we know is
+  // refused here, before a signature is recovered.
+  const version: BindingVersion =
+    args.version === undefined || args.version === null
+      ? DEFAULT_BINDING_VERSION
+      : isBindingVersion(args.version)
+        ? args.version
+        : ("unrecognised" as BindingVersion);
+  if (!isBindingVersion(version)) {
+    return { ok: false, why: "this grant's binding version is not one this deployment verifies" };
+  }
+  if (version === "privy-did-owner-v1") {
+    // PR B implements this arm. Refusing is the correct behaviour until then:
+    // a deployment that cannot verify a Privy binding must not fall back to
+    // verifying it as a legacy one, which would read a single owner signature
+    // as if it were two independent proofs.
+    return {
+      ok: false,
+      why: "privy bindings are not enabled on this deployment yet",
+    };
+  }
+
   const now = args.now ?? Date.now();
   const gate = checkNonce(args.nonce, args.origin, now);
   if (!gate.ok) return { ok: false, why: gate.why };
 
+  // ── legacy-wallet-owner-v1: TWO KEYS, TWO SIGNATURES ─────────────────────
+  //
+  // This version's whole content is that authentication and owner authority
+  // come from DIFFERENT keys. One key signing twice satisfies both recoveries
+  // arithmetically while proving only half of what the model claims, so the
+  // arm asserts its own premise. This is not a global rule that an owner may
+  // never equal a tenant — `privy-did-owner-v1` allows exactly that, and gets
+  // its authentication from a verified token instead.
+  if (!args.walletSignature) {
+    return {
+      ok: false,
+      // The route used to refuse this with an instruction. Moving the check
+      // into the validator must not cost the user the remedy.
+      why: "this grant is missing the login signature — create it again from a signed-in browser",
+    };
+  }
+
   const message = bindingMessage({
+    version: "legacy-wallet-owner-v1",
     origin: args.origin,
     nonce: args.nonce,
     owner: args.owner,
@@ -252,6 +330,35 @@ export async function verifyGrantBinding(args: {
   }
   if (ownerSigner.toLowerCase() !== args.owner.toLowerCase()) {
     return { ok: false, why: "the agent wallet did not co-sign — its owner key is not held here" };
+  }
+  // THE SECOND PROOF SHOULD BE A SECOND PROOF — MEASURED BEFORE IT IS ENFORCED.
+  //
+  // Under this version the owner key is minted in the browser, so two
+  // recoveries landing on one address means one key signed twice and the
+  // co-signature that makes the claim unforgeable was never made. That is the
+  // right rule and it is switched OFF, because `restoreAgentWallet` accepts any
+  // 64-hex key and somebody may have pasted the private key of the wallet they
+  // sign in with. Such an account is not malicious and not broken; it is a
+  // custody pattern nobody measured. Enforcing first would have it discovered
+  // at RE-ARM time, by a person whose agent stops working with no warning and
+  // no migration.
+  //
+  // The census lives in worker/src/identity-audit.ts and reads
+  // `grant_json->>'owner'` against the tenant. Flip this to `true` when that
+  // count is zero — the same shape as ENFORCE_TRADE_ECONOMICS, and for the same
+  // reason: the rule is computed and recorded long before it decides anything.
+  if (ENFORCE_LEGACY_TWO_PROOF && ownerSigner.toLowerCase() === walletSigner.toLowerCase()) {
+    return {
+      ok: false,
+      // SAY WHAT IS TRUE AND WHAT TO DO. It is not that possession is
+      // unproven — one key signing twice does prove possession of that key.
+      // It is that this version's two proofs collapsed into one, because the
+      // agent is owned by the very key used to sign in.
+      why:
+        "the key that owns this agent is the same key you sign in with, so this claim carries " +
+        "one proof where it needs two. A hosted agent needs its own generated owner key — create " +
+        "a new agent and sweep the old one from the recovery panel",
+    };
   }
 
   usedNonces.add(args.nonce);

@@ -202,13 +202,90 @@ export interface GrantCaps {
  *   chainId — merrymen runs testnet 46630 and mainnet 4663; without it one
  *             signature would bind on both
  */
-export function bindingMessage(args: {
-  origin: string;
-  nonce: string;
-  owner: `0x${string}`;
-  smartAccount: `0x${string}`;
-  chainId: number;
-}): string {
+/**
+ * WHICH SECURITY MODEL A BINDING WAS MADE UNDER. Never inferred.
+ *
+ * Both versions prove the same two things — that the person is who they say
+ * they are, and that they hold the key the account derives from — but they
+ * prove them with different evidence, and the evidence is not interchangeable:
+ *
+ *   legacy-wallet-owner-v1  the login wallet signs (authentication) and a
+ *                           SEPARATE browser-held owner key co-signs the same
+ *                           text (owner authority). Two keys, two signatures.
+ *
+ *   privy-did-owner-v1      a verified Privy access token carries the DID
+ *                           (authentication) and the embedded owner wallet
+ *                           signs the challenge (owner authority). One key may
+ *                           serve as both the identity anchor and the owner —
+ *                           the proofs are still separate, because one of them
+ *                           is a JWT the server verified and the other is a
+ *                           signature over a server-issued nonce.
+ *
+ * They are versioned rather than merged because a validator that accepted both
+ * shapes would have to decide, per request, which evidence it was looking at —
+ * and the wrong guess in either direction is a downgrade. A binding whose
+ * version this deployment does not recognise is refused, not best-guessed.
+ */
+export type BindingVersion = "legacy-wallet-owner-v1" | "privy-did-owner-v1";
+
+/**
+ * What an absent `version` means, and why that is a fact rather than a guess.
+ *
+ * Every grant signed before this field existed was made under the two-signature
+ * browser-owner model, because that was the only model there was. So absent
+ * resolves to legacy by CONSTRUCTION, not by falling through a default — and it
+ * resolves to the STRICTER of the two, which needs two independent signatures.
+ * An unrecognised version string is a refusal.
+ */
+export const DEFAULT_BINDING_VERSION: BindingVersion = "legacy-wallet-owner-v1";
+
+export function isBindingVersion(v: unknown): v is BindingVersion {
+  return v === "legacy-wallet-owner-v1" || v === "privy-did-owner-v1";
+}
+
+/** What a claim binds, by version. `did` exists on exactly the arm that needs it. */
+export type BindingClaim =
+  | {
+      version?: "legacy-wallet-owner-v1";
+      origin: string;
+      nonce: string;
+      owner: `0x${string}`;
+      smartAccount: `0x${string}`;
+      chainId: number;
+    }
+  | {
+      version: "privy-did-owner-v1";
+      origin: string;
+      nonce: string;
+      owner: `0x${string}`;
+      smartAccount: `0x${string}`;
+      chainId: number;
+      /** The Privy DID the access token was verified to carry. */
+      did: string;
+    };
+
+export function bindingMessage(args: BindingClaim): string {
+  if (args.version === "privy-did-owner-v1") {
+    // THE DID IS IN THE SIGNED TEXT. Without it the owner signature would say
+    // "this key authorizes account X" and name no identity at all — it would
+    // verify just as well when replayed under somebody else's login. Under the
+    // legacy version the second signature carries that job; here the text does.
+    return [
+      `${args.origin} wants you to authorize a merrymen agent account.`,
+      "",
+      "You are linking the agent wallet below to your merrymen identity. It moves no funds.",
+      "",
+      `Agent account: ${args.smartAccount.toLowerCase()}`,
+      `Owner key: ${args.owner.toLowerCase()}`,
+      `Identity: ${args.did}`,
+      `Chain ID: ${args.chainId}`,
+      `URI: ${args.origin}`,
+      `Nonce: ${args.nonce}`,
+    ].join("\n");
+  }
+  // THE LEGACY TEXT IS FROZEN, BYTE FOR BYTE. Grants signed by a browser that
+  // has not reloaded are still in flight, and a signature is over the exact
+  // bytes — change a space here and every one of them stops verifying.
   return [
     `${args.origin} wants you to authorize a merrymen agent account.`,
     "",
@@ -292,12 +369,30 @@ export interface StoredGrant {
    * no tenant to bind to.
    */
   binding?: {
-    /** The nonce both signatures were made over. Server-issued, single-use. */
+    /**
+     * Which security model this claim was made under. ABSENT MEANS LEGACY, and
+     * that is a statement about history rather than a default: the field did
+     * not exist when those grants were signed, and the only model that existed
+     * then was the two-signature one. See DEFAULT_BINDING_VERSION.
+     */
+    version?: BindingVersion;
+    /** The nonce the signature(s) were made over. Server-issued, single-use. */
     nonce: string;
-    /** personal_sign by the signed-in wallet — must recover to the tenant. */
-    walletSignature: `0x${string}`;
-    /** personal_sign by the generated owner key — must recover to `owner`. */
+    /**
+     * personal_sign by the signed-in wallet — must recover to the tenant.
+     * LEGACY ONLY. Under `privy-did-owner-v1` authentication is the verified
+     * access token, so there is no second signature and this is absent.
+     */
+    walletSignature?: `0x${string}`;
+    /** personal_sign by the owner key — must recover to `owner`. Both versions. */
     ownerSignature: `0x${string}`;
+    /**
+     * The Privy DID this account is being bound to, echoed so the server can
+     * reconstruct the signed text. NEVER TRUSTED AS AN IDENTITY — the server
+     * compares it to the DID it verified out of the access token and refuses on
+     * any difference. `privy-did-owner-v1` only.
+     */
+    did?: string;
   };
   /** TESTNET ONLY — production signers live in a TEE, never serialized. */
   demoSessionPrivateKey: `0x${string}`;
