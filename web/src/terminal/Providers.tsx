@@ -43,7 +43,15 @@ export function Providers({ children }: { children: ReactNode }) {
         // X FIRST. The array order is the modal order in react-auth v3, and
         // `loginMethodsAndOrder` is deprecated as of 3.40. This only FILTERS
         // what the dashboard already enables — it cannot turn a method on.
-        loginMethods: ["twitter", "email", "wallet"],
+        // X FIRST, THEN EMAIL, AND NO WALLET.
+        //
+        // "Continue with a wallet" is removed deliberately: an external wallet
+        // can authenticate somebody, but it cannot be the Kernel OWNER — that
+        // has to be the embedded wallet, whose key merrymen never sees. Offering
+        // it as a third door produced exactly one outcome in testing, which was
+        // a session whose wallet was not its owner and a mismatch error nobody
+        // could act on.
+        loginMethods: ["twitter", "email"],
         // THE v3 SHAPE, NESTED PER CHAIN FAMILY. The flat
         // `embeddedWallets.createOnLogin` is the v2 spelling and is silently
         // ignored here: an unknown extra property, no wallet, no error.
@@ -62,7 +70,14 @@ export function Providers({ children }: { children: ReactNode }) {
           theme: "dark",
           accentColor: "#c8ff00",
           walletChainType: "ethereum-only",
-          logo: "https://app.merrymen.dev/icon.png",
+          // AN ABSOLUTE URL TO A FILE THAT EXISTS, AND ONE THE GATE LETS
+          // THROUGH. The modal renders in an auth.privy.io iframe, so a
+          // relative path resolves against THEIR origin, and the gate cookie is
+          // SameSite so a cross-site image request arrives unauthenticated. The
+          // old value was /icon.png — which is not a file in web/public at all —
+          // fetched through a middleware that answered with the password page.
+          // Three separate reasons for one broken image.
+          logo: "https://app.merrymen.dev/icon-192.png",
         },
       }}
     >

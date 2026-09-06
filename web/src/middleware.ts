@@ -145,5 +145,11 @@ export function middleware(req: NextRequest) {
  * pattern cannot express.
  */
 export const config = {
-  matcher: ["/api/:path*", "/((?!_next/static|_next/image|favicon.ico).*)"],
+  // THE APP ICONS ARE EXEMPT, and they have to be. The Privy login modal runs
+  // in an auth.privy.io iframe and loads our logo cross-origin; the gate cookie
+  // is SameSite, so that request arrives unauthenticated and the gate answered
+  // it with the password page — which the browser rendered as a broken image at
+  // the top of the sign-in dialog. An icon is not a secret; the gate exists to
+  // keep people out of the app, not out of a PNG.
+  matcher: ["/api/:path*", "/((?!_next/static|_next/image|favicon.ico|icon-|apple-touch-icon|logo\.svg|merrymenlogo).*)"],
 };

@@ -216,7 +216,13 @@ describe("the client picks the embedded wallet deliberately", () => {
 
   it("X is the primary login method and the config uses the v3 shape", () => {
     const src = read("web/src/terminal/Providers.tsx");
-    assert.match(src, /loginMethods:\s*\["twitter",\s*"email",\s*"wallet"\]/, "X first");
+    // X first, email second, and NO wallet. An external wallet can authenticate
+    // somebody but cannot be the Kernel owner — that has to be the embedded
+    // wallet — so offering it produced exactly one outcome in testing: a
+    // session whose wallet was not its owner, and a mismatch error nobody could
+    // act on.
+    assert.match(src, /loginMethods:\s*\["twitter",\s*"email"\]/, "X first, and no wallet login");
+    assert.doesNotMatch(src, /loginMethods:[^\]]*"wallet"/, "the wallet door is closed");
     assert.match(
       src,
       /embeddedWallets:\s*\{\s*ethereum:\s*\{\s*createOnLogin:\s*"all-users"\s*\}\s*\}/,

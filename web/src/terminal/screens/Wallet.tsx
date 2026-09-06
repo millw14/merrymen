@@ -1451,7 +1451,9 @@ export default function GrantPage() {
               </div>
             ) : (
               <div className="grant-note">
-                waiting for the first deposit to land… this panel updates automatically.
+                waiting for the first deposit to land — usually under a minute, sometimes
+                a few. this panel checks every few seconds on its own, so leave it open;
+                you do not need to refresh.
                 {!grantIsTestnet && " (no faucet on mainnet — send from your own wallet or exchange)"}
               </div>
             )}
