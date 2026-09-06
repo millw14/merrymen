@@ -149,7 +149,41 @@ const BATCH_WAIT_MS = 20;
  * alongside somebody else's read.
  */
 export function chainRead(url: string | undefined, label = "read"): Transport {
-  return metered(http(url, { batch: { wait: BATCH_WAIT_MS, batchSize: BATCH_SIZE } }), label);
+  return metered(
+    http(url, {
+      batch: { wait: BATCH_WAIT_MS, batchSize: BATCH_SIZE },
+      // ── A REFUSED BATCH MUST STILL SAY IT WAS REFUSED ──────────────────
+      //
+      // Batching cost the fleet its own error messages, and that was very
+      // nearly worse than the rate limiting it fixed. Measured against
+      // rpc.mainnet.chain.robinhood.com: a batch it will not serve comes back
+      //
+      //   HTTP 429  {"jsonrpc":"2.0","error":{"code":429,"message":"Too Many Requests"}}
+      //
+      // — a SINGLE object where the batch protocol says an array. viem indexes
+      // the array it expected, finds undefined, and raises "An unknown RPC
+      // error occurred. Details: Cannot read properties of undefined (reading
+      // 'error')". The 429 is thrown away on the way past, so classifyRpcError
+      // files it as `other`: unrecognised, not retryable, and indistinguishable
+      // in a log from a bug in our own code. Measured: 460 refusals, 460 filed
+      // as `other`, zero as rate-limited.
+      //
+      // The status is right here, before viem touches the body. Raising it as
+      // an error keeps the one fact the fleet is steered by — with this hook,
+      // the same 420 refusals classify as `rate-limited` again — and it costs
+      // nothing on the single-request path, where viem raises the same thing
+      // itself a moment later.
+      onFetchResponse(response: Response) {
+        if (!response.ok) {
+          throw new Error(
+            `HTTP request failed. Status: ${response.status}` +
+              (response.status === 429 ? " Too Many Requests" : ""),
+          );
+        }
+      },
+    }),
+    label,
+  );
 }
 
 /** One line per meter: totals, peak concurrency, and the busiest methods. */

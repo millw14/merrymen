@@ -33,13 +33,26 @@ const addresses = (n: number): `0x${string}`[] =>
 let requests: unknown[][] = [];
 const realFetch = globalThis.fetch;
 
+/** When set, the stub refuses every request with this status. */
+let refuseWith: number | null = null;
+
 /** A node that answers anything, and records how many requests carried it. */
 function stubFetch(): void {
   requests = [];
+  refuseWith = null;
   globalThis.fetch = (async (_url: unknown, init?: { body?: string }) => {
     const body = JSON.parse(init?.body ?? "[]") as unknown;
     const calls = Array.isArray(body) ? body : [body];
     requests.push(calls);
+    if (refuseWith !== null) {
+      // EXACTLY WHAT THE REAL NODE DOES to a batch it will not serve: a single
+      // error object where the protocol says an array, under a non-200. That
+      // shape is what viem cannot read, and what threw the status away.
+      return new Response(
+        JSON.stringify({ jsonrpc: "2.0", error: { code: refuseWith, message: "Too Many Requests" } }),
+        { status: refuseWith, headers: { "content-type": "text/plain" } },
+      );
+    }
     const answer = (c: { id: number; method: string }) => ({
       jsonrpc: "2.0",
       id: c.id,
@@ -118,5 +131,76 @@ describe("the send edge is never batched", () => {
     const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
     assert.match(read("./index.ts"), /transport: chainRead\(rpc\)/);
     assert.match(read("./executor.ts"), /transport: chainRead\(opts\.rpcUrl\)/);
+  });
+});
+
+describe("a refused batch still says it was refused", () => {
+  it("A 429 ON A BATCH CLASSIFIES AS RATE-LIMITED, NOT AS `other`", async () => {
+    // This is the regression that batching introduced and that nearly made it
+    // a worse trade than the rate limiting it fixed. viem indexes the array it
+    // expected in a batch response, finds undefined on a single error object,
+    // and raises "Cannot read properties of undefined (reading 'error')" — so
+    // the 429 never reaches the classifier, and the fleet's own meter reports
+    // an unrecognised failure instead of the one thing it is steered by.
+    const { classifyRpcError } = await import("./rpc-error");
+    refuseWith = 429;
+    const client = createPublicClient({ transport: chainRead(FAKE) });
+
+    const results = await Promise.allSettled(addresses(12).map((address) => client.getCode({ address })));
+    const refusals = results.filter((r) => r.status === "rejected");
+    assert.ok(refusals.length > 0, "the stub was told to refuse; something must have failed");
+
+    const kinds = new Set(refusals.map((r) => classifyRpcError((r as PromiseRejectedResult).reason).kind));
+    assert.ok(
+      kinds.has("rate-limited"),
+      `a refused batch classified as ${[...kinds].join(", ")} — the status was lost on the way`,
+    );
+    assert.ok(!kinds.has("other"), "no refusal may reach the meter unrecognised");
+  });
+
+  it("and a healthy answer is not disturbed", async () => {
+    const client = createPublicClient({ transport: chainRead(FAKE) });
+    const codes = await Promise.all(addresses(4).map((address) => client.getCode({ address })));
+    assert.equal(codes.length, 4);
+  });
+});
+
+describe("the fleet does not wake together", () => {
+  it("SPREADS THIRTY-TWO CHILDREN ACROSS THE TICK", async () => {
+    // The orchestrator forks one child per tenant and they all reach the loop
+    // within a second of each other, so every deploy fires thirty-two identical
+    // first ticks at one endpoint. Batching cut what one tick costs and does
+    // nothing about thirty-two of them arriving together — measured after
+    // batching shipped, the boot burst still came back "market unreadable"
+    // while a child that happened to start late read the market cleanly.
+    const { startupSlotMs } = await import("./stagger");
+    const tick = 240_000;
+    const homes = Array.from({ length: 32 }, (_, i) => `/data/children/0x${i.toString(16).padStart(40, "0")}`);
+    const slots = homes.map((h) => startupSlotMs(h, tick));
+
+    for (const s of slots) {
+      assert.ok(s >= 0 && s < tick, `a slot of ${s}ms falls outside the tick it is spreading over`);
+    }
+    // The property that matters: they are not all in the same place. Ten
+    // buckets, and a spread worth having fills most of them.
+    const buckets = new Set(slots.map((s) => Math.floor((s / tick) * 10)));
+    assert.ok(buckets.size >= 6, `thirty-two children landed in only ${buckets.size} of ten buckets`);
+  });
+
+  it("the same tenant always takes the same slot", () => {
+    // Not random, so a crash-looping child cannot walk into a different
+    // neighbour's slot on every restart, and two deploys are comparable.
+    return import("./stagger").then(({ startupSlotMs }) => {
+      assert.equal(startupSlotMs("/data/children/0xabc", 240_000), startupSlotMs("/data/children/0xabc", 240_000));
+      assert.notEqual(startupSlotMs("/data/children/0xabc", 240_000), startupSlotMs("/data/children/0xdef", 240_000));
+    });
+  });
+
+  it("a nonsensical tick is not a stagger", () => {
+    return import("./stagger").then(({ startupSlotMs }) => {
+      assert.equal(startupSlotMs("", 240_000), 0);
+      assert.equal(startupSlotMs("/x", 0), 0);
+      assert.equal(startupSlotMs("/x", Number.NaN), 0);
+    });
   });
 });

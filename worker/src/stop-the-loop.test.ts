@@ -243,7 +243,18 @@ describe("A5 — the meter is a seam, not a policy", () => {
     // agents were not refusing to trade; they could not see the chain.
     const meter = strip(at("./rpc-meter.ts"));
     assert.match(meter, /export function chainRead\(/);
-    assert.match(meter, /metered\(http\(url, \{ batch:/, "chainRead must be metered AND batched");
+    // Two facts, asserted separately, because the call is laid out over
+    // several lines and a single regex over it would break on formatting.
+    const body = meter.slice(meter.indexOf("export function chainRead("));
+    assert.match(body, /return metered\(/, "chainRead must still be metered");
+    assert.match(body, /http\(url, \{/, "…around an http transport built from the url");
+    assert.match(body, /batch: \{ wait: BATCH_WAIT_MS, batchSize: BATCH_SIZE \}/, "…that batches");
+    // AND the refusal stays legible. Batching cost the fleet its own error
+    // messages once already: viem cannot read the single error object this
+    // node answers a refused batch with, so the 429 was thrown away and every
+    // refusal classified as `other`.
+    assert.match(body, /onFetchResponse\(response: Response\)/, "a refused batch must still say it was refused");
+    assert.match(body, /Status: \$\{response\.status\}/);
     // The send edge is deliberately not batched: a batch fails as a unit, and
     // eth_sendUserOperation must never be refused alongside somebody's read.
     assert.ok(

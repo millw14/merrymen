@@ -121,6 +121,7 @@ import {
   type ContributionTruth,
 } from "./bootstrap-state";
 import { ensureHome, homePaths, merrymenHome } from "./home";
+import { startupSlotMs } from "./stagger";
 import { resolveLlm } from "./llm";
 import { applyPaperIntent, type PaperPosition } from "./paper";
 import { checkPolicy, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
@@ -6248,8 +6249,31 @@ async function main() {
         setTimeout(runLoop, cfg.tickSeconds * 1000);
       });
   };
-  runLoop();
+
+  // ── DON'T ALL WAKE AT ONCE ──────────────────────────────────────────
+  //
+  // The orchestrator forks one child per tenant and they all reach this line
+  // within a second of each other, so every deploy fires thirty-two identical
+  // first ticks simultaneously against one endpoint. Batching cut what a
+  // single tick costs; it does nothing about thirty-two of them landing
+  // together, and the boot burst is exactly where the fleet's rate limiting
+  // was worst — measured after batching shipped, the first ticks still came
+  // back "market unreadable" while a child that happened to start late read
+  // the market cleanly on its first try.
+  //
+  // DERIVED FROM THE TENANT, NOT RANDOM. The same agent takes the same slot on
+  // every restart, so a crash-looping child cannot walk into a different
+  // neighbour's slot each time and a log is comparable across deploys. It is
+  // also bounded by the tick itself: nobody waits longer for their first tick
+  // than they will routinely wait for their second.
+  // MERRYMEN_HOME is …/children/<tenant> on a hosted child and a fixed path
+  // self-hosted, where a stagger is neither needed nor harmful.
+  const slot = startupSlotMs(merrymenHome(), cfg.tickSeconds * 1000);
+  if (slot > 0) console.log(`[worker] first tick in ${Math.round(slot / 1000)}s — staggered so the fleet does not wake together`);
+  setTimeout(runLoop, slot);
 }
+
+
 
 main().catch((e) => {
   console.error("[worker] fatal:", e);
