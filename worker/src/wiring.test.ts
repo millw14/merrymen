@@ -72,6 +72,69 @@ describe("every env-gated report the orchestrator defines is actually run", () =
   });
 });
 
+describe("the identity audit observes and does not repair", () => {
+  /**
+   * observe -> understand -> decide -> migrate -> constrain.
+   *
+   * The failure this forbids is a bootstrap routine that sees bad state and
+   * quietly normalises it: the collision disappears, the constraint applies,
+   * and nobody ever learns which of two people owned the agent. So the audit
+   * reads and prints, and that is all it is allowed to do.
+   */
+  const auditBody = () => {
+    const src = read("worker/src/orchestrator.ts");
+    const start = src.indexOf("async function runIdentityAuditIfAsked");
+    assert.ok(start > 0, "the audit runner must exist");
+    const rest = src.slice(start + 10);
+    const next = rest.search(/^async function /m);
+    return next < 0 ? src.slice(start) : src.slice(start, start + 10 + next);
+  };
+
+  it("issues no statement that can write", () => {
+    const body = auditBody();
+    for (const verb of ["INSERT", "UPDATE", "DELETE", "CREATE ", "ALTER", "DROP", "TRUNCATE", "COPY "]) {
+      assert.ok(!body.includes(verb), `the audit must not ${verb.trim()}`);
+    }
+    assert.ok(!/\.exec\(/.test(body), "exec() is the write path on this db wrapper");
+  });
+
+  it("goes to the database directly rather than through a store that bootstraps DDL", () => {
+    // getIdentityStore() would run CREATE TABLE / CREATE UNIQUE INDEX in its
+    // lazy constructor — which is exactly the migration this audit exists to
+    // decide about, and it would run it before anyone had read the result.
+    const body = auditBody();
+    assert.ok(!body.includes("getIdentityStore"), "the audit must not open the store it is auditing");
+    assert.ok(body.includes("makePgDb("), "it reads with a plain connection");
+  });
+
+  it("prints no raw identity material", () => {
+    // Tenant addresses are already in every orchestrator log line. A Privy DID
+    // is not, and printing one beside a tenant joins a social login to an
+    // on-chain identity for anyone who can read the fleet's logs.
+    const audit = read("worker/src/identity-audit.ts");
+    assert.match(audit, /report\("privy did", dids, true\)/, "DIDs must be fingerprinted");
+    assert.match(audit, /report\("provider\+subject", subjects, true\)/, "subjects must be fingerprinted");
+    assert.match(audit, /function fingerprint\(/);
+  });
+
+  it("reports every census the rollout decision depends on", () => {
+    const audit = read("worker/src/identity-audit.ts");
+    for (const census of [
+      "current account",
+      "account history",
+      "privy did",
+      "provider+subject",
+      "installed grants",
+      "zero-address residue",
+      "owner is tenant",
+      "empty identity keys",
+      "binding versions",
+    ]) {
+      assert.ok(audit.includes(`"${census}"`), `the audit must report: ${census}`);
+    }
+  });
+});
+
 describe("the two signers refuse the same things", () => {
   /**
    * The phone and the dashboard seal the SAME wall — worker/src/wall.test.ts

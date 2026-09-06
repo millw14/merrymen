@@ -56,6 +56,15 @@ export interface GrantClaimLite {
    * is also its own tenant. See the residue section below.
    */
   owner?: string | null;
+  /**
+   * The `binding.version` this grant was PERSISTED with, if any.
+   *
+   * Read because the version field is new and the table is old: every grant
+   * written before it existed carries none, and anything else that turns up
+   * here was written by a client we did not ship. Both are facts worth having
+   * before the dispatch starts refusing on it.
+   */
+  bindingVersion?: string | null;
 }
 
 /** Addresses are case-insensitive; the chain says so and every store lowercases. */
@@ -119,6 +128,10 @@ export interface IdentityAudit {
   zeroAddressResidue: number;
   /** Grants whose owner key is also their login wallet. See the residue section. */
   sameKeyOwners: number;
+  /** Identity keys that are present but empty — malformed input, not absence. */
+  emptyIdentityKeys: number;
+  /** Persisted binding versions the dispatch would refuse. */
+  unknownBindingVersions: number;
 }
 
 export function auditIdentity(rows: IdentityRowLite[], claims: GrantClaimLite[]): IdentityAudit {
@@ -243,6 +256,50 @@ export function auditIdentity(rows: IdentityRowLite[], claims: GrantClaimLite[])
   );
   for (const s of sameKey) lines.push(`  ${s}`);
 
+  // ── CENSUS: identity keys that are present but empty ─────────────────────
+  //
+  // An empty string is not an absence. A partial index (`WHERE provider IS NOT
+  // NULL`) does not exclude it, so two rows carrying `''` collide under a
+  // constraint that looks like it tolerates missing values — and an empty
+  // identifier is malformed input either way. Counted here so the fix is
+  // "reject it at the boundary", not "widen the index until it fits".
+  const emptyKeys: string[] = [];
+  for (const r of rows) {
+    if (r.privyDid !== null && exact(r.privyDid) === "") emptyKeys.push(`${lc(r.tenant)} has an empty privy_did`);
+    if (r.provider !== null && exact(r.provider) === "") emptyKeys.push(`${lc(r.tenant)} has an empty provider`);
+    if (r.subject !== null && exact(r.subject) === "") emptyKeys.push(`${lc(r.tenant)} has an empty subject`);
+    if (r.accounts.some((a) => lc(a) === "")) emptyKeys.push(`${lc(r.tenant)} lists an empty account`);
+    if (exact(r.slug) === "") emptyKeys.push(`${lc(r.tenant)} has an empty slug`);
+  }
+  for (const c of claims) {
+    if (lc(c.smartAccount) === "") emptyKeys.push(`${lc(c.tenant)} has a grant with an empty smart account`);
+  }
+  lines.push(
+    emptyKeys.length === 0
+      ? `${"empty identity keys".padEnd(22)} none`
+      : `${"empty identity keys".padEnd(22)} ${emptyKeys.length} FOUND — reject these at the boundary, not in the index`,
+  );
+  for (const e of emptyKeys) lines.push(`  ${e}`);
+
+  // ── CENSUS: binding versions already on disk ─────────────────────────────
+  //
+  // The dispatch refuses a version it does not recognise. Before it can do that
+  // safely we need to know what is actually stored: absent is expected and
+  // legacy by construction, `legacy-wallet-owner-v1` is expected, and anything
+  // else was written by a client we did not ship.
+  const versions = new Map<string, number>();
+  for (const c of claims) {
+    const v = c.bindingVersion === null || c.bindingVersion === undefined ? "(absent)" : exact(c.bindingVersion);
+    versions.set(v, (versions.get(v) ?? 0) + 1);
+  }
+  const KNOWN = new Set(["(absent)", "legacy-wallet-owner-v1", "privy-did-owner-v1"]);
+  const unknownVersions = [...versions].filter(([v]) => !KNOWN.has(v));
+  lines.push(
+    `${"binding versions".padEnd(22)} ` +
+      ([...versions].map(([v, n]) => `${v} x${n}`).join(", ") || "no grants read") +
+      (unknownVersions.length > 0 ? " — UNRECOGNISED PRESENT, these would be refused" : ""),
+  );
+
   const safeToConstrain =
     current.size === 0 && historical.size === 0 && dids.size === 0 && subjects.size === 0 && claimed.size === 0;
 
@@ -255,5 +312,12 @@ export function auditIdentity(rows: IdentityRowLite[], claims: GrantClaimLite[])
       : "VERDICT: DO NOT ADD THE CONSTRAINT. Resolve the collisions above by hand first; " +
           "deduplicating them automatically would pick an owner for an agent, which is not a migration's call",
   );
-  return { lines, safeToConstrain, zeroAddressResidue: zeroed.length, sameKeyOwners: sameKey.length };
+  return {
+    lines,
+    safeToConstrain,
+    zeroAddressResidue: zeroed.length,
+    sameKeyOwners: sameKey.length,
+    emptyIdentityKeys: emptyKeys.length,
+    unknownBindingVersions: unknownVersions.reduce((n, [, count]) => n + count, 0),
+  };
 }

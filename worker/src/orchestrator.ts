@@ -1006,7 +1006,11 @@ async function runIdentityAuditIfAsked(): Promise<void> {
       // sealed at 0x0, and is any owner key also its own login wallet. It is an
       // ADDRESS, never key material; the grant store refuses to hold a key at
       // all (packages/core hosted.ts, and a 422 at the intake).
-      .prepare("SELECT tenant, grant_json->>'smartAccount' AS smart_account, grant_json->>'owner' AS owner FROM grants")
+      .prepare(
+        "SELECT tenant, grant_json->>'smartAccount' AS smart_account, " +
+          "grant_json->>'owner' AS owner, " +
+          "grant_json->'binding'->>'version' AS binding_version FROM grants",
+      )
       .all()) as unknown as Record<string, unknown>[];
 
     const rows: IdentityRowLite[] = idRows.map((r) => {
@@ -1041,6 +1045,8 @@ async function runIdentityAuditIfAsked(): Promise<void> {
         tenant: String(r.tenant ?? ""),
         smartAccount: String(r.smart_account),
         owner: r.owner === null || r.owner === undefined ? null : String(r.owner),
+        bindingVersion:
+          r.binding_version === null || r.binding_version === undefined ? null : String(r.binding_version),
       }));
 
     for (const line of auditIdentity(rows, claims).lines) log(`identity| ${line}`);

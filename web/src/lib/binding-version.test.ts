@@ -24,11 +24,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { DEFAULT_BINDING_VERSION, bindingMessage, isBindingVersion } from "@merrymen/core";
 
 process.env.MERRYMEN_SESSION_SECRET = "test-secret-at-least-thirty-two-characters-long";
 
-import { issueChallengeNonce, verifyGrantBinding } from "./auth";
+import { ENFORCE_LEGACY_TWO_PROOF, issueChallengeNonce, verifyGrantBinding } from "./auth";
 
 const ORIGIN = "https://app.merrymen.dev";
 const SMART = "0x00000000000000000000000000000000000000a1" as `0x${string}`;
@@ -99,25 +101,35 @@ test("a privy binding is refused until the deployment can verify one", async () 
   assert.match(r.ok === false ? r.why : "", /privy bindings are not enabled/);
 });
 
-test("ONE KEY SIGNING TWICE IS NOT TWO PROOFS", async () => {
-  // The silent collapse. If the login wallet and the owner key are the same
-  // key, both recoveries land on the same address and the arithmetic passes —
-  // while the co-signature that makes a legacy claim unforgeable was never
-  // made. Note what is NOT asserted here: there is no global rule that an owner
-  // may never equal a tenant. `privy-did-owner-v1` allows exactly that, and
-  // gets its authentication from a verified token instead.
+test("ONE KEY SIGNING TWICE IS MEASURED, NOT YET REFUSED", async () => {
+  // The rule is right and it is switched off, on purpose. `restoreAgentWallet`
+  // accepts any 64-hex key, so somebody may have pasted the private key of the
+  // wallet they sign in with — a custody pattern nobody has counted. Enforcing
+  // before counting would have those users find out at RE-ARM time, which is
+  // the worst possible moment and offers them no migration.
+  //
+  // The census is `owner is tenant` in worker/src/identity-audit.ts. When it
+  // reports zero, ENFORCE_LEGACY_TWO_PROOF becomes true and this test flips to
+  // asserting the refusal.
+  assert.equal(ENFORCE_LEGACY_TWO_PROOF, false, "measure first, then enforce");
+
   const both = privateKeyToAccount(generatePrivateKey());
   const claim = await legacyClaim(both, both);
-  // Both signatures verify against their own addresses — the old checks pass:
+  // One key signing the same text twice produces the SAME signature, which is
+  // what makes the condition detectable at all.
   assert.equal(claim.walletSignature, claim.ownerSignature);
   const r = await verifyGrantBinding(claim);
-  assert.equal(r.ok, false);
-  const why = r.ok === false ? r.why : "";
-  assert.match(why, /one proof where it needs two/);
-  // And it says what to DO. A refusal on a fund-access path that only describes
-  // the cause leaves the user with a permanently unusable agent and no next
-  // step — which is how a correct check becomes an outage.
-  assert.match(why, /create a new agent and sweep the old one/);
+  assert.equal(r.ok, true, "an existing same-key account must keep working until it is counted");
+});
+
+test("the refusal exists, is gated on the flag, and names a remedy", () => {
+  // Source-read, because the branch cannot run while the flag is false — and a
+  // refusal that ships without a remedy turns a correct check into an outage.
+  const src = readFileSync(join(import.meta.dirname, "auth.ts"), "utf8");
+  assert.match(src, /if \(ENFORCE_LEGACY_TWO_PROOF && ownerSigner\.toLowerCase\(\) === walletSigner\.toLowerCase\(\)\)/);
+  assert.match(src, /one proof where it needs two/);
+  // A fragment that survives the string concatenation the message is built from.
+  assert.match(src, /sweep the old one from the recovery panel/);
 });
 
 test("a legacy claim with no wallet signature is refused, not treated as a privy claim", async () => {
