@@ -98,6 +98,53 @@ describe("which symbols this window asks about", () => {
     assert.notDeepEqual(w1, w2, "the next window asks about a different slice");
   });
 
+  it("a held name keeps its slot however the rotation falls", () => {
+    // The defect this pins: rotation is anchored on the clock, so priority
+    // order used to survive only while everything fitted. Production held TSLA
+    // and asked about GOOGL, AMZN and NVDA — three names nobody owned.
+    const universe = ["TSLA", "GOOGL", "AMZN", "NVDA", "AAPL", "MU", "SPCX", "COIN"];
+    for (let w = 0; w < 40; w += 1) {
+      const ask = chooseSymbols(universe, {
+        maxSymbols: 3,
+        asOf: NOW + w * 960,
+        ttlSec: 960,
+        alwaysAsk: ["TSLA"],
+      });
+      assert.equal(ask.length, 3);
+      assert.ok(ask.includes("TSLA"), "window " + w + " dropped the held name: " + ask.join(","));
+    }
+  });
+
+  it("a book bigger than one request rotates inside itself, never outside it", () => {
+    // Eight positions and three slots. Every slot goes to a name we own, and
+    // across windows the whole book gets covered — a held symbol must not lose
+    // its turn to a watch-list name it is competing with.
+    const held = ["A", "B", "C", "D", "E", "F", "G", "H"];
+    const universe = [...held, "WATCH1", "WATCH2", "WATCH3"];
+    const seen = new Set<string>();
+    for (let w = 0; w < 40; w += 1) {
+      const ask = chooseSymbols(universe, {
+        maxSymbols: 3,
+        asOf: NOW + w * 960,
+        ttlSec: 960,
+        alwaysAsk: held,
+      });
+      for (const s of ask) {
+        assert.ok(held.includes(s), "a watched name took a slot from the book: " + s);
+        seen.add(s);
+      }
+    }
+    assert.equal(seen.size, held.length, "some position never got asked about");
+  });
+
+  it("without a held set it behaves exactly as it did — pure rotation", () => {
+    const all = ["A", "B", "C", "D", "E"];
+    assert.deepEqual(
+      chooseSymbols(all, { maxSymbols: 2, asOf: NOW, ttlSec: 900 }),
+      chooseSymbols(all, { maxSymbols: 2, asOf: NOW, ttlSec: 900, alwaysAsk: [] }),
+    );
+  });
+
   it("the same window always asks the same thing, so a replay is reproducible", () => {
     const all = ["A", "B", "C", "D", "E"];
     const a = chooseSymbols(all, { maxSymbols: 2, asOf: NOW + 10, ttlSec: 900 });

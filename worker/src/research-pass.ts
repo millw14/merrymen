@@ -106,21 +106,47 @@ export function planNewsWindow(
 /**
  * Which slice of the fleet's wanted symbols this window asks about.
  *
- * `wanted` arrives in priority order — held names first — and the rotation is
- * anchored on the window index so the same window always produces the same ask.
- * When everything fits, everything is asked and rotation never runs.
+ * The rotation is anchored on the window index so the same window always
+ * produces the same ask, and when everything fits, everything is asked and
+ * rotation never runs.
+ *
+ * `alwaysAsk` IS THE PART THAT HAD TO BE ADDED. The caller passes its symbols
+ * in priority order and this function used to throw that order away the moment
+ * rotation ran: `start` is derived from the clock, so a held position could sit
+ * unheard-about for hours while the window walked a watch universe of names
+ * nobody owns. Production showed it — the fleet held TSLA and asked about
+ * GOOGL, AMZN and NVDA. Priority order that only survives while it makes no
+ * difference is not priority order.
+ *
+ * So held names take their slots first and the rotation fills what is left. If
+ * the held book alone is larger than one request can carry, the rotation runs
+ * INSIDE it — a big book still gets round-robin coverage, and never loses a
+ * slot to a name it does not own.
  */
 export function chooseSymbols(
   wanted: readonly string[],
-  opts: { maxSymbols: number; asOf: number; ttlSec: number },
+  opts: { maxSymbols: number; asOf: number; ttlSec: number; alwaysAsk?: readonly string[] },
 ): string[] {
-  const uniq = [...new Set(wanted.map((s) => s.trim().toUpperCase()).filter(Boolean))];
+  const norm = (xs: readonly string[]): string[] => [
+    ...new Set(xs.map((s) => s.trim().toUpperCase()).filter(Boolean)),
+  ];
+  const uniq = norm(wanted);
   if (uniq.length <= opts.maxSymbols) return uniq;
+
   const window = Math.floor(opts.asOf / Math.max(1, opts.ttlSec));
-  const start = (window * opts.maxSymbols) % uniq.length;
-  const out: string[] = [];
-  for (let i = 0; i < opts.maxSymbols; i += 1) out.push(uniq[(start + i) % uniq.length]!);
-  return [...new Set(out)];
+  const slice = (pool: readonly string[], n: number): string[] => {
+    if (n <= 0 || pool.length === 0) return [];
+    if (pool.length <= n) return [...pool];
+    const start = (window * n) % pool.length;
+    const out: string[] = [];
+    for (let i = 0; i < n; i += 1) out.push(pool[(start + i) % pool.length]!);
+    return [...new Set(out)];
+  };
+
+  const held = norm(opts.alwaysAsk ?? []).filter((s) => uniq.includes(s));
+  const first = slice(held, opts.maxSymbols);
+  const rest = uniq.filter((s) => !first.includes(s));
+  return [...first, ...slice(rest, opts.maxSymbols - first.length)];
 }
 
 /** What the desk holds right now, and how it came to hold it. */
@@ -144,7 +170,16 @@ export interface NewsDeskConfig {
 
 export interface NewsDesk {
   /** Refresh if the window has elapsed and the day's allowance permits. */
-  refresh(wanted: readonly string[], asOf: number): Promise<{ fetched: boolean; log: string | null }>;
+  /**
+   * @param wanted every symbol the fleet cares about, in priority order.
+   * @param alwaysAsk the ones with a position behind them. They keep their
+   *   slots when the allowance cannot carry the whole universe.
+   */
+  refresh(
+    wanted: readonly string[],
+    asOf: number,
+    alwaysAsk?: readonly string[],
+  ): Promise<{ fetched: boolean; log: string | null }>;
   state(): NewsDeskState;
   plan(): NewsWindowPlan;
 }
@@ -175,7 +210,7 @@ export function makeNewsDesk(cfg: NewsDeskConfig): NewsDesk {
     plan: () => plan,
     state: () => ({ ...state, asked: [...state.asked], items: [...state.items] }),
 
-    async refresh(wanted, asOf) {
+    async refresh(wanted, asOf, alwaysAsk) {
       // ATTEMPTS ARE RATE-LIMITED, NOT SUCCESSES. Keying the window on
       // `fetchedAt` would let a provider outage turn a fifteen-second
       // orchestrator pass into a fifteen-second retry loop and burn the day's
@@ -186,6 +221,7 @@ export function makeNewsDesk(cfg: NewsDeskConfig): NewsDesk {
         maxSymbols: plan.maxSymbols,
         asOf,
         ttlSec: plan.ttlSec,
+        alwaysAsk,
       });
       if (!symbols.length) return { fetched: false, log: null };
 

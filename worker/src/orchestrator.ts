@@ -1336,7 +1336,12 @@ async function runNewsPass(): Promise<void> {
     // rest of the watch universe, which is only a list of what is permitted.
     const reasoned = fleetReasonedSymbols;
     const now = Math.floor(Date.now() / 1000);
-    const r = await fleetNewsDesk.refresh([...held, ...reasoned, ...watch], now);
+    // HELD NAMES ARE PASSED TWICE, ON PURPOSE. Once in the priority list and
+    // once as the set that keeps its slots: the rotation is anchored on the
+    // clock, so before this the "held before watched" ordering above survived
+    // only while everything fitted. The fleet held TSLA and the desk asked
+    // about GOOGL, AMZN and NVDA.
+    const r = await fleetNewsDesk.refresh([...held, ...reasoned, ...watch], now, held);
     if (r.log) log(r.log);
 
     const state = fleetNewsDesk.state();
