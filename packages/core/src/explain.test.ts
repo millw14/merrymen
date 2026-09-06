@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { CONCEPTS, conceptsFor, renderConcepts, type Concept } from "./explain";
+import { CONCEPTS, conceptTooltip, conceptsFor, renderConcepts, type Concept } from "./explain";
 
 const ROOT = join(import.meta.dirname, "..", "..", "..");
 
@@ -122,5 +122,40 @@ describe("rendering", () => {
   it("leads with the confusion when there is one", () => {
     const rendered = renderConcepts(conceptsFor("why does it say would buy"));
     assert.match(rendered, /often confused with/);
+  });
+});
+
+describe("tooltips beside numbers", () => {
+  it("EVERY TERM THE UI ASKS FOR RESOLVES", () => {
+    // The caps row shipped asking for "Per trade limit", which the harvest had
+    // rejected — so the one cap the CHAIN actually enforces rendered an empty
+    // popover, on the row where that distinction matters most. A tooltip that
+    // silently resolves to "" is indistinguishable from one nobody wrote.
+    const wallet = readFileSync(new URL("../../../web/src/terminal/screens/Wallet.tsx", import.meta.url), "utf8");
+    const asked = [...wallet.matchAll(/conceptTooltip\("([^"]+)"\)/g)].map((m) => m[1]!);
+    assert.ok(asked.length >= 4, `expected the caps row to ask for tooltips, found ${asked.length}`);
+    const missing = asked.filter((t) => conceptTooltip(t) === "");
+    assert.deepEqual(missing, [], `these render an empty popover: ${missing.join(", ")}`);
+  });
+
+  it("a tooltip is short enough to read in one breath", () => {
+    for (const term of ["Per trade limit", "Per day limit", "daily cap", "drawdown breaker"]) {
+      const tip = conceptTooltip(term);
+      assert.ok(tip.length > 60, `${term}: too short to explain anything`);
+      assert.ok(tip.length <= 420, `${term}: ${tip.length} chars is a paragraph, not a hover`);
+      assert.match(tip, /[.!?]$/, `${term}: a tooltip must not stop mid-sentence`);
+    }
+  });
+
+  it("an unknown term renders nothing rather than something else's meaning", () => {
+    assert.equal(conceptTooltip("not a term in the base"), "");
+  });
+
+  it("the caps row says which limits the chain enforces and which merrymen does", () => {
+    // Four numbers on one row read as four equally hard promises. Two of them
+    // are counters in our own software. That is the single most important
+    // thing an owner can learn from hovering.
+    assert.match(conceptTooltip("Per trade limit"), /blockchain itself enforces/i);
+    assert.match(conceptTooltip("Per day limit"), /merrymen's own software/i);
   });
 });

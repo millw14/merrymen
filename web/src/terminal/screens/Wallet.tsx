@@ -34,6 +34,7 @@ import {
   type OwnerPreview,
   type SavedWallet,
 } from "@/lib/session";
+import { conceptTooltip } from "@merrymen/core";
 import { canStart } from "@/lib/can-start";
 // QUARANTINED, not fixed. This page moves real money, holds owner private keys
 // and is 1,750 lines of signature and recovery logic — the last place to
@@ -1477,11 +1478,38 @@ export default function GrantPage() {
               </div>
             </div>
 
-            <div className="caps" style={{ justifyContent: "center", marginTop: 14 }}>
-              <span className="cap">max <b>{grant.caps.perTradeUsdg} USDG</b>/trade</span>
-              <span className="cap"><b>{grant.caps.dailyUsdg} USDG</b>/day</span>
-              <span className="cap"><b>{grant.caps.maxOpsPerDay}</b> ops/day</span>
-              <span className="cap">breaker <b>{grant.caps.maxDrawdownPct}%</b></span>
+            {/*
+              FOUR NUMBERS ON ONE LINE, EACH ABLE TO EXPLAIN ITSELF.
+
+              A tester read "breaker 5%" and asked what it meant — reasonably,
+              since the row is four pieces of jargon with no way in. Each now
+              carries an "i" whose text comes from packages/core/src/explain.ts,
+              the same entries the chat answers from, so the hover and the agent
+              cannot drift apart into two different explanations of one number.
+
+              The tooltips are not decoration. Two of these four caps are
+              enforced by merrymen's own software rather than by the chain, and
+              the entries say so — which is the single most important thing an
+              owner can know about a row that otherwise reads as four equally
+              hard guarantees.
+            */}
+            <div className="caps caps-row">
+              <span className="cap">
+                max <b>{grant.caps.perTradeUsdg} USDG</b>/trade
+                <Info>{conceptTooltip("Per trade limit")}</Info>
+              </span>
+              <span className="cap">
+                <b>{grant.caps.dailyUsdg} USDG</b>/day
+                <Info>{conceptTooltip("Per day limit")}</Info>
+              </span>
+              <span className="cap">
+                <b>{grant.caps.maxOpsPerDay}</b> ops/day
+                <Info>{conceptTooltip("daily cap")}</Info>
+              </span>
+              <span className="cap">
+                breaker <b>{grant.caps.maxDrawdownPct}%</b>
+                <Info>{conceptTooltip("drawdown breaker")}</Info>
+              </span>
             </div>
 
             {/*

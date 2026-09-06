@@ -6716,3 +6716,138 @@
   font-size: 12px;
   line-height: 1.4;
 }
+
+/*
+  THE CAPS ROW, ON ONE LINE.
+
+  Four numbers that describe one signature belong together, centred, reading as
+  a single statement rather than four chips that happen to be adjacent. It still
+  wraps on a narrow screen — a row that overflows is worse than one that folds —
+  and each cap positions its own "i" popover, which is why the cap is relative.
+*/
+:where(.terminal-host) .caps-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 10px 18px;
+  margin-top: 14px;
+}
+
+:where(.terminal-host) .caps-row .cap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* Keeps "max 5 USDG/trade" from breaking across two lines mid-number. */
+  white-space: nowrap;
+}
+
+/*
+  THE "i" HAS NO BASE STYLES ON THIS SCREEN.
+
+  Info.tsx was written against legacy.css, and legacy.css is quarantined by
+  import site — only /grant and /settings pull it in, and the terminal layout
+  does not. A missing `.info-pop` rule does not degrade to an unstyled tooltip:
+  with no `position` and no `opacity` it is just a span, so all four cap
+  explanations print into the row in full, always. The component is therefore
+  restated here in the terminal's own palette rather than borrowed.
+*/
+:where(.terminal-host) .info {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  margin: 0 0 0 3px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: middle;
+  cursor: help;
+  user-select: none;
+}
+
+/*
+  `.cap span` above sets display:block on every span inside a cap — that is how
+  the stacked number/label pills elsewhere are built — and at (0,1,1) it outranks
+  the block above, flattening the glyph onto its own line. Restated at (0,2,0).
+*/
+:where(.terminal-host) .cap .info {
+  display: inline-grid;
+  margin: 0 0 0 3px;
+  font-size: 9.5px;
+}
+
+:where(.terminal-host) .info:hover,
+:where(.terminal-host) .info:focus {
+  color: var(--tx);
+  border-color: var(--tx-2);
+  outline: none;
+}
+
+:where(.terminal-host) .info .info-pop {
+  position: absolute;
+  bottom: 150%;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  width: max-content;
+  max-width: min(78vw, 280px);
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--raised);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  color: var(--tx-2);
+  font-family: var(--sans);
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.5;
+  letter-spacing: 0;
+  text-align: left;
+  /* `.cap` sets nowrap, which inherits: without this a 300-character
+     sentence becomes one endless line running off both edges. */
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s var(--ease);
+}
+
+:where(.terminal-host) .info:hover .info-pop,
+:where(.terminal-host) .info:focus .info-pop {
+  opacity: 1;
+}
+
+/*
+  ON A NARROW SCREEN THE GLYPH IS THE WRONG ANCHOR.
+
+  Centred on its own "i", a 280px popover hanging off the first cap in the row
+  runs past the left edge of the phone, and the half of the sentence that falls
+  off is not recoverable by scrolling — the row itself has not moved. So below
+  the wrap point the popover stops being a speech bubble and becomes a panel
+  the width of the row: `.info` goes static, which hands the containing block
+  to `.caps-row`, and it can no longer be positioned off any edge.
+*/
+@media (max-width: 560px) {
+  :where(.terminal-host) .caps-row {
+    position: relative;
+  }
+
+  :where(.terminal-host) .caps-row .info {
+    position: static;
+  }
+
+  :where(.terminal-host) .caps-row .info .info-pop {
+    left: 0;
+    right: 0;
+    bottom: calc(100% + 10px);
+    transform: none;
+    width: auto;
+    max-width: none;
+  }
+}

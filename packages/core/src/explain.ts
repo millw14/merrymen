@@ -131,6 +131,47 @@ export function conceptsFor(
 }
 
 /**
+ * One entry, by exact term. For a tooltip beside a number on screen.
+ *
+ * SEPARATE FROM `conceptsFor` ON PURPOSE. That one is fuzzy because a person
+ * types a sentence; this one is exact because a label knows precisely which
+ * thing it is labelling, and a tooltip that fuzzy-matched its way onto the
+ * wrong definition would be worse than no tooltip. Returns undefined rather
+ * than a fallback, so a caller that names a term that no longer exists renders
+ * nothing instead of something else's explanation.
+ */
+export function conceptByTerm(term: string, concepts: readonly Concept[] = CONCEPTS): Concept | undefined {
+  const want = term.trim().toLowerCase();
+  return concepts.find((c) => c.term.toLowerCase() === want);
+}
+
+/**
+ * The SHORT form, for a tooltip beside a number.
+ *
+ * A hover has one breath. The chat entries run three sentences because the
+ * chat can be asked a follow-up; a popover cannot, and a 600-character
+ * tooltip is one nobody finishes — which makes it decoration rather than an
+ * explanation. So this takes the first two sentences and stops.
+ *
+ * No `because`: the mechanism is for somebody who asked twice.
+ */
+export function conceptTooltip(term: string, concepts: readonly Concept[] = CONCEPTS): string {
+  const c = conceptByTerm(term, concepts);
+  if (!c) return "";
+  // BUDGETED BY LENGTH, NOT BY SENTENCE COUNT. Two sentences left the
+  // drawdown entry at 95 characters, stopping before it said what the brake
+  // actually does; the same rule left another at 250. Take whole sentences
+  // while they fit, and always take at least one.
+  const parts = c.plain.match(/[^.!?]+[.!?]+/g) ?? [c.plain];
+  const out: string[] = [];
+  for (const part of parts) {
+    if (out.length > 0 && out.join(" ").length + part.length > 360) break;
+    out.push(part.trim());
+  }
+  return out.join(" ").replace(/\s{2,}/g, " ").trim();
+}
+
+/**
  * Render concepts for a prompt.
  *
  * `confusable` is included because it is often the ENTIRE answer: somebody
@@ -332,6 +373,21 @@ export const CONCEPTS: readonly Concept[] = [
     because: "isPrivyOwned reads the durable binding version 'privy-did-owner-v1' sealed into the grant at signing time; createPrivyOwnedWallet omits demoOwnerPrivateKey entirely and its docstring states that recovery for a Privy-owned Merryman is signer-based and NOT yet built.",
     confusable: "A missing key means two opposite things and the code says so at on a legacy grant it means something went wrong (do not fund); on a Privy grant it means everything is working.",
     evidence: "web/src/lib/session.ts:104-123, web/src/lib/session.ts:795-828, web/src/terminal/screens/CreateAgent.tsx:105",
+  },
+  {
+    term: "Per trade limit",
+    aliases: [
+      "per trade",
+      "max per trade",
+      "10 usdg per trade",
+      "trade size",
+      "how much can it spend at once",
+      "biggest trade",
+    ],
+    plain: "The largest amount your agent can spend in any single trade. This is the one limit the blockchain itself enforces: it is sealed into the signature your agent trades with, so the account contract refuses a larger trade outright — nothing in merrymen has to be working correctly for it to hold.",
+    because: "perTradeUsdg is baked into the call policy inside the signed permission wall, so the account contract rejects an over-size call before merrymen sees it.",
+    confusable: "It sits beside the per-day and drawdown limits, which are counted by merrymen's own software rather than by the chain — the same panel, two different strengths of promise.",
+    evidence: "packages/core/src/wall.ts",
   },
   {
     term: "Per day limit",
@@ -607,7 +663,7 @@ export const CONCEPTS: readonly Concept[] = [
   {
     term: "drawdown breaker",
     aliases: ["breaker", "circuit breaker", "drawdown-breaker", "it stopped after losses", "max drawdown"],
-    plain: "A safety brake on losses. The app tracks the highest total value your account has ever reached. If your value drops by more than your preset's limit below that peak (5% on the smallest preset, 10% on the middle, 15% on the largest —, the agent refuses to spend money on anything new until the value recovers.",
+    plain: "A safety brake on losses. The app tracks the highest total value your account has ever reached. If your value drops by more than your preset's limit below that peak (5% on the smallest preset, 10% on the middle, 15% on the largest), the agent refuses to spend money on anything new until the value recovers.",
     because: "checkPolicy computes drawdown bps against the high-water mark and rejects with `drawdown-breaker`, but only after an `isExit` test that exempts vault-withdraw, transfer, swaps into cash, equity sells, and curve trades back into the quote side.",
     confusable: "The exit exemption exists because an earlier version blocked everything, locking the account into a losing position where the only escape the code offered was to deposit MORE money (which lifts the mark and shrinks the ratio).",
     evidence: "worker/src/policy.ts:478-536, worker/src/index.ts:5600-5603",
