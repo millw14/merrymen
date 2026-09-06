@@ -142,6 +142,10 @@ const CHILD_SECRET_STRIP = [
   // never sees this token" a fact about the process boundary rather than a
   // claim about our own carefulness. See research-files.ts.
   "MERRYMEN_MARKETAUX_API_KEY",
+  // Privy authenticates PEOPLE at the web edge. A worker child acts for an
+  // agent that is already authorized by a signed grant; it has no login to
+  // verify and no reason to hold the key that would verify one.
+  "PRIVY_APP_SECRET",
 ] as const;
 
 /** Where a tenant's child keeps its own ~/.merrymen — isolated from every other. */

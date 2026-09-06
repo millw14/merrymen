@@ -96,7 +96,15 @@ export function mintSlug(): string {
   return out;
 }
 
-export type IdentityProvider = "twitter" | "google";
+/**
+ * How somebody authenticated. DISPLAY AND ROUTING, never authorization.
+ *
+ * `twitter` is the primary route for merrymen; `email` and `wallet` are the
+ * secondary and fallback. Uniqueness lives on the DID and on
+ * (provider, subject) — never on a handle, which is reassignable, and never on
+ * this field alone.
+ */
+export type IdentityProvider = "twitter" | "google" | "email" | "wallet";
 
 /** The verified social identity, when there is one. Display, never authorization. */
 export interface SocialIdentity {
@@ -143,6 +151,26 @@ export interface IdentityStore {
    * that returns true.
    */
   linkSocial(tenant: `0x${string}`, social: SocialIdentity): Promise<boolean>;
+  /**
+   * Resolve a verified social identity to its tenant, creating the mapping if
+   * this DID has never been seen. ONE TRANSACTION, first claim wins.
+   *
+   * Distinct from `linkSocial`, which UPDATEs a row that must already exist —
+   * that is the EXISTING-user path, where a legacy login proved possession of
+   * the tenant first. This is the NEW-user path: a Privy DID arrives with a
+   * wallet whose possession was just proved, and there is no identity row yet
+   * because there is no agent yet. It creates one with an EMPTY account
+   * history, which is the honest description of somebody who has signed in and
+   * not yet made a Merryman.
+   *
+   * Returns the tenant that owns the DID. If the DID is already mapped, that
+   * mapping wins and `tenant` is ignored — which is what makes logging out and
+   * back in return the same Merryman rather than minting a second.
+   */
+  resolveOrClaimDid(
+    tenant: `0x${string}`,
+    social: SocialIdentity,
+  ): Promise<{ ok: true; tenant: `0x${string}`; created: boolean } | { ok: false; why: string }>;
   /** Every identity. Fleet-sized, and read by public routes to build slug maps. */
   all(): Promise<PublicIdentity[]>;
   remove(tenant: `0x${string}`): Promise<void>;
@@ -237,6 +265,30 @@ export class FileIdentityStore implements IdentityStore {
     await this.write({ ...rec, social, updatedAt: now() });
     return true;
   }
+  /** Single-writer backend, so the scan IS the transaction. Same rule. */
+  async resolveOrClaimDid(
+    tenant: `0x${string}`,
+    social: SocialIdentity,
+  ): Promise<{ ok: true; tenant: `0x${string}`; created: boolean } | { ok: false; why: string }> {
+    const problem = socialIdentityProblem(social);
+    if (problem) return { ok: false, why: problem };
+    const holder = await this.byDid(social.did);
+    if (holder) return { ok: true, tenant: holder.tenant, created: false };
+    const existing = await this.get(tenant);
+    const rec: PublicIdentity = existing
+      ? { ...existing, social, updatedAt: now() }
+      : {
+          tenant: tenant.toLowerCase() as `0x${string}`,
+          slug: mintSlug(),
+          accounts: [],
+          social,
+          createdAt: now(),
+          updatedAt: now(),
+        };
+    await this.write(rec);
+    return { ok: true, tenant: rec.tenant, created: !existing };
+  }
+
   async remove(tenant: `0x${string}`): Promise<void> {
     await rm(this.file(tenant), { force: true });
   }
@@ -633,6 +685,81 @@ export class PgIdentityStore implements IdentityStore {
     }
     return (rowCount ?? 0) > 0;
   }
+  /**
+   * ONE TRANSACTION, AND THE DID DECIDES.
+   *
+   * The read and the write cannot be separated: two tabs finishing an X login
+   * at the same moment would both see no holder and both insert, and the loser
+   * would either overwrite the winner or die on the unique index as a 500.
+   * Inside a transaction the second one blocks on the unique index, finds the
+   * first tenant on read-back, and returns it — so a duplicate login returns
+   * the SAME Merryman instead of minting a second.
+   */
+  async resolveOrClaimDid(
+    tenant: `0x${string}`,
+    social: SocialIdentity,
+  ): Promise<{ ok: true; tenant: `0x${string}`; created: boolean } | { ok: false; why: string }> {
+    const problem = socialIdentityProblem(social);
+    if (problem) return { ok: false, why: problem };
+    const c = await this.client();
+    const t = tenant.toLowerCase() as `0x${string}`;
+
+    await c.query("BEGIN");
+    try {
+      // Already mapped? That mapping wins, whatever wallet arrived with it.
+      const { rows: held } = await c.query(`SELECT tenant FROM agent_identity WHERE privy_did = $1`, [
+        social.did,
+      ]);
+      if (held[0]) {
+        await c.query("COMMIT");
+        return { ok: true, tenant: String(held[0].tenant).toLowerCase() as `0x${string}`, created: false };
+      }
+
+      // No mapping yet. The row may still exist — an existing Merryman linking
+      // its first social identity — so this is an upsert on the tenant, and the
+      // slug is minted only when there is nothing to keep.
+      const { rows: mine } = await c.query(`SELECT slug FROM agent_identity WHERE tenant = $1`, [t]);
+      const slug = mine[0] ? String(mine[0].slug) : mintSlug();
+      await c.query(
+        `INSERT INTO agent_identity
+           (tenant, slug, accounts, privy_did, provider, subject, handle, display_name, avatar_url, created_at, updated_at)
+         VALUES ($1, $2, '[]'::jsonb, $3, $4, $5, $6, $7, $8, $9, $9)
+         ON CONFLICT (tenant) DO UPDATE SET
+           privy_did = EXCLUDED.privy_did,
+           provider = EXCLUDED.provider,
+           subject = EXCLUDED.subject,
+           handle = EXCLUDED.handle,
+           display_name = EXCLUDED.display_name,
+           avatar_url = EXCLUDED.avatar_url,
+           updated_at = EXCLUDED.updated_at`,
+        [
+          t,
+          slug,
+          social.did,
+          social.provider,
+          social.subject,
+          social.handle ?? null,
+          social.displayName ?? null,
+          social.avatarUrl ?? null,
+          now(),
+        ],
+      );
+      await c.query("COMMIT");
+      return { ok: true, tenant: t, created: !mine[0] };
+    } catch (e) {
+      await c.query("ROLLBACK").catch(() => {});
+      if (isUniqueViolation(e)) {
+        // Lost a race, or this (provider, subject) belongs elsewhere. Read the
+        // winner rather than reporting a failure: the caller's question was
+        // "whose is this DID", and now there is an answer.
+        const winner = await this.byDid(social.did);
+        if (winner) return { ok: true, tenant: winner.tenant, created: false };
+        return { ok: false, why: "this social identity is already linked to another merryman" };
+      }
+      throw e;
+    }
+  }
+
   async remove(tenant: `0x${string}`): Promise<void> {
     const c = await this.client();
     await c.query(`DELETE FROM agent_identity WHERE tenant = $1`, [tenant.toLowerCase()]);

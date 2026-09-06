@@ -52,9 +52,13 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
     "@noble/hashes": "^1.8.0",
+    "@privy-io/node": "^0.34.0",
+    "@privy-io/react-auth": "^3.40.0",
+    "@stripe/stripe-js": "^9.15.0",
     "@zerodev/ecdsa-validator": "^5.4.9",
     "@zerodev/permissions": "^5.6.3",
     "@zerodev/sdk": "^5.5.10",
+    "@zerodev/webauthn-key": "^5.5.0",
     "lightweight-charts": "^5.2.1",
     "lucide-react": "^1.41.0",
     "next": "^15.1.0",
