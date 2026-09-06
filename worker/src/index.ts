@@ -21,7 +21,7 @@
  * policy enforcement, end to end.
  */
 
-import { rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { metered, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
 import { runShadowComparison, shadowEnabledFor, shadowLine } from "./reconcile-shadow";
 import {
@@ -50,6 +50,7 @@ import {
   pimlicoPaymasterUrl,
   robinhoodTestnet,
   grantHasMultihop,
+  grantHasNativeSwap,
   // Aliased: `grantHasTransfer` is also the name of the dep this file passes
   // to the Telegram executor, and the two must not shadow each other.
   grantHasTransfer as grantCarriesTransfer,
@@ -123,10 +124,11 @@ import {
 import { ensureHome, homePaths, merrymenHome } from "./home";
 import { resolveLlm } from "./llm";
 import { applyPaperIntent, type PaperPosition } from "./paper";
-import { checkPolicy, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
+import { checkPolicy, convertPolicyLimits, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
 import {
   bundlerChainMismatch,
   connectionKey,
+  patchSettingsFile,
   resolveConfig,
   strategyKey,
   type ResolvedConfig,
@@ -142,7 +144,22 @@ import { startVirtualsStreamer } from "./virtuals-streamer";
 import { createStateRef, ensureLinkCode } from "./telegram/state";
 import { readPositionRaw } from "./telegram/reads";
 import { formatDepth, formatNoDepth } from "./telegram/depth-format";
-import { bestCashPool } from "./venues/pool-price";
+import { bestCashPool, cashRawToUsdg, poolPriceUsable, readPoolPrice } from "./venues/pool-price";
+import { buildConvertCall } from "./venues/convert";
+import { convertReserve } from "./convert-reserve";
+import {
+  AUTO_CONVERT_COOLDOWN_MS,
+  emptyLatch,
+  latchAllowsFire,
+  latchFromRow,
+  latchToRow,
+  parseManualSwap,
+  ratchetMarkerDown,
+  recordFire,
+  recordSwapId,
+  swapIdCompleted,
+  type ConvertLatch,
+} from "./convert-latch";
 import { readPoolDepth } from "./venues/depth";
 import { readPage, signalsFrom } from "./venues/research";
 import { readTokenMeta } from "./venues/pons-meta";
@@ -220,6 +237,8 @@ import {
   recentDecisions,
   recentTradeTxHashes,
   getAgentEpoch,
+  getConvertState,
+  putConvertState,
   getAgentFinancials,
   accountingHistoryAuditable,
   hasEpochOneHistory,
@@ -443,7 +462,234 @@ async function main() {
    * below that used to make sponsorship unreachable.
    */
   const gasSponsored = () => cfg.sponsorGasEnabled && !!cfg.bundlerApiKey;
-  function paperPriceOf(
+  const AUTO_CONVERT_EXECUTION_TIMEOUT_MS = 120_000;
+  // The executor may still be waiting on a bundler receipt after this tick
+  // returns. Keep this guard set until that underlying promise settles so a
+  // later tick cannot submit a second operation with the same account nonce.
+  let convertInFlight: Promise<unknown> | null = null;
+  // Bounded execution for converts. The timeout only bounds THIS tick's wait —
+  // the underlying promise keeps the in-flight guard set until it settles, so
+  // a slow receipt can never be followed by a second submission carrying the
+  // same account nonce.
+  const convertExecute = async (
+    executor: AgentExecutor,
+    calls: Call[],
+    tag: string,
+  ): Promise<ExecutionResult> => {
+    const execution = executor.execute(calls, {
+      onSubmitted: async (userOpHash) => {
+        console.log(`[${tag}] submitted: ${userOpHash}`);
+      },
+    });
+    const tracked = execution
+      .then(() => undefined, () => undefined)
+      .finally(() => {
+        if (convertInFlight === tracked) convertInFlight = null;
+      });
+    convertInFlight = tracked;
+    return Promise.race([
+      execution,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `UserOperation execution timed out after ${AUTO_CONVERT_EXECUTION_TIMEOUT_MS / 1000}s; it remains in flight and will not be retried`,
+              ),
+            ),
+          AUTO_CONVERT_EXECUTION_TIMEOUT_MS,
+        ),
+      ),
+    ]);
+  };
+  // Quote a convert leg: TWAP-only, guarded. readPoolPrice is the same
+  // time-averaged number that values the book; poolPriceUsable applies the
+  // depth floor + divergence band. NO spot fallback — a pool with no TWAP
+  // history has no quote (fresh pools wait for history rather than executing
+  // off a manipulable spot). Returns null WITHOUT throwing when there is no
+  // safe price; throws only on RPC-level failure, which the caller treats as
+  // "unknown, refuse".
+  const quoteConvertLeg = async (
+    client: PublicClient,
+    amountEth: bigint,
+    tag: string,
+  ): Promise<{ expect6: bigint; minOut: bigint; fee: number } | null> => {
+    console.log(`[${tag}] fetching WETH/USDG TWAP quote`);
+    const price = await readPoolPrice(client, {
+      token: CASH.WETH as `0x${string}`,
+      tokenDecimals: 18, // native ETH / WETH raw units
+      cash: CASH.USDG as `0x${string}`,
+      cashDecimals: USDG_DECIMALS,
+    });
+    if (!price) {
+      console.log(`[${tag}] quote unavailable: no WETH→USDG pool`);
+      return null;
+    }
+    const usable = poolPriceUsable(
+      {
+        price8: price.price8,
+        // Single-pool depth in USDG, the same conversion readRoutedPrice uses
+        // (the cash leg here IS USDG ≈ $1 = 1e8).
+        liquidityUsdg: cashRawToUsdg(price.liquidityCashRaw, price.cashDecimals, 100_000_000n),
+        twapWindowSec: price.twapWindowSec,
+        divergenceBps: price.divergenceBps,
+      },
+      {
+        minLiquidityUsdg: BigInt(Math.round(cfg.minPoolLiquidityUsdg * 1_000_000)),
+        maxDivergenceBps: cfg.maxPriceDivergenceBps,
+      },
+    );
+    if (!usable.ok) {
+      console.log(`[${tag}] quote refused: ${usable.reason}`);
+      return null;
+    }
+    // price8 is USDG-per-whole-WETH at 8dp; amountEth is raw wei (18dp).
+    // USDG out (6dp) = price8/1e8 × wei/1e18 × 1e6 = price8×wei/1e20.
+    const expect6 = (price.price8 * amountEth) / 1_000_000_000_000_000_000_00n; // ÷1e20
+    const minOut = minOutWithSlippage(expect6, cfg.slippageBps);
+    if (expect6 <= 0n || minOut <= 0n) return null;
+    console.log(`[${tag}] quote ready (fee ${price.fee}): ~${usdgNum(expect6)} USDG`);
+    return { expect6, minOut, fee: price.fee };
+  };
+  // Scoped policy gate for converts: expiry, target-allowlist, ops-cap and
+  // breaker stay enforced; per-trade/daily caps are lifted by
+  // convertPolicyLimits (funding into one's own account is not market
+  // exposure — same rationale as unsized vault withdrawals). A refusal names
+  // its rule in the event; the caller decides retry vs fail.
+  const convertPolicyCheck = async (
+    agentId: string,
+    amountEth: bigint,
+    expect6: bigint,
+  ): Promise<{ ok: true } | { ok: false; line: string }> => {
+    if (!active) return { ok: false, line: "not armed" };
+    const intent = {
+      kind: "swap",
+      target: UNISWAP.swapRouter02 as `0x${string}`,
+      sellToken: CASH.WETH as `0x${string}`,
+      buyToken: CASH.USDG as `0x${string}`,
+      sellAmountRaw: amountEth,
+      notionalUsdg: expect6,
+    } as const;
+    const state: AgentState = {
+      spentTodayUsdg: spentToday(),
+      opsToday: opsTodayCount(),
+      highWaterMarkUsdg,
+      equityUsdg: lastEquityUsdg,
+      equityKnown: lastEquityKnown,
+      nowSec: Math.floor(Date.now() / 1000),
+    };
+    const verdict = checkPolicy(intent, convertPolicyLimits(active.limits), state, await scoutContextFor(intent));
+    if (verdict.ok) return { ok: true };
+    return { ok: false, line: `policy refused (${verdict.rule}): ${verdict.detail}` };
+  };
+  // Submit a quoted convert leg and record it. Shared by auto-convert and
+  // manual swaps so the two paths cannot drift: same wall-pinned call, same
+  // ledger shape. `tag` prefixes every log/event line ("auto-convert" keeps
+  // its historical text; manual swaps use `manual-swap <id>` so the /swap
+  // screen can match the outcome in the event feed).
+  const submitConvertLeg = async (args: {
+    client: PublicClient;
+    executor: AgentExecutor;
+    agentId: string;
+    amountEth: bigint;
+    expect6: bigint;
+    minOut: bigint;
+    fee: number;
+    tag: string;
+  }): Promise<{ userOpHash: string }> => {
+    console.log(
+      `[${args.tag}] submitting: amountIn=${args.amountEth} expectedOut=${args.expect6} minOut=${args.minOut}`,
+    );
+    const exec = await convertExecute(args.executor, [
+      buildConvertCall({
+        surplusEth: args.amountEth,
+        fee: args.fee,
+        minAmountOut: args.minOut,
+        recipient: args.executor.address as `0x${string}`,
+      }),
+    ], args.tag);
+    console.log(`[${args.tag}] ${formatUnits(args.amountEth, 18)} ETH → ~${usdgNum(args.expect6)} USDG (min ${usdgNum(args.minOut)}) · op ${exec.userOpHash}`);
+    await addEvent(
+      args.agentId,
+      "ok",
+      `${args.tag} ✓ ${formatUnits(args.amountEth, 18)} ETH → ~${usdgNum(args.expect6)} USDG (min ${usdgNum(args.minOut)}, fee ${args.fee / 10_000}%) — gas reserve kept`,
+    );
+    await addTrade({
+      agent_id: args.agentId,
+      kind: "swap",
+      target: CASH.WETH,
+      sell_token: "ETH",
+      buy_token: CASH.USDG,
+      amount_usdg: usdgNum(args.expect6),
+      status: "landed",
+      user_op_hash: exec.userOpHash,
+      tx_hash: exec.txHash,
+    });
+    return { userOpHash: exec.userOpHash };
+  };
+  // Deploy-first probe shared by auto-convert and manual swaps. A first
+  // operation from an UNDEPLOYED account pays Kernel deployment AND has its
+  // verification gas counted ×3 by the EntryPoint — a compound cost that left
+  // every convert attempt short of prefund (AA21) no matter how the floor was
+  // tuned. So DEPLOY FIRST with a policy-legal dust op — approve 1 wei USDG
+  // to the router, the same no-op the selftest uses — and then run the convert
+  // as a normal deployed-account operation. No explicit gas bounds: the
+  // executor sizes the ceiling itself from the operation's shape
+  // (readEnableState widens fresh enables internally).
+  //
+  // Returns `{ blocked: true }` (DO NOT attempt) when the balance cannot cover
+  // the one-time setup and gas is not sponsored. Throws when the probe itself
+  // fails; the caller applies the backoff. `{ deployed, blocked: false }`
+  // otherwise — including "no live executor" (callers no-op downstream without
+  // one) and "probe ran but still unreadable" (caller proceeds with the
+  // undeployed fallback floor).
+  const ensureDeployedForConvert = async (args: {
+    agentId: string;
+    balanceWei: bigint;
+    gasPrice: bigint;
+    tag: string;
+  }): Promise<{ deployed: boolean; blocked: boolean }> => {
+    if (!active?.executor) return { deployed: true, blocked: false };
+    const deployed =
+      ((await active.client.getCode({ address: active.executor.address })) ?? "0x") !== "0x";
+    if (deployed) return { deployed: true, blocked: false };
+    // The deployment op is a FIXED one-time cost, independent of deposit
+    // size. If the balance cannot prefund it, do not attempt — the bundler
+    // would refuse (AA21) and the event would read like a bug.
+    const deployFloor = args.gasPrice * 9_500_000n; // bounded deploy op ≈ 7.8M raw × 1.2 headroom
+    if (gasSponsored()) {
+      // Sponsored: the paymaster covers the deployment gas, so the account's
+      // own balance is irrelevant here — AA21 never fires.
+      console.log(`[${args.tag}] account undeployed — deployment is gas-sponsored, deploying at any balance`);
+    } else if (args.gasPrice > 0n && args.balanceWei < deployFloor) {
+      if (!autoConvertDeployNoteShown) {
+        autoConvertDeployNoteShown = true;
+        await addEvent(
+          args.agentId,
+          "warn",
+          `[${args.tag}] waiting — the account needs a one-time setup fee of about ${formatUnits(deployFloor, 18)} ETH to go live (it has ${formatUnits(args.balanceWei, 18)}). Top up the smart account by about ${formatUnits(deployFloor - args.balanceWei, 18)} more ETH; the setup runs once, and every deposit after that converts normally.`,
+        );
+      }
+      console.log(`[${args.tag}] NOT deploying: balance ${formatUnits(args.balanceWei, 18)} ETH is below the one-time setup cost ${formatUnits(deployFloor, 18)} ETH — waiting for a top-up`);
+      return { deployed: false, blocked: true };
+    }
+    console.log(`[${args.tag}] account undeployed — sending a dust approve first to deploy it`);
+    await convertExecute(active.executor, [
+      {
+        to: CASH.USDG as `0x${string}`,
+        value: 0n,
+        data: encodeFunctionData({
+          abi: erc20Abi,
+          functionName: "approve",
+          args: [UNISWAP.swapRouter02 as `0x${string}`, 1n],
+        }),
+      },
+    ], args.tag);
+    const nowDeployed =
+      ((await active.client.getCode({ address: active.executor.address })) ?? "0x") !== "0x";
+    console.log(`[${args.tag}] account deployed=${nowDeployed} — proceeding with the convert`);
+    return { deployed: nowDeployed, blocked: false };
+  };  function paperPriceOf(
     token: `0x${string}`,
   ): { priceUsd: number; stale: boolean; source: PriceQuote["source"] } | null {
     const t = watchTokens.find((w) => w.address.toLowerCase() === token.toLowerCase());
@@ -1467,6 +1713,16 @@ async function main() {
   let lastTierId = holderTier.id;
   let circleBlockedNoted = false; // so the "hold to unlock" note isn't spammed each tick
   let lastSequencerUp = true;
+  // One re-sign notice per arm, not per tick — a warn event every minute is
+  // noise, and the event log is the owner's record.
+  let autoConvertSignNoteShown = false;
+  // One deployment-funding notice per arm, not per tick — same reasoning.
+  let autoConvertDeployNoteShown = false;
+  // For a short window after a BALANCE change (a deposit), skip-path decisions
+  // are logged so a silent non-convert is diagnosable instead of invisible.
+  const AUTO_CONVERT_DEBUG_MS = 180_000;
+  let autoConvertDebugUntil = 0;
+  let autoConvertDebugBalance = "";
   // A feedless holding never resolves, so warn ONCE while it's held rather than
   // every tick forever. Resets when the book is valuable again.
   let notedUnpriced = false;
@@ -1490,6 +1746,42 @@ async function main() {
   // only one nothing checked: the failure arrived as a raw bundler exception,
   // truncated to 80 characters, in the reject_rule column, retried every tick.
   let lastGasWei: bigint | null = null; // feeds the low-gas alert AND the pre-flight refusal
+  // Convert latch: durable once-per-deposit memory (convert-latch.ts rules,
+  // convert_state row for durability). Loaded at arm (ledger row, else
+  // orchestrator seed, else empty); every mutation persists best-effort. The
+  // in-memory copy still gates when a write fails, and the next tick retries
+  // the write.
+  let convertLatch: ConvertLatch = emptyLatch();
+  const persistLatch = () => {
+    if (!active) return;
+    putConvertState(active.agentId, latchToRow(convertLatch)).catch(() => {});
+  };
+  // Read the durable latch at arm. Order matters: the ledger row first (live
+  // truth, including self-hosted where no seed ever exists), the orchestrator
+  // seed second (hosted redeploy — fresh, empty home), empty last. The seed is
+  // consumed (deleted) on adoption so a stale file can never regress live
+  // state later; a crash between spawn and arm simply re-adopts on next boot.
+  const loadConvertLatch = async (agentId: string): Promise<ConvertLatch> => {
+    try {
+      const row = await getConvertState(agentId);
+      if (row) return latchFromRow(row);
+    } catch {
+      /* fall through to seed, then empty */
+    }
+    try {
+      const raw = readFileSync(homePaths.convertSeed(), "utf8");
+      const seed = latchFromRow(JSON.parse(raw) as Parameters<typeof latchFromRow>[0]);
+      await putConvertState(agentId, latchToRow(seed));
+      try {
+        unlinkSync(homePaths.convertSeed());
+      } catch {
+        /* keep the seed; re-adoption is idempotent (same row, overwritten) */
+      }
+      return seed;
+    } catch {
+      return emptyLatch();
+    }
+  };
   let notifierHandle: ReturnType<typeof startNotifier> | null = null;
 
   // Uniswap TWAPs for tokens with no Chainlink feed. Cached across ticks — the
@@ -2891,6 +3183,11 @@ async function main() {
     // cap. Live only (paper never touches the chain); best-effort (guarded).
     if (executor) await reconcileInFlightAtArm(agentId, client, grant.smartAccount as `0x${string}`);
     await refreshBudget(agentId);
+
+    // Convert latch: durable row first, orchestrator seed (hosted redeploy)
+    // second, empty last. Consumed once — a stale seed can never regress live
+    // state later.
+    convertLatch = await loadConvertLatch(agentId);
 
     // ── epoch boundary ───────────────────────────────────────────────────
     // Everything written before the accounting was fixed is epoch 1: no flow
