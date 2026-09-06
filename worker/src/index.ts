@@ -4719,6 +4719,15 @@ async function main() {
     const blocking = verdict.mode === "live" ? null : verdict.rule;
     if (active && blocking !== lastLiveBlocker) {
       lastLiveBlocker = blocking;
+      // AND WHERE AN OPERATOR CAN COUNT IT. The event answers one owner; this
+      // line answers "how much of the fleet is actually trading for real, and
+      // what is stopping the rest" — which is a different question, asked from
+      // outside, and it is the one that says whether a fix worked.
+      console.log(
+        blocking === null
+          ? `[live] trading for real — every leg available`
+          : `[live] NOT LIVE — blocked by ${blocking}`,
+      );
       void addEvent(
         active.agentId,
         blocking === null ? "ok" : "warn",

@@ -718,6 +718,26 @@ async function fleetHealth(): Promise<void> {
     // event each is nothing beside the mirror's own writes, and the cap means a
     // fleet that is wholly broken reports a readable summary rather than
     // several hundred lines that push everything else out of the log window.
+    // ── AND HOW MANY ARE ACTUALLY TRADING FOR REAL ──────────────────────
+    //
+    // `status` says whether an agent could start; `mode` says what it is doing.
+    // A fleet can be 32-of-32 armed and simulating every fill, which is exactly
+    // what a tester found by hand and reported as "I can't see an option to
+    // switch to real trading". Counted here so nobody has to find that out one
+    // agent at a time.
+    try {
+      const modes = (await shared
+        .prepare("SELECT COALESCE(mode, 'unknown') AS mode, COUNT(*) AS n FROM agents GROUP BY mode")
+        .all()) as { mode: string; n: number | string }[];
+      if (modes.length) {
+        const line = modes.map((m) => `${m.mode} ${Number(m.n)}`).join(", ");
+        log(`fleet| rails — ${line}`);
+      }
+    } catch {
+      // The column may predate this deploy on a database mid-migration. A
+      // missing breakdown is not a fleet that is down.
+    }
+
     if (broken > 0) {
       const worst = (await shared
         .prepare(
