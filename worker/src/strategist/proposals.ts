@@ -17,6 +17,7 @@ import {
   curveMinOut,
   curveGraduated,
   type CurveReserves,
+  curveBuyImpactBps,
 } from "../venues/pons-price";
 
 export interface ProposedAction {
@@ -60,6 +61,15 @@ export interface StrategistUniverse {
   usdg: `0x${string}`;
   /** Hard per-proposal ceiling (6dp) — independent of, and beneath, grant caps. */
   maxPerActionUsdg: bigint;
+  /**
+   * How far a single BUY may move a bonding curve, in bps.
+   *
+   * Optional so every existing caller and fixture is unchanged, and absent
+   * means unchecked — which is exactly what the autonomous curve path was
+   * before this, and why the one caller that can produce a curve trade passes
+   * it explicitly.
+   */
+  maxImpactBps?: number;
   maxActionsPerTick: number;
   /**
    * symbol → its bonding curve, for tokens that trade on one.
@@ -204,6 +214,32 @@ export function proposalsToIntents(
       if (amountInRaw <= 0n) {
         rejected.push(`#${i} ${p.symbol}: size rounds to zero`);
         continue;
+      }
+
+      // ── IMPACT, ON THE THINNEST VENUE ON THE CHAIN ────────────────────
+      //
+      // Both swap branches call judgeImpact, and the owner-typed chat producer
+      // checks curveBuyImpactBps against the same ceiling. The AUTONOMOUS curve
+      // path had neither — which cost nothing while no production caller
+      // supplied curve legs, and became the gap the moment one did.
+      //
+      // Checked in the producer, like the chat path, because this is where the
+      // reserves are: the executor holds only an intent and would have to read
+      // them again, and curve-prices.ts is explicit that two reads of one tick
+      // are two different markets.
+      //
+      // Buys only. Impact on the way OUT is a cost of leaving, and refusing an
+      // exit because leaving is expensive is how an agent locks itself into the
+      // position it most needs to close.
+      if (isBuy && universe.maxImpactBps !== undefined) {
+        const impact = curveBuyImpactBps(curveLeg.reserves, amountInRaw);
+        if (impact !== null && impact > universe.maxImpactBps) {
+          rejected.push(
+            `#${i} ${p.symbol}: this size moves the curve ${(impact / 100).toFixed(1)}%, ` +
+              `over the ${(universe.maxImpactBps / 100).toFixed(1)}% ceiling`,
+          );
+          continue;
+        }
       }
 
       const quoted = isBuy

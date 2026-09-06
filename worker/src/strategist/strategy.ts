@@ -51,6 +51,8 @@ export interface LlmStrategistConfig {
     legs: ReadonlyMap<string, import("./proposals").CurveLeg>;
     tokens: ReadonlyMap<string, `0x${string}`>;
     slippageBps: number;
+    /** How far one buy may move the curve, bps. Travels with the legs. */
+    maxImpactBps: number;
   } | null;
   /** Minimum ms between model calls — decisions are windows, ticks are not. */
   decisionIntervalMs: number;
@@ -98,6 +100,21 @@ export interface LlmStrategistConfig {
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 function buildSignals(snap: Snapshot, universe: StrategistUniverse, at: Date): Signals {
+  // ── WHAT THE MODEL IS ALLOWED TO NAME ─────────────────────────────────
+  //
+  // BOTH VENUES, and it used to be one. `tradableSymbols` and the price list
+  // were derived from `universe.legs` alone, while curve legs live in a
+  // separate map — so a bonding-curve memecoin was never offered to the model
+  // and its price was filtered out of the prompt. Supplying `curveLegsNow` was
+  // therefore still inert: the converter could finally build a curve trade, and
+  // nothing ever asked for one.
+  //
+  // The two maps stay SEPARATE downstream, deliberately. `proposalsToIntents`
+  // checks `curveLegs` before `legs`, and a curve token placed in `legs` would
+  // be routed to the swap router — an operation against a pool that does not
+  // exist. This union is for what the model may SAY, not for how a trade is
+  // built.
+  const tradable = new Set([...universe.legs.keys(), ...(universe.curveTokens?.keys() ?? [])]);
   return {
     cashUsdg: Number(snap.cashUsdg) / 1e6,
     vaultUsdg: Number(snap.vaultUsdg) / 1e6,
@@ -110,13 +127,13 @@ function buildSignals(snap: Snapshot, universe: StrategistUniverse, at: Date): S
       priceStale: h.priceStale,
     })),
     prices: [...snap.prices.entries()]
-      .filter(([symbol]) => universe.legs.has(symbol))
+      .filter(([symbol]) => tradable.has(symbol))
       .map(([symbol, p]) => ({
         symbol,
         usd: Number(p.price8) / 1e8,
         stale: p.stale,
       })),
-    tradableSymbols: [...universe.legs.keys()],
+    tradableSymbols: [...tradable],
     maxPerActionUsdg: Number(universe.maxPerActionUsdg) / 1e6,
     utcHour: at.getUTCHours(),
     utcDay: at.getUTCDay(),
@@ -183,7 +200,14 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
             ? cfg.universe.maxPerActionUsdg
             : snap.perTradeCapUsdg,
         ...(curve
-          ? { curveLegs: curve.legs, curveTokens: curve.tokens, slippageBps: curve.slippageBps }
+          ? {
+              curveLegs: curve.legs,
+              curveTokens: curve.tokens,
+              slippageBps: curve.slippageBps,
+              // The same ceiling both swap branches and the chat producer use.
+              // Absent means unchecked, so it travels with the legs or not at all.
+              maxImpactBps: curve.maxImpactBps,
+            }
           : {}),
       };
 

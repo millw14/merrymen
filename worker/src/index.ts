@@ -198,7 +198,9 @@ import {
   curveBuyOut,
   curveSellOut,
   curveMinOut,
+  type CurveReserves,
 } from "./venues/pons-price";
+import type { CurveLeg } from "./strategist/proposals";
 import { mainnetClient, readAccountBalances, readMarketSafety, setMainnetRpc } from "./snapshot";
 import { applyFill } from "./basis";
 import {
@@ -481,8 +483,83 @@ async function main() {
   const paperPositionsOf = (shares: Record<string, { token: `0x${string}`; shares: number }>): PaperPosition[] =>
     Object.entries(shares).map(([symbol, v]) => ({ symbol, token: v.token, shares: v.shares }));
 
+  /**
+   * WHICH CURVE LEGS THE STRATEGIST MAY BE OFFERED THIS TICK.
+   *
+   * `curveLegsNow` was declared, forwarded and consumed, and no production
+   * caller ever supplied it — so `universe.curveLegs` was always undefined, the
+   * curve arm of proposalsToIntents was unreachable, and every memecoin the
+   * model named came back "not in the tradable universe". The worker had all of
+   * this already and wired it only to the chat command an owner types by hand.
+   *
+   * SUPPLYING IT WIDENS NOTHING. The legs below are a subset of the tokens the
+   * pricing pass already valued this tick, which is `watchTokens` — the set the
+   * owner added. What changes is that a proposal about one stops dying as
+   * unrecognised and starts either executing or being refused with a sentence
+   * that names the grant.
+   *
+   * Every filter here is a way a token could otherwise reach a spend it is not
+   * covered for. They are ordered cheapest-first, and none of them is the wall:
+   * checkPolicy still judges everything that survives.
+   */
+  function curveLegsNow(): {
+    legs: ReadonlyMap<string, CurveLeg>;
+    tokens: ReadonlyMap<string, `0x${string}`>;
+    slippageBps: number;
+    maxImpactBps: number;
+  } | null {
+    // PAPER CANNOT SIMULATE ONE. paper.ts refuses every non-swap intent, so
+    // offering curve legs on that rail produces "unsupported paper intent
+    // curve-trade" strings at an owner who did nothing wrong.
+    if (paperActive()) return null;
+    if (!active || !active.ponsAdapterLive) return null;
+    const adapter = grantPonsAdapter(active.grant);
+    if (!adapter) return null;
+
+    // THE GRANT, NEVER SETTINGS. `sellableAssets` comes from the signature; a
+    // token added in /settings is watched and priced but not covered, and
+    // buying it would open a position this key cannot close. checkPolicy would
+    // refuse it anyway — this stops the model wasting an action slot on it, and
+    // stops it being proposed in public as though it were possible.
+    const sellable = new Set((active.limits.sellableAssets ?? []).map((a) => a.toLowerCase()));
+    if (sellable.size === 0) return null;
+
+    // AND THE BASKET, which is the half an adversarial review caught me
+    // missing. registry.ts states the invariant every other leg obeys: adding a
+    // token in settings means "know about this", putting its symbol in the
+    // basket means "trade it" — "deliberately NOT automatic; a token added to
+    // be tracked must not start being bought on its own."
+    //
+    // The grant filter alone does not enforce it. Every signing site seals
+    // `grantTokens` from the WHOLE custom-token list with no per-token opt-in,
+    // so after any re-sign the grant covers everything watched — and this
+    // filter degenerated to the watch set. That made the curve venue's universe
+    // `watchTokens ∩ grant`, strictly WIDER than the `basketSymbols ∩
+    // watchTokens` every other arm uses, and it meant a token an owner added
+    // only to track and value could be bought on its own.
+    //
+    // Nothing is bypassed by the difference — the caps, the scout budget and
+    // the wall all still bind, and the asset is inside the signature. What was
+    // wrong is the SELECTION: an owner's "watch this" was being read as
+    // "trade this".
+    const selected = new Set(cfg.basketSymbols);
+
+    const legs = new Map<string, CurveLeg>();
+    const tokens = new Map<string, `0x${string}`>();
+    for (const [symbol, leg] of lastCurveLegs) {
+      if (!selected.has(symbol)) continue;
+      const token = watchTokens.find((t) => t.symbol === symbol)?.address;
+      if (!token || !sellable.has(token.toLowerCase())) continue;
+      legs.set(symbol, { curve: leg.curve, quoteToken: leg.quoteToken, adapter, reserves: leg.reserves });
+      tokens.set(symbol, token as `0x${string}`);
+    }
+    if (legs.size === 0) return null;
+    return { legs, tokens, slippageBps: cfg.slippageBps, maxImpactBps: cfg.maxImpactBps };
+  }
+
   function makeStrategy(c: ResolvedConfig): Strategy {
     return buildStrategy(c.strategy, {
+      curveLegsNow,
       swapRouter: swapRouterFor(c),
       // Resolve legs against the full watch set, so a selected memecoin is a
       // leg a strategy can actually trade rather than a balance it can only see.
@@ -1510,6 +1587,17 @@ async function main() {
   let lastGasWei: bigint | null = null; // feeds the low-gas alert AND the pre-flight refusal
   /** When the paper rail last looked at the account's REAL ETH. See the note at the assignment. */
   let lastRealGasReadAt = 0;
+  /**
+   * THIS TICK'S CURVE RESERVES, from the pricing pass that already read them.
+   *
+   * Never carried across ticks. curve-prices.ts forbids caching reserves and
+   * says why: measured p99 movement is 1,546 bps over 240 seconds, so a
+   * slippage floor derived from a stale reserve is a floor for a market that no
+   * longer exists. Cleared at the top of every pricing pass, populated by it,
+   * and read synchronously by curveLegsNow() — which is the only shape that
+   * satisfies both "this tick's reserves" and the synchronous contract.
+   */
+  let lastCurveLegs = new Map<string, { curve: `0x${string}`; quoteToken: `0x${string}`; reserves: CurveReserves }>();
   let notifierHandle: ReturnType<typeof startNotifier> | null = null;
 
   // Uniswap TWAPs for tokens with no Chainlink feed. Cached across ticks — the
@@ -1623,6 +1711,18 @@ async function main() {
     // includes any split. Pricing one from a pool would need that difference
     // handled everywhere it flows, so it simply isn't offered — such a token
     // stays honestly unvalued until Chainlink lists it.
+    // CLEARED AT THE TOP, so this pass's answer is the only one that survives it.
+    //
+    // The assignment below sits inside `if (noPool.length)`, which is the right
+    // place to fill it and the wrong place to be the only writer: a tick with
+    // no feedless tokens — the owner removed their memecoins, or every one of
+    // them found a pool — would leave last tick's reserves standing, and
+    // curveLegsNow would hand the strategist a slippage floor derived from a
+    // market that had already moved. curve-prices.ts measured p99 movement at
+    // 1,546 bps over 240 seconds, which is why that file refuses to cache these
+    // at all. Missing legs cost a skipped window; stale legs cost a bad fill.
+    lastCurveLegs = new Map();
+
     const feedless = watchTokens.filter((t) => t.chainlinkFeed === null && t.kind === "memecoin");
     if (!feedless.length) {
       poolRefusals = new Map();
@@ -1766,6 +1866,10 @@ async function main() {
           q.toLowerCase() === (CASH.USDG as string).toLowerCase() ? 6 : 18,
         guard: CURVE_GUARD_DEFAULTS,
       });
+      // The reserves this pass already paid for. Replaced wholesale, never
+      // merged, so a token that stopped pricing this tick cannot leave a stale
+      // leg behind for the strategist to size against.
+      lastCurveLegs = curveRes.legs;
       for (const [symbol, quote] of curveRes.quotes) if (!prices.has(symbol)) prices.set(symbol, quote);
       // A token the curve PRICED is no longer refused. Its pool refusal said
       // "no Uniswap v3 pool — nothing to price it from", which was true and is

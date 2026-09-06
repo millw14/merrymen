@@ -34,6 +34,7 @@ import {
   curvePriceUsable,
   type CurveGuard,
   type CurveRefusalKind,
+  type CurveReserves,
 } from "./pons-price";
 
 /** Where a token trades, and what it takes to read its reserves as money. */
@@ -47,6 +48,23 @@ export interface CurveRef {
 export interface CurvePricesResult {
   quotes: Map<string, PriceQuote>;
   refused: { symbol: string; kind: CurveRefusalKind | "no-curve"; reason: string }[];
+  /**
+   * WHAT THIS PASS ALREADY READ, kept instead of thrown away.
+   *
+   * Every entry here cost an RPC call that has already been made: the pricer
+   * reads a curve's reserves to value it, then discarded everything except the
+   * derived price. A strategist that wants to TRADE a curve needs exactly the
+   * same three facts, and reading them again a moment later would double the
+   * cost and — worse — get a different answer. The header of this file forbids
+   * caching curve reserves for good reason: measured p99 movement is 1,546 bps
+   * over 240 seconds. Two reads of the same tick are two different markets.
+   *
+   * Only symbols the guard ALLOWED appear. A curve too shallow, too graduated
+   * or too fresh to price is also one nobody should be sized against, so the
+   * refusal that keeps it off the dashboard keeps it out of here too — one
+   * decision, not two that can drift.
+   */
+  legs: Map<string, { curve: `0x${string}`; quoteToken: `0x${string}`; reserves: CurveReserves }>;
 }
 
 export interface CurvePricesDeps {
@@ -78,6 +96,7 @@ export interface CurvePricesDeps {
 export async function readCurvePrices(deps: CurvePricesDeps): Promise<CurvePricesResult> {
   const quotes = new Map<string, PriceQuote>();
   const refused: CurvePricesResult["refused"] = [];
+  const legs: CurvePricesResult["legs"] = new Map();
 
   for (const t of deps.tokens) {
     const ref = await deps.curveOf(t.address);
@@ -137,6 +156,7 @@ export async function readCurvePrices(deps: CurvePricesDeps): Promise<CurvePrice
       continue;
     }
 
+    legs.set(t.symbol, { curve: ref.curve, quoteToken: ref.quoteToken, reserves });
     quotes.set(t.symbol, {
       price8: priced!.price8,
       // Read fresh from the chain this tick. `stale` means "a Chainlink feed
@@ -152,5 +172,5 @@ export async function readCurvePrices(deps: CurvePricesDeps): Promise<CurvePrice
     });
   }
 
-  return { quotes, refused };
+  return { quotes, refused, legs };
 }

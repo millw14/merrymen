@@ -42,6 +42,8 @@ export interface StrategyBuildOpts {
     legs: ReadonlyMap<string, import("../strategist/proposals").CurveLeg>;
     tokens: ReadonlyMap<string, `0x${string}`>;
     slippageBps: number;
+    /** How far one buy may move the curve, bps. Travels with the legs. */
+    maxImpactBps: number;
   } | null;
   swapRouter: `0x${string}`;
   usdg6: (v: number) => bigint;
