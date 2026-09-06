@@ -20,7 +20,15 @@ WORKDIR /app
 # Deps first, for layer caching. --ignore-scripts skips the `prepare` hook
 # (cli/build.mjs, an npm-package concern); the dashboard is built explicitly
 # below. tsx/next/typescript are runtime dependencies, so --omit=dev keeps them.
-COPY package.json package-lock.json ./
+# .npmrc TRAVELS WITH THE LOCKFILE, and must.
+#
+# It carries `legacy-peer-deps=true`, which is how `@privy-io/react-auth`'s
+# optional smart-wallet peer stops blocking the install. Without it here the
+# image runs a STRICTER resolver than the one that wrote package-lock.json, and
+# `npm ci` refuses with a dozen "Missing from lock file" lines naming packages
+# nobody touched — date-fns, cross-fetch, react@18.3.1. The lockfile is fine;
+# the two resolvers simply disagreed, and only one of them had the config.
+COPY package.json package-lock.json .npmrc ./
 RUN npm ci --omit=dev --ignore-scripts
 
 # The Postgres driver — a HOSTED-ONLY runtime dependency. Both the shared ledger

@@ -21,7 +21,9 @@ WORKDIR /app
 
 # Deps first, for layer caching. The service needs tsx (it runs TypeScript
 # straight from source, exactly as the orchestrator does) and playwright.
-COPY package.json package-lock.json ./
+# Same reason as Dockerfile: npm ci must run under the resolver that wrote the
+# lockfile, and .npmrc is where that is configured.
+COPY package.json package-lock.json .npmrc ./
 RUN npm ci --omit=dev --ignore-scripts
 
 # Playwright itself is not a dependency of the main app and is deliberately kept
