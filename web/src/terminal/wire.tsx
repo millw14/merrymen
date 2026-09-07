@@ -8,16 +8,28 @@ function logoOf(tokens: LiveToken[], symbol: string | null): LiveToken | undefin
   return tokens.find((t) => t.symbol.toUpperCase() === symbol.toUpperCase());
 }
 
+/**
+ * What a reader has done with a post, and what everybody else has.
+ *
+ * PASSED IN RATHER THAN FETCHED HERE. The two halves come from two routes on
+ * purpose — `mine` is per-caller and uncacheable, `counts` is the same for
+ * everyone and cached — and they are merged once per page in `likes.ts`, not
+ * once per feed. Two feeds mount at a time on desktop.
+ */
+export type Likes = import("./likes").LikesView;
+
 export function Wire({
   lanes,
   tokens,
   onToken,
   onAgent,
+  likes,
 }: {
   lanes: Lane[];
   tokens: LiveToken[];
   onToken?: (id: string) => void;
   onAgent?: (slug: string) => void;
+  likes?: Likes;
 }) {
   const now = useNow(30_000);
   return (
@@ -35,6 +47,7 @@ export function Wire({
                 now={now}
                 onToken={onToken}
                 onAgent={onAgent}
+                likes={likes}
               />
             );
           }
@@ -54,12 +67,14 @@ function BeatRow({
   now,
   onToken,
   onAgent,
+  likes,
 }: {
   beat: Beat;
   tokens: LiveToken[];
   now: number;
   onToken?: (id: string) => void;
   onAgent?: (slug: string) => void;
+  likes?: Likes;
 }) {
   const tok = logoOf(tokens, beat.symbol);
   const actor = beat.actor;
@@ -117,8 +132,58 @@ function BeatRow({
             </button>
           </div>
         ) : null}
+
+        {/* A SIBLING OF `wire-hit`, never a child. That element is a <button>,
+            and a button inside a button is invalid HTML: browsers recover by
+            hoisting it out of the DOM you wrote, so the layout silently differs
+            from the source and the inner control's activation is undefined. */}
+        {likes && beat.postId ? <LikeButton postId={beat.postId} likes={likes} /> : null}
       </div>
     </div>
+  );
+}
+
+function LikeButton({ postId, likes }: { postId: string; likes: Likes }) {
+  const on = likes.mine.has(postId);
+  const n = likes.counts[postId] ?? 0;
+  const can = likes.onLike !== null;
+  return (
+    <div className="wire-acts">
+      <button
+        type="button"
+        className={`wire-like${on ? " on" : ""}`}
+        aria-pressed={on}
+        // SIGNED OUT IS NOT BROKEN, AND NEITHER IS THE SAME AS DOWN. The button
+        // stays visible and says which it is, because a control that disappears
+        // teaches nobody why — and one that says "sign in" to somebody who is
+        // signed in sends them to a remedy that cannot work.
+        title={
+          !likes.mineRead
+            ? "Likes could not be loaded just now"
+            : can
+              ? on
+                ? "Remove your like"
+                : "Like this post"
+              : "Sign in to like posts"
+        }
+        onClick={() => likes.onLike?.(postId, !on)}
+        disabled={!can}
+      >
+        <Heart filled={on} />
+        {/* NO NUMBER WHEN WE DID NOT ASK. A zero here would be a claim about
+            the post; the absence is a claim about our read, and the two must
+            not render the same. */}
+        {likes.read && n > 0 ? <span className="mono">{n}</span> : null}
+      </button>
+    </div>
+  );
+}
+
+function Heart({ filled }: { filled: boolean }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.9" aria-hidden>
+      <path d="M12 20s-7-4.35-7-9a4 4 0 0 1 7-2.65A4 4 0 0 1 19 11c0 4.65-7 9-7 9z" />
+    </svg>
   );
 }
 

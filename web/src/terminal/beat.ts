@@ -12,7 +12,18 @@ export interface Actor {
 }
 
 interface Core {
+  /** The RENDER key: stable within one read, and it moves when the post does. */
   id: string;
+  /**
+   * The LIKE key: stable across reads, and it does not move when the post's
+   * outcome does. Null when the agent has no public slug.
+   *
+   * Two ids because they answer two questions. `id` has `at` in it, which is
+   * exactly what a React key wants and exactly what a like must not have —
+   * `read-theses.ts` groups on `MAX(d.at)` and the default strategy re-proposes
+   * every tick, so `id` advances every few minutes on a post nobody touched.
+   */
+  postId: string | null;
   at: number;
   actor: Actor;
   /** The agent's own take, already run through `takeFor`. May be empty. */
@@ -142,6 +153,9 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
     // existed.
     const shadow = t.shadow === true || t.outcome === "shadow";
     const sizeUsd = sizeOf(t);
+    // Carried, never derived here: it is a hash of the ROW as the server read
+    // it, including a `source` the published post does not carry.
+    const postId = t.postId ?? null;
     const action = t.action;
 
     if ((action === "buy" || action === "sell") && t.symbol) {
@@ -149,6 +163,7 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
       out.push({
         kind: "trade",
         id: `${symbol}-${action}-${actor.slug}-${at}`,
+        postId,
         at,
         actor,
         reason,
@@ -169,6 +184,7 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
     out.push({
       kind: "view",
       id: `view-${actor.slug}-${at}-${symbol ?? ""}`,
+      postId,
       at,
       actor,
       reason,

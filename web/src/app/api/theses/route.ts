@@ -18,8 +18,7 @@
  * poll, and because removing it would break anything already pointed at it.
  */
 import { NextResponse } from "next/server";
-import { readTheses } from "@/lib/read-theses";
-import type { PublicThesis } from "@/lib/thesis";
+import { readTheses, type FeedThesis } from "@/lib/read-theses";
 
 /** Cacheable because the answer does not depend on who is asking. */
 /**
@@ -44,7 +43,15 @@ export const dynamic = "force-dynamic";
 
 export interface ThesesResponse {
   source: "sqlite" | "none";
-  theses: PublicThesis[];
+  /**
+   * Posts, each with a `postId` and NO like count.
+   *
+   * The count is not omitted from this response — it was never in this shape.
+   * Counts live on `/api/like-counts`, keyed by post id, and merge in the
+   * browser. That keeps THIS route byte-identical for every visitor, which is
+   * what its header says makes the caching honest.
+   */
+  theses: FeedThesis[];
 }
 
 export async function GET() {

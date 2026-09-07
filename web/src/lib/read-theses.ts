@@ -37,6 +37,7 @@
  * sheet — is not in the SELECT at all: absent, rather than filtered.
  */
 import { withReadDb } from "@/lib/ledger";
+import { postIdOf } from "@/lib/post-id";
 import { PUBLISHABLE_SOURCES, publishableThesis, type PublicThesis, type ThesisRow } from "@/lib/thesis";
 import { getIdentityStore } from "@merrymen/identity-store";
 
@@ -53,10 +54,29 @@ const SHOW = 40;
 // on the feed, looking for all the world like a bug in the gate.
 const SOURCES: readonly string[] = PUBLISHABLE_SOURCES;
 
+/**
+ * A published post, plus the stable name a like can be cast against.
+ *
+ * `postId` IS NOT ON `PublicThesis`, AND THAT IS THE FENCE. `PublicThesis` is
+ * the shape `worker/src/thesis-policy.ts` produces, and `peer-theses.ts`
+ * materialises it into the file an agent's desk reads. If the id lived there,
+ * every peer post would carry one and the only thing standing between a like
+ * count and a prompt would be a rule somebody had to keep obeying.
+ *
+ * Instead it is attached HERE, after the gate, by a module the worker cannot
+ * import (`imports.test.ts` forbids `@merrymen/*` under `worker/src`, and
+ * `web/src` is not aliased inward at all). The peer path produces no post id at
+ * all, so an object that reaches a prompt physically cannot carry a like.
+ */
+export type FeedThesis = PublicThesis & {
+  /** Null when the agent has no public slug — an unslugged post is not likeable. */
+  postId: string | null;
+};
+
 export interface ThesesRead {
   /** "none" means the ledger could not be read — NOT that nobody said anything. */
   source: "sqlite" | "none";
-  theses: PublicThesis[];
+  theses: FeedThesis[];
 }
 
 export interface ReadThesesOptions {
@@ -145,9 +165,29 @@ export async function readTheses(opts: ReadThesesOptions = {}): Promise<ThesesRe
       return { source: "sqlite", theses: [] };
     }
 
+    // THE ID IS DERIVED FROM THE PUBLISHED POST, not from the row, and only
+    // after the gate has admitted it. Every input is a field of the same object
+    // the id is returned in, so the id cannot disclose anything the post does
+    // not already say — which is what an adversarial review found was NOT true
+    // when the row's `source` was an input. See post-id.ts.
     const theses = rows
-      .map((r) => publishableThesis({ ...r, slug: slugFor.get(String(r.agent_id).toLowerCase()) ?? null }))
-      .filter((t): t is PublicThesis => t !== null)
+      .map((r) => {
+        const slug = slugFor.get(String(r.agent_id).toLowerCase()) ?? null;
+        const post = publishableThesis({ ...r, slug });
+        if (!post) return null;
+        return {
+          ...post,
+          postId: postIdOf({
+            slug: post.slug,
+            action: post.action,
+            symbol: post.symbol,
+            sizeUsdg: post.sizeUsdg,
+            reason: post.reason,
+            shadow: post.shadow,
+          }),
+        } satisfies FeedThesis;
+      })
+      .filter((t): t is FeedThesis => t !== null)
       .slice(0, limit);
 
     return { source: "sqlite", theses };

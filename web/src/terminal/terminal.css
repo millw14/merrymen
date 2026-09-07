@@ -7106,3 +7106,48 @@
 :where(.terminal-host) .wire-beat.view .wire-parts {
   border-left-color: var(--line);
 }
+
+/* ── LIKES ────────────────────────────────────────────────────────────────
+   The row's action slot. A SIBLING of .wire-hit rather than a child: that
+   element is a <button>, and nesting one inside it is invalid HTML that
+   browsers silently restructure. */
+
+:where(.terminal-host) .wire-acts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+:where(.terminal-host) .wire-like {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--faint);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 120ms var(--ease), border-color 120ms var(--ease);
+}
+
+:where(.terminal-host) .wire-like:hover:not(:disabled) {
+  color: var(--tx-2);
+  border-color: var(--tx-2);
+}
+
+:where(.terminal-host) .wire-like.on {
+  color: var(--down);
+  border-color: color-mix(in srgb, var(--down) 45%, transparent);
+}
+
+/* Signed out: still visible, still explains itself via its title, just inert.
+   A control that disappears teaches nobody why it is gone. */
+:where(.terminal-host) .wire-like:disabled {
+  cursor: default;
+  opacity: 0.55;
+}

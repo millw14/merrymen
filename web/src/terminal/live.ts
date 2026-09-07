@@ -157,6 +157,20 @@ export interface Thesis {
   shadow?: boolean;
   said?: number;
   at?: number;
+  /**
+   * A STABLE NAME FOR THIS POST, so a like can be cast against it.
+   *
+   * Optional because a post from an agent with no public slug does not get one
+   * and is not likeable, and because a response from before the field existed
+   * has none. Derived server-side in `lib/post-id.ts` from things already
+   * rendered on the card, so it discloses nothing new.
+   *
+   * NOTE WHAT IS NOT HERE: a like COUNT. Counts arrive separately, keyed by
+   * this id, and are merged in the browser — see `/api/like-counts`. The shape
+   * is the fence: an object that reaches a prompt cannot carry a number a
+   * wallet-minter can inflate.
+   */
+  postId?: string | null;
 }
 
 export interface ChainHolder {
