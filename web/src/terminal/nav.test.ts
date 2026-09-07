@@ -205,3 +205,34 @@ describe("what the nav rewrite could have broken quietly", () => {
     assert.ok(!/weekWins/.test(home), "the duplicate wins strip is gone");
   });
 });
+
+describe("what the room came for is at the top", () => {
+  const home = codeOf(at("./screens/Home.tsx"));
+
+  it("COINS RANK ABOVE STOCKS, in every list this screen sorts", () => {
+    // An admin's words: "can we show memecoins first instead of stocks? nobody
+    // here is trading stocks." Deliberately not done at the time — the memecoin
+    // path did not exist, so a coin at the top advertised something the product
+    // could not do. It exists now: the wall can cover a curve coin, the default
+    // strategy trades one when the equity feeds are shut, and the agent
+    // proposes vetted ones with a one-tap path to signing them.
+    assert.match(home, /const coinFirst = /);
+    // All three: most-bought, most-held, and the fallback — which is the one
+    // actually on screen while nothing has traded.
+    assert.equal(
+      (home.match(/coinFirst\(a, b\) \|\|/g) ?? []).length,
+      3,
+      "every ranked list on Home must put coins first",
+    );
+  });
+
+  it("and it is a SORT KEY, not a filter", () => {
+    // Stocks stay listed and stay ranked among themselves. An owner whose
+    // basket is equities loses nothing; this decides the top of the table, not
+    // its contents.
+    assert.ok(
+      !/kind !== "memecoin"|filter\(\(t\) => t\.kind === "memecoin"\)/.test(home),
+      "stocks must not be filtered out of the market table",
+    );
+  });
+});

@@ -52,22 +52,49 @@ export function Home({
   // it is also not evidence that anybody bought anything, so an unread row does
   // not get to sit at the top of "most bought".
   const count = (n: number | null) => n ?? 0;
+  /**
+   * COINS ABOVE STOCKS, everywhere this screen ranks anything.
+   *
+   * An admin's words: "can we show memecoins first instead of stocks? nobody
+   * here is trading stocks." They were right, and it was deliberately NOT done
+   * at the time, for a reason worth keeping written down: the memecoin path did
+   * not exist, so putting a coin at the top would have advertised something the
+   * product could not do. An owner who tapped one found an asset their agent
+   * was structurally unable to buy, with no route to changing that.
+   *
+   * That is no longer true. The wall can cover a curve coin, the default
+   * strategy trades one when the equity feeds are shut, and the agent proposes
+   * the ones it has vetted with a one-tap path to watching and signing them. So
+   * the ordering can now say what the room is actually here for.
+   *
+   * A SORT KEY, NOT A FILTER. Stocks are still listed, still ranked among
+   * themselves, and an owner whose basket is equities loses nothing — this
+   * decides what the top of the table is, not what the table contains.
+   */
+  const coinFirst = (a: { kind: string }, b: { kind: string }) =>
+    Number(b.kind === "memecoin") - Number(a.kind === "memecoin");
   const list =
     tokenTab === "buys"
       ? [...tokens]
           .filter((t) => count(t.buys) > 0 || t.cast.length > 0)
-          .sort((a, b) => count(b.buys) - count(a.buys))
+          .sort((a, b) => coinFirst(a, b) || count(b.buys) - count(a.buys))
       : [...tokens]
           .filter((t) => count(t.agents) > 0 || t.cast.length > 0)
           .sort(
             (a, b) =>
-              count(b.agents) - count(a.agents) || (b.holders ?? 0) - (a.holders ?? 0),
+              coinFirst(a, b) ||
+              count(b.agents) - count(a.agents) ||
+              (b.holders ?? 0) - (a.holders ?? 0),
           );
+  // THE FALLBACK IS WHAT THE ROOM ACTUALLY SEES. Nothing has traded, so both
+  // ranked lists are empty and this is the table on the screen — which is
+  // exactly where a wall of untraded stocks was being shown to people who came
+  // for coins.
   const shown =
     list.length > 0
       ? list
       : [...tokens]
-          .sort((a, b) => (b.change24hPct ?? 0) - (a.change24hPct ?? 0))
+          .sort((a, b) => coinFirst(a, b) || (b.change24hPct ?? 0) - (a.change24hPct ?? 0))
           .slice(0, 8);
 
   const eq = mine?.equity ?? null;
