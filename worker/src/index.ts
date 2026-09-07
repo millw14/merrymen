@@ -4844,6 +4844,13 @@ async function main() {
     // different container with a different environment — so anything it worked
     // out for itself could disagree with what the executor actually does.
     const sponsorGas = gasSponsored();
+    // WHAT IS STOPPING IT, resolved here so the row below can carry it.
+    //
+    // Computed before the write rather than after, because the sentence and the
+    // column are the same fact and a screen can only act on the one it can see.
+    // Null means trading for real — never "we did not check".
+    const verdict = execMode();
+    const blocking = verdict.mode === "live" ? null : verdict.rule;
     beatFile(mode, sponsorGas, blockNumber);
     // AND ON A CHANNEL THE DASHBOARD CAN ACTUALLY READ. The file above lives in
     // this worker's own MERRYMEN_HOME; hosted, that is a different directory in
@@ -4854,7 +4861,7 @@ async function main() {
     // Both, not one: the file is what the orchestrator's watchdog reads to decide
     // a child is wedged, and it must keep beating even when the database is
     // unreachable — otherwise a database blip gets a healthy worker SIGKILLed.
-    if (active) void setAgentMode(active.agentId, mode, at, sponsorGas);
+    if (active) void setAgentMode(active.agentId, mode, at, sponsorGas, blocking);
 
     // ── AND SAY WHY IT IS NOT LIVE ──────────────────────────────────────
     //
@@ -4867,8 +4874,6 @@ async function main() {
     // Once per CHANGE, not once per tick: the same line sixty times an hour
     // teaches an owner to scroll past it, and this repo already carries the
     // incident where 1,242 identical rejections told nobody anything.
-    const verdict = execMode();
-    const blocking = verdict.mode === "live" ? null : verdict.rule;
     if (active && blocking !== lastLiveBlocker) {
       lastLiveBlocker = blocking;
       // AND WHERE AN OPERATOR CAN COUNT IT. The event answers one owner; this

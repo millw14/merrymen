@@ -8,10 +8,11 @@ import { loadGrant } from "@/lib/session";
 import { X } from "lucide-react";
 import { PrivySignIn } from "@/terminal/PrivySignIn";
 import { privyEnabled } from "@/lib/privy-client";
+import { blockerAdvice } from "@/lib/live-blocker";
 
 export interface AccountState {
   session: {hosted: boolean; address: string | null};
-  status: {exists: boolean; mode?: string; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number}};
+  status: {exists: boolean; mode?: string; liveBlocker?: string | null; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number}};
 }
 export async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {...init, cache:"no-store", signal: AbortSignal.timeout(20000)});
@@ -63,7 +64,24 @@ export function FundingPanel({mode,account,onClose}:{mode:"deposit"|"withdraw";a
   const [error,setError]=useState("");
   const [ownerKey]=useState(()=>{const grant=loadGrant();return grant?.smartAccount.toLowerCase()===account.status.grant?.smartAccount.toLowerCase() ? grant?.demoOwnerPrivateKey ?? "" : "";});
   const grant=account.status.grant;
-  return <section className="hosted-funding"><header className="flow-top"><span>{mode==="deposit" ? "Add funds" : "Withdraw"}</span><button aria-label="Close funding" onClick={onClose}><X size={18}/></button></header>{mode==="withdraw" ? <RecoverPanel initialOwnerKey={ownerKey}/> : grant ? <><h2>Fund your agent</h2><p>Send USDG to your agent’s account on {grant.chainId===4663 ? "Robinhood Chain" : `chain ${grant.chainId}`}. Your balance updates after the transfer is recorded.</p><label>Agent account</label><p className="funding-address">{grant.smartAccount}</p><button className="flow-primary" onClick={()=>{void navigator.clipboard.writeText(grant.smartAccount).then(()=>setCopied(true)).catch(()=>setError("Could not copy. Select the address above to copy it."));}}>{copied ? "Address copied" : "Copy deposit address"}</button>{error && <p role="alert">{error}</p>}<a className="flow-secondary" href="/grant">Wallet setup and funding details</a></> : <a href="/grant">Set up an agent wallet</a>}</section>;
+  return <section className="hosted-funding"><header className="flow-top"><span>{mode==="deposit" ? "Add funds" : "Withdraw"}</span><button aria-label="Close funding" onClick={onClose}><X size={18}/></button></header>{mode==="withdraw" ? <RecoverPanel initialOwnerKey={ownerKey}/> : grant ? <><h2>Fund your agent</h2><p>Send USDG to your agent’s account on {grant.chainId===4663 ? "Robinhood Chain" : `chain ${grant.chainId}`}. Your balance updates after the transfer is recorded.</p>
+    {/* WHAT THIS AGENT IS ACTUALLY SHORT OF, on the screen where it can be fixed.
+        The verdict is the child's — `AgentStatus.liveBlocker`, resolved every
+        tick — and this panel only says what to do about it. Measured after the
+        fleet stopped being killed mid-tick: no-gas 12, wrong-chain 9,
+        dead-policy 6, no-cash 2. Twelve owners were reading the line above,
+        sending USDG exactly as told, and getting no trades, because the thing
+        missing was ETH for fees. And where money is NOT the fix, this says so
+        rather than letting a deposit address imply that it is. */}
+    {(() => {
+      const advice = blockerAdvice(account?.status.liveBlocker);
+      if (!advice) return null;
+      return (
+        <p className={advice.funding ? "fund-blocker" : "fund-blocker not-money"} role="status">
+          {advice.say}
+        </p>
+      );
+    })()}<label>Agent account</label><p className="funding-address">{grant.smartAccount}</p><button className="flow-primary" onClick={()=>{void navigator.clipboard.writeText(grant.smartAccount).then(()=>setCopied(true)).catch(()=>setError("Could not copy. Select the address above to copy it."));}}>{copied ? "Address copied" : "Copy deposit address"}</button>{error && <p role="alert">{error}</p>}<a className="flow-secondary" href="/grant">Wallet setup and funding details</a></> : <a href="/grant">Set up an agent wallet</a>}</section>;
 }
 
 export function LimitsPanel({account,onClose}:{account:AccountState|null;onClose:()=>void}) {

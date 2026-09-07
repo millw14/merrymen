@@ -7174,3 +7174,23 @@
 :where(.terminal-host) .wire-mentions button:hover {
   color: var(--lime);
 }
+
+/* WHAT THIS AGENT IS SHORT OF, on the funding screen.
+   Two looks, because the two cases have different remedies: one is "send this",
+   the other is "money will not help". Rendering them the same is how an owner
+   pays gas into an account on the wrong chain. */
+:where(.terminal-host) .fund-blocker {
+  margin: 12px 0;
+  padding: 11px 13px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--lime) 35%, transparent);
+  background: color-mix(in srgb, var(--lime) 8%, transparent);
+  color: var(--tx);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+:where(.terminal-host) .fund-blocker.not-money {
+  border-color: color-mix(in srgb, var(--down) 35%, transparent);
+  background: color-mix(in srgb, var(--down) 8%, transparent);
+}

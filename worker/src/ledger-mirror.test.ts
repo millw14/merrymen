@@ -28,7 +28,7 @@ const SRC = [
   "CREATE TABLE flows (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, direction TEXT, amount_usdg REAL, tx_hash TEXT, block_number INTEGER, log_index INTEGER, source TEXT, epoch INTEGER DEFAULT 1, chain_id INTEGER, at INTEGER);",
   "CREATE TABLE fee_accruals (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, profit_usdg REAL, fee_usdg REAL, hwm_before_usdg REAL, hwm_after_usdg REAL, epoch INTEGER DEFAULT 1, at INTEGER);",
   "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, at INTEGER);",
-  "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, sponsor_gas INTEGER, x_handle TEXT, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0, contributions_known INTEGER, contributions_why TEXT, gas_accounting TEXT, quality_at INTEGER);",
+  "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, sponsor_gas INTEGER, live_blocker TEXT, x_handle TEXT, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0, contributions_known INTEGER, contributions_why TEXT, gas_accounting TEXT, quality_at INTEGER);",
   "CREATE TABLE positions (agent_id TEXT, symbol TEXT, token TEXT, raw_balance TEXT, ui_multiplier TEXT, price_usd REAL, price_stale INTEGER, price_source TEXT DEFAULT 'chainlink', value_usdg REAL, updated_at INTEGER, PRIMARY KEY (agent_id, symbol));",
   "CREATE TABLE cost_basis (agent_id TEXT, mode TEXT, symbol TEXT, qty_raw TEXT, cost_usdg TEXT, updated_at INTEGER, PRIMARY KEY (agent_id, mode, symbol));",
 ].join("\n");
@@ -62,8 +62,8 @@ const seedChild = () => {
   raw.exec(
     `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps,
                          granted_at, expires_at, status, created_at, mode, beat_at, sponsor_gas,
-                         x_handle, epoch, hwm_usdg, accrued_fee_usdg)
-     VALUES ('0xagent','Robin','0xowner','0xsk',4663,'{}',1,2,'armed',3,'live',99,1,'much_miller',2,150.5,7.25)`,
+                         live_blocker, x_handle, epoch, hwm_usdg, accrued_fee_usdg)
+     VALUES ('0xagent','Robin','0xowner','0xsk',4663,'{}',1,2,'armed',3,'live',99,1,'no-gas','much_miller',2,150.5,7.25)`,
   );
   for (let i = 1; i <= 5; i++) {
     raw.exec(
@@ -254,6 +254,24 @@ describe("the ledger mirror", () => {
       .prepare("SELECT sponsor_gas FROM agents WHERE smart_account = ?")
       .get("0xagent")) as { sponsor_gas: number | null };
     assert.equal(Number(a.sponsor_gas), 1);
+  });
+
+  it("CARRIES WHAT IS BLOCKING THE LIVE RAIL, so a funding screen can act on it", async () => {
+    // Same channel and same reason as `sponsor_gas` above: only the child
+    // resolves it, from its own balances, chain and executor. A column the
+    // child writes and the mirror drops is a column the hosted dashboard can
+    // never see — which is how every hosted tenant read IDLE for weeks.
+    //
+    // Measured once the fleet stopped being SIGKILLed mid-tick: no-gas 12,
+    // wrong-chain 9, dead-policy 6, no-cash 2. The largest bucket is agents
+    // funded with USDG and no ETH, whose owners were reading "Send USDG to your
+    // agent's account" and doing exactly that.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const a = (await shared
+      .prepare("SELECT live_blocker FROM agents WHERE smart_account = ?")
+      .get("0xagent")) as { live_blocker: string | null };
+    assert.equal(a.live_blocker, "no-gas");
   });
 
   it("carries the owner's handle, so a public page can credit somebody", async () => {

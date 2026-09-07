@@ -90,6 +90,22 @@ export interface AgentStatus {
    * WITHDRAWAL IS NEVER SPONSORED, whatever this says.
    */
   gasSponsored?: boolean | null;
+  /**
+   * WHAT IS STOPPING THIS AGENT TRADING FOR REAL, as the child resolved it.
+   *
+   * One of the `RefuseRule` names — `no-gas`, `wrong-chain`, `dead-policy`,
+   * `no-cash`, `not-armed`, `no-executor` — or null.
+   *
+   * REPORTED BY THE WORKER, never computed here, for exactly the reasons
+   * `gasSponsored` above gives: the verdict depends on this child's own
+   * balances, chain and executor, and a second guess from another container
+   * would eventually disagree with the process that actually refuses trades.
+   *
+   * NULL IS TWO ANSWERS and a screen must render neither as a blocker: the
+   * agent has never beaten, or it is trading for real. `mode` and
+   * `workerAliveAt` are what separate those.
+   */
+  liveBlocker?: string | null;
 }
 
 export async function POST(req: Request) {
@@ -344,6 +360,7 @@ export async function GET(req: Request) {
   let workerAliveAt: number | null = null;
   let mode: AgentStatus["mode"] = null;
   let gasSponsored: boolean | null = null;
+  let liveBlocker: string | null = null;
   try {
     const hb = JSON.parse(await readFile(HEARTBEAT_FILE, "utf8")) as {
       at: number;
@@ -372,9 +389,14 @@ export async function GET(req: Request) {
       const row = await withReadDb(async (db) =>
         db
           ? ((await db
-              .prepare("SELECT mode, beat_at, sponsor_gas FROM agents WHERE smart_account = ?")
+              .prepare("SELECT mode, beat_at, sponsor_gas, live_blocker FROM agents WHERE smart_account = ?")
               .get(grant.smartAccount)) as
-              | { mode?: string | null; beat_at?: number | null; sponsor_gas?: number | null }
+              | {
+                  mode?: string | null;
+                  beat_at?: number | null;
+                  sponsor_gas?: number | null;
+                  live_blocker?: string | null;
+                }
               | undefined)
           : undefined,
       );
@@ -384,6 +406,7 @@ export async function GET(req: Request) {
         // Nullable at the source, so distinguish 'has not said' from 'no'.
         gasSponsored =
           row.sponsor_gas === null || row.sponsor_gas === undefined ? null : Number(row.sponsor_gas) === 1;
+        liveBlocker = row.live_blocker ?? null;
       }
     } catch {
       // an unreadable ledger is an unknown mode, not a claim about one
@@ -405,6 +428,7 @@ export async function GET(req: Request) {
     workerAliveAt,
     mode,
     gasSponsored,
+    liveBlocker,
   };
   return NextResponse.json(status);
 }

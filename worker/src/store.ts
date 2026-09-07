@@ -447,6 +447,22 @@ const SQLITE_ALTERS: string[] = [
     // NULLABLE on purpose — an agent that has never beaten has no answer, and
     // null is the honest value for that.
     "ALTER TABLE agents ADD COLUMN sponsor_gas INTEGER",
+    // WHAT IS STOPPING THIS AGENT FROM TRADING FOR REAL, in the child's own
+    // words — the same kind of fact as `sponsor_gas` above, and published for
+    // the same reason: only the child resolves it, and the dashboard has no
+    // other way to learn it.
+    //
+    // MEASURED, THEN NEEDED. Once the fleet stopped being killed mid-tick, a
+    // blocker census read: no-gas 12, wrong-chain 9, dead-policy 6, no-cash 2.
+    // The largest bucket is agents funded with USDG and no ETH — whose owners
+    // were reading a funding screen that says "Send USDG to your agent's
+    // account" and doing exactly that, twice. The sentence existed (an event
+    // per change, from liveBlockerText) and the screen that could act on it
+    // could not see it.
+    //
+    // NULLABLE, and null is TWO things: never beaten, or beaten and trading
+    // for real. A reader must not render either as a blocker.
+    "ALTER TABLE agents ADD COLUMN live_blocker TEXT",
     // WHO OWNS this agent, for a public page to credit — the X handle its owner
     // typed, nothing more.
     //
@@ -1799,11 +1815,26 @@ export async function setAgentMode(
    * learn it. Withdrawal is never sponsored, whatever this says.
    */
   sponsorGas: boolean,
+  /**
+   * What is stopping this agent trading for real, as the child resolved it, or
+   * null when nothing is.
+   *
+   * PUBLISHED BECAUSE THE SCREEN THAT CAN FIX IT COULD NOT SEE IT. The child
+   * already writes a sentence per change (`liveBlockerText`), but a funding
+   * panel cannot read an event stream — so an owner whose agent was short of
+   * ETH was reading "Send USDG to your agent's account" and doing exactly that.
+   *
+   * Null is TWO answers, and a reader must render neither as a blocker: never
+   * beaten, or beaten and trading for real.
+   */
+  blocker: string | null = null,
 ): Promise<void> {
   try {
     await getDb()
-      .prepare("UPDATE agents SET mode = ?, beat_at = ?, sponsor_gas = ? WHERE smart_account = ?")
-      .run(mode, atSec, sponsorGas ? 1 : 0, agentId);
+      .prepare(
+        "UPDATE agents SET mode = ?, beat_at = ?, sponsor_gas = ?, live_blocker = ? WHERE smart_account = ?",
+      )
+      .run(mode, atSec, sponsorGas ? 1 : 0, blocker, agentId);
   } catch {
     /* a missing heartbeat is a worse thing to crash over than to lose */
   }
