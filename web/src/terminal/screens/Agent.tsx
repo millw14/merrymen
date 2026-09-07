@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Proposals } from "../Proposals";
 import {
   ArrowDown,
   ArrowUp,
@@ -69,6 +70,7 @@ export function Agent({
   onDeposit,
   onWithdraw,
   onLimits,
+  onResign,
 }: {
   mine: LiveMine | null;
   tokens: LiveToken[];
@@ -83,6 +85,8 @@ export function Agent({
   onDeposit: () => void;
   onWithdraw: () => void;
   onLimits: () => void;
+  /** Point at the ONE signing control — see Proposals.tsx. */
+  onResign: () => void;
 }) {
   const [sending,setSending]=useState(false);
   const [chatError,setChatError]=useState("");
@@ -169,6 +173,7 @@ export function Agent({
   };
   return (
     <div className="desk-page">
+      <Proposals onResign={onResign} />
       <header className="desk-header">
         <Face name={mine.name} slug={mine.slug} />
         <div>

@@ -344,6 +344,7 @@ export function App() {
             onDeposit={() => openScreen({ kind: "deposit" })}
             onWithdraw={() => openScreen({ kind: "withdraw" })}
             onLimits={() => openScreen({ kind: "limits" })}
+            onResign={() => {window.location.href="/grant#resign";}}
           />
         )}
         {screen.kind === "tab" && screen.tab === "alpha" && (
