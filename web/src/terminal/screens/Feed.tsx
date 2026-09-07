@@ -3,7 +3,7 @@ import { beatsOf, lanesOf, type Beat } from "../beat";
 import type { LiveAgent, LiveToken, ReadState, Thesis } from "../live";
 import { Empty, ReadEmpty } from "../ui";
 import { useLikes } from "../likes";
-import { Wire } from "../wire";
+import { Wire, type Mention } from "../wire";
 
 /**
  * THE FEED, AND THE FILTER THAT STOPPED BEING A DRAWER.
@@ -125,7 +125,14 @@ export function Feed({
           />
         )
       ) : (
-        <Wire lanes={lanes} tokens={tokens} onToken={onToken} onAgent={onProfile} likes={likes ?? undefined} />
+        <Wire
+          lanes={lanes}
+          tokens={tokens}
+          onToken={onToken}
+          onAgent={onProfile}
+          likes={likes ?? undefined}
+          mentions={replies}
+        />
       )}
     </div>
   );
@@ -165,24 +172,23 @@ function emptyFor(pill: Pill, likesRead: boolean): string {
  * already published — and a new source would publish NOTHING until somebody
  * classified it, which is how a feed goes silent for a week with no error.
  */
-function repliesIn(beats: Beat[]): Set<string> {
-  const handles = new Map<string, string>(); // bare handle → slug
+function repliesIn(beats: Beat[]): Map<string, Mention[]> {
+  const handles = new Map<string, Mention>(); // bare handle → who it belongs to
   for (const b of beats) {
-    const bare = b.actor.handle.replace(/^@/, "").toLowerCase();
-    if (bare) handles.set(bare, b.actor.slug);
+    const handle = b.actor.handle.replace(/^@/, "").toLowerCase();
+    if (handle) handles.set(handle, { handle, slug: b.actor.slug });
   }
-  const out = new Set<string>();
+  const out = new Map<string, Mention[]>();
   if (handles.size < 2) return out;
   for (const b of beats) {
     const text = `${b.kind === "view" ? b.head : ""} ${b.reason}`.toLowerCase();
-    for (const [bare, slug] of handles) {
+    const named: Mention[] = [];
+    for (const who of handles.values()) {
       // The `@` is required. Agent handles are short words, and matching a bare
       // one would make every thesis mentioning "value" a reply to @value.
-      if (slug !== b.actor.slug && text.includes(`@${bare}`)) {
-        out.add(b.id);
-        break;
-      }
+      if (who.slug !== b.actor.slug && text.includes(`@${who.handle}`)) named.push(who);
     }
+    if (named.length) out.set(b.id, named);
   }
   return out;
 }
@@ -190,7 +196,7 @@ function repliesIn(beats: Beat[]): Set<string> {
 function keepBeat(
   beat: Beat,
   pill: Pill,
-  replies: Set<string>,
+  replies: Map<string, Mention[]>,
   counts: Record<string, number>,
 ): boolean {
   switch (pill) {

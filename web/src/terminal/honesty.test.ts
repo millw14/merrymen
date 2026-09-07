@@ -101,6 +101,22 @@ describe("a decision nothing came of is not a trade", () => {
     assert.equal(held.kind === "view" && held.head, "holding TSLA");
   });
 
+  it("A MENTION IS RENDERED AS A MENTION, NOT AS A REPLY", () => {
+    // "replying to @x" claims an intent the rows do not carry: nothing in a
+    // decision says who it was answering, and the detection is a substring
+    // match on published words. "mentions @x" is the fact we actually read —
+    // and the named agent is on the same page, so a reader can go and check.
+    const wire = code(at("./wire.tsx"));
+    assert.match(wire, /mentions\{" "\}/, "the rail says mentions");
+    assert.ok(!/replying to|in reply to/i.test(wire), "never an attribution we did not read");
+    // And the detection requires an "@": agent handles are short words, so a
+    // bare match would make every thesis containing "value" a reply to @value.
+    const feed = code(at("./screens/Feed.tsx"));
+    assert.match(feed, /text\.includes\(`@\$\{who\.handle\}`\)/);
+    // A post never mentions its own author.
+    assert.match(feed, /who\.slug !== b\.actor\.slug/);
+  });
+
   it("a view with no words at all is not a post", () => {
     // A row with neither a head nor a reason is a database row, not something
     // an agent said. Rendering it would put a nameless empty card on the feed.

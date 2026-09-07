@@ -21,6 +21,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import type { ChatTurn } from "./account";
+import { chatKeyFor, clearTurns, loadTurns, saveTurns } from "./chat-store";
 import {
   loadLive,
   seedLive,
@@ -114,11 +115,44 @@ export function App() {
   const stopped = account?.status.mode !== "live" && account?.status.mode !== "paper";
   const [chatDraft, setChatDraft] = useState("");
   const [turns, setTurns] = useState<ChatTurn[]>([]);
+  /**
+   * WHERE THIS READER'S CHAT IS KEPT — see chat-store.ts.
+   *
+   * Null while the session is still loading, and null for a hosted visitor who
+   * is signed out. `lastChatKey` remembers whose it was, because sign-out
+   * clears the account first and the key of the owner LEAVING is the one that
+   * has to be deleted.
+   */
+  const chatKey = chatKeyFor(account?.session ?? null);
+  const lastChatKey = useRef<string | null>(null);
 
   useLayoutEffect(() => {
     window.scrollTo(0, 0);
     if (bodyRef.current) bodyRef.current.scrollTop = 0;
   }, [screen]);
+
+  /**
+   * LOAD ON ARRIVAL, FORGET ON DEPARTURE.
+   *
+   * Runs when the key changes, which is exactly the two moments that matter: a
+   * page load once the session is known, and a sign-out or a switch to a
+   * different wallet. The previous owner's transcript is deleted rather than
+   * merely hidden — leaving it in the browser for the next person to sign in on
+   * a shared machine is the thing keying it was meant to prevent.
+   */
+  useEffect(() => {
+    const previous = lastChatKey.current;
+    if (previous && previous !== chatKey) clearTurns(previous);
+    lastChatKey.current = chatKey;
+    setTurns(loadTurns(chatKey));
+  }, [chatKey]);
+
+  // Written back on every change rather than on unmount: a tab the phone
+  // reclaims in the background never gets an unmount, which is one of the ways
+  // the conversation was being lost in the first place.
+  useEffect(() => {
+    saveTurns(chatKey, turns);
+  }, [chatKey, turns]);
 
   useEffect(() => {
     let alive = true;

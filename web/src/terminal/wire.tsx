@@ -18,18 +18,32 @@ function logoOf(tokens: LiveToken[], symbol: string | null): LiveToken | undefin
  */
 export type Likes = import("./likes").LikesView;
 
+/** An agent this post's own words named, and where to go to read them. */
+export interface Mention {
+  /** Bare, no leading "@" — the renderer adds it. */
+  handle: string;
+  slug: string;
+}
+
 export function Wire({
   lanes,
   tokens,
   onToken,
   onAgent,
   likes,
+  mentions,
 }: {
   lanes: Lane[];
   tokens: LiveToken[];
   onToken?: (id: string) => void;
   onAgent?: (slug: string) => void;
   likes?: Likes;
+  /**
+   * beat id → the handles this post's own words name, when they belong to
+   * agents that also posted in the window. A FACT WE READ, not an inference:
+   * see `repliesIn`.
+   */
+  mentions?: Map<string, Mention[]>;
 }) {
   const now = useNow(30_000);
   return (
@@ -48,6 +62,7 @@ export function Wire({
                 onToken={onToken}
                 onAgent={onAgent}
                 likes={likes}
+                mentions={mentions?.get(lane.beat.id)}
               />
             );
           }
@@ -68,6 +83,7 @@ function BeatRow({
   onToken,
   onAgent,
   likes,
+  mentions,
 }: {
   beat: Beat;
   tokens: LiveToken[];
@@ -75,6 +91,7 @@ function BeatRow({
   onToken?: (id: string) => void;
   onAgent?: (slug: string) => void;
   likes?: Likes;
+  mentions?: Mention[];
 }) {
   const tok = logoOf(tokens, beat.symbol);
   const actor = beat.actor;
@@ -131,6 +148,24 @@ function BeatRow({
               </span>
             </button>
           </div>
+        ) : null}
+
+        {/* "MENTIONS", NEVER "REPLYING TO". One is a fact about the words on
+            this post; the other is an intent the rows do not carry and we did
+            not read. The named agent is on the same page, so a reader can go
+            and check — which is the only reason this is safe to render at all. */}
+        {mentions?.length ? (
+          <p className="wire-mentions">
+            mentions{" "}
+            {mentions.map((m, i) => (
+              <span key={m.slug}>
+                {i > 0 ? ", " : ""}
+                <button type="button" onClick={() => onAgent?.(m.slug)}>
+                  @{m.handle}
+                </button>
+              </span>
+            ))}
+          </p>
         ) : null}
 
         {/* A SIBLING OF `wire-hit`, never a child. That element is a <button>,
