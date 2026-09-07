@@ -345,6 +345,7 @@ export function App() {
             onWithdraw={() => openScreen({ kind: "withdraw" })}
             onLimits={() => openScreen({ kind: "limits" })}
             onResign={() => {window.location.href="/grant#resign";}}
+            liveBlocker={account?.status.liveBlocker}
           />
         )}
         {screen.kind === "tab" && screen.tab === "alpha" && (

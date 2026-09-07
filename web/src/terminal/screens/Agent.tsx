@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Proposals } from "../Proposals";
+import { blockerAdvice } from "@/lib/live-blocker";
 import {
   ArrowDown,
   ArrowUp,
@@ -71,6 +72,7 @@ export function Agent({
   onWithdraw,
   onLimits,
   onResign,
+  liveBlocker,
 }: {
   mine: LiveMine | null;
   tokens: LiveToken[];
@@ -87,6 +89,13 @@ export function Agent({
   onLimits: () => void;
   /** Point at the ONE signing control — see Proposals.tsx. */
   onResign: () => void;
+  /**
+   * WHAT IS STOPPING THIS AGENT TRADING FOR REAL, as the child resolved it.
+   *
+   * Null is two answers and neither is a problem: trading for real, or never
+   * beaten. See AgentStatus.liveBlocker.
+   */
+  liveBlocker?: string | null;
 }) {
   const [sending,setSending]=useState(false);
   const [chatError,setChatError]=useState("");
@@ -171,8 +180,30 @@ export function Agent({
     } catch(error) {setChatError(error instanceof Error ? error.message : "Could not send. Try again.");}
     finally {setSending(false);input.current?.focus();}
   };
+  const blocked = blockerAdvice(liveBlocker);
   return (
     <div className="desk-page">
+      {/* WHAT IS STOPPING THIS AGENT, ON THE SCREEN ITS OWNER OPENS.
+          The sentence existed — status-line.ts has had a testnet branch for
+          months — but it renders on /you, and an owner who thinks their agent
+          is trading has no reason to go there. Measured on the fleet: ten
+          agents on the practice chain and six with a dead policy, every one of
+          them showing an ordinary-looking desk while being structurally unable
+          to trade. Their owners are the ones reporting "it doesn't trade".
+          Only they can fix it — a re-sign needs their signature — so the least
+          this screen can do is say so and point at the control. */}
+      {blocked && (
+        <section className="desk-blocked" role="status">
+          <p>{blocked.say}</p>
+          {/* Money is not the fix for wrong-chain, dead-policy or not-armed —
+              blockerAdvice says which — so only those get sent to the signer. */}
+          {!blocked.funding && (
+            <button type="button" onClick={onResign}>
+              Fix it — re-sign my permission →
+            </button>
+          )}
+        </section>
+      )}
       <Proposals onResign={onResign} />
       <header className="desk-header">
         <Face name={mine.name} slug={mine.slug} />

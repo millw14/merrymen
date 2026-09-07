@@ -110,3 +110,48 @@ describe("the fact travels from the child to the screen", () => {
     assert.match(route, /\n    liveBlocker,\n/);
   });
 });
+
+describe("the owner is told on the screen they actually open", () => {
+  const codeOf = (src: string) =>
+    src
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .split(/\r?\n/)
+      .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
+      .join("\n");
+  const at = (p: string) => codeOf(readFileSync(new URL(p, import.meta.url), "utf8"));
+
+  it("THE AGENT SCREEN SAYS WHAT IS STOPPING IT", () => {
+    // status-line.ts has had the right testnet sentence for months — on /you,
+    // which an owner who believes their agent is trading has no reason to open.
+    // Measured on the fleet: ten agents on the practice chain and six with a
+    // dead policy, every one showing an ordinary-looking desk. Their owners are
+    // the ones reporting "it doesn't trade".
+    const agent = at("../terminal/screens/Agent.tsx");
+    assert.match(agent, /const blocked = blockerAdvice\(liveBlocker\)/);
+    assert.match(agent, /className="desk-blocked"/);
+  });
+
+  it("and it points at the signer only when signing is the fix", () => {
+    // Sending money to a wrong-chain agent is money spent for nothing, and
+    // re-signing does not conjure USDG. `funding` is which of the two it is.
+    const agent = at("../terminal/screens/Agent.tsx");
+    assert.match(agent, /\{!blocked\.funding && \(/);
+    assert.match(agent, /onClick=\{onResign\}/);
+  });
+
+  it("WRONG-CHAIN IS A SIGNING PROBLEM, NOT A FUNDING ONE", () => {
+    // The ten testnet agents cannot be fixed by their owners sending anything.
+    // They need a new grant on 4663, which only the owner's own signature can
+    // mint — so the button has to be the signer, and money must not be implied.
+    const a = blockerAdvice("wrong-chain");
+    assert.ok(a);
+    assert.equal(a.funding, false);
+    assert.match(a.say, /new grant on Robinhood Chain/);
+    assert.match(a.say, /funds sent here will sit unused/);
+  });
+
+  it("the shell hands it the child's verdict, not one it worked out itself", () => {
+    const app = at("../terminal/App.tsx");
+    assert.match(app, /liveBlocker=\{account\?\.status\.liveBlocker\}/);
+  });
+});
