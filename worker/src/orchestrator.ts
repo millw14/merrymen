@@ -335,6 +335,60 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` 
 }
 
 /**
+ * HAND A RUNNING CHILD A GRANT THAT WAS RE-SIGNED UNDER IT.
+ *
+ * THE BUG THIS CLOSES. `writeGrantForChild` is called from `spawnChild` and
+ * nowhere else, while the reconcile below refreshes `settings.json` for every
+ * running child on every pass. So a config change reached a live agent in
+ * fifteen seconds and A NEW SIGNATURE NEVER REACHED IT AT ALL.
+ *
+ * That is not a theoretical gap. `restoreAgentWallet`'s own doc calls itself
+ * "the RE-SIGN path for widening the tradable set: adding a token in settings
+ * can't reach into an already-signed key, so covering it means minting a new
+ * grant over the same account." An owner does exactly that — adds a token,
+ * re-signs, watches the server accept it, sees the new grant on /grant — and
+ * their agent goes on refusing the token with `asset-allowlist` until something
+ * unrelated restarts the child. The wall it is enforcing is the OLD one,
+ * because the old one is the only file it has.
+ *
+ * The child is already willing: it re-reads `grant.json` every tick and re-arms
+ * when `smartAccount` or `grantedAt` changes (index.ts:2620-2623). It was never
+ * given the new file.
+ *
+ * WRITE ONLY ON CHANGE, and compare the WHOLE serialized grant rather than a
+ * key. `grantedAt` is whole seconds — index.ts:2566-2568 makes that point about
+ * its own dedup — so a key comparison here could miss a re-sign, and the cost
+ * of being wrong is an agent enforcing a wall its owner has replaced. A string
+ * compare cannot miss one. (The child's own re-arm still keys on `grantedAt`,
+ * so two re-signs inside one second remain its edge, not ours.)
+ *
+ * NOT `writeGrantForChild`. That one also mints a public identity, which is
+ * spawn-time work: idempotent, but a store write, and running it for every
+ * tenant every fifteen seconds would be pure waste.
+ */
+async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
+  let grant;
+  try {
+    grant = await getGrantStore().get(tenant);
+  } catch {
+    // An unreadable store is not a revoked grant. Leave the child with the wall
+    // it has; the kill switch below is what stands an agent down.
+    return;
+  }
+  if (!grant) return;
+
+  const file = path.join(childHome(tenant), "grant.json");
+  const next = JSON.stringify(grant, null, 2);
+  try {
+    if (readFileSync(file, "utf8") === next) return;
+  } catch {
+    // No file, or unreadable — writing it is the right answer either way.
+  }
+  writeFileSync(file, next, { encoding: "utf8", mode: 0o600 });
+  log(`${tenant}: grant changed on the store — handed the running child its new wall`);
+}
+
+/**
  * Hand the child the tenant's OWN settings.json from the store — their strategy,
  * basket, custom tokens, sizing, their Telegram bot. No-op if the tenant has
  * saved nothing yet (the child then runs the safe defaults). Refreshed every
@@ -605,6 +659,11 @@ export async function reconcile(): Promise<void> {
   const seenBotTokens = new Set<string>();
   for (const tenant of children.keys()) {
     await writeSettingsForChild(tenant as `0x${string}`, seenBotTokens);
+    // AND THEIR GRANT, for the same reason and on the same clock. Settings
+    // reached a live agent in fifteen seconds while a new SIGNATURE reached it
+    // only on a restart — so an owner who re-signed to cover a token watched
+    // their agent keep refusing it. See refreshGrantForChild.
+    await refreshGrantForChild(tenant as `0x${string}`);
   }
   // Stop (and forget) any running child whose grant is gone — the kill switch.
   for (const tenant of [...children.keys()]) {
