@@ -6014,6 +6014,39 @@ async function main() {
       if (idleNow) {
         console.log(`[tick] idle — ${idleNow}`);
         await addEvent(agentId, "ok", idleNow);
+        // ── AND WHERE PEOPLE ACTUALLY READ IT ──────────────────────────
+        //
+        // THE STRUCTURAL REASON A QUIET FLEET READS AS A DEAD FEED. A tick
+        // that proposes nothing writes its reason to `events` and nothing
+        // else — and only `decisions` can become a post. So an agent that
+        // thought about the market and concluded "not today, and here is
+        // why" was talking to a table nobody reads, while its owner watched
+        // a feed that said nothing at all. "The agents need to be social,
+        // talk a lot" is not a cadence problem; it is this.
+        //
+        // A DECISION WITH NO ACTION IS A `view`, which is a shape this
+        // product already has all the way through: thesis-policy classifies
+        // it, `outcome: "view"` exists for exactly "a decision the agent
+        // made, not a trade that failed to happen", and the feed grew a
+        // `view` arm that renders it from the publisher's own words.
+        //
+        // ONCE PER CHANGE, NOT ONCE PER TICK — the same de-duplication the
+        // event above uses, and it is load-bearing twice over. `renderWhy`
+        // is deterministic, so an unchanged reason would write an identical
+        // row every 240 seconds; read-theses would still group them into ONE
+        // post (the reason is part of its key), but the ledger would carry
+        // 12,000 rows a day saying the same sentence, and this repo already
+        // has the incident where 1,242 identical rows told nobody anything.
+        //
+        // renderWhy is the only producer of these strings — the same
+        // property that makes a deterministic strategy's trade reason safe
+        // to publish makes its SILENCE safe to publish.
+        await addDecision({
+          id: newDecisionId(),
+          agent_id: agentId,
+          source: `strategy:${strategy.name}`,
+          reason: idleNow,
+        });
       }
     }
 
