@@ -250,6 +250,16 @@ async function mintGrant(
    * client can trust.
    */
   hostedAs?: Address,
+  /**
+   * The account this call claims to be RE-SIGNING, when it is one.
+   *
+   * Absent for a fresh mint and for a restore of a wallet this browser has
+   * never seen — neither of those knows an address to expect. Present for a
+   * renewal, where landing on a different account is the failure that quietly
+   * costs somebody their funds. Enforced against the sudo-only derivation
+   * below, before the wall is pinned to anything.
+   */
+  expectAccount?: Address,
 ): Promise<MintedGrant> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
@@ -297,6 +307,37 @@ async function mintGrant(
   // derived the same zero, would MATCH. Refuse here, where it is still just a
   // failed derivation rather than a sealed grant.
   assertDerivedAccount(sudoOnlyAccount.address, "the smart account could not be derived");
+
+  /**
+   * RE-SIGNING MUST LAND ON THE ACCOUNT IT CLAIMS TO BE RE-SIGNING.
+   *
+   * A re-sign and a brand-new agent are the SAME CALL with a different owner.
+   * The Kernel address derives from the sudo validator alone, so an owner that
+   * is not the one this grant was minted under produces a different address —
+   * quietly, successfully, with no error anywhere. The caller would then hand
+   * the server a valid grant for an account holding nothing, while the funded
+   * account it meant to re-sign keeps its old wall and its money.
+   *
+   * That was survivable while the only re-sign path was `restoreAgentWallet`
+   * with a key read out of THIS grant: same key, same account, by construction.
+   * It stops being survivable with a Privy owner, because `usePrivyOwner`
+   * returns whichever embedded wallet is connected RIGHT NOW — a different
+   * Privy login in the same browser is a different owner and a different agent.
+   *
+   * Checked HERE rather than at the call site, and checked against the
+   * sudo-only address before the wall is pinned to anything: this is the one
+   * signing funnel, so a caller that knows which account it is re-signing
+   * cannot forget to say so, and one that legitimately does not know (minting a
+   * new agent, restoring a wallet the browser has never seen) passes nothing
+   * and is unaffected.
+   */
+  if (expectAccount && sudoOnlyAccount.address.toLowerCase() !== expectAccount.toLowerCase()) {
+    throw new Error(
+      `refusing to sign: this owner derives ${sudoOnlyAccount.address}, not ${expectAccount}. ` +
+        `Re-signing needs the same owner the agent was created with — signing in as somebody ` +
+        `else would mint a second agent and leave this one's funds where they are.`,
+    );
+  }
 
   // THE WALL now lives in packages/core/src/wall.ts, so the phone app signs the
   // IDENTICAL permission set rather than a second copy that could drift from this
@@ -775,6 +816,13 @@ export interface MintOptions {
   ponsAdapterAddress?: `0x${string}`;
   /** The signed-in wallet, on the hosted service. Absent when self-hosted. */
   hostedAs?: Address;
+  /**
+   * The account being RE-SIGNED, when this is a renewal rather than a mint.
+   *
+   * A re-sign and a new agent are the same call with a different owner, and the
+   * difference is invisible without this: see the refusal in mintGrant.
+   */
+  expectAccount?: Address;
 }
 
 export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
@@ -789,6 +837,7 @@ export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
     o.v4AdapterAddress,
     o.ponsAdapterAddress,
     o.hostedAs,
+    o.expectAccount,
   );
 }
 
@@ -824,6 +873,7 @@ export async function createPrivyOwnedWallet(
     o.v4AdapterAddress,
     o.ponsAdapterAddress,
     o.hostedAs,
+    o.expectAccount,
   );
 }
 
@@ -856,6 +906,7 @@ export async function restoreAgentWallet(
     o.v4AdapterAddress,
     o.ponsAdapterAddress,
     o.hostedAs,
+    o.expectAccount,
   );
 }
 

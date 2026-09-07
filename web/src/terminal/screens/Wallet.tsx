@@ -28,6 +28,7 @@ import {
   readFunding,
   refusalMessage,
   restoreAgentWallet,
+  createPrivyOwnedWallet,
   type Funding,
   type Grant,
   type GrantCaps,
@@ -36,6 +37,7 @@ import {
 } from "@/lib/session";
 import { conceptTooltip } from "@merrymen/core";
 import { canStart } from "@/lib/can-start";
+import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 // QUARANTINED, not fixed. This page moves real money, holds owner private keys
 // and is 1,750 lines of signature and recovery logic — the last place to
 // restyle during a redesign. It keeps the sheets it was written against, and
@@ -585,8 +587,31 @@ export default function GrantPage() {
    * sealed into the signed key, so the current `customTokens` are baked in here.
    */
   const [renewing, setRenewing] = useState(false);
+  const privyOwner = usePrivyOwner();
+  /**
+   * CAN THIS BROWSER RE-SIGN THIS AGENT, and by which owner.
+   *
+   * Two owners, one control. A legacy agent re-signs from the owner key in this
+   * browser's localStorage; a Privy agent re-signs from the embedded wallet,
+   * which merrymen never holds and never can. Both land in `renewKey` below, so
+   * there is still exactly ONE signing control with one set of conditions —
+   * the thing this file already learned the hard way.
+   *
+   * A PRIVY AGENT HAD NO RE-SIGN AT ALL until now: this returned early on the
+   * missing owner key, and the panel rendered a dead end telling the owner to
+   * paste a key that does not exist for their account. Since `CreateAgent`
+   * mints Privy-owned agents whenever the beta flag is on, that was the cohort
+   * least able to widen its own wall — and widening it is the only way a coin
+   * an agent found becomes a coin it can trade.
+   */
+  const resignBy: "owner-key" | "privy" | null = grant?.demoOwnerPrivateKey
+    ? "owner-key"
+    : isPrivyOwned(grant) && privyOwner
+      ? "privy"
+      : null;
+
   async function renewKey() {
-    if (!grant?.demoOwnerPrivateKey) return;
+    if (!grant || !resignBy) return;
     setError(null);
     setRenewing(true);
     try {
@@ -621,7 +646,7 @@ export default function GrantPage() {
       // selector showed mainnet silently re-signed on testnet, and any cap the
       // owner had just edited in the form was ignored. What the page shows is
       // what gets signed, or the page is lying.
-      const { local: g, handoff } = await restoreAgentWallet(grant.demoOwnerPrivateKey, {
+      const options = {
         caps,
         onStatus: setStatus,
         chainId,
@@ -629,7 +654,26 @@ export default function GrantPage() {
         v4AdapterAddress: freshAdapter,
         ponsAdapterAddress: await verifiedAdapter(freshPons, chainId, setStatus),
         hostedAs: session?.hosted ? (session.address ?? undefined) : undefined,
-      });
+        /**
+         * THE ACCOUNT WE ARE RE-SIGNING, stated so the signer can refuse.
+         *
+         * A re-sign and a brand-new agent are the same call with a different
+         * owner. For the owner-key path that cannot diverge — the key comes out
+         * of THIS grant. For Privy it very much can: `usePrivyOwner` returns
+         * whichever embedded wallet is connected right now, so a different
+         * login in the same browser derives a different account, mints a second
+         * agent, and leaves this one's funds exactly where they are, with
+         * nothing failing anywhere. mintGrant refuses instead.
+         */
+        expectAccount: grant.smartAccount as `0x${string}`,
+      };
+      // TWO OWNERS, ONE CONTROL. Everything above — the fresh settings, the
+      // selected chain, the current caps, the adapter verification — is shared;
+      // only where the signature comes from differs.
+      const { local: g, handoff } =
+        resignBy === "privy"
+          ? await createPrivyOwnedWallet(privyOwner!.account, privyOwner!.did, options)
+          : await restoreAgentWallet(grant.demoOwnerPrivateKey as `0x${string}`, options);
       setGrant(g);
       // Same correction as create/restore: report what the server said, so a
       // renewed key that the server refused doesn't read as a renewed agent.
@@ -1220,7 +1264,11 @@ export default function GrantPage() {
             {/* Tokens added in settings after this key was signed. The wall can't
                 widen without a signature — that's the point — so say it plainly
                 and put the fix one click away. */}
-            {uncoveredNames.length > 0 && grant.demoOwnerPrivateKey && (
+            {/* `resignBy`, not the owner key. A Privy agent's basket can carry
+                uncovered tokens exactly like anyone else's — and gating this on
+                a key that never exists for them meant the cohort CreateAgent
+                mints was never even TOLD its key did not cover its basket. */}
+            {uncoveredNames.length > 0 && resignBy && (
               <div className="renew-note">
                 <GI d="lock" size={14} /> <b>
                   {uncoveredNames.length === 1
@@ -1237,13 +1285,24 @@ export default function GrantPage() {
                 position with no way out, and no cap protects you from that.
                 <br />
                 Re-signing fixes it: same wallet, same funds, same caps, free and instant.
+                {/*
+                  SCROLLS, does not sign — the same correction the expiry prompt
+                  below already got, and for the same reason. This button called
+                  renewKey() directly with `disabled={renewing}` as its only
+                  guard, which is the exact shape that became a hole once the
+                  panel below gained a chain move: change the chain down there,
+                  come back up here, press this, and you re-sign onto another
+                  chain under a banner promising "same wallet, same caps".
+
+                  One signing control, one set of conditions, and everything
+                  else points at it. This is one of the things pointing at it.
+                */}
                 <button
                   className="grant-btn"
                   style={{ marginTop: 10, width: "100%" }}
-                  onClick={() => void renewKey()}
-                  disabled={renewing}
+                  onClick={() => document.getElementById("resign")?.scrollIntoView({ behavior: "smooth", block: "center" })}
                 >
-                  {renewing ? "re-signing…" : `re-sign to cover ${uncoveredNames.join(", ")}`}
+                  {`re-sign to cover ${uncoveredNames.join(", ")} →`}
                 </button>
               </div>
             )}
@@ -1251,7 +1310,10 @@ export default function GrantPage() {
                 gas, nothing moves, same wallet). Applies in paper AND live mode. */}
             {(() => {
               const secsLeft = grant.expiresAt - Math.floor(Date.now() / 1000);
-              if (secsLeft > 3 * 86_400 || !grant.demoOwnerPrivateKey) return null;
+              // `resignBy`, not the owner key: a Privy agent's key expires on
+              // exactly the same clock, and hiding the warning from the one
+              // cohort that could not act on it was two problems, not one.
+              if (secsLeft > 3 * 86_400 || !resignBy) return null;
               const expired = secsLeft <= 0;
               return (
                 <div className={expired ? "renew-note expired" : "renew-note"}>
@@ -1584,7 +1646,7 @@ export default function GrantPage() {
               current key carries, and anything it names as worth removing goes away here. The caps
               below are sealed into the signature too, so this is the moment to change them; the old
               key stops working as soon as the new one is armed.
-              {grant.demoOwnerPrivateKey ? (
+              {resignBy ? (
                 <>
                   <div className="grant-fields" style={{ marginTop: 12 }}>
                     <label className="field">
@@ -1711,9 +1773,27 @@ export default function GrantPage() {
                 </>
               ) : (
                 <p className="field-lead" style={{ marginTop: 12 }}>
-                  This browser does not hold the owner key for {short(grant.smartAccount)}, and
-                  re-signing needs it. Use <b>switch to another wallet</b> below and paste the key
-                  in, or run <code>merrymen recover</code> to sweep the funds somewhere you control.
+                  {/* TWO DIFFERENT MISSING OWNERS, and the remedies have nothing in
+                      common. A legacy agent's key SHOULD be in this browser, so its
+                      absence is a problem and pasting it back is the fix. A Privy
+                      agent has no key to paste — by design — and the fix is to sign
+                      in as the account that owns it. Telling a Privy owner to paste
+                      a key is advice that cannot be followed, which is what this
+                      panel used to say to the entire Privy cohort. */}
+                  {isPrivyOwned(grant) ? (
+                    <>
+                      Re-signing {short(grant.smartAccount)} needs the login that owns it. This
+                      agent is owned by a Privy embedded wallet — there is no key to paste, which
+                      is the point of it — so sign in as that account and this control comes back.
+                    </>
+                  ) : (
+                    <>
+                      This browser does not hold the owner key for {short(grant.smartAccount)}, and
+                      re-signing needs it. Use <b>switch to another wallet</b> below and paste the
+                      key in, or run <code>merrymen recover</code> to sweep the funds somewhere you
+                      control.
+                    </>
+                  )}
                 </p>
               )}
             </div>

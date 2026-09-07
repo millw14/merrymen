@@ -34,12 +34,27 @@ describe("mint entry points take NAMED options", () => {
   it("no caller passes them positionally", () => {
     // The exact shape that broke: a call whose fifth argument is an adapter and
     // whose sixth is a wallet, distinguishable only by reading the signature.
-    const calls = [...GRANT_PAGE_SRC.matchAll(/(createAgentWallet|restoreAgentWallet)\(([\s\S]{0,400}?)\)\s*;/g)];
-    assert.ok(calls.length >= 3, `expected the three call sites, found ${calls.length}`);
+    //
+    // AN OPTIONS OBJECT, INLINE OR HOISTED. The renew site now builds one
+    // `options` and hands it to whichever mint entry point the owner needs —
+    // that is still one named object, and it is what keeps a Privy re-sign and
+    // an owner-key re-sign on ONE set of conditions rather than two. What must
+    // never come back is a bare positional argument list.
+    const calls = [
+      ...GRANT_PAGE_SRC.matchAll(
+        /(createAgentWallet|restoreAgentWallet|createPrivyOwnedWallet)\(([\s\S]{0,400}?)\)\s*[;,\n]/g,
+      ),
+    ];
+    assert.ok(calls.length >= 4, `expected every mint call site, found ${calls.length}`);
     for (const [, name, args] of calls) {
-      assert.match(args, /\{/, `${name} must be called with an options object`);
-      assert.match(args, /onStatus:/, `${name} must name onStatus`);
+      const inline = /onStatus:/.test(args);
+      const hoisted = /(^|[\s,])options\s*$/.test(args.trim()) || /,\s*options\s*$/.test(args.trim());
+      assert.ok(inline || hoisted, `${name} must take a named options object, not positional args`);
     }
+    // And the hoisted one is a real options object, not something reshaped.
+    const hoistedLiteral = GRANT_PAGE_SRC.slice(GRANT_PAGE_SRC.indexOf("const options = {"));
+    assert.match(hoistedLiteral.slice(0, 900), /onStatus: setStatus/);
+    assert.match(hoistedLiteral.slice(0, 900), /hostedAs:/);
   });
 
   it("every call site that can be hosted passes hostedAs BY NAME", () => {
@@ -117,14 +132,22 @@ describe("the backup gate gets the copy with the key", () => {
   });
 
   it("every mint call site takes `local`, never the server copy", () => {
-    const sites = [...GRANT_PAGE_SRC.matchAll(/const \{ ([^}]*) \} = await (createAgentWallet|restoreAgentWallet)/g)];
-    assert.equal(sites.length, 3, "expected the three mint call sites");
-    for (const [, destructured, fn] of sites) {
-      assert.match(destructured, /local:/, `${fn} must take the local copy — it is the one with the key`);
+    // The renew site branches on which owner can sign — an owner key or a Privy
+    // embedded wallet — so the destructure sits above the branch rather than on
+    // each arm. Matched on the destructure itself for that reason.
+    const sites = [...GRANT_PAGE_SRC.matchAll(/const \{ ([^}]*) \} =\s*\n?\s*(?:await )?(?:resignBy|createAgentWallet|restoreAgentWallet|createPrivyOwnedWallet)/g)];
+    assert.ok(sites.length >= 3, `expected the mint call sites, found ${sites.length}`);
+    for (const [, destructured] of sites) {
+      assert.match(destructured, /local:/, "a mint result must be read as the LOCAL copy — it is the one with the key");
       assert.ok(
         !/(^|\s)grant:/.test(destructured),
-        `${fn} must not put the server-shaped grant into page state`,
+        "a mint call site must not put the server-shaped grant into page state",
       );
+    }
+    // And every mint entry point that can be reached from this page is covered
+    // by the loop above rather than sneaking in under a name it does not check.
+    for (const fn of ["createAgentWallet", "restoreAgentWallet", "createPrivyOwnedWallet"]) {
+      assert.ok(GRANT_PAGE_SRC.includes(`${fn}(`), `${fn} is expected on this page`);
     }
   });
 
