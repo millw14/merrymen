@@ -8,6 +8,13 @@
  */
 
 import type { TradeIntent } from "../policy";
+import type { CurveLeg } from "../strategist/proposals";
+import {
+  curveBuyImpactBps,
+  curveBuyOut,
+  curveGraduated,
+  curveMinOut,
+} from "../venues/pons-price";
 import type { Snapshot, Tick } from "./types";
 import type { Why } from "./reasons";
 
@@ -28,6 +35,31 @@ export interface SteadyBasketConfig {
   swapRouter: `0x${string}`;
   vault: `0x${string}`;
   usdg: `0x${string}`;
+  /**
+   * THE ALWAYS-ON SIDE OF THE CHAIN, for when the always-off side is shut.
+   *
+   * All 24 Chainlink equity feeds go stale at a weekend, so every leg is
+   * skipped and this strategy returns nothing for two days in three. That is
+   * most of what "no trading is being done" meant, and `all-legs-stale` below
+   * was only ever the honest sentence about it.
+   *
+   * SUPPLIED PER TICK, NOT CONFIGURED, because a curve leg carries THIS TICK'S
+   * reserves — the input a slippage floor is derived from, and curve-prices.ts
+   * measures p99 movement at 1,546 bps over 240 seconds. A cached leg is a
+   * floor for a market that has already moved.
+   *
+   * WHAT IS ALREADY TRUE OF ANYTHING IN HERE, before this file sees it: the
+   * owner put its symbol in their basket, their signature covers its address,
+   * the curve is one the worker knows, and the rail is live (paper cannot
+   * simulate a curve trade). `curveLegsNow` enforces all four. This strategy
+   * does not widen that set and cannot — it only decides whether to use it.
+   */
+  curve?: {
+    legs: ReadonlyMap<string, CurveLeg>;
+    tokens: ReadonlyMap<string, `0x${string}`>;
+    slippageBps: number;
+    maxImpactBps: number;
+  } | null;
 }
 
 export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick {
@@ -124,10 +156,99 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   // over a weekend that sweep is the only thing an agent does, and its owner is
   // still owed the sentence about why.
   const bought = intents.some((i) => i.kind === "swap");
+  const shut =
+    !bought && snap.cashUsdg >= cfg.buyPerTickUsdg && skippedStale + skippedPaused === cfg.legs.length && cfg.legs.length > 0;
+
+  // ── THE 24/7 FALLBACK ────────────────────────────────────────────────
+  //
+  // ONLY WHEN NOTHING ELSE COULD HAVE TRADED. `shut` is the same condition
+  // `all-legs-stale` reports: the schedule genuinely wanted to buy, there was
+  // cash for it, and every single leg was skipped. So this can never displace
+  // an equity buy, never fire on a short-cash tick, and never fire on a Monday.
+  //
+  // Stocks stay the default. This is the owner's own decision — "keep the
+  // basket, add a 24/7 fallback" — and its whole safety argument is that
+  // everything it can reach was already chosen twice: the symbol is in their
+  // basket ("trade it") and the address is in their signature ("you may").
+  // registry.ts calls that pairing deliberately not automatic, and it stays
+  // that way: a coin the owner merely WATCHES is not reachable from here.
+  if (shut && cfg.curve) {
+    const pick = pickCurveBuy(cfg, snap);
+    if (pick) {
+      intents.push(pick.intent);
+      why.push(pick.why);
+    }
+  }
+
+  const boughtCurve = intents.some((i) => i.kind === "curve-trade");
   const idle: Why | undefined =
-    !bought && snap.cashUsdg >= cfg.buyPerTickUsdg && skippedStale + skippedPaused === cfg.legs.length && cfg.legs.length > 0
+    shut && !boughtCurve
       ? { code: "all-legs-stale", legs: cfg.legs.length, paused: skippedPaused }
       : undefined;
 
   return idle ? { intents, why, idle } : { intents, why };
+}
+
+/**
+ * ONE curve buy, or nothing.
+ *
+ * ONE, deliberately. A tick's budget is `buyPerTickUsdg` and the equity path
+ * splits it across weighted legs; splitting it across memecoins would be an
+ * allocation policy nobody chose. The highest-conviction thing available is the
+ * owner's own basket order, so this takes the first leg that clears every
+ * check rather than inventing a ranking.
+ *
+ * EVERY REFUSAL IS SILENT HERE, and that is right: the tick still reports
+ * `all-legs-stale`, which is true and is the sentence the owner needs. A second
+ * sentence explaining that a fallback the owner never asked about also declined
+ * would be noise on a screen that already says nothing happened.
+ */
+function pickCurveBuy(
+  cfg: SteadyBasketConfig,
+  snap: Snapshot,
+): { intent: TradeIntent; why: Why } | null {
+  const curve = cfg.curve;
+  if (!curve) return null;
+
+  for (const [symbol, leg] of curve.legs) {
+    const token = curve.tokens.get(symbol);
+    if (!token) continue;
+    if (snap.pausedTokens.has(token.toLowerCase())) continue;
+    // NATIVE-QUOTED CURVES ARE UNREACHABLE: the adapter is non-payable and
+    // every wall permission carries valueLimit 0. Same refusal proposals.ts
+    // makes, for the same reason.
+    if (/^0x0{40}$/i.test(leg.quoteToken)) continue;
+    // Only a USDG-quoted curve is one hop from the agent's cash.
+    if (leg.quoteToken.toLowerCase() !== cfg.usdg.toLowerCase()) continue;
+    // A graduated curve has a pool now; buying it belongs on the swap path.
+    if (curveGraduated(leg.reserves)) continue;
+
+    const amountInRaw = cfg.buyPerTickUsdg;
+    // THE IMPACT CEILING, on the producer, because this is where the reserves
+    // are. The executor holds only an intent, and reading them again would be a
+    // second read of a market that has already moved.
+    const impact = curveBuyImpactBps(leg.reserves, amountInRaw);
+    if (impact !== null && impact > curve.maxImpactBps) continue;
+
+    const quoted = curveBuyOut(leg.reserves, amountInRaw);
+    if (quoted === null) continue;
+    const minAmountOutRaw = curveMinOut(quoted, curve.slippageBps);
+    // NO FLOOR, NO TRADE. Sizing it blind is how a fill lands at any price.
+    if (minAmountOutRaw === null || minAmountOutRaw <= 0n) continue;
+
+    return {
+      intent: {
+        kind: "curve-trade",
+        target: leg.adapter,
+        curve: leg.curve,
+        assetIn: cfg.usdg,
+        assetOut: token,
+        amountInRaw,
+        minAmountOutRaw,
+        notionalUsdg: amountInRaw,
+      },
+      why: { code: "stale-fallback", symbol, usdgRaw: amountInRaw, legs: cfg.legs.length },
+    };
+  }
+  return null;
 }

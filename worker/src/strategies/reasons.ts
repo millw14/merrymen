@@ -92,6 +92,17 @@ export type Why =
    * it stays publishable by the same rule as every other reason here.
    */
   | { code: "all-legs-stale"; legs: number; paused: number }
+  /**
+   * THE ALWAYS-ON SIDE OF THE CHAIN, when the always-off side is shut.
+   *
+   * Every equity feed goes stale at a weekend, so a stock basket does nothing
+   * for two days in three — which is most of what "no trading is being done"
+   * meant. This is the fallback the owner asked for: stocks stay the default,
+   * and when EVERY leg is stale the agent works a coin it has both put in its
+   * basket and signed for. Never a substitute for a leg that could have
+   * traded; it only fires when none of them could.
+   */
+  | { code: "stale-fallback"; symbol: string; usdgRaw: bigint; legs: number }
   /** The market is shut and the token keeps trading. */
   | { code: "gap-enter"; symbol: string; usdgRaw: bigint }
   /** The market reopened; the gap trade is over. */
@@ -142,6 +153,11 @@ export function renderWhy(w: Why): string {
         `stale, so there is no reference price to buy against` +
         (w.paused > 0 ? `, and ${w.paused} of them ${w.paused === 1 ? "is" : "are"} paused` : "") +
         `. This is a fact about the feeds, not about the market`
+      );
+    case "stale-fallback":
+      return (
+        `all ${w.legs} equity feeds are shut, so putting ${usdg(w.usdgRaw)} USDG into ${w.symbol} — ` +
+        `a coin I hold a signed permission for, on a market that does not close`
       );
     case "unpark":
       return (

@@ -269,5 +269,17 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
     vault: MORPHO.steakhouseUsdgVault as `0x${string}`,
     usdg: CASH.USDG as `0x${string}`,
   };
-  return { name: "steady-basket", tick: (snap) => steadyBasketTick(cfg, snap) };
+  // RE-READ PER TICK, NOT CAPTURED IN cfg. A curve leg carries that tick's
+  // reserves, and curve-prices.ts refuses to cache them for a measured reason:
+  // p99 movement is 1,546 bps over 240 seconds, so last tick's reserves are a
+  // slippage floor for a market that no longer exists.
+  //
+  // AND SUPPLIED HERE OR THE FALLBACK IS INERT. curve-wiring.test.ts exists
+  // because exactly this line was missing for the strategist: every layer
+  // looked wired, the production call site never passed it, and every memecoin
+  // came back "not in the tradable universe".
+  return {
+    name: "steady-basket",
+    tick: (snap) => steadyBasketTick({ ...cfg, curve: opts.curveLegsNow?.() ?? null }, snap),
+  };
 }
