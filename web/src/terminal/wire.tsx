@@ -1,9 +1,10 @@
-import { castOf, verbOf, whoOf, type Beat, type Lane } from "./beat";
+import { verbOf, whoOf, type Beat, type Lane } from "./beat";
 import { elapsed, useNow } from "./clock";
 import { money, type LiveToken } from "./live";
-import { Coin, Delta, FaceOn, FacesOn } from "./ui";
+import { Coin, Delta, FaceOn } from "./ui";
 
-function logoOf(tokens: LiveToken[], symbol: string): LiveToken | undefined {
+function logoOf(tokens: LiveToken[], symbol: string | null): LiveToken | undefined {
+  if (!symbol) return undefined;
   return tokens.find((t) => t.symbol.toUpperCase() === symbol.toUpperCase());
 }
 
@@ -61,69 +62,61 @@ function BeatRow({
   onAgent?: (slug: string) => void;
 }) {
   const tok = logoOf(tokens, beat.symbol);
-  const cast = castOf(beat);
+  const actor = beat.actor;
   const open = () => {
     if (tok && onToken) onToken(tok.id);
-    else if (onAgent) onAgent(cast[0]!.slug);
+    else if (onAgent) onAgent(actor.slug);
   };
 
-  const chorus = beat.kind === "chorus";
-  const cls = ["wire-beat", beat.action, chorus ? "chorus" : ""].filter(Boolean).join(" ");
+  const cls = ["wire-beat", beat.kind === "trade" ? beat.action : "view"].join(" ");
 
   return (
     <div className={cls}>
       <button type="button" className="wire-mark" onClick={open}>
-        {chorus ? (
-          <FacesOn cast={cast} symbol={beat.symbol} logo={tok?.logo ?? ""} />
-        ) : (
-          <FaceOn name={cast[0]!.name} slug={cast[0]!.slug} symbol={beat.symbol} logo={tok?.logo ?? ""} />
-        )}
+        <FaceOn name={actor.name} slug={actor.slug} symbol={beat.symbol ?? ""} logo={tok?.logo ?? ""} />
       </button>
       <div className="wire-body">
         <button type="button" className="wire-hit" onClick={open}>
           <span className="wire-said">
             <span className="wire-line">
-              <strong>{whoOf(beat)}</strong> {verbOf(beat)} {beat.symbol}{" "}
+              {/* TWO SENTENCES, BUILT TWO DIFFERENT WAYS, and the difference is
+                  the point. A trade has a direction the rail may conjugate. A
+                  view does not, so it prints what the PUBLISHER wrote — which
+                  is where the conditional already lives, and the only string
+                  that knows whether anything could have happened. */}
+              <strong>{whoOf(beat)}</strong>{" "}
+              {beat.kind === "trade" ? (
+                <>
+                  {verbOf(beat)} {beat.symbol}{" "}
+                </>
+              ) : (
+                <>{beat.head} </>
+              )}
               <em className="wire-when">{whenOf(beat.at, now)}</em>
             </span>
           </span>
         </button>
 
-        {beat.kind === "trade" ? (
-          <>
-            {beat.reason ? <p className="wire-why">{beat.reason}</p> : null}
-            <div className="wire-parts">
-              <button type="button" className="wire-part" onClick={open}>
-                <span className="wire-seat">
-                  <Coin symbol={beat.symbol} logo={tok?.logo ?? ""} />
-                  {beat.symbol}
-                </span>
-                <span className="wire-part-fig">
-                  {beat.sizeUsd != null ? <b>{money(beat.sizeUsd)}</b> : null}
-                  <Delta value={tok?.change24hPct ?? null} suffix="%" size={11} />
-                </span>
-              </button>
-            </div>
-          </>
-        ) : (
-          <div className="wire-parts">
-            {beat.parts.map((p) => (
-              <button
-                key={p.actor.slug}
-                type="button"
-                className="wire-part wire-voice"
-                onClick={() => onAgent?.(p.actor.slug)}
-              >
-                <span>{p.reason}</span>
-                <span className="wire-part-fig">
-                  {p.sizeUsd != null ? <b>{money(p.sizeUsd)}</b> : null}
-                  <Delta value={tok?.change24hPct ?? null} suffix="%" size={11} />
-                </span>
-              </button>
-            ))}
-          </div>
-        )}
+        {/* The take, when it adds something the line did not already say. A
+            view whose head IS its reasoning must not print it twice. */}
+        {beat.reason && (beat.kind === "trade" || beat.reason !== beat.head) ? (
+          <p className="wire-why">{beat.reason}</p>
+        ) : null}
 
+        {beat.symbol ? (
+          <div className="wire-parts">
+            <button type="button" className="wire-part" onClick={open}>
+              <span className="wire-seat">
+                <Coin symbol={beat.symbol} logo={tok?.logo ?? ""} />
+                {beat.symbol}
+              </span>
+              <span className="wire-part-fig">
+                {beat.sizeUsd != null ? <b>{money(beat.sizeUsd)}</b> : null}
+                <Delta value={tok?.change24hPct ?? null} suffix="%" size={11} />
+              </span>
+            </button>
+          </div>
+        ) : null}
       </div>
     </div>
   );

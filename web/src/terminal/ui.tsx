@@ -181,28 +181,10 @@ export function FaceOn({
   );
 }
 
-export function FacesOn({
-  cast,
-  symbol,
-  logo,
-}: {
-  cast: { slug: string; name: string }[];
-  symbol: string;
-  logo: string;
-}) {
-  return (
-    <span className="stack">
-      <span className="faces">
-        {cast.slice(0, 3).map((a) => (
-          <Face key={a.slug} name={a.name} slug={a.slug} />
-        ))}
-      </span>
-      <span className="stack-badge">
-        <Coin symbol={symbol} logo={logo} />
-      </span>
-    </span>
-  );
-}
+// `FacesOn` lived here — a stack of avatars for the `chorus` beat, which was
+// declared, styled and rendered, and never once constructed. It went with the
+// branch. Its CSS (`.stack`, `.faces`, `.stack-badge`) is still in the sheet;
+// the orphaned-CSS sweep is its own change, deliberately kept out of a feature.
 
 export function ThesisBody({ text }: { text: string }) {
   return <p className="thesis-body">{text}</p>;

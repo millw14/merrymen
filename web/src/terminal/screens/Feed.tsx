@@ -1,66 +1,35 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { beatsOf, lanesOf, type Beat } from "../beat";
 import type { LiveAgent, LiveToken, ReadState, Thesis } from "../live";
 import { Empty, ReadEmpty } from "../ui";
 import { Wire } from "../wire";
 
-type Asset = "all" | "stock" | "etf";
-type Topic =
-  | "trades"
-  | "closed"
-  | "theses"
-  | "multi"
-  | "listings"
-  | "spikes"
-  | "milestones"
-  | "newcomers";
+/**
+ * THE FEED, AND THE FILTER THAT STOPPED BEING A DRAWER.
+ *
+ * What was here: a modal sheet behind an icon, with eight topic checkboxes and
+ * an asset-type dropdown — a filter UI a person had to open, read and configure
+ * before it did anything, on the screen the owner calls the main tab. Nobody
+ * opens a drawer to find out what is on a feed.
+ *
+ * What replaced it: four pills, always visible, one tap each. They are the
+ * owner's own list. `Top` joins them when likes land — a pill that sorts by
+ * nothing would be exactly the "button with no value" this whole redesign is
+ * about.
+ *
+ * The eight topics are not mourned. "Price spikes", "Profit milestones" and
+ * "New traders" were derived filters over the same rows, invisible behind two
+ * taps, and none of them answered the question a reader actually arrives with:
+ * what did the agents do, and what did they say about it.
+ */
+type Pill = "all" | "trades" | "theses" | "debate";
 
-const ASSETS: { id: Asset; label: string }[] = [
+const PILLS: { id: Pill; label: string }[] = [
   { id: "all", label: "All" },
-  { id: "stock", label: "Stocks" },
-  { id: "etf", label: "ETFs" },
-];
-
-const TOPICS: { id: Topic; label: string }[] = [
   { id: "trades", label: "Trades" },
-  { id: "closed", label: "Closed positions" },
   { id: "theses", label: "Theses" },
-  { id: "multi", label: "Multi-user trades" },
-  { id: "listings", label: "New listings" },
-  { id: "spikes", label: "Price spikes" },
-  { id: "milestones", label: "Profit milestones" },
-  { id: "newcomers", label: "New traders" },
+  { id: "debate", label: "Debate" },
 ];
-
-const SPIKE = 2;
-const MILESTONE = 100;
-const MULTI_MS = 12 * 3_600_000;
-
-function allTopics(): Record<Topic, boolean> {
-  return {
-    trades: true,
-    closed: true,
-    theses: true,
-    multi: true,
-    listings: true,
-    spikes: true,
-    milestones: true,
-    newcomers: true,
-  };
-}
-
-function emptyTopics(): Record<Topic, boolean> {
-  return {
-    trades: false,
-    closed: false,
-    theses: false,
-    multi: false,
-    listings: false,
-    spikes: false,
-    milestones: false,
-    newcomers: false,
-  };
-}
 
 export function Feed({
   compact = false,
@@ -82,111 +51,45 @@ export function Feed({
   onProfile: (slug: string) => void;
   onDesk: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const sheet = useRef<HTMLDivElement>(null);
-  const [pick, setPick] = useState(false);
-  const [asset, setAsset] = useState<Asset>("all");
-  const [on, setOn] = useState(allTopics);
+  const [pill, setPill] = useState<Pill>("all");
 
   const beats = useMemo(() => beatsOf(theses, agents), [theses, agents]);
-  const tape = useMemo(() => tapeOf(beats), [beats]);
+  const replies = useMemo(() => repliesIn(beats), [beats]);
   const shown = useMemo(
-    () => beats.filter((b) => keepBeat(b, tokens, on, asset, tape)),
-    [beats, tokens, on, asset, tape],
+    () => beats.filter((b) => keepBeat(b, pill, replies)),
+    [beats, pill, replies],
   );
   const lanes = useMemo(() => lanesOf(shown), [shown]);
-  const chosen = countOn(on);
-  const filtered = asset !== "all" || chosen < TOPICS.length;
-
-  const reset = () => {
-    setAsset("all");
-    setOn(allTopics());
-  };
-
-  useEffect(() => {
-    if (!open) {
-      setPick(false);
-      return;
-    }
-    /**
-     * THE SHEET SAYS `aria-modal="true"`, SO IT HAS TO BE ONE.
-     *
-     * That attribute tells assistive technology to ignore everything outside
-     * this element. It was set while focus stayed wherever it was, Tab walked
-     * straight out into the page behind, and nothing came back on close — so a
-     * screen-reader user was told the rest of the page did not exist while a
-     * keyboard user was still moving through it. Either the claim goes or the
-     * behaviour arrives; a filter sheet should be modal, so: the behaviour.
-     */
-    const opener = document.activeElement as HTMLElement | null;
-    const focusable = (): HTMLElement[] => {
-      const found = sheet.current?.querySelectorAll<HTMLElement>(
-        "a[href], button:not([disabled]), input, select, textarea, [tabindex]",
-      );
-      return [...(found ?? [])].filter(
-        (el) => el.tabIndex >= 0 && el.offsetParent !== null,
-      );
-    };
-    focusable()[0]?.focus();
-    const hide = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setOpen(false);
-        return;
-      }
-      if (e.key !== "Tab") return;
-      const items = focusable();
-      if (!items.length) return;
-      const first = items[0]!;
-      const last = items[items.length - 1]!;
-      // Wrap at both ends rather than letting focus leave the dialog.
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      } else if (sheet.current && !sheet.current.contains(document.activeElement)) {
-        e.preventDefault();
-        first.focus();
-      }
-    };
-    const scroller = document.querySelector(".body");
-    const prev = scroller instanceof HTMLElement ? scroller.style.overflow : "";
-    if (scroller instanceof HTMLElement) scroller.style.overflow = "hidden";
-    document.addEventListener("keydown", hide);
-    return () => {
-      if (scroller instanceof HTMLElement) scroller.style.overflow = prev;
-      document.removeEventListener("keydown", hide);
-      // Focus goes back where it came from, so closing the sheet does not drop a
-      // keyboard user at the top of the document.
-      opener?.focus?.();
-    };
-  }, [open]);
 
   return (
     <div className="page feed-page">
       <header className="feed-head">
-        {compact ? (
-          <h2>Latest activity</h2>
-        ) : (
-          <h1 className="top-title">Feed</h1>
-        )}
-        <button
-          type="button"
-          className={`${compact ? "sidebar-feed-filter" : "icon-btn"} ${filtered ? "on" : ""}`}
-          aria-label="Filter"
-          aria-expanded={open}
-          onClick={() => setOpen(true)}
-        >
-          {compact ? "Filters" : <FilterIcon />}
-        </button>
+        {compact ? <h2>Latest activity</h2> : <h1 className="top-title">Feed</h1>}
       </header>
 
+      <div className="feed-pills" role="tablist" aria-label="Filter the feed">
+        {PILLS.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            role="tab"
+            aria-selected={pill === p.id}
+            className={pill === p.id ? "on" : ""}
+            onClick={() => setPill(p.id)}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+
       {shown.length === 0 ? (
-        filtered ? (
+        pill !== "all" ? (
+          // FILTERED-EMPTY IS NOT QUIET. The read succeeded and the rows are
+          // there; this one pill matched none of them, and saying "Quiet"
+          // would blame the agents for the reader's own filter.
           <Empty
-            title="Nothing matches."
-            action={{ label: "Clear filters", onClick: reset }}
+            title={emptyFor(pill)}
+            action={{ label: "Show everything", onClick: () => setPill("all") }}
           />
         ) : (
           <ReadEmpty
@@ -196,239 +99,78 @@ export function Feed({
           />
         )
       ) : (
-        <Wire
-          lanes={lanes}
-          tokens={tokens}
-          onToken={onToken}
-          onAgent={onProfile}
-        />
-      )}
-
-      {open && (
-        <div className="feed-scrim" onClick={() => setOpen(false)}>
-          <div
-            className="feed-sheet"
-            ref={sheet}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Filters"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <i className="feed-grip" aria-hidden />
-            <h2>Filters</h2>
-            <div className="feed-asset">
-              <span>Asset Type</span>
-              <div className="feed-asset-pick">
-                <button
-                  type="button"
-                  aria-expanded={pick}
-                  onClick={() => setPick((v) => !v)}
-                >
-                  {labelOf(asset)}
-                  <Chevron />
-                </button>
-                {pick && (
-                  <div className="feed-asset-menu" role="listbox">
-                    {ASSETS.map((a) => (
-                      <button
-                        key={a.id}
-                        type="button"
-                        role="option"
-                        aria-selected={asset === a.id}
-                        className={asset === a.id ? "on" : ""}
-                        onClick={() => {
-                          setAsset(a.id);
-                          setPick(false);
-                        }}
-                      >
-                        {a.label}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-            <button
-              type="button"
-              className="feed-clear"
-              onClick={() => setOn(chosen === 0 ? allTopics() : emptyTopics())}
-            >
-              {chosen === 0 ? "Select all" : "Deselect all"}
-            </button>
-            <ul className="feed-topics">
-              {TOPICS.map((t) => (
-                <li key={t.id}>
-                  <button
-                    type="button"
-                    role="checkbox"
-                    aria-checked={on[t.id]}
-                    className={on[t.id] ? "on" : ""}
-                    onClick={() =>
-                      setOn((prev) => ({ ...prev, [t.id]: !prev[t.id] }))
-                    }
-                  >
-                    <span>{t.label}</span>
-                    <i className="feed-check" aria-hidden>
-                      {on[t.id] ? <Tick /> : null}
-                    </i>
-                  </button>
-                </li>
-              ))}
-            </ul>
-            <button
-              type="button"
-              className="feed-shut"
-              onClick={() => setOpen(false)}
-            >
-              Close
-            </button>
-          </div>
-        </div>
+        <Wire lanes={lanes} tokens={tokens} onToken={onToken} onAgent={onProfile} />
       )}
     </div>
   );
 }
 
-function FilterIcon() {
-  return (
-    <svg
-      width="20"
-      height="20"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-    >
-      <path d="M4 6h16M7 12h10M10 18h4" />
-    </svg>
-  );
-}
-
-function Chevron() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.2"
-    >
-      <path d="M6 9l6 6 6-6" />
-    </svg>
-  );
-}
-
-function Tick() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="3"
-    >
-      <path d="M5 12l5 5 9-10" />
-    </svg>
-  );
-}
-
-function labelOf(asset: Asset): string {
-  switch (asset) {
+function emptyFor(pill: Pill): string {
+  switch (pill) {
+    case "trades":
+      return "No trades in this window.";
+    case "theses":
+      return "Nobody has published a view here yet.";
+    case "debate":
+      return "No agent has named another one yet.";
     case "all":
-      return "All";
-    case "stock":
-      return "Stocks";
-    case "etf":
-      return "ETFs";
+      return "Quiet.";
     default: {
-      const _x: never = asset;
+      const _x: never = pill;
       return _x;
     }
   }
 }
 
-function countOn(on: Record<Topic, boolean>): number {
-  return TOPICS.reduce((n, t) => n + (on[t.id] ? 1 : 0), 0);
-}
-
-function slugsOf(beat: Beat): string[] {
-  return beat.kind === "chorus"
-    ? beat.actors.map((a) => a.slug)
-    : [beat.actor.slug];
-}
-
-function otherHand(a: Beat, b: Beat): boolean {
-  const left = slugsOf(a);
-  const right = slugsOf(b);
-  return (
-    left.some((s) => !right.includes(s)) || right.some((s) => !left.includes(s))
-  );
-}
-
-interface Tape {
-  once: Set<string>;
-  crowd: Set<string>;
-  first: Set<string>;
-}
-
-function tapeOf(beats: Beat[]): Tape {
-  const n = new Map<string, number>();
-  const firstAt = new Map<string, number>();
-  const firstId = new Map<string, string>();
+/**
+ * WHO NAMED WHOM — read off the page, never inferred.
+ *
+ * A post is part of a debate when its own published words name another agent
+ * that also posted in the same window. Both sides are already on screen, so
+ * nothing here is an attribution we did not read: it is not "replying to",
+ * which would claim an intent the rows do not carry. It is "this text contains
+ * that handle, and that handle is somebody who posted".
+ *
+ * No new publish path, no new `SOURCE_POLICY` entry, and nothing for the worker
+ * to emit. A peer-influenced thesis is still `strategist` — already classified,
+ * already published — and a new source would publish NOTHING until somebody
+ * classified it, which is how a feed goes silent for a week with no error.
+ */
+function repliesIn(beats: Beat[]): Set<string> {
+  const handles = new Map<string, string>(); // bare handle → slug
   for (const b of beats) {
-    for (const slug of slugsOf(b)) n.set(slug, (n.get(slug) ?? 0) + 1);
-    const prev = firstAt.get(b.symbol);
-    if (prev == null || b.at < prev) {
-      firstAt.set(b.symbol, b.at);
-      firstId.set(b.symbol, b.id);
+    const bare = b.actor.handle.replace(/^@/, "").toLowerCase();
+    if (bare) handles.set(bare, b.actor.slug);
+  }
+  const out = new Set<string>();
+  if (handles.size < 2) return out;
+  for (const b of beats) {
+    const text = `${b.kind === "view" ? b.head : ""} ${b.reason}`.toLowerCase();
+    for (const [bare, slug] of handles) {
+      // The `@` is required. Agent handles are short words, and matching a bare
+      // one would make every thesis mentioning "value" a reply to @value.
+      if (slug !== b.actor.slug && text.includes(`@${bare}`)) {
+        out.add(b.id);
+        break;
+      }
     }
   }
-  const crowd = new Set<string>();
-  for (const a of beats) {
-    const hit = beats.some(
-      (b) =>
-        a.id !== b.id &&
-        a.symbol === b.symbol &&
-        Math.abs(a.at - b.at) <= MULTI_MS &&
-        otherHand(a, b),
-    );
-    if (hit) crowd.add(a.id);
-  }
-  return {
-    once: new Set([...n].filter(([, c]) => c === 1).map(([slug]) => slug)),
-    crowd,
-    first: new Set(firstId.values()),
-  };
-}
-
-function keepBeat(
-  beat: Beat,
-  tokens: LiveToken[],
-  on: Record<Topic, boolean>,
-  asset: Asset,
-  tape: Tape,
-): boolean {
-  const tok = tokens.find((t) => t.symbol.toUpperCase() === beat.symbol);
-  if (asset !== "all" && tok?.kind !== asset) return false;
-  return marksOf(beat, tok, tape).some((t) => on[t]);
-}
-
-function marksOf(beat: Beat, tok: LiveToken | undefined, tape: Tape): Topic[] {
-  const out: Topic[] = [];
-  if (beat.action === "buy") out.push("trades");
-  if (beat.action === "sell") out.push("closed");
-  const said =
-    beat.kind === "trade"
-      ? beat.reason.trim()
-      : beat.parts.some((p) => p.reason.trim());
-  if (said) out.push("theses");
-  if (tape.crowd.has(beat.id)) out.push("multi");
-  if (tape.first.has(beat.id)) out.push("listings");
-  if (tok && tok.change24hPct != null && Math.abs(tok.change24hPct) >= SPIKE)
-    out.push("spikes");
-  if (beat.sizeUsd != null && beat.sizeUsd >= MILESTONE) out.push("milestones");
-  if (slugsOf(beat).every((s) => tape.once.has(s))) out.push("newcomers");
   return out;
+}
+
+function keepBeat(beat: Beat, pill: Pill, replies: Set<string>): boolean {
+  switch (pill) {
+    case "all":
+      return true;
+    case "trades":
+      return beat.kind === "trade";
+    case "theses":
+      return beat.kind === "view";
+    case "debate":
+      return replies.has(beat.id);
+    default: {
+      const _x: never = pill;
+      return _x;
+    }
+  }
 }

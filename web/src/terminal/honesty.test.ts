@@ -20,7 +20,19 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
 
-import { beatsOf, verbOf } from "./beat";
+import { beatsOf, verbOf, type Beat } from "./beat";
+
+/**
+ * `verbOf` takes a TRADE, not a beat — a view has no direction to conjugate,
+ * and a signature that accepted one would invite exactly the fallback these
+ * tests exist to prevent. So the assertion that a row is a trade at all is now
+ * part of what they check.
+ */
+const asTrade = (b: Beat | undefined): Extract<Beat, { kind: "trade" }> => {
+  assert.ok(b, "beatsOf produced nothing");
+  assert.equal(b.kind, "trade", "a buy with a symbol is a trade beat");
+  return b as Extract<Beat, { kind: "trade" }>;
+};
 import { lastLine, ledgerSeconds, readStateOf, seedLive, tradeOutcome, type LiveAgent, type Thesis } from "./live";
 import { stampOf, whyLine } from "./why";
 import { entryCaveat } from "./bars";
@@ -67,14 +79,35 @@ describe("a decision nothing came of is not a trade", () => {
     // trade happened.
     const [real] = beatsOf([t({ at: 1_788_000_000, shadow: false })], [agent()]);
     const [shadow] = beatsOf([t({ at: 1_788_000_000, shadow: true })], [agent()]);
-    assert.ok(real && shadow);
-    assert.equal(verbOf(real), "bought");
-    assert.equal(verbOf(shadow), "would buy");
+    assert.equal(verbOf(asTrade(real)), "bought");
+    assert.equal(verbOf(asTrade(shadow)), "would buy");
   });
 
   it("the outcome arm alone is enough, for a row written before the flag existed", () => {
     const [beat] = beatsOf([t({ at: 1, shadow: undefined, outcome: "shadow" })], [agent()]);
-    assert.equal(verbOf(beat!), "would buy");
+    assert.equal(verbOf(asTrade(beat)), "would buy");
+  });
+
+  it("A HOLD REACHES THE FEED, AND BORROWS NO VERB TO DO IT", () => {
+    // The line that dropped it: `if (action !== "buy" && action !== "sell")
+    // continue`. Holds and pure theses already pass the publish gate with
+    // outcome "view" and already carry the agent's reasoning — most of what a
+    // strategist produces on a quiet day was being filtered out one line above
+    // the renderer, on the screen whose complaint is that nothing happens.
+    const [held] = beatsOf([t({ at: 2, action: "hold", outcome: "view", head: "holding TSLA" })], [agent()]);
+    assert.ok(held);
+    assert.equal(held.kind, "view", "a hold is not a trade");
+    // And it is rendered from the publisher's sentence, never conjugated here.
+    assert.equal(held.kind === "view" && held.head, "holding TSLA");
+  });
+
+  it("a view with no words at all is not a post", () => {
+    // A row with neither a head nor a reason is a database row, not something
+    // an agent said. Rendering it would put a nameless empty card on the feed.
+    assert.deepEqual(
+      beatsOf([t({ at: 3, action: null, symbol: null, head: "", reason: null })], [agent()]),
+      [],
+    );
   });
 
   it("`lastLine` renders the publisher's own head, which carries the conditional", () => {

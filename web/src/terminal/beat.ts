@@ -11,18 +11,12 @@ export interface Actor {
   strategy: StrategyId;
 }
 
-export interface Part {
-  actor: Actor;
-  at: number;
-  sizeUsd: number | null;
-  reason: string;
-}
-
 interface Core {
   id: string;
   at: number;
-  action: Action;
-  symbol: string;
+  actor: Actor;
+  /** The agent's own take, already run through `takeFor`. May be empty. */
+  reason: string;
   sizeUsd: number | null;
   /**
    * NOTHING CAME OF IT, AND NOTHING COULD HAVE.
@@ -39,21 +33,42 @@ interface Core {
 }
 
 /**
- * One thing an agent did, at a time. Attribution is not optional: a beat with
- * nobody attached cannot be built.
+ * One thing an agent did OR SAID, at a time. Attribution is not optional: a
+ * beat with nobody attached cannot be built.
+ *
+ * TWO ARMS BECAUSE THERE ARE TWO CLAIMS. A trade has a verb, a symbol and a
+ * direction, and `verbOf` builds a sentence out of them. A view has none of
+ * those — a hold, or a thesis about the market with no instrument attached —
+ * and the only honest sentence for it is the one the PUBLISHER wrote, because
+ * the publisher is the thing that knows what happened. Giving a view an
+ * `action` and letting the rail conjugate it is how "@robin bought TSLA"
+ * appears under a decision that bought nothing.
+ *
+ * `chorus` is gone. It was declared, rendered and never constructed —
+ * `beatsOf` only ever emitted `trade` — so the branch in wire.tsx, the parts
+ * list and `FacesOn` were all dead weight standing in the way of this change.
  */
 export type Beat =
-  | (Core & { kind: "trade"; actor: Actor; reason: string })
-  | (Core & { kind: "chorus"; actors: Actor[]; parts: Part[] });
+  | (Core & { kind: "trade"; action: Action; symbol: string })
+  | (Core & {
+      kind: "view";
+      /**
+       * The publisher's own sentence, rendered verbatim.
+       *
+       * Never rebuilt from `action`: `head` is where the conditional lives
+       * ("would buy TSLA 5.00 USDG"), and honesty.test.ts pins that no
+       * terminal module conjugates a past-tense verb without consulting
+       * `shadow`. A view has no verb of its own, so it borrows none.
+       */
+      head: string;
+      /** Present when the view is about something, absent when it is not. */
+      symbol: string | null;
+    });
 
 /** What the rail draws, top to bottom. Presentation, not domain. */
 export type Lane =
   | { kind: "beat"; id: string; beat: Beat }
   | { kind: "lull"; id: string; ms: number };
-
-export function castOf(b: Beat): Actor[] {
-  return b.kind === "chorus" ? b.actors : [b.actor];
-}
 
 /**
  * The verb, and the conditional that has to survive into it.
@@ -63,11 +78,12 @@ export function castOf(b: Beat): Actor[] {
  * sees. The publisher already bakes the conditional into `head` for exactly
  * this reason; the rail lays the facts out itself, so it has to make the same
  * distinction rather than inherit it.
+ *
+ * TAKES A TRADE, NOT A BEAT. A view has no direction to conjugate, and a
+ * signature that accepted one would invite exactly the fallback this function
+ * exists to prevent.
  */
-export function verbOf(b: Beat): string {
-  const many = b.kind === "chorus";
-  // The conditional is the same for one agent or twenty: "would buy" already
-  // says nothing happened, and there is no plural of it that says less.
+export function verbOf(b: Extract<Beat, { kind: "trade" }>): string {
   if (b.shadow) return `would ${b.action}`;
   switch (b.action) {
     case "buy":
@@ -75,7 +91,7 @@ export function verbOf(b: Beat): string {
     case "sell":
       return "sold";
     case "hold":
-      return many ? "are holding" : "is holding";
+      return "is holding";
     default: {
       const _x: never = b.action;
       return _x;
@@ -84,14 +100,7 @@ export function verbOf(b: Beat): string {
 }
 
 export function whoOf(b: Beat): string {
-  if (b.kind === "trade") return b.actor.handle;
-  return spellCast(b.actors.map((a) => a.handle));
-}
-
-/** Home's form, so the two screens agree: three names, then a count. */
-export function spellCast(names: string[]): string {
-  const shown = names.slice(0, 3).join(", ");
-  return names.length > 3 ? `${shown} +${names.length - 3}` : shown;
+  return b.actor.handle;
 }
 
 function actorOf(t: Thesis, agents: Map<string, LiveAgent>): Actor | null {
@@ -105,44 +114,73 @@ function actorOf(t: Thesis, agents: Map<string, LiveAgent>): Actor | null {
   };
 }
 
+/**
+ * THE FEED USED TO DROP MOST OF WHAT THE AGENTS SAID.
+ *
+ * `if (action !== "buy" && action !== "sell") continue` threw away every hold
+ * and every pure thesis — rows that already pass the publish gate with
+ * `outcome: "view"`, already carry the agent's reasoning, and are most of what
+ * a strategist produces on a quiet day. The owner's complaint was that nothing
+ * happens on the feed; a large part of what was happening was being filtered
+ * out one line above the renderer.
+ *
+ * Widening it roughly doubles the feed on its own, before any change to how
+ * often agents post.
+ */
 export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
   const bySlug = new Map(agents.map((a) => [a.slug, a]));
-  const parts: (Part & { action: Action; symbol: string; shadow: boolean })[] = [];
+  const out: Beat[] = [];
 
   for (const t of theses) {
-    const action = t.action;
-    if (action !== "buy" && action !== "sell") continue;
-    if (!t.symbol || t.at == null) continue;
+    if (t.at == null) continue;
     const actor = actorOf(t, bySlug);
     if (!actor) continue;
-    const symbol = t.symbol.toUpperCase();
-    parts.push({
+    const at = t.at;
+    const reason = takeFor(t.reason, bySlug.get(actor.slug)?.thesis);
+    // Carried from the published row. `shadow` is set by the publisher; the
+    // `outcome` check is the belt to it, for a row written before the flag
+    // existed.
+    const shadow = t.shadow === true || t.outcome === "shadow";
+    const sizeUsd = sizeOf(t);
+    const action = t.action;
+
+    if ((action === "buy" || action === "sell") && t.symbol) {
+      const symbol = t.symbol.toUpperCase();
+      out.push({
+        kind: "trade",
+        id: `${symbol}-${action}-${actor.slug}-${at}`,
+        at,
+        actor,
+        reason,
+        sizeUsd,
+        shadow,
+        action,
+        symbol,
+      });
+      continue;
+    }
+
+    // A VIEW NEEDS WORDS OR IT IS NOTHING. `head` is the publisher's sentence
+    // and the only thing a view is rendered from; with neither it nor a reason
+    // there is no post, just a row.
+    const head = t.head.trim();
+    if (!head && !reason) continue;
+    const symbol = t.symbol ? t.symbol.toUpperCase() : null;
+    out.push({
+      kind: "view",
+      id: `view-${actor.slug}-${at}-${symbol ?? ""}`,
+      at,
       actor,
-      at: t.at,
-      sizeUsd: sizeOf(t),
-      reason: takeFor(t.reason, bySlug.get(actor.slug)?.thesis),
-      action,
+      reason,
+      sizeUsd,
+      shadow,
+      head,
       symbol,
-      // Carried from the published row. `shadow` is set by the publisher; the
-      // `outcome` check is the belt to it, for a row written before the flag
-      // existed.
-      shadow: t.shadow === true || t.outcome === "shadow",
     });
   }
 
-  parts.sort((a, b) => b.at - a.at);
-
-  return parts.map((p) => ({
-    id: `${p.symbol}-${p.action}-${p.actor.slug}-${p.at}`,
-    at: p.at,
-    action: p.action,
-    symbol: p.symbol,
-    sizeUsd: p.sizeUsd,
-    shadow: p.shadow,
-    kind: "trade" as const,
-    actor: p.actor,
-    reason: p.reason,
-  }));
+  out.sort((a, b) => b.at - a.at);
+  return out;
 }
 
 const LULL_MS = 3 * 3_600_000;

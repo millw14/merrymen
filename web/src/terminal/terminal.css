@@ -7062,3 +7062,47 @@
 :where(.terminal-host) .alpha-passed[open] > summary {
   margin-bottom: 10px;
 }
+
+/* ── FEED PILLS ───────────────────────────────────────────────────────────
+   Always visible, one tap each. They replaced a modal sheet with eight topic
+   checkboxes behind an icon — a filter a person had to open, read and configure
+   before it did anything, on the tab the product opens to. */
+
+:where(.terminal-host) .feed-pills {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 0 8px;
+  margin: 0;
+}
+
+:where(.terminal-host) .feed-pills::-webkit-scrollbar {
+  display: none;
+}
+
+:where(.terminal-host) .feed-pills button {
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--tx-2);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+:where(.terminal-host) .feed-pills button.on {
+  background: var(--lime);
+  border-color: var(--lime);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* A view is not a trade and must not borrow a trade's colour: the buy/sell
+   accents mean money moved, and the whole point of this arm is that none did. */
+:where(.terminal-host) .wire-beat.view .wire-parts {
+  border-left-color: var(--line);
+}
