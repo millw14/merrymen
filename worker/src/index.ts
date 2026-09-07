@@ -48,6 +48,7 @@ import {
   effectivePerfFeeBps,
   pimlicoBundlerUrl,
   pimlicoPaymasterUrl,
+  ENTRYPOINT,
   robinhoodTestnet,
   grantHasMultihop,
   // Aliased: `grantHasTransfer` is also the name of the dep this file passes
@@ -80,7 +81,7 @@ import {
   type ExecuteHooks,
   type ExecutionResult,
 } from "./executor";
-import { createSponsor, type Sponsor } from "./paymaster";
+import { createSponsor, sponsorWillQuote, type Sponsor } from "./paymaster";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } from "./fills";
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey } from "./revert";
@@ -2661,13 +2662,43 @@ async function main() {
     // chain id is stamped from the grant, so a testnet grant can never reach a
     // mainnet sponsor. Absent unless the house turned it on AND there is a key
     // to build it from.
-    const sponsor: Sponsor | undefined =
+    let sponsor: Sponsor | undefined =
       cfg.sponsorGasEnabled && cfg.bundlerApiKey
         ? createSponsor({
             url: pimlicoPaymasterUrl(grant.chainId, cfg.bundlerApiKey),
             policyId: cfg.sponsorshipPolicyId,
           })
         : undefined;
+
+    // ASKED ONCE, BEFORE ANY TRADE — see sponsorWillQuote.
+    //
+    // A sponsor refusal is NOT a fallback: the trade books `rejected` with
+    // `reject_rule: sponsor-refused` and nothing is sent. So an unfunded
+    // deposit or an exhausted policy would not degrade an agent to
+    // self-paying — it would stop it trading entirely, and the agents that
+    // breaks are the ones that currently WORK, because they are the ones
+    // holding ETH. Turning the switch on would then be strictly worse than
+    // leaving it off, which is not a switch anybody can safely operate.
+    //
+    // Asking here makes it the opposite: no quote, no sponsorship, and the
+    // agent runs exactly as it does today.
+    if (sponsor) {
+      const quote = await sponsorWillQuote(sponsor, {
+        sender: grant.smartAccount as `0x${string}`,
+        entryPoint: ENTRYPOINT.v07 as `0x${string}`,
+        chainId: grant.chainId,
+      });
+      if (!quote.ok) {
+        sponsor = undefined;
+        console.log(`[live] gas sponsor will not quote — self-paying this session: ${quote.why ?? "no reason given"}`);
+        await addEvent(
+          await ensureAgent(grant),
+          "warn",
+          `Gas sponsorship is switched on but the sponsor would not quote, so this agent pays its own ` +
+            `fees this session — exactly as it did before. That is ours to fix, not yours.`,
+        );
+      }
+    }
     const agentId = await ensureAgent(grant);
 
     // THE PEAK COMES BACK IMMEDIATELY AFTER THE ROW EXISTS, and before anything

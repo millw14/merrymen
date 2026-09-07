@@ -187,6 +187,60 @@ export function createSponsor(opts: { url: string; policyId?: string }): Sponsor
   };
 }
 
+/**
+ * WILL THIS SPONSOR ACTUALLY PAY? Asked ONCE, at arm time, before any trade.
+ *
+ * WHY THIS IS NOT PARANOIA. A sponsor refusal is not a fallback — index.ts
+ * books the trade `rejected` with `reject_rule: sponsor-refused` and nothing is
+ * sent. So an unfunded deposit or an exhausted policy does not degrade an agent
+ * to self-paying; it stops it trading entirely, once per tick, silently as far
+ * as the owner can tell. Turning sponsorship on for a fleet without knowing the
+ * answer to this question is therefore strictly more dangerous than leaving it
+ * off, because the agents it would break are the ones that currently WORK.
+ *
+ * Asking once at arm converts that into the opposite: if the sponsor will not
+ * quote, the agent runs exactly as it does today — self-paying, with `no-gas`
+ * refusing the ones that hold no ETH. Enabling the switch can then only ever
+ * help, which is what makes it a safe thing for an operator to turn on.
+ *
+ * A QUOTE, NOT A COMMITMENT. `pm_getPaymasterStubData` is the same read the
+ * executor's own gas probe makes. Nothing is signed, nothing is broadcast, and
+ * a paymaster that answers here has not promised to pay for any particular
+ * operation later — a per-op refusal is still possible and still handled where
+ * it always was.
+ *
+ * DEFAULTS TO USABLE ON AN UNREADABLE ANSWER. A network blip at arm must not
+ * cost an agent its sponsorship for the life of the process: the per-op path
+ * already refuses correctly, so the conservative direction here is to proceed
+ * and let the real call decide.
+ */
+export async function sponsorWillQuote(
+  sponsor: Sponsor,
+  args: { sender: `0x${string}`; entryPoint: `0x${string}`; chainId: number },
+): Promise<{ ok: boolean; why?: string }> {
+  try {
+    await sponsor.paymaster.getPaymasterStubData({
+      sender: args.sender,
+      nonce: 0n,
+      callData: "0x",
+      callGasLimit: 100_000n,
+      verificationGasLimit: 100_000n,
+      preVerificationGas: 100_000n,
+      maxFeePerGas: 1_000_000_000n,
+      maxPriorityFeePerGas: 1_000_000_000n,
+      entryPointAddress: args.entryPoint,
+      chainId: args.chainId,
+      context: sponsor.paymasterContext,
+    } as unknown as GetPaymasterStubDataParameters);
+    return { ok: true };
+  } catch (e) {
+    // SponsorRefused is what our own wrapper throws; anything else is a
+    // transport problem. Both mean the same thing to the caller — do not rely
+    // on this sponsor — and the message is what tells an operator which.
+    return { ok: false, why: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 /** `0x…` or a bigint or a number → bigint. Anything else → undefined, never 0n. */
 function asBigint(v: unknown): bigint | undefined {
   if (typeof v === "bigint") return v;
