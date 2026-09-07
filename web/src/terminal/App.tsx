@@ -32,7 +32,9 @@ import {
 } from "./live";
 
 import { Agent } from "./screens/Agent";
+import { Alpha } from "./screens/Alpha";
 import { Board } from "./screens/Board";
+import { pathForScreen, screenForPath, TABS } from "./nav";
 
 import { Feed } from "./screens/Feed";
 import { Home } from "./screens/Home";
@@ -47,13 +49,6 @@ import { You } from "./screens/You";
 import { TabIcon } from "./ui";
 import { FirstVisit } from "./FirstVisit";
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: "home", label: "Home" },
-  { id: "feed", label: "Feed" },
-  { id: "agent", label: "Agent" },
-  { id: "board", label: "Board" },
-  { id: "you", label: "You" },
-];
 
 const HOME_SCREEN: Screen = { kind: "tab", tab: "home" };
 const desktopSnapshot = () => window.matchMedia("(min-width: 1100px)").matches;
@@ -96,14 +91,11 @@ export function App() {
   const [moneyMode, setMoneyMode] = useState<"deposit" | "withdraw" | null>(
     null,
   );
-  const screen: Screen =
-    moneyMode && !desktop
-      ? { kind: moneyMode }
-      : desktop &&
-          requestedScreen.kind === "tab" &&
-          (requestedScreen.tab === "feed" || requestedScreen.tab === "board")
-        ? HOME_SCREEN
-        : requestedScreen;
+  // THE DESKTOP REWRITE IS GONE. It silently sent /feed and /leaderboard to Home
+  // above 1100px, so the URL said one thing and the body showed another. That
+  // was survivable while the feed was a side panel; with the feed as the centre
+  // tab it would mean the main button does nothing on desktop.
+  const screen: Screen = moneyMode && !desktop ? { kind: moneyMode } : requestedScreen;
   const [tab, setTab] = useState<Tab>("home");
   const [tokenTab, setTokenTab] = useState<TokenTab>("buys");
   const perTrade = String(account?.status.grant?.caps.perTradeUsdg ?? "");
@@ -193,11 +185,13 @@ export function App() {
   };
   const goTab = (next: Tab) => {
     setMoneyMode(null);
-    if (next === "feed" || next === "board") setSidebarSection(next);
     setTab(next);
     setScreen({ kind: "tab", tab: next });
   };
-  const activeTab = screen.kind === "tab" ? screen.tab : tab;
+  // FROM THE URL, not from the click history. `tab` is only ever written by
+  // goTab, so a cold load of /alpha left the bar highlighting Home until the
+  // user clicked something.
+  const activeTab = screen.kind === "tab" ? screen.tab : requestedScreen.kind === "tab" ? requestedScreen.tab : tab;
   const token =
     screen.kind === "token" ? tokenById(live.tokens, screen.id) : undefined;
   const listedAgent =
@@ -217,7 +211,7 @@ export function App() {
     }).catch(e=>{if(alive)setProfileError(e.message);});
     return()=>{alive=false;};
   },[profileSlug]);
-  useEffect(()=>{if(pathname==="/feed")setSidebarSection("feed");else if(pathname==="/leaderboard")setSidebarSection("board");else if(pathname==="/agent")setSidebarSection("agents");},[pathname]);
+  useEffect(()=>{if(pathname==="/agent")setSidebarSection("agents");},[pathname]);
   const agent=profile ?? listedAgent;
   const mine = account?.status.exists && live.mine ? {...live.mine, statusLabel: account.status.mode === "paper" ? "Paper trading" : account.status.mode === "live" ? "Running" : account.status.mode === "idle" ? "Idle" : "Waiting for worker"} : null;
   // THE SHELL FOR A VISITOR WITH NO AGENT — and every figure on it is unknown,
@@ -263,6 +257,7 @@ export function App() {
             tokens={live.tokens}
             agents={live.agents}
             theses={live.theses}
+            read={live.reads.board}
             mine={mine}
             tokenTab={tokenTab}
             onTokenTab={setTokenTab}
@@ -301,15 +296,8 @@ export function App() {
             onLimits={() => openScreen({ kind: "limits" })}
           />
         )}
-        {screen.kind === "tab" && screen.tab === "board" && (
-          <Board
-            read={live.reads.board}
-            agents={live.agents}
-            theses={live.theses}
-            mine={mine}
-            onProfile={(slug) => openScreen({ kind: "profile", slug })}
-            onDesk={() => goTab("agent")}
-          />
+        {screen.kind === "tab" && screen.tab === "alpha" && (
+          <Alpha onToken={(id) => openScreen({ kind: "token", id })} />
         )}
         {screen.kind === "tab" && screen.tab === "you" && <div className="hosted-account-links"><a href="/settings">Settings</a><a href="/grant">Manage wallet & permissions</a>{account?.session.hosted && account.session.address && <button onClick={()=>{void requestJson("/api/auth/logout",{method:"POST"}).then(()=>{setLive(seedLive());setAccount(null);setTurns([]);setMoneyMode(null);setChatDraft("");refreshAccount();}).catch(e=>setLoadError(e.message));}}>Sign out</button>}</div>}
         {screen.kind === "tab" && screen.tab === "you" && (
@@ -446,20 +434,4 @@ export function App() {
         )}
     </div></div>
   );
-}
-function screenForPath(path: string): Screen {
-  if(path.startsWith("/t/")) return {kind:"token",id:decodeURIComponent(path.slice(3))};
-  if(path.startsWith("/a/")) return {kind:"profile",slug:decodeURIComponent(path.slice(3))};
-  if(path==="/search") return {kind:"search"};
-  if(path==="/create") return {kind:"create"};
-  if(path==="/settings") return {kind:"settings"};
-  if(path==="/grant") return {kind:"grant"};
-  if(path==="/limits") return {kind:"limits"};
-  return {kind:"tab",tab:path==="/agent"?"agent":path==="/you"?"you":path==="/feed"?"feed":path==="/leaderboard"?"board":"home"};
-}
-function pathForScreen(screen: Screen): string {
-  if(screen.kind==="token") return `/t/${encodeURIComponent(screen.id)}`;
-  if(screen.kind==="profile") return `/a/${encodeURIComponent(screen.slug)}`;
-  if(screen.kind==="tab") return ({home:"/",agent:"/agent",you:"/you",feed:"/feed",board:"/leaderboard"})[screen.tab];
-  return `/${screen.kind}`;
 }

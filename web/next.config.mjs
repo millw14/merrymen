@@ -31,6 +31,24 @@ const nextConfig = {
   // core lives outside the web/ dir (packages/core, resolved via tsconfig
   // paths) — externalDir lets Next compile it. No workspace dep needed, which
   // is what makes `npm install -g merrymen` possible.
+  // ── URLS PEOPLE ALREADY HAVE ────────────────────────────────────────
+  //
+  // The board tab retired onto Home, and /leaderboard is a link testers have
+  // open and have shared. `screenForPath` already resolves it to Home, so it
+  // renders correctly either way; this normalises the address bar so nobody is
+  // left looking at a URL for a screen that no longer exists.
+  //
+  // NOT `redirect()` inside the page. `(app)/layout.tsx` mounts the terminal
+  // and never renders `children`, so a redirect written there may never run —
+  // it would look right in review and do nothing.
+  //
+  // A REDIRECT IS NOT A REWRITE. venue.test.ts bans `rewrites(` and gives the
+  // reason: a rewrite is same-origin, so the browser attaches the reader's
+  // session cookie and Next forwards it upstream. A redirect sends the browser
+  // somewhere with no such thing attached, and the destination here is our own.
+  async redirects() {
+    return [{ source: "/leaderboard", destination: "/", permanent: false }];
+  },
   experimental: {
     externalDir: true,
   },

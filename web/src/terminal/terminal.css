@@ -6851,3 +6851,214 @@
     max-width: none;
   }
 }
+
+/* ── ALPHA ────────────────────────────────────────────────────────────────
+   The holder desk. Dense on purpose: it is read by people who already know
+   what FDV and a bonding curve are, and the owner asked for "not too long
+   text, crypto jargon". Everything here is scoped under .terminal-host for the
+   same reason the rest of this file is — legacy.css is quarantined by import
+   site and the terminal never loads it. */
+
+:where(.terminal-host) .alpha-page {
+  gap: 18px;
+}
+
+:where(.terminal-host) .alpha-tier {
+  font-size: 12px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+:where(.terminal-host) .alpha-lock {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 22px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--card);
+}
+
+:where(.terminal-host) .alpha-lock h2 {
+  margin: 0;
+  font-size: 19px;
+}
+
+:where(.terminal-host) .alpha-lock p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--tx-2);
+}
+
+:where(.terminal-host) .alpha-count {
+  font-size: 13px;
+  color: var(--faint);
+}
+
+:where(.terminal-host) .alpha-count b {
+  color: var(--tx);
+  font-weight: 600;
+}
+
+:where(.terminal-host) .alpha-perks {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--tx-2);
+}
+
+:where(.terminal-host) .alpha-go {
+  align-self: flex-start;
+  padding: 9px 16px;
+  border-radius: 999px;
+  background: var(--lime);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+:where(.terminal-host) .alpha-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+:where(.terminal-host) .alpha-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+/* Passed coins are still fully legible — dimmed, never hidden. The point of
+   this half of the page is that somebody can disagree with the scout. */
+:where(.terminal-host) .alpha-row.out {
+  background: transparent;
+}
+
+/* A SIBLING BUTTON, not a wrapper. The figures and the research line sit
+   outside it, because nesting readable rows inside one <button> is invalid
+   HTML and swallows their text into the button's accessible name. */
+:where(.terminal-host) .alpha-hit {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+:where(.terminal-host) .alpha-name {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+:where(.terminal-host) .alpha-name b {
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+:where(.terminal-host) .alpha-chip {
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+:where(.terminal-host) .alpha-chip.up {
+  color: var(--up);
+  border-color: color-mix(in srgb, var(--up) 40%, transparent);
+}
+
+:where(.terminal-host) .alpha-chg {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+:where(.terminal-host) .alpha-chg.up {
+  color: var(--up);
+}
+
+:where(.terminal-host) .alpha-chg.down {
+  color: var(--down);
+}
+
+:where(.terminal-host) .alpha-say {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--tx-2);
+}
+
+/* Marks, not a score out of five — a rating is a claim this is not making. */
+:where(.terminal-host) .alpha-say .pips {
+  color: var(--lime);
+  font-size: 10px;
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+
+:where(.terminal-host) .alpha-figs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--tx-2);
+}
+
+:where(.terminal-host) .alpha-figs i {
+  margin-right: 5px;
+  font-style: normal;
+  color: var(--faint);
+}
+
+:where(.terminal-host) .alpha-research {
+  margin: 0;
+  font-size: 11px;
+  color: var(--faint);
+  overflow-wrap: anywhere;
+}
+
+:where(.terminal-host) .alpha-passed > summary {
+  cursor: pointer;
+  padding: 10px 0;
+  font-size: 13px;
+  color: var(--tx-2);
+}
+
+:where(.terminal-host) .alpha-passed > summary span {
+  color: var(--faint);
+}
+
+:where(.terminal-host) .alpha-passed[open] > summary {
+  margin-bottom: 10px;
+}

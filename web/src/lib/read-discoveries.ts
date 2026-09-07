@@ -22,7 +22,7 @@ import {
 import { resolveConfig } from "../../../worker/src/settings";
 import { resolveLlm } from "../../../worker/src/llm";
 import { createMemecoinScout } from "../../../worker/src/strategist/memecoin-scout";
-import { researchCoins, scoutFieldsFor } from "../../../worker/src/strategist/coin-research";
+import { researchCoins, scoutFieldsFor, type ScoutSiteFields } from "../../../worker/src/strategist/coin-research";
 
 /**
  * What is trading on this chain.
@@ -347,6 +347,26 @@ async function rankUncached(
 ): Promise<{
   picks: { pool: GeckoPool; conviction: number; reason: string }[];
   /**
+   * Offered to the model and NOT chosen.
+   *
+   * The coins page shows what was picked; this is the other half of the same
+   * judgement, and it is the half that is actually hard to get anywhere else.
+   * Optional because the closed paths below return without a model call at all,
+   * and an empty array there would claim the scout looked and rejected
+   * everything — which is the one thing `why` exists to prevent.
+   */
+  passed?: readonly GeckoPool[];
+  /**
+   * What was read about each coin before the model saw it, keyed by lowercased
+   * token address.
+   *
+   * Booleans and counts only — never the launcher's prose, which is an
+   * instruction channel (memecoin-scout.ts:60-70). Absent whenever no browser
+   * is configured on this service, which is most of the time; absent and empty
+   * are different and the reader must say which.
+   */
+  research?: ReadonlyMap<string, ScoutSiteFields>;
+  /**
    * Why there are no verdicts, when there are none.
    *
    * "no-model", "model-failed" and "chose nothing" are three different facts and
@@ -380,7 +400,11 @@ async function rankUncached(
       });
       research = new Map([...found].map(([k, r]) => [k, scoutFieldsFor(r)]));
     }
-    return await createMemecoinScout(creds).rank(kept, nowSec, research);
+    // The research travels back out with the verdicts rather than being
+    // discarded at the end of this function. It was already paid for — one
+    // batched chain read and at most a handful of page visits — and it is the
+    // working behind the one-line reason the coins page shows.
+    return { ...(await createMemecoinScout(creds).rank(kept, nowSec, research)), research };
   } catch {
     return { picks: [] };
   }
@@ -556,6 +580,32 @@ export async function readPoolFor(
 interface Shared {
   payload: Payload;
   unscreened: Map<string, DiscoveryRow>;
+  alpha: AlphaExtras;
+}
+
+/**
+ * THE SCOUT'S WORKING — everything the coins page throws away.
+ *
+ * `/api/discoveries` is public and always will be: the verdict on a listed coin
+ * is what makes that page worth loading, and the plan is explicit that gating
+ * it "would empty the panel for every viewer". So this is deliberately NOT a
+ * copy of the payload behind a lock — it is the two things the payload drops.
+ *
+ * `passed` is the other half of the same judgement: the coins the model was
+ * shown and declined. `research` is what was read about each coin before the
+ * model saw it. Both are already paid for and neither is reachable over HTTP.
+ */
+export interface AlphaExtras {
+  /** Screened in, offered to the model, not chosen. Empty is a real answer. */
+  passed: DiscoveryRow[];
+  /**
+   * Per-coin research, keyed by lowercased token address.
+   *
+   * `null` — not the empty object — when no browser was configured, because
+   * "we did not look" and "we looked and the site published nothing" are
+   * different facts about a coin and only one of them is about the coin.
+   */
+  research: Record<string, ScoutSiteFields> | null;
 }
 
 /** What the index said about the market, before anything is built on top. */
@@ -801,5 +851,27 @@ async function build(): Promise<Shared> {
     truncated,
     degraded,
   };
-  return { payload, unscreened };
+  // The working, for the one screen that is allowed to see it. Built from
+  // `unscreened` so a passed-over coin renders with the same figures and the
+  // same caveats as a picked one — and carrying `verdict: null`, which is
+  // exactly what it is.
+  const alpha: AlphaExtras = {
+    passed: (scoutRes.passed ?? [])
+      .map((p) => unscreened.get(p.tokenAddress.toLowerCase()))
+      .filter((r): r is DiscoveryRow => r !== undefined),
+    research: scoutRes.research ? Object.fromEntries(scoutRes.research) : null,
+  };
+  return { payload, unscreened, alpha };
+}
+
+/**
+ * The payload plus the scout's working. Same single-flight read as `sharedRead`
+ * — calling this costs nothing a viewer of the coins page has not already paid.
+ *
+ * Module-scoped on purpose: there is no HTTP route that serves this, and the
+ * one route that may serve part of it (`/api/alpha`) checks a holder balance
+ * first.
+ */
+export function sharedAlpha(): Promise<{ payload: Payload; alpha: AlphaExtras }> {
+  return sharedReadFull().then((s) => ({ payload: s.payload, alpha: s.alpha }));
 }

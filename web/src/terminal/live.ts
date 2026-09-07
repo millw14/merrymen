@@ -3,7 +3,21 @@ import { STOCK_TOKENS } from "@merrymen/core";
 import { parseStrategy, strategyLabel, type StrategyGlance } from "./strategy";
 import { whyLine } from "./why";
 
-export type Tab = "home" | "feed" | "agent" | "board" | "you";
+/**
+ * THE FIVE THINGS THE BAR CAN BE ON.
+ *
+ * IDs, not labels. `board` left and `alpha` arrived, and the other three kept
+ * their ids on purpose even though their labels changed: these strings are
+ * wired into TabIcon's exhaustive switch, pathForScreen's record, the
+ * `data-screen` attribute CSS selects on, and FirstVisit. Renaming `agent` to
+ * `chat` or `you` to `profile` would be churn across five files for nothing a
+ * reader of the screen can see.
+ *
+ * The leaderboard is not gone — it moved onto HOME, where a balance and a
+ * ranking answer the same question ("how am I doing") and used to be two taps
+ * apart.
+ */
+export type Tab = "home" | "feed" | "agent" | "alpha" | "you";
 export type TokenTab = "held" | "buys";
 export type Screen =
   | { kind: "tab"; tab: Tab }

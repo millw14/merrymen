@@ -9,7 +9,7 @@ import {
   ArrowDownWideNarrow,
   ChevronDown,
 } from "lucide-react";
-import { Coin, Face, TabIcon } from "./ui";
+import { Coin, Face, LogoMark, TabIcon } from "./ui";
 import {
   money,
   coinPrice,
@@ -58,7 +58,13 @@ export function DesktopHeader({
         onClick={() => onTab("home")}
         aria-label="Merrymen home"
       >
-        <TabIcon id="agent" />
+        {/*
+          THE BRAND IS NOT A TAB. It borrowed the tab bar's icon for `agent`,
+          which happened to be the logo — so moving the logo to the feed tab
+          would have turned the desktop wordmark into a speech bubble, with
+          nothing failing to compile and no test noticing.
+        */}
+        <LogoMark size={15} />
         <span>merrymen</span>
       </button>
       <button

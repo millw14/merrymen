@@ -284,7 +284,19 @@ export function Spark({ values, down, small }: { values: number[]; down?: boolea
   );
 }
 
-export function TabIcon({ id }: { id: "home" | "feed" | "agent" | "board" | "you" }) {
+/**
+ * THE LOGO IS THE CENTRE BUTTON, and always was.
+ *
+ * It rendered for `agent`, which sat in the middle of a five-wide bar — so the
+ * owner already read the mark as "the main tab" and asked for the feed to be
+ * under it. Moving `<LogoMark/>` from agent to feed is the whole of that
+ * change; chat takes a speech bubble, and alpha the freed slot.
+ *
+ * Typed as `Tab` rather than a hand-copied union, so the `never` in the default
+ * arm is a real exhaustiveness check: add a tab and this file fails to compile
+ * until it has an icon.
+ */
+export function TabIcon({ id }: { id: import("./live").Tab }) {
   switch (id) {
     case "home":
       return (
@@ -293,23 +305,21 @@ export function TabIcon({ id }: { id: "home" | "feed" | "agent" | "board" | "you
         </svg>
       );
     case "feed":
+      // The mark, in the middle. This is the "LOGO tab".
+      return <LogoMark size={15} />;
+    case "agent":
       return (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-          <path d="M6 4v16" />
-          <circle cx="6" cy="8" r="1.9" fill="currentColor" stroke="none" />
-          <circle cx="6" cy="16" r="1.9" fill="currentColor" stroke="none" />
-          <path d="M11 8h8M11 16h6" />
+          <path d="M20.5 12c0 3.8-3.8 6.9-8.5 6.9a10 10 0 0 1-2.6-.34L4.4 20l1.2-3.4A6.4 6.4 0 0 1 3.5 12C3.5 8.2 7.3 5.1 12 5.1s8.5 3.1 8.5 6.9Z" />
         </svg>
       );
-    case "agent":
-      return <LogoMark size={15} />;
-    case "board":
+    case "alpha":
+      // A rising edge with a mark on it — a call, not a chart. Deliberately not
+      // the bar chart the leaderboard used, which now lives on Home.
       return (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
-          <path d="M9.6 20V9.2h4.8V20" />
-          <path d="M3.4 20v-6.4h6.2" />
-          <path d="M14.4 13.6h6.2V20" />
-          <path d="M2.6 20h18.8" />
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+          <path d="M3.5 16.4 9 10.6l3.6 3.4 6.4-7.2" />
+          <path d="M15.2 6.4h4.4v4.3" />
         </svg>
       );
     case "you":

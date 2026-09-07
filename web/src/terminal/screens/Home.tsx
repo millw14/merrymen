@@ -1,4 +1,5 @@
 import { PerformanceChart } from "../DitherChart";
+import { Board } from "./Board";
 import { useMemo } from "react";
 import { curveReturn } from "../beat";
 import {
@@ -31,6 +32,7 @@ export function Home({
   onDeposit,
   onSearch,
   onDesk,
+  read,
 }: {
   tokens: LiveToken[];
   agents: LiveAgent[];
@@ -43,6 +45,8 @@ export function Home({
   onDeposit: () => void;
   onSearch: () => void;
   onDesk: () => void;
+  /** Whether the leaderboard READ landed — quiet and unreadable are different. */
+  read: import("../live").ReadState;
 }) {
   // A count we do not have sorts last and filters out — it is not a zero, but
   // it is also not evidence that anybody bought anything, so an unread row does
@@ -66,10 +70,6 @@ export function Home({
           .sort((a, b) => (b.change24hPct ?? 0) - (a.change24hPct ?? 0))
           .slice(0, 8);
 
-  const wins = useMemo(
-    () => weekWins(agents, theses, mine),
-    [agents, theses, mine],
-  );
   const eq = mine?.equity ?? null;
   const chg = mine?.chg24 ?? null;
   const [whole, frac] = money(eq).replace("$", "").split(".");
@@ -113,28 +113,29 @@ export function Home({
         )}
       </header>
 
-      {wins.length > 0 && (
-        <section className="week-block">
-          <h2 className="week-label">Wins</h2>
-          <div className="week">
-            {wins.map((w) => (
-              <button
-                key={w.agent.slug}
-                type="button"
-                className="week-card"
-                onClick={() => onAgent(w.agent.slug)}
-              >
-                <span className="week-who">
-                  <Face name={w.agent.name} slug={w.agent.slug} />
-                  <strong>{w.agent.handle ?? w.agent.name}</strong>
-                </span>
-                <b className="up">{pctBps(w.ret)}</b>
-                <em>Reported return</em>
-              </button>
-            ))}
-          </div>
-        </section>
-      )}
+      {/*
+        THE LEADERBOARD, NOT A SECOND COPY OF IT.
+
+        This was a "Wins" strip ranking `agent.pnlBps` — the identical quantity
+        Board ranks, under a different heading, two taps away. With the board
+        tab retired into Home they would have been the same list twice on one
+        screen.
+
+        Mounted rather than reimplemented on purpose: Board carries the
+        unreadable-vs-quiet distinction through ReadEmpty, and honesty.test.ts
+        pins that by reading Board.tsx. A local reimplementation would pass that
+        test and lose the property — which is the exact shape of bug the test
+        exists to catch.
+      */}
+      <Board
+        compact
+        read={read}
+        agents={agents}
+        theses={theses}
+        mine={mine}
+        onProfile={onAgent}
+        onDesk={onDesk}
+      />
 
       <section>
         <div className="pills">
@@ -243,25 +244,4 @@ export function Home({
       </section>
     </>
   );
-}
-
-function weekWins(
-  agents: LiveAgent[],
-  theses: Thesis[],
-  mine: LiveMine | null,
-): { agent: LiveAgent; ret: number; made: null }[] {
-  return agents
-    .map((agent) => {
-      const n = Math.min(WEEK, agent.curve.length);
-      const ret = agent.pnlBps;
-      const have = mine?.slug === agent.slug ? mine.equity : null;
-      const made: null = null;
-      return { agent, ret, made };
-    })
-    .filter(
-      (w): w is { agent: LiveAgent; ret: number; made: null } =>
-        w.ret != null && w.ret > 0,
-    )
-    .sort((a, b) => b.ret - a.ret)
-    .slice(0, 8);
 }
