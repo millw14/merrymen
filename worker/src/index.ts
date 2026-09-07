@@ -4811,14 +4811,16 @@ async function main() {
    * third party answered an HTTP request, and conflating the two let a provider
    * outage read as a dead worker.
    */
-  function heartbeat(blockNumber?: bigint) {
+  /**
+   * THE FILE, AND ONLY THE FILE — what the watchdog actually reads.
+   *
+   * Split out of `heartbeat()` so it can be written before anything is armed.
+   * The rest of `heartbeat()` resolves an exec-mode verdict and touches the
+   * shared `agents` row, neither of which exists yet at startup; this half is a
+   * timestamp and a string, and it is the half a supervisor judges liveness by.
+   */
+  function beatFile(mode: string, sponsorGas: boolean, blockNumber?: bigint) {
     const at = Math.floor(Date.now() / 1000);
-    const mode = paperActive() ? "paper" : active?.executor ? "live" : "idle";
-    // WHO PAYS, reported rather than guessed. Only this process resolves it
-    // (sponsorGasEnabled AND a bundler key), and hosted the dashboard runs in a
-    // different container with a different environment — so anything it worked
-    // out for itself could disagree with what the executor actually does.
-    const sponsorGas = gasSponsored();
     try {
       ensureHome();
       writeFileSync(
@@ -4832,6 +4834,17 @@ async function main() {
     } catch {
       // heartbeat is best-effort telemetry — never let it kill the loop
     }
+  }
+
+  function heartbeat(blockNumber?: bigint) {
+    const at = Math.floor(Date.now() / 1000);
+    const mode = paperActive() ? "paper" : active?.executor ? "live" : "idle";
+    // WHO PAYS, reported rather than guessed. Only this process resolves it
+    // (sponsorGasEnabled AND a bundler key), and hosted the dashboard runs in a
+    // different container with a different environment — so anything it worked
+    // out for itself could disagree with what the executor actually does.
+    const sponsorGas = gasSponsored();
+    beatFile(mode, sponsorGas, blockNumber);
     // AND ON A CHANNEL THE DASHBOARD CAN ACTUALLY READ. The file above lives in
     // this worker's own MERRYMEN_HOME; hosted, that is a different directory in
     // a different container from the web service, which reads its own — so every
@@ -6503,6 +6516,32 @@ async function main() {
   // self-hosted, where a stagger is neither needed nor harmful.
   const slot = startupSlotMs(merrymenHome(), cfg.tickSeconds * 1000);
   if (slot > 0) console.log(`[worker] first tick in ${Math.round(slot / 1000)}s — staggered so the fleet does not wake together`);
+
+  /**
+   * BEAT BEFORE THE WAIT. This process is alive; that is the whole question the
+   * file answers, and it is true now rather than one stagger later.
+   *
+   * WHAT HAPPENED WITHOUT IT, measured in production. The watchdog treats a
+   * MISSING beat as stale the moment its 90-second grace expires — `beat ===
+   * null` short-circuits the age comparison, so the 570-second threshold never
+   * applies to a child that has not beaten yet. The stagger is spread over one
+   * whole tick (240s hosted), so every child whose derived slot landed past 90
+   * seconds was SIGKILLed before its first tick ever ran. And the slot is
+   * derived from the tenant, so it is the SAME slot on every restart: those
+   * children were killed, restarted, and killed again, permanently. Roughly
+   * five-eighths of the fleet, and each restart paid for a fresh arm and a
+   * 200,000-block getLogs sweep — which is the same kill → re-arm → rate-limit
+   * loop the orchestrator's own watchdog comment was written about.
+   *
+   * The stagger was right and the heartbeat's contract was right; what was
+   * wrong was making one contingent on the other. `heartbeat()` already says
+   * it: "A heartbeat answers 'is this process alive'. That is true whether or
+   * not a third party answered an HTTP request." It is equally true whether or
+   * not a timer I added has elapsed.
+   *
+   * "idle" is the honest mode here — nothing is armed until the first tick.
+   */
+  beatFile("idle", gasSponsored());
   setTimeout(runLoop, slot);
 }
 

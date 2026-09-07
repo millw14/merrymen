@@ -110,6 +110,32 @@ let cohortPasses = 0;
 const WATCHDOG_STALE_FLOOR_SEC = 180;
 /** Don't watchdog a child until it's had a chance to write its first beat. */
 const WATCHDOG_GRACE_SEC = 90;
+
+/**
+ * How long a child may take to write its FIRST beat, specifically.
+ *
+ * A SEPARATE NUMBER FROM `staleThresholdSec`, because a missing beat and a
+ * stale one are judged differently and one of them used to be judged by
+ * nothing at all: `beat === null` short-circuits the age comparison below, so
+ * the derived 570-second threshold never applied to a child that had not
+ * beaten yet — only the 90-second grace did.
+ *
+ * That was survivable while a child beat almost immediately. It stopped being
+ * survivable when the worker started STAGGERING its first tick across a whole
+ * tick period to spread the boot burst: every child whose derived slot landed
+ * past 90 seconds was SIGKILLed before its first tick ran, and since the slot
+ * is derived from the tenant it took the same slot on every restart and was
+ * killed again, permanently. Measured on the hosted fleet: 18 kills in one
+ * log window, all "never beat".
+ *
+ * The worker now beats at startup, before its staggered wait, which is the
+ * real fix. This is the second half of it: the supervisor's patience for a
+ * first beat is derived from the same tick the stagger is bounded by, so the
+ * two cannot disagree again if either side changes.
+ */
+export function firstBeatGraceSec(tickSeconds: number): number {
+  return WATCHDOG_GRACE_SEC + Math.max(0, Math.ceil(tickSeconds));
+}
 /** Cap a child's heap well below the container so an OOM kills the offender, not the box. */
 const CHILD_MAX_OLD_SPACE_MB = 384;
 /** Give up restarting a child that keeps dying right after start. */
@@ -205,6 +231,14 @@ interface Child {
    * be correct for every child at once.
    */
   staleSec: number;
+  /**
+   * Seconds this child may take to write its FIRST beat.
+   *
+   * Derived alongside `staleSec` and from the same tick, because the worker
+   * staggers its first tick across one whole tick period — see
+   * `firstBeatGraceSec`.
+   */
+  firstBeatSec: number;
 }
 
 /**
@@ -435,12 +469,13 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   await writeBootstrapForChild(tenant, smartAccount);
   const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
   const staleSec = staleThresholdSec(tickSeconds);
+  const firstBeatSec = firstBeatGraceSec(tickSeconds);
   const proc = spawn(
     process.execPath,
     [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
     { cwd: ROOT, env: childEnv(tenant), stdio: ["ignore", "pipe", "pipe"] },
   );
-  const child: Child = { proc, tenant, startedAt: Date.now(), restarts, staleSec };
+  const child: Child = { proc, tenant, startedAt: Date.now(), restarts, staleSec, firstBeatSec };
   children.set(tenant, child);
   const tag = `[${tenant.slice(0, 8)}]`;
   const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
@@ -1686,10 +1721,16 @@ export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
     const ageSec = (Date.now() - child.startedAt) / 1000;
     if (ageSec < WATCHDOG_GRACE_SEC) continue; // give it time to write its first beat
     const beat = heartbeatAt(tenant);
-    const stale = beat === null || nowSec - beat > child.staleSec;
+    // TWO DIFFERENT QUESTIONS. A child that has beaten and gone quiet is judged
+    // by the gap; a child that has never beaten is judged by how long it has
+    // been alive, against a grace that covers its staggered first tick.
+    const firstGrace = child.firstBeatSec;
+    const stale = beat === null ? ageSec > firstGrace : nowSec - beat > child.staleSec;
     if (stale) {
       log(
-        `${tenant} heartbeat stale (${beat === null ? "never beat" : `${nowSec - beat}s`} > ${child.staleSec}s) — SIGKILL + restart`,
+        beat === null
+          ? `${tenant} heartbeat stale (never beat in ${Math.round(ageSec)}s > ${firstGrace}s) — SIGKILL + restart`
+          : `${tenant} heartbeat stale (${nowSec - beat}s > ${child.staleSec}s) — SIGKILL + restart`,
       );
       const restarts = child.restarts;
       children.delete(tenant);
