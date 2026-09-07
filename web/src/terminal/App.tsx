@@ -88,15 +88,26 @@ export function App() {
   const [sidebarSection, setSidebarSection] =
     useState<SidebarSection>("markets");
   const desktop = useSyncExternalStore(subscribeDesktop, desktopSnapshot, () => false);
-  const [moneyMode, setMoneyMode] = useState<"deposit" | "withdraw" | null>(
-    null,
-  );
   // THE DESKTOP REWRITE IS GONE. It silently sent /feed and /leaderboard to Home
   // above 1100px, so the URL said one thing and the body showed another. That
   // was survivable while the feed was a side panel; with the feed as the centre
   // tab it would mean the main button does nothing on desktop.
-  const screen: Screen = moneyMode && !desktop ? { kind: moneyMode } : requestedScreen;
+  //
+  // AND SO IS `moneyMode`. Deposit and withdraw were component state, which
+  // meant the browser's Back button could not dismiss them and the tab bar
+  // disappeared while they were open — the most trapped a person could be in
+  // this shell, on the two screens where money moves. They are routes now, so
+  // Back works, a refresh keeps you there, and the link is shareable.
+  const money =
+    requestedScreen.kind === "deposit" || requestedScreen.kind === "withdraw"
+      ? requestedScreen.kind
+      : null;
+  // On a phone the money panel IS the screen. On desktop it is a side panel
+  // over whatever you were looking at, so the body keeps rendering that — the
+  // one place the URL and the body legitimately differ, because the panel is an
+  // overlay and the page under it did not go anywhere.
   const [tab, setTab] = useState<Tab>("home");
+  const screen: Screen = desktop && money ? { kind: "tab", tab } : requestedScreen;
   const [tokenTab, setTokenTab] = useState<TokenTab>("buys");
   const perTrade = String(account?.status.grant?.caps.perTradeUsdg ?? "");
   const perDay = String(account?.status.grant?.caps.dailyUsdg ?? "");
@@ -152,7 +163,7 @@ export function App() {
         const [session,status]=await Promise.all([requestJson<AccountState["session"]>("/api/auth/session"),requestJson<AccountState["status"]>("/api/grants")]);
         if(alive) {
           setAccount({session,status});
-          if(session.hosted && !session.address){setTurns([]);setChatDraft("");setMoneyMode(null);}
+          if(session.hosted && !session.address){setTurns([]);setChatDraft("");}
           setLive(previous=>({...next,tokens:next.tokens.map(t=>{const old=previous.tokens.find(p=>p.id===t.id);return {...t,priceUsd:t.priceUsd ?? old?.priceUsd ?? null,change24hPct:t.change24hPct ?? old?.change24hPct ?? null};})}));
         }
         await refreshChanges(next.tokens);
@@ -175,16 +186,16 @@ export function App() {
   }, [refreshKey]);
 
   const openScreen = (next: Screen) => {
-    if (next.kind === "deposit" || next.kind === "withdraw") {
-      if(!account?.status.exists) { router.push("/you"); return; }
-      setMoneyMode(next.kind);
+    // There is nothing to fund before an agent exists, and the deposit panel
+    // reads `account.status.grant` — so the guard stays, and it sends people to
+    // the screen that can actually create one.
+    if ((next.kind === "deposit" || next.kind === "withdraw") && !account?.status.exists) {
+      router.push("/you");
       return;
     }
-    setMoneyMode(null);
     setScreen(next);
   };
   const goTab = (next: Tab) => {
-    setMoneyMode(null);
     setTab(next);
     setScreen({ kind: "tab", tab: next });
   };
@@ -226,7 +237,12 @@ export function App() {
       className="app"
       data-screen={screen.kind === "tab" ? screen.tab : screen.kind}
     >
-      <DesktopHeader hasAgent={!!mine} mine={displayMine} onScreen={openScreen} onTab={goTab} />
+      {/* GATED IN JSX, NOT JUST IN CSS. These three were rendered on every
+          device and hidden by a media query, so a phone MOUNTED the desktop
+          header and the desktop rail — and with them a second `AccountEntry`,
+          which polls and fetches like the visible one. Display:none hides a
+          component; it does not stop it running. */}
+      {desktop && <DesktopHeader hasAgent={!!mine} mine={displayMine} onScreen={openScreen} onTab={goTab} />}
       {desktop && (
         <DesktopSidebar
           reads={live.reads}
@@ -249,7 +265,7 @@ export function App() {
         {loadError && <p className="flow-error" role="alert">{loadError} <button onClick={refreshAccount}>Try again</button></p>}
         <FirstVisit account={account} screen={requestedScreen} replies={turns.length} onScreen={openScreen} onQuestion={()=>{setChatDraft("Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
         {!mine && !desktop && screen.kind !== "create" && <AccountEntry account={account} onRefresh={refreshAccount}/>}
-        {screen.kind === "create" && <CreateAgent account={account} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);goTab("agent");setMoneyMode("deposit");}}/>}
+        {screen.kind === "create" && <CreateAgent account={account} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
         {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})}/>}
         {screen.kind === "grant" && <Wallet/>}
         {screen.kind === "tab" && screen.tab === "home" && (
@@ -299,7 +315,7 @@ export function App() {
         {screen.kind === "tab" && screen.tab === "alpha" && (
           <Alpha onToken={(id) => openScreen({ kind: "token", id })} />
         )}
-        {screen.kind === "tab" && screen.tab === "you" && <div className="hosted-account-links"><a href="/settings">Settings</a><a href="/grant">Manage wallet & permissions</a>{account?.session.hosted && account.session.address && <button onClick={()=>{void requestJson("/api/auth/logout",{method:"POST"}).then(()=>{setLive(seedLive());setAccount(null);setTurns([]);setMoneyMode(null);setChatDraft("");refreshAccount();}).catch(e=>setLoadError(e.message));}}>Sign out</button>}</div>}
+        {screen.kind === "tab" && screen.tab === "you" && <div className="hosted-account-links"><a href="/settings">Settings</a><a href="/grant">Manage wallet & permissions</a>{account?.session.hosted && account.session.address && <button onClick={()=>{void requestJson("/api/auth/logout",{method:"POST"}).then(()=>{setLive(seedLive());setAccount(null);setTurns([]);setChatDraft("");refreshAccount();}).catch(e=>setLoadError(e.message));}}>Sign out</button>}</div>}
         {screen.kind === "tab" && screen.tab === "you" && (
           <You
             history={
@@ -379,9 +395,16 @@ export function App() {
             onToken={(id) => openScreen({ kind: "token", id })}
           />
         )}
-        {screen.kind === "withdraw" && account && <FundingPanel mode="withdraw" account={account} onClose={()=>setMoneyMode(null)}/>}
-        {screen.kind === "deposit" && (
-          <FundingPanel mode="deposit" account={account!} onClose={()=>setMoneyMode(null)}/>
+        {/* `account!` USED TO BE SAFE BY ACCIDENT. The only way in was
+            openScreen, which refused before the account existed — so the
+            assertion held because nothing could reach it. Making these routes
+            means anybody can type the URL, and the assertion becomes a crash
+            into the error boundary that says "Couldn't load this page" about a
+            page that loaded fine. The guard moves to the render, where it
+            belongs, and the AccountEntry above says which kind of nothing this
+            is: loading, signed out, or no agent yet. */}
+        {!desktop && money && account && (
+          <FundingPanel key={money} mode={money} account={account} onClose={()=>goTab(tab)}/>
         )}
         {screen.kind === "search" && (
           <Search
@@ -396,14 +419,14 @@ export function App() {
           <LimitsPanel account={account} onClose={()=>goTab(tab)}/>
         )}
       </div>
-      {desktop && moneyMode ? (
+      {desktop && money ? (
         <aside
           className="desktop-money-panel"
-          aria-label={moneyMode === "withdraw" ? "Withdraw funds" : "Add funds"}
+          aria-label={money === "withdraw" ? "Withdraw funds" : "Add funds"}
         >
-          {account && <FundingPanel key={moneyMode} mode={moneyMode} account={account} onClose={()=>setMoneyMode(null)}/>}
+          {account && <FundingPanel key={money} mode={money} account={account} onClose={()=>goTab(tab)}/>}
         </aside>
-      ) : mine ? (
+      ) : desktop && mine ? (
         <DesktopPortfolio
           selectedToken={token}
           mine={mine}
@@ -414,7 +437,7 @@ export function App() {
           onScreen={openScreen}
           onTab={goTab}
         />
-      ) : <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} onRefresh={refreshAccount}/>}</aside>}
+      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} onRefresh={refreshAccount}/>}</aside> : null}
       {screen.kind !== "deposit" &&
         screen.kind !== "withdraw" &&
         screen.kind !== "limits" && (

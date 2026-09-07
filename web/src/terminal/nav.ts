@@ -44,6 +44,12 @@ export function screenForPath(path: string): Screen {
   if (path === "/settings") return { kind: "settings" };
   if (path === "/grant") return { kind: "grant" };
   if (path === "/limits") return { kind: "limits" };
+  // MONEY IS A PLACE, NOT A MODE. These were component state, so Back could not
+  // dismiss the panel and the tab bar vanished while it was open — on the two
+  // screens where a person is most likely to want out. Adding them here is what
+  // makes the browser's own back button work.
+  if (path === "/deposit") return { kind: "deposit" };
+  if (path === "/withdraw") return { kind: "withdraw" };
   // /leaderboard still resolves — it is a URL people have open and have shared.
   // The board moved onto Home rather than disappearing, so that is where it
   // goes. next.config.mjs also normalises the address bar with a redirect; this

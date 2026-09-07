@@ -113,6 +113,39 @@ describe("routing", () => {
   });
 });
 
+describe("money is a place, not a mode", () => {
+  // `moneyMode` was component state. The panel opened, the URL never changed,
+  // and so Back could not dismiss it — while the tab bar hides itself on these
+  // two screens. A person could reach the deposit panel and have no way out but
+  // the app's own close button, on the screen where money moves.
+  const MONEY = ["deposit", "withdraw"] as const;
+
+  it("BOTH ROUND-TRIP THROUGH A URL", () => {
+    for (const kind of MONEY) {
+      const path = pathForScreen({ kind });
+      assert.equal(path, `/${kind}`);
+      assert.deepEqual(screenForPath(path), { kind }, `${kind} does not survive its own URL`);
+    }
+  });
+
+  it("and both have a route file, or they 404 on refresh", () => {
+    for (const kind of MONEY) {
+      assert.ok(
+        existsSync(join(ROOT, `web/src/app/(app)/${kind}/page.tsx`)),
+        `/${kind} has no page stub`,
+      );
+    }
+  });
+
+  it("THE STATE IS GONE, not merely bypassed", () => {
+    // Leaving `moneyMode` in place beside the route gives two sources of truth
+    // for one panel, and the stale one wins whenever a link is followed.
+    const app = codeOf(at("./App.tsx"));
+    assert.ok(!/moneyMode|setMoneyMode/.test(app), "deposit and withdraw are routes now");
+    assert.match(app, /const money =\s*requestedScreen\.kind === "deposit"/, "derived from the URL, not stored");
+  });
+});
+
 describe("what the nav rewrite could have broken quietly", () => {
   it("THE CHAT PROMPT NAMES SCREENS THAT EXIST", () => {
     // The prompt hard-codes the menu, and its own comment records the tester
@@ -138,6 +171,28 @@ describe("what the nav rewrite could have broken quietly", () => {
     // `tab` is only written by goTab, so a cold load of /alpha highlighted Home
     // until something was clicked.
     assert.match(at("./App.tsx"), /const activeTab = screen\.kind === "tab" \? screen\.tab : requestedScreen\.kind === "tab"/);
+  });
+
+  it("A PHONE DOES NOT MOUNT THE DESKTOP SHELL", () => {
+    // display:none hides a component; it does not stop it running. The header,
+    // the rail and the portfolio aside were rendered on every device and hidden
+    // by a media query, so a phone mounted a SECOND `AccountEntry` — polling,
+    // fetching and holding its own state — behind the visible one.
+    const app = codeOf(at("./App.tsx"));
+    for (const c of ["DesktopHeader", "DesktopSidebar", "DesktopPortfolio"]) {
+      const at_ = app.indexOf(`<${c}`);
+      assert.ok(at_ > 0, `${c} is not mounted at all`);
+      assert.match(
+        app.slice(Math.max(0, at_ - 140), at_),
+        /desktop &&|desktop \?/,
+        `${c} renders on phones and is only hidden by CSS`,
+      );
+    }
+    assert.equal(
+      (app.match(/<AccountEntry/g) ?? []).length,
+      2,
+      "one for the phone body and one for the desktop rail — and they are on opposite sides of the gate",
+    );
   });
 
   it("HOME CARRIES THE BOARD, so retiring the tab lost nothing", () => {
