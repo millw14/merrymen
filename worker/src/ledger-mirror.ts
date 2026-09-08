@@ -647,13 +647,51 @@ export async function mirrorTenant(args: {
       const basis = (await child
         .prepare(`SELECT agent_id, mode, symbol, qty_raw, cost_usdg, updated_at FROM cost_basis`)
         .all()) as Record<string, unknown>[];
+      // AN EMPTY CHILD IS NOT A FLAT BOOK — and here that distinction is the
+      // difference between a stale row and a destroyed one.
+      //
+      // The child's sqlite lives in the container and is REBUILT on every
+      // redeploy; this file's own rewind detector reports it ("the child ledger
+      // was rebuilt beneath it"). Positions survive that, because the next tick
+      // re-reads them from the chain. A cost basis cannot: it is history, and
+      // the shared ledger holds the only surviving copy.
+      //
+      // So a wholesale delete keyed on the child's silence deleted real entry
+      // prices — and a holding with no entry price is one BOTH mechanical exits
+      // refuse, so the owner's stop-loss and take-profit went inert on a live
+      // position because a container restarted. Observed end to end: recovered
+      // from the receipts at 11:13, wiped by this line at 12:37.
+      //
+      // The delete is right for an agent the child has something to say about —
+      // a closed position's basis really is gone at the source and an upsert
+      // alone would leave it on the dashboard forever. It is only ever wrong as
+      // an inference from nothing. And a stale row is inert either way: the feed
+      // joins basis to POSITIONS, so a basis for a symbol nobody holds never
+      // appears, and the worker's own reconciler closes it on the next tick that
+      // can see the book.
+      //
+      // The signal is the one this file already computes: `restarted` is set
+      // when a row we know we copied is no longer at its id, which is only
+      // possible if the id space began again. That is a rebuilt ledger stated by
+      // evidence rather than guessed from a row count — and a row count could
+      // not tell these apart anyway, since a book with one closed position and a
+      // book that has forgotten one both report zero.
+      const rebuilt = Object.keys(restarted).length > 0;
       await shared.tx(async (db) => {
         for (const a of agents) {
+          if (rebuilt) continue;
           await db.prepare(`DELETE FROM cost_basis WHERE agent_id = ?`).run(a.smart_account);
         }
+        // UPSERT, because the delete above is now conditional. Without the
+        // delete a rebuilt child re-inserting the rows it does still have would
+        // collide with the primary key and throw the whole snapshot into the
+        // catch below — which would leave the shared ledger stale for a
+        // different reason.
         const ins = db.prepare(
           `INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(agent_id, mode, symbol) DO UPDATE SET
+             qty_raw = excluded.qty_raw, cost_usdg = excluded.cost_usdg, updated_at = excluded.updated_at`,
         );
         for (const b of basis) {
           await ins.run(b.agent_id, b.mode, b.symbol, b.qty_raw, b.cost_usdg, b.updated_at);

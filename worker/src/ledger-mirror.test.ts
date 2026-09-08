@@ -592,3 +592,62 @@ describe("the ledger mirror", () => {
     assert.equal(e.mode, "live");
   });
 });
+
+/**
+ * THE ENTRY PRICE A RESTART DESTROYED.
+ *
+ * The child's sqlite lives in the container and is rebuilt on every redeploy —
+ * this file's own rewind detector says so out loud. Positions survive that,
+ * because the next tick re-reads them from the chain. A cost basis cannot: it is
+ * history, and the shared ledger holds the only copy.
+ *
+ * So the wholesale delete, which is correct for an agent the child has something
+ * to say about, was wrong as an inference from silence. Observed end to end on a
+ * real book: two entry prices recovered from their receipts at 11:13, and gone
+ * again at 12:37 because a container restarted. A holding with no entry price is
+ * one both mechanical exits refuse, so the owner's stop-loss and take-profit
+ * went inert on a live position — displayed, armed, unable to act.
+ */
+describe("an empty child is not a flat book", () => {
+  it("A REBUILT CHILD DOES NOT DELETE THE ENTRY PRICES IT HAS FORGOTTEN", async () => {
+    // Copy a book up, then hand the mirror a NEW child with the same agent and
+    // an id space that starts again — which is what a redeployed container is.
+    // The rewind detector already sees it; this is what it must now protect.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    assert.equal(await count(shared, "cost_basis"), 1, "the basis was mirrored");
+
+    const reborn = new DatabaseSync(":memory:");
+    reborn.exec(SRC);
+    reborn.exec("INSERT INTO agents (smart_account, name, epoch) VALUES ('0xagent','Robin',2)");
+    // It still holds the position — it just cannot say what it cost any more.
+    reborn.exec("INSERT INTO positions VALUES ('0xagent','PEPE','0xp','1','1',2.0,0,'curve',10.0,9)");
+    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(reborn), shared });
+    assert.ok(r.restarted, "the rewind must be detected — that is the signal this rests on");
+
+    const b = (await shared.prepare("SELECT cost_usdg FROM cost_basis WHERE symbol = 'PEPE'").get()) as
+      | { cost_usdg: string }
+      | undefined;
+    assert.ok(b, "the only surviving copy of the entry price must not be deleted by a restart");
+  });
+
+  it("and it re-inserts what it DOES remember without colliding", async () => {
+    // The delete is conditional now, so the insert has to merge. A collision
+    // would throw the whole snapshot into the catch and leave the shared ledger
+    // stale for a different reason.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const reborn = new DatabaseSync(":memory:");
+    reborn.exec(SRC);
+    reborn.exec("INSERT INTO agents (smart_account, name, epoch) VALUES ('0xagent','Robin',2)");
+    reborn.exec("INSERT INTO cost_basis VALUES ('0xagent','live','PEPE','2','7.0',20)");
+    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(reborn), shared });
+    assert.equal(r.failed?.snapshots, undefined, "the snapshot copy must not have thrown");
+    const b = (await shared.prepare("SELECT qty_raw, cost_usdg FROM cost_basis WHERE symbol = 'PEPE'").get()) as {
+      qty_raw: string;
+      cost_usdg: string;
+    };
+    assert.equal(String(b.qty_raw), "2", "the newer reading wins");
+    assert.equal(String(b.cost_usdg), "7.0");
+  });
+});
