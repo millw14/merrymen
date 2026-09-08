@@ -241,6 +241,7 @@ import {
   setPaperBook,
   setAgentName,
   setAgentXHandle,
+  positionsExplained,
   getGasPaidUsdg,
   getNetContributionsUsdg,
   setAgentEpoch,
@@ -5869,7 +5870,30 @@ async function main() {
               contributionsKnown: accounting.contributionsKnown,
               equityComplete: !bookIncomplete,
               gasBasis: gasNow.unpricedTrades > 0 ? "gross" : gasNow.usdg > 0 ? "net" : "unknown",
-              positionHistoryAvailable: false,
+              // ASKED, NOT ASSUMED. This was hardcoded `false`, which is not a
+              // cautious default — it is a claim that there is no position
+              // history, made without looking.
+              //
+              // THE DEADLOCK IT CREATED. Brain's gate downgrades a book to
+              // `hold` at three quality caveats, and a never-traded agent had
+              // exactly three: this one, the audit that has genuinely not run,
+              // and gas basis "unknown" because it has never paid any gas. So
+              // every agent that had not yet traded was structurally forbidden
+              // from trading — it could not trade because it had never traded,
+              // and no amount of funding, gas or signal could reach the third
+              // caveat. Fixing every analyst lens would still have produced a
+              // forced hold.
+              //
+              // The other two caveats stay, because both are TRUE: no
+              // reconciliation has been run, and a book that has paid no gas
+              // genuinely cannot state a net-of-gas figure. Two is under the
+              // threshold, so a clean book can now be traded from — the gate's
+              // judgement is untouched, it is just no longer being fed a
+              // fabricated third failure.
+              positionHistoryAvailable: await positionsExplained(
+                agentId,
+                positions.map((pp) => pp.token),
+              ),
               quarantinedAssetsPresent: quarantine.totalCostUsdg > 0n,
               assessedAt: Math.floor(Date.now() / 1000),
             },

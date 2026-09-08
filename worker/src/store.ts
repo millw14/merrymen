@@ -3117,3 +3117,45 @@ export async function saveTriggerState(agentId: string, state: unknown): Promise
     console.error("[brain] trigger state write failed:", e);
   }
 }
+
+/**
+ * CAN THE LEDGER SAY HOW THE CURRENT POSITIONS WERE ACQUIRED?
+ *
+ * `PortfolioQuality.positionHistoryAvailable`, MEASURED — it was hardcoded
+ * `false` in the snapshot builder, which is not a cautious default but a claim:
+ * "there is no position history". Nobody had asked. And it cost the fleet
+ * everything, because Brain's gate downgrades a book to `hold` at three quality
+ * caveats and a never-traded agent had exactly three — this one, the audit that
+ * has genuinely not run, and gas basis "unknown" because it has never paid any.
+ * So every agent that had not yet traded was structurally forbidden from
+ * trading: it could not trade because it had never traded.
+ *
+ * VACUOUSLY TRUE FOR AN EMPTY BOOK, and that is the point rather than a
+ * loophole. "Nothing can be said about how this book got here" is a statement
+ * about a book with holdings whose origin is missing. A book with no holdings
+ * has no origin to be missing, and answering `false` there conflates "we found
+ * a gap" with "there was nothing to find" — the distinction this codebase draws
+ * everywhere else between empty and unavailable.
+ *
+ * A READ FAILURE IS `false`, not true: unable to check is not the same as
+ * checked and fine, and the caveat is the safe direction.
+ */
+export async function positionsExplained(agentId: string, tokens: readonly string[]): Promise<boolean> {
+  const want = [...new Set(tokens.map((t) => t.toLowerCase()))].filter(Boolean);
+  if (want.length === 0) return true;
+  try {
+    const rows = (await getDb()
+      .prepare(
+        // Any epoch. A fill booked before an epoch bump still explains how the
+        // token got here — epoch scopes what may be MEASURED over, not what is
+        // remembered.
+        `SELECT DISTINCT LOWER(buy_token) AS token FROM trades
+          WHERE agent_id = ? AND status = 'landed' AND buy_token IS NOT NULL`,
+      )
+      .all(agentId)) as { token: string }[];
+    const seen = new Set(rows.map((r) => r.token));
+    return want.every((t) => seen.has(t));
+  } catch {
+    return false;
+  }
+}
