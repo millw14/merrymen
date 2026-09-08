@@ -89,7 +89,7 @@ describe("what it does when confirmed", () => {
     // uses, carrying nothing but `writes` — and /api/settings strips every
     // house-owned field again on the server, so this is one of two gates.
     assert.match(CONFIRM, /fetch\("\/api\/settings", \{/);
-    assert.match(CONFIRM, /JSON\.stringify\(settingsPayload\(cmd, pending!\.args\)\)/);
+    assert.match(CONFIRM, /JSON\.stringify\(commandPayload\(cmd, pending!\.args\)\)/);
     assert.ok(!/\.\.\.pending/.test(CONFIRM), "the raw args must never be spread into the body");
   });
 

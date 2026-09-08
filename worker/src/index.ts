@@ -91,7 +91,7 @@ import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
 import { takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
-import { claimCommandFile, writeCommandResult } from "./command-files";
+import { claimCommandFile, isExpired, writeCommandResult, type FileCommand } from "./command-files";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs } from "./brain-shadow";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
@@ -2336,16 +2336,107 @@ async function main() {
       // The unlink above WAS the claim, so from here the command is ours and
       // will not be replayed — a lost probe is a button pressed again, a
       // replayed one is gas nobody asked to spend twice.
-      const outcome = cmd.kind === "selftest"
-        ? await runSelftestProbe("dashboard")
-        : { ok: false, line: `unknown command '${cmd.kind}'` };
+      const outcome = await runCommand(cmd);
       writeCommandResult(merrymenHome(), { id: cmd.id, ok: outcome.ok, line: outcome.line, at: Date.now() });
-      await addEvent(agentId, outcome.ok ? "ok" : "err", `selftest: ${outcome.line}`);
+      // LABELLED BY WHAT IT WAS. Every result used to be written into the
+      // owner's event feed as `selftest: …` regardless of kind, which for an
+      // order is a wrong claim about what the agent did, in the one log an
+      // operator reads to work out what a fleet is doing.
+      await addEvent(agentId, outcome.ok ? "ok" : "err", `${cmd.kind}: ${outcome.line}`);
     } catch (e) {
       console.log(`[command] failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       commandInFlight = false;
     }
+  }
+
+  /**
+   * WHAT A CLAIMED COMMAND ACTUALLY DOES — the second of the two gates.
+   *
+   * The channel is deliberately dumb: it carries a kind and a bag of scalars
+   * across three trust boundaries (web → Postgres → a file in this home) and
+   * believes nothing about either. So everything an order is allowed to be is
+   * decided HERE, in the process that holds the key, and again in the route
+   * before the row was ever written. Neither gate relies on the other — the
+   * same rule chat-commands.ts states for settings writes.
+   *
+   * An unknown kind is RECORDED, never run: a typo must not look identical to
+   * a queue that is not being drained.
+   */
+  async function runCommand(cmd: FileCommand): Promise<{ ok: boolean; line: string }> {
+    // ── an order that waited too long is not the order that was placed ──
+    //
+    // Checked before anything else, and checked even for a kind that has no
+    // expiry, so the answer is always about THIS command's own clock. The
+    // claim already consumed it; this decides what to write back. A silently
+    // vanished order and a never-delivered one must not read the same to the
+    // person who clicked.
+    if (isExpired(cmd, Date.now())) {
+      const late = Math.round((Date.now() - (cmd.expiresAt ?? 0)) / 1000);
+      return {
+        ok: false,
+        line: `expired — this was placed for a market ${late}s ago and I will not fill it into a different one. Ask again if you still want it.`,
+      };
+    }
+    if (cmd.kind === "selftest") return runSelftestProbe("dashboard");
+    if (cmd.kind === "trade") return runOrderCommand(cmd);
+    return { ok: false, line: `unknown command '${cmd.kind}'` };
+  }
+
+  /**
+   * AN OWNER'S OWN BUY OR SELL, arriving from the app rather than from Telegram.
+   *
+   * WHY THE VALIDATION IS HERE AND NOT ONLY IN THE ROUTE. Between the route and
+   * this line the order crossed a shared Postgres table, an orchestrator that
+   * can see every tenant's home, and a JSON file. The route's check is the one
+   * that gives the owner a good error; this one is the one that stands between
+   * a string and a signed UserOperation, and it must hold even if every layer
+   * above it is wrong.
+   *
+   * PAUSE IS HONOURED HERE, not at the drain. The drain runs above the tick's
+   * `isPaused()` return, deliberately — you want to be able to probe a paused
+   * agent. An ORDER is the opposite: pause is the owner's stop button, and a
+   * trade that executes through it is the worst surprise this app could
+   * produce. So the gate is per kind, which is why it sits in this function and
+   * not in the caller.
+   */
+  async function runOrderCommand(cmd: FileCommand): Promise<{ ok: boolean; line: string }> {
+    if (isPaused()) {
+      return { ok: false, line: "you have me paused, so I did not place it. Un-pause and ask again." };
+    }
+    const a = cmd.args ?? {};
+    const side = a.side === "buy" || a.side === "sell" ? a.side : null;
+    if (!side) return { ok: false, line: `'${String(a.side)}' is not a buy or a sell` };
+    // A SYMBOL IS A SHORT PLAIN TICKER OR IT IS NOTHING. It is resolved against
+    // the watch set below, so this only has to stop the shapes that have no
+    // business reaching a lookup at all.
+    const symbol = typeof a.symbol === "string" ? a.symbol.trim().toUpperCase() : "";
+    if (!/^[A-Z0-9]{1,12}$/.test(symbol)) return { ok: false, line: `'${String(a.symbol)}' is not a symbol I can look up` };
+    const size = typeof a.usdgAmount === "number" ? a.usdgAmount : Number(a.usdgAmount);
+    // FINITE AND POSITIVE, SAID OUT LOUD. The wall now refuses a non-positive
+    // swap by name too — two gates, neither relying on the other — but NaN and
+    // Infinity have to die before `usdg()` turns them into a BigInt throw.
+    if (!Number.isFinite(size) || size <= 0) {
+      return { ok: false, line: `${String(a.usdgAmount)} is not an amount I can trade` };
+    }
+    // THE OWNER'S OWN CEILING ON A TYPED ORDER. The setting predates this
+    // surface and is named for the other one, but it means the same thing in
+    // both: the most a single chat-typed action may spend. Applying it here
+    // rather than silently inheriting nothing is the point — the sealed
+    // per-trade cap is a wall, and this is the owner's own smaller fence
+    // inside it.
+    const ceiling = cfg.telegramMaxActionUsdg;
+    if (ceiling > 0 && size > ceiling) {
+      return {
+        ok: false,
+        line: `${size} USDG is over your ${ceiling} USDG limit for a chat order. Raise it in Settings if you mean it.`,
+      };
+    }
+    // And from here the wall decides. submitChatTrade reports what the LEDGER
+    // said, so this returns a sentence about a trade that really happened or
+    // really did not.
+    const line = await submitChatTrade(side, symbol, size);
+    return { ok: !/^(🧱|🤔|↩️)/.test(line), line };
   }
 
   /**
@@ -2379,8 +2470,11 @@ async function main() {
     await ensureDecision(probe, source, "pipeline probe (approve dust) — not a market view");
     // equityKnown: false, not equity 0 — the probe knows nothing about the book
     // and must not claim a zero.
-    await processIntent(probe, 0n, false);
-    const outcome = lastTradeOutcome;
+    // ITS OWN OUTCOME. Reading the global after the await could hand this the
+    // verdict on somebody else's intent, and every early return in
+    // processIntentLocked leaves the previous one standing. See
+    // processIntentReporting.
+    const outcome = await processIntentReporting(probe, 0n, false);
     if (!outcome) return { ok: false, line: "FAILED — the probe never reached the ledger at all" };
     if (outcome.status !== "landed") {
       return {
@@ -3353,6 +3447,48 @@ async function main() {
     );
     // The chain must never hold a rejection, or the next waiter inherits it.
     intentChain = run.catch(() => {});
+    return run;
+  }
+
+  /**
+   * Run an intent and report WHAT HAPPENED TO IT — not whatever the global
+   * `lastTradeOutcome` happens to say afterwards.
+   *
+   * TWO BUGS, BOTH ABOUT CLAIMING A TRADE THAT DID NOT HAPPEN.
+   *
+   * The first is staleness: `processIntentLocked` returns early on a dozen
+   * paths that write no row at all, leaving the PREVIOUS intent's outcome
+   * standing — so a caller reading the global afterwards can be handed
+   * somebody else's landed trade as the verdict on its own refusal. Cleared
+   * first, so a null read means "this one reached no ledger row", which is a
+   * different sentence and the honest one.
+   *
+   * The second is interleaving: the clear, the run and the read all happen
+   * INSIDE the serialising chain, so the next queued intent cannot land
+   * between them. Reading the global after `await processIntent(...)` — which
+   * is what the selftest probe did — is outside that region.
+   *
+   * This exists because an owner-typed order is about to need it. "🏹
+   * submitted" was returned unconditionally while every wall refusal was
+   * absorbed and recorded, which is the house rule about somebody's money
+   * broken in the most direct way there is: the owner believes they hold $25
+   * of TSLA and they do not.
+   */
+  function processIntentReporting(
+    intent: TradeIntent,
+    equityUsdg: bigint,
+    equityKnown = true,
+  ): Promise<{ status: TradeRow["status"]; rejectRule?: string } | null> {
+    const step = async () => {
+      lastTradeOutcome = null;
+      await processIntentLocked(intent, equityUsdg, equityKnown);
+      return lastTradeOutcome;
+    };
+    const run = intentChain.then(step, step);
+    intentChain = run.then(
+      () => {},
+      () => {},
+    );
     return run;
   }
 
@@ -6353,8 +6489,55 @@ async function main() {
       "chat",
       `owner asked to ${side} ${usdgAmount} USDG of ${symbol} on its bonding curve`,
     );
-    await processIntent(intent, lastEquityUsdg, lastEquityKnown);
-    return `🏹 submitted ${side} ${symbol} on its curve — watch /trades for the result (it still passes the policy wall).`;
+    const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
+    // A CURVE SELL IS ALL-OR-NOTHING and the reply has to say which size it
+    // actually used. The requested amount is discarded above — `amountInRaw` is
+    // the whole on-chain balance — so quoting the owner's number back at them
+    // would describe a partial exit that never existed.
+    const actual = isBuy ? usdgAmount : Number(quoted) / 1e6;
+    return sayTradeOutcome(outcome, side, symbol, actual, !isBuy);
+  }
+
+  /**
+   * What actually happened to an owner's order, in one sentence they can act on.
+   *
+   * READ FROM THE LEDGER ROW, NEVER FROM THE ABSENCE OF AN EXCEPTION.
+   * `processIntent` records a rejected, reverted, paper or landed row and
+   * returns normally, so "it did not throw" carries no information — the same
+   * mistake that had the selftest probe printing PASSED for a UserOp the wall
+   * had just refused. Every branch below names the status, and a refusal names
+   * the RULE, because "no" and "no, because your grant caps a trade at $10" are
+   * different messages to the only person who can fix it.
+   */
+  function sayTradeOutcome(
+    outcome: { status: TradeRow["status"]; rejectRule?: string } | null,
+    side: "buy" | "sell",
+    symbol: string,
+    usdgAmount: number,
+    clamped = false,
+  ): string {
+    const size = `${usdgAmount.toFixed(2)} USDG`;
+    const what = `${side} ${size} of ${symbol}`;
+    const note = clamped ? ` (that was all of it — less than you asked for)` : "";
+    if (!outcome) return `🤔 the ${side} never reached the ledger at all. Nothing was sent; try again.`;
+    switch (outcome.status) {
+      case "landed":
+        return `✅ ${side === "buy" ? "bought" : "sold"} ${size} of ${symbol}${note}. It is on your tape.`;
+      case "submitted":
+        return `🏹 sent ${what}${note} — it is in flight. Watch your trades for the fill.`;
+      case "paper":
+        // NOT A FILL, and it must never be reported as one. Paper is the
+        // fallback when the agent cannot trade for real, so the useful half of
+        // this sentence is WHY, not the practice trade.
+        return (
+          `📝 practised ${what}${note} instead of trading — I cannot trade for real right now` +
+          `${outcome.rejectRule ? ` (${outcome.rejectRule})` : ""}. Your money did not move.`
+        );
+      case "reverted":
+        return `↩️ the ${side} reached the chain and turned back${outcome.rejectRule ? ` — ${outcome.rejectRule}` : ""}. Nothing moved, but the gas is spent.`;
+      default:
+        return `🧱 refused: ${outcome.rejectRule ?? outcome.status}. Nothing was sent and nothing was spent.`;
+    }
   }
 
   async function submitChatTrade(side: "buy" | "sell", symbol: string, usdgAmount: number): Promise<string> {
@@ -6377,6 +6560,9 @@ async function main() {
 
     const router = swapRouterFor(cfg);
     let intent: TradeIntent;
+    // The size ACTUALLY sent, when it is not the size asked for. Null means the
+    // two agree and the reply can quote the owner back to themselves.
+    let sold: number | null = null;
     if (side === "buy") {
       const raw = usdg(usdgAmount);
       intent = { kind: "swap", target: router, sellToken: CASH.USDG as `0x${string}`, buyToken: token, sellAmountRaw: raw, notionalUsdg: raw };
@@ -6384,14 +6570,22 @@ async function main() {
       const pos = readPositionRaw(active.agentId, symbol, usdg);
       if (!pos) return `you don't hold any ${symbol}.`;
       const want = usdg(usdgAmount);
-      const sellRaw = want < pos.valueUsdg ? (pos.rawBalance * want) / pos.valueUsdg : pos.rawBalance;
-      const notional = want < pos.valueUsdg ? want : pos.valueUsdg;
+      const partial = want < pos.valueUsdg;
+      const sellRaw = partial ? (pos.rawBalance * want) / pos.valueUsdg : pos.rawBalance;
+      const notional = partial ? want : pos.valueUsdg;
       if (sellRaw === 0n) return `${symbol} amount rounds to zero shares.`;
+      // AN OVER-ASK IS CLAMPED, AND THE REPLY HAS TO SAY SO. It used to clamp
+      // silently and then quote the amount asked for: "submitted sell 500 USDG
+      // NVDA" for a 12 USDG position, a claim the ledger will never support —
+      // the trade row carries 12. Same rule as everywhere else here.
+      if (!partial) sold = Number(pos.valueUsdg) / 1e6;
       intent = { kind: "swap", target: router, sellToken: token, buyToken: CASH.USDG as `0x${string}`, sellAmountRaw: sellRaw, notionalUsdg: notional };
     }
     await ensureDecision(intent, "chat", `owner asked to ${side} ${usdgAmount} USDG ${symbol} in chat`);
-    await processIntent(intent, lastEquityUsdg, lastEquityKnown);
-    return `🏹 submitted ${side} ${usdgAmount} USDG ${symbol} — watch /trades for the result (it still passes the policy wall).`;
+    const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
+    // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
+    // sent, which is not always the amount asked for — see the clamp above.
+    return sayTradeOutcome(outcome, side, symbol, sold ?? usdgAmount, sold !== null);
   }
 
   async function submitChatTransfer(to: `0x${string}`, usdgAmount: number): Promise<string> {

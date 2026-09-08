@@ -76,8 +76,12 @@ export interface ChatCommand {
    * strips every house-owned field — so a command cannot set a fee, a bundler,
    * or somebody's sponsorship, whatever the model asks for.
    * `navigate` goes to a screen and does nothing else.
+   * `order` places a buy or a sell through POST /api/orders — which QUEUES it
+   * for the worker rather than doing it. That difference is not an
+   * implementation detail: a 200 means a row exists, not that a trade happened,
+   * and the card must not say otherwise.
    */
-  via: "settings" | "navigate";
+  via: "settings" | "navigate" | "order";
   /** For `settings`: which keys this command may write. Nothing else is sent. */
   writes?: readonly string[];
   /**
@@ -111,7 +115,12 @@ const money = (n: CommandArg) => `$${Number(n).toLocaleString(undefined, { maxim
  * ordinary text. That is the fail-closed direction: a model inventing a
  * plausible-sounding command must not be able to reach a route by naming it.
  */
-export const CHAT_COMMANDS: readonly ChatCommand[] = Object.freeze([
+// Typed on the way in rather than at the export, so each entry is checked
+// against ChatCommand individually. Inferring the array first makes every
+// optional field a union member (`fixed?: undefined` beside `fixed: {...}`),
+// which then fails to satisfy the interface for reasons that have nothing to do
+// with any of these commands.
+const REGISTRY: ChatCommand[] = [
   {
     id: "set-strategy",
     via: "settings",
@@ -178,6 +187,41 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = Object.freeze([
     writes: ["agentName"],
     say: (a) => `Call me ${String(a.agentName)} from now on.`,
   },
+  // ── the two that spend money ─────────────────────────────────────────────
+  //
+  // THE ONLY COMMANDS THAT ASK FOR A TRADE, and they still do not perform one.
+  // The route writes a row; the WORKER — the one process holding a key —
+  // decides whether it is a trade, against the wall the owner signed. Every
+  // refusal that always applied still applies in the same place: the sealed
+  // per-trade cap, the daily cap, the asset allowlist, no-exit, the drawdown
+  // breaker, gas. Nothing here widens any of them.
+  //
+  // Their sentences say WHAT IS NOT YET TRUE. "I'll place it" is honest;
+  // "bought" would be a claim about somebody's money made by a browser, a
+  // minute before the ledger has an opinion.
+  {
+    id: "buy",
+    via: "order",
+    writes: ["side", "symbol", "usdgAmount"],
+    fixed: { side: "buy" },
+    weighty: true,
+    say: (a) =>
+      `Spend ${money(a.usdgAmount)} buying ${String(a.symbol).toUpperCase()}. ` +
+      `I'll place it — my key's limits still decide whether it goes through.`,
+  },
+  {
+    id: "sell",
+    via: "order",
+    writes: ["side", "symbol", "usdgAmount"],
+    fixed: { side: "sell" },
+    weighty: true,
+    // ASK FOR MORE THAN YOU HOLD AND YOU GET ALL OF IT. Said here because the
+    // worker clamps silently and the sentence on the card is the last chance to
+    // set the expectation before money moves.
+    say: (a) =>
+      `Sell ${money(a.usdgAmount)} of ${String(a.symbol).toUpperCase()} — or all of it, if that is less than you hold. ` +
+      `I'll place it; my key's limits still decide.`,
+  },
   // ── the ones that only take you somewhere ────────────────────────────────
   {
     id: "open-deposit",
@@ -239,7 +283,9 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = Object.freeze([
     weighty: true,
     say: () => `Take you to re-sign my trading permission — free, one signature, nothing moves on-chain.`,
   },
-]);
+];
+
+export const CHAT_COMMANDS: readonly ChatCommand[] = Object.freeze(REGISTRY);
 
 const BY_ID = new Map(CHAT_COMMANDS.map((c) => [c.id, c]));
 
@@ -249,15 +295,20 @@ export function commandFor(id: unknown): ChatCommand | null {
 }
 
 /**
- * The settings payload a command may send — nothing but its own declared keys.
+ * The body a command may send — nothing but its own declared keys.
  *
  * THE MODEL SUPPLIES VALUES, NEVER FIELD NAMES. It can ask to set `strategy`
  * to something; it cannot ask to set `bundlerUrl`, because `writes` is ours and
- * anything outside it is dropped here. /api/settings strips house fields again
- * on the server, so this is the first of two independent gates rather than the
- * only one.
+ * anything outside it is dropped here. The server strips house fields again
+ * (/api/settings) and re-validates the whole order shape (/api/orders), so this
+ * is the first of two independent gates rather than the only one.
+ *
+ * NAMED FOR THE COMMAND RATHER THAN THE ROUTE since orders started using it.
+ * It was `settingsPayload`, and leaving that name would have meant either a
+ * second copy of the same filtering for the route where the stakes are highest,
+ * or a function whose name says it cannot do what it does.
  */
-export function settingsPayload(
+export function commandPayload(
   cmd: ChatCommand,
   args: Record<string, CommandArg>,
 ): Record<string, CommandArg | string[]> {
@@ -313,19 +364,51 @@ export const COMMAND_IDS = CHAT_COMMANDS.map((c) => c.id);
  * to offer something, not the owner doing anything wrong, and an error message
  * about a marker they never saw would be nonsense to them.
  */
-const MARKER = /<<CMD\s+([a-z-]+)\s*(\{[\s\S]*?\})?\s*>>/;
+/**
+ * ANCHORED TO THE END OF THE REPLY, and that anchor is a security control.
+ *
+ * It used to match anywhere. The prompt is fed the owner's ledger, and a
+ * position's `reason` is model-written text from ANOTHER agent — so an attacker
+ * who lands one sentence containing a literal marker does not have to persuade
+ * this model of anything. They only have to get it QUOTED, and "why did you buy
+ * that?" is a question whose honest answer repeats it back. The card that
+ * appeared would be real, correctly worded, authored by this registry, and
+ * shown exactly when the owner was reading about that position.
+ *
+ * A proposal is the LAST thing a reply does — the prompt says so, and now the
+ * parser agrees. Quoted text is followed by more sentence; a decision is not.
+ * The other half of this lives in /api/chat, which defangs any marker in the
+ * input before the model ever sees it. Both, because either alone is one regex
+ * from failing open.
+ */
+// `[^{}]*` and NOT `[\s\S]*?` — the args of a command are flat scalars, so a
+// brace can never legitimately nest. The lazy form could backtrack ACROSS an
+// intervening `>>` and swallow a second marker whole, which turned two markers
+// into one match with unparseable args: a quoted marker earlier in the reply
+// could then capture the model's real one.
+const MARKER = /<<CMD\s+([a-z-]+)\s*(\{[^{}]*\})?\s*>>\s*$/;
+/**
+ * Anything marker-SHAPED — used only to scrub, never to act.
+ *
+ * DELIBERATELY LOOSER THAN THE ONE ABOVE, and the asymmetry is the point:
+ * strict about what may become an action, permissive about what may be shown.
+ * A marker the strict regex refuses (nested braces, a mangled id, a quoted one
+ * from another agent's text) is still plumbing, and rendering it as though the
+ * agent had written it is its own small lie.
+ */
+const ANY_MARKER = /<<CMD[\s\S]*?>>/g;
 
 export function splitCommand(raw: string): {
   reply: string;
   command?: { id: string; args: Record<string, CommandArg> };
 } {
   const m = raw.match(MARKER);
-  if (!m) return { reply: raw };
-  // EVERY MARKER GOES, VALID OR NOT, AND WHETHER OR NOT IT IS THE ONE WE USE.
-  // The marker is machinery: leaving one in the reply shows an owner the
-  // plumbing for a card they never got. A card is also a single question, so
-  // only the FIRST proposal is acted on — the one the reply was arguing for.
-  const reply = raw.replace(new RegExp(MARKER.source, "g"), "").replace(/\n{3,}/g, "\n\n").trim();
+  // EVERY MARKER IS SCRUBBED, VALID OR NOT, ANCHORED OR NOT. It is machinery:
+  // leaving one in the reply shows an owner the plumbing — and a marker in the
+  // MIDDLE of a reply is very likely quoted from somebody else's text, which is
+  // the last thing to render as if the agent had written it.
+  const reply = raw.replace(ANY_MARKER, "").replace(/\n{3,}/g, "\n\n").trim();
+  if (!m) return { reply };
   if (!commandFor(m[1])) return { reply };
   let args: Record<string, CommandArg> = {};
   try {

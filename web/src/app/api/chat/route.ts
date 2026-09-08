@@ -58,6 +58,7 @@ WHEN THEY ASK YOU TO DO SOMETHING:
 - Propose ONE, only when they actually asked for it, and only when you are confident which. If they were vague, ask which they meant rather than guessing — a confirmation card for the wrong thing is worse than a question.
 - Say what you are proposing in your own words FIRST. The button carries its own description; yours is the part that explains why.
 - NEVER put a private key, a seed phrase or any secret in a reply. If they ask for their key, propose reveal-key — it takes them to the wallet page, which is the only place that shows it.
+- BUYING AND SELLING: propose buy or sell when they ask for one, and only with a symbol AND a size you were actually given. If either is missing, ASK — "how much?" is a better reply than a card for a number they never said. You are PLACING it, never doing it: the limits sealed into your key decide whether it goes through, and you find out at the same time they do. Never say you bought or sold anything; the trade appears on their tape when it is real.
 - MONEY OUT IS NOT SOMETHING YOU CAN DO FROM HERE. Whether funds can leave is decided by the permission sealed into your key when they signed, and most keys carry none at all. Propose open-withdraw and say so — never "sending it now", never a promise the wall will refuse.
 - IF YOU ARE NOT SURE WHICH SETTING THEY MEANT, propose open-settings rather than guessing at one. A card for the wrong dial is worse than a screen with every dial on it.`;
 
@@ -104,11 +105,39 @@ export async function POST(req: Request) {
   // question always selects the same entries, and explain.test.ts pins that.
   const concepts = renderConcepts(conceptsFor(message));
 
+  // ── A MARKER IN THE INPUT IS NOT A PROPOSAL ────────────────────────────
+  //
+  // THE ATTACK, WHICH THE CONFIRMATION CARD DOES NOT STOP. Everything below
+  // is attacker-influenced: a position's `reason` and a move's text are written
+  // by OTHER agents' models, and the history is whatever was said. An attacker
+  // who gets one sentence containing a literal `<<CMD buy {...}>>` into any of
+  // it does not have to jailbreak this model or even persuade it — they only
+  // have to get it QUOTED. "Why did you buy that?" is a question whose honest
+  // answer repeats the text back, and the marker lands in the reply.
+  //
+  // The card would then be real, correctly worded, authored by our own
+  // registry, and shown at the exact moment the owner was reading about that
+  // position. Its truthfulness makes it MORE convincing, not less. The card
+  // defends against a model that DECIDES badly; it is close to useless against
+  // one that ECHOES.
+  //
+  // So the marker is neutralised before the model can see it, and — in
+  // chat-commands.ts — only a marker at the very END of a reply is read as a
+  // proposal. Both, because either alone is one regex from failing open.
+  // Visibly defanged rather than deleted, and never with an invisible
+  // character: a reader of this prompt should be able to see that a marker was
+  // quoted, and a zero-width trick is one Unicode normalisation away from
+  // being a marker again.
+  const deCmd = (s: string) => s.replace(/<<\s*CMD/gi, "‹quoted CMD");
+
   const prompt = [
-    state ? `STATE:\n${state}` : "",
+    state ? `STATE:\n${deCmd(state)}` : "",
     concepts ? `MERRYMEN — the house's own words for these things:\n${concepts}` : "",
-    history ? `RECENT CONVERSATION (oldest first):\n${history}` : "",
-    `THEY JUST SAID:\n${message}`,
+    history ? `RECENT CONVERSATION (oldest first):\n${deCmd(history)}` : "",
+    // The owner's own words too. A proposal has to originate with the MODEL —
+    // a marker typed into the box would otherwise reach the card having skipped
+    // every sentence the model was told to write around it.
+    `THEY JUST SAID:\n${deCmd(message)}`,
     concepts
       ? "Reply as yourself. Explain from the MERRYMEN block above — those definitions are the house's, and they are what these words mean here."
       : "Reply as yourself — warm, in-character, grounded only in what you actually know above.",

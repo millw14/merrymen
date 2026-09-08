@@ -368,10 +368,27 @@ const SQLITE_ALTERS: string[] = [
       -- Postgres). A queue whose order depends on the user being slow is not
       -- a queue.
       created_at INTEGER NOT NULL,
+      -- MILLISECONDS TOO, both of them. They were written as unixepoch()
+      -- (seconds) by the queue helpers below and as Date.now() (milliseconds)
+      -- by the orchestrator's ferry, into these same two columns, and nothing
+      -- caught it because every reader only ever tested them for NULL. The
+      -- moment anything asks "how long did this order take to fill" the answer
+      -- is wrong by a factor of 1000, in the direction that makes an order look
+      -- instant.
       claimed_at INTEGER,
       done_at INTEGER,
       result TEXT
     )`,
+    // The order itself: side, symbol, size — JSON, nullable.
+    //
+    // NULLABLE WITH NO DEFAULT, which is the house rule: a command written
+    // before this column existed carries no arguments, and that is not the same
+    // fact as carrying empty ones. `selftest` has none either and never will.
+    //
+    // The channel stays deliberately dumb — this column is transport, not
+    // meaning. What an order is allowed to be is decided in the route before
+    // the row is written and again in the child before an intent is built.
+    "ALTER TABLE agent_commands ADD COLUMN args TEXT",
     // Measured execution quality: quoted-out vs received-out, in bps, positive
     // when the fill was worse than quoted. The slippage SETTING is one flat 1%
     // constant applied to a $5 trade and a $5,000 one alike; this is the

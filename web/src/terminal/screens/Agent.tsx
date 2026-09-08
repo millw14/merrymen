@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Proposals } from "../Proposals";
 import { blockerAdvice } from "@/lib/live-blocker";
-import { commandFor, settingsPayload, type CommandArg } from "@/lib/chat-commands";
+import { commandFor, commandPayload, type CommandArg } from "@/lib/chat-commands";
 import {
   ArrowDown,
   ArrowUp,
@@ -212,14 +212,44 @@ export function Agent({
         window.location.href = cmd.to!;
         return;
       }
+      if (cmd.via === "order") {
+        // AN ORDER IS QUEUED, NOT DONE, AND THE SENTENCE HAS TO SAY SO.
+        //
+        // A settings write is finished when the PUT returns. An order's 200
+        // means one thing only: a row exists on the command channel. It has not
+        // been ferried to the worker, not claimed, not put to the wall, not
+        // signed. The whole outcome — filled, refused by the cap, practised on
+        // paper, reverted — arrives a minute later and lands on the TAPE, which
+        // is where every other trade this agent makes is stated.
+        //
+        // So this writes the one sentence the ledger cannot yet make, in the
+        // past tense of the ASKING rather than of the trading: "I've placed it"
+        // is true the moment the row exists; "bought TSLA" would be a claim
+        // about somebody's money made by a browser, ahead of any evidence.
+        const placed = await fetch("/api/orders", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(commandPayload(cmd, pending!.args)),
+        });
+        const body = (await placed.json().catch(() => null)) as { error?: string } | null;
+        if (!placed.ok) throw new Error(body?.error ?? `that was refused (${placed.status})`);
+        onTurn({
+          question: "✓ confirmed",
+          answer:
+            `Placed it — ${cmd.say(pending!.args)} It is with my key now; whether it goes through is ` +
+            `up to the limits you signed. Watch your trades, it lands there either way.`,
+        });
+        setPending(null);
+        return;
+      }
       // READ-MODIFY-WRITE at click time, and ONLY the declared keys.
-      // `settingsPayload` drops everything the command did not declare, and
+      // `commandPayload` drops everything the command did not declare, and
       // /api/settings strips every house-owned field again on the server — two
       // independent gates, neither relying on the other.
       const put = await fetch("/api/settings", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(settingsPayload(cmd, pending!.args)),
+        body: JSON.stringify(commandPayload(cmd, pending!.args)),
       });
       if (!put.ok) {
         const j = (await put.json().catch(() => null)) as { errors?: string[] } | null;

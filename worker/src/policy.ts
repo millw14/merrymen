@@ -348,6 +348,27 @@ export function checkPolicy(
   }
 
   if (intent.kind === "swap") {
+    // POSITIVITY, AND IT IS NOT DECORATION.
+    //
+    // curve-trade, equity-order and transfer each carry this guard; `swap` —
+    // the oldest and most-travelled branch — never got the line, because until
+    // now every swap was sized by a strategy rather than by a person. An
+    // owner-typed order changes that: a caller now chooses the number.
+    //
+    // A negative size passes EVERY cap below, because every cap below is an
+    // upper bound: `-25000000n > perTradeUsdg` is false, and it goes on to
+    // REDUCE the day's spend against the daily cap — so the accounting is what
+    // gets fooled, not just the trade. It would die eventually in viem's
+    // uint256 encoding, which makes the refusal a stack trace instead of a
+    // rule, on a path where the rule is what the owner is shown.
+    if (intent.sellAmountRaw <= 0n || intent.notionalUsdg <= 0n) {
+      return {
+        ok: false,
+        rule: "non-positive",
+        detail: `swap sized ${intent.sellAmountRaw} raw / ${intent.notionalUsdg} USDG is not a trade`,
+      };
+    }
+
     for (const token of [intent.sellToken, intent.buyToken]) {
       if (!limits.allowedAssets.map(lc).includes(lc(token))) {
         return { ok: false, rule: "asset-allowlist", detail: `asset ${token} not allowed` };

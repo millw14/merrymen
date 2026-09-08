@@ -77,7 +77,18 @@ test("a grant this repo can sign does NOT carry the Rialto router — which is w
 });
 
 test("selftest fails loudly unless the probe LANDED", () => {
-  assert.match(PROBE, /lastTradeOutcome/, "it must read the ledger row, not the absence of an exception");
+  // IT MUST READ THE LEDGER ROW, not the absence of an exception. It used to
+  // read the global `lastTradeOutcome` directly after the await; it now takes
+  // the verdict back from `processIntentReporting`, which clears, runs and
+  // reads INSIDE the serialising chain. Strictly stronger — the old shape could
+  // be handed the previous intent's outcome, because every early return in
+  // processIntentLocked leaves it standing — so the assertion moves with it
+  // rather than pinning the weaker mechanism.
+  assert.match(
+    PROBE,
+    /const outcome = await processIntentReporting\(/,
+    "the verdict must come from the row this intent wrote, not from a global read after the fact",
+  );
   // The VERDICT belongs to the probe; the EXIT CODE belongs to the CLI. Split
   // because the probe is now shared with a dashboard command that has no
   // process to exit — and a shared probe is the whole point: the copy that
@@ -106,7 +117,9 @@ test("selftest fails loudly unless the probe LANDED", () => {
 test("selftest declares the probe's book UNKNOWN rather than zero", () => {
   assert.match(
     PROBE,
-    /processIntent\(probe, 0n, false\)/,
+    // Either wrapper — both serialise on the same chain. What is pinned is the
+    // third argument.
+    /processIntent(?:Reporting)?\(probe, 0n, false\)/,
     "equityKnown must be false — passing 0n as a known equity is the exact 'unknown as zero' bug this codebase exists to avoid",
   );
 });

@@ -220,6 +220,22 @@ export function childEnv(tenant: string): NodeJS.ProcessEnv {
 interface Child {
   proc: ChildProcess;
   tenant: `0x${string}`;
+  /**
+   * The SMART ACCOUNT this child trades from.
+   *
+   * KEPT BESIDE THE TENANT BECAUSE THEY ARE NOT THE SAME ADDRESS, and one
+   * seam in this file had already forgotten it. `agent_id` in every shared
+   * table is the ERC-4337 account (`ensureAgent` writes `grant.smartAccount`);
+   * `children` is keyed by the SIWE wallet. grant-store.ts:69-82 says the two
+   * "can never be equal" — the owner key is generated in the browser — and
+   * agent-for.ts was written because a route that compared them "matched zero
+   * rows for every hosted user" and failed closed, looking like a quiet agent.
+   *
+   * Held here rather than re-read per pass: `writeGrantForChild` already
+   * returns it at spawn, and the alternative is a decrypting store read every
+   * fifteen seconds for an address that changes only on a re-sign.
+   */
+  smartAccount: `0x${string}`;
   startedAt: number;
   restarts: number;
   /**
@@ -385,6 +401,12 @@ async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
     // No file, or unreadable — writing it is the right answer either way.
   }
   writeFileSync(file, next, { encoding: "utf8", mode: 0o600 });
+  // AND THE ACCOUNT WITH IT. A re-sign under a new owner key derives a new
+  // smart account, and that is the address the shared tables are keyed on — so
+  // a child left holding the old one would be looked up under an account that
+  // no longer trades. Same reason the file is rewritten: the wall moved.
+  const child = children.get(tenant);
+  if (child && grant.smartAccount) child.smartAccount = grant.smartAccount as `0x${string}`;
   log(`${tenant}: grant changed on the store — handed the running child its new wall`);
 }
 
@@ -529,7 +551,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
     { cwd: ROOT, env: childEnv(tenant), stdio: ["ignore", "pipe", "pipe"] },
   );
-  const child: Child = { proc, tenant, startedAt: Date.now(), restarts, staleSec, firstBeatSec };
+  const child: Child = { proc, tenant, smartAccount, startedAt: Date.now(), restarts, staleSec, firstBeatSec };
   children.set(tenant, child);
   const tag = `[${tenant.slice(0, 8)}]`;
   const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
@@ -729,25 +751,120 @@ async function ferryCommands2(): Promise<void> {
   }
 }
 
+/**
+ * The `args` column, turned back into a flat object of scalars.
+ *
+ * THE ORCHESTRATOR IS NOT THE VALIDATOR AND MUST NOT BECOME ONE. It is the one
+ * process that can see every tenant's home, so the less it believes about a
+ * payload the better: this drops anything that is not a scalar and hands the
+ * rest on unexamined. What an order MEANS is decided twice — once in the route
+ * before the row is written, once in the child before an intent is built — and
+ * neither of those gates lives here. Same principle chat-commands.ts states for
+ * settings: two independent gates, neither relying on the other.
+ *
+ * Unparseable args become `{}` rather than an exception: a command that arrives
+ * with nothing is refused by name at the dispatch, which is a sentence somebody
+ * can read. A throw here would stall the whole ferry for every tenant.
+ */
+function parseArgs(raw: string): Record<string, string | number | boolean> {
+  const out: Record<string, string | number | boolean> = {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return out;
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") out[k] = v;
+    }
+  } catch {
+    /* a malformed payload is a refusal at the dispatch, not a stalled ferry */
+  }
+  return out;
+}
+
 async function ferryCommands(shared: Db): Promise<void> {
-  for (const tenant of [...children.keys()]) {
-    const home = childHome(tenant);
+  for (const [tenant, child] of [...children.entries()]) {
+    await ferryForChild(shared, { home: childHome(tenant), smartAccount: child.smartAccount, tag: tenant });
+  }
+}
+
+/**
+ * One child's two legs. EXPORTED SO THE SEAM CAN BE TESTED.
+ *
+ * The hosted half of this channel had no test at all — `agent-commands.
+ * integration.test.ts` exercises the queue helpers in store.ts, which have no
+ * production caller, while the live path was three hand-written statements
+ * across two files. That is how the identity mismatch below survived: the
+ * tested code used one constant for both sides of a join whose whole difficulty
+ * is that the two sides are DIFFERENT ADDRESSES.
+ *
+ * So the account and the home arrive as arguments rather than being looked up
+ * from module state, and the test passes a real tenant→account pair that does
+ * not match — because a test that uses one address for both proves nothing
+ * about this function.
+ */
+export async function ferryForChild(
+  shared: Db,
+  { home, smartAccount, tag }: { home: string; smartAccount: string; tag: string },
+): Promise<void> {
+  {
+    const tenant = tag;
     // ── down: unclaimed commands become files ──
     try {
       const rows = (await shared
         .prepare(
-          `SELECT id, kind, created_at FROM agent_commands
-            WHERE agent_id = ? AND claimed_at IS NULL ORDER BY created_at ASC LIMIT 5`,
+          // BOUND TO THE SMART ACCOUNT, NOT THE TENANT. `agent_id` is the
+          // ERC-4337 account everywhere in this schema, and the web enqueues
+          // under exactly that (agent-for.ts). Binding the SIWE wallet here
+          // matched zero rows for every hosted tenant, always — so a queued
+          // command sat with claimed_at NULL forever while the dashboard said
+          // "queued", which its own comment reads as a worker that is not
+          // draining. The same mismatch agent-for.ts exists to prevent, one
+          // hop over, on the leg nothing tested.
+          //
+          // ORDER BY (created_at, id), never time alone: two commands really
+          // do land in the same millisecond, and neither backend has a
+          // portable insertion-order tiebreak. store.ts:1757 argues this at
+          // length for the queue nobody calls; the live path needs it more,
+          // because for two ORDERS "which one first" is a question about
+          // somebody's money.
+          `SELECT id, kind, args, created_at FROM agent_commands
+            WHERE agent_id = ? AND claimed_at IS NULL ORDER BY created_at ASC, id ASC LIMIT 5`,
         )
-        .all(tenant)) as { id: string; kind: string; created_at: number }[];
+        .all(smartAccount)) as { id: string; kind: string; args: string | null; created_at: number }[];
       for (const r of rows) {
-        writeCommand(home, { id: String(r.id), kind: String(r.kind), at: Number(r.created_at) });
-        // Marked claimed the moment it is DELIVERED, not when it completes.
-        // Otherwise the next pass ferries it again and the child runs it
-        // twice — and this one spends gas.
-        await shared
+        // CLAIMED BEFORE THE FILE IS WRITTEN, and the write only happens if the
+        // claim actually took.
+        //
+        // These are two writes to two systems and there is no transaction
+        // across them, so one of the two orders has to be chosen. It used to
+        // write first: a crash — or a thrown UPDATE, whose catch is a comment —
+        // between the two re-wrote `<id>.json` into a home that had already
+        // claimed, run and answered it. For a probe that is a second approve of
+        // 0.000001 USDG. For a BUY it is a second position at a second price
+        // with a second gas bill, and a ledger showing two fills for one
+        // instruction — a claim about somebody's money they never made.
+        //
+        // So: at-most-once, deliberately, in the direction this codebase
+        // already accepts. A lost command is a button pressed again
+        // (command-files.ts says so about the unlink); a replayed order is not
+        // recoverable by anyone.
+        const claim = await shared
           .prepare("UPDATE agent_commands SET claimed_at = ? WHERE id = ? AND claimed_at IS NULL")
           .run(Date.now(), r.id);
+        if (claim.changes === 0) continue; // another replica took it
+        // `expiresAt` rides in the same payload and is LIFTED OUT here rather
+        // than given a column of its own. It is not part of what the order
+        // means — it is how long the order is willing to wait — and the worker
+        // checks it before it looks at a single argument.
+        const args = r.args ? parseArgs(r.args) : {};
+        const expiresAt = typeof args.expiresAt === "number" ? args.expiresAt : undefined;
+        delete args.expiresAt;
+        writeCommand(home, {
+          id: String(r.id),
+          kind: String(r.kind),
+          at: Number(r.created_at),
+          ...(Object.keys(args).length ? { args } : {}),
+          ...(expiresAt ? { expiresAt } : {}),
+        });
         log(`command ${String(r.id).slice(0, 8)} → ${tenant.slice(0, 8)} (${r.kind})`);
       }
     } catch {

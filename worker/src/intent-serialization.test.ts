@@ -96,10 +96,31 @@ test("index.ts routes every caller through the wrapper", () => {
   assert.match(src, /function processIntent\(intent: TradeIntent[\s\S]{0,400}?intentChain\.then\(/, "the exported name must be the wrapper");
   assert.match(src, /async function processIntentLocked\(/, "and the body must be separately named");
 
-  // Every call site uses the wrapper. processIntentLocked is referenced exactly
-  // twice — the two arms of the .then — and nowhere else.
-  const locked = src.match(/processIntentLocked/g) ?? [];
-  assert.equal(locked.length, 3, "declaration plus the two .then arms; a fourth would be a bypass");
+  // THE BODY IS ONLY EVER REACHED THROUGH THE CHAIN.
+  //
+  // This counted references and expected three (the declaration plus the two
+  // `.then` arms). A second wrapper now exists — `processIntentReporting`,
+  // which clears the outcome, runs the intent and reads its verdict all inside
+  // the serialising region, so a caller gets ITS OWN result rather than
+  // whatever `lastTradeOutcome` says afterwards — and it necessarily names the
+  // body too. A count cannot tell that apart from a bypass, so this asserts the
+  // property instead: every mention of the body is either its declaration or
+  // sits inside a `.then` on the chain.
+  const uses = [...src.matchAll(/processIntentLocked\(/g)].map((m) => m.index ?? 0);
+  assert.ok(uses.length >= 3, "the body must still be called");
+  for (const at of uses) {
+    const before = src.slice(Math.max(0, at - 260), at);
+    const declared = /async function $/.test(before) || /async function \n?\s*$/.test(before);
+    assert.ok(
+      declared || /intentChain\.then\(/.test(before) || /const step = async \(\) => \{[\s\S]*$/.test(before),
+      `a call to the body at ${at} is outside the chain — that is a bypass of the lock`,
+    );
+  }
+  // And every reporting wrapper hands its run back to the chain, so two of them
+  // cannot run concurrently with each other either.
+  const reporting = src.slice(src.indexOf("function processIntentReporting"), src.indexOf("async function processIntentLocked"));
+  assert.match(reporting, /const run = intentChain\.then\(step, step\);/);
+  assert.match(reporting, /intentChain = run\.then\(/);
 });
 
 test("no timeout, deliberately", () => {
