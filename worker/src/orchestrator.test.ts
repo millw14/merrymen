@@ -71,3 +71,47 @@ describe("telegram bot-token collision guard", () => {
     assert.equal(b.telegramBotToken, "222:BBB");
   });
 });
+
+/**
+ * THE MIRROR MUST NOT SPEAK FOR A CHILD IT DOES NOT RUN.
+ *
+ * `children` keeps its entry after the tenant lease moves to another replica:
+ * the child was spawned here, a later reconcile handed the lease elsewhere, and
+ * the sqlite left behind in this container froze at whatever this replica last
+ * wrote. The mirror then copied THAT up — and `positions` and `cost_basis` are
+ * snapshots, delete-then-insert, because a closed position must not linger. So a
+ * stale local child with neither DELETED the live rows the owning replica had
+ * just written.
+ *
+ * Observed on a real book: positions emptying and refilling, entry prices
+ * recovered from their receipts and gone again minutes later, and a permanent
+ * "CURSOR REWOUND" on a tenant whose child was healthy throughout — the rewind
+ * detector correctly reporting that THIS replica's copy had been rebuilt
+ * beneath it, which it had, in another container.
+ */
+describe("the ledger mirror follows the lease", () => {
+  it("SKIPS A TENANT THIS REPLICA DOES NOT HOLD", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+    assert.match(src, /const lease = leases\.get\(tenant\.toLowerCase\(\)\);\s*\n\s*if \(!lease \|\| !lease\.healthy\(\)\) continue;/);
+  });
+
+  it("and it decides BEFORE opening the child's database", async () => {
+    // Not merely an optimisation: everything destructive is downstream of the
+    // handle, so the guard has to sit above it rather than beside the copy.
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+    const guard = src.indexOf("if (!lease || !lease.healthy()) continue;");
+    const open = src.indexOf("const handle = openChildLedger(childHome(tenant));");
+    assert.ok(guard > 0 && open > guard, "the lease check must precede the open");
+  });
+
+  it("and an unhealthy lease counts as not held", async () => {
+    // A lease whose connection dropped has been released by Postgres, so
+    // another replica may already own this child. Holding the object is not the
+    // same as holding the lock — the arm path draws exactly this distinction.
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+    assert.match(src, /!lease\.healthy\(\)/);
+  });
+});

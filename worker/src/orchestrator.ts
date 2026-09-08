@@ -1827,6 +1827,28 @@ async function mirrorLedgers(): Promise<void> {
     return;
   }
   for (const tenant of [...children.keys()]) {
+    // ONLY THE REPLICA THAT HOLDS THE LEASE MAY MIRROR, and this is not a
+    // tidiness rule — it is the difference between copying a ledger and
+    // destroying one.
+    //
+    // `children` keeps its entry after the lease moves: the child was spawned
+    // here, the lease went to another replica on a later reconcile, and the
+    // sqlite left behind in this container is whatever it was when this replica
+    // stopped writing it. The mirror then copied THAT up. `positions` and
+    // `cost_basis` are snapshots — delete-then-insert, because a closed position
+    // must not linger — so a stale child with none of either DELETED the live
+    // rows the owning replica had just written.
+    //
+    // Observed on a real book: positions emptying and refilling, entry prices
+    // recovered from receipts and gone again minutes later, and a permanent
+    // "CURSOR REWOUND" on a tenant whose child was healthy the whole time — the
+    // rewind detector correctly reporting that THIS replica's copy had been
+    // rebuilt beneath it, which it had, in another container.
+    //
+    // A lease we do not hold, or hold unhealthily, means the authoritative child
+    // is elsewhere. Say nothing rather than say something wrong.
+    const lease = leases.get(tenant.toLowerCase());
+    if (!lease || !lease.healthy()) continue;
     // CLOSED IN THE finally BELOW. One descriptor per tenant per pass, on a
     // fifteen-second clock, is twenty-two leaked handles a quarter-minute for
     // as long as the service runs.
