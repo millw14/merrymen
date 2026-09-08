@@ -27,7 +27,7 @@ import { rankPnl, type UnrankedWhy } from "@/lib/rank-pnl";
 import { growthIndex, drawdownBps } from "@/lib/growth-index";
 import { PUBLISHABLE_STRATEGIES } from "@/lib/thesis";
 import { getIdentityStore } from "@merrymen/identity-store";
-import { isEvidencedFlow } from "@merrymen/core";
+import { isEvidencedFlow, sameBookAsLatest } from "@merrymen/core";
 import { getSettingsStore } from "@merrymen/settings-store";
 
 export interface Holding {
@@ -271,14 +271,18 @@ export const readAgent = cache(async function readAgent(
     try {
       const pts = (await db
         .prepare(
-          `SELECT equity_usdg, at FROM (
-             SELECT equity_usdg, at, id FROM equity WHERE agent_id = ? AND epoch = ?
+          `SELECT equity_usdg, at, mode FROM (
+             SELECT equity_usdg, at, id, mode FROM equity WHERE agent_id = ? AND epoch = ?
               ORDER BY at DESC, id DESC LIMIT 500
            ) ORDER BY at ASC, id ASC`,
         )
-        .all(account, epoch)) as { equity_usdg: number; at: number }[];
+        .all(account, epoch)) as { equity_usdg: number; at: number; mode: string | null }[];
       equityRead = true;
-      const clean = pts
+      // ONE SERIES, ONE BOOK — the paper book opens at 1,000 USDG and the
+      // funded one holds what was sent, and both write here. A growth index
+      // computed across the step between them measures a change of ledger, not
+      // a change in value.
+      const clean = sameBookAsLatest(pts)
         .map((p) => ({ v: Number(p.equity_usdg), at: Number(p.at) }))
         .filter((p) => Number.isFinite(p.v));
       latest = clean.length ? clean[clean.length - 1]!.v : null;

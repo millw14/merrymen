@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs";
 import { NextResponse } from "next/server";
 import { homePaths } from "@merrymen/home";
-import { SETTINGS_DEFAULTS, isHostedMode, type MerrymenSettings } from "@merrymen/core";
+import { SETTINGS_DEFAULTS, isHostedMode, sameBookAsLatest, type MerrymenSettings } from "@merrymen/core";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
@@ -339,12 +339,23 @@ export async function GET(req: Request) {
        */
       const rows = (await db
         .prepare(
-          `SELECT cash_usdg, vault_usdg, equity_usdg, at
+          `SELECT cash_usdg, vault_usdg, equity_usdg, at, mode
            FROM (SELECT * FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 900)
            ORDER BY at ASC, id ASC`,
         )
-        .all(scope, ...epochArg)) as { cash_usdg: number; vault_usdg: number; equity_usdg: number; at: number }[];
-      equity = rows.map((r) => ({
+        .all(scope, ...epochArg)) as {
+        cash_usdg: number;
+        vault_usdg: number;
+        equity_usdg: number;
+        at: number;
+        mode: string | null;
+      }[];
+      // ONE SERIES, ONE BOOK. The paper book opens at 1,000 USDG and the funded
+      // one holds what the owner sent, and both write here — so an agent that
+      // practised and then went live had a curve that stepped between two
+      // different books, and `chg24` read the step as a day's performance. An
+      // owner was shown "−$950.17 today" for a book down 2.7 cents.
+      equity = sameBookAsLatest(rows).map((r) => ({
         cash_usdg: r.cash_usdg,
         vault_usdg: r.vault_usdg,
         equity_usdg: r.equity_usdg,

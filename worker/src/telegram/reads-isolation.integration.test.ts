@@ -58,7 +58,7 @@ async function seed() {
   await addDecision({ id: aDec, agent_id: ALICE, source: "strategist", symbol: "AAPL", action: "buy", size_usdg: 11.11, reason: "ALICE_REASONING_gap_open" });
   await addTrade({ agent_id: ALICE, kind: "swap", target: "0x0000000000000000000000000000000000000001", amount_usdg: 11.11, status: "landed", tx_hash: "0xa11ce", decision_id: aDec });
   await setPositions(ALICE, [{ symbol: "AAPL", token: "0x0000000000000000000000000000000000000001", rawBalance: 1n, uiMultiplier: 1n, priceUsd: 1, priceStale: false, priceSource: "chainlink", valueUsdg: 111.0 }]);
-  await addEquity(ALICE, { ethWei: 0n, cashUsdg: 111, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 111.11 });
+  await addEquity(ALICE, { mode: "live", ethWei: 0n, cashUsdg: 111, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 111.11 });
   await addEvent(ALICE, "ok", "ALICE_SECRET_EVENT");
 
   // Bob: a $22.22 TSLA buy with different reasoning, position, equity, event.
@@ -66,7 +66,7 @@ async function seed() {
   await addDecision({ id: bDec, agent_id: BOB, source: "strategist", symbol: "TSLA", action: "buy", size_usdg: 22.22, reason: "BOB_REASONING_momentum" });
   await addTrade({ agent_id: BOB, kind: "swap", target: "0x0000000000000000000000000000000000000002", amount_usdg: 22.22, status: "landed", tx_hash: "0xb0b", decision_id: bDec });
   await setPositions(BOB, [{ symbol: "TSLA", token: "0x0000000000000000000000000000000000000002", rawBalance: 1n, uiMultiplier: 1n, priceUsd: 1, priceStale: false, priceSource: "chainlink", valueUsdg: 222.0 }]);
-  await addEquity(BOB, { ethWei: 0n, cashUsdg: 222, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 222.22 });
+  await addEquity(BOB, { mode: "live", ethWei: 0n, cashUsdg: 222, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 222.22 });
   await addEvent(BOB, "ok", "BOB_SECRET_EVENT");
 }
 

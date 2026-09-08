@@ -20,3 +20,7 @@ export * from "./capital-classify";
 // worker, web, social and Brain. Exported from core precisely so none of them
 // can grow its own NAV or P&L implementation.
 export * from "./portfolio-snapshot";
+
+// ONE SERIES, ONE BOOK. The paper and funded books both write to `equity`;
+// this is the rule every reader of that series applies to tell them apart.
+export * from "./equity-book";

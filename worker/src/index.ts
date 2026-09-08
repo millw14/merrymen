@@ -5805,6 +5805,12 @@ async function main() {
     // number is not.
     if (!bookIncomplete) {
       await addEquity(agentId, {
+        // WHICH BOOK THIS MARK IS OF. `balances` is the paper ledger above and
+        // the chain below, and until now the row said nothing about which — so
+        // an agent that practised at 1,000 USDG and then went live wrote one
+        // series that stepped straight down to its real equity, and every
+        // surface reading that series called the step a loss.
+        mode: paper ? "paper" : "live",
         ethWei: balances.ethWei,
         cashUsdg: usdgNum(balances.cashUsdg),
         vaultUsdg: usdgNum(balances.vaultUsdg),

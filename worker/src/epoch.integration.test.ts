@@ -102,7 +102,7 @@ describe("the epoch boundary", () => {
 
     // NOW the case that used to lie: one small top-up in the new epoch.
     await addFlow({ agentId: id, direction: "in", amountUsdg: 1, source: "transfer-intent" });
-    await addEquity(id, { ethWei: 0n, cashUsdg: 1001, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 1001 });
+    await addEquity(id, { mode: "live", ethWei: 0n, cashUsdg: 1001, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 1001 });
 
     const contributed = await getNetContributionsUsdg(id);
     assert.equal(contributed, 1001);
@@ -120,7 +120,7 @@ describe("the epoch boundary", () => {
     const id = await ensureAgent(grant(acct));
 
     await addFlow({ agentId: id, direction: "in", amountUsdg: 500, source: "chain-log" });
-    await addEquity(id, { ethWei: 0n, cashUsdg: 500, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 500 });
+    await addEquity(id, { mode: "live", ethWei: 0n, cashUsdg: 500, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 500 });
     await addTrade({
       agent_id: id,
       kind: "swap",
@@ -142,7 +142,7 @@ describe("the epoch boundary", () => {
     const acct = "0x00000000000000000000000000000000000000e3";
     const id = await ensureAgent(grant(acct));
     equityAt(id, ACCOUNTING_FIXED_AT - 1, 42, 1); // one second before the fix
-    await addEquity(id, { ethWei: 0n, cashUsdg: 42, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 42 });
+    await addEquity(id, { mode: "live", ethWei: 0n, cashUsdg: 42, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 42 });
     assert.equal(await hasEpochOneHistory(id), true);
   });
 

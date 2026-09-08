@@ -6,7 +6,7 @@
  */
 
 import { NextResponse } from "next/server";
-import { isHostedMode } from "@merrymen/core";
+import { isHostedMode, sameBookAsLatest } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
 import { hostedAgentFor } from "@/lib/agent-for";
@@ -118,12 +118,14 @@ export async function GET(req: Request) {
       try {
         const erows = (await db
           .prepare(
-            `SELECT equity_usdg, at
+            `SELECT equity_usdg, at, mode
              FROM (SELECT * FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 500)
              ORDER BY at ASC, id ASC`,
           )
-          .all(account, ...epochArg)) as { equity_usdg: number; at: number }[];
-        equity = erows.map((r) => ({ equity_usdg: r.equity_usdg, at: fmtEpoch(r.at) }));
+          .all(account, ...epochArg)) as { equity_usdg: number; at: number; mode: string | null }[];
+        // ONE SERIES, ONE BOOK. Both the practice book and the funded one write
+        // to `equity`, and the practice book opens at 1,000 USDG.
+        equity = sameBookAsLatest(erows).map((r) => ({ equity_usdg: r.equity_usdg, at: fmtEpoch(r.at) }));
       } catch {
         /* table not created yet */
       }
@@ -190,6 +192,20 @@ export async function GET(req: Request) {
       // to be read into memory. NULL when there are no rows — an epoch with no
       // equity history has no drawdown to report, and 0.00% would read as
       // "flawless" rather than "nothing happened yet".
+      //
+      // AND OVER ONE BOOK. The practice book opens at 1,000 USDG and the funded
+      // one holds whatever the owner sent; both write to `equity`, and a peak
+      // taken from the practice one against a trough in the funded one is a
+      // drawdown of 95% that nobody suffered — published, on a page that ranks
+      // people. Filtered in SQL rather than in JS because this query
+      // deliberately never reads the series into memory.
+      //
+      // COALESCE against a sentinel rather than `IS`: it means the same thing in
+      // SQLite and in Postgres, and rows written before the column exists are
+      // unattributable, so they group with each other and with nothing else.
+      const sameBook =
+        ` AND COALESCE(mode, 'unattributed') = COALESCE(` +
+        `(SELECT mode FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 1), 'unattributed')`;
       let maxDdBps: number | null = null;
       try {
         const dd = (await db
@@ -202,9 +218,9 @@ export async function GET(req: Request) {
                               ORDER BY at ASC, id ASC
                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                             ) AS peak
-                       FROM equity WHERE agent_id = ?${epochWhere})`,
+                       FROM equity WHERE agent_id = ?${epochWhere}${sameBook})`,
           )
-          .get(account, ...epochArg)) as { bps: number | null } | undefined;
+          .get(account, ...epochArg, account, ...epochArg)) as { bps: number | null } | undefined;
         maxDdBps = dd?.bps ?? null;
       } catch {
         /* pre-migration ledger, or a SQLite without window functions */

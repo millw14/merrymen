@@ -27,6 +27,7 @@
  * No session read anywhere in this file — same property as read-theses, and the
  * same reason: it is what makes the caller cacheable.
  */
+import { sameBookAsLatest } from "@merrymen/core";
 import { withReadDb } from "@/lib/ledger";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { rankPnl, type UnrankedWhy } from "@/lib/rank-pnl";
@@ -108,13 +109,18 @@ export async function readLeaderboard(): Promise<LeaderboardRead> {
         try {
           const pts = (await db
             .prepare(
-              `SELECT equity_usdg FROM (
-                 SELECT equity_usdg, at, id FROM equity
+              `SELECT equity_usdg, mode FROM (
+                 SELECT equity_usdg, at, id, mode FROM equity
                   WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 500
                ) ORDER BY at ASC, id ASC`,
             )
-            .all(account, epoch)) as { equity_usdg: number }[];
-          const vals = pts.map((p) => Number(p.equity_usdg)).filter((n) => Number.isFinite(n));
+            .all(account, epoch)) as { equity_usdg: number; mode: string | null }[];
+          // ONE SERIES, ONE BOOK. A curve that steps from a practice book's
+          // 1,000 USDG to a funded book's real equity is published here beside
+          // a return, on a page that ranks people.
+          const vals = sameBookAsLatest(pts)
+            .map((p) => Number(p.equity_usdg))
+            .filter((n) => Number.isFinite(n));
           latest = vals.length ? vals[vals.length - 1]! : null;
           // Thinned to a fixed count rather than sent whole: this is a shape,
           // not a dataset, and 200 agents × 500 points is a payload nobody

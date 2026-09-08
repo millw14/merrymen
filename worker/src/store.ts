@@ -326,6 +326,24 @@ const SQLITE_ALTERS: string[] = [
     // number by someone forgetting.
     "ALTER TABLE trades ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE equity ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
+    // WHICH BOOK THIS MARK IS OF — the paper one or the funded one.
+    //
+    // Both were being written here, under one agent_id, with nothing to tell
+    // them apart. A paper book opens at `paperStartUsdg` (1,000 by default) and
+    // a funded one holds whatever the owner actually sent, so an agent that
+    // practised and then went live has a series that steps from 1,000 to its
+    // real equity in one row — and every surface reading that series calls the
+    // step a loss. One owner was shown "−$950.17 today" for a book that had
+    // lost 2.7 cents. The two HWMs were already kept apart (the paper book
+    // carries its own), so the breaker was never fooled; only the curve was.
+    //
+    // NULLABLE WITH NO DEFAULT, deliberately, exactly as the v4 PoolKey columns
+    // above are. Every existing row is one of the two and we cannot tell which,
+    // so `'live'` would be a claim made about 900 rows an owner can see. NULL
+    // says what is true: this row predates the question. Readers keep whatever
+    // behaviour they had for a NULL series and split on it once it is known,
+    // which is what makes this migration cost nothing on the way in.
+    "ALTER TABLE equity ADD COLUMN mode TEXT",
     "ALTER TABLE flows ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE fee_accruals ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
     // The epoch this agent is currently writing into.
@@ -2137,6 +2155,15 @@ export async function addEquity(
     marks?: readonly { symbol: string; priceUsd: number; source: string; stale: boolean }[];
     /** Block the balances were read at — the anchor an auditor re-reads from. */
     blockNumber?: bigint;
+    /**
+     * WHICH BOOK THIS MARK IS OF. REQUIRED — see the column comment.
+     *
+     * Not defaulted, because the whole failure was two books sharing a series
+     * with nothing saying which was which, and a default is how that happens
+     * again. The caller already knows: it read one book or the other a few
+     * lines earlier.
+     */
+    mode: "paper" | "live";
   },
 ): Promise<void> {
   try {
@@ -2156,6 +2183,10 @@ export async function addEquity(
           stale: m.stale,
           symbol: m.symbol,
         })),
+        // WHICH BOOK, in the evidence as well as in the row. An auditor
+        // re-deriving a mark needs to know whether they are re-deriving a
+        // simulation; a journal that cannot say is a journal of two books.
+        mode: b.mode,
         positionsUsdg: b.positionsUsdg,
         // Written only when the caller knows it, so an auditor can tell "there
         // was none" from "nobody said". Undefined is dropped by JSON.stringify,
@@ -2166,9 +2197,9 @@ export async function addEquity(
       async (db: Db) => {
         await db
           .prepare(
-            "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
           )
-          .run(agentId, b.ethWei.toString(), b.cashUsdg, b.vaultUsdg, b.positionsUsdg, b.equityUsdg, epoch);
+          .run(agentId, b.ethWei.toString(), b.cashUsdg, b.vaultUsdg, b.positionsUsdg, b.equityUsdg, epoch, b.mode);
       },
     );
   } catch (e) {

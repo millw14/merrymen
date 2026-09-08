@@ -177,7 +177,7 @@ describe("a top-up made while the worker was STOPPED", () => {
   it("is recoverable from the ledger — the worker is not the only memory", async () => {
     await ensureAgent(grant(R));
     // A tick before the restart recorded cash of 500.
-    await addEquity(R, { ethWei: 0n, cashUsdg: 500, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 500 });
+    await addEquity(R, { mode: "live", ethWei: 0n, cashUsdg: 500, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 500 });
     assert.equal(await lastKnownCashUsdg(R), 500);
   });
 
@@ -223,9 +223,9 @@ describe("readPnl reports the agent's own money", () => {
     // retired explicitly, or "which agent is current" answers with the newest.
     retireAllAgents();
     await setAgentStatus(A, "armed");
-    await addEquity(A, { ethWei: 0n, cashUsdg: 700, vaultUsdg: 0, positionsUsdg: 299.480778, equityUsdg: 999.480778 });
+    await addEquity(A, { mode: "live", ethWei: 0n, cashUsdg: 700, vaultUsdg: 0, positionsUsdg: 299.480778, equityUsdg: 999.480778 });
     // B is funded and marked to a very different number in the same tables.
-    await addEquity(B, { ethWei: 0n, cashUsdg: 50_000, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 50_000 });
+    await addEquity(B, { mode: "live", ethWei: 0n, cashUsdg: 50_000, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 50_000 });
 
     const out = readPnl();
     // The headline is equity MINUS capital: 999.48 − 750 = 249.48. It used to be
@@ -247,7 +247,7 @@ describe("readPnl reports the agent's own money", () => {
     await ensureAgent(grant(C));
     await setAgentStatus(A, "expired");
     await setAgentStatus(C, "armed");
-    await addEquity(C, { ethWei: 0n, cashUsdg: 999.48, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 999.48 });
+    await addEquity(C, { mode: "live", ethWei: 0n, cashUsdg: 999.48, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 999.48 });
 
     assert.equal(await getNetContributionsUsdg(C), null);
     const out = readPnl();
