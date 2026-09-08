@@ -120,6 +120,69 @@ export function Proposals({ onResign }: { onResign: () => void }) {
     }
   }, []);
 
+  /**
+   * ADD EVERY COIN AT ONCE — one click, then one signature.
+   *
+   * The re-sign was ALREADY all-at-once: minting seals `grantTokens` from the
+   * WHOLE custom-token list, so signing after five adds costs exactly one
+   * signature. The adds were not — one button per coin, each disabled while
+   * another was in flight — so five vetted coins meant five reads, five writes
+   * and five decisions before the single signature that actually mattered.
+   *
+   * That is the honest answer to "a human shouldn't be needed all the time".
+   * The wall can only ever widen by a signature the owner alone can make, so
+   * nothing here removes a human — it removes the four round-trips that were
+   * never the point, and leaves the one that is.
+   *
+   * ONE READ, ONE WRITE. Not a loop over `approve`: five sequential
+   * read-modify-writes against the same document race each other, and the last
+   * writer wins with a list built from a stale read — which would silently drop
+   * coins the owner just approved.
+   */
+  const approveAll = useCallback(async (list: Proposal[]) => {
+    setError("");
+    setAdding("all");
+    try {
+      const cur = await fetch("/api/settings", { cache: "no-store" });
+      if (!cur.ok) throw new Error("could not read your settings");
+      const values = ((await cur.json()) as { values?: { customTokens?: unknown[]; basketSymbols?: unknown[] } })
+        .values ?? {};
+      const tokens = (values.customTokens ?? []) as { symbol: string; address: string; decimals: number }[];
+      const basket = (values.basketSymbols ?? []) as string[];
+
+      const nextTokens = [...tokens];
+      const nextBasket = [...basket];
+      for (const p of list) {
+        if (!nextTokens.some((t) => String(t.address).toLowerCase() === p.token.toLowerCase())) {
+          nextTokens.push({ symbol: p.symbol, address: p.token, decimals: p.decimals });
+        }
+        if (!nextBasket.includes(p.symbol)) nextBasket.push(p.symbol);
+      }
+
+      const put = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ customTokens: nextTokens, basketSymbols: nextBasket }),
+      });
+      if (!put.ok) {
+        const j = (await put.json().catch(() => null)) as { errors?: string[] } | null;
+        throw new Error(j?.errors?.join(" ") ?? `settings refused it (${put.status})`);
+      }
+      // Marked added only after the write the server accepted — an optimistic
+      // tick on a refused PUT tells an owner their coin is covered when the one
+      // thing standing between them and a trade is that it is not.
+      setAdded((prev) => {
+        const next = new Set(prev);
+        for (const p of list) next.add(p.token);
+        return next;
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAdding(null);
+    }
+  }, []);
+
   if (state.kind === "loading") return null;
   // A PROPOSAL PANEL THAT CANNOT LOAD SAYS NOTHING, rather than an error strip
   // above a working chat. Nothing is wrong with the agent, and nothing here is
@@ -141,6 +204,22 @@ export function Proposals({ onResign }: { onResign: () => void }) {
         It can watch these already. It cannot trade them until your signed permission covers
         them — that is the wall doing its job, and only you can widen it.
       </p>
+      {/* ONE CLICK FOR THE LOT, then the one signature that was always the
+          point. Hidden once there is nothing left to add, and while a single
+          add is in flight, so the two controls can never race the same
+          document. */}
+      {proposals.length > 1 && proposals.some((p) => !added.has(p.token)) && (
+        <button
+          type="button"
+          className="proposal-add-all"
+          disabled={adding !== null}
+          onClick={() => approveAll(proposals.filter((p) => !added.has(p.token)))}
+        >
+          {adding === "all"
+            ? "adding…"
+            : `Add all ${proposals.filter((p) => !added.has(p.token)).length} to my watchlist`}
+        </button>
+      )}
 
       <ol className="proposal-list">
         {proposals.map((p) => (

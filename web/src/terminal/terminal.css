@@ -7322,6 +7322,26 @@
   padding-left: 9px;
 }
 
+/* The batch control. Full width and above the list, because it acts on all of
+   them — a pill tucked beside one coin would read as belonging to that coin. */
+:where(.terminal-host) .proposal-add-all {
+  width: 100%;
+  margin: 0 0 12px;
+  padding: 9px 14px;
+  border: 1px solid var(--lime);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--tx);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+:where(.terminal-host) .proposal-add-all:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 :where(.terminal-host) .proposal-add {
   align-self: flex-start;
   margin-top: 2px;

@@ -292,6 +292,25 @@ export function Agent({
         window.location.href = cmd.to!;
         return;
       }
+      if (cmd.via === "snipe") {
+        // A SNIPE ANSWERS IN FOUR WAYS AND ONLY ONE OF THEM IS A TRADE.
+        //
+        // The server resolves what was typed, so the reply that comes back is
+        // already the sentence to show — one coin placed, several coins asking
+        // which, not covered by the key yet, or nothing found. Rendering it
+        // verbatim is deliberate: every one of those is a fact the browser does
+        // not have and must not invent, and three of them are not errors.
+        const res = await fetch("/api/snipe", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(commandPayload(cmd, pending!.args)),
+        });
+        const out = (await res.json().catch(() => null)) as { say?: string; error?: string } | null;
+        if (!res.ok && !out?.say) throw new Error(out?.error ?? `that was refused (${res.status})`);
+        onTurn({ question: "✓ confirmed", answer: out?.say ?? "I could not tell how that went." });
+        setPending(null);
+        return;
+      }
       if (cmd.via === "order") {
         // AN ORDER IS QUEUED, NOT DONE, AND THE SENTENCE HAS TO SAY SO.
         //

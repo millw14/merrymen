@@ -24,3 +24,7 @@ export * from "./portfolio-snapshot";
 // ONE SERIES, ONE BOOK. The paper and funded books both write to `equity`;
 // this is the rule every reader of that series applies to tell them apart.
 export * from "./equity-book";
+
+// "SNIPE PEPE WITH $20" — one typed word to one token, and never a guess when
+// two coins share a ticker.
+export * from "./snipe-target";

@@ -81,7 +81,15 @@ export interface ChatCommand {
    * implementation detail: a 200 means a row exists, not that a trade happened,
    * and the card must not say otherwise.
    */
-  via: "settings" | "navigate" | "order";
+  /**
+   * `snipe` is its own rail and not an `order`, because the target is a
+   * QUERY rather than a symbol. An order names a token the caller has already
+   * resolved; a snipe hands over what somebody typed and asks the server to
+   * work out whether it means one coin, several, or none — and those three
+   * answers are not a trade, a trade, and an error. They are three different
+   * replies, only one of which places anything.
+   */
+  via: "settings" | "navigate" | "order" | "snipe";
   /** For `settings`: which keys this command may write. Nothing else is sent. */
   writes?: readonly string[];
   /**
@@ -208,6 +216,31 @@ const REGISTRY: ChatCommand[] = [
     say: (a) =>
       `Spend ${money(a.usdgAmount)} buying ${String(a.symbol).toUpperCase()}. ` +
       `I'll place it — my key's limits still decide whether it goes through.`,
+  },
+  /**
+   * SNIPE — "get me into PEPE with $20", where PEPE may be a coin this agent
+   * has never held and its owner has never typed before.
+   *
+   * Separate from `buy` because `buy` takes a SYMBOL the caller has already
+   * resolved, and the whole point of a snipe is that nobody has. Anyone can
+   * launch a token calling itself anything, and on this chain they have: the
+   * market list carries five NEONs and four HANKs. So the query goes to the
+   * server, which resolves it against everything it can see and answers with
+   * one coin, a question, or nothing found — and only the first of those places
+   * an order.
+   *
+   * The amount is still the owner's, the confirmation is still a click, and the
+   * order still goes through the same wall-checked path a typed buy takes.
+   */
+  {
+    id: "snipe",
+    via: "snipe",
+    writes: ["query", "usdgAmount"],
+    weighty: true,
+    say: (a) =>
+      `Go after ${String(a.query).toUpperCase()} with ${money(a.usdgAmount)}. ` +
+      `I'll find which coin you mean first — if more than one answers to that name I'll ask ` +
+      `rather than guess, and if my key doesn't cover it yet I'll tell you what it needs.`,
   },
   {
     id: "sell",

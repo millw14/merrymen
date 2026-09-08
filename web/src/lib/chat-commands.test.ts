@@ -276,14 +276,37 @@ describe("no secret is ever a command result", () => {
 
   it("and NOTHING in the registry returns a value rather than an action", () => {
     // Every command DOES something: writes a declared setting, moves the user,
-    // or places an order. None has a shape that could carry a secret back into
-    // the transcript — which is the property, not the count of kinds.
+    // places an order, or resolves a coin and then places one. None has a shape
+    // that could carry a secret back into the transcript — which is the
+    // property, not the count of kinds.
+    //
+    // `snipe` was the first to need reasoning about rather than waving through,
+    // because it is the only rail whose SERVER writes the sentence the browser
+    // then persists to the transcript. What it may say is bounded by what it
+    // knows: a token symbol, a shortened address, a count of coins sharing a
+    // ticker, and fixed prose. Its candidate list is the public registry, the
+    // house-wide discovery index, and this owner's own watchlist — no balance,
+    // no key, no other tenant, and nothing the caller could not read from the
+    // coins page. See api/snipe/route.ts.
     for (const cmd of CHAT_COMMANDS) {
       assert.ok(
-        cmd.via === "settings" || cmd.via === "navigate" || cmd.via === "order",
+        cmd.via === "settings" || cmd.via === "navigate" || cmd.via === "order" || cmd.via === "snipe",
         `${cmd.id} has a kind of effect nothing here has reasoned about`,
       );
     }
+  });
+
+  it("AND THE ONE RAIL THAT SPEAKS BACK CANNOT REACH A SECRET", () => {
+    // The narrow property for the exception above, pinned at the source rather
+    // than trusted: the route may read the registry, the discovery index and
+    // the caller's own settings, and must never reach the grant store — where
+    // the session key and, on a legacy agent, the owner key live.
+    const route = readFileSync(new URL("../app/api/snipe/route.ts", import.meta.url), "utf8");
+    for (const forbidden of ["getGrantStore", "demoOwnerPrivateKey", "demoSessionPrivateKey", "serialized"]) {
+      assert.ok(!route.includes(forbidden), `the snipe route must not touch ${forbidden}`);
+    }
+    // And it authorises the caller rather than trusting the chat that reached it.
+    assert.match(route, /tenantOf\(req\)/);
   });
 });
 
