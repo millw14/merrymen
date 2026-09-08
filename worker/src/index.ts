@@ -92,6 +92,7 @@ import { renderWhy } from "./strategies/reasons";
 import { takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
 import { claimCommandFile, isExpired, markRunning, writeCommandResult, type FileCommand } from "./command-files";
+import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision } from "./brain-live";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs } from "./brain-shadow";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
@@ -5912,6 +5913,9 @@ async function main() {
           });
           const inputs: ShadowInputs = {
             agentId,
+            // A brain-live agent CAN reach a trade, so its thinking must not be
+            // filed under a source this codebase lists as unable to.
+            decisionSource: brainLiveEnabledFor(agentId) ? "brain" : "brain-shadow",
             now: Math.floor(Date.now() / 1000),
             epoch: epochNow,
             // A HEADLINE MAY WAKE THE AGENT — the half of the loop that had no
@@ -6097,6 +6101,53 @@ async function main() {
               `[${short(agentId)}] [brain] about ${focusLabel(focus)} · technical: ${series} · ` +
                 `news: ${desk.coverage} (${desk.itemCount} story/stories, ${newsAge})`,
             );
+          }
+          // ── AND, FOR AN AGENT THE OWNER NAMED, IT MAY ACT ────────────────
+          //
+          // THE ONE CALL SITE. brain-shadow.ts was built on "execution is
+          // disconnected by ABSENCE, not by a flag... a future version that
+          // connects execution has to ADD an import, which is a reviewable act".
+          // This is that act, and it keeps the property rather than spending it:
+          // the shadow modules still import nothing executable, and neither does
+          // brain-live.ts — it returns three scalars. The connection lives HERE,
+          // in the file where every other execution decision already lives, and
+          // goes through `submitChatTrade`, the SAME wall-checked path an owner's
+          // own typed order takes. There is no second execution path and no
+          // bypass flag anywhere.
+          //
+          // GATED ON ITS OWN ALLOWLIST, DEFAULTING TO NOBODY. Reusing
+          // MERRYMEN_BRAIN_SHADOW would have turned every agent enrolled to be
+          // WATCHED into one that SPENDS, retroactively, for owners who agreed
+          // to the first thing and were never asked about the second.
+          //
+          // BOUNDED BY THE CEILING THAT ALREADY BOUNDS MODEL-DRIVEN TRADES on
+          // this agent — `llmMaxActionUsdg`, min'd against the sealed per-trade
+          // cap exactly as the strategist's own ceiling is. min() can only
+          // tighten; nothing here can raise what an agent may spend.
+          // `result.ok` first: a refused, unreachable or malformed run carries
+          // no decision at all, and a run that could not happen must never be
+          // read as one that decided nothing.
+          if (outcome.ran && outcome.result.ok && brainLiveEnabledFor(agentId)) {
+            const d = outcome.result.decision;
+            const ceiling = Math.min(cfg.llmMaxActionUsdg, Number(active.limits.perTradeUsdg) / 1e6);
+            const want = orderFromDecision(d, { maxUsdg: ceiling, minUsdg: BRAIN_MIN_TRADE_USDG });
+            if (!want.ok) {
+              // Held, or refused before the wall. Logged rather than filed as an
+              // event: a hold is the common case and 360 of them a day is noise.
+              console.log(`[${short(agentId)}] [brain] not acting — ${want.why}`);
+            } else {
+              const o = want.order;
+              console.log(`[${short(agentId)}] [brain] acting — ${o.side} ${o.usdgAmount} USDG ${o.symbol}`);
+              // SOURCE "brain", NEVER "chat". Filing this as chat would put the
+              // owner's name on a decision they did not make, in the one table
+              // the public feed reads for attribution — and brain-shadow.ts
+              // refuses the mirror image of that for the same reason.
+              const r = await submitChatTrade(o.side, o.symbol, o.usdgAmount, {
+                source: "brain",
+                reason: d.thesis?.slice(0, 500) || `brain decided to ${o.side} ${o.symbol}`,
+              });
+              await addEvent(agentId, r.ok ? "ok" : "warn", `brain: ${r.line}`);
+            }
           }
         }
       } catch (e) {
@@ -6514,6 +6565,13 @@ async function main() {
     symbol: string,
     token: `0x${string}`,
     usdgAmount: number,
+    // Threaded through so a curve buy carries the same provenance a pool buy
+    // does — memecoins are exactly where a reasoner other than the owner is
+    // most likely to be the one asking.
+    asked: { source: string; reason: string } = {
+      source: "chat",
+      reason: `owner asked to ${side} ${usdgAmount} USDG of ${symbol} on its bonding curve`,
+    },
   ): Promise<OrderReply> {
     if (!active) return no("no agent armed — sign a grant in the dashboard first.");
 
@@ -6662,11 +6720,7 @@ async function main() {
       notionalUsdg: isBuy ? sizeRaw : quoted,
     };
 
-    await ensureDecision(
-      intent,
-      "chat",
-      `owner asked to ${side} ${usdgAmount} USDG of ${symbol} on its bonding curve`,
-    );
+    await ensureDecision(intent, asked.source, asked.reason);
     const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
     // A CURVE SELL IS ALL-OR-NOTHING and the receipt has to name the size it
     // actually used, in whichever direction it differs. The requested amount is
@@ -6733,7 +6787,27 @@ async function main() {
     }
   }
 
-  async function submitChatTrade(side: "buy" | "sell", symbol: string, usdgAmount: number): Promise<OrderReply> {
+  /**
+   * WHO ASKED FOR THIS TRADE, for the decision row.
+   *
+   * PROVENANCE IS THE PRODUCT — brain-shadow.ts says so in as many words when
+   * it refuses to let a Brain thesis be attributed to the local strategist. So
+   * a Brain-driven trade must not be filed as `chat`: it would put the owner's
+   * name on a decision they did not make, in the one table the public feed
+   * reads for attribution.
+   *
+   * Default `chat`, because the owner typing an order is what this path was
+   * built for and is still the overwhelming majority of its traffic.
+   */
+  async function submitChatTrade(
+    side: "buy" | "sell",
+    symbol: string,
+    usdgAmount: number,
+    asked: { source: string; reason: string } = {
+      source: "chat",
+      reason: `owner asked to ${side} ${usdgAmount} USDG ${symbol} in chat`,
+    },
+  ): Promise<OrderReply> {
     if (!active) return no("no agent armed — sign a grant in the dashboard first.");
     // Before the first tick completes, equity is unknown (0n) and the drawdown
     // check would judge garbage — hold chat trades until the book is read.
@@ -6749,7 +6823,7 @@ async function main() {
     // WHERE DOES THIS TOKEN ACTUALLY TRADE? A Pons token has no pool until it
     // graduates, so routing it to the swap router would build an operation
     // against a pool that does not exist. Asked before anything is sized.
-    if (await curveFor(token)) return submitChatCurveTrade(side, symbol, token, usdgAmount);
+    if (await curveFor(token)) return submitChatCurveTrade(side, symbol, token, usdgAmount, asked);
 
     const router = swapRouterFor(cfg);
     let intent: TradeIntent;
@@ -6774,7 +6848,7 @@ async function main() {
       if (!partial) sold = Number(pos.valueUsdg) / 1e6;
       intent = { kind: "swap", target: router, sellToken: token, buyToken: CASH.USDG as `0x${string}`, sellAmountRaw: sellRaw, notionalUsdg: notional };
     }
-    await ensureDecision(intent, "chat", `owner asked to ${side} ${usdgAmount} USDG ${symbol} in chat`);
+    await ensureDecision(intent, asked.source, asked.reason);
     const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
     // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
     // sent, which is not always the amount asked for — see the clamp above.

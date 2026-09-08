@@ -55,6 +55,21 @@ const COLD_START_DELAY_SEC = 120;
 
 export interface ShadowInputs {
   agentId: string;
+  /**
+   * What to file this agent's thinking under. Defaults to `brain-shadow`.
+   *
+   * SHADOW_SOURCES (thesis-policy.ts) means "decisions that cannot reach a
+   * trade", and for an agent the owner has enrolled in MERRYMEN_BRAIN_LIVE that
+   * is no longer true — filing its thinking as `brain-shadow` would make the
+   * one list this codebase keeps of unreachable sources say something false
+   * about the very agent it stopped being true for.
+   *
+   * A STRING, not a capability. Passing "brain" here does not connect anything;
+   * the caller decides separately whether to act, and this module still imports
+   * nothing that could. It only makes the ledger's account of who thought what
+   * agree with what actually happens next.
+   */
+  decisionSource?: string;
   now: number;
   epoch: number;
   /** Micro-USDG, straight off the tick. */
@@ -224,7 +239,7 @@ export async function runShadow(
     tier: "research",
   });
 
-  await persist(i.agentId, runId, triggerId, trigger, snapshot, result, i.market, log);
+  await persist(i.agentId, i.decisionSource ?? "brain-shadow", runId, triggerId, trigger, snapshot, result, i.market, log);
   return { ran: true, trigger, snapshot, result };
 }
 
@@ -266,6 +281,12 @@ function coldStart(now: number): TriggerState {
  */
 async function persist(
   agentId: string,
+  /**
+   * What to file this run under. `brain-shadow` unless the caller has enrolled
+   * this agent in MERRYMEN_BRAIN_LIVE — see ShadowInputs.decisionSource. The
+   * comment below predicted this change and named the one place it would land.
+   */
+  source: string,
   runId: string,
   triggerId: string,
   trigger: TriggerVerdict,
@@ -287,7 +308,7 @@ async function persist(
     await addDecision({
       id: newDecisionId(),
       agent_id: agentId,
-      source: "brain-shadow",
+      source,
       strategy: "brain",
       // undefined, not null: DecisionRow leaves these out entirely for a run
       // that produced no decision, which is a different row shape from one that
@@ -335,9 +356,10 @@ async function persist(
     id: d.decision_id,
     agent_id: agentId,
     // SHADOW IS NAMED IN THE SOURCE, so nothing downstream can mistake a
-    // thought for an instruction. When execution connects, this becomes
-    // "brain" and the change is visible in one place.
-    source: "brain-shadow",
+    // thought for an instruction. This comment predicted its own change: when
+    // execution connected, this became "brain" for the agents the owner
+    // enrolled, and it is still one place.
+    source,
     strategy: "brain",
     provider: d.models[0]?.provider,
     model: d.models[0]?.model,

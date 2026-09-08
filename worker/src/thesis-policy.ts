@@ -176,6 +176,13 @@ const SOURCE_POLICY: Readonly<Record<string, "strategy" | "model">> = Object.fre
   // such; what makes it different is not the trust level but the TENSE — see
   // SHADOW_SOURCES.
   "brain-shadow": "model",
+  // The same reasoner, on an agent whose owner has enrolled it in
+  // MERRYMEN_BRAIN_LIVE — so its decisions CAN reach a trade and must not be
+  // filed under a source SHADOW_SOURCES lists as unable to. Publishable for
+  // exactly the reason `brain-shadow` is: the words are the model's own,
+  // address-scanned at two layers, and an owner watching a feed is owed the
+  // thinking behind a trade that spent their money more than one that did not.
+  brain: "model",
   ...Object.fromEntries(PUBLISHABLE_STRATEGIES.map((s) => [`strategy:${s}`, "strategy" as const])),
   // NOT here, and each for its own reason:
   //   chat     — carries a counterparty address by template

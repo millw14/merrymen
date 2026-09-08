@@ -60,16 +60,94 @@ describe("the shadow path cannot reach execution", () => {
     );
   });
 
-  it("the tick does nothing with the outcome but log it", () => {
-    // The decision is persisted inside runShadow and dropped here. If a future
-    // edit routes `outcome` onward, this is the line that notices.
-    const raw = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
-    const from = raw.indexOf("const outcome = await runShadow(");
-    assert.ok(from > 0, "the tick still calls runShadow");
-    const block = raw.slice(from, from + 700).replace(/\/\/[^\n]*/g, " ");
-    for (const fn of FORBIDDEN_CALLS) {
-      assert.doesNotMatch(block, new RegExp("\\b" + fn + "\\b"), "the outcome reaches " + fn);
+  it("brain-live carries no execution either — it returns three scalars", () => {
+    // THE CONNECTION EXISTS NOW, and this is the module that makes it. The
+    // guarantee it inherits is unchanged: it turns a decision into a plain
+    // {side, symbol, usdgAmount} and hands it back. If it ever grows an import
+    // that can move money, the connection has stopped being one reviewable call
+    // site and become a second execution path.
+    const code = codeOnly("brain-live");
+    const modules = [...code.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
+    for (const bad of FORBIDDEN_IMPORTS) {
+      const hit = modules.find((m) => m === bad || m.endsWith(bad.slice(1)));
+      assert.equal(hit, undefined, "brain-live imports " + bad);
     }
+    for (const fn of FORBIDDEN_CALLS) {
+      assert.doesNotMatch(code, new RegExp("\\b" + fn + "\\s*\\("), "brain-live calls " + fn);
+    }
+  });
+});
+
+/**
+ * ── AND WHEN THE OWNER ASKS FOR THE CONNECTION ──────────────────────────
+ *
+ * The old test here asserted "the tick does nothing with the outcome but log
+ * it", by scanning 700 characters after the runShadow call. That assertion is
+ * now FALSE — the tick can act on a decision — and it would have gone on
+ * passing anyway, because the call site that acts sits further down the file
+ * than its window reached. A guarantee that lapses by drifting out of a
+ * substring is worse than one that was never written.
+ *
+ * So it is replaced rather than deleted. What is guarded is no longer "nothing
+ * can happen" but the four things that make the connection safe, each of which
+ * a careless edit could remove without any of the above failing.
+ */
+describe("execution is connected in exactly one gated place", () => {
+  const tick = () => readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+
+  it("ONE CALL SITE, AND IT IS GATED ON ITS OWN ALLOWLIST", () => {
+    const raw = tick();
+    assert.equal(
+      (raw.match(/brainLiveEnabledFor\(agentId\)/g) ?? []).length,
+      2,
+      "the guard on acting, and the one deciding what to file the thinking as — no third",
+    );
+    assert.match(raw, /outcome\.ran && outcome\.result\.ok && brainLiveEnabledFor\(agentId\)/);
+  });
+
+  it("AND IT IS A DIFFERENT LIST FROM THE ONE THAT ONLY WATCHES", () => {
+    // Reusing MERRYMEN_BRAIN_SHADOW would have turned every agent enrolled to
+    // be observed into one that spends, retroactively, for owners who agreed to
+    // the first thing and were never asked about the second.
+    // CODE, NOT PROSE — this file's own header records the version of itself
+    // that failed on its documentation. brain-live.ts names the shadow variable
+    // in a comment, explaining why it is deliberately not the one it reads.
+    const live = codeOnly("brain-live");
+    assert.match(live, /env\.MERRYMEN_BRAIN_LIVE/);
+    assert.ok(!/MERRYMEN_BRAIN_SHADOW/.test(live), "the two lists must not be the same list");
+    // Defaults to nobody.
+    assert.match(live, /if \(!raw\) return false;/);
+  });
+
+  it("AND IT GOES THROUGH THE WALL-CHECKED PATH, never around it", () => {
+    // submitChatTrade is the same path an owner's own typed order takes:
+    // ensureDecision, then processIntent, then checkPolicy. A brain BUY of a
+    // token the grant does not name is refused by asset-allowlist exactly as
+    // anything else is.
+    const raw = tick();
+    const at = raw.indexOf("[brain] acting");
+    assert.ok(at > 0, "the acting branch must exist");
+    const block = raw.slice(at, at + 900);
+    assert.match(block, /await submitChatTrade\(o\.side, o\.symbol, o\.usdgAmount, \{/);
+    for (const fn of FORBIDDEN_CALLS) {
+      assert.doesNotMatch(block, new RegExp("\\b" + fn + "\\b"), "the brain path reaches " + fn + " directly");
+    }
+  });
+
+  it("AND IT IS FILED AS ITS OWN SOURCE, never as the owner", () => {
+    // Provenance is the product — brain-shadow.ts refuses the mirror image of
+    // this. Filing a brain trade as `chat` would put the owner's name on a
+    // decision they did not make, in the table the public feed reads.
+    const raw = tick();
+    const at = raw.indexOf("[brain] acting");
+    assert.match(raw.slice(at, at + 900), /source: "brain",/);
+  });
+
+  it("and a source that CAN trade is not listed as one that cannot", () => {
+    // SHADOW_SOURCES means "decisions that cannot reach a trade". `brain` can.
+    const policy = readFileSync(new URL("./thesis-policy.ts", import.meta.url), "utf8");
+    assert.match(policy, /export const SHADOW_SOURCES = \["brain-shadow"\] as const;/);
+    assert.match(policy, /\n  brain: "model",/, "a brain trade's thinking is publishable");
   });
 });
 

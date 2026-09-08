@@ -350,8 +350,25 @@ describe("shadow decisions say the conditional out loud", () => {
 
   it("a source nobody classified still publishes nothing", () => {
     // The fail-closed default is not weakened by the existence of a shadow arm.
+    //
+    // `brain` USED TO BE ONE OF THESE and is now classified, deliberately: an
+    // agent the owner enrolled in MERRYMEN_BRAIN_LIVE files its thinking under
+    // that source and its decisions CAN reach a trade, so an owner watching a
+    // feed is owed the reasoning behind a trade that spent their money at least
+    // as much as one that did not. The property this test is about — an
+    // unclassified source publishes nothing — is unchanged, and is checked with
+    // sources that really are unclassified.
     assert.equal(publishableThesis(shadow({ source: "brain-live" })), null);
-    assert.equal(publishableThesis(shadow({ source: "brain" })), null);
+    assert.equal(publishableThesis(shadow({ source: "brain-v2" })), null);
+    assert.equal(publishableThesis(shadow({ source: "whatever" })), null);
+  });
+
+  it("and `brain` IS classified, because it can now reach a trade", () => {
+    // The mirror of the above. If this ever goes back to null, an agent trading
+    // on model output would be doing it silently — which is the one thing the
+    // shadow arm was built to prevent in the other direction.
+    const post = publishableThesis(shadow({ source: "brain" }));
+    assert.ok(post, "a brain decision that can trade must be publishable");
   });
 
   it("marks non-shadow rows false, so the flag means something", () => {
