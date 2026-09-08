@@ -651,3 +651,33 @@ describe("an empty child is not a flat book", () => {
     assert.equal(String(b.cost_usdg), "7.0");
   });
 });
+
+describe("a rebuilt child does not empty the book it has merely forgotten", () => {
+  it("KEEPS THE SHARED POSITIONS WHEN THE REBUILT CHILD HAS NONE YET", async () => {
+    // Positions are re-derived from the chain every tick, so this heals itself
+    // — but the tick after a redeploy is the one most likely to fail on a cold
+    // RPC pool, and until the next good read the owner is shown an empty book.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    assert.equal(await count(shared, "positions"), 1, "the position was mirrored");
+
+    const reborn = new DatabaseSync(":memory:");
+    reborn.exec(SRC);
+    reborn.exec("INSERT INTO agents (smart_account, name, epoch) VALUES ('0xagent','Robin',2)");
+    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(reborn), shared });
+    assert.ok(r.restarted, "the rewind must be detected — that is the signal this rests on");
+    assert.equal(await count(shared, "positions"), 1, "a forgotten book is not an empty one");
+  });
+
+  it("BUT A BOOK THAT REALLY SOLD EVERYTHING STILL CLEARS", async () => {
+    // The half that must not regress: no rewind, no rows, so the child has
+    // genuinely read the chain and found nothing. A closed position that
+    // lingers is the bug the delete exists for.
+    const child = seedChild();
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    await child.prepare("DELETE FROM positions WHERE symbol = ?").run("PEPE");
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(await count(shared, "positions"), 0, "a flat book must clear");
+  });
+});

@@ -617,10 +617,24 @@ export async function mirrorTenant(args: {
                   price_source, value_usdg, updated_at FROM positions`,
         )
         .all()) as Record<string, unknown>[];
+      // A REBUILT CHILD HAS NOT GONE FLAT, IT HAS FORGOTTEN — the same rule the
+      // cost basis below now follows, and for a milder version of the same
+      // reason. Positions ARE re-derived from the chain every tick, so this
+      // heals itself; but the tick after a redeploy is exactly the tick most
+      // likely to fail (a cold RPC pool: "the market could not be read this
+      // tick (49 read(s) failed)" is what prompted this), and until the next
+      // good read the owner is shown an empty book with no explanation.
+      //
+      // The guard is narrow on purpose: it suppresses the delete ONLY when the
+      // rewind detector says the id space began again. A book that genuinely
+      // sold everything empties on an ordinary tick, no rewind, and still
+      // clears here — which it must, or a closed position lingers for ever.
+      const rebuiltChild = Object.keys(restarted).length > 0;
       await shared.tx(async (db) => {
         // Replace rather than merge: a closed position is GONE at the source,
         // and an upsert alone would leave it on the dashboard forever.
         for (const a of agents) {
+          if (rebuiltChild && positions.length === 0) continue;
           await db.prepare(`DELETE FROM positions WHERE agent_id = ?`).run(a.smart_account);
         }
         const ins = db.prepare(
