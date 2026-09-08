@@ -7384,3 +7384,63 @@
   font-weight: 600;
   cursor: pointer;
 }
+
+/* THE THING THE AGENT HAS ASKED PERMISSION TO DO.
+   Sits directly above the composer, because that is where the eye already is
+   when a reply lands — and it must not be possible to keep typing past it
+   without noticing what was proposed. Styled as an OFFER, not an alarm:
+   .desk-blocked above is the red one and means something is wrong; this one
+   means the agent understood and is waiting. */
+:where(.terminal-host) .desk-confirm {
+  margin: 0 0 10px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--lime) 45%, transparent);
+  border-radius: var(--r);
+  background: color-mix(in srgb, var(--lime) 8%, transparent);
+}
+
+/* ANYTHING THAT CHANGES WHAT THE AGENT DOES WITH MONEY, or that puts a key on
+   screen, reads louder. It does NOT skip the click — nothing does. */
+:where(.terminal-host) .desk-confirm.is-weighty {
+  border-color: color-mix(in srgb, var(--lime) 75%, transparent);
+  box-shadow: inset 3px 0 0 var(--lime);
+}
+
+:where(.terminal-host) .desk-confirm-say {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--tx);
+}
+
+:where(.terminal-host) .desk-confirm-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 11px;
+}
+
+:where(.terminal-host) .desk-confirm-row button {
+  padding: 8px 15px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--lime);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* DECLINING IS NOT A LESSER BUTTON, it is the safe one — same size, same
+   reach, so it is never the harder thing to hit. Only the fill differs. */
+:where(.terminal-host) .desk-confirm-row .desk-confirm-no {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--tx);
+}
+
+:where(.terminal-host) .desk-confirm-row button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

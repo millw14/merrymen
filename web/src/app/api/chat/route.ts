@@ -16,6 +16,7 @@ import { NextResponse } from "next/server";
 import { fitChatState } from "@/lib/chat-state";
 import { conceptsFor, isHostedMode, renderConcepts } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { COMMAND_IDS, commandFor, type CommandArg } from "@/lib/chat-commands";
 import { resolveConfig } from "@merrymen/settings";
 import { resolveLlm, llmText } from "@merrymen/llm";
 
@@ -38,6 +39,55 @@ WHEN THEY ASK WHAT SOMETHING MEANS:
 - An explanation may run longer than four sentences. Take the room it needs, in plain words, explaining any term you have to use. Answer what they actually asked before adding anything else.
 - Where the block names what something is COMMONLY CONFUSED WITH, lead with that. Most of these questions are not a missing definition — they are a wrong one, and correcting it is the whole answer.
 - Never tell them their money is fine or gone unless the STATE actually says so. "I can see X" and "I cannot see X" are different sentences and only one of them is usually true.`;
+
+/**
+ * WHAT THE MODEL MAY ASK FOR, and the shape it has to ask in.
+ *
+ * Appended to the system prompt rather than woven into it, so the narration
+ * rules above stay exactly as they were: this adds a capability, it does not
+ * loosen a single sentence of what the agent may claim.
+ */
+const COMMANDS = `
+
+WHEN THEY ASK YOU TO DO SOMETHING:
+- You may PROPOSE one action. You never perform it — they confirm it with a button, and only then does it happen. So propose freely and never claim you already did it.
+- To propose, end your reply with one line, alone, exactly: <<CMD id args-as-json>>
+  Examples: <<CMD set-strategy {"strategy":"dip-hunter"}>> · <<CMD open-deposit {}>> · <<CMD set-size {"buyPerTickUsdg":25}>>
+- The ONLY ids that exist are: ${COMMAND_IDS.join(", ")}. Naming anything else does nothing at all, so do not invent one — say plainly that you cannot do that yet instead.
+- Propose ONE, only when they actually asked for it, and only when you are confident which. If they were vague, ask which they meant rather than guessing — a confirmation card for the wrong thing is worse than a question.
+- Say what you are proposing in your own words FIRST. The button carries its own description; yours is the part that explains why.
+- NEVER put a private key, a seed phrase or any secret in a reply. If they ask for their key, propose reveal-key — it takes them to the wallet page, which is the only place that shows it.
+- MONEY OUT IS NOT SOMETHING YOU CAN DO FROM HERE. Whether funds can leave is decided by the permission sealed into your key when they signed, and most keys carry none at all. Propose open-withdraw and say so — never "sending it now", never a promise the wall will refuse.
+- IF YOU ARE NOT SURE WHICH SETTING THEY MEANT, propose open-settings rather than guessing at one. A card for the wrong dial is worse than a screen with every dial on it.`;
+
+/**
+ * Pull a proposed command off the end of a reply, if there is one.
+ *
+ * VALIDATED HERE, AGAINST THE REGISTRY. The id must be one we already know and
+ * the arguments must be flat scalars — so the worst a confused or injected
+ * model can produce is a command the owner sees written out and declines.
+ * Anything unparseable is simply stripped and the reply renders as text.
+ */
+function splitCommand(raw: string): { reply: string; command?: { id: string; args: Record<string, CommandArg> } } {
+  const m = raw.match(/<<CMD\s+([a-z-]+)\s*(\{[\s\S]*?\})?\s*>>/);
+  if (!m) return { reply: raw };
+  const reply = raw.replace(m[0], "").trim();
+  if (!commandFor(m[1])) return { reply };
+  let args: Record<string, CommandArg> = {};
+  try {
+    const parsed: unknown = m[2] ? JSON.parse(m[2]) : {};
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+        // SCALARS ONLY. A nested object or array here would be forwarded into a
+        // settings write, and this is the one place its shape is checked.
+        if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") args[k] = v;
+      }
+    }
+  } catch {
+    args = {};
+  }
+  return { reply, command: { id: m[1]!, args } };
+}
 
 interface ChatBody {
   message?: unknown;
@@ -95,8 +145,9 @@ export async function POST(req: Request) {
     .join("\n\n");
 
   try {
-    const reply = (await llmText(creds, { system: SYSTEM, prompt, maxTokens: concepts ? 700 : 400 })).trim();
-    return NextResponse.json({ reply: reply || null });
+    const raw = (await llmText(creds, { system: SYSTEM + COMMANDS, prompt, maxTokens: concepts ? 700 : 400 })).trim();
+    const { reply, command } = splitCommand(raw);
+    return NextResponse.json({ reply: reply || null, ...(command ? { command } : {}) });
   } catch (e) {
     // LLM unreachable/rate-limited — degrade to the client's deterministic path,
     // and SAY WHAT THE PROVIDER SAID. "llm-error" alone is four characters that

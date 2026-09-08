@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Proposals } from "../Proposals";
 import { blockerAdvice } from "@/lib/live-blocker";
+import { commandFor, settingsPayload, type CommandArg } from "@/lib/chat-commands";
 import {
   ArrowDown,
   ArrowUp,
@@ -99,6 +100,16 @@ export function Agent({
 }) {
   const [sending,setSending]=useState(false);
   const [chatError,setChatError]=useState("");
+  /**
+   * THE ONE THING THE AGENT HAS ASKED PERMISSION TO DO.
+   *
+   * Deliberately NOT part of a ChatTurn. Turns are persisted to this browser,
+   * and a confirmation card restored from storage would be an offer to act,
+   * made by nobody, on a page the owner reopened days later. A proposal lives
+   * as long as the conversation is on screen and no longer.
+   */
+  const [pending,setPending]=useState<{id:string;args:Record<string,CommandArg>}|null>(null);
+  const [running,setRunning]=useState(false);
   const [expanded, setExpanded] = useState(false);
   const [view, setView] = useState<"positions" | "trades">("positions");
   const viewport = useRef<HTMLElement>(null);
@@ -176,10 +187,55 @@ export function Agent({
       const data = await response.json();
       if(!response.ok || !data.reply) throw new Error(response.status===401 ? "Sign in again to chat with your agent." : data.why === "no-llm" ? "Chat is not configured yet. Open Settings to connect an AI provider." : "Your agent could not reply. Try sending again.");
       onTurn({question:question.trim(),answer:data.reply});
+      // VALIDATED AGAIN HERE. The route checks the id against the registry, and
+      // so does this — the client must not render a card for something it
+      // cannot describe, and `say` is where the description comes from.
+      setPending(data.command && commandFor(data.command.id) ? data.command : null);
       setAsk("");
     } catch(error) {setChatError(error instanceof Error ? error.message : "Could not send. Try again.");}
     finally {setSending(false);input.current?.focus();}
   };
+  /**
+   * DO THE THING THE OWNER JUST CONFIRMED.
+   *
+   * The model proposed it; this runs only from a click, and it calls the SAME
+   * authenticated route the buttons already call. Nothing here is a new way
+   * into the app — it is the existing way, reached by asking.
+   */
+  const confirm = async () => {
+    const cmd = pending && commandFor(pending.id);
+    if (!cmd || running) return;
+    setRunning(true);
+    setChatError("");
+    try {
+      if (cmd.via === "navigate") {
+        window.location.href = cmd.to!;
+        return;
+      }
+      // READ-MODIFY-WRITE at click time, and ONLY the declared keys.
+      // `settingsPayload` drops everything the command did not declare, and
+      // /api/settings strips every house-owned field again on the server — two
+      // independent gates, neither relying on the other.
+      const put = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(settingsPayload(cmd, pending!.args)),
+      });
+      if (!put.ok) {
+        const j = (await put.json().catch(() => null)) as { errors?: string[] } | null;
+        throw new Error(j?.errors?.join(" ") ?? `that was refused (${put.status})`);
+      }
+      // SAID BACK IN THE CONVERSATION, not as a toast that vanishes. What an
+      // agent did on your instruction belongs in the record of what you asked.
+      onTurn({ question: "✓ confirmed", answer: `Done — ${cmd.say(pending!.args)}` });
+      setPending(null);
+    } catch (e) {
+      setChatError(e instanceof Error ? e.message : "That did not go through.");
+    } finally {
+      setRunning(false);
+    }
+  };
+
   const blocked = blockerAdvice(liveBlocker);
   return (
     <div className="desk-page">
@@ -479,6 +535,37 @@ export function Agent({
         </div>
       </section>
       <div className="desk-chat-bottom">
+        {/* THE CLICK IS THE SECURITY BOUNDARY, NOT A COURTESY.
+            The chat prompt is fed this owner's own ledger, and a position's
+            `reason` is model-written text from ANOTHER agent — so the context
+            is genuinely attacker-influenced. Chat can drive the app only
+            because the model PROPOSES and a person CONFIRMS: an injected
+            "sell everything" becomes a card somebody declines.
+            The sentence below is OURS, from the registry — if the model wrote
+            it, it could describe one action and request another, and this
+            would be confirming the description rather than the act. */}
+        {pending && commandFor(pending.id) && (
+          <section
+            className={`desk-confirm${commandFor(pending.id)!.weighty ? " is-weighty" : ""}`}
+            role="group"
+            aria-label="Confirm this action"
+          >
+            <p className="desk-confirm-say">{commandFor(pending.id)!.say(pending.args)}</p>
+            <div className="desk-confirm-row">
+              <button type="button" onClick={confirm} disabled={running}>
+                {running ? "Doing it…" : commandFor(pending.id)!.via === "navigate" ? "Take me there" : "Yes, do it"}
+              </button>
+              <button
+                type="button"
+                className="desk-confirm-no"
+                onClick={() => setPending(null)}
+                disabled={running}
+              >
+                Not now
+              </button>
+            </div>
+          </section>
+        )}
         {sending && <p role="status">{mine.name} is thinking…</p>}
         {chatError && <p role="alert" className="flow-error">{chatError} {chatError.includes("Settings") && <a href="/settings">Open Settings</a>}</p>}
         {away && (
