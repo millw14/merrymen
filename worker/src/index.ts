@@ -528,8 +528,24 @@ async function main() {
    * Brain answers NO DATA AVAILABLE for a missing lens, which is the honest
    * input either way.
    */
-  const onchainLens = new Map<string, { text: string | null; at: number }>();
+  const onchainLens = new Map<string, { text: string | null; at: number; ttl: number }>();
   const ONCHAIN_TTL_SEC = 900;
+  /**
+   * And a much longer one after a sweep the provider cut short.
+   *
+   * THE FLEET IS ALREADY BEING THROTTLED ON THIS EXACT METHOD. Production, this
+   * hour: "eth_getLogs 14/8err [rate-limited:8]" against one child, with the
+   * reconciler giving up mid-window and saying so. Adding an optional analyst's
+   * sweep to that is defensible ONCE per token — the Brain trigger's own 900s
+   * cooldown means it cannot run oftener anyway — and indefensible as a
+   * fifteen-minute retry loop across 34 children while the endpoint is the
+   * thing that is failing.
+   *
+   * So a short sweep backs off for an hour rather than a quarter of one. The
+   * lens is absent meanwhile, which Brain reads as NO DATA AVAILABLE, which is
+   * exactly what it is.
+   */
+  const ONCHAIN_RETRY_SEC = 3_600;
   /**
    * How far back a scan reaches: ~28 hours at this chain's 9.911 blocks/sec.
    *
@@ -717,9 +733,10 @@ async function main() {
 
     const now = Math.floor(Date.now() / 1000);
     const cached = onchainLens.get(symbol);
-    if (cached && now - cached.at <= ONCHAIN_TTL_SEC) return cached.text;
+    if (cached && now - cached.at <= cached.ttl) return cached.text;
 
     let text: string | null = null;
+    let ttl = ONCHAIN_TTL_SEC;
     try {
       const client = active.client;
       const scan = await scanToken(
@@ -750,6 +767,10 @@ async function main() {
         },
       );
       text = renderOnchain({ symbol, scan, venues: [leg.curve] });
+      // A SHORT SWEEP IS THE PROVIDER SAYING NO, not this token being quiet.
+      // Backing off for an hour costs one absent analyst; retrying every
+      // fifteen minutes across the fleet costs the reads that move money.
+      if (!scan.scanned) ttl = ONCHAIN_RETRY_SEC;
       console.log(
         `[onchain] ${symbol} ${scan.transfers} transfers · ${scan.holders.length} holders · ` +
           `${scan.wholeHistory ? "whole history" : `partial (${scan.why})`}`,
@@ -760,8 +781,9 @@ async function main() {
       // would take the whole decision down over an optional analyst.
       console.error(`[onchain] could not read ${symbol}:`, e);
       text = null;
+      ttl = ONCHAIN_RETRY_SEC;
     }
-    onchainLens.set(symbol, { text, at: now });
+    onchainLens.set(symbol, { text, at: now, ttl });
     return text;
   }
 
