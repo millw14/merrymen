@@ -91,9 +91,19 @@ const LOG_TABLES = [
   // `positions_usdg` is part of the equity identity (cash + vault + positions +
   // quarantined) and was the one leg not carried, so a mirrored row could not be
   // decomposed into the numbers that made it.
+  //
+  // AND `mode`, WHICH BOOK THE MARK IS OF — the same shape of omission one
+  // paragraph up, with the same consequence. The child writes 'paper' or 'live'
+  // on every row; a column list that leaves it out lands every mirrored row in
+  // the shared ledger with mode NULL, and the shared ledger is the one the web
+  // tier reads. So the split between a practice book opening at 1,000 USDG and a
+  // funded book holding what the owner sent would exist in the child and nowhere
+  // anybody can see it — and the daily change, the chart, the growth index and
+  // the published drawdown would all go on measuring the step between two books
+  // as performance.
   {
     table: "equity",
-    cols: ["agent_id", "eth_wei", "cash_usdg", "vault_usdg", "positions_usdg", "equity_usdg", "epoch", "at"],
+    cols: ["agent_id", "eth_wei", "cash_usdg", "vault_usdg", "positions_usdg", "equity_usdg", "epoch", "mode", "at"],
   },
   // THE FLOW TERM. Without it equity is a bare balance reading and a deposit is
   // arithmetically indistinguishable from a gain — the bug that once reported

@@ -24,7 +24,7 @@ import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
 const SRC = [
   "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, level TEXT, message TEXT, created_at INTEGER);",
   "CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, target TEXT, sell_token TEXT, buy_token TEXT, amount_usdg REAL, user_op_hash TEXT, tx_hash TEXT, status TEXT, reject_rule TEXT, decision_id TEXT, fill_side TEXT, fill_qty_raw TEXT, fill_price_usd REAL, realized_pnl_usdg REAL, basis_source TEXT, gas_wei TEXT, sponsored_gas_wei TEXT, gas_usdg REAL, gas_units TEXT, fill_cash_usdg REAL, epoch INTEGER DEFAULT 1, created_at INTEGER);",
-  "CREATE TABLE equity (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, eth_wei TEXT, cash_usdg REAL, vault_usdg REAL, positions_usdg REAL, equity_usdg REAL, epoch INTEGER DEFAULT 1, at INTEGER);",
+  "CREATE TABLE equity (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, eth_wei TEXT, cash_usdg REAL, vault_usdg REAL, positions_usdg REAL, equity_usdg REAL, epoch INTEGER DEFAULT 1, mode TEXT, at INTEGER);",
   "CREATE TABLE flows (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, direction TEXT, amount_usdg REAL, tx_hash TEXT, block_number INTEGER, log_index INTEGER, source TEXT, epoch INTEGER DEFAULT 1, chain_id INTEGER, at INTEGER);",
   "CREATE TABLE fee_accruals (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, profit_usdg REAL, fee_usdg REAL, hwm_before_usdg REAL, hwm_after_usdg REAL, epoch INTEGER DEFAULT 1, at INTEGER);",
   "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, at INTEGER);",
@@ -77,8 +77,8 @@ const seedChild = () => {
   raw.exec("INSERT INTO positions VALUES ('0xagent','PEPE','0xp','1','1',2.0,0,'curve',10.0,9)");
   raw.exec("INSERT INTO cost_basis VALUES ('0xagent','live','PEPE','1','6.0',9)");
   raw.exec(
-    "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, at)" +
-      " VALUES ('0xagent','1000',90.0,0.0,10.0,100.0,2,120)",
+    "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, at)" +
+      " VALUES ('0xagent','1000',90.0,0.0,10.0,100.0,2,'live',120)",
   );
   // A deposit and a withdrawal. Without these the shared ledger has no flow
   // term at all, contributions read as UNKNOWN, and P&L is null forever.
@@ -575,5 +575,20 @@ describe("the ledger mirror", () => {
       Number(e.cash_usdg) + Number(e.vault_usdg) + Number(e.positions_usdg),
       Number(e.equity_usdg),
     );
+  });
+
+  it("AND WHICH BOOK THE MARK IS OF, or the shared ledger cannot tell two apart", async () => {
+    // The same omission as `positions_usdg` above, with a worse consequence. The
+    // child stamps every mark 'paper' or 'live'; a column list that drops it
+    // lands every mirrored row with mode NULL in the shared ledger — and the
+    // shared ledger is the one the web tier reads. The split would then exist in
+    // a child nobody can query, while the daily change, the chart, the growth
+    // index and the published drawdown all went on measuring the step from a
+    // practice book's opening 1,000 USDG to a funded book's real equity as
+    // performance. One owner was shown "−$950.17 today" that way.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const e = (await shared.prepare("SELECT mode FROM equity").get()) as { mode: string | null };
+    assert.equal(e.mode, "live");
   });
 });
