@@ -137,6 +137,7 @@ export function DesktopSidebar({
 
   return (
     <aside className="desktop-sidebar" aria-label="Explore">
+      <div className="desktop-explore-row">
       <div
         className="desktop-explore-tabs"
         role="tablist"
@@ -170,6 +171,9 @@ export function DesktopSidebar({
             {item.label}
           </button>
         ))}
+      </div>
+      <Link className="desktop-explore-link" href="/" aria-current={screen.kind === "tab" && screen.tab === "feed" ? "page" : undefined}>Feed</Link>
+      <Link className="desktop-explore-link" href="/leaderboard">Leaderboard</Link>
       </div>
       <section
         className="desktop-explore-panel"
