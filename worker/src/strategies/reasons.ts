@@ -93,6 +93,34 @@ export type Why =
    */
   | { code: "all-legs-stale"; legs: number; paused: number }
   /**
+   * NOTHING BOUGHT, AND IT IS THE BALANCE — a different silence with a
+   * different remedy.
+   *
+   * `all-legs-stale` fires only when the buy loop RAN and skipped every leg.
+   * When cash is below one tick's buy the loop never runs at all, so nothing is
+   * skipped, so `shut` is false, so that reason never fires — and the agent is
+   * not `no-cash` either, because only an exact zero blocks the live rail. The
+   * result is "trading for real — every leg available" printed beside a tape
+   * with no rows in it, indefinitely, on a stock agent with the default
+   * settings. It is the "nothing happens" complaint, and it had no sentence
+   * anywhere.
+   *
+   * Counts only, so it publishes by the same rule as everything else here.
+   */
+  | { code: "under-one-buy"; cashRaw: bigint; needRaw: bigint; vaultRaw: bigint }
+  /**
+   * THE MODEL LOOKED AND CHOSE TO HOLD.
+   *
+   * The LLM strategist returns a bare intent list, so a window where it decided
+   * to do nothing wrote zero decision rows, zero events and zero log lines —
+   * byte-for-byte identical to a window that never opened, to a model call that
+   * failed and was retried, and to a healthy agent between decision intervals.
+   * `all-legs-stale` was written to close exactly this hole and closed it only
+   * for the basket, leaving it open on the rail that is supposed to be the
+   * autonomous trading path.
+   */
+  | { code: "model-held"; held: number; considered: number; dropped: number }
+  /**
    * THE ALWAYS-ON SIDE OF THE CHAIN, when the always-off side is shut.
    *
    * Every equity feed goes stale at a weekend, so a stock basket does nothing
@@ -153,6 +181,20 @@ export function renderWhy(w: Why): string {
         `stale, so there is no reference price to buy against` +
         (w.paused > 0 ? `, and ${w.paused} of them ${w.paused === 1 ? "is" : "are"} paused` : "") +
         `. This is a fact about the feeds, not about the market`
+      );
+    case "under-one-buy":
+      return (
+        `nothing bought — ${usdg(w.cashRaw)} USDG on hand and one buy costs ${usdg(w.needRaw)}` +
+        (w.vaultRaw > 0n
+          ? `. There is ${usdg(w.vaultRaw)} USDG in the vault I can pull back, so this should clear itself`
+          : `, and the vault is empty. Add funds or lower the size per trade`)
+      );
+    case "model-held":
+      return (
+        `nothing bought — I looked at ${w.considered} ${w.considered === 1 ? "name" : "names"} and held ` +
+        `${w.held === w.considered ? "all of them" : `${w.held} of them`}` +
+        (w.dropped > 0 ? `; ${w.dropped} more ${w.dropped === 1 ? "was" : "were"} refused before I could act` : "") +
+        `. A decision, not a quiet tick`
       );
     case "stale-fallback":
       return (

@@ -181,10 +181,34 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   }
 
   const boughtCurve = intents.some((i) => i.kind === "curve-trade");
+  // THE OTHER SILENCE, WHICH HAD NO SENTENCE AT ALL.
+  //
+  // The comment above `shut` names this case exactly — "a tick that bought
+  // nothing because it had no cash is a different silence with a different
+  // remedy" — and then nothing ever wrote the different sentence. When cash is
+  // below one tick's buy the loop above never runs, so `skippedStale` and
+  // `skippedPaused` stay 0, so `shut` is false, so `all-legs-stale` cannot
+  // fire; and the agent is not `no-cash` either, because only an exact zero
+  // blocks the live rail. The owner sees "trading for real — every leg
+  // available" beside an empty tape, forever, on stock defaults (25 USDG a
+  // tick, a 50 USDG idle floor).
+  //
+  // Reported only when there was something it WANTED to buy — no legs
+  // configured is a different fact, and the basket screen already says it.
+  const short = !bought && cfg.legs.length > 0 && snap.cashUsdg < cfg.buyPerTickUsdg;
   const idle: Why | undefined =
     shut && !boughtCurve
       ? { code: "all-legs-stale", legs: cfg.legs.length, paused: skippedPaused }
-      : undefined;
+      : short
+        ? {
+            code: "under-one-buy",
+            cashRaw: snap.cashUsdg,
+            needRaw: cfg.buyPerTickUsdg,
+            // Named because it changes the remedy: with cash in the vault this
+            // clears itself on the unpark, and without it the owner has to act.
+            vaultRaw: snap.vaultUsdg,
+          }
+        : undefined;
 
   return idle ? { intents, why, idle } : { intents, why };
 }

@@ -6760,9 +6760,36 @@ async function main() {
       `tick ${cfg.tickSeconds}s, settings+grant re-synced every tick` +
       (cfg.telegramEnabled ? ", telegram ON" : ""),
   );
+  /**
+   * The last tick failure written down, so 360 identical ones do not become 360
+   * rows. Same de-duplication `lastLiveBlocker` uses, for the same reason: this
+   * repo carries the incident where 1,242 identical rows told nobody anything.
+   */
+  let lastTickError = "";
   const runLoop = () => {
     tick()
-      .catch((e) => console.error("[tick]", e))
+      .catch(async (e) => {
+        // A TICK THAT THREW IS THE ONE FAILURE THAT LEFT NO ROW.
+        //
+        // The heartbeat is written at the TOP of the tick, before any network
+        // call, and `setAgentMode` rides it — deliberately, so a rate limit
+        // cannot get a healthy worker SIGKILLed by the watchdog. The cost of
+        // that decision is that liveness and correctness came apart: a throw in
+        // readPositions, the depth reader, the paper book, `strategy.tick()` or
+        // `processIntent` silently ended the tick and every intent after it,
+        // while the orchestrator's watchdog and the dashboard's mode chip both
+        // went on reporting the agent as fine. The only trace was a stderr line
+        // in a fleet log nobody tails.
+        //
+        // Every other failure on this path writes a row naming its rule. This
+        // is the one place a failure produced nothing at all, so it writes one.
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error("[tick]", e);
+        if (active && msg !== lastTickError) {
+          lastTickError = msg;
+          await addEvent(active.agentId, "err", `tick failed: ${msg.slice(0, 300)}`).catch(() => {});
+        }
+      })
       // In the finally so a tick that threw still reports what it spent — the
       // ticks that fail are exactly the ones whose RPC cost matters most.
       .finally(() => {

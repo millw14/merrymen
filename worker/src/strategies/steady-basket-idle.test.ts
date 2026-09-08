@@ -73,11 +73,43 @@ describe("a stale weekend is reported, not just endured", () => {
     assert.equal(t.idle, undefined, "a tick that bought must not also claim it could not");
   });
 
-  it("SHORT OF CASH IS A DIFFERENT SILENCE, with a different remedy", () => {
-    // Saying "the feeds are stale" to an owner whose account is simply empty
-    // would send them to wait for Monday instead of to the deposit screen.
+  it("SHORT OF CASH IS A DIFFERENT SILENCE, and it gets its own sentence", () => {
+    // This used to assert `idle === undefined`, and it was RIGHT about the
+    // wrong sentence — telling an owner whose account is empty that "the feeds
+    // are stale" sends them to wait for Monday instead of to the deposit
+    // screen. It was wrong to conclude that saying nothing was the answer.
+    //
+    // Nothing at all was the worse outcome: the buy loop never runs, so
+    // skippedStale stays 0, so `shut` is false, so no reason fires — and the
+    // live rail is only blocked by an EXACT zero, so the agent reports
+    // "trading for real — every leg available" beside an empty tape, forever,
+    // on stock defaults. That is the "nothing happens" complaint, and it had no
+    // sentence anywhere in the system.
     const t = steadyBasketTick(cfg(), snap({ cashUsdg: 1_000_000n, staleFeeds: new Set(["QQQ", "NVDA", "TSLA"]) }));
-    assert.equal(t.idle, undefined);
+    assert.equal(t.idle?.code, "under-one-buy");
+    // The BALANCE, not the feeds — even though the feeds are stale here too.
+    // Whichever is reported is the one the owner will act on.
+    const said = renderWhy(t.idle!);
+    assert.match(said, /1\.00 USDG on hand and one buy costs 25\.00/);
+    assert.match(said, /Add funds or lower the size per trade/);
+    assert.ok(!/stale/.test(said), "the actionable fact is the money, not the weekend");
+  });
+
+  it("and when the vault can cover it, it says the problem clears itself", () => {
+    // Cash short WITH a vault balance is the unpark tick — a different remedy
+    // again, and one the agent performs on its own. Telling that owner to add
+    // funds would be wrong.
+    const t = steadyBasketTick(cfg(), snap({ cashUsdg: 1_000_000n, vaultUsdg: 50_000_000n }));
+    assert.equal(t.idle, undefined, "a tick that DID something is not idle");
+    assert.equal(t.intents[0]?.kind, "vault-withdraw");
+  });
+
+  it("no legs configured is not a silence this reports", () => {
+    // An empty basket is a different fact and the basket screen already states
+    // it. Reporting "you have 1.00 USDG and a buy costs 25.00" about a strategy
+    // with nothing to buy would be a true sentence about the wrong problem.
+    const bare = { ...cfg(), legs: [] };
+    assert.equal(steadyBasketTick(bare, snap({ cashUsdg: 1_000_000n })).idle, undefined);
   });
 
   it("counts paused legs separately, because pausing is not staleness", () => {

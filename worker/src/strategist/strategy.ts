@@ -9,7 +9,8 @@
 
 import { randomUUID } from "node:crypto";
 import type { TradeIntent } from "../policy";
-import type { Snapshot, Strategy } from "../strategies/types";
+import type { Snapshot, Strategy, Tick } from "../strategies/types";
+import type { Why } from "../strategies/reasons";
 import { parseProposals, proposalsToIntents, type StrategistUniverse } from "./proposals";
 import type { ProposalDriver, Signals } from "./driver";
 import { runDesk, type DeskLink, type DeskPeer, type DeskWorld } from "./desk";
@@ -164,7 +165,7 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
 
   return {
     name,
-    async tick(snap: Snapshot): Promise<TradeIntent[]> {
+    async tick(snap: Snapshot): Promise<TradeIntent[] | Tick> {
       if (!snap.sequencerUp) return [];
       const t = now();
       if (lastDecisionAt !== null && t - lastDecisionAt < cfg.decisionIntervalMs) return [];
@@ -319,7 +320,31 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
           note("ok", `strategist: ${a.action} ${a.sizeUsdg} USDG ${a.symbol} — ${a.reason}`);
         }
       }
-      return intents;
+
+      // ── AND WHEN IT PROPOSED NOTHING, SAY SO ────────────────────────────
+      //
+      // THE HOLE `all-legs-stale` WAS WRITTEN TO CLOSE, LEFT OPEN ON THE RAIL
+      // THAT MATTERS MORE. This returned a bare `TradeIntent[]`, so the `idle`
+      // field the basket uses was not even representable here — and a window
+      // where the model looked at the book and held everything wrote zero
+      // decision rows, zero events and zero log lines. Byte-for-byte identical
+      // to a window that never opened, to a model call that failed and was
+      // retried, and to a healthy agent between decision intervals. On the
+      // strategy that is supposed to BE the autonomous buy/sell path.
+      //
+      // Counts only — no prose, no symbols — so it publishes by the same rule
+      // as every other `Why`. The model's own words already have their own
+      // path: `thesis` becomes a decision row above, capped and scanned.
+      //
+      // Not reported when a `thesis` was written: that row IS the agent saying
+      // what it decided, and two rows for one silence is the duplication the
+      // de-duplication upstream exists to avoid.
+      const held = actions.filter((a) => a.action === "hold").length;
+      const idle: Why | undefined =
+        intents.length === 0 && !thesis && (actions.length > 0 || rejected.length > 0)
+          ? { code: "model-held", held, considered: actions.length, dropped: rejected.length }
+          : undefined;
+      return idle ? { intents, why: intents.map(() => null), idle } : intents;
     },
   };
 }
