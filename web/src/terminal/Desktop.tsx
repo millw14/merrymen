@@ -55,8 +55,8 @@ export function DesktopHeader({
     <header className="desktop-header">
       <button
         className="desktop-brand"
-        onClick={() => onTab("home")}
-        aria-label="Merrymen home"
+        onClick={() => onTab("feed")}
+        aria-label="Merrymen feed"
       >
         {/*
           THE BRAND IS NOT A TAB. It borrowed the tab bar's icon for `agent`,
@@ -328,7 +328,7 @@ export function DesktopSidebar({
         aria-labelledby="explore-tab-feed"
         hidden={section !== "feed"}
       >
-        <Feed
+        {section === "feed" && <Feed
           compact
           read={reads.theses}
           theses={theses}
@@ -337,7 +337,7 @@ export function DesktopSidebar({
           onToken={openToken}
           onProfile={openProfile}
           onDesk={() => onTab("agent")}
-        />
+        />}
       </section>
       <section
         className="desktop-explore-panel"
@@ -346,7 +346,7 @@ export function DesktopSidebar({
         aria-labelledby="explore-tab-board"
         hidden={section !== "board"}
       >
-        <Board
+        {section === "board" && <Board
           compact
           read={reads.board}
           agents={agents}
@@ -354,7 +354,7 @@ export function DesktopSidebar({
           mine={mine}
           onProfile={openProfile}
           onDesk={() => onTab("agent")}
-        />
+        />}
       </section>
     </aside>
   );
@@ -382,7 +382,7 @@ export function DesktopPortfolio({
         <div className="desktop-section-heading">
           <h2>Your agent</h2>
           <span className={`desktop-running ${stopped ? "paused" : ""}`}>
-            {mine.statusLabel ?? "Waiting for worker"}
+            {mine.statusLabel ?? "Offline"}
           </span>
         </div>
         <button className="desktop-agent-id" onClick={() => onTab("agent")}>

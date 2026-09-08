@@ -103,9 +103,9 @@ export function unrankedLabel(why: UnrankedWhy): string {
     case "never-filled":
       return "nothing has filled yet";
     case "contributions-unevidenced":
-      return "capital on record is not evidenced";
+      return "deposit history unavailable";
     case "quality-unknown":
-      return "not yet assessed";
+      return "return unavailable";
     default: {
       const exhaustive: never = why;
       return exhaustive;
@@ -121,9 +121,9 @@ export function unrankedShort(why: UnrankedWhy): string {
     case "never-filled":
       return "never filled";
     case "contributions-unevidenced":
-      return "unevidenced";
+      return "unverified deposits";
     case "quality-unknown":
-      return "unassessed";
+      return "unranked";
     default: {
       const exhaustive: never = why;
       return exhaustive;

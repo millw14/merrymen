@@ -34,7 +34,6 @@ import {
 
 import { Agent } from "./screens/Agent";
 import { Alpha } from "./screens/Alpha";
-import { Board } from "./screens/Board";
 import { pathForScreen, screenForPath, TABS } from "./nav";
 
 import { Feed } from "./screens/Feed";
@@ -49,9 +48,9 @@ import { Token } from "./screens/Token";
 import { You } from "./screens/You";
 import { TabIcon } from "./ui";
 import { FirstVisit } from "./FirstVisit";
+import { useDesktopDetail } from "./desktop-detail";
 
 
-const HOME_SCREEN: Screen = { kind: "tab", tab: "home" };
 const desktopSnapshot = () => window.matchMedia("(min-width: 1100px)").matches;
 function subscribeDesktop(onChange: () => void) {
   const media = window.matchMedia("(min-width: 1100px)");
@@ -89,12 +88,8 @@ export function App() {
   const [sidebarSection, setSidebarSection] =
     useState<SidebarSection>("markets");
   const desktop = useSyncExternalStore(subscribeDesktop, desktopSnapshot, () => false);
-  // THE DESKTOP REWRITE IS GONE. It silently sent /feed and /leaderboard to Home
-  // above 1100px, so the URL said one thing and the body showed another. That
-  // was survivable while the feed was a side panel; with the feed as the centre
-  // tab it would mean the main button does nothing on desktop.
-  //
-  // AND SO IS `moneyMode`. Deposit and withdraw were component state, which
+  const desktopDetail = useDesktopDetail(desktop, requestedScreen, live.tokens[0]?.id, live.agents[0]?.slug);
+  // Deposit and withdraw were component state, which
   // meant the browser's Back button could not dismiss them and the tab bar
   // disappeared while they were open — the most trapped a person could be in
   // this shell, on the two screens where money moves. They are routes now, so
@@ -107,8 +102,10 @@ export function App() {
   // over whatever you were looking at, so the body keeps rendering that — the
   // one place the URL and the body legitimately differ, because the panel is an
   // overlay and the page under it did not go anywhere.
-  const [tab, setTab] = useState<Tab>("home");
-  const screen: Screen = desktop && money ? { kind: "tab", tab } : requestedScreen;
+  const [tab, setTab] = useState<Tab>("feed");
+  const screen: Screen = desktop && (
+    money || (requestedScreen.kind === "tab" && (requestedScreen.tab === "feed" || requestedScreen.tab === "home"))
+  ) ? desktopDetail : requestedScreen;
   const [tokenTab, setTokenTab] = useState<TokenTab>("buys");
   const perTrade = String(account?.status.grant?.caps.perTradeUsdg ?? "");
   const perDay = String(account?.status.grant?.caps.dailyUsdg ?? "");
@@ -230,6 +227,10 @@ export function App() {
     setScreen(next);
   };
   const goTab = (next: Tab) => {
+    if (desktop && next === "feed") {
+      setSidebarSection("feed");
+      return;
+    }
     setTab(next);
     setScreen({ kind: "tab", tab: next });
   };
@@ -256,9 +257,12 @@ export function App() {
     }).catch(e=>{if(alive)setProfileError(e.message);});
     return()=>{alive=false;};
   },[profileSlug]);
-  useEffect(()=>{if(pathname==="/agent")setSidebarSection("agents");},[pathname]);
+  useEffect(()=>{if(pathname==="/agent" || pathname==="/chat")setSidebarSection("agents");},[pathname]);
+  useEffect(() => {
+    if (desktop && (pathname === "/" || pathname === "/feed")) setSidebarSection("feed");
+  }, [desktop, pathname]);
   const agent=profile ?? listedAgent;
-  const mine = account?.status.exists && live.mine ? {...live.mine, statusLabel: account.status.mode === "paper" ? "Paper trading" : account.status.mode === "live" ? "Running" : account.status.mode === "idle" ? "Idle" : "Waiting for worker"} : null;
+  const mine = account?.status.exists && live.mine ? {...live.mine, statusLabel: account.status.mode === "paper" ? "Paper trading" : account.status.mode === "live" ? "Running" : account.status.mode === "idle" ? "Idle" : "Offline"} : null;
   // THE SHELL FOR A VISITOR WITH NO AGENT — and every figure on it is unknown,
   // not zero. `equity:0, cashUsd:0` rendered "$0.00" in the header and the
   // sidebar for somebody who has no account at all, which is a balance we have
@@ -351,7 +355,6 @@ export function App() {
         {screen.kind === "tab" && screen.tab === "alpha" && (
           <Alpha onToken={(id) => openScreen({ kind: "token", id })} />
         )}
-        {screen.kind === "tab" && screen.tab === "you" && <div className="hosted-account-links"><a href="/settings">Settings</a><a href="/grant">Manage wallet & permissions</a>{account?.session.hosted && account.session.address && <button onClick={()=>{void requestJson("/api/auth/logout",{method:"POST"}).then(()=>{setLive(seedLive());setAccount(null);setTurns([]);setChatDraft("");refreshAccount();}).catch(e=>setLoadError(e.message));}}>Sign out</button>}</div>}
         {screen.kind === "tab" && screen.tab === "you" && (
           <You
             history={
@@ -368,6 +371,7 @@ export function App() {
             mine={mine}
           />
         )}
+        {screen.kind === "tab" && screen.tab === "you" && <div className="profile-session-actions">{!account?.status.exists && <a href="/create">Create agent</a>}{account?.session.hosted && account.session.address && <button onClick={()=>{void requestJson("/api/auth/logout",{method:"POST"}).then(()=>{setLive(seedLive());setAccount(null);setTurns([]);setChatDraft("");refreshAccount();}).catch(e=>setLoadError(e.message));}}>Sign out</button>}</div>}
         {/* THREE STATES, NOT ONE — see `liveLoaded`. Waiting is not failing, and
             a market list that came back without this address is a fact about the
             address rather than a fact about the request. */}
@@ -389,8 +393,8 @@ export function App() {
               <h1>{unreadable ? "Token unavailable" : "Token not listed"}</h1>
               <p role="status">
                 {unreadable
-                  ? "We could not read the market list, so we cannot tell you about this token. That is a gap on our side, not a statement about the token."
-                  : "The market list came back without this token. Check the address, or it may not be tradable here."}
+                  ? "Could not load this token. Try again."
+                  : "Token not found. Check the address."}
               </p>
               {unreadable && <button onClick={refreshAccount}>Try again</button>}
               <button onClick={()=>goTab("home")}>Back to markets</button>
@@ -417,8 +421,7 @@ export function App() {
             not. */}
         {screen.kind === "profile" && agent && profileError && (
           <p role="status" className="hosted-note">
-            Some of this agent’s profile could not be loaded ({profileError}). What is shown comes
-            from the leaderboard read, and its performance history is not published from that.
+            Some profile details are unavailable. Showing the agent’s leaderboard summary.
           </p>
         )}
         {screen.kind === "profile" && agent && (
@@ -474,16 +477,15 @@ export function App() {
           onTab={goTab}
         />
       ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} onRefresh={refreshAccount}/>}</aside> : null}
-      {screen.kind !== "deposit" &&
-        screen.kind !== "withdraw" &&
-        screen.kind !== "limits" && (
-          <nav className="tabbar">
+      {(
+          <nav className="tabbar" aria-label="Main navigation">
             {TABS.map((t) => (
               <button
                 key={t.id}
                 type="button"
                 className={activeTab === t.id ? "tab on" : "tab"}
                 aria-label={t.label}
+                aria-current={activeTab === t.id ? "page" : undefined}
                 onClick={() => goTab(t.id)}
               >
                 <TabIcon id={t.id} />

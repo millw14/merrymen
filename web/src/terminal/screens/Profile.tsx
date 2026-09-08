@@ -1,6 +1,7 @@
 import { PerformanceChart } from "../DitherChart";
 import { Boundary } from "../Boundary";
 import { useState } from "react";
+import { Empty } from "../ui";
 import { ArrowLeft } from "lucide-react";
 import {
   ageOf,
@@ -203,9 +204,7 @@ export function Profile({
           <span>{posts.length} updates</span>
         </div>
         {posts.length === 0 && (
-          <p className="public-empty">
-            New trades and decisions will appear here.
-          </p>
+          <Empty compact title="New trades and decisions will appear here."/>
         )}
         <div className="public-activity">
           {posts.slice(0, showAll ? undefined : 4).map((post, i) => {

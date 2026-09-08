@@ -1,3 +1,4 @@
+import { MessageSquare, Trophy, Search, UserRound, Layers, Activity, Wallet, type LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { faceSrc } from "./live";
 import { ownerTag } from "./strategy";
@@ -111,14 +112,33 @@ export function Dial({ left, size = 34 }: { left: number; size?: number }) {
   );
 }
 
-export function Empty({ title, action, note }: { title: string; action?: { label: string; onClick: () => void }; note?: string }) {
+type EmptyKind = "feed" | "board" | "chat" | "profile" | "search" | "positions" | "wallet";
+const EMPTY_ICONS: Record<EmptyKind, LucideIcon> = {
+  feed: Activity, board: Trophy, chat: MessageSquare, profile: UserRound,
+  search: Search, positions: Layers, wallet: Wallet,
+};
+
+export function EmptyArtwork({ kind = "feed" }: { kind?: EmptyKind }) {
+  const Icon = EMPTY_ICONS[kind];
+  return <div className={`empty-art empty-art-${kind}`} aria-hidden="true">
+    <span className="empty-art-card empty-art-back" />
+    <span className="empty-art-card empty-art-front">
+      <Icon size={30} strokeWidth={1.35}/>
+      <span className="empty-art-rule"/><span className="empty-art-rule short"/>
+    </span>
+    <span className="empty-art-pixel p1"/><span className="empty-art-pixel p2"/><span className="empty-art-pixel p3"/>
+  </div>;
+}
+
+export function Empty({ title, action, note, kind = "feed", compact = false }: { title: string; action?: { label: string; onClick: () => void }; note?: string; kind?: EmptyKind; compact?: boolean }) {
   return (
-    <div className="blank">
+    <div className={`blank${compact ? " blank-compact" : ""}`}>
+      <EmptyArtwork kind={kind}/>
       <strong>{title}</strong>
       {note && <p className="blank-note">{note}</p>}
       {action && (
         <button type="button" className="fund solid" onClick={action.onClick}>
-          {action.label}
+          {action.label}<span aria-hidden="true">↗</span>
         </button>
       )}
     </div>
@@ -143,21 +163,25 @@ export function ReadEmpty({
   state,
   title,
   action,
+  kind,
+  compact,
 }: {
   state: "unread" | "unreadable" | "ok";
   /** What to say when the read succeeded and there was genuinely nothing. */
   title: string;
   action?: { label: string; onClick: () => void };
+  kind?: EmptyKind;
+  compact?: boolean;
 }) {
-  if (state === "unread") return <Empty title="Loading…" />;
+  if (state === "unread") return <Empty title="Loading…" kind={kind} compact={compact} />;
   if (state === "unreadable")
     return (
       <Empty
-        title="Couldn’t read the ledger just now."
-        note="So this is what we don’t know, not a quiet hour. It will fill in when the read succeeds."
+        title="Activity unavailable."
+        kind={kind} compact={compact}
       />
     );
-  return <Empty title={title} action={action} />;
+  return <Empty title={title} action={action} kind={kind} compact={compact} />;
 }
 
 export function FaceOn({
@@ -321,13 +345,13 @@ export function TabIcon({ id }: { id: import("./live").Tab }) {
 export function TopBar({ onSearch, onDeposit }: { onSearch: () => void; onDeposit: () => void }) {
   return (
     <div className="top-row">
-      <LogoMark size={26} />
+      <a href="/" aria-label="Merrymen feed"><LogoMark size={26} /></a>
       <div className="top-actions">
         <button type="button" className="icon-btn" aria-label="Search" onClick={onSearch}>
           <SearchIcon />
         </button>
         <button type="button" className="fund solid" onClick={onDeposit}>
-          Fund
+          Deposit
         </button>
       </div>
     </div>

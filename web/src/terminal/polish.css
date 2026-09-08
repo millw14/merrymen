@@ -1,0 +1,228 @@
+
+/* Shared navigation and page presentation. */
+.terminal-host .desktop-explore-tabs { gap:10px; }
+.terminal-host .desktop-explore-tabs button { font-size:13px; white-space:nowrap; }
+.terminal-host .tabbar .tab { align-content: center; gap: 4px; min-width: 0; border-radius: 24px; }
+.terminal-host .tabbar .tab.on { background: var(--line); }
+@media (max-width: 1099px) {
+  .terminal-host .app > .tabbar {
+    display: grid;
+    z-index: 20;
+    width: min(300px, calc(100% - 40px));
+    height: 52px;
+    padding: 3px;
+    box-sizing: border-box;
+    bottom: max(10px, env(safe-area-inset-bottom));
+  }
+  .terminal-host .tabbar .tab { min-height: 44px; padding: 0; gap: 0; }
+  .terminal-host .app > .body { padding-bottom: calc(104px + env(safe-area-inset-bottom)); }
+}
+.terminal-host .tabbar .tab:focus-visible,
+.terminal-host .feed-views button:focus-visible,
+.terminal-host .feed-like:focus-visible { outline: 2px solid var(--tx); outline-offset: 2px; }
+.terminal-host .feed-views { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 20px; }
+.terminal-host .feed-views button { min-height: 44px; padding: 8px 12px; color: var(--tx-2); border: 1px solid var(--line); border-radius: 22px; font-size: 12px; }
+.terminal-host .feed-views button[aria-pressed="true"] { background: var(--tx); color: var(--ink); }
+.terminal-host .feed-like { display: inline-flex; gap: 7px; align-items: center; min-height: 44px; color: var(--tx-2); margin-top: 8px; font-size: 12px; }
+.terminal-host .feed-like[aria-pressed="true"] { color: var(--tx); }
+.terminal-host .feed-like > span:first-child { font-size: 21px; }
+.terminal-host .feed-like:disabled { opacity: .5; }
+.terminal-host .alpha-page { max-width: 800px; width: 100%; }
+.terminal-host .alpha-members { font-family: var(--pixel); font-size: 11px; color: var(--tx-2); }
+.terminal-host .alpha-intro { font-size: 21px; line-height: 1.4; margin: 20px 0 8px; }
+.terminal-host .alpha-gate { padding: 32px 20px; margin: 24px 0; border: 1px solid var(--line); border-radius: 18px; display: grid; gap: 16px; }
+.terminal-host .alpha-gate h2 { font-size: 24px; line-height: 1.2; }
+.terminal-host .alpha-gate p { color: var(--tx-2); font-size: 14px; line-height: 1.6; }
+.terminal-host .alpha-refresh { min-height: 44px; padding: 10px 16px; border: 1px solid var(--line); border-radius: 22px; margin: 12px 0; }
+.terminal-host .alpha-brief { border-top: 1px solid var(--line); padding: 24px 0; }
+.terminal-host .alpha-brief header { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; }
+.terminal-host .alpha-brief header h2 { font-size: 25px; }
+.terminal-host .alpha-brief header span { font-family: var(--pixel); font-size: 12px; }
+.terminal-host .alpha-brief time { font-size: 11px; color: var(--tx-2); }
+.terminal-host .alpha-brief p { line-height: 1.6; margin: 14px 0; }
+.terminal-host .alpha-brief summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; text-decoration: underline; }
+.terminal-host .alpha-brief blockquote { margin: 14px 0; padding: 0 16px; border-left: 2px solid var(--line); font-size: 13px; }
+.terminal-host .alpha-brief a { text-decoration: underline; }
+.terminal-host .hosted-account-links { flex-wrap: wrap; }
+.terminal-host .hosted-account-links { display: flex; gap: 8px; margin: 12px 0; }
+.terminal-host .hosted-account-links a,
+.terminal-host .hosted-account-links button { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 12px; color: var(--tx); font-size: 12px; text-decoration: none; }
+
+/* Shared controls used by the mobile page layouts. */
+.terminal-host .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+.terminal-host .feed-order { display:flex; align-items:center; justify-content:space-between; gap:12px; color:var(--tx-2); font-size:13px; margin:0 0 18px; }
+.terminal-host .feed-order select { min-height:44px; border:0; background:var(--bg); color:var(--tx); padding:8px; cursor:pointer; }
+.terminal-host .feed-filter-action { display:flex; align-items:center; gap:8px; min-height:44px; color:var(--tx-2); }
+.terminal-host .feed-filter-action svg { width:18px; height:18px; }
+.terminal-host .profile-funding { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:18px; }
+.terminal-host .profile-funding .account-fund { width:100%; margin:0; justify-content:center; }
+.terminal-host .profile-funding .account-fund:last-child { border:1px solid var(--line); color:var(--tx); background:var(--card); }
+.terminal-host .profile-mode { margin-left:auto; max-width:140px; border:1px solid var(--line); border-radius:8px; padding:7px 9px; color:var(--tx-2); font-size:12px; }
+.terminal-host .profile-account .account-control { display:flex; align-items:center; gap:14px; min-height:64px; padding:14px; margin:0; width:100%; text-decoration:none; color:var(--tx); border-bottom:1px solid var(--line); }
+.terminal-host .profile-account .account-control > span { flex:1; }
+.terminal-host .profile-account .account-control > svg { flex-shrink:0; color:var(--tx-2); }
+.terminal-host .profile-usage { margin-top:18px; color:var(--tx-2); font-size:13px; }
+.terminal-host .home-page { display:flex; flex-direction:column; gap:28px; min-width:0; }
+.terminal-host .home-market-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.terminal-host .home-market-heading .week-label { margin:0; }
+.terminal-host .home-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px; }
+.terminal-host .home-balance-label { display:block; color:var(--tx-2); font-size:14px; margin-top:20px; margin-bottom:8px; }
+.terminal-host .home-deposit { display:flex; align-items:center; justify-content:center; gap:16px; min-height:48px; width:100%; margin-top:18px; border-radius:12px; background:var(--tx); color:var(--ink); font-size:16px; font-weight:600; }
+.terminal-host .home-show-more { min-height:44px; width:100%; border:1px solid var(--line); border-radius:10px; padding:12px; margin-top:12px; font-size:14px; }
+.terminal-host .board-preview .board-head h2 { font-size:20px; margin:0; }
+.terminal-host .board-preview .board-head a { font-size:13px; color:var(--tx-2); }
+.terminal-host .board-preview .blank { margin:0; }
+.terminal-host .profile-session-actions:empty { display:none; }
+.terminal-host .profile-session-actions button { color:#f47777; min-height:44px; font-size:15px; }
+.terminal-host .alpha-threshold { display:grid; gap:5px; text-align:center; }
+.terminal-host .alpha-threshold strong { font-size:44px; line-height:1.1; letter-spacing:-.04em; }
+.terminal-host .alpha-threshold span { font-size:14px; color:var(--tx-2); }
+.terminal-host .alpha-inside h2 { font-size:20px; margin:0 0 14px; }
+.terminal-host .alpha-inside ul { display:grid; gap:16px; padding:0; margin:0; list-style:none; }
+.terminal-host .alpha-inside li { display:flex; align-items:center; gap:14px; font-size:15px; line-height:1.5; }
+.terminal-host .alpha-inside li svg { flex-shrink:0; color:var(--tx-2); }
+.terminal-host .alpha-inside > p { border-top:1px solid var(--line); padding-top:16px; margin-top:20px; color:var(--tx-2); font-size:13px; line-height:1.5; }
+
+@media (max-width:1099px) {
+  .terminal-host .app > .body { padding:16px 20px calc(100px + env(safe-area-inset-bottom)); gap:14px; }
+  .terminal-host .home-overview { padding:0; }
+  .terminal-host .home-overview .hero { padding:0; margin:0; width:100%; text-align:left; }
+  .terminal-host .home-overview .hero-who { margin:0; gap:12px; }
+  .terminal-host .home-overview .hero-who .face { width:40px; height:40px; }
+  .terminal-host .home-overview .name-block strong { font-size:18px; }
+  .terminal-host .home-overview .owned { font-size:13px; }
+  .terminal-host .home-overview .balance { font-size:56px; margin:0; line-height:1.1; }
+  .terminal-host .home-overview .dither-empty { font-size:13px; margin:14px 0 0; }
+  .terminal-host .home-page .week-label { font-size:20px; font-weight:600; letter-spacing:-.02em; text-transform:none; margin:0 0 12px; }
+  .terminal-host .home-page .board-preview { gap:14px; }
+  .terminal-host .home-page .board-preview .board-head { margin:0; }
+  .terminal-host .home-page .board-preview .blank { min-height:120px; flex-direction:row; padding:18px; gap:16px; text-align:left; }
+  .terminal-host .home-page .board-preview .blank > strong { font-size:15px; }
+  .terminal-host .home-markets .pills { margin:0 0 10px; }
+  .terminal-host .home-mobile-market .tok { padding:16px 0; gap:12px; }
+  .terminal-host .home-mobile-market .tok > div:not(.px) { min-width:0; }
+  .terminal-host .home-mobile-market .tok strong { font-size:16px; overflow-wrap:anywhere; }
+  .terminal-host .home-mobile-market .tok .meta { font-size:13px; overflow-wrap:anywhere; }
+  .terminal-host .home-mobile-market .px { font-size:15px; white-space:nowrap; }
+  .terminal-host .guide-launch { margin:0; min-height:28px; }
+  .terminal-host .guide-launch button { font-size:13px; min-height:32px; }
+  .terminal-host .top-title,
+  .terminal-host .account-header h1 { font-size:34px; line-height:1.15; font-weight:700; letter-spacing:-.04em; margin:0; }
+  .terminal-host .page { padding:0; }
+  .terminal-host .feed-head { margin:0 0 16px; min-height:44px; }
+  .terminal-host .feed-views { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:0; flex-wrap:nowrap; border-bottom:1px solid var(--line); margin:0 0 8px; }
+  .terminal-host .feed-views button { min-width:0; min-height:48px; padding:10px 4px; border:0; border-bottom:3px solid transparent; border-radius:0; font-size:15px; color:var(--tx-2); }
+  .terminal-host .feed-views button[aria-pressed="true"] { background:transparent; color:#38dda0; border-bottom-color:#38dda0; }
+  .terminal-host .feed-order { font-size:14px; margin-bottom:12px; }
+  .terminal-host .wire-beat { padding-block:22px; }
+  .terminal-host .wire-line { font-size:16px; line-height:1.5; }
+  .terminal-host .wire-why { font-size:16px; line-height:1.55; }
+  .terminal-host .wire-when { font-size:12px; }
+  .terminal-host .feed-like { font-size:14px; }
+  .terminal-host .account-page { display:flex; flex-direction:column; gap:24px; padding:0; }
+  .terminal-host .account-header { margin:0; }
+  .terminal-host .account-person { margin:0; gap:14px; }
+  .terminal-host .account-avatar { width:48px; height:48px; font-size:24px; }
+  .terminal-host .account-person h2 { font-size:19px; }
+  .terminal-host .account-person p { font-size:14px; }
+  .terminal-host .account-balance { padding:0; margin:0; }
+  .terminal-host .account-balance > .account-label { display:block; color:var(--tx-2); font-size:15px; margin-bottom:8px; }
+  .terminal-host .account-balance > strong { font-size:54px; line-height:1.15; }
+  .terminal-host .account-balance > p { font-size:14px; line-height:1.5; margin:8px 0 16px; }
+  .terminal-host .account-balance .profile-funding .account-fund { margin:0; height:50px; min-height:50px; padding:12px; font-size:16px; border-radius:10px; }
+  .terminal-host .account-section { margin:0; padding:0; border:0; }
+  .terminal-host .account-section-title { margin:0 0 12px; }
+  .terminal-host .account-section-title h2 { font-size:19px; font-weight:600; }
+  .terminal-host .account-agent { border:1px solid var(--line); border-radius:14px; background:var(--card); padding:16px 12px; gap:12px; }
+  .terminal-host .account-agent .face { width:44px; height:44px; }
+  .terminal-host .account-agent strong { font-size:16px; }
+  .terminal-host .account-agent small { font-size:13px; }
+  .terminal-host .account-agent-note { font-size:13px; line-height:1.5; margin:10px 0 0; }
+  .terminal-host .profile-account .account-control { background:var(--card); border:1px solid var(--line); border-top:0; }
+  .terminal-host .profile-account .account-control:nth-child(2) { border-top:1px solid var(--line); border-radius:12px 12px 0 0; }
+  .terminal-host .profile-account .account-control:nth-child(4) { border-radius:0 0 12px 12px; }
+  .terminal-host .account-control strong { font-size:16px; }
+  .terminal-host .account-control small { font-size:13px; }
+  .terminal-host .alpha-page > .alpha-intro { font-size:17px; line-height:1.5; color:var(--tx-2); margin:0 0 18px; }
+  .terminal-host .alpha-page .feed-head { margin-bottom:8px; }
+  .terminal-host .alpha-page { gap:0; }
+  .terminal-host .alpha-gate { text-align:center; justify-items:center; padding:24px 18px; margin:0 0 24px; gap:14px; }
+  .terminal-host .alpha-gate > svg { color:#38dda0; }
+  .terminal-host .alpha-gate h2 { font-size:22px; margin:0; }
+  .terminal-host .alpha-gate p { font-size:15px; margin:0; line-height:1.5; }
+  .terminal-host .alpha-gate .flow-primary { width:100%; min-height:50px; padding:14px 12px; border-radius:12px; background:#38dda0; color:#07150e; font-size:15px; font-weight:600; box-sizing:border-box; }
+  .terminal-host .alpha-gate .hosted-auth { width:100%; }
+  .terminal-host .alpha-threshold { margin:4px 0 8px; }
+  .terminal-host .body:has(> .desk-page) { padding-top:12px; padding-bottom:calc(92px + env(safe-area-inset-bottom)); gap:10px; }
+  .terminal-host .body > .desk-page { gap:16px; }
+  .terminal-host .desk-header { display:grid; grid-template-columns:44px minmax(0,1fr); gap:4px 12px; }
+  .terminal-host .desk-header > .face { width:44px; height:44px; grid-row:1 / 3; }
+  .terminal-host .desk-header h1 { font-size:20px; }
+  .terminal-host .desk-header p { font-size:14px; }
+  .terminal-host .desk-status { grid-column:2; margin:0; justify-self:start; font-size:12px; }
+  .terminal-host .desk-portfolio { padding:0 0 16px; border-bottom:1px solid var(--line); }
+  .terminal-host .desk-equity { font-size:50px; }
+  .terminal-host .portfolio-summary .meta { font-size:14px; }
+  .terminal-host .agent-portfolio-meta { font-size:14px; margin-top:12px; }
+  .terminal-host .chat-divider { font-size:14px; margin:0 0 16px; }
+  .terminal-host .desk-reply { grid-template-columns:36px minmax(0,1fr); gap:12px; }
+  .terminal-host .desk-reply > .face { width:36px; height:36px; }
+  .terminal-host .desk-reply strong { font-size:17px; }
+  .terminal-host .desk-reply p, .terminal-host .desk-reply blockquote { font-size:16px; line-height:1.55; }
+  .terminal-host .desk-prompts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); overflow:visible; gap:8px; }
+  .terminal-host .desk-prompts button { min-width:0; min-height:44px; padding:10px 5px; font-size:12px; white-space:normal; }
+  .terminal-host .desk-composer { min-height:58px; border:1px solid var(--line); border-radius:16px; padding:10px 12px; }
+  .terminal-host .desk-composer textarea { font-size:16px; line-height:1.5; }
+  .terminal-host .desk-composer button { width:40px; height:40px; flex-shrink:0; }
+  .terminal-host .body:has(> .home-page),
+  .terminal-host .body:has(> .account-page),
+  .terminal-host .body:has(> .feed-page),
+  .terminal-host .body:has(> .alpha-page) { position:relative; padding-top:20px; }
+  .terminal-host .body:has(> .home-page) > .guide-launch,
+  .terminal-host .body:has(> .account-page) > .guide-launch,
+  .terminal-host .body:has(> .feed-page) > .guide-launch,
+  .terminal-host .body:has(> .alpha-page) > .guide-launch { position:absolute; top:24px; right:20px; }
+  .terminal-host .account-header,
+  .terminal-host .feed-page .feed-head,
+  .terminal-host .alpha-page .feed-head { padding-right:132px; }
+}
+
+/* Empty surfaces keep the terminal's pixel details without inventing activity. */
+.terminal-host .blank {
+  position: relative;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 18px;
+  padding: 36px 24px 32px;
+  margin: 14px 0 24px;
+  min-height: 264px;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: radial-gradient(ellipse at 50% 0%, rgb(185 202 141 / .055), transparent 72%), var(--card);
+}
+.terminal-host .blank > strong { font-size: 19px; line-height: 1.4; max-width: 30ch; font-weight: 500; }
+.terminal-host .blank .fund.solid { display: inline-flex; gap: 24px; align-items: center; justify-content: center; min-height: 44px; margin-top: 0; border-radius: 12px; }
+.terminal-host .empty-art { position: relative; width: 170px; height: 116px; flex-shrink: 0; }
+.terminal-host .empty-art-card { position: absolute; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; width: 88px; height: 96px; border: 1px solid #3b4030; border-radius: 14px; }
+.terminal-host .empty-art-back { left: 28px; top: 8px; transform: rotate(-12deg); background: #171a13; border-color: #2b3022; }
+.terminal-host .empty-art-front { left: 54px; top: 5px; transform: rotate(7deg); background: linear-gradient(145deg,#282e20,#191d14); color: #b9ca8d; box-shadow: 0 10px 20px rgb(0 0 0 / .18); }
+.terminal-host .empty-art-rule { height: 2px; width: 34px; background: #505c3d; border-radius: 2px; }
+.terminal-host .empty-art-rule.short { width: 22px; background: #38412c; margin-top: -4px; }
+.terminal-host .empty-art-pixel { position: absolute; width: 4px; height: 4px; background: #65764b; }
+.terminal-host .empty-art-pixel.p1 { left: 13px; top: 35px; box-shadow: 5px 0 #65764b, 0 5px #65764b; }
+.terminal-host .empty-art-pixel.p2 { right: 8px; bottom: 30px; background: #3c462e; box-shadow: -5px 0 #3c462e; }
+.terminal-host .empty-art-pixel.p3 { right: 28px; top: 7px; background: #3c462e; }
+.terminal-host .blank.blank-compact { min-height: 160px; padding: 22px 18px; gap: 12px; background: transparent; border-style: dashed; }
+.terminal-host .blank-compact .empty-art { width: 102px; height: 70px; zoom: .7; }
+.terminal-host .blank-compact .empty-art-card { width: 64px; height: 64px; left: 22px; }
+.terminal-host .blank-compact .empty-art-back { left: 7px; }
+.terminal-host .blank-compact .empty-art-rule { display: none; }
+.terminal-host .blank-compact > strong { font-size: 13px; color: var(--tx-2); font-weight: 400; }
+.terminal-host .alpha-empty { align-items: center; text-align: center; }
+@media (min-width: 1100px) {
+  .terminal-host .desktop-sidebar .blank { min-height: 210px; padding: 24px 16px; }
+  .terminal-host .desktop-sidebar .blank > strong { font-size: 15px; }
+}

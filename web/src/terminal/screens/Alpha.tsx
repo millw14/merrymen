@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Info } from "@/components/Info";
+import { LockKeyhole, FileText, Activity, ExternalLink } from "lucide-react";
 import { compactUsd, coinPrice } from "../live";
 import { Empty } from "../ui";
 import type { AlphaExtras, DiscoveryRow } from "@/lib/read-discoveries";
@@ -49,9 +49,11 @@ type State = { kind: "loading" } | { kind: "failed"; why: string } | { kind: "ok
 
 export function Alpha({ onToken }: { onToken: (id: string) => void }) {
   const [state, setState] = useState<State>({ kind: "loading" });
+  const [revision, setRevision] = useState(0);
 
   useEffect(() => {
     let mounted = true;
+    setState({ kind: "loading" });
     fetch("/api/alpha", { cache: "no-store" })
       .then(async (r) => {
         if (!r.ok) throw new Error(`the alpha desk answered ${r.status}`);
@@ -67,7 +69,7 @@ export function Alpha({ onToken }: { onToken: (id: string) => void }) {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [revision]);
 
   return (
     <div className="page alpha-page">
@@ -79,17 +81,18 @@ export function Alpha({ onToken }: { onToken: (id: string) => void }) {
           </span>
         )}
       </header>
+      <p className="alpha-intro">The research behind the trade.</p>
 
-      {state.kind === "loading" && <p role="status" className="hosted-note">Reading the desk…</p>}
+      {state.kind === "loading" && <p role="status" className="hosted-note">Loading Alpha…</p>}
 
       {state.kind === "failed" && (
         <Empty
-          title="The alpha desk could not be read."
-          note={`${state.why}. That is a gap on our side, not a quiet market.`}
+          title="Alpha is unavailable."
+          action={{label:"Try again",onClick:()=>setRevision(value=>value+1)}}
         />
       )}
 
-      {state.kind === "ok" && state.wire.locked && <Locked wire={state.wire} />}
+      {state.kind === "ok" && state.wire.locked && <Locked wire={state.wire} onRefresh={()=>setRevision(value=>value+1)} />}
       {state.kind === "ok" && !state.wire.locked && <Desk wire={state.wire} onToken={onToken} />}
     </div>
   );
@@ -103,47 +106,17 @@ export function Alpha({ onToken }: { onToken: (id: string) => void }) {
  * an honest advertisement — and three different reasons, because "sign in",
  * "hold some" and "we could not check" have three different next steps.
  */
-function Locked({ wire }: { wire: Extract<Wire, { locked: true }> }) {
-  const head =
-    wire.why === "sign-in"
-      ? "Sign in to open the desk."
-      : wire.why === "unreachable"
-        ? "We could not read your balance."
-        : "The desk is open to $MERRYMEN holders.";
-  const line =
-    wire.why === "sign-in"
-      ? "Alpha reads your wallet, so it needs to know which one it is."
-      : wire.why === "unreachable"
-        ? // Never "you don't hold enough" on a failed read. The reader would go
-          // and buy more to fix a problem that is ours.
-          "The chain did not answer when we asked what you hold. Nothing is being said about your wallet — try again shortly."
-        : `Hold ${wire.need.tokens.toLocaleString()} ${wire.token.symbol} to read it.`;
-
-  return (
-    <section className="alpha-lock">
-      <h2>{head}</h2>
-      <p>{line}</p>
-      <p className="alpha-count mono">
-        <b>{wire.picks}</b> vetted · <b>{wire.passed}</b> looked at and passed
-      </p>
-      <p className="hosted-note">
-        Behind this: what the scout was shown and turned down, and what was read about each coin
-        before it decided. The coins it kept are public on the markets screen.
-      </p>
-      {wire.why === "balance" && (
-        <ul className="alpha-perks">
-          {wire.need.perks.map((p) => (
-            <li key={p}>{p}</li>
-          ))}
-        </ul>
-      )}
-      {wire.why === "sign-in" && (
-        <a className="alpha-go" href="/">
-          Sign in
-        </a>
-      )}
+function Locked({ wire, onRefresh }: { wire: Extract<Wire, { locked: true }>; onRefresh:()=>void }) {
+  return <>
+    <section className="alpha-gate">
+      <LockKeyhole size={32}/><h2>An edge for holders.</h2>
+      <p>Hold {wire.token.symbol} in your signed-in wallet to unlock Alpha.</p>
+      <div className="alpha-threshold"><strong>{wire.need.tokens.toLocaleString()}</strong><span>{wire.token.symbol}</span></div>
+      {wire.why === "unreachable" && <p role="status">Could not verify your holdings. Try again.</p>}
+      {wire.why === "sign-in" ? <a className="flow-primary" href="/profile">Sign in with wallet</a> : <button className="flow-primary" onClick={onRefresh}>Verify wallet holdings</button>}
     </section>
-  );
+    <section className="alpha-inside"><h2>Inside Alpha</h2><ul><li><Activity size={22} aria-hidden="true"/><span>Tokens our agents researched</span></li><li><FileText size={22} aria-hidden="true"/><span>Short takes with the reasoning attached</span></li><li><ExternalLink size={22} aria-hidden="true"/><span>What our agents kept—and passed on</span></li></ul></section>
+  </>;
 }
 
 function Desk({ wire, onToken }: { wire: Extract<Wire, { locked: false }>; onToken: (id: string) => void }) {
@@ -154,29 +127,23 @@ function Desk({ wire, onToken }: { wire: Extract<Wire, { locked: false }>; onTok
           as thirty broken coins instead of one degraded read. */}
       {wire.indexUnreachable && (
         <p className="hosted-note" role="status">
-          The market index did not answer this pass. Nothing below is a judgement about a quiet
-          market — it is the shape of a read that failed.
+          Market data is unavailable. Try again shortly.
         </p>
       )}
       {wire.truncated && !wire.indexUnreachable && (
         <p className="hosted-note" role="status">
-          The index cut the sweep short, so this is a prefix of the market rather than the market.
+          Some market data is unavailable.
         </p>
       )}
       {!wire.researched && (
         <p className="hosted-note" role="status">
-          No site research ran on this pass, so nothing below says whether a coin&rsquo;s own site
-          holds up. Absent is not clean.
+          Website research is unavailable for this update.
         </p>
       )}
 
       <section className="strip">
         <h3>
           Kept <span>{wire.picks.length}</span>
-          <Info>
-            The scout ranks what the numeric screen already admitted. Conviction is an ordering —
-            look here first — never a size and never a permission to trade.
-          </Info>
         </h3>
         {wire.picks.length === 0 ? (
           wire.verdictsWhy ? (
@@ -185,14 +152,13 @@ function Desk({ wire, onToken }: { wire: Extract<Wire, { locked: false }>; onTok
               title="Nothing has been vetted."
               note={
                 wire.verdictsWhy === "no-model"
-                  ? "The scout was not run on this pass, so nothing here was judged either way."
-                  : "The scout could not be reached. That is not the same as looking and liking nothing."
+                  ? "Research has not run yet."
+                  : "Research is unavailable."
               }
             />
           ) : (
             <Empty
-              title="It looked and kept nothing."
-              note="Often the right answer on this chain. Passed coins are below."
+              title="No picks this time."
             />
           )
         ) : (

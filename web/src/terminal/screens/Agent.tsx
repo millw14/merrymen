@@ -53,9 +53,9 @@ const tapeFor = (moves: LiveMine["moves"]) =>
   }));
 
 const ASKS = [
-  "How am I doing?",
-  "What do you hold?",
-  "Explain your last trade",
+  { label: "My strategy", question: "Explain your trading strategy." },
+  { label: "My holdings", question: "What do you hold?" },
+  { label: "Trading limits", question: "Explain my trading limits." },
 ];
 
 export function Agent({
@@ -167,6 +167,7 @@ export function Agent({
   if (!mine)
     return (
       <Empty
+        kind="chat"
         title="Your agent starts here."
         action={{ label: "Fund an agent", onClick: onDeposit }}
       />
@@ -391,7 +392,7 @@ export function Agent({
         </div>
         <span className={`desk-status ${stopped ? "paused" : ""}`}>
           <i />
-          {mine.statusLabel ?? "Waiting for worker"}
+          {mine.statusLabel ?? "Offline"}
         </span>
       </header>
       <section className="desk-portfolio">
@@ -484,7 +485,7 @@ export function Agent({
             {view === "positions" ? (
               <>
                 {positions.length === 0 && (
-                  <p className="desk-muted">No positions reported yet.</p>
+                  <Empty compact kind="positions" title="No positions reported yet."/>
                 )}
                 {positions.map((p) => {
                   const token = tokens.find(
@@ -527,7 +528,7 @@ export function Agent({
             ) : (
               <div className="desk-trades">
                 {trades.length === 0 && (
-                  <p className="desk-muted">No trades yet.</p>
+                  <Empty compact title="No trades yet."/>
                 )}
                 {trades.map((t, i) => (
                   <article className="desk-trade" key={`${t.at}-${i}`}>
@@ -698,8 +699,8 @@ export function Agent({
         {turns.length === 0 && (
           <div className="desk-prompts">
             {ASKS.map((q) => (
-              <button type="button" key={q} onClick={() => send(q)}>
-                {q}
+              <button type="button" key={q.label} disabled={sending} onClick={() => send(q.question)}>
+                {q.label}
               </button>
             ))}
           </div>

@@ -23,7 +23,7 @@ import {
   deltaClass,
 } from "../live";
 import { TvChart } from "../tv";
-import { Coin, Face } from "../ui";
+import { Coin, Face, Empty } from "../ui";
 import { useWatchlist } from "../watchlist";
 
 const WINDOWS: WindowId[] = ["1H", "4H", "1D", "5D", "1M", "ALL"];
@@ -409,7 +409,7 @@ export function Token({
           </div>
         )}
         {seats.length === 0 ? (
-          !holderError && <p className="meta">No public agent holdings reported yet.</p>
+          !holderError && <Empty compact kind="positions" title="No public agent holdings reported yet."/>
         ) : (
           <div className="helds">
             {seats.map((s) => (
