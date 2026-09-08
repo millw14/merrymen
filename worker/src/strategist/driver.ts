@@ -17,7 +17,21 @@ export interface Signals {
   cashUsdg: number;
   vaultUsdg: number;
   equityUsdg: number;
-  holdings: { symbol: string; valueUsdg: number; priceStale: boolean }[];
+  /**
+   * What is held, what it is worth, and — when the ledger knows — what it cost.
+   *
+   * `costUsdg` and `pnlUsdg` are ABSENT rather than zero when there is no cost
+   * basis on record. Zero would tell the model the whole position is profit,
+   * which is the original accounting bug in miniature; absent is a fact it can
+   * reason about instead of a number it would act on.
+   */
+  holdings: {
+    symbol: string;
+    valueUsdg: number;
+    priceStale: boolean;
+    costUsdg?: number;
+    pnlUsdg?: number;
+  }[];
   prices: { symbol: string; usd: number; stale: boolean }[];
   tradableSymbols: string[];
   maxPerActionUsdg: number;
@@ -60,6 +74,13 @@ vault yield automatically — you do not manage the vault.
 Propose portfolio actions via the propose_trades tool. Discipline rules:
 - Only trade symbols from tradableSymbols. Sizes are in USDG and must respect maxPerActionUsdg.
 - Prefer few, deliberate actions; propose holds when nothing is attractive.
+- YOU ARE ALSO RESPONSIBLE FOR LEAVING. A holding may carry \`costUsdg\` and \`pnlUsdg\` — what
+  it cost and what it is up or down since. Use them: take a profit that is worth taking, cut
+  a loss that is running, and leave a position whose reason has stopped being true. A position
+  you never close is not a decision you deferred, it is a decision you made.
+  Where \`costUsdg\` is ABSENT the ledger has no entry price for that holding — you do not know
+  whether you are up on it, and you must not assume you are. Say so rather than sizing off it.
+  \`priceStale\` means the market for it is closed, so the P&L beside it is last week's number.
 - There is no order book on this chain, so you cannot see one. When \`depth\` is present it is
   the next best thing and a different thing: pool liquidity. Per symbol it gives the USDG you
   could trade before moving the price more than 0.5%, and the nearest prices where liquidity

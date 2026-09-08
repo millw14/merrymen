@@ -19,6 +19,23 @@ export interface Holding {
   valueUsdg: bigint;
   /** The holding's Chainlink feed is stale (market closed) right now. */
   priceStale: boolean;
+  /**
+   * WHAT WAS PAID FOR IT, from the cost-basis ledger. 6dp, like valueUsdg.
+   *
+   * NULL IS NOT ZERO, and here the difference is the whole point. A holding
+   * carried only today's value, so a strategy could see what a position is
+   * worth and never what it cost — which makes "am I happy with my profit"
+   * a question the agent could not answer about itself, and there is no
+   * take-profit or stop-loss without it. The one-shot strategist has no other
+   * route to this: cost basis reached a model only through the desk tool loop,
+   * which is off by default.
+   *
+   * Null when the ledger has no basis for it — a position funded in kind, or
+   * one whose fills predate the basis columns. Rendering that as 0 would tell a
+   * model the entire holding is profit, which is the original accounting bug in
+   * miniature, so it must travel as absent all the way to the prompt.
+   */
+  costUsdg?: bigint | null;
 }
 
 export interface Snapshot {

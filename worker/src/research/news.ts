@@ -469,6 +469,21 @@ export interface NewsDeskView {
   /** Machine-readable, for the log line and the dataset viewer. */
   itemCount: number;
   sentiment: NewsSentiment | null;
+  /**
+   * The NEWEST material story about this symbol, by its stable id. Null when
+   * there is none.
+   *
+   * EXISTS SO A HEADLINE CAN WAKE THE AGENT. brain-trigger has always had a
+   * `news-event` reason keyed on a changing `newsKey`, and the only caller
+   * never set it — so the "or if it finds out something along the way" half of
+   * an autonomous loop had no wake path at all, and a breaking story could not
+   * cause a decision no matter how material it was.
+   *
+   * The ITEM ID, not a hash of the rendering: the same story must not re-fire
+   * because the prose around it changed, and a different story must fire even
+   * if it reads the same.
+   */
+  topId: string | null;
 }
 
 export function newsDesk(args: {
@@ -482,7 +497,7 @@ export function newsDesk(args: {
   windowSec?: number;
 }): NewsDeskView {
   const want = args.symbol.trim().toUpperCase();
-  const empty = { news: null, newsSentiment: null, itemCount: 0, sentiment: null };
+  const empty = { news: null, newsSentiment: null, itemCount: 0, sentiment: null, topId: null };
   // ORDER MATTERS. "Never asked" outranks "the fetch failed", because a symbol
   // outside the ask would have had no material either way and reporting the
   // failure would blame the provider for our own scheduling.
@@ -519,6 +534,7 @@ export function newsDesk(args: {
       newsSentiment: null,
       itemCount: 0,
       sentiment,
+      topId: null,
     };
   }
 
@@ -530,6 +546,8 @@ export function newsDesk(args: {
     newsSentiment: sentiment.direction === null ? null : renderNewsSentiment(sentiment),
     itemCount: chosen.length,
     sentiment,
+    // selectNews returns newest-first, so the head is the newest material item.
+    topId: chosen[0]?.id ?? null,
   };
 }
 

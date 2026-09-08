@@ -122,11 +122,31 @@ function buildSignals(snap: Snapshot, universe: StrategistUniverse, at: Date): S
     equityUsdg:
       Number(snap.cashUsdg + snap.vaultUsdg) / 1e6 +
       [...snap.holdings.values()].reduce((s, h) => s + Number(h.valueUsdg) / 1e6, 0),
-    holdings: [...snap.holdings.entries()].map(([symbol, h]) => ({
-      symbol,
-      valueUsdg: Number(h.valueUsdg) / 1e6,
-      priceStale: h.priceStale,
-    })),
+    // WHAT IT IS WORTH, AND WHAT IT COST. The second number is new, and without
+    // it the model was being asked to decide whether to sell while structurally
+    // unable to tell a winner from a loser.
+    //
+    // OMITTED, NOT ZEROED, when the ledger has no basis. `costUsdg: 0` says the
+    // whole position is profit; absent says we do not know what it cost, which
+    // is the truth and is a thing the model can reason about ("I cannot tell if
+    // I am up on this") instead of a number it would act on.
+    holdings: [...snap.holdings.entries()].map(([symbol, h]) => {
+      const cost = h.costUsdg ?? null;
+      return {
+        symbol,
+        valueUsdg: round2(Number(h.valueUsdg) / 1e6),
+        priceStale: h.priceStale,
+        ...(cost === null
+          ? {}
+          : {
+              costUsdg: round2(Number(cost) / 1e6),
+              // Stated rather than left as arithmetic. A stale price makes this
+              // a number about a market that closed, and `priceStale` beside it
+              // is what says so.
+              pnlUsdg: round2(Number(h.valueUsdg - cost) / 1e6),
+            }),
+      };
+    }),
     prices: [...snap.prices.entries()]
       .filter(([symbol]) => tradable.has(symbol))
       .map(([symbol, p]) => ({

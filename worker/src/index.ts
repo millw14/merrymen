@@ -5827,6 +5827,20 @@ async function main() {
             agentId,
             now: Math.floor(Date.now() / 1000),
             epoch: epochNow,
+            // A HEADLINE MAY WAKE THE AGENT — the half of the loop that had no
+            // wake path at all.
+            //
+            // `brain-trigger` has always carried a `news-event` reason, keyed on
+            // this value changing, and no caller ever set it. So it was
+            // permanently null, the reason could never be a candidate, and a
+            // breaking story could not cause a decision however material it was:
+            // "or if it finds out something along the way" was unreachable by
+            // construction.
+            //
+            // The STORY'S OWN ID, so the same one does not re-fire when the
+            // prose around it changes and a different one fires even if it reads
+            // the same. The trigger's 900s cooldown already bounds the cost.
+            newsKey: desk.topId,
             cashUsdg: Number(balances.cashUsdg),
             vaultUsdg: Number(balances.vaultUsdg),
             quarantinedUsdg: Number(quarantine.totalCostUsdg),
@@ -6027,6 +6041,26 @@ async function main() {
       }
     }
 
+    // WHAT EACH POSITION COST, read once per tick beside what it is worth.
+    //
+    // Without this a strategy can see the value of a holding and never its
+    // entry, so "am I up on this" is a question the agent cannot answer about
+    // itself — and there is no take-profit or stop-loss without an answer. The
+    // one-shot strategist had no other route to it: basis reached a model only
+    // through the desk tool loop, which is off by default.
+    //
+    // A FAILED READ IS NULL, NOT ZERO. Zero would say the position is entirely
+    // profit, which is the original accounting bug in miniature.
+    const basisMode = paperActive() ? "paper" : "live";
+    const basisBySymbol = new Map<string, bigint | null>();
+    for (const p of positions) {
+      try {
+        const b = await getBasis(active.agentId, basisMode, p.symbol);
+        basisBySymbol.set(p.symbol, b.qtyRaw === 0n && b.costUsdg === 0n ? null : b.costUsdg);
+      } catch {
+        basisBySymbol.set(p.symbol, null);
+      }
+    }
     const holdings = new Map<string, Holding>(
       positions.map((p) => [
         p.symbol,
@@ -6035,6 +6069,7 @@ async function main() {
           rawBalance: p.rawBalance,
           valueUsdg: p.valueUsdg,
           priceStale: p.priceStale,
+          costUsdg: basisBySymbol.get(p.symbol) ?? null,
         },
       ]),
     );

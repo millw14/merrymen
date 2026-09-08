@@ -45,7 +45,7 @@ import { getGrantStore } from "./grant-store";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
-import { CASH, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
+import { CASH, DEFAULT_BASKET_SYMBOLS, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
@@ -424,6 +424,24 @@ async function writeSettingsForChild(
 ): Promise<MerrymenSettings | null> {
   try {
     const settings = await getSettingsStore().get(tenant);
+    // THE UNIVERSE IS RECORDED EVEN WHEN NOTHING WAS SAVED, and that is the fix.
+    //
+    // This used to be set below, AFTER the early return — so a tenant who never
+    // opened the settings screen was recorded as having an empty universe,
+    // while the CHILD falls back to DEFAULT_BASKET_SYMBOLS and reasons about
+    // those symbols all day (settings.ts:262). The desk's per-tenant filter
+    // then matched nothing, the child's research file arrived with an empty
+    // `asked` list, and the news lens reported `not-fetched` for every symbol
+    // the agent actually holds — "nobody ever asked" — even on ticks where the
+    // fetch had succeeded and stories were sitting in the file.
+    //
+    // Resolved the SAME WAY THE CHILD RESOLVES IT, so the orchestrator's
+    // picture of a tenant's universe matches what that tenant actually trades.
+    // This narrows nothing and widens nothing: it is the same list either way.
+    tenantWatchSymbols.set(
+      tenant.toLowerCase(),
+      equitySymbols(settings?.basketSymbols ?? [...DEFAULT_BASKET_SYMBOLS]),
+    );
     if (!settings) return null;
     if (seenBotTokens && settings.telegramBotToken && dedupeBotToken(settings, seenBotTokens)) {
       log(`${tenant}: telegram bot token already claimed by another tenant — telegram disabled for this child`);
@@ -435,7 +453,7 @@ async function writeSettingsForChild(
     // because this is the one place the orchestrator reads a tenant's settings,
     // and it runs on every reconcile — so an owner who changes their basket
     // changes what the desk asks about within a pass.
-    tenantWatchSymbols.set(tenant.toLowerCase(), equitySymbols(settings.basketSymbols));
+    // (recorded above, before the early return — see the comment there)
     // Returned so the caller can size the watchdog to the tick THIS child will
     // read. Nothing else about the write changes.
     return settings;
