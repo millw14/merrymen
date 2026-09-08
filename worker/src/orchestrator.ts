@@ -68,7 +68,7 @@ import { makeNewsDesk, type NewsDesk } from "./research-pass";
 import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
 import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
-import { drainCommandResults, writeCommand } from "./command-files";
+import { dropCommandResult, drainCommandResults, writeCommand } from "./command-files";
 
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
@@ -780,6 +780,17 @@ function parseArgs(raw: string): Record<string, string | number | boolean> {
   return out;
 }
 
+/**
+ * How old a trade command must be before the ferry declares it never ran.
+ *
+ * The route stamps a five-minute expiry and the child enforces it at the claim;
+ * this is the same deadline plus room for a ferry pass and a slow tick, after
+ * which the row is closed with a reason. Kept here rather than imported from
+ * the web tier because the two processes share no module — and stated in both
+ * places so a change to one is visibly a change to the other.
+ */
+const ORDER_STALE_MS = 7 * 60_000;
+
 async function ferryCommands(shared: Db): Promise<void> {
   for (const [tenant, child] of [...children.entries()]) {
     await ferryForChild(shared, { home: childHome(tenant), smartAccount: child.smartAccount, tag: tenant });
@@ -871,15 +882,48 @@ export async function ferryForChild(
       /* a child that misses a command this pass gets it next pass */
     }
     // ── up: results become rows ──
-    try {
-      for (const r of drainCommandResults(home)) {
+    //
+    // ONE TRY PER RESULT, AND THE FILE IS DELETED ONLY AFTER ITS ROW LANDS.
+    // This was a single try around the whole loop, over a drain that unlinked
+    // every file as it read it — so one connection blip on the first result
+    // discarded every other tenant-visible receipt in the batch, permanently.
+    // For an order that loses the record of a trade that really happened, and
+    // an unanswered row is now what refuses the owner their next order.
+    for (const r of drainCommandResults(home)) {
+      try {
         await shared
           .prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ?")
           .run(Date.now(), r.line.slice(0, 500), r.id);
+        dropCommandResult(home, r.id);
         log(`command ${r.id.slice(0, 8)} ← ${tenant.slice(0, 8)}: ${r.ok ? "ok" : "failed"}`);
+      } catch {
+        // Left on disk on purpose: the next pass retries it. A receipt that
+        // survives is worth more than a tidy directory.
       }
+    }
+
+    // ── and a row nothing will ever answer is closed, not left running ──
+    //
+    // An order whose child was SIGKILLed mid-trade — the watchdog does that in
+    // bulk on this fleet — leaves `done_at` NULL forever, and the owner's poll
+    // shows an eternal spinner while the one-at-a-time rule refuses them any
+    // new order. Past its expiry it can no longer legally run, so it is closed
+    // with a sentence saying so rather than left to look like it is working.
+    try {
+      const stale = Date.now() - ORDER_STALE_MS;
+      await shared
+        .prepare(
+          `UPDATE agent_commands SET done_at = ?, result = ?
+            WHERE agent_id = ? AND kind = 'trade' AND done_at IS NULL AND created_at < ?`,
+        )
+        .run(
+          Date.now(),
+          "never ran — this order sat past its five-minute window and I will not fill it into a different market. Ask again if you still want it.",
+          smartAccount,
+          stale,
+        );
     } catch {
-      /* the result file is already gone; the event feed still carries it */
+      /* best effort; the age bound in the route is the other half of this */
     }
   }
 }

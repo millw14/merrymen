@@ -322,10 +322,17 @@ describe("the two commands that spend money", () => {
     }
   });
 
-  it("and the SELL card warns that an over-ask becomes everything", () => {
-    // The worker clamps to the whole position and always did; the card is the
-    // last place to set that expectation before money moves.
-    assert.match(commandFor("sell")!.say({ symbol: "GME", usdgAmount: 500 }), /or all of it/i);
+  it("and the SELL card warns that the size can come out different EITHER WAY", () => {
+    // This used to check for "or all of it, if that is less than you hold",
+    // which is only half true and the half that flatters. A stock sell clamps
+    // DOWN to the position; a bonding-curve coin cannot be sold in part at all,
+    // so the worker exits the whole holding — usually MORE than was asked for.
+    // The card promised the opposite of what happens on a curve, and the
+    // receipt then annotated a full liquidation as "less than you asked for".
+    const said = commandFor("sell")!.say({ symbol: "GME", usdgAmount: 500 });
+    assert.match(said, /if that is more than you hold I sell what is there/i);
+    assert.match(said, /bonding curve I have to sell the whole position/i);
+    assert.match(said, /I'll tell you which happened/i);
   });
 
   it("they are the ONLY commands that place an order", () => {

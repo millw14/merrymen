@@ -91,7 +91,7 @@ import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
 import { takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
-import { claimCommandFile, isExpired, writeCommandResult, type FileCommand } from "./command-files";
+import { claimCommandFile, isExpired, markRunning, writeCommandResult, type FileCommand } from "./command-files";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs } from "./brain-shadow";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
@@ -2333,6 +2333,10 @@ async function main() {
       // for grants and settings. See command-files.ts.
       const cmd = claimCommandFile(merrymenHome());
       if (!cmd) return;
+      // CLAIMED IS NOT THE SAME AS ANSWERED, and self-hosted the queue file is
+      // gone from here until the receipt lands. Without this marker an owner
+      // who asked again mid-trade got a second fill.
+      markRunning(merrymenHome(), cmd.id);
       // The unlink above WAS the claim, so from here the command is ours and
       // will not be replayed — a lost probe is a button pressed again, a
       // replayed one is gas nobody asked to spend twice.
@@ -2433,10 +2437,16 @@ async function main() {
       };
     }
     // And from here the wall decides. submitChatTrade reports what the LEDGER
-    // said, so this returns a sentence about a trade that really happened or
+    // said, so this returns a verdict about a trade that really happened or
     // really did not.
-    const line = await submitChatTrade(side, symbol, size);
-    return { ok: !/^(🧱|🤔|↩️)/.test(line), line };
+    //
+    // THE VERDICT TRAVELS WITH THE SENTENCE. This used to sniff the first emoji
+    // of the prose, which recognised three branches and missed every refusal
+    // that returns before an intent is built — so all of those were recorded as
+    // successes. `ok` is the sole input to the event LEVEL, and "ok" is a level
+    // no surface in this app renders, so an owner refused for being paused,
+    // expired, over their ceiling or in an unwatched symbol saw nothing at all.
+    return submitChatTrade(side, symbol, size);
   }
 
   /**
@@ -6333,24 +6343,44 @@ async function main() {
    * token and does not re-sign would otherwise pass every check here and revert
    * at the wall, having paid for the attempt.
    */
+  /**
+   * A VERDICT AND A SENTENCE — never a sentence somebody has to read a verdict
+   * out of.
+   *
+   * The caller used to derive success with `!/^(🧱|🤔|↩️)/.test(line)`: a regex
+   * over the first emoji of prose. Every refusal that returns BEFORE an intent
+   * is built carries no emoji at all, so all of them were recorded as
+   * successes — and `ok` is the sole input to the event LEVEL, so they were
+   * filed as "ok", which no surface in this app renders. An owner whose order
+   * was refused for being paused, expired, over their ceiling, or in a symbol
+   * the agent does not watch saw nothing at all.
+   *
+   * `ok` means the LEDGER SAYS SOMETHING HAPPENED — landed or in flight. A
+   * practice fill is not a success: the money did not move, and the owner needs
+   * to know why more than they need a green tick.
+   */
+  type OrderReply = { ok: boolean; line: string };
+  /** A refusal. Every path that does not reach the wall returns one of these. */
+  const no = (line: string): OrderReply => ({ ok: false, line });
+
   async function submitChatCurveTrade(
     side: "buy" | "sell",
     symbol: string,
     token: `0x${string}`,
     usdgAmount: number,
-  ): Promise<string> {
-    if (!active) return "no agent armed — sign a grant in the dashboard first.";
+  ): Promise<OrderReply> {
+    if (!active) return no("no agent armed — sign a grant in the dashboard first.");
 
     const adapter = grantPonsAdapter(active.grant);
     if (!adapter) {
-      return (
+      return no(
         `${symbol} trades on a bonding curve, and this grant does not carry the curve adapter. ` +
         `Add the adapter address in /settings and re-sign at /grant — the address is sealed into the ` +
         `signature, so setting it alone changes nothing.`
       );
     }
     if (!active.ponsAdapterLive) {
-      return (
+      return no(
         `${symbol} trades on a bonding curve, but the adapter this grant sealed has no code on this chain. ` +
         `That usually means the address came from the other chain or was never deployed. Nothing was sent.`
       );
@@ -6359,7 +6389,7 @@ async function main() {
     // The GRANT's reach, checked before anything is quoted or spent.
     const sellable = new Set((active.limits.sellableAssets ?? []).map((a) => a.toLowerCase()));
     if (!sellable.has(token.toLowerCase())) {
-      return (
+      return no(
         `I can't trade ${symbol}: this grant's signature doesn't name it, so the wall would refuse the ` +
         `trade after paying gas for it. Add ${symbol} in /settings and re-sign at /grant.`
       );
@@ -6369,21 +6399,21 @@ async function main() {
     // curve-trade with the raw string "unsupported paper intent curve-trade",
     // which surfaces to the owner and reads like a crash rather than a decision.
     if (paperActive()) {
-      return (
+      return no(
         `${symbol} trades on a bonding curve, and curve trading is live-only for now — the practice book ` +
         `can't simulate a curve yet. Nothing was sent.`
       );
     }
 
     const ref = await curveFor(token);
-    if (!ref) return `I don't have a curve on record for ${symbol}, so I can't trade it there.`;
+    if (!ref) return no(`I don't have a curve on record for ${symbol}, so I can't trade it there.`);
 
     const client = mainnetClient();
     const decimalsCache = new Map<string, number>();
     const quoteDecimals =
       (await quoteDecimalsOf(client, ref.quoteToken as `0x${string}`, decimalsCache)) ?? null;
     if (quoteDecimals === null) {
-      return `I can't read the decimals of what ${symbol}'s curve is quoted in, so I can't size a trade safely.`;
+      return no(`I can't read the decimals of what ${symbol}'s curve is quoted in, so I can't size a trade safely.`);
     }
     const tokenDecimals = watchTokens.find((t) => t.address.toLowerCase() === token.toLowerCase())?.decimals ?? 18;
 
@@ -6392,7 +6422,7 @@ async function main() {
       { curve: ref.curve as `0x${string}`, graduationThresholdRaw: ref.graduationThresholdRaw },
       { quote: quoteDecimals, token: tokenDecimals },
     );
-    if (!reserves) return `couldn't read ${symbol}'s curve just now — try again in a moment.`;
+    if (!reserves) return no(`couldn't read ${symbol}'s curve just now — try again in a moment.`);
     if (curveGraduated(reserves)) {
       // GRADUATION IS AN EXIT PROBLEM, not just a refusal.
       //
@@ -6407,9 +6437,11 @@ async function main() {
       // difference decides whether this is a re-sign or a sweep.
       const v4 = grantV4Adapter(active.grant);
       const base = `${symbol} has graduated off its bonding curve, so the curve adapter refuses it by name and its market has moved to a pool. Nothing was sent.`;
-      return v4
-        ? `${base} Its market is on Uniswap v4 now; routing a graduated position through the v4 adapter isn't wired yet, so for now sweep it with your owner key from /grant.`
-        : `${base} Exiting it needs the Uniswap v4 adapter, which this grant doesn't carry — add it in /settings and re-sign at /grant, or sweep the position with your owner key.`;
+      return no(
+        v4
+          ? `${base} Its market is on Uniswap v4 now; routing a graduated position through the v4 adapter isn't wired yet, so for now sweep it with your owner key from /grant.`
+          : `${base} Exiting it needs the Uniswap v4 adapter, which this grant doesn't carry — add it in /settings and re-sign at /grant, or sweep the position with your owner key.`,
+      );
     }
 
     // IMPACT, on the thinnest-liquidity venue on the chain. cfg.maxImpactBps has
@@ -6427,7 +6459,7 @@ async function main() {
       assetOut = token;
       // USDG-quoted curves are the one hop the agent's cash reaches directly.
       if (assetIn.toLowerCase() !== (CASH.USDG as string).toLowerCase()) {
-        return (
+        return no(
           `${symbol}'s curve is quoted in ${assetIn.slice(0, 10)}…, not USDG, so buying it needs a hop ` +
           `through that asset first. I don't do that in one step yet — nothing was sent.`
         );
@@ -6449,15 +6481,15 @@ async function main() {
           args: [active.grant.smartAccount as `0x${string}`],
         })) as bigint;
       } catch {
-        return `couldn't read your ${symbol} balance just now — try again in a moment.`;
+        return no(`couldn't read your ${symbol} balance just now — try again in a moment.`);
       }
-      if (held === 0n) return `you don't hold any ${symbol}.`;
+      if (held === 0n) return no(`you don't hold any ${symbol}.`);
       amountInRaw = held;
     }
 
     const impact = isBuy ? curveBuyImpactBps(reserves, amountInRaw) : null;
     if (impact !== null && impact > cfg.maxImpactBps) {
-      return (
+      return no(
         `that would move ${symbol}'s curve by ${(impact / 100).toFixed(1)}%, past your ${(
           cfg.maxImpactBps / 100
         ).toFixed(1)}% ceiling. Try a smaller size.`
@@ -6465,10 +6497,10 @@ async function main() {
     }
 
     const quoted = isBuy ? curveBuyOut(reserves, amountInRaw) : curveSellOut(reserves, amountInRaw);
-    if (quoted === null) return `couldn't quote ${symbol} on its curve — the reserves don't support a trade this size.`;
+    if (quoted === null) return no(`couldn't quote ${symbol} on its curve — the reserves don't support a trade this size.`);
     const minAmountOutRaw = curveMinOut(quoted, cfg.slippageBps);
     if (minAmountOutRaw === null || minAmountOutRaw <= 0n) {
-      return `couldn't derive a slippage floor for ${symbol} — refusing rather than signing an unbounded trade.`;
+      return no(`couldn't derive a slippage floor for ${symbol} — refusing rather than signing an unbounded trade.`);
     }
 
     const intent: TradeIntent = {
@@ -6490,12 +6522,14 @@ async function main() {
       `owner asked to ${side} ${usdgAmount} USDG of ${symbol} on its bonding curve`,
     );
     const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
-    // A CURVE SELL IS ALL-OR-NOTHING and the reply has to say which size it
-    // actually used. The requested amount is discarded above — `amountInRaw` is
-    // the whole on-chain balance — so quoting the owner's number back at them
-    // would describe a partial exit that never existed.
+    // A CURVE SELL IS ALL-OR-NOTHING and the receipt has to name the size it
+    // actually used, in whichever direction it differs. The requested amount is
+    // discarded above — `amountInRaw` is the whole on-chain balance — so the
+    // real size is usually MORE than was asked for, and this call hard-coded
+    // the note as "less than you asked for": a full liquidation annotated as
+    // though it had been trimmed.
     const actual = isBuy ? usdgAmount : Number(quoted) / 1e6;
-    return sayTradeOutcome(outcome, side, symbol, actual, !isBuy);
+    return sayTradeOutcome(outcome, side, symbol, usdgAmount, actual);
   }
 
   /**
@@ -6513,45 +6547,58 @@ async function main() {
     outcome: { status: TradeRow["status"]; rejectRule?: string } | null,
     side: "buy" | "sell",
     symbol: string,
-    usdgAmount: number,
-    clamped = false,
-  ): string {
-    const size = `${usdgAmount.toFixed(2)} USDG`;
+    asked: number,
+    actual: number = asked,
+  ): OrderReply {
+    const size = `${actual.toFixed(2)} USDG`;
     const what = `${side} ${size} of ${symbol}`;
-    const note = clamped ? ` (that was all of it — less than you asked for)` : "";
-    if (!outcome) return `🤔 the ${side} never reached the ledger at all. Nothing was sent; try again.`;
+    // THE SIZE CAN BE OFF IN EITHER DIRECTION, and naming the wrong one is not
+    // a rounding detail. A swap sell over-ask clamps DOWN to the position; a
+    // CURVE sell discards the request entirely and exits the whole holding,
+    // which is usually MORE. This was a hard-coded "less than you asked for",
+    // so a full liquidation was annotated as though it had been trimmed.
+    const off = Math.abs(actual - asked) >= 0.01;
+    const note = !off
+      ? ""
+      : actual < asked
+        ? ` (that was all of it — less than the ${asked.toFixed(2)} you asked for)`
+        : ` (all of it — MORE than the ${asked.toFixed(2)} you asked for: a bonding curve sells whole)`;
+    if (!outcome) return no(`🤔 the ${side} never reached the ledger at all. Nothing was sent; try again.`);
     switch (outcome.status) {
       case "landed":
-        return `✅ ${side === "buy" ? "bought" : "sold"} ${size} of ${symbol}${note}. It is on your tape.`;
+        return { ok: true, line: `✅ ${side === "buy" ? "bought" : "sold"} ${size} of ${symbol}${note}. It is on your tape.` };
       case "submitted":
-        return `🏹 sent ${what}${note} — it is in flight. Watch your trades for the fill.`;
+        return { ok: true, line: `🏹 sent ${what}${note} — it is in flight. Watch your trades for the fill.` };
       case "paper":
-        // NOT A FILL, and it must never be reported as one. Paper is the
-        // fallback when the agent cannot trade for real, so the useful half of
-        // this sentence is WHY, not the practice trade.
-        return (
+        // NOT A FILL, AND NOT A SUCCESS. Paper is the fallback when the agent
+        // cannot trade for real, so the useful half of this sentence is WHY,
+        // not the practice trade — and ok:false is what gets it onto a surface
+        // the owner actually reads.
+        return no(
           `📝 practised ${what}${note} instead of trading — I cannot trade for real right now` +
-          `${outcome.rejectRule ? ` (${outcome.rejectRule})` : ""}. Your money did not move.`
+            `${outcome.rejectRule ? ` (${outcome.rejectRule})` : ""}. Your money did not move.`,
         );
       case "reverted":
-        return `↩️ the ${side} reached the chain and turned back${outcome.rejectRule ? ` — ${outcome.rejectRule}` : ""}. Nothing moved, but the gas is spent.`;
+        return no(
+          `↩️ the ${side} reached the chain and turned back${outcome.rejectRule ? ` — ${outcome.rejectRule}` : ""}. Nothing moved, but the gas is spent.`,
+        );
       default:
-        return `🧱 refused: ${outcome.rejectRule ?? outcome.status}. Nothing was sent and nothing was spent.`;
+        return no(`🧱 refused: ${outcome.rejectRule ?? outcome.status}. Nothing was sent and nothing was spent.`);
     }
   }
 
-  async function submitChatTrade(side: "buy" | "sell", symbol: string, usdgAmount: number): Promise<string> {
-    if (!active) return "no agent armed — sign a grant in the dashboard first.";
+  async function submitChatTrade(side: "buy" | "sell", symbol: string, usdgAmount: number): Promise<OrderReply> {
+    if (!active) return no("no agent armed — sign a grant in the dashboard first.");
     // Before the first tick completes, equity is unknown (0n) and the drawdown
     // check would judge garbage — hold chat trades until the book is read.
-    if (lastEquityUsdg === 0n) return "🐎 the band is still saddling up (first tick pending) — try again in a minute.";
+    if (lastEquityUsdg === 0n) return no("🐎 the band is still saddling up (first tick pending) — try again in a minute.");
     // Resolve against the watch set, not the shipped registry — otherwise a
     // memecoin the owner added, covered by their grant and priced from its pool
     // still came back "unknown symbol" when they asked for it by name.
     const token = watchTokens.find((t) => t.symbol === symbol)?.address;
     if (!token) {
       const known = watchTokens.map((t) => t.symbol).join(", ");
-      return `I don't know ${symbol}. I'm watching: ${known || "nothing yet"}. Add it in /settings and re-sign at /grant if you want me trading it.`;
+      return no(`I don't know ${symbol}. I'm watching: ${known || "nothing yet"}. Add it in /settings and re-sign at /grant if you want me trading it.`);
     }
     // WHERE DOES THIS TOKEN ACTUALLY TRADE? A Pons token has no pool until it
     // graduates, so routing it to the swap router would build an operation
@@ -6568,12 +6615,12 @@ async function main() {
       intent = { kind: "swap", target: router, sellToken: CASH.USDG as `0x${string}`, buyToken: token, sellAmountRaw: raw, notionalUsdg: raw };
     } else {
       const pos = readPositionRaw(active.agentId, symbol, usdg);
-      if (!pos) return `you don't hold any ${symbol}.`;
+      if (!pos) return no(`you don't hold any ${symbol}.`);
       const want = usdg(usdgAmount);
       const partial = want < pos.valueUsdg;
       const sellRaw = partial ? (pos.rawBalance * want) / pos.valueUsdg : pos.rawBalance;
       const notional = partial ? want : pos.valueUsdg;
-      if (sellRaw === 0n) return `${symbol} amount rounds to zero shares.`;
+      if (sellRaw === 0n) return no(`${symbol} amount rounds to zero shares.`);
       // AN OVER-ASK IS CLAMPED, AND THE REPLY HAS TO SAY SO. It used to clamp
       // silently and then quote the amount asked for: "submitted sell 500 USDG
       // NVDA" for a 12 USDG position, a claim the ledger will never support —
@@ -6585,7 +6632,7 @@ async function main() {
     const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
     // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
     // sent, which is not always the amount asked for — see the clamp above.
-    return sayTradeOutcome(outcome, side, symbol, sold ?? usdgAmount, sold !== null);
+    return sayTradeOutcome(outcome, side, symbol, usdgAmount, sold ?? usdgAmount);
   }
 
   async function submitChatTransfer(to: `0x${string}`, usdgAmount: number): Promise<string> {
@@ -6673,7 +6720,10 @@ async function main() {
     // mirror must answer this question the same way or one of them is lying.
     grantHasTransfer: () => grantCarriesTransfer(active?.grant),
     readDepth: readDepthFor,
-    submitTrade: submitChatTrade,
+    // Telegram wants a sentence; the order path wants a verdict. One
+    // implementation, adapted here rather than duplicated.
+    submitTrade: (side: "buy" | "sell", symbol: string, usdg: number) =>
+      submitChatTrade(side, symbol, usdg).then((r) => r.line),
     submitTransfer: submitChatTransfer,
     onNameChange: (name) => {
       if (active) void setAgentName(active.agentId, name);
@@ -6768,6 +6818,14 @@ async function main() {
   let lastTickError = "";
   const runLoop = () => {
     tick()
+      // CLEARED BY A HEALTHY TICK. The latch was only ever assigned on failure,
+      // so a fault that came back after recovering was reported once and never
+      // again — the same shape `lastIdleReason` and `lastLiveBlocker` both got
+      // right by resetting when the condition clears. An intermittent failure
+      // is exactly the one an owner needs told about twice.
+      .then(() => {
+        lastTickError = "";
+      })
       .catch(async (e) => {
         // A TICK THAT THREW IS THE ONE FAILURE THAT LEFT NO ROW.
         //

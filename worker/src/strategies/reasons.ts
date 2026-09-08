@@ -190,12 +190,18 @@ export function renderWhy(w: Why): string {
           : `, and the vault is empty. Add funds or lower the size per trade`)
       );
     case "model-held":
-      return (
-        `nothing bought — I looked at ${w.considered} ${w.considered === 1 ? "name" : "names"} and held ` +
-        `${w.held === w.considered ? "all of them" : `${w.held} of them`}` +
-        (w.dropped > 0 ? `; ${w.dropped} more ${w.dropped === 1 ? "was" : "were"} refused before I could act` : "") +
-        `. A decision, not a quiet tick`
-      );
+      // "MORE" WAS WRONG: `dropped` comes out of the same proposal list as
+      // `considered`, so the refused ones were already inside the count and the
+      // sentence asserted a larger universe than the model actually looked at.
+      // And a refusal is not a hold — one is the model's decision, the other is
+      // the wall's — so when nothing was held the sentence is about the wall.
+      return w.held === 0
+        ? `nothing bought — I put ${w.dropped} ${w.dropped === 1 ? "idea" : "ideas"} up and my key's limits refused ${w.dropped === 1 ? "it" : "them"}. ` +
+            `That is the wall doing its job, not me sitting still`
+        : `nothing bought — I looked at ${w.considered} ${w.considered === 1 ? "name" : "names"} and held ` +
+            `${w.held === w.considered ? "all of them" : `${w.held} of them`}` +
+            (w.dropped > 0 ? `; ${w.dropped} of those my key's limits refused` : "") +
+            `. A decision, not a quiet tick`;
     case "stale-fallback":
       return (
         `all ${w.legs} equity feeds are shut, so putting ${usdg(w.usdgRaw)} USDG into ${w.symbol} — ` +

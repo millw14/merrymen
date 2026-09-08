@@ -57,6 +57,7 @@ import { resolveConfig } from "@merrymen/settings";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
+import { getSettingsStore } from "@merrymen/settings-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -69,6 +70,32 @@ export const dynamic = "force-dynamic";
  * have stopped watching. Minutes, not hours — see the header.
  */
 const ORDER_TTL_MS = 5 * 60_000;
+
+/**
+ * How long after its expiry a row may still hold the one-at-a-time slot.
+ *
+ * The expiry is enforced in the CHILD, at the claim, so a row can legitimately
+ * be a ferry pass and a tick behind its own deadline while it is genuinely
+ * being decided. Past that it either answered or never will, and either way it
+ * must stop blocking — an owner locked out of ordering by a row nothing can
+ * finish is the worse failure.
+ */
+const STALE_GRACE_MS = 2 * 60_000;
+
+/**
+ * Was this write refused because the row already exists?
+ *
+ * SQLSTATE 23505 is Postgres's unique violation; node:sqlite raises
+ * SQLITE_CONSTRAINT_PRIMARYKEY. Everything else — a missing column, a dropped
+ * connection, a read-only disk — is a failure to write, and the difference
+ * matters because one of them is honestly reported to the owner as "already
+ * queued" and the other must never be.
+ */
+function isDuplicateKey(e: unknown): boolean {
+  const code = String((e as { code?: unknown })?.code ?? "");
+  const msg = e instanceof Error ? e.message : String(e);
+  return code === "23505" || /PRIMARYKEY|UNIQUE constraint|duplicate key/i.test(`${code} ${msg}`);
+}
 
 const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskAgent());
 
@@ -101,6 +128,29 @@ function readOrder(body: OrderBody): { order: { side: "buy" | "sell"; symbol: st
   // Rounded to cents before it is hashed, so "25" and "25.000000001" are the
   // same order rather than two — the id is the idempotency key.
   return { order: { side, symbol, usdgAmount: Math.round(usdgAmount * 100) / 100 } };
+}
+
+/**
+ * The most this owner allows one typed order to spend.
+ *
+ * Falls back to the house default when the tenant has stored nothing, and when
+ * the store cannot be read — the SAFE direction, because the default is the
+ * smaller number and the sealed per-trade cap is the real wall underneath it
+ * either way. Enforced again in the worker, which reads the settings.json the
+ * orchestrator wrote for that child: two gates, neither relying on the other.
+ */
+async function ceilingFor(req: Request): Promise<number> {
+  const fallback = resolveConfig().telegramMaxActionUsdg;
+  if (!isHostedMode()) return fallback;
+  const tenant = tenantOf(req);
+  if (!tenant) return fallback;
+  try {
+    const stored = await getSettingsStore().get(tenant);
+    const own = stored?.telegramMaxActionUsdg;
+    return typeof own === "number" && Number.isFinite(own) && own >= 0 ? own : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 /**
@@ -140,7 +190,15 @@ export async function POST(req: Request) {
   // written; it means the same thing here, and applying it is the point —
   // silently inheriting nothing would let this surface claim more than the
   // owner's configured limit allows. Enforced again in the worker.
-  const ceiling = resolveConfig().telegramMaxActionUsdg;
+  //
+  // RESOLVED FOR THE CALLER, NOT FOR THIS CONTAINER. `resolveConfig()` reads
+  // the WEB process's own ~/.merrymen/settings.json merged with the server env
+  // — hosted, that is the house's file and has nothing to do with this tenant,
+  // whose settings live in the per-tenant store that /api/settings reads. So
+  // every hosted tenant was being held to the house default whatever they had
+  // configured. Self-hosted the two genuinely are one home, and the bare
+  // resolve is right there.
+  const ceiling = await ceilingFor(req);
   if (ceiling > 0 && order.usdgAmount > ceiling) {
     return NextResponse.json(
       { error: `${order.usdgAmount} USDG is over your ${ceiling} USDG limit for a chat order. Raise it in Settings if you mean it.` },
@@ -175,12 +233,27 @@ export async function POST(req: Request) {
     // ids and the collision would not catch them.
     try {
       const open = (await db
-        .prepare("SELECT id FROM agent_commands WHERE agent_id = ? AND kind = 'trade' AND done_at IS NULL LIMIT 1")
-        .get(agent)) as { id?: string } | undefined;
+        .prepare(
+          // BOUNDED BY THE ORDER'S OWN CLOCK. `done_at IS NULL` alone is an
+          // unbounded predicate, and the only writer of `done_at` in production
+          // is the ferry's up-leg, which fires only when the child produced a
+          // result file. So an order whose child was SIGKILLed mid-trade — the
+          // watchdog does that in bulk on this fleet — left a row that could
+          // never be finished and refused every future order from that tenant,
+          // forever. An order past its expiry can no longer legally run, so it
+          // must not go on holding the slot either.
+          "SELECT id FROM agent_commands WHERE agent_id = ? AND kind = 'trade' AND done_at IS NULL AND created_at > ? LIMIT 1",
+        )
+        .get(agent, now - ORDER_TTL_MS - STALE_GRACE_MS)) as { id?: string } | undefined;
       if (open?.id) return { ok: false as const, why: "in-flight" as const };
     } catch {
       return { ok: false as const, why: "unreachable" as const };
     }
+    // ONLY A KEY COLLISION IS A DUPLICATE. This catch used to swallow EVERY
+    // database error and answer `{queued:true}` — so a missing column, a
+    // dropped connection or a full disk all told the owner their order was
+    // placed when no row existed. The one error that genuinely means "already
+    // queued" is the primary key, and it is the only one reported as success.
     try {
       await db
         .prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at) VALUES (?, ?, ?, ?, ?)")
@@ -188,11 +261,13 @@ export async function POST(req: Request) {
         // error rather than a silently-wrong unit.
         .run(id, agent, "trade", JSON.stringify({ ...args, expiresAt: now + ORDER_TTL_MS }), now);
       return { ok: true as const };
-    } catch {
+    } catch (e) {
+      if (!isDuplicateKey(e)) return { ok: false as const, why: "unreachable" as const };
       // The primary key did its job: this exact order, this minute, is already
-      // queued. Reported as success with `duplicate`, because from the owner's
-      // side the thing they asked for IS queued — telling them it failed would
-      // invite the retry this is here to absorb.
+      // on the queue. Reported as success — from the owner's side the thing
+      // they asked for IS queued, and telling them it failed would invite the
+      // retry this exists to absorb — but flagged, so the card can say "already
+      // queued" rather than "placed it", which are different sentences.
       return { ok: true as const, duplicate: true };
     }
   });

@@ -215,12 +215,16 @@ const REGISTRY: ChatCommand[] = [
     writes: ["side", "symbol", "usdgAmount"],
     fixed: { side: "sell" },
     weighty: true,
-    // ASK FOR MORE THAN YOU HOLD AND YOU GET ALL OF IT. Said here because the
-    // worker clamps silently and the sentence on the card is the last chance to
-    // set the expectation before money moves.
+    // THE SIZE CAN COME OUT DIFFERENT IN EITHER DIRECTION, and the card is the
+    // last chance to say so before money moves. A stock sell CLAMPS DOWN to
+    // whatever the position is worth. A bonding-curve coin cannot be sold in
+    // part at all — the worker exits the whole holding — so a card promising
+    // "or all of it, if that is less than you hold" promised the opposite of
+    // what happens, and the receipt then called a full liquidation a trim.
     say: (a) =>
-      `Sell ${money(a.usdgAmount)} of ${String(a.symbol).toUpperCase()} — or all of it, if that is less than you hold. ` +
-      `I'll place it; my key's limits still decide.`,
+      `Sell ${money(a.usdgAmount)} of ${String(a.symbol).toUpperCase()}. ` +
+      `If that is more than you hold I sell what is there, and if it is a coin on a bonding curve I have to sell the whole position — ` +
+      `I'll tell you which happened. I'll place it; my key's limits still decide.`,
   },
   // ── the ones that only take you somewhere ────────────────────────────────
   {

@@ -244,14 +244,50 @@ export function readCommandState(
   return existsSync(path.join(dir, `${id}.json`)) ? { state: "queued" } : { state: "running" };
 }
 
-/** Is there an order for this home that has not been answered yet? */
+/**
+ * Is there an order for this home that has not been ANSWERED yet?
+ *
+ * QUEUED *OR* RUNNING, and the second half is the whole point. The claim is an
+ * unlink, and the receipt is written only after the trade finishes — so between
+ * those two moments the queue directory is empty and this returned false while
+ * an order was mid-flight. Self-hosted that is the one-at-a-time rule AND the
+ * idempotency key both going soft at once: an owner who saw nothing on the tape
+ * after 25 seconds and asked again got a second file, a second fill, and two
+ * positions at two prices for what they experienced as one order.
+ *
+ * Hosted has never had that hole, because the row keeps `done_at IS NULL`
+ * across the whole run. The two modes now mean the same thing by "waiting".
+ */
 export function hasPendingCommand(home: string): boolean {
   const dir = commandDir(home);
   if (!existsSync(dir)) return false;
   try {
-    return readdirSync(dir).some((n) => n.endsWith(".json") && !n.endsWith(".done.json"));
+    return readdirSync(dir).some(
+      (n) => (n.endsWith(".json") && !n.endsWith(".done.json")) || n.endsWith(RUNNING),
+    );
   } catch {
     return false;
+  }
+}
+
+/** Suffix of the marker that says "claimed, not yet answered". */
+const RUNNING = ".running";
+
+/**
+ * Mark a claimed command as RUNNING.
+ *
+ * Written after the unlink — which stays the claim — and removed when the
+ * result is written. It exists so that "unanswered" is observable during the
+ * seconds an order is actually being decided, which is exactly the window a
+ * worried owner asks again in.
+ */
+export function markRunning(home: string, id: string): void {
+  if (!ID_OK.test(id)) return;
+  try {
+    mkdirSync(commandDir(home), { recursive: true });
+    writeFileSync(path.join(commandDir(home), `${id}${RUNNING}`), String(Date.now()), "utf8");
+  } catch {
+    /* a missing marker costs a duplicate-order guard, never a trade */
   }
 }
 
@@ -259,6 +295,14 @@ export function hasPendingCommand(home: string): boolean {
 export function writeCommandResult(home: string, r: FileCommandResult): void {
   const dir = commandDir(home);
   mkdirSync(dir, { recursive: true });
+  // The answer supersedes the marker. Removed FIRST so a crash between the two
+  // leaves the order looking unanswered rather than answered — the direction
+  // that refuses a duplicate instead of admitting one.
+  try {
+    unlinkSync(path.join(dir, `${r.id}${RUNNING}`));
+  } catch {
+    /* never marked, or already swept */
+  }
   // SWEEP THE OLD ONES. Self-hosted nothing drains these — the orchestrator is
   // the only caller of drainCommandResults and self-hosted never runs it — so
   // without this they accumulate in a home directory forever. A day is far
@@ -283,7 +327,21 @@ export function writeCommandResult(home: string, r: FileCommandResult): void {
   renameSync(tmp, path.join(dir, `${r.id}.done.json`));
 }
 
-/** Collect and remove finished results. Called by the orchestrator. */
+/**
+ * Collect finished results. Called by the orchestrator.
+ *
+ * THE FILE IS NOT DELETED HERE ANY MORE, and that is the fix rather than an
+ * oversight. It used to unlink every `.done.json` as it read it, before the
+ * caller had written a single row — so one thrown UPDATE (the loop shares a
+ * try) abandoned that result AND every remaining one, with the files already
+ * gone and no way to recover them. For a probe that loses a diagnostic. For an
+ * ORDER it loses the receipt for a trade that really happened, and `done_at`
+ * staying NULL is now what refuses the owner their next order.
+ *
+ * The caller deletes each one with `dropCommandResult` after its row is safely
+ * written. Unreadable files are still removed here, because nothing downstream
+ * can ever do anything with them.
+ */
 export function drainCommandResults(home: string): FileCommandResult[] {
   const dir = commandDir(home);
   if (!existsSync(dir)) return [];
@@ -298,9 +356,12 @@ export function drainCommandResults(home: string): FileCommandResult[] {
     const f = path.join(dir, n);
     try {
       const r = JSON.parse(readFileSync(f, "utf8")) as FileCommandResult;
-      if (typeof r.id === "string") out.push(r);
+      if (typeof r.id === "string") {
+        out.push(r);
+        continue;
+      }
     } catch {
-      /* unreadable result — dropped with the file below */
+      /* unreadable — falls through to the unlink below */
     }
     try {
       unlinkSync(f);
@@ -309,4 +370,14 @@ export function drainCommandResults(home: string): FileCommandResult[] {
     }
   }
   return out;
+}
+
+/** Forget a result, once its row is written. See drainCommandResults. */
+export function dropCommandResult(home: string, id: string): void {
+  if (!ID_OK.test(id)) return;
+  try {
+    unlinkSync(path.join(commandDir(home), `${id}.done.json`));
+  } catch {
+    /* already gone */
+  }
 }

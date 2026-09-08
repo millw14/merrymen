@@ -7,8 +7,10 @@ import {
   claimCommandFile,
   commandDir,
   drainCommandResults,
+  dropCommandResult,
   hasPendingCommand,
   isExpired,
+  markRunning,
   readCommandState,
   writeCommand,
   writeCommandResult,
@@ -114,7 +116,16 @@ test("results travel back and are drained exactly once", () => {
     assert.equal(got[0]!.id, "a");
     assert.equal(got[0]!.ok, true);
     assert.match(got[0]!.line, /PASSED/);
-    assert.deepEqual(drainCommandResults(home), [], "draining removes them");
+    // READING NO LONGER DELETES, and that is the fix rather than a regression.
+    // The drain used to unlink every file as it read it, before the caller had
+    // written a single row — so one thrown UPDATE (the ferry's loop shared a
+    // try) abandoned that result AND every remaining one, with the files
+    // already gone. For a probe that loses a diagnostic; for an ORDER it loses
+    // the receipt for a trade that really happened, and an unanswered row is
+    // what refuses the owner their next order.
+    assert.equal(drainCommandResults(home).length, 1, "a receipt survives until its row is written");
+    dropCommandResult(home, "a");
+    assert.deepEqual(drainCommandResults(home), [], "and the caller drops it once the row lands");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -296,6 +307,43 @@ test("old receipts are swept, because self-hosted nothing drains them", () => {
     writeCommandResult(home, { id: "fresh", ok: true, line: "done", at: Date.now() });
     const left = readdirSync(commandDir(home)).sort();
     assert.deepEqual(left, ["fresh.done.json"], "a home must not accumulate receipts forever");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("CLAIMED IS NOT ANSWERED — a running order still reads as waiting", () => {
+  const home = tmpHome();
+  try {
+    // Self-hosted, the claim is an unlink and the receipt lands only when the
+    // trade finishes, so between them the queue directory was EMPTY and
+    // hasPendingCommand said false while an order was mid-flight. That is the
+    // one-at-a-time rule and the idempotency key both going soft at once: an
+    // owner who saw nothing on the tape after 25 seconds and asked again got a
+    // second file, a second fill, and two positions for one intention.
+    writeCommand(home, { id: "ord", kind: "trade", at: 1 });
+    assert.equal(hasPendingCommand(home), true, "queued");
+    const cmd = claimCommandFile(home);
+    assert.equal(cmd?.id, "ord");
+    assert.equal(hasPendingCommand(home), false, "the file is gone — this is the window that was open");
+    markRunning(home, "ord");
+    assert.equal(hasPendingCommand(home), true, "and now it reads as what it is: still unanswered");
+    writeCommandResult(home, { id: "ord", ok: true, line: "bought", at: 9 });
+    assert.equal(hasPendingCommand(home), false, "answered, so the next order may go");
+    // The marker is gone too — it must not outlive the thing it describes.
+    assert.equal(readdirSync(commandDir(home)).some((n) => n.endsWith(".running")), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("and a marker cannot be written for an id that is not a plain id", () => {
+  // Same boundary as writeCommand: this one joins a path too.
+  const home = tmpHome();
+  try {
+    markRunning(home, "../escape");
+    assert.equal(readdirSync(home).includes("escape"), false);
+    assert.equal(hasPendingCommand(home), false);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

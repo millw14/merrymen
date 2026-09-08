@@ -127,13 +127,22 @@ describe("the receipt says what the ledger says", () => {
     assert.ok(!/await processIntent\([^)]*\);\s*\n\s*const outcome = lastTradeOutcome;/.test(CODE));
   });
 
-  it("and a SELL clamped to the whole position says so", () => {
+  it("and a SELL whose size came out DIFFERENT says which way", () => {
     // "submitted sell 500 USDG NVDA" for a 12 USDG position is a claim the
     // ledger will never support — the trade row carries 12.
+    //
+    // AND IT CAN DIFFER UPWARD. A stock sell clamps DOWN to the position; a
+    // bonding-curve sell discards the request and exits the whole holding,
+    // which is usually MORE. The note used to be hard-coded as "less than you
+    // asked for", so a full liquidation was annotated as though it had been
+    // trimmed — asked and actual are now both passed and the direction derived.
     const submit = CODE.slice(CODE.indexOf("async function submitChatTrade"), CODE.indexOf("async function submitChatTransfer"));
     assert.match(submit, /if \(!partial\) sold = Number\(pos\.valueUsdg\) \/ 1e6;/);
-    assert.match(submit, /sayTradeOutcome\(outcome, side, symbol, sold \?\? usdgAmount, sold !== null\)/);
-    assert.match(CODE, /that was all of it — less than you asked for/);
+    assert.match(submit, /sayTradeOutcome\(outcome, side, symbol, usdgAmount, sold \?\? usdgAmount\)/);
+    const curve = CODE.slice(CODE.indexOf("async function submitChatCurveTrade"), CODE.indexOf("function sayTradeOutcome"));
+    assert.match(curve, /sayTradeOutcome\(outcome, side, symbol, usdgAmount, actual\)/);
+    assert.match(CODE, /less than the \$\{asked\.toFixed\(2\)\} you asked for/);
+    assert.match(CODE, /MORE than the \$\{asked\.toFixed\(2\)\} you asked for/);
   });
 });
 
@@ -143,5 +152,40 @@ describe("the event feed names what actually happened", () => {
     // `selftest: …` regardless of kind — a wrong claim about what the agent
     // did, in the one log an operator reads to work out what a fleet is doing.
     assert.match(CODE, /addEvent\(agentId, outcome\.ok \? "ok" : "err", `\$\{cmd\.kind\}: \$\{outcome\.line\}`\)/);
+  });
+});
+
+describe("a verdict, not a sentence somebody reads a verdict out of", () => {
+  it("EVERY PRE-WALL REFUSAL IS ok:false", () => {
+    // The caller used to derive success with a regex over the first emoji of
+    // the prose, which recognised three branches and missed every refusal that
+    // returns before an intent is built — so all of them were recorded as
+    // successes. `ok` is the sole input to the event LEVEL, and "ok" is a level
+    // no surface in this app renders, so an owner refused for being paused,
+    // expired, over their ceiling or in an unwatched symbol saw nothing at all.
+    assert.ok(!/\/\^\(🧱\|🤔\|↩️\)\//.test(CODE), "the emoji sniff is gone");
+    assert.match(CODE, /type OrderReply = \{ ok: boolean; line: string \};/);
+    assert.match(CODE, /const no = \(line: string\): OrderReply => \(\{ ok: false, line \}\);/);
+    // Both submitters return the verdict, and the dispatch passes it straight
+    // through rather than re-deriving one.
+    const trade = CODE.slice(CODE.indexOf("async function submitChatTrade"), CODE.indexOf("async function submitChatTransfer"));
+    assert.match(trade, /Promise<OrderReply>/);
+    assert.match(CODE, /return submitChatTrade\(side, symbol, size\);/);
+  });
+
+  it("and PAPER is not a success either", () => {
+    // The money did not move. An owner needs the reason more than a green tick,
+    // and ok:false is what puts it on a surface they read.
+    const say = CODE.slice(CODE.indexOf("function sayTradeOutcome"), CODE.indexOf("async function submitChatTrade"));
+    const paper = say.slice(say.indexOf('case "paper"'), say.indexOf('case "reverted"'));
+    assert.match(paper, /return no\(/);
+    // Only two branches are successes, and both mean the ledger says something
+    // happened: it landed, or it is genuinely in flight.
+    assert.equal((say.match(/ok: true/g) ?? []).length, 2);
+  });
+
+  it("and Telegram still gets a sentence, from the same implementation", () => {
+    // One implementation, adapted at the wiring — not duplicated.
+    assert.match(CODE, /submitChatTrade\(side, symbol, usdg\)\.then\(\(r\) => r\.line\)/);
   });
 });

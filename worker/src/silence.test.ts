@@ -64,7 +64,21 @@ describe("the three silences each get their own sentence", () => {
   it("and a model that held EVERYTHING reads differently from one that held some", () => {
     assert.match(renderWhy({ code: "model-held", held: 4, considered: 4, dropped: 0 }), /held all of them/);
     assert.match(renderWhy({ code: "model-held", held: 2, considered: 4, dropped: 1 }), /held 2 of them/);
-    assert.match(renderWhy({ code: "model-held", held: 2, considered: 4, dropped: 1 }), /1 more was refused/);
+    // "1 MORE was refused" was wrong twice over: `dropped` comes out of the
+    // same proposal list as `considered`, so it was already inside the count —
+    // the sentence asserted a larger universe than the model looked at.
+    assert.match(renderWhy({ code: "model-held", held: 2, considered: 4, dropped: 1 }), /1 of those my key's limits refused/);
+  });
+
+  it("A REFUSAL IS NOT A HOLD, and when nothing was held the sentence says so", () => {
+    // One is the model's decision, the other is the wall's. Reporting "I looked
+    // and held all of them" about proposals the wall threw out credits the
+    // agent with a judgement it never made, and points the owner at the wrong
+    // thing to change.
+    const wall = renderWhy({ code: "model-held", held: 0, considered: 3, dropped: 3 });
+    assert.match(wall, /my key's limits refused them/);
+    assert.match(wall, /the wall doing its job, not me sitting still/);
+    assert.ok(!/held/.test(wall), "nothing was held, so the sentence must not say it was");
   });
 });
 

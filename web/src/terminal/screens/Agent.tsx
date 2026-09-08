@@ -110,6 +110,9 @@ export function Agent({
    */
   const [pending,setPending]=useState<{id:string;args:Record<string,CommandArg>}|null>(null);
   const [running,setRunning]=useState(false);
+  /** Live while this screen is mounted, so a poll cannot outlive it. */
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
   const [expanded, setExpanded] = useState(false);
   const [view, setView] = useState<"positions" | "trades">("positions");
   const viewport = useRef<HTMLElement>(null);
@@ -196,6 +199,54 @@ export function Agent({
     finally {setSending(false);input.current?.focus();}
   };
   /**
+   * WAIT FOR THE ANSWER, AND SAY IT IN THE AGENT'S OWN WORDS.
+   *
+   * An order is the only command here that finishes somewhere else. It is
+   * queued, ferried, claimed, put to the wall and signed — seconds to a minute
+   * later — and until this existed the owner was told "placed it" and then
+   * nothing, ever. A refusal that never reaches the wall writes no trade row,
+   * so the tape cannot carry it either: this poll is the ONLY way the reason
+   * reaches the person who asked.
+   *
+   * The sentence comes from the WORKER, which read the ledger row. Nothing here
+   * infers an outcome — a browser guessing at what a trade did is exactly the
+   * claim this codebase refuses to make.
+   *
+   * Bounded and best-effort: it stops when the answer lands, when the order
+   * outlives its own five-minute window, or when the screen goes away. A poll
+   * that cannot end is a worse bug than a missing sentence.
+   */
+  const followOrder = async (id: string) => {
+    const started = Date.now();
+    while (Date.now() - started < 7 * 60_000) {
+      await new Promise((r) => setTimeout(r, 5_000));
+      if (!alive.current) return;
+      let data: { state?: string; result?: string | null } | null = null;
+      try {
+        const r = await fetch(`/api/orders?id=${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(8_000) });
+        data = r.ok ? await r.json() : null;
+      } catch {
+        continue; // a dropped poll is not an outcome
+      }
+      if (data?.state === "done" && data.result) {
+        onTurn({ question: "", answer: data.result });
+        return;
+      }
+    }
+    // NOT SILENCE. Seven minutes without an answer means the worker never took
+    // it — which is a real thing an owner needs told, and the state they were
+    // left in before was an unexplained absence.
+    if (alive.current) {
+      onTurn({
+        question: "",
+        answer:
+          "I never got to that order — my worker did not pick it up in time, so nothing was sent. " +
+          "Ask again and I will try once more.",
+      });
+    }
+  };
+
+  /**
    * DO THE THING THE OWNER JUST CONFIRMED.
    *
    * The model proposed it; this runs only from a click, and it calls the SAME
@@ -231,15 +282,28 @@ export function Agent({
           headers: { "content-type": "application/json" },
           body: JSON.stringify(commandPayload(cmd, pending!.args)),
         });
-        const body = (await placed.json().catch(() => null)) as { error?: string } | null;
+        const body = (await placed.json().catch(() => null)) as
+          | { error?: string; id?: string; duplicate?: boolean }
+          | null;
         if (!placed.ok) throw new Error(body?.error ?? `that was refused (${placed.status})`);
+        // "IT LANDS ON YOUR TRADES EITHER WAY" WAS FALSE. Only a trade row
+        // reaches the tape, and every refusal that returns before an intent is
+        // built — paused, expired, over the ceiling, a symbol I do not watch,
+        // no position, no grant — writes no row at all. So the tape would stay
+        // empty forever while the turn promised it would not, and the turn is
+        // PERSISTED to this browser, so the false promise outlives the order.
+        //
+        // What is true the moment the row exists is only that it was placed. So
+        // that is what this says, and the outcome is fetched below and said in
+        // its own turn — from the worker's own words, not from a guess here.
         onTurn({
           question: "✓ confirmed",
-          answer:
-            `Placed it — ${cmd.say(pending!.args)} It is with my key now; whether it goes through is ` +
-            `up to the limits you signed. Watch your trades, it lands there either way.`,
+          answer: body?.duplicate
+            ? `That exact order is already queued — I have not placed a second one.`
+            : `Placed it — ${cmd.say(pending!.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
         });
         setPending(null);
+        if (body?.id) void followOrder(body.id);
         return;
       }
       // READ-MODIFY-WRITE at click time, and ONLY the declared keys.

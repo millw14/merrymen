@@ -161,3 +161,44 @@ describe("what the caller is told", () => {
     assert.ok(!/bought|sold|filled|executed/i.test(CODE.replace(/'trade'|"trade"/g, "")));
   });
 });
+
+describe("what the review found, pinned so it cannot come back", () => {
+  it("A DATABASE ERROR IS NOT A DUPLICATE", () => {
+    // The INSERT catch used to swallow EVERY error and answer {queued:true} —
+    // so a missing column, a dropped connection or a full disk all told the
+    // owner their order was placed when no row existed. Exactly one error means
+    // "already queued", and it is the only one reported as success.
+    assert.match(CODE, /if \(!isDuplicateKey\(e\)\) return \{ ok: false as const, why: "unreachable" as const \};/);
+    assert.match(CODE, /code === "23505"/, "postgres unique violation");
+    assert.match(CODE, /PRIMARYKEY\|UNIQUE constraint\|duplicate key/, "and the sqlite spelling");
+  });
+
+  it("THE IN-FLIGHT GUARD HAS AN AGE BOUND, or one dead order locks the owner out forever", () => {
+    // `done_at` is written only by the ferry's up-leg, which fires only when the
+    // child produced a result file. A child SIGKILLed mid-trade — the watchdog
+    // does that in bulk on this fleet — left a row nothing could ever finish,
+    // and every future order from that tenant was refused.
+    assert.match(CODE, /done_at IS NULL AND created_at > \?/);
+    assert.match(CODE, /now - ORDER_TTL_MS - STALE_GRACE_MS/);
+    assert.match(CODE, /const STALE_GRACE_MS = /);
+  });
+
+  it("THE CEILING IS THE CALLER'S, not this container's", () => {
+    // `resolveConfig()` reads the WEB process's own ~/.merrymen/settings.json —
+    // hosted, the house's file, which has nothing to do with this tenant, whose
+    // settings live in the per-tenant store /api/settings reads. Every hosted
+    // tenant was held to the house default whatever they had configured.
+    assert.match(CODE, /const ceiling = await ceilingFor\(req\);/);
+    assert.match(CODE, /getSettingsStore\(\)\.get\(tenant\)/);
+    // Self-hosted the web process and the worker genuinely share one home, so
+    // the bare resolve is correct there and stays.
+    assert.match(CODE, /if \(!isHostedMode\(\)\) return fallback;/);
+  });
+
+  it("and an unreadable settings store falls back to the SMALLER number", () => {
+    // Fail-safe: the default is the tighter ceiling, and the sealed per-trade
+    // cap is the real wall underneath either way.
+    const fn = CODE.slice(CODE.indexOf("async function ceilingFor"), CODE.indexOf("function orderId"));
+    assert.match(fn, /catch \{\s*return fallback;\s*\}/);
+  });
+});
