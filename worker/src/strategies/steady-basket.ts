@@ -60,6 +60,32 @@ export interface SteadyBasketConfig {
     slippageBps: number;
     maxImpactBps: number;
   } | null;
+  /**
+   * TAKE A PROFIT WHEN A LEG HAS RUN THIS FAR AHEAD OF WHAT IT COST, in bps.
+   * Zero means never, and zero is the default.
+   *
+   * WHY THIS STRATEGY HAD NO SELL AT ALL. Every intent it could emit was a
+   * buy, a vault deposit or a vault withdrawal — `sellToken` was always cash.
+   * An agent on the shipped default could accumulate forever and never realise
+   * anything, which is not a strategy anybody chose; it is a strategy nobody
+   * noticed was one-way. In production one funded agent bought nine times with
+   * real money and still holds all six positions, because there was no code
+   * path that could ever sell them.
+   *
+   * TAKE-PROFIT ONLY, AND NO STOP-LOSS. A stop-loss on a DCA sleeve is
+   * incoherent: the whole thesis of averaging in is to keep buying through a
+   * drawdown, so a rule that sells the dip would fight the rule that buys it,
+   * and the two would trade against each other with the owner paying the
+   * spread both ways. Taking a profit does not contradict accumulating — it is
+   * the other half of it, and it is the half an owner means by "if it is happy
+   * with its profit it sells".
+   *
+   * OFF BY DEFAULT, DELIBERATELY. Turning this on changes what a live agent
+   * does with somebody's money, and the threshold that is right for one book is
+   * wrong for another. registry.ts already states the rule this follows: a
+   * setting is "know about this", never "do this to me" — the owner turns it on.
+   */
+  takeProfitBps?: number;
 }
 
 export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick {
@@ -80,6 +106,41 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   const intents: TradeIntent[] = [];
   // Positionally paired with `intents` — see Tick. Pushed together, always.
   const why: (Why | null)[] = [];
+
+  // ── LEAVING, BEFORE ENTERING ────────────────────────────────────────────
+  //
+  // Exits first, the same order trencher uses and for the same reason: a tick
+  // that both takes a profit and opens a new leg should realise the one it can
+  // measure before it spends on one it cannot. There is at most one exit per
+  // tick, so a basket that has run does not liquidate itself in a single pass.
+  //
+  // A STALE PRICE IS NOT A GAIN. `priceStale` means the market for that leg is
+  // closed, so its value is last session's number — selling against it would be
+  // taking a profit measured at a price nobody is currently making. And a leg
+  // with no cost on record is skipped rather than assumed free: `costUsdg` is
+  // null when the ledger has no basis for it, and treating null as zero would
+  // read the entire holding as profit, which is the accounting bug this
+  // codebase exists downstream of.
+  if (cfg.takeProfitBps && cfg.takeProfitBps > 0) {
+    for (const [symbol, h] of snap.holdings) {
+      if (h.priceStale) continue;
+      const cost = h.costUsdg ?? null;
+      if (cost === null || cost <= 0n) continue;
+      if (snap.pausedTokens.has(h.token.toLowerCase())) continue;
+      const gainBps = Number(((h.valueUsdg - cost) * 10_000n) / cost);
+      if (gainBps < cfg.takeProfitBps) continue;
+      intents.push({
+        kind: "swap",
+        target: cfg.swapRouter,
+        sellToken: h.token,
+        buyToken: cfg.usdg,
+        sellAmountRaw: h.rawBalance,
+        notionalUsdg: h.valueUsdg,
+      });
+      why.push({ code: "take-profit", symbol, gainBps, usdgRaw: h.valueUsdg, costRaw: cost });
+      break;
+    }
+  }
 
   // Counted so the tick can say WHY it bought nothing. An empty intent list
   // reads identically whether the schedule declined, the feeds were stale, or

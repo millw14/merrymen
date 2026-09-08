@@ -109,6 +109,15 @@ export type Why =
    */
   | { code: "under-one-buy"; cashRaw: bigint; needRaw: bigint; vaultRaw: bigint }
   /**
+   * A LEG THAT RAN FAR ENOUGH AHEAD OF WHAT IT COST TO BE WORTH REALISING.
+   *
+   * The default strategy could only ever buy — every intent it emitted had cash
+   * on the sell side — so an agent on it accumulated and never realised
+   * anything. This is the other half, and it carries the two numbers that make
+   * it checkable: what the position cost and what it is worth now.
+   */
+  | { code: "take-profit"; symbol: string; gainBps: number; usdgRaw: bigint; costRaw: bigint }
+  /**
    * THE MODEL LOOKED AND CHOSE TO HOLD.
    *
    * The LLM strategist returns a bare intent list, so a window where it decided
@@ -188,6 +197,11 @@ export function renderWhy(w: Why): string {
         (w.vaultRaw > 0n
           ? `. There is ${usdg(w.vaultRaw)} USDG in the vault I can pull back, so this should clear itself`
           : `, and the vault is empty. Add funds or lower the size per trade`)
+      );
+    case "take-profit":
+      return (
+        `${w.symbol} is up ${pct(w.gainBps)}% on what it cost — selling all ${usdg(w.usdgRaw)} USDG of it ` +
+        `against the ${usdg(w.costRaw)} paid, and taking the profit rather than watching it`
       );
     case "model-held":
       // "MORE" WAS WRONG: `dropped` comes out of the same proposal list as

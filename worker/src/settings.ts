@@ -95,6 +95,7 @@ export interface ResolvedConfig {
   scoutBudgetUsdg: number;
   /** Max USDG into any single unpriceable token. */
   scoutPerTokenUsdg: number;
+  takeProfitBps: number;
   buyPerTickUsdg: number;
   idleFloorUsdg: number;
   gapEnterBudgetUsdg: number;
@@ -320,6 +321,9 @@ export function mergeSettings(
     scoutEnabled: bool(file.scoutEnabled, env.MERRYMEN_SCOUT_ENABLED, d.scoutEnabled),
     scoutBudgetUsdg: num(file.scoutBudgetUsdg, env.MERRYMEN_SCOUT_BUDGET_USDG, d.scoutBudgetUsdg, 0, 1_000_000),
     scoutPerTokenUsdg: num(file.scoutPerTokenUsdg, env.MERRYMEN_SCOUT_PER_TOKEN_USDG, d.scoutPerTokenUsdg, 0, 1_000_000),
+    // 0 disables it; the ceiling is 100x, past which it is not a take-profit
+    // rule, it is a number nobody will ever hit.
+    takeProfitBps: num(file.takeProfitBps, env.MERRYMEN_TAKE_PROFIT_BPS, d.takeProfitBps ?? 0, 0, 1_000_000),
     buyPerTickUsdg: num(file.buyPerTickUsdg, env.MERRYMEN_BUY_PER_TICK_USDG, d.buyPerTickUsdg, 1, 100_000),
     idleFloorUsdg: num(file.idleFloorUsdg, env.MERRYMEN_IDLE_FLOOR_USDG, d.idleFloorUsdg, 0, 1_000_000),
     gapEnterBudgetUsdg: num(file.gapEnterBudgetUsdg, env.MERRYMEN_GAP_BUDGET_USDG, d.gapEnterBudgetUsdg, 1, 1_000_000),

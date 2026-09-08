@@ -575,6 +575,7 @@ async function main() {
       },
       usdg6: usdg,
       basketSymbols: c.basketSymbols,
+      takeProfitBps: c.takeProfitBps,
       buyPerTickUsdg: c.buyPerTickUsdg,
       idleFloorUsdg: c.idleFloorUsdg,
       gapEnterBudgetUsdg: c.gapEnterBudgetUsdg,

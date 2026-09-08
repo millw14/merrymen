@@ -55,6 +55,7 @@ export interface StrategyBuildOpts {
    * (tests, fixtures) falls back to the shipped registry, i.e. old behaviour.
    */
   universe?: readonly StockToken[];
+  takeProfitBps?: number;
   buyPerTickUsdg: number;
   idleFloorUsdg: number;
   gapEnterBudgetUsdg: number;
@@ -268,6 +269,7 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
     swapRouter: opts.swapRouter,
     vault: MORPHO.steakhouseUsdgVault as `0x${string}`,
     usdg: CASH.USDG as `0x${string}`,
+    takeProfitBps: opts.takeProfitBps ?? 0,
   };
   // RE-READ PER TICK, NOT CAPTURED IN cfg. A curve leg carries that tick's
   // reserves, and curve-prices.ts refuses to cache them for a measured reason:

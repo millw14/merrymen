@@ -198,6 +198,19 @@ export interface MerrymenSettings {
    * pool being manipulated right now. */
   maxPriceDivergenceBps?: number;
   /** Steady-basket: USDG bought per tick across the basket. */
+  /**
+   * Sell a basket leg once it is this far ahead of what it cost, in bps.
+   * 0 = never, and 0 is the default.
+   *
+   * THE DEFAULT STRATEGY HAD NO SELL AT ALL until this existed: every intent it
+   * could emit had cash on the sell side, so an agent on it accumulated forever
+   * and never realised anything. Take-profit only — a stop-loss on a DCA sleeve
+   * would sell exactly the dip the sleeve exists to buy.
+   *
+   * OFF BY DEFAULT because turning it on changes what a live agent does with
+   * somebody money, and the right threshold for one book is wrong for another.
+   */
+  takeProfitBps?: number;
   buyPerTickUsdg?: number;
   /** Steady-basket: cash floor kept liquid; the excess sweeps to the vault. */
   idleFloorUsdg?: number;
@@ -575,6 +588,7 @@ export const SETTINGS_DEFAULTS = {
   scoutEnabled: false,
   scoutBudgetUsdg: 0,
   scoutPerTokenUsdg: 25,
+  takeProfitBps: 0,
   buyPerTickUsdg: 25,
   idleFloorUsdg: 50,
   gapEnterBudgetUsdg: 75,
