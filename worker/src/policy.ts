@@ -476,7 +476,50 @@ export function checkPolicy(
     }
   }
 
-  if (state.opsToday >= limits.maxOpsPerDay) {
+  // ── THE ONE EXIT THE CHAIN DOES NOT SIZE ────────────────────────────────
+  //
+  // Computed here rather than below because the SIZE caps need it too, and
+  // this is the narrower question than the breaker's `isExit` further down.
+  //
+  // WHY THIS IS A MIRROR FIX AND NOT A LOOSENED RAIL. The comment under this
+  // one states this file's contract: the per-op ceiling "mirrors the on-chain
+  // call policy EXACTLY, because a stricter mirror rejects trades the chain
+  // would happily allow (a real bug per this file's contract)". It then lists
+  // "swaps & transfers → approve/transfer USDG capped at the PER-TRADE limit",
+  // which is true of the USDG approve — the BUY leg. The SELL leg is a
+  // different permission, and wall.ts emits it with an explicit `null` amount
+  // argument under the comment "No amount condition". So the chain does not
+  // bound the size of a sell, and this file was bounding it anyway.
+  //
+  // WHAT THAT COST. A trencher entry is 5 USDG against a 10 USDG per-trade cap.
+  // Hit the -35% stop and the exit is worth ~3.25 and passes; hit the +100%
+  // take-profit and it is worth ~10.0x and is refused with `per-trade-cap`,
+  // every tick, forever. The agent was structurally able to exit its losers and
+  // structurally unable to exit its winners — the exact inverse of what an
+  // owner asks for, and it would have been invisible as a stuck position rather
+  // than as an error.
+  //
+  // DELIBERATELY NARROWER THAN `isExit` BELOW. A `transfer` is genuinely capped
+  // on chain (wall.ts:421-425, LESS_THAN_OR_EQUAL perTradeUsdg) and an
+  // `equity-order` has no wall permission at all, so neither is exempt here
+  // even though the breaker rightly treats both as exits. The exemption is only
+  // where the chain's own permission carries no amount condition. Buys are
+  // untouched: that cap is real, it is on chain, and it stays.
+  const isUnsizedExit =
+    (intent.kind === "swap" &&
+      limits.cashToken !== undefined &&
+      lc(intent.buyToken) === lc(limits.cashToken)) ||
+    (intent.kind === "curve-trade" &&
+      ((limits.cashToken !== undefined && lc(intent.assetOut) === lc(limits.cashToken)) ||
+        (limits.quoteAssets !== undefined && limits.quoteAssets.map(lc).includes(lc(intent.assetOut)))));
+
+  // A RATE LIMIT MUST NOT BECOME A LOCK ON THE DOORS — the same sentence the
+  // drawdown breaker below is written under. This one is purely off-chain: the
+  // rate-limit policy contract has no bytecode on 4663 and was removed from the
+  // wall for that reason, so it is a worker-side brake on taking risk. On the
+  // shipped defaults (25 USDG a tick against 24 ops a day) an agent that spent
+  // its budget buying could not sell until the day rolled.
+  if (!isUnsizedExit && state.opsToday >= limits.maxOpsPerDay) {
     return { ok: false, rule: "ops-cap", detail: `${state.opsToday} ops in 24h >= ${limits.maxOpsPerDay}` };
   }
 
@@ -499,14 +542,22 @@ export function checkPolicy(
         : intent.amountUsdg;
     const isDeposit = intent.kind === "vault-deposit";
     const perOpCap = isDeposit ? limits.dailyUsdg : limits.perTradeUsdg;
-    if (notional > perOpCap) {
+    // See isUnsizedExit: the chain caps the USDG approve that funds a BUY, and
+    // emits the sell-side approve with no amount condition at all. Capping a
+    // sell here was the mirror being stricter than the chain, which this file's
+    // own contract calls a real bug — and it refused every winning exit.
+    if (!isUnsizedExit && notional > perOpCap) {
       return {
         ok: false,
         rule: isDeposit ? "deposit-cap" : "per-trade-cap",
         detail: `${notional} > ${perOpCap}`,
       };
     }
-    if (state.spentTodayUsdg + notional > limits.dailyUsdg) {
+    // The day's budget is a bound on what may be SPENT. A sell spends nothing —
+    // it returns cash — so counting it against the same allowance meant an
+    // agent that used its budget entering could not leave until the day rolled,
+    // which is the lock-in the breaker below refuses by name.
+    if (!isUnsizedExit && state.spentTodayUsdg + notional > limits.dailyUsdg) {
       return { ok: false, rule: "daily-cap", detail: `would exceed daily cap ${limits.dailyUsdg}` };
     }
   }
