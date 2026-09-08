@@ -41,6 +41,29 @@ interface Core {
    * invariant, not a wording preference.
    */
   shadow: boolean;
+  /**
+   * IT HAPPENED, WITH PRETEND MONEY.
+   *
+   * Reported from the beta in one sentence: "In the feed it says I've bought
+   * things but nothing shows in my portfolio." Both halves were true. The fill
+   * was real on a paper book; the portfolio reads the funded one.
+   *
+   * `paperTradingEnabled` defaults TRUE, so most of the fleet is pretend money
+   * — read-theses.ts says exactly that where it deliberately KEEPS paper
+   * agents in the feed, because excluding them emptied it. Its comment says
+   * they post "labelled", and `PublicThesis.paper` has carried the flag all
+   * along. THE RAIL WAS THE ONE SURFACE THAT NEVER READ IT: ThesisCard,
+   * Profile, Agent, the alerts rail and the token seats all draw a paper
+   * marker; the feed printed "@robin bought TSLA" and stopped.
+   *
+   * Same class of defect as `shadow` above, and here for the same reason — the
+   * rail lays the facts out itself, so it must make the distinction rather
+   * than inherit it. It differs in WHERE the falsehood sits: `shadow` makes
+   * the verb wrong, whereas a paper fill's verb is right and what misleads is
+   * the consequence a reader draws from it. So this does not touch `verbOf`;
+   * it is stated beside the sentence instead.
+   */
+  paper: boolean;
 }
 
 /**
@@ -152,6 +175,9 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
     // `outcome` check is the belt to it, for a row written before the flag
     // existed.
     const shadow = t.shadow === true || t.outcome === "shadow";
+    // Straight from the published post — the publisher sets it from the
+    // agent's mode at its last heartbeat. Nothing here re-derives it.
+    const paper = t.paper === true;
     const sizeUsd = sizeOf(t);
     // Carried, never derived here: it is a hash of the ROW as the server read
     // it, including a `source` the published post does not carry.
@@ -169,6 +195,7 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
         reason,
         sizeUsd,
         shadow,
+        paper,
         action,
         symbol,
       });
@@ -190,6 +217,7 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
       reason,
       sizeUsd,
       shadow,
+      paper,
       head,
       symbol,
     });

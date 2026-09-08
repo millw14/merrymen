@@ -31,10 +31,20 @@ const wallet = () => readFileSync(new URL("../terminal/screens/Wallet.tsx", impo
 const route = () => readFileSync(new URL("../app/api/grants/route.ts", import.meta.url), "utf8");
 
 describe("the server's grant may be adopted, never stored", () => {
-  it("IT IS ADOPTED INTO STATE WHEN THE OWNER IS PRIVY", () => {
+  it("IT IS ADOPTED WHENEVER THE SERVER HANDS ONE BACK, whatever the binding says", () => {
+    // THE FIRST FIX WAS HALF A FIX, and the report came back because of it.
+    // Adoption was gated on `binding.version === "privy-did-owner-v1"`, which
+    // asks how the agent is BOUND. Reading your own agent needs no owner at
+    // all — the address, the balances and the caps are the server's answer to
+    // a request it already authenticated. Three cohorts were refused a look at
+    // their own wallet by that gate, and the largest is grants minted BEFORE
+    // `binding` existed, where `.version` is undefined and the check is false.
     const src = wallet();
-    assert.match(src, /const adoptable = s\.grant && s\.grant\.binding\?\.version === "privy-did-owner-v1";/);
-    assert.match(src, /if \(adoptable && s\.grant\) \{[\s\S]{0,400}setGrant\(s\.grant\);/);
+    assert.match(src, /if \(s\.grant\) \{[\s\S]{0,200}setGrant\(s\.grant\);/);
+    assert.ok(
+      !/const adoptable\s*=/.test(src),
+      "the binding-version gate on ADOPTION is the bug; only signing may depend on the owner",
+    );
   });
 
   it("AND NEVER WRITTEN TO merrymen.grant.v1", () => {
@@ -48,19 +58,20 @@ describe("the server's grant may be adopted, never stored", () => {
     );
   });
 
-  it("and a legacy agent still goes to restore, because its key really is local", () => {
-    // Not a fallback to be removed later: a browser-generated owner key exists
-    // only in the browser that minted it, and no server has ever held one.
+  it("and restore is what is left when the server has no grant to hand back", () => {
+    // `exists` true with no grant body. Not a cohort — a server that knows of
+    // an agent it could not return — and there is nothing to adopt.
     const src = wallet();
     assert.match(src, /\} else \{[\s\S]{0,300}setMode\("restore"\);/);
   });
 
-  it("and the backup gate is skipped only for the adopted case", () => {
-    // The gate forces the owner to write down their key before funding. A
-    // Privy agent has no key in any browser, so in an adopted session the gate
-    // would block the screen on a task nobody can perform.
+  it("and the backup gate is skipped in an adopted session, because no key is here to save", () => {
+    // The gate forces the owner to write their key down before funding. In an
+    // adopted session this screen cannot show one — a Privy agent has none in
+    // any browser, a legacy agent's is in the browser that minted it — so the
+    // gate would block the page on a task it cannot offer.
     const src = wallet();
-    const adopt = src.slice(src.indexOf("const adoptable ="), src.indexOf('setMode("restore")'));
+    const adopt = src.slice(src.indexOf("if (s.grant) {"), src.indexOf('setMode("restore")'));
     assert.match(adopt, /setBackedUp\(true\);/);
   });
 });
@@ -82,13 +93,24 @@ describe("what the endpoint may hand over", () => {
     assert.match(src, /Omit<StoredGrant, "serialized" \| "demoSessionPrivateKey" \| "demoOwnerPrivateKey">/);
   });
 
-  it("and the adopted grant is only ever the binding version the re-sign can actually use", () => {
-    // If a legacy grant were ever adopted, `resignBy` would resolve to null and
-    // the control would be dead — a worse dead end than restore. The version
-    // check is what keeps those two cases apart.
+  it("AND ADOPTING ONE THIS BROWSER CANNOT SIGN IS STILL AN IMPROVEMENT, not a dead end", () => {
+    // The concern this replaces was that adopting a legacy grant leaves
+    // `resignBy` null and the signing control dead. It does — and that branch
+    // is not dead, it is the one that EXPLAINS. It names which owner is
+    // missing, and the two remedies have nothing in common: a legacy key
+    // should be in this browser and pasting it back is the fix, a Privy owner
+    // has no key to paste and signing in as that account is.
+    //
+    // Set against replacing the whole screen with a key form, the owner now
+    // sees their address, their balances and the limits they came to read.
+    // Being unable to re-sign from this browser is a fact about the key; being
+    // unable to LOOK was our screen refusing to render what it had.
     const src = wallet();
-    assert.match(src, /binding\?\.version === "privy-did-owner-v1"/);
     assert.match(src, /const resignBy: "owner-key" \| "privy" \| null = grant\?\.demoOwnerPrivateKey/);
+    assert.match(src, /This browser does not hold the owner key for/);
+    assert.match(src, /Re-signing \{short\(grant\.smartAccount\)\} needs the login that owns it/);
+    // And the route out is on the same screen.
+    assert.match(src, /switch to another wallet/);
   });
 });
 

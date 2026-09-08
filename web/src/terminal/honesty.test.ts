@@ -83,6 +83,28 @@ describe("a decision nothing came of is not a trade", () => {
     assert.equal(verbOf(asTrade(shadow)), "would buy");
   });
 
+  it("A PAPER FILL REACHES THE RAIL CARRYING THAT IT WAS PAPER", () => {
+    // "In the feed it says I've bought things but nothing shows in my
+    // portfolio." Both halves were true: the fill landed on a paper book and
+    // the portfolio reads the funded one. `paperTradingEnabled` defaults TRUE,
+    // so this is most of the fleet, and `PublicThesis.paper` had carried the
+    // flag all along — read-theses.ts keeps paper agents in the feed and says
+    // they post "labelled". The rail was the surface that never read it.
+    const [pretend] = beatsOf([t({ at: 1, paper: true })], [agent()]);
+    const [funded] = beatsOf([t({ at: 1, paper: false })], [agent()]);
+    assert.equal(pretend!.paper, true);
+    assert.equal(funded!.paper, false);
+    // AND THE VERB IS UNTOUCHED, which is the difference from `shadow` above.
+    // The agent did buy; what misleads is the consequence a reader draws. A
+    // conjugation change here would claim the trade did not happen.
+    assert.equal(verbOf(asTrade(pretend)), "bought");
+  });
+
+  it("and the rail renders that flag, or carrying it changes nothing", () => {
+    const wire = readFileSync(new URL("./wire.tsx", import.meta.url), "utf8");
+    assert.match(wire, /beat\.paper && <i className="tag unsettled">paper<\/i>/);
+  });
+
   it("the outcome arm alone is enough, for a row written before the flag existed", () => {
     const [beat] = beatsOf([t({ at: 1, shadow: undefined, outcome: "shadow" })], [agent()]);
     assert.equal(verbOf(asTrade(beat)), "would buy");

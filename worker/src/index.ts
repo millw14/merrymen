@@ -99,6 +99,8 @@ import { memoryLines, positionContext, sentimentLine, technicalLine } from "./br
 import { readFeedHistory } from "./read-feed-history";
 import { gradeFloor } from "./strategist/floor-grade";
 import { renderLiquidity } from "./research/coin-liquidity";
+import { renderOnchain } from "./research/coin-onchain";
+import { scanToken } from "./research/onchain-reader";
 import { buildTechnical, renderTechnical } from "./research/technical";
 import { newsDesk } from "./research/news";
 import { readResearch } from "./research-files";
@@ -286,6 +288,8 @@ import {
 import { quoteDecimalsOf, readCurveReserves } from "./venues/pons";
 
 const BREAKER_ABI = parseAbi(["function isTripped(address account) view returns (bool)"]);
+/** The one read the onchain reconstruction checks itself against. */
+const SUPPLY_ABI = parseAbi(["function totalSupply() view returns (uint256)"]);
 const VAULT_ABI = parseAbi([
   "function deposit(uint256 assets, address receiver) returns (uint256)",
   "function withdraw(uint256 assets, address receiver, address owner) returns (uint256)",
@@ -511,6 +515,32 @@ async function main() {
    */
   const deepBasisTried = new Set<string>();
   /**
+   * The `onchain` lens, cached per token, with the same lesson applied.
+   *
+   * One scan is a 1,000,000-block Transfer sweep — measured at 1.9s and ~757
+   * logs against the public RPC, so it is affordable ONCE and ruinous every
+   * tick, exactly like the deep basis scan above. Holder distribution does not
+   * move in four minutes; a fifteen-minute TTL is generous to the question and
+   * ends the repeat.
+   *
+   * A FAILED SCAN IS CACHED TOO, as a null. Retrying a token whose supply will
+   * not read, on every tick, is the same outage with a different excuse — and
+   * Brain answers NO DATA AVAILABLE for a missing lens, which is the honest
+   * input either way.
+   */
+  const onchainLens = new Map<string, { text: string | null; at: number }>();
+  const ONCHAIN_TTL_SEC = 900;
+  /**
+   * How far back a scan reaches: ~28 hours at this chain's 9.911 blocks/sec.
+   *
+   * Sized against what the provider serves rather than against what would be
+   * nice: 1,000,000 blocks answered in 1.9s where 4,000,000 timed out. A young
+   * launchpad token's whole life fits inside it, which is the case the lens
+   * exists for — and when it does not, the reader says so and the renderer
+   * withholds the distribution rather than reporting net flow as holdings.
+   */
+  const ONCHAIN_WINDOW_BLOCKS = 1_000_000n;
+  /**
    * Is somebody else paying the gas?
    *
    * Read from the CONFIG rather than from the executor, because the question is
@@ -652,6 +682,87 @@ async function main() {
       heldRaw,
       probeUsdg,
     });
+  }
+
+  /**
+   * THE `onchain` LENS — the last of the memecoin desk's four to get a supplier.
+   *
+   * coin-liquidity.ts named this gap and refused to fill it with a guess:
+   * "holder distribution and flow need an indexer this repo does not have, and
+   * a lens fed a guess is worse than a lens fed nothing." The indexer is still
+   * not here — Blockscout on this chain answers 403 behind a Cloudflare JS
+   * challenge to a server, browser user-agent included, measured 2026-09-09.
+   * What replaced it is a reconstruction from `eth_getLogs`, which the chain
+   * serves well, and which CHECKS ITSELF against `totalSupply()` so a window
+   * that missed the token's beginning is reported as unusable rather than
+   * rendered as a holder set. onchain-reader.ts carries that argument in full.
+   *
+   * CURVE TOKENS ONLY, on purpose. An equity token on this chain is a wrapper
+   * whose holder distribution says nothing about the underlying company, and
+   * scanning one would spend the RPC budget to tell an analyst that a bridge
+   * contract holds most of the supply. `lastCurveLegs` is also where the venue
+   * addresses come from, and without those a bonding curve reads as a whale
+   * holding 92% — which is the single most misleading number this lens could
+   * produce.
+   *
+   * NOT GATED ON `curveLegsNow`, for the reason the liquidity lens gives: that
+   * function answers whether the strategist may BUY this, and understanding
+   * what a position already held is doing is not spending.
+   */
+  async function onchainLensFor(symbol: string): Promise<string | null> {
+    const leg = lastCurveLegs.get(symbol);
+    if (!leg || !active) return null;
+    const token = watchTokens.find((t) => t.symbol === symbol)?.address;
+    if (!token) return null;
+
+    const now = Math.floor(Date.now() / 1000);
+    const cached = onchainLens.get(symbol);
+    if (cached && now - cached.at <= ONCHAIN_TTL_SEC) return cached.text;
+
+    let text: string | null = null;
+    try {
+      const client = active.client;
+      const scan = await scanToken(
+        {
+          chain: makeReconcileChain(client),
+          async totalSupply(t) {
+            try {
+              return (await client.readContract({
+                address: t,
+                abi: SUPPLY_ABI,
+                functionName: "totalSupply",
+              })) as bigint;
+            } catch {
+              // NULL, NEVER ZERO. A supply that will not read must not let a
+              // partial window pass the completeness proof — see the reader.
+              return null;
+            }
+          },
+        },
+        {
+          token: token as `0x${string}`,
+          head: await client.getBlockNumber(),
+          windowBlocks: ONCHAIN_WINDOW_BLOCKS,
+          // The curve is the venue: it is the market, not a holder, and it is
+          // the counterparty that makes a transfer a trade.
+          venues: [leg.curve],
+          log: (m) => console.log(`[onchain] ${symbol}: ${m}`),
+        },
+      );
+      text = renderOnchain({ symbol, scan, venues: [leg.curve] });
+      console.log(
+        `[onchain] ${symbol} ${scan.transfers} transfers · ${scan.holders.length} holders · ` +
+          `${scan.wholeHistory ? "whole history" : `partial (${scan.why})`}`,
+      );
+    } catch (e) {
+      // A lens that cannot be built is an ABSENT lens. Brain answers NO DATA
+      // AVAILABLE for it, which is the truthful input; a thrown error here
+      // would take the whole decision down over an optional analyst.
+      console.error(`[onchain] could not read ${symbol}:`, e);
+      text = null;
+    }
+    onchainLens.set(symbol, { text, at: now });
+    return text;
   }
 
   /**
@@ -6301,6 +6412,10 @@ async function main() {
             positions.find((pp) => pp.symbol === focus.symbol)?.rawBalance ?? 0n,
             probeUsdg,
           );
+          // Awaited here rather than inside the object so the cost is visible:
+          // this is the one lens that reads the chain, and it does so at most
+          // once per token every fifteen minutes.
+          const curveOnchain = await onchainLensFor(focus.symbol);
           const inputs: ShadowInputs = {
             agentId,
             // A brain-live agent CAN reach a trade, so its thinking must not be
@@ -6476,9 +6591,6 @@ async function main() {
                 // supplier, so every memecoin decision was mostly analysts
                 // reporting that they had been given nothing — at full price,
                 // since a lens costs a model call whether or not it was fed.
-                // `onchain` is still one of them: holder distribution and flow
-                // need an indexer this repo does not have, and a lens fed a
-                // guess is worse than a lens fed nothing.
                 //
                 // Costs no I/O: it is arithmetic over the reserves the pricing
                 // pass already read to value the position. Omitted entirely for
@@ -6486,6 +6598,19 @@ async function main() {
                 // established discipline, and the reason a stock does not get a
                 // liquidity analyst inventing one.
                 ...(curveLiquidity ? { liquidity: curveLiquidity } : {}),
+                // AND THE FOURTH, which had no supplier at all until now and
+                // said so in this comment for months. It is not the indexer
+                // that comment was waiting for — Blockscout is unreachable
+                // from a server on this chain — but a reconstruction from the
+                // transfer log that proves its own completeness before it
+                // speaks. See research/onchain-reader.ts.
+                //
+                // Omitted for anything not on a curve, and omitted when the
+                // scan could not verify itself. Both are the same discipline
+                // as the three above: a lens with no material is ABSENT, and
+                // Brain answers NO DATA AVAILABLE, which is the truthful
+                // input rather than a plausible sentence.
+                ...(curveOnchain ? { onchain: curveOnchain } : {}),
               },
             },
             expectedTradeGasUsdg: expectedTradeGasMicro === null ? null : Number(expectedTradeGasMicro),

@@ -124,6 +124,15 @@ function BeatRow({
               ) : (
                 <>{beat.head} </>
               )}
+              {/* THE FILL WAS REAL; THE MONEY WAS NOT.
+                  "In the feed it says I've bought things but nothing shows in
+                  my portfolio" — both halves true, because the fill landed on
+                  a paper book and the portfolio reads the funded one. Every
+                  other surface in the app marks this; the rail was the one
+                  that printed the sentence and stopped. Beside the sentence
+                  rather than inside the verb: "bought" is not the wrong word,
+                  the conclusion a reader draws from it is. */}
+              {beat.paper && <i className="tag unsettled">paper</i>}{" "}
               <em className="wire-when">{whenOf(beat.at, now)}</em>
             </span>
           </span>

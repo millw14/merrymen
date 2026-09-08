@@ -431,18 +431,48 @@ export default function GrantPage() {
            * the only copy of those keys with an object that has none. This
            * lives in React state for the life of the screen and nowhere else.
            */
-          const adoptable = s.grant && s.grant.binding?.version === "privy-did-owner-v1";
-          if (adoptable && s.grant) {
+          /**
+           * ADOPTED FOR DISPLAY WHATEVER THE BINDING SAYS — and this is the
+           * half the first fix got wrong, which is why the report came back.
+           *
+           * It gated adoption on `binding.version === "privy-did-owner-v1"`,
+           * as though the question were "how is this agent bound". It is not.
+           * READING your own agent needs no owner at all: the address, the
+           * balances, the caps and the expiry are the server's answer to a
+           * request it already authenticated. The owner only decides whether
+           * this browser can SIGN, and `resignBy` below is the one place that
+           * decides it.
+           *
+           * So the gate refused three cohorts that had every right to see
+           * their agent — a legacy grant, a grant whose binding does not
+           * verify, and, the one the reporters are almost certainly in, a
+           * grant minted BEFORE `binding` existed at all, where `.version` is
+           * undefined and the check reads false. Each of them landed on a form
+           * asking for a private key, having asked to look at their wallet.
+           *
+           * What that costs is exactly what was reported: an owner in a second
+           * browser could not read their own limits, let alone change them,
+           * and the way out was pasting the server's grant into localStorage
+           * by hand from a console — which works, and is a trap, because the
+           * server's copy has the session key stripped out and writing it over
+           * the real one destroys what it replaces.
+           *
+           * NEVER WRITTEN TO localStorage — the paragraph above is why. State
+           * for the life of the screen, and nowhere else.
+           */
+          if (s.grant) {
             setGrant(s.grant);
             setChainId(s.grant.chainId);
             setCaps(s.grant.caps);
-            // Nothing to write down in THIS browser — the owner key does not
-            // exist in any browser for a Privy agent, so the backup gate would
-            // block the screen on a task that cannot be performed.
+            // NOTHING TO WRITE DOWN *HERE*, which is not the same as backed
+            // up. A Privy agent has no owner key in any browser; a legacy one
+            // has it in the browser that minted it and not in this one. Either
+            // way this screen cannot show a key, so gating it behind "I have
+            // saved my key" blocks the page on a task it cannot offer.
             setBackedUp(true);
           } else {
-            // A legacy agent's owner key really does live only in the browser
-            // that minted it. Restore is the honest answer there.
+            // `exists` with no grant body: the server knows of an agent it
+            // could not hand back. Restore is the only honest offer.
             setMode("restore");
           }
         }
@@ -807,6 +837,37 @@ export default function GrantPage() {
           `Discard anyway?`,
       );
       if (!okToDrop) return;
+    }
+    /**
+     * AND SAY WHAT "START OVER" ACTUALLY DOES, WHICH IS LESS THAN IT SOUNDS.
+     *
+     * Reported: "Should positions and trades also become empty when starting
+     * over in paper mode?" — followed by "They still appear", with a portfolio
+     * showing two positions and five trades beside a freshly seeded $1,000.
+     *
+     * They do, and the reason is not a stale cache. An account signed in with
+     * X is derived from the wallet behind that login, and that owner does not
+     * change when this button is pressed — so the next agent resolves to THE
+     * SAME smart account, and the same account has the same book. What is
+     * discarded is the signed key, not the history. (An account made from a
+     * browser-generated owner key does get a new address, because a new key is
+     * generated with it, which is why this reads as inconsistent.)
+     *
+     * Clearing the book is worker-side work: the ledger the portfolio reads is
+     * mirrored from the child every tick, so deleting rows anywhere above the
+     * child is undone within a minute. Until that exists, the honest thing is
+     * to say so BEFORE the click rather than let somebody conclude the reset
+     * silently failed.
+     */
+    if (grant && !grant.demoOwnerPrivateKey) {
+      const okToKeepHistory = window.confirm(
+        `Starting over forgets the signed key — it does NOT empty your history.\n\n` +
+          `Your account address comes from the login you signed in with, so the next agent lands ` +
+          `on the same address, and its positions, trades and P&L are still there. Only the key ` +
+          `changes.\n\n` +
+          `Start over anyway?`,
+      );
+      if (!okToKeepHistory) return;
     }
     clearGrant();
     // Also destroy the worker-side handoff — otherwise the "discarded" grant
