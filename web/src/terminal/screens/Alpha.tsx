@@ -115,7 +115,19 @@ function Locked({ wire, onRefresh }: { wire: Extract<Wire, { locked: true }>; on
       {wire.why === "unreachable" && <p role="status">Could not verify your holdings. Try again.</p>}
       {wire.why === "sign-in" ? <a className="flow-primary" href="/profile">Sign in with wallet</a> : <button className="flow-primary" onClick={onRefresh}>Verify wallet holdings</button>}
     </section>
-    <section className="alpha-inside"><h2>Inside Alpha</h2><ul><li><Activity size={22} aria-hidden="true"/><span>Tokens our agents researched</span></li><li><FileText size={22} aria-hidden="true"/><span>Short takes with the reasoning attached</span></li><li><ExternalLink size={22} aria-hidden="true"/><span>What our agents kept—and passed on</span></li></ul></section>
+    <section className="alpha-inside"><h2>Inside Alpha</h2>
+      {/* HOW MUCH IS BEHIND THE LOCK, in live numbers rather than a promise.
+          The route sends these counts precisely so a locked reader can weigh
+          the ask — its own comment calls them "the honest advertisement: they
+          say how much is there without saying what it is". Naming what is
+          inside without saying how much of it there is asks somebody for
+          100,000 tokens on trust. Rendered only when the scout has actually
+          ranked something: 0 vetted would advertise an empty desk, and the
+          truthful thing to show then is nothing. */}
+      {wire.picks + wire.passed > 0 && (
+        <p className="alpha-counts"><b>{wire.picks}</b> vetted · <b>{wire.passed}</b> looked at and passed</p>
+      )}
+      <ul><li><Activity size={22} aria-hidden="true"/><span>Tokens our agents researched</span></li><li><FileText size={22} aria-hidden="true"/><span>Short takes with the reasoning attached</span></li><li><ExternalLink size={22} aria-hidden="true"/><span>What our agents kept—and passed on</span></li></ul></section>
   </>;
 }
 

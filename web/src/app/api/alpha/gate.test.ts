@@ -243,3 +243,30 @@ describe("the bar it asks for", () => {
     );
   });
 });
+
+/**
+ * THE ADVERTISEMENT, WHICH IS THE ONLY THING A LOCKED READER GETS.
+ *
+ * The route sends `picks` and `passed` so somebody deciding whether to buy
+ * 100,000 tokens can see how much is behind the lock. A UI pass replaced them
+ * with a static list of what Alpha contains — which describes the shelf without
+ * saying whether anything is on it, and asks for the tokens on trust.
+ */
+describe("the locked screen says how much is behind the lock", () => {
+  const SCREEN = readFileSync(new URL("../../../terminal/screens/Alpha.tsx", import.meta.url), "utf8");
+
+  it("RENDERS THE COUNTS THE ROUTE SENDS", () => {
+    assert.match(SCREEN, /\{wire\.picks\}<\/b> vetted · <b>\{wire\.passed\}<\/b> looked at and passed/);
+  });
+
+  it("and the price of entry, from the tier rather than typed", () => {
+    assert.match(SCREEN, /wire\.need\.tokens\.toLocaleString\(\)/);
+  });
+
+  it("AND SHOWS NOTHING RATHER THAN ADVERTISING AN EMPTY DESK", () => {
+    // 0 vetted is a true fact that reads as a broken product, and the scout is
+    // off by default on a fresh deploy — so the honest render of an unranked
+    // desk is silence, not a zero.
+    assert.match(SCREEN, /wire\.picks \+ wire\.passed > 0 &&/);
+  });
+});
