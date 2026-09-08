@@ -168,6 +168,59 @@ export async function acquiredLegOf(
   return pickAcquiredLeg(netTokenDeltas(logs, account), usdgToken);
 }
 
+/** ERC-20 `Transfer(address,address,uint256)`. */
+const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" as Hex;
+
+/**
+ * THE TRANSACTION THAT PUT THIS TOKEN IN THE ACCOUNT — if there is exactly one.
+ *
+ * The last resort for an entry price. A child's ledger is rebuilt on every
+ * redeploy, so after a restart it has no trade row to read a receipt from, and
+ * the orphan sweep only reaches back as far as the 24-hour cap window it was
+ * sized for. A position older than that, on a rebuilt child, has no path back to
+ * its own cost — and both mechanical exits refuse a holding they cannot price
+ * against an entry, so it becomes unsellable by rule for as long as it is held.
+ *
+ * This asks the narrow question directly, of the token's own log: when did this
+ * token arrive here. One filtered `getLogs` per uncovered symbol, not a sweep of
+ * every operation the account ever sent.
+ *
+ * EXACTLY ONE INBOUND TRANSFER, or null. Two is an averaged position, and the
+ * cost of a position built in two buys cannot be recovered from one of them —
+ * booking the newer would put the stop at a level nobody chose, which is the
+ * failure this whole area keeps circling. Zero means it did not arrive by
+ * transfer inside the window, which is not the same as free.
+ */
+export async function findSoleAcquisition(opts: {
+  chain: ReconcileChain;
+  token: `0x${string}`;
+  account: string;
+  lookbackBlocks: bigint;
+  maxSpan?: bigint;
+  log?: (m: string) => void;
+}): Promise<{ txHash: string } | null> {
+  const head = await opts.chain.getBlockNumber();
+  const from = head > opts.lookbackBlocks ? head - opts.lookbackBlocks : 0n;
+  const logs = await getLogsAdaptive(
+    opts.chain,
+    // topic2 is the indexed `to`: only transfers INTO this account come back,
+    // however wide the window, so the span cap is about provider limits rather
+    // than result volume — the same property findOrphanOps relies on.
+    { address: opts.token, topics: [TRANSFER_TOPIC, null, addressTopic(opts.account)] },
+    from,
+    head,
+    opts.maxSpan ?? 10_000n,
+    opts.log,
+  );
+  // An incomplete scan that found one transfer has NOT established that there
+  // was only one. Refusing here is the difference between "I read the whole
+  // window and it was a single buy" and "I read some of it and stopped looking".
+  if (!logs.complete) return null;
+  const txs = new Set(logs.logs.map((l) => String(l.transactionHash).toLowerCase()));
+  if (txs.size !== 1) return null;
+  return { txHash: [...txs][0]! };
+}
+
 /** Left-pad a 20-byte address into a 32-byte topic for an indexed-address filter. */
 export function addressTopic(addr: string): Hex {
   return `0x${"0".repeat(24)}${addr.toLowerCase().replace(/^0x/, "")}` as Hex;

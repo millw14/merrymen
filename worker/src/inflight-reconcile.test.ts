@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { encodeAbiParameters, encodeEventTopics, parseAbi, toHex, type Hex } from "viem";
-import { acquiredLegOf, addressTopic, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { acquiredLegOf, addressTopic, findOrphanOps, findSoleAcquisition, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import type { ReceiptLog } from "./fills";
 
 const EP_ABI = parseAbi([
@@ -391,5 +391,89 @@ describe("the same judgement, read from the other end", () => {
     assert.match(src, /if \(!uncovered\.length\) break;/);
     assert.match(src, /if \(!sym \|\| !uncovered\.includes\(sym\)\) continue;/);
     assert.match(src, /recovered \$\{sym\}'s entry price from its receipt/);
+  });
+});
+
+describe("the last resort for an entry price", () => {
+  const TOKEN = STOCK;
+  const xfer = (tx: Hex, from: string, to: string, value: bigint): RawLog => ({
+    address: TOKEN,
+    topics: [TRANSFER_TOPIC, addressTopic(from), addressTopic(to)] as [Hex, ...Hex[]],
+    data: toHex(value, { size: 32 }),
+    transactionHash: tx,
+    blockNumber: "0x1" as Hex,
+  }) as unknown as RawLog;
+
+  const chainOf = (logs: RawLog[], complete = true): ReconcileChain => ({
+    getBlockNumber: async () => (complete ? 100n : 10_000_000n),
+    getLogs: async () => logs,
+    getReceiptLogs: async () => null,
+  });
+
+  it("FINDS THE ONE TRANSACTION THAT PUT THE TOKEN HERE", async () => {
+    // The path that exists because a rebuilt child has no trade row to read a
+    // receipt from, and the cap sweep only reaches back 26 hours.
+    const tx = h(0xd1);
+    const got = await findSoleAcquisition({
+      chain: chainOf([xfer(tx, ROUTER, ACCOUNT, 42n)]),
+      token: TOKEN,
+      account: ACCOUNT,
+      lookbackBlocks: 50n,
+    });
+    assert.deepEqual(got, { txHash: tx.toLowerCase() });
+  });
+
+  it("AND REFUSES AN AVERAGED POSITION, because one buy is not its cost", async () => {
+    // Two acquisitions is a weighted average this cannot reconstruct from
+    // either one, and booking the newer would put the stop-loss at a level
+    // nobody chose — the exact failure the rest of this file refuses.
+    const got = await findSoleAcquisition({
+      chain: chainOf([xfer(h(0xd1), ROUTER, ACCOUNT, 42n), xfer(h(0xd2), ROUTER, ACCOUNT, 7n)]),
+      token: TOKEN,
+      account: ACCOUNT,
+      lookbackBlocks: 50n,
+    });
+    assert.equal(got, null);
+  });
+
+  it("and two transfers in ONE transaction are still one acquisition", async () => {
+    // A router can split delivery across two Transfer logs in the same trade.
+    // The transaction is the unit, not the log.
+    const tx = h(0xd3);
+    const got = await findSoleAcquisition({
+      chain: chainOf([xfer(tx, ROUTER, ACCOUNT, 40n), xfer(tx, ROUTER, ACCOUNT, 2n)]),
+      token: TOKEN,
+      account: ACCOUNT,
+      lookbackBlocks: 50n,
+    });
+    assert.deepEqual(got, { txHash: tx.toLowerCase() });
+  });
+
+  it("A PARTIAL SCAN THAT FOUND ONE HAS NOT ESTABLISHED THERE WAS ONE", async () => {
+    // "I read the whole window and it was a single buy" and "I read some of it
+    // and stopped looking" are different facts, and only the first may become a
+    // cost basis. Here the first span answers and the second refuses in a way
+    // no retry fixes, so coverage is short and the answer must be null even
+    // though exactly one transfer was seen.
+    let call = 0;
+    const chain: ReconcileChain = {
+      getBlockNumber: async () => 100n,
+      getLogs: async () => {
+        call += 1;
+        if (call === 1) return [xfer(h(0xd4), ROUTER, ACCOUNT, 42n)];
+        throw new Error("method not supported");
+      },
+      getReceiptLogs: async () => null,
+    };
+    const got = await findSoleAcquisition({ chain, token: TOKEN, account: ACCOUNT, lookbackBlocks: 90n, maxSpan: 10n });
+    assert.equal(got, null);
+    assert.ok(call > 1, "the scan really did run out of window rather than finishing");
+  });
+
+  it("and nothing found is nothing booked", async () => {
+    assert.equal(
+      await findSoleAcquisition({ chain: chainOf([]), token: TOKEN, account: ACCOUNT, lookbackBlocks: 50n }),
+      null,
+    );
   });
 });

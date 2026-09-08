@@ -86,7 +86,7 @@ import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } f
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey } from "./revert";
 import { SponsorRefused } from "./paymaster";
-import { acquiredLegOf, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { acquiredLegOf, findOrphanOps, findSoleAcquisition, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
 import { takeTick } from "./strategies/types";
@@ -5679,14 +5679,33 @@ async function main() {
       // Runs only while something is actually uncovered, so a healthy book pays
       // nothing at all, and it stops as soon as it has nothing left to fix.
       if (uncovered.length && active?.executor) {
-        for (const t of await landedFillsWithoutBasis(agentId)) {
+        const rc = makeReconcileChain(client);
+        // The ledger's own rows first, then the token's log. The rows are free —
+        // they are already here — and they carry the transaction directly. The
+        // log scan below is the fallback for the case the rows cannot cover: a
+        // child whose sqlite was rebuilt has no rows at all.
+        const candidates: { txHash: string }[] = [...(await landedFillsWithoutBasis(agentId))];
+        for (const sym of uncovered) {
+          const tok = watchTokens.find((t) => t.symbol === sym)?.address;
+          if (!tok) continue;
+          const found = await findSoleAcquisition({
+            chain: rc,
+            token: tok as `0x${string}`,
+            account: grant.smartAccount,
+            // A WIDER WINDOW THAN THE CAP SWEEP, on purpose. That one is sized
+            // to 26 hours because it exists to stop a mid-op restart loosening
+            // the day's spend, and an older op is outside the cap anyway. This
+            // has a different horizon: a position is held for as long as it is
+            // held, and its entry price does not age out. Bounded, and only ever
+            // reached while something is genuinely uncovered.
+            lookbackBlocks: 2_000_000n,
+            log: (m) => console.log(`[basis] ${m}`),
+          }).catch(() => null);
+          if (found) candidates.push(found);
+        }
+        for (const t of candidates) {
           if (!uncovered.length) break;
-          const legs = await acquiredLegOf(
-            makeReconcileChain(client),
-            t.txHash as `0x${string}`,
-            grant.smartAccount,
-            CASH.USDG,
-          );
+          const legs = await acquiredLegOf(rc, t.txHash as `0x${string}`, grant.smartAccount, CASH.USDG);
           if (!legs) continue;
           const sym = symbolOfToken(legs.token);
           if (!sym || !uncovered.includes(sym)) continue;
