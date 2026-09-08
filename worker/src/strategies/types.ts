@@ -36,6 +36,25 @@ export interface Holding {
    * miniature, so it must travel as absent all the way to the prompt.
    */
   costUsdg?: bigint | null;
+  /**
+   * THIS POSITION'S OWN FLOOR, in bps below cost, graded once when it was
+   * opened. Undefined or null means none was stamped, and the owner's single
+   * `stopLossBps` applies unchanged — which is what every position had before
+   * grading existed and what every position still gets when the grade could
+   * not be made.
+   *
+   * It travels on the HOLDING rather than in config because that is the only
+   * thing here that is per position. The alternative — a second map threaded
+   * beside `holdings` — would let the two drift, and a floor attached to the
+   * wrong symbol is worse than no floor.
+   *
+   * NEVER read on its own: `stopLossBps` decides WHETHER a floor is armed at
+   * all, and this decides only WHERE. An owner who has armed nothing must not
+   * acquire a stop because a grade was computed.
+   */
+  stopFloorBps?: number | null;
+  /** The sentence the grade was given for, so a fill can say why it fired there. */
+  stopFloorWhy?: string | null;
 }
 
 export interface Snapshot {

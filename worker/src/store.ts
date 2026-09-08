@@ -243,6 +243,37 @@ const SQLITE_SCHEMA = `
     -- null through its catch, and setTrenchEntry console-errored on every fill:
     -- the trench strategy had no entry baseline at all. entry_sec is DEFAULTed
     -- because the INSERT only supplies the liquidity.
+    -- HOW FAR THIS PARTICULAR POSITION MAY FALL, graded once at entry.
+    --
+    -- One floor swept across a whole book is the wrong shape for this one: a
+    -- 12% floor under a launchpad memecoin fires on the venue rather than on
+    -- the trade (p99 curve movement is 1,546bps over four minutes), and a 35%
+    -- floor under a well-evidenced equity is just 35% of the owner's money.
+    --
+    -- STAMPED ONCE AND NEVER MOVED. The INSERT is ON CONFLICT DO NOTHING, the
+    -- same device trench_positions uses and for the same reason written down
+    -- there: a top-up must not quietly reset the reference to a worse price,
+    -- "which would turn averaging down into a way of never stopping out". The
+    -- database enforces it rather than a caller remembering to.
+    --
+    -- The why column is the sentence the owner reads. Stored beside the number
+    -- because a level with no reason is a number nobody can argue with, and
+    -- this one was graded from evidence that will not exist by the time they
+    -- come to ask about it.
+    --
+    -- Dropped with the cost basis: see setBasis. A floor is a distance from an
+    -- entry price, so a position with no entry price has nothing to be a
+    -- distance from.
+    CREATE TABLE IF NOT EXISTS position_floors (
+      agent_id TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      stop_bps INTEGER NOT NULL,
+      rung TEXT NOT NULL,
+      why TEXT NOT NULL,
+      at INTEGER NOT NULL DEFAULT (unixepoch()),
+      PRIMARY KEY (agent_id, mode, symbol)
+    );
     CREATE TABLE IF NOT EXISTS trench_positions (
       agent_id TEXT NOT NULL,
       mode TEXT NOT NULL,
@@ -2601,6 +2632,21 @@ export async function setBasis(
       await db
         .prepare("DELETE FROM cost_basis WHERE agent_id = ? AND mode = ? AND symbol = ?")
         .run(agentId, mode, symbol);
+      // AND THE FLOOR WITH IT, in the same breath and for the same reason.
+      //
+      // A floor is a distance from an entry price. A position with no entry
+      // price has nothing to be a distance from — and a floor left behind is
+      // worse than absent, because the NEXT entry in that symbol would inherit
+      // a level graded from a market and an analysis that are both gone. The
+      // two rows share one lifecycle, so they share one line of code rather
+      // than two callers who each have to remember.
+      try {
+        await db
+          .prepare("DELETE FROM position_floors WHERE agent_id = ? AND mode = ? AND symbol = ?")
+          .run(agentId, mode, symbol);
+      } catch {
+        /* the table arrives with a migration */
+      }
       return;
     }
     await db
@@ -2992,6 +3038,62 @@ export async function recentCandidates(
  * instead — that ledger already tracks exactly what was paid per raw unit, and
  * a second copy could disagree with it after a partial fill.
  */
+/**
+ * Stamp this position's graded floor. FIRST WRITE WINS, for ever.
+ *
+ * `ON CONFLICT DO NOTHING`, exactly as `setTrenchEntry` below, and for the
+ * reason written on that one: a top-up must not move the reference, "which
+ * would turn averaging down into a way of never stopping out". Here it also
+ * stops a re-grade at a moment of panic — the grade belongs to the entry, and
+ * the entry happened once.
+ */
+export async function setPositionFloor(
+  agentId: string,
+  mode: BasisMode,
+  symbol: string,
+  f: { stopBps: number; rung: string; why: string },
+): Promise<void> {
+  try {
+    await getDb()
+      .prepare(
+        `INSERT INTO position_floors (agent_id, mode, symbol, stop_bps, rung, why)
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(agent_id, mode, symbol) DO NOTHING`,
+      )
+      .run(agentId, mode, symbol, Math.round(f.stopBps), f.rung, f.why.slice(0, 400));
+  } catch (e) {
+    // A floor that failed to stamp leaves the owner's own number in force,
+    // which is the safe direction: the position is still protected, just not
+    // graded. Never take a fill down for it.
+    console.error("[store] position floor insert failed:", e);
+  }
+}
+
+/**
+ * Every graded floor this book carries, by symbol.
+ *
+ * Returns an EMPTY MAP on failure, never null, because the caller's fallback is
+ * the owner's own floor — a level that is always correct to apply and never
+ * more dangerous than the graded one. A read failure must degrade to the
+ * owner's setting, not to no floor at all.
+ */
+export async function positionFloors(
+  agentId: string,
+  mode: BasisMode,
+): Promise<Map<string, { stopBps: number; rung: string; why: string }>> {
+  const out = new Map<string, { stopBps: number; rung: string; why: string }>();
+  try {
+    const rows = (await getDb()
+      .prepare("SELECT symbol, stop_bps, rung, why FROM position_floors WHERE agent_id = ? AND mode = ?")
+      .all(agentId, mode)) as { symbol: string; stop_bps: number; rung: string; why: string }[];
+    for (const r of rows) {
+      out.set(r.symbol, { stopBps: Number(r.stop_bps), rung: String(r.rung), why: String(r.why) });
+    }
+  } catch {
+    /* the table arrives with a migration; the owner's own floor still applies */
+  }
+  return out;
+}
+
 export async function setTrenchEntry(agentId: string, mode: BasisMode, symbol: string, liquidityUsd: number): Promise<void> {
   try {
     await getDb()

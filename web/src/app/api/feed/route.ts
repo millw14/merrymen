@@ -77,6 +77,18 @@ export interface PositionRow {
    * which is what one did, while the panel beside it listed the position.
    */
   cost_usdg?: number | null;
+  /**
+   * THIS POSITION'S OWN STOP, in bps below cost, graded when it was opened.
+   *
+   * NULL for a holding that carries no grade — one opened before grading
+   * existed, or one whose grade could not be made — and those fall back to the
+   * owner's single setting, which is what the whole book used to do. It travels
+   * because the agent is asked "what would make you sell" about a SPECIFIC
+   * holding, and until now it could only answer about the book.
+   */
+  stop_floor_bps?: number | null;
+  /** The sentence that level was graded for, written at entry. */
+  stop_floor_why?: string | null;
 }
 export interface TradeRecord {
   kind: string;
@@ -403,13 +415,20 @@ export async function GET(req: Request) {
           `SELECT p.symbol AS symbol, p.raw_balance AS raw_balance, p.ui_multiplier AS ui_multiplier,
                   p.price_usd AS price_usd, p.price_stale AS price_stale,
                   p.price_source AS price_source, p.value_usdg AS value_usdg,
-                  b.cost_usdg AS cost_usdg
+                  b.cost_usdg AS cost_usdg,
+                  f.stop_bps AS stop_floor_bps, f.why AS stop_floor_why
              FROM positions p
              LEFT JOIN cost_basis b
                ON b.agent_id = p.agent_id AND b.symbol = p.symbol AND b.mode = ?
+             LEFT JOIN position_floors f
+               ON f.agent_id = p.agent_id AND f.symbol = p.symbol AND f.mode = ?
             WHERE p.agent_id = ? ORDER BY p.value_usdg DESC`,
         )
-        .all(bookMode === "paper" ? "paper" : "live", scope)) as unknown as PositionRow[];
+        .all(
+          bookMode === "paper" ? "paper" : "live",
+          bookMode === "paper" ? "paper" : "live",
+          scope,
+        )) as unknown as PositionRow[];
       // MICRO-USDG → USDG at the boundary, so no browser has to know the column
       // keeps a different unit from every other money field on this response.
       positions = positions.map((p) => ({ ...p, cost_usdg: basisUsdg((p as { cost_usdg?: unknown }).cost_usdg) }));

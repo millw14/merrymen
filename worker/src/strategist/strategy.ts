@@ -67,6 +67,17 @@ export interface LlmStrategistConfig {
    * the strategist entirely.
    */
   stopLossBps?: number;
+  /**
+   * Sell a holding outright once it is this far ABOVE what it cost, in bps.
+   * 0 = off, and 0 is the default.
+   *
+   * THE SETTING EXISTED AND THIS STRATEGY NEVER RECEIVED IT. `takeProfitBps`
+   * has been in settings, on the UI, and in agents' own descriptions of
+   * themselves to their owners — and registry.ts forwarded it only to
+   * steady-basket. An owner on the strategist had a floor, no ceiling, and an
+   * agent that said otherwise.
+   */
+  takeProfitBps?: number;
   /** Minimum ms between model calls — decisions are windows, ticks are not. */
   decisionIntervalMs: number;
   /** Injectable clock for tests. */
@@ -236,6 +247,12 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       // so it will not catch a position that ran up and gave it all back to
       // break-even. Saying so here because the difference matters and the name
       // "stop loss" invites the other reading.
+      // A GRADED LEVEL, ONE FLAT PERMISSION. `cfg.stopLossBps` decides WHETHER
+      // a floor is armed at all and remains the level for anything ungraded;
+      // `h.stopFloorBps` decides only WHERE, for the positions that carry a
+      // grade stamped at their own entry. An owner who has armed nothing must
+      // not acquire a stop because a grade happened to be computable, which is
+      // why the guard below reads the owner's number and not the holding's.
       for (const [symbol, h] of snap.holdings) {
         if (!cfg.stopLossBps || cfg.stopLossBps <= 0) break;
         if (floorFired.has(symbol)) continue;
@@ -247,8 +264,11 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
         const cost = h.costUsdg ?? null;
         if (cost === null || cost <= 0n) continue;
         if (snap.pausedTokens.has(h.token.toLowerCase())) continue;
+        // A stamped floor of zero or less is not a floor; fall back rather than
+        // let a bad row disarm a position the owner armed.
+        const level = h.stopFloorBps && h.stopFloorBps > 0 ? h.stopFloorBps : cfg.stopLossBps;
         const lossBps = Number(((cost - h.valueUsdg) * 10_000n) / cost);
-        if (lossBps < cfg.stopLossBps) continue;
+        if (lossBps < level) continue;
         floorFired.add(symbol);
         return {
           intents: [
@@ -261,7 +281,60 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
               notionalUsdg: h.valueUsdg,
             },
           ],
-          why: [{ code: "stop-floor", symbol, lossBps, usdgRaw: h.valueUsdg, costRaw: cost }],
+          why: [
+            {
+              code: "stop-floor",
+              symbol,
+              lossBps,
+              usdgRaw: h.valueUsdg,
+              costRaw: cost,
+              // Carried only when this position's level was NOT the owner's own
+              // number, so the ordinary sentence stays exactly as it was and a
+              // graded one explains itself.
+              ...(level === cfg.stopLossBps ? {} : { floorBps: level, floorWhy: h.stopFloorWhy ?? null }),
+            },
+          ],
+        };
+      }
+
+      // ── AND THE CEILING, WHICH THIS STRATEGY NEVER HAD ────────────────
+      //
+      // `takeProfitBps` has existed as a setting, been shown in the UI, and
+      // been described by agents to their owners in chat — and `registry.ts`
+      // never forwarded it to this strategy. Only steady-basket read it. So an
+      // owner running the strategist had a floor, no ceiling, and an agent that
+      // told them otherwise: "my take-profit is set at 2000 basis points, so
+      // I'll sell if a holding rises 20% above its cost", about a rule that did
+      // not exist here.
+      //
+      // Same shape as the floor above and for the same reasons: above the
+      // decision window so it does not inherit a thirty-minute blind spot,
+      // built directly so the strategist ceiling cannot clamp an exit, measured
+      // against cost rather than a peak. NOT graded — a grade is about how much
+      // room a position needs to be wrong in, and a profit is not being wrong.
+      for (const [symbol, h] of snap.holdings) {
+        if (!cfg.takeProfitBps || cfg.takeProfitBps <= 0) break;
+        if (floorFired.has(symbol)) continue;
+        if (h.priceStale) continue;
+        const cost = h.costUsdg ?? null;
+        if (cost === null || cost <= 0n) continue;
+        if (snap.pausedTokens.has(h.token.toLowerCase())) continue;
+        if (h.valueUsdg <= cost) continue;
+        const gainBps = Number(((h.valueUsdg - cost) * 10_000n) / cost);
+        if (gainBps < cfg.takeProfitBps) continue;
+        floorFired.add(symbol);
+        return {
+          intents: [
+            {
+              kind: "swap",
+              target: cfg.universe.swapRouter,
+              sellToken: h.token,
+              buyToken: cfg.universe.usdg,
+              sellAmountRaw: h.rawBalance,
+              notionalUsdg: h.valueUsdg,
+            },
+          ],
+          why: [{ code: "take-profit", symbol, gainBps, usdgRaw: h.valueUsdg, costRaw: cost }],
         };
       }
       // A holding that has left the book has filled (or been sold another way),

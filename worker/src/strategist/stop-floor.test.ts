@@ -213,3 +213,168 @@ describe("it does not sell the same thing twice", () => {
     assert.equal((await tickOf(s, snap({ holdings: held() }))).intents.length, 1, "re-armed");
   });
 });
+
+/**
+ * THE LEVEL IS NOW THE POSITION'S, THE PERMISSION IS STILL THE OWNER'S.
+ *
+ * A single floor swept across a book fires on the venue under a launchpad coin
+ * and takes a third of the owner's money under an equity. So each position
+ * carries a level graded at its own entry — and nothing else about the rule
+ * changes: the owner's `stopLossBps` still decides whether a floor exists at
+ * all, still applies unchanged to everything ungraded, and a grade can never
+ * arm a stop on a book that armed none.
+ */
+const heldWith = (over: { value?: bigint; cost?: bigint; floor?: number | null; why?: string | null } = {}) =>
+  new Map([
+    [
+      "TSLA",
+      {
+        token: TSLA,
+        rawBalance: 5_000_000_000_000_000_000n,
+        valueUsdg: over.value ?? 7_000_000n, // 10 paid, worth 7 — a 30% loss
+        priceStale: false,
+        costUsdg: over.cost === undefined ? 10_000_000n : over.cost,
+        stopFloorBps: over.floor === undefined ? null : over.floor,
+        stopFloorWhy: over.why ?? null,
+      },
+    ],
+  ]);
+
+describe("a floor graded to this position", () => {
+  it("A TIGHTER GRADE FIRES WHERE THE OWNER'S NUMBER WOULD NOT", async () => {
+    const { driver } = spyDriver();
+    // 10 paid, worth 8.5 — a 15% loss. Under the owner's 25% it holds; under a
+    // 12% grade it goes.
+    const book = heldWith({ value: 8_500_000n, floor: 1_200 });
+    const t = await tickOf(build(2_500, driver), snap({ holdings: book }));
+    assert.equal(t.intents.length, 1, "the graded floor must fire at its own level");
+  });
+
+  it("AND A WIDER GRADE HOLDS WHERE THE OWNER'S NUMBER WOULD FIRE", async () => {
+    // The half that is easy to get wrong: a graded level must be able to be
+    // LOOSER than the setting, or the grade is decoration on a book of
+    // memecoins where 25% is inside four minutes of ordinary movement.
+    const { driver } = spyDriver();
+    const t = await tickOf(build(2_500, driver), snap({ holdings: heldWith({ floor: 3_500 }) }));
+    assert.equal(t.intents.length, 0, "a 30% loss is inside a 35% graded floor");
+  });
+
+  it("AN UNGRADED POSITION IS EXACTLY AS IT WAS", async () => {
+    const { driver } = spyDriver();
+    const t = await tickOf(build(2_000, driver), snap({ holdings: heldWith({ floor: null }) }));
+    assert.equal(t.intents.length, 1, "the owner's own number still applies unchanged");
+  });
+
+  it("AND A GRADE CANNOT ARM A FLOOR THE OWNER DID NOT", async () => {
+    // The load-bearing one. `stopLossBps: 0` is off, and a stamped level must
+    // never be read as permission to sell somebody's position.
+    const { driver } = spyDriver();
+    const t = await tickOf(build(0, driver), snap({ holdings: heldWith({ floor: 500 }) }));
+    assert.equal(t.intents.length, 0, "off means off, whatever is stamped");
+  });
+
+  it("and a zero or negative stamp falls back rather than disarming", async () => {
+    // A bad row must not be able to switch a position's protection off.
+    const { driver } = spyDriver();
+    for (const bad of [0, -100]) {
+      const t = await tickOf(build(2_000, driver), snap({ holdings: heldWith({ floor: bad }) }));
+      assert.equal(t.intents.length, 1, `a stamp of ${bad} must fall back to the owner's floor`);
+    }
+  });
+
+  it("and it says the level was graded, in the sentence that costs money", async () => {
+    const { driver } = spyDriver();
+    const t = await tickOf(
+      build(2_500, driver),
+      snap({ holdings: heldWith({ value: 8_500_000n, floor: 1_200, why: "12% — 3 analysts had real material on this" }) }),
+    );
+    const said = renderWhy((t.why as never[])[0]!);
+    assert.match(said, /A floor, not a view/, "the sentence an owner already knows is unchanged");
+    assert.match(said, /Its floor was graded when I bought it — 12% — 3 analysts/);
+  });
+
+  it("and an ungraded exit says exactly what it always said", async () => {
+    // No graded clause, no change in length, nothing new to read.
+    const { driver } = spyDriver();
+    const t = await tickOf(build(2_000, driver), snap({ holdings: heldWith({ floor: null }) }));
+    const said = renderWhy((t.why as never[])[0]!);
+    assert.ok(!said.includes("graded"), "an ungraded floor must not mention grading");
+    assert.ok(said.length < 220, "must not truncate on any surface");
+  });
+});
+
+describe("the ceiling this strategy never had", () => {
+  const up = (gain: bigint) =>
+    new Map([
+      [
+        "TSLA",
+        {
+          token: TSLA,
+          rawBalance: 5_000_000_000_000_000_000n,
+          valueUsdg: gain,
+          priceStale: false,
+          costUsdg: 10_000_000n,
+        },
+      ],
+    ]);
+
+  const withTp = (stopBps: number, takeProfitBps: number, driver: { name: string; propose: () => Promise<unknown> }) =>
+    makeLlmStrategist({
+      driver: driver as never,
+      universe: {
+        legs: new Map([["TSLA", TSLA], ["NVDA", NVDA]]),
+        swapRouter: ROUTER,
+        usdg: USDG,
+        maxPerActionUsdg: 10_000_000n,
+        maxActionsPerTick: 4,
+      },
+      stopLossBps: stopBps,
+      takeProfitBps,
+      decisionIntervalMs: 30 * 60_000,
+      now: () => 1_000_000,
+    });
+
+  it("TAKES A PROFIT AT THE LEVEL THE OWNER SET", async () => {
+    // `takeProfitBps` was saved in settings, shown in the UI, and described by
+    // agents to their owners — and registry.ts forwarded it only to
+    // steady-basket, so on this strategy it was read by nothing at all.
+    const { driver } = spyDriver();
+    const t = await tickOf(withTp(2_500, 2_000, driver), snap({ holdings: up(12_500_000n) }));
+    assert.equal(t.intents.length, 1, "up 25% against a 20% ceiling must sell");
+    const sell = t.intents[0]!;
+    assert.equal(sell.kind === "swap" && sell.buyToken, USDG, "into cash");
+    assert.equal(sell.kind === "swap" && sell.sellAmountRaw, 5_000_000_000_000_000_000n, "all of it");
+    assert.match(renderWhy((t.why as never[])[0]!), /is up 25% on what it cost/);
+  });
+
+  it("and it is off at zero, which is the shipped default", async () => {
+    const { driver } = spyDriver();
+    assert.equal((await tickOf(withTp(2_500, 0, driver), snap({ holdings: up(50_000_000n) }))).intents.length, 0);
+  });
+
+  it("and a position that has not run far enough is left alone", async () => {
+    const { driver } = spyDriver();
+    assert.equal((await tickOf(withTp(2_500, 2_000, driver), snap({ holdings: up(11_000_000n) }))).intents.length, 0);
+  });
+
+  it("AND IT IS NOT CLAMPED TO THE STRATEGIST CEILING EITHER", async () => {
+    // Same trap as the floor: routed through proposalsToIntents a 40 USDG
+    // winner could never be fully sold by the rule whose job is selling it.
+    const { driver } = spyDriver();
+    const big = new Map([
+      ["TSLA", { token: TSLA, rawBalance: 9n, valueUsdg: 40_000_000n, priceStale: false, costUsdg: 10_000_000n }],
+    ]);
+    const t = await tickOf(withTp(2_500, 2_000, driver), snap({ holdings: big }));
+    assert.equal(t.intents[0]!.kind === "swap" && t.intents[0]!.notionalUsdg, 40_000_000n, "40 USDG, not clamped to 10");
+  });
+
+  it("and it runs without asking the model, like the floor", async () => {
+    const spy = spyDriver();
+    const s = withTp(2_500, 2_000, spy.driver);
+    await tickOf(s, snap());
+    assert.equal(spy.calls.length, 1);
+    const t = await tickOf(s, snap({ holdings: up(12_500_000n) }));
+    assert.equal(spy.calls.length, 1, "no second model call");
+    assert.equal(t.intents.length, 1, "and it still took the profit");
+  });
+});

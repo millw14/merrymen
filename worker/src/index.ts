@@ -97,6 +97,7 @@ import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs } from "./brain-shadow";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { readFeedHistory } from "./read-feed-history";
+import { gradeFloor } from "./strategist/floor-grade";
 import { renderLiquidity } from "./research/coin-liquidity";
 import { buildTechnical, renderTechnical } from "./research/technical";
 import { newsDesk } from "./research/news";
@@ -209,6 +210,7 @@ import { buildCurveTradeCalls } from "./venues/pons-trade";
 const CURVE_DEADLINE_SEC = 60;
 import {
   CURVE_GUARD_DEFAULTS,
+  curveFloorDrawdownBps,
   curveGraduated,
   curveBuyImpactBps,
   curveBuyOut,
@@ -228,6 +230,8 @@ import {
   basisSymbols,
   getBasis,
   setBasis,
+  setPositionFloor,
+  positionFloors,
   newDecisionId,
   ensureAgent,
   type BasisMode,
@@ -468,6 +472,36 @@ async function main() {
   /** Which held symbols last lacked a cost basis, so the warning fires on change only. */
   let lastUncoveredBasisKey: string | null = null;
   /**
+   * WHAT BRAIN LAST FOUND OUT ABOUT EACH SYMBOL, so a fill can be graded.
+   *
+   * The decision itself is block-local to the brain step and gone long before a
+   * fill lands: nothing at module or main scope held it, and the trade does not
+   * carry the Brain decision_id either — `submitChatTrade` mints a fresh
+   * decision row, so a fill cannot look its own reasoning up afterwards.
+   *
+   * This keeps only the two things a floor may be graded from — which lenses
+   * ANSWERED and how much material each had, plus the deterministic economics
+   * verdict. Deliberately NOT confidence: see floor-grade.ts for why a model's
+   * self-report must never widen a stop.
+   *
+   * IN MEMORY AND UNRELIABLE ON PURPOSE. It is lost on restart and bounded by
+   * age below, and both are safe: a fill with no grade is stamped with no
+   * floor, and a position with no floor uses the owner's own number — which is
+   * what every position had before grading existed.
+   */
+  const brainGrade = new Map<
+    string,
+    { evidence: { lens: string; evidenceStrength: number }[]; economics: "viable" | "marginal" | "uneconomic" | "unknown" | null; at: number }
+  >();
+  /**
+   * How old a reading may be and still grade a fill.
+   *
+   * Brain runs on a trigger with a 900s cooldown, so a decision that led to a
+   * buy is minutes old at most. An hour-old reading describes a different
+   * market, and grading a new entry from it would be worse than not grading it.
+   */
+  const BRAIN_GRADE_TTL_SEC = 900;
+  /**
    * Symbols the deep acquisition scan has already been run for in this process.
    *
    * It walks two million blocks in spans, so it is hundreds of RPC calls. A tick
@@ -618,6 +652,63 @@ async function main() {
       heldRaw,
       probeUsdg,
     });
+  }
+
+  /**
+   * GRADE THIS POSITION'S FLOOR AND STAMP IT, once, at the moment it is opened.
+   *
+   * Assembles the three inputs floor-grade.ts will look at and no others: the
+   * instrument's class (ours, never the model's), the curve's overhang if it is
+   * on one, and which lenses had material the last time Brain looked at this
+   * symbol. Everything else it might want — confidence above all — is
+   * deliberately not passed; that file says why at length.
+   *
+   * SAFE TO FAIL. A grade that cannot be made stamps nothing, and a position
+   * with nothing stamped falls back to the owner's own `strategistStopLossBps`
+   * — which is what every position had before this existed. The only way this
+   * function can hurt is by stamping a WRONG level, so every input it cannot
+   * establish becomes an absence rather than a default.
+   */
+  async function stampFloorFor(agentId: string, mode: BasisMode, symbol: string): Promise<void> {
+    try {
+      if (!cfg.strategistStopLossBps || cfg.strategistStopLossBps <= 0) return;
+      const token =
+        watchTokens.find((t) => t.symbol === symbol)?.address ??
+        STOCK_TOKENS.find((t) => t.symbol === symbol)?.address;
+      if (!token) return;
+      // THE BEST INPUT, and the only one that is not a model's opinion. Null for
+      // an equity because it has no curve, and null for a memecoin whose curve
+      // this tick could not read — floor-grade.ts treats those two differently,
+      // which is the whole reason it takes the class as well.
+      const leg = lastCurveLegs.get(symbol);
+      const overhangBps = leg ? curveFloorDrawdownBps(leg.reserves) : null;
+      const g = brainGrade.get(symbol);
+      const fresh = g && Math.floor(Date.now() / 1000) - g.at <= BRAIN_GRADE_TTL_SEC ? g : null;
+      const graded = gradeFloor({
+        instrumentClass: instrumentClassOf(token),
+        overhangBps,
+        evidence: fresh?.evidence ?? [],
+        economics: fresh?.economics ?? null,
+        ownerBps: cfg.strategistStopLossBps,
+      });
+      if (graded.bps <= 0) return;
+      await setPositionFloor(agentId, mode, symbol, {
+        stopBps: graded.bps,
+        rung: graded.rung,
+        why: graded.why,
+      });
+      // Said once, when it is stamped, because it can never change afterwards
+      // and the owner should learn the level at the entry rather than at the
+      // exit. A default-rung grade is not announced: it is their own number,
+      // and an event for "nothing changed" is the noise this repo keeps
+      // stripping out.
+      if (graded.rung !== "default") {
+        await addEvent(agentId, "ok", `${symbol}: floor for this position set at ${graded.why}`);
+      }
+      console.log(`[floor] ${symbol} ${graded.rung} ${graded.bps}bps (owner ${cfg.strategistStopLossBps})`);
+    } catch (e) {
+      console.error(`[floor] could not grade ${symbol}:`, e);
+    }
   }
 
   function makeStrategy(c: ResolvedConfig): Strategy {
@@ -4814,6 +4905,19 @@ async function main() {
 
       // Only a LANDED swap moves the basis — a revert must never book P&L.
       const booked = liveFill ? await bookFill(agentId, "live", liveFill, basisSource) : null;
+      // AND THE FLOOR FOR THIS POSITION, graded once, here.
+      //
+      // HERE and not inside bookFill, which has five callers — two of them
+      // arm-time recovery paths that run before any pricing pass, where
+      // `lastCurveLegs` is empty and a memecoin would be graded as if its venue
+      // were unreadable. This is the one site where a buy has just landed on a
+      // priced tick, which is the only moment the grade can be made honestly.
+      //
+      // FIRST WRITE WINS at the database (ON CONFLICT DO NOTHING), so a top-up
+      // cannot move the level and no caller has to remember the rule.
+      if (liveFill?.side === "buy" && liveFill.qtyRaw > 0n) {
+        await stampFloorFor(agentId, "live", liveFill.symbol);
+      }
       await recordTrade({
         agent_id: agentId,
         kind: intent.kind,
@@ -6448,6 +6552,28 @@ async function main() {
           // `result.ok` first: a refused, unreachable or malformed run carries
           // no decision at all, and a run that could not happen must never be
           // read as one that decided nothing.
+          // WHAT THE ANALYSTS HAD, kept for the fill that may follow.
+          //
+          // Recorded whatever the verdict was — a hold that becomes a buy two
+          // ticks later was still reasoned from this material — and recorded
+          // outside the live arm, so a shadow agent's grades are ready the day
+          // its owner turns execution on.
+          //
+          // A lens is kept only if it ANSWERED. `no-data`, `parse-failed` and
+          // the other failure arms are absent rather than zero: four broken
+          // analysts must not read as a considered view of thin evidence.
+          if (outcome.ran && outcome.result.ok) {
+            const dd = outcome.result.decision;
+            const answered = (dd.analyst_views ?? [])
+              .filter((v) => v.direction === "buy" || v.direction === "sell" || v.direction === "hold")
+              .filter((v) => Number.isFinite(v.evidence_strength))
+              .map((v) => ({ lens: v.lens, evidenceStrength: v.evidence_strength }));
+            brainGrade.set(dd.symbol, {
+              evidence: answered,
+              economics: dd.economics ?? null,
+              at: Math.floor(Date.now() / 1000),
+            });
+          }
           if (outcome.ran && outcome.result.ok && brainLiveEnabledFor(agentId)) {
             const d = outcome.result.decision;
             const ceiling = Math.min(cfg.llmMaxActionUsdg, Number(active.limits.perTradeUsdg) / 1e6);
@@ -6500,6 +6626,14 @@ async function main() {
       }
     }
 
+    // EACH POSITION'S OWN FLOOR, read once per tick beside what it cost.
+    //
+    // Read for the same book the basis is read for, because the two are one
+    // fact: a floor is a distance from an entry price, and a paper entry price
+    // must never set the level under a funded position. An empty map is the
+    // honest failure — every holding then uses the owner's own number, which is
+    // exactly what they all did before grading existed.
+    const floorsBySymbol = await positionFloors(active.agentId, basisMode);
     const holdings = new Map<string, Holding>(
       positions.map((p) => [
         p.symbol,
@@ -6509,6 +6643,8 @@ async function main() {
           valueUsdg: p.valueUsdg,
           priceStale: p.priceStale,
           costUsdg: basisBySymbol.get(p.symbol) ?? null,
+          stopFloorBps: floorsBySymbol.get(p.symbol)?.stopBps ?? null,
+          stopFloorWhy: floorsBySymbol.get(p.symbol)?.why ?? null,
         },
       ]),
     );

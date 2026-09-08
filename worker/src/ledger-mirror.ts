@@ -698,6 +698,32 @@ export async function mirrorTenant(args: {
         }
       });
       copied.cost_basis = basis.length;
+
+      // AND THE GRADED FLOOR, which shares the basis's lifecycle exactly: it is
+      // a distance from an entry price, stamped once at entry and dropped when
+      // the basis is. So it gets the same treatment for the same reasons — the
+      // rebuilt-child guard, because it is history a restart cannot re-derive,
+      // and the upsert, because the delete above it is conditional.
+      const floors = (await child
+        .prepare(`SELECT agent_id, mode, symbol, stop_bps, rung, why, at FROM position_floors`)
+        .all()
+        .catch(() => [])) as Record<string, unknown>[];
+      await shared.tx(async (db) => {
+        for (const a of agents) {
+          if (rebuilt) continue;
+          await db.prepare(`DELETE FROM position_floors WHERE agent_id = ?`).run(a.smart_account);
+        }
+        const ins = db.prepare(
+          `INSERT INTO position_floors (agent_id, mode, symbol, stop_bps, rung, why, at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(agent_id, mode, symbol) DO UPDATE SET
+             stop_bps = excluded.stop_bps, rung = excluded.rung, why = excluded.why, at = excluded.at`,
+        );
+        for (const f of floors) {
+          await ins.run(f.agent_id, f.mode, f.symbol, f.stop_bps, f.rung, f.why, f.at);
+        }
+      });
+      copied.position_floors = floors.length;
     }
   } catch (e) {
     failed.snapshots = e instanceof Error ? e.message : String(e);

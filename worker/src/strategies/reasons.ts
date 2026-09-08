@@ -126,7 +126,21 @@ export type Why =
    * cost, what it is worth — so the feed never carries a model's own account of
    * why it sold as though it were the mechanism's.
    */
-  | { code: "stop-floor"; symbol: string; lossBps: number; usdgRaw: bigint; costRaw: bigint }
+  | {
+      code: "stop-floor";
+      symbol: string;
+      lossBps: number;
+      usdgRaw: bigint;
+      costRaw: bigint;
+      /**
+       * The level THIS position was graded to, when it was not the owner's own
+       * number. Absent for an ungraded position, so the sentence an owner has
+       * read for months is unchanged unless there is genuinely more to say.
+       */
+      floorBps?: number;
+      /** Why the grade landed there — written at entry, quoted at the exit. */
+      floorWhy?: string | null;
+    }
   /**
    * THE MODEL LOOKED AND CHOSE TO HOLD.
    *
@@ -211,7 +225,17 @@ export function renderWhy(w: Why): string {
     case "stop-floor":
       return (
         `${w.symbol} is ${pct(w.lossBps)}% below what it cost — selling all ${usdg(w.usdgRaw)} USDG of it ` +
-        `against the ${usdg(w.costRaw)} paid. A floor, not a view: the rule fired, I did not change my mind`
+        `against the ${usdg(w.costRaw)} paid. A floor, not a view: the rule fired, I did not change my mind` +
+        // The graded clause, and ONLY when this position carried its own level.
+        // An owner who never sees a grade should read exactly the sentence they
+        // always read; one whose position was graded wider or tighter than
+        // their setting is owed the reason it was, at the moment it costs them
+        // money rather than in a settings screen they will not open.
+        (w.floorBps
+          ? w.floorWhy
+            ? `. Its floor was graded when I bought it — ${w.floorWhy}`
+            : `. Its floor was graded at ${pct(w.floorBps)}% when I bought it, not your usual level`
+          : "")
       );
     case "take-profit":
       return (

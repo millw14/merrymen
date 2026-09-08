@@ -181,7 +181,7 @@ export interface ChainHolder {
 export interface LiveMine {
   statusLabel?: string;
   history?: number[];
-  positions?: {symbol:string;valueUsd:number;stale:boolean;costUsd:number|null;pnlPct:number|null}[];
+  positions?: {symbol:string;valueUsd:number;stale:boolean;costUsd:number|null;pnlPct:number|null;floorBps:number|null;floorWhy:string|null}[];
   name: string;
   slug: string | null;
   handle: string | null;
@@ -738,6 +738,11 @@ function mineOf(feed: Feed | null, theses: Thesis[]): LiveMine | null {
         stale:!!p.price_stale,
         costUsd,
         pnlPct: costUsd === null ? null : ((p.value_usdg - costUsd) / costUsd) * 100,
+        // THIS position's own floor, when it carries one. Null means the
+        // owner's single setting applies — what the whole book did before a
+        // floor could be graded per entry.
+        floorBps: typeof p.stop_floor_bps === "number" && p.stop_floor_bps > 0 ? p.stop_floor_bps : null,
+        floorWhy: typeof p.stop_floor_why === "string" && p.stop_floor_why ? p.stop_floor_why : null,
       };
     }),
     chg24: latest !== null && dayAgo !== null ? latest - dayAgo : null,
@@ -956,5 +961,5 @@ interface Feed {
     created_at: string;
   }[];
   equity?: { equity_usdg: number; cash_usdg?: number; vault_usdg?: number; at?: string }[];
-  positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:number|null}[];
+  positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:number|null; stop_floor_bps?:number|null; stop_floor_why?:string|null}[];
 }

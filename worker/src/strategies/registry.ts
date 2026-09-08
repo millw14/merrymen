@@ -208,6 +208,11 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
       curveLegsNow: opts.curveLegsNow,
       // The mechanical floor. 0 = off, which is the shipped default.
       stopLossBps: opts.strategistStopLossBps ?? 0,
+      // AND THE CEILING, which this branch never forwarded. `takeProfitBps`
+      // reached steady-basket only, so an owner on the strategist had the
+      // setting saved, shown in the UI, and read by nothing — while their agent
+      // described it to them as armed.
+      takeProfitBps: opts.takeProfitBps ?? 0,
       decisionIntervalMs: opts.llm.intervalMin * 60_000,
       onNote: opts.onNote,
       onDecision: opts.llm.onDecision,
