@@ -153,6 +153,29 @@ export interface MerrymenSettings {
   maxImpactBps?: number;
   /** Performance fee on profit above HWM, bps (accrual-only). */
   perfFeeBps?: number;
+  /**
+   * Per-trade fee on TURNOVER, bps. Accrual-only, like `perfFeeBps`.
+   *
+   * A DIFFERENT ANIMAL from the performance fee, and kept apart everywhere:
+   * that one is charged on profit above a peak and costs nothing when an agent
+   * loses money; this one is owed on every trade either way. Both are
+   * disclosed, but adding them into one total would hide which is which.
+   *
+   * HOUSE-OWNED — it is the platform charging the tenant, so a tenant who could
+   * set it would be setting their own bill to zero.
+   */
+  tradeFeeBps?: number;
+  /**
+   * Where a collected trade fee would go.
+   *
+   * NOTHING COLLECTS YET. Sealing this into a grant as a withdrawal address is
+   * what would let a session key transfer to it, and no existing grant carries
+   * one at all — `withdrawalAddresses` has always been empty — so until an
+   * owner re-signs this is a destination on paper. HOUSE-OWNED for the obvious
+   * reason: a tenant who could set it would point the platform's fee at their
+   * own wallet.
+   */
+  tradeFeeAddress?: string;
   /** Worker tick cadence, seconds. */
   tickSeconds?: number;
   /** Basket universe — symbols from the official token registry, equal-weighted. */
@@ -423,6 +446,11 @@ export const HOUSE_KEY_FIELDS = [
   // written on the house account, stored and honoured.
   "sponsorGasEnabled",
   "sponsorshipPolicyId",
+  // THE PLATFORM CHARGING THE TENANT — a fourth case, and the same reasoning.
+  // A tenant who could set these would be setting their own bill to zero, or
+  // pointing the platform fee at their own wallet.
+  "tradeFeeBps",
+  "tradeFeeAddress",
   "rialtoApiKey",
   "rialtoApiKeyHeader",
   "bitqueryApiKey",
@@ -516,6 +544,8 @@ export const SETTINGS_DEFAULTS = {
   // that would quietly cost more than the strategy could ever make back.
   maxImpactBps: 300,
   perfFeeBps: 1000,
+  // 0.5% of turnover, accrual-only — see fees.ts tradeFeeUsdg.
+  tradeFeeBps: 50,
   tickSeconds: 60,
   // A handful of the deepest names, NOT the whole tradable set — spreading a
   // first deposit across fourteen legs is worse, not more diversified. See

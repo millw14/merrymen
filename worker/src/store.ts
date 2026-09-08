@@ -390,6 +390,17 @@ const SQLITE_ALTERS: string[] = [
     // ops, so a setup-vs-steady split derived from wei alone would read a
     // doubling of the base fee as an expensive operation. Units are stable.
     "ALTER TABLE trades ADD COLUMN gas_units TEXT",
+    // THE PER-TRADE FEE, ACCRUED AND NOT COLLECTED.
+    //
+    // Per TRADE rather than a running total on the agents row, because the
+    // stated precondition for ever moving this money is that the ledger be
+    // auditable first — fees.ts: "the ledger records what is owed; actual
+    // collection ships with the funded-account flow so the ledger is auditable
+    // before any money moves." A total cannot be audited; a row per trade can.
+    //
+    // NULL means NOT ASSESSED, which is not zero: a trade written before this
+    // column existed, or one that never landed. Only a landed trade owes a fee.
+    "ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL",
     // Where a Pons launch actually trades. A pre-graduation token has NO pool
     // at all — it lives on its own bonding curve — so without this the token is
     // recorded and then unreachable: there is no tier-scan fallback the way
@@ -795,6 +806,14 @@ export interface TradeRow {
   gas_usdg?: number;
   /** Measured execution quality: how far the fill landed from the quote, in bps (+ is worse). */
   fill_slippage_bps?: number;
+  /**
+   * Per-trade platform fee ACCRUED on this trade, USDG. Nothing is moved.
+   *
+   * NULL means NOT ASSESSED — a row written before the column existed, or a
+   * trade that never landed. Only a landed trade owes a fee, and zero is a
+   * different answer from absent.
+   */
+  trade_fee_usdg?: number;
 }
 
 /** One row in the decisions table — the proposal, its reasoning, and its fate. */
@@ -1979,8 +1998,9 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
         `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, reject_rule,
                              sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, decision_id,
                              fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                             order_id, settlement_status, gas_wei, fill_slippage_bps, epoch, fill_cash_usdg, gas_usdg, gas_units)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             order_id, settlement_status, gas_wei, fill_slippage_bps, epoch, fill_cash_usdg, gas_usdg, gas_units,
+                             trade_fee_usdg)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.agent_id,
@@ -2011,6 +2031,9 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
         row.fill_cash_usdg ?? null,
         row.gas_usdg ?? null,
         row.gas_units ?? null,
+        // `?? null`, never `?? 0`: an unassessed fee and a zero fee are
+        // different claims, and only one of them is about the trade.
+        row.trade_fee_usdg ?? null,
       );
     };
     if (!moved) {

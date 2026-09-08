@@ -61,6 +61,10 @@ export interface ResolvedConfig {
   slippageBps: number;
   maxImpactBps: number;
   perfFeeBps: number;
+  /** Per-trade fee on turnover, bps. Accrual-only — see fees.ts. */
+  tradeFeeBps: number;
+  /** Where a collected trade fee would go. Nothing collects yet. */
+  tradeFeeAddress?: string;
   tickSeconds: number;
   basketSymbols: string[];
   /** Owner-added ERC-20s (memecoins). Shape-checked; still gated by the grant. */
@@ -291,6 +295,11 @@ export function mergeSettings(
     // is 100% impact, past which the number stops meaning anything.
     maxImpactBps: num(file.maxImpactBps, env.MERRYMEN_MAX_IMPACT_BPS, d.maxImpactBps, 0, 10_000),
     perfFeeBps: num(file.perfFeeBps, env.MERRYMEN_PERF_FEE_BPS, d.perfFeeBps, 0, 5_000),
+    // Bounded well below the performance fee ceiling: this is charged on every
+    // trade regardless of outcome, so the same number means something much
+    // larger here. 500 bps of turnover would eat an account in a fortnight.
+    tradeFeeBps: num(file.tradeFeeBps, env.MERRYMEN_TRADE_FEE_BPS, d.tradeFeeBps ?? 50, 0, 500),
+    tradeFeeAddress: str(file.tradeFeeAddress, env.MERRYMEN_TRADE_FEE_ADDRESS),
     tickSeconds: num(file.tickSeconds, env.MERRYMEN_TICK_SECONDS, d.tickSeconds, 15, 3_600),
     basketSymbols,
     customTokens,

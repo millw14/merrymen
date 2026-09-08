@@ -105,7 +105,7 @@ import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus } from "./circle";
-import { accrueAboveHwm } from "./fees";
+import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadGrantFile } from "./grant";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
 import { execModeOf, liveBlockerText, type ExecMode, type RefuseRule } from "./exec-mode";
@@ -4497,6 +4497,18 @@ async function main() {
             }),
         ...(slippageBps === null ? {} : { fill_slippage_bps: slippageBps }),
         status: "landed",
+        // THE PLATFORM FEE, ACCRUED. Recorded on the trade that owes it and
+        // moved nowhere — collection needs a `transfer` permission sealed into
+        // the wall, which no existing grant carries. On the notional, because
+        // that is the number every cap is denominated in and the one the owner
+        // already agreed to; a fee off the fill would move with slippage.
+        //
+        // A TRANSFER IS NOT A TRADE. Moving your own money home is not turnover
+        // and must not be charged as it — the branch below books it as a flow
+        // for the same reason.
+        ...(intent.kind === "transfer"
+          ? {}
+          : { trade_fee_usdg: usdgNum(tradeFeeUsdg(notional, cfg.tradeFeeBps)) }),
         ...sim,
         ...(booked ?? {}),
       });
