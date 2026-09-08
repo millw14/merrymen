@@ -111,6 +111,63 @@ export interface OrphanOp {
   acquired: { token: string; qtyRaw: bigint; side: "buy" | "sell" } | null;
 }
 
+/**
+ * WHAT A RECEIPT SAYS THIS TRADE ACTUALLY WAS — or nothing at all.
+ *
+ * ONE non-USDG token leg, or null. Two is a multi-hop route and there is no
+ * honest way to say which one the position is; more is a fee or a rebate in the
+ * middle of one. The cash leg must be present and must point the OTHER way:
+ * USDG out with tokens in is a buy, USDG in with tokens out is a sell, and
+ * anything pointing the same way is a funding event rather than a fill.
+ *
+ * Every one of those refusals returns null rather than a best guess, because
+ * this feeds a COST BASIS, and a cost basis is what a stop-loss measures
+ * against. A guessed one fires at a level nobody chose — worse than no stop at
+ * all, and worse in a way that only shows up once.
+ *
+ * One rule, two callers: the orphan sweep reading an op it has just found, and
+ * the backfill reading a transaction the ledger recorded long ago. Two copies of
+ * this judgement would be two answers about the same receipt.
+ */
+export function pickAcquiredLeg(
+  deltas: ReadonlyMap<string, bigint>,
+  usdgToken: string,
+): { token: string; qtyRaw: bigint; side: "buy" | "sell"; cashUsdg: bigint } | null {
+  const usdg = usdgToken.toLowerCase();
+  const usdgDelta = deltas.get(usdg) ?? 0n;
+  if (usdgDelta === 0n) return null;
+  const others = [...deltas].filter(([t, v]) => t !== usdg && v !== 0n);
+  if (others.length !== 1) return null;
+  const [token, delta] = others[0]!;
+  const qtyRaw = delta < 0n ? -delta : delta;
+  if (qtyRaw <= 0n) return null;
+  if (usdgDelta < 0n ? delta <= 0n : delta >= 0n) return null;
+  return {
+    token,
+    qtyRaw,
+    side: usdgDelta < 0n ? "buy" : "sell",
+    cashUsdg: usdgDelta < 0n ? -usdgDelta : usdgDelta,
+  };
+}
+
+/**
+ * The same judgement, applied to one transaction the ledger already knows.
+ *
+ * Null on an unreadable receipt as well as on an ambiguous one — "I could not
+ * look" and "I looked and it was not clear" both mean no basis is booked, which
+ * is the only safe answer either way.
+ */
+export async function acquiredLegOf(
+  chain: Pick<ReconcileChain, "getReceiptLogs">,
+  txHash: Hex,
+  account: string,
+  usdgToken: string,
+): Promise<{ token: string; qtyRaw: bigint; side: "buy" | "sell"; cashUsdg: bigint } | null> {
+  const logs = await chain.getReceiptLogs(txHash).catch(() => null);
+  if (!logs) return null;
+  return pickAcquiredLeg(netTokenDeltas(logs, account), usdgToken);
+}
+
 /** Left-pad a 20-byte address into a 32-byte topic for an indexed-address filter. */
 export function addressTopic(addr: string): Hex {
   return `0x${"0".repeat(24)}${addr.toLowerCase().replace(/^0x/, "")}` as Hex;
@@ -296,23 +353,8 @@ export async function findOrphanOps(opts: {
         notionalUsdg6 = usdgDelta < 0n ? -usdgDelta : usdgDelta;
         attributed = true;
       }
-      // THE OTHER LEG — read from the same receipt, on the same walk.
-      //
-      // ONE non-USDG token or nothing. Two legs is a multi-hop route, and there
-      // is no honest way to say which one the position is; a third is a fee or a
-      // rebate. The direction comes from the USDG side rather than from the sign
-      // of this one, because they must agree and USDG is the leg already
-      // established. Both are required to be non-zero: a token leg with no cash
-      // leg is a transfer, not a fill.
-      const others = [...deltas].filter(([t, v]) => t !== usdgToken.toLowerCase() && v !== 0n);
-      if (attributed && others.length === 1) {
-        const [token, delta] = others[0]!;
-        const qtyRaw = delta < 0n ? -delta : delta;
-        // The two sides have to point opposite ways for this to be a swap at
-        // all. Cash out and tokens in is a buy; cash in and tokens out a sell.
-        const consistent = usdgDelta < 0n ? delta > 0n : delta < 0n;
-        if (qtyRaw > 0n && consistent) acquired = { token, qtyRaw, side: usdgDelta < 0n ? "buy" : "sell" };
-      }
+      const leg = pickAcquiredLeg(deltas, usdgToken);
+      acquired = leg && { token: leg.token, qtyRaw: leg.qtyRaw, side: leg.side };
     }
     orphans.push({ userOpHash, txHash: String(txHash).toLowerCase(), notionalUsdg6, attributed, acquired });
   }

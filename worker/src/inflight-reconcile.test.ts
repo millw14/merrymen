@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { encodeAbiParameters, encodeEventTopics, parseAbi, toHex, type Hex } from "viem";
-import { addressTopic, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { acquiredLegOf, addressTopic, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import type { ReceiptLog } from "./fills";
 
 const EP_ABI = parseAbi([
@@ -357,5 +357,39 @@ describe("the other leg of a reconciled op", () => {
     // And the standing condition is reported for positions already in this
     // state, which no backfill can reach.
     assert.match(src, /the stop-loss and take-profit cannot act on/);
+  });
+});
+
+describe("the same judgement, read from the other end", () => {
+  it("ONE RULE, TWO CALLERS — a receipt gets the same answer either way", async () => {
+    // The orphan sweep reads an op it has just found; the backfill reads a
+    // transaction the ledger recorded long ago and never booked. Two copies of
+    // this judgement would be two answers about one receipt, and the answer is
+    // a cost basis a stop-loss measures against.
+    const tx = h(0xc1);
+    const logs = [transfer(USDG, ACCOUNT, ROUTER, 5_000000n), transfer(STOCK, ROUTER, ACCOUNT, 42n)];
+    const chain = fakeChain([], { [tx.toLowerCase()]: logs });
+    const leg = await acquiredLegOf(chain, tx, ACCOUNT, USDG);
+    assert.deepEqual(leg, { token: STOCK.toLowerCase(), qtyRaw: 42n, side: "buy", cashUsdg: 5_000000n });
+  });
+
+  it("AN UNREADABLE RECEIPT IS NOT AN AMBIGUOUS ONE, and both book nothing", async () => {
+    // "I could not look" and "I looked and it was not clear" are different
+    // facts, and the safe action is identical for both — which is the only
+    // reason they may share a return value here.
+    const chain = fakeChain([], {});
+    assert.equal(await acquiredLegOf(chain, h(0xc2), ACCOUNT, USDG), null);
+  });
+
+  it("and the backfill only runs for a holding that is actually uncovered", async () => {
+    // It costs a receipt fetch per row, so a healthy book must pay nothing —
+    // and it must stop the moment it has nothing left to fix, or an agent with
+    // one stubborn position re-reads the same receipts every arm forever.
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    assert.match(src, /if \(uncovered\.length && active\?\.executor\) \{/);
+    assert.match(src, /if \(!uncovered\.length\) break;/);
+    assert.match(src, /if \(!sym \|\| !uncovered\.includes\(sym\)\) continue;/);
+    assert.match(src, /recovered \$\{sym\}'s entry price from its receipt/);
   });
 });

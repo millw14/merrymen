@@ -86,7 +86,7 @@ import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } f
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey } from "./revert";
 import { SponsorRefused } from "./paymaster";
-import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { acquiredLegOf, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
 import { takeTick } from "./strategies/types";
@@ -250,6 +250,7 @@ import {
   getPaperBook,
   getSpentTodayUsdg,
   getTransferredTodayUsdg,
+  landedFillsWithoutBasis,
   listOpHashes,
   listSubmittedOps,
   initStore,
@@ -5666,6 +5667,52 @@ async function main() {
         const b = await getBasis(agentId, "live", p.symbol).catch(() => null);
         if (!b || b.costUsdg <= 0n) uncovered.push(p.symbol);
       }
+      // BEFORE REPORTING IT, TRY TO FIX IT — from the receipts, once.
+      //
+      // Forward, a reconciled op books its own basis now. But the ops that
+      // already went through the old path are `known` to the sweep and it will
+      // never look at them again, so the positions they opened would stay
+      // unexitable for as long as they are held. The transactions are still on
+      // the ledger and the chain still has their receipts: the same evidence,
+      // read from the other end.
+      //
+      // Runs only while something is actually uncovered, so a healthy book pays
+      // nothing at all, and it stops as soon as it has nothing left to fix.
+      if (uncovered.length && active?.executor) {
+        for (const t of await landedFillsWithoutBasis(agentId)) {
+          if (!uncovered.length) break;
+          const legs = await acquiredLegOf(
+            makeReconcileChain(client),
+            t.txHash as `0x${string}`,
+            grant.smartAccount,
+            CASH.USDG,
+          );
+          if (!legs) continue;
+          const sym = symbolOfToken(legs.token);
+          if (!sym || !uncovered.includes(sym)) continue;
+          await bookFill(
+            agentId,
+            "live",
+            {
+              side: legs.side,
+              symbol: sym,
+              qtyRaw: legs.qtyRaw,
+              cashUsdg: legs.cashUsdg,
+              priceUsd: Number(legs.cashUsdg) / 1e6 / (Number(legs.qtyRaw) / 1e18),
+            },
+            "receipt",
+          );
+          uncovered.splice(uncovered.indexOf(sym), 1);
+          await addEvent(
+            agentId,
+            "ok",
+            `recovered ${sym}'s entry price from its receipt (${fmt(legs.cashUsdg)} USDG) — the stop-loss and ` +
+              `take-profit can act on it again. Its row was written by the chain sweep after a restart, which ` +
+              `used to record what was spent and not what was bought.`,
+          );
+        }
+      }
+
       const uncoveredKey = uncovered.sort().join(",");
       if (uncoveredKey !== lastUncoveredBasisKey) {
         lastUncoveredBasisKey = uncoveredKey;

@@ -2401,6 +2401,41 @@ export async function listOpHashes(agentId: string): Promise<Set<string>> {
   return set;
 }
 
+/**
+ * LANDED FILLS WHOSE COST WAS NEVER BOOKED, newest first.
+ *
+ * A row written by the executor carries `fill_qty_raw`; one written by the
+ * arm-time reconciler does not, because a reconciled op used to record its spend
+ * and stop there. That left a real position with no entry price — and both
+ * mechanical exits refuse a holding they cannot measure against one, so the
+ * stop-loss and take-profit an owner had armed could not reach it, silently and
+ * permanently.
+ *
+ * This is the input to the backfill: the transactions whose receipts still hold
+ * the answer. Bounded hard, because each one costs a receipt fetch and a book
+ * with a hundred of these is a book with a different problem.
+ */
+export async function landedFillsWithoutBasis(
+  agentId: string,
+  limit = 20,
+): Promise<{ txHash: string; amountUsdg: number }[]> {
+  try {
+    const rows = (await getDb()
+      .prepare(
+        `SELECT tx_hash, amount_usdg FROM trades
+          WHERE agent_id = ? AND status = 'landed' AND tx_hash IS NOT NULL
+            AND fill_qty_raw IS NULL AND kind = 'swap'
+          ORDER BY id DESC LIMIT ?`,
+      )
+      .all(agentId, limit)) as { tx_hash: string; amount_usdg: number }[];
+    return rows.map((r) => ({ txHash: r.tx_hash.toLowerCase(), amountUsdg: Number(r.amount_usdg) }));
+  } catch {
+    // The fill columns arrive with a migration. An unreadable ledger must not
+    // take a tick down; the backfill simply does not run.
+    return [];
+  }
+}
+
 /** One op that left and never came back — the input to the resolver. */
 export interface SubmittedOp {
   userOpHash: string;
