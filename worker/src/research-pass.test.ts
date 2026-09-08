@@ -14,6 +14,7 @@
  *     request can return.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { chooseSymbols, makeNewsDesk, newsFailureLine, planNewsWindow } from "./research-pass";
 
@@ -286,5 +287,33 @@ describe("failure does not become silence, and does not become a retry storm", (
 
     const theirs = newsFailureLine("http-error", "429", ["TSLA"], 4, 100);
     assert.match(theirs, /the provider did not answer/);
+  });
+});
+
+describe("the desk keeps what it paid for", () => {
+  it("A SECOND FETCH DOES NOT ERASE THE FIRST", async () => {
+    // news-sentiment needs THREE scored articles from TWO publishers about one
+    // symbol inside 24h, and a request returns a handful across up to three
+    // symbols. Replacing the cache meant it never held enough about anything —
+    // the lens was arithmetically unreachable, not unlucky.
+    const src = readFileSync(new URL("./research-pass.ts", import.meta.url), "utf8");
+    assert.match(src, /dedupeNews\(\[\.\.\.r\.items, \.\.\.state\.items\]\)/);
+    assert.ok(!/items: r\.items \}/.test(src), "the replacing write is gone");
+  });
+
+  it("and the point-in-time rule is untouched", () => {
+    // Keeping a story cannot let it influence a decision dated before it was
+    // published: selectNews and aggregateNewsSentiment both filter on
+    // publishedAt <= asOf, and nothing here changes that.
+    const news = readFileSync(new URL("./research/news.ts", import.meta.url), "utf8");
+    assert.match(news, /publishedAt <= opts\.asOf|publishedAt > from/);
+  });
+
+  it("BOUNDED, so a busy tape cannot grow the file without limit", () => {
+    const src = readFileSync(new URL("./research-pass.ts", import.meta.url), "utf8");
+    // Older than the window can never be selected, so it is dropped here.
+    assert.match(src, /it\.publishedAt > asOf - NEWS_WINDOW_SEC/);
+    assert.match(src, /const NEWS_CACHE_MAX = 200;/);
+    assert.match(src, /\.slice\(0, NEWS_CACHE_MAX\)/);
   });
 });

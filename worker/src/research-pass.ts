@@ -34,7 +34,18 @@
  */
 
 import { fetchMarketauxNews, type NewsFetchFailure } from "./research/marketaux";
-import type { NewsItem } from "./research/news";
+import { NEWS_WINDOW_SEC, dedupeNews, type NewsItem } from "./research/news";
+
+/**
+ * How many stories the desk keeps.
+ *
+ * A CAP, not a target. The window already drops anything older than 24h, so
+ * this only binds on a genuinely busy tape — and the file is written to a
+ * child home on every fetch, so an unbounded list is an unbounded write.
+ * Comfortably above the 3-articles-from-2-publishers a reading needs, for many
+ * more symbols than one window asks about.
+ */
+const NEWS_CACHE_MAX = 200;
 
 /** Requests we assume are available in a day when nothing says otherwise. */
 export const DEFAULT_DAILY_LIMIT = 100;
@@ -256,7 +267,31 @@ export function makeNewsDesk(cfg: NewsDeskConfig): NewsDesk {
         };
       }
 
-      state = { fetchedAt: asOf, asked: r.asked, failure: null, items: r.items };
+      // ── MERGED, NOT REPLACED, AND THAT IS THE WHOLE FIX ─────────────────
+      //
+      // This was `items: r.items`, which threw away every story the previous
+      // request had paid for. `news-sentiment` needs THREE scored articles from
+      // TWO publishers about ONE symbol inside a 24h window, and a request
+      // fetches a handful of articles across at most three symbols — so the
+      // cache never held enough about anything to produce a reading, and that
+      // lens reported no-data forever. Arithmetically unreachable, not unlucky.
+      //
+      // NOTHING IS INVENTED BY KEEPING THEM. The point-in-time rule is enforced
+      // downstream and is untouched: selectNews and aggregateNewsSentiment both
+      // filter on `publishedAt <= asOf`, so a story cannot influence a decision
+      // dated before it was published, however long it has been in the cache.
+      // What changes is only that the desk stops discarding evidence it already
+      // bought.
+      //
+      // BOUNDED TWO WAYS. Stories older than the window can never be selected,
+      // so they are dropped here rather than accumulating; and the list is
+      // capped so a busy tape cannot grow the file without limit. dedupeNews is
+      // the existing rule for "the same story twice" — the ids are stable
+      // across fetches precisely so this works.
+      const fresh = dedupeNews([...r.items, ...state.items]).filter(
+        (it) => it.publishedAt > asOf - NEWS_WINDOW_SEC,
+      );
+      state = { fetchedAt: asOf, asked: r.asked, failure: null, items: fresh.slice(0, NEWS_CACHE_MAX) };
       return {
         fetched: true,
         log:
