@@ -191,7 +191,28 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
       (sum, i) => sum + (i.kind === "swap" ? i.notionalUsdg : 0n),
       0n,
     );
-    const headroom = snap.spendHeadroomUsdg - spentOnBuys;
+    // ── BUYS KEEP FIRST CLAIM ON THE DAY'S BUDGET ─────────────────────────
+    //
+    // A vault deposit counts toward the daily spend (only withdrawals are
+    // excluded), and this sweep took everything that was left — so on nine
+    // agents the parked cash exactly consumed the cap, and every buy after it
+    // was refused with `daily-cap` until the day rolled. The fit was exact:
+    // vault 483.335 + positions 16.498 against a 500 cap. And because the sweep
+    // repeats daily, those agents were capped permanently.
+    //
+    // Reserving one tick's buy is enough to keep the sleeve alive, and it
+    // LOOSENS NOTHING — the sweep already shrinks itself to what the wall will
+    // take, and this shrinks it slightly further. The cap itself is untouched.
+    const roomToday = snap.spendHeadroomUsdg - spentOnBuys;
+    // THE BUY THE WALL WOULD ACTUALLY TAKE, not the one configured. A tick size
+    // above the per-trade cap is refused whatever the budget says, so reserving
+    // the configured number would hold back cash for a trade that cannot happen.
+    const oneBuy = cfg.buyPerTickUsdg < snap.perTradeCapUsdg ? cfg.buyPerTickUsdg : snap.perTradeCapUsdg;
+    // And if even that does not fit in what is left today, the buy is impossible
+    // today too — reserving for it would strand the cash without enabling
+    // anything, which is the opposite of the point.
+    const reserve = oneBuy <= roomToday ? oneBuy : 0n;
+    const headroom = roomToday > reserve ? roomToday - reserve : 0n;
     const amountUsdg = excess < headroom ? excess : headroom;
     if (amountUsdg > 0n) {
       intents.push({ kind: "vault-deposit", target: cfg.vault, amountUsdg });

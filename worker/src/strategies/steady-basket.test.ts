@@ -69,8 +69,13 @@ describe("steadyBasketTick — the vault sweep sizes itself to the policy wall",
     );
     const deposit = intents.find((i) => i.kind === "vault-deposit");
     assert.ok(deposit, "still sweeps — the cash isn't stranded");
-    assert.equal(deposit!.kind === "vault-deposit" && deposit!.amountUsdg, 30_000_000n,
-      "50 headroom minus the 20 already committed to this tick's buys");
+    // 50 headroom, minus the 20 committed to this tick's buys, minus one
+    // tick's buy held BACK so the sleeve can trade again. The reserve is the
+    // fix for nine agents whose parked cash exactly consumed their daily cap —
+    // the fit was exact (vault 483.335 + positions 16.498 against a 500 cap)
+    // and the sweep repeats daily, so they were capped permanently.
+    assert.equal(deposit!.kind === "vault-deposit" && deposit!.amountUsdg, 10_000_000n,
+      "50 headroom, minus 20 spent this tick, minus a 20 reserve for the next buy");
   });
 
   it("accounts for the buys it proposed in the same tick — they spend the same budget", () => {
@@ -82,9 +87,11 @@ describe("steadyBasketTick — the vault sweep sizes itself to the policy wall",
     const deposit = intents.find((i) => i.kind === "vault-deposit");
     const buyTotal = buys.reduce((s, i) => s + (i.kind === "swap" ? i.notionalUsdg : 0n), 0n);
     assert.equal(buyTotal, 20_000_000n);
-    assert.equal(deposit!.kind === "vault-deposit" && deposit!.amountUsdg, 80_000_000n);
-    // The whole tick fits inside the budget — that's the point.
-    assert.ok(buyTotal + 80_000_000n <= 100_000_000n);
+    // 100 headroom - 20 spent this tick - 20 reserved for the next buy.
+    assert.equal(deposit!.kind === "vault-deposit" && deposit!.amountUsdg, 60_000_000n);
+    // The whole tick fits inside the budget AND leaves room to buy again.
+    assert.ok(buyTotal + 60_000_000n <= 100_000_000n);
+    assert.ok(100_000_000n - buyTotal - 60_000_000n >= 20_000_000n, "a buy still fits after the sweep");
   });
 
   it("proposes NO deposit when the daily budget is already spent — silence beats a guaranteed rejection", () => {

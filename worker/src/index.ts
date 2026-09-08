@@ -4393,8 +4393,42 @@ async function main() {
         };
         exec = await send([approve, { to: quote.to, value: 0n, data: quote.data }]);
       } else if (intent.kind === "swap") {
-        // Rialto venue without an API key: approval leg only until onboarding;
-        // swap calldata comes from that API. Bundler estimation still simulates.
+        // ── THE APPROVE-ONLY LEG ──────────────────────────────────────────
+        //
+        // Reached by two completely different things, and it used to treat them
+        // the same way:
+        //
+        //   1. The SELFTEST PROBE — a same-token "swap" that exists to push one
+        //      policy-legal no-op through the whole pipeline. An approve is the
+        //      entire point of it, and it acquires nothing.
+        //
+        //   2. A REAL SWAP on the Rialto venue with no API key, because the
+        //      swap calldata comes from that API. Sending only the approve there
+        //      books a full-size buy IN THE LEDGER that never happened on chain:
+        //      the owner's tape says they bought and their balance says they did
+        //      not. That is the worst kind of row this codebase can write.
+        //
+        // So the second one is refused by name. It is not a half-executed
+        // trade, it is a missing credential, and saying so points at the fix.
+        if (intent.sellToken !== intent.buyToken) {
+          await addEvent(
+            agentId,
+            "warn",
+            `swap venue is Rialto but no Rialto API key is set, so there is no swap calldata to send. ` +
+              `Nothing was traded. Set the key in /settings or switch the venue to Uniswap.`,
+          );
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            sell_token: intent.sellToken,
+            buy_token: intent.buyToken,
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: "no-rialto-key",
+          });
+          return;
+        }
         const data = encodeFunctionData({
           abi: erc20Abi,
           functionName: "approve",
@@ -4507,8 +4541,24 @@ async function main() {
       }
 
       const txHash = exec.txHash;
-      console.log(`[execute] ${intent.kind} landed: ${txHash}`);
-      await addEvent(agentId, "ok", `${intent.kind} landed (${fmt(notional)} USDG): ${txHash}`);
+      // AN APPROVE THAT ACQUIRED NOTHING IS NOT A SWAP THAT LANDED.
+      //
+      // The selftest probe is a same-token "swap", so both of these read
+      // `[execute] swap landed` and `swap landed (0.000001 USDG)` — and on the
+      // fleet that was 21 of them in 34 minutes across three accounts, every
+      // one of them an `approve(router, 0.000001)` with no swap leg. An
+      // operator reading the log, or an owner reading their event feed, saw a
+      // trading agent. Nothing was traded.
+      const isProbe = intent.kind === "swap" && intent.sellToken === intent.buyToken;
+      const what = isProbe ? "pipeline probe" : intent.kind;
+      console.log(`[execute] ${what} landed: ${txHash}`);
+      await addEvent(
+        agentId,
+        "ok",
+        isProbe
+          ? `pipeline probe landed — an approve that proves the wall, the bundler and the paymaster. No asset changed hands: ${txHash}`
+          : `${intent.kind} landed (${fmt(notional)} USDG): ${txHash}`,
+      );
 
       // ── DID IT ACTUALLY ARRIVE? ──────────────────────────────────────────
       //

@@ -51,6 +51,36 @@ const DEFAULTS: GrantCaps = {
   maxOpsPerDay: 48,
 };
 
+/**
+ * THE SMALLEST EACH CAP MAY BE SEALED AT, and why a floor exists at all.
+ *
+ * Every one of these is a number that, at zero, makes the agent permanently
+ * unable to act — and a signature cannot be edited afterwards. `maxDrawdownPct:
+ * 0` is the sharpest: policy.ts then computes `0bps >= 0bps` and refuses every
+ * non-exit intent for the life of the grant.
+ *
+ * The ceiling is deliberately absent. A cap is the owner's own limit on their
+ * own money and they may set it as high as they like; the floor exists only to
+ * stop them signing a permission that permits nothing.
+ */
+const CAP_FLOOR: Record<keyof GrantCaps, number> = {
+  perTradeUsdg: 1,
+  dailyUsdg: 1,
+  expiryDays: 1,
+  maxDrawdownPct: 1,
+  maxOpsPerDay: 1,
+};
+
+/** A typed cap value, floored. An empty or unreadable field falls to the floor. */
+function clampCap(k: keyof GrantCaps, raw: string): number {
+  const n = Number(raw);
+  const floor = CAP_FLOOR[k];
+  if (!Number.isFinite(n)) return floor;
+  // expiryDays is also bounded above by the signer itself; the rest are not.
+  const capped = k === "expiryDays" ? Math.min(n, 90) : n;
+  return Math.max(floor, Math.floor(capped));
+}
+
 /** One-click cap presets — pick a temperament, tweak if you like, ride. */
 const PRESETS: { id: string; icon: string; label: string; blurb: string; caps: GrantCaps }[] = [
   {
@@ -458,8 +488,26 @@ export default function GrantPage() {
     return () => clearInterval(id);
   }, [grant, backedUp, refreshFunding]);
 
+  /**
+   * A CAP THAT CANNOT BE SIGNED AS ZERO.
+   *
+   * `min={1}` on the input is advisory — it styles the spinner and it is what a
+   * browser validates on FORM SUBMIT, which this is not. Clearing the field, or
+   * typing a 0, produced `Number("") === NaN` or a literal 0 and sealed it.
+   *
+   * AND A SIGNATURE CANNOT BE EDITED. An agent signed with `maxDrawdownPct: 0`
+   * is bricked permanently: policy.ts computes `0bps >= 0bps` and refuses every
+   * non-exit intent for the life of the grant, so the account cannot trade, and
+   * no amount of funding, gas or re-configuring reaches it. Only a re-sign
+   * does. One agent on the fleet is in exactly that state right now, rejecting
+   * with `drawdown-breaker — 0bps >= 0bps` on every tick.
+   *
+   * THIS TIGHTENS THE RAIL. It removes a way to seal a permission that makes
+   * the agent unusable; it cannot widen one, because every bound below is the
+   * floor, never the ceiling.
+   */
   const set = (k: keyof GrantCaps) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setCaps((c) => ({ ...c, [k]: Number(e.target.value) }));
+    setCaps((c) => ({ ...c, [k]: clampCap(k, e.target.value) }));
 
   // Tokens listed in settings that THIS signature doesn't actually cover.
   // Settings can't reach into an already-signed key, so the gap is real: without

@@ -148,3 +148,46 @@ describe("off by default, and off means off", () => {
     assert.ok(t.intents.some((i) => i.kind === "swap" && i.buyToken === TSLA), "the DCA leg still fires");
   });
 });
+
+describe("the sweep stops eating the day's buying power", () => {
+  it("A BUY IS RESERVED BEFORE IDLE CASH IS PARKED", () => {
+    // A vault deposit counts toward the daily spend (only withdrawals are
+    // excluded), and the sweep took everything left — so on nine production
+    // agents the parked cash exactly consumed the cap and every buy after it
+    // was refused with `daily-cap`. The fit was exact: vault 483.335 +
+    // positions 16.498 against a 500 cap. And the sweep repeats daily, so
+    // those agents were capped permanently.
+    const t = steadyBasketTick(
+      cfg(),
+      snap({ cashUsdg: 500_000_000n, spendHeadroomUsdg: 100_000_000n, perTradeCapUsdg: 1_000_000_000n }),
+    );
+    const dep = t.intents.find((i) => i.kind === "vault-deposit");
+    assert.ok(dep, "the cash is still parked — it is not stranded");
+    // 100 headroom - 25 spent on this tick's buy - 25 reserved for the next.
+    assert.equal(dep!.kind === "vault-deposit" && dep!.amountUsdg, 50_000_000n);
+  });
+
+  it("and the reserve is the buy the WALL would take, not the one configured", () => {
+    // A tick size above the per-trade cap is refused whatever the budget says,
+    // so reserving the configured number holds cash back for a trade that
+    // cannot happen.
+    const t = steadyBasketTick(
+      cfg({ buyPerTickUsdg: 900_000_000n }),
+      snap({ cashUsdg: 500_000_000n, spendHeadroomUsdg: 100_000_000n, perTradeCapUsdg: 10_000_000n }),
+    );
+    const dep = t.intents.find((i) => i.kind === "vault-deposit");
+    // No buy fires (cash < tick size), so nothing is spent; 100 - 10 reserved.
+    assert.equal(dep!.kind === "vault-deposit" && dep!.amountUsdg, 90_000_000n);
+  });
+
+  it("and a buy that cannot fit today reserves NOTHING, rather than stranding the cash", () => {
+    // If even the wall-sized buy does not fit in what is left, the buy is
+    // impossible today — holding cash back for it enables nothing.
+    const t = steadyBasketTick(
+      cfg({ buyPerTickUsdg: 900_000_000n }),
+      snap({ cashUsdg: 500_000_000n, spendHeadroomUsdg: 5_000_000n, perTradeCapUsdg: 900_000_000n }),
+    );
+    const dep = t.intents.find((i) => i.kind === "vault-deposit");
+    assert.equal(dep!.kind === "vault-deposit" && dep!.amountUsdg, 5_000_000n, "the whole remaining budget sweeps");
+  });
+});

@@ -146,6 +146,32 @@ export async function POST(req: Request) {
     if (!isAddr(grant.owner)) {
       return NextResponse.json({ error: "grant owner is not an address" }, { status: 400 });
     }
+    // ── A CAP OF ZERO PERMITS NOTHING, AND A SIGNATURE CANNOT BE EDITED ────
+    //
+    // `maxDrawdownPct: 0` makes policy.ts compute `0bps >= 0bps` and refuse
+    // every non-exit intent for the life of the grant; a zero per-trade or
+    // daily cap refuses every trade outright; zero ops or zero days is an agent
+    // that is finished before it starts. None of it is recoverable without a
+    // re-sign, and one agent on the fleet is stuck in exactly that state.
+    //
+    // The browser clamps too. This is the second gate, because the clamp there
+    // is a UI convenience and this route accepts a POST from anywhere — and
+    // because a bricked grant is the one mistake nothing downstream can undo.
+    // REFUSED RATHER THAN REPAIRED: the caps are inside the signed payload, so
+    // "fixing" one here would store something the owner did not sign.
+    const zeroCap = (["perTradeUsdg", "dailyUsdg", "expiryDays", "maxDrawdownPct", "maxOpsPerDay"] as const).find(
+      (k) => !Number.isFinite(grant.caps?.[k]) || Number(grant.caps?.[k]) < 1,
+    );
+    if (zeroCap) {
+      return NextResponse.json(
+        {
+          error:
+            `${zeroCap} is ${String(grant.caps?.[zeroCap])}, which permits nothing — and a signature cannot be ` +
+            `edited afterwards, so this grant would be unusable forever. Set it to at least 1 and sign again.`,
+        },
+        { status: 400 },
+      );
+    }
     const binding = grant.binding;
     // Version-agnostic presence check. WHICH signatures a claim needs is the
     // validator's decision, not this route's — demanding a walletSignature here
