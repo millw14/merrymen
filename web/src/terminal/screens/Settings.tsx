@@ -72,6 +72,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const [tgNotify, setTgNotify] = useState<boolean | null>(null);
   const [virtualsEnabled, setVirtualsEnabled] = useState<boolean | null>(null);
   // Scout mode is a boolean, so it can't ride the string `draft`.
+  const [deskEnabled, setDeskEnabled] = useState<boolean | null>(null);
   const [scoutEnabled, setScoutEnabled] = useState<boolean | null>(null);
   const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
   const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
@@ -229,6 +230,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
     if (tgTransfer !== null) body.telegramTransferEnabled = tgTransfer;
     if (tgNotify !== null) body.telegramNotifyEnabled = tgNotify;
     if (virtualsEnabled !== null) body.virtualsEnabled = virtualsEnabled;
+    if (deskEnabled !== null) body.deskEnabled = deskEnabled;
     if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
     if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
     if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
@@ -330,6 +332,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const tgTransferVal = tgTransfer ?? view.values.telegramTransferEnabled ?? d.telegramTransferEnabled;
   const tgNotifyVal = tgNotify ?? view.values.telegramNotifyEnabled ?? d.telegramNotifyEnabled;
   const virtualsEnabledVal = virtualsEnabled ?? view.values.virtualsEnabled ?? d.virtualsEnabled;
+  const deskEnabledVal = deskEnabled ?? view.values.deskEnabled ?? d.deskEnabled;
   const scoutEnabledVal = scoutEnabled ?? view.values.scoutEnabled ?? d.scoutEnabled;
   const discoveryEnabledVal = discoveryEnabled ?? view.values.discoveryEnabled ?? d.discoveryEnabled;
   const trencherLiveVal = trencherLive ?? view.values.trencherLiveEnabled ?? d.trencherLiveEnabled;
@@ -753,6 +756,28 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             may sit that way is hard-capped.
           </p>
           <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">research before deciding</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={deskEnabledVal}
+                  onChange={(e) => setDeskEnabled(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {deskEnabledVal
+                    ? "the strategist looks things up before it commits"
+                    : "off — one shot from a fixed set of numbers"}
+                </span>
+              </span>
+              <span className="mm-hint">
+                llm-strategist only. On, a decision becomes a short research loop: it can pull
+                depth, check what a position cost, and read back its own past decisions before it
+                acts — and it writes what it concluded, in its own words, to your feed. Off by
+                default because it costs up to a few model calls per window instead of one.
+              </span>
+            </label>
             <label className="mm-field">
               <span className="mm-label">scout mode</span>
               <span className="mm-input">

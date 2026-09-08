@@ -94,7 +94,11 @@ describe("every control survives the restyle", () => {
     // A number that moves is not necessarily wrong — but it must be noticed,
     // and a class rename is never the reason for one.
     const count = (re: RegExp) => (SRC.match(re) ?? []).length;
-    assert.equal(count(/type="checkbox"/g), 11, "checkboxes");
+    // 12 since "research before deciding". deskEnabled was in core and read by
+    // the worker while missing from BOTH the settings route's field list and
+    // this screen — so the one setting that turns an agent from answering into
+    // thinking could not be turned on by anybody.
+    assert.equal(count(/type="checkbox"/g), 12, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
@@ -106,10 +110,10 @@ describe("every control survives the restyle", () => {
     assert.equal(count(/<select/g), 5, "selects");
   });
 
-  it("sends exactly the 17 fields save() guards", () => {
+  it("sends exactly the 18 fields save() guards", () => {
     // Every guard is "the user did not touch this, so do not overwrite it".
     // One dropped guard silently resets a setting to whatever the form had.
-    assert.equal((code.match(/!== null\)/g) ?? []).length, 17);
+    assert.equal((code.match(/!== null\)/g) ?? []).length, 18);
   });
 });
 

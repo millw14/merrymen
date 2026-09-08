@@ -187,11 +187,29 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   // Scout ceilings. 0 is a meaningful floor — it's the off switch for the
   // budget independently of the enable flag, so both have to allow it.
   discoveryIntervalMin: [1, 1440],
+  // How many model calls one research session may make before it must decide.
+  // Bounded here as well as defaulted, because this number IS the cost of
+  // deskEnabled and an owner turning that on should be able to size it.
+  deskMaxSteps: [1, 12],
   scoutBudgetUsdg: [0, 1_000_000],
   scoutPerTokenUsdg: [0, 1_000_000],
 };
 const BOOL_FIELDS = [
   "paperTradingEnabled",
+  // LET THE STRATEGIST RESEARCH BEFORE IT DECIDES, instead of answering in one
+  // shot from a fixed blob of numbers — it can pull depth, check what a
+  // position cost, and read back its own past decisions before it commits.
+  //
+  // Unreachable from the app until now: in core, read by the worker, and absent
+  // from this list, so a PUT carrying it came back ignored. It is the setting
+  // that turns an agent from one that answers into one that THINKS, and no
+  // owner could turn it on. Third field tonight with the same shape —
+  // takeProfitBps and this one were both real capabilities nobody could reach.
+  //
+  // Off by default and it stays off by default: it costs up to `deskMaxSteps`
+  // model calls per window instead of one, and the scout consumed a day's
+  // shared token allowance on 2026-08-31 doing exactly this kind of loop.
+  "deskEnabled",
   "telegramEnabled",
   "telegramControlEnabled",
   "telegramTransferEnabled",
