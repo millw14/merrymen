@@ -133,6 +133,38 @@ describe("the sentiment lens is other Merrymen, or nothing", () => {
   });
 });
 
+describe("the memecoin desk reads this on a different lens", () => {
+  it("ROUTED TO `social`, BECAUSE `sentiment` IS NOT ON THAT DESK", () => {
+    // _lenses_for("memecoin") is technical/onchain/social/liquidity. Peer views
+    // supplied as `sentiment` were computed, sent, billed and read by nobody on
+    // every memecoin decision this fleet ever made — the one genuine social
+    // signal it has, invisible on the class where a crowd matters most.
+    const s = sentimentLine([post({ name: "A", symbol: "PEPE" })], "PEPE", "social")!;
+    assert.match(s, /A: /, "the peer material is still there");
+  });
+
+  it("AND IT SAYS IT IS NOT A CROWD", () => {
+    // "Social" on a launchpad token means Twitter and holder chat. What this
+    // fleet has is a handful of trading agents, and an analyst not told so
+    // reads three peers agreeing as a groundswell.
+    const s = sentimentLine([post({ name: "A", symbol: "PEPE" })], "PEPE", "social")!;
+    assert.match(s, /THIS IS NOT CROWD SENTIMENT/);
+    assert.match(s, /A handful of agents is not a crowd/);
+    // And the equity desk's version does not carry the caveat, because there it
+    // is filed as sentiment and claims nothing more.
+    assert.ok(!sentimentLine([post({ symbol: "TSLA" })], "TSLA")!.includes("NOT CROWD"));
+  });
+
+  it("and the caveat does not eat the material it is about", () => {
+    // The cap exists for text other models wrote. Prefixing before the slice
+    // would let a warning about the source crowd the source out of the block.
+    const many = Array.from({ length: 50 }, (_, i) => post({ name: `Agent${i}`, reason: "x".repeat(300) }));
+    const social = sentimentLine(many, "PEPE", "social")!;
+    const plain = sentimentLine(many, "PEPE")!;
+    assert.ok(social.endsWith(plain), "the same 1200 characters of peer material, preface added on top");
+  });
+});
+
 describe("memory is what this agent could have said in public", () => {
   it("carries the ending, not just the thesis", () => {
     // "I said buy and it landed" and "I said buy and the wall refused it" are

@@ -5977,7 +5977,16 @@ async function main() {
               : null;
           const brainPeers = wire.theses;
           const brainOwn = wire.own ?? [];
-          const sentiment = sentimentLine(brainPeers, focus.symbol);
+          // THE KEY THE DESK FOR THIS INSTRUMENT ACTUALLY READS.
+          //
+          // `_lenses_for` gives an equity token `sentiment` and a memecoin
+          // `social` — different lenses, and the memecoin desk has never asked
+          // for `sentiment` in its life. So the peer views were computed, sent
+          // and billed on every memecoin decision, and no analyst ever saw
+          // them: the fleet's only genuine social signal, invisible on exactly
+          // the instrument class where a crowd matters most.
+          const peerLens = instrumentClassOf(focus.token) === "memecoin" ? "social" : "sentiment";
+          const peerViews = sentimentLine(brainPeers, focus.symbol, peerLens);
 
           // ── THE NEWS DESK ────────────────────────────────────────────────
           //
@@ -6174,16 +6183,21 @@ async function main() {
                 // block says in its first line that it is not social sentiment.
                 ...(desk.newsSentiment ? { "news-sentiment": desk.newsSentiment } : {}),
                 // The only genuine sentiment this fleet has: what other
-                // Merrymen actually published. OMITTED ENTIRELY when nobody
-                // said anything — an empty section reads as "we looked and
-                // there was nothing", and the truth is that nobody spoke.
-                ...(sentiment ? { sentiment } : {}),
-                // THE MEMECOIN DESK'S OWN LENS, and the one this chain can
+                // Merrymen actually published — under whichever key THIS desk
+                // reads it on, which is `social` for a memecoin. OMITTED
+                // ENTIRELY when nobody said anything — an empty section reads as
+                // "we looked and there was nothing", and the truth is that
+                // nobody spoke.
+                ...(peerViews ? { [peerLens]: peerViews } : {}),
+                // THE MEMECOIN DESK'S REMAINING LENS, and the one this chain can
                 // actually answer. `_lenses_for("memecoin")` asks for technical,
                 // onchain, social and liquidity; three of the four had no
                 // supplier, so every memecoin decision was mostly analysts
                 // reporting that they had been given nothing — at full price,
                 // since a lens costs a model call whether or not it was fed.
+                // `onchain` is still one of them: holder distribution and flow
+                // need an indexer this repo does not have, and a lens fed a
+                // guess is worse than a lens fed nothing.
                 //
                 // Costs no I/O: it is arithmetic over the reserves the pricing
                 // pass already read to value the position. Omitted entirely for

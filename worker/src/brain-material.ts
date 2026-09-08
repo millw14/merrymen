@@ -147,7 +147,22 @@ export function technicalLine(f: FocusView): string {
  * consideration is evidence; a peer talking about something else is context,
  * and context that crowds out evidence is just cost.
  */
-export function sentimentLine(peers: readonly PublicThesis[], symbol: string): string | null {
+export function sentimentLine(
+  peers: readonly PublicThesis[],
+  symbol: string,
+  /**
+   * WHICH LENS THIS DESK READS PEER VIEWS ON. `_lenses_for` gives an equity
+   * `sentiment` and a memecoin `social`, and material supplied under a key the
+   * desk does not read is computed, sent, billed and ignored — which is what
+   * was happening to every memecoin decision this fleet made.
+   *
+   * The two keys mean different things to an analyst, so the block says which
+   * it is rather than being quietly relabelled. "Social" on a launchpad token
+   * means the crowd; what this fleet actually has is a handful of other trading
+   * agents, and a model told otherwise would read three peers as a groundswell.
+   */
+  lens: "sentiment" | "social" = "sentiment",
+): string | null {
   if (!peers.length) return null;
   const want = symbol.trim().toUpperCase();
   const onName = peers.filter((p) => (p.symbol ?? "").toUpperCase() === want);
@@ -164,10 +179,20 @@ export function sentimentLine(peers: readonly PublicThesis[], symbol: string): s
     return `${p.name}: ${what}${why ? ` — "${why}"` : ""}`;
   });
 
-  return (
+  // LENS_MAX bounds the PEER MATERIAL, which is what other models wrote; the
+  // preface is this repo's own fixed sentence and is not what the cap is for.
+  // Prefixing before the slice would have let a caveat about the source crowd
+  // out the source.
+  const body = (
     `Other Merrymen on this chain have published these views (${onName.length} about ${want}):\n` +
     lines.join("\n")
   ).slice(0, LENS_MAX);
+  return lens === "social"
+    ? `THIS IS NOT CROWD SENTIMENT. There is no Twitter, Telegram or holder-chat feed behind this ` +
+        `lens — no source for one was read. What follows is every social signal this fleet actually ` +
+        `has: views published by other Merrymen trading agents on this chain. A handful of agents is ` +
+        `not a crowd, and agreement among them is not a market turning.\n${body}`
+    : body;
 }
 
 /**
