@@ -48,6 +48,7 @@ import { Token } from "./screens/Token";
 import { You } from "./screens/You";
 import { TabIcon } from "./ui";
 import { FirstVisit } from "./FirstVisit";
+import { useDesktopDetail } from "./desktop-detail";
 
 
 const desktopSnapshot = () => window.matchMedia("(min-width: 1100px)").matches;
@@ -87,6 +88,7 @@ export function App() {
   const [sidebarSection, setSidebarSection] =
     useState<SidebarSection>("markets");
   const desktop = useSyncExternalStore(subscribeDesktop, desktopSnapshot, () => false);
+  const desktopDetail = useDesktopDetail(desktop, requestedScreen, live.tokens[0]?.id, live.agents[0]?.slug);
   // Deposit and withdraw were component state, which
   // meant the browser's Back button could not dismiss them and the tab bar
   // disappeared while they were open — the most trapped a person could be in
@@ -101,10 +103,9 @@ export function App() {
   // one place the URL and the body legitimately differ, because the panel is an
   // overlay and the page under it did not go anywhere.
   const [tab, setTab] = useState<Tab>("feed");
-  const centerScreen: Screen = desktop && money ? { kind: "tab", tab } : requestedScreen;
-  const screen: Screen = desktop && centerScreen.kind === "tab" && centerScreen.tab === "feed"
-    ? { kind: "tab", tab: "home" }
-    : centerScreen;
+  const screen: Screen = desktop && (
+    money || (requestedScreen.kind === "tab" && (requestedScreen.tab === "feed" || requestedScreen.tab === "home"))
+  ) ? desktopDetail : requestedScreen;
   const [tokenTab, setTokenTab] = useState<TokenTab>("buys");
   const perTrade = String(account?.status.grant?.caps.perTradeUsdg ?? "");
   const perDay = String(account?.status.grant?.caps.dailyUsdg ?? "");
