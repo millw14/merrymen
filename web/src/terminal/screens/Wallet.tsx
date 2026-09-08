@@ -401,9 +401,51 @@ export default function GrantPage() {
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
     fetch("/api/grants")
       .then((r) => (r.ok ? r.json() : { exists: false }))
-      .then((s: { exists?: boolean; gasSponsored?: boolean | null }) => {
+      .then((s: { exists?: boolean; gasSponsored?: boolean | null; grant?: Grant }) => {
         setServerArmed(!!s.exists);
-        if(s.exists && !stored) setMode("restore");
+        if (s.exists && !stored) {
+          /**
+           * A SECOND BROWSER IS NOT A LOST WALLET.
+           *
+           * Signing in from incognito, a phone, or any machine that did not
+           * mint the agent left this screen with `grant === null`, so it fell
+           * to `restore` — a panel that asks for the owner PRIVATE KEY. For a
+           * Privy-owned agent there is no such key to paste: the owner is the
+           * embedded wallet behind their login, and merrymen never holds it.
+           * So the one screen that changes trading limits offered the single
+           * thing that account can never do, and re-signing was unreachable
+           * from anywhere but the original browser. A tester got out by hand-
+           * writing the server's grant into localStorage — which works, and is
+           * a trap: see below.
+           *
+           * Nothing secret is needed to re-sign. `renewKey` uses the smart
+           * account, the caps and the chain, and takes its signature from the
+           * Privy owner, which travels with the login. All three are in this
+           * response already.
+           *
+           * NEVER WRITTEN TO localStorage. `merrymen.grant.v1` is the browser's
+           * own full-fat copy — session key, and on a legacy agent the OWNER
+           * key, which is the smart account's sudo validator and is not bound
+           * by the wall. `/api/grants` strips all three
+           * (`grants/route.ts`), so persisting what comes back would replace
+           * the only copy of those keys with an object that has none. This
+           * lives in React state for the life of the screen and nowhere else.
+           */
+          const adoptable = s.grant && s.grant.binding?.version === "privy-did-owner-v1";
+          if (adoptable && s.grant) {
+            setGrant(s.grant);
+            setChainId(s.grant.chainId);
+            setCaps(s.grant.caps);
+            // Nothing to write down in THIS browser — the owner key does not
+            // exist in any browser for a Privy agent, so the backup gate would
+            // block the screen on a task that cannot be performed.
+            setBackedUp(true);
+          } else {
+            // A legacy agent's owner key really does live only in the browser
+            // that minted it. Restore is the honest answer there.
+            setMode("restore");
+          }
+        }
         setGasSponsored(s.gasSponsored === true);
       })
       .catch(() => setServerArmed(null));
@@ -438,7 +480,19 @@ export default function GrantPage() {
   /** Re-push the stored grant so the worker obeys it again (undo a desync). */
   async function reArm() {
     const stored = loadGrant();
-    if (!stored) return;
+    if (!stored) {
+      // THE BUTTON THAT DID NOTHING, second edition. Re-arming re-POSTs the
+      // browser's own grant, and this browser may be holding an ADOPTED one —
+      // read from the server for display and re-signing, with the session key
+      // stripped out. There is nothing here to push back. Silent return was
+      // this panel's original bug; say it instead, and point at the control
+      // that does work from here.
+      setError(
+        "this browser doesn't hold a copy of the signed key — it's reading your agent from the server. " +
+          "Re-sign the key below instead, which arms the worker with a fresh one.",
+      );
+      return;
+    }
     // STRIP THE OWNER KEY BEFORE RE-POSTING. loadGrant() reads the localStorage
     // copy, and that one ALWAYS carries demoOwnerPrivateKey — it is the root of
     // client-side recovery. Posting it verbatim tripped the hosted owner-key
