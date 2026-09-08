@@ -5808,6 +5808,27 @@ async function main() {
     // Everything after the guard is best-effort. A Brain that is slow, refuses,
     // or is unreachable must not delay or fail a tick — it produces no thought
     // this time, and the trigger will wake it again.
+    // WHAT EACH POSITION COST, read once per tick beside what it is worth.
+    //
+    // Without this a strategy can see the value of a holding and never its
+    // entry, so "am I up on this" is a question the agent cannot answer about
+    // itself — and there is no take-profit or stop-loss without an answer. The
+    // one-shot strategist had no other route to it: basis reached a model only
+    // through the desk tool loop, which is off by default.
+    //
+    // A FAILED READ IS NULL, NOT ZERO. Zero would say the position is entirely
+    // profit, which is the original accounting bug in miniature.
+    const basisMode = paperActive() ? "paper" : "live";
+    const basisBySymbol = new Map<string, bigint | null>();
+    for (const p of positions) {
+      try {
+        const b = await getBasis(active.agentId, basisMode, p.symbol);
+        basisBySymbol.set(p.symbol, b.qtyRaw === 0n && b.costUsdg === 0n ? null : b.costUsdg);
+      } catch {
+        basisBySymbol.set(p.symbol, null);
+      }
+    }
+
     if (shadowBrainEnabledFor(agentId) && cfg.brainUrl && cfg.brainToken && !bookIncomplete) {
       try {
         const epochNow = await getAgentEpoch(agentId);
@@ -5954,7 +5975,24 @@ async function main() {
               symbol: pp.symbol,
               qtyRaw: String(pp.rawBalance),
               valueUsdg: Number(pp.valueUsdg),
-              costBasisUsdg: null,
+              // WHAT IT COST, so Brain can tell a winner from a loser.
+              //
+              // This was a hard-coded null, and it meant the reasoner could see
+              // that a position is worth 8 USDG and had no way at all to know
+              // whether that was up 300% or down 60% — so "should I take this
+              // profit" and "should I cut this loss" were questions it was
+              // being asked while structurally unable to answer either. The
+              // strategist got this fixed; Brain was left blind.
+              //
+              // The read is already done: `basisBySymbol` is built once per
+              // tick a few lines above for exactly this. NULL STAYS NULL when
+              // the ledger has no basis — the snapshot type allows it and core
+              // refuses on it, which is the honest answer for a position whose
+              // origin is genuinely unknown. Zero would say it was free.
+              costBasisUsdg: (() => {
+                const c = basisBySymbol.get(pp.symbol);
+                return c === null || c === undefined ? null : Number(c);
+              })(),
               priceSource: pp.priceSource === "pool" ? "pool" : "chainlink",
               quarantined: false,
             })),
@@ -6193,26 +6231,6 @@ async function main() {
       }
     }
 
-    // WHAT EACH POSITION COST, read once per tick beside what it is worth.
-    //
-    // Without this a strategy can see the value of a holding and never its
-    // entry, so "am I up on this" is a question the agent cannot answer about
-    // itself — and there is no take-profit or stop-loss without an answer. The
-    // one-shot strategist had no other route to it: basis reached a model only
-    // through the desk tool loop, which is off by default.
-    //
-    // A FAILED READ IS NULL, NOT ZERO. Zero would say the position is entirely
-    // profit, which is the original accounting bug in miniature.
-    const basisMode = paperActive() ? "paper" : "live";
-    const basisBySymbol = new Map<string, bigint | null>();
-    for (const p of positions) {
-      try {
-        const b = await getBasis(active.agentId, basisMode, p.symbol);
-        basisBySymbol.set(p.symbol, b.qtyRaw === 0n && b.costUsdg === 0n ? null : b.costUsdg);
-      } catch {
-        basisBySymbol.set(p.symbol, null);
-      }
-    }
     const holdings = new Map<string, Holding>(
       positions.map((p) => [
         p.symbol,

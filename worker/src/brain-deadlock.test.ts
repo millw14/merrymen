@@ -113,3 +113,32 @@ describe("the arithmetic this feeds", () => {
     assert.equal(caveats, 3);
   });
 });
+
+describe("Brain can tell a winner from a loser", () => {
+  it("THE SNAPSHOT CARRIES WHAT EACH POSITION COST", () => {
+    // This was a hard-coded `costBasisUsdg: null`, so the reasoner could see a
+    // position is worth 8 USDG and had no way to know whether that was up 300%
+    // or down 60%. "Should I take this profit" and "should I cut this loss"
+    // were questions it was being asked while unable to answer either.
+    assert.match(INDEX, /costBasisUsdg: \(\(\) => \{/);
+    assert.match(INDEX, /const c = basisBySymbol\.get\(pp\.symbol\);/);
+    assert.ok(!/costBasisUsdg: null,/.test(INDEX), "the hard-coded null is gone");
+  });
+
+  it("AND NULL STAYS NULL when the ledger has no basis", () => {
+    // The snapshot type allows null and core refuses on it, which is the honest
+    // answer for a position whose origin is genuinely unknown. Zero would say
+    // it was free — the accounting bug in miniature, handed to a reasoner.
+    assert.match(INDEX, /return c === null \|\| c === undefined \? null : Number\(c\);/);
+  });
+
+  it("and the basis is read BEFORE the brain, not after it", () => {
+    // A temporal-dead-zone bug rather than a type error: `basisBySymbol` is a
+    // const in the same function scope, so referencing it from a block that
+    // runs earlier compiles cleanly and throws at runtime.
+    const read = INDEX.indexOf("const basisBySymbol = new Map<string, bigint | null>()");
+    const brain = INDEX.indexOf("if (shadowBrainEnabledFor(agentId)");
+    assert.ok(read > 0 && brain > 0, "both must exist");
+    assert.ok(read < brain, "the basis must be built before its first consumer");
+  });
+});
