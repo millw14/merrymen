@@ -819,6 +819,21 @@ export default function GrantPage() {
     setAck(false);
     setMainnetAck(false);
     setFunding(null);
+    // AND THE CHAIN, WHICH THIS FORGOT — the bug a tester walked into.
+    //
+    // "Start over" left `chainId` and `caps` holding whatever the discarded
+    // wallet had, including a testnet selection made from the checkbox below.
+    // Since the mount effect only assigns them `if (stored)`, and there is no
+    // stored grant after a discard, the next re-sign sealed a chain nobody had
+    // chosen on this screen — reported as "it goes to the Backup page and
+    // chooses mainnet mode", and in the mirror case as a key signed for 46630
+    // while the worker trades 4663, which the chat then reports as "funds sent
+    // here will sit unused".
+    //
+    // A start-over that leaves the two things a signature seals behind is not
+    // one. Both go back to the same defaults a first-time owner gets.
+    setChainId(MAINNET);
+    setCaps(PRESETS[0]!.caps);
   }
 
   /**
@@ -1053,7 +1068,15 @@ export default function GrantPage() {
               >
                 <span className="chain-card-title"><GI d="tree" size={16} /> Practice (testnet)</span>
                 <span className="chain-card-body">
-                  Simulated trading at live prices. No real deposits needed.
+                  {/* SAID AT THE POINT OF CHOICE, not afterwards in the chat.
+                      The hosted worker trades Robinhood Chain, so a key signed
+                      for the sandbox cannot trade at all — and an owner only
+                      found that out later, from "funds sent here will sit
+                      unused". Practice mode on this service is PAPER TRADING,
+                      which is a setting and needs no separate chain. */}
+                  {session?.hosted
+                    ? "Not for this service — your agent trades Robinhood Chain, so a key signed here cannot trade at all. For practice, keep paper trading on in Settings instead."
+                    : "Simulated trading at live prices. No real deposits needed."}
                 </span>
               </button>
               <button
@@ -1735,9 +1758,15 @@ export default function GrantPage() {
                       />
                       <span>
                         {grant.chainId === MAINNET ? (
-                          <>Move this key to <b>practice (testnet {TESTNET})</b> — it will stop being able to trade.</>
+                          <>
+                            Move this key to <b>practice (testnet {TESTNET})</b> — it will stop being
+                            able to trade
+                            {session?.hosted
+                              ? ", and on this service it cannot be used for anything: your agent trades Robinhood Chain. Turn paper trading on in Settings instead."
+                              : "."}
+                          </>
                         ) : (
-                          <>Move this key to <b>live trading (mainnet {MAINNET})</b>.</>
+                          <>Move this key to <b>live trading (mainnet {MAINNET})</b> — where your agent actually trades.</>
                         )}
                       </span>
                     </label>

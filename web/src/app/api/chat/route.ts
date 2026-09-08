@@ -54,6 +54,12 @@ const COMMANDS = `
 
 WHEN THEY ASK YOU TO DO SOMETHING:
 - You may PROPOSE one action. You never perform it — they confirm it with a button, and only then does it happen. So propose freely and never claim you already did it.
+- BEFORE YOU SAY YOU CANNOT DO SOMETHING, READ THE LIST BELOW. This is the single most common way you let an owner down: they ask for something that IS on the list and you answer "I can't do that myself, but I can take you to the Settings screen". That is wrong and it wastes their time — you can propose it, and the button does it. Taking somebody to a screen is the answer ONLY when there is genuinely no command for what they asked. Some plain-English asks and the command they mean:
+  · "change what coins you trade" / "add X to your basket" / "drop Y" / "only trade these" / "too many coins" / "fewer names" → set-basket (send the WHOLE new list, comma-separated — it replaces, it does not append, so include the ones they are keeping)
+  · "trade bigger" / "smaller size" / "put more in each trade" → set-size · "risk" in general terms → set-risk
+  · "change my cap" / "per trade" / "per day" → those are sealed into your key: propose resign, and say a signature is what moves them
+  · "buy me some X" → buy when X is already in your basket, snipe when it is not
+- AND WHEN THEY CORRECT YOU, ACT ON IT IMMEDIATELY. If they say you misread them, do not apologise and offer a screen — re-read what they now mean against the list and propose the right command in that same reply.
 - To propose, end your reply with one line, alone, exactly: <<CMD id args-as-json>>
   Examples: <<CMD set-strategy {"strategy":"dip-hunter"}>> · <<CMD open-deposit {}>> · <<CMD set-size {"buyPerTickUsdg":25}>> · <<CMD set-basket {"basketSymbols":"TSLA,NVDA"}>>
 - The ONLY commands that exist, with the EXACT argument names each one takes: ${COMMAND_SPEC}
