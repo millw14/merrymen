@@ -51,6 +51,40 @@ describe("a command cannot write a field it did not declare", () => {
     assert.deepEqual(payload, { strategy: "dip-hunter" });
   });
 
+  it("AND THE PAYLOAD IS ONE THE SETTINGS ROUTE ACCEPTS", () => {
+    // The failure this catches is not a security hole, it is a promise the app
+    // cannot keep: a card that says "trade this basket", a click, and a 400.
+    // /api/settings refuses `basketSymbols` that is not an array — and the
+    // model may only send scalars, by the route's own rule. So the widening
+    // happens here, or the command fails every time it is used.
+    assert.deepEqual(settingsPayload(commandFor("set-basket")!, { basketSymbols: "TSLA, NVDA ,, GME" }), {
+      basketSymbols: ["TSLA", "NVDA", "GME"],
+    });
+  });
+
+  it("A COMMAND WHOSE MEANING IS THE VALUE SUPPLIES IT ITSELF", () => {
+    // go-live IS `paperTradingEnabled: false`. If the model chose the boolean,
+    // an empty `{}` would write nothing while the card said "stop simulating",
+    // and the wrong boolean would do the opposite of the sentence confirmed.
+    assert.deepEqual(settingsPayload(commandFor("go-live")!, {}), { paperTradingEnabled: false });
+    assert.deepEqual(settingsPayload(commandFor("go-paper")!, {}), { paperTradingEnabled: true });
+    // And the command beats the model even when the model insists.
+    assert.deepEqual(settingsPayload(commandFor("go-live")!, { paperTradingEnabled: true }), {
+      paperTradingEnabled: false,
+    });
+  });
+
+  it("and nothing may be fixed that was not declared", () => {
+    // `fixed` writes into the payload, so it is inside the allowlist, not
+    // beside it. A fixed key outside `writes` would be a field the house-owned
+    // check above never looked at.
+    for (const cmd of CHAT_COMMANDS) {
+      for (const key of Object.keys(cmd.fixed ?? {})) {
+        assert.ok((cmd.writes ?? []).includes(key), `${cmd.id} fixes ${key} without declaring it`);
+      }
+    }
+  });
+
   it("a navigate command writes nothing at all", () => {
     for (const cmd of CHAT_COMMANDS.filter((c) => c.via === "navigate")) {
       assert.equal(cmd.writes, undefined, `${cmd.id} navigates and must not write`);

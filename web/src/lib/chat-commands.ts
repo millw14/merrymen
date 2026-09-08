@@ -80,6 +80,18 @@ export interface ChatCommand {
   via: "settings" | "navigate";
   /** For `settings`: which keys this command may write. Nothing else is sent. */
   writes?: readonly string[];
+  /**
+   * Values the COMMAND supplies itself, overriding anything the model sent.
+   *
+   * For a command whose whole meaning IS the value — go-live is
+   * `paperTradingEnabled: false` and nothing else — the model must not be the
+   * one to say which way the flag goes. Its own sentence is fixed, so a model
+   * that emitted the opposite boolean would produce a card promising one thing
+   * and a write doing the other; and an empty `{}` would produce a card that
+   * promised something and then wrote nothing at all, which is the quieter and
+   * worse of the two.
+   */
+  fixed?: Record<string, CommandArg>;
   /** For `navigate`: where to. */
   to?: string;
   /**
@@ -120,6 +132,7 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = Object.freeze([
     id: "go-paper",
     via: "settings",
     writes: ["paperTradingEnabled"],
+    fixed: { paperTradingEnabled: true },
     weighty: true,
     // PAPER IS PERMISSION TO SIMULATE, NOT A REQUEST TO — execModeOf asks
     // canTradeForReal first. Saying "switch to paper" would promise something
@@ -130,6 +143,7 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = Object.freeze([
     id: "go-live",
     via: "settings",
     writes: ["paperTradingEnabled"],
+    fixed: { paperTradingEnabled: false },
     weighty: true,
     say: () => `Stop simulating. If I cannot trade for real I will do nothing instead of practising.`,
   },
@@ -246,13 +260,41 @@ export function commandFor(id: unknown): ChatCommand | null {
 export function settingsPayload(
   cmd: ChatCommand,
   args: Record<string, CommandArg>,
-): Record<string, CommandArg> {
-  const out: Record<string, CommandArg> = {};
+): Record<string, CommandArg | string[]> {
+  const out: Record<string, CommandArg | string[]> = {};
   for (const key of cmd.writes ?? []) {
-    if (key in args) out[key] = args[key]!;
+    if (!(key in args)) continue;
+    const v = args[key]!;
+    // A LIST FIELD IS SENT AS A LIST. The model may only give us scalars — that
+    // is the route's own guard against a nested object reaching a settings
+    // write — so a basket arrives as "TSLA,NVDA" and /api/settings refuses
+    // anything that is not an array ("basketSymbols: must be an array of
+    // symbols"). Without this the command would fail every single time, which
+    // is worse than not existing: an owner would confirm and be told no.
+    out[key] = LIST_FIELDS.has(key)
+      ? String(v)
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : v;
+  }
+  // LAST, SO THE COMMAND WINS. See `fixed`: for go-live and go-paper the value
+  // is the command's meaning, not the model's to choose.
+  for (const [key, v] of Object.entries(cmd.fixed ?? {})) {
+    if ((cmd.writes ?? []).includes(key)) out[key] = v;
   }
   return out;
 }
+
+/**
+ * Settings fields stored as arrays, which a scalar-only command must widen.
+ *
+ * Only what a command actually writes belongs here. `customTokens` is an array
+ * too and is deliberately absent — adding a token is "know about this", which
+ * registry.ts keeps separate from "trade it" on purpose, and it is not
+ * something chat may do.
+ */
+const LIST_FIELDS = new Set(["basketSymbols"]);
 
 /** Every id the model is allowed to name, for the prompt. */
 export const COMMAND_IDS = CHAT_COMMANDS.map((c) => c.id);
