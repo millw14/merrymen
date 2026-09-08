@@ -3402,7 +3402,16 @@
 
 /* Personal account and agent conversation share the existing shell palette. */
 :where(.terminal-host) .desk-page, :where(.terminal-host) .account-page { min-width: 0; }
-:where(.terminal-host) .desk-page { padding-bottom: 145px; display: flex; flex-direction: column; min-height: calc(100dvh - var(--nav) - 50px); gap: 22px; }
+/* AND THE PAGE ITSELF SCROLLS, which is what was actually missing.
+   `.body` above this is `overflow: hidden` by design — it is the app shell — so
+   a column taller than the viewport is not scrolled, it is CLIPPED, and the
+   document is not scrollable either. With four proposals the page held 1,116px
+   inside 362 and a tester could not reach the bottom of the card. `.body` is a
+   flex column and this child already computes to `min-height: 0` through a
+   later rule, so it shrinks to the shell and scrolls its own overflow — one
+   declaration is the whole fix. Verified in the browser rather than reasoned
+   about: page scrollable, bottom reachable, body overflowing by zero. */
+:where(.terminal-host) .desk-page { padding-bottom: 145px; display: flex; flex-direction: column; min-height: calc(100dvh - var(--nav) - 50px); gap: 22px; overflow-y: auto; }
 :where(.terminal-host) .desk-header, :where(.terminal-host) .account-header, :where(.terminal-host) .account-person { display: flex; align-items: center; gap: 12px; }
 :where(.terminal-host) .desk-header h1, :where(.terminal-host) .account-header h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -.04em; }
 :where(.terminal-host) .desk-header p, :where(.terminal-host) .account-person p { margin: 3px 0 0; color: var(--tx-2); font-size: 12px; }
@@ -3804,7 +3813,14 @@
   scrollbar-width: thin;
 }
 :where(.terminal-host) .desk-page > .desk-conversation {
-  min-height: 0;
+  /* A FLOOR, SO THE CHAT CANNOT BE SQUEEZED OUT OF EXISTENCE.
+     `min-height: 0` let this flex child give up ALL its space to a tall
+     sibling: measured with a proposals card present, the conversation was
+     twelve pixels tall on a 1536x742 desktop. Zero is the right value for a
+     child that must be allowed to shrink; it is the wrong value for the one
+     the screen is named after. It keeps its own scroller either way, which is
+     what the auto-follow in Agent.tsx writes scrollTop to. */
+  min-height: 220px;
   overflow-y: auto;
   padding: 0 0 8px;
   scrollbar-width: thin;
@@ -7227,6 +7243,20 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* THE CARD MUST NOT EAT THE PAGE.
+     `.desk-page` is a viewport-height flex column whose only scroller is the
+     conversation, and `.body` above it is `overflow: hidden`. So a tall sibling
+     does not push the page into scrolling — it is CLIPPED, silently. Measured
+     with four proposals on a 1536x742 desktop: the card was 906px inside a
+     662px body, the page overflowed by 754px, the document was not scrollable
+     at all, and the conversation had been squeezed to twelve pixels. A tester
+     reported exactly this — "i cant scroll down, the bottom is cut off".
+     Bounding the LIST rather than the card keeps the heading and the re-sign
+     button — the thing an owner has to press to act on any of this — always in
+     view, and lets a long list scroll where a long list belongs. */
+  max-height: min(40vh, 320px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 :where(.terminal-host) .proposal {
