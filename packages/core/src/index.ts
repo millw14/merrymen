@@ -32,3 +32,7 @@ export * from "./snipe-target";
 // ONE DIAL INSTEAD OF SIX — a risk level a beginner can answer, and an honest
 // account of the two caps only a signature can move.
 export * from "./risk-level";
+
+// WHO ACTUALLY HOLDS THIS COIN — ChainMind's holder, transfer and swap
+// forensics, ported as the pure analysis behind the `onchain` lens.
+export * from "./onchain-forensics";
