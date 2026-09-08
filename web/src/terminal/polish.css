@@ -1,20 +1,11 @@
-.terminal-host .desktop-page-links { display:flex; gap:8px; padding:8px 4px 12px; border-bottom:1px solid var(--line); }
-.terminal-host .desktop-page-links a { flex:1; padding:10px 12px; border-radius:8px; color:var(--tx-2); text-align:center; text-decoration:none; font-size:14px; }
-.terminal-host .desktop-page-links a:hover,
-.terminal-host .desktop-page-links a[aria-current="page"] { background:var(--line); color:var(--tx); }
-.terminal-host .desktop-page-links a:focus-visible { outline:2px solid var(--tx); outline-offset:2px; }
 
 /* Shared navigation and page presentation. */
-.terminal-host .app > .tabbar {
-  display: grid;
-  height: 64px;
-  bottom: max(14px, env(safe-area-inset-bottom));
-  z-index: 20;
-}
 .terminal-host .tabbar .tab { align-content: center; gap: 4px; min-width: 0; border-radius: 24px; }
 .terminal-host .tabbar .tab.on { background: var(--line); }
 @media (max-width: 1099px) {
   .terminal-host .app > .tabbar {
+    display: grid;
+    z-index: 20;
     width: min(300px, calc(100% - 40px));
     height: 52px;
     padding: 3px;
@@ -22,11 +13,11 @@
     bottom: max(10px, env(safe-area-inset-bottom));
   }
   .terminal-host .tabbar .tab { min-height: 44px; padding: 0; gap: 0; }
+  .terminal-host .app > .body { padding-bottom: calc(104px + env(safe-area-inset-bottom)); }
 }
 .terminal-host .tabbar .tab:focus-visible,
 .terminal-host .feed-views button:focus-visible,
 .terminal-host .feed-like:focus-visible { outline: 2px solid var(--tx); outline-offset: 2px; }
-.terminal-host .app > .body { padding-bottom: calc(104px + env(safe-area-inset-bottom)); }
 .terminal-host .feed-views { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 20px; }
 .terminal-host .feed-views button { min-height: 44px; padding: 8px 12px; color: var(--tx-2); border: 1px solid var(--line); border-radius: 22px; font-size: 12px; }
 .terminal-host .feed-views button[aria-pressed="true"] { background: var(--tx); color: var(--ink); }
@@ -51,9 +42,6 @@
 .terminal-host .alpha-brief blockquote { margin: 14px 0; padding: 0 16px; border-left: 2px solid var(--line); font-size: 13px; }
 .terminal-host .alpha-brief a { text-decoration: underline; }
 .terminal-host .hosted-account-links { flex-wrap: wrap; }
-@media (min-width: 1100px) {
-  .terminal-host .app > .tabbar { max-width: 430px; }
-}
 .terminal-host .hosted-account-links { display: flex; gap: 8px; margin: 12px 0; }
 .terminal-host .hosted-account-links a,
 .terminal-host .hosted-account-links button { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 12px; color: var(--tx); font-size: 12px; text-decoration: none; }

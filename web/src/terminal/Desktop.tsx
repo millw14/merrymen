@@ -137,10 +137,6 @@ export function DesktopSidebar({
 
   return (
     <aside className="desktop-sidebar" aria-label="Explore">
-      <nav className="desktop-page-links" aria-label="Community navigation">
-        <Link href="/" aria-current={screen.kind === "tab" && screen.tab === "feed" ? "page" : undefined}>Feed</Link>
-        <Link href="/leaderboard">Leaderboard</Link>
-      </nav>
       <div
         className="desktop-explore-tabs"
         role="tablist"
