@@ -277,3 +277,85 @@ describe("resolveSubmittedOps", () => {
     assert.equal(calls, 0, "not even a block-number read");
   });
 });
+
+/**
+ * THE POSITION NO RULE COULD SELL.
+ *
+ * A reconciled op recorded its spend and nothing else — by design, and the
+ * design said so: "P&L for this fill isn't attributable, only its spend is."
+ * That reasoning is correct about P&L and silent about the consequence. BOTH
+ * mechanical exits refuse a holding with no cost on record: the stop floor and
+ * the take-profit each skip what they cannot measure against an entry.
+ *
+ * So a worker restarting between submitting an op and writing its row produced
+ * a position that could never be sold by rule. Measured in production on a real
+ * owner's book: two holdings, a 25% stop and a 20% take-profit both armed and
+ * displayed, and neither able to reach either position. Nothing said so.
+ *
+ * The evidence was already being fetched. `netTokenDeltas` walks the receipt to
+ * find the USDG leg and throws the other legs away; the token that arrived and
+ * how much of it arrived are on the same walk. These tests pin that it is read
+ * ONLY when the receipt is unambiguous — a guessed basis fires a stop at a level
+ * nobody chose, which is worse than no stop at all.
+ */
+describe("the other leg of a reconciled op", () => {
+  const orphanOf = async (logs: ReceiptLog[]) => {
+    const hash = h(0xa1);
+    const tx = h(0xb1);
+    const chain = fakeChain([opLog(hash, true, tx)], { [tx.toLowerCase()]: logs });
+    const [o] = await findOrphanOps({ chain, smartAccount: ACCOUNT, usdgToken: USDG, knownOpHashes: new Set(), lookbackBlocks: 1000n });
+    assert.ok(o, "expected one orphan");
+    return o;
+  };
+
+  it("A BUY CARRIES THE TOKEN AND THE QUANTITY, so a basis can be booked", async () => {
+    const o = await orphanOf([transfer(USDG, ACCOUNT, ROUTER, 5_000000n), transfer(STOCK, ROUTER, ACCOUNT, 42n)]);
+    assert.deepEqual(o.acquired, { token: STOCK.toLowerCase(), qtyRaw: 42n, side: "buy" });
+    assert.equal(o.notionalUsdg6, 5_000000n, "and the cash side is unchanged");
+  });
+
+  it("and a sell reads the other way round", async () => {
+    const o = await orphanOf([transfer(STOCK, ACCOUNT, ROUTER, 42n), transfer(USDG, ROUTER, ACCOUNT, 6_000000n)]);
+    assert.deepEqual(o.acquired, { token: STOCK.toLowerCase(), qtyRaw: 42n, side: "sell" });
+  });
+
+  it("A MULTI-HOP ROUTE IS AMBIGUOUS, AND STAYS NULL", async () => {
+    // Two token legs and no honest way to say which one the position is. A
+    // basis picked from one of them is a stop-loss level nobody chose.
+    const OTHER = "0x00000000000000000000000000000000000fee01" as const;
+    const o = await orphanOf([
+      transfer(USDG, ACCOUNT, ROUTER, 5_000000n),
+      transfer(STOCK, ROUTER, ACCOUNT, 42n),
+      transfer(OTHER, ROUTER, ACCOUNT, 7n),
+    ]);
+    assert.equal(o.acquired, null);
+    assert.equal(o.attributed, true, "the spend is still counted — that half was never in doubt");
+  });
+
+  it("and a token leg with NO cash leg is a transfer, not a fill", async () => {
+    // Somebody sent the account a token. There is no price in that, and calling
+    // it a buy at zero would say the position was free.
+    const o = await orphanOf([transfer(STOCK, ROUTER, ACCOUNT, 42n)]);
+    assert.equal(o.acquired, null);
+    assert.equal(o.attributed, false);
+  });
+
+  it("and legs pointing the SAME way are not a swap at all", async () => {
+    // Cash in and tokens in together is a funding event or a rebate. A swap has
+    // one of each, and the two sides have to disagree or this is not one.
+    const o = await orphanOf([transfer(USDG, ROUTER, ACCOUNT, 5_000000n), transfer(STOCK, ROUTER, ACCOUNT, 42n)]);
+    assert.equal(o.acquired, null);
+  });
+
+  it("THE RECONCILER BOOKS IT, and says whether the exits can now reach it", async () => {
+    // The consequence is the point, so the sentence an owner reads names it.
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    assert.match(src, /if \(wrote && o\.acquired && sym\) \{[\s\S]{0,200}bookFill\(/);
+    assert.match(src, /cost basis for \$\{sym\} booked from the receipt/);
+    assert.match(src, /no cost basis and no rule can exit it/);
+    // And the standing condition is reported for positions already in this
+    // state, which no backfill can reach.
+    assert.match(src, /the stop-loss and take-profit cannot act on/);
+  });
+});

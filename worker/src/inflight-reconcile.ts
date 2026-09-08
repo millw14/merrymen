@@ -89,6 +89,26 @@ export interface OrphanOp {
   notionalUsdg6: bigint;
   /** Whether a USDG leg was found (false → notional is a floor of 0, logged). */
   attributed: boolean;
+  /**
+   * THE OTHER SIDE OF THE TRADE, when the receipt names it unambiguously.
+   *
+   * Null unless EXACTLY ONE non-USDG token moved. That is the discipline this
+   * whole field turns on: a receipt with two token legs is a route, and picking
+   * one of them would invent a cost basis rather than read one.
+   *
+   * WHY IT IS WORTH CARRYING. A reconciled op used to record its spend and
+   * nothing else, so the position it opened had no cost on record — and BOTH
+   * mechanical exits refuse on a null basis (`strategist/strategy.ts` and the
+   * take-profit beside it skip a holding they cannot price against). The result
+   * was silent and permanent: an owner's stop-loss and take-profit were armed,
+   * displayed, and inert on the only two positions they held, because the worker
+   * restarted between submitting the op and writing its row.
+   *
+   * This is not a guess. `netTokenDeltas` already walks the receipt to find the
+   * USDG leg and discards the rest; the token that arrived and the quantity that
+   * arrived are the same evidence the live path books from, on the same receipt.
+   */
+  acquired: { token: string; qtyRaw: bigint; side: "buy" | "sell" } | null;
 }
 
 /** Left-pad a 20-byte address into a 32-byte topic for an indexed-address filter. */
@@ -267,6 +287,7 @@ export async function findOrphanOps(opts: {
     const txHash = raw.transactionHash;
     let notionalUsdg6 = 0n;
     let attributed = false;
+    let acquired: OrphanOp["acquired"] = null;
     const receiptLogs = await chain.getReceiptLogs(txHash).catch(() => null);
     if (receiptLogs) {
       const deltas = netTokenDeltas(receiptLogs, smartAccount);
@@ -275,8 +296,25 @@ export async function findOrphanOps(opts: {
         notionalUsdg6 = usdgDelta < 0n ? -usdgDelta : usdgDelta;
         attributed = true;
       }
+      // THE OTHER LEG — read from the same receipt, on the same walk.
+      //
+      // ONE non-USDG token or nothing. Two legs is a multi-hop route, and there
+      // is no honest way to say which one the position is; a third is a fee or a
+      // rebate. The direction comes from the USDG side rather than from the sign
+      // of this one, because they must agree and USDG is the leg already
+      // established. Both are required to be non-zero: a token leg with no cash
+      // leg is a transfer, not a fill.
+      const others = [...deltas].filter(([t, v]) => t !== usdgToken.toLowerCase() && v !== 0n);
+      if (attributed && others.length === 1) {
+        const [token, delta] = others[0]!;
+        const qtyRaw = delta < 0n ? -delta : delta;
+        // The two sides have to point opposite ways for this to be a swap at
+        // all. Cash out and tokens in is a buy; cash in and tokens out a sell.
+        const consistent = usdgDelta < 0n ? delta > 0n : delta < 0n;
+        if (qtyRaw > 0n && consistent) acquired = { token, qtyRaw, side: usdgDelta < 0n ? "buy" : "sell" };
+      }
     }
-    orphans.push({ userOpHash, txHash: String(txHash).toLowerCase(), notionalUsdg6, attributed });
+    orphans.push({ userOpHash, txHash: String(txHash).toLowerCase(), notionalUsdg6, attributed, acquired });
   }
   return orphans;
 }

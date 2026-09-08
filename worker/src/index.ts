@@ -464,6 +464,8 @@ async function main() {
   let lastLiveBlocker: RefuseRule | null | undefined;
   /** The last reason a tick proposed nothing, so THAT fires on change only too. */
   let lastIdleReason: string | null = null;
+  /** Which held symbols last lacked a cost basis, so the warning fires on change only. */
+  let lastUncoveredBasisKey: string | null = null;
   /**
    * Is somebody else paying the gas?
    *
@@ -1045,8 +1047,8 @@ async function main() {
         // 'swap' is the dominant and the SAFE default kind: it counts toward the
         // cap (unlike 'vault-withdraw', the only exempted kind), so a reconciled
         // op can only ever over-count spend, never under-count — the safe
-        // direction. Basis is deliberately not booked from a reconstructed
-        // receipt; P&L for this fill isn't attributable, only its spend is.
+        // direction.
+        const sym = o.acquired ? symbolOfToken(o.acquired.token as `0x${string}`) : null;
         const wrote = await addTrade({
           agent_id: agentId,
           kind: "swap",
@@ -1056,14 +1058,56 @@ async function main() {
           tx_hash: o.txHash,
           status: "landed",
           basis_source: "receipt",
+          // The legs, when the receipt named them without ambiguity. These were
+          // NULL on every reconciled row, so the position such a row opened had
+          // no token on its trade and no cost anywhere — see below.
+          ...(o.acquired
+            ? o.acquired.side === "buy"
+              ? { buy_token: o.acquired.token, sell_token: CASH.USDG }
+              : { sell_token: o.acquired.token, buy_token: CASH.USDG }
+            : {}),
         });
+        // AND THE COST, or the exits this owner armed cannot reach the position.
+        //
+        // This used to be skipped on purpose — "P&L for this fill isn't
+        // attributable, only its spend is" — and the reasoning was sound about
+        // P&L and silent about everything else. A held position with no basis is
+        // one BOTH mechanical exits refuse: the stop floor and the take-profit
+        // each `continue` on a null cost. So a worker restart between submitting
+        // an op and writing its row produced a position that could never be sold
+        // by rule, on a book whose owner could see their stop-loss armed on the
+        // screen. Measured in production: two positions, both uncoverable.
+        //
+        // It is not a fabrication. `acquired` is set only when the receipt named
+        // exactly one non-USDG leg with a cash leg pointing the other way — the
+        // same receipt, the same decode and the same `basis_source: "receipt"`
+        // the live path books from. Ambiguity stays null.
+        if (wrote && o.acquired && sym) {
+          await bookFill(
+            agentId,
+            "live",
+            {
+              side: o.acquired.side,
+              symbol: sym,
+              qtyRaw: o.acquired.qtyRaw,
+              cashUsdg: o.notionalUsdg6,
+              priceUsd: Number(o.notionalUsdg6) / 1e6 / (Number(o.acquired.qtyRaw) / 1e18),
+            },
+            "receipt",
+          );
+        }
         await addEvent(
           agentId,
           wrote ? "warn" : "err",
           wrote
             ? `reconciled a landed op the ledger had no row for (${o.userOpHash.slice(0, 10)}…, ` +
                 `${o.attributed ? `${fmt(o.notionalUsdg6)} USDG` : "notional unattributable"}) — ` +
-                `counted toward today's cap so a mid-op restart can't loosen it`
+                `counted toward today's cap so a mid-op restart can't loosen it` +
+                (o.acquired && sym
+                  ? `; cost basis for ${sym} booked from the receipt, so your stop-loss and take-profit can reach it`
+                  : o.acquired
+                    ? `; the token it moved is not one I watch, so it carries no cost basis and no rule can exit it`
+                    : `; the receipt named no single token leg, so it carries no cost basis and no rule can exit it`)
             : `found an unrecorded landed op (${o.userOpHash.slice(0, 10)}…) but could not write its ` +
                 `reconciliation row — spend for it stays uncounted; will retry next arm`,
         );
@@ -3309,14 +3353,19 @@ async function main() {
   }
 
   // Best-effort token → symbol for decision labels (unknown tokens → undefined).
-  const symbolOfToken = (addr?: string): string | undefined => {
+  //
+  // A HOISTED DECLARATION, not a const arrow, because it now has a caller
+  // 2,300 lines ABOVE it — the arm-time reconciler. A const in this scope
+  // compiles cleanly there and throws at runtime if the call order is ever not
+  // what it is today, which is the one failure TypeScript will not catch here.
+  function symbolOfToken(addr?: string): string | undefined {
     if (!addr) return undefined;
     const lc = addr.toLowerCase();
     return (
       watchTokens.find((t) => t.address.toLowerCase() === lc)?.symbol ??
       STOCK_TOKENS.find((t) => t.address.toLowerCase() === lc)?.symbol
     );
-  };
+  }
 
   /** Derive a decision's {action, symbol, size} from a typed intent — no model
    * text, just the structure, so deterministic strategies + chat are attributable. */
@@ -5598,6 +5647,38 @@ async function main() {
         await setBasis(agentId, "live", symbol, { qtyRaw: 0n, costUsdg: 0n });
         console.log(`[basis] ${symbol} no longer held on-chain — closing stranded basis (${fmt(stranded.costUsdg)} USDG cost)`);
         await addEvent(agentId, "warn", `closed leftover ${symbol} cost basis (${fmt(stranded.costUsdg)} USDG) — position is flat on-chain`);
+      }
+
+      // AND THE OPPOSITE GAP, WHICH NOBODY WAS SAYING OUT LOUD: a position on
+      // the books with no cost on record.
+      //
+      // Both mechanical exits refuse such a holding — the stop floor and the
+      // take-profit each skip what they cannot price against an entry — so the
+      // levels an owner armed are real, displayed, and unable to reach that
+      // position. Silently. It happens when a landed op is reconciled from the
+      // chain rather than written by the executor (a restart mid-op), and it is
+      // permanent until something books a basis.
+      //
+      // Once per change, like every other standing condition here: a line every
+      // tick is a line nobody reads.
+      const uncovered = [];
+      for (const p of positions) {
+        const b = await getBasis(agentId, "live", p.symbol).catch(() => null);
+        if (!b || b.costUsdg <= 0n) uncovered.push(p.symbol);
+      }
+      const uncoveredKey = uncovered.sort().join(",");
+      if (uncoveredKey !== lastUncoveredBasisKey) {
+        lastUncoveredBasisKey = uncoveredKey;
+        if (uncovered.length && (cfg.strategistStopLossBps > 0 || cfg.takeProfitBps > 0)) {
+          await addEvent(
+            agentId,
+            "warn",
+            `${uncovered.join(", ")} ${uncovered.length === 1 ? "has" : "have"} no entry price on record, so ` +
+              `the stop-loss and take-profit cannot act on ${uncovered.length === 1 ? "it" : "them"} — those rules ` +
+              `measure against what a position cost, and I do not know. Everything else still applies; I can be ` +
+              `told to sell, and the strategist can still choose to.`,
+          );
+        }
       }
     }
 
