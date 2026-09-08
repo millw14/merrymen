@@ -1,13 +1,7 @@
 
 /* Shared navigation and page presentation. */
-.terminal-host .desktop-explore-row { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-shrink:0; border-bottom:1px solid var(--line); }
-.terminal-host .desktop-explore-row .desktop-explore-tabs { margin:0; padding:0; border:0; gap:10px; }
-.terminal-host .desktop-explore-row .desktop-explore-tabs button,
-.terminal-host .desktop-explore-link { font-size:13px; white-space:nowrap; }
-.terminal-host .desktop-explore-link { display:flex; align-items:center; min-height:44px; color:var(--faint); text-decoration:none; }
-.terminal-host .desktop-explore-link:hover,
-.terminal-host .desktop-explore-link[aria-current="page"] { color:var(--tx); }
-.terminal-host .desktop-explore-link:focus-visible { outline:2px solid var(--tx); outline-offset:2px; }
+.terminal-host .desktop-explore-tabs { gap:10px; }
+.terminal-host .desktop-explore-tabs button { font-size:13px; white-space:nowrap; }
 .terminal-host .tabbar .tab { align-content: center; gap: 4px; min-width: 0; border-radius: 24px; }
 .terminal-host .tabbar .tab.on { background: var(--line); }
 @media (max-width: 1099px) {

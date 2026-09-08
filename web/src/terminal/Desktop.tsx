@@ -28,12 +28,15 @@ import {
 import { positionsOf } from "./account";
 import { BalanceFigure } from "./studio";
 import { strategyName } from "./strategy";
-import { tradeLine } from "./screens/Board";
+import { Feed } from "./screens/Feed";
+import { Board, tradeLine } from "./screens/Board";
 
-export type SidebarSection = "markets" | "agents";
+export type SidebarSection = "markets" | "agents" | "feed" | "board";
 const SECTIONS: { id: SidebarSection; label: string }[] = [
   { id: "markets", label: "Markets" },
   { id: "agents", label: "Agents" },
+  { id: "feed", label: "Feed" },
+  { id: "board", label: "Leaderboard" },
 ];
 
 type Actions = {
@@ -137,7 +140,6 @@ export function DesktopSidebar({
 
   return (
     <aside className="desktop-sidebar" aria-label="Explore">
-      <div className="desktop-explore-row">
       <div
         className="desktop-explore-tabs"
         role="tablist"
@@ -171,9 +173,6 @@ export function DesktopSidebar({
             {item.label}
           </button>
         ))}
-      </div>
-      <Link className="desktop-explore-link" href="/" aria-current={screen.kind === "tab" && screen.tab === "feed" ? "page" : undefined}>Feed</Link>
-      <Link className="desktop-explore-link" href="/leaderboard">Leaderboard</Link>
       </div>
       <section
         className="desktop-explore-panel"
@@ -321,6 +320,41 @@ export function DesktopSidebar({
               </button>
             ))}
         </div>
+      </section>
+      <section
+        className="desktop-explore-panel"
+        id="explore-panel-feed"
+        role="tabpanel"
+        aria-labelledby="explore-tab-feed"
+        hidden={section !== "feed"}
+      >
+        {section === "feed" && <Feed
+          compact
+          read={reads.theses}
+          theses={theses}
+          tokens={tokens}
+          agents={agents}
+          onToken={openToken}
+          onProfile={openProfile}
+          onDesk={() => onTab("agent")}
+        />}
+      </section>
+      <section
+        className="desktop-explore-panel"
+        id="explore-panel-board"
+        role="tabpanel"
+        aria-labelledby="explore-tab-board"
+        hidden={section !== "board"}
+      >
+        {section === "board" && <Board
+          compact
+          read={reads.board}
+          agents={agents}
+          theses={theses}
+          mine={mine}
+          onProfile={openProfile}
+          onDesk={() => onTab("agent")}
+        />}
       </section>
     </aside>
   );

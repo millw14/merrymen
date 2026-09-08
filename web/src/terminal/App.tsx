@@ -87,12 +87,7 @@ export function App() {
   const [sidebarSection, setSidebarSection] =
     useState<SidebarSection>("markets");
   const desktop = useSyncExternalStore(subscribeDesktop, desktopSnapshot, () => false);
-  // THE DESKTOP REWRITE IS GONE. It silently sent /feed and /leaderboard to Home
-  // above 1100px, so the URL said one thing and the body showed another. That
-  // was survivable while the feed was a side panel; with the feed as the centre
-  // tab it would mean the main button does nothing on desktop.
-  //
-  // AND SO IS `moneyMode`. Deposit and withdraw were component state, which
+  // Deposit and withdraw were component state, which
   // meant the browser's Back button could not dismiss them and the tab bar
   // disappeared while they were open — the most trapped a person could be in
   // this shell, on the two screens where money moves. They are routes now, so
@@ -106,7 +101,10 @@ export function App() {
   // one place the URL and the body legitimately differ, because the panel is an
   // overlay and the page under it did not go anywhere.
   const [tab, setTab] = useState<Tab>("feed");
-  const screen: Screen = desktop && money ? { kind: "tab", tab } : requestedScreen;
+  const centerScreen: Screen = desktop && money ? { kind: "tab", tab } : requestedScreen;
+  const screen: Screen = desktop && centerScreen.kind === "tab" && centerScreen.tab === "feed"
+    ? { kind: "tab", tab: "home" }
+    : centerScreen;
   const [tokenTab, setTokenTab] = useState<TokenTab>("buys");
   const perTrade = String(account?.status.grant?.caps.perTradeUsdg ?? "");
   const perDay = String(account?.status.grant?.caps.dailyUsdg ?? "");
@@ -228,6 +226,10 @@ export function App() {
     setScreen(next);
   };
   const goTab = (next: Tab) => {
+    if (desktop && next === "feed") {
+      setSidebarSection("feed");
+      return;
+    }
     setTab(next);
     setScreen({ kind: "tab", tab: next });
   };
@@ -255,6 +257,9 @@ export function App() {
     return()=>{alive=false;};
   },[profileSlug]);
   useEffect(()=>{if(pathname==="/agent" || pathname==="/chat")setSidebarSection("agents");},[pathname]);
+  useEffect(() => {
+    if (desktop && (pathname === "/" || pathname === "/feed")) setSidebarSection("feed");
+  }, [desktop, pathname]);
   const agent=profile ?? listedAgent;
   const mine = account?.status.exists && live.mine ? {...live.mine, statusLabel: account.status.mode === "paper" ? "Paper trading" : account.status.mode === "live" ? "Running" : account.status.mode === "idle" ? "Idle" : "Offline"} : null;
   // THE SHELL FOR A VISITOR WITH NO AGENT — and every figure on it is unknown,
