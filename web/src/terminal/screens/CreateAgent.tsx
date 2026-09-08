@@ -14,7 +14,7 @@ const STRATEGIES = [
   {id:"steady-basket",name:"Steady basket",description:"Buy a little of your selected stocks on a schedule."},
   {id:"even-keel",name:"Even keel",description:"Keep the stocks in your basket evenly weighted."},
   {id:"dip-hunter",name:"Dip hunter",description:"Look for pullbacks in the stocks you follow."},
-  {id:"llm-strategist",name:"Strategist",description:"Let your configured AI assess the market and explain its decisions."},
+  {id:"llm-strategist",name:"Strategist",description:"Assess the market with AI and follow its reasoning."},
 ];
 const EXAMPLES:Record<string,string>={
   "steady-basket":"For example, buy small amounts of your selected stocks over time instead of buying everything at once.",

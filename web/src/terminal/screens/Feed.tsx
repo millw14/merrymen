@@ -30,8 +30,7 @@ const PILLS: { id: Pill; label: string }[] = [
   { id: "all", label: "All" },
   { id: "trades", label: "Trades" },
   { id: "theses", label: "Theses" },
-  { id: "debate", label: "Debate" },
-  { id: "top", label: "Top" },
+  { id: "debate", label: "Debates" },
 ];
 
 export function Feed({
@@ -55,11 +54,12 @@ export function Feed({
   onDesk: () => void;
 }) {
   const [pill, setPill] = useState<Pill>("all");
+  const [sort, setSort] = useState("latest");
   const likes = useLikes();
   const counts = likes?.counts;
 
   // A PILL THAT CANNOT FILL IS NOT SHOWN. Top exists only where likes do.
-  const pills = likes ? PILLS : PILLS.filter((p) => p.id !== "top");
+  const pills = PILLS;
   // And a reader who selected it before the answer arrived is not left staring
   // at a filter that no longer exists.
   const active: Pill = pills.some((p) => p.id === pill) ? pill : "all";
@@ -68,14 +68,14 @@ export function Feed({
   const replies = useMemo(() => repliesIn(beats), [beats]);
   const shown = useMemo(() => {
     const kept = beats.filter((b) => keepBeat(b, active, replies, counts ?? {}));
-    if (active !== "top") return kept;
+    if (!likes || sort !== "liked") return kept;
     // MOST LIKED FIRST, then newest — a stable second key so equal counts do
     // not shuffle under the reader on every poll. Sorted in a COPY: `beats` is
     // memoised and shared with the other pills.
     return [...kept].sort(
       (a, b) => (counts?.[b.postId!] ?? 0) - (counts?.[a.postId!] ?? 0) || b.at - a.at,
     );
-  }, [beats, active, replies, counts]);
+  }, [beats, active, replies, counts, likes, sort]);
   const lanes = useMemo(() => lanesOf(shown), [shown]);
 
   return (
@@ -84,13 +84,12 @@ export function Feed({
         {compact ? <h2>Latest activity</h2> : <h1 className="top-title">Feed</h1>}
       </header>
 
-      <div className="feed-pills" role="tablist" aria-label="Filter the feed">
+      <div className="feed-views" role="group" aria-label="Filter the feed">
         {pills.map((p) => (
           <button
             key={p.id}
             type="button"
-            role="tab"
-            aria-selected={active === p.id}
+            aria-pressed={active === p.id}
             className={active === p.id ? "on" : ""}
             onClick={() => setPill(p.id)}
           >
@@ -98,7 +97,8 @@ export function Feed({
           </button>
         ))}
       </div>
-
+      {likes && <div className="feed-sort-row"><label className="feed-sort"><span className="sr-only">Sort posts</span><select aria-label="Sort posts" value={sort} onChange={event=>setSort(event.target.value)}><option value="latest">Latest</option><option value="liked">Most liked</option></select></label></div>}
+      {sort === "liked" && likes && !likes.read && <p role="status">Likes unavailable.</p>}
       {shown.length === 0 ? (
         active !== "all" ? (
           // FILTERED-EMPTY IS NOT QUIET. The read succeeded and the rows are
@@ -106,15 +106,6 @@ export function Feed({
           // would blame the agents for the reader's own filter.
           <Empty
             title={emptyFor(active, likes?.read ?? false)}
-            note={
-              // "Nobody has liked anything" is a claim about the posts. "We
-              // could not read the likes" is a claim about us, and rendering
-              // the second as the first is the one thing this codebase refuses
-              // everywhere else.
-              active === "top" && likes && !likes.read
-                ? "The like counts did not come back, so there is nothing to rank by. That is a gap on our side."
-                : undefined
-            }
             action={{ label: "Show everything", onClick: () => setPill("all") }}
           />
         ) : (

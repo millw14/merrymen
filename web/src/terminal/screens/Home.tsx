@@ -1,14 +1,13 @@
-import { PerformanceChart } from "../DitherChart";
 import { Board } from "./Board";
-import { useMemo } from "react";
-import { curveReturn } from "../beat";
+import { PerformanceChart } from "../DitherChart";
+import { useState } from "react";
+import { Search } from "lucide-react";
 import {
   coinPrice,
   quoteTitle,
   money,
   pctBps,
   pctPts,
-  sizeOf,
   type LiveAgent,
   type LiveMine,
   type LiveToken,
@@ -16,9 +15,7 @@ import {
   type TokenTab,
   deltaClass,
 } from "../live";
-import { Coin, Face, NameBlock, Pill, TopBar } from "../ui";
-
-const WEEK = 8;
+import { Coin, Face, NameBlock, Pill } from "../ui";
 
 export function Home({
   tokens,
@@ -51,6 +48,7 @@ export function Home({
   // A count we do not have sorts last and filters out — it is not a zero, but
   // it is also not evidence that anybody bought anything, so an unread row does
   // not get to sit at the top of "most bought".
+  const [showAll, setShowAll] = useState(false);
   const count = (n: number | null) => n ?? 0;
   /**
    * COINS ABOVE STOCKS, everywhere this screen ranks anything.
@@ -97,14 +95,15 @@ export function Home({
           .sort((a, b) => coinFirst(a, b) || (b.change24hPct ?? 0) - (a.change24hPct ?? 0))
           .slice(0, 8);
 
+  const visibleTokens = showAll ? shown : shown.slice(0, 8);
   const eq = mine?.equity ?? null;
   const chg = mine?.chg24 ?? null;
   const [whole, frac] = money(eq).replace("$", "").split(".");
 
   return (
-    <>
-      <header className="top">
-        <TopBar onSearch={onSearch} onDeposit={onDeposit} />
+    <div className="home-page">
+      <header className="top home-overview">
+        <div className="home-heading"><h1 className="top-title">Home</h1></div>
 
         {mine ? (
           <button type="button" className="hero" onClick={onDesk}>
@@ -112,12 +111,11 @@ export function Home({
               <Face name={mine.name} slug={mine.slug} />
               <NameBlock title={mine.name} owner={mine.owner ?? "you"} />
             </div>
-            {eq !== null && (
+            <span className="home-balance-label">Portfolio balance</span>
               <div className="balance">
-                ${whole}
+                {eq === null ? "—" : `$${whole}`}
                 {frac !== undefined && <sup>.{frac}</sup>}
               </div>
-            )}
             {chg !== null && (
               <p className={`chg-24 ${chg < 0 ? "down" : "up"}`}>
                 {chg < 0 ? "−" : "+"}${Math.abs(chg).toFixed(2)} today
@@ -126,12 +124,10 @@ export function Home({
           </button>
         ) : (
           <div className="hero empty">
-            <h1>This one trades.</h1>
-            <button type="button" className="fund solid" onClick={onDeposit}>
-              Fund an agent
-            </button>
+            <h2>This one trades.</h2>
           </div>
         )}
+        <button type="button" className="home-deposit" onClick={onDeposit}>{mine ? "Deposit" : "Set up your agent"}<span aria-hidden="true">↗</span></button>
         {mine && (
           <PerformanceChart
             balance values={mine.history ?? []}
@@ -155,21 +151,22 @@ export function Home({
         exists to catch.
       */}
       <Board
-        compact
+        preview
         read={read}
         agents={agents}
         theses={theses}
         mine={mine}
         onProfile={onAgent}
-        onDesk={onDesk}
+        onDesk={onDeposit}
       />
 
-      <section>
+      <section className="home-markets">
+        <div className="home-market-heading"><h2 className="week-label">Market activity</h2><button type="button" className="icon-btn" aria-label="Search tokens or agents" onClick={onSearch}><Search size={22}/></button></div>
         <div className="pills">
-          <Pill on={tokenTab === "buys"} onClick={() => onTokenTab("buys")}>
+          <Pill on={tokenTab === "buys"} onClick={() => {setShowAll(false);onTokenTab("buys");}}>
             Buying
           </Pill>
-          <Pill on={tokenTab === "held"} onClick={() => onTokenTab("held")}>
+          <Pill on={tokenTab === "held"} onClick={() => {setShowAll(false);onTokenTab("held");}}>
             Held
           </Pill>
         </div>
@@ -185,7 +182,7 @@ export function Home({
               </tr>
             </thead>
             <tbody>
-              {shown.map((t) => (
+              {visibleTokens.map((t) => (
                 <tr key={t.id}>
                   <td>
                     <button
@@ -222,7 +219,7 @@ export function Home({
           </table>
         </div>
         <div className="home-mobile-market">
-          {shown.map((t) => {
+          {visibleTokens.map((t) => {
             const chgPct = t.change24hPct;
             const who = t.cast.slice(0, 3);
             return (
@@ -268,7 +265,8 @@ export function Home({
             );
           })}
         </div>
+        {shown.length > 8 && <button className="home-show-more" onClick={()=>setShowAll(value=>!value)}>{showAll ? "Show fewer tokens" : `Show all ${shown.length} tokens`}</button>}
       </section>
-    </>
+    </div>
   );
 }

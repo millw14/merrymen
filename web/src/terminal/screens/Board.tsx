@@ -28,6 +28,7 @@ interface Row {
 
 export function Board({
   compact = false,
+  preview = false,
   agents,
   theses,
   mine,
@@ -36,6 +37,7 @@ export function Board({
   read = "ok",
 }: {
   compact?: boolean;
+  preview?: boolean;
   /** Whether the leaderboard read happened at all — see ReadEmpty. */
   read?: ReadState;
   agents: LiveAgent[];
@@ -45,6 +47,7 @@ export function Board({
   onDesk: () => void;
 }) {
   const [win, setWin] = useState<WindowId>("ALL");
+  const [showAll, setShowAll] = useState(false);
   const rows = useMemo(
     () => rank(agents, theses, mine, win),
     [agents, theses, mine, win],
@@ -53,10 +56,11 @@ export function Board({
   const mineSlug = mine?.slug;
 
   return (
-    <div className="page board-page">
+    <div className={`page board-page${preview ? " board-preview" : ""}`}>
       <header className="board-head">
-        {compact ? <h2>Return</h2> : <h1 className="top-title">Leaderboard</h1>}
-        {rows.length > 0 && (
+        {preview ? <h2>Leaderboard</h2> : compact ? <h2>Return</h2> : <h1 className="top-title">Leaderboard</h1>}
+        {preview && rows.length > 5 && <button onClick={()=>setShowAll(value=>!value)}>{showAll ? "Show fewer" : "View all"}</button>}
+        {!preview && rows.length > 0 && (
           <div className="wins">
             {WINDOWS.map((w) => (
               <button
@@ -71,13 +75,13 @@ export function Board({
           </div>
         )}
       </header>
-      <details className="ranking-help"><summary>How returns are measured</summary><p>No deposit means no capital to measure a return against. No completed trades means no return to measure. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
 
       {rows.length === 0 ? (
         <ReadEmpty
+          kind="board" compact={preview}
           state={read}
           title="Nobody has traded yet."
-          action={{ label: "Fund an agent", onClick: onDesk }}
+          action={preview ? undefined : { label: "Fund an agent", onClick: onDesk }}
         />
       ) : (
         <div className="board">
@@ -88,7 +92,7 @@ export function Board({
             <span>Capital</span>
             <span>Return</span>
           </div>
-          {rows.map((r) => (
+          {(preview && !showAll ? rows.slice(0,5) : rows).map((r) => (
             <Rank
               key={r.agent.slug}
               row={r}

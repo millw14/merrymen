@@ -339,9 +339,7 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
           {ctx && !ctx.hasStoredKey && !plan && (
             <>
               <p className="recover-sub">
-                {clientSide
-                  ? "Withdrawing happens right here in your browser — your owner key never leaves this device. It signs the withdrawal locally; this site only relays it to the network."
-                  : "No active agent on this machine, so paste the owner key you backed up when you created the wallet. It stays on your machine — it is used once to sign the sweep."}
+                Enter the recovery key you saved when creating this wallet.
               </p>
               <input
                 className="recover-input mono"

@@ -54,8 +54,8 @@ export const runtime = "nodejs";
 /** Per-caller. Never cacheable — the answer depends on who is asking. */
 export const dynamic = "force-dynamic";
 
-/** The lowest tier that is not the non-holder baseline: what the lock asks for. */
-const ENTRY_TIER = CIRCLE_TIERS.find((t) => t.id === "villager")!;
+/** Alpha requires the 100,000-token Merryman tier. */
+const ENTRY_TIER = CIRCLE_TIERS.find((t) => t.id === "merryman")!;
 
 /**
  * A balance moves when somebody trades the token; a tier moves when it crosses
@@ -184,6 +184,6 @@ export async function GET(req: Request) {
   }
 
   const tier = tierForBalance(raw);
-  if (tier.id === "outsider") return locked("balance", counts);
+  if (tier.minTokens < ENTRY_TIER.minTokens) return locked("balance", counts);
   return open(payload, alpha, tier);
 }
