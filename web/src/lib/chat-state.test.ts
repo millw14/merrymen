@@ -121,3 +121,43 @@ describe("the surfaces that feed it", () => {
     assert.ok(!src.includes("body.state.slice(0, 6000)"), "no prefix clamp may return");
   });
 });
+
+describe("the agent is told what it holds", () => {
+  it("POSITIONS ARE POSITIONS, NOT THE STRATEGY GLANCE", async () => {
+    // An owner asked their agent what NVDA and QQQ had cost and when it would
+    // sell, and it answered that it held nothing but cash — while the panel
+    // beside the chat listed both. It was not hallucinating. `positions` in the
+    // payload was `mine.glance`, a strategy descriptor whose `legs` are
+    // percentage weights, sent under the one key the system prompt names.
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../terminal/screens/Agent.tsx", import.meta.url), "utf8");
+    assert.ok(!src.includes("positions:mine.glance"), "the glance must not be sent as holdings");
+    assert.match(src, /positions:\(mine\.positions \?\? \[\]\)\.map/);
+  });
+
+  it("AND WITH WHAT THEY COST, or the sell question cannot be answered", async () => {
+    // "Should I take this profit" is unanswerable from a value alone. Cost and
+    // unrealised percentage travel on each holding.
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../terminal/screens/Agent.tsx", import.meta.url), "utf8");
+    assert.match(src, /costUsd:p\.costUsd/);
+    assert.match(src, /unrealisedPct/);
+    // NULL, never 0. Zero says the position was free, which is the accounting
+    // bug this repo is downstream of, handed to a model in a chat reply.
+    const live = readFileSync(new URL("../terminal/live.ts", import.meta.url), "utf8");
+    assert.match(live, /costUsd = c === null \|\| !Number\.isFinite\(c\) \|\| c <= 0 \? null : c/);
+  });
+
+  it("and the levels that sell without asking it", async () => {
+    // "What would make you get out" has a mechanical answer — a stop and a
+    // take-profit that fire on a tick, not on a view. NULL means unarmed, which
+    // is a different sentence from a level of zero, and the prompt says so.
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../terminal/screens/Agent.tsx", import.meta.url), "utf8");
+    assert.match(src, /stopLossBps:num\("strategistStopLossBps"\)/);
+    assert.match(src, /takeProfitBps:num\("takeProfitBps"\)/);
+    const prompt = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
+    assert.match(prompt, /WHEN YOU WOULD GET OUT/);
+    assert.match(prompt, /NULL means that rule is not armed at all/);
+  });
+});

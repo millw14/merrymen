@@ -181,7 +181,7 @@ export interface ChainHolder {
 export interface LiveMine {
   statusLabel?: string;
   history?: number[];
-  positions?: {symbol:string;valueUsd:number;stale:boolean}[];
+  positions?: {symbol:string;valueUsd:number;stale:boolean;costUsd:number|null;pnlPct:number|null}[];
   name: string;
   slug: string | null;
   handle: string | null;
@@ -723,7 +723,20 @@ function mineOf(feed: Feed | null, theses: Thesis[]): LiveMine | null {
     owner: "you",
     equity: latest,
     history: curve,
-    positions: (feed.positions ?? []).map(p=>({symbol:p.symbol,valueUsd:p.value_usdg,stale:!!p.price_stale})),
+    // `costUsd` is NULL when the ledger has no basis, never 0 — the difference
+    // between "I do not know what this cost" and "it was free", which is the
+    // whole of whether the agent can answer a question about taking a profit.
+    positions: (feed.positions ?? []).map(p=>{
+      const c = p.cost_usdg === null || p.cost_usdg === undefined ? null : Number(p.cost_usdg);
+      const costUsd = c === null || !Number.isFinite(c) || c <= 0 ? null : c;
+      return {
+        symbol:p.symbol,
+        valueUsd:p.value_usdg,
+        stale:!!p.price_stale,
+        costUsd,
+        pnlPct: costUsd === null ? null : ((p.value_usdg - costUsd) / costUsd) * 100,
+      };
+    }),
     chg24: latest !== null && dayAgo !== null ? latest - dayAgo : null,
     mode,
     thesis: mineTheses[0]?.reason ?? null,
@@ -940,5 +953,5 @@ interface Feed {
     created_at: string;
   }[];
   equity?: { equity_usdg: number; cash_usdg?: number; vault_usdg?: number; at?: string }[];
-  positions?: {symbol:string; value_usdg:number; price_stale?:number}[];
+  positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:string|number|null}[];
 }

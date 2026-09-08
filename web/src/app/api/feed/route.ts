@@ -61,6 +61,18 @@ export interface PositionRow {
    */
   price_source: string;
   value_usdg: number;
+  /**
+   * What this holding cost, USDG. NULL when the ledger has no basis for it —
+   * never 0, which would say the position was free and make every mark look
+   * like pure profit.
+   *
+   * A string on the wire because `cost_basis.cost_usdg` is stored as a decimal
+   * string; the browser parses it. It is here because the chat sends positions
+   * to the model, and an agent asked "what did NVDA cost you" with no basis on
+   * the row can only say it does not know — which is what one did, while the
+   * panel beside it listed the position.
+   */
+  cost_usdg?: string | number | null;
 }
 export interface TradeRecord {
   kind: string;
@@ -245,6 +257,8 @@ export async function GET(req: Request) {
     if (!db) return NextResponse.json(await emptyFeed(tenant));
     let events: FeedEvent[] = [];
     let equity: EquityPoint[] = [];
+    /** "paper" | "live" | null — the book the newest equity mark belongs to. */
+    let bookMode: string | null = null;
     let positions: PositionRow[] = [];
     let trades: TradeRecord[] = [];
     let financials: AgentFinancials | null = null;
@@ -355,6 +369,10 @@ export async function GET(req: Request) {
       // practised and then went live had a curve that stepped between two
       // different books, and `chg24` read the step as a day's performance. An
       // owner was shown "−$950.17 today" for a book down 2.7 cents.
+      // WHICH BOOK THE WORKER ACTUALLY RAN, from the mark it wrote — not from
+      // what settings say it should be doing. The two disagree for a tick after
+      // an owner flips the switch, and the cost basis below is keyed on it.
+      bookMode = rows.length ? (rows[rows.length - 1]!.mode ?? null) : null;
       equity = sameBookAsLatest(rows).map((r) => ({
         cash_usdg: r.cash_usdg,
         vault_usdg: r.vault_usdg,
@@ -365,13 +383,29 @@ export async function GET(req: Request) {
       /* table not created yet */
     }
     try {
+      // WHAT EACH HOLDING COST, joined here because the owner's own agent could
+      // not answer for it. Asked "what did NVDA cost you and when will you
+      // sell", it replied that it held nothing but cash — while the panel beside
+      // the chat listed NVDA and QQQ. The chat sends this payload, and a
+      // position with no basis on it cannot answer either half of that question.
+      //
+      // LEFT JOIN and NULL-tolerant: a holding with no basis on record is a fact
+      // ("I do not know what this cost"), and 0 would say it was free.
+      // `cost_basis` is keyed by BOOK — a paper cost must never price a funded
+      // position — so the mode comes from the newest equity mark, which is the
+      // book the worker actually ran.
       positions = (await db
         .prepare(
-          `SELECT symbol, raw_balance, ui_multiplier, price_usd, price_stale,
-                  price_source, value_usdg
-           FROM positions WHERE agent_id = ? ORDER BY value_usdg DESC`,
+          `SELECT p.symbol AS symbol, p.raw_balance AS raw_balance, p.ui_multiplier AS ui_multiplier,
+                  p.price_usd AS price_usd, p.price_stale AS price_stale,
+                  p.price_source AS price_source, p.value_usdg AS value_usdg,
+                  b.cost_usdg AS cost_usdg
+             FROM positions p
+             LEFT JOIN cost_basis b
+               ON b.agent_id = p.agent_id AND b.symbol = p.symbol AND b.mode = ?
+            WHERE p.agent_id = ? ORDER BY p.value_usdg DESC`,
         )
-        .all(scope)) as unknown as PositionRow[];
+        .all(bookMode === "paper" ? "paper" : "live", scope)) as unknown as PositionRow[];
     } catch {
       // price_source arrives with a worker migration. The dashboard can be
       // running against a database the upgraded worker hasn't opened yet, and

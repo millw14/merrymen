@@ -186,7 +186,29 @@ export function Agent({
     follow.current = true;
     try {
       const settings = await fetch("/api/settings", {signal:AbortSignal.timeout(5000)}).then(r=>r.ok?r.json():null).catch(()=>null);
-      const response = await fetch("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},signal:AbortSignal.timeout(45000),body:JSON.stringify({message:question.trim(),state:JSON.stringify({name:mine.name,equity:mine.equity,strategy:settings?.values?.strategy ?? settings?.defaults?.strategy ?? mine.glance.id,paperTradingEnabled:settings?.values?.paperTradingEnabled ?? settings?.defaults?.paperTradingEnabled ?? null,workerStatus:mine.statusLabel ?? "Unknown",positions:mine.glance,moves:tapeFor(mine.moves),movesShown:Math.min(mine.moves.length,TAPE_SHOWN),movesTotal:mine.moves.length,perTrade,perDay,stopped}),history:turns.flatMap(t=>[{role:"user",content:t.question},{role:"assistant",content:t.answer}]).slice(-8)})});
+      // WHAT IT ACTUALLY HOLDS, under the key the system prompt names.
+      //
+      // `positions` used to be `mine.glance` — a STRATEGY descriptor whose
+      // `legs` are percentage weights. So an owner asked their agent what NVDA
+      // and QQQ had cost and when it would sell, and it answered that it held
+      // nothing but cash, while the panel eighteen inches to its right listed
+      // both. It was not hallucinating; it was reading the payload it was given.
+      //
+      // Cost and P&L travel with each holding, because "should I take this
+      // profit" cannot be answered from a value alone. NULL, never 0, when the
+      // ledger has no basis — the difference between not knowing what something
+      // cost and believing it was free.
+      const sizeOf = (settings?.values ?? {}) as Record<string, unknown>;
+      const num = (k: string) => {
+        const v = sizeOf[k] ?? (settings?.defaults as Record<string, unknown> | undefined)?.[k];
+        return typeof v === "number" ? v : null;
+      };
+      const response = await fetch("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},signal:AbortSignal.timeout(45000),body:JSON.stringify({message:question.trim(),state:JSON.stringify({name:mine.name,equity:mine.equity,strategy:settings?.values?.strategy ?? settings?.defaults?.strategy ?? mine.glance.id,paperTradingEnabled:settings?.values?.paperTradingEnabled ?? settings?.defaults?.paperTradingEnabled ?? null,workerStatus:mine.statusLabel ?? "Unknown",positions:(mine.positions ?? []).map(p=>({symbol:p.symbol,valueUsd:p.valueUsd,costUsd:p.costUsd,unrealisedPct:p.pnlPct===null?null:Math.round(p.pnlPct*10)/10,priceStale:p.stale})),cashUsd:mine.glance.cashUsd ?? null,vaultUsd:mine.glance.vaultUsd ?? null,
+        // The two rules that answer "what would make you get out" — the levels
+        // that sell WITHOUT asking the model. Null means none is armed, which
+        // is a different answer from a level at zero.
+        stopLossBps:num("strategistStopLossBps"),takeProfitBps:num("takeProfitBps"),
+        moves:tapeFor(mine.moves),movesShown:Math.min(mine.moves.length,TAPE_SHOWN),movesTotal:mine.moves.length,perTrade,perDay,stopped}),history:turns.flatMap(t=>[{role:"user",content:t.question},{role:"assistant",content:t.answer}]).slice(-8)})});
       const data = await response.json();
       if(!response.ok || !data.reply) throw new Error(response.status===401 ? "Sign in again to chat with your agent." : data.why === "no-llm" ? "Chat is not configured yet. Open Settings to connect an AI provider." : "Your agent could not reply. Try sending again.");
       onTurn({question:question.trim(),answer:data.reply});
