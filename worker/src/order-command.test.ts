@@ -189,3 +189,41 @@ describe("a verdict, not a sentence somebody reads a verdict out of", () => {
     assert.match(CODE, /submitChatTrade\(side, symbol, usdg\)\.then\(\(r\) => r\.line\)/);
   });
 });
+
+describe("an unreadable market answers the order instead of starving it", () => {
+  it("THE DRAIN RUNS ON A TICK THAT COULD NOT READ THE MARKET", () => {
+    // The market-unreadable return sits a THOUSAND LINES above the normal
+    // drain, so a queued order was not delayed by such a tick — it was skipped
+    // entirely, and with the fleet rate-limited it was skipped on every tick
+    // until it expired. The owner then got "never ran" eight minutes later,
+    // about a problem that had nothing to do with their order. Watched exactly
+    // that in production: "the market could not be read this tick (49 read(s)
+    // failed)", four ticks running, over a queued buy.
+    const at = CODE.indexOf("the market could not be read this tick");
+    assert.ok(at > 0);
+    const branch = CODE.slice(at, CODE.indexOf("return;", at) + 8);
+    assert.match(branch, /runQueuedCommand\(active\.agentId, true\)/);
+    // And it is still ahead of the normal drain, which stays where it was.
+    assert.ok(CODE.indexOf("runQueuedCommand(active.agentId, true)") < CODE.indexOf("void runQueuedCommand(active.agentId)"));
+  });
+
+  it("AND A TRADE IS REFUSED BY NAME, never filled on stale data", () => {
+    // The equity snapshot behind the drawdown breaker is precisely what could
+    // not be read, and checkPolicy SKIPS the breaker when equity is unknown —
+    // so filling here would place a trade with that guard silently off.
+    assert.match(ORDER, /if \(marketUnreadable\) \{/);
+    assert.match(ORDER, /I could not read the market this tick, so I did not place it/);
+    // Checked before anything is sized, and before the pause gate.
+    const unread = ORDER.indexOf("if (marketUnreadable)");
+    assert.ok(unread > 0 && unread < ORDER.indexOf("isPaused()"), "the earliest gate in the order path");
+    assert.ok(unread < ORDER.indexOf("submitChatTrade("));
+  });
+
+  it("but the PROBE still runs, because it needs no market data at all", () => {
+    // A pipeline probe proves the wall, the bundler and the paymaster. None of
+    // that depends on a price, so an unreadable tick is no reason to refuse it.
+    // The probe arm takes no flag; only the trade arm does.
+    assert.match(RUN, /if \(cmd\.kind === "selftest"\) return runSelftestProbe\("dashboard"\);/);
+    assert.match(RUN, /if \(cmd\.kind === "trade"\) return runOrderCommand\(cmd, marketUnreadable\);/);
+  });
+});

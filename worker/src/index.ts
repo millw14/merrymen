@@ -2322,7 +2322,7 @@ async function main() {
    * evidence, not three UserOps racing the same nonce.
    */
   let commandInFlight = false;
-  async function runQueuedCommand(agentId: string): Promise<void> {
+  async function runQueuedCommand(agentId: string, marketUnreadable = false): Promise<void> {
     if (commandInFlight || !active) return;
     commandInFlight = true;
     try {
@@ -2342,7 +2342,7 @@ async function main() {
       // The unlink above WAS the claim, so from here the command is ours and
       // will not be replayed — a lost probe is a button pressed again, a
       // replayed one is gas nobody asked to spend twice.
-      const outcome = await runCommand(cmd);
+      const outcome = await runCommand(cmd, marketUnreadable);
       writeCommandResult(merrymenHome(), { id: cmd.id, ok: outcome.ok, line: outcome.line, at: Date.now() });
       // LABELLED BY WHAT IT WAS. Every result used to be written into the
       // owner's event feed as `selftest: …` regardless of kind, which for an
@@ -2369,7 +2369,7 @@ async function main() {
    * An unknown kind is RECORDED, never run: a typo must not look identical to
    * a queue that is not being drained.
    */
-  async function runCommand(cmd: FileCommand): Promise<{ ok: boolean; line: string }> {
+  async function runCommand(cmd: FileCommand, marketUnreadable = false): Promise<{ ok: boolean; line: string }> {
     // ── an order that waited too long is not the order that was placed ──
     //
     // Checked before anything else, and checked even for a kind that has no
@@ -2385,7 +2385,7 @@ async function main() {
       };
     }
     if (cmd.kind === "selftest") return runSelftestProbe("dashboard");
-    if (cmd.kind === "trade") return runOrderCommand(cmd);
+    if (cmd.kind === "trade") return runOrderCommand(cmd, marketUnreadable);
     return { ok: false, line: `unknown command '${cmd.kind}'` };
   }
 
@@ -2406,7 +2406,30 @@ async function main() {
    * produce. So the gate is per kind, which is why it sits in this function and
    * not in the caller.
    */
-  async function runOrderCommand(cmd: FileCommand): Promise<{ ok: boolean; line: string }> {
+  async function runOrderCommand(cmd: FileCommand, marketUnreadable = false): Promise<{ ok: boolean; line: string }> {
+    // ANSWERED, NOT STARVED.
+    //
+    // The tick returns early when the market could not be read, and that return
+    // sits a thousand lines above the command drain — so an owner's explicit
+    // order was skipped entirely on such a tick, and with the fleet
+    // rate-limited, on every tick after it until the order expired. Watched
+    // exactly that: "the market could not be read this tick (49 read(s)
+    // failed)", four ticks running, while a queued buy waited to be told
+    // anything at all and was eventually swept as "never ran".
+    //
+    // REFUSED HERE RATHER THAN FILLED. The equity snapshot behind the drawdown
+    // breaker is precisely what could not be read, and checkPolicy SKIPS the
+    // breaker when equity is unknown — so running the order on this tick would
+    // place a trade with that guard silently switched off. A prompt no is worth
+    // more than a late yes, and the owner can ask again in a minute.
+    if (marketUnreadable) {
+      return {
+        ok: false,
+        line:
+          "I could not read the market this tick, so I did not place it — that is a fact about my reads, " +
+          "not about your order. Ask again in a minute.",
+      };
+    }
     if (isPaused()) {
       return { ok: false, line: "you have me paused, so I did not place it. Un-pause and ask again." };
     }
@@ -5191,6 +5214,19 @@ async function main() {
             `This says nothing about prices or liquidity; it retries on the next tick.`,
         );
       }
+      // AN OWNER WHO ASKED FOR SOMETHING IS STILL OWED AN ANSWER.
+      //
+      // This return is a thousand lines above the command drain, so a queued
+      // order was not merely delayed by an unreadable tick — it was skipped,
+      // and with the fleet rate-limited it was skipped on every tick until it
+      // expired. The owner then got "never ran" eight minutes later, about a
+      // problem that had nothing to do with their order.
+      //
+      // Drained here with the reason attached: the probe still runs (it needs
+      // no market data at all), and a trade is refused BY NAME rather than
+      // filled — see runOrderCommand for why filling it would switch the
+      // drawdown breaker off.
+      if (active) await runQueuedCommand(active.agentId, true).catch(() => {});
       return;
     }
 
