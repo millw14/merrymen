@@ -170,6 +170,10 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   // here — so it was unreachable from the app and could only ever have been set
   // by an env var nobody has. Same failure `maxImpactBps` records two lines up.
   takeProfitBps: [0, 1_000_000],
+  // The strategist floor. 0 is off and the default; 10_000 bps is 100%, which
+  // is also off. A tight floor on a small ticket pays the chain to churn — gas
+  // is 0.44-0.78 USDG a leg, so a 10 USDG round trip is 9-16% of notional.
+  strategistStopLossBps: [0, 10_000],
   idleFloorUsdg: [0, 1_000_000],
   gapEnterBudgetUsdg: [1, 1_000_000],
   paperStartUsdg: [1, 10_000_000],

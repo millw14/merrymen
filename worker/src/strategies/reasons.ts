@@ -118,6 +118,16 @@ export type Why =
    */
   | { code: "take-profit"; symbol: string; gainBps: number; usdgRaw: bigint; costRaw: bigint }
   /**
+   * THE MACHINE CUT IT, not the model.
+   *
+   * A floor sell and a model sell are the same row in the tape, and an owner
+   * needs to be able to tell them apart: one means a rule fired, the other
+   * means a reasoner decided. Every figure here is COMPUTED — the loss, what it
+   * cost, what it is worth — so the feed never carries a model's own account of
+   * why it sold as though it were the mechanism's.
+   */
+  | { code: "stop-floor"; symbol: string; lossBps: number; usdgRaw: bigint; costRaw: bigint }
+  /**
    * THE MODEL LOOKED AND CHOSE TO HOLD.
    *
    * The LLM strategist returns a bare intent list, so a window where it decided
@@ -197,6 +207,11 @@ export function renderWhy(w: Why): string {
         (w.vaultRaw > 0n
           ? `. There is ${usdg(w.vaultRaw)} USDG in the vault I can pull back, so this should clear itself`
           : `, and the vault is empty. Add funds or lower the size per trade`)
+      );
+    case "stop-floor":
+      return (
+        `${w.symbol} is ${pct(w.lossBps)}% below what it cost — selling all ${usdg(w.usdgRaw)} USDG of it ` +
+        `against the ${usdg(w.costRaw)} paid. A floor, not a view: the rule fired, I did not change my mind`
       );
     case "take-profit":
       return (

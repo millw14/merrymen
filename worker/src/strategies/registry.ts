@@ -55,6 +55,7 @@ export interface StrategyBuildOpts {
    * (tests, fixtures) falls back to the shipped registry, i.e. old behaviour.
    */
   universe?: readonly StockToken[];
+  strategistStopLossBps?: number;
   takeProfitBps?: number;
   buyPerTickUsdg: number;
   idleFloorUsdg: number;
@@ -205,6 +206,8 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
       // The curve venue, re-read per decision. Undefined when the host does
       // not supply one, which keeps every existing strategy identical.
       curveLegsNow: opts.curveLegsNow,
+      // The mechanical floor. 0 = off, which is the shipped default.
+      stopLossBps: opts.strategistStopLossBps ?? 0,
       decisionIntervalMs: opts.llm.intervalMin * 60_000,
       onNote: opts.onNote,
       onDecision: opts.llm.onDecision,

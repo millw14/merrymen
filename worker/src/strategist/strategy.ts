@@ -55,6 +55,18 @@ export interface LlmStrategistConfig {
     /** How far one buy may move the curve, bps. Travels with the legs. */
     maxImpactBps: number;
   } | null;
+  /**
+   * Sell a holding outright once it is this far below what it cost, in bps.
+   * 0 = off, and 0 is the default.
+   *
+   * A FLOOR, NOT A VIEW. It runs on every tick rather than at the decision
+   * window, needs no model call, and can only ever ADD a sell — it never
+   * suppresses or delays one the model wanted to make. It exists because the
+   * strategy an owner actually runs had no mechanical exit of any kind: every
+   * stop in this repo belonged to trencher, and reaching it meant abandoning
+   * the strategist entirely.
+   */
+  stopLossBps?: number;
   /** Minimum ms between model calls — decisions are windows, ticks are not. */
   decisionIntervalMs: number;
   /** Injectable clock for tests. */
@@ -100,7 +112,7 @@ export interface LlmStrategistConfig {
  * keeps long floats out of a prompt with a fixed token budget. */
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-function buildSignals(snap: Snapshot, universe: StrategistUniverse, at: Date): Signals {
+function buildSignals(snap: Snapshot, universe: StrategistUniverse, at: Date, stopLossBps = 0): Signals {
   // ── WHAT THE MODEL IS ALLOWED TO NAME ─────────────────────────────────
   //
   // BOTH VENUES, and it used to be one. `tradableSymbols` and the price list
@@ -155,6 +167,9 @@ function buildSignals(snap: Snapshot, universe: StrategistUniverse, at: Date): S
         stale: p.stale,
       })),
     tradableSymbols: [...tradable],
+    // Absent when no floor is armed — never 0, which would read as a floor at
+    // break-even rather than as no floor at all.
+    ...(stopLossBps > 0 ? { stopLossBps } : {}),
     maxPerActionUsdg: Number(universe.maxPerActionUsdg) / 1e6,
     utcHour: at.getUTCHours(),
     utcDay: at.getUTCDay(),
@@ -182,12 +197,77 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
   const note = cfg.onNote ?? (() => {});
   const name = `llm-strategist(${cfg.driver.name})`;
   let lastDecisionAt: number | null = null;
+  /**
+   * Symbols whose floor sell is already on its way.
+   *
+   * Without this the same position is re-proposed on every tick for the one or
+   * two ticks a fill takes to land, and the agent sells the same holding twice.
+   * Cleared when the holding leaves the book, which is what "it filled" looks
+   * like from here.
+   */
+  const floorFired = new Set<string>();
 
   return {
     name,
     async tick(snap: Snapshot): Promise<TradeIntent[] | Tick> {
       if (!snap.sequencerUp) return [];
       const t = now();
+
+      // ── THE FLOOR, BEFORE THE DECISION WINDOW ─────────────────────────
+      //
+      // ABOVE the interval guard on purpose. A model is consulted every
+      // `decisionIntervalMs` — half an hour by default — and a stop that only
+      // ran then would be a stop with a thirty-minute blind spot, which on this
+      // chain is most of a move. This runs every tick, needs no model call, and
+      // costs nothing when it does not fire.
+      //
+      // IT CAN ONLY EVER ADD A SELL. It never suppresses, reorders or delays a
+      // model decision; on a window tick it returns before the model is asked
+      // only when it actually fires, and what it emits is a swap into cash,
+      // which the wall exempts from the per-trade, daily and ops caps and from
+      // the drawdown breaker. So it cannot be the thing that stops an exit.
+      //
+      // BUILT DIRECTLY, NOT THROUGH proposalsToIntents, and that is the point:
+      // that boundary clamps to the strategist ceiling, and a floor that can be
+      // clamped to 10 USDG cannot exit a position worth more than 10 USDG —
+      // which is precisely the position a stop is for.
+      //
+      // A STOP FROM ENTRY, NOT A TRAILING ONE. It measures against cost basis,
+      // so it will not catch a position that ran up and gave it all back to
+      // break-even. Saying so here because the difference matters and the name
+      // "stop loss" invites the other reading.
+      for (const [symbol, h] of snap.holdings) {
+        if (!cfg.stopLossBps || cfg.stopLossBps <= 0) break;
+        if (floorFired.has(symbol)) continue;
+        // A stale price is last session's number, not a loss. An absent cost is
+        // not a gain and not a loss — the same rule steady-basket already uses,
+        // because reading null as zero would make every holding look like a
+        // total loss and sell the entire book.
+        if (h.priceStale) continue;
+        const cost = h.costUsdg ?? null;
+        if (cost === null || cost <= 0n) continue;
+        if (snap.pausedTokens.has(h.token.toLowerCase())) continue;
+        const lossBps = Number(((cost - h.valueUsdg) * 10_000n) / cost);
+        if (lossBps < cfg.stopLossBps) continue;
+        floorFired.add(symbol);
+        return {
+          intents: [
+            {
+              kind: "swap",
+              target: cfg.universe.swapRouter,
+              sellToken: h.token,
+              buyToken: cfg.universe.usdg,
+              sellAmountRaw: h.rawBalance,
+              notionalUsdg: h.valueUsdg,
+            },
+          ],
+          why: [{ code: "stop-floor", symbol, lossBps, usdgRaw: h.valueUsdg, costRaw: cost }],
+        };
+      }
+      // A holding that has left the book has filled (or been sold another way),
+      // so the latch is released and the floor can arm again if it returns.
+      for (const s of [...floorFired]) if (!snap.holdings.has(s)) floorFired.delete(s);
+
       if (lastDecisionAt !== null && t - lastDecisionAt < cfg.decisionIntervalMs) return [];
       lastDecisionAt = t;
 
@@ -232,7 +312,7 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
           : {}),
       };
 
-      const signals = buildSignals(snap, universeNow, new Date(t));
+      const signals = buildSignals(snap, universeNow, new Date(t), cfg.stopLossBps ?? 0);
 
       // THE VIEW, when the desk ran. Empty on the one-shot path, and empty
       // whenever the desk failed to finish — an unfinished session is not a

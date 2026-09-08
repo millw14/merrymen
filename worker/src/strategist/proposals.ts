@@ -138,7 +138,22 @@ export function proposalsToIntents(
     // Venue-agnostic by construction now: it reads `size`, computed once above,
     // and it is the last thing between a number the model chose and a number
     // that reaches the wall.
-    if (size > universe.maxPerActionUsdg) {
+    // A SELL IS NOT SPENDING, so the ceiling does not bound it.
+    //
+    // THE SAME MIRROR ERROR, ONE LAYER UP. policy.ts fixed this at the wall:
+    // the chain caps the USDG approve that FUNDS a buy and emits the sell-side
+    // approve with no amount condition at all, so bounding a sell there was the
+    // mirror being stricter than the chain. This boundary reproduced it — the
+    // ceiling sat above the buy/sell split and applied to both.
+    //
+    // What that cost, concretely: on this owner grant the ceiling is
+    // min(llmMaxActionUsdg 50, perTradeCap 10) = 10 USDG. A position grown past
+    // 10 USDG could never be fully sold by the strategist, and one that doubled
+    // could not be sold at all — structurally able to exit its losers and unable
+    // to exit its winners, which presents as a stuck position rather than an
+    // error. llmMaxActionUsdg stays a bound on what one action may SPEND, which
+    // is what its own name says. Buys are untouched.
+    if (p.action !== "sell" && size > universe.maxPerActionUsdg) {
       rejected.push(`#${i} ${p.symbol}: ${p.sizeUsdg} USDG exceeds strategist ceiling`);
       continue;
     }
@@ -381,7 +396,22 @@ export function proposalsToEquityIntents(
       continue;
     }
     const size = usdg6(p.sizeUsdg);
-    if (size > universe.maxPerActionUsdg) {
+    // A SELL IS NOT SPENDING, so the ceiling does not bound it.
+    //
+    // THE SAME MIRROR ERROR, ONE LAYER UP. policy.ts fixed this at the wall:
+    // the chain caps the USDG approve that FUNDS a buy and emits the sell-side
+    // approve with no amount condition at all, so bounding a sell there was the
+    // mirror being stricter than the chain. This boundary reproduced it — the
+    // ceiling sat above the buy/sell split and applied to both.
+    //
+    // What that cost, concretely: on this owner grant the ceiling is
+    // min(llmMaxActionUsdg 50, perTradeCap 10) = 10 USDG. A position grown past
+    // 10 USDG could never be fully sold by the strategist, and one that doubled
+    // could not be sold at all — structurally able to exit its losers and unable
+    // to exit its winners, which presents as a stuck position rather than an
+    // error. llmMaxActionUsdg stays a bound on what one action may SPEND, which
+    // is what its own name says. Buys are untouched.
+    if (p.action !== "sell" && size > universe.maxPerActionUsdg) {
       rejected.push(`#${i} ${p.symbol}: ${p.sizeUsdg} USDG exceeds strategist ceiling`);
       continue;
     }

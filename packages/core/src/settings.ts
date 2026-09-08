@@ -220,6 +220,23 @@ export interface MerrymenSettings {
    * OFF BY DEFAULT because turning it on changes what a live agent does with
    * somebody money, and the right threshold for one book is wrong for another.
    */
+  /**
+   * Sell a holding outright once it is this far below what it cost, in bps.
+   * 0 = off, and 0 is the default.
+   *
+   * THE ONLY MECHANICAL EXIT llm-strategist has. Every other stop in this repo
+   * belongs to trencher, so reaching one meant abandoning the strategist
+   * entirely. This runs every tick, needs no model call, and can only ever ADD
+   * a sell.
+   *
+   * A STOP FROM ENTRY, NOT A TRAILING ONE: it measures against cost basis, so
+   * it does not catch a position that ran up and gave it back to break-even.
+   *
+   * Set it with the round trip in mind. Gas is roughly 0.44-0.78 USDG a leg on
+   * this chain, so on a 10 USDG position a stop-and-reenter costs 9-16% of
+   * notional — a tight floor turns into a machine that pays the chain to churn.
+   */
+  strategistStopLossBps?: number;
   takeProfitBps?: number;
   buyPerTickUsdg?: number;
   /** Steady-basket: cash floor kept liquid; the excess sweeps to the vault. */
@@ -599,6 +616,7 @@ export const SETTINGS_DEFAULTS = {
   scoutEnabled: false,
   scoutBudgetUsdg: 0,
   scoutPerTokenUsdg: 25,
+  strategistStopLossBps: 0,
   takeProfitBps: 0,
   buyPerTickUsdg: 25,
   idleFloorUsdg: 50,

@@ -34,6 +34,12 @@ export interface Signals {
   }[];
   prices: { symbol: string; usd: number; stale: boolean }[];
   tradableSymbols: string[];
+  /**
+   * The mechanical floor sitting below the model, in bps. ABSENT when none is
+   * armed — never 0, which would read as a floor at break-even rather than as
+   * no floor at all. Same discipline `costUsdg` follows.
+   */
+  stopLossBps?: number;
   maxPerActionUsdg: number;
   utcHour: number;
   utcDay: number;
@@ -74,6 +80,10 @@ vault yield automatically — you do not manage the vault.
 Propose portfolio actions via the propose_trades tool. Discipline rules:
 - Only trade symbols from tradableSymbols. Sizes are in USDG and must respect maxPerActionUsdg.
 - Prefer few, deliberate actions; propose holds when nothing is attractive.
+- A FLOOR MAY SIT BELOW YOU. When \`stopLossBps\` is present, a mechanical rule sells a holding
+  outright once it is that far below what it cost. It only ever FORCES an exit and never prevents
+  one, so cutting earlier is always available to you. It is a backstop for the case where you were
+  wrong and had not noticed — never a level to hold a losing position down to because it is there.
 - YOU ARE ALSO RESPONSIBLE FOR LEAVING. A holding may carry \`costUsdg\` and \`pnlUsdg\` — what
   it cost and what it is up or down since. Use them: take a profit that is worth taking, cut
   a loss that is running, and leave a position whose reason has stopped being true. A position
