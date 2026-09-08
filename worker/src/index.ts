@@ -97,6 +97,7 @@ import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs } from "./brain-shadow";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { readFeedHistory } from "./read-feed-history";
+import { renderLiquidity } from "./research/coin-liquidity";
 import { buildTechnical, renderTechnical } from "./research/technical";
 import { newsDesk } from "./research/news";
 import { readResearch } from "./research-files";
@@ -571,6 +572,40 @@ async function main() {
     }
     if (legs.size === 0) return null;
     return { legs, tokens, slippageBps: cfg.slippageBps, maxImpactBps: cfg.maxImpactBps };
+  }
+
+  /**
+   * THE `liquidity` LENS, from reserves this tick already read.
+   *
+   * The memecoin desk asks for four analysts and the worker supplied material
+   * for one, so three quarters of a memecoin decision was NO DATA AVAILABLE at
+   * the price of a model call each. This closes one of the three at ZERO extra
+   * I/O: `lastCurveLegs` is the pricing pass's own reading, kept rather than
+   * discarded, and coin-liquidity.ts is pure arithmetic on it.
+   *
+   * DELIBERATELY NOT GATED ON `curveLegsNow`. That function answers a different
+   * question — may the strategist BUY this — and its filters (the grant, the
+   * basket, the live rail) are about spending. Understanding what a position
+   * already held is doing is not spending, and an agent holding a coin it may
+   * no longer buy is exactly when it most needs to be told what leaving costs.
+   */
+  function liquidityLensFor(symbol: string, heldRaw: bigint, probeUsdg: bigint): string | null {
+    const leg = lastCurveLegs.get(symbol);
+    if (!leg) return null;
+    const q = leg.quoteToken.toLowerCase();
+    return renderLiquidity({
+      symbol,
+      reserves: leg.reserves,
+      quoteUsd8: lastCurveQuoteUsd8.get(symbol) ?? null,
+      quoteSymbol:
+        q === "0x0000000000000000000000000000000000000000" || q === (CASH.WETH as string).toLowerCase()
+          ? "ETH"
+          : q === (CASH.USDG as string).toLowerCase()
+            ? "USDG"
+            : (watchTokens.find((t) => t.address.toLowerCase() === q)?.symbol ?? "its quote asset"),
+      heldRaw,
+      probeUsdg,
+    });
   }
 
   function makeStrategy(c: ResolvedConfig): Strategy {
@@ -1616,6 +1651,16 @@ async function main() {
    * satisfies both "this tick's reserves" and the synchronous contract.
    */
   let lastCurveLegs = new Map<string, { curve: `0x${string}`; quoteToken: `0x${string}`; reserves: CurveReserves }>();
+  /**
+   * The USD price of each leg's QUOTE asset, as this pass valued it.
+   *
+   * Kept beside the legs and cleared with them, so a dollar figure and the
+   * reserve it was computed from always come from the same reading. Null for a
+   * quote asset this repo will not price — 42.8% of launches quote in stock
+   * tokens whose feeds are stale every weekend, and `quoteUsdOf` returns null
+   * for them on purpose rather than a plausible number.
+   */
+  let lastCurveQuoteUsd8 = new Map<string, bigint | null>();
   let notifierHandle: ReturnType<typeof startNotifier> | null = null;
 
   // Uniswap TWAPs for tokens with no Chainlink feed. Cached across ticks — the
@@ -1740,6 +1785,7 @@ async function main() {
     // 1,546 bps over 240 seconds, which is why that file refuses to cache these
     // at all. Missing legs cost a skipped window; stale legs cost a bad fill.
     lastCurveLegs = new Map();
+    lastCurveQuoteUsd8 = new Map();
 
     const feedless = watchTokens.filter((t) => t.chainlinkFeed === null && t.kind === "memecoin");
     if (!feedless.length) {
@@ -1888,6 +1934,12 @@ async function main() {
       // merged, so a token that stopped pricing this tick cannot leave a stale
       // leg behind for the strategist to size against.
       lastCurveLegs = curveRes.legs;
+      // The same `eth.price8` the reserves were valued against, kept rather than
+      // re-derived later — a second call would price this tick's reserves at
+      // another tick's ETH.
+      lastCurveQuoteUsd8 = new Map(
+        [...curveRes.legs].map(([symbol, leg]) => [symbol, quoteUsdOf(leg.quoteToken, eth.price8)]),
+      );
       for (const [symbol, quote] of curveRes.quotes) if (!prices.has(symbol)) prices.set(symbol, quote);
       // A token the curve PRICED is no longer refused. Its pool refusal said
       // "no Uniswap v3 pool — nothing to price it from", which was true and is
@@ -5946,6 +5998,19 @@ async function main() {
             failure: research.news.failure,
             items: research.news.items,
           });
+          // Sized here rather than inside the object so the min() is readable:
+          // what a buy would ACTUALLY be proposed at — the strategist's ceiling
+          // under the sealed per-trade cap, the same bound proposals.ts takes.
+          // A price impact quoted at a size nobody would trade is a number about
+          // nothing.
+          const probeUsdg = BigInt(
+            Math.max(0, Math.round(Math.min(cfg.llmMaxActionUsdg * 1e6, Number(active.limits.perTradeUsdg)))),
+          );
+          const curveLiquidity = liquidityLensFor(
+            focus.symbol,
+            positions.find((pp) => pp.symbol === focus.symbol)?.rawBalance ?? 0n,
+            probeUsdg,
+          );
           const inputs: ShadowInputs = {
             agentId,
             // A brain-live agent CAN reach a trade, so its thinking must not be
@@ -6113,6 +6178,19 @@ async function main() {
                 // said anything — an empty section reads as "we looked and
                 // there was nothing", and the truth is that nobody spoke.
                 ...(sentiment ? { sentiment } : {}),
+                // THE MEMECOIN DESK'S OWN LENS, and the one this chain can
+                // actually answer. `_lenses_for("memecoin")` asks for technical,
+                // onchain, social and liquidity; three of the four had no
+                // supplier, so every memecoin decision was mostly analysts
+                // reporting that they had been given nothing — at full price,
+                // since a lens costs a model call whether or not it was fed.
+                //
+                // Costs no I/O: it is arithmetic over the reserves the pricing
+                // pass already read to value the position. Omitted entirely for
+                // anything not on a curve, which is every equity token — the
+                // established discipline, and the reason a stock does not get a
+                // liquidity analyst inventing one.
+                ...(curveLiquidity ? { liquidity: curveLiquidity } : {}),
               },
             },
             expectedTradeGasUsdg: expectedTradeGasMicro === null ? null : Number(expectedTradeGasMicro),

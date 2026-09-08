@@ -30,6 +30,37 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 SCHEMA_VERSION = "1.0.0"
 
+#: EVERY LENS ANY DESK MAY ASK FOR. `graph._lenses_for` chooses which of these a
+#: given instrument class gets; this is the set it may choose from, and the set
+#: a caller may supply material for.
+#:
+#: It lives here rather than in graph.py because it is a boundary condition on
+#: the request, and a request has to be judgeable before any graph runs. graph.py
+#: checks its own desk map against this at import, so the two cannot part.
+LENS_KEYS = frozenset(
+    {
+        "technical",
+        "news",
+        "news-sentiment",
+        "sentiment",
+        "fundamentals",
+        "onchain",
+        "social",
+        "liquidity",
+        "peg",
+        "reserve",
+    }
+)
+
+#: Per-lens and whole-request ceilings on supplied material, in characters.
+#:
+#: ~4 chars a token, so 8,000 is roughly 2,000 tokens of material for one
+#: analyst and 24,000 is roughly 6,000 for a whole run — an order of magnitude
+#: under the 200,000-token research tier, which is the point: the budget cannot
+#: catch an oversized block until the call carrying it has already been made.
+MAX_LENS_CHARS = 8_000
+MAX_SIGNALS_CHARS = 24_000
+
 # An 0x-prefixed 20-byte address, in any case. Deliberately broad: the point is
 # to catch anything address-SHAPED, not to validate a real address.
 _ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
@@ -344,7 +375,28 @@ class MarketState(BaseModel):
     price_usd: str | None = None
     # Free-form per-source material. Everything in here is UNTRUSTED: it is
     # scraped or vendor-supplied text that an attacker may have written.
+    #
+    # BOUNDED IN TWO WAYS, and the budget is why. `check_before` bounds the call
+    # AFTER the current one, so a single oversized block passes the ceiling test
+    # and then breaches it inside the call it was already cleared for — the
+    # research tier is 200,000 tokens and one unbounded renderer reaches that on
+    # its own. The keys are an allowlist for a different reason: a key that no
+    # lens reads is material nobody asked for, paid for at the analyst that does
+    # read it, and `_lenses_for` is the only thing entitled to name one.
     signals: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("signals")
+    @classmethod
+    def _bounded_material(cls, v: dict[str, str]) -> dict[str, str]:
+        for key, text in v.items():
+            if key not in LENS_KEYS:
+                raise ValueError(f"signals key {key!r} is not a lens; see LENS_KEYS")
+            if len(text) > MAX_LENS_CHARS:
+                raise ValueError(f"signals[{key!r}] is {len(text)} chars, over {MAX_LENS_CHARS}")
+        total = sum(len(t) for t in v.values())
+        if total > MAX_SIGNALS_CHARS:
+            raise ValueError(f"signals total {total} chars, over {MAX_SIGNALS_CHARS}")
+        return v
     #: WHAT THE NEXT TRADE COSTS, micro-USDG. None when it could not be priced.
     #:
     #: MARGINAL, not average. The canary's first UserOperation carried the

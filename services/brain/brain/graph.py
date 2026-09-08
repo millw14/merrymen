@@ -48,6 +48,7 @@ from .schemas import (
     Cost,
     DecideRequest,
     Evidence,
+    LENS_KEYS,
     Refusal,
     SCHEMA_VERSION,
 )
@@ -533,9 +534,20 @@ def _lenses_for(instrument_class: str) -> list[str]:
     # cannot separate the observation from somebody else's verdict about it.
     # It sits beside `sentiment`, which on this fleet is what other Merrymen
     # published; those are also different things and are also not merged.
-    return {
-        "equity-token": ["technical", "news", "news-sentiment", "sentiment", "fundamentals"],
-        "crypto-native": ["technical", "onchain", "news", "news-sentiment", "sentiment"],
-        "memecoin": ["technical", "onchain", "social", "liquidity"],
-        "stablecoin": ["peg", "liquidity", "reserve"],
-    }.get(instrument_class, ["technical", "news"])
+    return _DESK.get(instrument_class, _DEFAULT_DESK)
+
+
+_DESK: dict[str, list[str]] = {
+    "equity-token": ["technical", "news", "news-sentiment", "sentiment", "fundamentals"],
+    "crypto-native": ["technical", "onchain", "news", "news-sentiment", "sentiment"],
+    "memecoin": ["technical", "onchain", "social", "liquidity"],
+    "stablecoin": ["peg", "liquidity", "reserve"],
+}
+_DEFAULT_DESK = ["technical", "news"]
+
+# A lens this desk asks for that the request schema will not accept material
+# for is a lens permanently answering NO DATA AVAILABLE while still costing a
+# model call — a silent, paid-for hole. Checked at import so it cannot ship.
+_unnameable = {lens for desk in [*_DESK.values(), _DEFAULT_DESK] for lens in desk} - LENS_KEYS
+if _unnameable:
+    raise RuntimeError(f"desk asks for lenses no request may carry: {sorted(_unnameable)}")
