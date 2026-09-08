@@ -336,8 +336,19 @@ async function persist(
   // difference between a hold that means the market is quiet and a hold that
   // means the agent is blind — which is the distinction the whole shadow
   // evaluation turns on.
+  // BOTH NUMBERS, because they are different facts and only one of them now
+  // moves money. `confidence` is the lens's view of its own answer;
+  // `evidence_strength` is how much it had to work with — and that second one
+  // is what grades a position's stop floor at entry (strategist/floor-grade.ts,
+  // which refuses confidence as an input on purpose). An operator reading this
+  // line to work out why a floor landed where it did needs the number the
+  // grader actually used.
   const lenses = (d.analyst_views ?? [])
-    .map((v) => `${v.lens}:${v.direction}${v.direction === "no-data" ? "" : `/${v.confidence.toFixed(2)}`}`)
+    .map((v) =>
+      v.direction === "no-data"
+        ? `${v.lens}:no-data`
+        : `${v.lens}:${v.direction}/${v.confidence.toFixed(2)}~${(v.evidence_strength ?? 0).toFixed(2)}`,
+    )
     .join(" ");
   log(
     `[brain] ${d.action.toUpperCase()} ${d.symbol} conf=${d.confidence.toFixed(2)} ` +
