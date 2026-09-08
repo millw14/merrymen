@@ -161,6 +161,15 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   perfFeeBps: [0, 5_000],
   tickSeconds: [15, 3_600],
   buyPerTickUsdg: [1, 100_000],
+  // SELL A LEG ONCE IT IS THIS FAR AHEAD OF WHAT IT COST. 0 disables it, which
+  // is the default — this is the only exit the default strategy has, and until
+  // an owner names a number it accumulates and never realises anything.
+  //
+  // ABSENT FROM THIS LIST IS THE SAME AS NOT EXISTING. The setting was added to
+  // core and read by the worker, and a PUT carrying it was silently dropped
+  // here — so it was unreachable from the app and could only ever have been set
+  // by an env var nobody has. Same failure `maxImpactBps` records two lines up.
+  takeProfitBps: [0, 1_000_000],
   idleFloorUsdg: [0, 1_000_000],
   gapEnterBudgetUsdg: [1, 1_000_000],
   paperStartUsdg: [1, 10_000_000],

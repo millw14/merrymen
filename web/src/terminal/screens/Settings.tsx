@@ -1312,6 +1312,13 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               <input type="number" min={1} placeholder={String(d.buyPerTickUsdg)} value={v("buyPerTickUsdg")} onChange={set("buyPerTickUsdg")} />
               <span className="mm-unit">USDG</span>
             </Field>
+            <Field
+              label="take profit"
+              hint="steady-basket: sell a leg once it is this far ahead of what it cost. 0 never sells — and this is the only exit this strategy has, so at 0 it only ever buys."
+            >
+              <input type="number" min={0} placeholder={String(d.takeProfitBps)} value={v("takeProfitBps")} onChange={set("takeProfitBps")} />
+              <span className="mm-unit">bps</span>
+            </Field>
             <Field label="idle cash floor" hint="steady-basket: cash kept liquid; the excess sweeps to the Morpho vault.">
               <input type="number" min={0} placeholder={String(d.idleFloorUsdg)} value={v("idleFloorUsdg")} onChange={set("idleFloorUsdg")} />
               <span className="mm-unit">USDG</span>

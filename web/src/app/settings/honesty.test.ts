@@ -95,7 +95,11 @@ describe("every control survives the restyle", () => {
     // and a class rename is never the reason for one.
     const count = (re: RegExp) => (SRC.match(re) ?? []).length;
     assert.equal(count(/type="checkbox"/g), 11, "checkboxes");
-    assert.equal(count(/type="number"/g), 12, "number inputs");
+    // 13 since "take profit" — the only exit steady-basket has. It was added to
+    // core and read by the worker while being absent from the settings route's
+    // field list AND from this screen, so it was unreachable from the app and
+    // an owner could not turn it on at all.
+    assert.equal(count(/type="number"/g), 13, "number inputs");
     assert.equal(count(/type="password"/g), 8, "password inputs");
     assert.equal(count(/type="text"/g), 12, "text inputs");
     assert.equal(count(/type="url"/g), 3, "url inputs");
