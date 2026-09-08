@@ -773,7 +773,10 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </Field>
           </div>
           <div className="mm-danger">
-            <b>The drawdown limit does not cover scout losses.</b> These positions stay valued at purchase cost even if they lose value. Only allocate funds you can afford to lose.
+            <b>The drawdown breaker cannot protect this money.</b> These positions stay valued at
+            purchase cost even if they lose value, so if one goes to zero your equity will not show
+            it and the breaker will not fire. <b>The budget is the risk control here</b>, not the
+            breaker — set it to what you have decided you can lose.
             {scoutEnabledVal && Number(v("scoutBudgetUsdg") || d.scoutBudgetUsdg) === 0 && (
               <>
                 <br />
@@ -1044,7 +1047,11 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               </label>
               {agentAutoShellVal && (
                 <div className="mm-danger">
-                  <b>Your agent can control this computer without asking for each action.</b> This includes running commands, typing, and opening links. It may damage files or expose private information. Send <code>/agent stop</code> to halt it.
+                  <b>Free-form shell is remote code execution by an AI.</b> Your agent can control
+                  this computer without asking for each action — running commands, typing, and
+                  opening links. It may damage files or expose private information. The destructive
+                  blocklist and the secret redaction are a <b>seatbelt, not a cage</b>: they narrow
+                  the damage, they do not prevent it. Send <code>/agent stop</code> to halt it.
                 </div>
               )}
               <div className="mm-grid">

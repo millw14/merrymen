@@ -75,6 +75,16 @@ export function Board({
           </div>
         )}
       </header>
+      {/* WHY AN AGENT IS UNRANKED, kept off the compact Home preview and kept on
+          the full board. "No deposit" and "never filled" are different facts
+          about somebody's agent and only one of them is fixed by depositing —
+          and a paper book divided by a real deposit is the +2643.3% incident
+          this repo already has. Collapsed, so it costs a line and not a screen. */}
+      {!preview && (
+        // ONE LINE ON PURPOSE: captions.test.ts reads this file as text, so a
+        // wrapped sentence breaks a guard that is about the words being present.
+        <details className="ranking-help"><summary>How returns are measured</summary><p>No deposit means no capital to measure a return against. No completed trades means no return to measure. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
+      )}
 
       {rows.length === 0 ? (
         <ReadEmpty

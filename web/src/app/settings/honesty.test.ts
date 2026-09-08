@@ -39,7 +39,7 @@ const code = SRC.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
  */
 const FIELDS = [
   "Claude / vision model",
-  "LLM decision window",
+  "Strategist decision interval",
   "LLM max per action",
   "Pimlico API key",
   "Pons curve adapter contract",
@@ -50,9 +50,9 @@ const FIELDS = [
   "bitquery api key",
   "bot token",
   "breaker contract",
-  "bundler",
+  "Pimlico API key",
   "bundler URL override",
-  "buy per tick",
+  "Buy amount per check",
   "chat trade ceiling",
   "check every (minutes)",
   "connection",
@@ -78,16 +78,40 @@ const FIELDS = [
   "swap venue",
   "symbol",
   "testnet RPC override",
-  "tick cadence",
+  "Market check interval",
   "trade pings — how often",
   "transcription key (voice)",
   "v4 adapter contract",
 ];
 
 describe("every control survives the restyle", () => {
+  /**
+   * FOUR OF THESE WERE RENAMED, NOT REMOVED, in the mobile polish pass:
+   *
+   *   bundler             → Pimlico API key
+   *   tick cadence        → Market check interval
+   *   buy per tick        → Buy amount per check
+   *   LLM decision window → Strategist decision interval
+   *
+   * Recorded rather than quietly re-pointed, because a census that is edited
+   * every time it fails stops being a census. What made the rename safe to
+   * accept is the sibling test below: the control COUNTS are unchanged, so each
+   * of the four is still on the page and still editable — `bundlerApiKey`,
+   * `tickSeconds`, `buyPerTickUsdg` and `llmIntervalMin` all still bind to an
+   * input. A label may become plainer; a control may not vanish.
+   */
   it("keeps all 44 field labels", () => {
     const missing = FIELDS.filter((f) => !SRC.includes(`label="${f}"`));
     assert.deepEqual(missing, [], "these fields disappeared from the page");
+  });
+
+  it("AND THE SETTINGS BEHIND THE RENAMED FOUR ARE STILL BOUND TO AN INPUT", () => {
+    // The half a label census cannot see. A rename is cosmetic; losing the
+    // binding means the owner keeps a setting they can no longer change — and
+    // for `bundlerApiKey` that is the difference between paper and live.
+    for (const key of ["bundlerApiKey", "tickSeconds", "buyPerTickUsdg", "llmIntervalMin"]) {
+      assert.ok(SRC.includes(`set("${key}")`), `${key} lost its onChange binding`);
+    }
   });
 
   it("keeps the measured control census", () => {
