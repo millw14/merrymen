@@ -355,6 +355,46 @@ const LIST_FIELDS = new Set(["basketSymbols"]);
 export const COMMAND_IDS = CHAT_COMMANDS.map((c) => c.id);
 
 /**
+ * The arguments a command needs the MODEL to supply — its declared keys, minus
+ * the ones it fills in itself.
+ */
+export function modelArgsFor(cmd: ChatCommand): string[] {
+  return (cmd.writes ?? []).filter((k) => !(k in (cmd.fixed ?? {})));
+}
+
+/**
+ * Every command WITH ITS ARGUMENT NAMES, for the prompt.
+ *
+ * DERIVED FROM THE REGISTRY, so the prompt cannot drift from what the parser
+ * accepts. The prompt used to list bare ids and nothing else, and the model did
+ * the reasonable thing: it invented plausible parameter names. Asked in
+ * production to buy 10 USDG of NVDA it proposed `{"symbol":"NVDA",
+ * "sizeUsdg":10}` — and `sizeUsdg` is not a declared key, so `commandPayload`
+ * dropped it and the order would have gone to the route with a symbol, a side,
+ * and no size at all. Refused there, correctly, and confusing to everyone.
+ *
+ * A name the model has to guess is a name it will sometimes guess wrong, and
+ * this is the one place that can state it without repeating itself.
+ */
+export const COMMAND_SPEC = CHAT_COMMANDS.map((c) => {
+  const args = modelArgsFor(c);
+  return args.length ? `${c.id} {${args.join(", ")}}` : `${c.id} {}`;
+}).join(" · ");
+
+/**
+ * Is this proposal complete enough to put in front of somebody?
+ *
+ * A COMMAND MISSING AN ARGUMENT IS NOT A COMMAND. A buy card with no size reads
+ * exactly like a buy card with one — the sentence renders `$NaN` — and clicking
+ * it produces a refusal the owner cannot act on. Better to say nothing and let
+ * the reply stand as text, which is what the model was told to do when it is
+ * unsure: ask, rather than guess.
+ */
+export function isComplete(cmd: ChatCommand, args: Record<string, CommandArg>): boolean {
+  return modelArgsFor(cmd).every((k) => k in args && args[k] !== "" && args[k] !== null);
+}
+
+/**
  * Pull a proposed command off a reply, if there is one.
  *
  * THE SEAM BETWEEN MODEL OUTPUT AND THE REGISTRY, and it lives here rather
@@ -413,7 +453,8 @@ export function splitCommand(raw: string): {
   // the last thing to render as if the agent had written it.
   const reply = raw.replace(ANY_MARKER, "").replace(/\n{3,}/g, "\n\n").trim();
   if (!m) return { reply };
-  if (!commandFor(m[1])) return { reply };
+  const cmd = commandFor(m[1]);
+  if (!cmd) return { reply };
   let args: Record<string, CommandArg> = {};
   try {
     const parsed: unknown = m[2] ? JSON.parse(m[2]) : {};
@@ -425,5 +466,10 @@ export function splitCommand(raw: string): {
   } catch {
     args = {};
   }
+  // AN INCOMPLETE PROPOSAL IS NOT ONE. A buy card with no size renders "$NaN"
+  // and, clicked, produces a refusal the owner can do nothing about. The reply
+  // stands as text instead — which is what the model was told to do when it is
+  // unsure: ask, rather than guess.
+  if (!isComplete(cmd, args)) return { reply };
   return { reply, command: { id: m[1]!, args } };
 }

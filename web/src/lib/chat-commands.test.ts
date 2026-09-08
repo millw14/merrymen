@@ -16,7 +16,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { CHAT_COMMANDS, COMMAND_IDS, commandFor, commandPayload, splitCommand } from "./chat-commands";
+import { CHAT_COMMANDS, COMMAND_IDS, COMMAND_SPEC, commandFor, commandPayload, splitCommand } from "./chat-commands";
 
 describe("what the model actually says, and what survives it", () => {
   it("A PROPOSAL IS LIFTED OUT AND THE MARKER NEVER REACHES A PERSON", () => {
@@ -61,13 +61,20 @@ describe("what the model actually says, and what survives it", () => {
     assert.equal(reply, "Here you go.");
   });
 
-  it("and malformed JSON proposes the command with NO arguments", () => {
-    // Not an error to the owner, and not a guess at what was meant. go-live
-    // still works because its value is fixed; set-size becomes an empty
-    // payload, which writes nothing rather than writing something invented.
-    const { command } = splitCommand("<<CMD set-size {buyPerTickUsdg: 25}>>");
-    assert.deepEqual(command, { id: "set-size", args: {} });
-    assert.deepEqual(commandPayload(commandFor("set-size")!, command!.args), {});
+  it("and malformed JSON proposes NOTHING, rather than a card with no value in it", () => {
+    // Not an error to the owner, and not a guess at what was meant.
+    //
+    // This used to propose the command with empty args, on the reasoning that
+    // an empty payload writes nothing rather than something invented. True of
+    // the WRITE, and wrong about the CARD: "Put $NaN to work each time I trade"
+    // is a sentence an owner would be asked to confirm, and clicking it does
+    // nothing at all. A command missing the value that IS its meaning is not a
+    // command.
+    assert.equal(splitCommand("<<CMD set-size {buyPerTickUsdg: 25}>>").command, undefined);
+    // A command whose value is its OWN, though, is still complete with nothing:
+    // go-live means `paperTradingEnabled: false` whatever the model sent.
+    assert.deepEqual(splitCommand("<<CMD go-live {oops}>>").command, { id: "go-live", args: {} });
+    assert.deepEqual(commandPayload(commandFor("go-live")!, {}), { paperTradingEnabled: false });
   });
 
   it("ONE PROPOSAL PER REPLY, and it is the one the reply ENDS on", () => {
@@ -368,5 +375,47 @@ describe("what changes money is marked", () => {
     // Not a second signer. Wallet.tsx: "One signing control, one set of
     // conditions, and everything else points at it."
     assert.equal(commandFor("resign")!.to, "/grant#resign");
+  });
+});
+
+describe("the model is told the argument names, not left to guess them", () => {
+  it("A COMMAND WITH NO SIZE IS NOT A COMMAND", () => {
+    // FOUND IN PRODUCTION. Asked to "buy 10 USDG of NVDA" the model proposed
+    // `{"symbol":"NVDA","sizeUsdg":10}` — a perfectly reasonable name, and not
+    // the declared one. commandPayload drops it, so the order reaches the route
+    // with a side, a symbol and no size, and is refused for having no amount.
+    // The card before that renders "$NaN".
+    const { reply, command } = splitCommand('Sure.\n<<CMD buy {"symbol":"NVDA","sizeUsdg":10}>>');
+    assert.equal(command, undefined, "an incomplete proposal must not become a card");
+    assert.equal(reply, "Sure.", "and the reply still stands as text");
+  });
+
+  it("and the same command WITH the declared name is fine", () => {
+    const { command } = splitCommand('Sure.\n<<CMD buy {"symbol":"NVDA","usdgAmount":10}>>');
+    assert.deepEqual(command, { id: "buy", args: { symbol: "NVDA", usdgAmount: 10 } });
+  });
+
+  it("THE PROMPT CARRIES THE ARGUMENT NAMES, derived from the registry", () => {
+    // Not restated by hand: a list the prompt keeps separately is a list that
+    // drifts from what the parser accepts, and the drift is invisible until a
+    // real order loses its size.
+    assert.match(COMMAND_SPEC, /buy \{symbol, usdgAmount\}/);
+    assert.match(COMMAND_SPEC, /sell \{symbol, usdgAmount\}/);
+    // `fixed` values are the command's own, so the model is never asked for them.
+    assert.ok(!/buy \{side/.test(COMMAND_SPEC), "side is fixed, not the model's to supply");
+    assert.match(COMMAND_SPEC, /go-live \{\}/, "a command that takes nothing says so");
+    // Every id still appears, so nothing became unreachable by being renamed.
+    for (const id of COMMAND_IDS) assert.ok(COMMAND_SPEC.includes(`${id} {`), `${id} is missing from the spec`);
+  });
+
+  it("and the route uses the spec rather than the bare id list", () => {
+    const route = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
+    assert.match(route, /EXACT argument names each one takes: \$\{COMMAND_SPEC\}/);
+    assert.ok(!/COMMAND_IDS/.test(route), "the bare id list is what left the model guessing");
+  });
+
+  it("a command that takes no arguments is still complete with none", () => {
+    const { command } = splitCommand("Right.\n<<CMD go-live {}>>");
+    assert.equal(command!.id, "go-live");
   });
 });

@@ -16,7 +16,7 @@ import { NextResponse } from "next/server";
 import { fitChatState } from "@/lib/chat-state";
 import { conceptsFor, isHostedMode, renderConcepts } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
-import { COMMAND_IDS, splitCommand } from "@/lib/chat-commands";
+import { COMMAND_SPEC, splitCommand } from "@/lib/chat-commands";
 import { resolveConfig } from "@merrymen/settings";
 import { resolveLlm, llmText } from "@merrymen/llm";
 
@@ -53,7 +53,8 @@ WHEN THEY ASK YOU TO DO SOMETHING:
 - You may PROPOSE one action. You never perform it — they confirm it with a button, and only then does it happen. So propose freely and never claim you already did it.
 - To propose, end your reply with one line, alone, exactly: <<CMD id args-as-json>>
   Examples: <<CMD set-strategy {"strategy":"dip-hunter"}>> · <<CMD open-deposit {}>> · <<CMD set-size {"buyPerTickUsdg":25}>> · <<CMD set-basket {"basketSymbols":"TSLA,NVDA"}>>
-- The ONLY ids that exist are: ${COMMAND_IDS.join(", ")}. Naming anything else does nothing at all, so do not invent one — say plainly that you cannot do that yet instead.
+- The ONLY commands that exist, with the EXACT argument names each one takes: ${COMMAND_SPEC}
+  Use those names verbatim. A name you invent is dropped, so a buy proposed with the wrong key for its size arrives with no size and is refused — say the words you like, but spell the keys as written here. Naming an id that is not on this list does nothing at all, so do not invent one; say plainly that you cannot do that yet instead.
 - Arguments are FLAT: a string, a number or true/false. Never an object, never a list — a basket is one comma-separated string. Several ids carry their own value and take no arguments at all; pass {} and do not try to steer them.
 - Propose ONE, only when they actually asked for it, and only when you are confident which. If they were vague, ask which they meant rather than guessing — a confirmation card for the wrong thing is worse than a question.
 - Say what you are proposing in your own words FIRST. The button carries its own description; yours is the part that explains why.
