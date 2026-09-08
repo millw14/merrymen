@@ -16,7 +16,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { CHAT_COMMANDS, COMMAND_IDS, COMMAND_SPEC, commandFor, commandPayload, splitCommand } from "./chat-commands";
+import { CHAT_COMMANDS, COMMAND_IDS, COMMAND_SPEC, commandFor, commandPayload, modelArgsFor, splitCommand } from "./chat-commands";
+import { RISK_PROFILES } from "@merrymen/core";
 
 describe("what the model actually says, and what survives it", () => {
   it("A PROPOSAL IS LIFTED OUT AND THE MARKER NEVER REACHES A PERSON", () => {
@@ -440,5 +441,50 @@ describe("the model is told the argument names, not left to guess them", () => {
   it("a command that takes no arguments is still complete with none", () => {
     const { command } = splitCommand("Right.\n<<CMD go-live {}>>");
     assert.equal(command!.id, "go-live");
+  });
+});
+
+/**
+ * ONE WORD IN, SIX SETTINGS OUT.
+ *
+ * `set-risk` is the first command where what the model says and what gets
+ * written are different lists. The failure it is built to avoid is quiet: send
+ * the model's word `level` to /api/settings and the unknown-key rejection fails
+ * the WHOLE save, so an owner confirms a card and nothing changes — the worst
+ * outcome for a control whose entire purpose is being easy to use.
+ */
+describe("the risk level writes settings, never the word", () => {
+  it("ASKS THE MODEL FOR ONE WORD", () => {
+    const cmd = commandFor("set-risk")!;
+    assert.deepEqual(modelArgsFor(cmd), ["level"]);
+  });
+
+  it("AND `level` NEVER REACHES THE SETTINGS PAYLOAD", () => {
+    // /api/settings rejects unknown keys, and `level` is not a setting.
+    const cmd = commandFor("set-risk")!;
+    const payload = commandPayload(cmd, { level: "bold" });
+    assert.ok(!("level" in payload), "level must not be written");
+  });
+
+  it("AND THE SIX IT DOES WRITE ARE THE PROFILE'S, not the model's", () => {
+    const cmd = commandFor("set-risk")!;
+    // A model that also sent numbers must not be able to override the level it
+    // named — `derive` is applied last precisely so the word wins.
+    const payload = commandPayload(cmd, { level: "careful", strategistStopLossBps: 9_999 });
+    assert.deepEqual(payload, RISK_PROFILES.careful.settings as unknown as typeof payload);
+  });
+
+  it("and an unrecognised level writes the balanced profile rather than nothing", () => {
+    // Failing closed here would mean a confirmed card that silently did
+    // nothing. Balanced is the shipped default, so it is the safe landing.
+    const payload = commandPayload(commandFor("set-risk")!, { level: "yolo" });
+    assert.deepEqual(payload, RISK_PROFILES.balanced.settings as unknown as typeof payload);
+  });
+
+  it("and its sentence names the two caps it cannot move", () => {
+    // The boundary, said at the moment of consent rather than in a doc.
+    const said = commandFor("set-risk")!.say({ level: "bold" });
+    assert.match(said, /per-trade and per-day caps/i);
+    assert.match(said, /only a new signature/i);
   });
 });

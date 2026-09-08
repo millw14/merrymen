@@ -7494,3 +7494,30 @@
   opacity: 0.55;
   cursor: default;
 }
+
+/* HOW MUCH RISK, AS ONE QUESTION — see HostedControls.tsx.
+   Three options rather than a slider: a slider implies a continuum between the
+   rungs that does not exist, and invites somebody to land between two coherent
+   sets of numbers. */
+:where(.terminal-host) .risk-bar { margin: 0 0 18px; }
+:where(.terminal-host) .risk-bar h3 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+:where(.terminal-host) .risk-options { display: flex; flex-direction: column; gap: 8px; }
+:where(.terminal-host) .risk-option {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--tx);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+:where(.terminal-host) .risk-option b { font-size: 14px; font-weight: 600; }
+:where(.terminal-host) .risk-option span { font-size: 12.5px; line-height: 1.5; color: var(--tx-2); }
+:where(.terminal-host) .risk-option.on { border-color: var(--lime); }
+:where(.terminal-host) .risk-option:disabled { opacity: .6; cursor: default; }
+:where(.terminal-host) .risk-note { margin: 10px 0 0; font-size: 12px; line-height: 1.55; color: var(--tx-2); }

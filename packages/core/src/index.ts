@@ -28,3 +28,7 @@ export * from "./equity-book";
 // "SNIPE PEPE WITH $20" — one typed word to one token, and never a guess when
 // two coins share a ticker.
 export * from "./snipe-target";
+
+// ONE DIAL INSTEAD OF SIX — a risk level a beginner can answer, and an honest
+// account of the two caps only a signature can move.
+export * from "./risk-level";

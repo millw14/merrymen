@@ -54,6 +54,7 @@
  * chat can widen a sealed grant. One control, one set of conditions, everything
  * else points at it — the third time this file reaches that conclusion.
  */
+import { riskProfile } from "@merrymen/core";
 
 /** A value an owner can be asked to confirm. Strings and numbers only. */
 export type CommandArg = string | number | boolean;
@@ -104,6 +105,27 @@ export interface ChatCommand {
    * worse of the two.
    */
   fixed?: Record<string, CommandArg>;
+  /**
+   * Values that FOLLOW from what the model said, computed at payload time.
+   *
+   * `fixed` is for a value the command always writes; this is for values the
+   * command works out. `set-risk` is the case it exists for: the model supplies
+   * one word and six settings follow from it, and asking the model for those
+   * six would hand it six numbers to get wrong in a command whose entire point
+   * is that nobody should have to know them.
+   *
+   * Applied LAST in `commandPayload`, so a derived value beats anything the
+   * model sent under the same key.
+   */
+  derive?: (args: Record<string, CommandArg>) => Record<string, CommandArg>;
+  /**
+   * What the MODEL is asked for, when that differs from what gets written.
+   *
+   * Defaults to `writes` minus `fixed`, which is right for every command whose
+   * arguments ARE its settings. `set-risk` asks for one word that is not a
+   * setting and writes six that the model never sees.
+   */
+  askFor?: readonly string[];
   /** For `navigate`: where to. */
   to?: string;
   /**
@@ -188,6 +210,53 @@ const REGISTRY: ChatCommand[] = [
     writes: ["buyPerTickUsdg"],
     weighty: true,
     say: (a) => `Put ${money(a.buyPerTickUsdg)} to work each time I trade.`,
+  },
+  /**
+   * ONE DIAL INSTEAD OF SIX, from chat as well as from the screen.
+   *
+   * `set-size`, `set-slippage` and `set-impact` each move one number and assume
+   * the owner knows what a normal value is. This moves the six that follow from
+   * a single question they can actually answer. The two sealed caps are NOT
+   * among them, which is why the sentence says so — a risk level that let
+   * somebody believe their per-trade cap had come down would be worse than no
+   * risk level at all.
+   */
+  {
+    id: "set-risk",
+    via: "settings",
+    // WHAT IS WRITTEN: six real settings. WHAT IS ASKED FOR: one word.
+    // `level` is deliberately NOT in `writes` — it is not a setting, and
+    // /api/settings rejects unknown keys, so sending it would fail the save.
+    askFor: ["level"],
+    writes: [
+      "strategistStopLossBps",
+      "takeProfitBps",
+      "buyPerTickUsdg",
+      "llmMaxActionUsdg",
+      "slippageBps",
+      "maxImpactBps",
+    ],
+    derive: (a) => {
+      const s = riskProfile(String(a.level)).settings;
+      return {
+        strategistStopLossBps: s.strategistStopLossBps,
+        takeProfitBps: s.takeProfitBps,
+        buyPerTickUsdg: s.buyPerTickUsdg,
+        llmMaxActionUsdg: s.llmMaxActionUsdg,
+        slippageBps: s.slippageBps,
+        maxImpactBps: s.maxImpactBps,
+      };
+    },
+    weighty: true,
+    say: (a) => {
+      const p = riskProfile(String(a.level));
+      return (
+        `Set me to ${p.name.toLowerCase()}: ${p.blurb.toLowerCase()} ` +
+        `That is my sizing and my two exit rules — sell at ${p.settings.strategistStopLossBps / 100}% down ` +
+        `or ${p.settings.takeProfitBps / 100}% up. It does NOT touch the per-trade and per-day caps ` +
+        `sealed into my key; only a new signature can move those.`
+      );
+    },
   },
   {
     id: "rename",
@@ -371,6 +440,14 @@ export function commandPayload(
   for (const [key, v] of Object.entries(cmd.fixed ?? {})) {
     if ((cmd.writes ?? []).includes(key)) out[key] = v;
   }
+  // AND LATER STILL, THE DERIVED ONES.
+  //
+  // `fixed` covers a value the command always writes; `derive` covers values
+  // that FOLLOW from what the model said. `set-risk` is the case: the model
+  // supplies one word and six settings follow from it, and letting the model
+  // send those six itself would be handing it six numbers to get wrong in a
+  // command whose whole purpose is that nobody should have to know them.
+  for (const [key, v] of Object.entries(cmd.derive?.(args) ?? {})) out[key] = v;
   return out;
 }
 
@@ -392,6 +469,16 @@ export const COMMAND_IDS = CHAT_COMMANDS.map((c) => c.id);
  * the ones it fills in itself.
  */
 export function modelArgsFor(cmd: ChatCommand): string[] {
+  // `askFor` WHEN WHAT THE MODEL SAYS IS NOT WHAT GETS WRITTEN.
+  //
+  // For most commands the two are the same list. `set-risk` is the exception
+  // that made the distinction necessary: the model supplies one word, "level",
+  // which is not a setting at all — six settings are DERIVED from it. Sending
+  // `level` to /api/settings would hit its unknown-key rejection and fail the
+  // whole save, so it must never be in `writes`; and deriving the six from a
+  // word the model was never asked for is impossible, so it must be asked for
+  // somewhere. This is that somewhere.
+  if (cmd.askFor) return [...cmd.askFor];
   return (cmd.writes ?? []).filter((k) => !(k in (cmd.fixed ?? {})));
 }
 
