@@ -23,6 +23,7 @@
  */
 import { cache } from "react";
 import { withReadDb } from "@/lib/ledger";
+import { basisUsdg } from "@/lib/basis-usdg";
 import { rankPnl, type UnrankedWhy } from "@/lib/rank-pnl";
 import { growthIndex, drawdownBps } from "@/lib/growth-index";
 import { PUBLISHABLE_STRATEGIES } from "@/lib/thesis";
@@ -429,7 +430,9 @@ export const readAgent = cache(async function readAgent(
         const book = rows.reduce((n, r) => n + Number(r.value_usdg ?? 0), 0);
         holdings = rows.map((r) => {
           const value = Number(r.value_usdg ?? 0);
-          const cost = r.cost_usdg === null || r.cost_usdg === undefined ? null : Number(r.cost_usdg);
+          // MICRO-USDG ON THE WIRE — see basisUsdg. Read as whole USDG this
+          // made every holding on the public agent page look down 99.99%.
+          const cost = basisUsdg(r.cost_usdg);
           const sym = String(r.symbol);
           const f = r.token ? (first.get(String(r.token).toLowerCase()) ?? null) : null;
           const mult = r.ui_multiplier === null || r.ui_multiplier === undefined

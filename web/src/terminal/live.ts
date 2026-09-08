@@ -727,6 +727,9 @@ function mineOf(feed: Feed | null, theses: Thesis[]): LiveMine | null {
     // between "I do not know what this cost" and "it was free", which is the
     // whole of whether the agent can answer a question about taking a profit.
     positions: (feed.positions ?? []).map(p=>{
+      // Already whole USDG: /api/feed converts the ledger's micro-USDG column at
+      // the boundary (see basisUsdg), so nothing here has to know that the one
+      // money field on this row is kept in a different unit from the rest.
       const c = p.cost_usdg === null || p.cost_usdg === undefined ? null : Number(p.cost_usdg);
       const costUsd = c === null || !Number.isFinite(c) || c <= 0 ? null : c;
       return {
@@ -953,5 +956,5 @@ interface Feed {
     created_at: string;
   }[];
   equity?: { equity_usdg: number; cash_usdg?: number; vault_usdg?: number; at?: string }[];
-  positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:string|number|null}[];
+  positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:number|null}[];
 }

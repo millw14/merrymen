@@ -10,6 +10,7 @@ import { SETTINGS_DEFAULTS, isHostedMode, sameBookAsLatest, type MerrymenSetting
 import { getSettingsStore } from "@merrymen/settings-store";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
+import { basisUsdg } from "@/lib/basis-usdg";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { hostedAgentFor } from "@/lib/agent-for";
 
@@ -62,17 +63,20 @@ export interface PositionRow {
   price_source: string;
   value_usdg: number;
   /**
-   * What this holding cost, USDG. NULL when the ledger has no basis for it —
-   * never 0, which would say the position was free and make every mark look
-   * like pure profit.
+   * What this holding cost, in WHOLE USDG like every other `_usdg` field here.
    *
-   * A string on the wire because `cost_basis.cost_usdg` is stored as a decimal
-   * string; the browser parses it. It is here because the chat sends positions
-   * to the model, and an agent asked "what did NVDA cost you" with no basis on
-   * the row can only say it does not know — which is what one did, while the
-   * panel beside it listed the position.
+   * The column behind it is not: `cost_basis.cost_usdg` is a decimal string of
+   * the worker's micro-USDG bigint, so it is converted at this boundary rather
+   * than in each browser that reads it — see `basisUsdg`. Sent raw it reads as a
+   * position that cost $8,332,500 and is now worth $8.32.
+   *
+   * NULL when the ledger has no basis for it — never 0, which would say the
+   * position was free and make the whole mark look like profit. It is here
+   * because the chat sends positions to the model, and an agent asked "what did
+   * NVDA cost you" with no basis on the row can only say it does not know —
+   * which is what one did, while the panel beside it listed the position.
    */
-  cost_usdg?: string | number | null;
+  cost_usdg?: number | null;
 }
 export interface TradeRecord {
   kind: string;
@@ -406,6 +410,9 @@ export async function GET(req: Request) {
             WHERE p.agent_id = ? ORDER BY p.value_usdg DESC`,
         )
         .all(bookMode === "paper" ? "paper" : "live", scope)) as unknown as PositionRow[];
+      // MICRO-USDG → USDG at the boundary, so no browser has to know the column
+      // keeps a different unit from every other money field on this response.
+      positions = positions.map((p) => ({ ...p, cost_usdg: basisUsdg((p as { cost_usdg?: unknown }).cost_usdg) }));
     } catch {
       // price_source arrives with a worker migration. The dashboard can be
       // running against a database the upgraded worker hasn't opened yet, and

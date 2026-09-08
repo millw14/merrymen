@@ -24,6 +24,7 @@
  */
 import { cache } from "react";
 import { withReadDb } from "@/lib/ledger";
+import { basisUsdg } from "@/lib/basis-usdg";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
 
@@ -205,7 +206,9 @@ export const readToken = cache(async function readToken(
         continue;
       }
       const value = Number(r.value_usdg ?? 0);
-      const cost = r.cost_usdg === null || r.cost_usdg === undefined ? null : Number(r.cost_usdg);
+      // MICRO-USDG ON THE WIRE — see basisUsdg. Read as whole USDG this made
+      // every holder on this page look down 99.99%.
+      const cost = basisUsdg(r.cost_usdg);
 
       const first = entry.get(String(r.agent_id)) ?? null;
 
