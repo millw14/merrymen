@@ -298,3 +298,45 @@ const LIST_FIELDS = new Set(["basketSymbols"]);
 
 /** Every id the model is allowed to name, for the prompt. */
 export const COMMAND_IDS = CHAT_COMMANDS.map((c) => c.id);
+
+/**
+ * Pull a proposed command off a reply, if there is one.
+ *
+ * THE SEAM BETWEEN MODEL OUTPUT AND THE REGISTRY, and it lives here rather
+ * than in the route because everything it enforces is the registry's rule: the
+ * id must be one we already know, and the arguments must be flat scalars. A
+ * nested object or array would otherwise be forwarded into a settings write,
+ * and this is the only place its shape is checked.
+ *
+ * Anything unparseable is simply STRIPPED and the reply renders as ordinary
+ * text — never surfaced as an error. A malformed proposal is the model failing
+ * to offer something, not the owner doing anything wrong, and an error message
+ * about a marker they never saw would be nonsense to them.
+ */
+const MARKER = /<<CMD\s+([a-z-]+)\s*(\{[\s\S]*?\})?\s*>>/;
+
+export function splitCommand(raw: string): {
+  reply: string;
+  command?: { id: string; args: Record<string, CommandArg> };
+} {
+  const m = raw.match(MARKER);
+  if (!m) return { reply: raw };
+  // EVERY MARKER GOES, VALID OR NOT, AND WHETHER OR NOT IT IS THE ONE WE USE.
+  // The marker is machinery: leaving one in the reply shows an owner the
+  // plumbing for a card they never got. A card is also a single question, so
+  // only the FIRST proposal is acted on — the one the reply was arguing for.
+  const reply = raw.replace(new RegExp(MARKER.source, "g"), "").replace(/\n{3,}/g, "\n\n").trim();
+  if (!commandFor(m[1])) return { reply };
+  let args: Record<string, CommandArg> = {};
+  try {
+    const parsed: unknown = m[2] ? JSON.parse(m[2]) : {};
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+        if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") args[k] = v;
+      }
+    }
+  } catch {
+    args = {};
+  }
+  return { reply, command: { id: m[1]!, args } };
+}

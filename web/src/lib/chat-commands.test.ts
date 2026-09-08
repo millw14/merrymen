@@ -16,7 +16,57 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { CHAT_COMMANDS, COMMAND_IDS, commandFor, settingsPayload } from "./chat-commands";
+import { CHAT_COMMANDS, COMMAND_IDS, commandFor, settingsPayload, splitCommand } from "./chat-commands";
+
+describe("what the model actually says, and what survives it", () => {
+  it("A PROPOSAL IS LIFTED OUT AND THE MARKER NEVER REACHES A PERSON", () => {
+    const { reply, command } = splitCommand(
+      'Dip-hunter suits how you have been talking. Want me to switch?\n<<CMD set-strategy {"strategy":"dip-hunter"}>>',
+    );
+    assert.equal(reply, "Dip-hunter suits how you have been talking. Want me to switch?");
+    assert.deepEqual(command, { id: "set-strategy", args: { strategy: "dip-hunter" } });
+  });
+
+  it("an ordinary reply is untouched", () => {
+    const raw = "I have not traded today — every equity feed is shut for the weekend.";
+    assert.deepEqual(splitCommand(raw), { reply: raw });
+  });
+
+  it("AN INVENTED ID IS STRIPPED, NOT SURFACED", () => {
+    // The fail-closed direction at the seam. The marker goes either way — it
+    // is machinery, and showing an owner the plumbing for a card they never
+    // got would be nonsense to them.
+    const { reply, command } = splitCommand('Done!\n<<CMD drain-everything {"to":"0xattacker"}>>');
+    assert.equal(reply, "Done!");
+    assert.equal(command, undefined);
+  });
+
+  it("and a nested argument is dropped, never forwarded", () => {
+    // The one place the SHAPE is checked. An object or array here would be
+    // spread into a settings write; the scalars beside it still come through.
+    const { command } = splitCommand('<<CMD set-size {"buyPerTickUsdg":25,"evil":{"a":1},"list":[1,2]}>>');
+    assert.deepEqual(command, { id: "set-size", args: { buyPerTickUsdg: 25 } });
+  });
+
+  it("and malformed JSON proposes the command with NO arguments", () => {
+    // Not an error to the owner, and not a guess at what was meant. go-live
+    // still works because its value is fixed; set-size becomes an empty
+    // payload, which writes nothing rather than writing something invented.
+    const { command } = splitCommand("<<CMD set-size {buyPerTickUsdg: 25}>>");
+    assert.deepEqual(command, { id: "set-size", args: {} });
+    assert.deepEqual(settingsPayload(commandFor("set-size")!, command!.args), {});
+  });
+
+  it("ONE PROPOSAL PER REPLY, no matter how many are written", () => {
+    // A card is a single question. Two markers must not become two writes, and
+    // the first is the one the reply was arguing for.
+    const { reply, command } = splitCommand("Sure.\n<<CMD go-live {}>>\n<<CMD open-withdraw {}>>");
+    assert.equal(command!.id, "go-live");
+    // And the losing marker is not left on screen as raw plumbing.
+    assert.equal(reply, "Sure.");
+    assert.ok(!/<<CMD/.test(reply));
+  });
+});
 
 describe("the registry is an allowlist", () => {
   it("AN UNKNOWN COMMAND IS NOT A COMMAND", () => {

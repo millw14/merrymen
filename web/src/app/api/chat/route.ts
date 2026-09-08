@@ -16,7 +16,7 @@ import { NextResponse } from "next/server";
 import { fitChatState } from "@/lib/chat-state";
 import { conceptsFor, isHostedMode, renderConcepts } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
-import { COMMAND_IDS, commandFor, type CommandArg } from "@/lib/chat-commands";
+import { COMMAND_IDS, splitCommand } from "@/lib/chat-commands";
 import { resolveConfig } from "@merrymen/settings";
 import { resolveLlm, llmText } from "@merrymen/llm";
 
@@ -60,35 +60,6 @@ WHEN THEY ASK YOU TO DO SOMETHING:
 - NEVER put a private key, a seed phrase or any secret in a reply. If they ask for their key, propose reveal-key — it takes them to the wallet page, which is the only place that shows it.
 - MONEY OUT IS NOT SOMETHING YOU CAN DO FROM HERE. Whether funds can leave is decided by the permission sealed into your key when they signed, and most keys carry none at all. Propose open-withdraw and say so — never "sending it now", never a promise the wall will refuse.
 - IF YOU ARE NOT SURE WHICH SETTING THEY MEANT, propose open-settings rather than guessing at one. A card for the wrong dial is worse than a screen with every dial on it.`;
-
-/**
- * Pull a proposed command off the end of a reply, if there is one.
- *
- * VALIDATED HERE, AGAINST THE REGISTRY. The id must be one we already know and
- * the arguments must be flat scalars — so the worst a confused or injected
- * model can produce is a command the owner sees written out and declines.
- * Anything unparseable is simply stripped and the reply renders as text.
- */
-function splitCommand(raw: string): { reply: string; command?: { id: string; args: Record<string, CommandArg> } } {
-  const m = raw.match(/<<CMD\s+([a-z-]+)\s*(\{[\s\S]*?\})?\s*>>/);
-  if (!m) return { reply: raw };
-  const reply = raw.replace(m[0], "").trim();
-  if (!commandFor(m[1])) return { reply };
-  let args: Record<string, CommandArg> = {};
-  try {
-    const parsed: unknown = m[2] ? JSON.parse(m[2]) : {};
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-        // SCALARS ONLY. A nested object or array here would be forwarded into a
-        // settings write, and this is the one place its shape is checked.
-        if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") args[k] = v;
-      }
-    }
-  } catch {
-    args = {};
-  }
-  return { reply, command: { id: m[1]!, args } };
-}
 
 interface ChatBody {
   message?: unknown;
