@@ -85,7 +85,15 @@ async function candidatesFor(tenant: `0x${string}` | null): Promise<SnipeCandida
   try {
     const d = await sharedRead();
     for (const r of d.rows ?? []) {
-      add({ address: r.token, symbol: r.name, name: r.name, covered: false });
+      // `DiscoveryRow.name` IS A PAIR LABEL, NOT A SYMBOL — "RUBEN / WETH",
+      // "CME / WETH". There is no symbol field on the row at all. Mapping the
+      // label straight in made every exact-ticker query miss: "NEON" never
+      // equals "NEON / WETH", so a coin plainly on the market list came back
+      // not-found, and only the substring pass ever hit — which is the loosest
+      // and least trustworthy of the three.
+      const label = String(r.name ?? "");
+      const symbol = (label.split("/")[0] ?? label).trim();
+      add({ address: r.token, symbol, name: label, covered: false });
     }
   } catch {
     /* the index is optional; the registry and the owner's list still answer */
@@ -164,36 +172,27 @@ export async function POST(req: Request) {
     });
   }
 
-  // ONE COIN, COVERED. Hand off to the order channel the confirm button already
-  // uses, rather than reaching for the worker directly.
-  const placed = await fetch(new URL("/api/orders", req.url), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      // The caller's session travels with it: /api/orders authorises the tenant
-      // itself, and it must, because this route is not the thing holding the
-      // authority.
-      cookie: req.headers.get("cookie") ?? "",
-    },
-    body: JSON.stringify({ side: "buy", symbol: t.symbol, usdgAmount }),
-  });
-  const order = (await placed.json().catch(() => null)) as { error?: string; duplicate?: boolean } | null;
-  if (!placed.ok) {
-    return NextResponse.json(
-      { outcome: "refused", target: { symbol: t.symbol }, error: order?.error ?? `refused (${placed.status})` },
-      { status: placed.status },
-    );
-  }
+  // ONE COIN, COVERED — SO THIS ROUTE'S JOB IS DONE.
+  //
+  // It resolves; it does not place. The first version called /api/orders from
+  // the server with the caller's cookie forwarded, and that was wrong twice
+  // over: it 500'd in production the moment a curated token resolved (a server
+  // fetching its own origin), and more importantly it made this a second thing
+  // that can start a trade. The browser already knows how to place an order —
+  // it is the same code the confirm button runs for `via: "order"` — so the
+  // resolved symbol goes back and the ONE execution path stays the one.
   return NextResponse.json({
-    outcome: "placed",
+    outcome: "resolved",
     target: { symbol: t.symbol, address: t.address, short: shortAddress(t.address) },
-    duplicate: !!order?.duplicate,
-    // PLACED, NOT BOUGHT — the same discipline the order card already keeps. A
-    // 200 here means a row exists on the command channel; the fill, the refusal
-    // or the paper practice arrives on the tape a minute later.
-    say: order?.duplicate
-      ? `Already had that one queued — ${t.symbol} for $${usdgAmount}. I have not placed it twice.`
-      : `On it — ${t.symbol} at ${shortAddress(t.address)}, $${usdgAmount}. Placed, not filled: my ` +
-        `key's limits still decide, and however it ends it lands on your trades.`,
+    usdgAmount,
+    matchedOn: resolved.matchedOn,
+    // What the owner reads if anything goes wrong after this point. The
+    // placement's own sentence is written by the order path, in the past tense
+    // of the ASKING — "placed, not filled" — because a 200 there means a row
+    // exists, not that anyone bought anything.
+    say:
+      `${t.symbol} at ${shortAddress(t.address)}` +
+      (resolved.matchedOn === "name" ? ` — matched on its name, not its ticker` : "") +
+      `. Placing $${usdgAmount}.`,
   });
 }

@@ -305,8 +305,38 @@ export function Agent({
           headers: { "content-type": "application/json" },
           body: JSON.stringify(commandPayload(cmd, pending!.args)),
         });
-        const out = (await res.json().catch(() => null)) as { say?: string; error?: string } | null;
+        const out = (await res.json().catch(() => null)) as {
+          outcome?: string;
+          say?: string;
+          error?: string;
+          target?: { symbol?: string };
+          usdgAmount?: number;
+        } | null;
         if (!res.ok && !out?.say) throw new Error(out?.error ?? `that was refused (${res.status})`);
+        // RESOLVED IS NOT PLACED. The route's job ends at "this query means this
+        // one coin, and your key covers it"; the order goes through the SAME
+        // channel the buy card uses, from here, so there is exactly one way an
+        // order is ever created. The other three outcomes never reach an order
+        // at all and are rendered as what they are.
+        if (out?.outcome === "resolved" && out.target?.symbol) {
+          const placed = await fetch("/api/orders", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ side: "buy", symbol: out.target.symbol, usdgAmount: out.usdgAmount }),
+          });
+          const body = (await placed.json().catch(() => null)) as
+            | { error?: string; duplicate?: boolean }
+            | null;
+          if (!placed.ok) throw new Error(body?.error ?? `that was refused (${placed.status})`);
+          onTurn({
+            question: "✓ confirmed",
+            answer: body?.duplicate
+              ? `${out.say} I already had that one queued, so I have not placed it twice.`
+              : `${out.say} Placed, not filled — my key's limits still decide, and however it ends it lands on your trades.`,
+          });
+          setPending(null);
+          return;
+        }
         onTurn({ question: "✓ confirmed", answer: out?.say ?? "I could not tell how that went." });
         setPending(null);
         return;

@@ -136,3 +136,47 @@ describe("telling two coins with one ticker apart", () => {
     assert.equal(shortAddress("PEPE"), "pepe");
   });
 });
+
+/**
+ * THE PAIR LABEL, WHICH IS NOT A SYMBOL.
+ *
+ * The discovery index has no symbol field. Its `name` is a PAIR label —
+ * "RUBEN / WETH", "CME / WETH" — and mapping it straight in as the ticker made
+ * every exact query miss: "NEON" never equals "NEON / WETH", so coins plainly
+ * on the market list came back not-found, and only the loose substring pass
+ * ever hit. Caught in production, not in review.
+ *
+ * The split lives at the callers, so this pins the shape the resolver needs
+ * rather than the parsing itself: a candidate's symbol must be the ticker
+ * alone, and its name may keep the label so a name search still works.
+ */
+describe("a pair label is not a ticker", () => {
+  const fromLabel = (label: string, n: number): SnipeCandidate => ({
+    address: at(n),
+    symbol: (label.split("/")[0] ?? label).trim(),
+    name: label,
+  });
+
+  it("AN EXACT TICKER MATCHES A COIN THE INDEX LABELLED AS A PAIR", () => {
+    const book = [fromLabel("RUBEN / WETH", 21), fromLabel("CME / WETH", 22)];
+    const r = resolveSnipeTarget("CME", book);
+    assert.equal(r.kind, "one");
+    assert.equal(r.kind === "one" && r.matchedOn, "symbol");
+    assert.equal(r.kind === "one" && r.target.address, at(22));
+  });
+
+  it("and the label still answers a name search", () => {
+    const r = resolveSnipeTarget("weth", [fromLabel("RUBEN / WETH", 21)]);
+    assert.equal(r.kind, "one");
+    assert.equal(r.kind === "one" && r.matchedOn, "name");
+  });
+
+  it("AND TWO PAIRS OF THE SAME COIN STILL ASK RATHER THAN PICK", () => {
+    // The reason the split matters for safety and not only for hit rate: once
+    // tickers are extracted, duplicates become visible as duplicates instead of
+    // hiding behind different pair labels.
+    const r = resolveSnipeTarget("NEON", [fromLabel("NEON / WETH", 31), fromLabel("NEON / USDG", 32)]);
+    assert.equal(r.kind, "many");
+    assert.equal(r.kind === "many" && r.candidates.length, 2);
+  });
+});
