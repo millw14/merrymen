@@ -83,10 +83,19 @@ describe("one click is at most one trade", () => {
     // when the market was unreadable, and the command file survives a restart.
     // Without this, a click during a wobble fills hours later at a price the
     // owner never saw.
-    assert.match(CODE, /const ORDER_TTL_MS = 5 \* 60_000;/);
-    assert.equal((CODE.match(/expiresAt: now \+ ORDER_TTL_MS|expiresAt: now \+ ORDER_TTL_MS \}/g) ?? []).length >= 1, true);
-    assert.ok(CODE.includes("now + ORDER_TTL_MS"), "hosted and self-hosted both stamp it");
-    assert.equal((CODE.match(/now \+ ORDER_TTL_MS/g) ?? []).length, 2);
+    // TWO TICKS OF THE TICK THIS TENANT ACTUALLY RUNS, not a constant tuned for
+    // the 60s default. The hosted fleet runs 240s and the child drains at most
+    // one command per tick, so five minutes bought exactly ONE attempt — and an
+    // order that missed it was dead. Watched that happen in production: a child
+    // re-armed, its tick clock reset, and the queued order sat through its
+    // entire window without being looked at once.
+    assert.match(CODE, /const ORDER_TTL_FLOOR_MS = 5 \* 60_000;/);
+    assert.match(CODE, /Math\.max\(ORDER_TTL_FLOOR_MS, \(2 \* tickSeconds \+ 15\) \* 1000\)/);
+    assert.ok(CODE.includes("now + ttlMs"), "hosted and self-hosted both stamp it");
+    assert.equal((CODE.match(/now \+ ttlMs/g) ?? []).length, 2);
+    // And it is the CALLER's tick, not this container's — the same lesson the
+    // ceiling above it had to learn.
+    assert.match(CODE, /\(await getSettingsStore\(\)\.get\(tenant\)\)\?\.tickSeconds/);
   });
 });
 
@@ -179,7 +188,7 @@ describe("what the review found, pinned so it cannot come back", () => {
     // does that in bulk on this fleet — left a row nothing could ever finish,
     // and every future order from that tenant was refused.
     assert.match(CODE, /done_at IS NULL AND created_at > \?/);
-    assert.match(CODE, /now - ORDER_TTL_MS - STALE_GRACE_MS/);
+    assert.match(CODE, /now - ttlMs - STALE_GRACE_MS/);
     assert.match(CODE, /const STALE_GRACE_MS = /);
   });
 

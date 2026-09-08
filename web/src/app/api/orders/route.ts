@@ -31,12 +31,14 @@
  *    unanswered. A queue one client can fill faster than a worker drains it is
  *    an account draining over hours with no view of it and no way to stop.
  *
- * 3. IT EXPIRES. Five minutes, enforced at the claim. A settings write is
- *    timeless; an order is not. The child returns early from its drain when it
- *    is unarmed, restarting, or when the market was unreadable, and the command
- *    file survives a restart — so without this, an owner who clicked during a
- *    wobble and closed the tab gets a fill hours later, at a price they never
- *    saw, into a book they never looked at.
+ * 3. IT EXPIRES, enforced at the claim. A settings write is timeless; an order
+ *    is not. The child returns early from its drain when it is unarmed,
+ *    restarting, or when the market was unreadable, and the command file
+ *    survives a restart — so without this, an owner who clicked during a wobble
+ *    and closed the tab gets a fill hours later, at a price they never saw,
+ *    into a book they never looked at. The window is TWO TICKS of the tick this
+ *    tenant actually runs, not a constant tuned for the default one — see
+ *    orderTtlMs.
  *
  * ── WHAT THIS ROUTE DELIBERATELY DOES NOT DECIDE ─────────────────────────
  *
@@ -62,14 +64,41 @@ import { getSettingsStore } from "@merrymen/settings-store";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/** The shortest an order window may ever be, whatever the tick. */
+const ORDER_TTL_FLOOR_MS = 5 * 60_000;
+
 /**
- * How long an order stays willing to fill.
+ * How long an order stays willing to fill, FOR THIS DEPLOYMENT'S ACTUAL TICK.
  *
- * Long enough to survive one slow tick (60s default) and a ferry pass (15s)
- * with room to spare; short enough that nobody gets a fill from a market they
- * have stopped watching. Minutes, not hours — see the header.
+ * A CONSTANT TUNED FOR THE DEFAULT IS WRONG EVERYWHERE ELSE. Five minutes was
+ * sized for "one slow tick (60s default) and a ferry pass (15s) with room to
+ * spare". The hosted fleet runs a 240s tick, and the child drains at most ONE
+ * command per tick — so five minutes bought a single attempt, and an order that
+ * missed it was dead. Observed exactly that in production: a child re-armed
+ * (because a setting changed), its tick clock reset, and the queued order sat
+ * through its whole window without being looked at once.
+ *
+ * Two ticks plus a ferry pass is the smallest window that survives missing one,
+ * with the original five minutes as a floor so a fast tick does not make orders
+ * expire faster than a person can watch them.
+ *
+ * READ FOR THE CALLER, not for this container — same lesson as the ceiling
+ * above it. Hosted, `resolveConfig()` is the house's own settings file and says
+ * nothing about this tenant's cadence.
  */
-const ORDER_TTL_MS = 5 * 60_000;
+async function orderTtlMs(req: Request): Promise<number> {
+  let tickSeconds = resolveConfig().tickSeconds;
+  if (isHostedMode()) {
+    const tenant = tenantOf(req);
+    try {
+      const own = tenant ? (await getSettingsStore().get(tenant))?.tickSeconds : undefined;
+      if (typeof own === "number" && Number.isFinite(own) && own > 0) tickSeconds = own;
+    } catch {
+      /* the container's own tick is the safe fallback */
+    }
+  }
+  return Math.max(ORDER_TTL_FLOOR_MS, (2 * tickSeconds + 15) * 1000);
+}
 
 /**
  * How long after its expiry a row may still hold the one-at-a-time slot.
@@ -207,6 +236,7 @@ export async function POST(req: Request) {
   }
 
   const now = Date.now();
+  const ttlMs = await orderTtlMs(req);
   const id = orderId(agent, order, now);
   const args = { ...order };
 
@@ -219,7 +249,7 @@ export async function POST(req: Request) {
       if (hasPendingCommand(merrymenHome())) {
         return NextResponse.json({ error: "you already have an order waiting. Let that one finish first." }, { status: 409 });
       }
-      writeCommand(merrymenHome(), { id, kind: "trade", at: now, args, expiresAt: now + ORDER_TTL_MS });
+      writeCommand(merrymenHome(), { id, kind: "trade", at: now, args, expiresAt: now + ttlMs });
       return NextResponse.json({ id, queued: true });
     } catch (e) {
       return NextResponse.json({ error: `couldn't queue it: ${e instanceof Error ? e.message : String(e)}` }, { status: 503 });
@@ -244,7 +274,7 @@ export async function POST(req: Request) {
           // must not go on holding the slot either.
           "SELECT id FROM agent_commands WHERE agent_id = ? AND kind = 'trade' AND done_at IS NULL AND created_at > ? LIMIT 1",
         )
-        .get(agent, now - ORDER_TTL_MS - STALE_GRACE_MS)) as { id?: string } | undefined;
+        .get(agent, now - ttlMs - STALE_GRACE_MS)) as { id?: string } | undefined;
       if (open?.id) return { ok: false as const, why: "in-flight" as const };
     } catch {
       return { ok: false as const, why: "unreachable" as const };
@@ -259,7 +289,7 @@ export async function POST(req: Request) {
         .prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at) VALUES (?, ?, ?, ?, ?)")
         // Milliseconds — the column has no default, so forgetting it is a write
         // error rather than a silently-wrong unit.
-        .run(id, agent, "trade", JSON.stringify({ ...args, expiresAt: now + ORDER_TTL_MS }), now);
+        .run(id, agent, "trade", JSON.stringify({ ...args, expiresAt: now + ttlMs }), now);
       return { ok: true as const };
     } catch (e) {
       if (!isDuplicateKey(e)) return { ok: false as const, why: "unreachable" as const };
