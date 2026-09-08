@@ -193,6 +193,16 @@ export interface MerrymenSettings {
   /** Refuse to value a token whose deepest route is shallower than this (USD).
    * A thin pool can be pushed for pocket change, and that price would feed
    * equity, P&L and the drawdown breaker. */
+  /**
+   * Smallest fully diluted value a memecoin must carry to be considered, USD.
+   * 0 = no floor, and 0 is the default.
+   *
+   * THE SIZE DIAL. Depth, volume and buyers all say how BUSY a pool is; none of
+   * them says how BIG the thing is. Two coins can match on all three and be a
+   * $40k novelty and a $4M one, and an owner who wants the larger end of the
+   * chain had no way to say so.
+   */
+  memecoinMinFdvUsd?: number;
   minPoolLiquidityUsdg?: number;
   /** Refuse when spot has run this far from the TWAP (bps) — the signature of a
    * pool being manipulated right now. */
@@ -568,6 +578,7 @@ export const SETTINGS_DEFAULTS = {
   // $25k of depth and a 5% spot/TWAP band. Deliberately strict: live pools on
   // this chain run from ~$3k (trivially pushed) to ~$1.2M, so this admits the
   // deep end and refuses the rest until the owner explicitly loosens it.
+  memecoinMinFdvUsd: 0,
   minPoolLiquidityUsdg: 25_000,
   maxPriceDivergenceBps: 500,
   // Scout mode is OFF and ZERO by default. Buying what you cannot price is a

@@ -322,3 +322,50 @@ describe("fetchGeckoPoolsResult separates a refusal from an empty market", () =>
     );
   });
 });
+
+describe("the size floor — the cap in high cap", () => {
+  const pool = (over: Partial<GeckoPool> = {}): GeckoPool =>
+    ({
+      poolId: "0x1", poolAddress: null, tokenAddress: "0xtok", name: "COIN/USDG",
+      reserveUsd: 100_000, volume24hUsd: 200_000, buyers24h: 500, sellers24h: 100,
+      buys24h: 600, sells24h: 100, fdvUsd: 4_000_000, priceUsd: 1,
+      change1hPct: 0, change24hPct: 0, createdAt: 0, quoteAddress: "0xq",
+      ...over,
+    }) as unknown as GeckoPool;
+
+  const LIMITS = { minReserveUsd: 25_000, minVolume24hUsd: 50_000, minBuyers24h: 100 };
+
+  it("NO FLOOR IS THE DEFAULT, and changes nothing", () => {
+    // Every tenant who never asks about size sees exactly the feed they saw
+    // before — including coins whose FDV cannot be read at all.
+    const r = screenPools([pool({ fdvUsd: 40_000 }), pool({ fdvUsd: null })], LIMITS);
+    assert.equal(r.kept.length, 2);
+  });
+
+  it("A SMALL COIN IS DROPPED, and the reason names both numbers", () => {
+    const r = screenPools([pool({ fdvUsd: 40_000 })], { ...LIMITS, minFdvUsd: 1_000_000 });
+    assert.equal(r.kept.length, 0);
+    assert.match(r.dropped[0]!.why, /FDV \$40,000 < \$1,000,000/);
+  });
+
+  it("and a big one is kept", () => {
+    const r = screenPools([pool({ fdvUsd: 4_000_000 })], { ...LIMITS, minFdvUsd: 1_000_000 });
+    assert.equal(r.kept.length, 1);
+  });
+
+  it("AN UNREADABLE SIZE IS REFUSED, not waved through", () => {
+    // The rule this file already states for every other limit: on a screening
+    // step, absent evidence is not evidence of soundness. A coin whose size
+    // cannot be read has not passed a size floor.
+    const r = screenPools([pool({ fdvUsd: null })], { ...LIMITS, minFdvUsd: 1_000_000 });
+    assert.equal(r.kept.length, 0);
+    assert.match(r.dropped[0]!.why, /FDV unknown/);
+  });
+
+  it("and the floor never rescues a coin the other limits refused", () => {
+    // Order matters only in the message; a thin pool is thin whatever its FDV.
+    const r = screenPools([pool({ reserveUsd: 100, fdvUsd: 900_000_000 })], { ...LIMITS, minFdvUsd: 1_000 });
+    assert.equal(r.kept.length, 0);
+    assert.match(r.dropped[0]!.why, /depth/);
+  });
+});

@@ -184,6 +184,9 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   // but that is the owner explicitly accepting a price anyone can push.
   minPoolLiquidityUsdg: [0, 100_000_000],
   maxPriceDivergenceBps: [10, 10_000],
+  // The size floor for a memecoin. 0 is the off switch and the default, so a
+  // tenant who never touches it sees exactly the discovery feed they saw before.
+  memecoinMinFdvUsd: [0, 1_000_000_000_000],
   // Scout ceilings. 0 is a meaningful floor — it's the off switch for the
   // budget independently of the enable flag, so both have to allow it.
   discoveryIntervalMin: [1, 1440],

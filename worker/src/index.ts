@@ -182,6 +182,19 @@ const TRENDING_SCREEN: ScreenLimits = {
   minVolume24hUsd: 50_000,
   minBuyers24h: 100,
 };
+
+/**
+ * The screen this tenant actually wants, which is the one above plus their own
+ * size floor.
+ *
+ * A FUNCTION, NOT A CONSTANT, because `memecoinMinFdvUsd` is per-tenant and the
+ * constant is shared by every child in this process. Folding the floor into the
+ * shared object would apply one owner's taste to everybody's discovery feed.
+ */
+const trendingScreen = (c: ResolvedConfig): ScreenLimits => ({
+  ...TRENDING_SCREEN,
+  minFdvUsd: c.memecoinMinFdvUsd,
+});
 import { buildCurveTradeCalls } from "./venues/pons-trade";
 
 /**
@@ -2596,7 +2609,7 @@ async function main() {
         known: watchTokens,
         fetchPools: (feed) => fetchGeckoPools(feed),
         scout: creds ? createMemecoinScout(creds) : nullScout,
-        limits: TRENDING_SCREEN,
+        limits: trendingScreen(cfg),
         nowSec,
         // Look the shortlist up before ranking it. Absent a browser this is
         // undefined and the pass decides on numbers alone, exactly as before —

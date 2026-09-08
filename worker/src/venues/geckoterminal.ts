@@ -317,6 +317,23 @@ export interface ScreenLimits {
   minVolume24hUsd: number;
   /** Distinct buyers, not trades — a wash-trader can inflate the latter cheaply. */
   minBuyers24h: number;
+  /**
+   * Smallest fully diluted value worth considering, USD. 0 or absent = no floor.
+   *
+   * THE "CAP" IN "HIGH CAP", and the one figure here that is about SIZE rather
+   * than activity. Depth, volume and buyers all describe how busy a pool is
+   * this week; two coins can match on all three and be a $40k novelty and a
+   * $4M one. An owner who wants the larger end of the chain has, until now, had
+   * no way to say so.
+   *
+   * FDV AND NOT MARKET CAP, because market cap needs a circulating-supply
+   * figure nobody on this chain publishes honestly. FDV is supply times price
+   * and both are readable, so it is the number that can actually be checked —
+   * and it is the CONSERVATIVE one for this purpose: it counts tokens that have
+   * never been sold into the pool, which is exactly the overhang the scout is
+   * already told to weigh against.
+   */
+  minFdvUsd?: number;
 }
 
 /**
@@ -350,6 +367,19 @@ export function screenPools(
     if (p.buyers24h === null || p.buyers24h < limits.minBuyers24h) {
       dropped.push({ name: label, why: `${p.buyers24h ?? "unknown"} buyers < ${limits.minBuyers24h}` });
       continue;
+    }
+    // AN UNKNOWN FDV IS REFUSED, like every other absent figure here — see the
+    // header. A coin whose size cannot be read is not a coin that passed a size
+    // floor. Skipped entirely when no floor is set, so an unreadable FDV costs
+    // nothing to anyone who has not asked about size.
+    if (limits.minFdvUsd && limits.minFdvUsd > 0) {
+      if (p.fdvUsd === null || p.fdvUsd < limits.minFdvUsd) {
+        dropped.push({
+          name: label,
+          why: `FDV ${p.fdvUsd === null ? "unknown" : `$${Math.round(p.fdvUsd).toLocaleString()}`} < $${limits.minFdvUsd.toLocaleString()}`,
+        });
+        continue;
+      }
     }
     kept.push(p);
   }

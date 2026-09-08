@@ -70,6 +70,7 @@ export interface ResolvedConfig {
   /** Owner-added ERC-20s (memecoins). Shape-checked; still gated by the grant. */
   customTokens: CustomToken[];
   /** USD depth below which a token is refused a price (manipulation guard). */
+  memecoinMinFdvUsd: number;
   minPoolLiquidityUsdg: number;
   /** Spot-vs-TWAP band, bps, above which a price is refused. */
   maxPriceDivergenceBps: number;
@@ -304,6 +305,7 @@ export function mergeSettings(
     tickSeconds: num(file.tickSeconds, env.MERRYMEN_TICK_SECONDS, d.tickSeconds, 15, 3_600),
     basketSymbols,
     customTokens,
+    memecoinMinFdvUsd: num(file.memecoinMinFdvUsd, env.MERRYMEN_MEMECOIN_MIN_FDV_USD, d.memecoinMinFdvUsd ?? 0, 0, 1_000_000_000_000),
     minPoolLiquidityUsdg: num(file.minPoolLiquidityUsdg, env.MERRYMEN_MIN_POOL_LIQUIDITY_USDG, d.minPoolLiquidityUsdg, 0, 100_000_000),
     maxPriceDivergenceBps: num(file.maxPriceDivergenceBps, env.MERRYMEN_MAX_PRICE_DIVERGENCE_BPS, d.maxPriceDivergenceBps, 10, 10_000),
     discoveryEnabled: bool(file.discoveryEnabled, env.MERRYMEN_DISCOVERY_ENABLED, d.discoveryEnabled),

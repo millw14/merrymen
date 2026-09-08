@@ -175,6 +175,12 @@ What is worth weight:
   moving from something already distributed. A large 24h gain that is now reversing is late.
 - Age. A token days old is a different risk to one hours old; neither is disqualifying, and
   both are already inside the screen's limits.
+- Size, where the numbers support it. Between two candidates that are otherwise comparable on
+  participation and sustainability, prefer the LARGER one: a deeper pool absorbs a position
+  without moving the price against it, and a bigger book is harder for one wallet to move.
+  This is a tie-breaker and never a thesis — a large coin being distributed is still being
+  distributed, and size does not redeem a bad buys/buyer ratio or a reversing 24h move. An
+  owner who wants a hard floor on size sets one; you are ordering, not admitting.
 - Nulls mean the figure is UNKNOWN, not zero. An unknown is a reason for less conviction,
   never for more.
 
