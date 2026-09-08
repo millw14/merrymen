@@ -477,3 +477,29 @@ describe("the last resort for an entry price", () => {
     );
   });
 });
+
+describe("the deep scan is a recovery, not a habit", () => {
+  it("RUNS ONCE PER SYMBOL PER PROCESS, whether or not it found anything", async () => {
+    // Two million blocks in spans is hundreds of RPC calls. Paying them every
+    // four minutes for a position that cannot be recovered is the shape of the
+    // incident this repo already has: 32 children on one public endpoint, 81 of
+    // 103 reads rate-limited, twelve agents unable to arm at all.
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    assert.match(src, /if \(deepBasisTried\.has\(sym\)\) continue;\s*\n\s*deepBasisTried\.add\(sym\);/);
+    // Added BEFORE the call, so a scan that throws is not retried either.
+    const add = src.indexOf("deepBasisTried.add(sym);");
+    const call = src.indexOf("findSoleAcquisition({");
+    assert.ok(add > 0 && call > add, "the symbol must be marked before the scan, not after");
+  });
+
+  it("and the cheap path is still tried first, every tick", async () => {
+    // The ledger's own rows carry the transaction and cost nothing to read. The
+    // scan is the fallback for the case they cannot cover — a rebuilt child.
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    const rows = src.indexOf("landedFillsWithoutBasis(agentId)");
+    const scan = src.indexOf("findSoleAcquisition({");
+    assert.ok(rows > 0 && rows < scan, "rows first, log scan second");
+  });
+});

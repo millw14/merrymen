@@ -468,6 +468,15 @@ async function main() {
   /** Which held symbols last lacked a cost basis, so the warning fires on change only. */
   let lastUncoveredBasisKey: string | null = null;
   /**
+   * Symbols the deep acquisition scan has already been run for in this process.
+   *
+   * It walks two million blocks in spans, so it is hundreds of RPC calls. A tick
+   * that found nothing would pay them again every four minutes, for ever, on the
+   * endpoint this fleet already once saturated. Once is a recovery; every tick
+   * is an outage with a good excuse.
+   */
+  const deepBasisTried = new Set<string>();
+  /**
    * Is somebody else paying the gas?
    *
    * Read from the CONFIG rather than from the executor, because the question is
@@ -5688,6 +5697,16 @@ async function main() {
         for (const sym of uncovered) {
           const tok = watchTokens.find((t) => t.symbol === sym)?.address;
           if (!tok) continue;
+          // ONCE PER SYMBOL, PER PROCESS. This walks two million blocks in
+          // spans, so it is hundreds of RPC calls — and every tick that found
+          // nothing would pay them again, on the shared endpoint this fleet
+          // already once brought to its knees (81 of 103 reads rate-limited,
+          // twelve agents unable to arm). A deep scan is worth doing; worth
+          // doing every four minutes it is not. Recorded whether it succeeded
+          // or not, because a failure that repeats forever costs the same as a
+          // success that repeats forever.
+          if (deepBasisTried.has(sym)) continue;
+          deepBasisTried.add(sym);
           const found = await findSoleAcquisition({
             chain: rc,
             token: tok as `0x${string}`,
@@ -5696,12 +5715,17 @@ async function main() {
             // to 26 hours because it exists to stop a mid-op restart loosening
             // the day's spend, and an older op is outside the cap anyway. This
             // has a different horizon: a position is held for as long as it is
-            // held, and its entry price does not age out. Bounded, and only ever
-            // reached while something is genuinely uncovered.
+            // held, and its entry price does not age out.
             lookbackBlocks: 2_000_000n,
+            // Wider spans than the op sweep uses, because this filter is
+            // indexed on `to` and one account's inbound transfers are a handful
+            // of logs however many blocks they span. The adaptive halving still
+            // handles a provider that refuses the range.
+            maxSpan: 50_000n,
             log: (m) => console.log(`[basis] ${m}`),
           }).catch(() => null);
           if (found) candidates.push(found);
+          else console.log(`[basis] no single acquisition found for ${sym} — not retrying this process`);
         }
         for (const t of candidates) {
           if (!uncovered.length) break;
