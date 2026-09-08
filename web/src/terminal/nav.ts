@@ -57,11 +57,11 @@ export function screenForPath(path: string): Screen {
   return {
     kind: "tab",
     tab:
-      path === "/agent"
+      path === "/agent" || path === "/chat"
         ? "agent"
-        : path === "/you"
+        : path === "/you" || path === "/profile"
           ? "you"
-          : path === "/feed"
+          : path === "/feed" || path === "/"
             ? "feed"
             : path === "/alpha"
               ? "alpha"
@@ -73,6 +73,6 @@ export function pathForScreen(screen: Screen): string {
   if (screen.kind === "token") return `/t/${encodeURIComponent(screen.id)}`;
   if (screen.kind === "profile") return `/a/${encodeURIComponent(screen.slug)}`;
   if (screen.kind === "tab")
-    return ({ home: "/", agent: "/agent", you: "/you", feed: "/feed", alpha: "/alpha" })[screen.tab];
+    return ({ home: "/home", agent: "/chat", you: "/profile", feed: "/", alpha: "/alpha" })[screen.tab];
   return `/${screen.kind}`;
 }

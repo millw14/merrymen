@@ -5,6 +5,7 @@ import localFont from "next/font/local";
 // startup documents keep their styles inline so they work without the app.
 import "@/terminal/terminal.css";
 import "@/terminal/forms.css";
+import "@/terminal/polish.css";
 import "@/terminal/root.css";
 import { RegisterSW } from "@/components/RegisterSW";
 

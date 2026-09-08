@@ -28,15 +28,12 @@ import {
 import { positionsOf } from "./account";
 import { BalanceFigure } from "./studio";
 import { strategyName } from "./strategy";
-import { Feed } from "./screens/Feed";
-import { Board, tradeLine } from "./screens/Board";
+import { tradeLine } from "./screens/Board";
 
-export type SidebarSection = "markets" | "agents" | "feed" | "board";
+export type SidebarSection = "markets" | "agents";
 const SECTIONS: { id: SidebarSection; label: string }[] = [
   { id: "markets", label: "Markets" },
   { id: "agents", label: "Agents" },
-  { id: "feed", label: "Feed" },
-  { id: "board", label: "Leaderboard" },
 ];
 
 type Actions = {
@@ -55,8 +52,8 @@ export function DesktopHeader({
     <header className="desktop-header">
       <button
         className="desktop-brand"
-        onClick={() => onTab("home")}
-        aria-label="Merrymen home"
+        onClick={() => onTab("feed")}
+        aria-label="Merrymen feed"
       >
         {/*
           THE BRAND IS NOT A TAB. It borrowed the tab bar's icon for `agent`,
@@ -140,6 +137,10 @@ export function DesktopSidebar({
 
   return (
     <aside className="desktop-sidebar" aria-label="Explore">
+      <nav className="desktop-page-links" aria-label="Community navigation">
+        <Link href="/" aria-current={screen.kind === "tab" && screen.tab === "feed" ? "page" : undefined}>Feed</Link>
+        <Link href="/leaderboard">Leaderboard</Link>
+      </nav>
       <div
         className="desktop-explore-tabs"
         role="tablist"
@@ -321,41 +322,6 @@ export function DesktopSidebar({
             ))}
         </div>
       </section>
-      <section
-        className="desktop-explore-panel"
-        id="explore-panel-feed"
-        role="tabpanel"
-        aria-labelledby="explore-tab-feed"
-        hidden={section !== "feed"}
-      >
-        <Feed
-          compact
-          read={reads.theses}
-          theses={theses}
-          tokens={tokens}
-          agents={agents}
-          onToken={openToken}
-          onProfile={openProfile}
-          onDesk={() => onTab("agent")}
-        />
-      </section>
-      <section
-        className="desktop-explore-panel"
-        id="explore-panel-board"
-        role="tabpanel"
-        aria-labelledby="explore-tab-board"
-        hidden={section !== "board"}
-      >
-        <Board
-          compact
-          read={reads.board}
-          agents={agents}
-          theses={theses}
-          mine={mine}
-          onProfile={openProfile}
-          onDesk={() => onTab("agent")}
-        />
-      </section>
     </aside>
   );
 }
@@ -382,7 +348,7 @@ export function DesktopPortfolio({
         <div className="desktop-section-heading">
           <h2>Your agent</h2>
           <span className={`desktop-running ${stopped ? "paused" : ""}`}>
-            {mine.statusLabel ?? "Waiting for worker"}
+            {mine.statusLabel ?? "Offline"}
           </span>
         </div>
         <button className="desktop-agent-id" onClick={() => onTab("agent")}>

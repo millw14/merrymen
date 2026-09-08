@@ -936,11 +936,7 @@ export default function GrantPage() {
           <div className="grant-panel desync-panel">
             <h1 className="grant-title">this wallet isn&apos;t active</h1>
             <p className="grant-sub">
-              Your browser still has this wallet, but the worker no longer holds its grant — so the
-              dashboard shows no merryman and it won&apos;t trade. This happens after a{" "}
-              <b>kill switch</b> or a <code>merrymen kill</code> — or because the server refused the
-              grant, in which case the reason is below. Re-arm it to make the band obey it again, or
-              discard it and start fresh.
+              Trading is inactive. Reconnect this wallet to resume, or choose another wallet.
             </p>
             {/* THE REASON, ON THE SCREEN THAT REPORTS THE PROBLEM. The shared
                 error line lives inside the create panel (it is nested under
@@ -982,11 +978,6 @@ export default function GrantPage() {
         {savedWallets.some((w) => !w.current) && (
           <div className="grant-panel">
             <h2 className="grant-title">wallets you used before</h2>
-            <p className="grant-sub">
-              Each agent wallet has its own address. These are ones this browser made earlier — if you
-              funded a wallet and the balance above looks wrong, the money is at one of these, and the
-              key to it is here.
-            </p>
             <div className="saved-wallets">
               {savedWallets
                 .filter((w) => !w.current)
@@ -1002,10 +993,7 @@ export default function GrantPage() {
           <div className="grant-panel">
             {switching && grant && (
               <div className="switch-note">
-                You&apos;re running <span className="mono">{short(grant.smartAccount)}</span> right
-                now. Restoring another wallet makes <b>that</b> one the active agent instead — your
-                current wallet is <b>archived on this machine with its owner key</b>, so nothing is
-                lost and you can switch back or sweep it anytime.
+                Restoring replaces your active wallet, <span className="mono">{short(grant.smartAccount)}</span>. You can still access it under saved wallets.
                 <button
                   className="copy-btn"
                   style={{ marginTop: 10 }}
@@ -1048,21 +1036,11 @@ export default function GrantPage() {
             <p className="grant-sub">
               {mode === "create" ? (
                 <>
-                  No wallet to connect. merrymen makes a fresh wallet and gives <b>you</b> the key.
-                  You set the spending limits below — and the blockchain itself{" "}
-                  <Info>
-                    Not honor-system limits. The size of each trade, how many it may make, how long
-                    the key lives and where value may land are sealed into the signature your
-                    account contract checks, so a hacked agent cannot exceed them. The daily total
-                    and the drawdown breaker are different — those are counted by the software on
-                    your machine. The summary below the sliders spells out which is which.
-                  </Info>{" "}
-                  enforces the important ones — the summary below says exactly which.
+                  Choose a network and set your agent&apos;s trading limits.
                 </>
               ) : (
                 <>
                   Enter your <b>recovery key</b> to restore your wallet with updated trading limits.{" "}
-                  <Info>Your smart-account address is derived from the owner key, so the same key always reproduces the same account — with the funds still in it. Restoring signs a fresh session key; it moves nothing on-chain.</Info>{" "}
                 </>
               )}
             </p>
@@ -1210,7 +1188,7 @@ export default function GrantPage() {
             </div>
 
             <div className="grant-summary">
-              <b>In plain English:</b> on {isMainnet ? "real money" : "practice"}, this agent can trade
+              In {isMainnet ? "live trading" : "practice mode"}, this agent can trade
               at most <b>{caps.perTradeUsdg} USDG</b> per trade, <b>{caps.dailyUsdg} USDG</b> per day,
               and <b>{caps.maxOpsPerDay}</b> trades per day. It stops itself if it&apos;s down{" "}
               <b>{caps.maxDrawdownPct}%</b>, and its key auto-expires in <b>{caps.expiryDays} days</b>.
@@ -1225,13 +1203,8 @@ export default function GrantPage() {
                 the worker — the process a compromise owns. Saying so costs a sentence and is the
                 difference between a promise and a claim.
               */}
-              <b>What the chain itself enforces:</b> the per-trade cap, the expiry, and the fact
-              that value can only land back in your own account. Those the agent cannot exceed no
-              matter what happens to the software. The <b>daily total</b>, the{" "}
-              <b>drawdown breaker</b> and the <b>trades-per-day</b> count are counters kept by
-              merrymen, so a tampered-with agent could ignore all three — which is why the lever
-              that bounds a loss is the <b>per-trade cap</b> and a <b>short expiry</b>, not the
-              daily figure.
+              The per-trade limit and expiry are enforced by your wallet. Daily spending, drawdown,
+              and trade-count limits depend on the agent software.
               {/*
                 The second copy of this sentence. Trades-per-day was corrected on the
                 loaded-grant panel, in the README, in WallPanel and in Console — and missed
@@ -1284,11 +1257,6 @@ export default function GrantPage() {
             )}
             {error && <div className="grant-error mono">{error}</div>}
 
-            <div className="grant-note">
-              {mode === "create"
-                ? "The keys are made right here in your browser so you can save them yourself — nobody else ever sees them."
-                : "Your owner key never leaves this browser — it's used to re-derive your account and sign the new session key locally. Restoring moves no funds and costs no gas."}
-            </div>
           </div>
         )}
 
@@ -1349,13 +1317,7 @@ export default function GrantPage() {
             </button>
 
             <div className="grant-note">
-              your account: <span className="mono">{short(grant.smartAccount)}</span> · session key
-              (worker-only, capped): <span className="mono">{short(grant.sessionKeyAddress)}</span>
-              <br />
-              This key controls the account, but its <i>own</i> address (
-              <span className="mono">{short(grant.owner)}</span>) is different — that&apos;s the
-              address MetaMask shows if you import the key. You fund and recover the{" "}
-              <b>account</b> address, not the key&apos;s address.
+              Account: <span className="mono">{short(grant.smartAccount)}</span>
             </div>
           </div>
         )}
@@ -1420,13 +1382,11 @@ export default function GrantPage() {
               return (
                 <div className={expired ? "renew-note expired" : "renew-note"}>
                   {expired ? (
-                    <><GI d="clock" size={13} /> <b>Your agent&apos;s key has expired</b> — it stopped trading (the safety timer did its job). Your funds are untouched.</>
+                    <><GI d="clock" size={13} /> <b>Your agent&apos;s key has expired.</b> Trading is paused.</>
                   ) : (
                     <><GI d="clock" size={13} /> <b>Your agent&apos;s key expires in {Math.max(1, Math.ceil(secsLeft / 86_400))} day{secsLeft > 86_400 ? "s" : ""}.</b></>
                   )}{" "}
-                  Re-signing is free and instant — same wallet, same funds, nothing sent
-                  on-chain. The new key is signed against <b>today&apos;s wall</b>, so its
-                  permissions can differ from the old one&apos;s.
+                  Review and renew your trading permissions below.
                   {/*
                     SCROLLS, does not sign. This button used to call renewKey()
                     directly with `disabled={renewing}` as its only guard — which
@@ -1453,10 +1413,7 @@ export default function GrantPage() {
             <p className="grant-sub">
               {grantIsTestnet ? (
                 <>
-                  Send <b>testnet gas (ETH)</b> to the account address below — that&apos;s the only
-                  thing worth sending here. <b>Don&apos;t send USDG:</b> merrymen only knows the
-                  mainnet token addresses, so testnet USDG reads 0 and is never traded. Practice
-                  trades a simulated book instead.
+                  Send only <b>testnet ETH</b> to this address. Practice trades use simulated funds.
                 </>
               ) : (
                 <>
@@ -1478,14 +1435,6 @@ export default function GrantPage() {
               )}
             </p>
 
-            <div className="paper-note mono" style={{ marginBottom: 14 }}>
-              <GI d="scroll" size={14} /> <b>Already riding.</b> Your band is trading in <b>paper mode</b> right now — real
-              live prices, simulated fills — so you can watch it work before funding anything. Head
-              to the <Link href="/">dashboard</Link> to see it.{" "}
-              {grantIsTestnet
-                ? "On practice there's nothing to fund for live trading — testnet has no trading venues, and testnet USDG won't even show up below. Faucet gas is still worth grabbing if you want to watch a real UserOp land. Going live means a mainnet wallet plus a bundler key in settings."
-                : "Fund the account below only when you're ready for live trades."}
-            </div>
 
             <div className="fund-addr mono">
               <span className="rk">account address · {chainLabel(grant.chainId)}</span>
@@ -1494,13 +1443,7 @@ export default function GrantPage() {
             </div>
 
             <div className="grant-note" style={{ marginTop: 12 }}>
-              <b>This is a smart-account address, not a MetaMask wallet.</b>{" "}
-              <Info>An ERC-4337 smart account. Your owner key controls it, but the key&apos;s own address (what MetaMask derives when you import it) is different — so MetaMask shows an empty wallet, not this account. That&apos;s expected.</Info>{" "}
-              Your owner key controls it, but that key&apos;s <i>own</i> address is different — import
-              the key into MetaMask and you&apos;ll see an empty wallet, not these funds. To move the
-              money out anytime — even after a kill switch — run{" "}
-              <span className="mono">merrymen recover</span>, which sweeps the balance to any address
-              you choose.
+              Deposit to the account address above. Use <Link href="/profile">Withdraw in Profile</Link> to move funds out.
             </div>
 
             <div className="fund-balances">
@@ -1513,7 +1456,7 @@ export default function GrantPage() {
                   {gasFunded
                     ? "funded ✓"
                     : grantIsTestnet
-                      ? "lets a UserOp land — no real swaps on testnet"
+                      ? "testnet network fees"
                       : gasSponsored
                         // Not 'needed to deploy + trade': it is needed for neither.
                         // The one thing it IS still needed for is the way out.
@@ -1564,15 +1507,7 @@ export default function GrantPage() {
               <div className="fund-ready mono">
                 {grantIsTestnet ? (
                   <>
-                    gas landed —{" "}
-                    {session?.hosted ? (
-                      <>your band is <b>already riding</b></>
-                    ) : (
-                      <>run <b>merrymen start</b> and the band rides</>
-                    )}{" "}
-                    its <b>paper book</b>: live prices, simulated fills. testnet has no trading
-                    venues, so no real swap can route here, and the USDG line above stays blank
-                    whatever you send.
+                    Testnet ETH received. {session?.hosted ? "Open your agent to follow paper trades." : <>Run <code>merrymen start</code> to begin paper trading.</>}
                   </>
                 ) : usdgFunded ? (
                   <>
@@ -1580,13 +1515,11 @@ export default function GrantPage() {
                         per tenant on its own clock. Telling a hosted owner to run a
                         CLI they never installed is the first instruction the product
                         gives them, and it does not apply. */}
-                    funded — {session?.hosted ? <>your band is <b>already riding</b></> : <>run <b>merrymen start</b> and your band rides</>}. balances
-                    refresh here every few seconds.
+                    Funds received. {session?.hosted ? <>Open your agent.</> : <>Run <code>merrymen start</code> to begin.</>}
                   </>
                 ) : (
                   <>
-                    gas landed — still waiting on <b>USDG</b>, the agent&apos;s trading capital.
-                    until it arrives the band stays on its paper book.
+                    ETH received. Add <b>USDG</b> for live trading.
                   </>
                 )}
                 {/*
@@ -1684,8 +1617,7 @@ export default function GrantPage() {
               read the JSON. Capability drift you cannot see is capability drift you cannot act on.
             */}
             <div className="grant-summary" style={{ marginTop: 14 }}>
-              <b>What this key carries.</b> A grant is a signature, so it is frozen at the moment it
-              was signed — re-signing is the only way to change it.
+              <b>Trading permissions</b>
               <ul style={{ margin: "10px 0 0", paddingLeft: 18, lineHeight: 1.7 }}>
                 <li>
                   <b>Stock list</b> —{" "}
@@ -1694,23 +1626,16 @@ export default function GrantPage() {
                     : "the legacy three (QQQ, NVDA, TSLA) only. Re-sign below to widen it."}
                 </li>
                 <li>
-                  <b>USDG out</b> — none. No withdrawal address is registered, so the key you are about
-                  to sign carries no transfer permission at all; moving money out is the owner
-                  key&apos;s job (<code>merrymen recover</code>). Wallets signed before this changed keep
-                  the free-form transfer permission they were signed with.
+                  <b>Withdrawals</b> — use your recovery key in Profile. Renewing removes any older agent transfer permission.
                 </li>
                 <li>
                   <b>Uniswap v4</b> —{" "}
                   {grantHasV4(grant) ? (
                     <span style={{ color: "var(--red)" }}>
-                      granted, and worth removing. Keys signed before this was changed carry a
-                      Permit2 + UniversalRouter pair whose recipient the chain cannot check, because
-                      a v4 swap hides it inside opaque calldata. A tampered agent could send your
-                      non-USDG tokens anywhere. <b>Re-signing below</b> issues it without the pair
-                      — same wallet, same funds, same address, and free.
+                      unrestricted transfer access. <b>Renew below</b> to remove it.
                     </span>
                   ) : (
-                    "not granted. Swaps route through Uniswap v3, where the chain pins the recipient to your own account."
+                    "not granted."
                   )}
                 </li>
               </ul>
@@ -1812,22 +1737,19 @@ export default function GrantPage() {
                         {grant.chainId === MAINNET ? (
                           <>Move this key to <b>practice (testnet {TESTNET})</b> — it will stop being able to trade.</>
                         ) : (
-                          <>Move this key to <b>real money (mainnet {MAINNET})</b>. Practice mode cannot trade at all: every token merrymen knows is a mainnet deployment, so a testnet balance reads as zero and every route is refused.</>
+                          <>Move this key to <b>live trading (mainnet {MAINNET})</b>.</>
                         )}
                       </span>
                     </label>
                   </div>
                   {chainId === MAINNET && grant.chainId !== MAINNET && (
                     <div className="mainnet-warning" style={{ marginTop: 10 }}>
-                      <b>This is real money.</b> Your owner &amp; session keys are stored in plain
-                      text in this browser — anyone with access to it controls the funds. There is
-                      no recovery service and no undo. The caps above are the seatbelt: start small.
+                      <b>This uses real funds.</b> Anyone with access to the keys saved in this browser can control your funds. Keep your recovery key private.
                       <br />
                       <br />
                       Your account address does not change, so anything already sitting at{" "}
                       <span className="mono">{short(grant.smartAccount)}</span> on mainnet stays
-                      there. Practice balances stay behind on testnet, where they were never worth
-                      anything.
+                      there. Testnet balances do not transfer to mainnet.
                       <label className="ack-row" style={{ marginTop: 10 }}>
                         <input
                           type="checkbox"

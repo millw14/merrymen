@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { coinPrice, lastLine, pctBps, type LiveAgent, type LiveToken } from "../live";
-import { Coin, Face } from "../ui";
+import { Coin, Face, Empty } from "../ui";
 
 export function Search({
   tokens,
@@ -70,7 +70,7 @@ export function Search({
           <span className="px">{coinPrice(t.priceUsd)}</span>
         </button>
       ))}
-      {query && ags.length === 0 && toks.length === 0 && <p className="meta">Nothing with that name.</p>}
+      {query && ags.length === 0 && toks.length === 0 && <Empty kind="search" title="Nothing with that name."/>}
     </div>
   );
 }

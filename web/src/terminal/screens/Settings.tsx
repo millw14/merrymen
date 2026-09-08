@@ -254,7 +254,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
         setStatus(null);
         return;
       }
-      setStatus("saved — the worker applies it within one tick");
+      setStatus("Changes saved");
       setDraft({});
       setSymbols(null);
       setTgEnabled(null);
@@ -384,7 +384,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
 
       <div className="mm-wrap">
         <p className="mm-note">
-            Choose how your agent trades and stays in touch. Leave a key blank to keep the saved one.
+            Leave an API key blank to keep the saved key.
         </p>
 
         {/* Setup steps live here after the /app muster is done — a quiet, honest
@@ -408,11 +408,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               <Field
                 label="AI provider"
                 action={prov.keyUrl ? { href: prov.keyUrl, label: providerNeedsKey ? "get a key" : "install" } : undefined}
-                hint={`Powers plain-English chat and the AI strategist. ${prov.blurb} ${
-                  hosted
-                    ? "We run a free model for you, so this is optional — bring your own key for a faster, smarter one on your own quota."
-                    : "Built-in strategies need no key at all."
-                } Blank keeps the saved key.`}
+                hint={hosted ? "Optional. Add your own provider for chat and the Strategist." : "Required for chat and the Strategist."}
               >
                 <select value={llmProviderVal} onChange={set("llmProvider")}>
                   {providers.map((p) => (
@@ -430,11 +426,6 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 <Field
                   label={`${prov.label} API key`}
                   action={prov.keyUrl ? { href: prov.keyUrl, label: "get a key" } : undefined}
-                  hint={
-                    hosted
-                      ? "Paste your own key and your agent uses it instead of ours — your quota, your choice of model, no daily cap shared with anyone. Stored encrypted and never shown again. Blank keeps the saved key."
-                      : "Paste the key for the provider you picked above. Never leaves your machine. Blank keeps the saved key."
-                  }
                 >
                   <input
                     type="password"
@@ -484,22 +475,12 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   
               </>
             )}
-            {hosted === true && (
-              <Field
-                label="bundler"
-                hint="The piece that puts your trades on chain. On merrymen.dev it is run for you -- nothing to paste and nothing to pay for. Self-host if you want to bring your own."
-              >
-                <div className="mm-subtle mono" style={{ padding: "6px 0" }}>
-                  run by the house
-                </div>
-              </Field>
-            )}
             {hosted === false && (
               <>
             <Field
                 label="Pimlico API key"
                 action={{ href: "https://dashboard.pimlico.io", label: "Get a free key" }}
-                hint="The key needed to trade live on mainnet. Tap “Get a free key” → API Keys, paste it here — we build the bundler URL for your wallet's chain automatically. Leave it blank on a testnet wallet: a key can't enable trades there (no venues, balances read 0) and it switches off the paper book. Blank = practice mode: the agent simulates every trade but never signs."
+                hint="Required for live trading on mainnet. Leave blank for paper trading or testnet."
               >
                 <input
                   type="password"
@@ -520,7 +501,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 agent is called Robin. */}
             <Field
               label="Agent name"
-              hint="What you call your agent. It signs its own messages with this, and it is how it refers to itself in chat. Letters, numbers, spaces, up to 24 characters."
+              hint="Up to 24 letters, numbers, or spaces."
             >
               <input
                 type="text"
@@ -532,7 +513,6 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </Field>
             <Field
               label="Strategy"
-              hint="steady-basket = DCA + vault sweep · weekend-gap = trade the close→open gap · llm-strategist = Claude proposes, policy disposes · trencher = enters newly launched tokens on chain-read signals and exits on a stop, a target, or liquidity leaving (PAPER MODE ONLY for now). Your own bots from strategies/ appear below the line."
             >
               <select value={v("strategy") || d.strategy} onChange={set("strategy")}>
                 {view.strategies.builtin.map((s) => (
@@ -579,10 +559,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               at the moment of choosing — rather than in the event feed later. */}
           {unsellable.length > 0 && (
             <div className="mm-danger">
-              Your agent&apos;s key can&apos;t sell <b>{unsellable.join(", ")}</b>, so it won&apos;t
-              buy {unsellable.length === 1 ? "it" : "them"} either — a position with no way out is
-              worse than a missed trade. Re-sign at <Link href="/grant">/grant</Link> to include{" "}
-              {unsellable.length === 1 ? "it" : "them"} (free, same wallet, same funds).
+              Update your <Link href="/grant">trading permissions</Link> to buy or sell <b>{unsellable.join(", ")}</b>.
             </div>
           )}
 
@@ -642,7 +619,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           <div className="mm-grid" style={{ marginTop: 12 }}>
             <Field
               label="minimum pool depth (USD)"
-              hint={`Refuse to price a token whose deepest route is thinner than this. Default ${d.minPoolLiquidityUsdg.toLocaleString()}. Lower it and you're accepting a price someone can push for pocket change — and that price feeds your equity and your drawdown breaker.`}
+              hint="Minimum liquidity required to use a token’s price. Lower values accept more price-manipulation risk."
             >
               <input
                 value={v("minPoolLiquidityUsdg")}
@@ -653,7 +630,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </Field>
             <Field
               label="max spot-vs-average gap (bps)"
-              hint={`Refuse a price when the current pool price has run this far from its time-average — the signature of a pool being pushed right now. Default ${d.maxPriceDivergenceBps} (${d.maxPriceDivergenceBps / 100}%).`}
+              hint="Maximum difference between the current and average pool price. 100 bps = 1%."
             >
               <input
                 value={v("maxPriceDivergenceBps")}
@@ -664,13 +641,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </Field>
           </div>
           <div className="mm-hint">
-            Paste the contract address from the explorer — merrymen prices these from the Uniswap
-            pool (a time-averaged price, and only when the pool is deep enough to trust), never from
-            a Chainlink feed. Thin pools are refused rather than guessed at.
-            <br />
-            <b>Adding a token here doesn&apos;t let your merryman trade it yet.</b> The tradable list
-            lives inside your signed key, so save this, then{" "}
-            <Link href="/grant">re-sign at /grant</Link> — free, instant, same wallet and same funds.
+            Save your tokens, then update <Link href="/grant">trading permissions</Link> to enable trading them.
           </div>
 
           {/* ── DISCOVERY ──────────────────────────────────────────────────
@@ -692,8 +663,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 </span>
               </span>
               <span className="mm-hint">
-                Needs a Bitquery key above (or the Merry Circle brain, whose token works for both).
-                Without one this does nothing and says nothing.
+                Requires a Bitquery key or Merry Circle token in Connections.
               </span>
             </label>
             {/* THE FLAG THAT MADE TRENCHER LOOK BROKEN.
@@ -716,15 +686,11 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 </span>
               </span>
               <span className="mm-hint">
-                Off by default, and until you turn it on the trencher strategy sees no
-                candidates at all once your agent can actually trade &mdash; so it looks like
-                it simply never finds anything. It still cannot touch a token your grant
-                does not name: turning this on removes a rail, not the wall.
+                Allows live Trencher trades in tokens covered by your trading permissions.
               </span>
             </label>
             <Field
               label="check every (minutes)"
-              hint={`How often to look. Default ${d.discoveryIntervalMin}. The shared holder gateway allows only a few calls a minute per wallet, and your merryman's brain draws on the same allowance.`}
             >
               <input
                 value={v("discoveryIntervalMin")}
@@ -735,12 +701,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </Field>
           </div>
           <div className="mm-hint">
-            Bitquery indexes Robinhood Chain from genesis, including <b>Uniswap v4</b> — where new
-            pairs actually launch, and which your merryman can&apos;t see by scanning. It reports
-            what it finds, with the depth and whether it could price it.
-            <br />
-            <b>It never buys anything.</b> A pair it surfaces still needs you to add it above and
-            re-sign at <Link href="/grant">/grant</Link>, exactly as if you&apos;d found it yourself.
+            Discovery sends alerts. To trade a discovered token, add it above and update your <Link href="/grant">trading permissions</Link>.
           </div>
 
           {/* ── SCOUT MODE ─────────────────────────────────────────────────
@@ -749,11 +710,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               the usual safety net genuinely does not apply here. */}
           <div className="mm-subtle mono">scout mode · buying what can&apos;t be priced yet</div>
           <p className="mm-hint" style={{ marginTop: 0 }}>
-            A token that just launched has no price history and almost no depth, so any price you
-            could read from its pool is one someone could push. merrymen normally refuses to value
-            those at all. Scout mode lets your merryman buy them anyway — <b>quarantined</b>: the
-            position is carried at what it <i>cost</i>, never at a pool reading, and the total that
-            may sit that way is hard-capped.
+            Buy tokens without a reliable market price, within your scout budget. These positions are valued at purchase cost.
           </p>
           <div className="mm-grid">
             <label className="mm-field">
@@ -791,14 +748,10 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                   {scoutEnabledVal ? "may buy unpriceable tokens, up to the budget" : "off — unpriceable tokens are never bought"}
                 </span>
               </span>
-              <span className="mm-hint">
-                Off by default. With it off, a buy of anything merrymen couldn&apos;t price is
-                refused outright.
-              </span>
             </label>
             <Field
               label="scout budget (USDG)"
-              hint={`Most that may sit in unpriceable positions AT ONCE, measured by what you paid. Selling out frees it again. Default ${d.scoutBudgetUsdg} — you have to name a number.`}
+              hint="Maximum purchase cost of all open scout positions. Selling restores the available budget."
             >
               <input
                 value={v("scoutBudgetUsdg")}
@@ -809,7 +762,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </Field>
             <Field
               label="max per token (USDG)"
-              hint={`Ceiling for any single unpriceable token, counting what you already put in — so topping up can't creep past a cap one buy would have hit. Default ${d.scoutPerTokenUsdg}.`}
+              hint="Maximum total purchase cost per scout token, including additional buys."
             >
               <input
                 value={v("scoutPerTokenUsdg")}
@@ -820,11 +773,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </Field>
           </div>
           <div className="mm-danger">
-            <b>The drawdown breaker cannot protect this money.</b> A quarantined position is carried
-            at cost, so it doesn&apos;t move — if one goes to zero, your equity won&apos;t show it
-            and the breaker won&apos;t fire. That isn&apos;t an oversight; it&apos;s what refusing to
-            trust an untrustworthy price actually means. <b>The budget is the risk control here</b>,
-            not the breaker. Set it to what you&apos;ve decided you can lose.
+            <b>The drawdown limit does not cover scout losses.</b> These positions stay valued at purchase cost even if they lose value. Only allocate funds you can afford to lose.
             {scoutEnabledVal && Number(v("scoutBudgetUsdg") || d.scoutBudgetUsdg) === 0 && (
               <>
                 <br />
@@ -843,7 +792,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           <div className="mm-grid">
             <Field
               label="bot token"
-              hint="From @BotFather. Stored locally, never sent back to the browser."
+              hint="Get your bot token from @BotFather."
             >
               <input
                 type="password"
@@ -857,7 +806,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 </button>
               )}
             </Field>
-            <Field label="connection" hint="Live check against Telegram (getMe).">
+            <Field label="connection">
               <button type="button" className="mm-tag" style={{ cursor: "pointer" }} onClick={() => void testTelegram()}>
                 test connection
               </button>
@@ -871,7 +820,6 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 <input type="checkbox" checked={tgEnabledVal} onChange={(e) => setTgEnabled(e.target.checked)} style={{ width: "auto" }} />
                 <span className="mm-unit">{tgEnabledVal ? "the bot is listening" : "off"}</span>
               </span>
-              <span className="mm-hint">Master switch for the Telegram poller.</span>
             </label>
           </div>
 
@@ -908,7 +856,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 <span className="mm-unit">{tgTransferVal ? "/transfer with /confirm" : "off"}</span>
               </span>
               <span className="mm-hint">
-                Lets chat send USDG out, if your wallet can. Wallets signed today register no withdrawal address, so their wall carries no transfer permission and the send is refused before anything is built — only grants signed before that changed can transfer. Money leaves with your owner key: merrymen recover.
+                Requires existing transfer permission. Otherwise, use Withdraw in Profile.
               </span>
             </label>
             <Field label="daily transfer budget" hint="Max USDG chat transfers may send per day — on top of the grant caps.">
@@ -1072,11 +1020,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               </span>
             </span>
             <span className="mm-hint">
-              Just talk to it — “<i>clone repo X, install, build, tell me what breaks</i>” (or
-              <code>/agent …</code>) — and the merryman works your PC in a tool loop (shell, files,
-              screen, vision), streaming progress to the chat until it&apos;s done. It remembers
-              names, projects and setup between tasks. Uses only the capability groups you enabled
-              above; say <b>stop</b> to halt it.
+              Send a task with <code>/agent</code>. It uses your enabled capabilities. Send <b>stop</b> to halt it.
             </span>
           </label>
           {agentEnabledVal && pcEnabledVal && (
@@ -1100,18 +1044,11 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               </label>
               {agentAutoShellVal && (
                 <div className="mm-danger">
-                  ⚠️ <b>Free-form shell is remote code execution by an AI.</b> The agent can run
-                  almost any command your account can, without asking per command — and this switch
-                  also unlocks <b>typing keystrokes</b> and <b>opening any URL</b>. The destructive
-                  blocklist (rm/rd/format/shutdown/registry/interpreters) and the secret-value
-                  redaction are a <b>seatbelt, not a cage</b>: a determined model can still do harm.
-                  Only arm this on a machine you&apos;d hand to a very eager intern, and keep{" "}
-                  <code>/agent stop</code> handy. With it OFF, the agent is limited to your
-                  allowlisted commands and can&apos;t type or open arbitrary links.
+                  <b>Your agent can control this computer without asking for each action.</b> This includes running commands, typing, and opening links. It may damage files or expose private information. Send <code>/agent stop</code> to halt it.
                 </div>
               )}
               <div className="mm-grid">
-                <Field label="step budget" hint="Max model↔tool steps per /agent task — the runaway brake.">
+                <Field label="step budget" hint="Maximum steps per task.">
                   <input type="number" min={1} max={60} placeholder={String(d.telegramAgentMaxSteps)} value={v("telegramAgentMaxSteps")} onChange={set("telegramAgentMaxSteps")} />
                   <span className="mm-unit">steps</span>
                 </Field>
@@ -1122,13 +1059,13 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           <div className="mm-grid">
             <Field
               label="files root"
-              hint="The ONE folder /ls and /get are confined to (absolute path). Blank = files off. Nothing outside it is reachable."
+              hint="Folder available to /ls and /get. Use an absolute path. Leave blank to disable file access."
             >
               <input type="text" placeholder="C:\\Users\\you\\Documents\\shared" value={v("telegramFilesRoot")} onChange={set("telegramFilesRoot")} />
             </Field>
             <Field
               label="transcription key (voice)"
-              hint="OpenAI-compatible key for voice notes → text. Blank = voice off. Stored locally, never shown."
+              hint="Transcription API key for voice notes. Leave blank to disable voice."
             >
               <input
                 type="password"
@@ -1195,7 +1132,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           <div className="mm-grid">
             <Field
               label="mainnet RPC override"
-              hint="Optional. The public RPC rate-limits at 1-minute ticks; a free Alchemy/QuickNode endpoint is smoother."
+              hint="Optional custom connection to Robinhood Chain mainnet."
             >
               <input type="url" placeholder={urlPlaceholder("rpcMainnet", "default: rpc.mainnet.chain.robinhood.com")} value={draft.rpcMainnet ?? ""} onChange={set("rpcMainnet")} />
             </Field>
@@ -1204,31 +1141,31 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </Field>
             <Field
               label="bundler URL override"
-              hint="Advanced — only if you use Alchemy or a self-hosted bundler instead of a Pimlico key. Takes precedence over the Pimlico key; the chain id must match your wallet's chain."
+              hint="Overrides the Pimlico connection. Must support your wallet’s network."
             >
               <input type="url" placeholder={urlPlaceholder("bundlerUrl", "https://…/rpc?apikey=…")} value={draft.bundlerUrl ?? ""} onChange={set("bundlerUrl")} />
             </Field>
             <Field
               label="breaker contract"
-              hint="Deployed BreakerRegistry address. Once set, a tripped breaker halts all trading at the wall."
+              hint="BreakerRegistry contract on your wallet’s network."
             >
               <input type="text" placeholder="0x…" value={v("breakerAddress")} onChange={set("breakerAddress")} />
             </Field>
             <Field
               label="v4 adapter contract"
-              hint="Deployed V4SelfSwap address for THIS chain — it opens Uniswap v4 (where new pairs launch). Does nothing until you re-sign the grant: the address is sealed into the signature."
+              hint="V4SelfSwap contract on your wallet’s network. Update trading permissions after saving."
             >
               <input type="text" placeholder="0x…" value={v("v4AdapterAddress")} onChange={set("v4AdapterAddress")} />
             </Field>
             <Field
               label="Pons curve adapter contract"
-              hint="Deployed PonsSelfTrade address for THIS chain — it opens the Pons launchpad, where tokens trade on a bonding curve before they graduate to a pool. Does nothing until you re-sign the grant: the address is sealed into the signature, and sealing it also makes that contract an approved spender for every token in the grant."
+              hint="PonsSelfTrade contract on your wallet’s network. Updating trading permissions authorizes this contract to spend your permitted tokens."
             >
               <input type="text" placeholder="0x…" value={v("ponsAdapterAddress")} onChange={set("ponsAdapterAddress")} />
             </Field>
             <Field
               label="Rialto integrator key"
-              hint="From Rialto's wallet-signed onboarding (docs.rialto.xyz). Enables real stock-token routing through their propAMMs."
+              hint="Required to trade through Rialto."
             >
               <input
                 type="password"
@@ -1263,7 +1200,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </label>
             <Field
               label="Virtuals API key"
-              hint="From your agent's page on app.virtuals.io. Stays on your machine; used only to post activity logs — it can never trade or move funds."
+              hint="Get this from your agent’s page on app.virtuals.io."
             >
               <input
                 type="password"
@@ -1280,7 +1217,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             <Field
               label="bitquery api key"
               action={{ href: "https://account.bitquery.io/", label: "get a key" }}
-              hint="Lets your merryman SEE what it otherwise can't: Bitquery indexes Robinhood Chain from genesis, including Uniswap v4 — where new pairs and graduating tokens actually launch. Discovery only: it can tell your agent a pair exists, never authorise a trade in one. Everything it finds still has to clear the same depth and price guards."
+              hint="Required for token discovery unless you use a Merry Circle token."
             >
               <input
                 type="password"
@@ -1297,7 +1234,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             <Field
               label="merry circle token"
               action={{ href: `${MERRYMEN_GATEWAY_ORIGIN}/claim`, label: "claim one" }}
-              hint="🏹 Holders only. Sign with your $MERRYMEN wallet to claim a token — then you need no Bitquery account of your own; discovery runs on the shared gateway. The same token also works as the Merrymen AI brain key, but the two are independent: use Claude for thinking and the gateway for discovery if you like. Your own Bitquery key above always takes precedence."
+              hint="Claim with your $MERRYMEN wallet for AI and token discovery access. A saved Bitquery key takes priority for discovery."
             >
               <input
                 type="password"
@@ -1315,7 +1252,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
 
           <div className="mm-section">Trading preferences</div>
           <div className="mm-grid">
-            <Field label="swap venue" hint="uniswap = permissionless v3 (QQQ has liquidity today) · rialto = meta-router (needs the Rialto key above for full execution).">
+            <Field label="swap venue" hint="Rialto requires an integrator key.">
               <select value={v("swapVenue") || d.swapVenue} onChange={set("swapVenue")}>
                 <option value="uniswap">uniswap</option>
                 <option value="rialto">rialto</option>
@@ -1325,15 +1262,15 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               <input type="number" min={1} max={SLIPPAGE_BPS_MAX} placeholder={String(d.slippageBps)} value={v("slippageBps")} onChange={set("slippageBps")} />
               <span className="mm-unit">bps</span>
             </Field>
-            <Field label="performance fee" hint="On profit above the high-water mark only. Accrual ledger — nothing is collected yet.">
+            <Field label="performance fee" hint="Calculated on new peak profits. Fees are recorded but not collected.">
               <input type="number" min={0} max={5000} placeholder={String(d.perfFeeBps)} value={v("perfFeeBps")} onChange={set("perfFeeBps")} />
               <span className="mm-unit">bps</span>
             </Field>
-            <Field label="tick cadence" hint="How often the worker wakes.">
+            <Field label="Market check interval">
               <input type="number" min={15} max={3600} placeholder={String(d.tickSeconds)} value={v("tickSeconds")} onChange={set("tickSeconds")} />
               <span className="mm-unit">sec</span>
             </Field>
-            <Field label="buy per tick" hint="steady-basket: USDG deployed across the basket each tick.">
+            <Field label="Buy amount per check" hint="Amount spread across the Steady Basket.">
               <input type="number" min={1} placeholder={String(d.buyPerTickUsdg)} value={v("buyPerTickUsdg")} onChange={set("buyPerTickUsdg")} />
               <span className="mm-unit">USDG</span>
             </Field>
@@ -1352,10 +1289,10 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               <input type="number" min={1} placeholder={String(d.gapEnterBudgetUsdg)} value={v("gapEnterBudgetUsdg")} onChange={set("gapEnterBudgetUsdg")} />
               <span className="mm-unit">USDG</span>
             </Field>
-            <Field label="Claude / vision model" hint="Model id used when the brain is Anthropic, and for screen vision. The active provider's model is set up top under “AI provider”.">
+            <Field label="Claude / vision model" hint="Model for Anthropic and screen analysis.">
               <input type="text" placeholder={d.llmModel} value={v("llmModel")} onChange={set("llmModel")} />
             </Field>
-            <Field label="LLM decision window" hint="Minutes between model calls — decisions are windows, not ticks.">
+            <Field label="Strategist decision interval">
               <input type="number" min={1} max={1440} placeholder={String(d.llmIntervalMin)} value={v("llmIntervalMin")} onChange={set("llmIntervalMin")} />
               <span className="mm-unit">min</span>
             </Field>
@@ -1378,7 +1315,6 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </div>
           )}
 
-        <p className="mm-note">Saved changes take effect when your agent next checks its settings.</p>
       </div>
     </AppShell>
   );

@@ -47,7 +47,7 @@ const nextConfig = {
   // session cookie and Next forwards it upstream. A redirect sends the browser
   // somewhere with no such thing attached, and the destination here is our own.
   async redirects() {
-    return [{ source: "/leaderboard", destination: "/", permanent: false }];
+    return [{ source: "/leaderboard", destination: "/home", permanent: false }];
   },
   experimental: {
     externalDir: true,
