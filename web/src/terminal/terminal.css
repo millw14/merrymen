@@ -3807,14 +3807,50 @@
   padding-bottom: calc(var(--nav) + 8px);
   gap: 0;
 }
+/* THE FLEXIBLE ROW WAS POSITIONAL, AND THE POSITION MOVED.
+   `grid-template-rows: auto auto minmax(0, 1fr) auto` assumed exactly four
+   children in a fixed order — header, portfolio, conversation, composer — so
+   the one row allowed to grow was whichever child happened to be THIRD. The
+   chat screen renders more than four whenever anything is announced above it:
+   the proposals panel, the live blocker, a worker notice. With any one of them
+   present the 1fr track lands on the PORTFOLIO and the conversation is left
+   with only the height its content asks for.
+
+   Measured at 375px, before this: 394px of conversation with nothing above it,
+   220px with the proposals panel. A screen opened to talk to an agent gave a
+   quarter of the phone to the talking, and the banner it gave the rest to was
+   one the owner had already read. Reported as "the chat design is too packed"
+   and "'your agent found 5 coins it wants to trade' just blocks the way".
+
+   A COLUMN, NOT A TEMPLATE. Flex names the flexible child by NAME rather than
+   by index, so the conversation keeps its room however many banners appear
+   above it — and a new banner added later cannot silently take it. */
 :where(.terminal-host) .body > .desk-page {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
   flex: none;
   height: calc(100dvh - var(--nav) - 26px);
   min-height: 0;
   padding-bottom: 0;
   gap: 22px;
+}
+:where(.terminal-host) .body > .desk-page > * {
+  flex: 0 0 auto;
+}
+:where(.terminal-host) .body > .desk-page > .desk-conversation {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* AND NO BANNER MAY GROW WITHOUT LIMIT.
+   A floor under the conversation was the obvious fix and the wrong one: with
+   two expanded banners it forced the composer 90px past a container whose
+   parent clips, which is how content ends up drawn over other content. Capping
+   the announcements instead means the sum can never exceed the screen — each
+   one scrolls inside itself, the conversation takes everything left, and
+   nothing overflows at any count. */
+:where(.terminal-host) .desk-conversation > .proposals,
+:where(.terminal-host) .desk-conversation > .desk-notice {
+  margin-bottom: 18px;
 }
 :where(.terminal-host) .desk-page > .desk-header,
 :where(.terminal-host) .desk-page > .desk-portfolio {
@@ -7548,3 +7584,153 @@
 :where(.terminal-host) .risk-option.on { border-color: var(--lime); }
 :where(.terminal-host) .risk-option:disabled { opacity: .6; cursor: default; }
 :where(.terminal-host) .risk-note { margin: 10px 0 0; font-size: 12px; line-height: 1.55; color: var(--tx-2); }
+
+/* ── the proposals panel, folded ──────────────────────────────────────────
+   It lives inside the chat screen's fixed-height grid, and the conversation is
+   the only flexible row in it. Measured at 375px: the conversation gets 394px
+   with no banner and 220px with this one — so a screen opened to talk to an
+   agent gave a quarter of the phone to the talking. Folded, it is one row.
+
+   FOLDED, NOT DISMISSED. The panel exists because the agent has found coins it
+   CANNOT trade until the owner re-signs; a banner somebody closed is a fact
+   nobody acts on. The summary line stays, and it carries the count that
+   matters — how many are already waiting on a signature. */
+:where(.terminal-host) .proposals.folded {
+  padding: 0;
+  overflow: hidden;
+}
+:where(.terminal-host) .proposals-peek {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 14px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  font-size: 12px;
+  color: var(--tx-2);
+  cursor: pointer;
+}
+:where(.terminal-host) .proposals-peek:hover { color: var(--tx); }
+:where(.terminal-host) .proposals-peek > span:last-child {
+  flex-shrink: 0;
+  color: var(--lime);
+  font-weight: 600;
+}
+:where(.terminal-host) .proposals-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+:where(.terminal-host) .proposals-fold {
+  flex-shrink: 0;
+  background: transparent;
+  border: 0;
+  padding: 2px 0;
+  font-size: 11px;
+  color: var(--tx-2);
+  cursor: pointer;
+}
+:where(.terminal-host) .proposals-fold:hover { color: var(--tx); }
+
+/* ── and the conversation keeps a floor ───────────────────────────────────
+   `.body > .desk-page` is a fixed-height grid whose only flexible track is the
+   conversation, so every banner above it comes straight out of the one area
+   the screen exists for. A floor means an extra banner scrolls the page
+   instead of eating the chat. */
+
+
+/* ── the desktop chat dock ────────────────────────────────────────────────
+   Reported: "for pc can you make the chat more easy? like maybe aligning it to
+   the right like a small popup that can be moved around", and separately "i
+   dont find it intuitive to get to the page where im talking to the agent".
+
+   Both came from the same decision: on desktop, opening the chat REPLACED the
+   centre of the app, so talking to your agent cost you the chart you were
+   reading. Floating it means the two can be true at once. Phone is untouched —
+   there the chat is the screen, which is right, because a phone shows one
+   thing. */
+:where(.terminal-host) .chat-dock {
+  position: fixed;
+  z-index: 60;
+  width: 396px;
+  max-width: calc(100vw - 32px);
+  height: min(660px, calc(100vh - 120px));
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 24px 60px rgb(0 0 0 / 55%);
+  overflow: hidden;
+}
+:where(.terminal-host) .chat-dock-grip {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+  cursor: grab;
+  /* The grip is dragged with a pointer; letting the browser interpret the
+     gesture as a scroll or a text selection makes the drag stutter. */
+  touch-action: none;
+  user-select: none;
+}
+:where(.terminal-host) .chat-dock-grip:active { cursor: grabbing; }
+:where(.terminal-host) .chat-dock-grip > svg { color: var(--faint); flex-shrink: 0; }
+:where(.terminal-host) .chat-dock-grip strong {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:where(.terminal-host) .chat-dock-grip button {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--tx-2);
+  cursor: pointer;
+}
+:where(.terminal-host) .chat-dock-grip button:hover { background: var(--raised); color: var(--tx); }
+:where(.terminal-host) .chat-dock-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 14px;
+}
+/* The agent screen inside the dock sizes to the PANEL, not to the viewport.
+   Its own height rule is written for a phone-shaped body; here the dock is the
+   body, and the composer belongs at the bottom of the panel rather than pinned
+   above the phone's tab bar. */
+:where(.terminal-host) .chat-dock-body > .desk-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 14px 0;
+  gap: 14px;
+}
+:where(.terminal-host) .chat-dock-body > .desk-page > * { flex: 0 0 auto; }
+:where(.terminal-host) .chat-dock-body > .desk-page > .desk-conversation { flex: 1 1 auto; min-height: 0; }
+:where(.terminal-host) .chat-dock-body .desk-chat-bottom {
+  position: static;
+  width: auto;
+  max-width: none;
+  transform: none;
+  left: auto;
+  bottom: auto;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+}

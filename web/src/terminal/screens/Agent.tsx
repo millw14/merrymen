@@ -446,12 +446,10 @@ export function Agent({
           answer to "why can't it trade for real" and outranks a log line; this
           is for everything that has no blocker rule and would otherwise say
           nothing at all. */}
-      {!blocked && mine.notice && (
-        <section className="desk-notice" role="status">
-          <p>{mine.notice.message}</p>
-        </section>
-      )}
-      <Proposals onResign={onResign} />
+      {/* The notice and the proposals panel used to sit HERE, pinned above the
+          conversation. They now scroll with it — see the top of
+          `.desk-conversation` below. The blocker stays pinned: it is short, and
+          it is the one thing on this screen that must not be scrolled past. */}
       <header className="desk-header">
         <Face name={mine.name} slug={mine.slug} />
         <div>
@@ -643,6 +641,25 @@ export function Agent({
           setAway(isAway);
         }}
       >
+        {/* ANNOUNCEMENTS SCROLL WITH THE CHAT, rather than standing on top of it.
+            Pinned above the conversation, these came straight out of the only
+            flexible row on a fixed-height screen: measured at 375px, the
+            conversation had 394px with nothing above it and 220px with the
+            proposals panel — and with the panel expanded it collapsed to 83px.
+            A screen opened to talk to an agent gave most of the phone to a
+            banner the owner had already read, which is what "it just blocks the
+            way" means.
+
+            Inside the scroller they cannot take the conversation's height at
+            all: they occupy the top of it and scroll away as soon as there is
+            anything to read. Nothing is hidden, nothing can overflow, and the
+            count no longer matters — a third banner costs nothing. */}
+        {!blocked && mine.notice && (
+          <section className="desk-notice" role="status">
+            <p>{mine.notice.message}</p>
+          </section>
+        )}
+        <Proposals onResign={onResign} />
         <div className="chat-divider">
           <span>Conversation</span>
         </div>

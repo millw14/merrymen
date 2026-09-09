@@ -49,6 +49,7 @@ import { You } from "./screens/You";
 import { TabIcon } from "./ui";
 import { FirstVisit } from "./FirstVisit";
 import { useDesktopDetail } from "./desktop-detail";
+import { ChatDock } from "./ChatDock";
 
 
 const desktopSnapshot = () => window.matchMedia("(min-width: 1100px)").matches;
@@ -87,6 +88,20 @@ export function App() {
   const refreshAccount=()=>setRefreshKey(k=>k+1);
   const [sidebarSection, setSidebarSection] =
     useState<SidebarSection>("markets");
+  /**
+   * Is the floating chat open? DESKTOP ONLY, and it is deliberately not a screen.
+   *
+   * On a phone the chat IS the screen, which is right — a phone shows one
+   * thing. On desktop, replacing the whole centre to talk to your agent throws
+   * away the chart you were reading, and getting back to it means leaving the
+   * conversation behind. Reported as "i dont find it intuitive to get to the
+   * page where im talking to the agent. i have to click around a bunch".
+   *
+   * Not a route, because it is an overlay over whatever you were looking at and
+   * that page did not go anywhere — the same reasoning the money panel already
+   * follows here.
+   */
+  const [chatDocked, setChatDocked] = useState(false);
   const desktop = useSyncExternalStore(subscribeDesktop, desktopSnapshot, () => false);
   const desktopDetail = useDesktopDetail(desktop, requestedScreen, live.tokens[0]?.id, live.agents[0]?.slug);
   // Deposit and withdraw were component state, which
@@ -227,6 +242,18 @@ export function App() {
     setScreen(next);
   };
   const goTab = (next: Tab) => {
+    /**
+     * THE SAME BUTTON, A DIFFERENT PLACE TO PUT IT.
+     *
+     * Every existing caller of goTab("agent") — the sidebar's "Open chat", the
+     * portfolio panel's "Chat with X", the tab bar — now opens the dock on
+     * desktop rather than navigating. One entry point, so there is no second
+     * one to keep in step, and the phone is untouched.
+     */
+    if (desktop && next === "agent") {
+      setChatDocked(true);
+      return;
+    }
     if (desktop && next === "feed") {
       setSidebarSection("feed");
       return;
@@ -493,6 +520,33 @@ export function App() {
             ))}
           </nav>
         )}
+      {/* THE SAME AGENT SCREEN, FLOATING. Not a second chat: identical props,
+          identical state, so there is one conversation and one draft however it
+          was opened. A second implementation would be a second place for the
+          agent's words to drift from what it actually did. */}
+      {desktop && chatDocked && mine && (
+        <ChatDock title={mine.name} onClose={() => setChatDocked(false)}>
+          <Agent
+            mine={mine}
+            tokens={live.tokens}
+            stopped={stopped}
+            turns={turns}
+            draft={chatDraft}
+            onDraft={setChatDraft}
+            onTurn={(turn) => setTurns((previous) => [...previous, turn])}
+            perTrade={perTrade}
+            perDay={perDay}
+            onToken={(id) => openScreen({ kind: "token", id })}
+            onDeposit={() => openScreen({ kind: "deposit" })}
+            onWithdraw={() => openScreen({ kind: "withdraw" })}
+            onLimits={() => openScreen({ kind: "limits" })}
+            onResign={() => {
+              window.location.href = "/grant#resign";
+            }}
+            liveBlocker={account?.status.liveBlocker}
+          />
+        </ChatDock>
+      )}
     </div></div>
   );
 }

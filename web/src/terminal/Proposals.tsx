@@ -2,6 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import type { Proposal, ProposalsResponse } from "@/app/api/proposals/route";
 import { compactUsd } from "../lib/format";
 
+/** Which proposal set the owner folded away. One key: only one set is live at a time. */
+const FOLD_KEY = "merrymen.proposals.folded.v1";
+
 /**
  * YOUR AGENT ASKING FOR SOMETHING.
  *
@@ -59,6 +62,23 @@ export function Proposals({ onResign }: { onResign: () => void }) {
   const [adding, setAdding] = useState<string | null>(null);
   const [added, setAdded] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState("");
+  /**
+   * Which proposal set the owner has folded away, and this view's override.
+   *
+   * Read once on mount rather than at render: localStorage throws in a private
+   * window and on a browser set to block site data, and a panel that crashes
+   * the chat screen because it could not remember a fold is a far worse trade
+   * than a panel that opens when it should have stayed shut.
+   */
+  const [foldedSig, setFoldedSig] = useState<string | null>(null);
+  const [openOverride, setOpenOverride] = useState<boolean | null>(null);
+  useEffect(() => {
+    try {
+      setFoldedSig(localStorage.getItem(FOLD_KEY));
+    } catch {
+      /* no memory of folds here; the panel simply opens */
+    }
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -195,11 +215,69 @@ export function Proposals({ onResign }: { onResign: () => void }) {
   // about their scout on a screen they opened to talk to their agent.
   if (why !== "ok" || !proposals.length) return null;
 
+  /**
+   * COLLAPSED UNTIL ASKED FOR, and this is a layout fix as much as a copy one.
+   *
+   * This panel lives inside the chat screen's grid, which on a phone is a FIXED
+   * height with the conversation on the only flexible row. Measured at 375px:
+   * the conversation gets 394px with no banner and 220px with this one — so
+   * opening a screen to talk to your agent gave you a quarter of the phone for
+   * the talking and the rest to a panel you had already read. Reported as "the
+   * 'your agent found 5 coins it wants to trade' just blocks the way".
+   *
+   * COLLAPSED, NEVER DISMISSED. The reflex is to add a close button, and it is
+   * wrong here: the whole point of this panel is that the agent has found
+   * something it CANNOT TRADE until the owner re-signs, and a banner somebody
+   * closed is a fact nobody ever acts on. So the summary line stays — one row
+   * instead of a screenful — and it says how many and whether any are already
+   * waiting on a signature. Nothing is hidden; it is folded.
+   *
+   * AND IT REMEMBERS PER SET. `sig` is the proposal set itself, so folding it
+   * away keeps it folded while the agent keeps proposing the same coins, and a
+   * genuinely new find opens again. Somebody who folds this at breakfast should
+   * not have it reopen every four minutes; somebody whose agent finds something
+   * new should see it.
+   */
+  const sig = proposals.map((p) => p.token).join(",");
+  const openByDefault = !foldedSig || foldedSig !== sig;
+  const open = openOverride ?? openByDefault;
+
+  if (!open) {
+    return (
+      <section className="proposals folded" aria-label="Coins your agent wants to trade">
+        <button type="button" className="proposals-peek" onClick={() => setOpenOverride(true)}>
+          <span>
+            {proposals.length} coin{proposals.length === 1 ? "" : "s"} your agent wants to trade
+            {added.size > 0 ? ` · ${added.size} waiting on your signature` : ""}
+          </span>
+          <span aria-hidden="true">Review</span>
+        </button>
+      </section>
+    );
+  }
+
   return (
     <section className="proposals" aria-label="Coins your agent wants to trade">
-      <h3>
-        Your agent found {proposals.length === 1 ? "a coin" : `${proposals.length} coins`} it wants to trade
-      </h3>
+      <div className="proposals-head">
+        <h3>
+          Your agent found {proposals.length === 1 ? "a coin" : `${proposals.length} coins`} it wants to trade
+        </h3>
+        <button
+          type="button"
+          className="proposals-fold"
+          onClick={() => {
+            setOpenOverride(false);
+            setFoldedSig(sig);
+            try {
+              localStorage.setItem(FOLD_KEY, sig);
+            } catch {
+              /* a browser that refuses storage folds for this view only */
+            }
+          }}
+        >
+          Fold away
+        </button>
+      </div>
       <p className="proposals-note">
         It can watch these already. It cannot trade them until your signed permission covers
         them — that is the wall doing its job, and only you can widen it.
