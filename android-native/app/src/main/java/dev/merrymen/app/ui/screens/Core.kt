@@ -44,8 +44,14 @@ import dev.merrymen.app.net.Thesis
 import dev.merrymen.app.net.TierView
 import dev.merrymen.app.ui.Bps
 import dev.merrymen.app.ui.Empty
+import dev.merrymen.app.ui.LikeButton
 import dev.merrymen.app.ui.LoadedBlock
+import dev.merrymen.app.ui.Acted
+import dev.merrymen.app.ui.COMMANDS
+import dev.merrymen.app.ui.CommandSpec
 import dev.merrymen.app.ui.Money
+import dev.merrymen.app.ui.Via
+import dev.merrymen.app.ui.runCommand
 import dev.merrymen.app.ui.NameBlock
 import dev.merrymen.app.ui.Notice
 import dev.merrymen.app.ui.Pill
@@ -137,6 +143,7 @@ fun HomeScreen(nav: NavHostController) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
           TextButton(onClick = { nav.navigate(Routes.MARKETS) }) { Text("Markets") }
           TextButton(onClick = { nav.navigate(Routes.LEADERBOARD) }) { Text("Leaderboard") }
+          TextButton(onClick = { nav.navigate(Routes.TRADE) }) { Text("Trade") }
           TextButton(onClick = { nav.navigate(Routes.SETTINGS) }) { Text("Settings") }
         }
       }
@@ -181,6 +188,8 @@ fun FeedScreen(nav: NavHostController) {
   val c = LocalContainer.current
   var page by remember { mutableStateOf<Loaded<List<Thesis>>>(Loaded.Loading) }
   var filter by remember { mutableStateOf("All") }
+  var byLikes by remember { mutableStateOf(false) }
+  val likes by c.social.likes.collectAsState()
   val scope = rememberCoroutineScope()
 
   suspend fun load() { page = c.api.theses().toLoaded().let { s ->
@@ -191,7 +200,10 @@ fun FeedScreen(nav: NavHostController) {
       else -> Loaded.Loading
     }
   } }
-  LaunchedEffect(Unit) { load() }
+  // The counts and this reader's own likes travel on separate routes from the
+  // posts, and both are throttled inside Social — coming back to this tab does
+  // not re-poll them.
+  LaunchedEffect(Unit) { load(); c.social.refresh() }
 
   Column(Modifier.fillMaxSize()) {
     ScreenTitle("Feed")
@@ -202,21 +214,45 @@ fun FeedScreen(nav: NavHostController) {
       listOf("All", "Trades", "Theses").forEach { f ->
         Pill(f, filter == f) { filter = f }
       }
+      // A PILL THAT CANNOT FILL IS NOT SHOWN. Most-liked exists only where
+      // likes do — a self-hosted install has no such route.
+      if (likes.supported) {
+        Pill("Most liked", byLikes) { byLikes = !byLikes }
+      }
+    }
+    // Sorting by a number we could not read would silently sort by nothing.
+    if (byLikes && !likes.read) {
+      Text(
+        "Likes unavailable — showing newest first.",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.error,
+        modifier = Modifier.padding(horizontal = 16.dp),
+      )
     }
     Spacer(Modifier.height(8.dp))
     LoadedBlock(page, onSignIn = { nav.navigate(Routes.SIGN_IN) }, onRetry = { scope.launch { load() } }) { rows ->
-      val shown = rows.filter {
+      val kept = rows.filter {
         when (filter) {
           "Trades" -> it.action == "buy" || it.action == "sell"
           "Theses" -> it.action == null || it.action == "hold" || it.outcome == "view"
           else -> true
         }
       }
+      // SORTED IN A COPY, and only where the numbers were actually read. A
+      // stable sort keeps equal-count posts in their published order rather
+      // than shuffling them under the reader on every poll.
+      val shown =
+        if (byLikes && likes.read) kept.sortedByDescending { t -> t.postId?.let { likes.counts[it] } ?: 0 }
+        else kept
       if (shown.isEmpty()) {
         Empty("Nothing here yet", "When agents trade or publish a view, it lands here.")
       } else {
         LazyColumn(Modifier.fillMaxSize()) {
-          items(shown) { t -> ThesisRow(t) { t.slug?.let { nav.navigate(Routes.agent(it)) } } }
+          items(shown) { t ->
+            ThesisRow(t, onSignIn = { nav.navigate(Routes.SIGN_IN) }) {
+              t.slug?.let { nav.navigate(Routes.agent(it)) }
+            }
+          }
         }
       }
     }
@@ -224,7 +260,7 @@ fun FeedScreen(nav: NavHostController) {
 }
 
 @Composable
-private fun ThesisRow(t: Thesis, onOpen: () -> Unit) {
+private fun ThesisRow(t: Thesis, onSignIn: (() -> Unit)? = null, onOpen: () -> Unit) {
   SectionCard(modifier = Modifier.clickable(onClick = onOpen)) {
     Row(verticalAlignment = Alignment.CenterVertically) {
       NameBlock(
@@ -254,6 +290,9 @@ private fun ThesisRow(t: Thesis, onOpen: () -> Unit) {
     (t.reason ?: t.head).takeIf { it.isNotBlank() }?.let {
       Text(it, style = MaterialTheme.typography.bodySmall)
     }
+    // Null on an unslugged post, which renders no heart at all — a post with no
+    // public identity has nothing stable for a like to attach to.
+    LikeButton(t.postId, onSignIn)
   }
 }
 
@@ -266,6 +305,16 @@ fun ChatScreen(nav: NavHostController) {
   var draft by remember { mutableStateOf("") }
   var sending by remember { mutableStateOf(false) }
   var error by remember { mutableStateOf<String?>(null) }
+  /**
+   * THE ONE THING THE AGENT HAS ASKED PERMISSION TO DO.
+   *
+   * Deliberately NOT part of a turn: turns are a transcript, and a confirmation
+   * card restored from one would be an offer to act, made by nobody, about a
+   * decision taken minutes ago. It lives as long as it is on screen.
+   */
+  var pending by remember { mutableStateOf<dev.merrymen.app.net.ChatCommand?>(null) }
+  var acting by remember { mutableStateOf(false) }
+  var outcome by remember { mutableStateOf<String?>(null) }
   val scope = rememberCoroutineScope()
 
   Column(Modifier.fillMaxSize()) {
@@ -278,6 +327,29 @@ fun ChatScreen(nav: NavHostController) {
         }
       }
     }
+    outcome?.let { Notice("Your agent", it) }
+    pending?.let { cmd -> ConfirmCard(
+      cmd = cmd,
+      acting = acting,
+      nav = nav,
+      onDismiss = { pending = null; outcome = null },
+    ) { spec, args ->
+      acting = true
+      scope.launch {
+        val (result, path) = runCommand(c.repo, spec, args)
+        acting = false
+        pending = null
+        when (result) {
+          is Acted.Ok -> {
+            if (path != null) nav.navigate(Routes.web(path, spec.id))
+            else outcome = result.line.ifBlank { "Done." }
+          }
+          is Acted.Failed -> outcome = result.line
+          is Acted.Ambiguous -> outcome = result.line + " — " + result.candidates.joinToString(", ")
+          is Acted.NeedsSignature -> outcome = result.line
+        }
+      }
+    } }
     Row(
       Modifier.fillMaxWidth().padding(12.dp),
       verticalAlignment = Alignment.CenterVertically,
@@ -305,8 +377,15 @@ fun ChatScreen(nav: NavHostController) {
                 // `reply: null` with a `why` is the server declining to speak,
                 // not an empty answer. Say which.
                 val text = r.value.reply
-                if (text.isNullOrBlank()) error = r.value.why ?: "no reply"
-                else turns.add(ChatTurnWire("assistant", text))
+                if (text.isNullOrBlank()) {
+                  error = listOfNotNull(r.value.why, r.value.detail).joinToString(" — ")
+                    .ifBlank { "no reply" }
+                } else {
+                  turns.add(ChatTurnWire("assistant", text))
+                }
+                // THE PROPOSAL, WHICH THIS CLIENT USED TO PARSE AND DISCARD.
+                pending = r.value.command
+                outcome = null
               }
               is Loaded.Refused -> error = r.message
               is Loaded.Unreachable -> error = "couldn't reach merrymen: " + r.cause
@@ -393,6 +472,9 @@ fun ProfileScreen(nav: NavHostController) {
     }
 
     SectionCard("Controls") {
+      TextButton(onClick = { nav.navigate(Routes.TRADE) }) { Text("Trade") }
+      TextButton(onClick = { nav.navigate(Routes.PROPOSALS) }) { Text("Coins to consider") }
+      TextButton(onClick = { nav.navigate(Routes.RISK) }) { Text("How much risk?") }
       TextButton(onClick = { nav.navigate(Routes.SETTINGS) }) { Text("Settings") }
       TextButton(onClick = { nav.navigate(Routes.TELEGRAM) }) { Text("Telegram") }
       TextButton(onClick = { nav.navigate(Routes.CIRCLE) }) { Text("The Merry Circle") }
@@ -419,5 +501,55 @@ fun ProfileScreen(nav: NavHostController) {
       }
     }
     Spacer(Modifier.height(24.dp))
+  }
+}
+
+/**
+ * THE CONFIRMATION CARD — the human tap that is the whole security boundary.
+ *
+ * The model may PROPOSE; only this button acts. That asymmetry is why the chat
+ * can be given a command vocabulary at all, and it is why nothing here runs
+ * automatically, however confident the reply sounded.
+ *
+ * AN UNKNOWN ID IS SHOWN AND REFUSED, NOT HIDDEN. A newer server can propose a
+ * command this build has never heard of; rendering nothing would make the agent
+ * look like it had done something, and guessing at it would be acting on
+ * something nobody reviewed. So it is named, and the button says no.
+ */
+@Composable
+private fun ConfirmCard(
+  cmd: dev.merrymen.app.net.ChatCommand,
+  acting: Boolean,
+  nav: NavHostController,
+  onDismiss: () -> Unit,
+  onConfirm: (CommandSpec, Map<String, String>) -> Unit,
+) {
+  val args = cmd.argText()
+  val known = COMMANDS[cmd.id]
+  val spec = known ?: CommandSpec(cmd.id, Via.UNKNOWN) { "" }
+  SectionCard(if (known?.weighty == true) "Your agent wants to — this one matters" else "Your agent wants to") {
+    Text(
+      known?.say?.invoke(args)
+        // The honest fallback: name the id and its arguments rather than
+        // inventing a sentence for something we do not model.
+        ?: "run \"${cmd.id}\"" + if (args.isEmpty()) "" else " with " +
+          args.entries.joinToString(", ") { "${it.key}=${it.value}" },
+      style = MaterialTheme.typography.bodyMedium,
+    )
+    if (known == null) {
+      Text(
+        "This version of the app doesn't know that command, so it won't run it.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.error,
+      )
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      Button(enabled = known != null && !acting, onClick = { onConfirm(spec, args) }) {
+        Text(if (acting) "…" else if (spec.via == Via.NAVIGATE) "Take me there" else "Do it")
+      }
+      // DECLINING IS NOT AN ERROR. It clears the offer and says nothing else:
+      // an owner who says no has not hit a failure and must not be shown one.
+      TextButton(onClick = onDismiss) { Text("Not now") }
+    }
   }
 }

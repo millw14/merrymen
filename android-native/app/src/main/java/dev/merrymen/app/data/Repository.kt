@@ -41,6 +41,7 @@ class Repository(
   val api: MerrymenApi,
   private val session: Session,
   private val jar: PersistentCookieJar,
+  private val social: Social,
 ) {
   private val _signedIn = MutableStateFlow<String?>(null)
   val signedIn: StateFlow<String?> = _signedIn.asStateFlow()
@@ -105,6 +106,8 @@ class Repository(
   /** Sign-out has to reach the SERVER, or the session outlives the app. */
   suspend fun signOut() {
     api.logout()
+    // What this wallet liked and wired is not the next wallet's business.
+    social.forget()
     WebAuth.forget(jar)
     session.clearSession()
     _signedIn.value = null

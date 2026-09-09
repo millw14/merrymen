@@ -64,26 +64,31 @@ wallet all open the web app's own screen for that action. They are signature
 ceremonies. They belong where the key is.
 
 ---
-
 ## What is native
+
 
 | Screen | Endpoints |
 |---|---|
 | Home — portfolio, positions, agent warning, Circle lock banner | `/api/feed`, `/api/tier` |
-| Feed — filters, honest verbs | `/api/theses` |
-| Chat — full conversation with the agent | `/api/chat` |
+| Feed — filters, most-liked sort, hearts | `/api/theses`, `/api/likes`, `/api/like-counts` |
+| Chat — full conversation, plus the propose/confirm card | `/api/chat`, and whatever the confirmed command writes |
 | Alpha — three-state lock | `/api/alpha` |
 | You — identity, controls, handoffs, sign out | `/api/feed`, `/api/auth/session` |
-| Markets, Token detail | `/api/market`, `/api/tokens/{address}` |
+| Markets | `/api/market` |
+| Token — chart over six spans, holders, star, share, copy | `/api/tokens/{address}`, `/api/venue?desk=chart` |
 | Search | `/api/search` |
-| Leaderboard, Agent detail | `/api/leaderboard`, `/api/theses` |
+| Leaderboard | `/api/leaderboard` |
+| Agent desk — owner line, **wire in** with its budget, likes | `/api/theses`, `/api/follow` |
+| Coins to consider — approve into basket and watchlist | `/api/proposals`, `/api/settings` |
+| Trade — buy, sell, snipe, with the order followed after it is placed | `/api/orders`, `/api/snipe` |
+| How much risk — one word into six settings | `/api/settings` |
 | The Merry Circle | `/api/circle` |
 | Telegram — connection, **link code**, owner chat | `/api/telegram` |
-| Settings — server, site gate, practice reset | `/api/settings`, `/api/gate`, `/api/paper-reset` |
+| Settings — a real editor, plus server, site gate, practice reset | `/api/settings`, `/api/gate`, `/api/paper-reset` |
 
-`MerrymenApi` covers the wider surface too — orders, snipe, proposals, selftest,
-follow, likes, models, holder link/unlink, grant revoke (the kill switch),
-market, venue, wall, wall-tape, discoveries, agents, scoreboard, like-counts.
+`MerrymenApi` covers the wider surface too — selftest, models, holder
+link/unlink, grant revoke (the kill switch), wall, wall-tape, discoveries,
+agents, scoreboard.
 
 ## Three rules carried across from the server
 
@@ -109,15 +114,16 @@ active, so the `Host` must be loopback or private-LAN.
 
 ## Known gaps
 
-- **Settings is read-only here**, with an "edit on the web screen" handoff. The
-  server's settings object has ~60 validated fields; a native form that PUT a
-  subset would silently unset everything it does not render — the exact
-  read-modify-write hazard that has already erased a basket and an allowlist in
-  this repo. Per-field editors need to be built against the server's validation,
-  not guessed.
 - No offline cache, no push, no widgets.
 - `AgentDetailScreen` filters the public thesis window client-side rather than
   reading a per-agent endpoint.
+- The **watchlist is device-local**, in DataStore, the way the web's is
+  device-local in `localStorage`. Starring here does not star on the web. There
+  is no server route for it and inventing one would put a per-caller read in
+  front of a page that does not otherwise need one.
+- **Search results carry no owner line.** `/api/search` answers
+  `{kind, href, title, sub}` and no handle, so there is nothing to render; the
+  owner appears everywhere the API actually sends one.
 
 ## What the compiler actually found
 
@@ -142,9 +148,36 @@ reported success (both answers are a 303, so redirects had to be turned off to
 see the destination), and requests used `suspendCoroutine`, leaking an
 in-flight call per abandoned screen.
 
+## What guessing at field names cost, separately
+
+`ignoreUnknownKeys` turns a wrong field name into SILENCE rather than an error,
+and four of them were wrong:
+
+- **`/api/follow` takes `target`, not `slug`** — so every follow this client
+  ever sent answered `400 "that is not an agent id"`.
+- **It reads `on === false` for an unfollow, not `follow`** — so `{follow:false}`
+  left `on` undefined and **unfollowing would have followed**.
+- **`/api/market` sends `paused`, not `halted`** — the halt flag decoded as null
+  on every token, and the detail screen said "we could not read whether trading
+  is halted" about a read that had succeeded.
+- **`/api/market` sends no 24-hour change at all** — so the arrow beside every
+  price was permanently an em dash. A coin's change comes from the index, on
+  `/api/tokens/{address}`.
+
+The two write bodies are now built by a serializer from a declared type, which
+is the actual fix: a serializer cannot get a key name wrong twice.
+
 ## Still missing
 
-The web terminal is a control surface; this is largely a viewer. Not yet here:
-the 19 chat commands and their propose/confirm card, the proposals approve
-loop, orders, snipe, likes, follows, the risk bar, watchlist and charts, and
-the ~60-field settings editor (deliberately a handoff — see above).
+The chat propose/confirm card, the proposals approve loop, orders with polling,
+snipe, the risk bar, a real settings editor, likes, follows, the token chart,
+the watchlist, sharing and the holders table are all here now. What is not:
+
+- **No agent creation and no signing.** Anything that ends in a signature — the
+  grant, a re-sign, a withdrawal — is a WebView handoff to the web app's own
+  screen, on purpose: that is where the owner key lives.
+- **No X-handle proof flow.** The app renders a proven handle as a link and an
+  unproven one as plain text, but the proof itself (post a nonce, verify it) is
+  web-only.
+- No per-agent endpoint, so a desk's history is the public window filtered
+  client-side.

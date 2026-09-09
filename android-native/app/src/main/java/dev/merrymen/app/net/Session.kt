@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -37,10 +38,37 @@ class Session(private val context: Context) {
     val COOKIES = stringPreferencesKey("cookies")
     val GATE = stringPreferencesKey("gate")
     val TENANT = stringPreferencesKey("tenant")
+    val WATCHLIST = stringSetPreferencesKey("watchlist")
   }
 
   val origin: Flow<String> = context.sessionStore.data.map { it[Keys.ORIGIN] ?: defaultOrigin }
   val tenant: Flow<String?> = context.sessionStore.data.map { it[Keys.TENANT] }
+
+  /**
+   * TOKENS THIS DEVICE WANTS TO COME BACK TO — and only this device.
+   *
+   * The web keeps its watchlist in `localStorage` under `merrymen.watchlist`,
+   * so it is already per-device there and does not follow a wallet. The same
+   * choice here rather than a new server route: a watchlist is a bookmark, it
+   * belongs to nobody's ledger, and inventing an endpoint for it would put a
+   * per-caller read in front of a page that does not otherwise need one. The
+   * consequence is worth stating plainly in the UI — starring on the phone does
+   * NOT star on the web.
+   *
+   * Addresses are lowercased on the way in, because the same token arrives
+   * checksummed from one route and lowercase from another.
+   */
+  val watchlist: Flow<Set<String>> =
+    context.sessionStore.data.map { it[Keys.WATCHLIST] ?: emptySet() }
+
+  suspend fun toggleWatch(address: String) {
+    val key = address.trim().lowercase()
+    if (key.isEmpty()) return
+    context.sessionStore.edit { p ->
+      val now = p[Keys.WATCHLIST] ?: emptySet()
+      p[Keys.WATCHLIST] = if (key in now) now - key else now + key
+    }
+  }
 
   suspend fun originNow(): String = origin.first()
 

@@ -188,14 +188,39 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
   // MARKETS IS /api/market. There is no /api/tokens list route — only
   // /api/tokens/{address} — so the old call was a 404 behind three screens.
   suspend fun market(): ApiResult<TokensPage> = getJson("/api/market")
-  suspend fun token(address: String): ApiResult<JsonElement> = getJson("/api/tokens/" + address)
+  /**
+   * ONE TOKEN, IN FULL: who holds it, what the index says, and its bars.
+   *
+   * The `window` the ROUTE takes is not the window the reader picked. It
+   * accepts four bar sizes (15m, 1h, 4h, 1d) and anything else silently
+   * becomes 1h; the six buttons are spans of history, which is a different
+   * question. `barSize` below maps one to the other, and the span is applied
+   * by trimming — never by padding.
+   */
+  suspend fun token(address: String, window: String = "1h"): ApiResult<TokenDetail> =
+    getJson("/api/tokens/" + address + "?window=" + window)
+
+  /**
+   * A STOCK'S BARS, through our own proxy.
+   *
+   * Never Yahoo directly: the allow-list of symbols lives on the server and is
+   * derived from the chain's own registry, so a chart we draw is always of an
+   * instrument this chain actually lists. A client that composed the upstream
+   * URL itself would be a free market-data relay wearing our domain.
+   */
+  suspend fun venueChart(symbol: String, window: String): ApiResult<VenueChart> =
+    getJson(
+      "/api/venue?desk=chart&symbol=" + java.net.URLEncoder.encode(symbol, "UTF-8") +
+        "&window=" + java.net.URLEncoder.encode(window, "UTF-8"),
+    )
   suspend fun leaderboard(): ApiResult<Leaderboard> = getJson("/api/leaderboard")
   suspend fun agent(slug: String): ApiResult<JsonElement> = getJson("/api/agents/" + slug)
   suspend fun discoveries(): ApiResult<JsonElement> = getJson("/api/discoveries")
   suspend fun venue(): ApiResult<JsonElement> = getJson("/api/venue")
   suspend fun wall(): ApiResult<JsonElement> = getJson("/api/wall")
   suspend fun wallTape(): ApiResult<JsonElement> = getJson("/api/wall-tape")
-  suspend fun likeCounts(): ApiResult<JsonElement> = getJson("/api/like-counts")
+  /** Session-free by design, so it is cacheable and carries nobody's identity. */
+  suspend fun likeCounts(): ApiResult<LikeCounts> = getJson("/api/like-counts")
 
   suspend fun search(q: String): ApiResult<SearchResults> =
     getJson("/api/search?q=" + java.net.URLEncoder.encode(q, "UTF-8"))
@@ -219,14 +244,15 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
   suspend fun settings(): ApiResult<SettingsEnvelope> = getJson("/api/settings")
 
   /**
-   * The WHOLE object goes back, not a patch.
+   * A PATCH of only what the owner edited.
    *
-   * `values` is what the server handed us with the edits applied on top. Sending
-   * a subset is how a client silently unsets every field it does not know about
-   * — see the note on SettingsEnvelope.
+   * The handler reads each field with `if ("name" in body)`, so omitted fields
+   * are left alone. Sending the whole object back would echo masked secrets
+   * (GET returns `set`/`hint`, never the value) and overwrite real keys with
+   * asterisks.
    */
-  suspend fun saveSettings(whole: JsonElement): ApiResult<SettingsEnvelope> =
-    sendJson("/api/settings", "PUT", json.encodeToString(JsonElement.serializer(), whole))
+  suspend fun patchSettings(patch: JsonElement): ApiResult<SettingsEnvelope> =
+    sendJson("/api/settings", "PUT", json.encodeToString(JsonElement.serializer(), patch))
 
   // ── telegram ──────────────────────────────────────────────────────────────
 
@@ -247,9 +273,11 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
   suspend fun order(side: String, symbol: String, usdg: Double): ApiResult<OrderResult> =
     sendJson("/api/orders", "POST", json.encodeToString(OrderBody.serializer(), OrderBody(side, symbol, usdg)))
 
-  suspend fun orderStatus(): ApiResult<OrderResult> = getJson("/api/orders")
+  /** What became of one order. Polled after placing it. */
+  suspend fun orderStatus(id: String): ApiResult<OrderState> =
+    getJson("/api/orders?id=" + java.net.URLEncoder.encode(id, "UTF-8"))
 
-  suspend fun snipe(query: String, usdg: Double): ApiResult<JsonElement> =
+  suspend fun snipe(query: String, usdg: Double): ApiResult<SnipeResult> =
     sendJson("/api/snipe", "POST", json.encodeToString(SnipeBody.serializer(), SnipeBody(query, usdg)))
 
   suspend fun selftest(): ApiResult<OrderResult> = sendJson("/api/selftest", "POST", null)
@@ -260,11 +288,29 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
 
   suspend fun models(): ApiResult<JsonElement> = sendJson("/api/models", "POST", "{}")
 
-  suspend fun follow(slug: String, on: Boolean): ApiResult<JsonElement> =
-    sendJson("/api/follow", "POST", """{"slug":"$slug","follow":$on}""")
+  // ── likes and follows ─────────────────────────────────────────────────────
 
-  suspend fun like(postId: String, on: Boolean): ApiResult<JsonElement> =
-    sendJson("/api/likes", "POST", """{"postId":"$postId","like":$on}""")
+  /**
+   * ONE TOGGLE, ONE ROUTE, in both cases: `on: false` is the undo.
+   *
+   * The bodies are ENCODED, not interpolated. A post id is a hex string and a
+   * slug is shape-checked, but the two write paths that build JSON by hand were
+   * also the two whose key names were wrong, and a serializer cannot get a key
+   * name wrong twice.
+   *
+   * A 404 FROM EITHER MEANS SELF-HOSTED, not an error and not a signed-out
+   * reader: one operator against one settings file has nobody for a like to be
+   * attributed to and no agent to wire in. Social.kt reads the status for that.
+   */
+  suspend fun likes(): ApiResult<LikesView> = getJson("/api/likes")
+
+  suspend fun like(postId: String, on: Boolean): ApiResult<LikesView> =
+    sendJson("/api/likes", "POST", json.encodeToString(LikeBody.serializer(), LikeBody(postId, on)))
+
+  suspend fun following(): ApiResult<FollowView> = getJson("/api/follow")
+
+  suspend fun follow(target: String, on: Boolean): ApiResult<FollowView> =
+    sendJson("/api/follow", "POST", json.encodeToString(FollowBody.serializer(), FollowBody(target, on)))
 
   /**
    * THE KILL SWITCH. Removes the grant, which stands the worker down.

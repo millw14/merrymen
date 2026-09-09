@@ -36,6 +36,9 @@ import dev.merrymen.app.ui.screens.HomeScreen
 import dev.merrymen.app.ui.screens.LeaderboardScreen
 import dev.merrymen.app.ui.screens.MarketsScreen
 import dev.merrymen.app.ui.screens.ProfileScreen
+import dev.merrymen.app.ui.screens.ProposalsScreen
+import dev.merrymen.app.ui.screens.RiskScreen
+import dev.merrymen.app.ui.screens.TradeScreen
 import dev.merrymen.app.ui.screens.SearchScreen
 import dev.merrymen.app.ui.screens.SettingsScreen
 import dev.merrymen.app.ui.screens.SignInScreen
@@ -70,6 +73,9 @@ object Routes {
   const val CIRCLE = "circle"
   const val LEADERBOARD = "leaderboard"
   const val SIGN_IN = "sign-in"
+  const val PROPOSALS = "proposals"
+  const val TRADE = "trade"
+  const val RISK = "risk"
 
   const val TOKEN = "token/{address}"
   fun token(address: String) = "token/$address"
@@ -148,6 +154,9 @@ private fun NavGraphBuilder.graph(nav: NavHostController) {
   composable(Routes.CIRCLE) { CircleScreen(nav) }
   composable(Routes.LEADERBOARD) { LeaderboardScreen(nav) }
   composable(Routes.SIGN_IN) { SignInScreen(nav) }
+  composable(Routes.PROPOSALS) { ProposalsScreen(nav) }
+  composable(Routes.TRADE) { TradeScreen(nav) }
+  composable(Routes.RISK) { RiskScreen(nav) }
 
   composable(Routes.TOKEN) { back ->
     TokenDetailScreen(nav, back.arguments?.getString("address").orEmpty())

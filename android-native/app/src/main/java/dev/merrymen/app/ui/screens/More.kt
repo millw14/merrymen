@@ -21,6 +21,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -42,16 +43,18 @@ import dev.merrymen.app.net.TokensPage
 import dev.merrymen.app.net.WebFlow
 import dev.merrymen.app.ui.Bps
 import dev.merrymen.app.ui.Empty
+import dev.merrymen.app.ui.LikeButton
 import dev.merrymen.app.ui.LoadedBlock
 import dev.merrymen.app.ui.Money
 import dev.merrymen.app.ui.NameBlock
 import dev.merrymen.app.ui.Notice
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.SectionCard
+import dev.merrymen.app.ui.WireButton
 import kotlinx.coroutines.launch
 
 @Composable
-private fun Header(title: String, nav: NavHostController) {
+internal fun Header(title: String, nav: NavHostController) {
   Row(
     Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
     verticalAlignment = Alignment.CenterVertically,
@@ -89,52 +92,25 @@ fun MarketsScreen(nav: NavHostController) {
                   t.name?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                   // HALT IS NULLABLE ON PURPOSE: the server may only assert it
                   // when the chain answered, so unknown stays quiet.
-                  if (t.halted == true) Text("trading halted", style = MaterialTheme.typography.labelSmall)
+                  if (t.paused == true) Text("trading halted", style = MaterialTheme.typography.labelSmall)
                 }
                 Column(horizontalAlignment = Alignment.End) {
                   Money(t.priceUsd)
-                  Bps(t.chg24?.toInt())
+                  // 24h VOLUME, NOT A 24h CHANGE. /api/market sends no change
+                  // figure, so the arrow that used to sit here was an em dash on
+                  // every row for every token, for ever.
+                  t.volume24hUsd?.let {
+                    Text(
+                      "24h vol",
+                      style = MaterialTheme.typography.labelSmall,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Money(it)
+                  }
                 }
               }
             }
           }
-        }
-      }
-    }
-  }
-}
-
-// ── TOKEN DETAIL ────────────────────────────────────────────────────────────
-
-@Composable
-fun TokenDetailScreen(nav: NavHostController, address: String) {
-  val c = LocalContainer.current
-  var state by remember { mutableStateOf<Loaded<TokensPage>>(Loaded.Loading) }
-  LaunchedEffect(address) { state = c.api.market().toLoaded() }
-
-  Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-    Header("Token", nav)
-    LoadedBlock(state) { page ->
-      val t = page.tokens.firstOrNull { it.address.equals(address, ignoreCase = true) }
-      if (t == null) {
-        Empty("Not listed", "This address is not in the registry on this deployment.")
-      } else {
-        SectionCard(t.symbol) {
-          t.name?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
-          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("Price", style = MaterialTheme.typography.bodySmall)
-            Money(t.priceUsd)
-          }
-          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("24h", style = MaterialTheme.typography.bodySmall)
-            Bps(t.chg24?.toInt())
-          }
-          when (t.halted) {
-            true -> Text("Trading is halted on this token.", style = MaterialTheme.typography.bodySmall)
-            null -> Text("We could not read whether trading is halted.", style = MaterialTheme.typography.bodySmall)
-            false -> Unit
-          }
-          Text(address, style = MaterialTheme.typography.labelSmall)
         }
       }
     }
@@ -242,23 +218,44 @@ fun LeaderboardScreen(nav: NavHostController) {
 fun AgentDetailScreen(nav: NavHostController, slug: String) {
   val c = LocalContainer.current
   var state by remember { mutableStateOf<Loaded<dev.merrymen.app.net.ThesesPage>>(Loaded.Loading) }
-  LaunchedEffect(slug) { state = c.api.theses().toLoaded() }
+  LaunchedEffect(slug) {
+    state = c.api.theses().toLoaded()
+    // What this owner's agent already reads, and this reader's own likes. Both
+    // throttled — walking back and forth between desks does not re-poll.
+    c.social.refreshWired()
+    c.social.refresh()
+  }
 
   Column(Modifier.fillMaxSize()) {
     Header("@$slug", nav)
     LoadedBlock(state) { page ->
       val mine = page.theses.filter { it.slug == slug }
-      if (mine.isEmpty()) {
-        Empty("Nothing published", "This agent has not posted inside the current window.")
-      } else {
-        LazyColumn {
-          items(mine) { t ->
-            SectionCard {
-              Text(t.head.ifBlank { t.reason ?: "" }, style = MaterialTheme.typography.bodyMedium)
-              t.outcome?.let {
-                Text(it, style = MaterialTheme.typography.labelSmall)
-              }
+      // The name as its own desk publishes it, with the owner underneath.
+      // Falls back to the slug, which is what this screen showed before.
+      val name = mine.firstOrNull()?.name ?: slug
+      LazyColumn {
+        item {
+          SectionCard {
+            NameBlock(
+              title = name,
+              owner = mine.firstOrNull()?.handle,
+              verified = mine.firstOrNull()?.handleVerified ?: false,
+            )
+          }
+          WireButton(slug, name, onSignIn = { nav.navigate(Routes.SIGN_IN) })
+        }
+        if (mine.isEmpty()) {
+          item {
+            Empty("Nothing published", "This agent has not posted inside the current window.")
+          }
+        }
+        items(mine) { t ->
+          SectionCard {
+            Text(t.head.ifBlank { t.reason ?: "" }, style = MaterialTheme.typography.bodyMedium)
+            t.outcome?.let {
+              Text(it, style = MaterialTheme.typography.labelSmall)
             }
+            LikeButton(t.postId, onSignIn = { nav.navigate(Routes.SIGN_IN) })
           }
         }
       }
@@ -377,6 +374,11 @@ fun SettingsScreen(nav: NavHostController) {
   var origin by remember { mutableStateOf("") }
   var gate by remember { mutableStateOf("") }
   var note by remember { mutableStateOf<String?>(null) }
+  // Only what the owner actually touched. Starts empty and stays that way for
+  // every control they do not move.
+  val edits = remember { mutableStateMapOf<String, kotlinx.serialization.json.JsonElement>() }
+  var dirty by remember { mutableStateOf(false) }
+  var saving by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
 
   LaunchedEffect(Unit) {
@@ -415,22 +417,44 @@ fun SettingsScreen(nav: NavHostController) {
     }
 
     LoadedBlock(state, onSignIn = { nav.navigate(Routes.SIGN_IN) }) { env ->
-      SectionCard("Your agent") {
-        // THE WHOLE OBJECT IS SHOWN AND SENT BACK WHOLE. Editing a subset here
-        // and PUTting only that is how a client silently unsets every field it
-        // does not render — the read-modify-write hazard this repo has already
-        // paid for twice. Rich per-field editors belong on the web screen until
-        // they can be built against the server's own validation.
-        Text(
-          env.values?.toString()?.take(2000) ?: "No settings stored yet.",
-          style = MaterialTheme.typography.bodySmall,
-        )
-        TextButton(onClick = { nav.navigate(Routes.web("/settings", "Settings")) }) {
-          Text("Edit on the web screen")
-        }
-      }
+      SettingsForm(
+        env = env,
+        edits = edits,
+        // Which strategies need the token, so the lock is stated where the
+        // choice is made rather than discovered later.
+        circleLocked = setOf("even-keel", "dip-hunter"),
+        onChanged = { dirty = true },
+      )
       if (env.errors.isNotEmpty()) {
         Notice("The server rejected some values", env.errors.joinToString("\n"))
+      }
+      SectionCard("Save") {
+        Text(
+          if (dirty) "Unsaved changes." else "Nothing changed yet.",
+          style = MaterialTheme.typography.bodySmall,
+        )
+        Button(
+          enabled = dirty && !saving,
+          onClick = {
+            saving = true
+            scope.launch {
+              // ONLY WHAT WAS TOUCHED. Omitted fields are left alone by the
+              // server; echoing a masked secret back would overwrite a key.
+              when (val r = c.api.patchSettings(patchOf(edits)).toLoaded()) {
+                is Loaded.Value -> {
+                  if (r.value.errors.isEmpty()) {
+                    edits.clear(); dirty = false; note = "Saved."
+                    state = c.api.settings().toLoaded()
+                  } else note = r.value.errors.joinToString("\n")
+                }
+                is Loaded.Refused -> note = r.message
+                is Loaded.Unreachable -> note = "Couldn't reach merrymen: " + r.cause
+                else -> Unit
+              }
+              saving = false
+            }
+          },
+        ) { Text(if (saving) "Saving…" else "Save changes") }
       }
     }
 

@@ -29,5 +29,8 @@ class AppContainer(app: Application) {
   val cookieJar = PersistentCookieJar(session)
   val http = Http.client(session, cookieJar)
   val api = dev.merrymen.app.net.MerrymenApi(http, session)
-  val repo = dev.merrymen.app.data.Repository(api, session, cookieJar)
+  // Before the repository, which clears it on sign-out: likes and follows are
+  // per-wallet facts and must not outlive the wallet they belong to.
+  val social = dev.merrymen.app.data.Social(api)
+  val repo = dev.merrymen.app.data.Repository(api, session, cookieJar, social)
 }
