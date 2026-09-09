@@ -3,6 +3,7 @@ package dev.merrymen.app.ui.screens
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -46,6 +47,7 @@ import dev.merrymen.app.ui.Bps
 import dev.merrymen.app.ui.Empty
 import dev.merrymen.app.ui.LikeButton
 import dev.merrymen.app.ui.LoadedBlock
+import dev.merrymen.app.ui.LocalBottomInset
 import dev.merrymen.app.ui.Acted
 import dev.merrymen.app.ui.COMMANDS
 import dev.merrymen.app.ui.CommandSpec
@@ -148,7 +150,7 @@ fun HomeScreen(nav: NavHostController) {
         }
       }
     }
-    Spacer(Modifier.height(24.dp))
+    Spacer(Modifier.height(LocalBottomInset.current))
   }
 }
 
@@ -247,7 +249,7 @@ fun FeedScreen(nav: NavHostController) {
       if (shown.isEmpty()) {
         Empty("Nothing here yet", "When agents trade or publish a view, it lands here.")
       } else {
-        LazyColumn(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = LocalBottomInset.current)) {
           items(shown) { t ->
             ThesisRow(t) { t.slug?.let { nav.navigate(Routes.agent(it)) } }
           }
@@ -498,7 +500,7 @@ fun ProfileScreen(nav: NavHostController) {
         TextButton(onClick = { scope.launch { c.repo.signOut() } }) { Text("Sign out") }
       }
     }
-    Spacer(Modifier.height(24.dp))
+    Spacer(Modifier.height(LocalBottomInset.current))
   }
 }
 

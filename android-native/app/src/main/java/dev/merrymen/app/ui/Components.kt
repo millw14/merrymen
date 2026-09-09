@@ -19,6 +19,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -192,16 +195,26 @@ fun Notice(
 
 @Composable
 fun Pill(text: String, selected: Boolean, onClick: () -> Unit) {
-  val bg = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
-  val fg = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+  val shape = RoundedCornerShape(22.dp)
   Box(
     Modifier
-      .background(bg, RoundedCornerShape(999.dp))
-      .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(999.dp))
+      .heightIn(min = 44.dp)
+      .clip(shape)
+      // SELECTED IS OFF-WHITE, NOT THE ACCENT. `--tx` on `--ink`. This was the
+      // lime accent, which reads as "live" everywhere else in the terminal —
+      // the accent is for a running agent and a confirm prompt, not for which
+      // filter you happen to be on.
+      .background(if (selected) MerryColors.tx else Color.Transparent)
+      .border(1.dp, MerryColors.line, shape)
       .clickable(onClick = onClick)
-      .padding(horizontal = 14.dp, vertical = 7.dp),
+      .padding(horizontal = 12.dp, vertical = 8.dp),
+    contentAlignment = Alignment.Center,
   ) {
-    Text(text, style = MaterialTheme.typography.bodySmall, color = fg)
+    Text(
+      text,
+      style = MaterialTheme.typography.bodySmall.copy(fontFamily = sans(12.sp), fontSize = 12.sp),
+      color = if (selected) MerryColors.ink else MerryColors.tx2,
+    )
   }
 }
 
@@ -254,3 +267,20 @@ fun toneOf(action: String?, outcome: String?): Color = when {
   action == "sell" -> Down
   else -> Neutral
 }
+
+/**
+ * HOW FAR THE LAST ROW MUST CLEAR THE FLOATING TAB BAR.
+ *
+ * `polish.css:17` — `.app > .body { padding-bottom: calc(104px + env(safe-area-inset-bottom)) }`.
+ *
+ * The bar is `position: fixed`, so content scrolls UNDER it and this padding is
+ * the only thing that lets the LAST card be read rather than sitting permanently
+ * behind the pill. It belongs INSIDE each scrollable — as `contentPadding` on a
+ * LazyColumn or a trailing Spacer on a scrolling Column — not as padding on the
+ * container, which would stop the content sliding under the bar at all and lose
+ * the translucency the design is built on.
+ */
+val LocalBottomInset = compositionLocalOf { 0.dp }
+
+/** The 104px, in dp. Provided by Shell; read via [LocalBottomInset]. */
+val BOTTOM_INSET = 104.dp
