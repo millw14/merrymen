@@ -1,9 +1,12 @@
 name: Desktop release
 
 # Push a tag like `desktop-v0.1.0` and this builds the installers on GitHub's own
-# Windows + macOS runners and publishes them to a Release. Also downloadable as
+# runners and publishes them to a Release. Also downloadable as
 # run artifacts (Actions → the run → Artifacts) even before the release is cut.
 # Or trigger manually from the Actions tab (workflow_dispatch).
+#
+# Linux-only for now: Windows/macOS stay out of the matrix until they can be
+# tested on real hardware. Re-add them when ready.
 on:
   push:
     tags:
@@ -18,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false # one OS failing shouldn't cancel the other
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -56,7 +59,7 @@ jobs:
           # trying to sign. (Add CSC_LINK/CSC_KEY_PASSWORD later to sign.)
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
-      # Always available: download the .exe/.dmg from the run itself.
+      # Always available: download the .AppImage from the run itself.
       - name: Upload run artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -64,8 +67,6 @@ jobs:
           name: merrymen-${{ matrix.os }}
           if-no-files-found: warn
           path: |
-            desktop/dist/*.exe
-            desktop/dist/*.dmg
             desktop/dist/*.AppImage
 
       # On a tag: attach the installers to a public GitHub Release.
@@ -80,13 +81,12 @@ jobs:
           body: |
             **merrymen desktop** — the one-click app. Double-click to install; no terminal, no Node.
 
-            - **Windows:** download the `.exe`. It's **unsigned**, so Windows SmartScreen shows
-              "Windows protected your PC" → **More info → Run anyway**. (We'll sign it later.)
-            - **macOS:** download the `.dmg`. It's **unsigned/un-notarized**, so right-click the app
-              → **Open** (or System Settings → Privacy & Security → Open Anyway) the first time.
+            - **Linux:** download the `.AppImage`, make it executable (`chmod +x`), and run it.
+              It needs FUSE to mount — Ubuntu 22.04+: `sudo apt install libfuse2`;
+              Arch: `sudo pacman -S fuse2`.
+            - **Windows/macOS:** not built in this release — coming once they can be
+              tested on real hardware.
 
             Shares its home (`~/.merrymen`) with the `npm i -g merrymen` CLI.
           files: |
-            desktop/dist/*.exe
-            desktop/dist/*.dmg
             desktop/dist/*.AppImage
