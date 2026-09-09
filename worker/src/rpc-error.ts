@@ -29,6 +29,21 @@
 export type RpcErrorKind =
   /** The provider refused because we asked too often. Ours to fix, not the chain's. */
   | "rate-limited"
+  /**
+   * WE decided not to ask. The governor's breaker was open.
+   *
+   * A SEPARATE KIND BECAUSE CONFLATING IT WITH `rate-limited` HID A REGRESSION
+   * OF MINE FOR A WHOLE DEPLOY. The breaker's refusal carried the words "Too
+   * Many Requests", so every request it declined was counted as one the
+   * endpoint had refused — the meter reported 93% rate-limited windows while
+   * the endpoint, measured directly at the same moment, was serving 50/s
+   * cleanly. A limiter that reports its own caution as the upstream's fault
+   * cannot be tuned, because every symptom points away from it.
+   *
+   * NOT RETRYABLE, and that is the whole point: retrying is what the breaker
+   * exists to prevent. The caller treats it as an unread, which it is.
+   */
+  | "declined"
   /** The request timed out or the socket died. Says nothing about the answer. */
   | "timeout"
   /** DNS, TLS, connection refused — the provider was not reachable at all. */
@@ -95,6 +110,15 @@ function headerRetryAfter(e: unknown): number | undefined {
  * `Rate Limit Hit, limit will reset in 60 seconds` — there is no HTTP status on
  * it at all, so a status-only classifier would miss every real case.
  */
+/**
+ * The marker the governor stamps on a request it declined to send.
+ *
+ * Lower-case and unmistakable: a phrase like "too many requests" can arrive
+ * from an upstream, and telling the two apart is the entire reason `declined`
+ * exists as its own kind.
+ */
+export const DECLINED_MARKER = "merrymen-rpc-declined";
+
 export function classifyRpcError(e: unknown): RpcErrorVerdict {
   const err = e as { name?: string; message?: string; details?: string; shortMessage?: string; code?: unknown; status?: unknown; cause?: unknown } | null;
   const text = [err?.message, err?.details, err?.shortMessage, err?.name]
@@ -106,9 +130,17 @@ export function classifyRpcError(e: unknown): RpcErrorVerdict {
   const codes: unknown[] = [err?.code, err?.status, (err?.cause as { code?: unknown } | null)?.code, (err?.cause as { status?: unknown } | null)?.status];
   const is = (n: number) => codes.some((c) => c === n || c === String(n));
 
+  // ── our own breaker ───────────────────────────────────────────────────
+  // BEFORE the rate-limit arm, because a declined request must never be
+  // mistaken for a refused one. It carries a marker rather than a phrase so it
+  // cannot be produced by anything upstream.
+  if (lower.includes(DECLINED_MARKER)) {
+    return { kind: "declined", retryable: false, detail };
+  }
+
   // ── rate limited ──────────────────────────────────────────────────────
-  // Checked FIRST. A 429 can also mention "limit", and reading it as a range
-  // hint is the exact bug this module was written to end.
+  // Checked FIRST among the upstream kinds. A 429 can also mention "limit", and
+  // reading it as a range hint is the exact bug this module was written to end.
   if (is(429) || lower.includes("rate limit") || lower.includes("too many requests")) {
     return { kind: "rate-limited", retryable: true, retryAfterMs: headerRetryAfter(e), detail };
   }

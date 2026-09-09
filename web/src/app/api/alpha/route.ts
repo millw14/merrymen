@@ -37,6 +37,7 @@
  * different facts with three different remedies, and only one of them is about
  * the reader. An RPC outage must never render as "you don't hold enough".
  */
+import { webChainRead } from "@/lib/chain-read";
 import { NextResponse } from "next/server";
 import {
   CIRCLE_TIERS,
@@ -45,7 +46,7 @@ import {
   robinhoodChain,
   tierForBalance,
 } from "@merrymen/core";
-import { createPublicClient, erc20Abi, http } from "viem";
+import { createPublicClient, erc20Abi } from "viem";
 
 import { tenantOf } from "@/lib/auth";
 import { sharedAlpha, type AlphaExtras, type DiscoveryRow, type Payload } from "@/lib/read-discoveries";
@@ -73,7 +74,7 @@ async function balanceOf(address: `0x${string}`): Promise<bigint> {
   const key = address.toLowerCase();
   const hit = balances.get(key);
   if (hit && Date.now() - hit.at < BALANCE_TTL_MS) return hit.raw;
-  const client = createPublicClient({ chain: robinhoodChain, transport: http() });
+  const client = createPublicClient({ chain: robinhoodChain, transport: webChainRead() });
   const raw = (await client.readContract({
     address: MERRYMEN_TOKEN.address,
     abi: erc20Abi,

@@ -1,4 +1,5 @@
-import { createPublicClient, http } from "viem";
+import { webChainRead } from "@/lib/chain-read";
+import { createPublicClient } from "viem";
 import {
   fetchGeckoPoolsResult,
   screenPools,
@@ -393,7 +394,7 @@ async function rankUncached(
 
     let research: ReadonlyMap<string, ReturnType<typeof scoutFieldsFor>> | undefined;
     if (cfg.browserUrl && cfg.browserToken) {
-      const client = createPublicClient({ transport: http("https://rpc.mainnet.chain.robinhood.com") });
+      const client = createPublicClient({ transport: webChainRead(process.env.MERRYMEN_RPC_MAINNET) });
       const found = await researchCoins(kept, {
         client: client as never,
         browser: { baseUrl: cfg.browserUrl, token: cfg.browserToken },
@@ -415,7 +416,7 @@ async function readFresh(): Promise<{ rows: FreshRow[]; chain: ChainStatus }> {
   // falses rather than three optimistic trues.
   const chain: ChainStatus = { launchpad: false, meta: false, facts: false, clock: false };
   try {
-    const client = createPublicClient({ transport: http("https://rpc.mainnet.chain.robinhood.com") });
+    const client = createPublicClient({ transport: webChainRead(process.env.MERRYMEN_RPC_MAINNET) });
     const W = MAX_ACTIVITY_BLOCKS;
     const [scan, activity] = await Promise.all([
       recentPonsLaunches(client as never, W),

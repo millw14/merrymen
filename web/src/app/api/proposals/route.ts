@@ -30,11 +30,12 @@
  * IT PROPOSES; IT DOES NOT DECIDE. Nothing here writes settings, touches a
  * grant, or widens anything. It returns a list and the reasoning behind it.
  */
+import { webChainRead } from "@/lib/chain-read";
 import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { getGrantStore } from "@merrymen/grant-store";
 import { getSettingsStore } from "@merrymen/settings-store";
-import { createPublicClient, erc20Abi, http } from "viem";
+import { createPublicClient, erc20Abi } from "viem";
 import { robinhoodChain } from "@merrymen/core";
 
 import { tenantOf } from "@/lib/auth";
@@ -72,7 +73,7 @@ function sanitizeSymbol(raw: string): string {
 async function identityOf(token: `0x${string}`): Promise<{ symbol: string; decimals: number } | null> {
   const key = token.toLowerCase();
   if (identity.has(key)) return identity.get(key) ?? null;
-  const client = createPublicClient({ chain: robinhoodChain, transport: http() });
+  const client = createPublicClient({ chain: robinhoodChain, transport: webChainRead() });
   try {
     const [s, d] = await Promise.all([
       client.readContract({ address: token, abi: erc20Abi, functionName: "symbol" }) as Promise<string>,

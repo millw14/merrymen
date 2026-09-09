@@ -6,11 +6,12 @@
  * Replaced by Supabase (encrypted, per-user) once persistence lands.
  */
 
+import { webChainRead } from "@/lib/chain-read";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@merrymen/home";
-import { createPublicClient, http, parseAbi } from "viem";
+import { createPublicClient, parseAbi } from "viem";
 import {
   CASH,
   MORPHO,
@@ -369,7 +370,7 @@ export async function GET(req: Request) {
   }
 
   const chain = chainForId(grant.chainId);
-  const client = createPublicClient({ chain, transport: http() });
+  const client = createPublicClient({ chain, transport: webChainRead() });
 
   const [ethWei, tokenReads] = await Promise.all([
     client.getBalance({ address: grant.smartAccount }).catch(() => 0n),

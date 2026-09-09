@@ -21,7 +21,7 @@
  * changes.
  */
 import { http, type Transport } from "viem";
-import { classifyRpcError, type RpcErrorKind } from "./rpc-error";
+import { DECLINED_MARKER, classifyRpcError, type RpcErrorKind } from "./rpc-error";
 import { merrymenHome } from "./home";
 import { clearCooldown, publishCooldown, readCooldown } from "./rpc-cooldown";
 import {
@@ -350,9 +350,15 @@ async function admit(): Promise<void> {
       return;
     }
     if (d.act === "refuse") {
+      // THE MARKER, NOT THE WORDS. This message used to say "Too Many
+      // Requests", so `classifyRpcError` filed every request the breaker
+      // declined as one the ENDPOINT had refused. The meter then reported 93%
+      // rate-limited windows while the endpoint, measured at the same moment,
+      // was serving 50/s cleanly — a limiter blaming the upstream for its own
+      // caution, which is untunable because every symptom points away from it.
       throw new Error(
-        `Too Many Requests — not sent: the endpoint refused this process ${state.strikes} time(s) in a row, ` +
-          `holding off ${Math.ceil(d.ms / 1000)}s. Asking again now is what caused it.`,
+        `${DECLINED_MARKER}: not sent — the endpoint refused this process ${state.strikes} time(s) ` +
+          `in a row, holding off ${d.ms}ms. Asking again now is what caused it.`,
       );
     }
     await new Promise((r) => setTimeout(r, d.ms));

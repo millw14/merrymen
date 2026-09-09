@@ -7,6 +7,7 @@
  * goes through the normal settings PUT; this route just reads + resolves.
  */
 
+import { webChainRead } from "@/lib/chain-read";
 import { readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { homePaths } from "@merrymen/home";
@@ -22,7 +23,7 @@ import {
   type CircleTier,
   type MerrymenSettings,
 } from "@merrymen/core";
-import { createPublicClient, erc20Abi, http } from "viem";
+import { createPublicClient, erc20Abi } from "viem";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -72,7 +73,7 @@ export async function GET() {
   }
 
   try {
-    const client = createPublicClient({ chain: robinhoodChain, transport: http(settings.rpcMainnet) });
+    const client = createPublicClient({ chain: robinhoodChain, transport: webChainRead(settings.rpcMainnet) });
     const raw = (await client.readContract({
       address: MERRYMEN_TOKEN.address,
       abi: erc20Abi,

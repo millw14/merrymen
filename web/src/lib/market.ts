@@ -9,7 +9,8 @@
  *  - Rialto /tokens (public): whether Rialto considers the token liquid.
  */
 
-import { createPublicClient, http } from "viem";
+import { webChainRead } from "@/lib/chain-read";
+import { createPublicClient } from "viem";
 import {
   CHAINLINK_ABI,
   RIALTO,
@@ -49,7 +50,7 @@ export interface MarketData {
   tokens: MarketToken[];
 }
 
-const client = createPublicClient({ chain: robinhoodChain, transport: http() });
+const client = createPublicClient({ chain: robinhoodChain, transport: webChainRead() });
 
 const BLOCKSCOUT = "https://robinhoodchain.blockscout.com/api/v2";
 const LOGO_CDN = (address: string) =>

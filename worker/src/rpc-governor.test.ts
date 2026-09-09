@@ -33,25 +33,55 @@ import {
 const L = DEFAULT_LIMITS;
 const T0 = 1_788_000_000_000;
 
+/** Refuse `n` requests in a row, from a clean state. */
+const strike = (n: number, rand = 0.9): GovernorState => {
+  let s = freshState(T0);
+  for (let i = 0; i < n; i += 1) s = end(begin(s, T0, L), T0, L, { refused: true }, rand);
+  return s;
+};
+
 describe("a refusal never produces another request into the refusal", () => {
-  it("THE BREAKER REFUSES, IT DOES NOT QUEUE", () => {
-    // The distinction is the entire fix. `wait` means "you are going too fast,
-    // slow down"; `refuse` means "the endpoint said stop". A governor that
-    // turned a 429 into a wait would still send — later, together with fourteen
-    // others — which is what viem's retryCount:3 was doing.
-    let s = freshState(T0);
-    s = begin(s, T0, L);
-    s = end(s, T0, L, { refused: true }, 0.9);
+  it("A LONE REFUSAL OPENS NOTHING — this is the regression, not the design", () => {
+    // Shipped opening on the first strike, and production went from 56% of
+    // meter windows showing refusals to 93%, with "market unreadable"
+    // outnumbering successful block reads. At this endpoint a single 429 is
+    // noise: measured, it serves 50/s cleanly and refuses about a fifth at
+    // 100/s. Stopping the whole container over one of them turns a slow tick
+    // into a blind one.
+    for (const n of [1, 2]) {
+      assert.equal(decide(strike(n), T0 + 1, L).act, "send", `${n} strike(s) must not open the breaker`);
+    }
+    assert.equal(strike(2).strikes, 2, "but they are still counted — the ladder needs them");
+  });
+
+  it("AND A PATTERN DOES — it refuses, it does not queue", () => {
+    // The distinction is the fix. `wait` means "you are going too fast, slow
+    // down"; `refuse` means "the endpoint said stop, repeatedly". A governor
+    // that turned a sustained refusal into a wait would still send — later,
+    // together with fourteen others — which is what viem's retryCount:3 did.
+    const s = strike(L.openAfterStrikes);
     const d = decide(s, T0 + 1, L);
     assert.equal(d.act, "refuse");
     assert.ok(d.ms > 0);
   });
 
   it("and the cooldown outranks a full bucket", () => {
-    // Tokens say yes, the endpoint said no. The endpoint wins.
-    let s: GovernorState = { ...freshState(T0), tokens: L.burst };
-    s = end({ ...s, inFlight: 1 }, T0, L, { refused: true }, 1);
+    // Tokens say yes, the endpoint has said no three times. The endpoint wins.
+    const s = { ...strike(L.openAfterStrikes, 1), tokens: L.burst };
     assert.equal(decide(s, T0 + 10, L).act, "refuse");
+  });
+
+  it("AND THE CEILING IS ONE A TICK CAN SURVIVE", () => {
+    // Thirty seconds — the first value — is longer than several sequential
+    // reads take, so an open breaker blinded the whole tick rather than
+    // slowing it. The cooldown is shared by every child, so its cost is paid
+    // fleet-wide at once.
+    assert.ok(L.maxBackoffMs <= 5_000, "a shared cooldown must be survivable inside one tick");
+    let worst = 0;
+    for (let n = L.openAfterStrikes; n < 20; n += 1) {
+      worst = Math.max(worst, backoffMs(n, L, 1, null));
+    }
+    assert.ok(worst <= L.maxBackoffMs);
   });
 });
 
@@ -60,9 +90,13 @@ describe("full jitter, because fifteen children share one endpoint", () => {
     // getLogsAdaptive retried a rate limit at a fixed 132ms. Fifteen children
     // refused in the same instant then retried in the same instant, which is
     // the burst reassembled. A uniform draw over the window is what breaks it.
-    const draws = [0, 0.1, 0.25, 0.5, 0.75, 0.99].map((r) => backoffMs(3, L, r, null));
+    const draws = [0, 0.1, 0.25, 0.5, 0.75, 0.99].map((r) => backoffMs(5, L, r, null));
     assert.equal(new Set(draws).size, draws.length, "distinct draws must give distinct delays");
-    assert.ok(Math.max(...draws) - Math.min(...draws) > 2_000, "and the spread must be wide");
+    const window = Math.min(L.maxBackoffMs, L.baseBackoffMs * 2 ** 4);
+    assert.ok(
+      Math.max(...draws) - Math.min(...draws) > window * 0.8,
+      "and the spread must cover most of the window, or it is not full jitter",
+    );
   });
 
   it("the window doubles per strike and then stops", () => {
@@ -97,8 +131,8 @@ describe("the shared cooldown only ever extends", () => {
   });
 
   it("but a longer one from another child is adopted", () => {
-    const s: GovernorState = { ...freshState(T0), coolUntil: T0 + 1_000 };
-    assert.equal(adoptShared(s, T0 + 9_000, T0, L).coolUntil, T0 + 9_000);
+    const s: GovernorState = { ...freshState(T0), coolUntil: T0 + 500 };
+    assert.equal(adoptShared(s, T0 + 4_000, T0, L).coolUntil, T0 + 4_000);
   });
 
   it("AND A FILE FROM YESTERDAY CANNOT BRICK THE FLEET", () => {

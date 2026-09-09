@@ -127,3 +127,32 @@ describe("the breaker is shared across the container", () => {
     assert.match(read, /catch \{\s*return null;/);
   });
 });
+
+describe("a request we declined is not a request they refused", () => {
+  it("THE BREAKER'S ERROR CARRIES A MARKER, NOT THE ENDPOINT'S WORDS", async () => {
+    // The regression this pins cost a whole deploy. The breaker's message said
+    // "Too Many Requests", so classifyRpcError filed every request it declined
+    // as one the endpoint had refused: the meter reported 93% rate-limited
+    // windows while the endpoint, measured directly at the same moment, served
+    // 50/s cleanly. A limiter that reports its own caution as the upstream's
+    // fault cannot be tuned, because every symptom points away from it.
+    const { classifyRpcError, DECLINED_MARKER } = await import("./rpc-error");
+    const meter = src("./rpc-meter.ts");
+    assert.match(meter, /\$\{DECLINED_MARKER\}: not sent/);
+    assert.ok(
+      !/Too Many Requests — not sent/.test(meter),
+      "the breaker must not describe itself in the endpoint's words",
+    );
+    const v = classifyRpcError(new Error(`${DECLINED_MARKER}: not sent — holding off 250ms`));
+    assert.equal(v.kind, "declined");
+    assert.equal(v.retryable, false, "retrying is the thing the breaker exists to prevent");
+  });
+
+  it("and a real 429 still classifies as the endpoint refusing", () => {
+    // The two must stay distinguishable in both directions.
+    return import("./rpc-error").then(({ classifyRpcError }) => {
+      const e = Object.assign(new Error("HTTP request failed. Status: 429 Too Many Requests"), { status: 429 });
+      assert.equal(classifyRpcError(e).kind, "rate-limited");
+    });
+  });
+});

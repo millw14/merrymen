@@ -1,3 +1,4 @@
+import { webChainRead } from "@/lib/chain-read";
 import { createPublicClient, http, type Address } from "viem";
 import { toAccount } from "viem/accounts";
 import { createKernelAccount } from "@zerodev/sdk";
@@ -33,7 +34,7 @@ export async function deriveKernelAccountAddress(owner: Address, chainId: number
   const chain = chainForId(chainId);
   // http() with no URL uses the chain's built-in default RPC — the same transport
   // the grants route already uses for balance reads.
-  const publicClient = createPublicClient({ chain, transport: http() });
+  const publicClient = createPublicClient({ chain, transport: webChainRead() });
 
   const viewSigner = toAccount({
     address: owner,

@@ -119,14 +119,43 @@ export interface GovernorLimits {
   baseBackoffMs: number;
   /** Longest backoff, however many refusals in a row. */
   maxBackoffMs: number;
+  /**
+   * CONSECUTIVE refusals before the breaker opens at all.
+   *
+   * THE FIRST VERSION OPENED ON ONE, AND THAT MADE THINGS WORSE. At this
+   * endpoint a lone 429 is routine — measured, it serves 50/s cleanly and
+   * refuses about a fifth at 100/s, so a single refusal is noise, not a
+   * signal. Opening on it stopped every child in the container for up to a
+   * second, then longer; against a tick that needs several sequential requests
+   * that is the difference between a slow tick and a blind one, and production
+   * went from 56% of windows showing refusals to 93%, with "market unreadable"
+   * outnumbering successful block reads.
+   *
+   * A breaker is for a pattern, not for an event. Below this, a refusal costs
+   * exactly its own request and nothing else — which, with viem's retry off,
+   * is already the whole fix.
+   */
+  openAfterStrikes: number;
 }
 
 export const DEFAULT_LIMITS: GovernorLimits = Object.freeze({
   ratePerSec: 2,
   burst: 12,
   maxInFlight: 6,
-  baseBackoffMs: 1_000,
-  maxBackoffMs: 30_000,
+  /**
+   * SHORT ON PURPOSE. The cooldown is shared by every child in the container,
+   * so its cost is paid by the whole fleet at once. Long enough to break the
+   * lockstep that rebuilds a burst, short enough that a tick which starts
+   * during one still finishes: a quarter of a second against a 240-second tick.
+   */
+  baseBackoffMs: 250,
+  /**
+   * And a ceiling a tick can survive. Thirty seconds — the first value here —
+   * is longer than several sequential reads take, so an open breaker blinded
+   * the tick entirely rather than slowing it. Five is enough to end a storm.
+   */
+  maxBackoffMs: 5_000,
+  openAfterStrikes: 3,
 });
 
 export interface GovernorState {
@@ -207,7 +236,11 @@ export function end(
   const inFlight = Math.max(0, s.inFlight - 1);
   if (!outcome.refused) return { ...s, inFlight, strikes: 0 };
   const strikes = Math.min(s.strikes + 1, 16);
-  const ms = backoffMs(strikes, lim, rand, outcome.retryAfterMs ?? null);
+  // A LONE REFUSAL IS NOISE AT THIS ENDPOINT, not a signal. It is counted — the
+  // ladder needs it — but it opens nothing, so a routine 429 costs its own
+  // request and no more. See `openAfterStrikes`.
+  if (strikes < lim.openAfterStrikes) return { ...s, inFlight, strikes };
+  const ms = backoffMs(strikes - lim.openAfterStrikes + 1, lim, rand, outcome.retryAfterMs ?? null);
   // NEVER SHORTEN A COOLDOWN somebody else set. Fifteen children share this
   // number; the longest opinion is the safe one, and a child whose own strike
   // count is low must not pull the fleet back in early.
