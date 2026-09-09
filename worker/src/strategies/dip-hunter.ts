@@ -29,7 +29,23 @@ export function makeDipHunter(cfg: DipHunterConfig): Strategy {
     name: "dip-hunter",
     tick(snap: Snapshot): Tick {
       if (!snap.sequencerUp) return { intents: [], why: [] };
-      if (snap.cashUsdg < cfg.buyPerTickUsdg) return { intents: [], why: [] };
+      if (snap.cashUsdg < cfg.buyPerTickUsdg) {
+        // SILENT UNTIL NOW, AND WORSE THAN STEADY-BASKET'S VERSION OF IT: this
+        // strategy emits no vault-withdraw anywhere, so once cash drifts under
+        // one buy nothing clears it and the agent is finished — with no
+        // sentence and no way back on its own. reasons.ts named this exact case
+        // and already renders the vault figure and the remedy alongside it.
+        return {
+          intents: [],
+          why: [],
+          idle: {
+            code: "under-one-buy",
+            cashRaw: snap.cashUsdg,
+            needRaw: cfg.buyPerTickUsdg,
+            vaultRaw: snap.vaultUsdg,
+          },
+        };
+      }
 
       // `symbol` rides along so the reason can name the leg, and `priced` counts
       // how many it actually had a fresh price for — 'deepest of the 3 I priced'
@@ -54,7 +70,58 @@ export function makeDipHunter(cfg: DipHunterConfig): Strategy {
         }
       }
 
-      if (!best) return { intents: [], why: [] };
+      if (!best) {
+        /**
+         * NOTHING PRICED IS NOT "NO DIP WAS DEEP ENOUGH".
+         *
+         * Every Chainlink equity feed is stale outside US market hours —
+         * roughly 15.5 hours of every weekday plus the whole weekend — and a
+         * stale leg is skipped above, so `priced` reaches zero and this
+         * returned a tick byte-identical to a healthy quiet one. The agent
+         * never got a price to measure a dip against, which is a fact about the
+         * feeds and not about the market. A stale basket does NOT make the tick
+         * "market unreadable" either (that needs every price missing), so
+         * nothing else in the system reported it.
+         *
+         * `priced > 0` genuinely is "I looked and none were deep enough", and
+         * that case stays quiet — it is the strategy working as designed.
+         */
+        const paused = cfg.legs.filter((l) => snap.pausedTokens.has(l.token.toLowerCase())).length;
+        return priced === 0 && cfg.legs.length > 0
+          ? { intents: [], why: [], idle: { code: "all-legs-stale", legs: cfg.legs.length, paused } }
+          : { intents: [], why: [] };
+      }
+      /**
+       * SIZED TO THE SIGNATURE, which this strategy never consulted.
+       *
+       * `snap.perTradeCapUsdg` is the cap sealed into the owner's grant and
+       * `spendHeadroomUsdg` is what is left of the day; steady-basket honours
+       * the first and trencher skips anything above either, while dip-hunter
+       * proposed `buyPerTickUsdg` flat. An owner whose size per trade sits
+       * above their signed cap therefore had every intent refused by their own
+       * key, on every tick, for the life of the grant — and a tape of rejected
+       * rows reads as a fussy agent rather than a mis-sized one.
+       *
+       * Clamping widens nothing: the wall is still the authority and still
+       * refuses whatever it would have refused. It stops proposing what is
+       * already known to be impossible.
+       */
+      const cap = snap.perTradeCapUsdg < snap.spendHeadroomUsdg ? snap.perTradeCapUsdg : snap.spendHeadroomUsdg;
+      const size = cfg.buyPerTickUsdg < cap ? cfg.buyPerTickUsdg : cap;
+      if (size <= 0n) {
+        // The day's budget is spent, or the signed cap is zero. Either way
+        // there is nothing to propose and the owner should hear which.
+        return {
+          intents: [],
+          why: [],
+          idle: {
+            code: "under-one-buy",
+            cashRaw: snap.cashUsdg,
+            needRaw: cfg.buyPerTickUsdg,
+            vaultRaw: snap.vaultUsdg,
+          },
+        };
+      }
       return {
         intents: [
           {
@@ -62,8 +129,8 @@ export function makeDipHunter(cfg: DipHunterConfig): Strategy {
             target: cfg.swapRouter,
             sellToken: cfg.usdg,
             buyToken: best.token,
-            sellAmountRaw: cfg.buyPerTickUsdg,
-            notionalUsdg: cfg.buyPerTickUsdg,
+            sellAmountRaw: size,
+            notionalUsdg: size,
           },
         ],
         why: [
@@ -72,7 +139,11 @@ export function makeDipHunter(cfg: DipHunterConfig): Strategy {
             symbol: best.symbol,
             dipBps: best.dipBps,
             priced,
-            usdgRaw: cfg.buyPerTickUsdg,
+            // THE SIZE ACTUALLY PROPOSED, not the configured one. They differ
+            // whenever the signed cap or the day's headroom is the binding
+            // constraint, and a reason that quotes the setting instead of the
+            // intent describes a trade nobody made.
+            usdgRaw: size,
           },
         ],
       };

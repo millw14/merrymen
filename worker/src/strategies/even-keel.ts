@@ -32,6 +32,32 @@ export interface EvenKeelConfig {
 const clamp = (v: bigint, hi: bigint) => (v > hi ? hi : v);
 
 /**
+ * THE CEILING THIS STRATEGY NEVER LOOKED AT.
+ *
+ * `snap.perTradeCapUsdg` is the cap sealed into the owner's SIGNATURE, and the
+ * wall enforces it on every intent. steady-basket has honoured it since it was
+ * added (`cfg.buyPerTickUsdg < snap.perTradeCapUsdg ? … : …`) and trencher
+ * skips any candidate above it; even-keel and dip-hunter ignored both it and
+ * `spendHeadroomUsdg` entirely.
+ *
+ * WHAT THAT COSTS, and it is not a rounding error. A default basket of three
+ * legs seeded at the "bold" size is 16.67 USDG a leg against a default signed
+ * cap of 10, so EVERY intent this strategy produced was refused by the wall —
+ * on the first tick, and on every tick after it, for the life of the grant.
+ * Nothing in the product reads as "your own key refuses this": the tape fills
+ * with rejected rows and the agent looks fussy rather than mis-sized.
+ *
+ * Clamping cannot widen anything. The wall is still the authority and still
+ * refuses whatever it would have refused; this only stops proposing what is
+ * already known to be impossible. The owner's remedy — a bigger cap — needs a
+ * new signature, which is theirs to give and not ours to assume.
+ */
+const withinCap = (v: bigint, snap: Snapshot): bigint => {
+  const capped = clamp(v, snap.perTradeCapUsdg);
+  return clamp(capped, snap.spendHeadroomUsdg);
+};
+
+/**
  * THREE WAYS THIS DID NOTHING AND SAID NOTHING.
  *
  * Reported by a tester, about a funded agent: "when the strategy is 'even
@@ -78,7 +104,7 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
   if (invested === 0n) {
     const budget = clamp(cfg.seedBudgetUsdg, snap.cashUsdg);
     const per = budget / BigInt(tradable.length);
-    const each = clamp(per, cfg.maxTradeUsdg);
+    const each = withinCap(clamp(per, cfg.maxTradeUsdg), snap);
     if (budget <= 0n || per <= 0n) {
       /**
        * THE FIRST BUY NEVER HAPPENED, AND THIS IS THE ANSWER TO "must the first
@@ -139,7 +165,23 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
   for (const l of tradable) {
     const diff = valueOf(l.symbol) - target; // >0 overweight, <0 underweight
     if (diff > band) {
-      // Trim the winner back toward target — sell stock for USDG.
+      /**
+       * Trim the winner back toward target — sell stock for USDG.
+       *
+       * NOT CLAMPED, AND THAT IS THE CAREFUL PART. `withinCap` belongs on the
+       * two BUY paths and must not touch this one: policy.ts exempts a sell leg
+       * from the per-trade cap outright (`isUnsizedExit`), because the chain's
+       * own permission for it "carries no amount condition" — wall.ts emits it
+       * with an explicit null amount. A strategy that clamped its own exits
+       * would be stricter than the wall, which that file calls a real bug in as
+       * many words, and it would rebuild the failure it records: an agent
+       * "structurally able to exit its losers and structurally unable to exit
+       * its winners", because a winner grows past the cap and a loser does not.
+       *
+       * Nor by `spendHeadroomUsdg`: that is the day's BUYING budget. Throttling
+       * an exit with it would mean a book that has spent its day cannot reduce
+       * risk, which is the wrong way round.
+       */
       const sellUsdg = clamp(diff, cfg.maxTradeUsdg);
       const held = snap.holdings.get(l.symbol);
       if (!held || held.valueUsdg === 0n) continue;
@@ -157,7 +199,7 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
       why.push({ code: "keel-trim", symbol: l.symbol, overRaw: sellUsdg });
     } else if (-diff > band && cashLeft > 0n) {
       // Top up the laggard from cash.
-      const buyUsdg = clamp(clamp(-diff, cfg.maxTradeUsdg), cashLeft);
+      const buyUsdg = withinCap(clamp(clamp(-diff, cfg.maxTradeUsdg), cashLeft), snap);
       if (buyUsdg <= 0n) continue;
       cashLeft -= buyUsdg;
       intents.push({
