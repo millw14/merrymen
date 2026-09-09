@@ -1892,6 +1892,8 @@ async function main() {
   let holderTier: CircleTier = CIRCLE_TIERS[0]!;
   let lastTierId = holderTier.id;
   let circleBlockedNoted = false; // so the "hold to unlock" note isn't spammed each tick
+  /** So the bricked-breaker note is said once per change, not once per tick, for ever. */
+  let breakerBrickNoted = false;
   let lastSequencerUp = true;
   // A feedless holding never resolves, so warn ONCE while it's held rather than
   // every tick forever. Resets when the book is valuable again.
@@ -6884,6 +6886,48 @@ async function main() {
     // Pause marker (toggled from Telegram/dashboard): keep reading state, but
     // the strategy stops proposing trades until resumed.
     if (isPaused()) return;
+
+    /**
+     * A KEY SIGNED WITH A ZERO DRAWDOWN LIMIT CAN NEVER TRADE, AND SAID SO
+     * NOWHERE.
+     *
+     * policy.ts refuses every non-exit intent when `drawdownBps >=
+     * limits.maxDrawdownBps`, and with the limit at zero that comparison is
+     * `0 >= 0` — true at a PERFECT high-water mark, on the first tick, and on
+     * every tick after it for the life of the grant. The agent arms, reports
+     * itself live, reads the market, proposes trades, and has all of them
+     * turned back by its owner's own signature.
+     *
+     * NOTHING TOLD THEM. `drawdown-breaker` is not in live-blocker.ts's advice
+     * and is not an exec-mode blocker, so it never becomes a `liveBlocker` and
+     * never reaches the banner; all the owner sees is rejected rows on the tape
+     * beside a status line that says the agent is running. One agent on the
+     * fleet is in exactly this state right now — measured, not hypothesised.
+     *
+     * THE SOURCE IS ALREADY PLUGGED: Wallet.tsx floors `maxDrawdownPct` at 1,
+     * so nobody can sign a zero from here again. This is for the keys that
+     * already carry one, which no edit can reach — only a new signature can,
+     * and it is the owner's to give. So the least this can do is say so, once,
+     * where the notice now renders.
+     *
+     * BEFORE the Circle gate, deliberately. This is the more absolute of the
+     * two: a Circle block lifts the moment they hold the token, and this one
+     * does not lift at all.
+     */
+    if (active && active.limits.maxDrawdownBps === 0) {
+      if (!breakerBrickNoted) {
+        breakerBrickNoted = true;
+        await addEvent(
+          agentId,
+          "warn",
+          "This agent's key was signed with a 0% drawdown limit, so the breaker refuses every " +
+            "buy — even with the book at its high-water mark. Nothing else is wrong and adding " +
+            "funds will not help. Re-sign the permission (free) to set a real limit.",
+        );
+      }
+      return;
+    }
+    breakerBrickNoted = false;
 
     // Merry Circle strategies run only for holders (Merry Man+). A non-holder may
     // select one, but it stays idle with a one-time note until they hold $MERRYMEN.
