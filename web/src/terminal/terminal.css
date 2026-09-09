@@ -7734,3 +7734,39 @@
   padding: 0;
   margin: 0;
 }
+
+/* The reason a trade did not happen, on the row that used to claim it did.
+   "tried to buy" without the reason invites blaming the agent, when the
+   commonest cause is a limit the owner set themselves. */
+:where(.terminal-host) .wire-refused {
+  font-style: normal;
+  color: var(--tx-2);
+  font-size: 12px;
+}
+
+/* ── linking a wallet that holds $MERRYMEN ────────────────────────────────
+   The tier reads a balance, and by default that is the wallet you sign in
+   with — the only address the server can verify without being told. Holding
+   the token elsewhere is a real case, and it needs a signature rather than a
+   text box, so this is a small flow rather than a field. */
+:where(.terminal-host) .holder-link { display: flex; flex-direction: column; gap: 10px; }
+:where(.terminal-host) .holder-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+:where(.terminal-host) .holder-row > input { flex: 1 1 260px; min-width: 0; }
+:where(.terminal-host) .holder-linked {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+}
+:where(.terminal-host) .holder-linked p { margin: 0; flex: 1 1 240px; font-size: 12px; }
+:where(.terminal-host) .holder-challenge { display: flex; flex-direction: column; gap: 8px; }
+:where(.terminal-host) .holder-challenge textarea {
+  width: 100%;
+  resize: vertical;
+  font-size: 11px;
+  line-height: 1.5;
+}

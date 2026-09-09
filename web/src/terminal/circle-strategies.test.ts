@@ -106,8 +106,13 @@ describe("the Circle gate is satisfiable, and the warning is visible", () => {
     // tenant and half the picker was inert for the whole beta, however much
     // $MERRYMEN anybody held. Marking the strategies as holders-only (above)
     // would have been a lie without this.
+    // The tenant is the FALLBACK now: a wallet proven by its own signature
+    // (/api/holder) outranks it, which is how somebody holding $MERRYMEN
+    // outside their login wallet earns the tier. What matters here is
+    // unchanged — the child is written an address the server established, not
+    // one the tenant typed.
     const orch = readFileSync(new URL("../../../worker/src/orchestrator.ts", import.meta.url), "utf8");
-    assert.match(orch, /const forChild: MerrymenSettings = \{ \.\.\.settings, holderAddress: tenant \};/);
+    assert.match(orch, /holderAddress: \(proven \?\? tenant\)/);
     assert.match(orch, /JSON\.stringify\(forChild, null, 2\)/, "and the child must be written the amended copy");
   });
 
@@ -118,11 +123,20 @@ describe("the Circle gate is satisfiable, and the warning is visible", () => {
     // The orchestrator's copy is the session-verified wallet, so the spread has
     // to put it LAST.
     const orch = readFileSync(new URL("../../../worker/src/orchestrator.ts", import.meta.url), "utf8");
-    const line = orch.match(/const forChild: MerrymenSettings = \{[^}]*\};/)![0];
+    // The end marker appears in three functions, so search FORWARD from the
+    // start of the block rather than from the top of the file — otherwise the
+    // slice runs backwards and comes out empty, which passes nothing and
+    // proves nothing.
+    const from = orch.indexOf("const forChild: MerrymenSettings = {");
+    assert.ok(from > 0, "the child settings copy must still be built here");
+    const block = orch.slice(from, orch.indexOf("const home = childHome(tenant);", from));
     assert.ok(
-      line.indexOf("...settings") < line.indexOf("holderAddress: tenant"),
-      "the verified address must override the stored one, not the other way round",
+      block.indexOf("...settings") < block.indexOf("holderAddress:"),
+      "the established address must override the stored one, not the other way round",
     );
+    // And the stored, typed-in field is never a fallback: only a signature or
+    // the session wallet decides whose balance counts.
+    assert.ok(!/settings\.holderAddress/.test(block), "the self-declared field must not be read here");
   });
 
   it("and a worker warning now reaches a screen that ships", () => {

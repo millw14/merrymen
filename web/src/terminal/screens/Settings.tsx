@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { CircleHelp } from "lucide-react";
+import { HolderLink } from "../HolderLink";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import { MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
@@ -1153,6 +1154,12 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             <span className="mm-hint">Names /open may launch. Full https:// URLs open without an allowlist.</span>
           </div>
 
+          <div className="mm-section">Merry Circle</div>
+          {/* The tier reads a $MERRYMEN balance. By default that is the wallet you
+              sign in with, which is the only address the server can verify without
+              being told. Holding the token elsewhere is a real case and needs a
+              proof, not a text box — see /api/holder. */}
+          <HolderLink />
           <div className="mm-section">Connections</div>
           <div className="mm-grid">
             <Field

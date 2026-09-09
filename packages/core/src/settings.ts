@@ -253,6 +253,23 @@ export interface MerrymenSettings {
    * to set your Circle tier — which lowers your platform fee and unlocks perks.
    * Optional; blank = no tier. Purely a discount/perk lookup, never a spend key. */
   holderAddress?: string;
+  /**
+   * A DIFFERENT WALLET, PROVEN BY ITS OWN SIGNATURE.
+   *
+   * `holderAddress` above is self-declared: shape-validated and nothing more,
+   * which is why /api/alpha refuses to use it as an authorisation input and why
+   * the orchestrator overwrites it with the session-verified tenant. That made
+   * the tier earnable and shut out anyone holding $MERRYMEN somewhere other
+   * than the wallet they log in with — a real case, raised by a tester.
+   *
+   * This is that case, answered the only way a claim can become an
+   * authorisation: the wallet signs a message naming itself and this account,
+   * and /api/holder verifies the recovery. WRITTEN ONLY BY THAT ROUTE. The
+   * settings PUT handler has no branch for it, so a tenant cannot set it by
+   * hand; holder-proof.test.ts pins that, because the day it gains one is the
+   * day the tier goes back to being a claim.
+   */
+  holderProof?: { address: string; at: number };
 
   // ── Virtuals Terminal (stream your agent's activity to its Virtuals page) ─
   /** Virtuals API key (secret). Get it from your agent's page on app.virtuals.io.

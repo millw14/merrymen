@@ -105,6 +105,39 @@ describe("a decision nothing came of is not a trade", () => {
     assert.match(wire, /beat\.paper && <i className="tag unsettled">paper<\/i>/);
   });
 
+  it("A REFUSED TRADE IS NOT A PURCHASE — the whole feed was claiming otherwise", () => {
+    // "In the feed it's saying I've bought coins but nothing in my portfolio."
+    // Measured on the public tape: eight consecutive rows from one agent with
+    // outcome "refused" and the text "past today's spending cap", every one of
+    // them rendering as "bought". Nothing was in that portfolio because nothing
+    // was ever bought. The shadow flag got exactly this treatment; the other
+    // four outcomes never did.
+    const refused = beatsOf([t({ at: 1, outcome: "refused", outcomeText: "past today's spending cap" })], [agent()]);
+    assert.equal(verbOf(asTrade(refused[0])), "tried to buy");
+    const reverted = beatsOf([t({ at: 1, outcome: "reverted" })], [agent()]);
+    assert.equal(verbOf(asTrade(reverted[0])), "tried to buy");
+    const dropped = beatsOf([t({ at: 1, outcome: "dropped" })], [agent()]);
+    assert.equal(verbOf(asTrade(dropped[0])), "tried to buy");
+  });
+
+  it("AND ONE STILL IN FLIGHT IS NEITHER TENSE", () => {
+    // A submitted operation is genuinely undecided: claiming it landed is the
+    // older bug, and claiming it failed would be the mirror of it.
+    const pending = beatsOf([t({ at: 1, outcome: "pending" })], [agent()]);
+    assert.equal(verbOf(asTrade(pending[0])), "is buying");
+  });
+
+  it("but a landed trade still reads as one", () => {
+    const landed = beatsOf([t({ at: 1, outcome: "landed" })], [agent()]);
+    assert.equal(verbOf(asTrade(landed[0])), "bought");
+  });
+
+  it("and the reason travels, so nobody blames the agent for their own cap", () => {
+    const refused = beatsOf([t({ at: 1, outcome: "refused", outcomeText: "past today's spending cap" })], [agent()]);
+    assert.equal(refused[0].outcomeText, "past today's spending cap");
+    const wire = readFileSync(new URL("./wire.tsx", import.meta.url), "utf8");
+    assert.match(wire, /beat.outcomeText &&/);
+  });
   it("the outcome arm alone is enough, for a row written before the flag existed", () => {
     const [beat] = beatsOf([t({ at: 1, shadow: undefined, outcome: "shadow" })], [agent()]);
     assert.equal(verbOf(asTrade(beat)), "would buy");

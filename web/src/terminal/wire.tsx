@@ -133,6 +133,20 @@ function BeatRow({
                   rather than inside the verb: "bought" is not the wrong word,
                   the conclusion a reader draws from it is. */}
               {beat.paper && <i className="tag unsettled">paper</i>}{" "}
+              {/* WHY IT DID NOT HAPPEN, where the claim was made.
+                  `verbOf` now says "tried to buy" rather than "bought" for a
+                  refused, reverted or dropped row — but "tried" without the
+                  reason invites the reader to blame the agent, when the
+                  commonest reason by far is a limit they set themselves ("past
+                  today's spending cap"). The publisher already writes the
+                  sentence; the rail just never showed it. */}
+              {beat.kind === "trade" &&
+                beat.outcomeText &&
+                (beat.outcome === "refused" ||
+                  beat.outcome === "reverted" ||
+                  beat.outcome === "dropped") && (
+                  <i className="wire-refused">— {beat.outcomeText}</i>
+                )}{" "}
               <em className="wire-when">{whenOf(beat.at, now)}</em>
             </span>
           </span>

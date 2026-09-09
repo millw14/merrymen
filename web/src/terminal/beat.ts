@@ -64,6 +64,28 @@ interface Core {
    * it is stated beside the sentence instead.
    */
   paper: boolean;
+  /**
+   * WHAT CAME OF IT — and without this the rail claimed a purchase for every
+   * trade the wall turned down.
+   *
+   * Reported as "In the feed it's saying I've bought coins but nothing in my
+   * portfolio", and the feed was worse than the reporter knew. Measured against
+   * production: of the buys on the public tape, EIGHT consecutive rows from one
+   * agent carried `outcome: "refused"` with the text "past today's spending
+   * cap" — and every one of them rendered as "bought". Nothing was in that
+   * portfolio because nothing was ever bought.
+   *
+   * `shadow` was given exactly this treatment and stopped exactly here: the
+   * publisher already classifies every row (thesis-policy.ts `outcomeOf`), the
+   * feed API already sends it, `Thesis` already declares it — and `beatsOf`
+   * read it only to detect `"shadow"`, so `refused`, `reverted`, `dropped` and
+   * `pending` all fell through to the past tense. The invariant test written
+   * after the shadow incident checks for a `shadow` consultation and nothing
+   * else, which is why this passed every test in the repo.
+   */
+  outcome: NonNullable<Thesis["outcome"]> | null;
+  /** The publisher's own sentence for that outcome — "past today's spending cap". */
+  outcomeText: string | null;
 }
 
 /**
@@ -119,6 +141,29 @@ export type Lane =
  */
 export function verbOf(b: Extract<Beat, { kind: "trade" }>): string {
   if (b.shadow) return `would ${b.action}`;
+  /**
+   * ONLY A LANDED TRADE EARNS THE PAST TENSE.
+   *
+   * A refused buy and a filled buy carried the same verb, so the tape said
+   * "bought NVDA" about a decision the wall turned down for exceeding the
+   * day's cap. The owner then went looking for NVDA in a portfolio that
+   * correctly did not contain it.
+   *
+   * `tried to buy` for the three that ended: refused at the wall, reverted on
+   * chain, dropped before either. `is buying` for one still in flight, because
+   * "submitted" is genuinely undecided and neither tense fits it.
+   *
+   * An ABSENT outcome keeps the old wording deliberately. Every row the feed
+   * API produces is classified by `outcomeOf`, so this arm is unreachable in
+   * practice; making it claim less would only change rows we know nothing
+   * about, and guessing quieter is still guessing.
+   */
+  if (b.outcome === "refused" || b.outcome === "reverted" || b.outcome === "dropped") {
+    return b.action === "hold" ? "meant to hold" : `tried to ${b.action}`;
+  }
+  if (b.outcome === "pending") {
+    return b.action === "buy" ? "is buying" : b.action === "sell" ? "is selling" : "is holding";
+  }
   switch (b.action) {
     case "buy":
       return "bought";
@@ -178,6 +223,9 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
     // Straight from the published post — the publisher sets it from the
     // agent's mode at its last heartbeat. Nothing here re-derives it.
     const paper = t.paper === true;
+    // Carried from the published row, which is the only thing that knows.
+    const outcome = t.outcome ?? null;
+    const outcomeText = t.outcomeText ?? null;
     const sizeUsd = sizeOf(t);
     // Carried, never derived here: it is a hash of the ROW as the server read
     // it, including a `source` the published post does not carry.
@@ -196,6 +244,8 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
         sizeUsd,
         shadow,
         paper,
+        outcome,
+        outcomeText,
         action,
         symbol,
       });
@@ -218,6 +268,8 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
       sizeUsd,
       shadow,
       paper,
+      outcome,
+      outcomeText,
       head,
       symbol,
     });

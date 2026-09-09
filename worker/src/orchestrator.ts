@@ -45,7 +45,7 @@ import { getGrantStore } from "./grant-store";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
-import { CASH, DEFAULT_BASKET_SYMBOLS, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
+import { CASH, DEFAULT_BASKET_SYMBOLS, isHolderProof, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
@@ -550,7 +550,31 @@ async function writeSettingsForChild(
      * operator's own `holderAddress` (or MERRYMEN_HOLDER_ADDRESS) stays exactly
      * as it was — there is no other tenant for it to be wrong about.
      */
-    const forChild: MerrymenSettings = { ...settings, holderAddress: tenant };
+    /**
+     * A PROVEN WALLET OUTRANKS THE LOGIN ONE — and only a proven one does.
+     *
+     * Writing the tenant here made the tier earnable and authoritative, and it
+     * shut out the case a tester raised: "you don't own tokens in your privy
+     * based wallet and you have them somewhere else… the app should have the
+     * possibility to define the holder address."
+     *
+     * `holderProof` is that possibility, and it is a different KIND of value
+     * from `holderAddress` beside it. `holderAddress` is typed in — anyone can
+     * name a whale's wallet — so it is still overwritten and still not trusted.
+     * `holderProof` is written by /api/holder and by nothing else, after
+     * recovering a signature over a message naming BOTH the wallet and this
+     * account. The settings PUT handler has no branch for it, so a tenant
+     * cannot forge one through the API they do have.
+     *
+     * Shape-checked before use, because a settings blob is data: a malformed
+     * proof falls back to the tenant rather than reaching `balanceOf` as
+     * whatever it happens to be.
+     */
+    const proven = isHolderProof(settings.holderProof) ? settings.holderProof.address : null;
+    const forChild: MerrymenSettings = {
+      ...settings,
+      holderAddress: (proven ?? tenant) as `0x${string}`,
+    };
     const home = childHome(tenant);
     mkdirSync(home, { recursive: true });
     writeFileSync(path.join(home, "settings.json"), JSON.stringify(forChild, null, 2), { encoding: "utf8", mode: 0o600 });
