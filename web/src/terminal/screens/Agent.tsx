@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Proposals } from "../Proposals";
 import { blockerAdvice } from "@/lib/live-blocker";
+import { badgeOf } from "@/lib/thesis-badge";
 import { commandFor, commandPayload, type CommandArg } from "@/lib/chat-commands";
 import {
   ArrowDown,
@@ -24,6 +25,7 @@ import { BalanceFigure } from "../studio";
 import { TradeTokenCard } from "../TradeTokenCard";
 import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
+import { loadTier } from "../tier";
 
 /**
  * How many recent moves the agent is shown.
@@ -35,6 +37,9 @@ import type { TierView } from "@/app/api/tier/route";
  */
 const TAPE_SHOWN = 8;
 
+/** Sentence case for a badge label that is written lower-case by design. */
+const capitalise = (w: string) => (w ? w[0]!.toUpperCase() + w.slice(1) : w);
+
 /**
  * The newest moves, reduced to what the model can actually use.
  *
@@ -43,16 +48,31 @@ const TAPE_SHOWN = 8;
  * exactly how a tester's agent came to report a months-old `no-gas` as its
  * current state. `movesShown`/`movesTotal` go beside it so the agent can say
  * "the last 8 of 30" rather than implying it saw everything.
+ *
+ * IT WAS HANDING OVER THE OLDEST EIGHT AND CALLING THEM THE LAST EIGHT.
+ * `slice(-TAPE_SHOWN)` takes the TAIL, and the tape arrives newest-first —
+ * /api/feed selects `ORDER BY created_at DESC` — so the model got the eight
+ * stalest rows of the window while `movesShown` told it these were the recent
+ * ones. That is the same present-tense-stale-refusal failure this comment was
+ * written about, rebuilt one line below it; the 7-day window bounded how old
+ * the lie could be and did not stop it being told.
+ *
+ * Sorted here rather than trusting the caller. The order is a fact about a SQL
+ * clause two services away, and reading the tape backwards is silent — nothing
+ * throws, nothing looks empty, the agent simply narrates the wrong week.
  */
 const tapeFor = (moves: LiveMine["moves"]) =>
-  moves.slice(-TAPE_SHOWN).map((m) => ({
-    at: m.at,
-    action: m.action,
-    symbol: m.symbol,
-    sizeUsdg: m.sizeUsdg,
-    outcome: m.outcome,
-    outcomeText: m.outcomeText,
-  }));
+  [...moves]
+    .sort((a, b) => (b.at ?? 0) - (a.at ?? 0))
+    .slice(0, TAPE_SHOWN)
+    .map((m) => ({
+      at: m.at,
+      action: m.action,
+      symbol: m.symbol,
+      sizeUsdg: m.sizeUsdg,
+      outcome: m.outcome,
+      outcomeText: m.outcomeText,
+    }));
 
 const ASKS = [
   { label: "My strategy", question: "Explain your trading strategy." },
@@ -131,10 +151,7 @@ export function Agent({
    */
   const [tier, setTier] = useState<TierView | null>(null);
   useEffect(() => {
-    fetch("/api/tier", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((t) => t && setTier(t as TierView))
-      .catch(() => {});
+    void loadTier().then(setTier);
   }, []);
   const scrollLatest = () => {
     const node = viewport.current;
@@ -729,7 +746,17 @@ export function Agent({
             {latest && (
               <article className="conversation-trade">
                 <div className="chat-trade-caption">
-                  {latest.action === "buy" ? "Bought" : "Sold"} ·{" "}
+                  {/*
+                   * `badgeOf`, NOT `action` — this line said "Bought" for a
+                   * trade the wall refused. It is the tester's own complaint
+                   * ("the feed says I've bought things but nothing shows in my
+                   * portfolio") on the screen he actually reads, and it
+                   * outlived the feed fix because the desk kept its own copy
+                   * of the conditional. The history list eight hundred lines
+                   * below already names the outcome; only this caption
+                   * asserted the fill.
+                   */}
+                  {capitalise(badgeOf(latest).label)} ·{" "}
                   {ageOf(latest) ? `${ageOf(latest)} ago` : "Recorded"}
                   {latest.paper ? " · Paper" : ""}
                 </div>

@@ -261,6 +261,7 @@ import {
   listSubmittedOps,
   initStore,
   setPaperBook,
+  resetPaperLedger,
   setAgentName,
   setAgentXHandle,
   positionsExplained,
@@ -2734,8 +2735,59 @@ async function main() {
       };
     }
     if (cmd.kind === "selftest") return runSelftestProbe("dashboard");
+    if (cmd.kind === "paper-reset") return runPaperReset();
     if (cmd.kind === "trade") return runOrderCommand(cmd, marketUnreadable);
     return { ok: false, line: `unknown command '${cmd.kind}'` };
+  }
+
+  /**
+   * START THE PRACTICE BOOK OVER.
+   *
+   * "Should positions and trades also become empty when 'starting over' in
+   * paper mode? They still appear." They did: discarding a grant forgets a
+   * signed KEY, and the book is worker-side state — the ledger mirror rewrites
+   * within a minute anything deleted above the child — so the screen could only
+   * warn about it. This is the thing that warning was standing in for.
+   *
+   * THE RAIL CHECK IS THE WHOLE SAFETY PROPERTY, and it is here rather than
+   * only in the route for the same reason runOrderCommand's is: between the
+   * click and this line the instruction crossed a shared table, an orchestrator
+   * that can see every tenant's home, and a JSON file. Run against a live agent
+   * this would clear the cost basis real P&L is computed from.
+   *
+   * HISTORY IS CLOSED, NOT DELETED. The trade rows and the equity curve move
+   * behind an accounting epoch — the primitive this repo already uses for the
+   * pre-flow-tracking rows — so the old fills stay on disk for forensics and
+   * stop counting toward anything. The opening balance is the practice stake,
+   * not the closing equity: carrying a simulated balance across a deliberate
+   * restart is what the owner asked NOT to happen.
+   */
+  async function runPaperReset(): Promise<{ ok: boolean; line: string }> {
+    // `active` carries the armed agent's id — the same handle runSelftestProbe
+    // takes, and the same reason: nothing may be written for an agent that has
+    // not armed on this process.
+    if (!active) return { ok: false, line: "not armed — there is no book to clear yet" };
+    const id = active.agentId;
+    if (!paperActive()) {
+      return {
+        ok: false,
+        line:
+          "this agent is on the live rail, so there is no practice book to clear — " +
+          "real positions and trades are never deleted.",
+      };
+    }
+    await resetPaperLedger(id, cfg.paperStartUsdg);
+    const opened = await openNextEpoch(id, cfg.paperStartUsdg);
+    await addEvent(
+      id,
+      "ok",
+      `practice book restarted — cash back to ${fmt(usdg(cfg.paperStartUsdg))} USDG, positions cleared, ` +
+        `and earlier paper trades closed into epoch ${opened - 1} (kept, but no longer counted)`,
+    );
+    return {
+      ok: true,
+      line: `practice book restarted at ${fmt(usdg(cfg.paperStartUsdg))} USDG with no positions.`,
+    };
   }
 
   /**

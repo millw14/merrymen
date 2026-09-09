@@ -2736,6 +2736,52 @@ export async function getPaperBook(agentId: string, startUsdg: number): Promise<
   return { cashUsdg: row.cash_usdg, vaultUsdg: row.vault_usdg, hwmUsdg: row.hwm_usdg, shares };
 }
 
+/**
+ * START THE PRACTICE BOOK OVER — paper only, and it deletes nothing that could
+ * ever have been real.
+ *
+ * "Should positions and trades also become empty when starting over in paper
+ * mode? They still appear." They did, and the screen said so rather than doing
+ * anything about it: discarding a grant clears a signed KEY, and the book is
+ * worker-side state that the ledger mirror rewrites within a minute of any
+ * attempt to clear it from above. So the honest stopgap was a warning, and this
+ * is the thing the warning was standing in for.
+ *
+ * WHAT IS RESET, and why each is safe:
+ *   paper_book      — the simulated cash, vault and share ledger. There is no
+ *                     other copy; this IS the practice book.
+ *   positions       — on the paper rail these rows are DERIVED from the book
+ *                     above (index.ts builds them with paperPositionsOf), so
+ *                     they are a cache, and the next tick rewrites them.
+ *   cost_basis      — scoped `mode = 'paper'`. The live basis is a different
+ *   position_floors   primary key and is never touched.
+ *
+ * WHAT IS NOT DELETED: the trade rows and the equity curve. Those are the
+ * agent's history, and this repo keeps history and reporting apart with an
+ * ACCOUNTING EPOCH rather than a DELETE — the same primitive that already
+ * carries the pre-flow-tracking rows. The caller opens the next epoch, so the
+ * old fills stay on disk for forensics and stop counting toward anything.
+ * Deleting them would also be the one operation here that could destroy
+ * something irreplaceable if the rail check above it were ever wrong.
+ *
+ * The rail check is the caller's job and it is not optional: run this against a
+ * live agent and you have cleared the cost basis it computes real P&L from.
+ */
+export async function resetPaperLedger(agentId: string, startUsdg: number): Promise<void> {
+  const db = getDb();
+  await db
+    .prepare(
+      `UPDATE paper_book SET cash_usdg = ?, vault_usdg = 0, hwm_usdg = 0, shares = '{}',
+         updated_at = unixepoch() WHERE agent_id = ?`,
+    )
+    .run(startUsdg, agentId);
+  // INSERT OR IGNORE first would be redundant: getPaperBook seeds the row on
+  // first touch, and an agent with no row has nothing to reset.
+  await db.prepare("DELETE FROM positions WHERE agent_id = ?").run(agentId);
+  await db.prepare("DELETE FROM cost_basis WHERE agent_id = ? AND mode = 'paper'").run(agentId);
+  await db.prepare("DELETE FROM position_floors WHERE agent_id = ? AND mode = 'paper'").run(agentId);
+}
+
 export async function setPaperBook(agentId: string, book: PaperBookRow): Promise<void> {
   await getDb()
     .prepare(

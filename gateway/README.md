@@ -64,12 +64,43 @@ hostile queries (including `__proto__`, `constructor`) rejected by name lookup,
 **`https://merrymen-gateway-production.up.railway.app`** — this is what the client
 and the website actually call, and the only host with a working certificate.
 
-`ai.merrymen.dev` is registered on the Railway service and its DNS is correct
-(CNAME to the Railway target; CAA on `merrymen.dev` permits `letsencrypt.org`),
-but **TLS still fails** — the edge presents a certificate for the wrong principal,
-so the Let's Encrypt issuance hasn't completed. Plain HTTP to it 301s, which
-means routing is fine and only the certificate is missing. Don't point anything
-at it until `curl https://ai.merrymen.dev/healthz` returns `{"ok":true}`.
+`ai.merrymen.dev` is registered on the Railway service (domain `84ba7858`, edge
+`edge-500b32d4`, targetPort 8080 — all correct), but **TLS fails, and this file
+used to be wrong about why**. It said the DNS was correct and blamed an
+unexplained Let’s Encrypt stall. The actual cause, from Railway’s own API:
+
+```
+status.verified    = false
+certificateStatus  = CERTIFICATE_STATUS_TYPE_ISSUING   # since 2026-08-02, never advanced
+verificationDnsHost = _railway-verify.ai               # _railway-verify.ai.merrymen.dev
+```
+
+**No certificate was ever issued, because ownership was never verified.** Railway
+is waiting on a TXT record that does not exist — `_railway-verify.ai.merrymen.dev`
+returns NXDOMAIN, authoritatively, from `ns1.vercel-dns.com`. With no per-domain
+cert the edge falls back to `*.up.railway.app` for that SNI and every client
+rejects the principal. Plain HTTP 301s, which is what made this look like a
+routing success and a certificate mystery.
+
+The sibling `app.merrymen.dev` is the control: same edge, same targetPort, and it
+HAS `_railway-verify.app.merrymen.dev` — verified true, certificate VALID. The TXT
+is the only difference.
+
+**The fix is one DNS record, in Vercel (owner-only — nothing to change on
+Railway):**
+
+| name | type | value |
+| --- | --- | --- |
+| `_railway-verify.ai` | TXT | the `verificationToken` from Railway’s domain API |
+
+Secondary, hygiene only: the `ai` CNAME points at `cslvpezy.up.railway.app` where
+Railway now wants `aqeqwooj.up.railway.app`. Railway still reports that record
+PROPAGATED and the dashboard shows it green, which is why it was never spotted —
+and cert selection is edge-IP-independent, so aligning it does **not** fix TLS on
+its own.
+
+Don’t point anything at it until `curl https://ai.merrymen.dev/healthz` returns
+`{"ok":true}`.
 
 When it does land, three hand-written copies of the host have to move together:
 

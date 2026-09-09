@@ -130,7 +130,12 @@ export function stampOf(t: Thesis): string | null {
   // happened. `thesis-badge.ts` orders its own check the same way and says why:
   // otherwise a shadow buy renders as "BUYING".
   if (t.shadow === true || t.outcome === "shadow") return "shadow";
-  if (t.outcome === "refused" || t.outcome === "reverted") {
+  // `dropped` BELONGS WITH THE OTHER TWO. It is the third way a decision
+  // comes to nothing, and leaving it out sent a dropped row to the paper/null
+  // arms below — so a decision the agent thought better of got the same stamp
+  // as one that filled, or no stamp at all. Same union, same treatment; only
+  // the words downstream differ.
+  if (t.outcome === "refused" || t.outcome === "reverted" || t.outcome === "dropped") {
     const x = (t.outcomeText ?? "").toLowerCase();
     if (x.includes("drawdown")) return "breaker";
     if (x.includes("per-trade")) return "cap";

@@ -855,17 +855,26 @@ export default function GrantPage() {
      *
      * Clearing the book is worker-side work: the ledger the portfolio reads is
      * mirrored from the child every tick, so deleting rows anywhere above the
-     * child is undone within a minute. Until that exists, the honest thing is
-     * to say so BEFORE the click rather than let somebody conclude the reset
-     * silently failed.
+     * child is undone within a minute — which is why this said so BEFORE the
+     * click rather than letting somebody conclude the reset silently failed.
+     *
+     * IT NOW ASKS THE WORKER TO DO IT. /api/paper-reset queues the one command
+     * the child can act on, and the child REFUSES IT ON THE LIVE RAIL: real
+     * positions and trades are never deleted by anything here. On paper it puts
+     * the practice cash back, drops the simulated positions, and closes the old
+     * fills into a new accounting epoch — kept on disk for forensics, counted
+     * toward nothing. Queued unconditionally because only the worker knows which
+     * rail it is on; this screen would be guessing.
      */
     if (grant && !grant.demoOwnerPrivateKey) {
       const okToKeepHistory = window.confirm(
-        `Starting over forgets the signed key — it does NOT empty your history.\n\n` +
-          `Your account address comes from the login you signed in with, so the next agent lands ` +
-          `on the same address, and its positions, trades and P&L are still there. Only the key ` +
-          `changes.\n\n` +
-          `Start over anyway?`,
+        `Starting over forgets the signed key, and your account address does not change.\n\n` +
+          `It comes from the login you signed in with, so the next agent lands on the same ` +
+          `address.\n\n` +
+          `If you are PRACTISING, the practice book restarts: cash back to the starting stake, ` +
+          `positions cleared, and earlier paper trades kept on file but no longer counted.\n\n` +
+          `If you are trading for REAL, nothing is deleted — your positions, trades and P&L stay ` +
+          `exactly as they are.\n\nStart over anyway?`,
       );
       if (!okToKeepHistory) return;
     }
@@ -873,6 +882,10 @@ export default function GrantPage() {
     // Also destroy the worker-side handoff — otherwise the "discarded" grant
     // stays armed and the worker keeps trading on it (kill-switch semantics).
     void fetch("/api/grants", { method: "DELETE" }).catch(() => {});
+    // Ask the child to restart the practice book. Best-effort and
+    // unconditional: only the worker knows which rail it is on, and it refuses
+    // this outright when the agent is live, so nothing real can be cleared.
+    void fetch("/api/paper-reset", { method: "POST" }).catch(() => {});
     localStorage.removeItem(BACKUP_KEY);
     setGrant(null);
     setBackedUp(false);

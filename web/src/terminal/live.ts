@@ -960,17 +960,26 @@ interface Feed {
   /** "none" means the ledger could not be read — see readStateOf. */
   source?: string;
   /**
-   * THE WARNINGS NOBODY HAS EVER SEEN.
+   * THE WARNINGS NOBODY HAD EVER SEEN — past tense now, and the tense is the
+   * point.
    *
-   * /api/feed has selected these for a long time and the terminal dropped them
+   * /api/feed had selected these for a long time and the terminal dropped them
    * on the floor: LiveMine had no field for them, so every gate that reports
-   * itself with addEvent() and nothing else was invisible by construction. The
-   * only renderer in the repo lives in app/(app)/you/YouClient.tsx, whose route
-   * returns null — mounted.test.ts lists it as known debt for that reason.
-   *
-   * That is what turns a blocked agent into a quiet one: the Circle-strategy
+   * itself with addEvent() and nothing else was invisible by construction.
+   * That is what turned a blocked agent into a quiet one — the Circle-strategy
    * gate, the trencher rail and the discovery credential check all announce
    * themselves here and nowhere else.
+   *
+   * THEY REACH A SCREEN NOW: `notice` is built from this array at ~line 735
+   * (newest warn/err/error with a message) and rendered on the agent desk at
+   * screens/Agent.tsx, guarded so a resolved blocker outranks a log line.
+   * circle-strategies.test.ts pins the filter and that JSX.
+   *
+   * This paragraph said the opposite in the present tense for a while after
+   * that landed, and it cost a re-audit: the stale sentence is more convincing
+   * than the code, because it is the thing a reader finds first. The other
+   * renderer — railNotices, in app/(app)/you/YouClient.tsx — is still unmounted
+   * and still tracked in mounted.test.ts KNOWN_DEBT; that half has not moved.
    */
   events?: { level?: string; message?: string; created_at?: string }[];
   agent?: { name?: string; strategy?: string; slug?: string | null } | null;

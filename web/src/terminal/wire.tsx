@@ -100,7 +100,24 @@ function BeatRow({
     else if (onAgent) onAgent(actor.slug);
   };
 
-  const cls = ["wire-beat", beat.kind === "trade" ? beat.action : "view"].join(" ");
+  /*
+   * THE ACCENT MEANS MONEY MOVED, so a trade that did not move any must not
+   * wear it. The class came from `action` alone, so a refused buy kept
+   * `.buy` and its green inset bar — the row said "tried to buy" in words and
+   * "bought" in colour, with the dollar figure beside it, which is the same
+   * claim the words were fixed to stop making. The `.view` rule below already
+   * spells the principle out: "the buy/sell accents mean money moved, and the
+   * whole point of this arm is that none did."
+   *
+   * Added ALONGSIDE the action class rather than replacing it, so anything
+   * keying off buy/sell still works and only the accent is neutralised.
+   */
+  const turned =
+    beat.kind === "trade" &&
+    (beat.outcome === "refused" || beat.outcome === "reverted" || beat.outcome === "dropped");
+  const cls = ["wire-beat", beat.kind === "trade" ? beat.action : "view", turned ? "turned" : ""]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <div className={cls}>

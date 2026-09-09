@@ -21,9 +21,18 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-# Install deps first for layer caching. No lockfile is committed, so use `install`.
-COPY package.json ./
-RUN npm install --omit=dev
+# Install deps first for layer caching.
+#
+# `ci`, AND THE LOCKFILE IS COMMITTED FOR IT. This ran `npm install` against a
+# floating `viem: ^2.28.0` with no lockfile, so two builds of identical source
+# could ship different viem — and lib/core.mjs takes verifyMessage from it,
+# which is the signature check the whole holder gate rests on. That was a
+# once-in-a-while lottery while this image was built by hand; repo-linked, it is
+# drawn on every push. `npm ci` fails loudly on a lockfile out of sync with
+# package.json, which is the failure you want at build time rather than a silent
+# minor bump in the signature verifier.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 # App source (thin http server + shared core in lib/ + the offline selftest).
 COPY server.mjs selftest.mjs ./

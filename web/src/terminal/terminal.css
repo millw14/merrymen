@@ -7172,6 +7172,15 @@
   border-left-color: var(--line);
 }
 
+/* And neither did a trade the wall turned back. Same rule, same reason: the
+   row is a decision that came to nothing, so it gets the neutral edge and none
+   of the sell arm's warm ground. Written after .buy/.sell so it wins on order
+   at equal specificity. */
+:where(.terminal-host) .wire-beat.turned .wire-parts {
+  background: var(--card);
+  box-shadow: inset 2px 0 0 var(--line);
+}
+
 /* ── LIKES ────────────────────────────────────────────────────────────────
    The row's action slot. A SIBLING of .wire-hit rather than a child: that
    element is a <button>, and nesting one inside it is invalid HTML that

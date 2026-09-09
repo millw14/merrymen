@@ -96,6 +96,50 @@ describe("even-keel sizes to the signature", () => {
       "an exit clamped to the per-trade cap is stricter than the wall — the documented bug",
     );
   });
+
+  it("A SPENT DAY PROPOSES NOTHING, not one zero-sized swap per leg", () => {
+    /*
+     * The guard tested the value BEFORE the clamp. `withinCap` also clamps to
+     * `spendHeadroomUsdg`, so once the day's budget was spent the seed size
+     * came out 0 while `budget` and `per` were still positive — and the
+     * cold-start branch proposed a zero-sized swap for every tradable leg. The
+     * wall refused each as non-positive and wrote a warn event and a rejected
+     * trade row per leg PER TICK, with nothing de-duplicating any of it.
+     *
+     * Note this is the seed path — no holdings — which is what distinguishes it
+     * from the trim test above, where the same zero headroom is correct to
+     * ignore because an exit is exempt from the cap entirely.
+     */
+    const t = evenKeelTick(cfg, snap({ spendHeadroomUsdg: 0n }));
+    assert.equal(t.intents.length, 0, "a zero-sized intent is not a proposal, it is a row about nothing");
+    assert.equal(t.idle?.code, "under-one-buy", "and the owner is told which dial it was");
+  });
+
+  it("a buy the WALL shrank says so; one the owner's own settings shrank does not", () => {
+    // The clause must name the signature only when the signature is the reason,
+    // or it sends somebody to re-sign a grant that was never the constraint.
+    const tight = evenKeelTick(cfg, snap({ perTradeCapUsdg: 1_000_000n }));
+    const seed = tight.why.find((w) => w?.code === "keel-seed") as { capped?: boolean } | undefined;
+    assert.ok(seed, "the seed still proposes");
+    assert.equal(seed?.capped, true, "the per-trade cap was the binding constraint");
+
+    const roomy = evenKeelTick(cfg, snap({ perTradeCapUsdg: 10n ** 12n, spendHeadroomUsdg: 10n ** 12n }));
+    const free = roomy.why.find((w) => w?.code === "keel-seed") as { capped?: boolean } | undefined;
+    assert.ok(free, "and so does an uncapped one");
+    assert.notEqual(free?.capped, true, "nothing here was cut by the wall, so nothing may blame it");
+  });
+
+  it("THE TRIM'S REASON NEVER CARRIES `capped`, because a trim is never capped", () => {
+    const holdings = new Map([
+      ["S1", { valueUsdg: 900_000_000n, rawBalance: 900n }],
+      ["S2", { valueUsdg: 50_000_000n, rawBalance: 50n }],
+      ["S3", { valueUsdg: 50_000_000n, rawBalance: 50n }],
+    ]);
+    const t = evenKeelTick(cfg, snap({ holdings: holdings as never, spendHeadroomUsdg: 0n }));
+    const trim = t.why.find((w) => w?.code === "keel-trim");
+    assert.ok(trim, "the trim is proposed");
+    assert.ok(!("capped" in (trim as object)), "the exit path must not even carry the field");
+  });
 });
 
 describe("dip-hunter sizes to the signature", () => {

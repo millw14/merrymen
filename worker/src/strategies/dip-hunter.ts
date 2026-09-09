@@ -144,6 +144,10 @@ export function makeDipHunter(cfg: DipHunterConfig): Strategy {
             // constraint, and a reason that quotes the setting instead of the
             // intent describes a trade nobody made.
             usdgRaw: size,
+            // And whether the wall is why it differs. `buyPerTickUsdg` is the
+            // owner's setting; a shrink from it here can only be the signed cap
+            // or the day's headroom, because nothing else applies between them.
+            capped: size < cfg.buyPerTickUsdg,
           },
         ],
       };

@@ -10,6 +10,7 @@ import { requestJson, SignIn, type AccountState } from "../HostedControls";
 import { Face } from "../ui";
 import { validAmount } from "../amount";
 import type { TierView } from "@/app/api/tier/route";
+import { loadTier } from "../tier";
 
 /**
  * `circle` MARKS A STRATEGY THE WORKER WILL NOT ACTUALLY RUN FOR A NON-HOLDER.
@@ -57,7 +58,7 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
    * /api/circle to check that and that's not good for normies".
    */
   const [tier,setTier]=useState<TierView|null>(null);
-  useEffect(()=>{fetch("/api/tier",{cache:"no-store"}).then(r=>r.ok?r.json():null).then(t=>t&&setTier(t as TierView)).catch(()=>{});},[]);
+  useEffect(()=>{void loadTier().then(setTier);},[]);
   // Null on a legacy session — which is what keeps an existing Merryman on
   // its existing owner key.
   const privyOwner=usePrivyOwner();

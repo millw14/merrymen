@@ -104,8 +104,27 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
   if (invested === 0n) {
     const budget = clamp(cfg.seedBudgetUsdg, snap.cashUsdg);
     const per = budget / BigInt(tradable.length);
-    const each = withinCap(clamp(per, cfg.maxTradeUsdg), snap);
-    if (budget <= 0n || per <= 0n) {
+    const want = clamp(per, cfg.maxTradeUsdg);
+    const each = withinCap(want, snap);
+    /**
+     * `each`, NOT JUST `budget`/`per` — the clamp sits between them and the test.
+     *
+     * `withinCap` also clamps to `spendHeadroomUsdg`, so on a day whose budget
+     * is already spent (chat and Telegram trades count toward it) `each` came
+     * out 0 while `budget` and `per` were both positive. This guard let that
+     * through, and the cold-start branch below then proposed ONE ZERO-SIZED SWAP
+     * PER LEG — refused by the wall as non-positive, one warn event and one
+     * rejected trade row each, every tick, with no de-duplication anywhere. A
+     * five-leg basket wrote ten rows a tick about nothing: the same
+     * 1,242-identical-rows shape this repo keeps citing, rebuilt by a guard that
+     * tested the value before the clamp instead of after it.
+     *
+     * dip-hunter already guards exactly this case ("the day's budget is spent,
+     * or the signed cap is zero — the owner should hear which"); the seed path
+     * never got it. The top-up path below was always fine: it tests the
+     * post-clamp size and continues.
+     */
+    if (budget <= 0n || per <= 0n || each <= 0n) {
       /**
        * THE FIRST BUY NEVER HAPPENED, AND THIS IS THE ANSWER TO "must the first
        * buy be done by the user".
@@ -152,6 +171,10 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
         code: "keel-seed" as const,
         usdgRaw: each,
         legs: tradable.length,
+        // Blame the signature only when the signature is the reason: `want` is
+        // already past cash and the owner's own per-tick bound, so any shrink
+        // from here is the wall and nothing else.
+        capped: each < want,
       })),
     };
   }
@@ -199,7 +222,8 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
       why.push({ code: "keel-trim", symbol: l.symbol, overRaw: sellUsdg });
     } else if (-diff > band && cashLeft > 0n) {
       // Top up the laggard from cash.
-      const buyUsdg = withinCap(clamp(clamp(-diff, cfg.maxTradeUsdg), cashLeft), snap);
+      const wantBuy = clamp(clamp(-diff, cfg.maxTradeUsdg), cashLeft);
+      const buyUsdg = withinCap(wantBuy, snap);
       if (buyUsdg <= 0n) continue;
       cashLeft -= buyUsdg;
       intents.push({
@@ -210,7 +234,7 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
         sellAmountRaw: buyUsdg,
         notionalUsdg: buyUsdg,
       });
-      why.push({ code: "keel-top", symbol: l.symbol, underRaw: buyUsdg });
+      why.push({ code: "keel-top", symbol: l.symbol, underRaw: buyUsdg, capped: buyUsdg < wantBuy });
     }
   }
 

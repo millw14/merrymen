@@ -19,7 +19,29 @@ export interface Badge {
   kind: BadgeKind;
 }
 
-export function badgeOf(t: PublicThesis): Badge {
+/**
+ * THE THREE FIELDS THE BADGE IS COMPUTED FROM, named so a second surface can
+ * reuse the rule instead of re-deriving it.
+ *
+ * The agent desk had its own copy — `latest.action === "buy" ? "Bought" : "Sold"`
+ * — which consulted no outcome at all, so a refused buy read "Bought · 2h ago"
+ * on the one screen its owner looks at most. That is the tester's original
+ * complaint ("in the feed it says I've bought things but nothing shows in my
+ * portfolio") surviving one screen over from where it was fixed, because the
+ * fix lived in a function the desk could not call: it took a full
+ * `PublicThesis`, and the desk holds the terminal's leaner `Thesis`.
+ *
+ * Widening the input is what makes the rule shared rather than copied. Every
+ * existing caller still satisfies it — this only stops the type from being the
+ * reason somebody writes the fourth version of this conditional.
+ */
+export interface BadgeInput {
+  action: PublicThesis["action"];
+  outcome?: PublicThesis["outcome"] | null;
+  shadow?: boolean | null;
+}
+
+export function badgeOf(t: BadgeInput): Badge {
   // SHADOW IS CHECKED FIRST, and the ordering is the whole safety property.
   //
   // A shadow decision arrives as a buy with a size and no status, which every

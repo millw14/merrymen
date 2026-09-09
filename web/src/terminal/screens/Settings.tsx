@@ -6,6 +6,7 @@ import { CircleHelp } from "lucide-react";
 import { HolderLink } from "../HolderLink";
 import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
+import { loadTier } from "../tier";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import { MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
@@ -110,10 +111,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
    */
   const [tier, setTier] = useState<TierView | null>(null);
   useEffect(() => {
-    fetch("/api/tier", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((t) => t && setTier(t as TierView))
-      .catch(() => {});
+    void loadTier().then(setTier);
   }, []);
 
   const loadTelegram = () =>

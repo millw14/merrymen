@@ -169,13 +169,31 @@ export type Why =
   /** The market reopened; the gap trade is over. */
   | { code: "gap-exit"; symbol: string }
   /** Laying down an equal-weight book for the first time. */
-  | { code: "keel-seed"; usdgRaw: bigint; legs: number }
+  /**
+   * THE SIGNED KEY WOULD NOT ALLOW THE SIZE THIS STRATEGY WANTED.
+   *
+   * Set only where the buy was cut by `perTradeCapUsdg`/`spendHeadroomUsdg`,
+   * never where cash or the owner's own per-tick bound was the binding
+   * constraint — otherwise the sentence blames a signature that was not the
+   * reason. The clamp itself is right and documented (even-keel.ts): it stops
+   * the strategy proposing what the wall is certain to refuse. What was
+   * missing is that nothing anywhere told the owner it was happening, so the
+   * settings field kept reading 25 while the tape read 10 and no surface
+   * joined them.
+   *
+   * ONLY ON THE BUY VARIANTS. `keel-trim` is the exit and must never carry
+   * this, because the exit is never clamped: policy.ts exempts an unsized
+   * exit from the per-trade cap, and a strategy that clamped its own exits
+   * would be stricter than the wall — "structurally able to exit its losers
+   * and unable to exit its winners". cap-aware.test.ts locks that.
+   */
+  | { code: "keel-seed"; usdgRaw: bigint; legs: number; capped?: boolean }
   /** A leg has drifted above its share. */
   | { code: "keel-trim"; symbol: string; overRaw: bigint }
   /** A leg has drifted below its share. */
-  | { code: "keel-top"; symbol: string; underRaw: bigint }
+  | { code: "keel-top"; symbol: string; underRaw: bigint; capped?: boolean }
   /** The deepest drawdown among the legs that could be priced. */
-  | { code: "dip"; symbol: string; dipBps: number; priced: number; usdgRaw: bigint }
+  | { code: "dip"; symbol: string; dipBps: number; priced: number; usdgRaw: bigint; capped?: boolean }
   /** A launch that cleared every entry bound. */
   | { code: "trench-enter"; symbol: string; liqUsd: number; fdvUsd: number; ageSec: number; usdgRaw: bigint }
   /**
@@ -195,6 +213,13 @@ export type Why =
  * Exhaustive by construction: the `never` fallthrough makes adding a `Why`
  * without a sentence a compile error rather than a silently empty post.
  */
+/**
+ * The trailing clause naming the wall, when the wall is why the size shrank.
+ * Deliberately short: reasons.test.ts caps a rendered sentence at 220 chars,
+ * and the figure already appears earlier in every sentence that uses this.
+ */
+const capClause = (capped?: boolean) =>
+  capped ? " — cut to what your signed key allows; re-sign to raise it" : "";
 export function renderWhy(w: Why): string {
   switch (w.code) {
     case "dca-leg":
@@ -274,15 +299,15 @@ export function renderWhy(w: Why): string {
       // No P&L claim: the strategy proposes, and never learns what it filled at.
       return `${w.symbol}'s feed is live again — the market reopened, so the whole position goes back to cash`;
     case "keel-seed":
-      return `nothing invested yet — laying down an equal-weight entry, ${usdg(w.usdgRaw)} USDG into each of ${w.legs}`;
+      return `nothing invested yet — laying down an equal-weight entry, ${usdg(w.usdgRaw)} USDG into each of ${w.legs}${capClause(w.capped)}`;
     case "keel-trim":
       return `${w.symbol} is ${usdg(w.overRaw)} USDG over its equal weight — trimming it back toward the line`;
     case "keel-top":
-      return `${w.symbol} is ${usdg(w.underRaw)} USDG under its equal weight — topping it up from cash`;
+      return `${w.symbol} is ${usdg(w.underRaw)} USDG under its equal weight — topping it up from cash${capClause(w.capped)}`;
     case "dip":
       return (
         `${w.symbol} is ${pct(w.dipBps)}% off its rolling high, the deepest of the ${w.priced} I priced — ` +
-        `${usdg(w.usdgRaw)} USDG in`
+        `${usdg(w.usdgRaw)} USDG in${capClause(w.capped)}`
       );
     case "trench-enter":
       return (
