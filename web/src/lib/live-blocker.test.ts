@@ -155,3 +155,39 @@ describe("the owner is told on the screen they actually open", () => {
     assert.match(app, /liveBlocker=\{account\?\.status\.liveBlocker\}/);
   });
 });
+
+describe("the chat is told what the screen already knows", () => {
+  it("THE BLOCKER REACHES THE MODEL, or the agent guesses at a fact it was handed", () => {
+    // `liveBlocker` is what the worker itself resolved as the ONE thing stopping
+    // real trading. It was a prop on the agent screen, rendered as advice, and
+    // never sent to the chat — so an owner asking "do I still need to send gas
+    // in ETH?" got a general answer while the specific one sat in the same
+    // component. Reported verbatim in the beta.
+    const agent = readFileSync(new URL("../terminal/screens/Agent.tsx", import.meta.url), "utf8");
+    assert.match(agent, /liveBlocker:liveBlocker \?\? null,/);
+  });
+
+  it("and the prompt names every rule the screen advises on", () => {
+    // If a new RefuseRule gains screen advice but the prompt does not learn it,
+    // the agent falls back to a guess about the one thing it could have known.
+    const chat = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
+    for (const rule of ADVISED_RULES) {
+      // The prompt lives inside a template literal, so its backticks are
+      // escaped in the source. Match the rule name and its bullet, not the
+      // quoting — the quoting is an artefact of where the string lives.
+      assert.match(
+        chat,
+        new RegExp(`·\\s*\\\\?\`${rule}\\\\?\``),
+        `the chat prompt must explain ${rule}`,
+      );
+    }
+  });
+
+  it("AND NULL IS NOT READ AS 'ALL FINE'", () => {
+    // Null means trading for real OR never beaten. The prompt has to carry that
+    // ambiguity, because reading it as health is how an idle agent gets told it
+    // is working.
+    const chat = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
+    assert.match(chat, /A NULL \\?`liveBlocker\\?` IS TWO ANSWERS/);
+  });
+});

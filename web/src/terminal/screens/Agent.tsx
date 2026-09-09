@@ -204,7 +204,7 @@ export function Agent({
         const v = sizeOf[k] ?? (settings?.defaults as Record<string, unknown> | undefined)?.[k];
         return typeof v === "number" ? v : null;
       };
-      const response = await fetch("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},signal:AbortSignal.timeout(45000),body:JSON.stringify({message:question.trim(),state:JSON.stringify({name:mine.name,equity:mine.equity,strategy:settings?.values?.strategy ?? settings?.defaults?.strategy ?? mine.glance.id,paperTradingEnabled:settings?.values?.paperTradingEnabled ?? settings?.defaults?.paperTradingEnabled ?? null,workerStatus:mine.statusLabel ?? "Unknown",positions:(mine.positions ?? []).map(p=>({symbol:p.symbol,valueUsd:p.valueUsd,costUsd:p.costUsd,unrealisedPct:p.pnlPct===null?null:Math.round(p.pnlPct*10)/10,priceStale:p.stale,
+      const response = await fetch("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},signal:AbortSignal.timeout(45000),body:JSON.stringify({message:question.trim(),state:JSON.stringify({name:mine.name,equity:mine.equity,strategy:settings?.values?.strategy ?? settings?.defaults?.strategy ?? mine.glance.id,paperTradingEnabled:settings?.values?.paperTradingEnabled ?? settings?.defaults?.paperTradingEnabled ?? null,workerStatus:mine.statusLabel ?? "Unknown",liveBlocker:liveBlocker ?? null,positions:(mine.positions ?? []).map(p=>({symbol:p.symbol,valueUsd:p.valueUsd,costUsd:p.costUsd,unrealisedPct:p.pnlPct===null?null:Math.round(p.pnlPct*10)/10,priceStale:p.stale,
         // THIS holding's own stop, graded when it was bought. Null means it
         // carries no grade and the book-wide `stopLossBps` below applies — the
         // distinction matters because "what would make you sell THIS" is the
