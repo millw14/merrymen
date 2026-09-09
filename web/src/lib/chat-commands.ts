@@ -55,6 +55,7 @@
  * else points at it — the third time this file reaches that conclusion.
  */
 import { riskProfile } from "@merrymen/core";
+import { isCircleStrategyId } from "@/terminal/strategy";
 
 /** A value an owner can be asked to confirm. Strings and numbers only. */
 export type CommandArg = string | number | boolean;
@@ -156,7 +157,21 @@ const REGISTRY: ChatCommand[] = [
     via: "settings",
     writes: ["strategy"],
     weighty: true,
-    say: (a) => `Switch me to the ${String(a.strategy)} strategy. It changes what I trade and when.`,
+    /**
+     * THE CARD SAYS IF THE TARGET IS ONE I CANNOT ACTUALLY RUN.
+     *
+     * The chat can propose this switch, the card said only "it changes what I
+     * trade and when", and /api/settings accepts any builtin from anybody —
+     * so an owner could be talked into a strategy their tier will not run and
+     * hear "Done". This cannot know their balance (it is pure, and the args
+     * are all it gets), but whether the strategy is holder-only is a static
+     * fact, and stating the requirement is the half that stops the surprise.
+     */
+    say: (a) =>
+      `Switch me to the ${String(a.strategy)} strategy. It changes what I trade and when.` +
+      (isCircleStrategyId(String(a.strategy))
+        ? " Note: that one only runs while you hold $MERRYMEN — below that I stay idle, however well funded I am."
+        : ""),
   },
   {
     id: "set-basket",

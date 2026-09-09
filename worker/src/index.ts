@@ -109,7 +109,7 @@ import { chooseFocus, focusLabel } from "./brain-focus";
 import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
-import { readHolderStatus } from "./circle";
+import { readHolderStatus, readHolderStatusResult } from "./circle";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadGrantFile } from "./grant";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
@@ -1894,6 +1894,8 @@ async function main() {
   let circleBlockedNoted = false; // so the "hold to unlock" note isn't spammed each tick
   /** So the bricked-breaker note is said once per change, not once per tick, for ever. */
   let breakerBrickNoted = false;
+  /** Did the last $MERRYMEN read actually answer? A failed read must not be reported as a wallet. */
+  let holderReadOk = true;
   let lastSequencerUp = true;
   // A feedless holding never resolves, so warn ONCE while it's held rather than
   // every tick forever. Resets when the book is valuable again.
@@ -6013,8 +6015,28 @@ async function main() {
 
     // Merry Circle — refresh the holder's tier ($MERRYMEN on mainnet, read-only)
     // and note tier changes. The tier discounts the performance fee below.
-    holderTier = (await readHolderStatus(cfg.rpcMainnet, cfg.holderAddress)).tier;
-    if (holderTier.id !== lastTierId) {
+    /**
+     * A BALANCE WE COULD NOT READ IS NOT A BALANCE OF ZERO.
+     *
+     * This took `.tier` straight off a call that returned the outsider floor
+     * for BOTH "holds nothing" and "the chain would not answer" — on a fleet
+     * whose mainnet reads are refused routinely. Two things followed on the
+     * same tick: the owner was told there was no $MERRYMEN at their wallet, a
+     * confident claim about an address nobody had managed to read; and
+     * `effectivePerfFeeBps` below took the undiscounted rate, so a tick that
+     * also set a new high-water mark accrued the FULL performance fee to the
+     * ledger, permanently, against a holder who had paid for the discount.
+     *
+     * The last known-good tier is kept instead. That is the conservative
+     * direction in both senses: it grants nothing that was not read at least
+     * once, and it stops an outage silently repricing somebody. Before any
+     * successful read there is nothing to keep, and the floor stands — which
+     * is exactly where every agent starts anyway.
+     */
+    const holderRead = await readHolderStatusResult(cfg.rpcMainnet, cfg.holderAddress);
+    holderReadOk = holderRead.ok;
+    if (holderRead.ok) holderTier = holderRead.status.tier;
+    if (holderRead.ok && holderTier.id !== lastTierId) {
       lastTierId = holderTier.id;
       await addEvent(
         agentId,
@@ -6937,7 +6959,12 @@ async function main() {
         await addEvent(
           agentId,
           "warn",
-          `${strategy.name} is a Merry Circle strategy — hold $MERRYMEN (Merry Man tier) to run it; idle until then`,
+          // AND WHICH KIND OF NO IT IS. Telling a holder to go and hold
+          // $MERRYMEN because our own read failed is advice they cannot act
+          // on — they already did the thing being asked of them.
+          holderReadOk
+            ? `${strategy.name} is a Merry Circle strategy — hold $MERRYMEN (Merry Man tier) to run it; idle until then`
+            : `${strategy.name} is a Merry Circle strategy and we could not read your $MERRYMEN balance this tick, so it is idle. That is our read failing, not your wallet — it should clear on its own.`,
         );
       }
       return;

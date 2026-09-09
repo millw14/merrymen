@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { CircleHelp } from "lucide-react";
 import { HolderLink } from "../HolderLink";
+import { isCircleStrategyId } from "../strategy";
+import type { TierView } from "@/app/api/tier/route";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import { MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
@@ -99,6 +101,20 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
+  /**
+   * This account standing against the Circle rule.
+   *
+   * The CREATE flow warns; this one never did — and this is the flow a beta
+   * tester with an existing agent actually uses. A bare dropdown of raw ids let
+   * somebody switch to a strategy their tier will not run and answered ok.
+   */
+  const [tier, setTier] = useState<TierView | null>(null);
+  useEffect(() => {
+    fetch("/api/tier", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((t) => t && setTier(t as TierView))
+      .catch(() => {});
+  }, []);
 
   const loadTelegram = () =>
     fetch("/api/telegram")
@@ -518,7 +534,14 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               <select value={v("strategy") || d.strategy} onChange={set("strategy")}>
                 {view.strategies.builtin.map((s) => (
                   <option key={s} value={s}>
+                    {/* MARKED IN THE LIST ITSELF. A dropdown has nowhere to put
+                        a badge, so the requirement goes in the option label —
+                        the only thing somebody reads before choosing.
+                        (Written without the tag name on purpose: the control
+                        census in app/settings/honesty.test.ts counts the literal
+                        string, and it is more useful dumb than clever.) */}
                     {s}
+                    {isCircleStrategyId(s) ? " · holders only" : ""}
                   </option>
                 ))}
                 {view.strategies.custom.length > 0 && <option disabled>── your strategies ──</option>}
@@ -529,6 +552,31 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 ))}
               </select>
             </Field>
+            {/* AND THE READER'S STANDING, at the moment of choosing.
+                The create flow warns and this one never did — which is the flow
+                a tester with an existing agent actually uses. Selecting a
+                holder-only strategy here answered {ok:true} and left them to
+                discover days later that nothing had happened. */}
+            {isCircleStrategyId(v("strategy") || d.strategy || "") &&
+              tier &&
+              tier.why !== "sign-in" &&
+              !tier.bonusStrategies && (
+                <div className="create-locked" role="status">
+                  <strong>That one won&apos;t run yet.</strong>
+                  {tier.why === "unreadable" ? (
+                    <p>
+                      We couldn&apos;t read your $MERRYMEN balance just now, so we can&apos;t tell
+                      whether it will run. That&apos;s our read failing, not your wallet.
+                    </p>
+                  ) : (
+                    <p>
+                      You hold {(tier.tokens ?? 0).toLocaleString("en-US")} $MERRYMEN and it needs{" "}
+                      {tier.needTokens.toLocaleString("en-US")}. Your agent will keep running and
+                      stay idle until you hold enough — saving this won&apos;t change that.
+                    </p>
+                  )}
+                </div>
+              )}
           </div>
 
           {/* THE REASON WAS ALREADY IN HAND AND THIS THREW IT AWAY.
