@@ -255,7 +255,7 @@ fun AgentDetailScreen(nav: NavHostController, slug: String) {
             t.outcome?.let {
               Text(it, style = MaterialTheme.typography.labelSmall)
             }
-            LikeButton(t.postId, onSignIn = { nav.navigate(Routes.SIGN_IN) })
+            LikeButton(t.postId)
           }
         }
       }

@@ -16,6 +16,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -90,6 +91,16 @@ fun SectionCard(
 }
 
 /**
+ * HOW ANY SCREEN OPENS THE DOOR, without thirteen call sites passing a lambda.
+ *
+ * The gate is a property of the whole install, so the way out of it is the same
+ * from every screen. Shell provides this once; a preview or a test that does not
+ * gets null and renders the sentence without a button, which still names the
+ * remedy.
+ */
+val LocalOpenSettings = compositionLocalOf<(() -> Unit)?> { null }
+
+/**
  * THE THREE-STATE RENDERER, so no screen has to reinvent the distinction.
  *
  * Refused-with-401 is a door, not an emptiness. Unreachable is our failure, not
@@ -110,12 +121,38 @@ fun <T> LoadedBlock(
       CircularProgressIndicator(strokeWidth = 2.dp)
     }
     is Loaded.Value -> content(state.value)
-    is Loaded.Refused -> Notice(
-      title = if (state.status == 401) "Sign in to see this" else "The server said no",
-      body = state.message,
-      actionLabel = if (state.status == 401 && onSignIn != null) "Sign in" else null,
-      onAction = onSignIn,
-    )
+    is Loaded.Refused -> {
+      // TWO DIFFERENT 401s, AND ONLY ONE OF THEM IS ABOUT YOUR ACCOUNT.
+      //
+      // While the site gate is on, EVERY route answers 401 {"error":"gated"} —
+      // including the ones that would tell us who you are. Rendering that as
+      // "Sign in to see this" sent a reader into a wallet signature ceremony to
+      // fix a door that a shared password opens, which is a remedy that cannot
+      // work. Seen on a real device: every screen said "Sign in", the Sign in
+      // button opened the web sign-in, and the web sign-in was behind the same
+      // closed door.
+      val gated = state.status == 401 && state.message.trim().equals("gated", ignoreCase = true)
+      val openSettings = LocalOpenSettings.current
+      Notice(
+        title = when {
+          gated -> "This deployment is behind a password"
+          state.status == 401 -> "Sign in to see this"
+          else -> "The server said no"
+        },
+        body = when {
+          gated ->
+            "merrymen is in closed beta. The site password goes in Settings — it is the door to " +
+              "the whole deployment, not your account."
+          else -> state.message
+        },
+        actionLabel = when {
+          gated && openSettings != null -> "Open settings"
+          !gated && state.status == 401 && onSignIn != null -> "Sign in"
+          else -> null
+        },
+        onAction = if (gated) openSettings else onSignIn,
+      )
+    }
     is Loaded.Unreachable -> Notice(
       title = "Couldn't reach merrymen",
       // Deliberately OUR failure, in our words. Not "you are offline" — we do

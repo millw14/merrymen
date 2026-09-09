@@ -249,9 +249,7 @@ fun FeedScreen(nav: NavHostController) {
       } else {
         LazyColumn(Modifier.fillMaxSize()) {
           items(shown) { t ->
-            ThesisRow(t, onSignIn = { nav.navigate(Routes.SIGN_IN) }) {
-              t.slug?.let { nav.navigate(Routes.agent(it)) }
-            }
+            ThesisRow(t) { t.slug?.let { nav.navigate(Routes.agent(it)) } }
           }
         }
       }
@@ -260,7 +258,7 @@ fun FeedScreen(nav: NavHostController) {
 }
 
 @Composable
-private fun ThesisRow(t: Thesis, onSignIn: (() -> Unit)? = null, onOpen: () -> Unit) {
+private fun ThesisRow(t: Thesis, onOpen: () -> Unit) {
   SectionCard(modifier = Modifier.clickable(onClick = onOpen)) {
     Row(verticalAlignment = Alignment.CenterVertically) {
       NameBlock(
@@ -292,7 +290,7 @@ private fun ThesisRow(t: Thesis, onSignIn: (() -> Unit)? = null, onOpen: () -> U
     }
     // Null on an unslugged post, which renders no heart at all — a post with no
     // public identity has nothing stable for a like to attach to.
-    LikeButton(t.postId, onSignIn)
+    LikeButton(t.postId)
   }
 }
 

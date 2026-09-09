@@ -59,9 +59,16 @@ import kotlinx.coroutines.launch
  * disables the button and explains in a `title` attribute, a phone has no
  * hover, so the control stays tappable and says why instead — with the remedy
  * where there is one.
+ *
+ * IT SAYS THE REMEDY; IT DOES NOT PERFORM IT. The first version called an
+ * `onSignIn` that navigated straight to the sign-in flow, and on a real device
+ * that meant tapping a HEART threw the reader out of the feed and into a wallet
+ * signature ceremony — with the explanation flashing past on the way. A heart is
+ * the smallest gesture in the product and it must not be the one that hijacks
+ * where you are. The message names the tab; the reader decides.
  */
 @Composable
-fun LikeButton(postId: String?, onSignIn: (() -> Unit)? = null) {
+fun LikeButton(postId: String?) {
   if (postId == null) return
   val c = LocalContainer.current
   val likes by c.social.likes.collectAsState()
@@ -87,10 +94,7 @@ fun LikeButton(postId: String?, onSignIn: (() -> Unit)? = null) {
         .clickable {
           note = null
           when {
-            !likes.signedIn -> {
-              note = "Sign in to like posts."
-              onSignIn?.invoke()
-            }
+            !likes.signedIn -> note = "Sign in from the You tab to like posts."
             !likes.mineRead ->
               note = "We could not reach your likes just now, so this would not be saved."
             else -> scope.launch { note = c.social.toggleLike(postId, !mine) }

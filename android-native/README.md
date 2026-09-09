@@ -176,8 +176,101 @@ the watchlist, sharing and the holders table are all here now. What is not:
 - **No agent creation and no signing.** Anything that ends in a signature — the
   grant, a re-sign, a withdrawal — is a WebView handoff to the web app's own
   screen, on purpose: that is where the owner key lives.
+- The app is **verified running** on an API 35 emulator against production; see
+  "Running it on an emulator" below.
 - **No X-handle proof flow.** The app renders a proven handle as a link and an
   unproven one as plain text, but the proof itself (post a nonce, verify it) is
   web-only.
 - No per-agent endpoint, so a desk's history is the public window filtered
   client-side.
+
+## Running it on an emulator
+
+It runs. This section exists because an earlier session concluded it did not,
+and that conclusion was wrong in a way worth writing down.
+
+### The one thing that will waste your afternoon
+
+**`applicationIdSuffix = ".debug"` moves the PACKAGE but not the CLASS.** The
+debug build installs as `dev.merrymen.app.debug`; `namespace` stays
+`dev.merrymen.app`, so the activity is still `dev.merrymen.app.MainActivity`.
+Only one component string resolves:
+
+```bash
+adb shell am start -n 'dev.merrymen.app.debug/dev.merrymen.app.MainActivity'
+```
+
+Both of the obvious things to type fail, and fail identically:
+
+- `dev.merrymen.app/.MainActivity` — that package is not installed.
+- `dev.merrymen.app.debug/.MainActivity` — `ComponentName.unflattenFromString`
+  expands a leading dot against the **package**, giving
+  `dev.merrymen.app.debug.MainActivity`, which does not exist.
+
+Both answer `START_CLASS_NOT_FOUND`, which is **-92**
+(`FIRST_START_FATAL_ERROR_CODE = -100`, `+ 8`). That code comes from a
+PackageManagerService manifest-record lookup in `ActivityStarter.executeRequest`
+— it is decided **before any class is loaded**, so it can never be caused by a
+dexopt problem. If the dex were genuinely broken you would get
+`START_SUCCESS (0)` and then a `ClassNotFoundException` in logcat instead. A
+`[location is error]` line in `dumpsys package dexopt` alongside it is a red
+herring; do not chase it.
+
+`./gradlew installDebug` never hits this, because it resolves the component
+itself. Only a hand-typed `am start` does.
+
+### The AVD
+
+The `shadow`/`shadow35` AVDs belong to a different project. Make your own:
+
+```bash
+export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"
+export JAVA_HOME="/c/Program Files/Android/Android Studio/jbr"
+echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager.bat" create avd \
+  -n merrymen35 -k "system-images;android-35;google_apis;x86_64" -d pixel_6 --force
+```
+
+`avdmanager` writes `avd.id = <build>` and `disk.dataPartition.path = <temp>`
+into config.ini. Those literal-looking placeholders are **normal** — the
+emulator resolves them at launch (check `hardware-qemu.ini` after a boot if you
+doubt it). What it also writes is the pixel_6 profile's RAM, which is too low
+for API 35, so raise these in `~/.android/avd/merrymen35.avd/config.ini`:
+
+```
+hw.ramSize=4096M
+vm.heapSize=576M
+disk.dataPartition.size=4096M
+hw.gpu.enabled=yes
+hw.gpu.mode=swiftshader_indirect
+hw.keyboard=yes
+```
+
+API 35 `google_apis` matches the app exactly (`compileSdk`/`targetSdk` 35,
+`minSdk` 26) and is rootable, unlike the `google_apis_playstore` images.
+
+### Boot, install, drive
+
+```bash
+"$ANDROID_HOME/emulator/emulator.exe" -avd merrymen35 \
+  -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect &
+adb wait-for-device
+adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
+adb install -r -t app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n 'dev.merrymen.app.debug/dev.merrymen.app.MainActivity'
+```
+
+Then put the **site password** into Settings — every route answers
+`401 {"error":"gated"}` until you do, and that is a different 401 from being
+signed out. The app says which; see `LoadedBlock`.
+
+Driving it blind by pixel coordinates drifts. Read the real ones:
+
+```bash
+adb shell uiautomator dump /sdcard/ui.xml && adb exec-out cat /sdcard/ui.xml
+```
+
+**Git-bash gotchas on Windows**, both of which cost time here: `adb push`/`pull`
+need a *Windows* path for the host side (`C:\...`), while guest paths like
+`/sdcard/ui.xml` get mangled into `C:/Program Files/Git/sdcard/...` unless you
+set `MSYS2_ARG_CONV_EXCL="*"`. Setting `MSYS_NO_PATHCONV=1` fixes the guest side
+and breaks the host side, so set neither globally — scope them per command.

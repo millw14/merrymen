@@ -350,12 +350,17 @@ private fun ChartBlock(bars: Loaded<List<Bar>>, kind: ChartKind, t: TokenDetail)
         PriceChart(bars.value, kind, partialLast = partial)
         val gaps = candles?.gaps ?: 0
         Text(
+          // Each clause closes itself. Built the other way round, a series with
+          // no label and no gaps read "79 bars The newest bar is still forming"
+          // — two sentences run together, which is what a caption assembled from
+          // optional parts does unless every part ends itself.
           buildString {
             append(bars.value.size)
             append(if (bars.value.size == 1) " bar" else " bars")
             candles?.label?.takeIf { it.isNotBlank() }?.let { append(", ").append(it) }
+            append(".")
             if (gaps > 0) {
-              append(". ")
+              append(" ")
               append(gaps)
               append(" periods published nothing and are left out rather than drawn across.")
             }

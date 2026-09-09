@@ -16,6 +16,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -135,7 +136,12 @@ fun Shell() {
     },
   ) { pad ->
     Box(Modifier.fillMaxSize().padding(pad)) {
-      NavHost(navController = nav, startDestination = Routes.HOME) { graph(nav) }
+      // Provided once: while the site gate is shut EVERY screen is refused, and
+      // every one of them needs the same way out — the password field in
+      // Settings, not a wallet signature. See LoadedBlock.
+      CompositionLocalProvider(LocalOpenSettings provides { nav.navigate(Routes.SETTINGS) }) {
+        NavHost(navController = nav, startDestination = Routes.HOME) { graph(nav) }
+      }
     }
   }
 }
