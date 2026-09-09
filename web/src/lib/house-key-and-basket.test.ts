@@ -29,9 +29,11 @@ const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 
 describe("the model list falls back to the house key", () => {
   it("A TENANT WITH NO KEY OF THEIR OWN STILL GETS A LIST", () => {
+    // The tenant's own key still wins — `house()` is only what it falls back
+    // to, and it is gated on there being a tenant at all (below).
     const src = read("../app/api/models/route.ts");
-    assert.match(src, /saved\.groqApiKey \|\| process\.env\.GROQ_API_KEY \|\| ""/);
-    assert.match(src, /saved\.anthropicApiKey \|\| process\.env\.ANTHROPIC_API_KEY \|\| ""/);
+    assert.match(src, /saved\.groqApiKey \|\| house\(process\.env\.GROQ_API_KEY\)/);
+    assert.match(src, /saved\.anthropicApiKey \|\| house\(process\.env\.ANTHROPIC_API_KEY\)/);
   });
 
   it("AND THE HOUSE KEY NEVER GOES TO A CALLER-INFLUENCED URL", () => {
@@ -98,5 +100,34 @@ describe("the agent can see its own basket", () => {
     // payload it was given.
     const chat = read("../app/api/chat/route.ts");
     assert.match(chat, /it settles whether a coin they name gets \\`buy\\` \(already in it\) or \\`snipe\\` \(not\)/);
+  });
+});
+
+describe("the house key is for the house's tenants", () => {
+  it("AN UNAUTHENTICATED CALLER DOES NOT SPEND OUR QUOTA", () => {
+    // This route has no auth check of its own — hosted, readSavedSettings just
+    // returns {} for a caller with no session. An unconditional fallback let an
+    // anonymous request use the house key, which I confirmed against production
+    // before tightening it: a POST with no cookie returned the full list.
+    // Nothing was disclosed, but "the house pays for inference" means for the
+    // people it is hosting.
+    const src = read("../app/api/models/route.ts");
+    assert.match(src, /const houseKeyAllowed = !isHostedMode\(\) \|\| !!tenantOf\(req\);/);
+    assert.match(src, /const house = \(v: string \| undefined\) => \(houseKeyAllowed \? \(v \?\? ""\) : ""\);/);
+  });
+
+  it("and every env fallback goes through that gate", () => {
+    // A new provider added later must not reintroduce a raw process.env read.
+    const src = read("../app/api/models/route.ts");
+    const block = src.slice(src.indexOf("let apiKey = body.apiKey"), src.indexOf("let baseUrl = prov.baseUrl"));
+    const raw = [...block.matchAll(/process\.env\.[A-Z_]+/g)].filter(
+      (m) => !block.slice(Math.max(0, m.index! - 8), m.index!).includes("house("),
+    );
+    assert.equal(raw.length, 0, `these env reads bypass the tenant gate: ${raw.map((m) => m[0]).join(", ")}`);
+  });
+
+  it("but self-hosted keeps its own key, because there is no other tenant", () => {
+    const src = read("../app/api/models/route.ts");
+    assert.match(src, /!isHostedMode\(\) \|\|/, "a self-hosted operator must not be gated on a session");
   });
 });

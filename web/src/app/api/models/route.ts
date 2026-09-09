@@ -97,12 +97,30 @@ export async function POST(req: Request) {
    * provider still uses the tenant's own stored key with the tenant's own
    * stored URL, exactly as before.
    */
+  /**
+   * AND THE HOUSE KEY IS FOR THE HOUSE'S TENANTS, not for anyone who can reach
+   * this endpoint.
+   *
+   * This route has no auth check of its own — hosted, `readSavedSettings`
+   * simply returns {} for a caller with no session. Falling back to the house
+   * key unconditionally therefore let an unauthenticated request spend our
+   * quota, which I confirmed against production before tightening it: a POST
+   * with no cookie came back with the full model list.
+   *
+   * Nothing was disclosed — Groq's model names are public and the key never
+   * leaves this process — but "the house pays for inference" means for the
+   * people it is hosting. Self-hosted there is no session and no other tenant,
+   * so the operator's own env key stays exactly as available as it was.
+   */
+  const houseKeyAllowed = !isHostedMode() || !!tenantOf(req);
+  const house = (v: string | undefined) => (houseKeyAllowed ? (v ?? "") : "");
+
   let apiKey = body.apiKey || "";
   if (!apiKey) {
-    if (prov.id === "groq") apiKey = saved.groqApiKey || process.env.GROQ_API_KEY || "";
-    else if (prov.id === "anthropic") apiKey = saved.anthropicApiKey || process.env.ANTHROPIC_API_KEY || "";
+    if (prov.id === "groq") apiKey = saved.groqApiKey || house(process.env.GROQ_API_KEY);
+    else if (prov.id === "anthropic") apiKey = saved.anthropicApiKey || house(process.env.ANTHROPIC_API_KEY);
     else if (prov.id === "custom") apiKey = saved.llmApiKey ?? "";
-    else apiKey = saved.llmApiKey || process.env.MERRYMEN_LLM_API_KEY || "";
+    else apiKey = saved.llmApiKey || house(process.env.MERRYMEN_LLM_API_KEY);
   }
 
   let baseUrl = prov.baseUrl;
