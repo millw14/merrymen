@@ -80,15 +80,19 @@ class Repository(
   /**
    * Who the session says we are.
    *
-   * Read from /api/grants rather than invented locally: the cookie is opaque to
-   * this client by design (httpOnly, HMAC-signed server-side), so the only
-   * honest way to know whether it still works is to use it.
+   * /api/auth/session exists for exactly this and is documented "read-only,
+   * safe to poll". Inferring it from /api/grants instead conflated two
+   * different questions — "are you signed in" and "do you have an agent" — so
+   * a signed-in owner who had not minted one yet read as signed OUT.
+   *
+   * Unreachable leaves the answer ALONE. Not knowing is not the same as being
+   * signed out, and treating it as such logs people out on a flaky train.
    */
   suspend fun refreshIdentity() {
-    when (val g = api.grants()) {
-      is ApiResult.Ok -> _signedIn.value = if (g.value.exists) "yes" else null
-      is ApiResult.Refused -> if (g.status == 401) _signedIn.value = null
-      is ApiResult.Unreachable -> Unit // unknown, and unknown is not signed-out
+    when (val s = api.session()) {
+      is ApiResult.Ok -> _signedIn.value = s.value.address
+      is ApiResult.Refused -> if (s.status == 401) _signedIn.value = null
+      is ApiResult.Unreachable -> Unit
     }
   }
 
@@ -98,7 +102,9 @@ class Repository(
     refreshIdentity()
   }
 
+  /** Sign-out has to reach the SERVER, or the session outlives the app. */
   suspend fun signOut() {
+    api.logout()
     WebAuth.forget(jar)
     session.clearSession()
     _signedIn.value = null

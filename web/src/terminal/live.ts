@@ -73,6 +73,14 @@ export interface LiveAgent {
   name: string;
   handle: string | null;
   owner: string | null;
+  /**
+   * Was the owner's X handle PROVEN, or merely typed?
+   *
+   * Carried separately from `owner` because they answer different questions:
+   * one is who they say they are, the other is whether anybody checked. Only a
+   * true here may become a link — see NameBlock.
+   */
+  ownerVerified?: boolean;
   pnlBps: number | null;
   /**
    * The series a chart may draw — AND WHICH QUANTITY IT IS.
@@ -551,6 +559,7 @@ export async function loadLive(onMine?: (mine: LiveMine | null) => void): Promis
       landed: a.landed,
       last: latestBySlug.get(a.slug!) ?? latestBySlug.get(a.name) ?? null,
       owner: a.handle,
+      ownerVerified: a.handleVerified === true,
       glance: publicGlance(),
       thesis:
         (latestBySlug.get(a.slug!) ?? latestBySlug.get(a.name))?.reason ?? "",
@@ -568,6 +577,8 @@ export async function loadLive(onMine?: (mine: LiveMine | null) => void): Promis
         landed: 0,
         last: t,
         owner: t.handle,
+        // A thesis row carries no proof flag, and absent is not proven.
+        ownerVerified: false,
         glance: publicGlance(),
         thesis: t.reason ?? "",
       });
@@ -928,6 +939,8 @@ interface BoardRow {
   slug: string | null;
   name: string;
   handle: string | null;
+  /** Optional so an older server, which does not send it, reads as unproven. */
+  handleVerified?: boolean;
   pnlBps: number | null;
   curve?: number[];
   landed: number;

@@ -51,6 +51,15 @@ export interface ResolvedConfig {
   breakerAddress: `0x${string}` | undefined;
   agentName: string | undefined;
   xHandle: string | undefined;
+  /**
+   * Proof that xHandle is theirs, written only by /api/x-proof.
+   *
+   * Carried through so the worker can stamp `agents.x_verified` — the flag a
+   * public surface needs before it may turn a handle into a link. Read from
+   * the file only: unlike the handle beside it there is no env override,
+   * because a proof somebody can set from a shell is not a proof.
+   */
+  xProof: { handle: string; at: number } | undefined;
   v4AdapterAddress: `0x${string}` | undefined;
   ponsAdapterAddress: `0x${string}` | undefined;
   paperTradingEnabled: boolean;
@@ -223,6 +232,18 @@ export function mergeSettings(
 
   const agentName = str(file.agentName, env.MERRYMEN_AGENT_NAME);
   const xHandle = str(file.xHandle, env.MERRYMEN_X_HANDLE);
+  // Shape-checked before use, because a settings blob is data: a malformed
+  // proof falls back to "unproven" rather than reaching the column as whatever
+  // it happens to be. Same treatment holderProof gets in the orchestrator.
+  const rawProof = file.xProof;
+  const xProof =
+    rawProof &&
+    typeof rawProof === "object" &&
+    typeof rawProof.handle === "string" &&
+    /^[A-Za-z0-9_]{1,15}$/.test(rawProof.handle) &&
+    typeof rawProof.at === "number"
+      ? { handle: rawProof.handle, at: rawProof.at }
+      : undefined;
 
   const rawAdapter = str(file.v4AdapterAddress, env.MERRYMEN_V4_ADAPTER_ADDRESS);
   const v4AdapterAddress =
@@ -281,6 +302,7 @@ export function mergeSettings(
     breakerAddress,
     agentName,
     xHandle,
+    xProof,
     v4AdapterAddress,
     ponsAdapterAddress,
     paperTradingEnabled: bool(file.paperTradingEnabled, env.MERRYMEN_PAPER_TRADING, d.paperTradingEnabled),

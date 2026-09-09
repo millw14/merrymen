@@ -9,7 +9,7 @@ import {
   ArrowDownWideNarrow,
   ChevronDown,
 } from "lucide-react";
-import { Coin, Face, LogoMark, TabIcon } from "./ui";
+import { Coin, Face, LogoMark, TabIcon, NameBlock } from "./ui";
 import {
   money,
   coinPrice,
@@ -293,7 +293,7 @@ export function DesktopSidebar({
               >
                 <Face name={a.name} slug={a.slug} />
                 <span>
-                  <strong>{a.handle ?? a.name}</strong>
+                  <NameBlock title={a.name} owner={a.owner} verified={a.ownerVerified === true} />
                   {/*
                     WHAT IT HAS DONE, not what we cannot tell you. This read
                     "Strategy not published" on every row — one hard-coded

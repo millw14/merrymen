@@ -1,6 +1,7 @@
 import { MessageSquare, Trophy, Search, UserRound, Layers, Activity, Wallet, type LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { faceSrc } from "./live";
+import { shortAddress, xProfileUrl } from "@/lib/x-handle";
 import { ownerTag } from "./strategy";
 
 function hueOf(seed: string): number {
@@ -46,18 +47,58 @@ export function Face({
   );
 }
 
+/**
+ * A NAME, AND UNDERNEATH IT WHO OWNS THE AGENT.
+ *
+ * Three renderings, and the difference between them is who checked what:
+ *
+ *   PROVEN HANDLE → a link to x.com. The owner posted a nonce we issued, from
+ *   that account, so the association is one we verified. See /api/x-proof.
+ *
+ *   UNPROVEN HANDLE, or an address → PLAIN TEXT. `xHandle` is typed by the
+ *   owner and nothing checks they own it, so linking it would make merrymen
+ *   vouch for an association it never made — and would let an agent
+ *   impersonate anyone by typing their name. An address has nowhere honest to
+ *   link to at all.
+ *
+ *   NOTHING → no line. An absent owner is not an anonymous one; it is a fact
+ *   we do not have, and inventing a placeholder for it says more than we know.
+ */
 export function NameBlock({
   title,
   owner,
+  verified = false,
 }: {
   title: string;
   owner?: string | null;
+  /** Only true when a stored xProof names exactly this handle. */
+  verified?: boolean;
 }) {
+  const href = verified ? xProfileUrl(owner) : null;
   return (
     <div className="name-block">
       <strong>{title}</strong>
       {owner ? (
-        <p className="owned">{owner === "you" ? "owned by you" : `owned by ${ownerTag(owner)}`}</p>
+        <p className="owned">
+          {owner === "you" ? (
+            "owned by you"
+          ) : href ? (
+            <>
+              {"owned by "}
+              <a href={href} target="_blank" rel="noreferrer noopener" className="owner-x">
+                {ownerTag(owner)}
+              </a>
+              {/* The tick is the whole difference between this and the plain
+                  arm; without it a reader cannot tell a checked claim from an
+                  unchecked one, which is the thing being fixed. */}
+              <i className="owner-ok" title="This X account was proven by its owner">
+                {" ✓"}
+              </i>
+            </>
+          ) : (
+            `owned by ${shortAddress(owner) ?? ownerTag(owner)}`
+          )}
+        </p>
       ) : null}
     </div>
   );

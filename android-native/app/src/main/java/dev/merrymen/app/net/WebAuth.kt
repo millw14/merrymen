@@ -10,7 +10,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import okhttp3.Cookie
-import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 
 /**
  * SIGNING IN WITHOUT EVER HOLDING A KEY.
@@ -73,7 +73,7 @@ object WebAuth {
    */
   fun harvest(origin: String, jar: PersistentCookieJar) {
     val raw = CookieManager.getInstance().getCookie(origin) ?: return
-    val url = runCatching { HttpUrl.get(origin) }.getOrNull() ?: return
+    val url = runCatching { origin.toHttpUrl() }.getOrNull() ?: return
     val cookies = raw.split(';').mapNotNull { part ->
       val trimmed = part.trim()
       val eq = trimmed.indexOf('=')
@@ -81,7 +81,7 @@ object WebAuth {
       Cookie.Builder()
         .name(trimmed.substring(0, eq))
         .value(trimmed.substring(eq + 1))
-        .domain(url.host())
+        .domain(url.host)
         .path("/")
         .build()
     }

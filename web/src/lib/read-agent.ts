@@ -68,6 +68,14 @@ export interface AgentProfile {
   slug: string;
   name: string;
   handle: string | null;
+  /**
+   * Was that handle PROVEN, or merely typed?
+   *
+   * The handle alone is unverified — the owner typed it and nothing checked
+   * they own it — so it renders as plain text. Only this flag, set from a
+   * stored xProof, lets a surface turn it into a link to x.com.
+   */
+  handleVerified: boolean;
   /** "live" | "paper" | "idle". The LAST HEARTBEAT's value, not a per-row fact. */
   mode: string;
   /** Unix seconds of the last heartbeat. Null when it has never beaten. */
@@ -193,6 +201,7 @@ export const readAgent = cache(async function readAgent(
           smart_account: string;
           name: string;
           x_handle: string | null;
+          x_verified: number | null;
           mode: string;
           epoch: number;
           beat_at: number | null;
@@ -201,7 +210,8 @@ export const readAgent = cache(async function readAgent(
     try {
       row = (await db
         .prepare(
-          `SELECT smart_account, name, x_handle, COALESCE(mode, 'idle') AS mode,
+          `SELECT smart_account, name, x_handle, COALESCE(x_verified, 0) AS x_verified,
+                  COALESCE(mode, 'idle') AS mode,
                   COALESCE(epoch, 1) AS epoch, beat_at
              FROM agents WHERE LOWER(smart_account) IN (${inList})
             ORDER BY created_at DESC LIMIT 1`,
@@ -488,6 +498,9 @@ export const readAgent = cache(async function readAgent(
       slug: identity.slug,
       name: String(row.name ?? "Agent"),
       handle: (row.x_handle ?? "").trim() || null,
+      // WHETHER ANYONE CHECKED. The handle is what the owner typed; this is
+      // whether they proved it. Only a true here may become a link.
+      handleVerified: Number(row.x_verified ?? 0) !== 0,
       mode: String(row.mode ?? "idle"),
       beatAt: row.beat_at ? Number(row.beat_at) : null,
       how,

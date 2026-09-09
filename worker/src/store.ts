@@ -554,6 +554,11 @@ const SQLITE_ALTERS: string[] = [
     // (settings-store.ts), and a public page must never decrypt a tenant to render
     // a name.
     "ALTER TABLE agents ADD COLUMN x_handle TEXT",
+    // WHETHER THAT HANDLE WAS PROVEN, which is a different fact from having
+    // one. Unverified it renders as plain text; only this flag lets a public
+    // surface turn it into a link, because only then did anyone check. Written
+    // from the tenant's stored xProof, never from what they typed.
+    "ALTER TABLE agents ADD COLUMN x_verified INTEGER NOT NULL DEFAULT 0",
     // ── WHAT THE BOOK IS ALLOWED TO CLAIM, MADE DURABLE ──────────────────
     //
     // `PortfolioQuality` existed only inside the worker's tick closure. Nothing
@@ -2352,11 +2357,18 @@ export async function getOpsToday(agentId: string, rail: BudgetRail = "live"): P
  * Two agents may claim the same handle and both render, because nobody has
  * verified either and a constraint would imply somebody had.
  */
-export async function setAgentXHandle(agentId: string, handle: string | null): Promise<void> {
+export async function setAgentXHandle(
+  agentId: string,
+  handle: string | null,
+  verified = false,
+): Promise<void> {
   try {
     await getDb()
-      .prepare(`UPDATE agents SET x_handle = ? WHERE smart_account = ?`)
-      .run(handle, agentId);
+      .prepare(`UPDATE agents SET x_handle = ?, x_verified = ? WHERE smart_account = ?`)
+      // A handle with no proof is stored UNVERIFIED even if it was verified a
+      // moment ago under a different spelling: the proof names one handle, and
+      // changing the handle is changing the claim.
+      .run(handle, verified ? 1 : 0, agentId);
   } catch {
     /* a missing handle is cosmetic — never worth failing an arm over */
   }

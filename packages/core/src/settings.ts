@@ -107,9 +107,17 @@ export interface MerrymenSettings {
    * The owner's X handle, for a public page to credit them.
    *
    * DISPLAY METADATA, NEVER AN AUTHORIZATION KEY. Nothing looks up an agent,
-   * tenant or permission by this. It is unverified — we store what the owner
-   * typed and nothing checks that they own it — so it renders disclaimed and
-   * never as a link.
+   * tenant or permission by this.
+   *
+   * UNVERIFIED, IT RENDERS DISCLAIMED AND NEVER AS A LINK — we store what the
+   * owner typed and nothing checks that they own it, so linking it would make
+   * merrymen vouch for an association it never checked and would let an agent
+   * impersonate anyone by typing their name.
+   *
+   * That rule now has one exception, and it is the exception that proves it:
+   * when `xProof` below records that this exact handle was proven, the check
+   * HAS been made and the handle may be linked. Absent a proof, nothing
+   * changes — plain text, as before.
    */
   xHandle?: string;
   v4AdapterAddress?: string;
@@ -270,6 +278,25 @@ export interface MerrymenSettings {
    * day the tier goes back to being a claim.
    */
   holderProof?: { address: string; at: number };
+
+  /**
+   * PROOF THAT `xHandle` IS ACTUALLY THEIRS — written only by /api/x-proof.
+   *
+   * This is what changes the rule above the `xHandle` field. Unverified, a
+   * handle still renders as plain text and never as a link, for exactly the
+   * reason stated there: nothing checked they own it, and a link would make
+   * merrymen vouch for an association it never made. With a proof, we DID
+   * check — the owner posted a nonce we issued, from that account — so it may
+   * be linked, and only then.
+   *
+   * The settings PUT handler has no branch for this field, deliberately: like
+   * `holderProof`, a tenant must not be able to mint their own proof through
+   * the API they do have.
+   *
+   * POINT-IN-TIME, like the holder proof beside it. `at` records when we
+   * looked; deleting the post later does not un-verify, and nothing re-checks.
+   */
+  xProof?: { handle: string; at: number };
 
   // ── Virtuals Terminal (stream your agent's activity to its Virtuals page) ─
   /** Virtuals API key (secret). Get it from your agent's page on app.virtuals.io.

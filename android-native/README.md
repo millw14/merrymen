@@ -1,12 +1,21 @@
 # merrymen for Android — native Kotlin client
 
-Jetpack Compose, Material 3, Kotlin 2.0. A native client for the merrymen API.
+Jetpack Compose, Material 3, Kotlin 2.2. A native client for the merrymen API.
 
-> **Not built on this machine.** There is no JDK, Gradle or Android SDK on the
-> workstation this was written on, so **none of this has been compiled, linted
-> or run**. It is written to compile, and the parts that are easy to get wrong
-> without a compiler are called out at the bottom. Treat the first `./gradlew
-> assembleDebug` as the real review.
+> **It builds.** `assembleDebug` produces an 18 MB debug APK.
+>
+> An earlier version of this file said the machine had no toolchain and that
+> nothing here had been compiled. That was wrong: Android Studio’s bundled JDK
+> (`jbr`, OpenJDK 25) and a full SDK were both installed, just not on `PATH`.
+> The version matrix guessed at the time — AGP 8.7.3 with Kotlin 2.0.21 — could
+> not have worked on Gradle 9.3.1 or JDK 25; it is now AGP 8.13.1 with Kotlin
+> 2.2.20 and `compileSdk` 36.
+>
+> This file also had the OkHttp guidance **backwards**. It said 4.x uses
+> methods rather than properties; that describes 3.x. In 4.x those became
+> `val`s and the method forms are `DeprecationLevel.ERROR`, so `response.code()`
+> is a compile error, not a warning. Eight call sites had to move to property
+> form.
 
 ```bash
 # from android-native/
@@ -64,8 +73,8 @@ ceremonies. They belong where the key is.
 | Feed — filters, honest verbs | `/api/theses` |
 | Chat — full conversation with the agent | `/api/chat` |
 | Alpha — three-state lock | `/api/alpha` |
-| You — identity, controls, handoffs, sign out | `/api/feed`, `/api/grants` |
-| Markets, Token detail | `/api/tokens` |
+| You — identity, controls, handoffs, sign out | `/api/feed`, `/api/auth/session` |
+| Markets, Token detail | `/api/market`, `/api/tokens/{address}` |
 | Search | `/api/search` |
 | Leaderboard, Agent detail | `/api/leaderboard`, `/api/theses` |
 | The Merry Circle | `/api/circle` |
@@ -110,14 +119,32 @@ active, so the `Host` must be loopback or private-LAN.
 - `AgentDetailScreen` filters the public thesis window client-side rather than
   reading a per-agent endpoint.
 
-## Most likely to be wrong on first compile
+## What the compiler actually found
 
-Written without a compiler, so in rough order of risk:
+Kept because the list is more useful than the guesses it replaced:
 
-1. Compose BOM / AGP / Kotlin 2.0 alignment in `gradle/libs.versions.toml`.
-2. `StateFlow.collectAsState()` import — `androidx.compose.runtime`.
-3. OkHttp 4.x uses **methods** (`response.code()`, `body()`, `HttpUrl.get()`),
-   not Kotlin properties. Moving to OkHttp 5 changes all of those.
-4. `Modifier.clickable` on `SectionCard` passes through to its outer `Column`.
-5. The suspend-`load()`-inside-composable pattern is deliberate and compiles,
-   but every call site must be inside a coroutine or a `LaunchedEffect`.
+1. **A KDoc containing `/api/` + `*` opened a nested block comment.** Kotlin
+   nests them, so one glob in a doc comment swallowed the rest of the file and
+   surfaced as "Missing `}`" a hundred lines away — which then made every
+   `c.api.*` call site an unresolved reference.
+2. **Eight OkHttp calls in method form**, all `DeprecationLevel.ERROR`.
+3. `Preferences.MutablePreferences` is a **top-level** class, not nested.
+4. Wrong endpoints: `/api/tokens` has no list route (it is `/api/market`), and
+   `/api/agents` is per-slug only.
+5. Wrong shapes: `/api/search` returns `{hits}`; `/api/feed` sends positions in
+   **snake_case** with `price_stale` as 0/1, and its agent object carries only
+   `{slug,name,strategy,basket}` — no equity, which comes from the equity
+   series; `/api/alpha` changes the TYPE of `picks` between locked and open, so
+   the old model threw for every non-holder.
+
+Two runtime bugs were fixed at the same time: a wrong site-gate password
+reported success (both answers are a 303, so redirects had to be turned off to
+see the destination), and requests used `suspendCoroutine`, leaking an
+in-flight call per abandoned screen.
+
+## Still missing
+
+The web terminal is a control surface; this is largely a viewer. Not yet here:
+the 19 chat commands and their propose/confirm card, the proposals approve
+loop, orders, snipe, likes, follows, the risk bar, watchlist and charts, and
+the ~60-field settings editor (deliberately a handoff — see above).

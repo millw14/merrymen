@@ -46,6 +46,7 @@ import dev.merrymen.app.ui.Bps
 import dev.merrymen.app.ui.Empty
 import dev.merrymen.app.ui.LoadedBlock
 import dev.merrymen.app.ui.Money
+import dev.merrymen.app.ui.NameBlock
 import dev.merrymen.app.ui.Notice
 import dev.merrymen.app.ui.Pill
 import dev.merrymen.app.ui.Routes
@@ -97,11 +98,13 @@ fun HomeScreen(nav: NavHostController) {
         Text(f.agent?.name ?: "No agent yet", style = MaterialTheme.typography.titleMedium)
         Row(verticalAlignment = Alignment.CenterVertically) {
           Text("Portfolio  ", style = MaterialTheme.typography.bodySmall)
-          Money(f.agent?.equity, bold = true)
+          Money(f.equityNow, bold = true)
         }
         // The mode chip is a fact about the RAIL, not a performance claim.
-        f.agent?.mode?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
-        f.agent?.thesis?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        f.agent?.strategy?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
+        if (f.agent?.basket?.isNotEmpty() == true) {
+          Text("Trading " + f.agent.basket.joinToString(", "), style = MaterialTheme.typography.bodySmall)
+        }
       }
 
       // THE WORKER'S OWN WARNING, which for a long time rendered nowhere at all.
@@ -224,7 +227,11 @@ fun FeedScreen(nav: NavHostController) {
 private fun ThesisRow(t: Thesis, onOpen: () -> Unit) {
   SectionCard(modifier = Modifier.clickable(onClick = onOpen)) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-      Text(t.name ?: t.handle ?: "an agent", style = MaterialTheme.typography.titleMedium)
+      NameBlock(
+        title = t.name ?: t.handle ?: "an agent",
+        owner = t.handle,
+        verified = t.handleVerified,
+      )
       Spacer(Modifier.width(6.dp))
       // The verb carries the outcome. "tried to buy", never "bought", for a
       // trade the wall turned back.
@@ -342,10 +349,10 @@ fun AlphaScreen(nav: NavHostController) {
             if (a.why == "sign-in") nav.navigate(Routes.SIGN_IN) else nav.navigate(Routes.CIRCLE)
           },
         )
-      } else if (a.picks.isEmpty()) {
+      } else if (a.pickRows.isEmpty()) {
         Empty("Nothing vetted yet", "Nothing has cleared the screen recently. That is not the same as nothing looking good.")
       } else {
-        a.picks.forEach { pick ->
+        a.pickRows.forEach { pick ->
           SectionCard { Text(pick.toString(), style = MaterialTheme.typography.bodySmall) }
         }
       }
@@ -380,7 +387,7 @@ fun ProfileScreen(nav: NavHostController) {
         f.agent?.owner?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         Row(verticalAlignment = Alignment.CenterVertically) {
           Text("24h  ", style = MaterialTheme.typography.bodySmall)
-          Bps(f.agent?.chg24?.toInt())
+          Bps(null)
         }
       }
     }

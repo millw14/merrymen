@@ -524,7 +524,7 @@ export async function mirrorTenant(args: {
         // unmirrored high-water mark and accrued fee did not render as unknown —
         // they rendered as a confident zero.
         `SELECT smart_account, name, owner_address, session_key_address, chain_id, caps,
-                granted_at, expires_at, status, created_at, mode, beat_at, sponsor_gas, live_blocker, x_handle,
+                granted_at, expires_at, status, created_at, mode, beat_at, sponsor_gas, live_blocker, x_handle, x_verified,
                 epoch, hwm_usdg, accrued_fee_usdg,
                 contributions_known, contributions_why, gas_accounting, quality_at FROM agents`,
       )
@@ -534,15 +534,18 @@ export async function mirrorTenant(args: {
         const ins = db.prepare(
           `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id,
                                caps, granted_at, expires_at, status, created_at, mode, beat_at,
-                               sponsor_gas, live_blocker, x_handle, epoch, hwm_usdg, accrued_fee_usdg,
+                               sponsor_gas, live_blocker, x_handle, x_verified, epoch, hwm_usdg, accrued_fee_usdg,
                                contributions_known, contributions_why, gas_accounting, quality_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (smart_account) DO UPDATE SET
              name = excluded.name, status = excluded.status, caps = excluded.caps,
              expires_at = excluded.expires_at, mode = excluded.mode,
              beat_at = excluded.beat_at, sponsor_gas = excluded.sponsor_gas,
              live_blocker = excluded.live_blocker,
              x_handle = excluded.x_handle,
+             -- NOT a ratchet: a handle that loses its proof (renamed, or
+             -- unlinked) has to be able to stop being a link.
+             x_verified = excluded.x_verified,
              -- MONOTONIC, NOT OVERWRITTEN. These three are RATCHETS, and the
              -- child that supplies them lives in a container whose database a
              -- redeploy empties. A fresh child recreates its local agents row at
@@ -589,7 +592,7 @@ export async function mirrorTenant(args: {
             a.sponsor_gas ?? null,
             // Null is TWO answers — never beaten, or beaten and trading for real —
             // and a reader must render neither as a blocker.
-            a.live_blocker ?? null, a.x_handle ?? null,
+            a.live_blocker ?? null, a.x_handle ?? null, a.x_verified ?? 0,
             // These three have NOT NULL DEFAULTs at the source, so a null here
             // means a pre-migration child rather than an absent value — fall back
             // to the same defaults the schema would have applied.

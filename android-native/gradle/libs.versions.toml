@@ -2,24 +2,19 @@
 # not have the Android SDK checked into the repo, so a floating version is a
 # build that works today and not next month.
 [versions]
-agp = "8.7.3"
-kotlin = "2.0.21"
-ksp = "2.0.21-1.0.27"
+agp = "8.13.1"
+kotlin = "2.2.20"
+
 compose-bom = "2024.12.01"
 coroutines = "1.9.0"
 serialization = "1.7.3"
 okhttp = "4.12.0"
-retrofit = "2.11.0"
-retrofit-kotlinx = "1.0.0"
 lifecycle = "2.8.7"
 navigation = "2.8.5"
 activity = "1.9.3"
 core-ktx = "1.15.0"
 datastore = "1.1.1"
-security-crypto = "1.1.0-alpha06"
 browser = "1.8.0"
-coil = "2.7.0"
-work = "2.10.0"
 junit = "4.13.2"
 
 [libraries]
@@ -29,9 +24,7 @@ androidx-lifecycle-runtime-ktx = { module = "androidx.lifecycle:lifecycle-runtim
 androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycle" }
 androidx-navigation-compose = { module = "androidx.navigation:navigation-compose", version.ref = "navigation" }
 androidx-datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "datastore" }
-androidx-security-crypto = { module = "androidx.security:security-crypto", version.ref = "security-crypto" }
 androidx-browser = { module = "androidx.browser:browser", version.ref = "browser" }
-androidx-work-runtime-ktx = { module = "androidx.work:work-runtime-ktx", version.ref = "work" }
 
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "compose-bom" }
 compose-ui = { module = "androidx.compose.ui:ui" }
@@ -46,10 +39,6 @@ kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serializa
 
 okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
 okhttp-logging = { module = "com.squareup.okhttp3:logging-interceptor", version.ref = "okhttp" }
-retrofit = { module = "com.squareup.retrofit2:retrofit", version.ref = "retrofit" }
-retrofit-kotlinx-serialization = { module = "com.jakewharton.retrofit:retrofit2-kotlinx-serialization-converter", version.ref = "retrofit-kotlinx" }
-
-coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coil" }
 
 junit = { module = "junit:junit", version.ref = "junit" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }

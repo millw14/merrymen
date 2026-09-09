@@ -7809,3 +7809,16 @@
   line-height: 1.55;
 }
 :where(.terminal-host) .desk-circle-locked { margin: 0; }
+
+
+/* The owner line under an agent name. A PROVEN handle is a link; an
+   unproven one, or an address, is plain text — see NameBlock. */
+:where(.terminal-host) .owned .owner-x {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+:where(.terminal-host) .owned .owner-ok {
+  font-style: normal;
+  opacity: 0.7;
+}

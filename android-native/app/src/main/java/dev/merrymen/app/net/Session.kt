@@ -1,6 +1,7 @@
 package dev.merrymen.app.net
 
 import android.content.Context
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -69,7 +70,7 @@ class Session(private val context: Context) {
 
   /** Sign-out: forget the session, keep the origin and the doorknob. */
   suspend fun clearSession() =
-    context.sessionStore.edit { p: Preferences.MutablePreferences ->
+    context.sessionStore.edit { p: MutablePreferences ->
       p.remove(Keys.COOKIES)
       p.remove(Keys.TENANT)
     }

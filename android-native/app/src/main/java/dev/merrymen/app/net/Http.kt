@@ -4,6 +4,7 @@ import kotlinx.coroutines.runBlocking
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Response
@@ -83,7 +84,7 @@ class PersistentCookieJar(private val session: Session) : CookieJar {
   }
 
   private fun String.toHttpHostOrNull(): String? =
-    runCatching { HttpUrl.get(this).host() }.getOrNull()
+    runCatching { this.toHttpUrl().host }.getOrNull()
 }
 
 /**

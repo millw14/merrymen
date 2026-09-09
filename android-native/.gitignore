@@ -1,0 +1,10 @@
+# Android / Gradle
+build/
+.gradle/
+.idea/
+*.iml
+*.hprof
+.cxx/
+# Machine-specific: the SDK path on THIS box. Never committed — a checked-in
+# local.properties is how a build breaks for everyone but its author.
+local.properties

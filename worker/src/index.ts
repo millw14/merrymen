@@ -3257,7 +3257,13 @@ async function main() {
     // No soul and no reconcile for the handle: unlike the name it has no
     // in-character meaning and nothing at runtime reads it, so there is no second
     // place for it to be true in a different version. Straight from settings.
-    await setAgentXHandle(agentId, cfg.xHandle ?? null);
+    // PROVEN ONLY IF THE PROOF NAMES THIS EXACT HANDLE. A proof for a handle
+    // the owner has since changed proves nothing about the new one.
+    const provenX =
+      typeof cfg.xProof?.handle === "string" &&
+      typeof cfg.xHandle === "string" &&
+      cfg.xProof.handle.toLowerCase() === cfg.xHandle.toLowerCase();
+    await setAgentXHandle(agentId, cfg.xHandle ?? null, provenX);
 
     // Pimlico/Alchemy bundler URLs embed a chain id — a testnet bundler with a
     // mainnet grant (or vice versa) fails every op with opaque errors. Advisory

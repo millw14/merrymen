@@ -26,6 +26,10 @@ data class Version(val version: String? = null, val commit: String? = null)
 
 // ── auth ────────────────────────────────────────────────────────────────────
 
+/** GET /api/auth/session — {hosted, address}. address is null when signed out. */
+@Serializable
+data class SessionView(val hosted: Boolean = false, val address: String? = null)
+
 @Serializable
 data class Challenge(val origin: String, val nonce: String, val message: String)
 
@@ -84,16 +88,45 @@ data class CircleView(
 // ── alpha ───────────────────────────────────────────────────────────────────
 
 @Serializable
+data class AlphaNeed(val tokens: Int? = null, val name: String? = null, val emoji: String? = null)
+
+@Serializable
+data class AlphaToken(val symbol: String? = null, val address: String? = null)
+
+/**
+ * THE LOCKED AND OPEN PAYLOADS ARE DIFFERENT SHAPES, and `picks` changes TYPE
+ * between them: a COUNT when locked, a list of rows when open.
+ *
+ * That is not sloppiness on the server's part, it is the lock working — the
+ * body genuinely does not ship to a reader who has not earned it, so there is
+ * nothing to blur. But it means a client that declares `picks: List<...>`
+ * throws a SerializationException on the default path, which is every
+ * non-holder. Modelled as raw JSON and read through the accessors below.
+ */
+@Serializable
 data class AlphaView(
   val locked: Boolean = true,
   /** "sign-in" | "balance" | "unreachable" — three remedies, one of them ours. */
   val why: String? = null,
-  val needTokens: Int? = null,
-  val symbol: String? = null,
+  val need: AlphaNeed? = null,
+  val token: AlphaToken? = null,
   val tokens: Int? = null,
-  /** ABSENT when locked. A blur is not a lock: the body must not ship at all. */
-  val picks: List<JsonElement> = emptyList(),
-)
+  val picks: JsonElement? = null,
+  val passed: JsonElement? = null,
+) {
+  val needTokens: Int? get() = need?.tokens
+  val symbol: String? get() = token?.symbol
+
+  /** The rows, when they were sent; empty when locked or absent. */
+  val pickRows: List<JsonElement>
+    get() = (picks as? kotlinx.serialization.json.JsonArray)?.toList() ?: emptyList()
+
+  /** How many were vetted, whether or not we were allowed to see them. */
+  val pickCount: Int
+    get() = (picks as? kotlinx.serialization.json.JsonArray)?.size
+      ?: (picks as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull()
+      ?: 0
+}
 
 // ── telegram ────────────────────────────────────────────────────────────────
 
@@ -124,6 +157,7 @@ data class Thesis(
   val name: String? = null,
   val slug: String? = null,
   val handle: String? = null,
+  val handleVerified: Boolean = false,
   val head: String = "",
   val action: String? = null,
   val symbol: String? = null,
@@ -145,24 +179,42 @@ data class ThesesPage(val theses: List<Thesis> = emptyList(), val source: String
 @Serializable
 data class Position(
   val symbol: String,
-  val token: String? = null,
-  val valueUsdg: Double? = null,
-  val priceUsd: Double? = null,
-  val priceStale: Boolean = false,
-  val priceSource: String? = null,
-)
+  @SerialName("price_usd") val priceUsd: Double? = null,
+  // 0/1 ON THE WIRE, not a bool. Decoding it as Boolean throws and takes the
+  // whole feed down, so it is an Int with a helper below.
+  @SerialName("price_stale") val priceStaleRaw: Int = 0,
+  @SerialName("price_source") val priceSource: String? = null,
+  @SerialName("value_usdg") val valueUsdg: Double? = null,
+  @SerialName("raw_balance") val rawBalance: String? = null,
+) {
+  val priceStale: Boolean get() = priceStaleRaw != 0
+}
 
 @Serializable
 data class AgentGlance(
-  val id: String? = null,
-  val name: String? = null,
   val slug: String? = null,
+  val name: String? = null,
+  val strategy: String? = null,
+  val basket: List<String> = emptyList(),
+  // NOT SENT BY /api/feed TODAY. Declared because /api/agents/{slug} does send
+  // them and the same type is reused there; on the feed they stay null, which
+  // renders as an em dash rather than as a confident zero.
   val handle: String? = null,
+  val handleVerified: Boolean = false,
   val owner: String? = null,
-  val equity: Double? = null,
-  val chg24: Double? = null,
-  val mode: String? = null,
-  val thesis: String? = null,
+)
+
+/**
+ * One mark on the equity curve. THE HEADLINE FIGURE COMES FROM HERE, not from
+ * an `equity` field on the agent — /api/feed does not send one, so reading it
+ * from there rendered an em dash forever.
+ */
+@Serializable
+data class EquityPoint(
+  @SerialName("cash_usdg") val cashUsdg: Double? = null,
+  @SerialName("vault_usdg") val vaultUsdg: Double? = null,
+  @SerialName("equity_usdg") val equityUsdg: Double? = null,
+  val at: String? = null,
 )
 
 @Serializable
@@ -184,32 +236,46 @@ data class Feed(
   val events: List<EventRow> = emptyList(),
   val trades: List<JsonElement> = emptyList(),
   val positions: List<Position> = emptyList(),
-  val equity: List<JsonElement> = emptyList(),
-)
+  val equity: List<EquityPoint> = emptyList(),
+) {
+  /** The newest mark, or null when the curve is empty. Null, never 0.0. */
+  val equityNow: Double? get() = equity.lastOrNull()?.equityUsdg
+}
 
 // ── markets ─────────────────────────────────────────────────────────────────
 
+/**
+ * Mirrors MarketToken in web/src/lib/market.ts, served by **`/api/market`**.
+ *
+ * There is no `/api/tokens` list route — only `/api/tokens/{address}` — so the
+ * markets screen was pointed at a 404. `halted` is deliberately nullable: the
+ * server's own comment says a halt "may only be asserted when the chain
+ * actually answered", and a client that defaults it to false republishes
+ * "trading normally" for a token nobody could read.
+ */
 @Serializable
 data class Token(
-  val id: String? = null,
   val symbol: String,
   val name: String? = null,
-  val address: String? = null,
-  val priceUsd: Double? = null,
-  val chg24: Double? = null,
-  val logo: String? = null,
   val kind: String? = null,
-  val stale: Boolean = false,
+  val address: String? = null,
+  val logo: String? = null,
+  val priceUsd: Double? = null,
+  val priceUpdatedAt: Long? = null,
+  val halted: Boolean? = null,
+  val chg24: Double? = null,
 )
 
 @Serializable
-data class TokensPage(val tokens: List<Token> = emptyList())
+data class TokensPage(val fetchedAt: Long? = null, val tokens: List<Token> = emptyList())
 
 @Serializable
 data class LeaderRow(
   val slug: String? = null,
   val name: String? = null,
   val handle: String? = null,
+  /** False by default: absent is not proven. */
+  val handleVerified: Boolean = false,
   val pnlBps: Int? = null,
   val trades: Int? = null,
   val why: String? = null,
@@ -218,8 +284,24 @@ data class LeaderRow(
 @Serializable
 data class Leaderboard(val agents: List<LeaderRow> = emptyList(), val why: String? = null)
 
+/**
+ * `/api/search` answers with ONE list of hits, not two typed lists.
+ *
+ * `kind` is "token" or "agent" and `href` is the web path (`/t/<addr>` or
+ * `/a/<slug>`), which the client turns into its own route. Decoding the wrong
+ * shape did not throw — `ignoreUnknownKeys` swallowed it — so search returned
+ * an empty list for every query and looked like "no results".
+ */
 @Serializable
-data class SearchResults(val agents: List<LeaderRow> = emptyList(), val tokens: List<Token> = emptyList())
+data class SearchHit(
+  val kind: String? = null,
+  val href: String? = null,
+  val title: String? = null,
+  val sub: String? = null,
+)
+
+@Serializable
+data class SearchResults(val hits: List<SearchHit> = emptyList())
 
 // ── settings ────────────────────────────────────────────────────────────────
 

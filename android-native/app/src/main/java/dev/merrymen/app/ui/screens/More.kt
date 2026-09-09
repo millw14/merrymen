@@ -44,6 +44,7 @@ import dev.merrymen.app.ui.Bps
 import dev.merrymen.app.ui.Empty
 import dev.merrymen.app.ui.LoadedBlock
 import dev.merrymen.app.ui.Money
+import dev.merrymen.app.ui.NameBlock
 import dev.merrymen.app.ui.Notice
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.SectionCard
@@ -68,7 +69,7 @@ fun MarketsScreen(nav: NavHostController) {
   val c = LocalContainer.current
   var state by remember { mutableStateOf<Loaded<TokensPage>>(Loaded.Loading) }
   val scope = rememberCoroutineScope()
-  suspend fun load() { state = c.api.tokens().toLoaded() }
+  suspend fun load() { state = c.api.market().toLoaded() }
   LaunchedEffect(Unit) { load() }
 
   Column(Modifier.fillMaxSize()) {
@@ -86,7 +87,9 @@ fun MarketsScreen(nav: NavHostController) {
                 Column {
                   Text(t.symbol, style = MaterialTheme.typography.titleMedium)
                   t.name?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                  if (t.stale) Text("price stale", style = MaterialTheme.typography.labelSmall)
+                  // HALT IS NULLABLE ON PURPOSE: the server may only assert it
+                  // when the chain answered, so unknown stays quiet.
+                  if (t.halted == true) Text("trading halted", style = MaterialTheme.typography.labelSmall)
                 }
                 Column(horizontalAlignment = Alignment.End) {
                   Money(t.priceUsd)
@@ -107,7 +110,7 @@ fun MarketsScreen(nav: NavHostController) {
 fun TokenDetailScreen(nav: NavHostController, address: String) {
   val c = LocalContainer.current
   var state by remember { mutableStateOf<Loaded<TokensPage>>(Loaded.Loading) }
-  LaunchedEffect(address) { state = c.api.tokens().toLoaded() }
+  LaunchedEffect(address) { state = c.api.market().toLoaded() }
 
   Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
     Header("Token", nav)
@@ -126,11 +129,10 @@ fun TokenDetailScreen(nav: NavHostController, address: String) {
             Text("24h", style = MaterialTheme.typography.bodySmall)
             Bps(t.chg24?.toInt())
           }
-          if (t.stale) {
-            Text(
-              "The feed for this token is stale. The mark is the last good price, not a live one.",
-              style = MaterialTheme.typography.bodySmall,
-            )
+          when (t.halted) {
+            true -> Text("Trading is halted on this token.", style = MaterialTheme.typography.bodySmall)
+            null -> Text("We could not read whether trading is halted.", style = MaterialTheme.typography.bodySmall)
+            false -> Unit
           }
           Text(address, style = MaterialTheme.typography.labelSmall)
         }
@@ -168,17 +170,23 @@ fun SearchScreen(nav: NavHostController) {
     )
     Spacer(Modifier.height(8.dp))
     LoadedBlock(state) { r ->
-      LazyColumn {
-        items(r.agents) { a ->
-          SectionCard(modifier = Modifier.clickable { a.slug?.let { nav.navigate(Routes.agent(it)) } }) {
-            Text(a.name ?: a.handle ?: "agent", style = MaterialTheme.typography.titleMedium)
-            Bps(a.pnlBps)
-          }
-        }
-        items(r.tokens) { t ->
-          SectionCard(modifier = Modifier.clickable { t.address?.let { nav.navigate(Routes.token(it)) } }) {
-            Text(t.symbol, style = MaterialTheme.typography.titleMedium)
-            Money(t.priceUsd)
+      if (r.hits.isEmpty()) {
+        Empty("Nothing matched", "No token or agent by that name.")
+      } else {
+        LazyColumn {
+          items(r.hits) { h ->
+            SectionCard(modifier = Modifier.clickable {
+              // The server hands back its own web path; turn it into our route
+              // rather than re-deriving the destination from the kind field.
+              val href = h.href.orEmpty()
+              when {
+                href.startsWith("/t/") -> nav.navigate(Routes.token(href.removePrefix("/t/")))
+                href.startsWith("/a/") -> nav.navigate(Routes.agent(href.removePrefix("/a/")))
+              }
+            }) {
+              Text(h.title ?: "", style = MaterialTheme.typography.titleMedium)
+              h.sub?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            }
           }
         }
       }
@@ -211,7 +219,11 @@ fun LeaderboardScreen(nav: NavHostController) {
             SectionCard(modifier = Modifier.clickable { a.slug?.let { nav.navigate(Routes.agent(it)) } }) {
               Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Column {
-                  Text(a.name ?: a.handle ?: "agent", style = MaterialTheme.typography.titleMedium)
+                  NameBlock(
+                    title = a.name ?: a.handle ?: "agent",
+                    owner = a.handle,
+                    verified = a.handleVerified,
+                  )
                   a.trades?.let { Text("$it trades", style = MaterialTheme.typography.bodySmall) }
                 }
                 Bps(a.pnlBps)

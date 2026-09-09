@@ -58,9 +58,9 @@ dependencies {
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.datastore.preferences)
-  implementation(libs.androidx.security.crypto)
+  // Custom Tabs, for opening an owner's X profile in the user's own browser
+  // rather than in the WebView reserved for signature ceremonies.
   implementation(libs.androidx.browser)
-  implementation(libs.androidx.work.runtime.ktx)
 
   implementation(platform(libs.compose.bom))
   implementation(libs.compose.ui)
@@ -72,11 +72,11 @@ dependencies {
 
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.serialization.json)
+  // No Retrofit: MerrymenApi is hand-rolled over OkHttp because the origin is a
+  // RUNTIME value (hosted / staging / a laptop) and Retrofit fixes its base URL
+  // when the instance is built.
   implementation(libs.okhttp)
   implementation(libs.okhttp.logging)
-  implementation(libs.retrofit)
-  implementation(libs.retrofit.kotlinx.serialization)
-  implementation(libs.coil.compose)
 
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)

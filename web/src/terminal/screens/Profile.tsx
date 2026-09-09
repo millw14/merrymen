@@ -1,7 +1,7 @@
 import { PerformanceChart } from "../DitherChart";
 import { Boundary } from "../Boundary";
 import { useState } from "react";
-import { Empty } from "../ui";
+import { Empty, NameBlock } from "../ui";
 import { ArrowLeft } from "lucide-react";
 import {
   ageOf,
@@ -49,11 +49,14 @@ export function Profile({
   const mentioned = [
     ...new Set(posts.flatMap((t) => (t.symbol ? [t.symbol] : []))),
   ];
-  const owner = agent.owner
-    ? agent.owner.length > 20
-      ? `${agent.owner.slice(0, 6)}…${agent.owner.slice(-4)}`
-      : agent.owner
-    : null;
+  /*
+   * THE HANDLE AND THE OWNER WERE THE SAME STRING, PRINTED TWICE.
+   *
+   * `owner` is populated from `agent.handle` (live.ts aliases the x_handle
+   * into it), so this header could render "@much_miller · by @much_miller".
+   * The slug is the agent's identity; the handle is its OWNER's X account.
+   * They are different facts and only one of them is a person.
+   */
   return (
     <div className="public-agent-page">
       <header className="public-agent-id">
@@ -68,10 +71,12 @@ export function Profile({
         <Face name={agent.name} slug={agent.slug} />
         <div>
           <h1>{agent.name}</h1>
-          <p>
-            @{agent.handle ?? agent.slug}
-            {owner ? ` · by ${owner}` : ""}
-          </p>
+          <p>@{agent.slug}</p>
+          <NameBlock
+            title=""
+            owner={agent.owner}
+            verified={agent.ownerVerified === true}
+          />
         </div>
       </header>
       <section className="public-performance" aria-label="Agent performance">

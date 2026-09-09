@@ -4,6 +4,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import okhttp3.FormBody
 import okhttp3.MediaType
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
@@ -11,7 +13,7 @@ import okhttp3.Response
 import java.io.IOException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-import kotlin.coroutines.suspendCoroutine
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 /**
  * EVERY ENDPOINT THE PRODUCT HAS, IN ONE PLACE.
@@ -54,14 +56,18 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
     coerceInputValues = false
   }
 
-  private val jsonType: MediaType = MediaType.get("application/json; charset=utf-8")
+  private val jsonType: MediaType = "application/json; charset=utf-8".toMediaType()
 
   // ── plumbing ──────────────────────────────────────────────────────────────
 
   private suspend fun url(path: String): String = session.originNow() + path
 
-  private suspend fun call(req: Request): ApiResult<String> = suspendCoroutine { cont ->
-    http.newCall(req).enqueue(object : okhttp3.Callback {
+  private suspend fun call(req: Request): ApiResult<String> = suspendCancellableCoroutine { cont ->
+    // CANCELLABLE, so a screen that goes away takes its request with it.
+    // suspendCoroutine leaked one in-flight call per abandoned LaunchedEffect.
+    val theCall = http.newCall(req)
+    cont.invokeOnCancellation { theCall.cancel() }
+    theCall.enqueue(object : okhttp3.Callback {
       override fun onFailure(call: okhttp3.Call, e: IOException) {
         cont.resume(ApiResult.Unreachable(e.message ?: e.javaClass.simpleName))
       }
@@ -69,7 +75,7 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
       override fun onResponse(call: okhttp3.Call, response: Response) {
         response.use { r ->
           val body = try {
-            r.body()?.string().orEmpty()
+            r.body?.string().orEmpty()
           } catch (e: IOException) {
             cont.resume(ApiResult.Unreachable(e.message ?: "read failed"))
             return
@@ -82,13 +88,12 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
             // Try JSON, fall back to the raw body, never invent a sentence.
             val msg = runCatching { json.decodeFromString<ApiError>(body) }
               .getOrNull()?.let { it.error ?: it.detail }
-              ?: body.ifBlank { "HTTP ${r.code()}" }
-            cont.resume(ApiResult.Refused(r.code(), msg))
+              ?: body.ifBlank { "HTTP ${r.code}" }
+            cont.resume(ApiResult.Refused(r.code, msg))
           }
         }
       }
     })
-    cont.context // keep the continuation referenced for clarity
   }
 
   private suspend inline fun <reified T> getJson(path: String): ApiResult<T> =
@@ -99,7 +104,7 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
     method: String,
     bodyJson: String?,
   ): ApiResult<T> {
-    val body: RequestBody = RequestBody.create(jsonType, bodyJson ?: "{}")
+    val body: RequestBody = (bodyJson ?: "{}").toRequestBody(jsonType)
     val req = Request.Builder().url(url(path)).method(method, body).build()
     return call(req).map { json.decodeFromString<T>(it) }
   }
@@ -109,20 +114,60 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
   /**
    * POST /api/gate — FORM DATA, not JSON, and it answers 303.
    *
-   * The whole deployment sits behind this while it is in beta: every /api/*
-   * path except this one returns 401 {"error":"gated"} without the cookie. The
+   * The whole deployment sits behind this while it is in beta: every API path
+   * except this one returns 401 {"error":"gated"} without the cookie. (Written
+   * without the glob on purpose — Kotlin nests block comments, so a literal
+   * slash-star inside a KDoc opens a comment that never closes and takes the
+   * whole file down with a syntax error 100 lines away.) The
    * password is checked with a constant-time compare and the cookie value IS
    * the password, so it is stored the way a password is.
    */
   suspend fun gate(password: String): ApiResult<Unit> {
     val form = FormBody.Builder().add("password", password).build()
     val req = Request.Builder().url(url("/api/gate")).post(form).build()
-    // A 303 is the SUCCESS shape here, and OkHttp follows redirects by default,
-    // so the cookie is captured by the jar on the way through.
-    return call(req).map { }
+    /*
+     * REDIRECTS OFF, BECAUSE BOTH ANSWERS ARE A 303.
+     *
+     * The route replies 303 to "/" when the password is right and 303 to
+     * "/gate?again=1" when it is wrong. Following either lands on a 200 HTML
+     * page, so a client that follows redirects reports SUCCESS for a wrong
+     * password — and then stores it, leaving every later request 401 "gated"
+     * with the UI insisting it saved. The destination is the only thing that
+     * distinguishes them, so we have to see it.
+     */
+    val once = http.newBuilder().followRedirects(false).build()
+    return suspendCancellableCoroutine { cont ->
+      val c = once.newCall(req)
+      cont.invokeOnCancellation { c.cancel() }
+      c.enqueue(object : okhttp3.Callback {
+        override fun onFailure(call: okhttp3.Call, e: IOException) {
+          cont.resume(ApiResult.Unreachable(e.message ?: "gate unreachable"))
+        }
+
+        override fun onResponse(call: okhttp3.Call, response: Response) {
+          response.use { r ->
+            val where = r.header("location").orEmpty()
+            cont.resume(
+              when {
+                where.startsWith("/gate") ->
+                  ApiResult.Refused(401, "that password was not accepted")
+                r.isRedirect || r.isSuccessful -> ApiResult.Ok(Unit)
+                else -> ApiResult.Refused(r.code, "HTTP ${r.code}")
+              },
+            )
+          }
+        }
+      })
+    }
   }
 
   // ── sign-in ───────────────────────────────────────────────────────────────
+
+  /** Who am I? The purpose-built read — "read-only, safe to poll". */
+  suspend fun session(): ApiResult<SessionView> = getJson("/api/auth/session")
+
+  /** Sign-out must invalidate the SERVER session, not just the local jar. */
+  suspend fun logout(): ApiResult<JsonElement> = sendJson("/api/auth/logout", "POST", null)
 
   suspend fun challenge(): ApiResult<Challenge> = getJson("/api/auth/challenge")
 
@@ -140,10 +185,12 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
   // ── read: the world ───────────────────────────────────────────────────────
 
   suspend fun theses(): ApiResult<ThesesPage> = getJson("/api/theses")
-  suspend fun tokens(): ApiResult<TokensPage> = getJson("/api/tokens")
-  suspend fun market(): ApiResult<JsonElement> = getJson("/api/market")
+  // MARKETS IS /api/market. There is no /api/tokens list route — only
+  // /api/tokens/{address} — so the old call was a 404 behind three screens.
+  suspend fun market(): ApiResult<TokensPage> = getJson("/api/market")
+  suspend fun token(address: String): ApiResult<JsonElement> = getJson("/api/tokens/" + address)
   suspend fun leaderboard(): ApiResult<Leaderboard> = getJson("/api/leaderboard")
-  suspend fun agents(): ApiResult<JsonElement> = getJson("/api/agents")
+  suspend fun agent(slug: String): ApiResult<JsonElement> = getJson("/api/agents/" + slug)
   suspend fun discoveries(): ApiResult<JsonElement> = getJson("/api/discoveries")
   suspend fun venue(): ApiResult<JsonElement> = getJson("/api/venue")
   suspend fun wall(): ApiResult<JsonElement> = getJson("/api/wall")

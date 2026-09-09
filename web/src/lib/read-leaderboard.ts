@@ -45,6 +45,14 @@ export interface LeaderRow {
   unrankedWhy: UnrankedWhy | null;
   name: string;
   handle: string | null;
+  /**
+   * Was that handle PROVEN, or merely typed?
+   *
+   * The handle alone is unverified — the owner typed it and nothing checked
+   * they own it — so it renders as plain text. Only this flag, set from a
+   * stored xProof, lets a surface turn it into a link to x.com.
+   */
+  handleVerified: boolean;
   /** Return over capital contributed, in basis points. Null = unknown. */
   pnlBps: number | null;
   /** Deepest peak-to-trough this epoch, in bps. Null = no history to measure. */
@@ -81,12 +89,14 @@ export async function readLeaderboard(): Promise<LeaderboardRead> {
       smart_account: string;
       name: string;
       x_handle: string | null;
+      x_verified: number | null;
       epoch: number;
     }[] = [];
     try {
       rows = (await db
         .prepare(
-          `SELECT smart_account, name, x_handle, COALESCE(epoch, 1) AS epoch
+          `SELECT smart_account, name, x_handle, COALESCE(x_verified, 0) AS x_verified,
+                  COALESCE(epoch, 1) AS epoch
              FROM agents
             WHERE mode = 'live' AND smart_account NOT LIKE 'rh:%'
             ORDER BY created_at DESC
@@ -197,6 +207,7 @@ export async function readLeaderboard(): Promise<LeaderboardRead> {
           unrankedWhy,
           name: String(r.name ?? "Agent"),
           handle: (r.x_handle ?? "").trim() || null,
+          handleVerified: Number(r.x_verified ?? 0) !== 0,
           pnlBps,
           maxDdBps,
           landed,

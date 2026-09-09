@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { coinPrice, lastLine, pctBps, type LiveAgent, type LiveToken } from "../live";
-import { Coin, Face, Empty } from "../ui";
+import { Coin, Face, Empty, NameBlock } from "../ui";
 
 export function Search({
   tokens,
@@ -54,7 +54,7 @@ export function Search({
         <button key={a.slug} type="button" className="tok" onClick={() => onProfile(a.slug)}>
           <Face name={a.name} slug={a.slug} />
           <div>
-            <strong>{a.handle ?? a.name}</strong>
+            <NameBlock title={a.name} owner={a.owner} verified={a.ownerVerified === true} />
             {a.last && <p className="meta">{lastLine(a.last)}</p>}
           </div>
           <span className={`px ${a.pnlBps == null ? "" : a.pnlBps >= 0 ? "up" : "down"}`}>{pctBps(a.pnlBps)}</span>

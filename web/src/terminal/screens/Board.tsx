@@ -10,7 +10,7 @@ import {
   type Thesis,
 } from "../live";
 import { strategyName } from "../strategy";
-import { Empty, ReadEmpty, Face, Stamp } from "../ui";
+import { Empty, ReadEmpty, Face, Stamp, NameBlock } from "../ui";
 import { unrankedLabel, unrankedShort } from "@/lib/rank-pnl";
 
 type WindowId = "24H" | "7D" | "30D" | "ALL";
@@ -139,7 +139,7 @@ function Rank({
         <Face name={a.name} slug={a.slug} />
         <div className="rank-who">
           <div className="rank-name">
-            <strong>{a.handle ?? a.name}</strong>
+            <NameBlock title={a.name} owner={a.owner} verified={a.ownerVerified === true} />
             {you && <i className="tag on">you</i>}
           </div>
           <div className="rank-meta">
