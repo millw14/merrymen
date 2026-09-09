@@ -5,6 +5,7 @@ import { ensureLinkCode, rotateLinkCode, type TelegramState } from "./state";
 const base: TelegramState = {
   offset: 0,
   linkCode: "",
+  linkedChats: [],
   linkRound: 0,
   ownerId: null,
   linkedAt: null,

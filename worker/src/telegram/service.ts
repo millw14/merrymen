@@ -392,7 +392,22 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       next.add(msg.chatId);
       patchSettingsFile({ telegramAllowlist: [...next] });
       state = rotateLinkCode(
-        { ...state, ownerId: state.ownerId ?? msg.fromId, linkedAt: state.linkedAt ?? now() },
+        {
+          ...state,
+          ownerId: state.ownerId ?? msg.fromId,
+          linkedAt: state.linkedAt ?? now(),
+          // AND IN THE ONE FILE NOBODY OVERWRITES. patchSettingsFile above
+          // wrote the chat into the child’s settings.json, which hosted the
+          // orchestrator replaces wholesale from the tenant store every 15
+          // seconds — so the link above, on its own, is undone before the
+          // owner can send a second command, and the code that bought it has
+          // already been consumed by this very rotation. This file is
+          // child-owned; the parent reads it and unions these ids back into
+          // the stored allowlist, which is what makes the link durable.
+          linkedChats: state.linkedChats.includes(msg.chatId)
+            ? state.linkedChats
+            : [...state.linkedChats, msg.chatId],
+        },
         token,
       );
       stateRef.set(state);

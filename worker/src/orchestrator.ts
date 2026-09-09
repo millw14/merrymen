@@ -62,6 +62,7 @@ import { replayLines, scoreDecision, type Observation, type PricedDecision } fro
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
+import { TELEGRAM_STATE_DDL, publishTenantTelegram } from "./telegram-store";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
 import { makeNewsDesk, type NewsDesk } from "./research-pass";
@@ -404,6 +405,89 @@ function heartbeatAt(tenant: string): number | null {
     return typeof hb.at === "number" ? hb.at : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * A CHILD’S TELEGRAM RUNTIME STATE, WHICH ONLY THIS PROCESS CAN SEE.
+
+ * The child mints its link code on boot and writes it into its own home. The
+ * dashboard read `merrymenHome()/telegram.json` on the WEB container, where
+ * nothing has ever written one — so `linkCode` was null for every hosted tenant
+ * and the Telegram panel rendered a placeholder where a six-character code
+ * should be. Two testers stopped there: "I’m stuck at this point, no code from
+ * /link".
+ *
+ * The orchestrator is the only process that can see both a child’s home and the
+ * shared database — children have DATABASE_URL stripped on purpose — so it
+ * ferries, exactly as it does for the ledger and for command results.
+ */
+function readChildTelegram(tenant: string): {
+  linkCode: string | null;
+  ownerId: number | null;
+  linkedAt: number | null;
+  linkedChats: number[];
+} | null {
+  try {
+    const raw = readFileSync(path.join(childHome(tenant), "telegram.json"), "utf8").replace(/^﻿/, "");
+    const t = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      linkCode: typeof t.linkCode === "string" && t.linkCode ? t.linkCode : null,
+      ownerId: typeof t.ownerId === "number" ? t.ownerId : null,
+      linkedAt: typeof t.linkedAt === "number" ? t.linkedAt : null,
+      linkedChats: Array.isArray(t.linkedChats)
+        ? (t.linkedChats as unknown[]).filter((c): c is number => typeof c === "number")
+        : [],
+    };
+  } catch {
+    // No file yet (no bot token set, or the child has not booted) is not an
+    // error and must not be published as an empty code — that would overwrite a
+    // real one during a restart. The caller skips instead.
+    return null;
+  }
+}
+
+/**
+ * Publish the code, and PROMOTE ANY CHAT THE OWNER LINKED into their stored
+ * allowlist.
+ *
+ * The second half is what makes a hosted /link stick. The child authorizes the
+ * chat by patching its OWN settings.json — and `writeSettingsForChild` replaces
+ * that file wholesale from the tenant store on the next pass, fifteen seconds
+ * later, with the link code already spent by the rotation. So the tester linked,
+ * it worked, and it stopped working before they could use it.
+ *
+ * A READ-MODIFY-WRITE, AND ONLY WHEN SOMETHING IS ACTUALLY NEW. `put` replaces
+ * the whole sealed blob and the web is its other writer, so an unconditional
+ * write on a 15-second loop would race a tenant typing on the settings page and
+ * silently discard their save. Guarded this way the write happens once, in the
+ * seconds after a successful link, and never again — and removing a chat from
+ * the dashboard still works, because the child only ever reports chats it has
+ * just linked, and a code cannot be reused once it has rotated.
+ */
+async function publishChildTelegram(tenant: `0x${string}`, shared: Db): Promise<void> {
+  const tg = readChildTelegram(tenant);
+  if (!tg) return;
+  try {
+    await publishTenantTelegram(shared, tenant, {
+      linkCode: tg.linkCode,
+      ownerId: tg.ownerId,
+      linkedAt: tg.linkedAt,
+    });
+  } catch (e) {
+    log(`${tenant}: could not publish telegram state — ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (tg.linkedChats.length === 0) return;
+  try {
+    const stored = (await getSettingsStore().get(tenant)) ?? {};
+    const have = new Set(Array.isArray(stored.telegramAllowlist) ? stored.telegramAllowlist : []);
+    const missing = tg.linkedChats.filter((c) => !have.has(c));
+    if (missing.length === 0) return;
+    for (const c of missing) have.add(c);
+    await getSettingsStore().put(tenant, { ...stored, telegramAllowlist: [...have] });
+    log(`${tenant}: telegram link promoted — ${missing.length} chat(s) added to the stored allowlist`);
+  } catch (e) {
+    log(`${tenant}: could not promote telegram link — ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -1986,6 +2070,10 @@ async function mirrorLedgers(): Promise<void> {
     // clock, so a fresh deploy heals itself.
     await applyLedgerSchema(shared);
     await shared.exec(translateSchema(MIRROR_STATE_DDL));
+    // Same clock, same reasoning: the one process that can reach this database
+    // creates what it writes, so a fresh deploy heals itself rather than
+    // needing DDL run by hand.
+    await shared.exec(translateSchema(TELEGRAM_STATE_DDL));
   } catch (e) {
     log(`ledger mirror: shared db unavailable — ${e instanceof Error ? e.message : String(e)}`);
     return;
@@ -2020,6 +2108,10 @@ async function mirrorLedgers(): Promise<void> {
     if (!handle) continue;
     try {
       const r = await mirrorTenant({ tenant, child: handle.db, shared });
+      // The link code and any chat the owner just linked. Not part of the
+      // ledger — it is a file, not a table — but it needs the same ferry and
+      // the same lease: only the replica that owns this child may speak for it.
+      await publishChildTelegram(tenant as `0x${string}`, shared);
       // Read while the handle is open, on the mirror's clock. The news desk
       // asks about what the fleet holds before what it merely may buy, and this
       // is the only place the orchestrator can see the difference.

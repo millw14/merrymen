@@ -49,8 +49,26 @@ export interface TelegramState {
   /** Increments on each successful /link so the code rotates. */
   linkRound: number;
   ownerId: number | null;
-  /** Unix seconds of the FIRST successful /link — the relationship's day zero. */
+  /** Unix seconds of the FIRST successful /link — the relationship’s day zero. */
   linkedAt: number | null;
+  /**
+   * EVERY CHAT A SUCCESSFUL /link HAS AUTHORIZED, recorded here as well as in
+   * settings, because hosted the settings copy does not survive.
+   *
+   * The link writes the chat id into the child’s own settings.json via
+   * patchSettingsFile, and hosted the orchestrator rewrites that file wholesale
+   * from the tenant store every 15 seconds — so a tester linked successfully and
+   * was de-authorized before they could send a second command, with the code
+   * already consumed by the rotation. This file is child-owned and never
+   * overwritten from above, so it is the durable record; the orchestrator reads
+   * it and unions these ids back into the tenant’s stored allowlist.
+   *
+   * NOT AN AUTHORIZATION INPUT ON ITS OWN. service.ts still authorizes from
+   * `cfg.telegramAllowlist` and nothing else; this is the list the parent
+   * promotes INTO that setting, which keeps the dashboard the one place a chat
+   * can be removed.
+   */
+  linkedChats: number[];
   /** Owner messages handled — feeds the relationship stage. */
   messageCount: number;
   /** Highest trades.id already pushed to the owner chat. -1 = not initialized. */
@@ -78,6 +96,7 @@ const DEFAULT: TelegramState = {
   linkRound: 0,
   ownerId: null,
   linkedAt: null,
+  linkedChats: [],
   messageCount: 0,
   lastNotifiedTradeId: -1,
   lastTradeDigestAt: 0,
@@ -100,6 +119,9 @@ export function loadTelegramState(): TelegramState {
       linkRound: typeof s.linkRound === "number" ? s.linkRound : 0,
       ownerId: typeof s.ownerId === "number" ? s.ownerId : null,
       linkedAt: typeof s.linkedAt === "number" ? s.linkedAt : null,
+      linkedChats: Array.isArray(s.linkedChats)
+        ? (s.linkedChats as unknown[]).filter((c): c is number => typeof c === "number")
+        : [],
       messageCount: typeof s.messageCount === "number" ? s.messageCount : 0,
       lastNotifiedTradeId: typeof s.lastNotifiedTradeId === "number" ? s.lastNotifiedTradeId : -1,
       lastTradeDigestAt: typeof s.lastTradeDigestAt === "number" ? s.lastTradeDigestAt : 0,
