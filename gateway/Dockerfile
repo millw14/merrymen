@@ -1,6 +1,22 @@
 # Merrymen AI gateway — a long-lived Node HTTP server (NOT a serverless function),
 # so it needs a host that runs a persistent process: Railway, Render, Fly, a VPS.
 # Vercel's default model won't run this. Build: `docker build -t merrymen-gateway .`
+#
+# THIS IMAGE IS FOUND BY POSITION, NOT BY NAME, and railway.json names no
+# dockerfilePath on purpose. Railway looks for a Dockerfile at the root of the
+# SOURCE directory, which is correct in both of this service's deploy modes: a
+# `railway up` run from gateway/ (source root = gateway/) and a repo build with
+# Root Directory = /gateway. A relative "Dockerfile" was unambiguous for the
+# upload and a coin-flip for the repo build — resolved against the REPO root it
+# finds ./Dockerfile, the Next.js dashboard image, which would build and start
+# and serve the wrong application on the domain packages/core, the CLI provider
+# list and the website all point at. Naming no path cannot pick the wrong one.
+#
+# The matching trap is that Railway's config file does NOT follow the root
+# directory: with none set explicitly it reads the REPO-ROOT railway.json, which
+# is the web app's and carries no healthcheckPath — so the /healthz gate below
+# would vanish silently and a gateway that boots broken would deploy green. The
+# service therefore pins railwayConfigFile to /gateway/railway.json.
 FROM node:22-alpine
 
 WORKDIR /app
