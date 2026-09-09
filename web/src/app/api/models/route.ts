@@ -70,11 +70,39 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: `unknown provider: ${providerId}` }, { status: 400 });
   }
 
+  /**
+   * THE TENANT'S KEY FIRST, THEN THE HOUSE'S — the same order as everything else.
+   *
+   * THE BUG THIS FIXES, reported as "Could not load AI models. Check your
+   * provider and key, or enter a model name" showing for somebody whose chat
+   * was working fine. It read ONLY the tenant's stored settings, while the rest
+   * of the product resolves a key as `str(file, env)` — the tenant's own key if
+   * they brought one, the house key otherwise (settings.ts:272). The house
+   * pays for inference and GROQ_API_KEY is set on this service, so a tenant who
+   * had never pasted a key of their own — which is nearly all of them, because
+   * the house key is what makes chat work — got no Authorization header at all,
+   * a 401 from the provider, and a message telling them to check the key that
+   * was working.
+   *
+   * `HOUSE_KEY_FIELDS` no longer strips these: settings.ts records that the
+   * house key became the DEFAULT and a tenant's own key OVERRIDES it, precisely
+   * so somebody can bring their own quota. This route was the one place that
+   * never learned the second half.
+   *
+   * AND THE HOUSE KEY NEVER GOES TO A CALLER-INFLUENCED URL. For a fixed-base
+   * provider the destination is a constant in this repo, so there is nothing to
+   * aim it at. `custom` is excluded outright: its base URL is configuration,
+   * and pairing OUR credential with an address somebody else chose is the
+   * exfiltration oracle the guard below already exists to prevent. A custom
+   * provider still uses the tenant's own stored key with the tenant's own
+   * stored URL, exactly as before.
+   */
   let apiKey = body.apiKey || "";
   if (!apiKey) {
-    if (prov.id === "groq") apiKey = saved.groqApiKey ?? "";
-    else if (prov.id === "anthropic") apiKey = saved.anthropicApiKey ?? "";
-    else apiKey = saved.llmApiKey ?? "";
+    if (prov.id === "groq") apiKey = saved.groqApiKey || process.env.GROQ_API_KEY || "";
+    else if (prov.id === "anthropic") apiKey = saved.anthropicApiKey || process.env.ANTHROPIC_API_KEY || "";
+    else if (prov.id === "custom") apiKey = saved.llmApiKey ?? "";
+    else apiKey = saved.llmApiKey || process.env.MERRYMEN_LLM_API_KEY || "";
   }
 
   let baseUrl = prov.baseUrl;

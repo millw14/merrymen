@@ -530,7 +530,25 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </Field>
           </div>
 
-          {modelsError && <p role="status" className="mm-danger">Could not load AI models. Check your provider and key, or enter a model name.</p>}
+          {/* THE REASON WAS ALREADY IN HAND AND THIS THREW IT AWAY.
+              `setModelsError(j.error ?? …)` captures what the route actually
+              said — "provider returned 401", "provider returned 502", a
+              timeout, an unknown provider — and the render replaced all of it
+              with one sentence telling the reader to check a key. Two testers
+              reported seeing it "all the time, but everything is set", and for
+              one of them everything WAS set: the route was not reading the
+              house key, so the provider refused a request that carried no key
+              at all. Blaming their key for our omission is the same shape as
+              telling somebody the market is closed when it was our read that
+              failed. */}
+          {modelsError && (
+            <p role="status" className="mm-danger">
+              Could not load the model list — {modelsError}.{" "}
+              {/^provider returned 40[13]/.test(modelsError)
+                ? "The provider refused the key. Check it, or type a model name below and save — the list is a convenience, not a requirement."
+                : "You can type a model name below and save; the list is a convenience, not a requirement."}
+            </p>
+          )}
           <div className="mm-section">Trading basket</div>
           <div className="mm-chips">
             {/* Owner-added tokens sit alongside the registry ones. Selecting is
