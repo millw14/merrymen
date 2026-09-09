@@ -534,13 +534,52 @@ let inFlight: Promise<Shared> | null = null;
 let last: { at: number; shared: Shared } | null = null;
 const WHOLE_MS = 120_000;
 const DEGRADED_MS = 10_000;
+/**
+ * How many degraded reads in a row. Resets on the first whole one.
+ *
+ * THE SHORT TTL WAS AN AMPLIFIER THAT ARMED ITSELF DURING THE OUTAGE. Ten
+ * seconds against a hundred and twenty is a twelvefold increase in how often
+ * `build()` runs, and `build()` is eleven unbatched requests at the same keyless
+ * endpoint the worker fleet reads. `degraded` is true precisely when the chain
+ * enrichment failed — so the moment the endpoint began refusing, this cache
+ * went from ~5.5 requests a minute to ~66, into the refusals.
+ *
+ * That is the same shape as the retry storm found in the worker: a failure
+ * causing more requests to the thing that failed. It is worth naming as one,
+ * because the fix is not to remove the fast retry — the reasoning for it above
+ * is sound, an enrichment wave really does recover in seconds and a stale
+ * degraded render really did claim for two and a half minutes that coins had
+ * published nothing. The fix is that the fast retry may happen ONCE.
+ */
+let degradedRuns = 0;
+
+/**
+ * How long to keep the current answer.
+ *
+ * A whole read lives its full two minutes. The FIRST degraded read keeps the
+ * ten-second retry that was the point of this, and each further one doubles,
+ * capped at twice the whole-read life — so a genuine blink still recovers in
+ * seconds and a sustained refusal costs less traffic than a healthy fleet does,
+ * not twelve times more.
+ *
+ * JITTERED, because `web` may run more than one replica and every replica's
+ * memo would otherwise expire together and re-fire together — which is how a
+ * cache becomes a thundering herd.
+ */
+function degradedTtl(runs: number): number {
+  const window = Math.min(WHOLE_MS * 2, DEGRADED_MS * 2 ** Math.max(0, runs - 1));
+  return runs <= 1 ? DEGRADED_MS : Math.round(window * (0.75 + Math.random() * 0.5));
+}
 
 function sharedReadFull(): Promise<Shared> {
-  const ttl = last?.shared.payload.degraded ? DEGRADED_MS : WHOLE_MS;
+  const ttl = last?.shared.payload.degraded ? degradedTtl(degradedRuns) : WHOLE_MS;
   if (last && Date.now() - last.at < ttl) return Promise.resolve(last.shared);
   if (inFlight) return inFlight;
   inFlight = build()
     .then((p) => {
+      // One whole read clears the ladder completely. A run of bad minutes must
+      // not leave the cache backing off into a healthy endpoint.
+      degradedRuns = p.payload.degraded ? degradedRuns + 1 : 0;
       last = { at: Date.now(), shared: p };
       return p;
     })

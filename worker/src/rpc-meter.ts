@@ -22,6 +22,17 @@
  */
 import { http, type Transport } from "viem";
 import { classifyRpcError, type RpcErrorKind } from "./rpc-error";
+import { merrymenHome } from "./home";
+import { clearCooldown, publishCooldown, readCooldown } from "./rpc-cooldown";
+import {
+  DEFAULT_LIMITS,
+  adoptShared,
+  begin,
+  decide,
+  end,
+  freshState,
+  shouldPublish,
+} from "./rpc-governor";
 
 interface MethodStat {
   calls: number;
@@ -149,8 +160,33 @@ const BATCH_WAIT_MS = 20;
  * alongside somebody else's read.
  */
 export function chainRead(url: string | undefined, label = "read"): Transport {
-  return metered(
+  return governed(
+    metered(
     http(url, {
+      /**
+       * ── THE AMPLIFIER, TURNED OFF ──────────────────────────────────────
+       *
+       * viem's `buildRequest` retries on status 429 — `shouldRetry` returns
+       * true for it (utils/buildRequest.js:141) — and this options object never
+       * set `retryCount`, so its default of 3 applied to every refusal. One
+       * refused read became FOUR requests, issued 150ms, 300ms and 600ms after
+       * the endpoint said stop, into the limiter that had just said it.
+       *
+       * The arithmetic is legible in production: refused calls averaged 1624ms
+       * against 210ms for successful ones, which is one request plus that exact
+       * ladder of waits.
+       *
+       * WHY ZERO RATHER THAN A SMALLER NUMBER. The http transport exposes
+       * `retryCount` and `retryDelay` and NOT `shouldRetry`, so there is no
+       * setting that keeps a retry for a network blip and drops it for a 429 —
+       * and retrying a rate limit is the one thing that must not happen here.
+       * The policy moves to rpc-governor.ts, which can tell the two apart, and
+       * `getLogsAdaptive` keeps its own retry for the range walk it owns.
+       *
+       * This does not make the fleet ask for less. It stops it asking FOUR
+       * TIMES for the thing it was already told it could not have.
+       */
+      retryCount: 0,
       batch: { wait: BATCH_WAIT_MS, batchSize: BATCH_SIZE },
       // ── A REFUSED BATCH MUST STILL SAY IT WAS REFUSED ──────────────────
       //
@@ -175,15 +211,138 @@ export function chainRead(url: string | undefined, label = "read"): Transport {
       // itself a moment later.
       onFetchResponse(response: Response) {
         if (!response.ok) {
-          throw new Error(
+          /**
+           * ── AND THE HEADERS COME WITH IT, which they did not ──────────────
+           *
+           * This hook threw a PLAIN Error. viem re-wrapped it as an
+           * HttpRequestError carrying no `status` and no `headers`, with two
+           * consequences that pulled in opposite directions and were both bad:
+           *
+           *   `shouldRetry` fell through to its unconditional `return true`, so
+           *   the refusal was retried on the catch-all rather than on the 429
+           *   branch — retried harder than a recognised rate limit would have
+           *   been; and
+           *
+           *   `classifyRpcError`'s `headerRetryAfter` had nothing to read, so
+           *   NOTHING IN THIS SYSTEM HAS EVER HONOURED Retry-After. The
+           *   endpoint has been telling us when to come back and the answer was
+           *   discarded at this line.
+           *
+           * The status was always right here, before viem touched the body.
+           * Carrying it and the headers onto the error costs nothing and makes
+           * the endpoint's own back-pressure usable: rpc-governor.ts takes
+           * `retryAfterMs` as a floor on its backoff and could never receive one.
+           */
+          const e = new Error(
             `HTTP request failed. Status: ${response.status}` +
               (response.status === 429 ? " Too Many Requests" : ""),
-          );
+          ) as Error & { status?: number; headers?: Headers };
+          e.status = response.status;
+          e.headers = response.headers;
+          throw e;
         }
       },
     }),
     label,
+    ),
   );
+}
+
+/**
+ * THE GOVERNOR, WRAPPED ROUND THE METER.
+ *
+ * Outside `metered` on purpose, so the meter still counts exactly what left this
+ * process and a request the breaker refuses is NOT counted as a call we made —
+ * it is a call we declined to make, and conflating the two would hide whether
+ * the breaker is working.
+ *
+ * The decisions are rpc-governor.ts (pure); the clock, the randomness and the
+ * shared file are here.
+ */
+function governed(transport: Transport): Transport {
+  return ((opts) => {
+    const inner = transport(opts);
+    return {
+      ...inner,
+      async request(args: { method: string; params?: unknown }, reqOpts?: unknown) {
+        await admit();
+        let refused = false;
+        let retryAfterMs: number | null = null;
+        try {
+          return await (inner.request as (a: unknown, o?: unknown) => Promise<unknown>)(args, reqOpts);
+        } catch (e) {
+          const v = classifyRpcError(e);
+          refused = v.kind === "rate-limited";
+          retryAfterMs = v.retryAfterMs ?? null;
+          throw e;
+        } finally {
+          state = end(state, Date.now(), LIMITS, { refused, retryAfterMs }, Math.random());
+          if (refused) publishIfNew();
+        }
+      },
+    };
+  }) as Transport;
+}
+
+let state = freshState(Date.now());
+const LIMITS = DEFAULT_LIMITS;
+/** Last shared value read, and when — the file is polled, not watched. */
+let sharedSeen: { until: number | null; at: number } = { until: null, at: 0 };
+/** How stale a read of the shared file may be. A breaker measured in seconds does not need better. */
+const SHARED_POLL_MS = 250;
+
+function shared(now: number): number | null {
+  if (now - sharedSeen.at < SHARED_POLL_MS) return sharedSeen.until;
+  sharedSeen = { until: readCooldown(merrymenHome()), at: now };
+  return sharedSeen.until;
+}
+
+function publishIfNew(): void {
+  const s = shared(Date.now());
+  if (!shouldPublish(state, s)) return;
+  publishCooldown(merrymenHome(), state.coolUntil, process.env.MERRYMEN_HOME ?? "worker");
+  sharedSeen = { until: state.coolUntil, at: Date.now() };
+}
+
+/**
+ * Hold, or refuse, until this request may go.
+ *
+ * A REFUSAL THROWS RATHER THAN QUEUEING, and the distinction is the fix. "You
+ * are going too fast" is a wait; "the endpoint told us to stop" is not
+ * something waiting fixes, and holding the request would only reassemble the
+ * burst a moment later. The error is shaped so `classifyRpcError` files it as
+ * rate-limited, because that is what it is — and every read path above already
+ * turns a failed read into `unread`, which is the honest rendering: we did not
+ * ask, so we do not know. It must never become a zero.
+ */
+async function admit(): Promise<void> {
+  for (;;) {
+    const now = Date.now();
+    state = adoptShared(state, shared(now), now, LIMITS);
+    const d = decide(state, now, LIMITS);
+    if (d.act === "send") {
+      state = begin(state, now, LIMITS);
+      return;
+    }
+    if (d.act === "refuse") {
+      throw new Error(
+        `Too Many Requests — not sent: the endpoint refused this process ${state.strikes} time(s) in a row, ` +
+          `holding off ${Math.ceil(d.ms / 1000)}s. Asking again now is what caused it.`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, d.ms));
+  }
+}
+
+/** Test seam: forget the governor's state between cases. */
+export function resetGovernorForTest(): void {
+  state = freshState(Date.now());
+  sharedSeen = { until: null, at: 0 };
+  // AND THE FILE, because the shared cooldown outlives the process. Forgetting
+  // it here is what makes a test measure the transport rather than the previous
+  // case's warning to the rest of the fleet — and finding that out is how the
+  // cap in `adoptShared` came to exist.
+  clearCooldown(merrymenHome());
 }
 
 /** One line per meter: totals, peak concurrency, and the busiest methods. */

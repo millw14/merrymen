@@ -82,9 +82,19 @@ describe("A2 — the exit handler only cleans up its own child", () => {
     // And the unconditional form must be gone from the exit path.
     const exitAt = src.indexOf('proc.on("exit"');
     const guardAt = src.indexOf("if (children.get(tenant) === child)", exitAt);
-    const respawnAt = src.indexOf("!children.has(tenant)", exitAt);
     assert.ok(exitAt > 0 && guardAt > exitAt, "the guard must be inside the exit handler");
-    assert.ok(guardAt < respawnAt, "and must run before the respawn check");
+    // THE RESPAWN MOVED, THE PROPERTY DID NOT. Both restart paths now go
+    // through `scheduleRestart` — the watchdog used to spawn on the line after
+    // its SIGKILL with no delay and no ceiling — so the check that a
+    // replacement is not spawned over a live child lives there, not below this
+    // handler. Asserted where it is rather than by position, so relocating it
+    // again fails loudly instead of silently finding nothing.
+    const policy = src.slice(src.indexOf("function scheduleRestart("), src.indexOf("async function spawnChild("));
+    assert.match(policy, /!stopping && !children\.has\(tenant\)/, "no respawn over a live child");
+    assert.ok(
+      !/proc\.on\("exit"[\s\S]{0,600}spawnChild\(/.test(src),
+      "the exit handler must not spawn directly — it goes through the one policy",
+    );
   });
 
   it("the watchdog logs the threshold it actually applied", () => {
@@ -246,7 +256,13 @@ describe("A5 — the meter is a seam, not a policy", () => {
     // Two facts, asserted separately, because the call is laid out over
     // several lines and a single regex over it would break on formatting.
     const body = meter.slice(meter.indexOf("export function chainRead("));
-    assert.match(body, /return metered\(/, "chainRead must still be metered");
+    assert.match(body, /metered\(/, "chainRead must still be metered");
+    // AND GOVERNED, which is the layer added after this test was written. The
+    // batching below cut what one tick costs; it did nothing about a refusal
+    // producing four more requests, which is what kept the fleet collapsing at
+    // a tenth of the endpoint's measured capacity. See rpc-governor.ts.
+    assert.match(body, /return governed\(/, "chainRead must be governed as well as metered");
+    assert.match(body, /retryCount: 0/, "and viem must not retry a 429 underneath it");
     assert.match(body, /http\(url, \{/, "…around an http transport built from the url");
     assert.match(body, /batch: \{ wait: BATCH_WAIT_MS, batchSize: BATCH_SIZE \}/, "…that batches");
     // AND the refusal stays legible. Batching cost the fleet its own error
@@ -273,10 +289,31 @@ describe("A5 — the meter is a seam, not a policy", () => {
   });
 
   it("changes no behaviour: it forwards, counts, and rethrows", () => {
+    // SCOPED TO `metered` ITSELF, which is where this property always lived.
+    // It used to be asserted over the whole file, which was the same thing
+    // while the file held nothing but the meter. It no longer does: `governed`
+    // is in there now and it delays and refuses ON PURPOSE — that is the fix.
+    // Reading the file as a whole would either fail on the governor or, if
+    // loosened, stop noticing a delay creeping into the meter. So the meter is
+    // read on its own, and the governor is asserted separately below.
     const code = strip(at("./rpc-meter.ts"));
-    assert.match(code, /return await \(inner\.request/, "the result must be forwarded untouched");
-    assert.match(code, /throw e;/, "the error must be rethrown, not swallowed");
-    assert.doesNotMatch(code, /setTimeout|sleep|await new Promise/, "a meter must not delay anything");
+    const meter = code.slice(code.indexOf("export function metered("), code.indexOf("const BATCH_SIZE"));
+    assert.match(meter, /return await \(inner\.request/, "the result must be forwarded untouched");
+    assert.match(meter, /throw e;/, "the error must be rethrown, not swallowed");
+    assert.doesNotMatch(meter, /setTimeout|sleep|await new Promise/, "a meter must not delay anything");
+  });
+
+  it("AND THE GOVERNOR DELAYS, WHICH IS THE POINT — but still never alters a result", () => {
+    // The meter's rule was "a transport that changed an outcome would be
+    // measuring itself". The governor changes WHEN a request is made and
+    // whether a refusal is repeated. It must not change which call is made or
+    // what it returns, or the fleet would be reading a limiter's opinion of the
+    // chain instead of the chain.
+    const code = strip(at("./rpc-meter.ts"));
+    const gov = code.slice(code.indexOf("function governed("));
+    assert.match(gov, /return await \(inner\.request/, "the result is still forwarded untouched");
+    assert.match(gov, /throw e;/, "and the error is still rethrown");
+    assert.ok(!/catch \{\s*return /.test(gov), "no failure may be turned into a value");
   });
 });
 

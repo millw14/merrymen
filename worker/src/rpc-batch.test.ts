@@ -22,7 +22,7 @@ import { readFileSync } from "node:fs";
 import { createPublicClient } from "viem";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
-import { chainRead } from "./rpc-meter";
+import { chainRead, resetGovernorForTest } from "./rpc-meter";
 
 const FAKE = "http://127.0.0.1:9/rpc";
 
@@ -64,7 +64,14 @@ function stubFetch(): void {
   }) as typeof globalThis.fetch;
 }
 
-beforeEach(stubFetch);
+beforeEach(() => {
+  stubFetch();
+  // THE GOVERNOR IS PROCESS-WIDE, which is right in production — one breaker
+  // per child, not one per client — and means a case that simulates a 429
+  // leaves the breaker open for the next one. Reset between cases so each
+  // tests the transport rather than the previous test's cooldown.
+  resetGovernorForTest();
+});
 afterEach(() => {
   globalThis.fetch = realFetch;
 });

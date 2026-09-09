@@ -141,6 +141,64 @@ const CHILD_MAX_OLD_SPACE_MB = 384;
 /** Give up restarting a child that keeps dying right after start. */
 const MAX_RESTARTS = 8;
 
+/**
+ * HOW LONG A GIVEN-UP TENANT STAYS GIVEN UP.
+ *
+ * `reconcile()` runs every 15 seconds and respawns anything in the roster that
+ * is not currently running — with `restarts` defaulting to 0. So the exit
+ * handler's ladder and its MAX_RESTARTS ceiling were both undone on a
+ * fifteen-second timer: a tenant that "kept dying right after start" was
+ * restarted a quarter of a minute later with a clean slate, climbed the ladder
+ * again, gave up again, and was picked up again. Roughly nine restarts every
+ * two minutes, for ever.
+ *
+ * That is expensive in exactly the currency the fleet is short of. Each restart
+ * re-pays a cold arm — 28 sequential reads including a twenty-one-span,
+ * 200,000-block getLogs walk — and throws away the in-process caches that exist
+ * to stop million-block sweeps repeating.
+ *
+ * FIVE MINUTES, NOT FOR EVER. A tenant whose child cannot stay up is a real
+ * problem that a human has to see, and a supervisor that stops trying entirely
+ * turns a crash loop into a silent outage for that owner. The cool-off makes
+ * the loop cheap; it does not make it permanent.
+ */
+const GIVE_UP_COOLOFF_MS = 5 * 60_000;
+
+/**
+ * Tenants the exit handler has given up on, and when they may be tried again.
+ *
+ * Deliberately NOT keyed to a child: the point is that it survives the child's
+ * death, which is the only reason `reconcile` could see a clean slate.
+ */
+const gaveUpUntil = new Map<string, { until: number; restarts: number }>();
+
+/**
+ * ONE RESTART POLICY, because there were two and only one of them had a brake.
+ *
+ * The exit handler backed off and capped. The watchdog — the path a
+ * rate-limited child actually takes, because a tick stuck retrying stops
+ * beating — called `spawnChild` on the same line as the SIGKILL, with no delay
+ * and no ceiling. So the failure mode the fleet is in is the one that got the
+ * un-braked restart, and every one of those restarts is another cold arm
+ * against the endpoint that caused it.
+ */
+function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string): void {
+  if (stopping) return;
+  if (restarts > MAX_RESTARTS) {
+    gaveUpUntil.set(tenant, { until: Date.now() + GIVE_UP_COOLOFF_MS, restarts });
+    log(
+      `${tenant} keeps dying right after start (${why}) — standing down for ` +
+        `${Math.round(GIVE_UP_COOLOFF_MS / 60_000)}m rather than letting reconcile pick it straight back up`,
+    );
+    return;
+  }
+  const delay = Math.min(30_000, 1_000 * 2 ** Math.min(restarts, 5));
+  log(`${tenant} rallying again in ${Math.round(delay / 1000)}s (restart #${restarts}, ${why})`);
+  setTimeout(() => {
+    if (!stopping && !children.has(tenant)) void spawnChild(tenant, restarts);
+  }, delay);
+}
+
 /** The worker entrypoint each child runs — the same main() the CLI supervises. */
 const WORKER_ENTRY = path.join(fileURLToPath(new URL(".", import.meta.url)), "index.ts");
 /** Repo root (…/worker/src → up two), the cwd children need to resolve tsx + deps. */
@@ -214,6 +272,22 @@ export function childEnv(tenant: string): NodeJS.ProcessEnv {
   for (const k of CHILD_SECRET_STRIP) delete env[k];
   env.MERRYMEN_HOSTED = "1";
   env.MERRYMEN_HOME = childHome(tenant);
+  /**
+   * WHERE THE CHILDREN AGREE WITH EACH OTHER.
+   *
+   * MERRYMEN_HOME above is deliberately private per tenant — that isolation is
+   * the point of it. But the RPC circuit breaker is a fact about the ENDPOINT,
+   * not about a tenant: every child in this container reads one endpoint
+   * through one egress IP, so a refusal one of them earns is true for all
+   * fifteen. Held per-process it would be fifteen breakers that can each only
+   * learn by being refused, and each of those refusals is load — which is the
+   * thing causing the refusals.
+   *
+   * Passed explicitly rather than derived by walking up from MERRYMEN_HOME: a
+   * child that computed the wrong parent would get a private file, a breaker
+   * that silently coordinated with nobody, and no way to tell from the outside.
+   */
+  env.MERRYMEN_FLEET_HOME = merrymenHome();
   return env;
 }
 
@@ -598,16 +672,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     log(`${tenant} exited (${code})`);
     // A long healthy run that then dies is a fresh incident, not a crash loop.
     const freshRestarts = Date.now() - child.startedAt > 60_000 ? 0 : restarts + 1;
-    if (freshRestarts > MAX_RESTARTS) {
-      log(`${tenant} keeps dying right after start — giving up until the next reconcile`);
-      return;
-    }
-    const delay = Math.min(30_000, 1_000 * 2 ** Math.min(freshRestarts, 5));
-    log(`${tenant} rallying again in ${Math.round(delay / 1000)}s (restart #${freshRestarts})`);
-    setTimeout(() => {
-      // Only respawn if the tenant is still meant to be running (not killed meanwhile).
-      if (!stopping && !children.has(tenant)) void spawnChild(tenant, freshRestarts);
-    }, delay);
+    scheduleRestart(tenant, freshRestarts, `exit ${code}`);
   });
   log(`${tenant} spawned (pid ${proc.pid}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
 }
@@ -675,6 +740,26 @@ export async function reconcile(): Promise<void> {
   for (const tenant of tenants) {
     const lc = tenant.toLowerCase() as `0x${string}`;
     if (children.has(lc)) continue;
+    /**
+     * A TENANT THE RESTART POLICY GAVE UP ON IS NOT A TENANT THAT ISN'T RUNNING.
+     *
+     * This loop's job is "spawn anything wanted that is not running", and a
+     * crash-looping child is not running — so every fifteen seconds it was
+     * respawned here with `restarts` defaulting to 0, wiping the ladder and the
+     * MAX_RESTARTS ceiling the exit handler had just reached. The measured
+     * result is roughly nine restarts every two minutes, indefinitely, each one
+     * a fresh 28-call cold arm including a 200,000-block getLogs walk.
+     *
+     * The cool-off expires, and when it does the tenant is retried with the
+     * restart count it had — not with a clean slate, which is what made the
+     * ceiling unreachable in the first place.
+     */
+    const cool = gaveUpUntil.get(lc);
+    if (cool && Date.now() < cool.until) continue;
+    if (cool) {
+      gaveUpUntil.delete(lc);
+      log(`${lc}: stand-down over — trying once more`);
+    }
     if (!leases.has(lc)) {
       let lease: TenantLease | null;
       try {
@@ -689,7 +774,7 @@ export async function reconcile(): Promise<void> {
       }
       leases.set(lc, lease);
     }
-    await spawnChild(lc);
+    await spawnChild(lc, cool?.restarts ?? 0);
   }
   // Refresh every running child's settings.json so a tenant's config change
   // reaches it (the worker re-reads settings.json each tick). Cheap: one small
@@ -1999,7 +2084,13 @@ export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
       } catch {
         /* already gone */
       }
-      if (!stopping) void spawnChild(tenant as `0x${string}`, restarts + 1);
+      // THROUGH THE SAME POLICY AS AN EXIT. This line used to call spawnChild
+      // directly — no delay, no ceiling — and it is the path a rate-limited
+      // child takes, because a tick stuck retrying stops beating. The one
+      // failure a rate limit actually produces was the one that got the
+      // un-braked restart, and every restart is another cold arm against the
+      // endpoint that caused it.
+      scheduleRestart(tenant as `0x${string}`, restarts + 1, "heartbeat stale");
     }
   }
 }
