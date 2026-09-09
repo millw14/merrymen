@@ -224,6 +224,24 @@ describe("A4 — an unreadable market is not a stale feed", () => {
     assert.match(code, /block === null \? false :/);
     assert.match(code, /blockNumber: block === null \? null : block\.number/);
   });
+
+  it("and it is not a DOWN sequencer claim in the LOG either", () => {
+    // The ledger half above is guarded by the `market.unreadable` return, so an
+    // owner never reads that claim. The tick console line prints ABOVE that
+    // return, and it rendered the collapsed boolean raw: "block unread ·
+    // sequencer DOWN" — the two halves of one sentence contradicting each other,
+    // with the alarming half stated as fact. An operator reading it during a
+    // rate-limit burst goes looking for a chain outage. That is what happened.
+    const code = strip(at("./index.ts"));
+    assert.ok(
+      code.includes("market.blockNumber === null ? \"unread\" : market.sequencerUp ? \"up\" : \"DOWN\""),
+      "the tick line must have three states, because there are three",
+    );
+    assert.ok(
+      !code.includes("sequencer ${market.sequencerUp ? \"up\" : \"DOWN\"}"),
+      "the two-state rendering must not come back",
+    );
+  });
 });
 
 describe("A5 — the meter is a seam, not a policy", () => {

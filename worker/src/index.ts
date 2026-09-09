@@ -5606,8 +5606,29 @@ async function main() {
     // Beat again WITH the height once the chain has answered, so the file still
     // carries block number whenever it is genuinely known.
     heartbeat(market.blockNumber ?? undefined);
+    /*
+     * THREE STATES, BECAUSE THERE ARE THREE. `sequencerUp` is a boolean that
+     * carries `false` for BOTH "the chain has stopped producing blocks" and
+     * "we could not read a block" — snapshot.ts collapses them deliberately and
+     * lets `unreadable` carry the difference, which is why the owner-facing
+     * "sequencer DOWN — all trading paused" event below is safe: it sits under
+     * the `market.unreadable` return and never fires on our own 429.
+     *
+     * THIS LINE SITS ABOVE THAT RETURN, so it was the one surface that printed
+     * the collapsed value raw. It rendered "block unread · sequencer DOWN" — the
+     * two halves of the same sentence contradicting each other, with the
+     * alarming half stated as fact. Reading it during a rate-limit burst costs
+     * an operator a chain probe and a rollback deliberation before they notice
+     * the word "unread" two fields to the left. It cost exactly that once.
+     *
+     * `blockNumber === null` is the same condition snapshot.ts uses to produce
+     * the `false`, so this reads the cause rather than re-deriving it, and no
+     * gate changes: every consumer tests `!sequencerUp` and still refuses.
+     */
+    const sequencerWord =
+      market.blockNumber === null ? "unread" : market.sequencerUp ? "up" : "DOWN";
     console.log(
-      `[tick] mainnet block ${market.blockNumber ?? "unread"} · sequencer ${market.sequencerUp ? "up" : "DOWN"} · ` +
+      `[tick] mainnet block ${market.blockNumber ?? "unread"} · sequencer ${sequencerWord} · ` +
         `${market.pausedTokens.size} paused · ${market.staleFeeds.size} stale · ${market.unread.length} unread`,
     );
 
