@@ -203,19 +203,37 @@ export function createGateway(cfg) {
     ].join("\n");
 
   // ── on-chain holder check (cached) ─────────────────────────────────────────
+  /**
+   * Is this wallet a holder — and did we actually find out?
+   *
+   * A FAILED READ WAS BEING CACHED AS A NEGATIVE FACT, FOR TEN MINUTES. The
+   * catch set `ok = false` under the note "fail closed — never grant access we
+   * can't verify", which is right, and then fell through to the same
+   * `setBal(key, ok, BALANCE_TTL_SEC)` as a successful read. So one transient
+   * RPC error persisted "not a holder" for the whole TTL, and every request in
+   * that window was refused with a 403 telling a genuine holder that their
+   * wallet "no longer meets the $MERRYMEN holding requirement" — about tokens
+   * they still held. Their strategist stopped proposing anything meanwhile.
+   *
+   * Failing closed and REMEMBERING a failure are different things. Only a read
+   * that answered is cached; a failure refuses this one request and is
+   * forgotten, so the next request tries again. And the caller is told which of
+   * the two it was, because "you do not hold enough" and "we could not check"
+   * have different remedies and only one of them is about the reader.
+   */
   async function isHolder(addr) {
     const key = addr.toLowerCase();
     const cached = await store.getBal(key);
-    if (cached !== null) return cached;
-    let ok = false;
+    if (cached !== null) return { ok: cached, read: true };
     try {
       const raw = await publicClient.readContract({ address: tokenAddress, abi: erc20Abi, functionName: "balanceOf", args: [addr] });
-      ok = raw / 10n ** decimals >= minTokens;
+      const ok = raw / 10n ** decimals >= minTokens;
+      await store.setBal(key, ok, T.BALANCE_TTL_SEC);
+      return { ok, read: true };
     } catch {
-      ok = false; // fail closed — never grant access we can't verify
+      // Not cached. Fail closed for THIS request only.
+      return { ok: false, read: false };
     }
-    await store.setBal(key, ok, T.BALANCE_TTL_SEC);
-    return ok;
   }
 
   // ── cost clamp: never trust the client's model/limits ──────────────────────
@@ -266,7 +284,13 @@ export function createGateway(cfg) {
     if (!(await store.spendNonce(nonceTok, T.NONCE_TTL_SEC))) {
       return { status: 401, json: { error: "nonce already used — refresh the page and sign again" } };
     }
-    if (!(await isHolder(address))) {
+    const claimHolder = await isHolder(address);
+    // A read that did not happen is a 503, not a verdict about their wallet.
+    if (!claimHolder.read) {
+      // The nonce is already spent above, so "try again" means a new one.
+      return { status: 503, json: { error: "we couldn't read your $MERRYMEN balance just now — that's our chain read failing, not your wallet. Refresh the page and sign again." } };
+    }
+    if (!claimHolder.ok) {
       return { status: 403, json: { error: `this wallet doesn't hold at least ${minTokens} $MERRYMEN — join the Circle, then claim.` } };
     }
     await store.setBal(address.toLowerCase(), true, T.BALANCE_TTL_SEC);
@@ -298,7 +322,14 @@ export function createGateway(cfg) {
     const addr = verifyToken(token);
     if (!addr) return { status: 401, json: { error: { message: "invalid or expired Merrymen AI token — re-claim at /claim" } } };
     if (!(await store.rateHit(addr, T.RATE_PER_MIN, 60))) return { status: 429, json: { error: { message: "rate limit — slow down (holder quota)" } } };
-    if (!(await isHolder(addr))) return { status: 403, json: { error: { message: "this wallet no longer meets the $MERRYMEN holding requirement" } } };
+    const chatHolder = await isHolder(addr);
+    if (!chatHolder.read) {
+      // 503, not 403. This caller already proved the balance once to get the
+      // token; an unread balance is our outage, and the openai transport the
+      // brain uses retries a 503 and gives up on a 403.
+      return { status: 503, json: { error: { message: "could not check the $MERRYMEN balance for this wallet right now — try again shortly" } } };
+    }
+    if (!chatHolder.ok) return { status: 403, json: { error: { message: "this wallet no longer meets the $MERRYMEN holding requirement" } } };
     if (!body || typeof body !== "object") return { status: 400, json: { error: { message: "bad request body" } } };
     clampPayload(body);
     try {
@@ -394,7 +425,11 @@ export function createGateway(cfg) {
     if (!(await store.rateHit(`bq:${addr}`, T.BITQUERY_RATE_PER_MIN, 60))) {
       return { status: 429, json: { error: "rate limit — discovery is polled, not streamed (holder quota)" } };
     }
-    if (!(await isHolder(addr))) {
+    const bqHolder = await isHolder(addr);
+    if (!bqHolder.read) {
+      return { status: 503, json: { error: "could not check the $MERRYMEN balance for this wallet right now — try again shortly" } };
+    }
+    if (!bqHolder.ok) {
       return { status: 403, json: { error: "this wallet no longer meets the $MERRYMEN holding requirement" } };
     }
     const name = body && typeof body === "object" ? body.query : null;

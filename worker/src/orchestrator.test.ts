@@ -18,6 +18,7 @@ process.env.GROQ_API_KEY = "house-groq-key";
 process.env.MERRYMEN_STORE_DEK = "SECRET-dek-never-to-a-child";
 process.env.MERRYMEN_SESSION_SECRET = "SECRET-session-never-to-a-child";
 process.env.DATABASE_URL = "postgres://SECRET-never-to-a-child";
+process.env.MERRYMEN_HOLDER_ADDRESS = "0x00000000000000000000000000000000000Wha1e";
 
 const { childHome, childEnv, fleetHaltFile, dedupeBotToken } = await import("./orchestrator");
 
@@ -40,6 +41,24 @@ describe("orchestrator env curation", () => {
     assert.equal(env.MERRYMEN_STORE_DEK, undefined, "the DEK decrypts every tenant's key");
     assert.equal(env.MERRYMEN_SESSION_SECRET, undefined, "the secret forges any session");
     assert.equal(env.DATABASE_URL, undefined, "the url reaches every tenant's grant");
+    /**
+     * And the one that is not a secret at all.
+     *
+     * settings.ts reads `str(file.holderAddress, env.MERRYMEN_HOLDER_ADDRESS)`,
+     * so the orchestrator's per-tenant overwrite only holds for a child that
+     * actually got a settings file. `writeChildSettings` returns early on
+     * unreadable settings and again from its catch — and that child would then
+     * inherit the OPERATOR'S holder wallet and resolve the operator's balance
+     * as its own: Circle strategies unlocked and the fee discounted for a
+     * tenant who may hold nothing. Every other holder path fails closed; this
+     * was the one that failed open, on the pass where something else had
+     * already broken.
+     */
+    assert.equal(
+      env.MERRYMEN_HOLDER_ADDRESS,
+      undefined,
+      "a child with no settings file must inherit NO holder wallet, not the operator's",
+    );
   });
 
   it("fleetHaltFile sits under the orchestrator home", () => {

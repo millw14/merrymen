@@ -230,6 +230,30 @@ const CHILD_SECRET_STRIP = [
   // agent that is already authorized by a signed grant; it has no login to
   // verify and no reason to hold the key that would verify one.
   "PRIVY_APP_SECRET",
+  /**
+   * NOT A SECRET — AN ANSWER TO A QUESTION ABOUT SOMEBODY ELSE, which is why it
+   * belongs on this list even though nothing here could leak or misuse it.
+   *
+   * Every path below writes `holderAddress` into the child's settings.json, and
+   * settings.ts:235 reads `str(file.holderAddress, env.MERRYMEN_HOLDER_ADDRESS)`
+   * — file first, env as the fallback. So the overwrite is authoritative for
+   * every child that GETS a settings file, and silently inverted for every
+   * child that does not: `writeChildSettings` returns early when a tenant's
+   * settings are unreadable and again from its catch, and the child then spawns
+   * with defaults and inherits the OPERATOR'S holder wallet from this process's
+   * env. That child resolves the operator's balance as its own — Circle
+   * strategies unlocked, performance fee discounted — for a tenant who may hold
+   * nothing, and it happens on exactly the pass where something already went
+   * wrong. It is the one holder path that fails OPEN.
+   *
+   * Stripped, the fallback has nothing to fall back to: no settings file means
+   * no holder wallet, circle.ts reads that as the outsider floor, and the
+   * failure mode is a tenant briefly missing perks they own rather than a
+   * tenant silently granted perks they never bought. Self-hosted keeps its
+   * variable — there is no orchestrator there, and no other tenant for one
+   * operator's own wallet to be wrong about.
+   */
+  "MERRYMEN_HOLDER_ADDRESS",
 ] as const;
 
 /** Where a tenant's child keeps its own ~/.merrymen — isolated from every other. */
