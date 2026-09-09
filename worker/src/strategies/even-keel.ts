@@ -31,13 +31,45 @@ export interface EvenKeelConfig {
 
 const clamp = (v: bigint, hi: bigint) => (v > hi ? hi : v);
 
+/**
+ * THREE WAYS THIS DID NOTHING AND SAID NOTHING.
+ *
+ * Reported by a tester, about a funded agent: "when the strategy is 'even
+ * keel', I've realised that the agent hasn't bought automatically a single
+ * stock token during all day.... I don't know if it makes sense and first buys
+ * must be done by user."
+ *
+ * Every early return below used to be a bare `{ intents: [], why: [] }`, which
+ * is byte-identical to a healthy quiet tick. steady-basket.ts already learned
+ * this — its own comment records 34 agents spending a weekend "doing nothing
+ * and saying nothing", reported by their owners as "no trading is being done" —
+ * and the vocabulary it added (`all-legs-stale`, `under-one-buy`) plus the
+ * `idle` channel on `Tick` were built for exactly this. even-keel never used
+ * either.
+ *
+ * WHICH ONE FIRES MATTERS, because the remedies have nothing in common: a stale
+ * feed clears itself when the market opens, and an empty balance does not.
+ */
 export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
+  // Not an idle reason: the sequencer being down is a fact about the CHAIN that
+  // every strategy sees at once, and the tick line already reports it. An event
+  // per agent per tick would be 34 copies of one sentence.
   if (!snap.sequencerUp) return { intents: [], why: [] };
 
+  const paused = cfg.legs.filter((l) => snap.pausedTokens.has(l.token.toLowerCase())).length;
   const tradable = cfg.legs.filter(
     (l) => !snap.pausedTokens.has(l.token.toLowerCase()) && !snap.staleFeeds.has(l.symbol),
   );
-  if (tradable.length === 0) return { intents: [], why: [] };
+  if (tradable.length === 0) {
+    // THE OVERNIGHT AND WEEKEND CASE, and the one the tester almost certainly
+    // hit. Every Chainlink equity feed is stale outside US market hours, so a
+    // stock basket has nothing to weigh itself against — and said so nowhere.
+    // Reported only when there were legs to skip; a basket with none is a
+    // different fact the basket screen already shows.
+    return cfg.legs.length > 0
+      ? { intents: [], why: [], idle: { code: "all-legs-stale", legs: cfg.legs.length, paused } }
+      : { intents: [], why: [] };
+  }
 
   const valueOf = (symbol: string) => snap.holdings.get(symbol)?.valueUsdg ?? 0n;
   const invested = tradable.reduce((sum, l) => sum + valueOf(l.symbol), 0n);
@@ -45,10 +77,42 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
   // Cold start: nothing invested yet → lay down an equal-weight entry from cash.
   if (invested === 0n) {
     const budget = clamp(cfg.seedBudgetUsdg, snap.cashUsdg);
-    if (budget <= 0n) return { intents: [], why: [] };
     const per = budget / BigInt(tradable.length);
-    if (per <= 0n) return { intents: [], why: [] };
     const each = clamp(per, cfg.maxTradeUsdg);
+    if (budget <= 0n || per <= 0n) {
+      /**
+       * THE FIRST BUY NEVER HAPPENED, AND THIS IS THE ANSWER TO "must the first
+       * buy be done by the user".
+       *
+       * No: this strategy opens the book itself. It divides the seed budget
+       * across the tradable legs, and it produces nothing when that division
+       * comes out at zero — which happens when there is no cash, or when the
+       * budget is smaller than the number of legs. A five-name basket seeded
+       * with 4 USDG buys nothing at all, and every previous version of this
+       * function returned silently in both cases.
+       *
+       * `needRaw` IS THE WHOLE SEED, not one leg's share, because this strategy
+       * opens the book in one move: it buys every tradable leg at once, so the
+       * amount the owner has to clear is the round, not a twentieth of it.
+       *
+       * A ZERO SEED RENDERS IMPERFECTLY and that is a deliberate trade. When
+       * the size per trade is set to zero the sentence reads "…one buy costs
+       * 0.00", which is odd — but it names the right dial ("lower the size per
+       * trade", inverted) and, far more importantly, it is NOT SILENCE. A
+       * misconfigured size deserves its own reason code; it does not have one,
+       * and adding a vocabulary entry is a wider change than this fix.
+       */
+      return {
+        intents: [],
+        why: [],
+        idle: {
+          code: "under-one-buy",
+          cashRaw: snap.cashUsdg,
+          needRaw: cfg.seedBudgetUsdg,
+          vaultRaw: snap.vaultUsdg,
+        },
+      };
+    }
     return {
       intents: tradable.map((l) => ({
         kind: "swap",

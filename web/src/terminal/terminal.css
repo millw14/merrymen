@@ -1727,6 +1727,19 @@
   color: #111;
 }
 
+/* A capability the worker will only run for a $MERRYMEN holder. Marked at the
+   point of choosing, because an unmarked one is chosen, funded, and then never
+   runs — which reads as a broken agent rather than as a locked feature. */
+:where(.terminal-host) .tag.holders {
+  margin-left: 6px;
+  background: #2a2413;
+  color: #d8b44a;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
 :where(.terminal-host) .held-sub {
   display: flex;
   align-items: baseline;

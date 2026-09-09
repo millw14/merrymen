@@ -10,10 +10,29 @@ import { requestJson, SignIn, type AccountState } from "../HostedControls";
 import { Face } from "../ui";
 import { validAmount } from "../amount";
 
+/**
+ * `circle` MARKS A STRATEGY THE WORKER WILL NOT ACTUALLY RUN FOR A NON-HOLDER.
+ *
+ * `even-keel` and `dip-hunter` are Merry Circle strategies
+ * (worker/src/strategies/registry.ts CIRCLE_STRATEGIES). The tick gates them on
+ * `holderTier.bonusStrategies` and, for anyone below Merry Man, writes ONE warn
+ * event and returns — every tick, for ever.
+ *
+ * This list offered both with no marking at all, so the flow was: pick "Even
+ * keel", read "Keep the stocks in your basket evenly weighted", sign a grant,
+ * send real money, and watch an agent that never buys anything. Reported
+ * exactly that way: "the agent hasn't bought automatically a single stock token
+ * during all day.... I don't know if it makes sense and first buys must be done
+ * by user".
+ *
+ * Marked rather than hidden, and still selectable: a strategy nobody can see is
+ * a strategy nobody buys $MERRYMEN for, and an owner who holds it would find it
+ * missing. What was wrong was letting somebody choose it without knowing.
+ */
 const STRATEGIES = [
   {id:"steady-basket",name:"Steady basket",description:"Buy a little of your selected stocks on a schedule."},
-  {id:"even-keel",name:"Even keel",description:"Keep the stocks in your basket evenly weighted."},
-  {id:"dip-hunter",name:"Dip hunter",description:"Look for pullbacks in the stocks you follow."},
+  {id:"even-keel",name:"Even keel",description:"Keep the stocks in your basket evenly weighted.",circle:true},
+  {id:"dip-hunter",name:"Dip hunter",description:"Look for pullbacks in the stocks you follow.",circle:true},
   {id:"llm-strategist",name:"Strategist",description:"Assess the market with AI and follow its reasoning."},
 ];
 const EXAMPLES:Record<string,string>={
@@ -95,7 +114,7 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
   return <section className="create-agent">
     <header className="create-heading"><button aria-label="Back" disabled={busy||step==="backup"} onClick={()=>step==="limits"?setStep("agent"):onBack()}><ArrowLeft size={18}/></button><span>Create an agent</span></header>
     <ol className="create-steps" aria-label="Setup progress">{["Agent","Limits","Backup","Ready"].map((label,i)=><li key={label} aria-current={i===index?"step":undefined}><span>{i<index?<Check size={12}/>:i+1}</span>{label}</li>)}</ol>
-    {step==="agent" && <><div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Meet your next agent.</h1><p>A name, a strategy, and room to make its own moves.</p></div><form onSubmit={e=>{e.preventDefault();if(!name.trim()){setError("Give your agent a name.");return;}setError("");setStep("limits");}}><label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} placeholder="What should we call it?" onChange={e=>setName(e.target.value)} required/><fieldset className="create-strategies"><legend>How should it trade?</legend>{STRATEGIES.map(s=><label className={strategy===s.id?"selected":""} key={s.id}><input type="radio" name="strategy" value={s.id} checked={strategy===s.id} onChange={()=>setStrategy(s.id)}/><span><strong>{s.name}</strong><small>{s.description}</small></span><span className="create-radio" aria-hidden>{strategy===s.id&&<Check size={13}/>}</span></label>)}</fieldset><div className="create-example" aria-live="polite"><span>Strategy example</span><p>{EXAMPLES[strategy]}</p></div><button className="flow-primary" type="submit">Set trading limits <ArrowRight size={16}/></button></form></>}
+    {step==="agent" && <><div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Meet your next agent.</h1><p>A name, a strategy, and room to make its own moves.</p></div><form onSubmit={e=>{e.preventDefault();if(!name.trim()){setError("Give your agent a name.");return;}setError("");setStep("limits");}}><label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} placeholder="What should we call it?" onChange={e=>setName(e.target.value)} required/><fieldset className="create-strategies"><legend>How should it trade?</legend>{STRATEGIES.map(s=><label className={strategy===s.id?"selected":""} key={s.id}><input type="radio" name="strategy" value={s.id} checked={strategy===s.id} onChange={()=>setStrategy(s.id)}/><span><strong>{s.name}{s.circle&&<i className="tag holders" title="Runs only while you hold $MERRYMEN">holders</i>}</strong><small>{s.description}{s.circle?" Runs only while you hold $MERRYMEN — pick it now and it stays idle until you do.":""}</small></span><span className="create-radio" aria-hidden>{strategy===s.id&&<Check size={13}/>}</span></label>)}</fieldset><div className="create-example" aria-live="polite"><span>Strategy example</span><p>{EXAMPLES[strategy]}</p></div><button className="flow-primary" type="submit">Set trading limits <ArrowRight size={16}/></button></form></>}
     {step==="limits" && <><div className="create-intro"><h1>A little freedom.<br/>Clear limits.</h1><p>Start small. You can change these limits with a new signature later.</p></div><div className="create-limits"><label>Per trade, USD<input className="create-input" inputMode="decimal" value={trade} onChange={e=>setTrade(e.target.value)} maxLength={12}/></label><label>Per day, USD<input className="create-input" inputMode="decimal" value={day} onChange={e=>setDay(e.target.value)} maxLength={12}/></label></div><dl className="fund-breakdown"><div><dt>Trading permission</dt><dd>7 days</dd></div><div><dt>Drawdown limit</dt><dd>5%</dd></div><div><dt>Maximum operations</dt><dd>24 per day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl><fieldset className="create-mode"><legend>Start with</legend><label><input type="radio" name="mode" checked={paper} onChange={()=>setPaper(true)}/> Paper trading · recommended</label><label><input type="radio" name="mode" checked={!paper} onChange={()=>setPaper(false)}/> Live trading</label></fieldset><p className="create-note">{paper?"Practice with simulated funds and live market prices. This is a setting, not a different network — your agent stays on Robinhood Chain either way, and you can switch it off any time without a new signature.":"Your agent will trade the real funds you deposit, within these limits."}</p>{!paper&&<label className="create-check"><input type="checkbox" checked={ack} onChange={e=>setAck(e.target.checked)}/>I understand this agent can trade real funds.</label>}<button className="flow-primary" disabled={busy} onClick={()=>void create()}>{busy?"Creating your agent…":"Create agent"}</button></>}
     {/* TWO OWNER MODELS, TWO DIFFERENT TRUTHS TO TELL.
         A Privy-owned account has NO key here, by design — showing dots and
