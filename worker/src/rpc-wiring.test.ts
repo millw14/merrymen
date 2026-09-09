@@ -46,19 +46,42 @@ describe("the amplifier stays off", () => {
 });
 
 describe("every read goes through the governor", () => {
-  it("chainRead WRAPS THE METER IN IT — a seam nothing goes through is not a seam", () => {
+  it("chainRead INSTALLS IT — a seam nothing goes through is not a seam", () => {
     const meter = src("./rpc-meter.ts");
-    assert.match(meter, /return governed\(\s*metered\(/);
+    const body = meter.slice(meter.indexOf("export function chainRead"), meter.indexOf("async function governedFetch"));
+    assert.match(body, /fetchFn: governedFetch,/);
   });
 
-  it("and the governor is OUTSIDE the meter, so a refused request is not counted as one we made", () => {
-    // The distinction the operator reads: a call the breaker declined to send
-    // is not a call the endpoint refused. Folding them together would hide
-    // whether the breaker is working.
+  it("AND IT SITS BELOW THE BATCHING, WHICH IS THE WHOLE TRAP", () => {
+    // A limiter around the transport's `request` throttles LOGICAL calls, and
+    // `batch` collapses twenty of those into one HTTP request by collecting
+    // whatever is issued inside a 20ms window. Spacing logical calls out stops
+    // them landing in the same window, so they stop batching: a tick's three
+    // collapsed calls become three requests, and the limiter added to reduce
+    // load multiplies it.
+    //
+    // `fetchFn` is under the batcher, so one call is one HTTP request — the
+    // unit the endpoint actually counts. This test exists because the first
+    // version of this change got it wrong.
     const meter = src("./rpc-meter.ts");
-    const g = meter.indexOf("return governed(");
-    const m = meter.indexOf("metered(", g);
-    assert.ok(g >= 0 && m > g, "governed() must be the outer wrapper");
+    assert.ok(
+      !/function governed\(transport: Transport\)/.test(meter),
+      "the governor must not wrap the transport — that is above the batcher",
+    );
+    assert.match(meter, /async function governedFetch\(/);
+    // And the batching it must not disturb is still configured.
+    assert.match(meter, /batch: \{ wait: BATCH_WAIT_MS, batchSize: BATCH_SIZE \}/);
+  });
+
+  it("and it reads the status from the Response, where Retry-After is still legible", () => {
+    // Before viem touches it. The old hook threw a plain Error and viem
+    // re-wrapped it with no status and no headers, which is why nothing in
+    // this system has ever honoured Retry-After.
+    const meter = src("./rpc-meter.ts");
+    const fn = meter.slice(meter.indexOf("async function governedFetch("), meter.indexOf("function retryAfterFrom("));
+    assert.match(fn, /res\.status === 429/);
+    assert.match(fn, /retryAfterFrom\(res\.headers\.get\("retry-after"\)\)/);
+    assert.match(fn, /return res;/, "the response must be returned untouched");
   });
 
   it("AND THE SEND EDGE IS NOT GOVERNED", () => {

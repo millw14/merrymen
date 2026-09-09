@@ -261,7 +261,7 @@ describe("A5 — the meter is a seam, not a policy", () => {
     // batching below cut what one tick costs; it did nothing about a refusal
     // producing four more requests, which is what kept the fleet collapsing at
     // a tenth of the endpoint's measured capacity. See rpc-governor.ts.
-    assert.match(body, /return governed\(/, "chainRead must be governed as well as metered");
+    assert.match(body, /fetchFn: governedFetch,/, "chainRead must be governed as well as metered");
     assert.match(body, /retryCount: 0/, "and viem must not retry a 429 underneath it");
     assert.match(body, /http\(url, \{/, "…around an http transport built from the url");
     assert.match(body, /batch: \{ wait: BATCH_WAIT_MS, batchSize: BATCH_SIZE \}/, "…that batches");
@@ -310,10 +310,9 @@ describe("A5 — the meter is a seam, not a policy", () => {
     // what it returns, or the fleet would be reading a limiter's opinion of the
     // chain instead of the chain.
     const code = strip(at("./rpc-meter.ts"));
-    const gov = code.slice(code.indexOf("function governed("));
-    assert.match(gov, /return await \(inner\.request/, "the result is still forwarded untouched");
-    assert.match(gov, /throw e;/, "and the error is still rethrown");
-    assert.ok(!/catch \{\s*return /.test(gov), "no failure may be turned into a value");
+    const gov = code.slice(code.indexOf("async function governedFetch("), code.indexOf("function retryAfterFrom("));
+    assert.match(gov, /return res;/, "the response is still returned untouched");
+    assert.ok(!/catch/.test(gov), "and it never swallows a failure — there is no catch at all");
   });
 });
 

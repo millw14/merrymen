@@ -88,21 +88,29 @@ export type Decision =
 
 export interface GovernorLimits {
   /**
-   * Sustained requests a second this process may issue.
+   * Sustained HTTP REQUESTS a second this process may issue.
+   *
+   * REQUESTS, NOT LOGICAL CALLS — the governor runs under viem's batcher, so
+   * one token buys one round trip however many calls ride in it. Measured
+   * against the live transport: thirteen logical calls left as a single
+   * request. That is the unit the endpoint counts, and it is why the numbers
+   * here look small next to the fleet's 11.2 logical calls a second.
    *
    * DEFAULT SIZED TO THE FLEET, NOT TO ONE CHILD. The measured clean rate is
-   * 50/s for the whole egress IP; divided across a fleet of ~15 and left with
-   * headroom for the web service, 2/s per process is three times the median
-   * child's measured 0.68/s and a twenty-fifth of the ceiling. It bounds a
-   * runaway, and a healthy child never touches it.
+   * 50/s for the whole egress IP. Fifteen children at 2/s is 30/s worst case
+   * with room left for the web service, and a healthy child — whose tick is
+   * three requests every four minutes — never comes near it. This bounds a
+   * runaway; it does not pace normal work.
    */
   ratePerSec: number;
   /**
    * How much of that rate may be spent at once.
    *
-   * A tick's price multicall is issued as one burst and batched into a handful
-   * of requests; a bucket that could not hold it would delay every tick for no
-   * reason. Sized to a tick, not to a second.
+   * Sized to the most expensive thing a child legitimately does in one go: a
+   * cold arm is ~28 strictly sequential requests, and the depth reader ~20. A
+   * burst of twelve lets the front of either through untouched and paces the
+   * tail, which costs an arm about eight seconds and a tick about four —
+   * against a 240-second tick.
    */
   burst: number;
   /** Requests in flight at once, per process. */

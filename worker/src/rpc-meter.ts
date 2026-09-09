@@ -160,9 +160,30 @@ const BATCH_WAIT_MS = 20;
  * alongside somebody else's read.
  */
 export function chainRead(url: string | undefined, label = "read"): Transport {
-  return governed(
-    metered(
+  return metered(
     http(url, {
+      /**
+       * ── THE GOVERNOR SITS HERE, BELOW THE BATCHING, NOT ABOVE IT ────────
+       *
+       * The obvious place to put a limiter is around the transport's
+       * `request`, and it is the wrong one. `request` is called once per
+       * LOGICAL call, and the `batch` option below is what turns twenty of
+       * those into one HTTP request — by collecting everything issued inside a
+       * 20ms window. A limiter above that spaces logical calls out, so they
+       * stop landing in the same window, so they stop batching: a tick's three
+       * collapsed calls become three requests, and the limiter added to reduce
+       * load multiplies it. Throttling would have made this worse in exactly
+       * the units that matter.
+       *
+       * `fetchFn` is under the batcher. One call here is one HTTP request —
+       * the same thing the endpoint counts — so the bucket, the concurrency
+       * cap and the breaker are all denominated in the endpoint's own units,
+       * and batching is untouched.
+       *
+       * A refused fetch fails a whole batch, which is what a real 429 already
+       * does: this file's own note is that "a batch fails as a unit".
+       */
+      fetchFn: governedFetch,
       /**
        * ── THE AMPLIFIER, TURNED OFF ──────────────────────────────────────
        *
@@ -244,44 +265,48 @@ export function chainRead(url: string | undefined, label = "read"): Transport {
       },
     }),
     label,
-    ),
   );
 }
 
 /**
- * THE GOVERNOR, WRAPPED ROUND THE METER.
- *
- * Outside `metered` on purpose, so the meter still counts exactly what left this
- * process and a request the breaker refuses is NOT counted as a call we made —
- * it is a call we declined to make, and conflating the two would hide whether
- * the breaker is working.
+ * ONE HTTP REQUEST, GOVERNED.
  *
  * The decisions are rpc-governor.ts (pure); the clock, the randomness and the
- * shared file are here.
+ * shared file are here. This is the fetch viem calls once per HTTP request —
+ * after batching — so everything it counts is denominated in the endpoint's own
+ * units rather than in logical calls.
+ *
+ * THE STATUS IS READ HERE RATHER THAN FROM A THROWN ERROR. At this point the
+ * Response has not been through viem, so a 429 is unambiguous and its
+ * Retry-After is readable. The response is then returned untouched and
+ * `onFetchResponse` above raises it exactly as before — this observes, it does
+ * not change what any caller sees.
  */
-function governed(transport: Transport): Transport {
-  return ((opts) => {
-    const inner = transport(opts);
-    return {
-      ...inner,
-      async request(args: { method: string; params?: unknown }, reqOpts?: unknown) {
-        await admit();
-        let refused = false;
-        let retryAfterMs: number | null = null;
-        try {
-          return await (inner.request as (a: unknown, o?: unknown) => Promise<unknown>)(args, reqOpts);
-        } catch (e) {
-          const v = classifyRpcError(e);
-          refused = v.kind === "rate-limited";
-          retryAfterMs = v.retryAfterMs ?? null;
-          throw e;
-        } finally {
-          state = end(state, Date.now(), LIMITS, { refused, retryAfterMs }, Math.random());
-          if (refused) publishIfNew();
-        }
-      },
-    };
-  }) as Transport;
+async function governedFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+  await admit();
+  let refused = false;
+  let retryAfterMs: number | null = null;
+  try {
+    const res = await fetch(input as RequestInfo, init);
+    if (res.status === 429 || res.status === 503) {
+      refused = true;
+      retryAfterMs = retryAfterFrom(res.headers.get("retry-after"));
+    }
+    return res;
+  } finally {
+    state = end(state, Date.now(), LIMITS, { refused, retryAfterMs }, Math.random());
+    if (refused) publishIfNew();
+  }
+}
+
+/** `Retry-After` as milliseconds: seconds, or an HTTP date. Null when absent or unusable. */
+function retryAfterFrom(v: string | null): number | null {
+  if (!v) return null;
+  const secs = Number(v);
+  if (Number.isFinite(secs) && secs >= 0) return Math.min(secs * 1000, 300_000);
+  const at = Date.parse(v);
+  if (Number.isFinite(at)) return Math.max(0, Math.min(at - Date.now(), 300_000));
+  return null;
 }
 
 let state = freshState(Date.now());
