@@ -16,3 +16,6 @@ contracts/cache/
 # Scratch renders used to eyeball a breakpoint. Never shipped: anything under
 # web/public is served publicly.
 web/public/_probe/
+
+# Sampling scratch from incident work — never committed.
+*.log
