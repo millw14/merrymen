@@ -4,6 +4,7 @@
   "private": true,
   "description": "merrymen — the one-click desktop app. Bundles Node, boots the agent worker + dashboard, opens it in a native window. No terminal, no npm.",
   "author": "merrymen",
+  "repository": { "type": "git", "url": "git+https://github.com/millw14/merrymen.git" },
   "main": "main.js",
   "scripts": {
     "start": "electron .",
