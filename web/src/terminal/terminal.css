@@ -7428,6 +7428,20 @@
   background: color-mix(in srgb, var(--down) 9%, transparent);
 }
 
+/* A worker warning that has no blocker rule behind it. Quieter than
+   .desk-blocked: that one names a thing the owner must fix to trade at all,
+   this one is the agent telling them why it is sitting still. */
+:where(.terminal-host) .desk-notice {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-left: 2px solid #6b6a55;
+  background: #17170f;
+  color: var(--tx-2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+
 :where(.terminal-host) .desk-blocked p {
   margin: 0;
   font-size: 13px;

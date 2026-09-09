@@ -520,9 +520,40 @@ async function writeSettingsForChild(
     if (seenBotTokens && settings.telegramBotToken && dedupeBotToken(settings, seenBotTokens)) {
       log(`${tenant}: telegram bot token already claimed by another tenant — telegram disabled for this child`);
     }
+    /**
+     * WHOSE $MERRYMEN BALANCE DECIDES THE CIRCLE TIER — settled here, by the
+     * only process that knows the answer.
+     *
+     * TWO FAULTS, ONE LINE. `cfg.holderAddress` is what the child reads to
+     * resolve its tier (index.ts, readHolderStatus), and the tier is what gates
+     * `even-keel` and `dip-hunter` at the top of the tick. Hosted, NO SCREEN IN
+     * THE PRODUCT EVER WRITES THAT FIELD — it exists in the settings PUT
+     * handler and in /api/circle, which has no caller — so it is undefined for
+     * every tenant, circle.ts returns OUTSIDER on the spot, and half the
+     * create-time strategy picker has been inert for the whole beta no matter
+     * how much of the token anybody holds. A tester reported it as the agent
+     * "hasn't bought automatically a single stock token during all day".
+     *
+     * And it was SELF-DECLARED. The field is tenant-settable, shape-validated
+     * and nothing more, so anyone could have named a whale's address and
+     * claimed the tier. /api/alpha refuses to use this field for exactly that
+     * reason, in as many words: "fine for a fee discount an owner claims for
+     * themselves, never an authorisation input."
+     *
+     * The orchestrator holds the one address that is neither missing nor
+     * self-declared: the tenant is the wallet the session was verified against.
+     * Writing it here makes the gate satisfiable AND authoritative in the same
+     * move — a holder gets what they paid for, and naming someone else's
+     * wallet stops working, because this overwrite is unconditional.
+     *
+     * SELF-HOSTED IS UNTOUCHED. There is no orchestrator there, so a single
+     * operator's own `holderAddress` (or MERRYMEN_HOLDER_ADDRESS) stays exactly
+     * as it was — there is no other tenant for it to be wrong about.
+     */
+    const forChild: MerrymenSettings = { ...settings, holderAddress: tenant };
     const home = childHome(tenant);
     mkdirSync(home, { recursive: true });
-    writeFileSync(path.join(home, "settings.json"), JSON.stringify(settings, null, 2), { encoding: "utf8", mode: 0o600 });
+    writeFileSync(path.join(home, "settings.json"), JSON.stringify(forChild, null, 2), { encoding: "utf8", mode: 0o600 });
     // The universe this tenant may trade, kept for the news desk. Recorded here
     // because this is the one place the orchestrator reads a tenant's settings,
     // and it runs on every reconcile — so an owner who changes their basket

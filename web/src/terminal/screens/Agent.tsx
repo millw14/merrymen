@@ -432,6 +432,25 @@ export function Agent({
           )}
         </section>
       )}
+      {/* THE WARNINGS NOBODY HAS EVER SEEN, finally somewhere somebody looks.
+          /api/feed has selected the events table for a long time and the
+          terminal dropped it: LiveMine had no field for it, and the only
+          renderer in the repo is in app/(app)/you/YouClient.tsx, whose route
+          returns null. So every gate that reports itself with addEvent() and
+          nothing else was invisible by construction — the Circle-strategy
+          block, the trencher rail, the discovery credential check. Each one
+          turns a blocked agent into a quiet one, which is what an owner
+          reports as "it doesn't trade".
+
+          BELOW the blocker banner on purpose. `liveBlocker` is the resolved
+          answer to "why can't it trade for real" and outranks a log line; this
+          is for everything that has no blocker rule and would otherwise say
+          nothing at all. */}
+      {!blocked && mine.notice && (
+        <section className="desk-notice" role="status">
+          <p>{mine.notice.message}</p>
+        </section>
+      )}
       <Proposals onResign={onResign} />
       <header className="desk-header">
         <Face name={mine.name} slug={mine.slug} />

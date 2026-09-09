@@ -180,6 +180,15 @@ export interface ChainHolder {
 
 export interface LiveMine {
   statusLabel?: string;
+  /**
+   * The newest thing the worker warned about, or null.
+   *
+   * ONE, NOT FORTY. These repeat: the worker latches the ones that matter to
+   * once-per-change, but a list on the agent screen would still become a log,
+   * and a log is where a sentence goes to be ignored. The newest warning is the
+   * one that describes now.
+   */
+  notice?: { level: string; message: string; at: string } | null;
   history?: number[];
   positions?: {symbol:string;valueUsd:number;stale:boolean;costUsd:number|null;pnlPct:number|null;floorBps:number|null;floorWhy:string|null}[];
   name: string;
@@ -716,6 +725,16 @@ function mineOf(feed: Feed | null, theses: Thesis[]): LiveMine | null {
   const dayAgo = equityDayAgo(feed.equity ?? [], Date.now() / 1000);
   const mode = feed.agent?.strategy ?? null;
   const slug = feed.agent?.slug ?? null;
+  /**
+   * THE NEWEST THING WORTH SAYING, if the worker said one.
+   *
+   * WARN AND ERR ONLY. The "ok" level is the running commentary — a floor
+   * stamped, a stale feed noticed — and putting that on the agent screen would
+   * bury the one message that matters under the ones that do not.
+   */
+  const notice = (feed.events ?? []).find(
+    (e) => (e.level === "warn" || e.level === "err" || e.level === "error") && !!e.message,
+  );
   return {
     name,
     slug,
@@ -723,6 +742,7 @@ function mineOf(feed: Feed | null, theses: Thesis[]): LiveMine | null {
     owner: "you",
     equity: latest,
     history: curve,
+    notice: notice ? { level: String(notice.level), message: String(notice.message), at: String(notice.created_at ?? "") } : null,
     // `costUsd` is NULL when the ledger has no basis, never 0 — the difference
     // between "I do not know what this cost" and "it was free", which is the
     // whole of whether the agent can answer a question about taking a profit.
@@ -939,6 +959,20 @@ interface Disc {
 interface Feed {
   /** "none" means the ledger could not be read — see readStateOf. */
   source?: string;
+  /**
+   * THE WARNINGS NOBODY HAS EVER SEEN.
+   *
+   * /api/feed has selected these for a long time and the terminal dropped them
+   * on the floor: LiveMine had no field for them, so every gate that reports
+   * itself with addEvent() and nothing else was invisible by construction. The
+   * only renderer in the repo lives in app/(app)/you/YouClient.tsx, whose route
+   * returns null — mounted.test.ts lists it as known debt for that reason.
+   *
+   * That is what turns a blocked agent into a quiet one: the Circle-strategy
+   * gate, the trencher rail and the discovery credential check all announce
+   * themselves here and nowhere else.
+   */
+  events?: { level?: string; message?: string; created_at?: string }[];
   agent?: { name?: string; strategy?: string; slug?: string | null } | null;
   trades?: {
     kind: string;

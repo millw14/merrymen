@@ -98,3 +98,49 @@ describe("even-keel says why it is idle", () => {
     assert.match(stale, /cfg\.legs\.length > 0/, "a basket with no legs is a different fact");
   });
 });
+
+describe("the Circle gate is satisfiable, and the warning is visible", () => {
+  it("THE ORCHESTRATOR SUPPLIES THE HOLDER ADDRESS, so the tier can be earned at all", () => {
+    // `cfg.holderAddress` is what the child reads to resolve its tier, and
+    // hosted NO SCREEN EVER WROTE IT — so circle.ts returned OUTSIDER for every
+    // tenant and half the picker was inert for the whole beta, however much
+    // $MERRYMEN anybody held. Marking the strategies as holders-only (above)
+    // would have been a lie without this.
+    const orch = readFileSync(new URL("../../../worker/src/orchestrator.ts", import.meta.url), "utf8");
+    assert.match(orch, /const forChild: MerrymenSettings = \{ \.\.\.settings, holderAddress: tenant \};/);
+    assert.match(orch, /JSON\.stringify\(forChild, null, 2\)/, "and the child must be written the amended copy");
+  });
+
+  it("AND IT OVERWRITES, because the field was self-declared", () => {
+    // /api/settings accepts holderAddress from the tenant with shape validation
+    // and nothing else, so anyone could have named a whale's wallet and claimed
+    // the tier. /api/alpha refuses to use this field for exactly that reason.
+    // The orchestrator's copy is the session-verified wallet, so the spread has
+    // to put it LAST.
+    const orch = readFileSync(new URL("../../../worker/src/orchestrator.ts", import.meta.url), "utf8");
+    const line = orch.match(/const forChild: MerrymenSettings = \{[^}]*\};/)![0];
+    assert.ok(
+      line.indexOf("...settings") < line.indexOf("holderAddress: tenant"),
+      "the verified address must override the stored one, not the other way round",
+    );
+  });
+
+  it("and a worker warning now reaches a screen that ships", () => {
+    // Every gate that reports itself with addEvent() and nothing else was
+    // invisible: /api/feed selected the events table, live.ts had no field for
+    // it, and the only renderer sits in a route that returns null.
+    const live = readFileSync(new URL("./live.ts", import.meta.url), "utf8");
+    assert.match(live, /notice\?: \{ level: string; message: string; at: string \} \| null;/);
+    assert.match(live, /e\.level === "warn" \|\| e\.level === "err"/);
+    const agent = readFileSync(new URL("./screens/Agent.tsx", import.meta.url), "utf8");
+    assert.match(agent, /\{!blocked && mine\.notice && \(/);
+  });
+
+  it("and the blocker still outranks it, because one is resolved and one is a log line", () => {
+    const agent = readFileSync(new URL("./screens/Agent.tsx", import.meta.url), "utf8");
+    assert.ok(
+      agent.indexOf("{blocked && (") < agent.indexOf("{!blocked && mine.notice && ("),
+      "the resolved blocker must render above the notice",
+    );
+  });
+});
