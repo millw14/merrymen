@@ -49,6 +49,7 @@ import {
 import { createPublicClient, erc20Abi } from "viem";
 
 import { tenantOf } from "@/lib/auth";
+import { holderWalletFor } from "@/lib/holder-wallet";
 import { sharedAlpha, type AlphaExtras, type DiscoveryRow, type Payload } from "@/lib/read-discoveries";
 
 export const runtime = "nodejs";
@@ -174,9 +175,25 @@ export async function GET(req: Request) {
   const tenant = tenantOf(req);
   if (!tenant) return locked("sign-in", counts);
 
+  /**
+   * THE SAME WALLET THE WORKER READS — see lib/holder-wallet.ts.
+   *
+   * This read the session wallet directly, which was right until a wallet
+   * could be PROVEN by signature. After that, linking a second wallet started
+   * the Circle strategies running while this page went on saying the holder
+   * did not qualify: two surfaces, two answers, both confident, about the same
+   * person. One resolver now, so they cannot drift again.
+   *
+   * Nothing is loosened. A proof is only ever written by /api/holder after
+   * recovering a signature naming both the wallet and this account, and the
+   * self-declared `settings.holderAddress` this file has always refused is
+   * still refused — the resolver will not read it.
+   */
+  const wallet = (await holderWalletFor(tenant))?.address ?? tenant;
+
   let raw: bigint;
   try {
-    raw = await balanceOf(tenant);
+    raw = await balanceOf(wallet);
   } catch {
     // The chain would not answer. That is a fact about our read, not about the
     // reader's wallet — telling them they hold too little would be a lie they

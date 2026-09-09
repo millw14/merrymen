@@ -9,6 +9,7 @@ import { verifiedAdapter } from "@/lib/verified-adapter";
 import { requestJson, SignIn, type AccountState } from "../HostedControls";
 import { Face } from "../ui";
 import { validAmount } from "../amount";
+import type { TierView } from "@/app/api/tier/route";
 
 /**
  * `circle` MARKS A STRATEGY THE WORKER WILL NOT ACTUALLY RUN FOR A NON-HOLDER.
@@ -46,6 +47,17 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
   const [step,setStep]=useState<"agent"|"limits"|"backup"|"fund">("agent");
   const [name,setName]=useState("");
   const [strategy,setStrategy]=useState("steady-basket");
+  /**
+   * THIS READER STANDING AGAINST THE RULE, not the rule.
+   *
+   * The badge states the requirement; it never said whether YOU meet it, which
+   * is the only half that decides whether to press the button. Reported as
+   * "the app should warn more eye-catching when someone has chosen a
+   * holder-only strategy and don't have access to it… I had to go to
+   * /api/circle to check that and that's not good for normies".
+   */
+  const [tier,setTier]=useState<TierView|null>(null);
+  useEffect(()=>{fetch("/api/tier",{cache:"no-store"}).then(r=>r.ok?r.json():null).then(t=>t&&setTier(t as TierView)).catch(()=>{});},[]);
   // Null on a legacy session — which is what keeps an existing Merryman on
   // its existing owner key.
   const privyOwner=usePrivyOwner();
@@ -114,7 +126,33 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
   return <section className="create-agent">
     <header className="create-heading"><button aria-label="Back" disabled={busy||step==="backup"} onClick={()=>step==="limits"?setStep("agent"):onBack()}><ArrowLeft size={18}/></button><span>Create an agent</span></header>
     <ol className="create-steps" aria-label="Setup progress">{["Agent","Limits","Backup","Ready"].map((label,i)=><li key={label} aria-current={i===index?"step":undefined}><span>{i<index?<Check size={12}/>:i+1}</span>{label}</li>)}</ol>
-    {step==="agent" && <><div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Meet your next agent.</h1><p>A name, a strategy, and room to make its own moves.</p></div><form onSubmit={e=>{e.preventDefault();if(!name.trim()){setError("Give your agent a name.");return;}setError("");setStep("limits");}}><label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} placeholder="What should we call it?" onChange={e=>setName(e.target.value)} required/><fieldset className="create-strategies"><legend>How should it trade?</legend>{STRATEGIES.map(s=><label className={strategy===s.id?"selected":""} key={s.id}><input type="radio" name="strategy" value={s.id} checked={strategy===s.id} onChange={()=>setStrategy(s.id)}/><span><strong>{s.name}{s.circle&&<i className="tag holders" title="Runs only while you hold $MERRYMEN">holders</i>}</strong><small>{s.description}{s.circle?" Runs only while you hold $MERRYMEN — pick it now and it stays idle until you do.":""}</small></span><span className="create-radio" aria-hidden>{strategy===s.id&&<Check size={13}/>}</span></label>)}</fieldset><div className="create-example" aria-live="polite"><span>Strategy example</span><p>{EXAMPLES[strategy]}</p></div><button className="flow-primary" type="submit">Set trading limits <ArrowRight size={16}/></button></form></>}
+    {step==="agent" && <><div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Meet your next agent.</h1><p>A name, a strategy, and room to make its own moves.</p></div><form onSubmit={e=>{e.preventDefault();if(!name.trim()){setError("Give your agent a name.");return;}setError("");setStep("limits");}}><label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} placeholder="What should we call it?" onChange={e=>setName(e.target.value)} required/><fieldset className="create-strategies"><legend>How should it trade?</legend>{STRATEGIES.map(s=><label className={strategy===s.id?"selected":""} key={s.id}><input type="radio" name="strategy" value={s.id} checked={strategy===s.id} onChange={()=>setStrategy(s.id)}/><span><strong>{s.name}{s.circle&&<i className="tag holders" title="Runs only while you hold $MERRYMEN">holders</i>}</strong><small>{s.description}{s.circle?" Runs only while you hold $MERRYMEN — pick it now and it stays idle until you do.":""}</small></span><span className="create-radio" aria-hidden>{strategy===s.id&&<Check size={13}/>}</span></label>)}</fieldset><div className="create-example" aria-live="polite"><span>Strategy example</span><p>{EXAMPLES[strategy]}</p></div>
+            {/* THE READER'S STANDING, not the rule. The badge above states the
+                requirement; this says whether THEY meet it, which is the only
+                half that decides whether to press the button. "I had to go to
+                /api/circle to check that and that's not good for normies." */}
+            {STRATEGIES.find((x) => x.id === strategy)?.circle &&
+              tier &&
+              tier.why !== "sign-in" &&
+              !tier.bonusStrategies && (
+                <div className="create-locked" role="status">
+                  <strong>This one won&apos;t run yet.</strong>
+                  {tier.why === "unreadable" ? (
+                    <p>
+                      We couldn&apos;t read your $MERRYMEN balance just now, so we can&apos;t tell
+                      whether this strategy will run. That&apos;s our read failing, not your wallet
+                      — try again in a moment.
+                    </p>
+                  ) : (
+                    <p>
+                      You hold {(tier.tokens ?? 0).toLocaleString("en-US")} $MERRYMEN and this one
+                      needs {tier.needTokens.toLocaleString("en-US")}. Your agent will arm, read the
+                      market and stay idle until you hold enough. Steady basket and Strategist run
+                      for everyone.
+                    </p>
+                  )}
+                </div>
+              )}<button className="flow-primary" type="submit">Set trading limits <ArrowRight size={16}/></button></form></>}
     {step==="limits" && <><div className="create-intro"><h1>A little freedom.<br/>Clear limits.</h1><p>Start small. You can change these limits with a new signature later.</p></div><div className="create-limits"><label>Per trade, USD<input className="create-input" inputMode="decimal" value={trade} onChange={e=>setTrade(e.target.value)} maxLength={12}/></label><label>Per day, USD<input className="create-input" inputMode="decimal" value={day} onChange={e=>setDay(e.target.value)} maxLength={12}/></label></div><dl className="fund-breakdown"><div><dt>Trading permission</dt><dd>7 days</dd></div><div><dt>Drawdown limit</dt><dd>5%</dd></div><div><dt>Maximum operations</dt><dd>24 per day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl><fieldset className="create-mode"><legend>Start with</legend><label><input type="radio" name="mode" checked={paper} onChange={()=>setPaper(true)}/> Paper trading · recommended</label><label><input type="radio" name="mode" checked={!paper} onChange={()=>setPaper(false)}/> Live trading</label></fieldset><p className="create-note">{paper?"Practice with simulated funds and live market prices. This is a setting, not a different network — your agent stays on Robinhood Chain either way, and you can switch it off any time without a new signature.":"Your agent will trade the real funds you deposit, within these limits."}</p>{!paper&&<label className="create-check"><input type="checkbox" checked={ack} onChange={e=>setAck(e.target.checked)}/>I understand this agent can trade real funds.</label>}<button className="flow-primary" disabled={busy} onClick={()=>void create()}>{busy?"Creating your agent…":"Create agent"}</button></>}
     {/* TWO OWNER MODELS, TWO DIFFERENT TRUTHS TO TELL.
         A Privy-owned account has NO key here, by design — showing dots and

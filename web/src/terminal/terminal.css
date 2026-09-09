@@ -7770,3 +7770,33 @@
   font-size: 11px;
   line-height: 1.5;
 }
+
+/* ── a capability you have chosen but cannot yet use ──────────────────────
+   The picker states the requirement; this states the reader's standing against
+   it, which is the only half that decides whether to press the button. Louder
+   than a hint and quieter than an error, because nothing is broken — they
+   simply have not qualified yet. */
+:where(.terminal-host) .create-locked,
+:where(.terminal-host) .desk-circle-locked {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border: 1px solid #6b5a1f;
+  border-left-width: 3px;
+  border-radius: 10px;
+  background: #221d0c;
+}
+:where(.terminal-host) .create-locked strong,
+:where(.terminal-host) .desk-circle-locked strong {
+  display: block;
+  margin-bottom: 4px;
+  color: #d8b44a;
+  font-size: 13px;
+}
+:where(.terminal-host) .create-locked p,
+:where(.terminal-host) .desk-circle-locked p {
+  margin: 0;
+  color: var(--tx-2);
+  font-size: 12px;
+  line-height: 1.55;
+}
+:where(.terminal-host) .desk-circle-locked { margin: 0; }

@@ -149,3 +149,19 @@ export function ownerTag(handle: string | null | undefined): string {
   if (!handle) return "";
   return handle.startsWith("@") ? handle : `@${handle}`;
 }
+
+/**
+ * The strategies the WORKER will only run for a $MERRYMEN holder.
+ *
+ * Mirrors CIRCLE_STRATEGIES in worker/src/strategies/registry.ts. Kept here
+ * rather than imported because every consumer is a client component, and
+ * importing the registry would pull every strategy implementation into the
+ * browser bundle for the sake of two strings. circle-strategies.test.ts holds
+ * the two lists together — add one to the gate without adding it here and it
+ * fails, which is the only thing stopping the next one being offered to
+ * somebody who cannot run it.
+ */
+export const CIRCLE_STRATEGY_IDS: readonly string[] = ["even-keel", "dip-hunter"];
+
+/** Is this a strategy that stays idle below the Merry Man tier? */
+export const isCircleStrategyId = (id: string): boolean => CIRCLE_STRATEGY_IDS.includes(id);

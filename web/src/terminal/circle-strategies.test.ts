@@ -147,14 +147,51 @@ describe("the Circle gate is satisfiable, and the warning is visible", () => {
     assert.match(live, /notice\?: \{ level: string; message: string; at: string \} \| null;/);
     assert.match(live, /e\.level === "warn" \|\| e\.level === "err"/);
     const agent = readFileSync(new URL("./screens/Agent.tsx", import.meta.url), "utf8");
-    assert.match(agent, /\{!blocked && mine\.notice && \(/);
+    assert.match(agent, /\{!blocked && !circleLocked && mine\.notice && \(/);
   });
 
   it("and the blocker still outranks it, because one is resolved and one is a log line", () => {
     const agent = readFileSync(new URL("./screens/Agent.tsx", import.meta.url), "utf8");
     assert.ok(
-      agent.indexOf("{blocked && (") < agent.indexOf("{!blocked && mine.notice && ("),
+      agent.indexOf("{blocked && (") < agent.indexOf("{!blocked && !circleLocked && mine.notice && ("),
       "the resolved blocker must render above the notice",
     );
+  });
+
+  it("AND THE CIRCLE BLOCK IS ITS OWN BANNER, not a line in the log slot", () => {
+    // "The app should warn more eye-catching when someone has chosen a
+    // holder-only strategy and don't have access to it… I had to go to
+    // /api/circle to check that and that's not good for normies."
+    //
+    // The notice slot renders the newest warn EVENT, and the Circle warn is
+    // written once per process behind a latch — so hours later it has aged out
+    // of the feed's window and the slot shows something else, or nothing. A
+    // permanent condition cannot be reported by a transient log line.
+    const agent = readFileSync(new URL("./screens/Agent.tsx", import.meta.url), "utf8");
+    assert.match(agent, /\{circleLocked && \(/);
+    assert.match(agent, /desk-circle-locked/);
+    // Derived from the reader's own standing, so it is true on first paint.
+    assert.match(agent, /isCircleStrategyId\(mine\.glance\.id\) && tier !== null/);
+    // And it must not fire while the tier is still unknown — an unread balance
+    // is not a locked one.
+    assert.match(agent, /tier\.why !== "sign-in" && !tier\.bonusStrategies/);
+  });
+
+  it("and it names the one remedy that is not money", () => {
+    // The commonest wrong move is to send more USDG at an agent that is not
+    // short of USDG.
+    const agent = readFileSync(new URL("./screens/Agent.tsx", import.meta.url), "utf8");
+    // Inside a template literal, so it is a plain apostrophe rather than the
+    // JSX entity the surrounding markup uses.
+    assert.match(agent, /Adding funds won't change it/);
+  });
+
+  it("and the picker shows the same standing at the moment of choosing", () => {
+    const create = readFileSync(new URL("./screens/CreateAgent.tsx", import.meta.url), "utf8");
+    assert.match(create, /create-locked/);
+    assert.match(create, /This one won&apos;t run yet/);
+    // An unreadable balance is its own answer there too, never "you hold too
+    // little" — somebody would go and buy more on the strength of our outage.
+    assert.match(create, /That&apos;s our read failing, not your wallet/);
   });
 });

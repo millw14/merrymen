@@ -22,6 +22,8 @@ import { strategyName } from "../strategy";
 import { Coin, Empty, Face } from "../ui";
 import { BalanceFigure } from "../studio";
 import { TradeTokenCard } from "../TradeTokenCard";
+import { isCircleStrategyId } from "../strategy";
+import type { TierView } from "@/app/api/tier/route";
 
 /**
  * How many recent moves the agent is shown.
@@ -120,6 +122,20 @@ export function Agent({
   const portfolio = useRef<HTMLDialogElement>(null);
   const follow = useRef(true);
   const [away, setAway] = useState(false);
+  /**
+   * This account standing against the Circle rule, read from the chain.
+   *
+   * Fetched here rather than derived from an event: an event ages out of the
+   * feed window, and a permanent condition must not stop being reported because
+   * the log moved on.
+   */
+  const [tier, setTier] = useState<TierView | null>(null);
+  useEffect(() => {
+    fetch("/api/tier", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((t) => t && setTier(t as TierView))
+      .catch(() => {});
+  }, []);
   const scrollLatest = () => {
     const node = viewport.current;
     if (!node) return;
@@ -172,6 +188,16 @@ export function Agent({
         action={{ label: "Fund an agent", onClick: onDeposit }}
       />
     );
+  /**
+   * Has this owner chosen a strategy their tier will not run?
+   *
+   * Both halves have to be known: an unread tier is not a locked one, so the
+   * banner stays away until the chain has actually answered. `bonusStrategies`
+   * is the tier's own field, so a future tier that unlocks these needs no
+   * change here.
+   */
+  const circleLocked =
+    isCircleStrategyId(mine.glance.id) && tier !== null && tier.why !== "sign-in" && !tier.bonusStrategies;
   const positions = positionsOf(mine);
   const trades = mine.moves
     .filter((t) => t.action === "buy" || t.action === "sell")
@@ -654,7 +680,33 @@ export function Agent({
             all: they occupy the top of it and scroll away as soon as there is
             anything to read. Nothing is hidden, nothing can overflow, and the
             count no longer matters — a third banner costs nothing. */}
-        {!blocked && mine.notice && (
+        {/* THE HARD STOP, STATED AS ONE.
+            A Circle-strategy block is not a quiet note: the agent arms, reads
+            the market, proposes nothing, and will go on doing that for ever
+            until its owner holds the token. It announced itself with a single
+            warn event — so the one tester who worked it out did so by opening
+            /api/circle, which he called "not good for normies".
+
+            Rendered from the reader's OWN standing rather than from a log line,
+            so it is true on the first paint and does not depend on an event
+            still being inside the feed's forty-row window hours later. */}
+        {circleLocked && (
+          <section className="desk-circle-locked" role="status">
+            <strong>
+              {strategyName(mine.glance.id)} is a Merry Circle strategy — it isn&apos;t running.
+            </strong>
+            <p>
+              {tier?.why === "unreadable"
+                ? "We couldn't read your $MERRYMEN balance just now, so this may clear on its own. That's our read failing, not your wallet."
+                : `Your agent is armed and watching, but this strategy only runs while you hold ${(
+                    tier?.needTokens ?? 100_000
+                  ).toLocaleString("en-US")} $MERRYMEN — you hold ${(
+                    tier?.tokens ?? 0
+                  ).toLocaleString("en-US")}. Adding funds won't change it. Switch to Steady basket or Strategist, which run for everyone, or hold the token.`}
+            </p>
+          </section>
+        )}
+        {!blocked && !circleLocked && mine.notice && (
           <section className="desk-notice" role="status">
             <p>{mine.notice.message}</p>
           </section>
