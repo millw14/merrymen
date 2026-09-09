@@ -101,11 +101,29 @@ npm start                 # listens on :8787
 ```
 
 **Railway**, concretely — `railway.json` is committed, so it builds from the
-Dockerfile and health-checks `/healthz` with no dashboard fiddling:
+Dockerfile and health-checks `/healthz`:
 
 ```bash
 railway init && railway up
 ```
+
+That is the path for a **fresh** install, and it is still the fallback if a repo
+build ever goes wrong. The live `merrymen-gateway` service no longer uses it:
+it is sourced from `millw14/merrymen` on `main` and redeploys itself when
+anything under `gateway/` changes. Three service settings make that work, and
+each of them fails silently if it is missing — `docs/hosted-deploy.md` §5b has
+the table and the reasoning:
+
+| | |
+|---|---|
+| Root Directory | `/gateway` |
+| Config-as-code path | `/gateway/railway.json` |
+| Watch Paths | `/gateway/**` |
+
+Deploying by hand is what let this service sit several commits behind `main`
+while a fix looked shipped, so prefer a push. If you must, `railway up` from
+**this directory** — never from the repo root, which would upload the whole
+monorepo and build the dashboard image into this service.
 
 Then set the variables in the Railway dashboard (**not** in the repo):
 `MERRYMEN_GATEWAY_UPSTREAM_KEY`, `MERRYMEN_GATEWAY_SECRET` (32+ random bytes),
