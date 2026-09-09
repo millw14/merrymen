@@ -150,6 +150,43 @@ healthcheck it can't answer.
 1. **web** — new service from this repo. Leave `MERRYMEN_START` unset → runs the Next dashboard. Set the web env above, then add the custom domain (`app.merrymen.dev`) and follow its DNS record.
 2. **orchestrator** — a second service from the same repo. Set `MERRYMEN_START=start:orchestrator`. Set the orchestrator env above. It needs **no public domain**.
 
+## 5b. The AI gateway (its own Railway project)
+
+`merrymen-gateway` is **not** one of the services above and does not live in the
+same Railway project. It is the holder-gated LLM proxy at
+`merrymen-gateway-production.up.railway.app` that `packages/core/src/token.ts`,
+`site/lib/gateway.ts` and the `merrymen` provider in `cli/bin.mjs` all point at.
+It builds from `gateway/`, which is a standalone package inside this repo: one
+dependency (`viem`), no imports outside `gateway/lib`.
+
+It used to be deployed by hand — `cd gateway && railway up` — which is why it
+once sat several commits behind `main` while a fix looked shipped. It now
+deploys from the repo like everything else, but **its build config resolves
+differently from every other service here**, and both differences fail silently:
+
+| Setting | Value | Why it is not the default |
+|---|---|---|
+| Root Directory | `/gateway` | Unset, Railway builds the **repo-root `Dockerfile`** — the Next.js dashboard — into the gateway service. It builds and starts, so the only symptom is the gateway domain serving the dashboard and every agent's completions 404ing. |
+| Config-as-code path | `/gateway/railway.json` | **Railway's config file does not follow the Root Directory.** Unset, it reads the repo-root `railway.json`, which deliberately carries no `healthcheckPath` — so `/healthz` stops gating deploys and a gateway that boots broken goes green. |
+| Watch Paths | `/gateway/**` | Unset, every push to `main` redeploys it. The service has a **volume at `/data`**, and Railway guarantees downtime on redeploy with a volume attached (and forbids replicas), so an unrelated `web/` commit becomes gateway downtime. The leading slash is required: watch paths operate from the repo root even when a Root Directory is set. |
+
+`gateway/railway.json` names **no `dockerfilePath`** on purpose — Railway then
+takes the Dockerfile at the root of the *source* directory, which is correct
+both for a repo build rooted at `/gateway` and for a `railway up` run from
+`gateway/`. An explicit relative path is a coin-flip between the two.
+
+**The volume is the one irreplaceable thing.** `/data/ios-beta.jsonl` is the iOS
+beta waiting list (`gateway/lib/signups.mjs`). Nothing else on the service
+writes to disk — nonces, rate limits and the balance cache are in-process and
+expire in minutes by design. Losing it is silent: `readAll()` swallows ENOENT,
+the endpoint keeps answering 200, and the count restarts at 1. So **re-point the
+existing service, never create a new one**, and check `GET /ios-beta` before and
+after any change to the service's source.
+
+Fallback if a repo build is ever wrong: `railway service source disconnect
+--service merrymen-gateway`, then `cd gateway && railway up`. Rollback through
+the dashboard also works but expires with the plan's image-retention window.
+
 ## 6. Deploy & verify
 - Web comes up at `MERRYMEN_PUBLIC_ORIGIN`; `GET /api/version` returns 200.
 - Open the dashboard, **sign in** (SIWE — your wallet signs a free challenge), create/**sign a testnet grant** (session-key-only; the owner key never leaves your browser).
