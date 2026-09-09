@@ -1,0 +1,14 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- A drawn bow, so the launcher does not depend on a binary asset that
+         cannot be reviewed in a diff. -->
+    <path android:fillColor="#C8A24C"
+        android:pathData="M38,30 C58,38 58,70 38,78 L42,74 C58,66 58,42 42,34 Z" />
+    <path android:strokeColor="#C8A24C" android:strokeWidth="2"
+        android:pathData="M40,32 L40,76" />
+    <path android:strokeColor="#EDEDEF" android:strokeWidth="2"
+        android:pathData="M40,54 L72,54" />
+    <path android:fillColor="#EDEDEF"
+        android:pathData="M72,50 L80,54 L72,58 Z" />
+</vector>
