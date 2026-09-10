@@ -187,7 +187,19 @@ class Social(private val api: MerrymenApi) {
           rollBack()
           "We could not save that just now."
         } else if (r.value.refused != null) {
-          _likes.value = _likes.value.copy(mine = r.value.liked.toSet(), mineRead = true)
+          // REFUSED IS A ROLL-BACK, TOO. The server did not store the like, so
+          // the optimistic +1 must come off the count — reconciling `mine` from
+          // the server's `liked` (which does not contain this post) fixed the
+          // heart but left the number one too high, a like nobody cast standing
+          // on screen until the next counts poll. At-capacity is only reachable
+          // on an `on = true` like, so this always undoes a +1; the delta-from-
+          // current form keeps a poll that landed in between correct.
+          val s = _likes.value
+          _likes.value = s.copy(
+            mine = r.value.liked.toSet(),
+            mineRead = true,
+            counts = s.counts + (postId to maxOf(0, (s.counts[postId] ?: 0) + if (on) -1 else 1)),
+          )
           if (r.value.refused == "at-capacity") {
             "You have liked as many posts as we keep (${r.value.max}). Unlike one to make room."
           } else {

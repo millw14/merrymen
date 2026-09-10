@@ -88,6 +88,29 @@ object WebAuth {
     if (cookies.isNotEmpty()) jar.saveFromResponse(url, cookies)
   }
 
+  /**
+   * SEED THE WEBVIEW WITH WHAT THE APP ALREADY KNOWS — the reverse of harvest.
+   *
+   * The WebView's cookie store and OkHttp's jar are separate, and the sign-in
+   * page is BEHIND THE SITE GATE. The app has already opened that gate (its jar
+   * holds `mm_gate`), but the WebView does not — so loading the sign-in URL
+   * showed the gate's "enter your password" page inside the sign-in screen, and
+   * a reader who typed the site password once was asked for it again before they
+   * could even reach the wallet login. Copying the jar's cookies into
+   * CookieManager before the first load lets the WebView through the same door
+   * the app is already through. `Secure` because the origin is https; the
+   * platform store keeps httpOnly cookies like `mm_gate` faithfully.
+   */
+  fun seed(origin: String, jar: PersistentCookieJar) {
+    val url = runCatching { origin.toHttpUrl() }.getOrNull() ?: return
+    val cm = CookieManager.getInstance()
+    cm.setAcceptCookie(true)
+    for (c in jar.loadForRequest(url)) {
+      cm.setCookie(origin, "${c.name}=${c.value}; Path=/; Secure")
+    }
+    cm.flush()
+  }
+
   /** Sign-out has to clear BOTH jars, or the next sign-in silently reuses one. */
   fun forget(jar: PersistentCookieJar) {
     jar.clear()
@@ -116,6 +139,9 @@ fun WebFlow(
 ) {
   DisposableEffect(Unit) {
     CookieManager.getInstance().setAcceptCookie(true)
+    // Hand the WebView the gate (and any session) cookie the app already holds,
+    // so the sign-in page is not itself gated behind the site password.
+    WebAuth.seed(origin, jar)
     onDispose { CookieManager.getInstance().flush() }
   }
   AndroidView(

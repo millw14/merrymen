@@ -219,7 +219,13 @@ private suspend fun stockBars(
         out.add(Bar(ts[i], o * multiplier, h * multiplier, l * multiplier, c * multiplier))
       }
     }
-    Loaded.Value(trim(trim(out, VENUE_CUT[window]), WINDOW_SECONDS[window]))
+    // ONE TRIM, NOT TWO. The web trims a STOCK series only by the venue's own
+    // `cut` (VENUE_CUT), because the range it asked the venue for already
+    // matches the span; WINDOW_SECONDS is the COIN path's trimmer. Applying both
+    // over-clipped 5D/1M so the chart showed fewer sessions than its label — and
+    // the change line under the price, computed off the first drawn bar, then
+    // read the wrong span. bars.ts trims stocks by cut alone.
+    Loaded.Value(trim(out, VENUE_CUT[window]))
   }
   is ApiResult.Refused -> Loaded.Refused(r.status, r.message)
   is ApiResult.Unreachable -> Loaded.Unreachable(r.cause)

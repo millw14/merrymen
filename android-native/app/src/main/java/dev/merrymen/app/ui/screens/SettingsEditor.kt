@@ -134,7 +134,11 @@ import java.util.Locale
 /** The numeric bounds the server enforces, mirrored so the UI can say them. */
 private val RANGES: Map<String, Pair<Double, Double>> = mapOf(
   "buyPerTickUsdg" to (1.0 to 100_000.0),
-  "slippageBps" to (1.0 to 5_000.0),
+  // SLIPPAGE_BPS_MAX = 1_000 in packages/core/src/settings.ts:616. This was
+  // 5_000, so the field's own "1–5,000" hint and pre-flight guard both invited a
+  // value the server then refused — the client vouching for a bound the server
+  // does not honour.
+  "slippageBps" to (1.0 to 1_000.0),
   "maxImpactBps" to (0.0 to 10_000.0),
   "takeProfitBps" to (0.0 to 1_000_000.0),
   "strategistStopLossBps" to (0.0 to 10_000.0),

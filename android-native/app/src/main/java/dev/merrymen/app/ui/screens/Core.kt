@@ -1840,7 +1840,12 @@ fun ChatScreen(nav: NavHostController) {
         pending = null
         when (result) {
           is Acted.Ok -> {
-            if (path != null) nav.navigate(Routes.web(path, spec.id))
+            // THE SECOND VALUE IS ONLY A WEB PATH FOR A NAVIGATE COMMAND. For an
+            // ORDER or a SNIPE runCommand returns the placed order's ID there,
+            // not a path — so navigating on `path != null` sent a confirmed buy
+            // off to a WebView instead of showing "placed". Gate the handoff on
+            // the command's own kind; the order id is not needed here.
+            if (spec.via == Via.NAVIGATE && path != null) nav.navigate(Routes.web(path, spec.id))
             else outcome = result.line.ifBlank { "Done." }
           }
           is Acted.Failed -> outcome = result.line
@@ -2840,6 +2845,7 @@ private fun ResearchLine(f: JsonObject?) {
 fun ProfileScreen(nav: NavHostController) {
   val c = LocalContainer.current
   val signedIn by c.repo.signedIn.collectAsState()
+  val identityKnown by c.repo.identityKnown.collectAsState()
   var feed by remember { mutableStateOf<Loaded<Feed>>(Loaded.Loading) }
   val scope = rememberCoroutineScope()
   LaunchedEffect(Unit) { feed = c.api.feed().toLoaded() }
@@ -2855,7 +2861,12 @@ fun ProfileScreen(nav: NavHostController) {
   ) {
     PageTitle("You")
 
-    if (signedIn == null) {
+    // ONLY WHEN WE KNOW YOU ARE SIGNED OUT. While the gate is shut, identity is
+    // unknown (the session route 401s "gated" like everything else), and a
+    // "Sign in" banner would send the reader to a web sign-in behind the same
+    // closed door. When identity is unknown the feed's own LoadedBlock below
+    // shows the gate notice with "Open settings" instead.
+    if (identityKnown && signedIn == null) {
       Notice(
         title = "Not signed in",
         body = "Signing in proves you control your owner key. It moves no funds and grants no permissions.",
@@ -2911,6 +2922,54 @@ fun ProfileScreen(nav: NavHostController) {
     }
 
     if (signedIn != null) {
+      // THE KILL SWITCH, WHICH WAS DECLARED AND NEVER WIRED. revokeGrant()
+      // (DELETE /api/grants) stands the worker down, and nothing in the app
+      // reached it — a stop control you cannot find is not a stop control. It
+      // arms then confirms, the way KillSwitch.tsx does, because a single tap on
+      // "stop everything" is too easy to hit by accident. It is DESTRUCTIVE in
+      // the true sense (`--down`, not the softer sign-out red): re-arming the
+      // agent afterwards needs a fresh signature, which is a web handoff.
+      var armed by remember { mutableStateOf(false) }
+      var stopNote by remember { mutableStateOf<String?>(null) }
+      Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Box(
+          Modifier
+            .heightIn(min = 44.dp)
+            .clickable(role = Role.Button) {
+              if (!armed) {
+                armed = true
+                stopNote = "Tap again to stop it. This revokes its trading permission until you re-sign."
+              } else {
+                armed = false
+                scope.launch {
+                  stopNote = when (val r = c.api.revokeGrant()) {
+                    is dev.merrymen.app.net.ApiResult.Ok ->
+                      "Stopped. Your agent will not trade again until you re-sign its permission."
+                    is dev.merrymen.app.net.ApiResult.Refused ->
+                      if (r.status == 401) "Sign in first." else r.message
+                    is dev.merrymen.app.net.ApiResult.Unreachable ->
+                      "Couldn't reach merrymen to stop it. " + r.cause
+                  }
+                }
+              }
+            },
+          contentAlignment = Alignment.CenterStart,
+        ) {
+          Text(
+            text = if (armed) "Tap again to stop your agent" else "Stop my agent",
+            style = TextStyle(fontFamily = sans(15.sp, FontWeight.SemiBold), fontSize = 15.sp),
+            color = MerryColors.down,
+          )
+        }
+        stopNote?.let {
+          Text(
+            it,
+            style = TextStyle(fontFamily = sans(13.sp), fontSize = 13.sp, lineHeight = 19.sp),
+            color = MerryColors.tx2,
+          )
+        }
+      }
+
       // `.profile-session-actions button` — polish.css:75-76: colour #f47777,
       // min-height 44px, 15px, transparent, no border. That red is NOT `--down`;
       // it is a softer one used only here, and keeping them apart keeps "a loss"

@@ -1330,7 +1330,16 @@ fun CircleScreen(nav: NavHostController) {
             actionLabel = "Sign in",
             onAction = { nav.navigate(Routes.SIGN_IN) },
           )
-          "no-wallet" -> Notice("No holder wallet linked", "Your login wallet is used unless you link another.")
+          // Linking a SEPARATE holder wallet is a signature flow this client
+          // does not carry yet, so the copy no longer promises it — it states
+          // what is true (your login wallet is what's checked) and points at the
+          // web for the rest, rather than offering a "link another" the app
+          // cannot deliver.
+          "no-wallet" -> Notice(
+            "No holder wallet linked",
+            "Your \$MERRYMEN balance is read from your login wallet. To point the Circle at a " +
+              "different wallet, use the merrymen web app.",
+          )
           "unreadable" -> Notice(
             "Couldn't read your balance",
             "That's our chain read failing, not your wallet. " + (v.error ?: ""),
@@ -1540,10 +1549,27 @@ fun SettingsScreen(nav: NavHostController) {
         PrimaryButton("Save and reconnect") {
           scope.launch {
             c.repo.setOrigin(origin)
-            if (gate.isNotBlank()) c.repo.openGate(gate)
-            note = "Saved. Reloading."
-            noteBad = false
-            state = c.api.settings().toLoaded()
+            // A REFUSAL IS NOT A SAVE. openGate's result was thrown away and the
+            // note said "Saved. Reloading." no matter what — so a WRONG password
+            // read as success (the password is correctly not stored, but the UI
+            // claimed it was). The door only opens on Ok; anything else keeps the
+            // old session and says so, in the error colour, and does not refetch.
+            val opened = if (gate.isNotBlank()) c.repo.openGate(gate) else null
+            when (opened) {
+              is Loaded.Refused -> {
+                note = "That password didn't open the door. Check it and try again."
+                noteBad = true
+              }
+              is Loaded.Unreachable -> {
+                note = "Couldn't reach the server to check that password. " + opened.cause
+                noteBad = true
+              }
+              else -> {
+                note = "Saved. Reloading."
+                noteBad = false
+                state = c.api.settings().toLoaded()
+              }
+            }
           }
         }
       }
