@@ -91,7 +91,17 @@ export type Why =
    * reported it as "no trading is being done". Carries counts only, so
    * it stays publishable by the same rule as every other reason here.
    */
-  | { code: "all-legs-stale"; legs: number; paused: number }
+  /**
+   * `marketShut` decides which of two true sentences this becomes.
+   *
+   * The rendering used to end "This is a fact about the feeds, not about the
+   * market" unconditionally. It was written for the case where our own reads
+   * failed, and then became the only sentence for both — so on a weekend, or
+   * any weekday after 20:00 UTC, the agent told its owner the exact opposite of
+   * what was happening. Optional, and absent renders the old wording: a fixture
+   * that never established it should not have a claim invented for it.
+   */
+  | { code: "all-legs-stale"; legs: number; paused: number; marketShut?: boolean }
   /**
    * NOTHING BOUGHT, AND IT IS THE BALANCE — a different silence with a
    * different remedy.
@@ -258,7 +268,15 @@ export function renderWhy(w: Why): string {
         `nothing bought — ${w.legs === 1 ? "the price feed for the only leg is" : `all ${w.legs} legs' price feeds are`} ` +
         `stale, so there is no reference price to buy against` +
         (w.paused > 0 ? `, and ${w.paused} of them ${w.paused === 1 ? "is" : "are"} paused` : "") +
-        `. This is a fact about the feeds, not about the market`
+        // The whole point of the flag. Stale-because-shut and stale-because-broken
+        // are the same observation with opposite meanings and opposite remedies.
+        (w.marketShut === true
+          ? `. The US market is closed right now, which is why — stock feeds run 24/5, and this ` +
+            `clears itself when it reopens. Memecoins trade around the clock and are unaffected`
+          : w.marketShut === false
+            ? `. The market is OPEN, so this is our own read path rather than the feeds' schedule — ` +
+              `worth looking at if it lasts`
+            : `. This is a fact about the feeds, not about the market`)
       );
     case "budget-spent":
       return (

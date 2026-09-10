@@ -87,6 +87,16 @@ export interface Snapshot {
   pausedTokens: Set<string>;
   /** Chainlink staleness per symbol; stale = underlying market closed (nights/weekends). */
   staleFeeds: Set<string>;
+  /**
+   * Is the US equity market closed? See MarketSafety.marketShut.
+   *
+   * It qualifies `staleFeeds` and nothing else — a stale feed with this true is
+   * a closed market, and with it false is our own read path. Never gate a trade
+   * on it: the feed staleness is the operative fact, this only decides which
+   * true sentence the owner is shown. Optional so fixtures need not carry it,
+   * and absent reads as "not established", which renders the old wording.
+   */
+  marketShut?: boolean;
   sequencerUp: boolean;
   /**
    * USDG (6dp) still spendable today: the grant's daily cap minus what's already

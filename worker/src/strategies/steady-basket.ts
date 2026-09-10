@@ -326,7 +326,14 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   const spent = !bought && cfg.legs.length > 0 && budgetSpent;
   const idle: Why | undefined =
     shut && !boughtCurve
-      ? { code: "all-legs-stale", legs: cfg.legs.length, paused: skippedPaused }
+      ? {
+          code: "all-legs-stale",
+          legs: cfg.legs.length,
+          paused: skippedPaused,
+          // Which of two true sentences this becomes. Passed through rather than
+          // re-derived: the snapshot decided it beside the staleness it explains.
+          marketShut: snap.marketShut,
+        }
       : spent
         ? { code: "budget-spent", capRaw: cfg.buyPerTickUsdg }
         : short

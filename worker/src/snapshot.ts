@@ -48,6 +48,29 @@ export interface MarketSafety {
   /** Symbols whose Chainlink feed is >2h old (expected on weekends — 24/5 feeds). */
   staleFeeds: Set<string>;
   /**
+   * Is the US equity market closed right now?
+   *
+   * WHY THIS IS A SEPARATE FACT FROM `staleFeeds`. A stale stock feed has two
+   * completely different causes with two completely different remedies: the
+   * market is shut (nothing is wrong, wait), or our own read path is broken
+   * (something is wrong, act). Both produce an identical `staleFeeds` entry,
+   * and the sentence the owner was shown asserted the second one unconditionally
+   * — "This is a fact about the feeds, not about the market." On a Saturday that
+   * is precisely backwards, and Saturday is two sevenths of the week.
+   *
+   * Derived here, beside the staleness it qualifies, rather than in a strategy:
+   * it is a property of the clock and the feed's schedule, and two strategies
+   * working it out separately is how they come to disagree.
+   *
+   * A CALENDAR APPROXIMATION, and it does not pretend otherwise: regular hours
+   * Mon–Fri 13:30–20:00 UTC, with no holidays and no half-days. Wrong on roughly
+   * nine days a year, and wrong in the safe direction — it says "open" on
+   * Thanksgiving, which degrades to today's sentence rather than inventing a new
+   * wrong one. It never gates a trade; it only chooses which true sentence to
+   * show.
+   */
+  marketShut: boolean;
+  /**
    * Latest USD price per symbol (8dp), stale or not — for valuation. Chainlink
    * only as it leaves this function; the tick merges pool-derived quotes in for
    * feedless tokens, which is why each entry carries its own `source`.
@@ -148,6 +171,15 @@ export async function readMarketSafety(): Promise<MarketSafety> {
     if (answer > 0n) prices.set(t.symbol, { price8: answer, stale, source: "chainlink" });
   });
 
+  // See MarketSafety.marketShut. Regular US equity hours, no holiday calendar.
+  const marketShut = (() => {
+    const d = new Date(now * 1000);
+    const day = d.getUTCDay();
+    if (day === 0 || day === 6) return true;
+    const minutes = d.getUTCHours() * 60 + d.getUTCMinutes();
+    return minutes < 13 * 60 + 30 || minutes >= 20 * 60;
+  })();
+
   // Sequencer heuristic until the Chainlink sequencer-uptime feed address is
   // confirmed for 4663: a healthy sequencer produces blocks continuously.
   //
@@ -164,6 +196,7 @@ export async function readMarketSafety(): Promise<MarketSafety> {
   return {
     pausedTokens,
     staleFeeds,
+    marketShut,
     prices,
     sequencerUp,
     blockNumber: block === null ? null : block.number,

@@ -110,3 +110,47 @@ describe("every reason is publishable prose", () => {
     assert.doesNotMatch(s, /lock|captur|profit|made/i);
   });
 });
+
+/**
+ * THE SENTENCE THAT SAID THE OPPOSITE OF THE TRUTH, TWO DAYS IN SEVEN.
+ *
+ * `all-legs-stale` closed with "This is a fact about the feeds, not about the
+ * market." It was written for the case where our own reads failed, and then
+ * became the only sentence for both causes. Stock feeds are 24/5, so on any
+ * weekend — and on any weekday after 20:00 UTC — the stale feed IS the market
+ * being shut, and the agent told its owner otherwise.
+ */
+describe("a stale feed says WHICH kind of stale it is", () => {
+  it("a closed market is named as a closed market", () => {
+    const text = renderWhy({ code: "all-legs-stale", legs: 3, paused: 0, marketShut: true });
+    assert.match(text, /market is closed/i);
+    assert.ok(
+      !/not about the market/.test(text),
+      "on a Saturday this clause is exactly backwards",
+    );
+  });
+
+  it("and it tells the owner it clears itself, because that is the remedy", () => {
+    const text = renderWhy({ code: "all-legs-stale", legs: 3, paused: 0, marketShut: true });
+    assert.match(text, /reopens/);
+  });
+
+  it("an OPEN market with stale feeds points at us, not at the schedule", () => {
+    const text = renderWhy({ code: "all-legs-stale", legs: 3, paused: 0, marketShut: false });
+    assert.match(text, /our own read path/);
+    assert.ok(!/market is closed/i.test(text));
+  });
+
+  it("an unestablished flag keeps the old wording rather than inventing a claim", () => {
+    // A fixture that never worked it out must not have an answer made up for it.
+    const text = renderWhy({ code: "all-legs-stale", legs: 3, paused: 0 });
+    assert.match(text, /not about the market/);
+  });
+
+  it("the paused clause still renders alongside either branch", () => {
+    for (const marketShut of [true, false]) {
+      const text = renderWhy({ code: "all-legs-stale", legs: 3, paused: 2, marketShut });
+      assert.match(text, /2 of them are paused/);
+    }
+  });
+});
