@@ -70,8 +70,14 @@ function xProofMessage(nonce: string): string {
  *
  * Deliberately strict: ids are digits, and accepting anything else here would
  * put user text into the URL we fetch.
+ *
+ * Not exported, for the same Next constraint as `xProofMessage` above — a route
+ * module may export route handlers and a fixed set of config names, and every
+ * other VALUE export is typechecked against `never`. (Interfaces are fine and
+ * this file's siblings export plenty: types are erased, so they never reach the
+ * generated check.) Nothing imports this.
  */
-export function tweetIdFrom(raw: string): string | null {
+function tweetIdFrom(raw: string): string | null {
   const s = raw.trim();
   const direct = /^\d{5,25}$/.exec(s);
   if (direct) return direct[0];
