@@ -202,6 +202,7 @@ const trendingScreen = (c: ResolvedConfig): ScreenLimits => ({
   ...TRENDING_SCREEN,
   minFdvUsd: c.memecoinMinFdvUsd,
 });
+import { readClassLegs } from "./venues/class-legs";
 import {
   buildClassBuyCalls,
   buildClassSellCalls,
@@ -218,6 +219,24 @@ import { buildCurveTradeCalls } from "./venues/pons-trade";
  * the exact failure this bounds.
  */
 const CURVE_DEADLINE_SEC = 60;
+/**
+ * Chain reads one class pass may spend. A class token is never in watchTokens,
+ * so its reserves cannot come from the pricing pass the tick already paid for —
+ * every survivor of the free filters costs an eth_call, and this is the ceiling
+ * on that. Same discipline PONS_MAX_EVALUATE applies to discovery.
+ */
+const CLASS_MAX_READS = 8;
+/**
+ * How much of an immediate round trip may be lost before an entry is refused.
+ *
+ * THE ON-RAMP CHECK THE WALL CANNOT PROVIDE. Everywhere else the `no-exit` rule
+ * refuses a buy the key could not sell. On the class route the key CAN sell —
+ * that is what the vault is for — so the question becomes the other one:
+ * whether selling would return anything. Curve fees are 99 bps a side, so a
+ * round trip cannot beat ~200 bps on a healthy curve; this leaves room for that
+ * plus real slippage and refuses what is much worse than both.
+ */
+const CLASS_MAX_ROUND_TRIP_BPS = 600;
 import {
   CURVE_GUARD_DEFAULTS,
   curveFloorDrawdownBps,
@@ -665,6 +684,137 @@ async function main() {
    * covered for. They are ordered cheapest-first, and none of them is the wall:
    * checkPolicy still judges everything that survives.
    */
+  /**
+   * CLASS ENTRIES THIS TICK — buying a token nobody enumerated.
+   *
+   * A SIBLING OF curveLegsNow, sharing none of its inputs. That function filters
+   * `lastCurveLegs` (built from watchTokens) by `sellableAssets ∩ basketSymbols`;
+   * a class token is in NONE of those three by definition, because it postdates
+   * the grant. So the selection is built from scratch, and the opt-in has to be
+   * built from scratch with it.
+   *
+   * THREE LAYERS MUST ALL HOLD, and they answer different questions:
+   *
+   *   the SIGNATURE   a sealed vault and factory — "this key could reach one"
+   *   the SETTINGS    classSnipeEnabled and a non-zero size — "go and do it"
+   *   the BUDGET      the scout ceiling — "with money I have decided to lose"
+   *
+   * The first two are separate on purpose. This is the same invariant
+   * curveLegsNow was fixed to respect one level down — an owner's "know about
+   * this" must never be read as "trade this" — and here the equivalent is that
+   * signing a wall which COULD reach class tokens must never be read as asking
+   * for them. Nothing is bypassed by keeping them apart; the caps, the scout
+   * budget and the wall all still bind. What would be wrong is the SELECTION.
+   *
+   * Returns [] rather than throwing on every refusal, because "no class entry
+   * this tick" is the overwhelmingly common answer and the ordinary one.
+   */
+  async function proposeClassEntries(): Promise<TradeIntent[]> {
+    // PAPER CANNOT SIMULATE ONE. paper.ts refuses every non-swap intent, and a
+    // simulated class fill would need a price for a token with no oracle, no
+    // pool and no TWAP — necessarily the curve's own reserves, which
+    // curve-prices.ts says are good enough to VALUE something held and not good
+    // enough to AUTHORISE a buy. Worse, everything that distinguishes this venue
+    // — the vault holding, delivery, fee-on-transfer, honeypots — is exactly
+    // what a simulator cannot model, on the one venue where the tape is written
+    // by the adversary.
+    if (paperActive()) return [];
+    if (!cfg.classSnipeEnabled) return [];
+    if (cfg.classPerEntryUsdg <= 0) return [];
+    if (!active) return [];
+    const vault = grantPonsClassVault(active.grant);
+    if (!vault) return [];
+
+    // ALREADY-HELD POSITIONS BOUND THE COUNT. Null means the record could not
+    // be read, and an unreadable position count must not read as zero — that
+    // would let the ceiling free itself exactly when the book is unknown.
+    const held = await classPositions(active.agentId);
+    if (held === null) return [];
+    if (cfg.classMaxPositions > 0 && held.length >= cfg.classMaxPositions) return [];
+    const alreadyHeld = new Set(held.map((h) => h.token));
+
+    // THE ONLY ADMISSIBLE SOURCE. recentCandidates without `poolsOnly`, whose
+    // rows carry the curve — and curve-provenance.invariant.test.ts pins that
+    // `recordCandidate` has exactly one curve-writing producer and that it is
+    // the factory-filtered launch scan. Anything else (a model, a trending
+    // feed, a chat message) breaks the property checkPolicy's curve-provenance
+    // rule rests on, and for a class trade that rule is the ONLY thing vouching
+    // for the output token.
+    const rows = await recentCandidates(6 * 3600, 40);
+    const candidates = rows
+      .filter((r) => !alreadyHeld.has(r.address.toLowerCase()))
+      .flatMap((r) => {
+        // The curve fields travel as ONE object or not at all — the store keeps
+        // them together because a threshold without a curve, or a curve without
+        // a threshold, cannot be read as money. So this destructures rather
+        // than testing three fields that could disagree.
+        const c = r.curve;
+        if (!c) return [];
+        return [
+          {
+            token: r.address.toLowerCase() as `0x${string}`,
+            symbol: r.symbol,
+            decimals: r.decimals,
+            curve: c.curve.toLowerCase() as `0x${string}`,
+            quoteToken: c.quoteToken.toLowerCase() as `0x${string}`,
+            graduationThresholdRaw: BigInt(c.graduationThresholdRaw),
+          },
+        ];
+      });
+    if (candidates.length === 0) return [];
+
+    const { legs } = await readClassLegs({
+      client: active.client,
+      candidates,
+      usdg: CASH.USDG as `0x${string}`,
+      minRealDepthUsdg: usdg(cfg.classMinDepthUsdg),
+      maxReads: CLASS_MAX_READS,
+    });
+    if (legs.length === 0) return [];
+
+    // ONE ENTRY PER TICK. The caps would bound a burst anyway, but a single
+    // proposal keeps the decision legible: an owner reading the feed sees one
+    // considered entry rather than a wall of refusals from a batch that could
+    // only ever have filled its first member.
+    const leg = legs[0]!;
+    const size = usdg(cfg.classPerEntryUsdg);
+    const spend = size < active.limits.perTradeUsdg ? size : active.limits.perTradeUsdg;
+    if (spend <= 0n) return [];
+
+    // Quoted, impact-checked and floored HERE, because this is where the
+    // reserves are — the executor holds only an intent. Every existing curve
+    // producer makes the same three checks in the same order.
+    const quoted = curveBuyOut(leg.reserves, spend);
+    if (quoted === null || quoted <= 0n) return [];
+    const impact = curveBuyImpactBps(leg.reserves, spend);
+    if (impact === null || impact > cfg.maxImpactBps) return [];
+    const floor = curveMinOut(quoted, cfg.slippageBps);
+    if (floor === null || floor <= 0n) return [];
+
+    // THE ON-RAMP CHECK THE WALL CANNOT PROVIDE. Everywhere else `no-exit`
+    // refuses a buy the key could not sell; here the key CAN sell, so the
+    // question is whether selling would return anything. Curve fees are 99 bps
+    // a side, so a round trip cannot beat ~200 bps and a curve where it is much
+    // worse than that is one nobody should be entering.
+    const roundTrip = curveSellOut(leg.reserves, quoted);
+    if (roundTrip === null || roundTrip * 10_000n < spend * BigInt(10_000 - CLASS_MAX_ROUND_TRIP_BPS)) {
+      return [];
+    }
+
+    return [
+      {
+        kind: "curve-trade",
+        target: vault,
+        curve: leg.curve,
+        assetIn: leg.quoteToken,
+        assetOut: leg.token,
+        amountInRaw: spend,
+        minAmountOutRaw: floor,
+        notionalUsdg: spend,
+      },
+    ];
+  }
+
   function curveLegsNow(): {
     legs: ReadonlyMap<string, CurveLeg>;
     tokens: ReadonlyMap<string, `0x${string}`>;
@@ -7680,6 +7830,18 @@ async function main() {
       // equityUsdg excludes anything we couldn't value, so when the book is
       // incomplete it is a partial sum — say so, or the drawdown rule reads the
       // gap as a loss and rejects every intent including the exit.
+      await processIntent(intent, equityUsdg, !bookIncomplete);
+    }
+
+    // ── THE CLASS ROUTE ────────────────────────────────────────────────────
+    //
+    // Driven here rather than from inside a strategy, deliberately. A strategy
+    // decides WHICH of the assets it was given to trade; this decides whether
+    // to reach for an asset nobody gave it, which is a different kind of
+    // decision and belongs where it can be read as one. It also keeps every
+    // existing strategy unable to reach the route by accident.
+    for (const intent of await proposeClassEntries()) {
+      await ensureDecision(intent, "class-route");
       await processIntent(intent, equityUsdg, !bookIncomplete);
     }
   }

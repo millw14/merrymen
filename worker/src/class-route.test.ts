@@ -171,3 +171,94 @@ describe("the arm stays where its idempotency argument holds", () => {
     assert.ok(lock > 0 && arm > lock, "the class arm must live inside the serialized path");
   });
 });
+
+/**
+ * THE OPT-IN, which is a SEPARATE decision from the signature.
+ *
+ * Sealing a class vault at /grant says "this key could reach class tokens".
+ * `classSnipeEnabled` says "go and do it". Keeping them apart is the same
+ * invariant curveLegsNow was fixed to respect one level down — an owner's "know
+ * about this" must never be read as "trade this" — and here the stakes are
+ * higher, because the assets in question are ones nobody named at all.
+ */
+describe("three layers must hold before an agent reaches for a class token", () => {
+  const PRODUCER = (() => {
+    const start = CODE.indexOf("async function proposeClassEntries()");
+    assert.ok(start > 0, "the class producer must exist");
+    return CODE.slice(start, CODE.indexOf("function curveLegsNow()", start));
+  })();
+
+  it("the SETTINGS switch is checked, not just the signature", () => {
+    // The assertion that stops "the wall allows it" being read as "the owner
+    // asked for it".
+    assert.match(PRODUCER, /if \(!cfg\.classSnipeEnabled\) return \[\]/);
+  });
+
+  it("a zero size proposes nothing", () => {
+    // Two closed doors rather than one: enabling the route and forgetting the
+    // size is a no-op; setting a size and forgetting the route is not.
+    assert.match(PRODUCER, /cfg\.classPerEntryUsdg <= 0/);
+  });
+
+  it("the SIGNATURE is checked too, from the grant", () => {
+    assert.match(PRODUCER, /grantPonsClassVault\(active\.grant\)/);
+  });
+
+  it("paper proposes nothing, and refuses rather than simulating", () => {
+    // A simulated class fill needs a price for a token with no oracle and no
+    // pool — necessarily the curve's own reserves, which curve-prices.ts says
+    // are good enough to VALUE something held and not to AUTHORISE a buy.
+    assert.match(PRODUCER, /if \(paperActive\(\)\) return \[\]/);
+  });
+
+  it("an unreadable position count proposes nothing", () => {
+    // Null must not read as zero, or the position ceiling frees itself exactly
+    // when the book is unknown.
+    assert.match(PRODUCER, /if \(held === null\) return \[\]/);
+  });
+
+  it("candidates come from the factory-filtered launch feed and nowhere else", () => {
+    // curve-provenance.invariant.test.ts pins that recordCandidate has exactly
+    // one curve-writing producer and that it is the Pons launch scan. For a
+    // class trade that provenance is the ONLY thing vouching for the output
+    // token, so any other source breaks the rule checkPolicy rests on.
+    assert.match(PRODUCER, /recentCandidates\(/);
+    assert.ok(
+      !/poolsOnly/.test(PRODUCER),
+      "poolsOnly filters out exactly the curve rows this path needs",
+    );
+    for (const forbidden of ["cfg.customTokens", "watchTokens", "basketSymbols"]) {
+      assert.ok(!PRODUCER.includes(forbidden), `${forbidden} must not select a class candidate`);
+    }
+  });
+
+  it("sizes against the per-trade cap as well as the setting", () => {
+    assert.match(PRODUCER, /active\.limits\.perTradeUsdg/);
+  });
+
+  it("checks impact and a slippage floor where the reserves are", () => {
+    // In the producer, because that is where the reserves live — the executor
+    // holds only an intent. Every existing curve producer does the same three
+    // in the same order.
+    assert.match(PRODUCER, /curveBuyImpactBps\(/);
+    assert.match(PRODUCER, /curveMinOut\(/);
+  });
+
+  it("refuses a curve whose immediate round trip loses too much", () => {
+    // The on-ramp check `no-exit` provides everywhere else. Here the key CAN
+    // sell, so the question is whether selling would return anything.
+    assert.match(PRODUCER, /curveSellOut\(/);
+    assert.match(PRODUCER, /CLASS_MAX_ROUND_TRIP_BPS/);
+  });
+
+  it("proposes at most ONE entry per tick", () => {
+    // The caps would bound a burst anyway; one proposal keeps the decision
+    // legible instead of producing a wall of refusals from a batch that could
+    // only ever have filled its first member.
+    assert.match(PRODUCER, /const leg = legs\[0\]!/);
+  });
+
+  it("targets the sealed vault, so the executor's fork and the mirror agree", () => {
+    assert.match(PRODUCER, /target: vault/);
+  });
+});

@@ -413,6 +413,53 @@ export interface MerrymenSettings {
   scoutBudgetUsdg?: number;
   /** Max USDG into any single unpriceable token. */
   scoutPerTokenUsdg?: number;
+
+  // ── the class route (buying tokens the grant never named) ──────────────
+  /**
+   * MAY THIS AGENT BUY A TOKEN NOBODY ENUMERATED? OFF by default.
+   *
+   * READ THIS BEFORE TURNING IT ON. Every other venue can only trade assets the
+   * owner named in `customTokens` and sealed by re-signing at /grant. The class
+   * route is the one exception: it buys tokens that did not exist when the grant
+   * was signed, holds them in a per-account vault (because a token the ACCOUNT
+   * holds cannot be sold — the wall has no approve permission for an address
+   * nobody enumerated), and sells them back through the same vault.
+   *
+   * What still bounds it: the per-trade cap, the daily cap, the ops cap, the
+   * scout budget, `classPerEntryUsdg` below, and the fact that the vault can pay
+   * nobody but this account. What does NOT bound it, stated rather than implied:
+   * NOTHING ON CHAIN VOUCHES FOR THE TOKEN. The wall cannot pin a curve — a new
+   * address per launch — so provenance lives entirely in the worker's
+   * factory-filtered launch feed. For this permission the chain is LOOSER than
+   * the off-chain mirror, which is the reverse of this system's usual posture,
+   * and it is the price of the capability.
+   *
+   * A SEPARATE DECISION FROM THE SIGNATURE, deliberately. Sealing a class vault
+   * at /grant says "this key COULD reach class tokens". This says "go and do
+   * it". The distinction is the one curveLegsNow was fixed to respect: an
+   * owner's "know about this" must never be read as "trade this", and the same
+   * rule applies one level up.
+   */
+  classSnipeEnabled?: boolean;
+  /**
+   * Max USDG into a single class entry. 0 = nothing, which is the default.
+   *
+   * Two switches rather than one because they fail differently: forgetting to
+   * set a size is a no-op, and forgetting to turn the route off is not.
+   */
+  classPerEntryUsdg?: number;
+  /** Max simultaneous class positions. 0 = no limit beyond the scout budget. */
+  classMaxPositions?: number;
+  /**
+   * Minimum REAL curve depth, USDG, before a class entry is considered.
+   *
+   * Real, not reported: a Pons curve's quote reserve includes a virtual seed
+   * worth 40% of the graduation threshold, which is not money anyone can sell
+   * into. `CURVE_GUARD_DEFAULTS.minRealDepthUsdg` is the venue's own
+   * correctly-scaled floor; trencher's $25,000 is a POOL figure and sits 2.4x
+   * above the maximum a curve can ever hold.
+   */
+  classMinDepthUsdg?: number;
   /** Master switch — OFF by default. When on (and a key is set), landed/rejected
    * trades and the daily report are PUBLISHED to your agent's Virtuals page.
    * Outbound + public: nothing streams until you turn this on. */
@@ -660,6 +707,18 @@ export const SETTINGS_DEFAULTS = {
   scoutEnabled: false,
   scoutBudgetUsdg: 0,
   scoutPerTokenUsdg: 25,
+  // THE CLASS ROUTE IS OFF, AND SIZED AT ZERO. Two closed doors rather than
+  // one, because they fail differently: an owner who enables the route and
+  // forgets the size gets a no-op, and one who sets a size and forgets to
+  // disable the route does not. See MerrymenSettings.classSnipeEnabled for what
+  // is actually being opted into.
+  classSnipeEnabled: false,
+  classPerEntryUsdg: 0,
+  classMaxPositions: 0,
+  // The venue's own floor (CURVE_GUARD_DEFAULTS.minRealDepthUsdg), not
+  // trencher's $25,000 — that is a POOL figure and sits 2.4x above the most a
+  // Pons curve can ever hold.
+  classMinDepthUsdg: 250,
   strategistStopLossBps: 0,
   takeProfitBps: 0,
   buyPerTickUsdg: 25,

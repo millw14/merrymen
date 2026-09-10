@@ -200,6 +200,17 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   deskMaxSteps: [1, 12],
   scoutBudgetUsdg: [0, 1_000_000],
   scoutPerTokenUsdg: [0, 1_000_000],
+  // THE CLASS ROUTE. Bounded here as well as defaulted, for the reason
+  // deskMaxSteps is: these numbers ARE the exposure an owner is choosing.
+  //
+  // And present here at all because this handler is the only writer of the
+  // hosted tenant store — a field missing from this file is silently dropped
+  // while the PUT returns {ok:true}, which is exactly what happened to
+  // ponsAdapterAddress and made its deploy script and runbook impossible to
+  // follow.
+  classPerEntryUsdg: [0, 1_000_000],
+  classMaxPositions: [0, 1_000],
+  classMinDepthUsdg: [0, 10_000_000],
 };
 const BOOL_FIELDS = [
   "paperTradingEnabled",
@@ -227,6 +238,11 @@ const BOOL_FIELDS = [
   "virtualsEnabled",
   "trencherLiveEnabled",
   "scoutEnabled",
+  // BUYING A TOKEN NOBODY ENUMERATED. See MerrymenSettings.classSnipeEnabled
+  // for what this actually permits. It is a SECOND decision on top of sealing a
+  // class vault at /grant — the signature says the key could reach class
+  // tokens, this says go and do it — and both are required.
+  "classSnipeEnabled",
   "discoveryEnabled",
 ] as const;
 /** Telegram PC string-array allowlists: (field, per-entry maxLen). */

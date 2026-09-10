@@ -105,6 +105,11 @@ export interface ResolvedConfig {
   scoutBudgetUsdg: number;
   /** Max USDG into any single unpriceable token. */
   scoutPerTokenUsdg: number;
+  /** The class route. See MerrymenSettings.classSnipeEnabled — OFF by default. */
+  classSnipeEnabled: boolean;
+  classPerEntryUsdg: number;
+  classMaxPositions: number;
+  classMinDepthUsdg: number;
   strategistStopLossBps: number;
   takeProfitBps: number;
   buyPerTickUsdg: number;
@@ -346,6 +351,10 @@ export function mergeSettings(
     scoutEnabled: bool(file.scoutEnabled, env.MERRYMEN_SCOUT_ENABLED, d.scoutEnabled),
     scoutBudgetUsdg: num(file.scoutBudgetUsdg, env.MERRYMEN_SCOUT_BUDGET_USDG, d.scoutBudgetUsdg, 0, 1_000_000),
     scoutPerTokenUsdg: num(file.scoutPerTokenUsdg, env.MERRYMEN_SCOUT_PER_TOKEN_USDG, d.scoutPerTokenUsdg, 0, 1_000_000),
+    classSnipeEnabled: bool(file.classSnipeEnabled, env.MERRYMEN_CLASS_SNIPE, d.classSnipeEnabled),
+    classPerEntryUsdg: num(file.classPerEntryUsdg, env.MERRYMEN_CLASS_PER_ENTRY_USDG, d.classPerEntryUsdg, 0, 1_000_000),
+    classMaxPositions: num(file.classMaxPositions, env.MERRYMEN_CLASS_MAX_POSITIONS, d.classMaxPositions, 0, 1_000),
+    classMinDepthUsdg: num(file.classMinDepthUsdg, env.MERRYMEN_CLASS_MIN_DEPTH_USDG, d.classMinDepthUsdg, 0, 10_000_000),
     // 0 disables it; the ceiling is 100x, past which it is not a take-profit
     // rule, it is a number nobody will ever hit.
     strategistStopLossBps: num(file.strategistStopLossBps, env.MERRYMEN_STRATEGIST_STOP_LOSS_BPS, d.strategistStopLossBps ?? 0, 0, 10_000),
