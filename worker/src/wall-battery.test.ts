@@ -122,12 +122,27 @@ describe("runWallBattery", () => {
     const result = runWallBattery(classGrant, NOW);
 
     assert.equal(result.allHeld, true);
-    // 10 shared cases + the three class ones (the non-class fixtures get one).
-    assert.equal(result.cases.length, 13);
+    // 10 shared cases + five class ones (a non-class fixture gets one).
+    assert.equal(result.cases.length, 15);
     assert.deepEqual(
-      result.cases.slice(-3).map((entry) => entry.rule ?? "approved"),
-      ["approved", "curve-provenance", "asset-allowlist"],
+      result.cases.slice(-5).map((entry) => entry.rule ?? "approved"),
+      // enter · the price of entering · the exit · the exit under a tripped
+      // breaker · the bound
+      ["approved", "curve-provenance", "approved", "approved", "asset-allowlist"],
     );
+  });
+
+  it("PROVES THE EXIT, which three buy cases could not", () => {
+    // A wall that can open a class position and never close one is the exact
+    // trap PonsClassVault exists to remove — and a battery of buys would have
+    // printed all-green over it. Asserted separately from the sequence above so
+    // it cannot be lost in a reordering.
+    const result = runWallBattery(grant([TRADEABLE_V2, GRANT_PONS_CLASS], undefined, CLASS_VAULT), NOW);
+    const exits = result.cases.filter((c) => /exit/i.test(c.attempt));
+    assert.equal(exits.length, 2, "the plain exit and the exit under a tripped breaker");
+    for (const e of exits) {
+      assert.equal(e.ok, true, `${e.attempt} — ${e.rule ?? ""} ${e.detail ?? ""}`);
+    }
   });
 
   it("uses the requested watchlist as allowedAssets without widening sell permissions", () => {

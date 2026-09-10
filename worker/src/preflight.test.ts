@@ -232,3 +232,61 @@ describe("preflight — when a sponsor pays the gas", () => {
     assert.ok(idsAt(ready({ ethWei: null, sponsored: true }), "warn").includes("gas"));
   });
 });
+
+/**
+ * THE DEFAULTS SPEND THE DAY'S BUDGET IN TWO MINUTES.
+ *
+ * `buyPerTickUsdg` and `tickSeconds` are settings; `caps.dailyUsdg` is sealed in
+ * the signature. Nothing cross-validates them, so the shipped pairing — 25 USDG
+ * a tick, 60s, a 50 USDG cap — spends the whole allowance before the third tick
+ * and then refuses every buy for the remaining 1,438 minutes.
+ *
+ * The cap is right and stays. The arithmetic is checkable before an owner funds
+ * anything, which beats discovering it from a feed full of refusals.
+ */
+describe("the tick rate is checked against the daily cap", () => {
+  const grantWith = (dailyUsdg: number) =>
+    ({
+      smartAccount: "0x0000000000000000000000000000000000000001",
+      chainId: 4663,
+      expiresAt: NOW + 10 * 86_400,
+      caps: { perTradeUsdg: 10, dailyUsdg, expiryDays: 14, maxDrawdownPct: 15, maxOpsPerDay: 24 },
+      grantFeatures: [],
+    }) as never;
+
+  const run = (settings: Record<string, unknown>, dailyUsdg: number) =>
+    preflight(
+      ready({ settings: { ...ready().settings, ...settings } as never, grant: grantWith(dailyUsdg) }),
+    ).find((c) => c.id === "daily-budget-rate");
+
+  it("warns on the SHIPPED DEFAULTS — 25 a tick, 60s, a 50 cap", () => {
+    const c = run({ buyPerTickUsdg: 25, tickSeconds: 60 }, 50);
+    assert.ok(c, "the shipped pairing must not pass silently");
+    assert.equal(c!.level, "warn");
+  });
+
+  it("names both remedies, and that they cost differently", () => {
+    // One is a setting that takes effect next tick; the other is sealed in the
+    // signature and needs a re-sign. Telling an owner to "raise the cap" without
+    // that is telling them to do the expensive one.
+    const c = run({ buyPerTickUsdg: 25, tickSeconds: 60 }, 50)!;
+    assert.match(c.detail ?? "", /buyPerTickUsdg/);
+    assert.match(c.detail ?? "", /re-sign/);
+  });
+
+  it("says exits are never blocked, because that is the question it prompts", () => {
+    assert.match(run({ buyPerTickUsdg: 25, tickSeconds: 60 }, 50)!.detail ?? "", /[Ss]elling is never blocked/);
+  });
+
+  it("stays quiet on a sanely-paired agent", () => {
+    // 5 USDG every 5 minutes against a 500 cap: about eight hours of budget.
+    assert.equal(run({ buyPerTickUsdg: 5, tickSeconds: 300 }, 500), undefined);
+  });
+
+  it("cannot fire without a grant to read the cap from", () => {
+    const c = preflight(
+      ready({ settings: { ...ready().settings, buyPerTickUsdg: 25, tickSeconds: 60 } as never, grant: null }),
+    ).find((x) => x.id === "daily-budget-rate");
+    assert.equal(c, undefined, "an unknown cap must not produce an invented ratio");
+  });
+});

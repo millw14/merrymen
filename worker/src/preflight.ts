@@ -60,6 +60,8 @@ export interface PreflightInput {
     paperTradingEnabled?: boolean;
     basketSymbols?: string[];
     buyPerTickUsdg?: number;
+    /** Seconds between ticks. Paired with buyPerTickUsdg it IS the spend rate. */
+    tickSeconds?: number;
     idleFloorUsdg?: number;
     /** RPC overrides, if the owner set them — the CLI reads balances through these. */
     rpcMainnet?: string;
@@ -413,6 +415,44 @@ export function preflight(input: PreflightInput): Check[] {
         "and that deposit counts against the daily spend cap — so it can eat most of the day's " +
         "allowance before any trading happens. Raise idleFloorUsdg above your deposit to stop it.",
     });
+  }
+
+  // ── THE TICK RATE AGAINST THE DAILY CAP ─────────────────────────────────
+  //
+  // Two files that never meet: `buyPerTickUsdg` and `tickSeconds` live in
+  // settings, `caps.dailyUsdg` is sealed in the signature, and nothing
+  // cross-validates them. On the shipped defaults — 25 USDG a tick, 60s, a 50
+  // USDG cap — the day's entire budget is spent in TWO MINUTES and every
+  // proposal for the remaining 1,438 is refused at `daily-cap`.
+  //
+  // The cap is correct and must stay; it is a sane starting wall. What is wrong
+  // is the PAIRING, and it is arithmetic, so it can be checked before an owner
+  // funds anything rather than discovered from a feed full of refusals.
+  //
+  // The neighbouring `idle-sweep` check has exactly this shape — it warns that
+  // the vault deposit eats the same allowance — and this is its sibling.
+  const tickSeconds = s.tickSeconds ?? 60;
+  // Optional all the way down, and not merely for tidiness: preflight is one
+  // function returning many checks, so a throw here takes every OTHER check
+  // with it — an owner debugging a missing bundler key would get a stack trace
+  // instead of the answer. `caps` is required on the type and absent on real
+  // partial grants that reach this shape.
+  const dailyCap = input.grant?.caps?.dailyUsdg ?? null;
+  if (dailyCap !== null && dailyCap > 0 && perTick > 0 && tickSeconds > 0) {
+    const minutesOfBudget = (dailyCap / perTick) * (tickSeconds / 60);
+    if (minutesOfBudget < 60) {
+      out.push({
+        id: "daily-budget-rate",
+        level: "warn",
+        title: `today's budget lasts about ${Math.max(1, Math.round(minutesOfBudget))} minute(s) at this tick rate`,
+        detail:
+          `${perTick} USDG every ${tickSeconds}s against a ${dailyCap} USDG daily cap spends the ` +
+          `whole allowance in roughly ${Math.max(1, Math.round(minutesOfBudget))} minute(s), after which every buy is ` +
+          `refused at daily-cap until the 24h window rolls. Selling is never blocked by it. ` +
+          `Two remedies and they cost differently: lower buyPerTickUsdg (a setting, takes effect ` +
+          `next tick) or raise the daily cap (sealed in the signature, needs a re-sign at /grant).`,
+      });
+    }
   }
 
   return out;

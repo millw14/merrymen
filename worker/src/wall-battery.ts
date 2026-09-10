@@ -127,6 +127,32 @@ export function runWallBattery(
           limits,
         },
         {
+          // THE EXIT, and until now nothing in this battery proved it reachable.
+          // All three class cases were BUYS — so a wall that could open a class
+          // position and never close one would have printed all-green. That is
+          // the exact trap PonsClassVault exists to remove, and a proof that
+          // does not check it is a proof of the wrong thing.
+          attempt: "selling a class position back out — the exit the vault exists for",
+          want: "approved",
+          intent: classBuy(classVault, CLASS_TOKEN, usdgAddr),
+          state: calm,
+          limits: withFeed,
+        },
+        {
+          // The breaker must never block that exit either. A class buy craters
+          // equity against an unmoved high-water mark, so a drawdown is exactly
+          // the state a class position gets sold in.
+          attempt: "the same exit while the drawdown breaker is tripped",
+          want: "approved",
+          intent: classBuy(classVault, CLASS_TOKEN, usdgAddr),
+          state: {
+            ...calm,
+            highWaterMarkUsdg: usdgUnits(1000),
+            equityUsdg: usdgUnits(1000 - (1000 * grant.caps.maxDrawdownPct) / 100),
+          },
+          limits: withFeed,
+        },
+        {
           attempt: "rolling one un-enumerated token straight into another (nothing in it is anchored)",
           want: "rejected",
           expectedRule: "asset-allowlist",
