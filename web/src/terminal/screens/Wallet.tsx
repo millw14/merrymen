@@ -9,6 +9,8 @@ import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import {
   explorerFor,
   grantHasV4,
+  grantPonsAdapter,
+  grantPonsClassVault,
   isValidCustomToken,
   robinhoodChain,
   robinhoodTestnet,
@@ -379,6 +381,8 @@ export default function GrantPage() {
   // the wall at signing — which is why it is read here and not at trade time.
   const [v4Adapter, setV4Adapter] = useState<`0x${string}` | undefined>(undefined);
   const [ponsAdapter, setPonsAdapter] = useState<`0x${string}` | undefined>(undefined);
+  /** The class-vault FACTORY. Each account’s own vault is derived from it at sign time. */
+  const [classFactory, setClassFactory] = useState<`0x${string}` | undefined>(undefined);
   // The basket matters here for the same reason: /settings offers every registry
   // symbol, but only the ones sealed into the signature can be sold.
   const [basketSymbols, setBasketSymbols] = useState<string[]>([]);
@@ -492,7 +496,7 @@ export default function GrantPage() {
       .catch(() => setSession(null));
     fetch("/api/settings")
       .then((r) => (r.ok ? r.json() : null))
-      .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[]; v4AdapterAddress?: string; ponsAdapterAddress?: string }; defaults?: { basketSymbols?: string[] } } | null) => {
+      .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[]; v4AdapterAddress?: string; ponsAdapterAddress?: string; ponsClassVaultFactory?: string }; defaults?: { basketSymbols?: string[] } } | null) => {
         const list = (v?.values?.customTokens ?? []).filter(isValidCustomToken);
         setCustomTokens(list as CustomToken[]);
         setBasketSymbols(v?.values?.basketSymbols ?? v?.defaults?.basketSymbols ?? []);
@@ -635,6 +639,7 @@ export default function GrantPage() {
         extraTokens: customTokens,
         v4AdapterAddress: v4Adapter,
         ponsAdapterAddress: await verifiedAdapter(ponsAdapter, chainId, setStatus),
+        ponsClassVaultFactory: classFactory,
         hostedAs: session.hosted ? (session.address ?? undefined) : undefined,
       });
       setGrant(g);
@@ -686,6 +691,7 @@ export default function GrantPage() {
         extraTokens: customTokens,
         v4AdapterAddress: v4Adapter,
         ponsAdapterAddress: await verifiedAdapter(ponsAdapter, chainId, setStatus),
+        ponsClassVaultFactory: classFactory,
         hostedAs: session?.hosted ? (session.address ?? undefined) : undefined,
       });
       // They just pasted the owner key, so it's demonstrably backed up — skip the
@@ -755,11 +761,15 @@ export default function GrantPage() {
       let freshTokens = customTokens;
       let freshAdapter = v4Adapter;
       let freshPons = ponsAdapter;
+      // Re-read at CLICK time like its siblings. The mount fetch predates
+      // anything the owner just saved, and re-signing from stale state seals a
+      // wall without the thing they added thirty seconds ago.
+      let freshClassFactory = classFactory;
       try {
         const r = await fetch("/api/settings");
         if (r.ok) {
           const v = (await r.json()) as {
-            values?: { customTokens?: unknown[]; v4AdapterAddress?: string; ponsAdapterAddress?: string };
+            values?: { customTokens?: unknown[]; v4AdapterAddress?: string; ponsAdapterAddress?: string; ponsClassVaultFactory?: string };
           };
           freshTokens = (v?.values?.customTokens ?? []).filter(isValidCustomToken) as CustomToken[];
           const a = v?.values?.v4AdapterAddress;
@@ -785,6 +795,7 @@ export default function GrantPage() {
         extraTokens: freshTokens,
         v4AdapterAddress: freshAdapter,
         ponsAdapterAddress: await verifiedAdapter(freshPons, chainId, setStatus),
+        ponsClassVaultFactory: freshClassFactory,
         hostedAs: session?.hosted ? (session.address ?? undefined) : undefined,
         /**
          * THE ACCOUNT WE ARE RE-SIGNING, stated so the signer can refuse.
@@ -1730,6 +1741,37 @@ export default function GrantPage() {
                   {grantHasV4(grant) ? (
                     <span style={{ color: "var(--red)" }}>
                       unrestricted transfer access. <b>Renew below</b> to remove it.
+                    </span>
+                  ) : (
+                    "not granted."
+                  )}
+                </li>
+                {/*
+                  TWO VENUES THIS LIST NEVER MENTIONED. The block above says
+                  "capability drift you cannot see is capability drift you
+                  cannot act on", and then showed three lines out of five —
+                  docs/owner-runbook-pons.md even instructs the owner to check
+                  here for the Pons adapter, which was never rendered.
+
+                  The class line matters most: it is the only permission in the
+                  wall that lets an agent buy something nobody named, and it
+                  puts assets in a contract rather than the account. An owner
+                  should not have to read grant.json to find that out.
+                */}
+                <li>
+                  <b>Bonding curves</b> —{" "}
+                  {grantPonsAdapter(grant) ? (
+                    <>sealed to {short(grantPonsAdapter(grant)!)}.</>
+                  ) : (
+                    "not granted."
+                  )}
+                </li>
+                <li>
+                  <b>Class route</b> —{" "}
+                  {grantPonsClassVault(grant) ? (
+                    <span style={{ color: "var(--amber, var(--red))" }}>
+                      this key may buy tokens you never named, held in your vault at{" "}
+                      {short(grantPonsClassVault(grant)!)}. <b>Renew below</b> to remove it.
                     </span>
                   ) : (
                     "not granted."

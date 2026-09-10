@@ -459,6 +459,17 @@ export async function PUT(req: Request) {
       setOrClear("ponsAdapterAddress", v.trim());
     else errors.push("ponsAdapterAddress: must be a 0x… address");
   }
+  // THE CLASS VAULT FACTORY, which follows the note above rather than
+  // rediscovering it: the field is here so /settings can actually write it, and
+  // it is the FACTORY rather than a vault because a vault is CREATE2-salted with
+  // one smart account — the signer derives each account's own from this.
+  if ("ponsClassVaultFactory" in body) {
+    const v = body.ponsClassVaultFactory;
+    if (v === "" || v === null || v === undefined) setOrClear("ponsClassVaultFactory", undefined);
+    else if (typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v.trim()))
+      setOrClear("ponsClassVaultFactory", v.trim());
+    else errors.push("ponsClassVaultFactory: must be a 0x… address");
+  }
   // $MERRYMEN holder wallet — a read-only address for the Merry Circle fee tier.
   if ("holderAddress" in body) {
     const v = body.holderAddress;

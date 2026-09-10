@@ -62,6 +62,8 @@ export interface ResolvedConfig {
   xProof: { handle: string; at: number } | undefined;
   v4AdapterAddress: `0x${string}` | undefined;
   ponsAdapterAddress: `0x${string}` | undefined;
+  /** The PonsClassVaultFactory. A HINT for signing; the grant is the authority. */
+  ponsClassVaultFactory: `0x${string}` | undefined;
   paperTradingEnabled: boolean;
   paperStartUsdg: number;
   /** Builtin name, or a user strategy filename (strategies/<name>.ts). */
@@ -255,6 +257,11 @@ export function mergeSettings(
     rawAdapter && /^0x[0-9a-fA-F]{40}$/.test(rawAdapter) ? (rawAdapter as `0x${string}`) : undefined;
 
   const rawPons = str(file.ponsAdapterAddress, env.MERRYMEN_PONS_ADAPTER_ADDRESS);
+  const rawClassFactory = str(file.ponsClassVaultFactory, env.MERRYMEN_CLASS_VAULT_FACTORY);
+  const ponsClassVaultFactory =
+    rawClassFactory && /^0x[0-9a-fA-F]{40}$/.test(rawClassFactory)
+      ? (rawClassFactory as `0x${string}`)
+      : undefined;
   const ponsAdapterAddress =
     rawPons && /^0x[0-9a-fA-F]{40}$/.test(rawPons) ? (rawPons as `0x${string}`) : undefined;
 
@@ -310,6 +317,7 @@ export function mergeSettings(
     xProof,
     v4AdapterAddress,
     ponsAdapterAddress,
+    ponsClassVaultFactory,
     paperTradingEnabled: bool(file.paperTradingEnabled, env.MERRYMEN_PAPER_TRADING, d.paperTradingEnabled),
     paperStartUsdg: num(file.paperStartUsdg, env.MERRYMEN_PAPER_START_USDG, d.paperStartUsdg, 1, 10_000_000),
     // Any sane token is a valid strategy name — builtins resolve directly,

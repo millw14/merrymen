@@ -131,6 +131,22 @@ export interface MerrymenSettings {
    * contract the signature never covered.
    */
   ponsAdapterAddress?: string;
+  /**
+   * The deployed PonsClassVaultFactory for this chain, or absent.
+   *
+   * A HINT AT SIGNING TIME, on exactly the terms `ponsAdapterAddress` is one:
+   * the worker calls whatever the grant was sealed against
+   * (grantPonsClassVaultFactory), and this only lets the dashboard offer it when
+   * a grant is minted.
+   *
+   * THE FACTORY, NOT THE VAULT, and that is not interchangeable. A vault is
+   * CREATE2-salted with one smart account, so there is no vault address that is
+   * correct for every agent — the signer derives each account's own from this.
+   *
+   * Setting it alone changes nothing. It has to be sealed by re-signing at
+   * /grant, and the wall REFUSES to seal a vault without it.
+   */
+  ponsClassVaultFactory?: string;
 
   // ── paper trading (the full loop with zero funds) ──────────────────────
   /** When the account can't sign (no bundler key), fill approved intents as

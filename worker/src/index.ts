@@ -3787,6 +3787,66 @@ async function main() {
       }
     }
 
+    // ── THE CLASS ROUTE, WHERE "NO CODE" IS THE ORDINARY STATE ─────────────
+    //
+    // A deliberate NON-copy of the two blocks above, and the difference is the
+    // point. For an adapter, no code means a wrong chain or a wrong address and
+    // there is nothing the worker can do, so the route is disabled. For a vault
+    // it means the account has simply never made a class trade: the address is a
+    // CREATE2 prediction and the contract is created on first use. Refusing on
+    // it would refuse the FIRST class trade of every grant, permanently, since
+    // nothing else deploys one.
+    //
+    // So this reports and does not gate. The executor decides from a FRESH
+    // getCode immediately before building — anything cached here is stale the
+    // moment the first class buy lands.
+    const sealedVault = grantPonsClassVault(grant);
+    if (sealedVault) {
+      const vaultCode = await client.getCode({ address: sealedVault }).catch(() => undefined);
+      const sealedFactory = grantPonsClassVaultFactory(grant);
+      const factoryCode = sealedFactory
+        ? await client.getCode({ address: sealedFactory }).catch(() => undefined)
+        : undefined;
+      if (vaultCode === undefined) {
+        await addEvent(
+          agentId,
+          "warn",
+          `could not read your class vault at ${short(sealedVault)} on chain ${chain.id}. That is not ` +
+            `the same as it being absent — class trades will retry each tick.`,
+        );
+      } else if (vaultCode === "0x" && (!sealedFactory || factoryCode === "0x")) {
+        // THE REAL SIBLING of the adapter warning: an uncreated vault AND a
+        // factory that cannot create it means the vault can never exist. Left
+        // alone, a class buy would CALL a codeless address, succeed with empty
+        // returndata, and book a purchase that bought nothing.
+        console.log(`[worker] class vault ${sealedVault} cannot be created on chain ${chain.id} — class route dead`);
+        await addEvent(
+          agentId,
+          "warn",
+          `your class vault at ${short(sealedVault)} has never been created and the factory this ` +
+            `grant sealed ${sealedFactory ? `(${short(sealedFactory)}) has no code` : "is missing"} ` +
+            `on chain ${chain.id}. The class route cannot work — deploy the factory and re-sign.`,
+        );
+      } else if (vaultCode === "0x") {
+        // Ordinary, and said as ordinary: "ok", not "warn". Every class-enabled
+        // grant starts here.
+        await addEvent(
+          agentId,
+          "ok",
+          `your class vault at ${short(sealedVault)} hasn't been created yet — the first class buy ` +
+            `creates it in the same operation, which costs a little extra gas once.`,
+        );
+      } else if (cfg.ponsClassVaultFactory && sealedFactory && cfg.ponsClassVaultFactory.toLowerCase() !== sealedFactory) {
+        await addEvent(
+          agentId,
+          "warn",
+          `settings name a different class-vault factory (${cfg.ponsClassVaultFactory}) than this ` +
+            `grant was sealed against (${sealedFactory}). The worker uses the SEALED one — re-sign ` +
+            `at /grant to switch.`,
+        );
+      }
+    }
+
     active = {
       grant,
       agentId,

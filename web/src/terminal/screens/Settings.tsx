@@ -1242,6 +1242,17 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               <input type="text" placeholder="0x…" value={v("ponsAdapterAddress")} onChange={set("ponsAdapterAddress")} />
             </Field>
             <Field
+              label="Class vault factory contract"
+              hint="PonsClassVaultFactory on your wallet’s network. This lets your agent buy tokens that did not exist when you signed — they are held in a vault of your own, because a token your account holds directly cannot be sold. Setting this alone changes nothing: it has to be sealed by updating trading permissions, and buying only starts when you also turn on the class route below."
+            >
+              <input
+                type="text"
+                placeholder="0x…"
+                value={v("ponsClassVaultFactory")}
+                onChange={set("ponsClassVaultFactory")}
+              />
+            </Field>
+            <Field
               label="Rialto integrator key"
               hint="Required to trade through Rialto."
             >
