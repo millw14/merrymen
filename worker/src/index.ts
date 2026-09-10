@@ -4440,7 +4440,14 @@ async function main() {
       // so analysis never mistakes an estimate for a settled figure.
       let liveFill: { side: "buy" | "sell"; symbol: string; qtyRaw: bigint; cashUsdg: bigint; priceUsd: number } | null = null;
       // The pair this trade is about, kept so the receipt can be attributed.
-      let fillPair: { stockToken: `0x${string}`; symbol: string; quotedOut: bigint; floorOut: bigint } | null = null;
+      // `quotedOut` is NULLABLE, and only the curve venue passes null. Execution
+      // quality is measured against what the venue QUOTED; a curve trade is
+      // quoted by its producer, which keeps the floor on the intent and does not
+      // carry the pre-slippage figure forward. Passing the floor here instead
+      // would compare the fill against a number it is guaranteed to beat and
+      // report perfect execution on every trade — a metric that cannot fail is
+      // worse than an absent one.
+      let fillPair: { stockToken: `0x${string}`; symbol: string; quotedOut: bigint | null; floorOut: bigint } | null = null;
       // Same-token "swaps" (the selftest no-op) skip the quote path — they are
       // approval-leg pipeline probes, not trades.
       if (intent.kind === "swap" && cfg.swapVenue === "uniswap" && intent.sellToken !== intent.buyToken) {
@@ -4948,6 +4955,74 @@ async function main() {
           releaseBudget();
           return;
         }
+        // ATTRIBUTE THE FILL, which this venue has never done.
+        //
+        // `fillPair` is assigned in exactly one other place — inside the
+        // Uniswap-quote branch — so the receipt decode below has never run for a
+        // curve trade, and `bookFill` has therefore never been called for one.
+        // Every bonding-curve round trip this repo can produce books NO cost
+        // basis at all: the sell then meets `prev.qtyRaw <= 0` in applyFill,
+        // returns `basisUnknown`, and writes NULL realized P&L that
+        // getRealizedPnlUsdg excludes. The position is also invisible to the
+        // stop floor and the take-profit, both of which skip what they cannot
+        // price against an entry.
+        //
+        // Set here rather than up in the quote chain because a curve trade was
+        // already quoted BY ITS PRODUCER — the reserves live there and the
+        // intent carries the result. There is nothing left to quote; there is
+        // only something left to attribute.
+        //
+        // The USDG-leg rule is the swap branch's, unchanged and for the same
+        // reason: the accounting assumes EXACTLY ONE leg is 6dp cash, and
+        // feeding an 18dp token amount into the cash field is a 10^12 error.
+        // Every curve producer today quotes in USDG, so this holds for all of
+        // them — and a stock-quoted curve, if one ever reaches here, books
+        // nothing rather than booking nonsense.
+        {
+          const usdgAddr = (CASH.USDG as string).toLowerCase();
+          const inIsUsdg = intent.assetIn.toLowerCase() === usdgAddr;
+          const outIsUsdg = intent.assetOut.toLowerCase() === usdgAddr;
+          if (inIsUsdg !== outIsUsdg) {
+            const curveToken = inIsUsdg ? intent.assetOut : intent.assetIn;
+            const symbol = symbolOfToken(curveToken);
+            if (symbol) {
+              fillPair = {
+                stockToken: curveToken,
+                symbol,
+                // NO QUOTE TO COMPARE AGAINST — see the declaration. The intent
+                // carries `minAmountOutRaw`, which is the quote already reduced
+                // by the owner's slippage tolerance. It is the floor, and using
+                // it as the quote would score every fill against a bar it
+                // cannot miss.
+                quotedOut: null,
+                floorOut: intent.minAmountOutRaw,
+              };
+              // FALLBACK ONLY, replaced by the receipt below wherever one parses.
+              // The received side takes minAmountOutRaw for the same reason the
+              // swap branch takes minOut: a fill can come in worse than quoted
+              // and never better, so the conservative figure is the honest one.
+              // Cash comes from `notionalUsdg`, which the producer computed in
+              // USDG terms, rather than being re-derived from a leg here.
+              const qtyRaw = inIsUsdg ? intent.minAmountOutRaw : intent.amountInRaw;
+              const cashUsdg = intent.notionalUsdg;
+              if (qtyRaw > 0n) {
+                liveFill = {
+                  side: inIsUsdg ? "buy" : "sell",
+                  symbol,
+                  qtyRaw,
+                  cashUsdg,
+                  priceUsd: Number(cashUsdg) / 1e6 / (Number(qtyRaw) / 1e18),
+                };
+              }
+            }
+          } else {
+            await addEvent(
+              agentId,
+              "warn",
+              `curve trade has no USDG leg — cost basis not booked for this fill`,
+            );
+          }
+        }
         // The minimum is computed from the same quote the caps judged, with the
         // owner's slippage tolerance — the adapter enforces it against the
         // account's own balance, so this number is the whole protection.
@@ -5059,7 +5134,11 @@ async function main() {
           // Execution quality, measured rather than assumed. The received side
           // is the stock leg on a buy and the cash leg on a sell.
           const receivedOut = measured.side === "buy" ? measured.qtyRaw : measured.cashUsdg;
-          slippageBps = slippageBpsAgainst(fillPair.quotedOut, receivedOut);
+          // Null on the curve venue, which has no quote at this layer. NULL is
+          // the right answer there — `slippage_bps: 0` would read in the tape as
+          // a measured perfect fill rather than as a measurement that never ran.
+          slippageBps =
+            fillPair.quotedOut === null ? null : slippageBpsAgainst(fillPair.quotedOut, receivedOut);
 
           // THE FLOOR IS A DIFFERENT QUESTION FROM DELIVERY, and it is the one
           // that genuinely needs the decode: it compares the SETTLED output
