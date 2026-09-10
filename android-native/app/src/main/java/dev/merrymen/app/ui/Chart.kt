@@ -36,6 +36,24 @@ import androidx.compose.ui.unit.dp
  */
 data class Bar(val time: Long, val open: Double, val high: Double, val low: Double, val close: Double)
 
+/**
+ * WHERE THIS STILL DIVERGES FROM THE WEB, said rather than hidden.
+ *
+ * [ChartKind.CANDLE] matches: same 220px stage, same `--up`/`--down` bodies,
+ * borders and wicks, same gaps-stay-gaps treatment, and — as on a phone — no
+ * price scale, no time scale, no grid and no price line.
+ *
+ * [ChartKind.LINE] DOES NOT. The web's line mode is not a polyline: it is
+ * `DitherChart`, a low-resolution canvas scaled up with `image-rendering:
+ * pixelated`, filling under the series with an ordered dither in the dither-kit's
+ * own `rgb(40,210,110)` / `rgb(240,70,70)` — deliberately different greens and
+ * reds from the terminal's tokens — with a dashed crosshair, a clamped tooltip
+ * and round agent "riders" along the series. That is a licensed component and a
+ * substantial piece of drawing; reproducing it by eye would produce something
+ * that looks like it and is not it. This draws an honest polyline instead, with
+ * the same breaks across gaps, and the difference is recorded here rather than
+ * left for somebody to find.
+ */
 enum class ChartKind { CANDLE, LINE }
 
 /**
@@ -114,10 +132,13 @@ fun PriceChart(
 ) {
   if (bars.isEmpty()) return
   val (slots, _) = withGaps(bars)
-  val up = MaterialTheme.colorScheme.primary
-  val down = MaterialTheme.colorScheme.error
-  val line = MaterialTheme.colorScheme.onSurface
-  val axis = MaterialTheme.colorScheme.outline
+  // NAMED, NOT BORROWED FROM THE MATERIAL SLOTS. `primary` is the lime accent,
+  // and a rising candle drawn in it would say "live" rather than "up" — the one
+  // colour rule this product states outright. The web sets body, border and wick
+  // all to --up / --down.
+  val up = MerryColors.up
+  val down = MerryColors.down
+  val line = MerryColors.tx
 
   // ONE SCALE FOR EVERY MARK. Taken over the highs and lows actually drawn, so
   // nothing can be placed outside the box it is drawn in.
@@ -135,8 +156,12 @@ fun PriceChart(
     val slotW = w / slots.size
     fun y(v: Double): Float = (h - ((v - lo) / span) * h).toFloat()
 
-    // A baseline, so an empty right-hand edge still reads as a chart.
-    drawLine(axis.copy(alpha = 0.4f), Offset(0f, h - 1), Offset(w, h - 1), strokeWidth = 1f)
+    // NO AXES, NO GRID, NO BASELINE — on a phone. The web configures its
+    // renderer with `visible: desktop` for both the price scale and the time
+    // scale, and `grid.vertLines/horzLines.visible: desktop`, where `desktop` is
+    // `matchMedia("(min-width:1100px)")`. It also sets `priceLineVisible: false`,
+    // so nothing is drawn across the plot either. The baseline that used to sit
+    // here was a line the web does not draw at this width.
 
     if (kind == ChartKind.LINE) {
       val path = Path()

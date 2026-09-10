@@ -285,6 +285,26 @@ data class Token(
 @Serializable
 data class TokensPage(val fetchedAt: Long? = null, val tokens: List<Token> = emptyList())
 
+/**
+ * TWO MORE GUESSED FIELD NAMES, and this pair cost a false statement.
+ *
+ * The wire sends `landed`, `refused` and `unrankedWhy`; this declared `trades`
+ * and `why`, so with `ignoreUnknownKeys` both decoded null on every row, for
+ * ever. Verified against the live route: a row is
+ * `{slug, unrankedWhy, name, handle, handleVerified, pnlBps, maxDdBps, landed, refused, curve}`.
+ *
+ * WHY THAT WAS NOT MERELY COSMETIC. A NULL `pnlBps` HERE DOES NOT MEAN
+ * "UNREADABLE". `rank-pnl.ts` guarantees exactly one of `pnlBps` and
+ * `unrankedWhy` is ever set, so a null return always means unranked FOR A NAMED
+ * REASON — and on the live board eight rows carry one right now
+ * ("contributions-unevidenced"). With the reason discarded, the phone rendered
+ * those as the app's em dash, which Components.kt reserves for "we never got an
+ * answer". That is the app stating something the server never said, in the one
+ * glyph it keeps for its own ignorance.
+ *
+ * `landed` IS DELIBERATELY NOT CALLED `trades`. The web never does: a row with
+ * 0 landed and 12 paper fills reads "12 on paper", not "0 trades".
+ */
 @Serializable
 data class LeaderRow(
   val slug: String? = null,
@@ -292,13 +312,44 @@ data class LeaderRow(
   val handle: String? = null,
   /** False by default: absent is not proven. */
   val handleVerified: Boolean = false,
+  /** Null when unranked; then — and only then — [unrankedWhy] says why. */
   val pnlBps: Int? = null,
-  val trades: Int? = null,
-  val why: String? = null,
+  val maxDdBps: Int? = null,
+  /** Settled fills. NOT "trades", and never rendered as one when it is 0. */
+  val landed: Int? = null,
+  val refused: Int? = null,
+  /** no-deposit | never-filled | contributions-unevidenced | quality-unknown. */
+  val unrankedWhy: String? = null,
 )
 
+/**
+ * The web's own wording for an unranked row, from `unrankedShort` in
+ * `web/src/lib/rank-pnl.ts:117`. Mirrored verbatim so the two clients do not
+ * describe the same row differently.
+ *
+ * An id this build does not know falls back to "unranked" rather than printing
+ * a raw enum at somebody.
+ */
+fun unrankedShort(why: String?): String = when (why) {
+  "no-deposit" -> "no deposit"
+  "never-filled" -> "never filled"
+  "contributions-unevidenced" -> "unverified deposits"
+  "quality-unknown" -> "unranked"
+  else -> "unranked"
+}
+
 @Serializable
-data class Leaderboard(val agents: List<LeaderRow> = emptyList(), val why: String? = null)
+data class Leaderboard(
+  val agents: List<LeaderRow> = emptyList(),
+  /**
+   * "sqlite" or "none", and "none" means THE LEDGER COULD NOT BE READ — not
+   * that nobody has traded. The route answers `{source, agents}`; this type
+   * declared `why`, which does not exist on the wire, so the screen's
+   * "couldn't rank" branch was dead and an unreadable board rendered as an
+   * empty one. Same class of bug as [LeaderRow]'s, one level up.
+   */
+  val source: String? = null,
+)
 
 /**
  * `/api/search` answers with ONE list of hits, not two typed lists.
