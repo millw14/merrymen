@@ -86,7 +86,7 @@ import { createSponsor, sponsorWillQuote, type Sponsor } from "./paymaster";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } from "./fills";
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
-import { provenanceCurves, strandedBasisSymbols } from "./custody";
+import { bookAddresses, provenanceCurves, strandedBasisSymbols } from "./custody";
 import { SponsorRefused } from "./paymaster";
 import { acquiredLegOf, findOrphanOps, findSoleAcquisition, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
@@ -3881,6 +3881,22 @@ async function main() {
    *
    * Returns undefined for non-swaps, so vault moves and transfers are untouched.
    */
+  /**
+   * The symbol a class token was recorded under, or undefined.
+   *
+   * `symbolOfToken` covers the watch set and STOCK_TOKENS, neither of which can
+   * contain a class token — it postdates the grant by definition. The class
+   * record is the only place its symbol exists, and without it every basis
+   * lookup for a class position reads zero.
+   *
+   * Undefined on a failed read, NOT a fabricated symbol: a wrong key would
+   * attribute one token's cost to another, which is worse than reading none.
+   */
+  async function classSymbolOf(agentId: string, token: string): Promise<string | undefined> {
+    const rows = await classPositions(agentId);
+    return rows?.find((r) => r.token === token.toLowerCase())?.symbol ?? undefined;
+  }
+
   async function scoutContextFor(intent: TradeIntent): Promise<ScoutContext | undefined> {
     // ── BOTH VENUES, NOT JUST THE POOL ONE ────────────────────────────────
     //
@@ -3902,7 +3918,29 @@ async function main() {
       intent.kind === "swap" ? intent.buyToken : intent.kind === "curve-trade" ? intent.assetOut : null;
     if (!buyToken) return undefined;
     const symbol = symbolOfToken(buyToken);
-    const buyUnpriceable = lastUnpriceable.has(buyToken.toLowerCase());
+    // ── AND FOR A CLASS TOKEN THE GATE DID NOT RUN AT ALL ─────────────────
+    //
+    // Widening this to curve trades was not enough. `lastUnpriceable` is built
+    // from `watchTokens`, and a class token is not in `watchTokens` BY
+    // DEFINITION — it postdates the grant, so nobody enumerated it. So
+    // `buyUnpriceable` came back false, and policy.ts gates the ENTIRE scout
+    // block on that flag: `scoutAllows` never ran, the budget never bound, and
+    // the same unpriceable token could be bought forever.
+    //
+    // Both other inputs read zero for the same reason — `symbolOfToken` returns
+    // undefined for a token outside the watch set, so `existingCostUsdg` was 0
+    // and the per-token cap could not bite either.
+    //
+    // TRUE UNCONDITIONALLY, not measured. A class token has no oracle, no pool
+    // deep enough to trust and no TWAP; it is unpriceable by construction rather
+    // than by this tick's luck. Deciding it by measurement would mean a curve
+    // that briefly quoted turned the budget off for the buy that followed —
+    // `quarantine.ts` fails closed on every ambiguity and so does this.
+    const isClassBuy =
+      intent.kind === "curve-trade" &&
+      active.limits.ponsClassVault !== undefined &&
+      intent.target.toLowerCase() === active.limits.ponsClassVault.toLowerCase();
+    const buyUnpriceable = isClassBuy || lastUnpriceable.has(buyToken.toLowerCase());
     return {
       limits: {
         enabled: cfg.scoutEnabled,
@@ -3910,10 +3948,16 @@ async function main() {
         perTokenUsdg: usdg(cfg.scoutPerTokenUsdg),
       },
       buyUnpriceable,
-      existingCostUsdg:
-        symbol !== undefined
-          ? (await getBasis(active.agentId, paperActive() ? "paper" : "live", symbol)).costUsdg
-          : 0n,
+      // The PER-TOKEN ceiling, and it needs a symbol to find the basis by.
+      // `symbolOfToken` only knows the watch set, so for a class token it
+      // answers undefined and the cost read as zero — which meant the per-token
+      // cap could be topped up indefinitely, one `scoutPerTokenUsdg` at a time.
+      // The class record is the only place a class token's symbol exists.
+      existingCostUsdg: await (async () => {
+        const s = symbol ?? (isClassBuy ? await classSymbolOf(active.agentId, buyToken) : undefined);
+        if (s === undefined) return 0n;
+        return (await getBasis(active.agentId, paperActive() ? "paper" : "live", s)).costUsdg;
+      })(),
       quarantinedUsdg: lastQuarantinedUsdg,
     };
   }
@@ -5159,12 +5203,33 @@ async function main() {
       //
       // See delivery.ts for why it is exact-zero-only, why a failed read is
       // 'unknown' rather than a zero, and why it can never fail the trade.
-      const acquired: { token: `0x${string}`; label: string } | null =
+      //
+      // AND ASK THE RIGHT HOLDER. A class buy delivers to the VAULT by design —
+      // that is the mechanism, not a fault — so reading the account's balance
+      // would find an exact zero and `delivery.ts`'s exact-zero rule would write
+      // "treat this position as unrecoverable and do not size up" about a trade
+      // that worked perfectly. On the one venue where honeypots actually live,
+      // an alarm that fires on every success is an alarm nobody reads.
+      const classVaultHolder =
+        intent.kind === "curve-trade" &&
+        active.limits.ponsClassVault !== undefined &&
+        intent.target.toLowerCase() === active.limits.ponsClassVault.toLowerCase()
+          ? (active.limits.ponsClassVault as `0x${string}`)
+          : null;
+      const acquired: { token: `0x${string}`; label: string; holder: `0x${string}` } | null =
         intent.kind === "swap" && intent.buyToken.toLowerCase() !== (CASH.USDG as string).toLowerCase()
-          ? { token: intent.buyToken, label: fillPair?.symbol ?? short(intent.buyToken) }
+          ? {
+              token: intent.buyToken,
+              label: fillPair?.symbol ?? short(intent.buyToken),
+              holder: executor.address,
+            }
           : intent.kind === "curve-trade" &&
               intent.assetOut.toLowerCase() !== (CASH.USDG as string).toLowerCase()
-            ? { token: intent.assetOut, label: short(intent.assetOut) }
+            ? {
+                token: intent.assetOut,
+                label: short(intent.assetOut),
+                holder: classVaultHolder ?? executor.address,
+              }
             : null;
       if (acquired) {
         const delivery = await checkDelivery({
@@ -5173,7 +5238,7 @@ async function main() {
               address: acquired.token,
               abi: erc20Abi,
               functionName: "balanceOf",
-              args: [executor.address],
+              args: [acquired.holder],
             }) as Promise<bigint>,
         });
         const note = describeDelivery(acquired.label, delivery);
@@ -5189,7 +5254,11 @@ async function main() {
       let basisSource: "receipt" | "quote" = "quote";
       let slippageBps: number | null = null;
       if (fillPair) {
-        const deltas = netTokenDeltas(exec.logs, executor.address);
+        // EVERY HOLDER THAT IS US. A class buy delivers its token to the vault,
+        // so with the account alone the token leg is absent from the map and the
+        // fill is unattributable — the quote-derived basis this file exists to
+        // eliminate, back again. See custody.ts `bookAddresses`.
+        const deltas = netTokenDeltas(exec.logs, bookAddresses(active.grant, executor.address));
         const measured = fillFromDeltas({
           deltas,
           usdgToken: CASH.USDG as string,
@@ -5900,7 +5969,11 @@ async function main() {
      * The paper branch leaves the default: paper has no vault and cannot have
      * one, so `ok: true` there is a fact rather than an assumption.
      */
-    let classBook: { ok: boolean; symbols: string[] } = { ok: true, symbols: [] };
+    let classBook: { ok: boolean; symbols: string[]; tokens: string[] } = {
+      ok: true,
+      symbols: [],
+      tokens: [],
+    };
     if (paper) {
       // The book IS the paper ledger, marked to market at the live oracle px.
       const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
@@ -6006,17 +6079,33 @@ async function main() {
       positions = posRead.positions;
       missingPrice = posRead.missingPrice;
       unpricedByDesign = posRead.unpricedByDesign;
-      lastUnpricedSymbols = new Set(unpricedByDesign);
       // Only tokens the vault ACTUALLY holds. A recorded row with a zero balance
       // is a position that has been fully sold or swept — its basis is genuinely
       // stranded and should close, which is the one case the guard must not
       // block.
+      const classHeldRows = (classRows ?? []).filter(
+        (r) => (classRead.balances.get(r.token) ?? 0n) > 0n,
+      );
       classBook = {
         ok: classRead.unread.length === 0,
-        symbols: (classRows ?? [])
-          .filter((r) => (classRead.balances.get(r.token) ?? 0n) > 0n)
-          .map((r) => r.symbol ?? short(r.token)),
+        symbols: classHeldRows.map((r) => r.symbol ?? short(r.token)),
+        tokens: classHeldRows.map((r) => r.token),
       };
+      // A CLASS POSITION IS UNPRICEABLE BY CONSTRUCTION, so it joins the set the
+      // quarantine carries at cost. Without this it is in no equity term at all:
+      // the buy reads as a pure cash decrease with nothing arriving, equity
+      // craters against an unmoved high-water mark, and the drawdown breaker
+      // fires on a trade that worked. `quarantine.ts` is explicit that carrying
+      // at cost is not a valuation — it keeps the arithmetic sound so the
+      // breaker can go on judging the part of the book it CAN protect.
+      //
+      // Deliberately not "always quarantine, forever": if one of these ever
+      // graduates and gets a real pool, the pricing pass will value it and it
+      // leaves this set on its own. Pinning it at cost permanently would make
+      // the class venue the only one with no working stop-loss, which inverts
+      // the reason the vault was built.
+      unpricedByDesign = [...unpricedByDesign, ...classBook.symbols];
+      lastUnpricedSymbols = new Set(unpricedByDesign);
       unreadBook = bookGaps({
         // MERGED BEFORE THE GATE, not after. `bookGaps` feeds the early return
         // below; a custody read reported anywhere later would let the tick
@@ -6115,14 +6204,25 @@ async function main() {
     // ceiling and a round-trip cost check — enough to value a holding, not
     // enough to authorise a new one on its own. The scout budget stays the
     // owner's real bound on buying something nobody can independently value.
-    lastUnpriceable = new Set(
-      watchTokens
+    lastUnpriceable = new Set([
+      ...watchTokens
         .filter((t) => {
           const q = market.prices.get(t.symbol);
           return !q || q.source === "curve" || q.source === "v4";
         })
         .map((t) => t.address.toLowerCase()),
-    );
+      // CLASS TOKENS ARE NEVER IN watchTokens — they postdate the grant, which
+      // is the definition of the class. So this set, built from watchTokens
+      // alone, had no entry for them and `scoutContextFor` read
+      // `buyUnpriceable: false`, which is the flag policy.ts gates the ENTIRE
+      // scout block on. The budget meant to bound the least priceable assets on
+      // the chain was, for those assets, not connected to anything.
+      //
+      // scoutContextFor also answers true for a class buy directly, because a
+      // FIRST buy has no position here to be listed. This covers every other
+      // reader of the set and keeps the two answers consistent.
+      ...classBook.tokens,
+    ]);
     // The scout BUDGET must count curve-marked holdings too.
     //
     // Keeping them in `lastUnpriceable` above preserves the scout GATE, but the

@@ -7,6 +7,7 @@
  * notices: one DELETES a cost basis, the other REFUSES an exit.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   bookAddresses,
@@ -140,5 +141,75 @@ describe("a position cannot be evicted out of its own exit", () => {
     // Nothing known is a readable fact and must stay distinguishable from
     // "could not ask" — policy.ts treats them oppositely.
     assert.deepEqual(provenanceCurves([], []), []);
+  });
+});
+
+/**
+ * THE WIRING, asserted as source.
+ *
+ * Everything above is pure and testable. What is not testable is whether the
+ * tick actually calls it — and "declared, forwarded, never supplied" is the
+ * failure mode this repo has shipped repeatedly (curve-wiring.test.ts exists
+ * for one instance; the suppression key for another). Each assertion here
+ * corresponds to a specific silent failure.
+ */
+describe("the tick uses the custody seam", () => {
+  const CODE = readFileSync(new URL("./index.ts", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .split(/\r?\n/)
+    .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
+    .join("\n");
+
+  it("the receipt decode nets over every holder, not just the account", () => {
+    // Otherwise a class buy's token leg is absent and the fill is unattributable
+    // — the quote-derived basis, back again.
+    assert.match(CODE, /netTokenDeltas\(exec\.logs, bookAddresses\(/);
+  });
+
+  it("the delivery probe asks the holder that actually received it", () => {
+    // A class buy delivers to the vault BY DESIGN. Reading the account would
+    // find an exact zero and accuse a working trade of being a honeypot, on the
+    // one venue where honeypots really live.
+    assert.match(CODE, /args: \[acquired\.holder\]/);
+    assert.ok(
+      !/functionName: "balanceOf",\s*args: \[executor\.address\],\s*\}\) as Promise<bigint>,\s*\}\);\s*const note = describeDelivery/.test(CODE),
+      "the delivery probe must not be hardcoded to the account",
+    );
+  });
+
+  it("the scout gate treats a class buy as unpriceable without measuring", () => {
+    // lastUnpriceable is built from watchTokens, which a class token can never
+    // be in — so the flag read false and policy.ts skipped the WHOLE scout
+    // block. The budget meant to bound the least priceable assets on the chain
+    // was not connected to them at all.
+    assert.match(CODE, /const buyUnpriceable = isClassBuy \|\| lastUnpriceable\.has/);
+  });
+
+  it("the per-token scout cap can find a class token's basis", () => {
+    // symbolOfToken only knows the watch set, so existingCostUsdg read zero and
+    // the cap could be topped up indefinitely, one scoutPerTokenUsdg at a time.
+    assert.match(CODE, /classSymbolOf\(active\.agentId, buyToken\)/);
+  });
+
+  it("the stranded-basis sweep is the extracted predicate, not an inline set", () => {
+    assert.match(CODE, /strandedBasisSymbols\(\{/);
+    assert.ok(
+      !/const heldNow = new Set\(\[\.\.\.positions\.map/.test(CODE),
+      "the inline three-set version deletes live class positions",
+    );
+  });
+
+  it("the custody read's failure reaches bookGaps, which is the gate that holds", () => {
+    // Reported any later and the tick publishes an equity figure missing a real
+    // holding, then runs a destructive sweep against a book it could not see.
+    assert.match(CODE, /unreadBalances: \[\.\.\.bal\.unread, \.\.\.classRead\.unread\]/);
+  });
+
+  it("provenance is unioned at BOTH limitsFromGrant call sites", () => {
+    const calls = CODE.match(/limitsFromGrant\([^;]*?\)/gs) ?? [];
+    assert.ok(calls.length >= 2, `expected the arm and the hot-reload site, found ${calls.length}`);
+    for (const call of calls) {
+      assert.match(call, /provenanceCurves\(/, `a site still passes the raw feed: ${call.slice(0, 120)}`);
+    }
   });
 });

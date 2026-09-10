@@ -42,19 +42,44 @@ function addressFromTopic(topic: string): string {
  * and a token that arrives and leaves within the same operation moved nothing.
  * Filtering to logs that name our account on one side is what makes this the
  * account's own ledger rather than the transaction's.
+ *
+ * `account` MAY BE A LIST, and exactly one thing widens it: a custody contract
+ * that holds this account's own assets (see custody.ts `bookAddresses`). A class
+ * buy moves its token `curve → vault`, so with the account alone neither side
+ * matches, the token drops out of the map entirely, and `fillFromDeltas` returns
+ * null for want of a stock leg — the receipt-measured basis silently reverting to
+ * the quote-derived one this file was written to eliminate.
+ *
+ * The netting already handles the second holder correctly and it is worth
+ * stating why: on a class buy the USDG goes `account → vault` and then
+ * `vault → curve`, so with both addresses in the set the vault's two legs cancel
+ * and the map reads `{USDG: −in, TOKEN: +out}` — an unambiguous buy. The
+ * per-address bookkeeping below sums into one delta per token, which is exactly
+ * that cancellation.
+ *
+ * WHAT THIS COSTS, said plainly: for the length of one decode, "we can move
+ * this" and "we own this" are summed. A token at the vault has not arrived at
+ * the account and the account cannot `transfer()` it. `Position.custody` carries
+ * that distinction onward; the delta map itself loses it. The list is per-agent
+ * and comes from `grantPonsClassVault` alone — marker AND well-formed address —
+ * so no setting, strategy or token can widen it.
  */
 export function netTokenDeltas(
   logs: readonly ReceiptLog[],
-  account: string,
+  account: string | readonly string[],
 ): Map<string, bigint> {
-  const me = account.toLowerCase();
+  const mine = new Set(
+    (typeof account === "string" ? [account] : account).map((a) => a.toLowerCase()),
+  );
   const deltas = new Map<string, bigint>();
   for (const log of logs) {
     if (log.topics.length < 3) continue;
     if (log.topics[0]?.toLowerCase() !== TRANSFER_TOPIC) continue;
     const from = addressFromTopic(log.topics[1]!);
     const to = addressFromTopic(log.topics[2]!);
-    if (from !== me && to !== me) continue;
+    const fromMine = mine.has(from);
+    const toMine = mine.has(to);
+    if (!fromMine && !toMine) continue;
     let value: bigint;
     try {
       value = BigInt(log.data);
@@ -63,8 +88,10 @@ export function netTokenDeltas(
     }
     const token = log.address.toLowerCase();
     let delta = deltas.get(token) ?? 0n;
-    if (to === me) delta += value;
-    if (from === me) delta -= value;
+    // Both true is a move BETWEEN our own holders — account to vault. It nets to
+    // zero, which is the truth: nothing entered or left the book.
+    if (toMine) delta += value;
+    if (fromMine) delta -= value;
     deltas.set(token, delta);
   }
   return deltas;

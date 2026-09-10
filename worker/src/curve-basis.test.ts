@@ -208,3 +208,88 @@ describe("the curve arm actually attributes the fill", () => {
     );
   });
 });
+
+/**
+ * THE CLASS SHAPE, where the token never touches the account at all.
+ *
+ * PonsSelfTrade pays msg.sender, so both legs of an adapter trade touch the
+ * account and the account-scoped filter sees them. PonsClassVault does the
+ * opposite on purpose: the token goes `curve → vault` and STAYS there, because
+ * a class token held by the account cannot be sold — no per-token approve can
+ * be written for an address nobody enumerated.
+ *
+ * So for this venue the account-scoped filter finds no token leg, `fillFromDeltas`
+ * returns null, and the receipt-measured basis silently reverts to the
+ * quote-derived one this file's sibling exists to eliminate.
+ */
+describe("a class receipt needs both holders to read", () => {
+  const VAULT = "0x00000000000000000000000000000000000000c0";
+  const classBuy = [
+    transfer(USDG, ME, VAULT, SPEND),
+    transfer(USDG, VAULT, CURVE, SPEND),
+    transfer(PEPE, CURVE, VAULT, BOUGHT),
+  ];
+  const classSell = [
+    transfer(PEPE, VAULT, CURVE, BOUGHT),
+    // The vault pays the OWNER directly — PonsClassVault.sol:196. It never
+    // holds the account's cash.
+    transfer(USDG, CURVE, ME, PROCEEDS),
+  ];
+
+  it("THE BUG: account-only sees the cash leave and nothing arrive", () => {
+    const deltas = netTokenDeltas(classBuy, ME);
+    assert.equal(deltas.get(USDG.toLowerCase()), -SPEND);
+    assert.equal(deltas.get(PEPE.toLowerCase()), undefined, "the token is invisible");
+    assert.equal(
+      fillFromDeltas({ deltas, usdgToken: USDG, stockToken: PEPE, symbol: "PEPE" }),
+      null,
+      "unattributable — the fill falls back to the quote",
+    );
+  });
+
+  it("THE FIX: with both holders, the vault's paired legs cancel", () => {
+    const deltas = netTokenDeltas(classBuy, [ME, VAULT]);
+    // USDG in and straight out again at the vault: nothing entered or left the
+    // book there, and the account's -SPEND is the whole movement.
+    assert.equal(deltas.get(USDG.toLowerCase()), -SPEND);
+    assert.equal(deltas.get(PEPE.toLowerCase()), BOUGHT);
+    const fill = fillFromDeltas({ deltas, usdgToken: USDG, stockToken: PEPE, symbol: "PEPE" });
+    assert.deepEqual(
+      { side: fill?.side, qtyRaw: fill?.qtyRaw, cashUsdg: fill?.cashUsdg },
+      { side: "buy", qtyRaw: BOUGHT, cashUsdg: SPEND },
+    );
+  });
+
+  it("and the sell reads too, with the proceeds landing on the owner", () => {
+    const deltas = netTokenDeltas(classSell, [ME, VAULT]);
+    const fill = fillFromDeltas({ deltas, usdgToken: USDG, stockToken: PEPE, symbol: "PEPE" });
+    assert.deepEqual(
+      { side: fill?.side, qtyRaw: fill?.qtyRaw, cashUsdg: fill?.cashUsdg },
+      { side: "sell", qtyRaw: BOUGHT, cashUsdg: PROCEEDS },
+    );
+  });
+
+  it("the widening does NOT make the filter see other people's money", () => {
+    // The whole risk of taking a list. A transfer between two strangers is not
+    // ours however many holders we name.
+    const STRANGER_A = "0x00000000000000000000000000000000000000f1";
+    const STRANGER_B = "0x00000000000000000000000000000000000000f2";
+    const deltas = netTokenDeltas([transfer(PEPE, STRANGER_A, STRANGER_B, 999n)], [ME, VAULT]);
+    assert.equal(deltas.size, 0);
+  });
+
+  it("a move BETWEEN our own holders nets to zero, which is the truth", () => {
+    // `sweep` moves a position from the vault to the account with no economic
+    // event at all. It must not read as a buy on one side and a sell on the other.
+    const deltas = netTokenDeltas([transfer(PEPE, VAULT, ME, BOUGHT)], [ME, VAULT]);
+    assert.equal(deltas.get(PEPE.toLowerCase()), 0n);
+  });
+
+  it("a single-address caller still behaves exactly as before", () => {
+    // Every existing call site passes a string. The widening must be additive.
+    assert.deepEqual(
+      [...netTokenDeltas(buyReceipt, ME).entries()],
+      [...netTokenDeltas(buyReceipt, [ME]).entries()],
+    );
+  });
+});
