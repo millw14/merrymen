@@ -57,6 +57,7 @@ import {
   grantV4Adapter,
   grantPonsAdapter,
   grantPonsClassVault,
+  grantPonsClassVaultFactory,
   grantHasV4,
   tokenCoverage,
   uncoveredBasketSymbols,
@@ -201,6 +202,11 @@ const trendingScreen = (c: ResolvedConfig): ScreenLimits => ({
   ...TRENDING_SCREEN,
   minFdvUsd: c.memecoinMinFdvUsd,
 });
+import {
+  buildClassBuyCalls,
+  buildClassSellCalls,
+  buildClassVaultDeployCall,
+} from "./venues/pons-class";
 import { buildCurveTradeCalls } from "./venues/pons-trade";
 
 /**
@@ -234,6 +240,7 @@ import {
   basisSymbols,
   classPositionCurves,
   classPositions,
+  upsertClassPosition,
   getBasis,
   setBasis,
   setPositionFloor,
@@ -5039,6 +5046,182 @@ async function main() {
         exec = await send([
           { to: MORPHO.steakhouseUsdgVault as `0x${string}`, value: 0n, data },
         ]);
+      } else if (
+        intent.kind === "curve-trade" &&
+        // ── IS THIS A CLASS TRADE? THE TARGET DECIDES, AND NOTHING ELSE ────
+        //
+        // Same rule and the same accessor checkPolicy used to judge it
+        // (policy.ts, "IS THIS A CLASS TRADE?"), so the address the mirror
+        // called a class trade and the address the executor routes as one
+        // cannot be two different things. Read from the GRANT rather than from
+        // `active.limits`, mirroring the adapter arm's own precedent below.
+        grantPonsClassVault(active.grant) !== null &&
+        intent.target.toLowerCase() === grantPonsClassVault(active.grant)
+      ) {
+        const vault = grantPonsClassVault(active.grant)!;
+        const factory = grantPonsClassVaultFactory(active.grant);
+        // Six refusals share the row-writing, and each call site still carries
+        // its own `releaseBudget()` afterwards.
+        //
+        // THAT REPETITION IS DELIBERATE. recordTrade releases on every path, so
+        // the explicit release is unreachable bookkeeping — but
+        // budget-reservation.invariant.test.ts walks every `return` in this
+        // function, finds its enclosing block, and demands a release it can SEE.
+        // A helper it cannot read through would pass the leak that test was
+        // written for. The adapter arm below carries the same pair for the same
+        // reason.
+        const refuse = async (rule: string, say: string) => {
+          await addEvent(agentId, "warn", say);
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: tradeTarget,
+            ...tokenLegs(intent),
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: rule,
+          });
+        };
+
+        // ── WHICH SIDE IS THIS? ───────────────────────────────────────────
+        //
+        // The intent has no `side`, and the class route needs one because buy
+        // and sell are different functions with different shapes. Derive it from
+        // the asymmetry checkPolicy already relies on: a class trade may leave
+        // exactly ONE leg un-enumerated, and that leg is the class token.
+        const sellableNow = new Set((active.limits.sellableAssets ?? []).map((a) => a.toLowerCase()));
+        const inEnum = sellableNow.has(intent.assetIn.toLowerCase());
+        const outEnum = sellableNow.has(intent.assetOut.toLowerCase());
+        if (inEnum === outEnum) {
+          // Both enumerated means this should have gone to the adapter; neither
+          // means checkPolicy should already have refused it. Either way it is a
+          // merrymen fault, not an owner's, and it is refused rather than guessed.
+          await refuse(
+            "class-side-ambiguous",
+            `refusing a class trade whose direction cannot be read: ${inEnum ? "both" : "neither"} ` +
+              `leg is in the signed grant. Nothing was sent. This is a merrymen fault.`,
+          );
+          releaseBudget();
+          return;
+        }
+        const isBuy = inEnum;
+
+        // ── AND FOR A SELL, CONFIRM THE LEGS AGAINST THE LAUNCH RECORD ────
+        //
+        // `sell` carries no asset words at all — the vault derives both from the
+        // curve — so the mirror judged legs that are not in the calldata. A
+        // wrongly-derived BUY is self-limiting (the vault checks pairToken and
+        // reverts), but a wrongly-derived SELL would read a USDG figure as a
+        // count of class-token units. Cheap to confirm, expensive to get wrong.
+        if (!isBuy) {
+          const ref = await curveFor(intent.assetIn);
+          if (
+            !ref ||
+            ref.curve.toLowerCase() !== intent.curve.toLowerCase() ||
+            ref.quoteToken.toLowerCase() !== intent.assetOut.toLowerCase()
+          ) {
+            await refuse(
+              "class-legs-unconfirmed",
+              `refusing to sell ${short(intent.assetIn)} through the class vault: the launch record ` +
+                `does not confirm this curve and quote pair. The sell's asset legs are not in the ` +
+                `calldata, so this record is the only thing that can check them.`,
+            );
+            releaseBudget();
+            return;
+          }
+        }
+
+        // ── DOES THE VAULT EXIST? A FRESH READ, EVERY TIME ────────────────
+        //
+        // Never `active.classVaultDeployed` — a flag read at arm time goes stale
+        // the moment the first class buy of the arm lands. And "could not tell"
+        // must never read as "no": a CALL to a codeless address SUCCEEDS with
+        // empty returndata, so a buy against an undeployed vault would approve
+        // the USDG, no-op, and report a landed trade that bought nothing.
+        const vaultCode = await active.client
+          .getCode({ address: vault })
+          .catch(() => undefined);
+        if (vaultCode === undefined) {
+          await refuse(
+            "class-vault-unreadable",
+            `could not read the class vault at ${short(vault)} on chain ${active.grant.chainId}. ` +
+              `Nothing was sent — a buy against a vault that might not exist books a purchase that ` +
+              `bought nothing. Retrying next tick.`,
+          );
+          releaseBudget();
+          return;
+        }
+        const deployed = vaultCode !== "0x";
+
+        if (!deployed && !isBuy) {
+          // Different fix from the buy case, so a different rule: there is
+          // nothing to sell, and deploying an empty vault would not help.
+          await refuse(
+            "class-sell-needs-vault",
+            `nothing to sell — the class vault at ${short(vault)} has never been created, so it ` +
+              `holds nothing.`,
+          );
+          releaseBudget();
+          return;
+        }
+        if (!deployed && !factory) {
+          await refuse(
+            "no-class-vault",
+            `can't open a class position — the vault at ${short(vault)} does not exist yet and this ` +
+              `grant seals no factory to create it. Re-sign at /grant with the class factory set.`,
+          );
+          releaseBudget();
+          return;
+        }
+
+        const deadline = BigInt(Math.floor(Date.now() / 1000) + CURVE_DEADLINE_SEC);
+        // Deploy FIRST when it is needed. The approve would work in either
+        // order — it is a mapping write on the quote token — but "the vault
+        // exists before anything references it" is the invariant a reader
+        // should be able to see in the call list.
+        //
+        // The batch cannot be made idempotent at the calldata level: the factory
+        // is idempotent-by-revert on purpose, and a Kernel batch has no
+        // branching. It is idempotent at the DECISION level instead, and one
+        // fresh read suffices because processIntentLocked is serialized by
+        // intentChain and `send` awaits the receipt inside that lock. If someone
+        // else deploys in the window the CREATE2 collides, this op reverts, and
+        // the next tick's fresh read sees code and builds the two-call batch.
+        // One wasted op, self-healing.
+        exec = await send([
+          ...(deployed || !isBuy ? [] : [buildClassVaultDeployCall(factory!, executor.address)]),
+          ...(isBuy
+            ? buildClassBuyCalls({
+                vault,
+                curve: intent.curve,
+                quoteAsset: intent.assetIn,
+                quoteInRaw: intent.amountInRaw,
+                minTokensOutRaw: intent.minAmountOutRaw,
+                deadline,
+              })
+            : buildClassSellCalls({
+                vault,
+                curve: intent.curve,
+                tokensInRaw: intent.amountInRaw,
+                minQuoteOutRaw: intent.minAmountOutRaw,
+                deadline,
+              })),
+        ]);
+
+        // REMEMBER THE POSITION, because the vault cannot be asked what it
+        // holds. This record is the enumeration — for the custody read, for the
+        // provenance union that keeps the exit reachable, and for recovery.
+        // Written after the op lands, keyed by (agent, token), idempotent.
+        if (isBuy) {
+          const ref = await curveFor(intent.assetOut);
+          await upsertClassPosition(agentId, {
+            token: intent.assetOut,
+            symbol: symbolOfToken(intent.assetOut) ?? short(intent.assetOut),
+            decimals: 18,
+            curve: intent.curve,
+            quoteToken: ref?.quoteToken ?? intent.assetIn,
+          });
+        }
       } else if (intent.kind === "curve-trade") {
         // A bonding-curve trade, through the adapter the GRANT was sealed
         // against — never `cfg.ponsAdapterAddress`, which anyone with the
