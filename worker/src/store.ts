@@ -696,6 +696,41 @@ const SQLITE_ALTERS: string[] = [
   // this it seq-scans and sorts the whole table on every revalidation. Exactly
   // the reason decisions_time exists a few lines up.
   "CREATE INDEX IF NOT EXISTS trades_time ON trades (created_at DESC)",
+  // ── CLASS CUSTODY ────────────────────────────────────────────────────────
+  //
+  // WHAT THIS AGENT'S CLASS VAULT HOLDS, because the contract cannot be asked.
+  //
+  // `PonsClassVault` has no enumerable interface, deliberately — "tokens the
+  // owner never enumerated" is the whole framing. So the worker's own record IS
+  // the enumeration, and the contract's `sweep(address)` taking a token argument
+  // is the contract acknowledging that the record can be lost.
+  //
+  // This is a CANDIDATE LIST, never a balance. Every reader re-reads
+  // `balanceOf(vault)` and treats the chain as the authority; a row here only
+  // says "ask about this token". That distinction is what keeps a stale row from
+  // becoming a phantom position.
+  //
+  // `curve` is stored alongside because a position must outlive its
+  // `discovered_pools` row: that table is pruned to the 5,000 newest and the
+  // launchpad adds ~10 an hour, so a curve ages out in about 21 days against a
+  // 14-day grant. `knownCurves` is the only thing vouching for a class token, and
+  // policy.ts refuses a class trade without it — so an evicted curve would mean
+  // the agent could not sell its own position. The exit trap the vault exists to
+  // remove, rebuilt at the mirror.
+  `CREATE TABLE IF NOT EXISTS class_positions (
+     agent_id TEXT NOT NULL,
+     token TEXT NOT NULL,
+     symbol TEXT,
+     decimals INTEGER NOT NULL DEFAULT 18,
+     curve TEXT,
+     quote_token TEXT,
+     first_seen INTEGER NOT NULL DEFAULT (unixepoch()),
+     PRIMARY KEY (agent_id, token)
+   )`,
+  "CREATE INDEX IF NOT EXISTS class_positions_agent ON class_positions (agent_id)",
+  // WHERE A POSITION SITS. 'account' for everything that existed before this
+  // column, which is every row: the default is the truth for them, not a guess.
+  "ALTER TABLE positions ADD COLUMN custody TEXT NOT NULL DEFAULT 'account'",
 ];
 
 /** Open node:sqlite, run the schema SYNCHRONOUSLY, and wrap it as the async Db.
@@ -3246,16 +3281,117 @@ export async function clearTrenchEntry(agentId: string, mode: BasisMode, symbol:
  * That property was INCIDENTAL until the policy rule started depending on it —
  * which is exactly why it is written down here.
  *
- * NOT age-windowed and NOT LIMIT-bounded, unlike `recentCandidates`. A position
- * opened last week must still be exitable today, and an exit refused because the
- * curve aged out of a recency window would be the worst possible time to
- * discover that this list was the wrong shape.
+ * THE QUERY is not age-windowed and not LIMIT-bounded, unlike `recentCandidates`.
+ * THE TABLE UNDER IT IS BOTH, and this comment used to promise otherwise: it
+ * said "a position opened last week must still be exitable today", which is the
+ * right requirement and is not something this function can deliver on its own.
+ * `pruneDiscovered` trims `discovered_pools` to the 5,000 newest rows by
+ * `first_seen`, and the launchpad alone adds roughly ten an hour — about 21 days
+ * to full turnover, against a 14-day default grant.
+ *
+ * So a curve CAN age out from under an open position, and for a class position
+ * that is fatal rather than inconvenient: its output leg is un-enumerated by
+ * design, so `curve-provenance` is the only rule vouching for it, and losing the
+ * row means the mirror refuses the sell that would close it while the wall would
+ * have allowed it — the exit trap the vault exists to remove, rebuilt off-chain.
+ *
+ * The requirement is met by the CALLER instead, which unions this with
+ * `classPositionCurves` — an agent's own open positions, which nothing prunes.
+ * Written down here because the promise was made here.
  *
  * Returns null on failure, never []. Empty means "no curves known", which would
  * refuse the whole venue; null means "could not ask", which leaves the rule
  * unable to run rather than silently converting a database hiccup into a
  * blanket refusal.
  */
+/** One token this agent's class vault is believed to hold. See `class_positions`. */
+export interface ClassPositionRow {
+  token: string;
+  symbol: string | null;
+  decimals: number;
+  curve: string | null;
+  quoteToken: string | null;
+}
+
+/**
+ * The candidate list for this agent's class vault, or null.
+ *
+ * NULL ON FAILURE, NEVER []. The two mean opposite things to every caller: []
+ * is "this vault holds nothing", which is an honest zero, and null is "the
+ * question could not be asked", which must never close a cost basis or publish
+ * an equity figure. Same discipline as `knownCurves` below, and it matters more
+ * here because the consequence downstream is a deletion.
+ */
+export async function classPositions(agentId: string): Promise<ClassPositionRow[] | null> {
+  try {
+    const rows = (await getDb()
+      .prepare(
+        `SELECT token, symbol, decimals, curve, quote_token FROM class_positions WHERE agent_id = ?`,
+      )
+      .all(agentId)) as {
+      token: string;
+      symbol: string | null;
+      decimals: number;
+      curve: string | null;
+      quote_token: string | null;
+    }[];
+    return rows.map((r) => ({
+      token: r.token.toLowerCase(),
+      symbol: r.symbol,
+      decimals: r.decimals,
+      curve: r.curve ? r.curve.toLowerCase() : null,
+      quoteToken: r.quote_token ? r.quote_token.toLowerCase() : null,
+    }));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The curves of this agent's OWN open class positions.
+ *
+ * Unioned into `knownCurves` at arm time so a position can never be evicted out
+ * of its own exit — see the `class_positions` migration for why that is a real
+ * hazard rather than a theoretical one. Null on failure, and the caller must
+ * treat a null from EITHER source as "the rule cannot run" rather than merging a
+ * partial list: for a class trade a short list is a refusal, so a partial one is
+ * a silent refusal of exactly the positions that were dropped.
+ */
+export async function classPositionCurves(agentId: string): Promise<string[] | null> {
+  const rows = await classPositions(agentId);
+  if (rows === null) return null;
+  return rows.map((r) => r.curve).filter((c): c is string => !!c);
+}
+
+/** Remember that the class vault now holds this token. Idempotent by (agent, token). */
+export async function upsertClassPosition(
+  agentId: string,
+  row: ClassPositionRow,
+): Promise<void> {
+  try {
+    await getDb()
+      .prepare(
+        `INSERT INTO class_positions (agent_id, token, symbol, decimals, curve, quote_token)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(agent_id, token) DO UPDATE SET
+           symbol = COALESCE(excluded.symbol, symbol),
+           decimals = excluded.decimals,
+           curve = COALESCE(excluded.curve, curve),
+           quote_token = COALESCE(excluded.quote_token, quote_token)`,
+      )
+      .run(
+        agentId,
+        row.token.toLowerCase(),
+        row.symbol,
+        row.decimals,
+        row.curve,
+        row.quoteToken,
+      );
+  } catch (e) {
+    console.error("[store] class_positions insert failed:", e);
+  }
+}
+
 export async function knownCurves(): Promise<string[] | null> {
   try {
     const rows = (await getDb()

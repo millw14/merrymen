@@ -280,3 +280,75 @@ export async function readAccountBalances(
 
   return { ethWei, cashUsdg, vaultUsdg, unread };
 }
+
+/** What a custody contract holds for this account, per token. */
+export interface CustodyBalances {
+  /** Raw balance per token address (lowercased). Present only for tokens that ANSWERED. */
+  balances: Map<string, bigint>;
+  /**
+   * Empty means every figure above is an observation.
+   *
+   * "class" here, not a per-token list, and deliberately: the caller's response
+   * is all-or-nothing — hold the tick — so a partial answer is no more useful
+   * than none, and naming the tokens would invite someone to book the ones that
+   * did answer.
+   */
+  unread: string[];
+}
+
+/**
+ * WHAT THE CLASS VAULT HOLDS.
+ *
+ * The Morpho vault's sibling, and the differences are the whole story.
+ *
+ * Morpho: the ACCOUNT holds shares, so discovery starts from `balanceOf(account)`
+ * and the work is CONVERSION — `convertToAssets` is a second step that can fail
+ * independently of the balance read, which is why `sharesKnown` exists.
+ *
+ * Here: the account holds NOTHING. Discovery cannot start from it at all, so the
+ * caller supplies the candidate list from `class_positions` and this function
+ * only asks the chain what is actually there. And there is no conversion — a
+ * class token is an ERC-20 with a price problem, not a wrapper, so it is valued
+ * by the same pipeline as every other memecoin the book already carries.
+ *
+ * FAILURE IS NEVER A ZERO. A reverted call and a dead RPC are both "we don't
+ * know", and the caller's `unread` handling holds the tick rather than writing a
+ * phantom crater — exactly the discipline `readAccountBalances` above records
+ * having been added the hard way.
+ */
+export async function readClassCustody(
+  client: PublicClient,
+  vault: `0x${string}`,
+  tokens: readonly `0x${string}`[],
+): Promise<CustodyBalances> {
+  const balances = new Map<string, bigint>();
+  // Nothing to ask about is not a failed read. An agent with a vault and no
+  // recorded positions genuinely holds nothing, and saying "unread" here would
+  // hold every tick of every class-enabled agent forever.
+  if (tokens.length === 0) return { balances, unread: [] };
+
+  const results = await client
+    .multicall({
+      contracts: tokens.map((token) => ({
+        address: token,
+        abi: ERC20_READS,
+        functionName: "balanceOf" as const,
+        args: [vault] as const,
+      })),
+    })
+    .catch(() => null);
+
+  if (results === null) return { balances, unread: ["class"] };
+
+  // ONE failed token holds the whole tick. A partial custody read produces a
+  // partial book, and the two things downstream that consume it — the equity
+  // sum and the stranded-basis sweep — are both wrong in a destructive
+  // direction when a holding is missing: the first craters, the second deletes.
+  let anyFailed = false;
+  results.forEach((r, i) => {
+    if (r.status === "success") balances.set(tokens[i]!.toLowerCase(), r.result as bigint);
+    else anyFailed = true;
+  });
+
+  return { balances, unread: anyFailed ? ["class"] : [] };
+}

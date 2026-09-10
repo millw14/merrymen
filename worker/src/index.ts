@@ -56,6 +56,7 @@ import {
   grantHasTransfer as grantCarriesTransfer,
   grantV4Adapter,
   grantPonsAdapter,
+  grantPonsClassVault,
   grantHasV4,
   tokenCoverage,
   uncoveredBasketSymbols,
@@ -85,6 +86,7 @@ import { createSponsor, sponsorWillQuote, type Sponsor } from "./paymaster";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } from "./fills";
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
+import { provenanceCurves, strandedBasisSymbols } from "./custody";
 import { SponsorRefused } from "./paymaster";
 import { acquiredLegOf, findOrphanOps, findSoleAcquisition, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
@@ -221,7 +223,7 @@ import {
   type CurveReserves,
 } from "./venues/pons-price";
 import type { CurveLeg } from "./strategist/proposals";
-import { mainnetClient, readAccountBalances, readMarketSafety, setMainnetRpc } from "./snapshot";
+import { mainnetClient, readAccountBalances, readClassCustody, readMarketSafety, setMainnetRpc } from "./snapshot";
 import { applyFill } from "./basis";
 import {
   addDecision,
@@ -230,6 +232,8 @@ import {
   addFeeAccrual,
   addTrade,
   basisSymbols,
+  classPositionCurves,
+  classPositions,
   getBasis,
   setBasis,
   setPositionFloor,
@@ -1045,7 +1049,11 @@ async function main() {
       watchTokens = watchTokensFor(next.basketSymbols, next.customTokens);
       console.log(`[settings] strategy settings applied — ${strategy.name}, venue ${next.swapVenue}`);
       if (active) {
-        active.limits = limitsFromGrant(active.grant, watchTokens, (await knownCurves()) ?? undefined);
+        active.limits = limitsFromGrant(
+          active.grant,
+          watchTokens,
+          provenanceCurves(await knownCurves(), await classPositionCurves(active.agentId)),
+        );
         await addEvent(active.agentId, "ok", `settings applied — strategy ${strategy.name}, venue ${next.swapVenue}`);
       }
       stratKey = nextStrat;
@@ -3621,7 +3629,16 @@ async function main() {
       // The provenance set for the curve-trade rule. Read once at arm time,
       // alongside every other grant-derived bound, so a curve the agent never
       // saw launch cannot be traded even though the wall cannot pin it.
-      limits: limitsFromGrant(grant, watchTokens, (await knownCurves()) ?? undefined),
+      // UNIONED WITH THIS AGENT'S OWN OPEN CLASS POSITIONS. discovered_pools is
+      // pruned to 5,000 rows and the launchpad turns that over in ~21 days, so a
+      // curve can age out from under a position the agent is still holding —
+      // and for a class position that means the mirror refusing its own exit.
+      // See provenanceCurves, including why a partial list is worse than none.
+      limits: limitsFromGrant(
+        grant,
+        watchTokens,
+        provenanceCurves(await knownCurves(), await classPositionCurves(agentId)),
+      ),
       // Read once here, with every other grant-derived bound, because deciding
       // it per-tick would re-parse a serialized signature that cannot change.
       deadPolicy,
@@ -5871,6 +5888,19 @@ async function main() {
     // from missingPrice: there the holding is known and the PRICE is missing;
     // here the holding itself is unknown, so there is nothing to value.
     let unreadBook: string[] = [];
+    /**
+     * What the class vault holds, and whether we managed to ask.
+     *
+     * `ok: true` with an empty `symbols` is the ordinary case and an honest
+     * zero — no vault sealed, or a vault holding nothing. `ok: false` means the
+     * question could not be asked, and the one consumer that spends it (the
+     * stranded-basis sweep) treats that as "do nothing" rather than "holds
+     * nothing", because its output is a deletion.
+     *
+     * The paper branch leaves the default: paper has no vault and cannot have
+     * one, so `ok: true` there is a fact rather than an assumption.
+     */
+    let classBook: { ok: boolean; symbols: string[] } = { ok: true, symbols: [] };
     if (paper) {
       // The book IS the paper ledger, marked to market at the live oracle px.
       const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
@@ -5944,17 +5974,55 @@ async function main() {
         });
       }
     } else {
-      const [bal, posRead] = await Promise.all([
+      // ── THE CLASS VAULT'S CANDIDATE LIST ─────────────────────────────────
+      //
+      // Read BEFORE the balances so its failure can join `bal.unread` and be
+      // handled by the one gate that already holds the tick. Three states, and
+      // the middle one is the one this repo keeps having to relearn:
+      //
+      //   no vault sealed  → nothing to ask; [] is a fact, not a gap
+      //   rows unreadable  → "class" into unread; the tick HOLDS
+      //   rows readable    → ask the chain; the chain is the authority
+      //
+      // A row in `class_positions` is a candidate, never a balance. It says
+      // "ask about this token" and nothing more, which is what keeps a stale row
+      // from becoming a phantom position.
+      const classVaultAddr = grantPonsClassVault(grant);
+      const classRows = classVaultAddr ? await classPositions(agentId) : [];
+      const classUnread: string[] = classRows === null ? ["class"] : [];
+
+      const [bal, posRead, classRead] = await Promise.all([
         readAccountBalances(client, grant.smartAccount),
         readPositions(client, grant.smartAccount, watchTokens, market.prices),
+        classVaultAddr && classRows
+          ? readClassCustody(
+              client,
+              classVaultAddr,
+              classRows.map((r) => r.token as `0x${string}`),
+            )
+          : Promise.resolve({ balances: new Map<string, bigint>(), unread: classUnread }),
       ]);
       balances = bal;
       positions = posRead.positions;
       missingPrice = posRead.missingPrice;
       unpricedByDesign = posRead.unpricedByDesign;
       lastUnpricedSymbols = new Set(unpricedByDesign);
+      // Only tokens the vault ACTUALLY holds. A recorded row with a zero balance
+      // is a position that has been fully sold or swept — its basis is genuinely
+      // stranded and should close, which is the one case the guard must not
+      // block.
+      classBook = {
+        ok: classRead.unread.length === 0,
+        symbols: (classRows ?? [])
+          .filter((r) => (classRead.balances.get(r.token) ?? 0n) > 0n)
+          .map((r) => r.symbol ?? short(r.token)),
+      };
       unreadBook = bookGaps({
-        unreadBalances: bal.unread,
+        // MERGED BEFORE THE GATE, not after. `bookGaps` feeds the early return
+        // below; a custody read reported anywhere later would let the tick
+        // publish an equity figure missing a real holding and then run the
+        // stranded-basis sweep against a book it could not see.
+        unreadBalances: [...bal.unread, ...classRead.unread],
         positionsReadFailed: posRead.readFailed,
         missingPrice: [], // reported separately below — it has its own message
       });
@@ -6115,10 +6183,22 @@ async function main() {
     if (!paper) {
       // A held-but-unpriceable symbol is absent from `positions` yet very much
       // still owned — closing its basis here would discard the cost of a real
-      // position and later report its whole sale proceeds as profit.
-      const heldNow = new Set([...positions.map((p) => p.symbol), ...unpricedByDesign, ...missingPrice]);
-      for (const symbol of await basisSymbols(agentId, "live")) {
-        if (heldNow.has(symbol)) continue;
+      // position, and the `position_floors` row goes with it, so both mechanical
+      // exits go blind on a live holding.
+      //
+      // The predicate moved to custody.ts. It is a destructive irreversible
+      // write that was reachable from no test, and it has to ask "do we hold it"
+      // of everywhere we could be holding it — `positions` is account-scoped,
+      // and a class-custodied position is in none of these three sets. See
+      // strandedBasisSymbols, including why a failed custody read closes nothing.
+      for (const symbol of strandedBasisSymbols({
+        basisSymbols: await basisSymbols(agentId, "live"),
+        positions: positions.map((p) => p.symbol),
+        unpricedByDesign,
+        missingPrice,
+        classHeld: classBook.symbols,
+        classReadOk: classBook.ok,
+      })) {
         const stranded = await getBasis(agentId, "live", symbol);
         if (stranded.qtyRaw <= 0n) continue;
         await setBasis(agentId, "live", symbol, { qtyRaw: 0n, costUsdg: 0n });
