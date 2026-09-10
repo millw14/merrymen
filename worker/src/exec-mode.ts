@@ -28,7 +28,23 @@
  */
 import { TRADEABLE_CHAIN_ID } from "./preflight";
 
-export type RefuseRule = "not-armed" | "dead-policy" | "no-executor" | "wrong-chain" | "no-gas" | "no-cash";
+/**
+ * THE RULE NAMES AND THEIR REMEDIES NOW LIVE IN CORE, and are re-exported here
+ * so every existing importer is untouched.
+ *
+ * They moved for the reason the old comment on `liveBlockerText` already gave —
+ * "the remedy is a property of the rule, and two surfaces already render this" —
+ * except that the second surface, the web tier, could not import from the
+ * worker and so had no way to render them at all. The result was nine owners
+ * sitting in practice mode because the one thing that would fix it, a free
+ * re-signature, was named only in a worker log they never see.
+ *
+ * `liveBlocker` itself stays here: deciding WHICH leg failed reads the worker's
+ * own inputs. Naming the legs does not.
+ */
+export type { RefuseRule } from "../../packages/core/src/autonomy";
+export { liveBlockerText } from "../../packages/core/src/autonomy";
+import type { RefuseRule } from "../../packages/core/src/autonomy";
 
 export type ExecMode =
   /**
@@ -213,25 +229,3 @@ export function liveBlocker(a: ExecInputs): RefuseRule {
   return "no-cash";
 }
 
-/**
- * The same leg, in words an owner can act on.
- *
- * Lives here rather than in the UI because the remedy is a property of the
- * rule, and two surfaces already render this (the dashboard and the chat).
- */
-export function liveBlockerText(rule: RefuseRule): string {
-  switch (rule) {
-    case "not-armed":
-      return "your trading key is not active yet — the agent has no permission to trade with";
-    case "dead-policy":
-      return "this trading key was signed before a fix and cannot reach the chain; re-signing it is free and instant";
-    case "no-executor":
-      return "no bundler is configured, so nothing can be submitted to the chain";
-    case "wrong-chain":
-      return "this key is for a different network than the one trading happens on";
-    case "no-gas":
-      return "the account holds no ETH, and every operation has to pay a fee before it reaches the chain";
-    case "no-cash":
-      return "the account holds no USDG to trade with";
-  }
-}

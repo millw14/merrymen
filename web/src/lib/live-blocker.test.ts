@@ -18,11 +18,24 @@ import { describe, it } from "node:test";
 
 import { ADVISED_RULES, blockerAdvice } from "./live-blocker";
 
-/** Every member of the worker's `RefuseRule` union, read from its source. */
+/**
+ * Every member of the `RefuseRule` union, read from its source.
+ *
+ * THE UNION MOVED, AND THIS FOLLOWED IT. It was declared in
+ * `worker/src/exec-mode.ts` and is now in `packages/core/src/autonomy.ts`,
+ * because the web tier cannot import from the worker and so had no way to
+ * render the remedies at all — which is how nine owners sat in practice mode
+ * while the one thing that would fix it was named only in a worker log.
+ * exec-mode.ts re-exports it, so every worker importer is untouched.
+ *
+ * Read as TEXT rather than imported on purpose, and that is worth keeping: the
+ * property is that the screen covers the union as DECLARED, and importing the
+ * type would erase at runtime and assert nothing.
+ */
 function refuseRules(): string[] {
-  const src = readFileSync(new URL("../../../worker/src/exec-mode.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../../../packages/core/src/autonomy.ts", import.meta.url), "utf8");
   const at = src.indexOf("export type RefuseRule");
-  assert.ok(at > 0, "RefuseRule must be declared in exec-mode.ts");
+  assert.ok(at > 0, "RefuseRule must be declared in packages/core/src/autonomy.ts");
   const decl = src.slice(at, src.indexOf(";", at));
   const names = [...decl.matchAll(/"([a-z-]+)"/g)].map((m) => m[1]!);
   assert.ok(names.length >= 4, `expected the union's members, parsed ${names.length}`);

@@ -13,7 +13,17 @@ import { RISK_LEVELS, RISK_PROFILES, levelOf, type RiskLevel } from "@merrymen/c
 
 export interface AccountState {
   session: {hosted: boolean; address: string | null};
-  status: {exists: boolean; mode?: string; liveBlocker?: string | null; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number}};
+  /**
+   * `mode` is the published rail, and it is the THREE the worker publishes —
+   * not `string`. It was widened here and the widening reached `autonomyOf`,
+   * which switches on it: a fourth value would have fallen out of every arm as
+   * "idle" and rendered a blocked agent as merely quiet.
+   *
+   * `balances` is the CHAIN's answer (a multicall in /api/grants), and it is
+   * the only figure that may decide whether real money exists. The book's cash
+   * is the simulated balance in paper mode, which is the whole confusion.
+   */
+  status: {exists: boolean; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; balances?: {ethWei: string; cashUsdg: string; vaultUsdg: string}; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number}};
 }
 export async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {...init, cache:"no-store", signal: AbortSignal.timeout(20000)});

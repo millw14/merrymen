@@ -189,6 +189,16 @@ export interface ChainHolder {
 export interface LiveMine {
   statusLabel?: string;
   /**
+   * WHAT THIS AGENT IS, and why it cannot act if it cannot.
+   *
+   * Not optional: every surface that prints a balance has to consult
+   * `moneyLabel`, and an optional field is one a surface can forget. Forgetting
+   * it is precisely the bug — an account holding nothing rendered "Available
+   * cash $964" because the label was a constant and the number was the paper
+   * book. Computed once in App.tsx from /api/grants, never re-derived.
+   */
+  autonomy: import("@merrymen/core").Autonomy;
+  /**
    * The newest thing the worker warned about, or null.
    *
    * ONE, NOT FORTY. These repeat: the worker latches the ones that matter to
@@ -211,11 +221,24 @@ export interface LiveMine {
   glance: StrategyGlance;
 }
 
+/**
+ * THE SAME AGENT, BEFORE ANYONE HAS ASKED WHETHER IT CAN TRADE.
+ *
+ * mineOf builds this from the FEED, which knows the book but not the grant, the
+ * chain balance or the blocker. Rather than let it invent an autonomy state it
+ * cannot know — a default here would render "IDLE" over a blocked agent — the
+ * field is absent until App.tsx supplies it from /api/grants. Omitting it from
+ * the producer is what makes rendering a balance without a truthful label a
+ * compile error rather than a judgement call.
+ */
+export type FeedMine = Omit<LiveMine, "autonomy">;
+
+
 export interface LiveState {
   tokens: LiveToken[];
   agents: LiveAgent[];
   theses: Thesis[];
-  mine: LiveMine | null;
+  mine: FeedMine | null;
   /**
    * WHETHER EACH READ ACTUALLY HAPPENED — carried beside the data, not instead
    * of it.
@@ -442,7 +465,7 @@ export function readStateOf(body: { source?: string } | null | undefined): ReadS
   return body.source === "none" ? "unreadable" : "ok";
 }
 
-export async function loadLive(onMine?: (mine: LiveMine | null) => void): Promise<LiveState> {
+export async function loadLive(onMine?: (mine: FeedMine | null) => void): Promise<LiveState> {
   const [market, board, thesesRes, feed, quotes, disc] = await Promise.all([
     getJson<{ tokens: MarketTok[]; source?: string }>("/api/market"),
     getJson<{ agents: BoardRow[]; source?: string }>("/api/leaderboard"),
@@ -706,7 +729,7 @@ export function equityDayAgo(
   return best;
 }
 
-function mineOf(feed: Feed | null, theses: Thesis[]): LiveMine | null {
+function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
   if (!feed?.agent?.name && !feed?.equity?.length) return null;
   const name = feed.agent?.name ?? "Your agent";
   const mineTheses = feed.agent?.slug ? theses.filter((t) => t.slug === feed.agent?.slug) : [];

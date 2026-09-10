@@ -23,12 +23,28 @@ import { describe, it } from "node:test";
 import { REJECT_RULES } from "./thesis-policy";
 import { liveBlockerText } from "./exec-mode";
 
-const SOURCE = readFileSync(new URL("./exec-mode.ts", import.meta.url), "utf8");
+/**
+ * THE UNION MOVED TO CORE, AND THIS FOLLOWED IT.
+ *
+ * It was declared in `exec-mode.ts`, which re-exports it still, so every worker
+ * importer is unchanged. It moved because the web tier cannot import from the
+ * worker, so the remedies were unreachable by the only surface an owner reads —
+ * which left nine of them in practice mode without being told that a free
+ * re-signature was the entire fix.
+ *
+ * Still read from SOURCE, for the reason the header gives: the point is to fail
+ * when someone adds a seventh rule and forgets this map, and importing a union
+ * of string literals gives a compile error nobody sees.
+ */
+const SOURCE = readFileSync(
+  new URL("../../packages/core/src/autonomy.ts", import.meta.url),
+  "utf8",
+);
 
 /** The RefuseRule union, parsed from the file that declares it. */
 const RULES = (() => {
   const decl = /export type RefuseRule =([^;]+);/.exec(SOURCE);
-  assert.ok(decl, "RefuseRule must still be a string-literal union in exec-mode.ts");
+  assert.ok(decl, "RefuseRule must still be a string-literal union in packages/core/src/autonomy.ts");
   const rules = [...decl[1]!.matchAll(/"([a-z-]+)"/g)].map((m) => m[1]!);
   assert.ok(rules.length >= 6, `expected the full union, parsed ${rules.length}`);
   return rules;

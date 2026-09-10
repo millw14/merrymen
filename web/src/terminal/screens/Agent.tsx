@@ -623,8 +623,8 @@ export function Agent({
                     </button>
                   );
                 })}
-                <div className="desk-cash">
-                  <span>Available cash</span>
+                <div className={mine.autonomy.simulated ? "desk-cash is-simulated" : "desk-cash"}>
+                  <span>{mine.autonomy.moneyLabel}</span>
                   <strong>{money(mine.glance.cashUsd ?? null)}</strong>
                 </div>
                 {mine.glance.vaultUsd != null && (

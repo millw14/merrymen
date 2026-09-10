@@ -76,8 +76,11 @@ export function DesktopHeader({
       </button>
       <div className="desktop-header-account">
         <Link className="desktop-settings-link" href="/settings">Settings</Link>
-        <span>
-          <small>Available cash</small>
+        {/* THE LABEL CARRIES THE TRUTH, not a caption under it. Someone who has
+            already read "$964" as their deposit does not go on to read a
+            footnote. See packages/core/src/autonomy.ts. */}
+        <span className={mine.autonomy.simulated ? "is-simulated" : undefined}>
+          <small>{mine.autonomy.moneyLabel}</small>
           <strong>{money(mine.glance.cashUsd ?? null)}</strong>
         </span>
         <button
@@ -411,10 +414,20 @@ export function DesktopPortfolio({
             Withdraw
           </button>
         </div>
-        <div className="desktop-cash">
-          <span>Available cash</span>
+        <div className={mine.autonomy.simulated ? "desktop-cash is-simulated" : "desktop-cash"}>
+          <span>{mine.autonomy.moneyLabel}</span>
           <strong>{money(mine.glance.cashUsd ?? null)}</strong>
         </div>
+        {/* THE ONE THING THAT WOULD END IT, where the money is — not in a feed
+            event nobody reads. Only ever rendered when the worker itself
+            resolved a blocker the owner alone can clear. */}
+        {mine.autonomy.needsOwnerAction && mine.autonomy.action && (
+          <div className="desktop-blocked" role="status">
+            <strong>Your Merryman needs a free permission renewal to trade autonomously.</strong>
+            <p>{mine.autonomy.reason}</p>
+            <button onClick={() => onScreen({ kind: "grant" })}>{mine.autonomy.action.label}</button>
+          </div>
+        )}
       </section>
       {selectedToken && (
         <section className="desktop-token-context">

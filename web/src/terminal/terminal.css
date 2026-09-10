@@ -7822,3 +7822,68 @@
   font-style: normal;
   opacity: 0.7;
 }
+
+/* ── SIMULATED MONEY MUST NOT LOOK LIKE MONEY ────────────────────────────────
+   A tester with 0.000000 USDG on chain read "$964" as their deposit, waited a
+   day, and reported the product broken. The figure was honest arithmetic about
+   the paper book; nothing lied. It simply wore the same type, weight and colour
+   as a funded balance, and that is the whole of what a reader takes from a
+   number that size.
+
+   So the label changes (packages/core/src/autonomy.ts owns the words) AND the
+   figure stops looking authoritative: dimmed, italic, and struck through with
+   nothing — it is a quantity in a book that does not exist on any chain.
+   Deliberately NOT red: this is not an error state, it is practice working
+   correctly. */
+:where(.terminal-host) .is-simulated {
+  opacity: 0.72;
+}
+:where(.terminal-host) .is-simulated strong,
+:where(.terminal-host) .is-simulated small {
+  font-style: italic;
+  font-weight: 400;
+}
+:where(.terminal-host) .is-simulated small,
+:where(.terminal-host) .is-simulated > span:first-child {
+  letter-spacing: 0.01em;
+}
+
+/* ── THE ONE THING THAT WOULD END IT ─────────────────────────────────────────
+   Rendered only when the worker itself resolved a blocker the owner alone can
+   clear — dead-policy, wrong-chain, not-armed, or an expired permission. Nine
+   owners sat in practice mode on these while the remedy, a free signature, was
+   named only in a worker log they never see. Placed beside the balance because
+   that is the figure that sent them looking for an explanation. */
+:where(.terminal-host) .desktop-blocked {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.14));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--tx, #fff) 5%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+:where(.terminal-host) .desktop-blocked strong {
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 1.35;
+  color: var(--tx);
+}
+:where(.terminal-host) .desktop-blocked p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--faint);
+}
+:where(.terminal-host) .desktop-blocked button {
+  align-self: flex-start;
+  padding: 7px 13px;
+  border-radius: 8px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.18));
+  background: var(--tx);
+  color: var(--bg, #000);
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+}

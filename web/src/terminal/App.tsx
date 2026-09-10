@@ -20,6 +20,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { autonomyOf } from "@merrymen/core";
 import type { ChatTurn } from "./account";
 import { chatKeyFor, clearTurns, loadTurns, saveTurns } from "./chat-store";
 import {
@@ -289,12 +290,49 @@ export function App() {
     if (desktop && (pathname === "/" || pathname === "/feed")) setSidebarSection("feed");
   }, [desktop, pathname]);
   const agent=profile ?? listedAgent;
-  const mine = account?.status.exists && live.mine ? {...live.mine, statusLabel: account.status.mode === "paper" ? "Paper trading" : account.status.mode === "live" ? "Running" : account.status.mode === "idle" ? "Idle" : "Offline"} : null;
+  /**
+   * WHAT THIS AGENT ACTUALLY IS, decided once and handed to every surface.
+   *
+   * This line used to be a ternary over `mode` alone, producing "Paper trading"
+   * / "Running" / "Idle" / "Offline". Two things were wrong with it, and a
+   * tester found both.
+   *
+   * It never mentioned the BLOCKER, so nine owners whose keys predate a wall fix
+   * sat under the word "Paper trading" while the one thing that would end it —
+   * a free re-signature — was named only in a worker log they never see.
+   *
+   * And it left the BALANCE alone. An account holding 0.000000 USDG rendered
+   * "Available cash $964", because with no real money the agent drops to paper
+   * and the paper book's balance is what the account line then reports. Nothing
+   * lied; the screen simply printed practice money in the shape of deposited
+   * money, and the reader supplied the only meaning available to them.
+   *
+   * `autonomyOf` lives in core so the chat and the feed read the same words.
+   * Real cash comes from `balances.cashUsdg`, which is a chain multicall in
+   * /api/grants — NOT `glance.cashUsd`, which is the book and is exactly the
+   * figure that must not be trusted to say whether money exists.
+   */
+  const autonomy = autonomyOf({
+    mode: account?.status.mode ?? null,
+    liveBlocker: account?.status.liveBlocker ?? null,
+    expired:
+      account?.status.grant?.expiresAt !== undefined
+        ? account.status.grant.expiresAt * 1000 < Date.now()
+        : false,
+    realCashUsd: account?.status.balances
+      ? Number(account.status.balances.cashUsdg) / 1e6
+      : null,
+  });
+  const mine = account?.status.exists && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy} : null;
   // THE SHELL FOR A VISITOR WITH NO AGENT — and every figure on it is unknown,
   // not zero. `equity:0, cashUsd:0` rendered "$0.00" in the header and the
   // sidebar for somebody who has no account at all, which is a balance we have
   // never read for a book that does not exist.
-  const emptyMine = {name:"Your agent",slug:null,handle:null,owner:null,equity:null,chg24:null,mode:null,thesis:null,moves:[],glance:{id:"custom" as const,label:"",cashUsd:undefined}};
+  // A VISITOR WITH NO AGENT gets the idle arm, not a blocked or paper one:
+  // there is no agent to be blocked and no book to simulate. `autonomyOf` with
+  // a null mode returns exactly that, so the shell carries a real answer rather
+  // than a placeholder every surface then has to special-case.
+  const emptyMine = {name:"Your agent",slug:null,handle:null,owner:null,equity:null,chg24:null,mode:null,thesis:null,moves:[],glance:{id:"custom" as const,label:"",cashUsd:undefined},autonomy:autonomyOf({mode:null,liveBlocker:null})};
   const displayMine = mine ?? emptyMine;
 
   return (

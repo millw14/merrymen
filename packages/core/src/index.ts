@@ -21,6 +21,12 @@ export * from "./robinhood-oauth";
 export * from "./flow-evidence";
 export * from "./capital-classify";
 
+// WHETHER AN AGENT CAN ACT ON ITS OWN, and why not when it cannot. Here rather
+// than in the worker because the dashboard, the chat and the feed all render
+// these words, and a second copy in the web tier is how one surface comes to
+// say "add funds" while another says "re-sign".
+export * from "./autonomy";
+
 // THE CANONICAL PORTFOLIO SNAPSHOT. One type, one builder, four consumers —
 // worker, web, social and Brain. Exported from core precisely so none of them
 // can grow its own NAV or P&L implementation.
