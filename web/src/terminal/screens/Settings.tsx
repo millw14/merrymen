@@ -77,6 +77,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const [virtualsEnabled, setVirtualsEnabled] = useState<boolean | null>(null);
   // Scout mode is a boolean, so it can't ride the string `draft`.
   const [deskEnabled, setDeskEnabled] = useState<boolean | null>(null);
+  const [depositScanEnabled, setDepositScanEnabled] = useState<boolean | null>(null);
   const [scoutEnabled, setScoutEnabled] = useState<boolean | null>(null);
   const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
   const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
@@ -246,6 +247,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
     if (tgNotify !== null) body.telegramNotifyEnabled = tgNotify;
     if (virtualsEnabled !== null) body.virtualsEnabled = virtualsEnabled;
     if (deskEnabled !== null) body.deskEnabled = deskEnabled;
+    if (depositScanEnabled !== null) body.depositScanEnabled = depositScanEnabled;
     if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
     if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
     if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
@@ -348,6 +350,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const tgNotifyVal = tgNotify ?? view.values.telegramNotifyEnabled ?? d.telegramNotifyEnabled;
   const virtualsEnabledVal = virtualsEnabled ?? view.values.virtualsEnabled ?? d.virtualsEnabled;
   const deskEnabledVal = deskEnabled ?? view.values.deskEnabled ?? d.deskEnabled;
+  const depositScanEnabledVal = depositScanEnabled ?? view.values.depositScanEnabled ?? d.depositScanEnabled;
   const scoutEnabledVal = scoutEnabled ?? view.values.scoutEnabled ?? d.scoutEnabled;
   const discoveryEnabledVal = discoveryEnabled ?? view.values.discoveryEnabled ?? d.discoveryEnabled;
   const trencherLiveVal = trencherLive ?? view.values.trencherLiveEnabled ?? d.trencherLiveEnabled;
@@ -1354,6 +1357,29 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             <Field label="performance fee" hint="Calculated on new peak profits. Fees are recorded but not collected.">
               <input type="number" min={0} max={5000} placeholder={String(d.perfFeeBps)} value={v("perfFeeBps")} onChange={set("perfFeeBps")} />
               <span className="mm-unit">bps</span>
+            </Field>
+            {/* THE ONLY THING THAT CAN BOOK A CONTRIBUTION FROM A RECEIPT.
+                Next to the fee on purpose: the fee is charged on equity above
+                the peak, and a deposit that was never booked is equity above
+                the peak. Off by default, and until now it was unreachable —
+                absent from the settings route's field list, so a PUT carrying
+                it returned {ok:true} and changed nothing. Per-tenant beats the
+                MERRYMEN_DEPOSIT_SCAN env var (worker/src/settings.ts bool()
+                reads the file first), which is what makes a single canary
+                possible instead of the whole fleet at once. */}
+            <Field
+              label="read deposits from the chain"
+              hint="On, contributions are read from USDG Transfer receipts and each one gets a transaction hash. Off, they are inferred from balance changes — and a deposit that lands in the same moment as a trade is not inferred at all, which leaves the agent with no contributions on record and no P&L it will publish. Changes how every P&L figure is measured, so it is off by default."
+            >
+              <input
+                type="checkbox"
+                checked={depositScanEnabledVal}
+                onChange={(e) => setDepositScanEnabled(e.target.checked)}
+                style={{ width: "auto" }}
+              />
+              <span className="mm-unit">
+                {depositScanEnabledVal ? "contributions come from receipts" : "off — contributions are inferred"}
+              </span>
             </Field>
             <Field label="Market check interval">
               <input type="number" min={15} max={3600} placeholder={String(d.tickSeconds)} value={v("tickSeconds")} onChange={set("tickSeconds")} />
