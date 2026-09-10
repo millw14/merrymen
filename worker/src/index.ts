@@ -90,7 +90,7 @@ import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
 import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbols } from "./custody";
 import { SponsorRefused } from "./paymaster";
 import { acquiredLegOf, findOrphanOps, findSoleAcquisition, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
-import { findTransferFlows, resumeFrom } from "./deposit-log";
+import { findTransferFlows, openingScanFrom, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
 import { takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
@@ -1697,22 +1697,43 @@ async function main() {
         if (chainScanCursor === null) {
           const mark = await lastChainLogBlock(agentId);
           if (mark === null) {
-            // Never scanned. Open at the head rather than re-litigating the
-            // account's whole history transfer by transfer — everything before
-            // this point belongs to the single `inferred` opening-balance row.
-            chainScanCursor = head;
-            return false;
+            // NEVER SCANNED, and where to open is a real decision rather than a
+            // constant — `openingScanFrom` is it, and carries the argument.
+            //
+            // Opening at the head is right whenever the history before it is
+            // already accounted for. It is wrong, and permanently so, for an
+            // account holding money that no flow row explains: the scan is the
+            // only writer of a chain-log row, so opening at the head is what
+            // keeps the mark null, which is what opens at the head next boot.
+            // The owner-visible end of that loop is `no-capital-contributed`
+            // and an agent that holds forever.
+            const open = openingScanFrom({
+              head,
+              maxLookback: DEPOSIT_LOOKBACK_BLOCKS,
+              netContributionsUsdg: await getNetContributionsUsdg(agentId),
+              equityUsdg,
+            });
+            chainScanCursor = open.at;
+            if (!open.reachingBack) return false;
+            // Said out loud because it is the one pass that reads a window this
+            // wide, and an operator watching a quiet agent should see the reason
+            // it stopped being quiet.
+            console.log(
+              `[flows] ${fmt(equityUsdg)} USDG of equity and no flow row accounts for any of it — ` +
+                `reaching back to block ${open.at} for the funding transfer`,
+            );
+          } else {
+            const at = resumeFrom(mark, head, DEPOSIT_LOOKBACK_BLOCKS);
+            if (at > BigInt(mark)) {
+              // resumeFrom clamped, so the gap since the last scan is wider than
+              // we will reach back. Say so by returning false: inference books the
+              // net boundary movement it is designed for, and the exact scan
+              // restarts from here rather than silently skipping the difference.
+              chainScanCursor = head;
+              return false;
+            }
+            chainScanCursor = at;
           }
-          const at = resumeFrom(mark, head, DEPOSIT_LOOKBACK_BLOCKS);
-          if (at > BigInt(mark)) {
-            // resumeFrom clamped, so the gap since the last scan is wider than
-            // we will reach back. Say so by returning false: inference books the
-            // net boundary movement it is designed for, and the exact scan
-            // restarts from here rather than silently skipping the difference.
-            chainScanCursor = head;
-            return false;
-          }
-          chainScanCursor = at;
         }
         from = chainScanCursor;
         flows = await findTransferFlows({

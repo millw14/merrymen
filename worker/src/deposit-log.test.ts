@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { toEventSelector, type Hex } from "viem";
 import { addressTopic, type RawLog, type ReconcileChain } from "./inflight-reconcile";
-import { TRANSFER_TOPIC, findTransferFlows, flowKey, resumeFrom } from "./deposit-log";
+import { TRANSFER_TOPIC, findTransferFlows, flowKey, openingScanFrom, resumeFrom } from "./deposit-log";
 
 /**
  * WHY THIS FILE EXISTS. `FlowSource` declared 'chain-log' from the beginning and
@@ -234,6 +234,67 @@ describe("where the next scan starts", () => {
   it("never scans further back than the lookback allows", () => {
     // A long outage must not turn one tick into an unbounded historical scan.
     assert.equal(resumeFrom(10, 5_000n, 1_000n), 4_000n);
+  });
+});
+
+/**
+ * WHERE A FIRST SCAN OPENS, which used to be the constant `head` and is now a
+ * decision — because always opening at the head is self-perpetuating.
+ *
+ * The scan is the only writer of a `chain-log` row. Open at the head and the
+ * mark stays null; a null mark is what opens at the head. An agent funded
+ * outside a scanned window therefore never gets a contribution row and no later
+ * run can reach back for one, so `computePnl` answers `no-capital-contributed`
+ * on every wake and the agent holds forever. These pin the escape hatch and,
+ * more importantly, how narrow it is.
+ */
+describe("where a first scan opens", () => {
+  const open = (netContributionsUsdg: number | null, equityUsdg: bigint) =>
+    openingScanFrom({ head: 500_000n, maxLookback: 200_000n, netContributionsUsdg, equityUsdg });
+
+  it("reaches back for an account holding money no flow row accounts for", () => {
+    // Milla: 49.86 USDG of deposits on chain, `flows 0` in the ledger.
+    const r = open(null, 49_860_761n);
+    assert.equal(r.reachingBack, true);
+    assert.equal(r.at, 300_000n);
+  });
+
+  it("opens at the head for a book that already has flow rows", () => {
+    // The ordinary case, and the reason the reach-back is not the default: the
+    // history is accounted for, so re-reading it would only re-book what is
+    // booked.
+    assert.deepEqual(open(10_000_000, 49_860_761n), { at: 500_000n, reachingBack: false });
+  });
+
+  it("does NOT reach back for rows that merely net to zero", () => {
+    // Deposited and then fully withdrew. Net zero, but EVIDENCED — the rows are
+    // there and correct. This is the case that makes the null/zero distinction
+    // in getNetContributionsUsdg load-bearing rather than stylistic: collapse
+    // them and every fully-withdrawn book rescans 200k blocks every boot.
+    assert.deepEqual(open(0, 49_860_761n), { at: 500_000n, reachingBack: false });
+  });
+
+  it("does NOT reach back for an empty account", () => {
+    // No rows and no money is not a gap, it is a new agent. There is nothing to
+    // find and the opening-balance path owns this case.
+    assert.deepEqual(open(null, 0n), { at: 500_000n, reachingBack: false });
+  });
+
+  it("clamps at genesis rather than underflowing", () => {
+    // bigint has no negative-block guard rail; a young chain would otherwise
+    // ask for a fromBlock below zero and the RPC would refuse the whole pass.
+    assert.equal(
+      openingScanFrom({ head: 50n, maxLookback: 200_000n, netContributionsUsdg: null, equityUsdg: 1n }).at,
+      0n,
+    );
+  });
+
+  it("is self-limiting — one found flow ends the reach-back for good", () => {
+    // The property that makes this safe to do automatically on every agent.
+    // Once the scan books the funding transfer there IS a chain-log row, so the
+    // caller resumes from the mark and never consults this function again.
+    assert.equal(open(null, 1n).reachingBack, true);
+    assert.equal(open(49_860_761, 1n).reachingBack, false);
   });
 });
 
