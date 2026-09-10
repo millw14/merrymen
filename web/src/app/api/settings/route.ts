@@ -228,25 +228,6 @@ const BOOL_FIELDS = [
   // model calls per window instead of one, and the scout consumed a day's
   // shared token allowance on 2026-08-31 doing exactly this kind of loop.
   "deskEnabled",
-  // READ CONTRIBUTIONS FROM RECEIPTS INSTEAD OF INFERRING THEM.
-  //
-  // Fourth field with the shape described above, and the most expensive one to
-  // have missed. In core, read by the worker at index.ts's reconcileFlowsOrRetry
-  // call — and absent from this list, so a PUT carrying it came back {ok:true}
-  // and changed nothing. The only other way to set it is MERRYMEN_DEPOSIT_SCAN,
-  // which is fleet-wide, so "try it on one agent" was not expressible at all.
-  //
-  // What its absence costs: with the scan off, contributions can only be
-  // INFERRED from balance changes, and index.ts says plainly that a deposit
-  // landing in the same tick as a fill is not inferred. Deposit, then trade, and
-  // nothing is booked — ever, because `resume-clean` books nothing on every
-  // later restart. computePnl then answers `no-capital-contributed`, may_size is
-  // false, and the agent holds forever while paying for model calls. One owner's
-  // agent has 49.86 USDG of deposits on chain and no flow row for any of it.
-  //
-  // Stays OFF by default. It changes how contributions are counted and every
-  // P&L figure is measured against those; this makes it reachable, not on.
-  "depositScanEnabled",
   "telegramEnabled",
   "telegramControlEnabled",
   "telegramTransferEnabled",

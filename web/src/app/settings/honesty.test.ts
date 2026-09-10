@@ -73,7 +73,6 @@ const FIELDS = [
   "model",
   "Agent name",
   "performance fee",
-  "read deposits from the chain",
   "scout budget (USDG)",
   "step budget",
   "Strategy",
@@ -102,7 +101,7 @@ describe("every control survives the restyle", () => {
    * `tickSeconds`, `buyPerTickUsdg` and `llmIntervalMin` all still bind to an
    * input. A label may become plainer; a control may not vanish.
    */
-  it("keeps all 46 field labels", () => {
+  it("keeps all 45 field labels", () => {
     const missing = FIELDS.filter((f) => !SRC.includes(`label="${f}"`));
     assert.deepEqual(missing, [], "these fields disappeared from the page");
   });
@@ -124,13 +123,7 @@ describe("every control survives the restyle", () => {
     // the worker while missing from BOTH the settings route's field list and
     // this screen — so the one setting that turns an agent from answering into
     // thinking could not be turned on by anybody.
-    // 13 since "read deposits from the chain". Same shape as deskEnabled and
-    // takeProfitBps before it: in core, read by the worker, absent from the
-    // settings route's field list — so a PUT carrying it returned {ok:true} and
-    // changed nothing, and the only other way to set it was a fleet-wide env
-    // var. That made "turn it on for one agent" inexpressible, which is the
-    // whole shape of a safe rollout. Off by default still; reachable now.
-    assert.equal(count(/type="checkbox"/g), 13, "checkboxes");
+    assert.equal(count(/type="checkbox"/g), 12, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
@@ -146,12 +139,10 @@ describe("every control survives the restyle", () => {
     assert.equal(count(/<select/g), 5, "selects");
   });
 
-  it("sends exactly the 19 fields save() guards", () => {
+  it("sends exactly the 18 fields save() guards", () => {
     // Every guard is "the user did not touch this, so do not overwrite it".
     // One dropped guard silently resets a setting to whatever the form had.
-    // 19 since depositScanEnabled — a boolean cannot ride the string `draft`,
-    // so it needs its own state, its own guard, and its own line in the census.
-    assert.equal((code.match(/!== null\)/g) ?? []).length, 19);
+    assert.equal((code.match(/!== null\)/g) ?? []).length, 18);
   });
 });
 
