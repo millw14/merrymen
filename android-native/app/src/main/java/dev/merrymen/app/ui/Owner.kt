@@ -9,6 +9,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextDecoration
@@ -83,6 +87,10 @@ fun NameBlock(
 ) {
   val context = LocalContext.current
   val linkable = verified && xProfileUrl(owner) != null
+  // `.owned` (terminal.css:934): 11px, `--faint`, 2px above. The owner line is
+  // the quietest thing in the block on purpose — it identifies, it does not
+  // advertise.
+  val ownedStyle = TextStyle(fontFamily = sans(11.sp), fontSize = 11.sp)
   Column(modifier) {
     Text(title, style = MaterialTheme.typography.titleMedium)
     when {
@@ -91,15 +99,23 @@ fun NameBlock(
         // The tick is the whole difference between a checked claim and an
         // unchecked one; without it the reader cannot tell them apart.
         text = "owned by ${xHandleTag(owner)} ✓",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.primary,
+        style = ownedStyle,
+        // `color: inherit`, NOT the accent. `.owned .owner-x` (terminal.css:7816)
+        // takes the parent's `--faint` and marks itself a link with an
+        // UNDERLINE alone. Painting it lime made the one unverified-by-default
+        // claim on the screen the brightest thing in the block, and lime means
+        // "live" everywhere else in this product.
+        color = MerryColors.faint,
         textDecoration = TextDecoration.Underline,
-        modifier = Modifier.clickable { openX(context, owner) },
+        modifier = Modifier
+          .padding(top = 2.dp)
+          .clickable { openX(context, owner) },
       )
       else -> Text(
         "owned by ${shortAddress(owner) ?: xHandleTag(owner) ?: owner}",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = ownedStyle,
+        color = MerryColors.faint,
+        modifier = Modifier.padding(top = 2.dp),
       )
     }
   }

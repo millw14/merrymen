@@ -168,6 +168,31 @@ fun PageTitle(text: String, modifier: Modifier = Modifier) {
  * resolves every digit to it and every letter to DM Sans. That split is what
  * makes a column of money line up.
  */
+/**
+ * A PRICE, WITH ENOUGH DIGITS TO BE ONE.
+ *
+ * Mirrors `coinPrice` in `web/src/terminal/live.ts:263` exactly, and it is not a
+ * cosmetic mirror. Formatting everything as `%,.2f` renders a token trading at
+ * $0.0000031 as **"$0.00"** — a real price, printed as no price, in a client
+ * whose entire premise is that "$0.00" and "—" are different claims. The bug is
+ * the house rule inverted: not a null shown as a zero, but a VALUE shown as a
+ * zero. Both tell the reader something the data does not say.
+ *
+ * The bands, from the web:
+ *   null / non-finite -> "—"      (we have no figure)
+ *   exactly 0         -> "$0"     (a real zero, and said briefly)
+ *   < $0.01           -> 3 significant figures, so a sub-cent coin keeps its magnitude
+ *   >= $100           -> grouped, 2 decimals
+ *   otherwise         -> 2 decimals at or above $1, 4 below it
+ */
+private fun coinPrice(n: Double): String {
+  if (!n.isFinite()) return "—"
+  if (n == 0.0) return "$0"
+  if (n < 0.01) return "$" + java.math.BigDecimal(n).round(java.math.MathContext(3)).toPlainString()
+  if (n >= 100) return "$" + String.format(Locale.US, "%,.2f", n)
+  return "$" + String.format(Locale.US, if (n >= 1) "%.2f" else "%.4f", n)
+}
+
 @Composable
 fun Money(
   value: Double?,
@@ -177,7 +202,7 @@ fun Money(
 ) {
   val weight = if (bold) FontWeight.W600 else FontWeight.W400
   Text(
-    text = value?.let { "$" + String.format(Locale.US, "%,.2f", it) } ?: "—",
+    text = value?.let { coinPrice(it) } ?: "—",
     modifier = modifier,
     style = TextStyle(
       fontFamily = numerals(weight),
@@ -1235,4 +1260,42 @@ fun toneOf(action: String?, outcome: String?): Color = when {
 @Composable
 fun BottomInsetSpacer() {
   Spacer(Modifier.height(LocalBottomInset.current))
+}
+
+/**
+ * A TOKEN'S MARK — and it is NOT an agent's face.
+ *
+ * The web draws two different circles and the difference is the point. `.face`
+ * (an agent) is a hue-derived gradient generated from the name, so every desk
+ * gets its own colour. `.coin` (a token) is `terminal.css:1079`: a flat
+ * **#ecece4** disc with **#0e0e10** glyphs, 40x40 at radius 999, font-size 12 —
+ * one colour for every token, because a token's identity is its logo and its
+ * ticker, not a hue this app invented for it.
+ *
+ * Using [Avatar] for a token row therefore did two wrong things at once: it gave
+ * every coin a fake identity colour, and it ran the ticker through `initialsOf`,
+ * which splits on WHITESPACE — so "AAPL" became "AA" and a blank one became the
+ * literal "??". A ticker is already short; it is truncated, not initialised.
+ */
+@Composable
+fun Coin(symbol: String, modifier: Modifier = Modifier, size: Dp = 40.dp) {
+  Box(
+    modifier
+      .size(size)
+      .clip(CircleShape)
+      .background(MerryColors.tx),
+    contentAlignment = Alignment.Center,
+  ) {
+    Text(
+      // Up to two characters of the ticker, uppercased — the web's own rule for
+      // a coin with no logo.
+      text = symbol.filter { it.isLetterOrDigit() }.take(2).uppercase(Locale.US),
+      style = TextStyle(
+        fontFamily = sans(size.value.times(0.3f).sp, FontWeight.W700),
+        fontSize = size.value.times(0.3f).sp,
+        fontWeight = FontWeight.W700,
+      ),
+      color = Color(0xFF0E0E10),
+    )
+  }
 }

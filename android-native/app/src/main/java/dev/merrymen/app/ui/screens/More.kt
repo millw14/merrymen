@@ -80,6 +80,7 @@ import dev.merrymen.app.net.WebAuth
 import dev.merrymen.app.net.WebFlow
 import dev.merrymen.app.ui.Avatar
 import dev.merrymen.app.ui.Bps
+import dev.merrymen.app.ui.Coin
 import dev.merrymen.app.ui.Empty
 import dev.merrymen.app.ui.EmptyKind
 import dev.merrymen.app.ui.LikeButton
@@ -799,7 +800,9 @@ private fun TokRow(
     horizontalArrangement = Arrangement.spacedBy(12.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
-    Avatar(seed, size = 40.dp)
+    // A TOKEN, NOT AN AGENT. See Coin() — the web draws a flat #ecece4 disc
+    // here, not the hue-gradient face it generates for a desk.
+    Coin(seed, size = 40.dp)
     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
       Text(
         text = title,
