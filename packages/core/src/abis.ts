@@ -184,6 +184,54 @@ export const V4SELFSWAP_ABI = [
  *
  * There is no recipient argument. It is msg.sender, in bytecode.
  */
+/**
+ * PonsClassVault — the per-account holder that makes a CLASS position exitable.
+ *
+ * NOTE THE SHAPE, because it is what the wall relies on: the class token is not
+ * an argument to EITHER call. `buy` names the FUNDING asset (which stays
+ * enumerated) and derives the token from the curve; `sell` names no asset at
+ * all, because the vault can only sell what it already holds and can only pay
+ * its own owner. So there is no token word for the policy to leave unpinned —
+ * the class capability comes from WHERE the token lives, not from a loosened
+ * constraint.
+ *
+ * `sweep` is deliberately absent. It moves a position back to the account, which
+ * is a RECOVERY action taken with the owner key — and the owner key is not bound
+ * by the wall. Granting it to the session key would only let an agent move a
+ * token into the account, where it cannot be sold for want of an approve.
+ *
+ * uint256 amounts, matching PonsClassVault.sol exactly — its sibling above uses
+ * uint128 and matches ITS contract. A mismatch here changes the selector and the
+ * permission silently matches nothing.
+ */
+export const PONS_CLASS_VAULT_ABI = [
+  {
+    type: "function",
+    name: "buy",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "curve", type: "address" },
+      { name: "quoteAsset", type: "address" },
+      { name: "quoteIn", type: "uint256" },
+      { name: "minTokensOut", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+    outputs: [{ name: "tokensOut", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "sell",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "curve", type: "address" },
+      { name: "tokensIn", type: "uint256" },
+      { name: "minQuoteOut", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+    outputs: [{ name: "quoteOut", type: "uint256" }],
+  },
+] as const;
+
 export const PONS_SELFTRADE_ABI = [
   {
     type: "function",

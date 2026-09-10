@@ -690,6 +690,106 @@ describe("curve trades are judged off-chain, not discovered on-chain", () => {
   it("allows a legal curve buy", () => {
     assert.equal(checkPolicy(curveIntent(), limits(), state()).ok, true);
   });
+
+  /**
+   * THE CLASS ROUTE — where "both legs must be enumerated" stops being possible.
+   *
+   * A sniped token did not exist when the grant was signed, so it can never be
+   * in `sellableAssets`. The vault is what makes that safe rather than a trap:
+   * it holds the token, so exiting needs no per-token approve, and the wall pins
+   * the VAULT as the target rather than trying to pin a token nobody has heard
+   * of. These tests pin the three things that has to mean off-chain.
+   *
+   * Every case here differs from the block above by ONE field — `target`. That
+   * is deliberate: the class relaxation must be reachable only through the vault
+   * the grant sealed, and an identical trade through the ordinary adapter must
+   * still be refused. The pair below proves both halves.
+   */
+  describe("the class route", () => {
+    const VAULT = "0x7777777777777777777777777777777777777777";
+    const CLASS_TOKEN = "0x9999999999999999999999999999999999999999";
+    const OTHER_CLASS = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const classLimits = (over: Record<string, unknown> = {}) =>
+      limits({ allowedTargets: [ADAPTER, VAULT], ponsClassVault: VAULT, ...over });
+
+    it("buys a token that did not exist at signing — the capability", () => {
+      const v = checkPolicy(
+        curveIntent({ target: VAULT, assetOut: CLASS_TOKEN }),
+        classLimits(),
+        state(),
+      );
+      assert.equal(v.ok, true, "the class vault is the whole point; this must be reachable");
+    });
+
+    it("sells one back out — the exit, which is what the vault exists for", () => {
+      // assetIn is the un-enumerated leg on this shape. If only `assetOut` were
+      // allowed to be un-enumerated, entering would work and exiting would not:
+      // the no-exit trap, rebuilt inside the thing that was supposed to remove it.
+      const v = checkPolicy(
+        curveIntent({ target: VAULT, assetIn: CLASS_TOKEN, assetOut: USDG }),
+        classLimits(),
+        state(),
+      );
+      assert.equal(v.ok, true, "an exit must always be attemptable");
+    });
+
+    it("refuses the identical trade through the ordinary adapter", () => {
+      // The relaxation belongs to the vault, not to the venue. Through the
+      // adapter the token would land in the ACCOUNT, where selling it needs a
+      // per-token approve the wall cannot express — so this refusal is the
+      // no-exit rule doing its job one call earlier.
+      const v = checkPolicy(curveIntent({ assetOut: CLASS_TOKEN }), classLimits(), state());
+      assert.equal(v.ok, false);
+      assert.equal((v as { rule: string }).rule, "asset-allowlist");
+    });
+
+    it("refuses when NEITHER leg is in the grant", () => {
+      // One un-enumerated leg is the class token. Two means nothing in the trade
+      // is anchored to the signature at all — rolling junk into junk.
+      const v = checkPolicy(
+        curveIntent({ target: VAULT, assetIn: CLASS_TOKEN, assetOut: OTHER_CLASS }),
+        classLimits(),
+        state(),
+      );
+      assert.equal(v.ok, false);
+      assert.equal((v as { rule: string }).rule, "asset-allowlist");
+    });
+
+    it("refuses a class trade when the launch feed is UNREADABLE, not just when the curve is unknown", () => {
+      // THE INVERSION, and the only place in this file where it applies.
+      // `knownCurves: undefined` means "the rule cannot run" everywhere else and
+      // the trade proceeds on the rules that can. A class trade has no such
+      // rules left — its output leg is un-enumerated by design — so an absent
+      // feed is a refusal. A check that did not run must never read as a pass.
+      const v = checkPolicy(
+        curveIntent({ target: VAULT, assetOut: CLASS_TOKEN }),
+        classLimits({ knownCurves: undefined }),
+        state(),
+      );
+      assert.equal(v.ok, false);
+      assert.equal((v as { rule: string }).rule, "curve-provenance");
+    });
+
+    it("leaves an ORDINARY curve trade untouched when the feed is unreadable", () => {
+      // The counterpart to the case above, and what keeps that inversion from
+      // quietly becoming a fleet-wide fail-closed change nobody asked for.
+      const v = checkPolicy(curveIntent(), classLimits({ knownCurves: undefined }), state());
+      assert.equal(v.ok, true);
+    });
+
+    it("ignores the class rules entirely when the grant sealed no vault", () => {
+      // ABSENT IS THE SECURE DEFAULT: a grant signed before this feature existed
+      // gets the strict both-legs rule, with nothing to opt into and nothing to
+      // configure.
+      const v = checkPolicy(
+        curveIntent({ target: VAULT, assetOut: CLASS_TOKEN }),
+        limits({ allowedTargets: [ADAPTER, VAULT] }),
+        state(),
+      );
+      assert.equal(v.ok, false);
+      assert.equal((v as { rule: string }).rule, "asset-allowlist");
+    });
+  });
 });
 
 /**

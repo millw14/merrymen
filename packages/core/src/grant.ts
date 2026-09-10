@@ -125,6 +125,52 @@ export function grantPonsAdapter(
   return a.toLowerCase() as `0x${string}`;
 }
 
+/**
+ * The CLASS permission: this signature can trade Pons tokens it never named.
+ *
+ * DISTINCT FROM GRANT_PONS_ADAPTER, and the distinction carries the whole
+ * security difference. `pons-adapter` lets the agent trade the curve tokens the
+ * owner ENUMERATED at signing time. This one lets it trade tokens that did not
+ * exist when the grant was signed — which is what a sniper needs and what no
+ * enumerated list can express. An owner may hold the first without the second,
+ * and the separate marker is what makes that choice available.
+ *
+ * WHAT THE OWNER IS ACTUALLY OPTING INTO, said plainly because a marker name
+ * cannot say it: an agent that may convert up to the per-trade USDG cap,
+ * repeatedly until expiry, into ANY token reachable through a curve — one
+ * nobody enumerated or reviewed. What still bounds it: the funding leg stays
+ * the enumerated quote asset, the amount stays under the capped USDG approve,
+ * and the vault can pay nobody but the account. What does NOT bound it: the
+ * chain cannot check the curve's provenance (a curve self-reports its factory
+ * and the Pons factory publishes no registry), so for the class case the CHAIN
+ * IS LOOSER THAN THE OFF-CHAIN MIRROR and `knownCurves` is the only provenance
+ * gate. That inversion is the price of the capability.
+ */
+export const GRANT_PONS_CLASS = "pons-class";
+
+/**
+ * The per-account class vault this signature can call, or null.
+ *
+ * BOTH the marker and a valid address are required, for exactly the reason
+ * grantPonsAdapter demands both: a marker alone is a claim, not evidence.
+ *
+ * WHY AN ADDRESS AT ALL, when the vault is derivable from the owner: because
+ * the wall pins it as a literal `target`, and the worker must call THE ADDRESS
+ * THE SIGNATURE SEALED rather than one it re-derives at tick time. A derivation
+ * that drifted — a different factory, a changed init code — would send the
+ * agent's money to a contract the wall never authorised, and the failure would
+ * look like a revert with no explanation. Sealing it makes the two agree by
+ * construction.
+ */
+export function grantPonsClassVault(
+  grant: Pick<StoredGrant, "grantFeatures" | "ponsClassVaultAddress"> | null | undefined,
+): `0x${string}` | null {
+  if (!grant?.grantFeatures?.includes(GRANT_PONS_CLASS)) return null;
+  const a = grant.ponsClassVaultAddress;
+  if (typeof a !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(a)) return null;
+  return a.toLowerCase() as `0x${string}`;
+}
+
 export const GRANT_TRANSFER = "transfer";
 
 /**
@@ -341,6 +387,19 @@ export interface StoredGrant {
    * GRANT_PONS_ADAPTER marker alongside it.
    */
   ponsAdapterAddress?: string;
+  /**
+   * The PonsClassVault this signature's class `buy`/`sell` permissions were
+   * sealed against, lowercased. PER ACCOUNT, not per deploy — unlike its two
+   * adapter siblings, every account has its own vault, so this address is
+   * unique to this grant.
+   *
+   * It is knowable before the vault exists (CREATE2, owner as salt), which is
+   * the only reason a class permission can be written at all: the wall has to
+   * name the target at signing time, and at signing time the vault has usually
+   * not been deployed. See grantPonsClassVault, its only reader, which requires
+   * the GRANT_PONS_CLASS marker alongside it.
+   */
+  ponsClassVaultAddress?: string;
   /**
    * HOSTED ONLY — the two signatures that bind this account to a tenant.
    *

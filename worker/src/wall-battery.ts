@@ -3,6 +3,7 @@ import {
   STOCK_TOKENS,
   UNISWAP,
   grantHasTransfer,
+  grantPonsClassVault,
   sellableAssets,
   usdgUnits,
   type StoredGrant,
@@ -33,6 +34,14 @@ export interface WallBatteryResult {
 const EVIL = "0x000000000000000000000000000000000000dEaD" as const;
 const RANDOM_VENUE = "0x1111111111111111111111111111111111111111" as const;
 const UNKNOWN_TOKEN = "0x2222222222222222222222222222222222222222" as const;
+/** A bonding curve the launch feed never saw — stands in for "vouched for by nobody". */
+const RANDOM_CURVE = "0x3333333333333333333333333333333333333333" as const;
+/** A token minted after this grant was signed. It is un-enumerable BY DEFINITION. */
+const CLASS_TOKEN = "0x4444444444444444444444444444444444444444" as const;
+/** A second one — the case where nothing in the trade is anchored to the grant. */
+const OTHER_CLASS_TOKEN = "0x5555555555555555555555555555555555555555" as const;
+/** A vault address for a grant that never sealed one. Not a target this key has. */
+const UNSEALED_VAULT = "0x6666666666666666666666666666666666666666" as const;
 
 interface BatteryInput {
   attempt: string;
@@ -73,6 +82,70 @@ export function runWallBattery(
   const noExitLimits = nonSellableStock
     ? limits
     : { ...limits, allowedAssets: [...limits.allowedAssets, nonSellable] };
+
+  // THE CLASS ROUTE, exercised only when this signature actually carries it.
+  const classVault = grantPonsClassVault(grant);
+  const classBuy = (
+    vault: `0x${string}`,
+    assetIn: `0x${string}`,
+    assetOut: `0x${string}`,
+  ): TradeIntent => ({
+    kind: "curve-trade",
+    target: vault,
+    curve: RANDOM_CURVE,
+    assetIn,
+    assetOut,
+    amountInRaw: 1n,
+    minAmountOutRaw: 0n,
+    notionalUsdg: 1n,
+  });
+  // The launch feed, present. limitsFromGrant leaves knownCurves undefined
+  // because this battery has no store to read — which is itself a refusal for a
+  // class trade, and gets its own case below rather than being papered over.
+  const withFeed: AgentLimits = { ...limits, knownCurves: [RANDOM_CURVE] };
+
+  const classCases: BatteryInput[] = classVault
+    ? [
+        {
+          attempt:
+            "sniping a token minted after this grant was signed — the case the class vault exists for",
+          want: "approved",
+          intent: classBuy(classVault, usdgAddr, CLASS_TOKEN),
+          state: calm,
+          limits: withFeed,
+        },
+        {
+          attempt:
+            "the same snipe, but the launch feed is unreadable — provenance is the only thing vouching for a class token",
+          want: "rejected",
+          expectedRule: "curve-provenance",
+          intent: classBuy(classVault, usdgAddr, CLASS_TOKEN),
+          state: calm,
+          // knownCurves undefined. Everywhere else that means "this rule cannot
+          // run"; here it means refuse, because nothing else in the trade names
+          // the output at all.
+          limits,
+        },
+        {
+          attempt: "rolling one un-enumerated token straight into another (nothing in it is anchored)",
+          want: "rejected",
+          expectedRule: "asset-allowlist",
+          intent: classBuy(classVault, CLASS_TOKEN, OTHER_CLASS_TOKEN),
+          state: calm,
+          limits: withFeed,
+        },
+      ]
+    : [
+        {
+          attempt:
+            "routing through a class vault this key never sealed (this wall has no class route at all)",
+          want: "rejected",
+          expectedRule: "target-allowlist",
+          intent: classBuy(UNSEALED_VAULT, usdgAddr, CLASS_TOKEN),
+          state: calm,
+          limits: withFeed,
+        },
+      ];
 
   const legalSwap = (notional: bigint): TradeIntent => ({
     kind: "swap",
@@ -204,6 +277,15 @@ export function runWallBattery(
       state: calm,
       limits: noExitLimits,
     },
+    // ── the class route ─────────────────────────────────────────────────────
+    //
+    // WHICH CASES RUN DEPENDS ON THE GRANT, exactly like the transfer case at
+    // the top of this battery and for the same reason: a battery that asserts a
+    // capability the signature does not carry prints "⚠ BREACH" about a wall
+    // that is simply narrower than the fixture assumed. So a grant with no
+    // class vault is asked the only honest question available to it — what
+    // happens when something aims at a vault it never sealed.
+    ...classCases,
   ];
 
   const cases: WallCase[] = battery.map(

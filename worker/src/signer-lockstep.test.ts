@@ -95,6 +95,60 @@ test("both signers mint the PONS adapter marker only when the permission was sea
   }
 });
 
+test("both signers mint the CLASS marker off the resolved vault, not the factory", () => {
+  // The same lockstep rule a third time, with one twist that is easy to get
+  // wrong and impossible to see afterwards.
+  //
+  // The class opt-in is a FACTORY address; what the wall pins is the per-account
+  // VAULT the factory names. Minting GRANT_PONS_CLASS off the factory would mint
+  // it off the REQUEST rather than the result — a grant claiming a class route
+  // whose target the wall may never have pinned. resolveClassVault throws rather
+  // than returning undefined precisely so the two can never disagree, and this
+  // pins the conditional to the resolved value so a later edit cannot quietly
+  // swap in the factory.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    assert.ok(src.includes("GRANT_PONS_CLASS"), `${name} must mint the marker`);
+    assert.ok(src.includes("resolveClassVault"), `${name} must resolve the vault from core`);
+    assert.match(
+      src,
+      /ponsClassVaultAddress\s*\?\s*\[GRANT_PONS_CLASS\]\s*:\s*\[\]/,
+      `${name} must mint GRANT_PONS_CLASS only when a vault was actually resolved`,
+    );
+    assert.ok(
+      !/ponsClassVaultFactory\s*\?\s*\[GRANT_PONS_CLASS\]/.test(src),
+      `${name} must not mint the class marker off the factory — that is the request, not the pin`,
+    );
+    assert.match(
+      src,
+      /ponsClassVaultAddress:\s*ponsClassVaultAddress\.toLowerCase\(\)/,
+      `${name} must persist the sealed vault — the marker alone is a claim`,
+    );
+  }
+});
+
+test("a class route is never implied by another venue's opt-in", () => {
+  // THREE venues, three decisions. Class is the one that most invites being
+  // folded into Pons — it trades the same curves — and folding it in would give
+  // every bonding-curve grant a custodial contract holding its positions,
+  // without the owner ever choosing that.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    assert.ok(
+      !/ponsAdapterAddress\s*\?\s*\[[^\]]*GRANT_PONS_CLASS/.test(src),
+      `${name} must not mint the class marker off the Pons adapter address`,
+    );
+    assert.ok(
+      !/ponsClassVaultAddress\s*\?\s*\[[^\]]*GRANT_PONS_ADAPTER/.test(src),
+      `${name} must not mint the Pons adapter marker off the class vault`,
+    );
+  }
+});
+
 test("the two adapter opt-ins stay INDEPENDENT in both signers", () => {
   // One venue must never imply the other. If a future edit collapses them into
   // a single flag, this fails and demands the author read the wall's note on

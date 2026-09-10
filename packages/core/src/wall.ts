@@ -2,7 +2,14 @@ import { erc20Abi, parseAbi, type Address } from "viem";
 import { PolicyFlags } from "@zerodev/permissions";
 import { CallPolicyVersion, ParamCondition, toCallPolicy } from "@zerodev/permissions/policies";
 import { toTimestampPolicy } from "@zerodev/permissions/policies";
-import { UNISWAP_SWAP_ROUTER_ABI, PERMIT2_ABI, UNIVERSAL_ROUTER_ABI, V4SELFSWAP_ABI, PONS_SELFTRADE_ABI } from "./abis";
+import {
+  UNISWAP_SWAP_ROUTER_ABI,
+  PERMIT2_ABI,
+  UNIVERSAL_ROUTER_ABI,
+  V4SELFSWAP_ABI,
+  PONS_SELFTRADE_ABI,
+  PONS_CLASS_VAULT_ABI,
+} from "./abis";
 import { MORPHO, RIALTO, UNISWAP } from "./protocols";
 import { CASH, STOCK_TOKENS, TRADEABLE_SYMBOLS, USDG_DECIMALS, isValidCustomToken, type CustomToken } from "./tokens";
 import { builtinGrantTargets, type GrantCaps } from "./grant";
@@ -119,6 +126,7 @@ export function allowedSpenders(
   allowUniswapV4 = false,
   v4AdapterAddress?: Address,
   ponsAdapterAddress?: Address,
+  ponsClassVaultAddress?: Address,
 ): Address[] {
   return [
     // Rialto is OPT-IN, and off by default — see WallOptions.allowRialto. An
@@ -155,6 +163,17 @@ export function allowedSpenders(
     // that its CURVE argument cannot be pinned by any policy — see the call
     // permission below, which says so rather than implying otherwise.
     ...(ponsAdapterAddress ? [ponsAdapterAddress] : []),
+    // The class vault, for the same reason as its two siblings and with the
+    // same "this is ALL it gets" caveat: it must be nameable as a spender so
+    // the account's capped USDG approve can fund a class buy. It gains no
+    // approve permission of its own.
+    //
+    // The difference worth stating: the other two hand everything straight
+    // back within the call, and this one KEEPS the token — that is its entire
+    // purpose. What makes that safe to approve is not that it holds nothing,
+    // but that it holds for exactly one owner and has no code path that names
+    // anyone else.
+    ...(ponsClassVaultAddress ? [ponsClassVaultAddress] : []),
   ];
 }
 
@@ -198,6 +217,32 @@ export interface WallOptions {
    * defensible only if you actually use it, and it needs an integrator API key
    * to work at all, so the default is off and the risk is opt-in.
    */
+  /**
+   * The per-account class vault — the ONLY way this wall can reach a token the
+   * owner never enumerated. ABSENT (the default) means it cannot, at all.
+   *
+   * WHAT MAKES THIS EXPRESSIBLE. A permission is keyed by (target, selector),
+   * and the class token cannot be a target — nobody knows it at signing time.
+   * The vault can: its address is CREATE2-derived from the account, so it is
+   * knowable before it is deployed. Pinning the vault and letting it hold the
+   * token moves the un-nameable thing out of the policy entirely; the token is
+   * not even an argument to the calls below.
+   *
+   * WHY IT IS A SEPARATE OPT-IN FROM ponsAdapterAddress. That one trades the
+   * curve tokens the owner LISTED. This one trades tokens that did not exist
+   * when the grant was signed. An owner may want the first and refuse the
+   * second, and the widening is real: up to the per-trade USDG cap, repeatedly
+   * until expiry, into anything reachable through a curve. What still bounds it
+   * is below — the funding leg stays enumerated, the size stays under the capped
+   * approve, and the vault can pay nobody but the account.
+   *
+   * WHAT IT DOES NOT BUY. The chain cannot check the curve's provenance, so for
+   * the class case the CHAIN IS LOOSER THAN THE OFF-CHAIN MIRROR and the
+   * worker's factory-filtered `knownCurves` is the only provenance gate. That is
+   * the reverse of this file's usual posture and must be understood before it is
+   * signed.
+   */
+  ponsClassVaultAddress?: string;
   allowRialto?: boolean;
   /**
    * The Uniswap v4 route — Permit2 plus the UniversalRouter. OFF by default.
@@ -345,7 +390,20 @@ export function buildCallPermissions(
     }
     ponsAdapter = opts.ponsAdapterAddress.toLowerCase() as Address;
   }
-  const spenders = allowedSpenders(opts.allowRialto, opts.allowUniswapV4, adapter, ponsAdapter);
+  let classVault: Address | undefined;
+  if (opts.ponsClassVaultAddress !== undefined) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(opts.ponsClassVaultAddress)) {
+      throw new Error(`ponsClassVaultAddress is not an address: ${JSON.stringify(opts.ponsClassVaultAddress)}`);
+    }
+    classVault = opts.ponsClassVaultAddress.toLowerCase() as Address;
+  }
+  const spenders = allowedSpenders(
+    opts.allowRialto,
+    opts.allowUniswapV4,
+    adapter,
+    ponsAdapter,
+    classVault,
+  );
   const extras = usableExtraTokens(opts.extraTokens);
   // Every asset this signature may hold a leg in: USDG plus everything the
   // approve permissions below cover. This is what the adapter's tokenIn and
@@ -609,6 +667,60 @@ export function buildCallPermissions(
           } as const,
         ]
       : []),
+    // THE CLASS PERMISSIONS — the only route in this wall to a token the owner
+    // never enumerated, and the reason PonsClassVault exists.
+    //
+    // READ THE ARGUMENT LISTS: the class token is not among them. `buy` names
+    // the FUNDING asset, which stays pinned to the same enumerated list as
+    // everything else here, and derives the token from the curve. `sell` names
+    // no asset at all. So nothing below is a loosened constraint — there is no
+    // token word to loosen. The capability comes from the vault HOLDING the
+    // token, which is what removes the per-token `approve` from the exit path;
+    // that approve is the thing no policy can express for an unknown address,
+    // and it is why a buy-side-only class permission would be a trap.
+    //
+    // What still binds: the funding leg is ONE_OF the same `adapterAssets` the
+    // approve permissions cover; the size is bounded by the capped USDG approve;
+    // and the vault has no recipient argument anywhere, so every payout is its
+    // own owner. What does NOT bind, stated rather than implied: the curve is
+    // unpinnable here exactly as it is for the adapter above, and NOTHING on
+    // chain vouches for the token. Provenance lives only in the worker's
+    // factory-filtered knownCurves — for this permission the chain is looser
+    // than the mirror, which is the reverse of this file's usual posture.
+    //
+    // `sweep` is deliberately NOT granted. It is a recovery action taken with
+    // the OWNER key, which the wall does not bind; giving it to the session key
+    // would only let an agent move a token into the account, where it cannot be
+    // sold for want of the very approve this design avoids.
+    ...(classVault
+      ? [
+          {
+            target: classVault,
+            valueLimit: 0n,
+            abi: PONS_CLASS_VAULT_ABI,
+            functionName: "buy",
+            args: [
+              null, // curve — unpinnable, same as the adapter above
+              { condition: ParamCondition.ONE_OF, value: adapterAssets }, // funding leg stays enumerated
+              null, // quoteIn — bounded by the capped USDG approve
+              null, // minTokensOut — denominated in a token nobody enumerated
+              null, // deadline
+            ],
+          } as const,
+          {
+            target: classVault,
+            valueLimit: 0n,
+            abi: PONS_CLASS_VAULT_ABI,
+            functionName: "sell",
+            args: [
+              null, // curve — unpinnable
+              null, // tokensIn — the vault can only sell what it holds
+              null, // minQuoteOut
+              null, // deadline
+            ],
+          } as const,
+        ]
+      : []),
     {
       // Morpho vault deposits, capped per call at the daily limit — and the
       // SHARES must come back to the agent's own account.
@@ -750,6 +862,14 @@ export function buildWallPolicies(args: {
         allowUniswapV4: args.allowUniswapV4,
         v4AdapterAddress: args.v4AdapterAddress,
         ponsAdapterAddress: args.ponsAdapterAddress,
+        // Forwarded for exactly the reason the comment above documents: omit it
+        // and the field is accepted at the call site (the argument is an
+        // intersection with WallOptions) and dropped one line later, producing a
+        // grant that carries the `pons-class` marker and a sealed vault address
+        // over a call policy with no class permission and no vault in the
+        // spender set. The mirror would allow it, the worker would build it, and
+        // the chain would refuse it.
+        ponsClassVaultAddress: args.ponsClassVaultAddress,
       }) as never,
     }),
   ];

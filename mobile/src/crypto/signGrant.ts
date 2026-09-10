@@ -9,6 +9,8 @@ import {
   GRANT_V4,
   GRANT_V4_ADAPTER,
   GRANT_PONS_ADAPTER,
+  GRANT_PONS_CLASS,
+  resolveClassVault,
   TRADEABLE_V2,
   buildWallPolicies,
   WALL_POLICY_FLAG,
@@ -70,6 +72,16 @@ export async function signGrant(args: {
    * never ahead of it.
    */
   ponsAdapterAddress?: `0x${string}`;
+  /**
+   * The deployed PonsClassVaultFactory, or absent for no class route.
+   *
+   * A FACTORY, NOT A VAULT. The vault is per-account, salted with the smart
+   * account this call is about to derive, so nobody upstream could name it.
+   * Resolved below from the account, by the same core helper the dashboard
+   * calls — two signers, one vault. Like its two siblings above, the phone
+   * passes nothing today, so phone grants honestly carry no class marker.
+   */
+  ponsClassVaultFactory?: `0x${string}`;
   rpcUrl?: string;
   onProgress?: SignProgress;
 }): Promise<SignedGrant> {
@@ -145,6 +157,21 @@ export async function signGrant(args: {
   // phone and the dashboard must seal the same wall or the worker cannot tell
   // what a signature actually carries.
   const allowUniswapV4: boolean = false;
+
+  // THE CLASS VAULT, from the account derived immediately above — its owner and
+  // its CREATE2 salt, so this is the first moment the address exists to be
+  // asked for. Throws rather than falling back if the factory cannot be read;
+  // identical helper, identical refusal, on both signers.
+  let ponsClassVaultAddress: `0x${string}` | undefined;
+  if (args.ponsClassVaultFactory) {
+    say("locating your class vault");
+    ponsClassVaultAddress = await resolveClassVault(
+      publicClient,
+      args.ponsClassVaultFactory,
+      sudoOnlyAccount.address,
+    );
+  }
+
   const { policies, now, expiresAt } = buildWallPolicies({
     caps: args.caps,
     smartAccount: sudoOnlyAccount.address,
@@ -152,6 +179,7 @@ export async function signGrant(args: {
     allowUniswapV4,
     v4AdapterAddress: args.v4AdapterAddress,
     ponsAdapterAddress: args.ponsAdapterAddress,
+    ponsClassVaultAddress,
   });
 
   say("attaching the permissions");
@@ -209,9 +237,16 @@ export async function signGrant(args: {
         ...(allowUniswapV4 ? [GRANT_V4] : []),
         ...(args.v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
         ...(args.ponsAdapterAddress ? [GRANT_PONS_ADAPTER] : []),
+        // From the RESOLVED VAULT, never from `args.ponsClassVaultFactory` —
+        // the factory is the request, the vault address is the evidence. See
+        // the same line in web/src/lib/session.ts.
+        ...(ponsClassVaultAddress ? [GRANT_PONS_CLASS] : []),
       ],
       ...(args.v4AdapterAddress ? { v4AdapterAddress: args.v4AdapterAddress.toLowerCase() } : {}),
       ...(args.ponsAdapterAddress ? { ponsAdapterAddress: args.ponsAdapterAddress.toLowerCase() } : {}),
+      ...(ponsClassVaultAddress
+        ? { ponsClassVaultAddress: ponsClassVaultAddress.toLowerCase() }
+        : {}),
       grantTokens: usableExtraTokens(args.extraTokens).map((t) => t.address.toLowerCase()),
       demoSessionPrivateKey: sessionPrivateKey,
     },

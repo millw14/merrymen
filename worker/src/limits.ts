@@ -8,6 +8,7 @@ import {
   grantHasV4,
   grantV4Adapter,
   grantPonsAdapter,
+  grantPonsClassVault,
   builtinGrantTargets,
   sellableAssets,
   usdgUnits,
@@ -86,6 +87,15 @@ export function limitsFromGrant(
         const a = grantPonsAdapter(grant);
         return a ? [a] : [];
       })(),
+      // THE CLASS VAULT, on the same terms again — and this one is a per-ACCOUNT
+      // address, so mirroring it from anywhere but the grant would not merely be
+      // loose, it would point one owner's agent at another owner's vault. The
+      // vault refuses that on chain (`only`), but the refusal arrives as a spent
+      // UserOp instead of a rule.
+      ...((): `0x${string}`[] => {
+        const a = grantPonsClassVault(grant);
+        return a ? [a] : [];
+      })(),
     ],
     allowedAssets: [CASH.USDG as `0x${string}`, ...watchTokens.map((token) => token.address)],
     sellableAssets: [...sellableAssets(grant)],
@@ -93,6 +103,17 @@ export function limitsFromGrant(
     // this is the set of tokens a curve trade could be buying INTO.
     quoteAssets: [...builtinGrantTargets(grant)],
     knownCurves,
+    // THE CLASS FLAG. Same accessor as the target entry above, deliberately —
+    // one source, so the address checkPolicy calls a class trade and the address
+    // it will permit as a target can never be two different things.
+    //
+    // Spread, not `ponsClassVault: grantPonsClassVault(grant) ?? undefined`,
+    // because ABSENT and PRESENT are the two states AgentLimits reads and a key
+    // holding undefined is neither in the eyes of a fixture that spreads it.
+    ...((): { ponsClassVault?: string } => {
+      const a = grantPonsClassVault(grant);
+      return a ? { ponsClassVault: a } : {};
+    })(),
     // THE TRANSFER PERMISSION, MIRRORED. checkPolicy has always known how to
     // judge this — it was simply never told. A grant without the transfer
     // marker has NO USDG transfer permission in its call policy:

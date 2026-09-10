@@ -11,6 +11,10 @@ export * from "./derivation";
 export * from "./explain";
 export * from "./hosted";
 export * from "./wall";
+// The per-account vault address the wall pins, resolved from the factory at
+// signing time. Separate from wall.ts because that file is pure and this one
+// reads the chain.
+export * from "./classvault";
 export * from "./mcp";
 export * from "./safe-url";
 export * from "./robinhood-oauth";

@@ -67,6 +67,21 @@ export interface AgentLimits {
    */
   knownCurves?: readonly string[];
   /**
+   * The per-account CLASS VAULT this grant sealed, or absent.
+   *
+   * Its presence is what makes a curve trade a CLASS trade: the vault is the
+   * only target that can reach a token nobody enumerated, so a trade aimed at
+   * it is judged by different rules than one aimed at the adapter — see the
+   * curve-trade branch. Read from the GRANT (grantPonsClassVault: marker AND
+   * sealed address), never from settings, for the same reason every other
+   * mirrored address is.
+   *
+   * ABSENT IS THE SECURE DEFAULT and means every curve trade is judged the old
+   * way: both legs must be enumerated. A fixture that leaves this undefined
+   * gets the strict rules, which is the direction a missing value should fail.
+   */
+  ponsClassVault?: string;
+  /**
    * The QUOTE side of the book: USDG and the tradeable stock tokens.
    *
    * `builtinGrantTargets(grant)` -- deliberately NOT sellableAssets, which also
@@ -314,18 +329,60 @@ export function checkPolicy(
       };
     }
 
+    // IS THIS A CLASS TRADE? The TARGET decides, and nothing else does.
+    //
+    // A class trade is one aimed at the per-account vault the grant sealed. The
+    // vault is the only target that can hold a token nobody enumerated and still
+    // sell it back — see PonsClassVault.sol — so the asset rule below reads
+    // differently for it. `target-allowlist` above has already established that
+    // this address is one the grant permits at all; this only asks WHICH of the
+    // permitted targets it is.
+    //
+    // Absent `ponsClassVault` (no class marker, or a grant signed before the
+    // feature existed) this is false for every trade and the strict both-legs
+    // rule is the only rule there is.
+    const isClassTrade =
+      limits.ponsClassVault !== undefined && lc(intent.target) === lc(limits.ponsClassVault);
+
     if (limits.sellableAssets) {
       const sellable = limits.sellableAssets.map(lc);
-      for (const token of [intent.assetIn, intent.assetOut]) {
-        if (!sellable.includes(lc(token))) {
-          return {
-            ok: false,
-            rule: "asset-allowlist",
-            detail:
-              `asset ${token} is not in the signed grant, so the wall will refuse this trade. ` +
-              `Add it at /settings and re-sign the grant at /grant to cover it.`,
-          };
-        }
+      const unenumerated = [intent.assetIn, intent.assetOut].filter(
+        (token) => !sellable.includes(lc(token)),
+      );
+
+      if (!isClassTrade && unenumerated.length > 0) {
+        return {
+          ok: false,
+          rule: "asset-allowlist",
+          detail:
+            `asset ${unenumerated[0]} is not in the signed grant, so the wall will refuse this ` +
+            `trade. Add it at /settings and re-sign the grant at /grant to cover it.`,
+        };
+      } else if (isClassTrade && unenumerated.length > 1) {
+        // A CLASS TRADE MAY LEAVE EXACTLY ONE LEG UN-ENUMERATED — the class
+        // token itself, which by definition did not exist when the grant was
+        // signed and so could never have been named in it.
+        //
+        // The other leg is the anchor, and it stays enumerated on BOTH shapes:
+        // on a buy it is the funding asset, which the wall pins ONE_OF the
+        // sealed list (wall.ts, the class `buy` permission); on a sell the wall
+        // pins nothing at all, because the vault can only sell what it holds
+        // and can only pay its own owner — so requiring the proceeds to be a
+        // sealed asset here is a mirror STRICTER than the chain, which is the
+        // one direction that is always safe.
+        //
+        // Both legs un-enumerated is the case that has no honest reading: it is
+        // either funding a class buy out of another class token, or selling one
+        // into another, and both end with the account holding something no rule
+        // above ever vouched for.
+        return {
+          ok: false,
+          rule: "asset-allowlist",
+          detail:
+            `neither ${intent.assetIn} nor ${intent.assetOut} is in the signed grant. A class ` +
+            `trade may leave the class token itself un-enumerated, but the other leg has to be ` +
+            `an asset the grant sealed — otherwise nothing in this trade is anchored to it.`,
+        };
       }
     }
 
@@ -344,6 +401,25 @@ export function checkPolicy(
             `why it is checked here.`,
         };
       }
+    } else if (isClassTrade) {
+      // FAIL CLOSED, and only here does the inversion matter enough to state.
+      //
+      // Everywhere else in this file an absent list means "the rule cannot run"
+      // and the trade is judged by the rules that can — safe, because some other
+      // rule still names every asset involved. A class trade is the one shape
+      // where that is not true: its output leg is deliberately un-enumerated, so
+      // the factory-filtered launch feed is the ONLY thing that vouches for the
+      // token existing at all. With `knownCurves` undefined, a class trade has
+      // exactly zero provenance, and skipping the check would turn the missing
+      // list into a pass.
+      return {
+        ok: false,
+        rule: "curve-provenance",
+        detail:
+          `a class trade cannot be judged without the launch feed: its output leg is not in the ` +
+          `grant by design, so the curve's provenance is the only thing vouching for it. ` +
+          `knownCurves is unreadable, which is not the same as this curve being known.`,
+      };
     }
   }
 

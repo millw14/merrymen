@@ -79,6 +79,8 @@ import {
   GRANT_V4,
   GRANT_V4_ADAPTER,
   GRANT_PONS_ADAPTER,
+  GRANT_PONS_CLASS,
+  resolveClassVault,
   bindingMessage,
   TRADEABLE_V2,
   USDG_DECIMALS,
@@ -260,6 +262,24 @@ async function mintGrant(
    * below, before the wall is pinned to anything.
    */
   expectAccount?: Address,
+  /**
+   * The deployed PonsClassVaultFactory, or absent for no class route.
+   *
+   * A FACTORY, NOT A VAULT, and the distinction is not a detail. The vault is
+   * per-account and derived from a smart account that, on a fresh mint, does not
+   * exist until several steps into this function — so no caller could hand us
+   * the address even in principle. The factory is the deployment constant; the
+   * vault comes out of it below, once the account is known.
+   *
+   * A THIRD, SEPARATE opt-in: v4, Pons and class are three venues, three risks,
+   * three decisions. Marker, sealed address and permission are minted together
+   * or not at all — and if the factory cannot be read, nothing is signed, see
+   * resolveClassVault.
+   *
+   * APPENDED AT THE END on purpose. The comment on MintOptions records what
+   * inserting an optional address in the middle of this list cost last time.
+   */
+  ponsClassVaultFactory?: `0x${string}`,
 ): Promise<MintedGrant> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
@@ -348,6 +368,21 @@ async function mintGrant(
   // capability the wall granted regardless of it. Deriving both from one
   // constant is what stops them drifting apart again.
   const allowUniswapV4: boolean = false;
+
+  // THE CLASS VAULT, RESOLVED FROM THE ACCOUNT THAT WAS JUST DERIVED. It has to
+  // happen here and not earlier: `sudoOnlyAccount.address` is the vault's owner
+  // and the CREATE2 salt, and it is only known now. Throws rather than falling
+  // back if the factory cannot be read — see resolveClassVault.
+  let ponsClassVaultAddress: `0x${string}` | undefined;
+  if (ponsClassVaultFactory) {
+    onStatus("locating your class vault…");
+    ponsClassVaultAddress = await resolveClassVault(
+      publicClient,
+      ponsClassVaultFactory,
+      sudoOnlyAccount.address,
+    );
+  }
+
   const { policies, now, expiresAt } = buildWallPolicies({
     caps,
     smartAccount: sudoOnlyAccount.address,
@@ -355,6 +390,7 @@ async function mintGrant(
     allowUniswapV4,
     v4AdapterAddress,
     ponsAdapterAddress,
+    ponsClassVaultAddress,
   });
 
   const permissionValidator = await toPermissionValidator(publicClient, {
@@ -433,9 +469,19 @@ async function mintGrant(
       ...(allowUniswapV4 ? [GRANT_V4] : []),
       ...(v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
       ...(ponsAdapterAddress ? [GRANT_PONS_ADAPTER] : []),
+      // GRANT_PONS_CLASS is minted from `ponsClassVaultAddress`, NOT from
+      // `ponsClassVaultFactory`. The factory is what the owner asked for; the
+      // vault address is what the wall actually pinned, and only the second one
+      // is evidence. They differ in exactly the case that matters — a factory
+      // that could not be read — and that case never gets here, because
+      // resolveClassVault throws instead of returning undefined.
+      ...(ponsClassVaultAddress ? [GRANT_PONS_CLASS] : []),
     ],
     ...(v4AdapterAddress ? { v4AdapterAddress: v4AdapterAddress.toLowerCase() } : {}),
     ...(ponsAdapterAddress ? { ponsAdapterAddress: ponsAdapterAddress.toLowerCase() } : {}),
+    ...(ponsClassVaultAddress
+      ? { ponsClassVaultAddress: ponsClassVaultAddress.toLowerCase() }
+      : {}),
     // What this signature ACTUALLY covers — the worker compares it against the
     // owner's configured tokens and says so when they've drifted apart.
     // Same filter the wall itself applied, so what we RECORD as covered and what
@@ -823,6 +869,14 @@ export interface MintOptions {
    * difference is invisible without this: see the refusal in mintGrant.
    */
   expectAccount?: Address;
+  /**
+   * The deployed PonsClassVaultFactory, or absent for no class route.
+   *
+   * The FACTORY, because the vault is per-account and derives from a smart
+   * account this call is about to create — see the parameter of the same name
+   * on mintGrant.
+   */
+  ponsClassVaultFactory?: `0x${string}`;
 }
 
 export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
@@ -838,6 +892,7 @@ export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
     o.ponsAdapterAddress,
     o.hostedAs,
     o.expectAccount,
+    o.ponsClassVaultFactory,
   );
 }
 
@@ -874,6 +929,7 @@ export async function createPrivyOwnedWallet(
     o.ponsAdapterAddress,
     o.hostedAs,
     o.expectAccount,
+    o.ponsClassVaultFactory,
   );
 }
 
@@ -907,6 +963,7 @@ export async function restoreAgentWallet(
     o.ponsAdapterAddress,
     o.hostedAs,
     o.expectAccount,
+    o.ponsClassVaultFactory,
   );
 }
 
