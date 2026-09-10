@@ -91,6 +91,32 @@ export interface ClassifyInput {
    * amounts of authority and merging them would silently promote a router.
    */
   systemAddresses?: readonly string[];
+  /**
+   * Contracts that hold THIS account's own assets — its class vault.
+   *
+   * A PER-CALL PARAMETER, never a module constant, and that is the whole design.
+   * `protocolAddresses` and `systemAddresses` are lists of addresses that are the
+   * same for everyone; a class vault is CREATE2-salted with one smart account, so
+   * a global list could never contain it and `protocols.ts`'s single-constant
+   * shape does not carry over.
+   *
+   * It extends the PRIMARY rule rather than adding a fallback arm, deliberately.
+   * A class buy moves USDG account -> vault and the token curve -> vault in the
+   * same transaction; a class sell moves the token vault -> curve and the
+   * proceeds curve -> account. Both are trades, and both are decided by
+   * TRANSACTION CONTEXT — the property this module's header says an allowlist can
+   * never have. Without it neither leg pairs, both fall to `no-pair-external`,
+   * and a trade is booked as a deposit or a withdrawal, corrupting the
+   * denominator of every P&L figure.
+   *
+   * NOT `knownAccounts`. That answers "still ours, parked", which is defensible
+   * for the first leg alone and becomes a lie the moment the vault pays the
+   * curve: the money was SPENT, not moved.
+   *
+   * Absent means no class route, which is every grant today, and the behaviour
+   * is byte-identical to before this field existed.
+   */
+  custodyAddresses?: readonly string[];
 }
 
 /**
@@ -164,19 +190,25 @@ export function classifyUsdgMovement(input: ClassifyInput): Classification {
   //
   // That is a swap, and it is the only signal here that does not depend on
   // knowing the venue. Checked before everything else for exactly that reason.
+  // "The account" here means the account OR a contract holding for it — see
+  // ClassifyInput.custodyAddresses. A class buy's token lands at the vault and
+  // never touches the account at all, so an account-only test finds no pair and
+  // books a trade as a withdrawal.
+  const ours = (address: string) => eq(address, account) || has(input.custodyAddresses, address);
   const paired = txLegs.find(
     (l) =>
       !eq(l.token, usdgToken) &&
-      (outbound ? eq(l.to, account) : eq(l.from, account)) &&
+      (outbound ? ours(l.to) : ours(l.from)) &&
       BigInt(l.amountRaw || "0") > 0n,
   );
   if (paired) {
+    const custodied = outbound ? !eq(paired.to, account) : !eq(paired.from, account);
     return {
       kind: outbound ? "trade-out" : "trade-in",
       pairedToken: paired.token,
       why: outbound
-        ? `the same transaction moved ${paired.token} INTO the account — this USDG bought something, it did not leave`
-        : `the same transaction moved ${paired.token} OUT of the account — this USDG is sale proceeds, not a deposit`,
+        ? `the same transaction moved ${paired.token} INTO ${custodied ? `this account's vault at ${paired.to}` : "the account"} — this USDG bought something, it did not leave`
+        : `the same transaction moved ${paired.token} OUT of ${custodied ? `this account's vault at ${paired.from}` : "the account"} — this USDG is sale proceeds, not a deposit`,
       evidence: { ...base, rule: "paired-token-movement" },
     };
   }

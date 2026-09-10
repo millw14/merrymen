@@ -86,7 +86,7 @@ import { createSponsor, sponsorWillQuote, type Sponsor } from "./paymaster";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } from "./fills";
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
-import { bookAddresses, provenanceCurves, strandedBasisSymbols } from "./custody";
+import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbols } from "./custody";
 import { SponsorRefused } from "./paymaster";
 import { acquiredLegOf, findOrphanOps, findSoleAcquisition, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
@@ -1439,7 +1439,10 @@ async function main() {
     cashUsdg: bigint,
     equityUsdg: bigint,
     /** Present when flows can be READ instead of inferred. See scanChainFlows. */
-    scan?: { chain: ReconcileChain; smartAccount: `0x${string}` },
+    // `grant` rides along so the flow classifier can be told which contracts
+    // hold this account's own assets — without it a class buy pairs with
+    // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
+    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
   ): Promise<void> => {
     const record = async (
       deltaUsdg: bigint,
@@ -1527,6 +1530,7 @@ async function main() {
     const scanChainFlows = async (s: {
       chain: ReconcileChain;
       smartAccount: `0x${string}`;
+      grant?: StoredGrant;
     }): Promise<boolean> => {
       let head: bigint;
       let from: bigint;
@@ -1562,6 +1566,12 @@ async function main() {
           toBlock: head,
           knownKeys: await knownFlowKeys(agentId, Number(from)),
           tradeTxHashes: await recentTradeTxHashes(agentId),
+          // FROM THE GRANT, so the flow classifier knows a class buy is a trade
+          // and not a withdrawal. `tradeTxHashes` usually masks this — but it is
+          // recency-bounded and reads the local ledger, so it fails exactly when
+          // the ledger is empty or the row aged out, which is the case this
+          // whole module exists to handle.
+          custodyAddresses: custodyAddressesOf(s.grant),
           log: (m) => console.log(`[flows] ${m}`),
         });
       } catch (e) {
@@ -1688,7 +1698,10 @@ async function main() {
     agentId: string,
     cashUsdg: bigint,
     equityUsdg: bigint,
-    scan?: { chain: ReconcileChain; smartAccount: `0x${string}` },
+    // `grant` rides along so the flow classifier can be told which contracts
+    // hold this account's own assets — without it a class buy pairs with
+    // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
+    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
   ): Promise<void> => {
     try {
       await reconcileFlows(agentId, cashUsdg, equityUsdg, scan);
@@ -6511,7 +6524,12 @@ async function main() {
         balances.cashUsdg,
         equityUsdg,
         cfg.depositScanEnabled
-          ? { chain: makeReconcileChain(client), smartAccount: grant.smartAccount as `0x${string}` }
+          ? {
+              chain: makeReconcileChain(client),
+              smartAccount: grant.smartAccount as `0x${string}`,
+              // So the flow classifier can tell a class trade from a withdrawal.
+              grant,
+            }
           : undefined,
       );
       // A PERFORMANCE FEE NEEDS TO KNOW WHAT WAS CONTRIBUTED.

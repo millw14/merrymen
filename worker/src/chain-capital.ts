@@ -144,6 +144,15 @@ export async function scanFleetCapital(
     toBlock: bigint;
     maxSpan?: bigint;
     protocolAddresses?: readonly string[];
+    /**
+     * Contracts holding one account's own assets — its class vault.
+     *
+     * A LOOKUP, not a list, and that is forced: this pass sweeps the whole
+     * fleet, and a class vault is CREATE2-salted with one smart account, so
+     * there is no fleet-wide set to pass. Absent means no class route anywhere,
+     * which is every grant today.
+     */
+    custodyAddressesFor?: (account: string) => readonly string[] | undefined;
     log?: (m: string) => void;
   },
 ): Promise<Map<string, AccountCapital>> {
@@ -305,6 +314,12 @@ export async function scanFleetCapital(
               usdgToken: usdg,
               knownAccounts: args.accounts,
               protocolAddresses: args.protocolAddresses,
+              // See ClassifyInput.custodyAddresses. A lookup rather than a list
+              // because this sweep is fleet-wide and a vault belongs to one
+              // account. Missing it here books class trades as capital flows for
+              // every agent at once, which is the fleet-scale version of the
+              // same bug deposit-log carries per agent.
+              custodyAddresses: args.custodyAddressesFor?.(account),
             })
           : {
               kind: "ambiguous",

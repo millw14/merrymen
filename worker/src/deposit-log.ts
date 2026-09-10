@@ -131,6 +131,13 @@ export async function findTransferFlows(opts: {
   protocolAddresses?: readonly string[];
   /** Chain infrastructure — EntryPoints, Permit2. Never a source of capital. */
   systemAddresses?: readonly string[];
+  /**
+   * Contracts holding THIS account's assets — its class vault.
+   *
+   * Per-account, so it cannot live on a static list the way venues do. Absent
+   * means no class route, which is every grant today.
+   */
+  custodyAddresses?: readonly string[];
   maxSpan?: bigint;
   log?: (m: string) => void;
 }): Promise<TransferFlow[]> {
@@ -286,6 +293,11 @@ export async function findTransferFlows(opts: {
       knownAccounts: opts.knownAccounts,
       protocolAddresses: opts.protocolAddresses,
       systemAddresses: opts.systemAddresses,
+      // Contracts holding THIS account's own assets. Without it a class buy
+      // pairs with nothing, falls to `no-pair-external`, and a trade is booked
+      // as a withdrawal — corrupting the denominator of every P&L figure.
+      // See ClassifyInput.custodyAddresses.
+      custodyAddresses: opts.custodyAddresses,
     });
 
     if (v.kind === "capital-in" || v.kind === "capital-out") {

@@ -195,3 +195,159 @@ describe("C4 — gross and net are separately derivable", () => {
     assert.equal(t.grossContributionsRaw, "123456789012345678901234", "exact past 2^53");
   });
 });
+
+/**
+ * A CLASS TRADE IS A TRADE, even though its token never touches the account.
+ *
+ * The paired-leg rule is the primary one here precisely because it does not
+ * depend on knowing the venue — it reads transaction context, which the header
+ * says an allowlist can never do. But it asked whether the other token moved to
+ * or from THE ACCOUNT, and a class buy delivers to the vault by design.
+ *
+ * So neither leg paired, both fell to `no-pair-external`, and a trade was booked
+ * as a deposit or a withdrawal. That is not a display bug: net contributions are
+ * the denominator of every P&L figure, so a spent 25 USDG counted as a
+ * withdrawal shows up as profit that never existed.
+ *
+ * And the vault can never be on `protocolAddresses` — it is CREATE2-salted with
+ * one smart account, so there is no global list it could belong to. Hence a
+ * per-call parameter rather than a constant.
+ */
+describe("a class vault's legs are the account's own trades", () => {
+  const ME = "0x00000000000000000000000000000000000000a1";
+  const VAULT = "0x00000000000000000000000000000000000000c0";
+  const CURVE = "0x00000000000000000000000000000000000000c3";
+  const USDG = "0x0000000000000000000000000000000000000dd0";
+  const PEPE = "0x0000000000000000000000000000000000000ee0";
+
+  const leg = (token: string, from: string, to: string, amountRaw: string) => ({
+    token,
+    from,
+    to,
+    amountRaw,
+  });
+
+  // A class BUY: cash to the vault, vault to the curve, token to the vault.
+  const buyLegs = [
+    leg(USDG, ME, VAULT, "25000000"),
+    leg(USDG, VAULT, CURVE, "25000000"),
+    leg(PEPE, CURVE, VAULT, "400000000000000000000"),
+  ];
+  // A class SELL: token out of the vault, proceeds straight to the owner.
+  const sellLegs = [
+    leg(PEPE, VAULT, CURVE, "400000000000000000000"),
+    leg(USDG, CURVE, ME, "31000000"),
+  ];
+
+  it("THE BUG: without the vault, a class buy is booked as a WITHDRAWAL", () => {
+    const v = classifyUsdgMovement({
+      account: ME,
+      usdg: buyLegs[0]!,
+      txLegs: buyLegs,
+      usdgToken: USDG,
+    });
+    assert.equal(v.kind, "capital-out");
+    assert.equal(v.evidence.rule, "no-pair-external");
+  });
+
+  it("THE FIX: naming the vault makes it a trade", () => {
+    const v = classifyUsdgMovement({
+      account: ME,
+      usdg: buyLegs[0]!,
+      txLegs: buyLegs,
+      usdgToken: USDG,
+      custodyAddresses: [VAULT],
+    });
+    assert.equal(v.kind, "trade-out");
+    assert.equal(v.evidence.rule, "paired-token-movement");
+    assert.equal(v.pairedToken, PEPE);
+  });
+
+  it("and the WHY says where the token actually went, so it is re-derivable", () => {
+    // A classification an auditor cannot re-derive is an assertion, and "into
+    // the account" would be false here.
+    const v = classifyUsdgMovement({
+      account: ME,
+      usdg: buyLegs[0]!,
+      txLegs: buyLegs,
+      usdgToken: USDG,
+      custodyAddresses: [VAULT],
+    });
+    assert.match(v.why, /vault/);
+    assert.match(v.why, new RegExp(VAULT));
+  });
+
+  it("a class sell is sale proceeds, not a deposit", () => {
+    const v = classifyUsdgMovement({
+      account: ME,
+      usdg: sellLegs[1]!,
+      txLegs: sellLegs,
+      usdgToken: USDG,
+      custodyAddresses: [VAULT],
+    });
+    assert.equal(v.kind, "trade-in");
+    assert.equal(v.pairedToken, PEPE);
+  });
+
+  it("an ordinary trade is unchanged, and still says `the account`", () => {
+    // The widening must be additive. A normal swap's token DOES reach the
+    // account, and its sentence must not start talking about a vault.
+    const swapLegs = [leg(USDG, ME, CURVE, "25000000"), leg(PEPE, CURVE, ME, "400000000000000000000")];
+    const v = classifyUsdgMovement({
+      account: ME,
+      usdg: swapLegs[0]!,
+      txLegs: swapLegs,
+      usdgToken: USDG,
+      custodyAddresses: [VAULT],
+    });
+    assert.equal(v.kind, "trade-out");
+    assert.match(v.why, /INTO the account/);
+  });
+
+  it("a REAL withdrawal to a stranger is still a withdrawal", () => {
+    // The rule must not become "anything with a second leg is a trade".
+    const STRANGER = "0x00000000000000000000000000000000000000f1";
+    const v = classifyUsdgMovement({
+      account: ME,
+      usdg: leg(USDG, ME, STRANGER, "25000000"),
+      txLegs: [leg(USDG, ME, STRANGER, "25000000")],
+      usdgToken: USDG,
+      custodyAddresses: [VAULT],
+    });
+    assert.equal(v.kind, "capital-out");
+  });
+
+  it("and a token landing at SOMEONE ELSE'S vault does not pair", () => {
+    // custodyAddresses is per-account. Another owner's vault is a stranger.
+    const OTHER_VAULT = "0x00000000000000000000000000000000000000c1";
+    const v = classifyUsdgMovement({
+      account: ME,
+      usdg: leg(USDG, ME, OTHER_VAULT, "25000000"),
+      txLegs: [
+        leg(USDG, ME, OTHER_VAULT, "25000000"),
+        leg(PEPE, CURVE, OTHER_VAULT, "400000000000000000000"),
+      ],
+      usdgToken: USDG,
+      custodyAddresses: [VAULT],
+    });
+    assert.equal(v.kind, "capital-out");
+  });
+
+  it("absent custodyAddresses reproduces today's behaviour exactly", () => {
+    const swapLegs = [leg(USDG, ME, CURVE, "25000000"), leg(PEPE, CURVE, ME, "400000000000000000000")];
+    const withField = classifyUsdgMovement({
+      account: ME,
+      usdg: swapLegs[0]!,
+      txLegs: swapLegs,
+      usdgToken: USDG,
+      custodyAddresses: [],
+    });
+    const without = classifyUsdgMovement({
+      account: ME,
+      usdg: swapLegs[0]!,
+      txLegs: swapLegs,
+      usdgToken: USDG,
+    });
+    assert.deepEqual(withField, without);
+  });
+});
