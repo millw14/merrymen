@@ -473,6 +473,32 @@ export async function recoverFunds(opts: {
       movable.push(b);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      // NOT EVERY REVERT IS A TOKEN REFUSING TO MOVE.
+      //
+      // This regex was written when every leg was `token.transfer(...)`, where a
+      // revert really does mean "this token will not move and the others still
+      // should". Once a leg can be `vault.sweep(token)` the same regex swallows
+      // a revert that means something completely different:
+      //
+      //   NotOwner()  — we are asking the WRONG VAULT. A different owner key, a
+      //                 stale factory constant, or another account's vault. The
+      //                 class book is untouched and the sweep would report
+      //                 success, which is the failure this whole path exists to
+      //                 prevent. Abort and name it.
+      //   ZeroAmount() — an empty balance. Filtered out before the batch is
+      //                 built; reaching here means a balance moved between the
+      //                 read and the simulation, which is ordinary.
+      //
+      // Everything else keeps the original behaviour, including the fail-open
+      // below: on an escape hatch, attempting a move that might fail beats
+      // leaving money behind because a network call flaked.
+      if (/NotOwner/.test(msg)) {
+        throw new Error(
+          `refusing to sweep: ${b.symbol} at ${b.address} answered NotOwner(). This owner key does ` +
+            `not control that contract, so nothing here would move and reporting a successful ` +
+            `recovery would be a lie. Check the owner key and the chain.`,
+        );
+      }
       if (/revert|execution reverted/i.test(msg)) {
         skipped.push({ symbol: b.symbol, reason: msg.replace(/\s+/g, " ").slice(0, 120) });
       } else {

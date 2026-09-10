@@ -1228,11 +1228,32 @@ async function recover() {
   // was told it held nothing while its whole balance sat there.
   const heldWei = BigInt(plan.result.gasWei ?? "0");
   const heldEth = Number(heldWei) / 1e18;
+  // A BALANCE WE COULD NOT READ IS NOT A ZERO, and this is the one place that
+  // forgot. The child already refuses to say "empty" when anything was
+  // unreadable — recover-cli writes "that is NOT a zero balance. Check the RPC
+  // and rerun" to stderr and puts the list on the wire — and then this printed
+  // "holds no ETH, USDG or tokens" over the top of it on stdout. Two answers to
+  // the same question, and the confident one was wrong.
+  //
+  // It matters most on the path where being wrong costs the most: an owner told
+  // their account is empty stops looking for the money.
+  const unreadable = plan.result.unreadable ?? [];
   if (balances.length === 0 && heldWei === 0n) {
     p.close();
+    if (unreadable.length) {
+      warn(`could not read ${unreadable.join(", ")} for ${plan.result.smartAccount}.`);
+      console.log(dim("  That is NOT a zero balance — nothing was swept and nothing is confirmed empty."));
+      console.log(dim("  Check the RPC and run this again."));
+      return;
+    }
     warn(`nothing to recover — ${plan.result.smartAccount} holds no ETH, USDG or tokens.`);
     console.log(dim("  If you expected funds here, check you're using the right owner key and chain."));
     return;
+  }
+  // Something IS movable, but the picture is still incomplete — say so before
+  // the owner reads the sweep list as the whole account.
+  if (unreadable.length) {
+    warn(`heads up: ${unreadable.join(", ")} could not be read, so there may be more here than this shows.`);
   }
 
   const parts = balances.map((b) => `${b.amount} ${b.symbol}`);
