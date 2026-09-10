@@ -299,6 +299,24 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   // invisible in the lane breakdown and unnamed in the feed.
   "no-curve-adapter": "this grant carries no adapter for that launchpad",
   "curve-provenance": "the launch could not be verified",
+  // ── THE FIVE THAT SAY AN AGENT IS NOT TRADING AT ALL ────────────────────
+  //
+  // `no-gas` above is one of six RefuseRules that execModeOf can produce, and
+  // it was the only one here. The other five are written into `reject_rule`
+  // every tick a blocked agent proposes anything, so the sentences that explain
+  // an agent doing NOTHING — the single most common thing an owner asks about —
+  // were the ones falling to the catch-all and rendering as unnamed amber.
+  //
+  // Wording follows exec-mode.ts's own `liveBlockerText`, which is where an
+  // owner meets these in the feed; a public page and a private feed disagreeing
+  // about the same fact is its own bug. live-blocker.test.ts already forces the
+  // funding screen to cover every RefuseRule — nothing forced this map, which
+  // is why it drifted.
+  "not-armed": "it has no signed trading key yet",
+  "dead-policy": "its signature seals a policy contract that is not on this chain",
+  "no-executor": "no bundler is configured to submit anything",
+  "wrong-chain": "its key was signed for a different network",
+  "no-cash": "the account held no USDG to trade with",
 });
 
 /**

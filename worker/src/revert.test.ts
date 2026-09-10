@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
 import { toFunctionSelector } from "viem";
-import { PATTERN_SOURCES, PONS_ERROR_SELECTORS, classifyRevert, suppressionKey } from "./revert";
+import { PATTERN_SOURCES, PONS_ERROR_SELECTORS, classifyRevert, suppressionKey, suppressionLegs } from "./revert";
 
 /**
  * The value of this table is entirely in what it REFUSES to claim, so most of
@@ -261,5 +261,92 @@ describe("Pons adapter reverts", () => {
         `${sig} (${sel}) is declared in PonsSelfTrade.sol but classifies as unclassified`,
       );
     }
+  });
+});
+
+/**
+ * THE KEY THE WRITER STORES MUST BE THE KEY THE READER LOOKS UP.
+ *
+ * `suppressionKey` was tested here in isolation — case, direction, kind — and
+ * every one of those tests passed while curve suppression was completely dead.
+ * Both call sites were correct about the function and wrong about each other:
+ * the writer passed the curve's legs, the reader passed undefined, and
+ * `curve-trade:0xin->0xout` never matched `curve-trade:->`.
+ *
+ * A non-retryable curve revert was therefore classified, warned about, recorded
+ * as suppressed, and re-proposed sixty seconds later — forever, each attempt a
+ * real UserOp and real gas — while the tape said it had been stopped.
+ *
+ * These tests are the round trip, which is the only shape that could have
+ * caught it.
+ */
+describe("suppression survives the round trip, for every kind that has legs", () => {
+  const A = "0xAAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaA";
+  const B = "0xBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBb";
+
+  const intents = [
+    { kind: "swap", sellToken: A, buyToken: B },
+    { kind: "curve-trade", assetIn: A, assetOut: B, curve: A, target: B },
+    { kind: "vault-deposit", target: A },
+    { kind: "transfer", target: A, recipient: B },
+  ] as const;
+
+  for (const intent of intents) {
+    it(`${intent.kind}: what is written is what is read`, () => {
+      // The writer's key.
+      const written = suppressionKey(intent.kind, ...suppressionLegs(intent));
+      const store = new Map<string, string>([[written, "graduated"]]);
+      // The reader's key, derived independently the same way.
+      const read = suppressionKey(intent.kind, ...suppressionLegs(intent));
+      assert.equal(store.get(read), "graduated", `${intent.kind} suppression did not survive`);
+    });
+  }
+
+  it("a curve suppression is scoped to ITS pair, not to the whole venue", () => {
+    // The over-broad version this replaced: one graduated token took every
+    // curve trade down with it for the rest of the arm.
+    const one = suppressionKey("curve-trade", ...suppressionLegs(intents[1]));
+    const other = suppressionKey(
+      "curve-trade",
+      ...suppressionLegs({ kind: "curve-trade", assetIn: A, assetOut: A }),
+    );
+    assert.notEqual(one, other);
+  });
+
+  it("and a swap and a curve trade over the same pair stay distinct", () => {
+    assert.notEqual(
+      suppressionKey("swap", ...suppressionLegs(intents[0])),
+      suppressionKey("curve-trade", ...suppressionLegs(intents[1])),
+    );
+  });
+
+  it("a kind with no legs still gets a stable key rather than throwing", () => {
+    assert.equal(suppressionKey("vault-deposit", ...suppressionLegs(intents[2])), "vault-deposit:->");
+  });
+});
+
+describe("both call sites derive the key the same way", () => {
+  // The round-trip tests above prove the FUNCTION is consistent. They cannot
+  // prove index.ts calls it at both ends, and "one end was updated" is the
+  // entire bug. So this reads the source.
+  const CODE = readFileSync(new URL("./index.ts", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .split(/\r?\n/)
+    .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
+    .join("\n");
+
+  it("every suppressionKey call in the worker goes through suppressionLegs", () => {
+    const calls = CODE.match(/suppressionKey\([^)]*\)/g) ?? [];
+    assert.ok(calls.length >= 2, "expected a read site and a write site");
+    for (const call of calls) {
+      assert.match(call, /suppressionLegs\(intent\)/, `hand-rolled legs: ${call}`);
+    }
+  });
+
+  it("and no site special-cases swap on its own any more", () => {
+    assert.ok(
+      !/suppressionKey\(\s*intent\.kind,\s*intent\.kind === "swap"/.test(CODE),
+      "the read site's swap-only derivation is what silently disabled curve suppression",
+    );
   });
 });

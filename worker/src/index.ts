@@ -84,7 +84,7 @@ import {
 import { createSponsor, sponsorWillQuote, type Sponsor } from "./paymaster";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } from "./fills";
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
-import { classifyRevert, suppressionKey } from "./revert";
+import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
 import { SponsorRefused } from "./paymaster";
 import { acquiredLegOf, findOrphanOps, findSoleAcquisition, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
@@ -4092,12 +4092,11 @@ async function main() {
     // The row is a rejection carrying the ORIGINAL revert class, not a new
     // word — so 'why did it stop trading NVDA' has the same answer on the
     // hundredth tick as on the first, instead of a gap in the tape.
+    // THE SAME DERIVATION THE WRITER USES. Passing the legs for swaps only —
+    // which this did — meant every curve suppression was stored under one key
+    // and looked up under another, so it never fired at all. See suppressionLegs.
     const suppressed = suppressedIntents.get(
-      suppressionKey(
-        intent.kind,
-        intent.kind === "swap" ? intent.sellToken : undefined,
-        intent.kind === "swap" ? intent.buyToken : undefined,
-      ),
+      suppressionKey(intent.kind, ...suppressionLegs(intent)),
     );
     if (suppressed && verdict.ok) {
       await recordTrade({
@@ -5561,13 +5560,9 @@ async function main() {
         // suppressed ALL curve trading for the rest of the arm — one graduated
         // token taking the whole venue down with it. suppressionKey's own comment
         // says the scope is the token PAIR precisely so that cannot happen.
-        const [supSell, supBuy] =
-          intent.kind === "swap"
-            ? [intent.sellToken, intent.buyToken]
-            : intent.kind === "curve-trade"
-              ? [intent.assetIn, intent.assetOut]
-              : [undefined, undefined];
-        const key = suppressionKey(intent.kind, supSell, supBuy);
+        // Shared with the READ site above — see suppressionLegs. Fixing this
+        // derivation here alone is what silently disabled curve suppression.
+        const key = suppressionKey(intent.kind, ...suppressionLegs(intent));
         suppressedIntents.set(key, revertVerdict.rule);
         await addEvent(
           agentId,

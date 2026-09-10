@@ -336,3 +336,36 @@ export function classifyRevert(message: string): RevertVerdict {
 export function suppressionKey(kind: string, sellToken?: string, buyToken?: string): string {
   return `${kind}:${(sellToken ?? "").toLowerCase()}->${(buyToken ?? "").toLowerCase()}`;
 }
+
+/**
+ * The legs of an intent, for the key above. ONE derivation, TWO callers.
+ *
+ * THIS EXISTS BECAUSE FIXING THE WRITER BROKE THE READER, silently.
+ *
+ * Both sites used to pass tokens for `swap` only, so every curve failure
+ * collapsed to `curve-trade:->`. That was over-broad — one graduated token
+ * suppressed the whole venue — and it was fixed at the WRITE site alone. The
+ * READ site kept passing undefined, so from that moment the writer stored
+ * `curve-trade:0xin->0xout` and the reader looked up `curve-trade:->`, which
+ * matches nothing. Curve suppression stopped working entirely: a non-retryable
+ * revert was classified, warned about, recorded, and then re-proposed sixty
+ * seconds later, forever, each attempt a real UserOp and real gas.
+ *
+ * The over-broad version at least worked. Two half-fixes made it worse than
+ * the bug — which is what a key derived in two places will eventually do, so
+ * now it is derived in one.
+ *
+ * `revert.test.ts` tested `suppressionKey` in isolation — case, direction, kind
+ * — and could not have caught this: both callers were correct about the
+ * function and wrong about each other.
+ */
+export function suppressionLegs(
+  intent:
+    | { kind: "swap"; sellToken: string; buyToken: string }
+    | { kind: "curve-trade"; assetIn: string; assetOut: string }
+    | { kind: string },
+): [string | undefined, string | undefined] {
+  if (intent.kind === "swap" && "sellToken" in intent) return [intent.sellToken, intent.buyToken];
+  if (intent.kind === "curve-trade" && "assetIn" in intent) return [intent.assetIn, intent.assetOut];
+  return [undefined, undefined];
+}
