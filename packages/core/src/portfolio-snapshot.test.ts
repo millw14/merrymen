@@ -326,3 +326,78 @@ describe("auditability is a property, not an epoch number", () => {
     }
   });
 });
+
+/**
+ * THE FIVE REFUSALS ARE FIVE DIFFERENT PROBLEMS.
+ *
+ * `computePnl` returning `publishable: false` is the most consequential flag in
+ * the system: it makes `may_size` false, and cohort-vetting.ts states the
+ * consequence outright — "every decision a forced hold". An agent in that state
+ * runs, reasons, pays for model calls, and holds forever.
+ *
+ * So the REASON has to survive. Each of these sends whoever reads it somewhere
+ * different — a missing deposit, legacy rows needing repair, a ledger that
+ * could not be read, no capital at all, or a missing equity term — and
+ * collapsing them into one boolean is what turned a diagnosable condition into
+ * a fleet-wide silence nobody could explain.
+ */
+describe("computePnl names which gate is shut", () => {
+  const q = (over: Record<string, unknown> = {}) =>
+    ({
+      arithmetic: "verified",
+      contributionsKnown: true,
+      currentAccountingHistoryAuditable: true,
+      equityComplete: true,
+      epoch: 2,
+      gasBasis: "net",
+      ...over,
+    }) as never;
+
+  const run = (over: Record<string, unknown> = {}, qover: Record<string, unknown> = {}) =>
+    computePnl({
+      equityUsdg: 50_000_000,
+      netContributionsUsdg: 40_000_000,
+      gasUsdg: 0,
+      quality: q(qover),
+      ...over,
+    } as never);
+
+  it("publishes when every gate is open", () => {
+    const r = run();
+    assert.equal(r.publishable, true);
+    assert.equal(r.unavailable, null);
+    assert.equal(r.usdgSinceContribution, 10_000_000);
+  });
+
+  it("each refusal carries its own distinct reason", () => {
+    assert.equal(run({ netContributionsUsdg: null }).unavailable, "contributions-unknown");
+    assert.equal(run({}, { contributionsKnown: false }).unavailable, "contributions-unknown");
+    assert.equal(
+      run({}, { currentAccountingHistoryAuditable: false }).unavailable,
+      "legacy-accounting-history",
+    );
+    // Undefined is NOT the same as false — "we found bad rows" and "we could not
+    // look" send you to two different places.
+    assert.equal(
+      run({}, { currentAccountingHistoryAuditable: undefined }).unavailable,
+      "history-auditability-unknown",
+    );
+    assert.equal(run({ netContributionsUsdg: 0 }).unavailable, "no-capital-contributed");
+    assert.equal(run({}, { equityComplete: false }).unavailable, "equity-incomplete");
+  });
+
+  it("no refusal is silent — publishable false always names a reason", () => {
+    for (const [o, qo] of [
+      [{ netContributionsUsdg: null }, {}],
+      [{}, { contributionsKnown: false }],
+      [{}, { currentAccountingHistoryAuditable: false }],
+      [{}, { currentAccountingHistoryAuditable: undefined }],
+      [{ netContributionsUsdg: 0 }, {}],
+      [{}, { equityComplete: false }],
+    ] as const) {
+      const r = run(o as never, qo as never);
+      assert.equal(r.publishable, false);
+      assert.ok(r.unavailable, "a closed gate must say which gate it is");
+    }
+  });
+});

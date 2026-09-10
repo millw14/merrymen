@@ -212,10 +212,35 @@ export async function runShadow(
 
   const runId = `brain_${i.agentId.slice(2, 10)}_${i.now}`;
   const triggerId = `${trigger.reason}_${i.now}`;
+  // SAY WHICH GATE IS SHUT, not merely that one is.
+  //
+  // `pnlPublishable=false` was the whole story this line told, and it is the
+  // most consequential flag in the system: computePnl refusing makes `may_size`
+  // false, and cohort-vetting.ts states the consequence outright — "every
+  // decision a forced hold". So an agent in this state runs, reasons, pays for
+  // model calls, and holds forever, and its owner reports exactly that: "it's
+  // running and I can tell him to buy stuff, but he doesn't do anything on his
+  // own and just waits."
+  //
+  // computePnl distinguishes FIVE reasons and returns the one that applied.
+  // They are not variations on a theme — they send whoever reads this to
+  // different places:
+  //
+  //   contributions-unknown        the deposit was never booked
+  //   legacy-accounting-history    pre-cutover rows; needs accounting repair
+  //   history-auditability-unknown the ledger could not be read — not the same
+  //   no-capital-contributed       contributions net to zero, so no denominator
+  //   equity-incomplete            a term of the equity identity is missing
+  //
+  // Dropping that distinction turned five diagnosable conditions into one
+  // unexplained silence, fleet-wide.
   log(
     `[brain] waking — ${trigger.detail} · snapshot ${snapshot.snapshotId} · ` +
       `quality epoch=${snapshot.quality.epoch} contributionsKnown=${snapshot.quality.contributionsKnown} ` +
-      `pnlPublishable=${snapshot.pnl.publishable}`,
+      `pnlPublishable=${snapshot.pnl.publishable}` +
+      (snapshot.pnl.publishable ? "" : ` (${snapshot.pnl.unavailable ?? "reason not reported"})`) +
+      ` historyAuditable=${snapshot.quality.currentAccountingHistoryAuditable ?? "unknown"}` +
+      ` equityComplete=${snapshot.quality.equityComplete}`,
   );
 
   const result = await decide(cfg, {
