@@ -90,7 +90,7 @@ import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
 import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbols } from "./custody";
 import { SponsorRefused } from "./paymaster";
 import { acquiredLegOf, findOrphanOps, findSoleAcquisition, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
-import { findTransferFlows, openingScanFrom, resumeFrom } from "./deposit-log";
+import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
 import { takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
@@ -1697,43 +1697,60 @@ async function main() {
         if (chainScanCursor === null) {
           const mark = await lastChainLogBlock(agentId);
           if (mark === null) {
-            // NEVER SCANNED, and where to open is a real decision rather than a
-            // constant — `openingScanFrom` is it, and carries the argument.
+            // Never scanned. Open at the head rather than re-litigating the
+            // account's whole history transfer by transfer — everything before
+            // this point belongs to the single `inferred` opening-balance row.
             //
-            // Opening at the head is right whenever the history before it is
-            // already accounted for. It is wrong, and permanently so, for an
-            // account holding money that no flow row explains: the scan is the
-            // only writer of a chain-log row, so opening at the head is what
-            // keeps the mark null, which is what opens at the head next boot.
-            // The owner-visible end of that loop is `no-capital-contributed`
-            // and an agent that holds forever.
-            const open = openingScanFrom({
-              head,
-              maxLookback: DEPOSIT_LOOKBACK_BLOCKS,
-              netContributionsUsdg: await getNetContributionsUsdg(agentId),
-              equityUsdg,
-            });
-            chainScanCursor = open.at;
-            if (!open.reachingBack) return false;
-            // Said out loud because it is the one pass that reads a window this
-            // wide, and an operator watching a quiet agent should see the reason
-            // it stopped being quiet.
-            console.log(
-              `[flows] ${fmt(equityUsdg)} USDG of equity and no flow row accounts for any of it — ` +
-                `reaching back to block ${open.at} for the funding transfer`,
-            );
-          } else {
-            const at = resumeFrom(mark, head, DEPOSIT_LOOKBACK_BLOCKS);
-            if (at > BigInt(mark)) {
-              // resumeFrom clamped, so the gap since the last scan is wider than
-              // we will reach back. Say so by returning false: inference books the
-              // net boundary movement it is designed for, and the exact scan
-              // restarts from here rather than silently skipping the difference.
-              chainScanCursor = head;
-              return false;
-            }
-            chainScanCursor = at;
+            // THERE IS A REAL DEADLOCK BEHIND THIS LINE, and reaching back from
+            // HERE is not the way out of it. Both halves are written down: the
+            // second is not obvious, and learning it cost a reverted commit that
+            // was live on production main for half an hour.
+            //
+            // THE DEADLOCK. This scan is the only writer of a `chain-log` row,
+            // and opening at the head means it only ever sees blocks AFTER the
+            // process started. So opening at the head is what keeps the mark
+            // null, and a null mark is what opens at the head next boot. An
+            // agent funded outside a scanned window — or funded in the same
+            // window as a fill, which the inference below deliberately declines
+            // to attribute — never gets a contribution row; planFirstObservation
+            // returns `resume-clean` on every restart after that, and computePnl
+            // answers `no-capital-contributed`. The agent then wakes, reasons,
+            // pays for model calls and holds, forever. One owner's agent sat
+            // that way holding 49.86 USDG of deposits plainly visible on chain.
+            //
+            // WHY REACHING BACK HERE MAKES IT WORSE. A reach-back has to know
+            // which flows are already booked, and in hosted mode this process
+            // cannot know. Children have DATABASE_URL stripped (store.ts:764),
+            // so BOTH getNetContributionsUsdg and knownFlowKeys read the CHILD's
+            // sqlite — which a redeploy wipes. The anchor block below says this
+            // outright: the child's table answers null "for an account whose
+            // contributions are on record in the shared database". So after each
+            // deploy the predicate reads "nothing is booked" for EVERY funded
+            // agent while the dedup set is empty, and every old deposit is
+            // booked a second time. record() raises the high-water mark with it,
+            // and the mirror ratchets hwm with MAX — so the inflation is durable
+            // and one-way: the fee is suppressed against a peak that never
+            // happened, and the drawdown breaker halts a healthy account.
+            // Strictly worse than the quiet agent it set out to repair.
+            //
+            // WHERE THE REPAIR BELONGS. Off the tick, in an operator tool that
+            // can see durable state: there the already-booked set is readable, a
+            // multi-day window is affordable (getLogsAdaptive is sequential, so
+            // a day is hundreds of serial calls), and a human is watching a
+            // write that moves contributions and the peak together.
+            chainScanCursor = head;
+            return false;
           }
+          const at = resumeFrom(mark, head, DEPOSIT_LOOKBACK_BLOCKS);
+          if (at > BigInt(mark)) {
+            // resumeFrom clamped, so the gap since the last scan is wider than
+            // we will reach back. Say so by returning false: inference books the
+            // net boundary movement it is designed for, and the exact scan
+            // restarts from here rather than silently skipping the difference.
+            chainScanCursor = head;
+            return false;
+          }
+          chainScanCursor = at;
         }
         from = chainScanCursor;
         flows = await findTransferFlows({

@@ -340,80 +340,12 @@ export async function findTransferFlows(opts: {
  * free of consequence.
  *
  * `null` means nothing has been scanned yet, and the caller decides where to
- * open — see `openingScanFrom`, which is that decision.
+ * open: at arm that is the head. The comment at that call site in index.ts
+ * says why it is the head, and why reaching back from there is unsafe.
  */
 export function resumeFrom(lastRecordedBlock: number | null, head: bigint, maxLookback: bigint): bigint {
   if (lastRecordedBlock === null) return head;
   const floor = head > maxLookback ? head - maxLookback : 0n;
   const at = BigInt(lastRecordedBlock);
   return at < floor ? floor : at;
-}
-
-/**
- * Where a scan opens when this agent has never recorded a chain-log flow.
- *
- * THE OLD ANSWER WAS ALWAYS "THE HEAD", and it rested on a claim: everything
- * before this point belongs to the single `inferred` opening-balance row, so
- * re-litigating it transfer by transfer would only re-book what is already
- * booked. That claim is true for almost every agent. It is FALSE for one that
- * holds money no flow row accounts for — and that case was unreachable by
- * design rather than rare:
- *
- *   The scan is the only writer of a `chain-log` row, and opening at the head
- *   means it can only ever see blocks AFTER the process started. So an agent
- *   funded while its worker was down — or funded in the same window as a fill,
- *   which skips the balance-change inference in `reconcileFlows` because a
- *   ledger write "explains" the delta — ends the window with no contribution
- *   row. On the next boot there is still no chain-log mark, so the cursor opens
- *   at the head again, and the funding block is behind it. Permanently.
- *   `planFirstObservation` then returns `resume-clean` and books nothing, on
- *   every restart, forever.
- *
- * What an owner sees is not an accounting complaint. Contributions net to zero,
- * so `computePnl` returns `no-capital-contributed`, `may_size` is false, and
- * every decision is a forced hold: the agent wakes, reasons, pays for model
- * calls and does nothing. One in the fleet sat that way holding 49.86 USDG of
- * deposits that are plainly on chain, with `flows 0` in its ledger.
- *
- * So the claim is now CHECKED rather than assumed. When the book has no flow
- * rows at all and the account holds money, reach back instead. Four properties
- * make that safe to do automatically:
- *
- *   BOUNDED   — the same lookback the resume path already uses, not genesis.
- *   DEDUPED   — `knownFlowKeys` makes a re-read of a booked flow free.
- *   CLASSIFIED — the reached-back transfers go through the same receipt-based
- *     classifier as any other, so a trade leg is not booked as capital.
- *   SELF-LIMITING — the moment it finds the funding transfer there IS a
- *     chain-log row, and this branch is never taken for that agent again.
- *
- * `netContributionsUsdg` must come from a reader that answers NULL for "no rows
- * on record" and 0 for "rows that net to zero" (`getNetContributionsUsdg`).
- * Collapsing those two would make this fire on a book that deposited and then
- * fully withdrew — which has rows, is correctly accounted, and needs no scan.
- *
- * WHAT THIS DOES NOT REACH, stated because the limit is easy to mistake for a
- * guarantee. `maxLookback` is the resume path's window — a little over five
- * hours at this chain's ~10 blocks/sec — and it is not widened here on purpose:
- * `getLogsAdaptive` walks its range in SEQUENTIAL spans, so a multi-day reach
- * would be several hundred serial RPC calls inside a trading tick. So this
- * breaks the deadlock for a deposit that is still within the window, which is
- * every agent funded while the system is running. An agent whose funding is
- * already older than the window stays unaccounted, and no tick will repair it —
- * that backlog needs a one-shot operator backfill that can run off the tick and
- * scan a named range. The deadlock is the part that was silently permanent; the
- * backlog is at least visible, as `no-capital-contributed` naming itself.
- */
-export function openingScanFrom(args: {
-  head: bigint;
-  maxLookback: bigint;
-  /** NULL means no flow rows exist for this epoch. Zero means rows that net out. */
-  netContributionsUsdg: number | null;
-  equityUsdg: bigint;
-}): { at: bigint; reachingBack: boolean } {
-  const unaccounted = args.equityUsdg > 0n && args.netContributionsUsdg === null;
-  if (!unaccounted) return { at: args.head, reachingBack: false };
-  return {
-    at: args.head > args.maxLookback ? args.head - args.maxLookback : 0n,
-    reachingBack: true,
-  };
 }
