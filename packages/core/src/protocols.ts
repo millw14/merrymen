@@ -69,3 +69,35 @@ export const MORPHO = {
   ethenaSteakhouseUsdgVault: "0xbEeFF0fb1Dc19344A87b8479dAb60A2e16160737",
   graphqlApi: "https://blue-api.morpho.org/graphql",
 } as const;
+
+/**
+ * PonsClassVaultFactory, per chain. NOT YET DEPLOYED ANYWHERE.
+ *
+ * Both entries are `null`, and that is the honest state rather than a
+ * placeholder waiting to be forgotten: `contracts/deployments.json` does not
+ * exist in this checkout, so nothing here — not this factory, not PonsSelfTrade,
+ * not V4SelfSwap — has been deployed from it.
+ *
+ * WHY A CONSTANT AT ALL, when the grant already seals the factory it was signed
+ * against. Because RECOVERY may have no grant. `merrymen recover` accepts a
+ * pasted owner key with nothing else, and it can also run against an ARCHIVED
+ * grant — so the vault has to be derivable from the owner key alone, and the
+ * only missing input is the factory. Without this, an owner who lost their
+ * machine could not reach class positions they still own.
+ *
+ * A DEPLOY CONSTANT, never a setting, and the distinction matters more here than
+ * for the adapters: recovery signs with the sudo validator and is NOT bound by
+ * the wall, so a settings-supplied factory would let a settings write redirect
+ * where a recovery goes looking — and since the vault address is a CREATE2
+ * function of the factory, that points the sweep at a contract holding nothing
+ * while the real position sits elsewhere.
+ *
+ * `null` means "no class route on this chain", which is a different fact from
+ * "the factory answered zero" and must stay distinguishable from it.
+ */
+export const PONS_CLASS_VAULT_FACTORY: Readonly<Record<number, string | null>> = Object.freeze({
+  /** Robinhood Chain mainnet. */
+  4663: null,
+  /** Robinhood Chain testnet. */
+  46630: null,
+});
