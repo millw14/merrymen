@@ -19,17 +19,65 @@
 
 const { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog } = require("electron");
 const { spawn } = require("node:child_process");
-const { existsSync, mkdirSync, rmSync, writeFileSync } = require("node:fs");
+const { accessSync, constants, cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } = require("node:fs");
 const http = require("node:http");
+const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 
 const HOST = "127.0.0.1";
-const PORT = 3100;
+// Env override first: a fixed port that is already taken must never be a
+// silent exit. See ensurePortFree below — the default stays 3100 so existing
+// installs keep working.
+const PORT = Number(process.env.MERRYMEN_PORT) || 3100;
 // Shared with the CLI (~/.merrymen); honor an override so data can be relocated.
 const HOME = process.env.MERRYMEN_HOME || path.join(os.homedir(), ".merrymen");
+// ── writable app copy (the AppImage squashfs is read-only) ────────────────
+// Next's runtime cache (.next/cache) — and any future state the backend
+// writes — fails inside the mount with ENOENT. So on launch: if this
+// directory is writable (dev checkout, classic installer), run in place;
+// otherwise copy the app tree once to ~/.merrymen/app/ and run from the copy.
+// Re-copies when the bundle changes (fingerprinted on main.js); the marker
+// makes repeat launches free. DATA is untouched — the ledger/settings stay in
+// ~/.merrymen directly. This is code, not data: never the reverse.
+function bundleFingerprint() {
+  try {
+    const st = statSync(__filename);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return `fallback-${Date.now()}`;
+  }
+}
+function ensureWritableApp() {
+  try {
+    accessSync(__dirname, constants.W_OK);
+    return __dirname;
+  } catch {
+    /* read-only mount — fall through to the copy */
+  }
+  const dest = path.join(HOME, "app");
+  let current = "";
+  try {
+    current = readFileSync(path.join(dest, ".bundle-fingerprint"), "utf8");
+  } catch {
+    /* first launch — nothing copied yet */
+  }
+  if (current !== bundleFingerprint()) {
+    rmSync(dest, { recursive: true, force: true });
+    mkdirSync(dest, { recursive: true });
+    cpSync(__dirname, dest, {
+      recursive: true,
+      // The dashboard rebuilds its cache on boot; copying hundreds of MB of
+      // stale cache only slows first launch.
+      filter: (src) => !src.includes(`${path.sep}.next${path.sep}cache`),
+    });
+    writeFileSync(path.join(dest, ".bundle-fingerprint"), bundleFingerprint(), "utf8");
+  }
+  return dest;
+}
+const APP_DIR = ensureWritableApp();
 const PAUSED_MARKER = path.join(HOME, "paused"); // present = agent paused (worker honors it)
-const ICON = path.join(__dirname, "build", "icon.png");
+const ICON = path.join(APP_DIR, "build", "icon.png");
 
 let mainWin = null;
 let splashWin = null;
@@ -38,6 +86,39 @@ let quitting = false;
 let closeHintShown = false;
 let workerChild = null;
 const children = [];
+
+// ── port: probe before binding, never fail silent ──────────────────────────
+// The dashboard binds a fixed port and the app used to discover a conflict by
+// exiting 0 with no window and no message. Probe first; on conflict offer
+// Retry (the holder may be shutting down) or Quit. MERRYMEN_PORT is the
+// escape hatch for a permanently busy 3100.
+function isPortFree() {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once("error", () => resolve(false));
+    probe.once("listening", () => probe.close(() => resolve(true)));
+    probe.listen(PORT, HOST);
+  });
+}
+async function ensurePortFree() {
+  for (;;) {
+    if (await isPortFree()) return true;
+    const choice = dialog.showMessageBoxSync({
+      type: "warning",
+      title: "merrymen — port in use",
+      message: `Port ${PORT} is already in use on this machine.`,
+      detail: "The dashboard needs it. Free the port (or set MERRYMEN_PORT to another one), then Retry — or Quit.",
+      buttons: ["Retry", "Quit"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (choice !== 0) {
+      quitting = true;
+      app.quit();
+      return false;
+    }
+  }
+}
 
 // ── pause control (the same marker the worker's tick loop + Telegram /pause use) ─
 function isPaused() {
@@ -58,6 +139,10 @@ function setPaused(paused) {
 
 // ── resolve the bundled merrymen + its tool bins (hoisting-safe) ─────────────
 function merrymenRoot() {
+  // Prefer the writable copy: the dashboard's cwd lives under it, so its
+  // runtime cache writes land on disk instead of the read-only mount.
+  const cand = path.join(APP_DIR, "node_modules", "merrymen", "package.json");
+  if (existsSync(cand)) return path.dirname(cand);
   return path.dirname(require.resolve("merrymen/package.json"));
 }
 // Locate a tool binary ON DISK, not via require.resolve — packages like tsx have
@@ -143,7 +228,7 @@ function makeSplash() {
     backgroundColor: "#0b0b0d",
     webPreferences: { contextIsolation: true },
   });
-  splashWin.loadFile(path.join(__dirname, "loading.html"));
+  splashWin.loadFile(path.join(APP_DIR, "loading.html"));
 }
 
 function showWindow() {
@@ -287,6 +372,7 @@ if (!app.requestSingleInstanceLock()) {
     Menu.setApplicationMenu(null); // app-like; the dashboard is the whole UI
     makeSplash();
     try {
+      if (!(await ensurePortFree())) return;
       startBackend();
       await waitForServer();
       makeMain();
