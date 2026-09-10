@@ -43,6 +43,14 @@ android {
     sourceCompatibility = JavaVersion.VERSION_17
     targetCompatibility = JavaVersion.VERSION_17
   }
+
+  // The dependency-metadata task fails to initialise under the JDK bundled with
+  // this Android Studio; the block only feeds Play's dependency report, so
+  // turning it off unblocks a release build with no effect on the app.
+  dependenciesInfo {
+    includeInApk = false
+    includeInBundle = false
+  }
   kotlinOptions { jvmTarget = "17" }
   buildFeatures {
     compose = true

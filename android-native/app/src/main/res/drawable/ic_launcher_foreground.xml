@@ -2,13 +2,15 @@
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
     <!-- A drawn bow, so the launcher does not depend on a binary asset that
-         cannot be reviewed in a diff. -->
-    <path android:fillColor="#C8A24C"
+         cannot be reviewed in a diff. Mint #4AD696 now, not the old gold — the
+         whole product moved to the terminal's green and the icon is the first
+         thing a phone shows, on the launcher and on the cold-start splash. -->
+    <path android:fillColor="#4AD696"
         android:pathData="M38,30 C58,38 58,70 38,78 L42,74 C58,66 58,42 42,34 Z" />
-    <path android:strokeColor="#C8A24C" android:strokeWidth="2"
+    <path android:strokeColor="#4AD696" android:strokeWidth="2"
         android:pathData="M40,32 L40,76" />
-    <path android:strokeColor="#EDEDEF" android:strokeWidth="2"
+    <path android:strokeColor="#ECECE4" android:strokeWidth="2"
         android:pathData="M40,54 L72,54" />
-    <path android:fillColor="#EDEDEF"
+    <path android:fillColor="#ECECE4"
         android:pathData="M72,50 L80,54 L72,58 Z" />
 </vector>

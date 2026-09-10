@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The terminal ground (bg token). The window and the cold-start splash
+         both paint this so nothing flashes a lighter colour before Compose. -->
+    <color name="ground">#070806</color>
+</resources>

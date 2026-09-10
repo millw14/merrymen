@@ -121,14 +121,27 @@ fun Shell() {
   // and holds the graph back; the Box's own background covers that instant.
   var start by remember { mutableStateOf<String?>(null) }
   LaunchedEffect(Unit) {
+    // THE ROUTE IS DECIDED FROM A LOCAL READ, NOT A NETWORK ONE. welcomedNow()
+    // is a DataStore read (sub-millisecond); bootstrap() is three network
+    // round-trips (open the gate, read version, read identity). Waiting for
+    // bootstrap before composing ANYTHING left the screen black for the whole
+    // network wait — measured as the ~1s "jank" on the welcome page, which was
+    // never the logos and never CPU: it was the app refusing to draw until the
+    // server answered, for a screen that needs no server at all.
+    //
+    // So: a fresh install that has not been welcomed goes straight to the
+    // welcome page with zero network on the critical path, and bootstrap runs
+    // AFTER — the welcome's three doors don't need the gate open. Anyone who has
+    // been welcomed goes to Home, and THERE bootstrap must finish first, because
+    // Home's own reads 401 until the gate is open (Repository.bootstrap).
     val welcomed = container.session.welcomedNow()
-    // The door first, then identity. While the site gate is on, every other
-    // route answers 401 regardless of the session — see Repository.bootstrap.
-    container.repo.bootstrap()
-    val signed = container.repo.signedIn.value != null
-    // A signed-in reader has plainly been past the welcome before; only a fresh
-    // install that has neither been welcomed nor signed in starts at the page.
-    start = if (welcomed || signed) Routes.HOME else Routes.WELCOME
+    if (!welcomed) {
+      start = Routes.WELCOME
+      container.repo.bootstrap()
+    } else {
+      container.repo.bootstrap()
+      start = Routes.HOME
+    }
   }
 
   val entry by nav.currentBackStackEntryAsState()
