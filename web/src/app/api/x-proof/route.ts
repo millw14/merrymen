@@ -45,8 +45,23 @@ function requireTenant(req: Request): `0x${string}` | null {
   return tenantOf(req);
 }
 
-/** The sentence the owner posts. Names the product and the nonce, nothing else. */
-export function xProofMessage(nonce: string): string {
+/**
+ * The sentence the owner posts. Names the product and the nonce, nothing else.
+ *
+ * NOT EXPORTED, and that is a Next constraint rather than a style choice. A
+ * route module may only export route handlers plus a fixed set of config names
+ * (`runtime`, `dynamic`, …); Next generates a type that maps every OTHER export
+ * to `never` and typechecks the module against it. So exporting a helper here
+ * fails the build with an error that names `.next/types/...`, points at
+ * generated code, and says nothing about the line that caused it.
+ *
+ * It had been failing CI on every push for eight commits — and because
+ * Typecheck runs before Test in the workflow, the whole test suite had not run
+ * in CI once in that window. Nothing imported this symbol; the export was
+ * simply never needed. If something outside this route ever does need it, it
+ * moves to `@/lib/x-handle` rather than being exported from here again.
+ */
+function xProofMessage(nonce: string): string {
   return `Verifying my merrymen agent. ${nonce}`;
 }
 

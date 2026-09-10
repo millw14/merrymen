@@ -43,6 +43,7 @@ const FIELDS = [
   "LLM max per action",
   "Pimlico API key",
   "Pons curve adapter contract",
+  "Class vault factory contract",
   "Rialto integrator key",
   "Rialto key header",
   "Virtuals API key",
@@ -100,7 +101,7 @@ describe("every control survives the restyle", () => {
    * `tickSeconds`, `buyPerTickUsdg` and `llmIntervalMin` all still bind to an
    * input. A label may become plainer; a control may not vanish.
    */
-  it("keeps all 44 field labels", () => {
+  it("keeps all 45 field labels", () => {
     const missing = FIELDS.filter((f) => !SRC.includes(`label="${f}"`));
     assert.deepEqual(missing, [], "these fields disappeared from the page");
   });
@@ -129,7 +130,11 @@ describe("every control survives the restyle", () => {
     // an owner could not turn it on at all.
     assert.equal(count(/type="number"/g), 13, "number inputs");
     assert.equal(count(/type="password"/g), 8, "password inputs");
-    assert.equal(count(/type="text"/g), 12, "text inputs");
+    // 13 since the class vault factory. The number moved for the reason this
+    // census exists to allow — a control was ADDED, deliberately — and the
+    // check below pins that it is bound, because an address field nobody can
+    // save is how ponsAdapterAddress spent a release being undocumentedly dead.
+    assert.equal(count(/type="text"/g), 13, "text inputs");
     assert.equal(count(/type="url"/g), 3, "url inputs");
     assert.equal(count(/<select/g), 5, "selects");
   });
