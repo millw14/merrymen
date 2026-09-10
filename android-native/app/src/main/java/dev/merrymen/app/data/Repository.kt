@@ -35,7 +35,8 @@ fun <T> ApiResult<T>.toLoaded(): Loaded<T> = when (this) {
 }
 
 /** True when the refusal means "you are not signed in", across the API's shapes. */
-fun Loaded<*>.needsSignIn(): Boolean = this is Loaded.Refused && status == 401
+fun Loaded<*>.needsSignIn(): Boolean =
+  this is Loaded.Refused && status == 401 && !message.trim().equals("gated", ignoreCase = true)
 
 class Repository(
   val api: MerrymenApi,

@@ -110,6 +110,7 @@ import dev.merrymen.app.ui.Pixel
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.Via
 import dev.merrymen.app.ui.numerals
+import dev.merrymen.app.ui.buildChatState
 import dev.merrymen.app.ui.runCommand
 import dev.merrymen.app.ui.sans
 import dev.merrymen.app.ui.shortAddress
@@ -922,8 +923,12 @@ private fun CircleLockBanner(tier: Loaded<TierView>, nav: NavHostController) {
     )
     t.why == "ok" && !t.bonusStrategies -> Notice(
       title = "Holder-only strategies are locked",
-      body = "even-keel and dip-hunter run only while you hold ${t.needTokens} \$MERRYMEN — " +
-        "you hold ${t.tokens ?: 0}. Adding cash won't change it.",
+      body = "even-keel and dip-hunter run only while you hold ${t.needTokens} \$MERRYMEN" +
+        // NULL TOKENS IS "—", NOT "0". A self-hosted origin (and any read that
+        // did not resolve a balance) sends no token count; `?: 0` printed "you
+        // hold 0", a confident zero the sibling screens never allow. Omit the
+        // clause entirely when the balance is unknown.
+        (t.tokens?.let { " — you hold $it. Adding cash won't change it." } ?: "."),
       actionLabel = "See the Circle",
       onAction = { nav.navigate(Routes.CIRCLE) },
       modifier = Modifier.padding(bottom = 28.dp),
@@ -1885,9 +1890,18 @@ fun ChatScreen(nav: NavHostController) {
         draft = ""
         sending = true
         error = null
+        // HISTORY IS THE CONVERSATION BEFORE THIS MESSAGE. Snapshot it first,
+        // then add the turn for display — capturing after the add sent the
+        // current message twice (as `message` and as the last history turn),
+        // which the model reads as the user repeating themselves.
+        val history = turns.toList()
         turns.add(ChatTurnWire("user", msg))
         scope.launch {
-          when (val r = c.api.chat(ChatBody(message = msg, history = turns.toList())).toLoaded()) {
+          // Give the agent the state its prompt is built around — above all the
+          // basket, so it stops guessing that an unread basket is empty. Null on
+          // a failed read, which degrades to the no-state path rather than a lie.
+          val state = buildChatState(c.repo)
+          when (val r = c.api.chat(ChatBody(message = msg, state = state, history = history)).toLoaded()) {
             is Loaded.Value -> {
               // `reply: null` with a `why` is the server declining to speak,
               // not an empty answer. Say which.
@@ -2316,10 +2330,22 @@ fun AlphaScreen(nav: NavHostController) {
         AlphaGate(a, nav)
         InsideAlpha(picks = a.pickCount, passed = passedCount(a.passed))
       } else if (a.pickRows.isEmpty()) {
-        Empty(
-          "Nothing vetted yet",
-          "Nothing has cleared the screen recently. That is not the same as nothing looking good.",
-        )
+        // AN OUTAGE IS NOT A QUIET DAY. When the index could not be read the
+        // route sends an empty list WITH indexUnreachable — the same empty
+        // shape as "considered everything and passed", but a different fact.
+        // Saying "nothing cleared the screen" for our own failed read states
+        // something about the market we did not learn.
+        if (a.indexUnreachable) {
+          Notice(
+            title = "Couldn't read the desk just now",
+            body = "That's our data feed failing, not a quiet market. It should clear on its own.",
+          )
+        } else {
+          Empty(
+            "Nothing vetted yet",
+            "Nothing has cleared the screen recently. That is not the same as nothing looking good.",
+          )
+        }
       } else {
         AlphaKept(a, nav)
       }

@@ -113,6 +113,13 @@ data class AlphaView(
   val tokens: Int? = null,
   val picks: JsonElement? = null,
   val passed: JsonElement? = null,
+  /**
+   * The DESK COULD NOT BE READ, for a holder who is allowed to see it. Distinct
+   * from "considered and passed on everything": an empty picks list with this
+   * true is our outage, not a quiet day. Rendering the two the same states a
+   * fact about the market out of a failed read.
+   */
+  val indexUnreachable: Boolean = false,
 ) {
   val needTokens: Int? get() = need?.tokens
   val symbol: String? get() = token?.symbol
@@ -577,11 +584,28 @@ data class GrantView(
 data class HolderChallenge(val message: String? = null, val nonce: String? = null, val error: String? = null)
 
 @Serializable
-data class HolderLinked(val address: String? = null, val at: Long? = null)
+data class HolderLinked(val linked: HolderProof? = null)
+
+/** The nested shape /api/holder actually returns: `{"linked":{address,at}}` or `{"linked":null}`. */
+@Serializable
+data class HolderProof(val address: String? = null, val at: Long? = null)
 
 /** A single-field error body, which several routes use verbatim. */
 @Serializable
-data class ApiError(val error: String? = null, val detail: String? = null)
+data class ApiError(
+  val error: String? = null,
+  val detail: String? = null,
+  /**
+   * The VALIDATION shape. /api/settings and the read-modify-write it backs
+   * (proposals, risk) refuse with `{"errors":["slippageBps: must be a number
+   * between 1 and 1000", …]}` — a list, not a single `error`. Without this the
+   * client fell through to dumping the raw JSON body into the note, so a careful
+   * per-field message arrived as `{"errors":[…]}`.
+   */
+  val errors: List<String>? = null,
+  /** /api/chat's refusal carries its reason here (`{"reply":null,"why":"not signed in"}`). */
+  val why: String? = null,
+)
 
 // ── likes and follows ───────────────────────────────────────────────────────
 

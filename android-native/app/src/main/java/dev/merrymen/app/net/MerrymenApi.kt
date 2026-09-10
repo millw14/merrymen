@@ -86,8 +86,16 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
             // The API answers with several error shapes, and two routes answer
             // in PLAIN TEXT (the middleware's host and cross-site refusals).
             // Try JSON, fall back to the raw body, never invent a sentence.
+            // Prefer a VALIDATION list, then a single error/detail, then chat's
+            // `why`; only fall back to the raw body when the JSON says nothing.
+            // The list is what /api/settings and its read-modify-write callers
+            // return, and joining it here means every screen gets clean per-line
+            // messages without each one re-parsing the body.
             val msg = runCatching { json.decodeFromString<ApiError>(body) }
-              .getOrNull()?.let { it.error ?: it.detail }
+              .getOrNull()?.let {
+                it.errors?.takeIf { e -> e.isNotEmpty() }?.joinToString("\n")
+                  ?: it.error ?: it.detail ?: it.why
+              }
               ?: body.ifBlank { "HTTP ${r.code}" }
             cont.resume(ApiResult.Refused(r.code, msg))
           }

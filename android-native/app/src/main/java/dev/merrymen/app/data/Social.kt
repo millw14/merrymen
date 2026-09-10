@@ -71,6 +71,12 @@ data class WiredState(
   val known: Boolean = false,
   /** Why it is not known, in the reader's words. Null once it is. */
   val why: String? = null,
+  /**
+   * Not known BECAUSE you are signed out — as opposed to self-hosted (404) or
+   * unreachable. Only this case earns a "Sign in" button; the others get the
+   * `why` sentence and nothing to tap, since signing in would not help.
+   */
+  val signedOut: Boolean = false,
 ) {
   fun has(slug: String): Boolean = slug in wired
   val full: Boolean get() = wired.size >= max
@@ -237,6 +243,7 @@ class Social(private val api: MerrymenApi) {
       // viewer follows nobody. It claims not to know, which is the truth.
       is ApiResult.Refused -> _wired.value = _wired.value.copy(
         known = false,
+        signedOut = r.status == 401,
         why = when (r.status) {
           401 -> "Sign in to wire other desks into your agent."
           404 -> "Wiring is part of the hosted service."

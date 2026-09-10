@@ -350,7 +350,10 @@ fun WireButton(slug: String, name: String, onSignIn: (() -> Unit)? = null) {
           "agent for it to go into.",
         MerryColors.tx2,
       )
-      if (onSignIn != null) FlowPrimary("Sign in", onSignIn)
+      // ONLY WHEN SIGNING IN WOULD HELP. A self-hosted install (404) or an
+      // unreachable server is not fixed by a sign-in, so those get the sentence
+      // and no button; the prominent "Sign in" is for the signed-out case alone.
+      if (wired.signedOut && onSignIn != null) FlowPrimary("Sign in", onSignIn)
       return@Column
     }
 

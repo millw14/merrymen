@@ -49,11 +49,32 @@ data class CommandSpec(
 /** basketSymbols arrives as "TSLA,NVDA" and the API refuses anything but a list. */
 private val LIST_FIELDS = setOf("basketSymbols")
 
+/**
+ * Settings that are STRINGS even when they look like numbers. `agentName` "007"
+ * and a strategy id must not be coerced to a JSON number by settingsPayload, or
+ * the validator refuses the wrong-typed value — a rename to an all-digits name
+ * would silently fail.
+ */
+private val STRING_FIELDS = setOf("agentName", "strategy")
+
+/** The holder-only strategies, from packages/core's risk/circle config. */
+val CIRCLE_STRATEGIES = setOf("even-keel", "dip-hunter")
+
 private fun money(a: Map<String, String>, k: String) = a[k]?.let { "$$it" } ?: "the amount"
 
 val COMMANDS: Map<String, CommandSpec> = listOf(
   CommandSpec("set-strategy", Via.SETTINGS, listOf("strategy"), weighty = true) {
-    "Switch me to the ${it["strategy"] ?: "chosen"} strategy. It changes what I trade and when."
+    val s = it["strategy"] ?: "chosen"
+    val base = "Switch me to the $s strategy. It changes what I trade and when."
+    // The same caveat the web card appends: a holder-only strategy runs only
+    // while you hold enough $MERRYMEN, so picking it can mean the agent sits
+    // idle. Saying so on the card is the difference between an informed switch
+    // and a silent stall.
+    if (s in CIRCLE_STRATEGIES) {
+      "$base But that one only runs while you hold enough \$MERRYMEN — below that I stay idle."
+    } else {
+      base
+    }
   },
   CommandSpec("set-basket", Via.SETTINGS, listOf("basketSymbols"), weighty = true) {
     "Trade this basket from now on: ${it["basketSymbols"] ?: "—"}. Anything not on that list I stop buying."
@@ -189,8 +210,11 @@ fun settingsPayload(spec: CommandSpec, args: Map<String, String>): JsonObject = 
       })
     } else {
       // Numbers must go as numbers: the validator checks the type and a quoted
-      // number is refused as the wrong shape.
-      val n = raw.toDoubleOrNull()
+      // number is refused as the wrong shape. But a STRING field that happens to
+      // parse as a number (agentName "007") must stay a string, or the same
+      // type check refuses it — coerce by the field's kind, not by whether the
+      // text parses.
+      val n = if (key in STRING_FIELDS) null else raw.toDoubleOrNull()
       put(key, if (n != null) JsonPrimitive(n) else JsonPrimitive(raw))
     }
   }

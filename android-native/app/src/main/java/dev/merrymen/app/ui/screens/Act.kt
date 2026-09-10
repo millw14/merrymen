@@ -737,16 +737,34 @@ fun TradeScreen(nav: NavHostController) {
   var followed by remember { mutableStateOf<String?>(null) }
   val scope = rememberCoroutineScope()
 
-  /** Poll until the worker has answered, then say what it said. */
+  /**
+   * Poll until the worker has answered, then say what it said.
+   *
+   * TIME-BOUNDED TO OUTLIVE THE HOSTED TICK, not a fixed 20 tries. The hosted
+   * worker claims one command per ~240s tick, so an order can sit unclaimed for
+   * up to four minutes before anything happens to it; a 60s budget timed out
+   * before the order was even looked at. The web polls for seven minutes, which
+   * covers two ticks, and so does this.
+   */
   suspend fun follow(id: String?) {
     if (id == null) return
-    repeat(20) {
-      delay(3_000)
+    val deadline = 7 * 60 * 1000L
+    var elapsed = 0L
+    while (elapsed < deadline) {
+      delay(5_000); elapsed += 5_000
       val st = c.api.orderStatus(id)
       if (st is dev.merrymen.app.net.ApiResult.Ok) {
         val s = st.value
-        if (s.state == "done") { followed = s.result ?: "Done."; return }
-        followed = "Still with your agent (${s.state})…"
+        // "done" IS TERMINAL ONLY WITH A RESULT. The worker returns done with a
+        // null result when it has nothing to say; printing "Done." there reads
+        // as a settled trade the worker never reported. Keep waiting instead.
+        val result = s.result
+        if (s.state == "done" && !result.isNullOrBlank()) { followed = result; return }
+        // "none" is also what the route answers when the ledger read fails, not
+        // only "nothing queued", so it is not a fact to interpolate at the
+        // reader — a neutral "checking" is the honest word.
+        followed = if (s.state == "none" || s.state == "done") "Checking with your agent…"
+        else "Still with your agent (${s.state})…"
       }
     }
     // A TIMEOUT IS NOT A FAILURE AND NOT A FILL. Say only what is true.

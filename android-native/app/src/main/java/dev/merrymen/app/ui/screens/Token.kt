@@ -1601,8 +1601,15 @@ private fun Modifier.describedAs(text: String): Modifier =
 private fun copy(ctx: Context, address: String): String? {
   val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
     ?: return "This device would not give us the clipboard."
-  cm.setPrimaryClip(ClipData.newPlainText("token address", address))
-  return null
+  // setPrimaryClip CAN THROW — a dead system_server, an OEM or work-profile
+  // clipboard policy, a DeadObjectException. Catching it means a rejected write
+  // says so rather than crashing the token screen.
+  return try {
+    cm.setPrimaryClip(ClipData.newPlainText("token address", address))
+    null
+  } catch (e: RuntimeException) {
+    "This device would not let us copy just now."
+  }
 }
 
 /**
