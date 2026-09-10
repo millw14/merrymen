@@ -113,7 +113,7 @@ import { readHolderStatus, readHolderStatusResult } from "./circle";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadGrantFile } from "./grant";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
-import { execModeOf, liveBlockerText, type ExecMode, type RefuseRule } from "./exec-mode";
+import { execModeOf, liveBlockerText, publishedMode, type ExecMode, type RefuseRule } from "./exec-mode";
 import { limitsFromGrant } from "./limits";
 import {
   accountingLicence,
@@ -474,6 +474,48 @@ async function main() {
   let lastLiveBlocker: RefuseRule | null | undefined;
   /** The last reason a tick proposed nothing, so THAT fires on change only too. */
   let lastIdleReason: string | null = null;
+  /**
+   * The last policy refusal an owner was TOLD about, so it fires on change only.
+   *
+   * The third of these, and it was the loudest omission. Its two siblings above
+   * both dedupe and both cite the same incident — 1,242 identical rejections
+   * that told nobody anything. The policy-rejection event did not, and it is on
+   * the hottest path there is: the default strategy proposes three legs a tick
+   * at 60s, so an agent past its daily budget writes the same warn line roughly
+   * 4,300 times a day. A feed that repeats itself is a feed an owner learns to
+   * scroll past, which is how the sentence that explains everything gets lost.
+   *
+   * KEYED BY WHAT THE RULE IS ABOUT, which is not the same for every rule and
+   * is the part that is easy to get wrong. A budget rule is about the ACCOUNT:
+   * `daily-cap` on QQQ and `daily-cap` on NVDA are one piece of news, and
+   * keying those by token would fire three times a tick and fix nothing. An
+   * asset rule is about the TOKEN: two different coins failing
+   * `asset-allowlist` are two different things an owner has to act on, and
+   * collapsing them would hide the second one for as long as the first persists.
+   *
+   * The `trades` ROW is still written every time. The tape must stay complete —
+   * it is what the wall-tape screen and every audit count — and it is only the
+   * human-facing line that benefits from being said once.
+   */
+  let lastPolicyRefusal: string | null = null;
+  /**
+   * Rules that are about the account's own state, not about an asset.
+   *
+   * Everything not listed here is treated as token-specific, which is the safe
+   * direction: the cost of over-reporting is a repeated line, and the cost of
+   * under-reporting is an owner never hearing about the second broken token.
+   */
+  const ACCOUNT_WIDE_RULES = new Set([
+    "expiry",
+    "ops-cap",
+    "per-trade-cap",
+    "daily-cap",
+    "deposit-cap",
+    "drawdown-breaker",
+    "scout-budget",
+    "transfer-not-permitted",
+    "non-positive",
+  ]);
   /** Which held symbols last lacked a cost basis, so the warning fires on change only. */
   let lastUncoveredBasisKey: string | null = null;
   /**
@@ -4070,8 +4112,18 @@ async function main() {
     }
 
     if (!verdict.ok) {
+      // The operator line stays every time — it is counted, not read, and a
+      // suppressed log line is a suppressed measurement.
       console.log(`[policy] REJECTED ${intent.kind}: ${verdict.rule} — ${verdict.detail}`);
-      await addEvent(agentId, "warn", `policy rejected ${intent.kind}: ${verdict.rule} — ${verdict.detail}`);
+      // The OWNER line fires on change only. See lastPolicyRefusal.
+      const legs = tokenLegs(intent);
+      const refusalKey = ACCOUNT_WIDE_RULES.has(verdict.rule)
+        ? `${verdict.rule}|${intent.kind}`
+        : `${verdict.rule}|${intent.kind}|${legs.sell_token ?? ""}|${legs.buy_token ?? ""}`;
+      if (refusalKey !== lastPolicyRefusal) {
+        lastPolicyRefusal = refusalKey;
+        await addEvent(agentId, "warn", `policy rejected ${intent.kind}: ${verdict.rule} — ${verdict.detail}`);
+      }
       await recordTrade({
         agent_id: agentId,
         kind: intent.kind,
@@ -5606,12 +5658,6 @@ async function main() {
 
   function heartbeat(blockNumber?: bigint) {
     const at = Math.floor(Date.now() / 1000);
-    const mode = paperActive() ? "paper" : active?.executor ? "live" : "idle";
-    // WHO PAYS, reported rather than guessed. Only this process resolves it
-    // (sponsorGasEnabled AND a bundler key), and hosted the dashboard runs in a
-    // different container with a different environment — so anything it worked
-    // out for itself could disagree with what the executor actually does.
-    const sponsorGas = gasSponsored();
     // WHAT IS STOPPING IT, resolved here so the row below can carry it.
     //
     // Computed before the write rather than after, because the sentence and the
@@ -5619,6 +5665,33 @@ async function main() {
     // Null means trading for real — never "we did not check".
     const verdict = execMode();
     const blocking = verdict.mode === "live" ? null : verdict.rule;
+    // THE PUBLISHED MODE IS THE VERDICT, and it has to be derived from it rather
+    // than worked out again beside it.
+    //
+    // This line used to read `paperActive() ? "paper" : active?.executor ?
+    // "live" : "idle"`, which is a fifth definition of the rail in the file
+    // whose header is about there having been two that disagreed — and it lost
+    // a whole state. execModeOf answers `paper | refuse | live`; that expression
+    // answered `paper | live | idle`, and REFUSE had nowhere to go. An agent
+    // with an executor that refuses every intent — no cash, no gas, dead policy,
+    // wrong chain — matched `active?.executor` and published as **live**.
+    //
+    // That is not a cosmetic mislabel. `mode` is what the whole product reads:
+    // the terminal renders "Running", `stopped` computes false, the public
+    // profile draws a SOLID equity line for a book executing nothing, and chat
+    // is told the agent is live. It is also the exact shape of the complaint
+    // that started this — `go-live` writes `paperTradingEnabled: false`, so an
+    // unfunded agent lands on `{mode:"refuse", rule:"no-cash"}` and was shown as
+    // live, funded:false, with zero trades and no explanation anywhere.
+    //
+    // The mapping itself lives in exec-mode.ts, with the vocabulary it belongs
+    // to, so this site cannot invent a sixth definition of the rail.
+    const mode = publishedMode(verdict);
+    // WHO PAYS, reported rather than guessed. Only this process resolves it
+    // (sponsorGasEnabled AND a bundler key), and hosted the dashboard runs in a
+    // different container with a different environment — so anything it worked
+    // out for itself could disagree with what the executor actually does.
+    const sponsorGas = gasSponsored();
     beatFile(mode, sponsorGas, blockNumber);
     // AND ON A CHANNEL THE DASHBOARD CAN ACTUALLY READ. The file above lives in
     // this worker's own MERRYMEN_HOME; hosted, that is a different directory in

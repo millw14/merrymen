@@ -148,7 +148,33 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   let skippedStale = 0;
   let skippedPaused = 0;
 
-  if (snap.cashUsdg >= cfg.buyPerTickUsdg) {
+  // ── THE DAY'S BUDGET BINDS THE BUYS, NOT JUST THE SWEEP ──────────────────
+  //
+  // This loop consulted `snap.cashUsdg` and nothing else, so once the daily cap
+  // was spent it proposed the same legs every tick and checkPolicy refused every
+  // one. On the shipped defaults that is not an edge case, it is Tuesday:
+  // `buyPerTickUsdg` 25 against a `dailyUsdg` of 50 at `tickSeconds` 60 spends
+  // the entire day's budget in TWO MINUTES and then refuses for the remaining
+  // 1,438 — three refusals a tick, ~4,300 a day.
+  //
+  // The cap is right and stays. The bug is the pairing: two files that never
+  // meet ship a per-tick rate 720× the daily allowance. Making the strategy read
+  // the headroom is what turns "refused again" into "the budget is spent", which
+  // is a thing an owner can act on.
+  //
+  // It also unblocks the `Why` mechanism. `bought` goes true whenever this loop
+  // pushes anything, and `bought` true means `idle` is never set — so the one
+  // machine built to say why nothing happened could not fire in the commonest
+  // way for nothing to happen. Proposing nothing is what lets it speak.
+  //
+  // The clamp only ever SHRINKS the proposal, exactly like the sweep's below.
+  // Reported as `idle` at the bottom, not pushed to `why` here — `why` is what
+  // the tick DID, and this is the reason it did nothing. Same treatment as
+  // `all-legs-stale` and `under-one-buy`.
+  const budgetToday = snap.spendHeadroomUsdg;
+  const budgetSpent = budgetToday <= 0n;
+
+  if (!budgetSpent && snap.cashUsdg >= cfg.buyPerTickUsdg) {
     for (const leg of cfg.legs) {
       if (snap.pausedTokens.has(leg.token.toLowerCase())) {
         skippedPaused += 1;
@@ -158,8 +184,20 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
         skippedStale += 1;
         continue; // no reference price → no trade
       }
-      const legAmount = (cfg.buyPerTickUsdg * BigInt(leg.weightBps)) / 10_000n;
-      if (legAmount === 0n) continue;
+      const wanted = (cfg.buyPerTickUsdg * BigInt(leg.weightBps)) / 10_000n;
+      // CLAMP TO WHAT IS LEFT, per leg, as the legs consume it. Gating the loop
+      // on `budgetToday > 0` alone would still propose a full 25 against a
+      // headroom of 3 and be refused — the same dead loop, one tick later.
+      const alreadyProposed = intents.reduce(
+        (sum, i) => sum + (i.kind === "swap" ? i.notionalUsdg : 0n),
+        0n,
+      );
+      const room = budgetToday - alreadyProposed;
+      const legAmount = wanted < room ? wanted : room;
+      // A leg that rounds to nothing is not a trade. This also ends the loop
+      // cleanly once the budget is exhausted mid-basket, rather than pushing
+      // zero-sized intents that `non-positive` would refuse.
+      if (legAmount <= 0n) continue;
       intents.push({
         kind: "swap",
         target: cfg.swapRouter,
@@ -278,10 +316,20 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   // Reported only when there was something it WANTED to buy — no legs
   // configured is a different fact, and the basket screen already says it.
   const short = !bought && cfg.legs.length > 0 && snap.cashUsdg < cfg.buyPerTickUsdg;
+  // AND THE THIRD SILENCE, which on shipped defaults is by far the commonest.
+  //
+  // Ordered AHEAD of `short`, because when the budget is spent the cash test
+  // says nothing useful: an agent can be flush and still forbidden to buy, and
+  // "you have 900 USDG and one buy costs 25" is a baffling thing to read at that
+  // moment. Behind `shut`, because a closed market is the more fundamental fact
+  // — there would be nothing to buy either way.
+  const spent = !bought && cfg.legs.length > 0 && budgetSpent;
   const idle: Why | undefined =
     shut && !boughtCurve
       ? { code: "all-legs-stale", legs: cfg.legs.length, paused: skippedPaused }
-      : short
+      : spent
+        ? { code: "budget-spent", capRaw: cfg.buyPerTickUsdg }
+        : short
         ? {
             code: "under-one-buy",
             cashRaw: snap.cashUsdg,

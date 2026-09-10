@@ -47,6 +47,37 @@ export type ExecMode =
   | { mode: "refuse"; rule: RefuseRule }
   | { mode: "live" };
 
+/**
+ * What the `agents` row publishes, and therefore what the whole product shows.
+ *
+ * THIS EXISTS BECAUSE THE CALL SITE WORKED IT OUT AGAIN. The heartbeat used to
+ * derive it as `paperActive() ? "paper" : active?.executor ? "live" : "idle"`,
+ * beside the verdict rather than from it — a fifth definition of the rail in a
+ * module whose whole header is about two that disagreed. And it lost a state:
+ * this type has three arms and that expression had three values, but they were
+ * not the same three. REFUSE had nowhere to go, so an agent with an executor
+ * that refused every intent published as `live`, and the terminal, the public
+ * profile and the chat prompt all believed it.
+ *
+ * `refuse` maps to `idle` deliberately rather than to a new fourth value.
+ * "Idle" is already exactly this fact — not trading, whatever the reason — and
+ * every reader handles it. WHICH reason is a separate column, `live_blocker`,
+ * written on the same row from this same verdict, and that is what tells
+ * not-armed apart from armed-but-broke. One fact, one source, two fields.
+ */
+export type PublishedMode = "paper" | "live" | "idle";
+
+export function publishedMode(v: ExecMode): PublishedMode {
+  switch (v.mode) {
+    case "paper":
+      return "paper";
+    case "live":
+      return "live";
+    case "refuse":
+      return "idle";
+  }
+}
+
 export interface ExecInputs {
   /** Is there an armed grant at all? */
   armed: boolean;

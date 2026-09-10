@@ -195,3 +195,76 @@ describe("steadyBasketTick", () => {
     assert.deepEqual(intents, []);
   });
 });
+
+/**
+ * THE DAY'S BUDGET WAS BINDING ON THE SWEEP AND NOT ON THE BUYS.
+ *
+ * The buy loop consulted `cashUsdg` and nothing else, so once the daily cap was
+ * spent it proposed the same legs every tick and checkPolicy refused every one.
+ * On shipped defaults that is not an edge case: 25 USDG a tick at 60s against a
+ * 50 USDG daily cap spends the whole allowance in TWO MINUTES and then refuses
+ * for the remaining 1,438 — three refusals a tick, roughly 4,300 a day.
+ *
+ * The second half matters as much as the first. `bought` goes true whenever the
+ * loop pushes anything, and `bought` true means `idle` is never set — so the
+ * machine built to say why nothing happened could not fire in the commonest way
+ * for nothing to happen.
+ */
+describe("the daily budget binds the buy loop", () => {
+  it("proposes nothing when the day's budget is spent, however much cash is on hand", () => {
+    // 900 USDG of cash and no permission to spend any of it. Before the clamp
+    // this returned two swaps that the wall refused, every tick, all day.
+    const out = takeTick(
+      steadyBasketTick(cfg(), snap({ cashUsdg: 900_000_000n, spendHeadroomUsdg: 0n })),
+    );
+    assert.deepEqual(
+      out.intents.filter((i) => i.kind === "swap"),
+      [],
+      "a buy the wall will certainly refuse must not be proposed",
+    );
+  });
+
+  it("and SAYS SO, which it structurally could not before", () => {
+    const out = takeTick(
+      steadyBasketTick(cfg(), snap({ cashUsdg: 900_000_000n, spendHeadroomUsdg: 0n })),
+    );
+    assert.equal(out.idle?.code, "budget-spent");
+  });
+
+  it("does not blame the cash when the cash is fine", () => {
+    // `under-one-buy` reads "you have X and one buy costs Y" — a baffling thing
+    // to be told while holding 900 USDG. Ordering is the whole fix.
+    const out = takeTick(
+      steadyBasketTick(cfg(), snap({ cashUsdg: 900_000_000n, spendHeadroomUsdg: 0n })),
+    );
+    assert.notEqual(out.idle?.code, "under-one-buy");
+  });
+
+  it("clamps a partial budget instead of proposing the full tick", () => {
+    // 20 USDG a tick across two 50% legs, with only 6 USDG of headroom left.
+    // Gating on `headroom > 0` alone would still propose 10 + 10 and be refused.
+    const intents = sbTick(cfg(), snap({ spendHeadroomUsdg: 6_000_000n }));
+    const spent = intents
+      .filter((i) => i.kind === "swap")
+      .reduce((sum, i) => sum + (i.kind === "swap" ? i.notionalUsdg : 0n), 0n);
+    assert.ok(spent > 0n, "a partial budget still buys something");
+    assert.ok(spent <= 6_000_000n, `proposed ${spent} against 6 USDG of headroom`);
+  });
+
+  it("never proposes a zero-sized leg when the budget runs out mid-basket", () => {
+    // The first leg takes the last of it; the second must be dropped, not
+    // pushed at zero for `non-positive` to refuse.
+    const intents = sbTick(cfg(), snap({ spendHeadroomUsdg: 10_000_000n }));
+    for (const i of intents) {
+      if (i.kind === "swap") assert.ok(i.notionalUsdg > 0n, "a zero-sized buy is not a trade");
+    }
+  });
+
+  it("an ample budget is unchanged — this must not throttle a healthy agent", () => {
+    const intents = sbTick(cfg(), snap());
+    const swaps = intents.filter((i) => i.kind === "swap");
+    assert.equal(swaps.length, 2);
+    const spent = swaps.reduce((sum, i) => sum + (i.kind === "swap" ? i.notionalUsdg : 0n), 0n);
+    assert.equal(spent, 20_000_000n, "the full per-tick size still goes out");
+  });
+});

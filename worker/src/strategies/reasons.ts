@@ -109,6 +109,26 @@ export type Why =
    */
   | { code: "under-one-buy"; cashRaw: bigint; needRaw: bigint; vaultRaw: bigint }
   /**
+   * TODAY'S BUYING BUDGET IS GONE, which is not the same as being out of money.
+   *
+   * The sibling of `under-one-buy`, and the one that fires far more often. The
+   * daily cap is sealed into the signature; `buyPerTickUsdg` is a setting. Ship
+   * 25 per tick at 60s against a 50 cap and the day's allowance is spent in two
+   * minutes, after which the strategy proposed the same legs every tick and the
+   * wall refused every one — ~4,300 refusals a day, none of them news.
+   *
+   * It had no sentence because it could not have one: `bought` went true the
+   * moment the loop pushed anything, and `bought` true means `idle` is never
+   * set. The mechanism built to say why nothing happened was structurally
+   * unable to fire in the commonest way for nothing to happen. Clamping the
+   * loop is what lets this speak.
+   *
+   * Carries the per-tick figure rather than the cap: the cap needs a re-sign to
+   * change and the tick size does not, so the number here is the one the owner
+   * can actually act on.
+   */
+  | { code: "budget-spent"; capRaw: bigint }
+  /**
    * A LEG THAT RAN FAR ENOUGH AHEAD OF WHAT IT COST TO BE WORTH REALISING.
    *
    * The default strategy could only ever buy — every intent it emitted had cash
@@ -239,6 +259,13 @@ export function renderWhy(w: Why): string {
         `stale, so there is no reference price to buy against` +
         (w.paused > 0 ? `, and ${w.paused} of them ${w.paused === 1 ? "is" : "are"} paused` : "") +
         `. This is a fact about the feeds, not about the market`
+      );
+    case "budget-spent":
+      return (
+        `nothing bought — today's buying budget is spent. That is the daily cap in your ` +
+        `signature doing its job, not a fault: I buy ${usdg(w.capRaw)} USDG a tick, so a small ` +
+        `cap is gone quickly. Lower the size per tick in settings to spread it across the day, ` +
+        `or raise the cap at /grant — that one needs a re-sign. Selling is never blocked by this`
       );
     case "under-one-buy":
       return (

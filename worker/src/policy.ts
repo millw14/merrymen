@@ -26,6 +26,21 @@
 
 import { scoutAllows, type ScoutLimits } from "./quarantine";
 
+/**
+ * A 6dp USDG amount, written the way an owner reads it.
+ *
+ * LOCAL, four lines, rather than imported. This module's contract is to stay
+ * import-light — it is the mirror of an on-chain policy and every dependency is
+ * a thing that could make a verdict depend on something the chain cannot see.
+ * A number formatter is not worth breaking that for, and `reasons.ts` (which
+ * has its own) is a rendering layer this file must not reach into.
+ *
+ * `detail` strings from here are printed VERBATIM into the owner's event feed
+ * by index.ts, which is why the units matter: `50000000` is what a 50 USDG
+ * agent was being shown, and nobody reads that as fifty dollars.
+ */
+const money = (v: bigint) => `${(Number(v) / 1e6).toFixed(2)} USDG`;
+
 export interface AgentLimits {
   /** USDG (6dp) ceiling for a single trade. */
   perTradeUsdg: bigint;
@@ -626,7 +641,10 @@ export function checkPolicy(
       return {
         ok: false,
         rule: isDeposit ? "deposit-cap" : "per-trade-cap",
-        detail: `${notional} > ${perOpCap}`,
+        detail:
+          `this ${money(notional)} ${isDeposit ? "deposit" : "trade"} is over the ` +
+          `${money(perOpCap)} ${isDeposit ? "daily" : "per-trade"} cap. That cap is sealed into ` +
+          `the signature — raising it means re-signing at /grant.`,
       };
     }
     // The day's budget is a bound on what may be SPENT. A sell spends nothing —
@@ -634,7 +652,22 @@ export function checkPolicy(
     // agent that used its budget entering could not leave until the day rolled,
     // which is the lock-in the breaker below refuses by name.
     if (!isUnsizedExit && state.spentTodayUsdg + notional > limits.dailyUsdg) {
-      return { ok: false, rule: "daily-cap", detail: `would exceed daily cap ${limits.dailyUsdg}` };
+      // WRITTEN FOR THE PERSON WHO HAS TO READ IT. This said
+      // `would exceed daily cap 50000000` — a raw 6dp bigint, no units, no
+      // remaining balance, no reset — and index.ts prints the detail verbatim
+      // into the owner's feed. "Fifty million" is what an owner of a 50 USDG
+      // agent saw, up to three times a tick, all day.
+      //
+      // The numbers that answer the actual question are all right here: what
+      // has gone, what the allowance was, and what this trade would have added.
+      return {
+        ok: false,
+        rule: "daily-cap",
+        detail:
+          `spent ${money(state.spentTodayUsdg)} of the ${money(limits.dailyUsdg)} daily budget; ` +
+          `this ${money(notional)} buy would go over it. Exits are never blocked by this — ` +
+          `the budget bounds what may be SPENT, and it rolls 24h from the first spend.`,
+      };
     }
   }
 

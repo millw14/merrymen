@@ -861,3 +861,84 @@ describe("drawdown breaker and curve exits", () => {
     assert.equal((v as { rule: string }).rule, "drawdown-breaker");
   });
 });
+
+/**
+ * A REFUSAL AN OWNER CAN ACT ON.
+ *
+ * `detail` is printed VERBATIM into the owner's event feed by index.ts. The
+ * daily-cap refusal said `would exceed daily cap 50000000` — a raw 6dp bigint,
+ * no units, no remaining balance, no reset time. "Fifty million" is what the
+ * owner of a 50 USDG agent read, up to three times a tick, all day.
+ */
+describe("cap refusals are written for the person who has to read them", () => {
+  const USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+  const STOCK = "0x4444444444444444444444444444444444444444";
+  const ROUTER = "0x3333333333333333333333333333333333333333";
+
+  const capLimits = () =>
+    ({
+      allowedTargets: [ROUTER],
+      allowedAssets: [USDG, STOCK],
+      sellableAssets: [USDG, STOCK],
+      cashToken: USDG,
+      perTradeUsdg: 10_000_000n,
+      dailyUsdg: 50_000_000n,
+      maxOpsPerDay: 100,
+      maxDrawdownBps: 10_000,
+      expiresAt: 2_000_000_000,
+    }) as never;
+
+  const capBuy = (notional: bigint) =>
+    ({
+      kind: "swap",
+      target: ROUTER,
+      sellToken: USDG,
+      buyToken: STOCK,
+      sellAmountRaw: notional,
+      notionalUsdg: notional,
+    }) as never;
+
+  const capState = (spent: bigint) =>
+    ({
+      spentTodayUsdg: spent,
+      opsToday: 0,
+      equityUsdg: 1_000_000_000n,
+      highWaterMarkUsdg: 0n,
+      nowSec: 1_000_000_000,
+    }) as never;
+
+  it("the daily-cap refusal contains no bare 6dp integer", () => {
+    const v = checkPolicy(capBuy(5_000_000n), capLimits(), capState(49_000_000n));
+    assert.equal(v.ok, false);
+    assert.equal((v as { rule: string }).rule, "daily-cap");
+    const detail = (v as { detail: string }).detail;
+    assert.ok(
+      !/\b\d{7,}\b/.test(detail),
+      `a raw micro-USDG figure reached the owner: ${detail}`,
+    );
+  });
+
+  it("and names what was spent, what the budget was, and what this trade wanted", () => {
+    const v = checkPolicy(capBuy(5_000_000n), capLimits(), capState(49_000_000n));
+    const detail = (v as { detail: string }).detail;
+    for (const part of ["49.00 USDG", "50.00 USDG", "5.00 USDG"]) {
+      assert.ok(detail.includes(part), `expected ${part} in: ${detail}`);
+    }
+  });
+
+  it("says the exit is never blocked by it, because that is the question this prompts", () => {
+    const detail = (checkPolicy(capBuy(5_000_000n), capLimits(), capState(49_000_000n)) as { detail: string }).detail;
+    assert.match(detail, /[Ee]xits are never blocked/);
+  });
+
+  it("the per-trade refusal is legible too, and names the re-sign", () => {
+    const v = checkPolicy(capBuy(25_000_000n), capLimits(), capState(0n));
+    assert.equal((v as { rule: string }).rule, "per-trade-cap");
+    const detail = (v as { detail: string }).detail;
+    assert.ok(!/\b\d{7,}\b/.test(detail), `raw figure in: ${detail}`);
+    assert.ok(detail.includes("25.00 USDG") && detail.includes("10.00 USDG"));
+    // The remedy differs from the daily cap's: this one is sealed in the
+    // signature, so settings cannot move it.
+    assert.match(detail, /re-sign/);
+  });
+});
