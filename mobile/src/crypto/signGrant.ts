@@ -180,6 +180,10 @@ export async function signGrant(args: {
     v4AdapterAddress: args.v4AdapterAddress,
     ponsAdapterAddress: args.ponsAdapterAddress,
     ponsClassVaultAddress,
+    // Rides with the vault. buildWallPolicies THROWS on a vault without a
+    // factory — two of three class permissions is a key that can reach a vault
+    // it can never create, and a CALL to a codeless address succeeds silently.
+    ponsClassVaultFactoryAddress: args.ponsClassVaultFactory,
   });
 
   say("attaching the permissions");
@@ -245,7 +249,11 @@ export async function signGrant(args: {
       ...(args.v4AdapterAddress ? { v4AdapterAddress: args.v4AdapterAddress.toLowerCase() } : {}),
       ...(args.ponsAdapterAddress ? { ponsAdapterAddress: args.ponsAdapterAddress.toLowerCase() } : {}),
       ...(ponsClassVaultAddress
-        ? { ponsClassVaultAddress: ponsClassVaultAddress.toLowerCase() }
+        ? {
+            ponsClassVaultAddress: ponsClassVaultAddress.toLowerCase(),
+            // Both, or the worker has a marker and a vault it cannot create.
+            ponsClassVaultFactoryAddress: args.ponsClassVaultFactory!.toLowerCase(),
+          }
         : {}),
       grantTokens: usableExtraTokens(args.extraTokens).map((t) => t.address.toLowerCase()),
       demoSessionPrivateKey: sessionPrivateKey,

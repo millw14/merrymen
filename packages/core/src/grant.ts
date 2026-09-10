@@ -171,6 +171,31 @@ export function grantPonsClassVault(
   return a.toLowerCase() as `0x${string}`;
 }
 
+/**
+ * The FACTORY this signature's `deploy` permission was sealed against, or null.
+ *
+ * SAME MARKER as the vault, deliberately, and not a second one. `wall.ts` emits
+ * all three class permissions from one branch, so a separate marker would allow
+ * a grant that claims a class route, can buy through a vault, and has no way to
+ * CREATE the vault it buys through — "a marker alone is a claim" wearing a new
+ * costume. One decision, one marker, three permissions.
+ *
+ * The address is sealed for the same reason the vault's is: the worker must call
+ * the factory the SIGNATURE covers, not one it re-derives or reads from settings.
+ * A settings-sourced factory would let a settings write redirect where a vault
+ * gets created — and since the vault address is a CREATE2 function OF the
+ * factory, that silently moves the account's custody somewhere the wall never
+ * pinned.
+ */
+export function grantPonsClassVaultFactory(
+  grant: Pick<StoredGrant, "grantFeatures" | "ponsClassVaultFactoryAddress"> | null | undefined,
+): `0x${string}` | null {
+  if (!grant?.grantFeatures?.includes(GRANT_PONS_CLASS)) return null;
+  const a = grant.ponsClassVaultFactoryAddress;
+  if (typeof a !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(a)) return null;
+  return a.toLowerCase() as `0x${string}`;
+}
+
 export const GRANT_TRANSFER = "transfer";
 
 /**
@@ -400,6 +425,17 @@ export interface StoredGrant {
    * the GRANT_PONS_CLASS marker alongside it.
    */
   ponsClassVaultAddress?: string;
+  /**
+   * The PonsClassVaultFactory this signature's `deploy` permission was sealed
+   * against, lowercased.
+   *
+   * A DEPLOY CONSTANT, unlike the vault above — the same address for every
+   * account on a chain. Sealed anyway, because the vault address is a CREATE2
+   * function OF this one: a factory read from settings could silently relocate
+   * where the account's custody gets created, to somewhere the wall never
+   * pinned. See grantPonsClassVaultFactory.
+   */
+  ponsClassVaultFactoryAddress?: string;
   /**
    * HOSTED ONLY — the two signatures that bind this account to a tenant.
    *

@@ -749,3 +749,101 @@ test("the swap's pinned asset set IS the approve set — they cannot drift", () 
     }
   }
 });
+
+/**
+ * THE CLASS ROUTE — the only door in this wall to a token nobody enumerated.
+ *
+ * Three permissions, granted together or not at all. The reason they cannot be
+ * split is EVM semantics rather than tidiness: a vault address is a CREATE2
+ * prediction and the contract does not exist until the factory is called, and a
+ * CALL to a codeless address SUCCEEDS with empty returndata. So a wall carrying
+ * `buy`/`sell` without `deploy` would approve USDG, no-op the buy, and report a
+ * landed trade that bought nothing — every tick, forever.
+ */
+const CLASS_VAULT = "0x00000000000000000000000000000000000000c0" as const;
+const CLASS_FACTORY = "0x00000000000000000000000000000000000000fa" as const;
+const classOpts = {
+  ponsClassVaultAddress: CLASS_VAULT,
+  ponsClassVaultFactoryAddress: CLASS_FACTORY,
+};
+
+test("a class grant carries buy, sell AND deploy — three, not two", () => {
+  const list = buildCallPermissions(CAPS, SELF, classOpts);
+  const base = buildCallPermissions(CAPS, SELF, {});
+  assert.equal(list.length, base.length + 3, "the class route is exactly three permissions");
+
+  const onVault = list.filter((p) => p.target.toLowerCase() === CLASS_VAULT);
+  assert.deepEqual(
+    onVault.map((p) => p.functionName).sort(),
+    ["buy", "sell"],
+    "the vault gets buy and sell, and nothing else — sweep is an OWNER action",
+  );
+  const onFactory = list.filter((p) => p.target.toLowerCase() === CLASS_FACTORY);
+  assert.equal(onFactory.length, 1);
+  assert.equal(onFactory[0]!.functionName, "deploy");
+});
+
+test("a vault with no factory is REFUSED, not silently granted", () => {
+  // Two of three is a key that can reach a vault it can never create.
+  assert.throws(
+    () => buildCallPermissions(CAPS, SELF, { ponsClassVaultAddress: CLASS_VAULT }),
+    /factory/i,
+  );
+});
+
+test("deploy is pinned to THIS account, so it can create exactly one contract", () => {
+  // Deployment is permissionless, so this pin is not about privilege. Left
+  // unpinned, a compromised key could burn the account's gas creating vaults
+  // for strangers, repeatedly, inside the ops cap. Pinned, the only contract
+  // this permission can produce is the vault the wall already names as a target.
+  const deploy = buildCallPermissions(CAPS, SELF, classOpts).find(
+    (p) => p.functionName === "deploy",
+  )!;
+  assert.deepEqual(deploy.args, [{ condition: ParamCondition.EQUAL, value: SELF }]);
+  assert.equal(deploy.valueLimit, 0n);
+});
+
+test("the class BUY pins its funding leg and nothing else", () => {
+  // The class token is not an argument to either call — that is what makes this
+  // expressible at all. `buy` names the FUNDING asset, which stays enumerated;
+  // the token is derived from the curve inside the contract.
+  const buy = buildCallPermissions(CAPS, SELF, classOpts).find((p) => p.functionName === "buy")!;
+  const args = buy.args!;
+  assert.equal(args.length, 5, "curve, quoteAsset, quoteIn, minTokensOut, deadline");
+  assert.equal(args[0], null, "the curve is unpinnable — a new address per launch");
+  assert.equal(
+    (args[1] as { condition: number }).condition,
+    ParamCondition.ONE_OF,
+    "the funding leg must stay inside the sealed asset set",
+  );
+  for (const i of [2, 3, 4]) assert.equal(args[i], null);
+  assert.equal(buy.valueLimit, 0n, "keeps native value out of the class route");
+});
+
+test("the class SELL constrains nothing, because the vault already does", () => {
+  // It can only sell what it holds and can only pay its own owner, so there is
+  // nothing here a policy could usefully bound. Stated by assertion rather than
+  // left to be inferred from an empty-looking args list.
+  const sell = buildCallPermissions(CAPS, SELF, classOpts).find((p) => p.functionName === "sell")!;
+  assert.deepEqual(sell.args, [null, null, null, null]);
+  assert.equal(sell.valueLimit, 0n);
+});
+
+test("the vault is an approve SPENDER; the factory is not", () => {
+  // The vault must be nameable so the account's capped USDG approve can fund a
+  // buy. The factory pulls nothing and must never appear — an approve spender is
+  // a standing licence, and this one would be granted for no reason at all.
+  const spenders = allowedSpenders(false, false, undefined, undefined, CLASS_VAULT).map((a) =>
+    a.toLowerCase(),
+  );
+  assert.ok(spenders.includes(CLASS_VAULT));
+  assert.ok(!spenders.includes(CLASS_FACTORY));
+});
+
+test("no class option means no class permission, which is every grant today", () => {
+  const list = buildCallPermissions(CAPS, SELF, {});
+  for (const p of list) {
+    assert.notEqual(p.target.toLowerCase(), CLASS_VAULT);
+    assert.notEqual(p.target.toLowerCase(), CLASS_FACTORY);
+  }
+});

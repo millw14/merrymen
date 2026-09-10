@@ -9,6 +9,7 @@ import {
   V4SELFSWAP_ABI,
   PONS_SELFTRADE_ABI,
   PONS_CLASS_VAULT_ABI,
+  PONS_CLASS_VAULT_FACTORY_DEPLOY_ABI,
 } from "./abis";
 import { MORPHO, RIALTO, UNISWAP } from "./protocols";
 import { CASH, STOCK_TOKENS, TRADEABLE_SYMBOLS, USDG_DECIMALS, isValidCustomToken, type CustomToken } from "./tokens";
@@ -243,6 +244,15 @@ export interface WallOptions {
    * signed.
    */
   ponsClassVaultAddress?: string;
+  /**
+   * The deployed PonsClassVaultFactory, required alongside a class vault.
+   *
+   * A deploy constant rather than a per-account address, but sealed all the
+   * same: the vault address is a CREATE2 function OF this one, so a factory
+   * that could be swapped would relocate the account's custody. Passing a
+   * vault without this THROWS — see the refusal in buildCallPermissions.
+   */
+  ponsClassVaultFactoryAddress?: string;
   allowRialto?: boolean;
   /**
    * The Uniswap v4 route — Permit2 plus the UniversalRouter. OFF by default.
@@ -396,6 +406,32 @@ export function buildCallPermissions(
       throw new Error(`ponsClassVaultAddress is not an address: ${JSON.stringify(opts.ponsClassVaultAddress)}`);
     }
     classVault = opts.ponsClassVaultAddress.toLowerCase() as Address;
+  }
+  let classFactory: Address | undefined;
+  if (opts.ponsClassVaultFactoryAddress !== undefined) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(opts.ponsClassVaultFactoryAddress)) {
+      throw new Error(
+        `ponsClassVaultFactoryAddress is not an address: ${JSON.stringify(opts.ponsClassVaultFactoryAddress)}`,
+      );
+    }
+    classFactory = opts.ponsClassVaultFactoryAddress.toLowerCase() as Address;
+  }
+  // TWO OF THREE CLASS PERMISSIONS IS NOT A SUBSET, IT IS A TRAP.
+  //
+  // A vault address is a CREATE2 prediction and the contract does not exist
+  // until the factory is called. Seal `buy`/`sell` without `deploy` and the key
+  // can reach a vault it has no way to create — and because a CALL to a codeless
+  // address SUCCEEDS with empty returndata, the first buy would approve USDG,
+  // no-op, and report `landed`. A ledger row for a purchase that bought nothing,
+  // repeated every tick.
+  //
+  // Refuse at signing time rather than hand back a grant that looks complete.
+  if (classVault && !classFactory) {
+    throw new Error(
+      "refusing to seal a class vault with no factory: the vault is a CREATE2 prediction and " +
+        "nothing could ever deploy it, so every class buy would silently no-op against an empty " +
+        "address. Pass ponsClassVaultFactoryAddress alongside ponsClassVaultAddress.",
+    );
   }
   const spenders = allowedSpenders(
     opts.allowRialto,
@@ -719,6 +755,28 @@ export function buildCallPermissions(
               null, // deadline
             ],
           } as const,
+          {
+            // CREATING THE VAULT, which nothing else in this wall can do.
+            //
+            // The address above is a CREATE2 prediction; the contract exists
+            // only once somebody calls this. Deployment is permissionless, so
+            // the key needs no privilege — only permission, and without it the
+            // first class buy CALLs a codeless address, succeeds with empty
+            // returndata, and books a purchase that bought nothing.
+            //
+            // `owner_` is pinned EQUAL to this account, which matters even
+            // though anyone may deploy anyone's vault. Left unpinned, a
+            // compromised session key could burn the account's gas creating
+            // vaults for strangers, repeatedly, inside the ops cap. Pinned, this
+            // permission can produce exactly ONE contract: the vault whose salt
+            // is this account, which is the address the wall already names as a
+            // target above. It cannot make a second one — CREATE2 collides.
+            target: classFactory!,
+            valueLimit: 0n,
+            abi: PONS_CLASS_VAULT_FACTORY_DEPLOY_ABI,
+            functionName: "deploy",
+            args: [self],
+          } as const,
         ]
       : []),
     {
@@ -870,6 +928,7 @@ export function buildWallPolicies(args: {
         // spender set. The mirror would allow it, the worker would build it, and
         // the chain would refuse it.
         ponsClassVaultAddress: args.ponsClassVaultAddress,
+        ponsClassVaultFactoryAddress: args.ponsClassVaultFactoryAddress,
       }) as never,
     }),
   ];

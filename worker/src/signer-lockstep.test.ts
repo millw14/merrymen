@@ -129,6 +129,53 @@ test("both signers mint the CLASS marker off the resolved vault, not the factory
   }
 });
 
+test("both signers seal the FACTORY alongside the vault", () => {
+  // The vault address is a CREATE2 prediction and the contract does not exist
+  // until the factory is called. A grant carrying the vault and not the factory
+  // is a key that can reach a contract it can never create — and because a CALL
+  // to a codeless address succeeds with empty returndata, its first class buy
+  // would approve USDG, no-op, and report a landed trade that bought nothing.
+  //
+  // buildWallPolicies throws on that combination, so this is the belt to its
+  // braces: it catches a signer that forwards the factory to the wall and then
+  // forgets to RECORD it, which throws nowhere and leaves the worker with a
+  // marker, a vault, and no way to create it.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    assert.match(
+      src,
+      /ponsClassVaultFactoryAddress:\s*(args\.)?ponsClassVaultFactory/,
+      `${name} must forward the factory into the wall`,
+    );
+    assert.match(
+      src,
+      /ponsClassVaultFactoryAddress:\s*(args\.)?ponsClassVaultFactory!?\.toLowerCase\(\)/,
+      `${name} must persist the sealed factory — the worker reads it to build the deploy call`,
+    );
+  }
+});
+
+test("the factory is recorded only WITH a vault, never on its own", () => {
+  // The pair is the unit. A recorded factory with no vault would be a grant
+  // claiming a class route whose target the wall never pinned — the mirror image
+  // of the case above, and equally a marker without evidence.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    assert.ok(
+      !/ponsClassVaultFactory\s*\?\s*\{\s*ponsClassVaultFactoryAddress/.test(src),
+      `${name} must not record the factory off its own presence`,
+    );
+    // Both fields live inside the SAME conditional spread, keyed on the vault.
+    const spread = /ponsClassVaultAddress\s*\?\s*\{([\s\S]{0,400}?)\}/.exec(src);
+    assert.ok(spread, `${name} must record both under one condition`);
+    assert.match(spread[1]!, /ponsClassVaultFactoryAddress/, `${name}: the factory must ride with the vault`);
+  }
+});
+
 test("a class route is never implied by another venue's opt-in", () => {
   // THREE venues, three decisions. Class is the one that most invites being
   // folded into Pons — it trades the same curves — and folding it in would give

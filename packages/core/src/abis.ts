@@ -232,6 +232,40 @@ export const PONS_CLASS_VAULT_ABI = [
   },
 ] as const;
 
+/**
+ * PonsClassVaultFactory.deploy — the one call that CREATES a class vault.
+ *
+ * WHY THE WALL NEEDS THIS AT ALL. A vault address is a CREATE2 prediction; the
+ * contract does not exist until somebody calls this. Deployment is permissionless
+ * (anyone may pay to create anyone's vault), so the session key needs no
+ * privilege — only PERMISSION, which is a different thing and the wall's entire
+ * business.
+ *
+ * Leaving it ungranted is not the safe option, and the reason is EVM semantics
+ * rather than policy: a CALL to an address with no code SUCCEEDS with empty
+ * returndata. So a class buy against an undeployed vault would not revert — the
+ * USDG approve would land, the `buy` would no-op, and the trade would report
+ * `landed`. A ledger row for a purchase that bought nothing.
+ *
+ * Kept in this file rather than beside `vaultFor` in classvault.ts: one constant
+ * imported by BOTH the wall (which derives the pinned selector) and the worker
+ * (which encodes the call), so the selector the policy matches and the selector
+ * the call carries cannot drift. That drift is the failure the note above
+ * PONS_CLASS_VAULT_ABI describes for the uint128/uint256 width.
+ *
+ * All-static, one address word, so the call policy's positional offsets and the
+ * ABI agree by construction — see the note on PONS_SELFTRADE_ABI.
+ */
+export const PONS_CLASS_VAULT_FACTORY_DEPLOY_ABI = [
+  {
+    type: "function",
+    name: "deploy",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "owner_", type: "address" }],
+    outputs: [{ name: "vault", type: "address" }],
+  },
+] as const;
+
 export const PONS_SELFTRADE_ABI = [
   {
     type: "function",

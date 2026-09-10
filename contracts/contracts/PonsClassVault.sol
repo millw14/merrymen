@@ -22,10 +22,28 @@ import {IPonsCurve, IERC20Trade} from "./interfaces/IPonsCurve.sol";
  * `transferFrom`, so selling token X requires the account to have called
  * `X.approve(adapter, amount)` first. That call's `target` IS token X — a
  * literal address — and a Kernel CallPolicy permission is keyed by
- * (target, selector). There is no wildcard target, so a permission to approve a
- * token nobody has heard of yet cannot be written. The consequence is the one
- * outcome no cap protects against: an agent that can BUY a position it can
- * never EXIT.
+ * (target, selector). The consequence is the one outcome no cap protects
+ * against: an agent that can BUY a position it can never EXIT.
+ *
+ * A CORRECTION, because this comment used to claim more than is true. It said
+ * "there is no wildcard target, so a permission to approve a token nobody has
+ * heard of yet cannot be written". That is not established. The zerodev
+ * permissions package (5.6.3) documents, in constants.ts, that
+ * CALL_POLICY_CONTRACT_V0_0_2 onward "Added `zeroAddress` target address
+ * support, which means you can approve any contracts with specific selector.
+ * (e.g. approve any ERC20 transfer)" — and the wall pins V0_0_4. The claim rests
+ * on one changelog line: no SDK code path, type or test exercises it, and the
+ * policy contract's source is not published. So it is DOCUMENTED BUT
+ * UNEXERCISED, which is neither "supported" nor "absent".
+ *
+ * This contract is still the right answer, for a different and weaker reason
+ * than the one originally given. A zeroAddress-target approve, paired with the
+ * unpinned adapter leg it would need to be useful, lets a compromised session
+ * key approve EVERY token the account holds — airdrops and transfers-in
+ * included — and sell each into any curve it names. This vault's exposure is one
+ * capped USDG approve per trade, the account's own token balances are never in
+ * scope, and it rests on bytecode in this repository rather than on a sentence
+ * in a dependency's changelog. Narrower, and checkable.
  *
  * THE FIX IS TO MOVE WHERE THE TOKEN LIVES. If the class token is never held by
  * the account, the account never needs to approve it. This vault holds it, and

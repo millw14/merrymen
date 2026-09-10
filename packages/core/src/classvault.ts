@@ -22,8 +22,18 @@ import { isAddress, type Address } from "viem";
  */
 
 /**
- * `vaultFor` alone. The factory also has `deploy`, deliberately not here: this
- * module is what a SIGNER uses, and a signer never deploys anything.
+ * `vaultFor` alone, and `deploy` deliberately elsewhere.
+ *
+ * This used to say "a signer never deploys anything", which was true of the
+ * signer and became the wrong reason to keep the selector out of this file. The
+ * WALL needs `deploy` to pin it as a permission and the WORKER needs it to
+ * encode the call, so it lives in abis.ts with every other wall ABI — one
+ * constant, both readers, no chance of the pinned selector and the encoded
+ * selector disagreeing.
+ *
+ * What stays true is the split this file is for: `vaultFor` is a read a signer
+ * makes, `deploy` is a write a session key makes, and they are used at different
+ * moments by different code.
  */
 export const PONS_CLASS_VAULT_FACTORY_ABI = [
   {

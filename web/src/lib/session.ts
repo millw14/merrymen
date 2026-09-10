@@ -391,6 +391,10 @@ async function mintGrant(
     v4AdapterAddress,
     ponsAdapterAddress,
     ponsClassVaultAddress,
+    // The factory rides with the vault. buildWallPolicies THROWS on a vault
+    // without one — two of three class permissions is a key that can reach a
+    // vault it can never create.
+    ponsClassVaultFactoryAddress: ponsClassVaultFactory,
   });
 
   const permissionValidator = await toPermissionValidator(publicClient, {
@@ -480,7 +484,10 @@ async function mintGrant(
     ...(v4AdapterAddress ? { v4AdapterAddress: v4AdapterAddress.toLowerCase() } : {}),
     ...(ponsAdapterAddress ? { ponsAdapterAddress: ponsAdapterAddress.toLowerCase() } : {}),
     ...(ponsClassVaultAddress
-      ? { ponsClassVaultAddress: ponsClassVaultAddress.toLowerCase() }
+      ? {
+          ponsClassVaultAddress: ponsClassVaultAddress.toLowerCase(),
+          ponsClassVaultFactoryAddress: ponsClassVaultFactory!.toLowerCase(),
+        }
       : {}),
     // What this signature ACTUALLY covers — the worker compares it against the
     // owner's configured tokens and says so when they've drifted apart.
