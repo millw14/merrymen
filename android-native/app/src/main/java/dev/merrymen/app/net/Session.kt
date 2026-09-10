@@ -39,7 +39,22 @@ class Session(private val context: Context) {
     val GATE = stringPreferencesKey("gate")
     val TENANT = stringPreferencesKey("tenant")
     val WATCHLIST = stringSetPreferencesKey("watchlist")
+    val WELCOMED = androidx.datastore.preferences.core.booleanPreferencesKey("welcomed")
   }
+
+  /**
+   * Whether the welcome page has been past ONCE on this device.
+   *
+   * A startup page, not a wall: it shows on a cold start until the reader signs
+   * in or chooses to go on as a guest, then never again. The gate is already the
+   * one thing that stops you at the door; this is an introduction, so it must
+   * not become a second gate. Signing in also sets it (the reader has plainly
+   * seen it), and it is device-local like the watchlist — nothing about a first
+   * visit belongs in anyone's ledger.
+   */
+  val welcomed: Flow<Boolean> = context.sessionStore.data.map { it[Keys.WELCOMED] == true }
+  suspend fun welcomedNow(): Boolean = welcomed.first()
+  suspend fun setWelcomed() = context.sessionStore.edit { it[Keys.WELCOMED] = true }
 
   val origin: Flow<String> = context.sessionStore.data.map { it[Keys.ORIGIN] ?: defaultOrigin }
   val tenant: Flow<String?> = context.sessionStore.data.map { it[Keys.TENANT] }

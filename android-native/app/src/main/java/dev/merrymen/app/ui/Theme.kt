@@ -69,6 +69,16 @@ object MerryColors {
    */
   val up = Color(0xFF3DD68C)
   val down = Color(0xFFFF5C71)
+
+  /**
+   * `#4AD696` — the ONBOARDING mint.
+   *
+   * The brand green of the welcome page and the colour the dithered stock marks
+   * are drawn in (they ship with it baked into their path fill). Deliberately
+   * kept distinct from [up]: [up] means money moved and may appear on a figure,
+   * where this is a marketing accent that never sits on a number.
+   */
+  val mint = Color(0xFF4AD696)
 }
 
 /** Kept at these names because the screens already read them. */

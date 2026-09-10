@@ -19,7 +19,9 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
@@ -50,6 +52,7 @@ import dev.merrymen.app.ui.screens.TradeScreen
 import dev.merrymen.app.ui.screens.SearchScreen
 import dev.merrymen.app.ui.screens.SettingsScreen
 import dev.merrymen.app.ui.screens.SignInScreen
+import dev.merrymen.app.ui.screens.WelcomeScreen
 import dev.merrymen.app.ui.screens.TelegramScreen
 import dev.merrymen.app.ui.screens.TokenDetailScreen
 import dev.merrymen.app.ui.screens.WebFlowScreen
@@ -81,6 +84,7 @@ object Routes {
   const val CIRCLE = "circle"
   const val LEADERBOARD = "leaderboard"
   const val SIGN_IN = "sign-in"
+  const val WELCOME = "welcome"
   const val PROPOSALS = "proposals"
   const val TRADE = "trade"
   const val RISK = "risk"
@@ -112,9 +116,20 @@ fun Shell() {
   val nav = rememberNavController()
   val container = LocalContainer.current
 
-  // The door first, then identity. While the site gate is on, every other route
-  // answers 401 regardless of the session — see Repository.bootstrap.
-  LaunchedEffect(Unit) { container.repo.bootstrap() }
+  // WHICH SCREEN OPENS is decided before the NavHost composes, so the reader
+  // never sees Home flash behind the welcome page. Null means "not decided yet"
+  // and holds the graph back; the Box's own background covers that instant.
+  var start by remember { mutableStateOf<String?>(null) }
+  LaunchedEffect(Unit) {
+    val welcomed = container.session.welcomedNow()
+    // The door first, then identity. While the site gate is on, every other
+    // route answers 401 regardless of the session — see Repository.bootstrap.
+    container.repo.bootstrap()
+    val signed = container.repo.signedIn.value != null
+    // A signed-in reader has plainly been past the welcome before; only a fresh
+    // install that has neither been welcomed nor signed in starts at the page.
+    start = if (welcomed || signed) Routes.HOME else Routes.WELCOME
+  }
 
   val entry by nav.currentBackStackEntryAsState()
   val current = entry?.destination?.route
@@ -145,8 +160,17 @@ fun Shell() {
       // starts below the system UI; here the window is edge-to-edge, so without
       // this the page title renders behind the clock. Dropping the Scaffold is
       // what removed it — the Scaffold had been applying the inset invisibly.
-      Box(Modifier.fillMaxSize().statusBarsPadding()) {
-        NavHost(navController = nav, startDestination = Routes.HOME) { graph(nav) }
+      // The welcome page is EDGE-TO-EDGE art and owns its own insets, so it does
+      // not get the status-bar padding every other screen needs to keep its
+      // title out from behind the clock. Applying both would inset its top
+      // twice.
+      val edgeToEdge = current == Routes.WELCOME
+      Box(Modifier.fillMaxSize().then(if (edgeToEdge) Modifier else Modifier.statusBarsPadding())) {
+        // Held back until the start screen is decided, so Home never flashes
+        // behind the welcome page; the Box's own background covers that instant.
+        start?.let { s ->
+          NavHost(navController = nav, startDestination = s) { graph(nav) }
+        }
       }
     }
     if (onTab) {
@@ -262,6 +286,7 @@ private fun NavGraphBuilder.graph(nav: NavHostController) {
   composable(Routes.CIRCLE) { CircleScreen(nav) }
   composable(Routes.LEADERBOARD) { LeaderboardScreen(nav) }
   composable(Routes.SIGN_IN) { SignInScreen(nav) }
+  composable(Routes.WELCOME) { WelcomeScreen(nav) }
   composable(Routes.PROPOSALS) { ProposalsScreen(nav) }
   composable(Routes.TRADE) { TradeScreen(nav) }
   composable(Routes.RISK) { RiskScreen(nav) }
