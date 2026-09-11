@@ -69,7 +69,11 @@ describe("a fresh child gets its link back", () => {
   it("writes nothing when there is no recipient to restore", () => {
     // An empty file is worse than no file: it looks linked to every later
     // reader and would mask a genuine publish.
-    assert.match(FN, /if \(!tg\?\.ownerId\) return;/);
+    //
+    // Tested on the RECOVERED id rather than the mirror's, because the mirror
+    // turned out to be empty fleet-wide and the allowlist fallback is what
+    // actually produces a recipient.
+    assert.match(FN, /if \(!ownerId\) return;/);
   });
 
   it("cannot take the fleet down if the shared record is unreadable", () => {
@@ -83,6 +87,46 @@ describe("a fresh child gets its link back", () => {
   it("says so when it does restore one", () => {
     // Silent repair of a silent breakage leaves nobody able to confirm it
     // worked — which is how the original defect survived.
-    assert.match(FN, /telegram link restored from the shared record/);
+    assert.match(FN, /telegram link restored/);
+  });
+});
+
+describe("recovering a link the mirror never held", () => {
+  const FN = ORCH.slice(
+    ORCH.indexOf("async function writeTelegramForChild"),
+    ORCH.indexOf("async function publishChildTelegram"),
+  );
+
+  it("falls back to the sealed allowlist when the mirror is empty", () => {
+    // Measured on the fleet: 4 tenants hold a bot token, 2 completed a link,
+    // and 0 had a live owner_id. `tenant_telegram` is only written while a
+    // child HAS the file this function exists to restore, so the redeploy that
+    // destroys the file also stops the mirror being refreshed. The allowlist is
+    // in the sealed settings and survives.
+    assert.match(FN, /telegramAllowlist/);
+    assert.match(FN, /telegram owner recovered from the stored allowlist/);
+  });
+
+  it("only ever recovers a DM, never a group", () => {
+    // Telegram gives users positive ids and groups negative ones. Restoring a
+    // group as the owner would start sending an agent's private trade reports
+    // and P&L into a room full of people.
+    assert.match(FN, /typeof c === "number" && c > 0/);
+    assert.match(FN, /sort\(\(a, b\) => a - b\)\[0\]/, "the earliest linker, which is who /link made the owner");
+  });
+
+  it("does NOT recover the link code, which rotates", () => {
+    // A stale code is worse than none: it looks usable and is not. The child
+    // mints a fresh one and the dashboard shows it.
+    assert.match(FN, /linkCode: tg\?\.linkCode \?\? ""/);
+  });
+
+  it("says when the recovery was a heuristic rather than a read", () => {
+    // It recovers a recipient rather than reading one, so it must be
+    // distinguishable in the log from a straight restore.
+    assert.ok(
+      FN.includes("recovered from the stored allowlist") && FN.includes("telegram link restored"),
+      "the two paths must log differently",
+    );
   });
 });

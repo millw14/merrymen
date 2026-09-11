@@ -493,16 +493,48 @@ async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db): Promis
   if (!url && !shared) return;
   try {
     const tg = await readTenantTelegram(shared ?? (await makePgDb(url!)), tenant);
-    // No row is "never linked"; a row with no ownerId is "linked once, then
-    // unlinked". Neither is worth writing a file for — there is no recipient to
-    // restore, and an empty file would only mask a later genuine publish.
-    if (!tg?.ownerId) return;
+    let ownerId = tg?.ownerId ?? null;
+
+    // THE MIRROR IS USUALLY EMPTY TOO, so fall back to the allowlist.
+    //
+    // `tenant_telegram.owner_id` is only ever written while a child HAS a
+    // telegram.json — and the file is destroyed by the same redeploy that this
+    // function exists to repair. Measured on the fleet: 4 tenants hold a bot
+    // token, 2 completed a link, and 0 had a live owner_id. The mirror had
+    // nothing to give back.
+    //
+    // `telegramAllowlist` is in the SEALED SETTINGS and survives. It is
+    // populated by `publishChildTelegram` promoting every chat that ran /link,
+    // so a positive id in it is a person who explicitly linked their own DM —
+    // Telegram gives users positive ids and groups negative ones, and restoring
+    // a group as the owner would start sending an agent's private reports to a
+    // room. The lowest positive id is the earliest linker, which is the same
+    // chat `/link` would have made the owner.
+    //
+    // A heuristic, and logged as one, because it recovers a recipient rather
+    // than reading one.
+    if (!ownerId) {
+      const stored = await getSettingsStore().get(tenant);
+      const list = Array.isArray(stored?.telegramAllowlist) ? stored.telegramAllowlist : [];
+      const dm = list.filter((c) => typeof c === "number" && c > 0).sort((a, b) => a - b)[0];
+      if (dm !== undefined) {
+        ownerId = dm;
+        log(`${tenant}: telegram owner recovered from the stored allowlist — no mirrored link survived`);
+      }
+    }
+    // Nothing to restore is the ordinary state of a tenant who never linked.
+    // An empty file would only mask a later genuine publish.
+    if (!ownerId) return;
     mkdirSync(childHome(tenant), { recursive: true });
     writeFileSync(
       file,
-      JSON.stringify({ linkCode: tg.linkCode ?? "", ownerId: tg.ownerId, linkedAt: tg.linkedAt ?? 0 }, null, 2),
+      // `ownerId` is the recovered one, which may have come from the allowlist
+      // rather than the mirror. The link CODE is not recovered — it rotates on
+      // every link and a stale one would be worse than none, so the child mints
+      // a fresh code and the dashboard shows it.
+      JSON.stringify({ linkCode: tg?.linkCode ?? "", ownerId, linkedAt: tg?.linkedAt ?? 0 }, null, 2),
     );
-    log(`${tenant}: telegram link restored from the shared record — the owner keeps receiving alerts`);
+    log(`${tenant}: telegram link restored — the owner keeps receiving alerts`);
   } catch (e) {
     // Never fatal. A child with no telegram link still trades; it just cannot
     // tell anyone about it, which is the status quo this repairs.
