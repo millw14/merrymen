@@ -26,6 +26,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # changelog step needs tag history to diff against
 
       - uses: actions/setup-node@v4
         with:
@@ -90,6 +92,31 @@ jobs:
       # (in-app toggle → allowPrerelease) are offered them.
       # Titles follow the maintainer style ("Desktop 0.1.7"), derived from
       # the tag instead of echoing it raw.
+      # Changelog: desktop-scoped commit subjects since the previous desktop-*
+      # tag, so every release note lists what actually changed. Unscoped the
+      # range drowns in unrelated mainline history (600+ commits); the desktop
+      # release only names what it ships. A commit appears if it touches any
+      # of these paths — so a change spanning cli/ + desktop/ still shows.
+      # First tag (or a rebuild with no new commits) falls back to an explicit
+      # line, never blank-mysterious.
+      - name: Build changelog
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          REF="${{ github.ref }}"
+          PREV="$(git tag --list 'desktop-*' --sort=-creatordate | grep -v "${REF#refs/tags/}" | head -n 1)"
+          SCOPE="desktop .github/workflows/desktop-release.yml .github/workflows/desktop-dev.yml"
+          {
+            echo "PREV_TAG=$PREV"
+            echo "CHANGELOG<<EOF"
+            if [ -n "$PREV" ] && [ -n "$(git log --oneline "$PREV..HEAD" -- $SCOPE 2>/dev/null)" ]; then
+              git log --format='- %s (%h)' "$PREV..HEAD" -- $SCOPE
+            else
+              echo "(rebuild — no desktop changes since ${PREV:-the beginning})"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
       - name: Set channel (stable vs beta)
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
@@ -119,6 +146,9 @@ jobs:
             **merrymen desktop** — the one-click app. Double-click to install; no terminal, no Node.
 
             ${{ env.CHANNEL_LINE }}
+
+            ### What's changed
+            ${{ env.CHANGELOG }}
 
             - **Linux:** download the `.AppImage`, make it executable (`chmod +x`), and run it.
               It needs FUSE to mount — Ubuntu 22.04+: `sudo apt install libfuse2`;
