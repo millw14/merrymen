@@ -4356,19 +4356,40 @@ async function main() {
     // moment the first class buy lands.
     const sealedVault = grantPonsClassVault(grant);
     if (sealedVault) {
-      const vaultCode = await client.getCode({ address: sealedVault }).catch(() => undefined);
+      // The same split as the dispatch, for the same reason: viem returns
+      // `undefined` for an address with no code, so folding a thrown read into
+      // `undefined` makes an absent vault — the ORDINARY state of every grant
+      // that has not class-traded yet — indistinguishable from a failed one.
+      // Here it only mis-worded a warning, but it also made the branch below
+      // unreachable, and that branch is the one that catches a vault nothing
+      // can ever create.
+      let vaultCode: string | undefined;
+      let vaultUnread = false;
+      try {
+        vaultCode = await client.getCode({ address: sealedVault });
+      } catch {
+        vaultUnread = true;
+      }
       const sealedFactory = grantPonsClassVaultFactory(grant);
-      const factoryCode = sealedFactory
-        ? await client.getCode({ address: sealedFactory }).catch(() => undefined)
-        : undefined;
-      if (vaultCode === undefined) {
+      let factoryCode: string | undefined;
+      let factoryUnread = false;
+      if (sealedFactory) {
+        try {
+          factoryCode = await client.getCode({ address: sealedFactory });
+        } catch {
+          factoryUnread = true;
+        }
+      }
+      const noVaultCode = vaultCode === undefined || vaultCode === "0x";
+      const noFactoryCode = factoryCode === undefined || factoryCode === "0x";
+      if (vaultUnread) {
         await addEvent(
           agentId,
           "warn",
           `could not read your class vault at ${short(sealedVault)} on chain ${chain.id}. That is not ` +
             `the same as it being absent — class trades will retry each tick.`,
         );
-      } else if (vaultCode === "0x" && (!sealedFactory || factoryCode === "0x")) {
+      } else if (noVaultCode && (!sealedFactory || (!factoryUnread && noFactoryCode))) {
         // THE REAL SIBLING of the adapter warning: an uncreated vault AND a
         // factory that cannot create it means the vault can never exist. Left
         // alone, a class buy would CALL a codeless address, succeed with empty
@@ -4381,7 +4402,7 @@ async function main() {
             `grant sealed ${sealedFactory ? `(${short(sealedFactory)}) has no code` : "is missing"} ` +
             `on chain ${chain.id}. The class route cannot work — deploy the factory and re-sign.`,
         );
-      } else if (vaultCode === "0x") {
+      } else if (noVaultCode) {
         // Ordinary, and said as ordinary: "ok", not "warn". Every class-enabled
         // grant starts here.
         await addEvent(
@@ -5923,10 +5944,28 @@ async function main() {
         // must never read as "no": a CALL to a codeless address SUCCEEDS with
         // empty returndata, so a buy against an undeployed vault would approve
         // the USDG, no-op, and report a landed trade that bought nothing.
-        const vaultCode = await active.client
-          .getCode({ address: vault })
-          .catch(() => undefined);
-        if (vaultCode === undefined) {
+        //
+        // AND THE FAILURE IS THE CATCH, NOT THE VALUE. viem's `getCode` returns
+        // `undefined` for an address with no code — it maps "0x" to undefined
+        // before we ever see it. So `.catch(() => undefined)` collapsed the two
+        // answers this branch exists to tell apart, and an absent vault read as
+        // an unreadable one.
+        //
+        // That deadlocked the entire route. A vault is created by the first
+        // class buy and by nothing else, so "refuse until the vault exists"
+        // means refuse for ever: every tick produced a valid leg, proposed it,
+        // and turned it back with `class-vault-unreadable` against an address
+        // that was answering perfectly well and saying "nothing here yet".
+        //
+        // The safety property is unchanged and is why the try/catch is split
+        // out rather than the test loosened: a genuine RPC failure still
+        // refuses and still sends nothing, because a buy against a vault that
+        // MIGHT not exist books a purchase that bought nothing. What changes is
+        // that a clear answer of "no code" is now heard as the answer it is.
+        let vaultCode: string | undefined;
+        try {
+          vaultCode = await active.client.getCode({ address: vault });
+        } catch {
           await refuse(
             "class-vault-unreadable",
             `could not read the class vault at ${short(vault)} on chain ${active.grant.chainId}. ` +
@@ -5936,7 +5975,10 @@ async function main() {
           releaseBudget();
           return;
         }
-        const deployed = vaultCode !== "0x";
+        // Both spellings of "no code": viem hands back undefined, but a
+        // transport or version that passes "0x" through must not read as
+        // deployed — that is the codeless-CALL trap, and it fails silently.
+        const deployed = vaultCode !== undefined && vaultCode !== "0x";
 
         if (!deployed && !isBuy) {
           // Different fix from the buy case, so a different rule: there is
