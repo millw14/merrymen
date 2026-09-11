@@ -1725,20 +1725,34 @@ export async function recentTradeTxHashes(agentId: string, limit = 2000): Promis
 export async function getGasPaidUsdg(
   agentId: string,
   epoch?: number,
-): Promise<{ usdg: number; unpricedTrades: number }> {
+): Promise<{ usdg: number; unpricedTrades: number; landedTrades: number; read: boolean }> {
   try {
     const where = epoch === undefined ? "" : " AND epoch = ?";
     const params = epoch === undefined ? [agentId] : [agentId, epoch];
     const row = await getDb()
       .prepare(
         `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
+                COUNT(*) AS landed,
                 SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
            FROM trades WHERE agent_id = ? AND status = 'landed'${where}`,
       )
-      .get(...params) as { usdg: number; unpriced: number | null } | undefined;
-    return { usdg: row?.usdg ?? 0, unpricedTrades: row?.unpriced ?? 0 };
+      .get(...params) as { usdg: number; landed: number | null; unpriced: number | null } | undefined;
+    return {
+      usdg: row?.usdg ?? 0,
+      unpricedTrades: row?.unpriced ?? 0,
+      landedTrades: row?.landed ?? 0,
+      read: true,
+    };
   } catch {
-    return { usdg: 0, unpricedTrades: 0 }; // pre-migration ledger
+    // A PRE-MIGRATION LEDGER IS NOT A BOOK THAT PAID NO GAS.
+    //
+    // This used to return `{ usdg: 0, unpricedTrades: 0 }` — byte for byte what
+    // a sponsored agent with a dozen landed trades returns — so every consumer
+    // that asked "was gas subtracted" got the same answer from a measurement and
+    // from a failure. `read: false` is the only thing that can separate them,
+    // and it has to come from here: inferring it downstream from the numbers is
+    // the bug in a new place. See packages/core/src/gas-basis.ts.
+    return { usdg: 0, unpricedTrades: 0, landedTrades: 0, read: false };
   }
 }
 

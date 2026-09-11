@@ -59,6 +59,7 @@ import {
   grantPonsClassVault,
   grantPonsClassVaultFactory,
   grantHasV4,
+  gasBasisOf,
   tokenCoverage,
   uncoveredBasketSymbols,
   type CircleTier,
@@ -7000,8 +7001,10 @@ async function main() {
       await setAgentQuality(agentId, {
         contributionsKnown: accounting.contributionsKnown,
         why: accounting.why,
-        gasAccounting:
-          gasCov.unpricedTrades > 0 ? "gross" : gasCov.usdg > 0 ? "net" : "unknown",
+        // ONE RULE, IN CORE. This read `usdg > 0 ? "net" : "unknown"` here and
+        // in two other places, and all three took a sponsored agent's genuine
+        // zero for an absence. See packages/core/src/gas-basis.ts.
+        gasAccounting: gasBasisOf(gasCov),
       });
       const feeBpsThisTick = accounting.contributionsKnown ? effFeeBps : 0;
       if (!accounting.contributionsKnown && effFeeBps > 0 && !feeSuppressionLogged) {
@@ -7389,7 +7392,20 @@ async function main() {
             // as `never` meant core could add, rename or remove a field and
             // nothing here would fail to compile.
             quality: {
-              auditPassed: false,
+              // NOT RUN, SAID AS "NOT RUN". This was the literal `false`, which
+              // told every consumer the audit had been performed and had failed.
+              // It supplied one of the two automatic caveats that left the whole
+              // fleet a single real problem away from a forced hold — on a
+              // statement that was never true of any agent.
+              //
+              // It stays null here rather than becoming a real verdict, because
+              // the real verdict is expensive and the cheap version would lie:
+              // `reconcile(reconstruct(await readJournal(...)))` replays the
+              // epoch's entire journal per agent per tick, and `readJournal`
+              // returns `[]` on failure — so a bad read would reconstruct an
+              // empty book and pass. A caveat that says "nobody has checked" is
+              // the honest output of a tick that has not checked.
+              auditPassed: null,
               epoch: epochNow,
               // THE PROPERTY, ASKED DIRECTLY, replacing the `epoch >= 2` proxy.
               // Null when the ledger could not be read, and core refuses on
@@ -7397,7 +7413,7 @@ async function main() {
               currentAccountingHistoryAuditable: historyAuditable,
               contributionsKnown: accounting.contributionsKnown,
               equityComplete: !bookIncomplete,
-              gasBasis: gasNow.unpricedTrades > 0 ? "gross" : gasNow.usdg > 0 ? "net" : "unknown",
+              gasBasis: gasBasisOf(gasNow),
               // ASKED, NOT ASSUMED. This was hardcoded `false`, which is not a
               // cautious default — it is a claim that there is no position
               // history, made without looking.

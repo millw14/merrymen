@@ -50,8 +50,36 @@ export const microToString = (m: MicroUsdg): string => {
  * cannot be persuaded.
  */
 export interface PortfolioQuality {
-  /** The ledger recomputed from fills/flows/marks and matched. */
-  auditPassed: boolean;
+  /**
+   * The ledger recomputed from fills/flows/marks and matched — TRI-STATE.
+   *
+   *   true    the audit RAN and every check passed
+   *   false   the audit RAN and found a problem
+   *   null    the audit has not run, or could not be evaluated
+   *
+   * It was `boolean`, and the worker's only producer was the literal `false`.
+   * That is not a cautious default: it is the claim "we audited this book and it
+   * failed", made without auditing anything. The identical mistake is recorded
+   * four lines below on `positionHistoryAvailable` — "not a cautious default, it
+   * is a claim that there is no position history, made without looking" — which
+   * was fixed while this one was not.
+   *
+   * NULL IS NOT A FREE PASS. A book nobody has checked is still a book nobody
+   * has checked, and `gate.py` keeps a caveat for it. What changes is the words:
+   * "not run" and "failed" send an operator to two different places, exactly as
+   * `currentAccountingHistoryAuditable` below already distinguishes "we found
+   * rows we cannot vouch for" from "we could not look". That field is the
+   * precedent; this one now follows it.
+   *
+   * WHY THE TICK CANNOT PRODUCE true. `reconcile()` needs `reconstruct()` over
+   * `readJournal()`, which is an unbounded SELECT over the epoch's whole journal
+   * replayed in full — per agent, per tick. And `readJournal` swallows its own
+   * failure and returns `[]`, so a failed read would reconstruct an EMPTY book
+   * and the audit would "pass" on nothing. Running it on the tick would
+   * manufacture the false `true` this field exists to avoid. A real verdict
+   * comes from an audit that actually ran, recorded where the tick can read it.
+   */
+  auditPassed: boolean | null;
   /**
    * Accounting epoch. A ROW-SCOPING KEY, and nothing more.
    *

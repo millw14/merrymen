@@ -59,12 +59,36 @@ describe("the flag is measured, not asserted", () => {
     assert.match(fn.slice(0, fn.indexOf("\n}")), /catch \{\s*return false;\s*\}/);
   });
 
-  it("the OTHER two caveats are untouched, because both are true", () => {
-    // No reconciliation has been run, and a book that has paid no gas genuinely
-    // cannot state a net-of-gas figure. The fix was to stop fabricating a third
-    // failure, not to talk the gate out of the two real ones.
-    assert.match(INDEX, /auditPassed: false/);
-    assert.match(INDEX, /gasBasis: gasNow\.unpricedTrades > 0 \? "gross" : gasNow\.usdg > 0 \? "net" : "unknown"/);
+  it("the other two caveats are now ENCODED honestly — one real, one that never was", () => {
+    // THIS TEST USED TO ASSERT THE OPPOSITE, and the reason is worth keeping.
+    //
+    // It read: "No reconciliation has been run, and a book that has paid no gas
+    // genuinely cannot state a net-of-gas figure. The fix was to stop
+    // fabricating a third failure, not to talk the gate out of the two real
+    // ones." The first clause was right. The second was wrong, and looking
+    // again at WHY the fleet still never traded is what found it.
+    //
+    // An audit that has not run is real — but `false` does not say that. It
+    // says the ledger was recomputed and did not match, which was a claim made
+    // about every agent without recomputing anything. Null says the true thing,
+    // and gate.py still charges a caveat for it.
+    //
+    // The gas caveat was not real at all. Gas here is SPONSORED: the paymaster
+    // settles with the EntryPoint and the account never handles ETH, so its
+    // trading gas costs the owner exactly zero — and zero subtracted is
+    // subtracted correctly. "Performance is unknown-of-gas, trading costs are
+    // not subtracted" was false of every sponsored book in the fleet.
+    //
+    // So the margin was never two honest caveats. It was one honest caveat and
+    // one mis-encoding, and the fleet sat one real problem from a forced hold.
+    // The threshold is untouched; a caveat now has to be earned.
+    assert.ok(!/auditPassed: false/.test(INDEX), "the hardcoded false is a claim, not a default");
+    assert.match(INDEX, /auditPassed: null/);
+    assert.match(INDEX, /gasBasis: gasBasisOf\(gasNow\)/);
+    assert.ok(
+      !/gasNow\.usdg > 0 \? "net"/.test(INDEX),
+      "deriving basis from whether the number is non-zero is the bug; it must key on whether it was READ",
+    );
   });
 });
 
@@ -91,18 +115,23 @@ describe("the arithmetic this feeds", () => {
     }
   });
 
-  it("A CLEAN NEW BOOK NOW CLEARS THE THRESHOLD, with two honest caveats", () => {
-    // The whole point, as arithmetic. equity complete, nothing quarantined,
-    // position history vacuously present; audit not run and gas basis unknown.
+  it("A CLEAN SPONSORED BOOK NOW CLEARS THE THRESHOLD WITH ROOM, on one honest caveat", () => {
+    // The whole point, as arithmetic — and the count is now 1, not 2, because
+    // the gas caveat was never true of a sponsored book. See the correction
+    // above. The threshold did not move; the inputs stopped lying.
     const caveats = [
       false, // equity has gaps
-      true, //  audit has not run        — real
-      true, //  gas basis is not "net"   — real
+      true, //  audit has not run        — real, and now SAID as "not run"
+      false, // gas basis is not "net"   — was a mis-encoded measured zero
       false, // quarantined assets
-      false, // no position history      — was fabricated, now measured
+      false, // no position history      — fabricated once, now measured
     ].filter(Boolean).length;
-    assert.equal(caveats, 2);
-    assert.ok(caveats < 3, "a book with two honest caveats must be tradeable");
+    assert.equal(caveats, 1);
+    assert.ok(caveats < 3, "a clean sponsored book must be tradeable");
+    // TWO REAL PROBLEMS ARE STILL SURVIVABLE, THREE ARE STILL NOT. This is the
+    // margin the correction bought: two, where it used to be one.
+    assert.ok(caveats + 1 < 3, "one more real problem must still leave it sizeable");
+    assert.ok(caveats + 2 >= 3, "two more real problems must still force a hold");
   });
 
   it("and a book that really cannot explain its holdings is still held", () => {

@@ -139,8 +139,24 @@ def assess(portfolio: PortfolioState) -> GateResult:
     # ── DOWNGRADE: a book that can be read but not measured ─────────────────
     if not q.equity_complete:
         caveats.append("the equity series has gaps, so drawdown and trend are not reliable")
-    if not q.audit_passed:
-        caveats.append("the ledger has not passed an audit; treat position values as approximate")
+    # NOT RUN AND FAILED ARE ONE CAVEAT EACH, AND DIFFERENT WORDS.
+    #
+    # Both are a reason to treat position values as approximate, so neither is a
+    # free pass and the count is unchanged. But they send a reader to different
+    # places: "nobody has checked this" is a job to schedule, "the check
+    # disagreed with the book" is a defect to investigate. Collapsing them is
+    # what let a fleet-wide `False` masquerade as a finding for months.
+    if q.audit_passed is None:
+        caveats.append(
+            "no audit has been run on this ledger, so position values are unverified — "
+            "this is an absence of evidence, not a disagreement"
+        )
+    elif not q.audit_passed:
+        caveats.append("the ledger did not pass its audit; treat position values as approximate")
+    # A MEASURED ZERO IS NET. Sponsored gas costs this book nothing, and a figure
+    # with nothing to subtract is exactly as net-of-gas as one with a large
+    # subtraction — so `unknown` now means only that the ledger could not be
+    # read. See packages/core/src/gas-basis.ts for the producer's side.
     if q.gas_basis != "net":
         caveats.append(
             f"performance is {q.gas_basis}-of-gas — trading costs are not subtracted, so small "

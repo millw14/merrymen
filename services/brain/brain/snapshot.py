@@ -56,7 +56,14 @@ def from_canonical(payload: dict[str, Any]) -> PortfolioState:
 
     q = _require(payload, "quality")
     quality = PortfolioQuality(
-        audit_passed=bool(q.get("auditPassed", False)),
+        # CARRIED, NEVER COERCED — the rule the comment below already states,
+        # applied to the field one line above it. `bool(None)` is False, and
+        # False here means "an audit ran and found a problem" while None means
+        # "no audit has run". This read `bool(q.get("auditPassed", False))`, so
+        # both a missing key and an honest null arrived as a failed audit.
+        audit_passed=(
+            None if q.get("auditPassed") is None else bool(q.get("auditPassed"))
+        ),
         epoch=int(q.get("epoch", 1)),
         # CARRIED, NEVER COERCED. `bool(None)` is False, and False here means
         # "we found legacy rows" while None means "we could not look" — both

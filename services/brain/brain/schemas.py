@@ -312,7 +312,20 @@ class PortfolioQuality(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    audit_passed: bool = False
+    #: DID AN AUDIT RUN, AND DID IT PASS? True / False / None, where None means
+    #: no audit has run — which is not the same claim as one that ran and failed.
+    #:
+    #: It was `bool = False`, and the worker's only producer was the literal
+    #: `False`. Between them they asserted, of every agent in the fleet, that its
+    #: ledger had been recomputed and had not matched. Nothing had been
+    #: recomputed. That false caveat was one of two the whole fleet carried by
+    #: construction, leaving every book a single real problem short of the
+    #: three-caveat downgrade.
+    #:
+    #: None still earns a caveat — a book nobody has checked is a book nobody
+    #: has checked — but `gate.py` names it apart, exactly as it already does for
+    #: `current_accounting_history_auditable`.
+    audit_passed: bool | None = None
     #: A ROW-SCOPING KEY, carried for the record and for log lines. It decides
     #: nothing — see `current_accounting_history_auditable`.
     epoch: int = 1

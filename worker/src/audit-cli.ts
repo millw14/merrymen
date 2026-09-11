@@ -25,6 +25,7 @@ import {
   type FetchedReceipt,
 } from "./audit";
 import { gasQualifier, pnlUsdg } from "./equity";
+import { gasBasisOf } from "../../packages/core/src/gas-basis";
 import {
   guaranteeLines,
   qualityGaps,
@@ -312,7 +313,12 @@ async function doVerify(): Promise<void> {
       arithmetic.length === 0 && book.markCount > 0 && r.checked && book.unanchored.length === 0,
     costBasisComplete: book.unanchored.filter((u) => u.kind === "fill").length === 0,
     marksComplete: book.markCount > 0,
-    gasAccounting: book.gasUnpricedFills > 0 ? "gross" : book.gasWei > 0n ? "net" : "unknown",
+    // THE SAME RULE THE WORKER USES, from the same place. This read
+    // `gasWei > 0n ? "net" : "unknown"`, which calls a sponsored book's measured
+    // zero an absence — and a book reconstructed from a journal we just walked
+    // has unambiguously been READ, so `read: true` is a fact here rather than an
+    // assumption. See packages/core/src/gas-basis.ts.
+    gasAccounting: gasBasisOf({ read: true, unpricedTrades: book.gasUnpricedFills }),
     // THREE STATES, DECIDED HERE where the facts are, not recovered later from
     // a sentence. "We refetched nothing" is UNKNOWN; only a real disagreement
     // or a real gap in coverage is a failure.

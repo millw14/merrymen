@@ -854,3 +854,84 @@ def test_a_400_that_is_not_about_the_hint_stays_an_error():
     asyncio.run(go())
     assert calls == 2, "the ordinary bounded retry, and no extra hint-dropping attempt"
     assert cfg.base_url not in _REASONING_HINT_REFUSED
+
+
+def test_caveat_margin_is_not_spent_on_statements_that_were_never_true():
+    """
+    THE FLEET SAT ONE REAL PROBLEM AWAY FROM BEING UNABLE TO TRADE.
+
+    `assess` downgrades to hold at three caveats. Two of them arrived by
+    construction, and neither was true of any agent:
+
+      auditPassed   the worker's only producer was the literal `false`, which
+                    claims a ledger was recomputed and did not match. Nothing
+                    was ever recomputed.
+      gasBasis      derived as `usdg > 0 ? "net" : "unknown"`, which reads a
+                    sponsored agent's measured zero as an absence and produces
+                    "trading costs are not subtracted" about a book with no
+                    trading costs.
+
+    So a healthy sponsored agent spent two thirds of its margin before anything
+    real was wrong with it. The threshold is untouched — three is still three.
+    What changed is that a caveat now has to be earned.
+    """
+    from brain.gate import assess
+    from brain.schemas import PortfolioQuality, PortfolioState
+
+    def book(**q):
+        base = dict(
+            audit_passed=None,
+            contributions_known=True,
+            equity_complete=True,
+            gas_basis="net",
+            position_history_available=True,
+            quarantined_assets_present=False,
+            current_accounting_history_auditable=True,
+            epoch=1,
+        )
+        base.update(q)
+        return PortfolioState(
+            snapshot_id="s", as_of=1, cash_usdg=300_000_000, equity_usdg=300_000_000,
+            net_contributions_usdg=300_000_000, pnl_publishable=True,
+            quality=PortfolioQuality(**base),
+        )
+
+    # A HEALTHY SPONSORED AGENT: audit not run, gas measured at zero.
+    healthy = assess(book())
+    assert healthy.may_size, "a sponsored book with no audit yet must still be sizeable"
+    assert len(healthy.caveats) == 1, f"expected one caveat, got {healthy.caveats}"
+    assert "no audit has been run" in healthy.caveats[0]
+    # AND IT MUST NOT SAY THE AUDIT FAILED. That is a different claim entirely,
+    # and it is the one that was being made about everybody.
+    assert "did not pass" not in healthy.caveats[0]
+
+    # NULL IS NOT A FREE PASS. It still costs a caveat.
+    assert len(assess(book(audit_passed=True)).caveats) == 0
+
+    # A REAL FAILURE IS NAMED AS ONE, and costs the same single caveat.
+    failed = assess(book(audit_passed=False))
+    assert len(failed.caveats) == 1
+    assert "did not pass its audit" in failed.caveats[0]
+
+    # UNKNOWN GAS IS NOW ONLY A READ FAILURE, and is still a caveat.
+    assert len(assess(book(gas_basis="unknown")).caveats) == 2
+    assert len(assess(book(gas_basis="gross")).caveats) == 2
+
+    # ── THE THRESHOLD STILL BITES ────────────────────────────────────────────
+    # Three real problems on top of an unrun audit must still force a hold.
+    forced = assess(book(equity_complete=False, quarantined_assets_present=True))
+    assert len(forced.caveats) == 3, forced.caveats
+    assert forced.verdict == "downgrade-to-hold"
+    assert not forced.may_size, "three caveats must still downgrade to hold"
+
+    # And two is still under it, so the margin really is two rather than one.
+    two = assess(book(quarantined_assets_present=True))
+    assert len(two.caveats) == 2
+    assert two.may_size, "two caveats is under the threshold, as it always was"
+
+    # A THIRD REAL PROBLEM, EACH WAY ROUND. Any one of these on top of the
+    # unrun audit plus one other still shuts the gate — nothing was relaxed.
+    for third in ("equity_complete", "position_history_available"):
+        shut = assess(book(quarantined_assets_present=True, **{third: False}))
+        assert len(shut.caveats) == 3, (third, shut.caveats)
+        assert not shut.may_size, f"{third} must still be able to force a hold"

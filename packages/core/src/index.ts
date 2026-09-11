@@ -27,6 +27,10 @@ export * from "./capital-classify";
 // say "add funds" while another says "re-sign".
 export * from "./autonomy";
 
+// WHETHER A P&L HAS HAD ITS GAS TAKEN OUT. Three sites derived this and all
+// three read a sponsored agent's measured zero as an absence.
+export * from "./gas-basis";
+
 // THE CANONICAL PORTFOLIO SNAPSHOT. One type, one builder, four consumers —
 // worker, web, social and Brain. Exported from core precisely so none of them
 // can grow its own NAV or P&L implementation.
