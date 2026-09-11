@@ -9049,6 +9049,18 @@ async function main() {
     buildStatusContext,
     getAlertInputs: () => ({
       grantExpiresAt: active?.grant.expiresAt ?? null,
+      // THE EFFECTIVE CEILING, derived the same way the strategist derives it:
+      // `min(llmMaxActionUsdg, the per-trade cap sealed into the grant)`. The
+      // strategist has computed this every window for months and reported it
+      // only inside its own prose — so an owner whose cap made every action
+      // pointless had the explanation written for them and never delivered.
+      maxActionUsdg: active
+        ? Math.min(cfg.llmMaxActionUsdg, Number(active.limits.perTradeUsdg) / 1e6)
+        : null,
+      // Real cash only. `lastEquityUsdg` includes positions, and a ceiling is
+      // judged against what can actually be DEPLOYED — an agent fully invested
+      // in one holding is not being throttled by its cap.
+      cashUsdg: lastCashUsdg === null ? null : Number(lastCashUsdg) / 1e6,
       drawdownBps:
         highWaterMarkUsdg > 0n && lastEquityUsdg > 0n
           ? Number(((highWaterMarkUsdg - lastEquityUsdg) * 10_000n) / highWaterMarkUsdg)

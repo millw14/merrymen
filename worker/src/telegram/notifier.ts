@@ -32,6 +32,25 @@ import type { StateRef, Watcher } from "./state";
 export interface AlertInputs {
   /** Grant expiry (unix) or null when not armed. */
   grantExpiresAt: number | null;
+  /**
+   * The most this agent may put into one action, USDG — `min(llmMaxActionUsdg,
+   * the per-trade cap sealed into the grant)`. Null when not armed.
+   *
+   * WHY AN ALERT NEEDS IT. An agent whose ceiling is a rounding error against
+   * its own book is not broken and has nothing to report: every window it
+   * correctly concludes there is nothing worth doing at that size, proposes
+   * nothing, and looks from outside exactly like an agent that has stopped
+   * working. One owner watched that for days and reported the bot as dead.
+   *
+   * The strategist works the reason out every single window — "the max action
+   * size ($1) is barely bigger than the position itself" — and until now that
+   * went only into prose nobody acts on. This is the same defect as the
+   * renewal banner: the system knows precisely why it is idle and does not say
+   * so where the owner is looking.
+   */
+  maxActionUsdg: number | null;
+  /** Deployable capital, USDG — what the ceiling is judged against. */
+  cashUsdg: number | null;
   /** Current drawdown from the high-water mark, bps; null when unknown. */
   drawdownBps: number | null;
   /** The breaker limit, bps; null when not armed. */
@@ -244,6 +263,37 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
           `⏳ your permission grant dies in ${Math.max(1, Math.floor(left / 3600))}h — re-sign at the dashboard /grant to keep the band riding.`,
         );
       }
+    }
+    // ── A CEILING SO LOW THE AGENT HAS NOTHING WORTH DOING ─────────────────
+    //
+    // Not a fault, which is exactly why it needs saying: the agent is funded,
+    // unblocked and correct, and will go on proposing nothing for as long as
+    // the ceiling stands. Every other alert here reports something broken; this
+    // one reports a setting quietly making a working agent look dead.
+    //
+    // TWENTIETHS, not a fixed floor. A $1 ceiling is fine on a $20 book and
+    // absurd on a $50 one, so the test is whether a single action could move
+    // the book at all. Twenty is deliberately generous — an owner who chose a
+    // small cap on purpose is not nagged, and the alert fires only where the
+    // arithmetic is genuinely self-defeating.
+    //
+    // Keyed on the ceiling itself, so raising it and hitting the same wall
+    // again alerts afresh rather than being swallowed by a cooldown.
+    if (
+      !inputs.paper &&
+      inputs.maxActionUsdg !== null &&
+      inputs.maxActionUsdg > 0 &&
+      inputs.cashUsdg !== null &&
+      inputs.cashUsdg >= 20 * inputs.maxActionUsdg
+    ) {
+      await fire(
+        `action-ceiling:${inputs.maxActionUsdg}`,
+        `🪙 your per-trade limit is <b>$${inputs.maxActionUsdg.toFixed(2)}</b> against $${inputs.cashUsdg.toFixed(2)} of cash, ` +
+          `so I keep deciding there is nothing worth buying at that size — a trade that small cannot move your book. ` +
+          `Nothing is broken: I am funded and live and the limit is doing exactly what it says. ` +
+          `Raise it at the dashboard <b>/grant</b> (free, same wallet, same funds, nothing moves), ` +
+          `and check <b>LLM max per action</b> in /settings — whichever is lower is the one that binds.`,
+      );
     }
     if (inputs.drawdownBps !== null && inputs.breakerBps !== null && inputs.breakerBps > 0) {
       if (inputs.drawdownBps >= inputs.breakerBps / 2) {
