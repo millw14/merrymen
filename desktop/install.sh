@@ -6,8 +6,12 @@
 # Installs the latest published merrymen desktop AppImage to ~/.local/bin
 # (or $XDG_BIN_HOME), makes it executable, and checks the FUSE prerequisite.
 # Safe to re-run: re-installs/updates to the latest release. Override with:
-#   MERRY_MEN_VERSION=v0.1.8  curl -fsSL ... | bash   # pin a version
+#   MERRY_MEN_VERSION=desktop-beta-v0.1.8-dev.1 curl -fsSL ... | bash  # pin a version
+#   MERRY_MEN_CHANNEL=beta curl -fsSL ... | bash  # latest beta pre-release
 #   MERRY_MEN_BIN_DIR=/usr/local/bin ...              # system-wide (needs sudo)
+#
+# Default channel is stable (latest full release). Beta installs the newest
+# published pre-release carrying an AppImage.
 #
 # This is the DESKTOP installer (bundled Electron app). For the CLI, see the
 # root install.sh instead.
@@ -17,6 +21,7 @@ REPO="millw14/merrymen"
 APP="merrymen-desktop"
 BIN_DIR="${MERRY_MEN_BIN_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}"
 TAG="${MERRY_MEN_VERSION:-latest}"
+CHANNEL="${MERRY_MEN_CHANNEL:-stable}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -40,13 +45,28 @@ if ! command -v fusermount >/dev/null 2>&1 && [ ! -e /dev/fuse ]; then
   fi
 fi
 
-if [ "$TAG" = "latest" ]; then
-  API="https://api.github.com/repos/$REPO/releases/latest"
-else
+if [ -n "${MERRY_MEN_VERSION:-}" ]; then
   API="https://api.github.com/repos/$REPO/releases/tags/$TAG"
+  say "resolving $APP release ($TAG)…"
+  URL="$(curl -fsSL "$API" | grep -o '"browser_download_url": *"[^"]*\.AppImage"' | head -n 1 | cut -d'"' -f4)"
+elif [ "$CHANNEL" = "beta" ]; then
+  command -v python3 >/dev/null 2>&1 || die "MERRY_MEN_CHANNEL=beta needs python3 to read the releases list"
+  API="https://api.github.com/repos/$REPO/releases"
+  say "resolving $APP latest beta pre-release…"
+  URL="$(curl -fsSL "$API" | python3 -c 'import json,sys
+for r in json.load(sys.stdin):
+    if r.get("prerelease") and not r.get("draft"):
+        for a in r.get("assets", []):
+            if a.get("name", "").endswith(".AppImage"):
+                print(a["browser_download_url"]); break
+        break')"
+elif [ "$CHANNEL" = "stable" ]; then
+  API="https://api.github.com/repos/$REPO/releases/latest"
+  say "resolving $APP release (latest stable)…"
+  URL="$(curl -fsSL "$API" | grep -o '"browser_download_url": *"[^"]*\.AppImage"' | head -n 1 | cut -d'"' -f4)"
+else
+  die "MERRY_MEN_CHANNEL must be stable or beta (got: $CHANNEL)"
 fi
-say "resolving $APP release ($TAG)…"
-URL="$(curl -fsSL "$API" | grep -o '"browser_download_url": *"[^"]*\.AppImage"' | head -n 1 | cut -d'"' -f4)"
 [ -n "$URL" ] || die "no AppImage asset found (API: $API)"
 
 TMP="$(mktemp -d)"
