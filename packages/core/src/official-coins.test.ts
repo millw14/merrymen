@@ -205,10 +205,10 @@ describe("ponsAdapterForSigning", () => {
     assert.equal(ponsAdapterForSigning(MAINNET, mixed), mixed.toLowerCase());
   });
 
-  it("ignores a malformed settings value and falls through to the constant", () => {
+  it("ignores a malformed settings value rather than sealing nonsense", () => {
     // A typo must not mint a marker plus a permission pinned at nonsense.
-    assert.equal(ponsAdapterForSigning(MAINNET, "not-an-address"), PONS_SELF_TRADE[MAINNET] ?? undefined);
-    assert.equal(ponsAdapterForSigning(MAINNET, "0x1234"), PONS_SELF_TRADE[MAINNET] ?? undefined);
+    assert.equal(ponsAdapterForSigning(MAINNET, "not-an-address"), undefined);
+    assert.equal(ponsAdapterForSigning(MAINNET, "0x1234"), undefined);
   });
 
   it("returns undefined, never a zero address, when there is no adapter", () => {
@@ -219,12 +219,24 @@ describe("ponsAdapterForSigning", () => {
     assert.equal(ponsAdapterForSigning(1, ""), undefined);
   });
 
-  it("falls back to the chain's constant when the owner named nothing", () => {
-    const expected = PONS_SELF_TRADE[MAINNET];
+  it("NEVER falls back to the deployed constant, even where one exists", () => {
+    // THE SECURITY PROPERTY, pinned because it is one line to undo by accident
+    // and its absence is invisible until a key is stolen.
+    //
+    // The curve argument to PonsSelfTrade.tradeExactIn is unpinnable — ~475 new
+    // curve addresses an hour — and the adapter hands that caller-supplied
+    // address a live allowance over the pulled input. The stock-token approve
+    // permissions carry no amount condition and the adapter is in `spenders`, so
+    // a compromised session key that holds this permission can name a contract
+    // it controls and have the tokens taken. Sealing it must therefore be an
+    // owner's explicit choice, never a platform default.
+    assert.ok(PONS_SELF_TRADE[MAINNET], "this test is only meaningful while an adapter is deployed");
     assert.equal(
       ponsAdapterForSigning(MAINNET, undefined),
-      expected ? expected.toLowerCase() : undefined,
+      undefined,
+      "a deployed adapter must NOT be sealed into a grant the owner did not ask for",
     );
+    assert.equal(ponsAdapterForSigning(MAINNET, null), undefined);
   });
 
   it("keeps the two chains separate", () => {

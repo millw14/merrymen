@@ -160,8 +160,40 @@ export const PONS_SELF_TRADE: Readonly<Record<number, string | null>> = Object.f
 });
 
 /**
- * The adapter a NEW signature should carry: the owner's own choice if they made
- * one, else the chain's deployed adapter, else nothing.
+ * The adapter a NEW signature should carry: the owner's own choice, or nothing.
+ *
+ * THIS DELIBERATELY DOES NOT FALL BACK TO `PONS_SELF_TRADE`, and the reason is a
+ * threat-model change rather than a bug in the adapter.
+ *
+ * It briefly did fall back, so that the weekend curve fallback could work
+ * without every owner pasting an address. What that missed: the curve is a
+ * caller-supplied argument that the wall CANNOT pin — ~475 new curve addresses
+ * an hour, so there is no set to enumerate — and `PonsSelfTrade.tradeExactIn`
+ * gives that address a live ERC-20 allowance over the pulled input
+ * (PonsSelfTrade.sol:225) before calling it. Meanwhile the stock-token and
+ * owner-extra `approve` permissions carry NO amount condition
+ * (wall.ts:485, `args: [{ONE_OF: spenders}, null]`), and the adapter is in
+ * `spenders`.
+ *
+ * So a COMPROMISED SESSION KEY — not a third party, and not an honest agent —
+ * can approve the adapter for an unbounded amount of an enumerated asset, call
+ * `tradeExactIn` naming a contract it controls as the "curve", and have that
+ * contract take the tokens. The output check is satisfied by returning one wei
+ * of another enumerated asset, since `minAmountOut` is unpinned. The on-chain
+ * ops cap that would have bounded repetition does not exist: RateLimitPolicy is
+ * codeless on 4663, so `maxOpsPerDay` is worker-enforced only (wall.ts:871-897).
+ *
+ * That converts a worker compromise from "can churn the portfolio" — every sale
+ * already being permitted, with `transfer` pinned to registered withdrawal
+ * addresses — into "can exfiltrate the portfolio". V4SelfSwap does not have this
+ * shape: it pins its PoolManager as an immutable, because there is exactly one
+ * singleton to trust. A Pons curve has no singleton, which is the whole reason
+ * the argument is unpinnable.
+ *
+ * The adapter stays deployed and remains reachable for an owner who sets
+ * `ponsAdapterAddress` themselves — an explicit, informed choice for curve
+ * tokens they have vetted. What is withdrawn is the SILENT default, which would
+ * have widened every grant signed from now on without the owner choosing it.
  *
  * Returns `undefined` rather than a zero address for "none", because every
  * signer treats the field as optional-and-absent and a zero would mint a marker
@@ -171,6 +203,7 @@ export function ponsAdapterForSigning(
   chainId: number,
   fromSettings?: string | null,
 ): `0x${string}` | undefined {
-  const chosen = fromSettings && /^0x[0-9a-fA-F]{40}$/.test(fromSettings) ? fromSettings : PONS_SELF_TRADE[chainId];
-  return chosen ? (chosen.toLowerCase() as `0x${string}`) : undefined;
+  void chainId;
+  if (!fromSettings || !/^0x[0-9a-fA-F]{40}$/.test(fromSettings)) return undefined;
+  return fromSettings.toLowerCase() as `0x${string}`;
 }
