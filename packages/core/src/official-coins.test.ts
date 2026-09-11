@@ -31,8 +31,13 @@ const TESTNET = 46630;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 describe("official coins — the listing", () => {
-  it("lists at least one coin on mainnet and none on testnet", () => {
-    assert.ok(officialCoinsFor(MAINNET).length > 0, "mainnet should carry a listing");
+  it("returns a list for every known chain, empty or not", () => {
+    // NOT "at least one on mainnet", which is what this asserted until the first
+    // listing died. An empty list is a legitimate and honest state — the
+    // platform is not obliged to be listing anything — so pinning a non-empty
+    // registry would make an accurate registry fail its own test, and invite
+    // somebody to re-list a dead coin to get CI green.
+    assert.ok(Array.isArray(officialCoinsFor(MAINNET)));
     assert.deepEqual(officialCoinsFor(TESTNET), [], "the testnet launchpad is not populated");
   });
 
@@ -80,9 +85,15 @@ describe("official coins — the listing", () => {
   });
 
   it("looks a coin up by address and by symbol, case-insensitively", () => {
-    const c = officialCoinsFor(MAINNET)[0]!;
-    assert.equal(officialCoinByAddress(MAINNET, c.address.toUpperCase())?.symbol, c.symbol);
-    assert.equal(officialCoinBySymbol(MAINNET, c.symbol.toLowerCase())?.address, c.address);
+    // Runs over whatever is listed, so it stays true of an empty registry and
+    // becomes load-bearing the moment one is added — rather than crashing on
+    // `[0]!`, which is how these read before the first listing was retired.
+    for (const c of officialCoinsFor(MAINNET)) {
+      assert.equal(officialCoinByAddress(MAINNET, c.address.toUpperCase())?.symbol, c.symbol);
+      assert.equal(officialCoinBySymbol(MAINNET, c.symbol.toLowerCase())?.address, c.address);
+    }
+    // These two hold with or without a listing, which is the half worth having
+    // while the list is empty: a miss must be null, never a partial answer.
     assert.equal(officialCoinByAddress(MAINNET, "0x" + "9".repeat(40)), null);
     assert.equal(officialCoinBySymbol(MAINNET, "NOSUCHCOIN"), null);
   });
@@ -90,12 +101,13 @@ describe("official coins — the listing", () => {
   it("returns the curve record as one object or not at all", () => {
     // The store keeps curve/quote/threshold together because a threshold
     // without a curve cannot be read as money. The accessor must not be looser.
-    const c = officialCoinsFor(MAINNET)[0]!;
-    const rec = officialCoinCurve(MAINNET, c.address);
-    assert.ok(rec, "a listed coin must resolve a curve record");
-    assert.equal(rec.curve, c.curve);
-    assert.equal(rec.quoteToken, c.quoteToken);
-    assert.equal(rec.graduationThresholdRaw, c.graduationThresholdRaw);
+    for (const c of officialCoinsFor(MAINNET)) {
+      const rec = officialCoinCurve(MAINNET, c.address);
+      assert.ok(rec, "a listed coin must resolve a curve record");
+      assert.equal(rec.curve, c.curve);
+      assert.equal(rec.quoteToken, c.quoteToken);
+      assert.equal(rec.graduationThresholdRaw, c.graduationThresholdRaw);
+    }
     assert.equal(officialCoinCurve(MAINNET, "0x" + "9".repeat(40)), null);
   });
 
@@ -146,16 +158,17 @@ describe("official coins — what a listing must never become", () => {
   it("de-duplicates against an owner who typed the same coin in by hand", () => {
     // Listings go first at the signer, so the VERIFIED address survives and the
     // hand-typed duplicate is dropped rather than producing two permissions.
-    const official = officialCoinTokens(MAINNET);
-    const c = official[0]!;
-    const ownerTyped = { symbol: "MYNAME", address: c.address, decimals: c.decimals };
+    //
+    // Uses a SYNTHETIC listing so the property is pinned whether or not the
+    // platform is currently listing anything. `usableExtraTokens` is pure, so
+    // this exercises the real de-duplication rather than a stand-in for it.
+    const official = [{ symbol: "OFFICIAL", address: ("0x" + "d".repeat(40)) as `0x${string}`, decimals: 18 }];
+    const ownerTyped = { symbol: "MYNAME", address: official[0]!.address, decimals: 6 };
     const usable = usableExtraTokens([...official, ownerTyped]);
-    assert.equal(
-      usable.filter((u) => u.address.toLowerCase() === c.address.toLowerCase()).length,
-      1,
-      "the same address must not be sealed twice",
-    );
-    assert.equal(usable.find((u) => u.address.toLowerCase() === c.address.toLowerCase())!.symbol, c.symbol);
+    const hits = usable.filter((u) => u.address.toLowerCase() === official[0]!.address.toLowerCase());
+    assert.equal(hits.length, 1, "the same address must not be sealed twice");
+    assert.equal(hits[0]!.symbol, "OFFICIAL", "the listing's own symbol and decimals must win");
+    assert.equal(hits[0]!.decimals, 18);
   });
 
   it("hands the signer exactly the CustomToken shape, with real decimals", () => {

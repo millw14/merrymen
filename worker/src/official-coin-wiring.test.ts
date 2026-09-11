@@ -16,8 +16,25 @@ import { legsForUniverse, watchTokensFor } from "./strategies/registry";
 import { officialCoinTokens, officialCoinsFor, robinhoodChain, STOCK_TOKENS } from "../../packages/core/src/index";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const OFFICIAL = officialCoinsFor(robinhoodChain.id);
-const COIN = OFFICIAL[0]!;
+
+/**
+ * A SYNTHETIC LISTING, not whatever the registry happens to hold today.
+ *
+ * These tests originally read `officialCoinsFor(4663)[0]`, which made them
+ * vacuous — or crashing — the moment the mainnet list went empty, which it did
+ * within a day of being filled. `watchTokensFor` and `legsForUniverse` both take
+ * the listing as a PARAMETER, so the wiring can be exercised whether or not the
+ * platform is currently listing anything. That is the stronger test: what is
+ * pinned here is the behaviour, and the behaviour must hold for the next listing
+ * as much as for this one.
+ */
+const COIN = {
+  symbol: "TESTCOIN",
+  name: "Test Coin",
+  address: "0xdddddddddddddddddddddddddddddddddddddddd" as `0x${string}`,
+  decimals: 18,
+};
+const OFFICIAL = [COIN];
 const BASKET = ["AAPL", "GOOGL", "TSLA"];
 const CUSTOM: { symbol: string; address: `0x${string}`; decimals: number }[] = [];
 
@@ -238,7 +255,13 @@ describe("the signer seals what the worker watches", () => {
     // The two lists are built by different functions in different packages. If
     // they disagreed, the owner would get refusals naming a coin they never
     // chose and cannot remove.
-    const watched = watchTokensFor(BASKET, CUSTOM, OFFICIAL)
+    //
+    // Run against the REAL registry on both sides, because this is the one
+    // property a synthetic fixture cannot check: it is about the two production
+    // paths agreeing on the live list. Holds trivially while the list is empty,
+    // and becomes load-bearing the moment it is not.
+    const real = officialCoinsFor(robinhoodChain.id);
+    const watched = watchTokensFor(BASKET, CUSTOM, real)
       .filter((t) => t.kind === "memecoin")
       .map((t) => t.address.toLowerCase())
       .sort();

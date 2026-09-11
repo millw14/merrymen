@@ -117,32 +117,43 @@ function isUsdgQuoted(c: OfficialCoin): boolean {
  */
 export const OFFICIAL_COINS: Readonly<Record<number, readonly OfficialCoin[]>> = Object.freeze({
   /**
-   * Robinhood Chain mainnet.
+   * Robinhood Chain mainnet — EMPTY, and the measurement that emptied it is the
+   * most useful thing in this file.
    *
-   * ROBINHOOD was picked by measurement, not by taste: of 1,509 USDG-quoted Pons
-   * launches in a 25-hour window it carried the deepest real book — $3,007.70
-   * excluding the virtual seed, 37.2% of the way to graduation, against a median
-   * in the low tens of dollars. Everything below was read from the chain on the
-   * listing date: 18 decimals, 1,000,000,000 supply, 3,248 bytes of token code,
-   * 10,229 bytes of curve code, no `tokenPaused()`, and a $5 round trip
-   * returning 97.87% — fees (99bps a side) plus 0.15% impact.
+   * ROBINHOOD (0xcd69e6…77dd6) was listed here on 2026-09-11, picked by
+   * measurement rather than taste: of 1,509 USDG-quoted Pons launches in a
+   * 25-hour window it carried by far the deepest real book — $3,007.70 excluding
+   * the virtual seed, 37.2% of the way to graduation, against a median in the
+   * low tens of dollars. It read clean on every other axis too: 18 decimals, 1e9
+   * supply, no `tokenPaused()`, and a $5 round trip returning 97.87%.
    *
-   * Depth is the figure to re-check before trusting this listing: a curve can
-   * thin out, and the guards size against depth AT TRADE TIME rather than
-   * against this comment.
+   * THREE AND A HALF HOURS LATER ITS CURVE HELD $0.26. Nearly the whole supply
+   * had been sold back into it. Production caught this correctly and refused to
+   * value it ("only $0 has really been raised into this curve, under the $250
+   * floor"), so nothing could be bought — but the listing was by then a dead
+   * token pinned inside a platform constant.
+   *
+   * IT WAS NOT A BAD PICK; IT WAS THE WRONG CONTAINER. Re-measuring the 14
+   * deepest USDG curves over the same interval: two went to zero, five lost
+   * ~79%, six were flat or up — SEVEN OF FOURTEEN fell under the $250 curve
+   * floor in one afternoon. A launchpad coin's depth has a half-life measured in
+   * hours. A listing here has to outlive a 14-day grant cycle, because the wall
+   * seals token addresses at SIGNING time and every owner must re-sign to reach
+   * a new entry. Those two timescales are three orders of magnitude apart, and
+   * no amount of care choosing the coin closes that gap.
+   *
+   * SO WHAT BELONGS HERE is an asset whose depth is durable on the scale of a
+   * grant: a graduated token with a real pool, or a major non-equity. The
+   * ephemeral-launchpad problem is a DIFFERENT problem, and this repo already
+   * has the right architecture for it — the class route, which grants
+   * permissions on a per-account vault rather than on token addresses, and can
+   * therefore reach a coin that did not exist when the grant was signed. See
+   * MerrymenSettings.classSnipeEnabled and docs/owner-runbook-class.md.
+   *
+   * An empty list is the honest state, and it is a different fact from "official
+   * coins are turned off", which is a setting.
    */
-  4663: [
-    {
-      symbol: "ROBINHOOD",
-      name: "Team Robinhood",
-      address: "0xcd69e62e32babe8f65179a773889c0ad5ab77dd6",
-      decimals: 18,
-      curve: "0x35308b52c06f6a910160f113a1f7b969a8d24a2b",
-      quoteToken: CASH.USDG as `0x${string}`,
-      graduationThresholdRaw: 8_090_000_000n,
-      listedOn: "2026-09-11",
-    },
-  ],
+  4663: [],
   /** Robinhood Chain testnet — the launchpad is not meaningfully populated. */
   46630: [],
 });
