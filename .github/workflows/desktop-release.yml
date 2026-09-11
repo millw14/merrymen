@@ -98,6 +98,9 @@ jobs:
       # range drowns in unrelated mainline history (600+ commits); the desktop
       # release only names what it ships. A commit appears if it touches any
       # of these paths — so a change spanning cli/ + desktop/ still shows.
+      # web/src/terminal is in scope because the desktop bundles the dashboard:
+      # a terminal layout fix ships in the AppImage. Broader web/ is not — it
+      # would drown the notes in non-desktop web history.
       # First tag (or a rebuild with no new commits) falls back to an explicit
       # line, never blank-mysterious.
       - name: Build changelog
@@ -106,7 +109,7 @@ jobs:
         run: |
           REF="${{ github.ref }}"
           PREV="$(git tag --list 'desktop-*' --sort=-creatordate | grep -v "${REF#refs/tags/}" | head -n 1)"
-          SCOPE="desktop .github/workflows/desktop-release.yml .github/workflows/desktop-dev.yml"
+          SCOPE="desktop web/src/terminal .github/workflows/desktop-release.yml .github/workflows/desktop-dev.yml"
           {
             echo "PREV_TAG=$PREV"
             echo "CHANGELOG<<EOF"
