@@ -935,3 +935,44 @@ export function buildWallPolicies(args: {
 
   return { policies, now, expiresAt };
 }
+
+/**
+ * THE WALL A STORED GRANT DESCRIBES — one rebuild, two callers.
+ *
+ * The signer knows its wall because it is about to build it. The executor holds
+ * only the SERIALIZED account, and `buildWallPolicies` says plainly why that is
+ * no help: "the ZeroDev Policy objects are opaque once constructed". So the
+ * executor rebuilds the wall from the same inputs the signature was made over,
+ * and both sides size the first operation from the same object.
+ *
+ * That shared rebuild is the whole point. The product minted grants whose first
+ * UserOp the executor was already designed to refuse, because signing had no
+ * idea the executor's ceiling existed. Two descriptions of one wall is how that
+ * happened; this is the one description.
+ *
+ * PLACEHOLDER TOKENS, DELIBERATELY. `grantTokens` records the ADDRESSES this
+ * grant's policy covers, while `usableExtraTokens` wants whole `CustomToken`
+ * objects. Only the COUNT reaches the shape — each extra adds one approve
+ * permission and one entry to each list it appears in — so well-formed
+ * placeholders reproduce the size exactly. Using the symbols would be no more
+ * accurate and would need a second source that can disagree.
+ *
+ * AND `grantTokens`, NOT `settings.customTokens`. The grant records what its
+ * policy actually covers; settings record what the owner has typed since. They
+ * differ exactly when someone added a token without re-signing — and sizing a
+ * wall from the larger list would refuse a wall that is genuinely small.
+ */
+export function grantWallOptions(grant: {
+  grantTokens?: readonly string[];
+  grantFeatures?: readonly string[];
+}): WallOptions {
+  const features = new Set((grant.grantFeatures ?? []).map((f) => String(f).toLowerCase()));
+  const extraTokens: CustomToken[] = (grant.grantTokens ?? [])
+    .filter((a) => /^0x[0-9a-fA-F]{40}$/.test(String(a)))
+    .map((address, i) => ({ symbol: `X${i}`, address: String(address) as `0x${string}`, decimals: 18 }));
+  return {
+    extraTokens,
+    allowRialto: features.has("rialto"),
+    allowUniswapV4: features.has("v4"),
+  };
+}

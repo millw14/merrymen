@@ -31,6 +31,10 @@ export * from "./autonomy";
 // three read a sponsored agent's measured zero as an absence.
 export * from "./gas-basis";
 
+// WHAT A PERMISSION WALL COSTS TO INSTALL, derived from the wall itself, so the
+// signer and the executor cannot drift about which walls are deployable.
+export * from "./first-enable-gas";
+
 // THE CANONICAL PORTFOLIO SNAPSHOT. One type, one builder, four consumers —
 // worker, web, social and Brain. Exported from core precisely so none of them
 // can grow its own NAV or P&L implementation.

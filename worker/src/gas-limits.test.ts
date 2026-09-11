@@ -471,7 +471,30 @@ test("THE CALL SITE: the ceiling is keyed on the OPERATION, and the deploy state
   const src = readFileSync(new URL("./executor.ts", import.meta.url), "utf8");
   assert.match(src, /const enable = await readEnableState\(/, "the chain is asked");
   assert.match(src, /const firstEnable = enable\.kind === "fresh-enable";/, "and only one answer widens");
-  assert.match(src, /firstEnable \? FIRST_ENABLE_GAS_BOUNDS : GAS_BOUNDS/, "anything else gets the ordinary ceiling");
+  // THE WIDENED BRANCH IS NOW PER-WALL, and the ordinary branch is untouched.
+  //
+  // This pinned the literal `firstEnable ? FIRST_ENABLE_GAS_BOUNDS : GAS_BOUNDS`.
+  // The flat ceiling was derived for the DEFAULT 18-permission wall plus five
+  // custom tokens and budgets for nothing else, so two funded agents were
+  // refused on their first operation with it behaving exactly as documented.
+  // The allowance now comes from the wall being installed.
+  //
+  // What must NOT change, and is asserted below: the widening still happens
+  // only for `fresh-enable`, and everything else still gets GAS_BOUNDS — a
+  // deployed account's ordinary operations are judged at 3,000,000 exactly as
+  // before, so this cannot widen a steady-state ceiling.
+  assert.match(src, /const bounds = firstEnable/, "the ceiling is still keyed on the operation");
+  assert.match(src, /:\s*GAS_BOUNDS;/, "anything that is not a fresh enable gets the ordinary ceiling");
+  assert.match(
+    src,
+    /absoluteMax: opts\.firstEnable\.allowedMaxBounded/,
+    "and the enable's ceiling comes from ITS OWN wall",
+  );
+  assert.match(
+    src,
+    /:\s*FIRST_ENABLE_GAS_BOUNDS/,
+    "with the flat ceiling still the fallback when no wall was sized",
+  );
   // Asserted against CODE, not prose. The comment above readEnableState names
   // the old condition on purpose — a fix that erases the record of what it fixed
   // invites the next person to reinstate it.

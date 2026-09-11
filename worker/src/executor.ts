@@ -383,6 +383,27 @@ export async function createAgentExecutor(opts: {
    * weakening, and one nobody is told about is how the next incident starts.
    */
   onUnverified?: (why: string) => void;
+  /**
+   * WHAT THIS GRANT'S OWN WALL COSTS TO INSTALL, from the caller that holds it.
+   *
+   * The flat `FIRST_ENABLE_GAS_BOUNDS.absoluteMax` was derived for the DEFAULT
+   * 18-permission wall plus five custom tokens and budgets for nothing else —
+   * and each optional capability widens the spender list, which is pinned as a
+   * ONE_OF on every approve permission, so enabling one costs about what the
+   * whole five-token margin was worth. Two funded agents sat refused on their
+   * first operation with the ceiling behaving exactly as documented.
+   *
+   * Computed by the caller because only it holds the StoredGrant: this module
+   * has the SERIALIZED account, whose policies are opaque once deserialized.
+   * Same function the signer calls (`firstEnableEnvelope`), so the two limits
+   * cannot drift — which is how grants came to be minted that the executor was
+   * already designed to refuse.
+   *
+   * ABSENT MEANS THE FLAT CEILING, unchanged. A caller that has not been taught
+   * to compute this gets exactly today's behaviour rather than an accidental
+   * widening.
+   */
+  firstEnable?: { allowedMaxBounded: bigint; expectedBounded: bigint; stubBytes: number };
 }): Promise<AgentExecutor> {
   const publicClient = createPublicClient({ chain: opts.chain, transport: chainRead(opts.rpcUrl) });
   const entryPoint = getEntryPoint("0.7");
@@ -586,7 +607,17 @@ export async function createAgentExecutor(opts: {
       const nonce = await account.getNonce();
       const enable = await readEnableState(publicClient, account.address, nonce);
       const firstEnable = enable.kind === "fresh-enable";
-      const bounds = firstEnable ? FIRST_ENABLE_GAS_BOUNDS : GAS_BOUNDS;
+      // PER-WALL, AND ONLY FOR THE OPERATION THAT INSTALLS ONE.
+      //
+      // A deployed account's ordinary operations are untouched: they take
+      // GAS_BOUNDS exactly as before, so nothing here can widen a steady-state
+      // ceiling. The enlarged allowance belongs to the enable and expires with
+      // it — the next operation this account signs is judged at 3,000,000.
+      const bounds = firstEnable
+        ? opts.firstEnable
+          ? { ...FIRST_ENABLE_GAS_BOUNDS, absoluteMax: opts.firstEnable.allowedMaxBounded }
+          : FIRST_ENABLE_GAS_BOUNDS
+        : GAS_BOUNDS;
 
       // An enable-shaped operation we cannot justify is refused BY NAME, before
       // the estimate and long before a signature. Letting these fall through to

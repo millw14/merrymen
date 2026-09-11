@@ -60,6 +60,10 @@ import {
   grantPonsClassVaultFactory,
   grantHasV4,
   gasBasisOf,
+  firstEnableEnvelope,
+  wallShape,
+  buildCallPermissions,
+  grantWallOptions,
   tokenCoverage,
   uncoveredBasketSymbols,
   type CircleTier,
@@ -3554,6 +3558,38 @@ async function main() {
       // noise. So: record it where the owner will see it, leave the agent
       // unarmed, and let the tick continue so the heartbeat still beats and the
       // dashboard can say IDLE rather than going silent.
+      // WHAT THIS GRANT'S OWN WALL COSTS TO INSTALL, computed here because this
+      // is where the StoredGrant is. The executor holds only the serialized
+      // account, whose policies are opaque once deserialized.
+      //
+      // Built from the SAME inputs the signature was made over, through the same
+      // `grantWallOptions` the signing path uses — so the ceiling the executor
+      // applies and the ceiling the signer enforced are the same number by
+      // construction rather than by agreement.
+      const firstEnable = (() => {
+        try {
+          const shape = wallShape(
+            buildCallPermissions(grant.caps, grant.smartAccount, {
+              ...grantWallOptions(grant),
+              ...(grantV4Adapter(grant) ? { v4AdapterAddress: grantV4Adapter(grant)! } : {}),
+              ...(grantPonsAdapter(grant) ? { ponsAdapterAddress: grantPonsAdapter(grant)! } : {}),
+              ...(grantPonsClassVault(grant) ? { ponsClassVaultAddress: grantPonsClassVault(grant)! } : {}),
+            }) as never,
+          );
+          const env = firstEnableEnvelope(shape);
+          console.log(
+            `[gas] wall ${shape.permissions} permission(s) · ${shape.oneOfEntries} ONE_OF entr(ies) · ` +
+              `${shape.stubBytes}B stub · first-enable expected ${env.expectedBounded} · ` +
+              `allowed ${env.allowedMaxBounded}${env.withinHardMax ? "" : " · OVER THE PRODUCT MAXIMUM — needs a narrower wall"}`,
+          );
+          return { allowedMaxBounded: env.allowedMaxBounded, expectedBounded: env.expectedBounded, stubBytes: shape.stubBytes };
+        } catch (e) {
+          // A shape we cannot compute must not silently widen anything. Absent
+          // means the executor keeps the flat ceiling — today's behaviour.
+          console.log(`[gas] could not size this wall (${e instanceof Error ? e.message : String(e)}) — using the flat first-enable ceiling`);
+          return undefined;
+        }
+      })();
       try {
         executor = await createAgentExecutor({
           chain,
@@ -3561,6 +3597,7 @@ async function main() {
           bundlerUrl,
           rpcUrl: rpc,
           sponsor,
+          firstEnable,
           // SAID OUT LOUD, ONCE PER ARM. The re-derivation is a defence in
           // depth, and when the chain will not answer it we arm anyway rather
           // than strand the agent — but the owner is entitled to know that the
