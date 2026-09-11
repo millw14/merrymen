@@ -504,6 +504,16 @@ export default function GrantPage() {
         setV4Adapter(typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) ? (a as `0x${string}`) : undefined);
         const pa = v?.values?.ponsAdapterAddress;
         setPonsAdapter(typeof pa === "string" && /^0x[0-9a-fA-F]{40}$/.test(pa) ? (pa as `0x${string}`) : undefined);
+        // THE STATION THAT WAS MISSING. `classFactory` was declared, typed into
+        // this very response shape, threaded into all three signing calls — and
+        // never assigned, so `setClassFactory` appeared exactly once in the
+        // file: its own declaration. Every grant signed here carried
+        // `ponsClassVaultFactory: undefined`, session.ts skipped the whole vault
+        // block, no GRANT_PONS_CLASS marker was minted, and the worker's class
+        // route returned at `if (!vault)` on every tick forever. The feature
+        // was unreachable from the only screen that can reach it.
+        const cf = v?.values?.ponsClassVaultFactory;
+        setClassFactory(typeof cf === "string" && /^0x[0-9a-fA-F]{40}$/.test(cf) ? (cf as `0x${string}`) : undefined);
       })
       .catch(() => {
         setCustomTokens([]);
@@ -776,9 +786,15 @@ export default function GrantPage() {
           freshAdapter = typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) ? (a as `0x${string}`) : undefined;
           const pa = v?.values?.ponsAdapterAddress;
           freshPons = typeof pa === "string" && /^0x[0-9a-fA-F]{40}$/.test(pa) ? (pa as `0x${string}`) : undefined;
+          // Same missing assignment as the mount fetch. The variable and the
+          // comment above it were both already here; only the line that fills
+          // it was not, so a renewal could never add a class vault either.
+          const cf = v?.values?.ponsClassVaultFactory;
+          freshClassFactory = typeof cf === "string" && /^0x[0-9a-fA-F]{40}$/.test(cf) ? (cf as `0x${string}`) : undefined;
           setCustomTokens(freshTokens);
           setV4Adapter(freshAdapter);
           setPonsAdapter(freshPons);
+          setClassFactory(freshClassFactory);
         }
       } catch {
         /* unreachable settings: sign with what the page already had, as before */

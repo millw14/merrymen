@@ -93,8 +93,24 @@ buy creates the vault in the same operation.
 
 Paste the factory address into `/settings` as **"Class vault factory contract"**.
 
+**Already deployed on Robinhood Chain mainnet (4663):**
+`0x48a560371230ece659b2ba40fb19e8335866ab3d` — 5,248 bytes, 2026-09-11.
+Verified independently of the deploy script: `vaultFor` returns exactly the
+address `deploy` produces, for three separate owners. That equality is the
+property everything rests on, because the wall pins the vault as a literal
+target BEFORE the contract exists, and a CALL to a codeless address succeeds
+with empty returndata — so a mismatch would land the approve, no-op the buy, and
+report the trade as filled.
+
 This is a HINT, not the authority — the worker uses whatever the grant was sealed
 against, and warns you if the two have drifted.
+
+**Deliberately NOT a platform default.** The Pons adapter briefly had one and it
+was withdrawn, for a reason that applies here with more force: the curve is a
+caller-supplied argument no policy can pin, and both `PonsSelfTrade.tradeExactIn`
+and `PonsClassVault.buy` hand that address a live allowance over what they pull.
+Sealing either is an informed choice, never something the platform does to a
+wall on an owner's behalf.
 
 ## Step 3 — re-sign
 
