@@ -112,6 +112,9 @@ export interface ResolvedConfig {
   classPerEntryUsdg: number;
   classMaxPositions: number;
   classMinDepthUsdg: number;
+  /** The class EXIT. See MerrymenSettings.classMaxHoldSec — a clock, not a price. */
+  classMaxHoldSec: number;
+  classExitAtGraduationPct: number;
   /**
    * The platform's official coins. See MerrymenSettings.officialCoinsEnabled —
    * ON by default, and the only member of this block that is.
@@ -368,6 +371,11 @@ export function mergeSettings(
     classPerEntryUsdg: num(file.classPerEntryUsdg, env.MERRYMEN_CLASS_PER_ENTRY_USDG, d.classPerEntryUsdg, 0, 1_000_000),
     classMaxPositions: num(file.classMaxPositions, env.MERRYMEN_CLASS_MAX_POSITIONS, d.classMaxPositions, 0, 1_000),
     classMinDepthUsdg: num(file.classMinDepthUsdg, env.MERRYMEN_CLASS_MIN_DEPTH_USDG, d.classMinDepthUsdg, 0, 10_000_000),
+    // FLOOR OF 60s, not 0. A zero hold window would sell every position on the
+    // tick after it opened, turning the route into a fee pump; the exit exists
+    // to bound a hold, not to forbid one.
+    classMaxHoldSec: num(file.classMaxHoldSec, env.MERRYMEN_CLASS_MAX_HOLD_SEC, d.classMaxHoldSec, 60, 30 * 86_400),
+    classExitAtGraduationPct: num(file.classExitAtGraduationPct, env.MERRYMEN_CLASS_EXIT_GRAD_PCT, d.classExitAtGraduationPct, 1, 100),
     officialCoinsEnabled: bool(file.officialCoinsEnabled, env.MERRYMEN_OFFICIAL_COINS, d.officialCoinsEnabled),
     // 0 disables it; the ceiling is 100x, past which it is not a take-profit
     // rule, it is a number nobody will ever hit.

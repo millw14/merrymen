@@ -1246,6 +1246,9 @@ async function fleetHealth(): Promise<void> {
     // what a tester found by hand and reported as "I can't see an option to
     // switch to real trading". Counted here so nobody has to find that out one
     // agent at a time.
+    // Carried out of the block below so the funnel can tell an IDLE fleet from
+    // an unreadable one. Null means the read failed, which is not zero.
+    let liveAgents: number | null = null;
     try {
       const modes = (await shared
         .prepare("SELECT COALESCE(mode, 'unknown') AS mode, COUNT(*) AS n FROM agents GROUP BY mode")
@@ -1254,6 +1257,9 @@ async function fleetHealth(): Promise<void> {
         const line = modes.map((m) => `${m.mode} ${Number(m.n)}`).join(", ");
         log(`fleet| rails — ${line}`);
       }
+      liveAgents = modes
+        .filter((m) => String(m.mode) === "live")
+        .reduce((s, m) => s + Number(m.n), 0);
     } catch {
       // The column may predate this deploy on a database mid-migration. A
       // missing breakdown is not a fleet that is down.
@@ -1300,11 +1306,24 @@ async function fleetHealth(): Promise<void> {
       const holds = (k: string) =>
         h.filter((r) => r.kind === k).reduce((s, r) => s + Number(r.n), 0);
 
-      // SILENT WHEN THERE IS NOTHING TO SAY. An idle hour is not news, and a
-      // line printed every pass regardless is a line nobody reads.
-      if (proposals > 0 || h.length > 0) {
+      // SILENT ONLY WHEN NOBODY IS LIVE — because silence means two things and
+      // this is a health metric.
+      //
+      // It used to be silent on any idle hour. But "no agent is trading for
+      // real" and "every agent is live and proposed nothing for an hour" are
+      // opposite facts, and the second is the one worth waking up for: it is
+      // precisely the state that went unnoticed for weeks. Rendered identically
+      // as an absent line, an operator reads the alarming case as the boring
+      // one — the same empty-versus-unavailable mistake this codebase refuses
+      // everywhere it prints a number.
+      //
+      // `liveAgents === null` is a FAILED READ and stays silent, because
+      // claiming "0 live" off a query that did not answer would be the same
+      // error pointing the other way.
+      if (proposals > 0 || h.length > 0 || (liveAgents !== null && liveAgents > 0)) {
         log(
-          `autonomy| 1h — proposals ${proposals} · policy-passed ${proposals - rejected} · ` +
+          `autonomy| 1h — ${liveAgents ?? "?"} live · proposals ${proposals} · ` +
+            `policy-passed ${proposals - rejected} · ` +
             `userops ${submitted} · LANDED ${landed} · failed ${failed} · ` +
             `grant-too-wide ${tooWide} · holds ${holds("MODEL_HOLD")} model, ` +
             `${holds("GATE_FORCED_HOLD")} gate-forced, ${holds("unreported")} unreported`,

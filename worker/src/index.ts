@@ -254,6 +254,7 @@ import {
   curveBuyOut,
   curveSellOut,
   curveMinOut,
+  curveDepthFraction,
   type CurveReserves,
 } from "./venues/pons-price";
 import type { CurveLeg } from "./strategist/proposals";
@@ -325,7 +326,7 @@ import {
   setPositions,
   type TradeRow,  knownCurves,
 } from "./store";
-import { quoteDecimalsOf, readCurveReserves } from "./venues/pons";
+import { quoteDecimalsOf, readCurveReserves, readCurveThreshold } from "./venues/pons";
 
 const BREAKER_ABI = parseAbi(["function isTripped(address account) view returns (bool)"]);
 /** The one read the onchain reconstruction checks itself against. */
@@ -857,6 +858,161 @@ async function main() {
         notionalUsdg: spend,
       },
     ];
+  }
+
+  /**
+   * WHAT THE VAULT ACTUALLY HOLDS, from the tick's own custody read.
+   *
+   * Kept rather than discarded for the same reason `lastCurveLegs` is: the exit
+   * below needs the balance at the VAULT, the tick already paid for it, and a
+   * second read would be a different moment's answer.
+   */
+  let lastClassBalances: ReadonlyMap<string, bigint> = new Map<string, bigint>();
+  /** Quote-token decimals, learned once and kept for the life of the process. */
+  const classQuoteDecimals = new Map<string, number>();
+
+  /**
+   * LEAVING A CLASS POSITION — the half that did not exist.
+   *
+   * `proposeClassEntries` was the only producer in the repo that could set
+   * `target` to the class vault, and it only ever builds a BUY. So the route
+   * could open a position and NOTHING anywhere could close it: `buildClassSellCalls`
+   * and the executor's sell arm were both reachable only from a test. An agent
+   * could buy a coin nobody enumerated and then hold it until its owner
+   * intervened with their own key.
+   *
+   * That is not a missing feature, it is a trap, and it is why this exists
+   * before any canary runs.
+   *
+   * ── WHY A CLOCK AND A CLIFF, AND NOT A PRICE ───────────────────────────
+   *
+   * Every price-based exit is unreachable in the case that matters. A class
+   * token has no oracle by definition, its curve may be drained, and a rugged
+   * one has no price at all — so a stop-loss cannot fire exactly when it is
+   * most needed. Both triggers here are answerable without a valuation:
+   *
+   *   THE CLOCK      how long it has been held. Always knowable.
+   *   THE CLIFF      how far the curve is toward graduation. `PonsClassVault`
+   *                  refuses a graduated curve by name (`CurveGraduated`), so a
+   *                  position still here when its curve graduates can never be
+   *                  sold through it again — the exit does not get worse, it
+   *                  DISAPPEARS. Leaving early costs the last stretch; leaving
+   *                  late costs the position.
+   *
+   * ── AND NO IMPACT CEILING ──────────────────────────────────────────────
+   *
+   * Deliberately unlike the entry, which refuses a buy that moves the curve too
+   * far. Refusing an exit for being expensive locks in precisely the position
+   * that most needs to close. The slippage floor still binds, so the trade is
+   * bounded — it just is not abandoned for being costly.
+   *
+   * ALL OR NOTHING. A partial exit leaves a rump that has to be closed again
+   * later, against a curve that is by then thinner, and the whole point is that
+   * the position stops existing.
+   */
+  async function proposeClassExits(): Promise<TradeIntent[]> {
+    if (paperActive()) return [];
+    if (!active) return [];
+    const vault = grantPonsClassVault(active.grant);
+    if (!vault) return [];
+
+    // NULL IS NOT EMPTY. An unreadable position list must not read as "nothing
+    // held" — that would silently skip every exit at the exact moment the
+    // database is unwell, which is when a stuck position is most likely.
+    const held = await classPositions(active.agentId);
+    if (held === null) return [];
+
+    const now = Math.floor(Date.now() / 1000);
+    const maxHold = cfg.classMaxHoldSec;
+    const exitAtPct = cfg.classExitAtGraduationPct;
+    const out: TradeIntent[] = [];
+
+    for (const p of held) {
+      const balance = lastClassBalances.get(p.token) ?? 0n;
+      if (balance <= 0n) continue; // sold, swept, or never delivered
+      // Both are needed to route a sell, and they travel together in the store
+      // for that reason. A row missing either cannot be exited here — it needs
+      // the owner's `sweep`, and the warning below says so.
+      if (!p.curve || !p.quoteToken) {
+        void addEvent(
+          active.agentId,
+          "warn",
+          `${p.symbol ?? short(p.token)} is in your vault with no curve on record, so I cannot sell it for you. ` +
+            `It is not lost — your own key can move it out with \`merrymen recover\`.`,
+        );
+        continue;
+      }
+
+      // The quote's decimals, cached across the loop. Null means we could not
+      // learn them, and a wrong decimals figure silently misprices the floor by
+      // orders of magnitude — so it is treated exactly like an unreadable curve
+      // rather than defaulted to 18.
+      const quoteDec = await quoteDecimalsOf(
+        active.client,
+        p.quoteToken as `0x${string}`,
+        classQuoteDecimals,
+      ).catch(() => null);
+      const reserves =
+        quoteDec === null
+          ? null
+          : await readCurveReserves(
+              active.client,
+              // THE THRESHOLD COMES FROM THE CURVE, not from this row: the store
+              // does not keep it, and a zero would make `curveDepthFraction`
+              // meaningless — which is the number the graduation cliff is read
+              // from. `readCurveThreshold` asks the contract that owns it.
+              {
+                curve: p.curve as `0x${string}`,
+                graduationThresholdRaw:
+                  (await readCurveThreshold(active.client, p.curve as `0x${string}`).catch(() => null)) ?? 0n,
+              },
+              { quote: quoteDec, token: p.decimals },
+            ).catch(() => null);
+      // AN UNREADABLE CURVE IS NOT A REASON TO SELL BLIND. Without reserves
+      // there is no slippage floor, and a sell with no floor into a curve we
+      // cannot see is how a position leaves for nothing. Said out loud, because
+      // the remedy is the owner's key and they cannot guess that.
+      if (!reserves) {
+        void addEvent(
+          active.agentId,
+          "warn",
+          `couldn't read ${p.symbol ?? short(p.token)}'s curve, so I am not selling it blind — a sell with no ` +
+            `floor is how a position leaves for nothing. Retrying each tick; \`merrymen recover\` is the way out if it stays dead.`,
+        );
+        continue;
+      }
+
+      const heldSec = Math.max(0, now - p.firstSeen);
+      const progressPct = (curveDepthFraction(reserves) ?? 0) * 100;
+      const aged = heldSec >= maxHold;
+      const graduating = progressPct >= exitAtPct;
+      if (!aged && !graduating) continue;
+
+      const quoted = curveSellOut(reserves, balance);
+      if (quoted === null || quoted <= 0n) continue;
+      const floor = curveMinOut(quoted, cfg.slippageBps);
+      if (floor === null || floor <= 0n) continue;
+
+      console.log(
+        `[class] exiting ${p.symbol ?? short(p.token)} — ${
+          graduating ? `${progressPct.toFixed(1)}% to graduation (the vault cannot sell a graduated curve)` : `held ${Math.round(heldSec / 60)}m`
+        }`,
+      );
+      out.push({
+        kind: "curve-trade",
+        target: vault,
+        curve: p.curve as `0x${string}`,
+        assetIn: p.token as `0x${string}`,
+        assetOut: p.quoteToken as `0x${string}`,
+        amountInRaw: balance,
+        minAmountOutRaw: floor,
+        // The NOTIONAL is what we expect back, because for a sell the quote leg
+        // is the money. Sizing it off the token amount would report a memecoin
+        // count as USDG.
+        notionalUsdg: quoted,
+      });
+    }
+    return out;
   }
 
   function curveLegsNow(): {
@@ -6692,6 +6848,12 @@ async function main() {
         symbols: classHeldRows.map((r) => r.symbol ?? short(r.token)),
         tokens: classHeldRows.map((r) => r.token),
       };
+      // Kept for the exit producer, which needs the balance AT THE VAULT and
+      // must not pay for a second read of it. Replaced wholesale, never merged,
+      // for the same reason `lastCurveLegs` is: a token that stopped answering
+      // this tick must not leave a stale balance behind for a sell to size
+      // against.
+      lastClassBalances = classRead.balances;
       // A CLASS POSITION IS UNPRICEABLE BY CONSTRUCTION, so it joins the set the
       // quarantine carries at cost. Without this it is in no equity term at all:
       // the buy reads as a pure cash decrease with nothing arriving, equity
@@ -8110,6 +8272,17 @@ async function main() {
     // to reach for an asset nobody gave it, which is a different kind of
     // decision and belongs where it can be read as one. It also keeps every
     // existing strategy unable to reach the route by accident.
+    // EXITS BEFORE ENTRIES, and the order is load-bearing rather than tidy.
+    //
+    // Both compete for the same per-tick budget, the same daily cap and the
+    // same ops allowance. Running entries first means a tick that spends its
+    // allowance opening a new position cannot close one that is about to become
+    // unsellable — a curve at 85% of graduation has a deadline, and a new
+    // candidate never does. The way out goes first.
+    for (const intent of await proposeClassExits()) {
+      await ensureDecision(intent, "class-route");
+      await processIntent(intent, equityUsdg, !bookIncomplete);
+    }
     for (const intent of await proposeClassEntries()) {
       await ensureDecision(intent, "class-route");
       await processIntent(intent, equityUsdg, !bookIncomplete);

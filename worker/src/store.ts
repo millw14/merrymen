@@ -3351,6 +3351,16 @@ export interface ClassPositionRow {
   decimals: number;
   curve: string | null;
   quoteToken: string | null;
+  /**
+   * When this position was first recorded, unix seconds.
+   *
+   * Selected because the EXIT needs a clock that does not depend on a price. A
+   * class token has no oracle and may have no depth at all, so a stop-loss
+   * cannot reach it — but "you have held this for N hours" is always answerable,
+   * and a position that can always be closed is the difference between a
+   * position and a trap.
+   */
+  firstSeen: number;
 }
 
 /**
@@ -3366,7 +3376,7 @@ export async function classPositions(agentId: string): Promise<ClassPositionRow[
   try {
     const rows = (await getDb()
       .prepare(
-        `SELECT token, symbol, decimals, curve, quote_token FROM class_positions WHERE agent_id = ?`,
+        `SELECT token, symbol, decimals, curve, quote_token, first_seen FROM class_positions WHERE agent_id = ?`,
       )
       .all(agentId)) as {
       token: string;
@@ -3374,6 +3384,7 @@ export async function classPositions(agentId: string): Promise<ClassPositionRow[
       decimals: number;
       curve: string | null;
       quote_token: string | null;
+      first_seen: number | null;
     }[];
     return rows.map((r) => ({
       token: r.token.toLowerCase(),
@@ -3381,6 +3392,11 @@ export async function classPositions(agentId: string): Promise<ClassPositionRow[
       decimals: r.decimals,
       curve: r.curve ? r.curve.toLowerCase() : null,
       quoteToken: r.quote_token ? r.quote_token.toLowerCase() : null,
+      // A NULL clock reads as "right now", not as 1970. The column has a
+      // default so this should not happen, but a zero would make every position
+      // instantly older than any hold window and force an immediate exit — an
+      // unreadable age must not be able to sell somebody's book.
+      firstSeen: r.first_seen ?? Math.floor(Date.now() / 1000),
     }));
   } catch {
     return null;
@@ -3406,7 +3422,11 @@ export async function classPositionCurves(agentId: string): Promise<string[] | n
 /** Remember that the class vault now holds this token. Idempotent by (agent, token). */
 export async function upsertClassPosition(
   agentId: string,
-  row: ClassPositionRow,
+  // WITHOUT the clock. The column carries its own default, and letting a caller
+  // supply one would let a re-record reset the age the exit is measured
+  // against — which on an idempotent upsert would mean a position that is
+  // touched often can never grow old enough to be sold.
+  row: Omit<ClassPositionRow, "firstSeen">,
 ): Promise<void> {
   try {
     await getDb()

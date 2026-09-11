@@ -56,12 +56,33 @@ describe("the reserves come from the pass that already read them", () => {
     // a slippage floor derived from the wrong one is a floor for a market that
     // no longer exists. The pricing pass already pays for these.
     assert.match(CODE, /lastCurveLegs = curveRes\.legs;/, "the legs must come from the pricing result");
-    // readCurveReserves is still allowed exactly once, for the owner-typed chat
-    // command, which runs outside the tick.
+    // TWO READS ARE ALLOWED, AND NEITHER IS A RE-READ. The rule this guard
+    // enforces is "never read a curve the pricing pass already read", which it
+    // used to express as a count of one. The count stopped matching the rule
+    // when the class exit arrived:
+    //
+    //   1. the owner-typed chat command, which runs outside the tick.
+    //   2. proposeClassExits. A CLASS token is never in `watchTokens` — that is
+    //      the definition of the class — so `lastCurveLegs`, which is built
+    //      from watchTokens, never contains its curve. The pricing pass does
+    //      not pay for it, there is nothing to reuse, and without this read
+    //      there is no slippage floor and therefore no exit at all.
+    //
+    // Raising the number is only legitimate alongside that argument. A read of
+    // a WATCHED token's curve would still be the bug, and the assertion below
+    // keeps the class read where its justification holds.
     assert.equal(
       (CODE.match(/await readCurveReserves\(/g) ?? []).length,
-      1,
-      "a second reserve read inside the tick would double the cost and change the answer",
+      2,
+      "a re-read of a curve the pricing pass already priced would be two different markets",
+    );
+    const exitAt = CODE.indexOf("async function proposeClassExits");
+    const exitEnd = CODE.indexOf("\n  function curveLegsNow", exitAt);
+    assert.ok(exitAt > -1 && exitEnd > exitAt, "proposeClassExits must exist to justify the second read");
+    assert.match(
+      CODE.slice(exitAt, exitEnd),
+      /await readCurveReserves\(/,
+      "the second read must be the class exit's, which has no priced leg to reuse",
     );
   });
 
