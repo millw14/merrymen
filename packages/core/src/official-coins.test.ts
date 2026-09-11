@@ -219,4 +219,44 @@ describe("ponsAdapterForSigning", () => {
     // and /grant offers a two-click chain switch.
     assert.ok(MAINNET in PONS_SELF_TRADE && TESTNET in PONS_SELF_TRADE);
   });
+
+  it("matches contracts/deployments.json, which is the deploy's own record", () => {
+    // TWO RECORDS OF ONE FACT, so they are pinned to each other.
+    //
+    // The constant is what every signer seals; deployments.json is what the
+    // deploy script wrote. If they drifted, grants would be minted against an
+    // address nobody deployed — and the failure appears at the bundler, one
+    // re-sign too late, as a UserOp the account contract refuses.
+    //
+    // A MISSING FILE IS NOT A PASS. `contracts/deployments.json` is gitignored
+    // by nothing and absent only when nothing has been deployed, so the file's
+    // absence has to mean the constants are null rather than "skip the check".
+    const file = path.join(__dirname, "..", "..", "..", "contracts", "deployments.json");
+    let book: Record<string, Record<string, { address?: string }>> = {};
+    let present = true;
+    try {
+      book = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      present = false;
+    }
+    for (const chainId of [MAINNET, TESTNET]) {
+      const constant = PONS_SELF_TRADE[chainId];
+      const recorded: string | undefined = present
+        ? book[String(chainId)]?.PonsSelfTrade?.address
+        : undefined;
+      if (!present || recorded === undefined) {
+        assert.equal(
+          constant,
+          null,
+          `chain ${chainId}: PONS_SELF_TRADE names an address that no deployment records`,
+        );
+        continue;
+      }
+      assert.equal(
+        constant?.toLowerCase(),
+        recorded.toLowerCase(),
+        `chain ${chainId}: the sealed constant and the deploy record disagree`,
+      );
+    }
+  });
 });

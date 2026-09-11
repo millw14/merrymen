@@ -133,9 +133,17 @@ export const PONS_CLASS_VAULT_FACTORY: Readonly<Record<number, string | null>> =
  * "the adapter answered zero" and must stay distinguishable from it.
  */
 export const PONS_SELF_TRADE: Readonly<Record<number, string | null>> = Object.freeze({
-  /** Robinhood Chain mainnet. */
-  4663: null,
-  /** Robinhood Chain testnet. */
+  /**
+   * Robinhood Chain mainnet. Deployed 2026-09-11, 3,095 bytes.
+   *
+   * Verified against the chain independently of the deploy script's own report:
+   * chain id 4663; selector `0xc0cfd48c` — `tradeExactIn(address,address,
+   * address,uint128,uint128,uint256)`, the exact shape PONS_SELFTRADE_ABI pins,
+   * uint128 and not uint256 — present in the bytecode; and a value-bearing call
+   * reverts, which is the property that lets the wall keep `valueLimit: 0n`.
+   */
+  4663: "0xe9dbd4b1e53f1c6d887ab8251d74e3745ac08019",
+  /** Robinhood Chain testnet — not deployed. */
   46630: null,
 });
 
