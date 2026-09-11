@@ -1778,8 +1778,9 @@ async function runAnnouncementIfAsked(): Promise<void> {
       log(
         `announcement ${id}: ${out.dryRun ? "DRY RUN, nothing sent" : "SENT"} — ` +
           `${out.considered} tenants, ${out.eligible} eligible, ${out.sent} ${out.dryRun ? "would receive" : "delivered"}, ` +
-          `${out.personalised} with their own reason · skipped: ${out.skippedNoChat} no chat, ` +
-          `${out.skippedNoToken} no bot, ${out.skippedDisabled} tg off, ${out.skippedNotifyOff} pushes off, ` +
+          `${out.personalised} with their own reason · ` +
+          `${out.withAllowlist} have linked at some point, ${out.withBotToken} hold a bot token · ` +
+          `skipped: ${out.skippedNoChat} no chat, ${out.skippedNoToken} no bot, ${out.skippedDisabled} tg off, ${out.skippedNotifyOff} pushes off, ` +
           `${out.skippedAlreadySent} already had it · ${out.failed.length} failed`,
       );
       // "Nobody is blocked" and "the join broke" are the same empty map and

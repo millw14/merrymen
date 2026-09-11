@@ -262,3 +262,46 @@ describe("three layers must hold before an agent reaches for a class token", () 
     assert.match(PRODUCER, /target: vault/);
   });
 });
+
+/**
+ * PROVENANCE MUST BE A LIVE READ, NOT AN ARM-TIME SNAPSHOT.
+ *
+ * `curve-provenance` is the ONLY thing vouching for a class token — its output
+ * leg is deliberately un-enumerated, so no wall and no allowlist names it. The
+ * rule checks `limits.knownCurves`, and `limitsFromGrant` built that list at
+ * ARM TIME and refreshed it only when strategy settings changed.
+ *
+ * So the one route whose entire purpose is trading a launch that did not exist
+ * at signing could only ever have traded a launch that DID. On a hosted child
+ * it was total rather than narrow: `discovered_pools` lives in the child's
+ * ephemeral home, so the table is EMPTY when the agent arms, the snapshot was
+ * empty, and every class buy was refused `curve-provenance` for ever.
+ *
+ * Observed on the live canary: the producer found candidates from the
+ * factory-filtered scan, sized one, proposed it, and policy refused the very
+ * curve the scan had written minutes earlier.
+ */
+describe("class provenance is re-read every tick", () => {
+  const SRC = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  const BLOCK = SRC.slice(SRC.indexOf("PROVENANCE IS RE-READ HERE, EVERY TICK"), SRC.indexOf("await proposeClassExits()"));
+
+  it("refreshes before the producers run, not at arm time only", () => {
+    assert.ok(BLOCK.length > 300, "the refresh moved — re-point this test, do not delete it");
+    assert.match(BLOCK, /provenanceCurves\(await knownCurves\(\), await classPositionCurves\(active\.agentId\)\)/);
+  });
+
+  it("replaces the list WHOLE, never patches it", () => {
+    // provenanceCurves returns undefined if either read failed, and undefined
+    // means the rule cannot run — which for a class trade is a refusal. A
+    // partial list would silently refuse exactly the positions it dropped,
+    // including a position's own exit.
+    assert.match(BLOCK, /if \(fresh\) active\.limits = \{ \.\.\.active\.limits, knownCurves: fresh \};/);
+  });
+
+  it("keeps the old list when the read fails, rather than emptying it", () => {
+    // An empty list is not a safe default here: it refuses every class trade
+    // including an exit. Keeping the previous answer is the conservative one.
+    assert.doesNotMatch(BLOCK, /knownCurves: fresh \?\? \[\]/);
+    assert.doesNotMatch(BLOCK, /knownCurves: \[\]/);
+  });
+});

@@ -50,7 +50,12 @@ export interface SettingsReader {
   listTenants(): Promise<`0x${string}`[]>;
   get(
     tenant: `0x${string}`,
-  ): Promise<{ telegramBotToken?: string; telegramEnabled?: boolean; telegramNotifyEnabled?: boolean } | null>;
+  ): Promise<{
+    telegramBotToken?: string;
+    telegramEnabled?: boolean;
+    telegramNotifyEnabled?: boolean;
+    telegramAllowlist?: number[];
+  } | null>;
 }
 
 /** Telegram tolerates ~30 messages/second globally; this is far under it. */
@@ -103,6 +108,18 @@ export interface AnnounceOutcome {
   sent: number;
   /** How many messages will carry this agent's own reason. The rest are generic. */
   personalised: number;
+  /**
+   * HOW MANY HAVE EVER LINKED, from the DURABLE record.
+   *
+   * `telegramAllowlist` lives in the sealed settings and survives a redeploy;
+   * `tenant_telegram.owner_id` is a mirror of an EPHEMERAL child file. When
+   * these two disagree, the difference is people whose link was destroyed by a
+   * deploy rather than people who never linked — and those need telling to
+   * re-link, not telling how to set one up.
+   */
+  withAllowlist: number;
+  /** Tenants holding a bot token at all, counted independently of the chat. */
+  withBotToken: number;
   failed: { tenant: string; reason: string }[];
   /**
    * The blocker join failed. An empty blocker map means "nobody is blocked"
@@ -183,12 +200,21 @@ export async function resolveRecipients(
   const recipients: AnnounceRecipient[] = [];
   for (const tenant of tenants) {
     const key = tenant.toLowerCase();
+    // READ SETTINGS FIRST, and count the two durable facts unconditionally.
+    //
+    // The skip counters below are ORDERED — chat before token — so a tenant
+    // dropped at the first test was never examined for the second, and
+    // "0 no bot" meant "nobody got that far", not "everybody has one". That
+    // reading cost a wrong conclusion about the whole fleet.
+    const s = await store.get(tenant);
+    if (s?.telegramBotToken) out.withBotToken += 1;
+    if (Array.isArray(s?.telegramAllowlist) && s.telegramAllowlist.length > 0) out.withAllowlist += 1;
+
     const chatId = chats.get(key);
     if (chatId === undefined) {
       out.skippedNoChat += 1;
       continue;
     }
-    const s = await store.get(tenant);
     if (!s?.telegramBotToken) {
       out.skippedNoToken += 1;
       continue;
@@ -255,6 +281,8 @@ export async function runAnnouncement(opts: {
     skippedAlreadySent: 0,
     sent: 0,
     personalised: 0,
+    withAllowlist: 0,
+    withBotToken: 0,
     failed: [],
     blockerJoinError: null,
     dryRun: !opts.confirmed,

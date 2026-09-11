@@ -97,7 +97,15 @@ const makeClient = (opts: { chats: [string, number][]; blockers?: [string, strin
  * store would need the real DEK.
  */
 const store = (
-  tenants: Record<string, { telegramBotToken?: string; telegramEnabled?: boolean; telegramNotifyEnabled?: boolean }>,
+  tenants: Record<
+    string,
+    {
+      telegramBotToken?: string;
+      telegramEnabled?: boolean;
+      telegramNotifyEnabled?: boolean;
+      telegramAllowlist?: number[];
+    }
+  >,
 ) =>
   ({
     listTenants: async () => Object.keys(tenants) as `0x${string}`[],
@@ -340,5 +348,38 @@ describe("the phone-fireable trigger on the orchestrator", () => {
   it("shouts when the per-agent lookup failed rather than reporting a clean run", () => {
     assert.match(BLOCK, /blockerJoinError/);
     assert.match(BLOCK, /every message would be generic/);
+  });
+});
+
+describe("the census counts the durable facts independently", () => {
+  it("counts bot tokens and allowlists BEFORE the ordered skips", async () => {
+    // The skip counters are ordered — chat is tested before token — so a tenant
+    // dropped at the first test was never examined for the second. Reading
+    // "0 no bot" as "everybody has a bot" cost me a wrong conclusion about the
+    // whole fleet, stated to the owner. These two are counted for every tenant,
+    // whatever happens after.
+    const st = store({
+      "0xaa": { telegramBotToken: "t1", telegramAllowlist: [111] },
+      "0xbb": { telegramBotToken: "t2" },
+      "0xcc": {},
+    });
+    const client = makeClient({ chats: [] }); // nobody has a live chat
+    const out = await runAnnouncement({
+      client, store: st, announceId: "x", body: "B", confirmed: false, send: (async () => ({ ok: true })) as never, sleep: async () => {},
+    });
+    assert.equal(out.skippedNoChat, 3, "all three drop out at the first test");
+    assert.equal(out.withBotToken, 2, "and the token count is still right for all three");
+    assert.equal(out.withAllowlist, 1, "as is the count of who has ever linked");
+  });
+
+  it("separates 'never linked' from 'link was destroyed'", () => {
+    // telegramAllowlist is in the sealed settings and survives a redeploy;
+    // tenant_telegram.owner_id mirrors an EPHEMERAL child file. A gap between
+    // them is people whose link a deploy destroyed — who need telling to
+    // re-link, not telling how to set one up.
+    const src = readFileSync(new URL("./announce.ts", import.meta.url), "utf8");
+    const doc = src.slice(src.indexOf("HOW MANY HAVE EVER LINKED"), src.indexOf("withAllowlist: number;"));
+    assert.match(doc, /survives a redeploy/);
+    assert.match(doc, /EPHEMERAL/);
   });
 });

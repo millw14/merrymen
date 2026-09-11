@@ -8623,6 +8623,28 @@ async function main() {
 
     // ── THE CLASS ROUTE ────────────────────────────────────────────────────
     //
+    // PROVENANCE IS RE-READ HERE, EVERY TICK, and that is the whole reason this
+    // block exists before the producers.
+    //
+    // `limits.knownCurves` was built by `limitsFromGrant` at ARM TIME and
+    // refreshed only when strategy settings change. Every curve discovered
+    // after the arm was therefore absent from it, and `curve-provenance` fails
+    // closed — so the one route whose entire purpose is trading a launch that
+    // did not exist at signing could only ever have traded a launch that DID.
+    //
+    // Worse on a hosted child, where it is not a narrow window but a total one:
+    // `discovered_pools` lives in the child's ephemeral home, so at arm time
+    // the table is EMPTY. The snapshot was empty, and no launch could ever pass.
+    //
+    // Refreshed as a whole, never patched in place: `provenanceCurves` returns
+    // undefined if EITHER read failed, and undefined means the rule cannot run,
+    // which for a class trade is a refusal. A partial list would silently
+    // refuse exactly the positions it dropped — including a position's own exit.
+    if (active) {
+      const fresh = provenanceCurves(await knownCurves(), await classPositionCurves(active.agentId));
+      if (fresh) active.limits = { ...active.limits, knownCurves: fresh };
+    }
+
     // Driven here rather than from inside a strategy, deliberately. A strategy
     // decides WHICH of the assets it was given to trade; this decides whether
     // to reach for an asset nobody gave it, which is a different kind of
