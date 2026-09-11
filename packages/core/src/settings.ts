@@ -458,6 +458,30 @@ export interface MerrymenSettings {
    */
   classSnipeEnabled?: boolean;
   /**
+   * Trade the platform's OFFICIAL COINS — the curated non-equity listings in
+   * packages/core/src/official-coins.ts. Default ON.
+   *
+   * DEFAULT ON, which is the opposite of `classSnipeEnabled` two fields up, and
+   * the difference is what is being trusted. The class route buys a token nobody
+   * enumerated, on provenance that lives entirely off-chain; an official coin is
+   * an address the platform published, verified and stands behind, reaching the
+   * owner the same way the default equity basket does. Requiring an opt-in for a
+   * curated listing would reproduce the exact failure this was built to end: an
+   * owner holding the default basket, shown the sentence "Memecoins trade around
+   * the clock and are unaffected", with nothing on the platform able to reach
+   * one.
+   *
+   * Turning it off removes the listings from the watch set entirely, so they are
+   * not watched, not priced, not legs, and not sealed at the next re-sign —
+   * rather than watched-but-untradable, which is the state that made an agent
+   * look broken while behaving correctly.
+   *
+   * IT IS NOT PERMISSION AND CANNOT BECOME PERMISSION. A grant signed before a
+   * listing does not cover it, whatever this says; the owner re-signs or the
+   * coin stays unreachable.
+   */
+  officialCoinsEnabled?: boolean;
+  /**
    * Max USDG into a single class entry. 0 = nothing, which is the default.
    *
    * Two switches rather than one because they fail differently: forgetting to
@@ -731,6 +755,9 @@ export const SETTINGS_DEFAULTS = {
   classSnipeEnabled: false,
   classPerEntryUsdg: 0,
   classMaxPositions: 0,
+  // ON, unlike everything above it. See MerrymenSettings.officialCoinsEnabled
+  // for why a curated listing defaults differently from a discovered one.
+  officialCoinsEnabled: true,
   // The venue's own floor (CURVE_GUARD_DEFAULTS.minRealDepthUsdg), not
   // trencher's $25,000 — that is a POOL figure and sits 2.4x above the most a
   // Pons curve can ever hold.

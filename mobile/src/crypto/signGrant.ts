@@ -19,6 +19,8 @@ import {
   WALL_POLICY_FLAG,
   robinhoodChain,
   usableExtraTokens,
+  officialCoinTokens,
+  ponsAdapterForSigning,
   assertDerivedAccount,
   type CustomToken,
   type GrantCaps,
@@ -175,11 +177,29 @@ export async function signGrant(args: {
     );
   }
 
+  /**
+   * The platform's official listings, plus whatever the caller passed, plus the
+   * chain's deployed Pons adapter when the caller named none.
+   *
+   * THE PHONE NEEDS THIS MORE THAN THE BROWSER DOES, not less. The web signer
+   * can at least read /settings; this file's own note records that "the phone
+   * passes nothing today, so phone grants honestly carry no Pons marker", and
+   * `onboarding/grant.tsx` passes three fields with no tokens and no adapter. So
+   * without a default resolved HERE, a phone-signed grant can never reach a
+   * curve — and the owner's only symptom is an agent that never trades when the
+   * equity market is shut.
+   *
+   * Both defaults are signing-time only. The worker trades whatever address the
+   * signature sealed, never the constant.
+   */
+  const sealedTokens = [...officialCoinTokens(chain.id), ...(args.extraTokens ?? [])];
+  const sealedPonsAdapter = ponsAdapterForSigning(chain.id, args.ponsAdapterAddress);
+
   const wallOpts = {
-    extraTokens: args.extraTokens,
+    extraTokens: sealedTokens,
     allowUniswapV4,
     v4AdapterAddress: args.v4AdapterAddress,
-    ponsAdapterAddress: args.ponsAdapterAddress,
+    ponsAdapterAddress: sealedPonsAdapter,
     ponsClassVaultAddress,
     // Rides with the vault. buildWallPolicies THROWS on a vault without a
     // factory — two of three class permissions is a key that can reach a vault
@@ -255,14 +275,14 @@ export async function signGrant(args: {
         TRADEABLE_V2,
         ...(allowUniswapV4 ? [GRANT_V4] : []),
         ...(args.v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
-        ...(args.ponsAdapterAddress ? [GRANT_PONS_ADAPTER] : []),
+        ...(sealedPonsAdapter ? [GRANT_PONS_ADAPTER] : []),
         // From the RESOLVED VAULT, never from `args.ponsClassVaultFactory` —
         // the factory is the request, the vault address is the evidence. See
         // the same line in web/src/lib/session.ts.
         ...(ponsClassVaultAddress ? [GRANT_PONS_CLASS] : []),
       ],
       ...(args.v4AdapterAddress ? { v4AdapterAddress: args.v4AdapterAddress.toLowerCase() } : {}),
-      ...(args.ponsAdapterAddress ? { ponsAdapterAddress: args.ponsAdapterAddress.toLowerCase() } : {}),
+      ...(sealedPonsAdapter ? { ponsAdapterAddress: sealedPonsAdapter.toLowerCase() } : {}),
       ...(ponsClassVaultAddress
         ? {
             ponsClassVaultAddress: ponsClassVaultAddress.toLowerCase(),
@@ -270,7 +290,7 @@ export async function signGrant(args: {
             ponsClassVaultFactoryAddress: args.ponsClassVaultFactory!.toLowerCase(),
           }
         : {}),
-      grantTokens: usableExtraTokens(args.extraTokens).map((t) => t.address.toLowerCase()),
+      grantTokens: usableExtraTokens(sealedTokens).map((t) => t.address.toLowerCase()),
       demoSessionPrivateKey: sessionPrivateKey,
     },
     sessionPrivateKey,

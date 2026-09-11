@@ -8,6 +8,11 @@
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
+import {
+  officialCoinCurve,
+  officialCoinsFor,
+  robinhoodChain,
+} from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
 import { wrapSqlite, makePgDb, type Db } from "./db";
 // The one definition of a flow's identity. Imported rather than restated so
@@ -595,6 +600,12 @@ const SQLITE_ALTERS: string[] = [
     // WITHIN a chain, and this codebase runs mainnet 4663 and testnet 46630
     // against the same schema.
     "ALTER TABLE flows ADD COLUMN chain_id INTEGER",
+    // WHY A HOLD WAS A HOLD, persisted so the funnel can be read without logs.
+    // graph.py applies a shut gate by overwriting action to "hold" AFTER parsing,
+    // so a forced hold and a chosen one are identical in the decision row unless
+    // this is carried. Null on every row written before the Brain reported it,
+    // and null is rendered as unknown rather than as either kind.
+    "ALTER TABLE decisions ADD COLUMN hold_kind TEXT",
     // ── NORMALISE BEFORE CONSTRAINING, in this order and not the other ──────
     //
     // Rows written before the identity existed carry a NULL chain and whatever
@@ -937,6 +948,20 @@ export interface DecisionRow {
   /** Set when the proposal was dropped before execution (no trade will link to it). */
   dropped_rule?: string;
   signals_json?: string;
+  /**
+   * WHY A HOLD WAS A HOLD — "MODEL_HOLD" or "GATE_FORCED_HOLD".
+   *
+   * The Brain's gate applies a shut verdict by overwriting the action to "hold"
+   * AFTER parsing, deliberately, because a model told it may not size will
+   * still sometimes size one. So a forced hold and a considered one are
+   * identical in this row unless the kind is carried — and "the agent decided
+   * not to trade" and "the agent was not allowed to" have opposite remedies.
+   *
+   * Absent on anything a non-Brain strategy wrote, and on rows from before the
+   * Brain reported it. Absent stays absent: a funnel that counts unknown holds
+   * as model holds would report a healthy fleet while it was being gated.
+   */
+  hold_kind?: string;
 }
 
 /** A fresh decision id. Kept here so every producer stamps the same shape. */
@@ -948,8 +973,8 @@ export async function addDecision(row: DecisionRow): Promise<void> {
   try {
     await getDb()
       .prepare(
-        `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action, size_usdg, reason, dropped_rule, signals_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action, size_usdg, reason, dropped_rule, signals_json, hold_kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
@@ -964,6 +989,7 @@ export async function addDecision(row: DecisionRow): Promise<void> {
         row.reason ?? null,
         row.dropped_rule ?? null,
         row.signals_json ?? null,
+        row.hold_kind ?? null,
       );
   } catch (e) {
     console.error("[store] decision insert failed:", e);
@@ -3411,7 +3437,21 @@ export async function knownCurves(): Promise<string[] | null> {
     const rows = (await getDb()
       .prepare(`SELECT DISTINCT curve FROM discovered_pools WHERE curve IS NOT NULL`)
       .all()) as { curve: string | null }[];
-    return rows.map((r) => r.curve).filter((c): c is string => !!c).map((c) => c.toLowerCase());
+    const discovered = rows.map((r) => r.curve).filter((c): c is string => !!c).map((c) => c.toLowerCase());
+    // OFFICIAL CURVES JOIN THE PROVENANCE SET, for the same reason `curveFor`
+    // consults the listing first: the launch scan may never have seen a listed
+    // coin (it launched before this worker existed, or its row was pruned), and
+    // the curve-provenance rule would then refuse the very trades the platform
+    // published the coin to make — including the SELL that closes a position.
+    //
+    // Unioned ONLY on a successful read. A failed read returns null below, and
+    // must keep returning null: `null` means "could not tell" and makes the
+    // caller pass `undefined`, while a list containing only the official curves
+    // would be a PARTIAL answer, which silently refuses exactly the positions it
+    // dropped. A short provenance list is a refusal; a partial one is a silent
+    // refusal, which is worse.
+    const official = officialCoinsFor(robinhoodChain.id).map((c) => c.curve.toLowerCase());
+    return [...new Set([...discovered, ...official])];
   } catch {
     return null;
   }
@@ -3434,6 +3474,27 @@ export async function knownCurves(): Promise<string[] | null> {
 export async function curveFor(
   address: string,
 ): Promise<{ curve: string; quoteToken: string; graduationThresholdRaw: bigint } | null> {
+  // AN OFFICIAL LISTING CARRIES ITS OWN CURVE, and it is consulted before the
+  // table rather than as a fallback behind it.
+  //
+  // `discovered_pools` cannot be the authority for a listing. It is wiped on
+  // every redeploy in hosted mode (the child's sqlite is rebuilt beneath it),
+  // and `pruneDiscovered` trims it to the 5,000 newest rows against a launchpad
+  // measured at ~475 launches an hour — so a coin the PLATFORM published would
+  // lose its own provenance within hours and become unpriceable and unsellable.
+  // A position the platform put an owner into and then forgot how to value is
+  // the no-exit trap in its purest form, so the pinned record wins.
+  //
+  // The two cannot meaningfully disagree — both decode the same launch log —
+  // but where they could, the verified constant is the one to trust.
+  const official = officialCoinCurve(robinhoodChain.id, address);
+  if (official) {
+    return {
+      curve: official.curve,
+      quoteToken: official.quoteToken,
+      graduationThresholdRaw: official.graduationThresholdRaw,
+    };
+  }
   try {
     const row = (await getDb()
       .prepare(

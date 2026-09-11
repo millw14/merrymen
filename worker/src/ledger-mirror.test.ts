@@ -27,7 +27,12 @@ const SRC = [
   "CREATE TABLE equity (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, eth_wei TEXT, cash_usdg REAL, vault_usdg REAL, positions_usdg REAL, equity_usdg REAL, epoch INTEGER DEFAULT 1, mode TEXT, at INTEGER);",
   "CREATE TABLE flows (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, direction TEXT, amount_usdg REAL, tx_hash TEXT, block_number INTEGER, log_index INTEGER, source TEXT, epoch INTEGER DEFAULT 1, chain_id INTEGER, at INTEGER);",
   "CREATE TABLE fee_accruals (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, profit_usdg REAL, fee_usdg REAL, hwm_before_usdg REAL, hwm_after_usdg REAL, epoch INTEGER DEFAULT 1, at INTEGER);",
-  "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, at INTEGER);",
+  // `hold_kind` is on here because a migrated database has it, and this fixture
+  // is a model of that database. It caught the column the moment it was added —
+  // the mirror's SELECT named it, this schema did not, and the copy silently
+  // moved zero rows. Which is the failure the comment further down records
+  // having already happened once with price_source.
+  "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, hold_kind TEXT, at INTEGER);",
   "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, sponsor_gas INTEGER, live_blocker TEXT, x_handle TEXT, x_verified INTEGER DEFAULT 0, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0, contributions_known INTEGER, contributions_why TEXT, gas_accounting TEXT, quality_at INTEGER);",
   "CREATE TABLE positions (agent_id TEXT, symbol TEXT, token TEXT, raw_balance TEXT, ui_multiplier TEXT, price_usd REAL, price_stale INTEGER, price_source TEXT DEFAULT 'chainlink', value_usdg REAL, updated_at INTEGER, PRIMARY KEY (agent_id, symbol));",
   "CREATE TABLE cost_basis (agent_id TEXT, mode TEXT, symbol TEXT, qty_raw TEXT, cost_usdg TEXT, updated_at INTEGER, PRIMARY KEY (agent_id, mode, symbol));",
@@ -95,7 +100,14 @@ const seedChild = () => {
       " VALUES ('0xagent',20.0,2.0,130.5,150.5,2,115)",
   );
   raw.exec(
-    "INSERT INTO decisions VALUES ('d1','0xagent','strategist',null,null,null,'PEPE','buy',5,'looked cheap',null,'{}',9)",
+    // COLUMNS NAMED, deliberately. A bare `VALUES (...)` binds by position, so
+    // every migration that adds a column to `decisions` silently shifts the
+    // meaning of every value after it — `hold_kind` landing in `at` is exactly
+    // what happened here, and SQLite only caught it because the counts stopped
+    // matching. With the columns named, a future migration is a no-op for these
+    // fixtures instead of a puzzle.
+    "INSERT INTO decisions (id, agent_id, source, symbol, action, size_usdg, reason, signals_json, at)" +
+      " VALUES ('d1','0xagent','strategist','PEPE','buy',5,'looked cheap','{}',9)",
   );
   return wrapSqlite(raw);
 };
@@ -427,7 +439,10 @@ describe("the ledger mirror", () => {
     const shared = mem(DEST);
     for (let i = 0; i < 600; i++) {
       await child
-        .prepare("INSERT INTO decisions VALUES (?, '0xagent','strategist',null,null,null,'PEPE','buy',5,?,null,'{}',?)")
+        .prepare(
+          "INSERT INTO decisions (id, agent_id, source, symbol, action, size_usdg, reason, signals_json, at)" +
+            " VALUES (?, '0xagent','strategist','PEPE','buy',5,?,'{}',?)",
+        )
         .run(`x${i}`, `reason ${i}`, 1000 + i);
     }
     // Two passes: the first fills a batch, the second collects the rest.
@@ -442,12 +457,18 @@ describe("the ledger mirror", () => {
     const child = seedChild();
     const shared = mem(DEST);
     await child
-      .prepare("INSERT INTO decisions VALUES ('t1','0xagent','strategist',null,null,null,'A','buy',1,'first',null,'{}',5000)")
+      .prepare(
+        "INSERT INTO decisions (id, agent_id, source, symbol, action, size_usdg, reason, signals_json, at)" +
+          " VALUES ('t1','0xagent','strategist','A','buy',1,'first','{}',5000)",
+      )
       .run();
     await mirrorTenant({ tenant: "0xten", child, shared });
     // A second decision written in the SAME second, after the cursor moved.
     await child
-      .prepare("INSERT INTO decisions VALUES ('t2','0xagent','strategist',null,null,null,'B','buy',1,'same second',null,'{}',5000)")
+      .prepare(
+        "INSERT INTO decisions (id, agent_id, source, symbol, action, size_usdg, reason, signals_json, at)" +
+          " VALUES ('t2','0xagent','strategist','B','buy',1,'same second','{}',5000)",
+      )
       .run();
     await mirrorTenant({ tenant: "0xten", child, shared });
     const got = (await shared.prepare("SELECT COUNT(*) AS n FROM decisions WHERE at = 5000").get()) as { n: number };

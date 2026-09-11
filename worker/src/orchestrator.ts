@@ -1259,6 +1259,72 @@ async function fleetHealth(): Promise<void> {
       // missing breakdown is not a fleet that is down.
     }
 
+    // ── IS AUTONOMY STILL HEALTHY? ONE LINE, FROM THE LEDGER ────────────
+    //
+    // Everything below was previously answerable only by reading raw container
+    // logs, which is how a fleet that had not landed a single autonomous fill
+    // in weeks went unnoticed. The funnel is the shape that matters: a hundred
+    // proposals and zero fills is a completely different fault from zero
+    // proposals, and a count of "trades" tells you neither.
+    //
+    // ONE HOUR, because the question is "is it working NOW". A lifetime total
+    // keeps reading healthy for days after execution breaks — the canary's six
+    // fills would mask a fleet that stopped this morning.
+    //
+    // Read-only, bounded, and wrapped like the block above: a missing column on
+    // a database mid-migration is not a fleet that is down, and this must never
+    // be the thing that stops a mirror pass.
+    try {
+      const since = Math.floor(Date.now() / 1000) - 3600;
+      const t = (await shared
+        .prepare(
+          `SELECT status, COALESCE(reject_rule, '') AS rule, COUNT(*) AS n
+             FROM trades WHERE at >= ? GROUP BY status, rule`,
+        )
+        .all(since)) as { status: string; rule: string; n: number | string }[];
+      const h = (await shared
+        .prepare(
+          `SELECT COALESCE(hold_kind, 'unreported') AS kind, COUNT(*) AS n
+             FROM decisions WHERE at >= ? AND action = 'hold' GROUP BY kind`,
+        )
+        .all(since)) as { kind: string; n: number | string }[];
+
+      const n = (f: (r: { status: string; rule: string }) => boolean) =>
+        t.filter(f).reduce((s, r) => s + Number(r.n), 0);
+      const proposals = t.reduce((s, r) => s + Number(r.n), 0);
+      const rejected = n((r) => r.status === "rejected");
+      const landed = n((r) => r.status === "landed");
+      const failed = n((r) => r.status === "reverted");
+      const submitted = n((r) => r.status === "submitted") + landed + failed;
+      const tooWide = n((r) => r.rule === "grant-too-wide");
+      const holds = (k: string) =>
+        h.filter((r) => r.kind === k).reduce((s, r) => s + Number(r.n), 0);
+
+      // SILENT WHEN THERE IS NOTHING TO SAY. An idle hour is not news, and a
+      // line printed every pass regardless is a line nobody reads.
+      if (proposals > 0 || h.length > 0) {
+        log(
+          `autonomy| 1h — proposals ${proposals} · policy-passed ${proposals - rejected} · ` +
+            `userops ${submitted} · LANDED ${landed} · failed ${failed} · ` +
+            `grant-too-wide ${tooWide} · holds ${holds("MODEL_HOLD")} model, ` +
+            `${holds("GATE_FORCED_HOLD")} gate-forced, ${holds("unreported")} unreported`,
+        );
+        // The refusals, largest first, so a new one announces itself rather
+        // than hiding inside a total. Bounded — a fleet refusing in twenty ways
+        // should report the five that matter, not push the log window out.
+        const why = t
+          .filter((r) => r.status === "rejected" && r.rule)
+          .sort((a, b) => Number(b.n) - Number(a.n))
+          .slice(0, 5)
+          .map((r) => `${r.rule} ${Number(r.n)}`)
+          .join(" · ");
+        if (why) log(`autonomy| 1h refusals — ${why}`);
+      }
+    } catch {
+      // `hold_kind` predates this deploy on a database mid-migration, and the
+      // funnel is a report rather than a guarantee.
+    }
+
     if (broken > 0) {
       const worst = (await shared
         .prepare(

@@ -76,21 +76,78 @@ test("both signers mint the PONS adapter marker only when the permission was sea
   // thread one and forget the other and nothing else would notice. The failure
   // is the transfer saga again — a marker the wall does not back means the
   // worker builds a UserOp the account contract refuses.
+  // PINNED BY RELATIONSHIP, NOT BY VARIABLE NAME.
+  //
+  // This used to match the literal `ponsAdapterAddress` in all three places,
+  // which pinned the right property for the wrong reason: it held only while the
+  // value the wall receives happens to be the raw parameter. Once the signers
+  // resolve a platform default (`ponsAdapterForSigning`), the parameter and the
+  // sealed value are DIFFERENT expressions, and a name-matching guard would
+  // either fail on correct code or — far worse — pass while the marker was
+  // minted off the parameter and the wall pinned the default. That is exactly
+  // the drift this test exists to catch, so it now reads the identifier the wall
+  // was actually given and demands the other two sites use that same one.
   for (const [name, src] of [
     ["web/src/lib/session.ts", WEB],
     ["mobile/src/crypto/signGrant.ts", MOBILE],
   ] as const) {
     assert.ok(src.includes("GRANT_PONS_ADAPTER"), `${name} must mint the marker`);
     assert.ok(src.includes("ponsAdapterAddress"), `${name} must thread the sealed address`);
+
+    // The value handed to buildWallPolicies — `ponsAdapterAddress: <ident>,`.
+    // Dots are excluded from the identifier so the persisted
+    // `<ident>.toLowerCase()` site below cannot match here instead.
+    const sealed = /ponsAdapterAddress:\s*([A-Za-z_$][\w$]*)\s*,/.exec(src);
+    assert.ok(sealed, `${name} must pass an adapter address into the wall options`);
+    const ident = sealed[1]!;
+
     assert.match(
       src,
-      /ponsAdapterAddress\s*\?\s*\[GRANT_PONS_ADAPTER\]\s*:\s*\[\]/,
-      `${name} must mint GRANT_PONS_ADAPTER only when the permission was sealed`,
+      new RegExp(`${ident}\\s*\\?\\s*\\[GRANT_PONS_ADAPTER\\]\\s*:\\s*\\[\\]`),
+      `${name} must mint GRANT_PONS_ADAPTER off the SAME value the wall sealed (${ident})`,
     );
     assert.match(
       src,
-      /ponsAdapterAddress:\s*(args\.)?ponsAdapterAddress\.toLowerCase\(\)/,
-      `${name} must persist the sealed address — the marker alone is a claim`,
+      new RegExp(`ponsAdapterAddress:\\s*${ident}\\.toLowerCase\\(\\)`),
+      `${name} must persist the value the wall sealed (${ident}) — the marker alone is a claim`,
+    );
+  }
+});
+
+test("both signers seal the platform's official coins, so a listing is reachable", () => {
+  // The token list is baked into the call policy at SIGNING time. A listing the
+  // worker watches, prices and treats as a tradable leg, but which no signer
+  // seals, produces refusals naming a coin the owner never chose and cannot
+  // remove — the worst version of this failure, because the owner has no action
+  // available to them.
+  //
+  // Pinned in BOTH signers for the same reason every rule in this file is: the
+  // phone is a separate seam with no /settings fetch, and it has already been
+  // the one that silently carried nothing.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    assert.ok(src.includes("officialCoinTokens"), `${name} must merge the official listings`);
+    // Listings FIRST, so usableExtraTokens' de-duplication keeps the verified
+    // address when an owner has separately typed the same coin in by hand.
+    assert.match(
+      src,
+      /\[\s*\.\.\.officialCoinTokens\([^)]*\)\s*,\s*\.\.\.\(?\s*(args\.)?extraTokens/,
+      `${name} must put official listings BEFORE the owner's own tokens`,
+    );
+    // And the merged list — not the raw parameter — is what reaches the policy.
+    const merged = /const\s+(sealedTokens)\b/.exec(src);
+    assert.ok(merged, `${name} must name the merged token list`);
+    assert.match(
+      src,
+      new RegExp(`grantTokens:\\s*usableExtraTokens\\(${merged[1]}\\)`),
+      `${name} must record the MERGED list as covered, or the grant and the wall disagree`,
+    );
+    assert.match(
+      src,
+      new RegExp(`extraTokens:\\s*${merged[1]}`),
+      `${name} must build the wall from the MERGED list`,
     );
   }
 });

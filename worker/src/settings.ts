@@ -112,6 +112,11 @@ export interface ResolvedConfig {
   classPerEntryUsdg: number;
   classMaxPositions: number;
   classMinDepthUsdg: number;
+  /**
+   * The platform's official coins. See MerrymenSettings.officialCoinsEnabled —
+   * ON by default, and the only member of this block that is.
+   */
+  officialCoinsEnabled: boolean;
   strategistStopLossBps: number;
   takeProfitBps: number;
   buyPerTickUsdg: number;
@@ -363,6 +368,7 @@ export function mergeSettings(
     classPerEntryUsdg: num(file.classPerEntryUsdg, env.MERRYMEN_CLASS_PER_ENTRY_USDG, d.classPerEntryUsdg, 0, 1_000_000),
     classMaxPositions: num(file.classMaxPositions, env.MERRYMEN_CLASS_MAX_POSITIONS, d.classMaxPositions, 0, 1_000),
     classMinDepthUsdg: num(file.classMinDepthUsdg, env.MERRYMEN_CLASS_MIN_DEPTH_USDG, d.classMinDepthUsdg, 0, 10_000_000),
+    officialCoinsEnabled: bool(file.officialCoinsEnabled, env.MERRYMEN_OFFICIAL_COINS, d.officialCoinsEnabled),
     // 0 disables it; the ceiling is 100x, past which it is not a take-profit
     // rule, it is a number nobody will ever hit.
     strategistStopLossBps: num(file.strategistStopLossBps, env.MERRYMEN_STRATEGIST_STOP_LOSS_BPS, d.strategistStopLossBps ?? 0, 0, 10_000),

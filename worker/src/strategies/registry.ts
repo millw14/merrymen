@@ -55,6 +55,12 @@ export interface StrategyBuildOpts {
    * (tests, fixtures) falls back to the shipped registry, i.e. old behaviour.
    */
   universe?: readonly StockToken[];
+  /**
+   * Symbols that are legs whether or not the owner listed them — the platform's
+   * official coins. See `legsForUniverse` for why this is a different question
+   * from the basket, and why it is not permission.
+   */
+  alwaysSymbols?: readonly string[];
   strategistStopLossBps?: number;
   takeProfitBps?: number;
   buyPerTickUsdg: number;
@@ -103,8 +109,8 @@ export function tokensForSymbols(symbols: readonly string[]): StockToken[] {
 }
 
 /**
- * The full set the worker watches: the curated basket, plus whatever the owner
- * added themselves.
+ * The full set the worker watches: the curated basket, the platform's official
+ * coins, plus whatever the owner added themselves.
  *
  * Owner-added entries become `kind: "memecoin"` with `chainlinkFeed: null`, which
  * is what routes them to pool pricing and keeps them out of every code path that
@@ -116,14 +122,40 @@ export function tokensForSymbols(symbols: readonly string[]): StockToken[] {
  * feed; letting a settings entry shadow it would let a typo'd or hostile address
  * take over a real symbol — and the basket would keep naming it as if nothing
  * had changed.
+ *
+ * OFFICIAL COINS TAKE THE MEMECOIN DOOR, NOT THE REGISTRY DOOR, and they come in
+ * ahead of the owner's own extras so the same collision rule protects them: a
+ * settings entry cannot shadow an official listing's symbol or address. They are
+ * deliberately NOT `STOCK_TOKENS` entries — see official-coins.ts for the three
+ * things that would break if they were, one of which is a hole in the wall.
+ *
+ * The caller passes the list rather than this function reading it, so that "which
+ * chain" and "did the owner opt out" are decided once, by code that knows the
+ * answer, instead of being guessed here.
  */
 export function watchTokensFor(
   basketSymbols: readonly string[],
   customTokens: readonly { symbol: string; address: `0x${string}`; decimals: number }[],
+  officialCoins: readonly { symbol: string; name: string; address: `0x${string}`; decimals: number }[] = [],
 ): StockToken[] {
   const basket = tokensForSymbols(basketSymbols);
   const takenSymbols = new Set(STOCK_TOKENS.map((t) => t.symbol.toUpperCase()));
   const takenAddresses = new Set(basket.map((t) => t.address.toLowerCase()));
+  const official: StockToken[] = [];
+  for (const c of officialCoins) {
+    if (takenSymbols.has(c.symbol.toUpperCase())) continue;
+    if (takenAddresses.has(c.address.toLowerCase())) continue;
+    takenSymbols.add(c.symbol.toUpperCase());
+    takenAddresses.add(c.address.toLowerCase());
+    official.push({
+      symbol: c.symbol,
+      name: c.name,
+      address: c.address,
+      chainlinkFeed: null,
+      kind: "memecoin",
+      decimals: c.decimals,
+    });
+  }
   const extras: StockToken[] = [];
   for (const c of customTokens) {
     if (takenSymbols.has(c.symbol.toUpperCase())) continue;
@@ -139,7 +171,7 @@ export function watchTokensFor(
       decimals: c.decimals,
     });
   }
-  return [...basket, ...extras];
+  return [...basket, ...official, ...extras];
 }
 
 /**
@@ -154,10 +186,31 @@ export function watchTokensFor(
  * means "know about this", putting its symbol in the basket means "trade it".
  * Exactly how stock tokens already work, and deliberately NOT automatic — a
  * token added to be tracked must not start being bought on its own.
+ *
+ * `alwaysSymbols` IS THE ONE EXCEPTION, and it is a different question from the
+ * one the rule above answers. That rule protects the owner from the PLATFORM
+ * reading their "watch this" as "trade this" — from discovery, a feed, or a
+ * model quietly widening what gets bought. An official coin is not discovered:
+ * it is a listing the platform publishes and stands behind, in the same breath
+ * as AAPL, and an owner who never edits their basket still gets AAPL. Listing is
+ * the platform saying "this is reachable", exactly as the default basket already
+ * does, and it is declinable in one setting.
+ *
+ * What it still is NOT: permission. The signature, the caps, the scout budget,
+ * the depth floor and the impact ceiling all bind afterwards, and a listing
+ * cannot widen a grant that is already signed.
  */
-export function legsForUniverse(symbols: readonly string[], universe?: readonly StockToken[]) {
+export function legsForUniverse(
+  symbols: readonly string[],
+  universe?: readonly StockToken[],
+  alwaysSymbols: readonly string[] = [],
+) {
   const pool = universe ?? STOCK_TOKENS;
-  const chosen = pool.filter((t) => symbols.includes(t.symbol));
+  // Deduplicated, because an owner who ALSO put the official symbol in their
+  // basket must not get the leg twice — that would halve every other leg's
+  // weight and silently double the coin's target allocation.
+  const wanted = new Set([...symbols, ...alwaysSymbols]);
+  const chosen = pool.filter((t) => wanted.has(t.symbol));
   return chosen.map((t) => ({
     symbol: t.symbol,
     token: t.address,
@@ -167,7 +220,7 @@ export function legsForUniverse(symbols: readonly string[], universe?: readonly 
 
 export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
   const legsFor = (symbols: readonly string[]) =>
-    legsForUniverse(symbols, opts.universe);
+    legsForUniverse(symbols, opts.universe, opts.alwaysSymbols);
   // Not a builtin → a user-written strategy file in strategies/ (lazy-loaded,
   // hot-reloading, crash-isolated; every intent is shape-validated and then
   // policy-checked like any other).

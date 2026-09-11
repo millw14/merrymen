@@ -243,6 +243,12 @@ const BOOL_FIELDS = [
   // class vault at /grant — the signature says the key could reach class
   // tokens, this says go and do it — and both are required.
   "classSnipeEnabled",
+  // THE ONLY ONE HERE THAT IS ON BY DEFAULT, so this entry is what lets an owner
+  // turn something OFF rather than on — and a field missing from this list is
+  // dropped with an {ok:true}, which for an opt-OUT means the owner's refusal is
+  // discarded and the page tells them it saved. See
+  // MerrymenSettings.officialCoinsEnabled.
+  "officialCoinsEnabled",
   "discoveryEnabled",
 ] as const;
 /** Telegram PC string-array allowlists: (field, per-entry maxLen). */

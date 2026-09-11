@@ -4,6 +4,7 @@ export * from "./llm-providers";
 export * from "./tokens";
 export * from "./token";
 export * from "./protocols";
+export * from "./official-coins";
 export * from "./abis";
 export * from "./grant";
 export * from "./holder-proof";

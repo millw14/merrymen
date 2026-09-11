@@ -454,6 +454,12 @@ async function persist(
     // has nowhere to go yet, and marking it dropped would make the tape read as
     // though policy had refused it.
     dropped_rule: undefined,
+    // WHY A HOLD WAS A HOLD, persisted so the funnel is readable from the
+    // ledger rather than from logs. Carried from the Brain, never inferred:
+    // absent on a non-hold and on any build that does not report it, and absent
+    // must stay absent — counting unknown holds as model holds would report a
+    // healthy fleet while it was being gated.
+    hold_kind: d.hold_kind ?? undefined,
     signals_json: JSON.stringify({
       brain_run_id: runId,
       decision_id: d.decision_id,

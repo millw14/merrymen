@@ -101,3 +101,56 @@ export const PONS_CLASS_VAULT_FACTORY: Readonly<Record<number, string | null>> =
   /** Robinhood Chain testnet. */
   46630: null,
 });
+
+/**
+ * PonsSelfTrade — the adapter that makes a Pons bonding curve constrainable by
+ * the permission wall. Per chain, `null` where it is not deployed.
+ *
+ * WHY A CONSTANT, when `ponsAdapterAddress` is already a setting. Because the
+ * setting could never be a platform answer. Its own docstring calls it "A HINT,
+ * never the authority", and the delivery path proves the point: the web
+ * `GET /api/settings` returns the stored blob with no default merged in, the
+ * phone signer has no settings fetch wired at all, and the worker's
+ * `MERRYMEN_PONS_ADAPTER_ADDRESS` sits on the far side of the boundary where it
+ * can only raise a drift warning. So every owner who never pasted an address
+ * signed a grant with no Pons route, and the weekend curve fallback — shipped,
+ * tested, and the documented remedy for all 24 equity feeds going stale — could
+ * not fire for anybody on the platform.
+ *
+ * A DEPLOY FACT, which is what makes a constant right rather than merely
+ * convenient: this address is decided once per chain by whoever ran the deploy,
+ * it is identical for every tenant, and no tenant has information about it that
+ * the platform lacks. That is the same argument PONS_CLASS_VAULT_FACTORY makes
+ * above, and the two should be read together.
+ *
+ * PRECEDENCE IS GRANT-FIRST, EVERYWHERE. The worker calls whatever address the
+ * signature SEALED (`grantPonsAdapter`), never this. This is consulted only when
+ * a grant is being MINTED, as the default a signer offers when the owner has not
+ * named one — so a redeploy can never redirect an existing grant's trades, and
+ * a settings entry still wins over it for an owner who has a reason to differ.
+ *
+ * `null` means "no curve route on this chain", which is a different fact from
+ * "the adapter answered zero" and must stay distinguishable from it.
+ */
+export const PONS_SELF_TRADE: Readonly<Record<number, string | null>> = Object.freeze({
+  /** Robinhood Chain mainnet. */
+  4663: null,
+  /** Robinhood Chain testnet. */
+  46630: null,
+});
+
+/**
+ * The adapter a NEW signature should carry: the owner's own choice if they made
+ * one, else the chain's deployed adapter, else nothing.
+ *
+ * Returns `undefined` rather than a zero address for "none", because every
+ * signer treats the field as optional-and-absent and a zero would mint a marker
+ * plus a permission pinned at nowhere.
+ */
+export function ponsAdapterForSigning(
+  chainId: number,
+  fromSettings?: string | null,
+): `0x${string}` | undefined {
+  const chosen = fromSettings && /^0x[0-9a-fA-F]{40}$/.test(fromSettings) ? fromSettings : PONS_SELF_TRADE[chainId];
+  return chosen ? (chosen.toLowerCase() as `0x${string}`) : undefined;
+}

@@ -466,7 +466,7 @@ export async function mirrorTenant(args: {
     const rows = (await child
       .prepare(
         `SELECT id, agent_id, source, strategy, provider, model, symbol, action, size_usdg,
-                reason, dropped_rule, signals_json, at
+                reason, dropped_rule, signals_json, hold_kind, at
          FROM decisions WHERE at >= ? ORDER BY at ASC LIMIT ?`,
       )
       .all(since, batch)) as Record<string, unknown>[];
@@ -474,15 +474,15 @@ export async function mirrorTenant(args: {
       await shared.tx(async (db) => {
         const ins = db.prepare(
           `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action,
-                                  size_usdg, reason, dropped_rule, signals_json, at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  size_usdg, reason, dropped_rule, signals_json, hold_kind, at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
         );
         for (const r of rows) {
           await ins.run(
             r.id, r.agent_id, r.source, r.strategy ?? null, r.provider ?? null, r.model ?? null,
             r.symbol ?? null, r.action ?? null, r.size_usdg ?? null, r.reason ?? null,
-            r.dropped_rule ?? null, r.signals_json ?? null, r.at,
+            r.dropped_rule ?? null, r.signals_json ?? null, r.hold_kind ?? null, r.at,
           );
         }
         // Same transaction as the rows, for the same reason the log tables do

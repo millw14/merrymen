@@ -50,6 +50,10 @@ import {
   pimlicoPaymasterUrl,
   ENTRYPOINT,
   robinhoodTestnet,
+  robinhoodChain,
+  officialCoinsFor,
+  officialCoinSymbols,
+  officialCoinCurve,
   grantHasMultihop,
   // Aliased: `grantHasTransfer` is also the name of the dep this file passes
   // to the Telegram executor, and the two must not shadow each other.
@@ -448,7 +452,25 @@ async function main() {
   setMainnetRpc(cfg.rpcMainnet);
   let connKey = connectionKey(cfg);
   let stratKey = strategyKey(cfg);
-  let watchTokens = watchTokensFor(cfg.basketSymbols, cfg.customTokens);
+
+  /**
+   * The official listings this worker may watch, or none.
+   *
+   * MAINNET, and stated rather than inferred. The watch set has always been
+   * implicitly mainnet — `STOCK_TOKENS` carries mainnet addresses with no chain
+   * gating, and the whole pricing pass runs against `mainnetClient()` — so
+   * reading listings for any other chain here would be a new and different
+   * assumption, not a more careful version of the existing one. A testnet grant
+   * gets an empty list, which is also what `OFFICIAL_COINS[46630]` says.
+   *
+   * Read through a function rather than captured once, because settings are
+   * hot-reloaded and an owner who turns this off must stop seeing the listings
+   * on the next tick rather than on the next redeploy.
+   */
+  const officialCoinsIn = (c: ResolvedConfig) =>
+    c.officialCoinsEnabled ? officialCoinsFor(robinhoodChain.id) : [];
+  const officialCoins = () => officialCoinsIn(cfg);
+  let watchTokens = watchTokensFor(cfg.basketSymbols, cfg.customTokens, officialCoins());
 
   // ── paper trading plumbing ────────────────────────────────────────────
   /**
@@ -1076,7 +1098,16 @@ async function main() {
       swapRouter: swapRouterFor(c),
       // Resolve legs against the full watch set, so a selected memecoin is a
       // leg a strategy can actually trade rather than a balance it can only see.
-      universe: watchTokensFor(c.basketSymbols, c.customTokens),
+      universe: watchTokensFor(c.basketSymbols, c.customTokens, officialCoinsIn(c)),
+      // Official listings are legs whether or not this owner's basket names
+      // them — see legsForUniverse for why that is a different question from
+      // the basket rule, and why it is still not permission.
+      //
+      // Read from `c`, NOT the `cfg` closure: this function is called both with
+      // the live config and with a candidate one during a settings reload, and
+      // resolving the universe from a different config than the legs is how a
+      // strategy ends up naming a symbol its own universe does not contain.
+      alwaysSymbols: officialCoinsIn(c).map((o) => o.symbol),
       trench: {
         usdgToken: CASH.USDG as `0x${string}`,
         candidates: trenchCandidates,
@@ -1225,7 +1256,7 @@ async function main() {
     if (nextStrat !== stratKey) {
       cfg = next; // makeStrategy reads the new values
       strategy = makeStrategy(next);
-      watchTokens = watchTokensFor(next.basketSymbols, next.customTokens);
+      watchTokens = watchTokensFor(next.basketSymbols, next.customTokens, officialCoins());
       console.log(`[settings] strategy settings applied — ${strategy.name}, venue ${next.swapVenue}`);
       if (active) {
         active.limits = limitsFromGrant(

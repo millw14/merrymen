@@ -77,6 +77,8 @@ import {
   wallShape,
   wallSignable,
   chainForId,
+  officialCoinTokens,
+  ponsAdapterForSigning,
   robinhoodChain,
   
   GRANT_V4,
@@ -292,6 +294,45 @@ async function mintGrant(
   const chain = chainForId(chainId);
   const publicClient = createPublicClient({ chain, transport: http() });
 
+  /**
+   * EVERY token this signature will cover: the platform's official listings
+   * first, then whatever the owner added.
+   *
+   * Sealed here rather than at the four call sites, because the failure mode of
+   * missing one is invisible. A caller that forgot would mint a grant whose wall
+   * does not cover a coin the worker is watching, pricing and treating as a
+   * tradable leg — and the owner would see refusals naming a token they never
+   * chose and cannot remove.
+   *
+   * Listings go FIRST so `usableExtraTokens`' own de-duplication keeps the
+   * verified address when an owner has separately typed the same coin in by
+   * hand, possibly with a typo.
+   *
+   * THIS IS WHERE A LISTING BECOMES REACHABLE, and it is the only place it can
+   * be: the token list is baked into the call policy at SIGNING time, so
+   * publishing a coin cannot widen a grant that is already signed. An owner
+   * whose grant predates a listing must re-sign before their key can touch it.
+   * That is the wall working, not a gap in it.
+   */
+  const sealedTokens: readonly CustomToken[] = [...officialCoinTokens(chainId), ...extraTokens];
+
+  /**
+   * The Pons adapter this signature seals: the owner's own if they named one,
+   * else the chain's deployed adapter.
+   *
+   * RESOLVED HERE for the same reason as the tokens above — the address reached
+   * a grant only if an owner had pasted it into /settings, and essentially none
+   * had, so the weekend curve fallback could not fire for anybody. Defaulting at
+   * the call sites would leave the phone signer out, which has no /settings
+   * fetch wired at all.
+   *
+   * A SIGNING-TIME DEFAULT ONLY. The worker still calls whatever address the
+   * signature sealed (`grantPonsAdapter`) and never this constant, so a later
+   * redeploy cannot redirect an existing grant's trades, and an owner who names
+   * their own address still wins over the platform's.
+   */
+  const sealedPonsAdapter = ponsAdapterForSigning(chainId, ponsAdapterAddress);
+
   const entryPoint = getEntryPoint("0.7");
   const kernelVersion = KERNEL_V3_3;
 
@@ -387,10 +428,10 @@ async function mintGrant(
   }
 
   const wallOpts = {
-    extraTokens,
+    extraTokens: sealedTokens,
     allowUniswapV4,
     v4AdapterAddress,
-    ponsAdapterAddress,
+    ponsAdapterAddress: sealedPonsAdapter,
     ponsClassVaultAddress,
     // The factory rides with the vault. buildWallPolicies THROWS on a vault
     // without one — two of three class permissions is a key that can reach a
@@ -497,7 +538,7 @@ async function mintGrant(
       TRADEABLE_V2,
       ...(allowUniswapV4 ? [GRANT_V4] : []),
       ...(v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
-      ...(ponsAdapterAddress ? [GRANT_PONS_ADAPTER] : []),
+      ...(sealedPonsAdapter ? [GRANT_PONS_ADAPTER] : []),
       // GRANT_PONS_CLASS is minted from `ponsClassVaultAddress`, NOT from
       // `ponsClassVaultFactory`. The factory is what the owner asked for; the
       // vault address is what the wall actually pinned, and only the second one
@@ -507,7 +548,7 @@ async function mintGrant(
       ...(ponsClassVaultAddress ? [GRANT_PONS_CLASS] : []),
     ],
     ...(v4AdapterAddress ? { v4AdapterAddress: v4AdapterAddress.toLowerCase() } : {}),
-    ...(ponsAdapterAddress ? { ponsAdapterAddress: ponsAdapterAddress.toLowerCase() } : {}),
+    ...(sealedPonsAdapter ? { ponsAdapterAddress: sealedPonsAdapter.toLowerCase() } : {}),
     ...(ponsClassVaultAddress
       ? {
           ponsClassVaultAddress: ponsClassVaultAddress.toLowerCase(),
@@ -519,7 +560,7 @@ async function mintGrant(
     // Same filter the wall itself applied, so what we RECORD as covered and what
     // the policy actually covers cannot disagree — the worker compares this
     // against the owner's configured tokens and warns when they've drifted.
-    grantTokens: usableExtraTokens(extraTokens).map((t) => t.address.toLowerCase()),
+    grantTokens: usableExtraTokens(sealedTokens).map((t) => t.address.toLowerCase()),
     demoSessionPrivateKey: sessionPrivateKey,
     // THE CUSTODY LINE. Self-hosted keeps the owner key on the grant object: it
     // is a localhost round-trip to a 0600 file on the user's own machine, which
