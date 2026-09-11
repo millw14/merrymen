@@ -164,9 +164,61 @@ export function chooseSymbols(
 export interface NewsDeskState {
   /** Unix seconds of the last SUCCESSFUL answer. 0 when there has never been one. */
   fetchedAt: number;
+  /**
+   * THE SYMBOLS THIS DESK CAN SPEAK FOR, and it is a WINDOW, not a window's ask.
+   *
+   * It used to be exactly the last request's three symbols, which threw away
+   * coverage of everything else the moment the scheduler moved on. `items` was
+   * already merged across windows — the desk keeps 24h of stories it paid for —
+   * but `news.ts` checks THIS list first, before the cache is ever consulted,
+   * and returns `not-fetched` with a null reading for anything absent from it.
+   * So five fresh NVDA stories sitting in `items` were discarded outright
+   * because the most recent window happened to ask about AAPL, MU and SPCX.
+   *
+   * Derived from `askedAt` below and bounded by the same 24h window the stories
+   * are, so the two can never disagree: a symbol is claimed exactly as long as
+   * its material could still be selected.
+   */
   asked: string[];
+  /**
+   * When each symbol was last actually asked about, unix seconds.
+   *
+   * The reason coverage can be merged without lying. A naive union of every
+   * symbol ever asked would report a three-day-old ask as current — trading one
+   * false statement for another — so coverage expires on the same clock as the
+   * stories it describes.
+   */
+  askedAt: Record<string, number>;
   failure: string | null;
   items: NewsItem[];
+}
+
+/**
+ * Coverage after this window: what is still in date, plus what we just asked.
+ *
+ * `add` is stamped at `asOf`; everything carried over keeps its own timestamp
+ * and drops out once it is older than the window. Pure, so the retention rule
+ * is testable without a clock or a provider.
+ */
+export function retainAsked(
+  prev: Record<string, number>,
+  add: readonly string[],
+  asOf: number,
+  windowSec: number,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [sym, at] of Object.entries(prev)) {
+    if (at > asOf - windowSec) out[sym] = at;
+  }
+  for (const sym of add) out[sym] = asOf;
+  return out;
+}
+
+/** The covered list, newest ask first so a log line reads usefully. */
+export function coveredSymbols(askedAt: Record<string, number>): string[] {
+  return Object.entries(askedAt)
+    .sort((a, b) => b[1] - a[1])
+    .map(([sym]) => sym);
 }
 
 export interface NewsDeskConfig {
@@ -211,7 +263,7 @@ const dayKey = (asOf: number): string => new Date(asOf * 1000).toISOString().sli
  */
 export function makeNewsDesk(cfg: NewsDeskConfig): NewsDesk {
   const plan = planNewsWindow(cfg.dailyLimit, cfg.articlesPerRequest, cfg.windowSec);
-  let state: NewsDeskState = { fetchedAt: 0, asked: [], failure: null, items: [] };
+  let state: NewsDeskState = { fetchedAt: 0, asked: [], askedAt: {}, failure: null, items: [] };
   let ledger = { day: "", used: 0 };
   let lastAttemptAt = 0;
 
@@ -219,7 +271,7 @@ export function makeNewsDesk(cfg: NewsDeskConfig): NewsDesk {
 
   return {
     plan: () => plan,
-    state: () => ({ ...state, asked: [...state.asked], items: [...state.items] }),
+    state: () => ({ ...state, asked: [...state.asked], askedAt: { ...state.askedAt }, items: [...state.items] }),
 
     async refresh(wanted, asOf, alwaysAsk) {
       // ATTEMPTS ARE RATE-LIMITED, NOT SUCCESSES. Keying the window on
@@ -242,7 +294,11 @@ export function makeNewsDesk(cfg: NewsDeskConfig): NewsDesk {
         lastAttemptAt = asOf;
         // A GENUINE UNAVAILABILITY, and it says which. The desk reports
         // fetch-failed rather than pretending the world was quiet.
-        state = { ...state, asked: symbols, failure: "budget-exhausted" };
+        // Same rule as a failed fetch: the allowance is spent, so these symbols
+        // were not asked about and coverage must not claim they were. What is
+        // already in date stays in date.
+        const askedAt = retainAsked(state.askedAt, [], asOf, NEWS_WINDOW_SEC);
+        state = { ...state, askedAt, asked: coveredSymbols(askedAt), failure: "budget-exhausted" };
         return {
           fetched: false,
           log: "news: the day's allowance of " + limit + " request(s) is spent — no fetch this window",
@@ -260,7 +316,22 @@ export function makeNewsDesk(cfg: NewsDeskConfig): NewsDesk {
       });
 
       if (!r.ok) {
-        state = { fetchedAt: state.fetchedAt, asked: r.asked, failure: r.failure, items: state.items };
+        // A FAILED WINDOW DOES NOT EXTEND COVERAGE, and does not revoke it.
+        //
+        // The symbols we just tried were not answered, so stamping them would
+        // claim a fetch that did not happen. The symbols already in date were
+        // answered, earlier, and their stories are still here — revoking them
+        // because an unrelated request failed would blame the provider for
+        // material we already hold. So coverage is carried and expired, and
+        // nothing new is added.
+        const askedAt = retainAsked(state.askedAt, [], asOf, NEWS_WINDOW_SEC);
+        state = {
+          fetchedAt: state.fetchedAt,
+          askedAt,
+          asked: coveredSymbols(askedAt),
+          failure: r.failure,
+          items: state.items,
+        };
         return {
           fetched: false,
           log: newsFailureLine(r.failure, r.detail, r.asked, ledger.used, limit),
@@ -291,7 +362,29 @@ export function makeNewsDesk(cfg: NewsDeskConfig): NewsDesk {
       const fresh = dedupeNews([...r.items, ...state.items]).filter(
         (it) => it.publishedAt > asOf - NEWS_WINDOW_SEC,
       );
-      state = { fetchedAt: asOf, asked: r.asked, failure: null, items: fresh.slice(0, NEWS_CACHE_MAX) };
+      // ── AND COVERAGE IS MERGED TOO, WHICH IS THE OTHER HALF OF THAT FIX ──
+      //
+      // Merging `items` alone bought nothing, because `news.ts` checks `asked`
+      // FIRST and returns a null reading for any symbol absent from it. So the
+      // stories this desk had already paid for were still thrown away — not
+      // deleted, just unreachable — the moment the scheduler asked about three
+      // different names. A 25-symbol universe against 3 slots meant a given
+      // symbol was speakable-for roughly one window in eight.
+      //
+      // BOUNDED BY THE SAME CLOCK AS THE STORIES. Coverage expires after the
+      // same 24h window, so the desk can never claim a three-day-old ask as
+      // current — that would be a different false statement, not a fix. And the
+      // ask itself is unchanged: still at most `maxSymbols` names, still one
+      // request, still the same daily ledger. Nothing here spends more budget;
+      // it stops discarding what the budget already bought.
+      const askedAt = retainAsked(state.askedAt, r.asked, asOf, NEWS_WINDOW_SEC);
+      state = {
+        fetchedAt: asOf,
+        askedAt,
+        asked: coveredSymbols(askedAt),
+        failure: null,
+        items: fresh.slice(0, NEWS_CACHE_MAX),
+      };
       return {
         fetched: true,
         log:
