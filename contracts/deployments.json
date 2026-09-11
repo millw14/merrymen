@@ -4,6 +4,11 @@
       "address": "0xe9dbd4b1e53f1c6d887ab8251d74e3745ac08019",
       "deployedAt": "2026-09-11T07:41:20.385Z",
       "codeBytes": 3095
+    },
+    "PonsClassVaultFactory": {
+      "address": "0x48a560371230ece659b2ba40fb19e8335866ab3d",
+      "deployedAt": "2026-09-11T08:24:09.654Z",
+      "codeBytes": 5248
     }
   }
 }

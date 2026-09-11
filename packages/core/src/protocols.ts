@@ -96,9 +96,21 @@ export const MORPHO = {
  * "the factory answered zero" and must stay distinguishable from it.
  */
 export const PONS_CLASS_VAULT_FACTORY: Readonly<Record<number, string | null>> = Object.freeze({
-  /** Robinhood Chain mainnet. */
-  4663: null,
-  /** Robinhood Chain testnet. */
+  /**
+   * Robinhood Chain mainnet. Deployed 2026-09-11, 5,248 bytes.
+   *
+   * Verified independently of the deploy script's own report, and the decisive
+   * check was NOT that the code exists but that `vaultFor` predicts exactly what
+   * `deploy` produces — measured equal for three separate owner addresses. The
+   * wall pins the vault as a literal target BEFORE the contract exists, and a
+   * CALL to a codeless address SUCCEEDS with empty returndata: Kernel's batch
+   * executor checks `success` without decoding, so a mismatch here would let the
+   * USDG approve land, the buy no-op, and the trade report `landed` — a ledger
+   * row for a purchase that bought nothing. Also checked: `deploy(address(0))`
+   * reverts (ZeroOwner), and the factory is non-payable.
+   */
+  4663: "0x48a560371230ece659b2ba40fb19e8335866ab3d",
+  /** Robinhood Chain testnet — not deployed. */
   46630: null,
 });
 

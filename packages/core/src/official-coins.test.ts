@@ -24,7 +24,7 @@ import {
 } from "./official-coins";
 import { CASH, STOCK_TOKENS } from "./tokens";
 import { builtinGrantTargets, usableExtraTokens } from "./index";
-import { ponsAdapterForSigning, PONS_SELF_TRADE } from "./protocols";
+import { ponsAdapterForSigning, PONS_CLASS_VAULT_FACTORY, PONS_SELF_TRADE } from "./protocols";
 
 const MAINNET = 4663;
 const TESTNET = 46630;
@@ -244,6 +244,10 @@ describe("ponsAdapterForSigning", () => {
     // A MISSING FILE IS NOT A PASS. `contracts/deployments.json` is gitignored
     // by nothing and absent only when nothing has been deployed, so the file's
     // absence has to mean the constants are null rather than "skip the check".
+    //
+    // BOTH DEPLOY CONSTANTS, from one table. Written per-contract, the second
+    // one gets added the day it is deployed and forgotten every day after —
+    // which is precisely the drift this test exists to catch.
     const file = path.join(__dirname, "..", "..", "..", "contracts", "deployments.json");
     let book: Record<string, Record<string, { address?: string }>> = {};
     let present = true;
@@ -252,24 +256,60 @@ describe("ponsAdapterForSigning", () => {
     } catch {
       present = false;
     }
-    for (const chainId of [MAINNET, TESTNET]) {
-      const constant = PONS_SELF_TRADE[chainId];
-      const recorded: string | undefined = present
-        ? book[String(chainId)]?.PonsSelfTrade?.address
-        : undefined;
-      if (!present || recorded === undefined) {
+    const PINNED: readonly [string, Readonly<Record<number, string | null>>][] = [
+      ["PonsSelfTrade", PONS_SELF_TRADE],
+      ["PonsClassVaultFactory", PONS_CLASS_VAULT_FACTORY],
+    ];
+    for (const [contract, table] of PINNED) {
+      for (const chainId of [MAINNET, TESTNET]) {
+        const constant = table[chainId];
+        const recorded: string | undefined = present
+          ? book[String(chainId)]?.[contract]?.address
+          : undefined;
+        if (!present || recorded === undefined) {
+          assert.equal(
+            constant,
+            null,
+            `chain ${chainId}: ${contract} constant names an address that no deployment records`,
+          );
+          continue;
+        }
         assert.equal(
-          constant,
-          null,
-          `chain ${chainId}: PONS_SELF_TRADE names an address that no deployment records`,
+          constant?.toLowerCase(),
+          recorded.toLowerCase(),
+          `chain ${chainId}: the ${contract} constant and the deploy record disagree`,
         );
-        continue;
       }
-      assert.equal(
-        constant?.toLowerCase(),
-        recorded.toLowerCase(),
-        `chain ${chainId}: the sealed constant and the deploy record disagree`,
-      );
+    }
+  });
+
+  it("names every deployed contract in a constant, so none is recorded and unused", () => {
+    // The other direction, and it is not symmetric. The check above catches a
+    // constant with no deployment; this catches a DEPLOYMENT WITH NO CONSTANT —
+    // an address that exists, cost gas, and that no signer will ever seal. That
+    // is how PonsSelfTrade spent a release deployed-by-nobody and unreachable,
+    // and the only evidence was the absence of trades.
+    const file = path.join(__dirname, "..", "..", "..", "contracts", "deployments.json");
+    let book: Record<string, Record<string, { address?: string }>> = {};
+    try {
+      book = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      return; // nothing deployed yet is a legitimate state
+    }
+    const TABLES: Record<string, Readonly<Record<number, string | null>>> = {
+      PonsSelfTrade: PONS_SELF_TRADE,
+      PonsClassVaultFactory: PONS_CLASS_VAULT_FACTORY,
+    };
+    for (const [chainId, contracts] of Object.entries(book)) {
+      for (const [contract, rec] of Object.entries(contracts)) {
+        const table = TABLES[contract];
+        assert.ok(table, `${contract} is deployed on chain ${chainId} but no constant carries it`);
+        assert.equal(
+          table[Number(chainId)]?.toLowerCase(),
+          rec.address?.toLowerCase(),
+          `${contract} on chain ${chainId} is deployed but its constant does not name it`,
+        );
+      }
     }
   });
 });

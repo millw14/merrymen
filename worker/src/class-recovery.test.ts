@@ -48,13 +48,38 @@ describe("finding the vault", () => {
   it("says NONE when there is no marker and no factory for the chain", async () => {
     // The ordinary case, and it must cost nothing: no read, no warning, no
     // "unreadable" that would hold up a perfectly good recovery.
+    //
+    // TESTNET, not 4663, and the switch is the point rather than a workaround.
+    // This asked 4663 and passed only because PONS_CLASS_VAULT_FACTORY[4663]
+    // was null — so it was pinning a DEPLOYMENT STATE, and it broke the moment
+    // the factory was deployed, which is not a regression in anything. The
+    // property under test is "no marker AND no factory for this chain yields
+    // none", and expressing it needs a chain that genuinely has no factory.
+    // 46630 is that chain today; if it is ever deployed there, this should move
+    // again rather than be loosened.
     const v = await findClassVault({
       client: client({}) as never,
-      chainId: 4663,
+      chainId: 46630,
       smartAccount: ACCOUNT,
       grant: { grantFeatures: ["tradeable-v2"] },
     });
     assert.equal(v.kind, "none");
+  });
+
+  it("uses the deployed factory on a chain that HAS one, rather than saying none", async () => {
+    // The other side of the switch above, and the reason it is safe to make.
+    // With a factory constant present, a grant carrying no class marker must
+    // still resolve through the factory — that is what lets `merrymen recover`
+    // reach a vault when the grant is archived or absent. Saying "none" here
+    // would strand a real position.
+    const v = await findClassVault({
+      client: client({ vaultFor: VAULT }) as never,
+      chainId: 4663,
+      smartAccount: ACCOUNT,
+      grant: { grantFeatures: ["tradeable-v2"] },
+    });
+    assert.equal(v.kind, "found");
+    assert.equal(v.kind === "found" ? v.vault : null, VAULT);
   });
 
   it("REFUSES when the grant and the factory disagree", async () => {
