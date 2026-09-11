@@ -16,6 +16,8 @@
  * locally and only the signed op reaches the bundler.
  */
 
+import { findClassVault, planClassSweep, readClassHoldings } from "./class-recovery";
+import { readClassLog } from "./venues/class-log";
 import {
   createPublicClient,
   encodeFunctionData,
@@ -42,6 +44,19 @@ import { userOpGasConfig } from "./gas";
 
 /** Shares are an ERC-4626 position: priced, never counted. Same reads snapshot.ts uses. */
 const VAULT_READS = parseAbi(["function convertToAssets(uint256 shares) view returns (uint256)"]);
+
+/** The vault's unconditional exit. No recipient, no amount: one destination, fixed at construction. */
+const CLASS_VAULT_SWEEP = parseAbi(["function sweep(address token) returns (uint256)"]);
+
+/**
+ * How far back recovery reads a vault's history. ~7 days at 0.101 s/block.
+ *
+ * Bounded because an owner running this is waiting at a prompt. A holding older
+ * than the window is NOT lost — it is simply absent from the enumeration, which
+ * is why `classNote` says the list may be short rather than implying it is
+ * complete.
+ */
+const CLASS_RECOVERY_LOOKBACK = 6_000_000n;
 
 export interface TokenBalance {
   symbol: string;
@@ -73,6 +88,26 @@ export interface RecoverPlan {
    * non-empty means the plan is incomplete, not that the account is.
    */
   unreadable: string[];
+  /**
+   * What the CLASS VAULT holds, which the account itself does not.
+   *
+   * A separate field because it is a separate contract and a separate
+   * operation: `sweep` moves a token from the vault to the account, and only
+   * then can the ordinary transfer batch reach it. Reported here so an owner
+   * can SEE it before deciding — `recover-cli` used to say "this account is
+   * empty" about an owner whose whole book was class tokens.
+   */
+  classVault: Address | null;
+  classHoldings: { token: Address; symbol: string; raw: bigint; amount: string }[];
+  /**
+   * Why the class list may be short. Null when it is complete.
+   *
+   * The class book is reconstructed from the vault's own ClassBuy logs, which
+   * is the only source that works with no database and no worker — and a log
+   * scan can be refused. An incomplete list must say so, for the same reason
+   * `unreadable` exists.
+   */
+  classNote: string | null;
 }
 
 export interface RecoverResult extends RecoverPlan {
@@ -329,12 +364,78 @@ export async function planRecovery(opts: {
     }),
   );
 
+  // ── AND WHAT THE CLASS VAULT HOLDS ───────────────────────────────────────
+  //
+  // THE PART THAT HAD TO WORK WITH NOTHING RUNNING. The vault's contents are
+  // enumerated from its own `ClassBuy` logs, not from `class_positions` — that
+  // table lives in a child container's sqlite, and this path exists precisely
+  // for the case where no worker, no orchestrator and no database are available
+  // at all. An owner key and an RPC are the whole dependency list.
+  //
+  // Every failure here is reported and none of it stops the plan: a class vault
+  // that cannot be read must not prevent an owner sweeping the USDG and ETH
+  // they can see.
+  let classVault: Address | null = null;
+  let classHoldings: RecoverPlan["classHoldings"] = [];
+  let classNote: string | null = null;
+  try {
+    const lookup = await findClassVault({
+      client: publicClient,
+      chainId: opts.chain.id,
+      smartAccount: account.address,
+      // NO GRANT. Recovery may run from a pasted key with nothing else, so the
+      // vault is derived from the factory constant — which is exactly why that
+      // constant is a deploy fact and not a setting.
+      grant: null,
+    });
+    if (lookup.kind === "found") {
+      classVault = lookup.vault;
+      const head = await publicClient.getBlockNumber();
+      const from = head > CLASS_RECOVERY_LOOKBACK ? head - CLASS_RECOVERY_LOOKBACK : 0n;
+      const scan = await readClassLog(publicClient, lookup.vault, from, head);
+      const candidates = [...new Set(scan.events.map((e) => e.token))].map((token) => ({
+        token,
+        symbol: `${token.slice(0, 10)}…`,
+      }));
+      const contents = await readClassHoldings({
+        client: publicClient,
+        vault: lookup.vault,
+        candidates,
+      });
+      classHoldings = contents.holdings.map((h) => ({
+        token: h.token,
+        symbol: h.symbol,
+        raw: h.raw,
+        // 18dp is the launchpad's shape, and it is a DISPLAY figure here — the
+        // sweep moves the whole balance and never uses this number.
+        amount: formatUnits(h.raw, 18),
+      }));
+      if (scan.failed) {
+        classNote =
+          "the vault's history could not be read in full, so this list may be short — there may be more in the vault than it shows";
+      } else if (contents.kind === "partial") {
+        classNote = contents.why;
+      }
+    } else if (lookup.kind === "unreadable" || lookup.kind === "conflict") {
+      // NOT "no vault". An owner whose RPC blinked must not be told their class
+      // book is empty on the one screen where believing it costs the most.
+      classNote = lookup.why;
+      unreadable.push("class vault");
+    }
+  } catch (e) {
+    classNote = `could not check the class vault: ${e instanceof Error ? e.message : String(e)}`;
+    unreadable.push("class vault");
+  }
+
   return {
     smartAccount: account.address,
     ownerAddress: ownerAccount.address,
     balances,
     gasWei: gas ?? 0n,
     unreadable,
+    classVault,
+    classHoldings,
+    classNote,
   };
 }
 
@@ -415,7 +516,14 @@ export async function recoverFunds(opts: {
     // unaffordable. The tokens still move, which is the larger sum.
   }
 
-  if (plan.balances.length === 0 && nativeSweptWei === 0n) {
+  // "NOTHING TO RECOVER" MUST NOT BE SAID OVER A FULL VAULT.
+  //
+  // This read `plan.balances.length === 0 && nativeSweptWei === 0n`, and the
+  // class vault is not in `balances` — it is a different contract holding
+  // tokens the ACCOUNT does not. So an owner whose entire book was class
+  // positions was told their account was empty by the one command that exists
+  // to get money out.
+  if (plan.balances.length === 0 && nativeSweptWei === 0n && plan.classHoldings.length === 0) {
     return { ...plan, txHash: null, to: opts.to, skipped: [], nativeSweptWei: 0n, nativeReservedWei };
   }
   const entryPoint = getEntryPoint("0.7");
@@ -460,6 +568,74 @@ export async function recoverFunds(opts: {
   // because a network call flaked.
   const TRANSFER_ANY_RETURN = parseAbi(["function transfer(address,uint256)"]);
   const skipped: { symbol: string; reason: string }[] = [];
+
+  // ── OP 1: EMPTY THE CLASS VAULT INTO THE ACCOUNT ─────────────────────────
+  //
+  // TWO OPERATIONS, NOT ONE, and `planClassSweep` already argues why: `sweep`
+  // takes no recipient and no amount, so the path out is vault → account →
+  // destination, and the amount arriving is not known until the sweep has run.
+  // A Kernel batch cannot thread call N's return into call N+1's arguments, and
+  // predicting it from a pre-read balance is the tempting option that must not
+  // be taken — a curve token is exactly the asset that moves between the read
+  // and the send, an oversized transfer reverts, and the batch is ATOMIC, so it
+  // would take the USDG and the ETH down with it.
+  //
+  // The window between the two ops is safe because the tokens land in an
+  // account the same key controls: if op 2 fails, rerunning `merrymen recover`
+  // sweeps them as ordinary account balances. That property is what makes two
+  // ops safe and one op not.
+  //
+  // Failures here are REPORTED AND SURVIVED. A vault that will not give up its
+  // tokens must not stop an owner recovering the USDG and ETH they can see.
+  let classSweepTx: `0x${string}` | null = null;
+  if (plan.classVault && plan.classHoldings.length > 0) {
+    const sweepable = planClassSweep(
+      plan.classHoldings.map((h) => ({ token: h.token, symbol: h.symbol, raw: h.raw })),
+    );
+    if (sweepable.length > 0) {
+      try {
+        classSweepTx = await client.sendUserOperation({
+          calls: sweepable.map((h) => ({
+            to: plan.classVault!,
+            value: 0n,
+            data: encodeFunctionData({
+              abi: CLASS_VAULT_SWEEP,
+              functionName: "sweep",
+              args: [h.token],
+            }),
+          })),
+        });
+        await client.waitForUserOperationReceipt({ hash: classSweepTx });
+        // The account now holds them. Re-read so op 2 moves the REAL amount
+        // rather than the one predicted before the sweep ran.
+        for (const h of sweepable) {
+          const raw = (await publicClient
+            .readContract({
+              address: h.token,
+              abi: erc20Abi,
+              functionName: "balanceOf",
+              args: [account.address],
+            })
+            .catch(() => 0n)) as bigint;
+          if (raw > 0n) {
+            plan.balances.push({
+              symbol: h.symbol,
+              address: h.token,
+              raw,
+              decimals: 18,
+              amount: formatUnits(raw, 18),
+              note: "swept out of your class vault by this recovery",
+            });
+          }
+        }
+      } catch (e) {
+        skipped.push({
+          symbol: `class vault (${sweepable.length} token(s))`,
+          reason: `the vault sweep did not go through: ${e instanceof Error ? e.message : String(e)}. Your tokens are still in the vault — rerun this command.`,
+        });
+      }
+    }
+  }
   const movable: TokenBalance[] = [];
   for (const b of plan.balances) {
     try {
