@@ -74,16 +74,21 @@ jobs:
       # Stable (`desktop-v*`) ships as a full release; beta tags
       # (`desktop-beta-v*`) ship as prereleases so only beta-channel apps
       # (in-app toggle → allowPrerelease) are offered them.
+      # Titles follow the maintainer style ("Desktop 0.1.7"), derived from
+      # the tag instead of echoing it raw.
       - name: Set channel (stable vs beta)
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/desktop-beta-* ]]; then
+          REF="${{ github.ref }}"
+          if [[ "$REF" == refs/tags/desktop-beta-* ]]; then
             echo "IS_PRERELEASE=true" >> "$GITHUB_ENV"
             echo "CHANNEL_LINE=**Channel:** beta — offered only to apps with the beta toggle on." >> "$GITHUB_ENV"
+            echo "DISPLAY_NAME=Desktop ${REF#refs/tags/desktop-beta-v}" >> "$GITHUB_ENV"
           else
             echo "IS_PRERELEASE=false" >> "$GITHUB_ENV"
             echo "CHANNEL_LINE=**Channel:** stable." >> "$GITHUB_ENV"
+            echo "DISPLAY_NAME=Desktop ${REF#refs/tags/desktop-v}" >> "$GITHUB_ENV"
           fi
 
       # On a tag: attach the installers to a public GitHub Release.
@@ -91,7 +96,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          name: merrymen desktop ${{ github.ref_name }}
+          name: ${{ env.DISPLAY_NAME }}
           tag_name: ${{ github.ref_name }}
           draft: false
           prerelease: ${{ env.IS_PRERELEASE }}
