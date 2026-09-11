@@ -240,7 +240,24 @@ export async function runShadow(
       `pnlPublishable=${snapshot.pnl.publishable}` +
       (snapshot.pnl.publishable ? "" : ` (${snapshot.pnl.unavailable ?? "reason not reported"})`) +
       ` historyAuditable=${snapshot.quality.currentAccountingHistoryAuditable ?? "unknown"}` +
-      ` equityComplete=${snapshot.quality.equityComplete}`,
+      ` equityComplete=${snapshot.quality.equityComplete}` +
+      // THE REMAINING GATE INPUTS, so `may_size` can be derived from this line.
+      //
+      // It cannot be observed any other way. `gate.assess` runs inside the Brain
+      // service and its verdict never crosses back: graph.py forces
+      // `action, delta = "hold", 0` when the gate is shut, with no marker — so a
+      // forced hold and a model's own hold are byte-identical in the response.
+      // "How many agents can autonomously reach may_size" was therefore a
+      // question production could not answer about itself.
+      //
+      // These four plus the three above are the whole of `assess`'s input, and
+      // it is pure, so the line now determines the verdict rather than hinting
+      // at it. Cheaper and less brittle than widening the response schema, and
+      // it keeps the gate's single home in the Brain.
+      ` auditPassed=${snapshot.quality.auditPassed ?? "not-run"}` +
+      ` gasBasis=${snapshot.quality.gasBasis}` +
+      ` quarantined=${snapshot.quality.quarantinedAssetsPresent}` +
+      ` positionHistory=${snapshot.quality.positionHistoryAvailable}`,
   );
 
   const result = await decide(cfg, {
