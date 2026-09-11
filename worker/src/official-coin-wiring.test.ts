@@ -191,6 +191,48 @@ describe("an official listing carries its own provenance", () => {
   });
 });
 
+describe("the two basket filters agree", () => {
+  /**
+   * THE BUG THIS EXISTS TO PREVENT, because it nearly shipped.
+   *
+   * There are TWO independent basket filters. `legsForUniverse` decides what a
+   * strategy may name; `curveLegsNow` decides what the curve venue will build.
+   * Widening one and not the other makes an official coin a leg every strategy
+   * can propose and the curve venue silently refuses — and since the curve venue
+   * is the ONLY route to a listed coin (it has no pool before graduation), that
+   * is the entire feature failing on a shut equity market while every component
+   * reports success.
+   *
+   * Read from source because `curveLegsNow` is a closure over worker state that
+   * a unit test cannot construct. What can be pinned is that its selection set
+   * is built from the official symbols as well as the basket.
+   */
+  const INDEX = readFileSync(path.join(__dirname, "index.ts"), "utf8");
+
+  it("curveLegsNow selects official symbols as well as the basket", () => {
+    const at = INDEX.indexOf("function curveLegsNow");
+    assert.ok(at > -1, "curveLegsNow must exist");
+    // Bounded by the loop that consumes the set, NOT by a closing brace:
+    // `curveLegsNow`'s return type is a multi-line object literal, so the first
+    // `\n  }` after the declaration closes the TYPE and cuts the body off before
+    // the selection is built. The loop is the thing the set feeds, so it is both
+    // a correct boundary and one that cannot drift away from what is measured.
+    const end = INDEX.indexOf("for (const [symbol, leg] of lastCurveLegs)", at);
+    assert.ok(end > at, "curveLegsNow must still iterate lastCurveLegs");
+    const body = INDEX.slice(at, end);
+    const sel = /const selected = new Set\(([^;]*)\);/.exec(body);
+    assert.ok(sel, "curveLegsNow must build a selection set");
+    assert.match(sel[1]!, /cfg\.basketSymbols/, "the owner's basket must still select");
+    assert.match(sel[1]!, /officialCoins\(\)/, "official listings must select too, or the curve venue refuses them");
+  });
+
+  it("buildStrategy threads alwaysSymbols from the same source", () => {
+    // The other half of the pair. If this one regressed instead, a listed coin
+    // would be buildable by the curve venue and never proposed by anything.
+    assert.match(INDEX, /alwaysSymbols:\s*officialCoinsIn\(c\)\.map/, "legs must carry the official symbols");
+  });
+});
+
 describe("the signer seals what the worker watches", () => {
   it("hands the signer the same addresses the worker will watch", () => {
     // The two lists are built by different functions in different packages. If

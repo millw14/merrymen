@@ -147,7 +147,30 @@ describe("what an adversarial review caught", () => {
     // re-sign the grant covers everything watched — and the filter degenerated
     // to the watch set, making the curve venue's universe strictly wider than
     // every other arm's. Three independent reviewers failed to refute it.
-    assert.match(FILTER, /const selected = new Set\(cfg\.basketSymbols\)/);
+    //
+    // PINNED AS A PROPERTY, NOT AS A LITERAL. This asserted the exact text
+    // `new Set(cfg.basketSymbols)`, which pinned the right invariant through its
+    // syntax — and syntax could not distinguish the two ways the set can widen.
+    // One is the bug: degenerating to the WATCH SET, so a token the owner added
+    // only to track starts being bought. The other is the platform's own coin
+    // list, which reaches an owner the way the default basket does and is
+    // declinable in one setting. The first must stay impossible; the second is
+    // deliberate. So the three clauses below say that directly.
+    const sel = /const selected = new Set\(([^;]*)\);/.exec(FILTER);
+    assert.ok(sel, "curveLegsNow must build a selection set");
+    const source = sel[1]!;
+    // 1. The owner's own choice still selects.
+    assert.match(source, /cfg\.basketSymbols/, "the basket must still decide what the owner trades");
+    // 2. THE ORIGINAL BUG STAYS DEAD. The watch set must never be the source —
+    //    that is precisely the degeneration three reviewers failed to refute.
+    assert.ok(
+      !/watchTokens/.test(source),
+      "the selection must never be built from the watch set — 'know about this' is not 'trade this'",
+    );
+    assert.ok(
+      !/customTokens/.test(source),
+      "a token added in settings must not select itself into the curve venue",
+    );
     assert.match(FILTER, /if \(!selected\.has\(symbol\)\) continue;/);
     // Both filters, not one: the basket says what the owner chose to trade, the
     // grant says what the signature covers. Neither implies the other.

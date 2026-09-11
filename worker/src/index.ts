@@ -899,7 +899,21 @@ async function main() {
     // the wall all still bind, and the asset is inside the signature. What was
     // wrong is the SELECTION: an owner's "watch this" was being read as
     // "trade this".
-    const selected = new Set(cfg.basketSymbols);
+    //
+    // THE PLATFORM'S OWN LISTINGS JOIN IT, for the same reason and with the same
+    // limit as in `legsForUniverse`. The rule above protects an owner from THEIR
+    // "watch this" being read as "trade this" — from settings, discovery or a
+    // model widening what gets bought behind their back. An official coin is not
+    // something they added and not something anything discovered: it is a list
+    // the platform publishes and stands behind, exactly as the default basket
+    // is, and it is declinable in one setting.
+    //
+    // This is a SECOND, INDEPENDENT basket filter — `legsForUniverse` has its
+    // own — and they have to agree. Union them in one place and not the other
+    // and an official coin becomes a leg every strategy can name and the curve
+    // venue silently refuses, which on a shut equity market is the whole
+    // feature failing while every part of it reports success.
+    const selected = new Set([...cfg.basketSymbols, ...officialCoins().map((c) => c.symbol)]);
 
     const legs = new Map<string, CurveLeg>();
     const tokens = new Map<string, `0x${string}`>();
@@ -3409,7 +3423,25 @@ async function main() {
     // tell an owner they misconfigured something they never configured.
     if (officialNames.length) {
       const list = officialNames.join(", ");
-      console.log(`[worker] official coin(s) ${list} postdate this grant — re-sign at /grant to trade them`);
+      // THE SECOND DOOR, NAMED IN THE SAME BREATH AS THE FIRST.
+      //
+      // A listed coin is priced from its own bonding curve, and a curve mark is
+      // good enough to value a holding but not to authorise one — there is no
+      // oracle to check it against. So every buy of one is gated by the scout
+      // budget, which is off and zero by default. That gate is right and stays,
+      // but an owner who re-signs and then watches nothing happen has been told
+      // half a truth. Both remedies belong in one sentence, or the second is
+      // discovered only as a refusal.
+      const scoutShut = !cfg.scoutEnabled || cfg.scoutBudgetUsdg <= 0;
+      const also = scoutShut
+        ? ` You will also need a scout budget: a coin is priced from its own curve, which is good enough to ` +
+          `value a holding but not to authorise buying one, so spending on it is opt-in. Turn on scout mode ` +
+          `and set a budget in /settings — that figure is what you have decided you can afford to lose here.`
+        : "";
+      console.log(
+        `[worker] official coin(s) ${list} postdate this grant — re-sign at /grant to trade them` +
+          (scoutShut ? " (and the scout budget is shut, which would refuse the buy anyway)" : ""),
+      );
       await addEvent(
         agentId,
         "warn",
@@ -3417,7 +3449,7 @@ async function main() {
           `signed before — so ${officialNames.length === 1 ? "it stays" : "they stay"} watched but untradable. ` +
           `Coins trade around the clock, which is what lets your agent keep working when the stock market is ` +
           `shut. Re-sign at /grant to turn ${officialNames.length === 1 ? "it" : "them"} on (free, same wallet, ` +
-          `same funds, nothing moves), or switch the coin list off in /settings.`,
+          `same funds, nothing moves), or switch the coin list off in /settings.${also}`,
       );
     }
   }
