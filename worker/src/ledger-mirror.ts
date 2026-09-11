@@ -741,6 +741,78 @@ export async function mirrorTenant(args: {
         }
       });
       copied.position_floors = floors.length;
+
+      // ── AND THE CLASS BOOK ────────────────────────────────────────────────
+      //
+      // Money the ACCOUNT does not hold. A class position sits in a separate
+      // contract, so it is in no other table here: `positions` is read from the
+      // account's own balances and `cost_basis` is written by a path the class
+      // executor never takes. Without this the shared ledger — and therefore
+      // the dashboard, the operator view and anything reading Postgres — could
+      // not see a class position at all, and an owner's equity would be missing
+      // a real holding with nothing saying so.
+      //
+      // SAME TREATMENT AS cost_basis, for the same reason: these rows carry
+      // what a position COST, which is history a restart cannot re-derive from
+      // the account. The rebuilt-child guard keeps a wiped container from
+      // deleting it, and the upsert makes the conditional delete safe.
+      //
+      // The child re-derives this from the chain at every arm, so the shared
+      // copy is a convenience rather than the only survivor — which is exactly
+      // the relationship `class_positions` should have with the truth.
+      const classRows = (await child
+        .prepare(
+          `SELECT agent_id, token, symbol, decimals, curve, quote_token, first_seen,
+                  vault, entry_tx, exit_tx, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, state
+             FROM class_positions`,
+        )
+        .all()
+        .catch(() => [])) as Record<string, unknown>[];
+      await shared.tx(async (db) => {
+        for (const a of agents) {
+          if (rebuilt) continue;
+          await db.prepare(`DELETE FROM class_positions WHERE agent_id = ?`).run(a.smart_account);
+        }
+        const ins = db.prepare(
+          `INSERT INTO class_positions
+             (agent_id, token, symbol, decimals, curve, quote_token, first_seen,
+              vault, entry_tx, exit_tx, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, state)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(agent_id, token) DO UPDATE SET
+             symbol = COALESCE(excluded.symbol, symbol),
+             decimals = excluded.decimals,
+             curve = COALESCE(excluded.curve, curve),
+             quote_token = COALESCE(excluded.quote_token, quote_token),
+             vault = COALESCE(excluded.vault, vault),
+             entry_tx = COALESCE(excluded.entry_tx, entry_tx),
+             exit_tx = COALESCE(excluded.exit_tx, exit_tx),
+             cost_usdg = COALESCE(excluded.cost_usdg, cost_usdg),
+             qty_raw = COALESCE(excluded.qty_raw, qty_raw),
+             proceeds_usdg = COALESCE(excluded.proceeds_usdg, proceeds_usdg),
+             opened_at_block = COALESCE(excluded.opened_at_block, opened_at_block),
+             state = excluded.state`,
+        );
+        for (const c of classRows) {
+          await ins.run(
+            c.agent_id,
+            c.token,
+            c.symbol,
+            c.decimals,
+            c.curve,
+            c.quote_token,
+            c.first_seen,
+            c.vault,
+            c.entry_tx,
+            c.exit_tx,
+            c.cost_usdg,
+            c.qty_raw,
+            c.proceeds_usdg,
+            c.opened_at_block,
+            c.state,
+          );
+        }
+      });
+      copied.class_positions = classRows.length;
     }
   } catch (e) {
     failed.snapshots = e instanceof Error ? e.message : String(e);

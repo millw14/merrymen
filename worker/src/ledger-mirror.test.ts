@@ -36,6 +36,18 @@ const SRC = [
   "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, sponsor_gas INTEGER, live_blocker TEXT, x_handle TEXT, x_verified INTEGER DEFAULT 0, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0, contributions_known INTEGER, contributions_why TEXT, gas_accounting TEXT, quality_at INTEGER);",
   "CREATE TABLE positions (agent_id TEXT, symbol TEXT, token TEXT, raw_balance TEXT, ui_multiplier TEXT, price_usd REAL, price_stale INTEGER, price_source TEXT DEFAULT 'chainlink', value_usdg REAL, updated_at INTEGER, PRIMARY KEY (agent_id, symbol));",
   "CREATE TABLE cost_basis (agent_id TEXT, mode TEXT, symbol TEXT, qty_raw TEXT, cost_usdg TEXT, updated_at INTEGER, PRIMARY KEY (agent_id, mode, symbol));",
+  // THE GRADED FLOOR, which this fixture has never had — so the snapshot pass
+  // threw "no such table: position_floors" on every run, the outer catch
+  // swallowed it into `failed.snapshots`, and everything AFTER it in that block
+  // silently never ran. No test asserted on it, so nothing went red; the copy
+  // was simply not happening, in a fixture whose whole job is to model the
+  // shared database. Found by adding a table below it and watching the new
+  // assertion fail for the previous table's reason.
+  "CREATE TABLE position_floors (agent_id TEXT, mode TEXT, symbol TEXT, stop_bps INTEGER, rung INTEGER, why TEXT, at INTEGER, PRIMARY KEY (agent_id, mode, symbol));",
+  // The class book. Money the ACCOUNT does not hold — it sits in a separate
+  // contract — so it appears in no other table here, and without the mirror the
+  // shared ledger cannot see a class position at all.
+  "CREATE TABLE class_positions (agent_id TEXT, token TEXT, symbol TEXT, decimals INTEGER DEFAULT 18, curve TEXT, quote_token TEXT, first_seen INTEGER, vault TEXT, entry_tx TEXT, exit_tx TEXT, cost_usdg TEXT, qty_raw TEXT, proceeds_usdg TEXT, opened_at_block TEXT, state TEXT DEFAULT 'open', PRIMARY KEY (agent_id, token));",
 ].join("\n");
 
 /** The destination, with the same shape a Postgres ledger has. */
@@ -352,6 +364,68 @@ describe("the ledger mirror", () => {
       .prepare("SELECT qty_raw, cost_usdg FROM cost_basis WHERE agent_id = ? AND symbol = ?")
       .get("0xagent", "PEPE")) as { qty_raw: string; cost_usdg: string };
     assert.equal(String(b.cost_usdg), "6.0");
+  });
+
+  it("CARRIES THE CLASS BOOK, which no other table can hold", async () => {
+    // A class position sits in a separate CONTRACT, so it is in neither
+    // `positions` (read from the account's own balances) nor `cost_basis`
+    // (written by a path the class executor never takes). Without this the
+    // shared ledger cannot see it at all, and an owner's equity is missing a
+    // real holding with nothing saying so.
+    const child = seedChild();
+    await child
+      .prepare(
+        `INSERT INTO class_positions (agent_id, token, symbol, decimals, curve, quote_token, first_seen,
+           vault, entry_tx, cost_usdg, qty_raw, opened_at_block, state)
+         VALUES ('0xagent','0xtok','WAGMI',18,'0xcurve','0xusdg',1000,'0xvault','0xentry','4870000','400000000000000000000',NULL,'open')`,
+      )
+      .run();
+    const shared = mem(DEST);
+    const r = await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(JSON.stringify(r.failed ?? {}), "{}", "the snapshot pass must not throw");
+    assert.equal(r.copied.class_positions, 1);
+    const row = (await shared
+      .prepare("SELECT cost_usdg, qty_raw, vault, entry_tx, state FROM class_positions WHERE agent_id = ? AND token = ?")
+      .get("0xagent", "0xtok")) as Record<string, string>;
+    // The ACTUAL cost, as TEXT — a bigint through a REAL column loses precision
+    // at 2^53, which an 18dp memecoin quantity passes in its first token.
+    assert.equal(String(row.cost_usdg), "4870000");
+    assert.equal(String(row.qty_raw), "400000000000000000000");
+    assert.equal(String(row.vault), "0xvault", "recovery needs the vault address");
+    assert.equal(String(row.entry_tx), "0xentry", "and the audit trail needs the entry");
+    assert.equal(String(row.state), "open");
+  });
+
+  it("a rebuilt child does not delete the class book it has merely forgotten", async () => {
+    // Same hazard as cost_basis, and worse: this is the ONLY durable record of
+    // what a class position cost, and the container it lives in is rebuilt on
+    // every redeploy.
+    const child = seedChild();
+    await child
+      .prepare(
+        `INSERT INTO class_positions (agent_id, token, symbol, decimals, curve, quote_token, first_seen, vault, cost_usdg, state)
+         VALUES ('0xagent','0xtok','WAGMI',18,'0xcurve','0xusdg',1000,'0xvault','4870000','open')`,
+      )
+      .run();
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(await count(shared, "class_positions"), 1);
+
+    // The child comes back empty AND with its id space restarted — the evidence
+    // this file already uses to tell a rebuild from a genuine close.
+    const rebuilt = mem(SRC);
+    await rebuilt
+      .prepare(
+        `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, created_at)
+         VALUES ('0xagent','a','0xown','0xsk',4663,'{}',1,2,'armed',1)`,
+      )
+      .run();
+    await mirrorTenant({ tenant: "0xten", child: rebuilt, shared });
+    assert.equal(
+      await count(shared, "class_positions"),
+      1,
+      "a wiped container must not erase the only record of what a position cost",
+    );
   });
 
   it("drops a basis whose position closed", async () => {
