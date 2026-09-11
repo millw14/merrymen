@@ -6,7 +6,11 @@
   "scripts": {
     "build": "hardhat compile",
     "test": "hardhat test",
-    "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json"
+    "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",
+    "deploy:pons:testnet": "node --import tsx node_modules/hardhat/internal/cli/cli.js run scripts/deploy-ponsselftrade.ts --network robinhoodTestnet",
+    "deploy:pons:mainnet": "node --import tsx node_modules/hardhat/internal/cli/cli.js run scripts/deploy-ponsselftrade.ts --network robinhood",
+    "deploy:classfactory:testnet": "node --import tsx node_modules/hardhat/internal/cli/cli.js run scripts/deploy-ponsclassvaultfactory.ts --network robinhoodTestnet",
+    "deploy:classfactory:mainnet": "node --import tsx node_modules/hardhat/internal/cli/cli.js run scripts/deploy-ponsclassvaultfactory.ts --network robinhood"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-viem": "^2.0.0",

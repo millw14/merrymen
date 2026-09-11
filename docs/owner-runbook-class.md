@@ -68,13 +68,16 @@ If those five paragraphs do not change your mind, the rest is the procedure.
 Testnet first. The two runs produce two different addresses.
 
 ```bash
-cd contracts && NODE_OPTIONS="--import tsx" npx hardhat run scripts/deploy-ponsclassvaultfactory.ts --network robinhoodTestnet
+cd contracts && npm run deploy:classfactory:testnet
 ```
 
-`NODE_OPTIONS="--import tsx"` is required — `hardhat run` hands the script to
-Node's ESM loader, which has no TS handler, so without it the command dies with
-`ERR_UNKNOWN_FILE_EXTENSION` before touching the network. In PowerShell, set it
-first: `$env:NODE_OPTIONS = "--import tsx"`.
+…and `npm run deploy:classfactory:mainnet` for 4663.
+
+Use the npm script, not `npx hardhat run` — the latter hands the script to
+Node's ESM loader, which has no TypeScript handler, and dies with
+`ERR_UNKNOWN_FILE_EXTENSION` before touching the network. The script carries the
+loader in the command rather than in an environment variable, because the
+`VAR=x cmd` prefix form is bash-only and does nothing in PowerShell.
 
 The deployer key comes from `MERRYMEN_DEPLOYER_PRIVATE_KEY` in the shell that
 runs it, is never logged, and should be unset afterwards. The script refuses any

@@ -63,15 +63,18 @@ If those four paragraphs do not change your mind, the rest is the procedure.
 Testnet first. The two runs produce two different addresses.
 
 ```bash
-cd contracts && NODE_OPTIONS="--import tsx" npx hardhat run scripts/deploy-ponsselftrade.ts --network robinhoodTestnet
+cd contracts && npm run deploy:pons:testnet
 ```
 
-`NODE_OPTIONS="--import tsx"` IS REQUIRED, and leaving it off is not a subtle
-failure — `hardhat run` hands the script to Node's ESM loader, which has no TS
-handler, so the command in this runbook used to die with
-`ERR_UNKNOWN_FILE_EXTENSION` before touching the network. Hardhat compiles its
-own `hardhat.config.ts` and nothing else. In PowerShell, set it separately
-first: `$env:NODE_OPTIONS = "--import tsx"`.
+…and `npm run deploy:pons:mainnet` for 4663.
+
+USE THE NPM SCRIPT, NOT `npx hardhat run`. `hardhat run` compiles its own
+`hardhat.config.ts` and then hands the deploy script to Node's ESM loader, which
+has no TypeScript handler — so the command this runbook used to give died with
+`ERR_UNKNOWN_FILE_EXTENSION` before touching the network. The fix is a loader,
+and the npm script carries it inside the command rather than in an environment
+variable, because the `VAR=x cmd` prefix form is bash-only and silently does
+nothing in PowerShell: you get the identical error and no hint as to why.
 
 The deployer key comes from `MERRYMEN_DEPLOYER_PRIVATE_KEY` in the shell that
 runs it, is never logged or written, and should be unset afterwards. The script

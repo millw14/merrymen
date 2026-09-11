@@ -8,16 +8,18 @@
  * logged, written, or echoed by this script — only the ADDRESS it derives to.
  *
  *   $env:MERRYMEN_DEPLOYER_PRIVATE_KEY = "0x…"   # shell-only; close it after
- *   $env:NODE_OPTIONS = "--import tsx"           # see below — required
- *   npx hardhat run scripts/deploy-ponsselftrade.ts --network robinhoodTestnet
- *   npx hardhat run scripts/deploy-ponsselftrade.ts --network robinhood
+ *   npm run deploy:pons:testnet
+ *   npm run deploy:pons:mainnet
  *
- * THE LOADER IS NOT OPTIONAL. `hardhat run` compiles `hardhat.config.ts` itself
- * and then hands THIS file to Node's ESM loader, which has no TypeScript
- * handler — so without `--import tsx` the documented command fails with
- * ERR_UNKNOWN_FILE_EXTENSION before it reaches the network. That is a safe
- * failure (nothing is spent) and an expensive one to meet for the first time
- * with a funded key in the shell, which is why it is here and in the runbook.
+ * RUN IT THROUGH THE NPM SCRIPT, never `npx hardhat run` directly. Hardhat
+ * compiles `hardhat.config.ts` itself and then hands THIS file to Node's ESM
+ * loader, which has no TypeScript handler — so the bare command fails with
+ * ERR_UNKNOWN_FILE_EXTENSION before it reaches the network. The npm script
+ * carries the `--import tsx` loader inside the command, deliberately rather
+ * than as an environment variable: the `VAR=x cmd` prefix is bash-only and
+ * silently does nothing in PowerShell, which produces the identical error with
+ * no clue that the fix was skipped. Nothing is spent when it fails, but it is
+ * an expensive thing to debug for the first time with a funded key in scope.
  *
  * The two runs produce two DIFFERENT addresses (independent nonces per chain).
  * Paste each into /settings as `ponsAdapterAddress` on the machine that signs
