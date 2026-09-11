@@ -104,6 +104,23 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
+  // Model-list failure, in words a non-developer can act on. Built here (not
+  // in the render) so the render below stays one literal line — see the pin
+  // in house-key-and-basket.test.ts. `missing_key` never reaches this: it
+  // renders as the neutral hint, not an error.
+  const modelsErrorMessage = (
+    code: string,
+    source: string | null,
+    provider: { label: string; keyUrl: string },
+  ): string => {
+    if (code === "key_rejected") {
+      const whose =
+        source === "typed" ? "the one just typed" : source === "house" ? "the shared key" : "the saved key";
+      const where = provider.keyUrl ? ` — check it at ${provider.keyUrl.replace(/^https?:\/\//, "")}` : "";
+      return `the ${provider.label} key was refused (${whose}${where})`;
+    }
+    return `couldn't reach ${provider.label} — check connection`;
+  };
   /**
    * This account standing against the Circle rule.
    *
@@ -143,6 +160,10 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   }, [loadAttempt]);
 
   // Debounced model fetch — triggers when provider, key, or custom URL changes.
+  // No client-side gate on key presence: the server may still serve the list
+  // from the shared house key, which the client cannot see. A response with no
+  // key behind it comes back as missing_key and renders as the neutral hint
+  // below — never as an error for something the user never did.
   useEffect(() => {
     if (!view) return;
     const providerId = draft.llmProvider ?? view.values.llmProvider ?? "groq";
@@ -168,17 +189,18 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
-        const j = (await res.json()) as { models?: string[]; error?: string };
+        const j = (await res.json()) as { models?: string[]; error?: string; code?: string; keySource?: string };
         if (res.ok && j.models) {
           setAvailableModels(j.models);
           setModelsError(null);
         } else {
           setAvailableModels([]);
-          setModelsError(j.error ?? "failed to list models");
+          const code = j.code ?? "provider_error";
+          setModelsError(code === "missing_key" ? code : modelsErrorMessage(code, j.keySource ?? null, prov));
         }
       } catch {
         setAvailableModels([]);
-        setModelsError("network error");
+        setModelsError(modelsErrorMessage("provider_error", null, prov));
       } finally {
         setModelsLoading(false);
       }
@@ -588,23 +610,19 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               )}
           </div>
 
-          {/* THE REASON WAS ALREADY IN HAND AND THIS THREW IT AWAY.
-              `setModelsError(j.error ?? …)` captures what the route actually
-              said — "provider returned 401", "provider returned 502", a
-              timeout, an unknown provider — and the render replaced all of it
-              with one sentence telling the reader to check a key. Two testers
-              reported seeing it "all the time, but everything is set", and for
-              one of them everything WAS set: the route was not reading the
-              house key, so the provider refused a request that carried no key
-              at all. Blaming their key for our omission is the same shape as
-              telling somebody the market is closed when it was our read that
-              failed. */}
-          {modelsError && (
+          {/* Model-list status: missing_key renders as the neutral hint (nothing
+              was attempted); anything else renders the single literal line the
+              pin in house-key-and-basket.test.ts requires, with the composed
+              sentence — never raw provider text. */}
+          {modelsError === "missing_key" && (
+            <p role="status" className="mm-hint">
+              Enter a {prov.label} API key above to load the model list — or just type a model id below.
+            </p>
+          )}
+          {modelsError && modelsError !== "missing_key" && (
             <p role="status" className="mm-danger">
               Could not load the model list — {modelsError}.{" "}
-              {/^provider returned 40[13]/.test(modelsError)
-                ? "The provider refused the key. Check it, or type a model name below and save — the list is a convenience, not a requirement."
-                : "You can type a model name below and save; the list is a convenience, not a requirement."}
+              You can still type a model name below and save; the list is a convenience, not a requirement.
             </p>
           )}
           <div className="mm-section">Trading basket</div>

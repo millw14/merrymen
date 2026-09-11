@@ -116,11 +116,35 @@ export async function POST(req: Request) {
   const house = (v: string | undefined) => (houseKeyAllowed ? (v ?? "") : "");
 
   let apiKey = body.apiKey || "";
+  // Which key would be sent — never the key itself. Lets the UI name the
+  // failed credential ("your saved Groq key") instead of showing raw JSON.
+  // Resolved after the fallback chain by re-reading the saved field for this
+  // provider: non-empty means the key came from settings, else from house env.
+  // The one-liner shapes below are pinned by house-key-and-basket.test.ts —
+  // keep them literal.
+  let keySource: "typed" | "saved" | "house" | "none" = body.apiKey ? "typed" : "none";
   if (!apiKey) {
     if (prov.id === "groq") apiKey = saved.groqApiKey || house(process.env.GROQ_API_KEY);
     else if (prov.id === "anthropic") apiKey = saved.anthropicApiKey || house(process.env.ANTHROPIC_API_KEY);
     else if (prov.id === "custom") apiKey = saved.llmApiKey ?? "";
     else apiKey = saved.llmApiKey || house(process.env.MERRYMEN_LLM_API_KEY);
+    if (apiKey) {
+      const savedForProvider =
+        prov.id === "groq" ? saved.groqApiKey :
+        prov.id === "anthropic" ? saved.anthropicApiKey :
+        saved.llmApiKey;
+      keySource = savedForProvider ? "saved" : "house";
+    }
+  }
+  // No key to try from any source — not a failure, nothing was attempted.
+  // The client treats this as the neutral "enter a key" hint rather than
+  // an error, so a bare page load never shows a provider refusal for
+  // something the user never did.
+  if (!apiKey) {
+    return NextResponse.json(
+      { error: "no API key to try", code: "missing_key", keySource },
+      { status: 200 },
+    );
   }
 
   let baseUrl = prov.baseUrl;
@@ -174,12 +198,14 @@ export async function POST(req: Request) {
   try {
     const res = await fetch(modelsUrl, { headers, signal: AbortSignal.timeout(10000) });
     if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      const detail = text ? ` (${text.slice(0, 200)})` : "";
-      return NextResponse.json(
-        { error: `provider returned ${res.status}${detail}` },
-        { status: 502 },
-      );
+      // Classified, not parroted: raw provider bodies read as gibberish and
+      // leak provider internals. The UI renders per-code guidance instead.
+      const code = res.status === 401 || res.status === 403 ? "key_rejected" : "provider_error";
+      const error =
+        code === "key_rejected"
+          ? "provider refused the API key"
+          : `provider returned ${res.status}`;
+      return NextResponse.json({ error, code, keySource }, { status: 502 });
     }
 
     const json = (await res.json()) as Record<string, unknown>;
@@ -212,8 +238,7 @@ export async function POST(req: Request) {
 
     models.sort((a, b) => a.localeCompare(b));
     return NextResponse.json({ models });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown error";
-    return NextResponse.json({ error: message }, { status: 502 });
+  } catch {
+    return NextResponse.json({ error: "provider unreachable", code: "provider_error", keySource }, { status: 502 });
   }
 }
