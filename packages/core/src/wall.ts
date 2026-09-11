@@ -452,6 +452,43 @@ export function buildCallPermissions(
     ),
     ...extras.map((t) => t.address as Address),
   ];
+  /**
+   * WHAT A CURVE TRADE MAY TOUCH: cash and the owner's own coins. Never the
+   * equity book.
+   *
+   * A STRICT SUBSET OF `adapterAssets`, and the only place in this file where
+   * one venue gets a narrower asset list than another. The reason is that the
+   * Pons venues are the only ones whose COUNTERPARTY is a caller-supplied
+   * address that no policy can pin — the launchpad mints ~475 new curve
+   * addresses an hour, so there is no set to enumerate — and both
+   * `PonsSelfTrade.tradeExactIn` and `PonsClassVault.buy` hand that address a
+   * live ERC-20 allowance over the pulled input before calling it.
+   *
+   * `allowedSpenders` above warns twice that an approved spender is "a standing
+   * licence to move every share the agent holds", and exempts the two adapters
+   * on the grounds that everything they pull they hand straight back. That
+   * argument holds for V4SelfSwap, which pins its PoolManager as an immutable
+   * because there is exactly one singleton to trust. It does NOT hold here: a
+   * compromised session key can name a contract it controls as the curve, and
+   * the delta check is satisfied by returning one wei, `minAmountOut` being
+   * unpinned. There is no on-chain repetition limit either — RateLimitPolicy is
+   * codeless on 4663, so `maxOpsPerDay` is worker-enforced only.
+   *
+   * Narrowing the CALL is what closes it, not capping the approve: an allowance
+   * the wall's call permissions can never spend is inert. So the stock approvals
+   * stay uncapped — share counts are 18dp and not comparable to a USDG figure,
+   * exactly as the comment there says — and a curve trade simply cannot name a
+   * stock token as either leg.
+   *
+   * WHAT THIS GIVES UP, stated rather than discovered later: curves quoted in a
+   * Robinhood stock token, which are 42.8% of the launchpad. Reaching those
+   * would mean letting the equity book fund an unpinnable counterparty, which is
+   * the whole exposure. USDG-quoted curves and the owner's own coins remain.
+   */
+  const curveAssets: Address[] = [
+    CASH.USDG as Address,
+    ...extras.map((t) => t.address as Address),
+  ];
   const self = { condition: ParamCondition.EQUAL, value: smartAccount } as const;
   // Deduped and lowercased so a list with the same address twice doesn't bloat
   // the on-chain policy, and a case difference can't read as a second address.
@@ -694,8 +731,12 @@ export function buildCallPermissions(
             functionName: "tradeExactIn",
             args: [
               null, // curve — unpinnable, see above
-              { condition: ParamCondition.ONE_OF, value: adapterAssets },
-              { condition: ParamCondition.ONE_OF, value: adapterAssets },
+              // `curveAssets`, NOT `adapterAssets`: cash and the owner's coins,
+              // never the equity book. The curve is caller-supplied and gets a
+              // live allowance over whatever is pulled, so this list is the only
+              // thing deciding what an unpinnable counterparty can be handed.
+              { condition: ParamCondition.ONE_OF, value: curveAssets },
+              { condition: ParamCondition.ONE_OF, value: curveAssets },
               null, // amountIn — bounded by the approve caps
               null, // minAmountOut — denominated in the output asset, says nothing useful
               null, // deadline
@@ -737,7 +778,19 @@ export function buildCallPermissions(
             functionName: "buy",
             args: [
               null, // curve — unpinnable, same as the adapter above
-              { condition: ParamCondition.ONE_OF, value: adapterAssets }, // funding leg stays enumerated
+              // USDG AND NOTHING ELSE, narrower still than the adapter's list.
+              //
+              // The class producer only ever funds an entry in USDG
+              // (`proposeClassEntries` passes `usdg: CASH.USDG`, and
+              // `readClassLegs` filters to it), so every other asset here was
+              // reach nothing uses. It mattered more than an unused branch
+              // usually does: `buy` pulls this asset FROM THE ACCOUNT and then
+              // approves the caller-supplied curve for it, so the funding list
+              // is exactly the list of things a hostile curve can be handed.
+              // With one capped asset, that is bounded by the capped USDG
+              // approve — which is what the old comment on `quoteIn` already
+              // claimed, and which only becomes true here.
+              { condition: ParamCondition.ONE_OF, value: [CASH.USDG as Address] },
               null, // quoteIn — bounded by the capped USDG approve
               null, // minTokensOut — denominated in a token nobody enumerated
               null, // deadline
