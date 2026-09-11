@@ -739,6 +739,34 @@ const SQLITE_ALTERS: string[] = [
      PRIMARY KEY (agent_id, token)
    )`,
   "CREATE INDEX IF NOT EXISTS class_positions_agent ON class_positions (agent_id)",
+  // ── WHAT THE CHAIN SAID, KEPT SO AN OPERATOR CAN SEE IT ────────────────
+  //
+  // The columns above describe a CANDIDATE: which token, on which curve. These
+  // describe the POSITION — what it actually cost, how much actually arrived,
+  // which transaction opened it, and whether it is still open.
+  //
+  // ALL OF IT IS DERIVED FROM THE VAULT'S OWN EVENTS, never from the proposal.
+  // `classPerEntryUsdg` is a request; `ClassBuy.quoteIn` is a cost. They differ
+  // by slippage on every single fill, and only one of them is a number the
+  // scout budget may accrue or a P&L may be computed against.
+  //
+  // And it is a CACHE, not the truth. This table lives in the child's sqlite,
+  // which a redeploy rebuilds; the truth is the chain, re-read on every arm.
+  // What this buys is that the shared ledger — and therefore the dashboard and
+  // the recovery path — can see a position without replaying the tape.
+  "ALTER TABLE class_positions ADD COLUMN vault TEXT",
+  "ALTER TABLE class_positions ADD COLUMN entry_tx TEXT",
+  "ALTER TABLE class_positions ADD COLUMN exit_tx TEXT",
+  // ACTUAL, both of them. Raw units: USDG at 6dp, the token at its own.
+  "ALTER TABLE class_positions ADD COLUMN cost_usdg TEXT",
+  "ALTER TABLE class_positions ADD COLUMN qty_raw TEXT",
+  "ALTER TABLE class_positions ADD COLUMN proceeds_usdg TEXT",
+  "ALTER TABLE class_positions ADD COLUMN opened_at_block TEXT",
+  // 'open' | 'closed' | 'recovered'. `recovered` is the honest name for a
+  // balance the chain shows in a vault whose entry we cannot find — it has an
+  // UNKNOWN basis, which is not a zero basis. Booking it at zero would report
+  // the whole exit as profit; treating it as flat would hide somebody's money.
+  "ALTER TABLE class_positions ADD COLUMN state TEXT NOT NULL DEFAULT 'open'",
   // WHERE A POSITION SITS. 'account' for everything that existed before this
   // column, which is every row: the default is the truth for them, not a guess.
   "ALTER TABLE positions ADD COLUMN custody TEXT NOT NULL DEFAULT 'account'",
@@ -3361,6 +3389,27 @@ export interface ClassPositionRow {
    * position and a trap.
    */
   firstSeen: number;
+  /** The vault this was bought into, for recovery when no grant is available. */
+  vault: string | null;
+  /** The transaction that opened it, and the one that closed it. */
+  entryTx: string | null;
+  exitTx: string | null;
+  /**
+   * ACTUAL USDG spent and ACTUAL tokens received, raw, from `ClassBuy`.
+   *
+   * Null means UNKNOWN, which is the honest state for a position rediscovered
+   * from a vault balance whose entry log is outside the scanned range. It is
+   * not zero: a zero cost reports the whole exit as profit, and a zero quantity
+   * hides somebody's money.
+   */
+  costRaw: bigint | null;
+  qtyRaw: bigint | null;
+  /** USDG returned by sells so far. */
+  proceedsRaw: bigint | null;
+  /** Block of the first buy — the clock the chain keeps, immune to a redeploy. */
+  openedAtBlock: bigint | null;
+  /** 'open' | 'closed' | 'recovered' — see the column comment in the migration. */
+  state: string;
 }
 
 /**
@@ -3376,7 +3425,9 @@ export async function classPositions(agentId: string): Promise<ClassPositionRow[
   try {
     const rows = (await getDb()
       .prepare(
-        `SELECT token, symbol, decimals, curve, quote_token, first_seen FROM class_positions WHERE agent_id = ?`,
+        `SELECT token, symbol, decimals, curve, quote_token, first_seen, vault, entry_tx, exit_tx,
+                cost_usdg, qty_raw, proceeds_usdg, opened_at_block, state
+           FROM class_positions WHERE agent_id = ?`,
       )
       .all(agentId)) as {
       token: string;
@@ -3385,13 +3436,40 @@ export async function classPositions(agentId: string): Promise<ClassPositionRow[
       curve: string | null;
       quote_token: string | null;
       first_seen: number | null;
+      vault: string | null;
+      entry_tx: string | null;
+      exit_tx: string | null;
+      cost_usdg: string | null;
+      qty_raw: string | null;
+      proceeds_usdg: string | null;
+      opened_at_block: string | null;
+      state: string | null;
     }[];
+    // NULL STAYS NULL through this map. Every one of these is money or the
+    // clock money is measured against, and `?? 0n` on any of them would turn
+    // "we do not know" into a confident wrong number.
+    const big = (v: string | null): bigint | null => {
+      if (v === null) return null;
+      try {
+        return BigInt(v);
+      } catch {
+        return null;
+      }
+    };
     return rows.map((r) => ({
       token: r.token.toLowerCase(),
       symbol: r.symbol,
       decimals: r.decimals,
       curve: r.curve ? r.curve.toLowerCase() : null,
       quoteToken: r.quote_token ? r.quote_token.toLowerCase() : null,
+      vault: r.vault ? r.vault.toLowerCase() : null,
+      entryTx: r.entry_tx,
+      exitTx: r.exit_tx,
+      costRaw: big(r.cost_usdg),
+      qtyRaw: big(r.qty_raw),
+      proceedsRaw: big(r.proceeds_usdg),
+      openedAtBlock: big(r.opened_at_block),
+      state: r.state ?? "open",
       // A NULL clock reads as "right now", not as 1970. The column has a
       // default so this should not happen, but a zero would make every position
       // instantly older than any hold window and force an immediate exit — an
@@ -3419,14 +3497,83 @@ export async function classPositionCurves(agentId: string): Promise<string[] | n
   return rows.map((r) => r.curve).filter((c): c is string => !!c);
 }
 
+/**
+ * Write what the CHAIN says about one class position.
+ *
+ * IDEMPOTENT BY CONSTRUCTION, and that is the whole design rather than a nice
+ * property. Every figure here is a fold over `(txHash, logIndex)`-identified
+ * events, so writing the same reconciliation twice writes the same row. There
+ * is no `+=` anywhere in this path: a restart, a re-arm and a replayed block
+ * range all converge on the same numbers, which is the only way an accrual that
+ * feeds a spending budget can survive a redeploy loop.
+ *
+ * Contrast `upsertClassPosition` below, which records a CANDIDATE — a token to
+ * ask the chain about. This records the answer.
+ */
+export async function writeClassLedger(
+  agentId: string,
+  row: {
+    token: string;
+    vault: string;
+    curve: string | null;
+    costRaw: bigint | null;
+    qtyRaw: bigint | null;
+    proceedsRaw: bigint | null;
+    openedAtBlock: bigint | null;
+    entryTx: string | null;
+    exitTx: string | null;
+    state: "open" | "closed" | "recovered";
+  },
+): Promise<void> {
+  try {
+    await getDb()
+      .prepare(
+        `INSERT INTO class_positions
+           (agent_id, token, vault, curve, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, entry_tx, exit_tx, state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(agent_id, token) DO UPDATE SET
+           vault = COALESCE(excluded.vault, vault),
+           curve = COALESCE(excluded.curve, curve),
+           cost_usdg = COALESCE(excluded.cost_usdg, cost_usdg),
+           qty_raw = COALESCE(excluded.qty_raw, qty_raw),
+           proceeds_usdg = COALESCE(excluded.proceeds_usdg, proceeds_usdg),
+           opened_at_block = COALESCE(excluded.opened_at_block, opened_at_block),
+           entry_tx = COALESCE(excluded.entry_tx, entry_tx),
+           exit_tx = COALESCE(excluded.exit_tx, exit_tx),
+           state = excluded.state`,
+      )
+      .run(
+        agentId,
+        row.token.toLowerCase(),
+        row.vault.toLowerCase(),
+        row.curve,
+        // Stored as TEXT. A bigint through a REAL column loses precision at
+        // 2^53, and a memecoin quantity at 18dp passes that in the first token.
+        row.costRaw === null ? null : row.costRaw.toString(),
+        row.qtyRaw === null ? null : row.qtyRaw.toString(),
+        row.proceedsRaw === null ? null : row.proceedsRaw.toString(),
+        row.openedAtBlock === null ? null : row.openedAtBlock.toString(),
+        row.entryTx,
+        row.exitTx,
+        row.state,
+      );
+  } catch (e) {
+    console.error("[store] class ledger write failed:", e);
+  }
+}
+
 /** Remember that the class vault now holds this token. Idempotent by (agent, token). */
 export async function upsertClassPosition(
   agentId: string,
-  // WITHOUT the clock. The column carries its own default, and letting a caller
-  // supply one would let a re-record reset the age the exit is measured
-  // against — which on an idempotent upsert would mean a position that is
-  // touched often can never grow old enough to be sold.
-  row: Omit<ClassPositionRow, "firstSeen">,
+  // THE CANDIDATE FIELDS ONLY — which token, on which curve, priced in what.
+  //
+  // Not the whole row, and not the clock. The money columns are written by
+  // `writeClassLedger` from the chain's own events, because they are the one
+  // thing a caller must never be able to assert: a proposal knows the size it
+  // ASKED for, and booking that as a cost is how a budget drifts from reality
+  // by one slippage per fill. The clock is excluded for the matching reason —
+  // a re-record on a top-up must not rejuvenate a position past its exit.
+  row: Pick<ClassPositionRow, "token" | "symbol" | "decimals" | "curve" | "quoteToken">,
 ): Promise<void> {
   try {
     await getDb()

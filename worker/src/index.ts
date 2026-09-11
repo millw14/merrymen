@@ -269,6 +269,7 @@ import {
   basisSymbols,
   classPositionCurves,
   classPositions,
+  writeClassLedger,
   upsertClassPosition,
   getBasis,
   setBasis,
@@ -327,6 +328,8 @@ import {
   type TradeRow,  knownCurves,
 } from "./store";
 import { quoteDecimalsOf, readCurveReserves, readCurveThreshold } from "./venues/pons";
+import { foldClassEvents, readClassLog } from "./venues/class-log";
+import { reconcileClassBook, scoutCostOf } from "./class-reconcile";
 
 const BREAKER_ABI = parseAbi(["function isTripped(address account) view returns (bool)"]);
 /** The one read the onchain reconstruction checks itself against. */
@@ -868,8 +871,101 @@ async function main() {
    * second read would be a different moment's answer.
    */
   let lastClassBalances: ReadonlyMap<string, bigint> = new Map<string, bigint>();
+  /** What the OPEN class positions actually cost, from the chain. Scout budget. */
+  let lastClassCostUsdg = 0n;
   /** Quote-token decimals, learned once and kept for the life of the process. */
   const classQuoteDecimals = new Map<string, number>();
+
+  /**
+   * How far back an arm looks for a vault's history.
+   *
+   * ~7 days at the measured 0.101 s/block. Bounded because this runs on every
+   * arm and an unbounded scan of a busy chain is a startup that never finishes.
+   *
+   * A position older than the window is NOT lost: its balance still shows up,
+   * and it is classified `recovered` — held, with an honestly unknown basis —
+   * rather than dropped. The window decides how much history we can explain,
+   * never how much money we can see.
+   */
+  const CLASS_LOG_LOOKBACK_BLOCKS = 6_000_000n;
+
+  /**
+   * Rebuild this agent's class book from the chain and write it to the cache.
+   *
+   * Everything it writes is a fold over `(txHash, logIndex)`-identified events,
+   * so running it twice writes the same rows. There is no `+=` in the path,
+   * which is what lets a restart loop, a re-arm and a replayed block range all
+   * converge instead of compounding.
+   */
+  async function reconcileClassFromChain(
+    agentId: string,
+    vault: `0x${string}`,
+    client: PublicClient,
+  ): Promise<void> {
+    try {
+      const head = await client.getBlockNumber();
+      const from = head > CLASS_LOG_LOOKBACK_BLOCKS ? head - CLASS_LOG_LOOKBACK_BLOCKS : 0n;
+      const scan = await readClassLog(client, vault, from, head);
+      const folded = foldClassEvents(scan.events);
+
+      // The cache's tokens join the candidate list so a position whose entry
+      // predates the window is still ASKED about. It contributes nothing but a
+      // question.
+      const cachedRows = (await classPositions(agentId)) ?? [];
+      const candidates = [...new Set([...folded.keys(), ...cachedRows.map((r) => r.token)])];
+      if (candidates.length === 0) return;
+
+      const custody = await readClassCustody(client, vault, candidates as `0x${string}`[]);
+      const rec = reconcileClassBook({
+        folded,
+        balances: custody.balances,
+        cached: cachedRows.map((r) => r.token),
+        logComplete: !scan.failed,
+        balancesComplete: custody.unread.length === 0,
+      });
+
+      for (const p of rec.positions) {
+        await writeClassLedger(agentId, {
+          token: p.token,
+          vault,
+          curve: p.curve,
+          costRaw: p.costRaw,
+          qtyRaw: p.qtyRaw,
+          proceedsRaw: p.proceedsRaw,
+          openedAtBlock: p.openedAtBlock,
+          entryTx: p.entryTx,
+          exitTx: p.exitTx,
+          state: p.state,
+        });
+      }
+
+      const open = rec.positions.filter((p) => p.state === "open" || p.state === "recovered");
+      if (open.length > 0 || rec.incomplete) {
+        console.log(
+          `[class] reconciled ${open.length} open · ${rec.recovered.length} recovered · ` +
+            `scanned ${from}-${head}${rec.incomplete ? ` · INCOMPLETE: ${rec.why}` : ""}`,
+        );
+      }
+      // SAY IT TO THE OWNER, because a position with an unknown basis makes
+      // every P&L that includes it a guess, and they are entitled to know which
+      // number is not trustworthy.
+      if (rec.recovered.length > 0) {
+        await addEvent(
+          agentId,
+          "warn",
+          `found ${rec.recovered.length} token(s) in your class vault whose purchase I could not find in the ` +
+            `last ~7 days of chain history, so I do not know what they cost. They are safe and they are ` +
+            `yours — I just cannot tell you the profit on them, and I will not invent a number. ` +
+            `\`merrymen recover\` moves them out with your own key.`,
+        );
+      }
+    } catch (e) {
+      // A failed reconciliation must never stop an arm. The book stays as it
+      // was, which is the conservative direction: positions are kept, not
+      // closed.
+      console.error("[class] reconcile failed:", e);
+    }
+  }
 
   /**
    * LEAVING A CLASS POSITION — the half that did not exist.
@@ -4191,6 +4287,22 @@ async function main() {
             `at /grant to switch.`,
         );
       }
+
+      // ── AND RECONCILE THE BOOK AGAINST THE CHAIN, EVERY ARM ──────────────
+      //
+      // `class_positions` lives in the CHILD's sqlite, which the orchestrator
+      // rebuilds on every redeploy. So an open position's whole record could
+      // vanish while the tokens sat in the vault, and an empty table read as a
+      // flat book — the worst possible default for money.
+      //
+      // The chain cannot be redeployed. `balanceOf` says what is held and the
+      // vault's own ClassBuy/ClassSell events say what it actually cost, so the
+      // book is rebuilt from evidence rather than remembered. Runs at ARM, not
+      // per tick: it is a bounded log scan, and the answer only changes when a
+      // class trade lands — which re-arms nothing but does write its own row.
+      if (vaultCode !== undefined && vaultCode !== "0x") {
+        await reconcileClassFromChain(agentId, sealedVault, client);
+      }
     }
 
     active = {
@@ -5783,6 +5895,24 @@ async function main() {
             quoteToken: ref?.quoteToken ?? intent.assetIn,
           });
         }
+        // AND RE-READ THE BOOK FROM THE CHAIN, buy or sell.
+        //
+        // The row above records a CANDIDATE — which token, on which curve. What
+        // it actually cost is in the vault's own ClassBuy event, and only the
+        // chain can say it: the proposal knows the size it ASKED for, and the
+        // fill differs by slippage every time.
+        //
+        // Done here rather than only at arm because the scout budget must bind
+        // WITHIN a session. Without it, a second entry in the same session would
+        // be sized against a ceiling that had not yet noticed the first one —
+        // the budget would bound nothing until the next redeploy, which is the
+        // opposite of what it is for.
+        //
+        // Re-folding the whole tape rather than adding this fill is deliberate:
+        // a fold over (txHash, logIndex) converges, an increment compounds. A
+        // retried reconcile is then free of consequence, which is the property
+        // that makes it safe to call from an execution path at all.
+        await reconcileClassFromChain(agentId, vault, active.client);
       } else if (intent.kind === "curve-trade") {
         // A bonding-curve trade, through the adapter the GRANT was sealed
         // against — never `cfg.ponsAdapterAddress`, which anyone with the
@@ -6854,6 +6984,44 @@ async function main() {
       // this tick must not leave a stale balance behind for a sell to size
       // against.
       lastClassBalances = classRead.balances;
+      // AND WHAT THEY ACTUALLY COST, for the scout budget.
+      //
+      // `quarantine` books these at ZERO, because it reads `cost_basis` and the
+      // class executor never writes one — so the budget that is documented as
+      // the only risk control for unpriceable money was, for the least
+      // priceable asset on the chain, counting nothing. Every class entry was
+      // free as far as the ceiling was concerned.
+      //
+      // The figure comes from the vault's own ClassBuy events via
+      // `writeClassLedger`, so it is the ACTUAL fill rather than the size that
+      // was proposed, and it survives a redeploy because the chain does.
+      // `scoutCostOf` keeps the existing semantics — what was SPENT, open
+      // positions only — rather than inventing a second definition here.
+      const classCost = scoutCostOf(
+        classHeldRows.map((r) => ({
+          token: r.token,
+          curve: r.curve,
+          costRaw: r.costRaw,
+          qtyRaw: r.qtyRaw,
+          proceedsRaw: r.proceedsRaw,
+          openedAtBlock: r.openedAtBlock,
+          entryTx: r.entryTx,
+          exitTx: r.exitTx,
+          state: (r.state === "closed" ? "closed" : r.state === "recovered" ? "recovered" : "open") as
+            | "open"
+            | "closed"
+            | "recovered",
+          balanceRaw: classRead.balances.get(r.token) ?? 0n,
+        })),
+      );
+      lastClassCostUsdg = classCost.spentRaw;
+      // A HELD POSITION WHOSE COST WE CANNOT NAME does not silently pass as
+      // zero. It cannot be added to the budget honestly, so it is surfaced —
+      // the owner is the one who gets to decide what to do about a holding
+      // nobody can price.
+      if (classCost.unknown.length > 0) {
+        console.log(`[class] ${classCost.unknown.length} held position(s) with an unknown basis — not counted against the scout budget`);
+      }
       // A CLASS POSITION IS UNPRICEABLE BY CONSTRUCTION, so it joins the set the
       // quarantine carries at cost. Without this it is in no equity term at all:
       // the buy reads as a pure cash decrease with nothing arriving, equity
@@ -7004,7 +7172,15 @@ async function main() {
       if (p.priceSource !== "curve") continue;
       curveCostUsdg += (await getBasis(agentId, qMode, p.symbol)).costUsdg;
     }
-    lastQuarantinedUsdg = quarantine.totalCostUsdg + curveCostUsdg;
+    // PLUS WHAT THE CLASS VAULT HOLDS, which the quarantine counts at zero.
+    //
+    // `quarantine.totalCostUsdg` reads `cost_basis`, and the class executor
+    // never writes one — so every class position was free as far as this
+    // ceiling was concerned, and the budget documented as the ONLY risk control
+    // for unpriceable money bounded nothing at all for the least priceable
+    // asset on the chain. No double count: there is no cost_basis row to have
+    // counted it once already, which is precisely the defect.
+    lastQuarantinedUsdg = quarantine.totalCostUsdg + curveCostUsdg + lastClassCostUsdg;
 
     const unknownCost = quarantine.holdings.filter((h) => h.costUsdg === 0n).map((h) => h.symbol);
     const bookIncomplete = unknownCost.length > 0;

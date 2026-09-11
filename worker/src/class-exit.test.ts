@@ -140,8 +140,14 @@ describe("every refusal fails in the safe direction", () => {
 });
 
 describe("the hold clock is real and cannot be reset", () => {
-  it("classPositions selects first_seen", () => {
-    assert.match(STORE, /SELECT token, symbol, decimals, curve, quote_token, first_seen FROM class_positions/);
+  it("classPositions selects the clock and the money, not just the candidate", () => {
+    // Asserted by column rather than by the whole SELECT string, which grew
+    // when the durable metadata arrived. The property is that each of these
+    // reaches the caller — an exit needs the clock, and a budget needs the cost.
+    const sel = STORE.slice(STORE.indexOf("FROM class_positions"), 0) || STORE;
+    for (const col of ["first_seen", "cost_usdg", "qty_raw", "opened_at_block", "state", "vault"]) {
+      assert.match(sel, new RegExp(`\\b${col}\\b`), `class_positions must expose ${col}`);
+    }
   });
 
   it("a null clock reads as NOW, never as 1970", () => {
@@ -150,9 +156,25 @@ describe("the hold clock is real and cannot be reset", () => {
     assert.match(STORE, /firstSeen: r\.first_seen \?\? Math\.floor\(Date\.now\(\) \/ 1000\)/);
   });
 
-  it("the writer cannot supply a clock, so an upsert cannot rejuvenate a position", () => {
+  it("the candidate writer cannot supply a clock OR a cost", () => {
     // The row is re-recorded on every landed buy of the same token. If the
-    // caller set first_seen, a position topped up often would never age out.
-    assert.match(STORE, /row: Omit<ClassPositionRow, "firstSeen">/);
+    // caller set first_seen, a position topped up often would never age out —
+    // and if it set the cost, the size that was PROPOSED would become the
+    // number the scout budget accrues, which is wrong by one slippage on every
+    // fill. Both come from the chain instead.
+    assert.match(
+      STORE,
+      /row: Pick<ClassPositionRow, "token" \| "symbol" \| "decimals" \| "curve" \| "quoteToken">/,
+      "upsertClassPosition records a candidate, never a position",
+    );
+  });
+
+  it("the money is written by a separate, chain-derived writer", () => {
+    assert.match(STORE, /export async function writeClassLedger/);
+    // Idempotent by construction: a fold over (txHash, logIndex) converges
+    // where an increment would compound. No `+=` may appear in that path.
+    const fn = STORE.slice(STORE.indexOf("export async function writeClassLedger"));
+    const body = fn.slice(0, fn.indexOf("\n}"));
+    assert.ok(!/\+=/.test(body), "a budget-feeding write must not accumulate");
   });
 });
