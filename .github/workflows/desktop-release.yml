@@ -50,6 +50,20 @@ jobs:
           npm install                      # electron + electron-builder + deps
           npm install ../merrymen-*.tgz    # replace file:.. with the packed copy
 
+      # Gate: a bundle that can't resolve its sentinels must fail the run,
+      # not ship as a release. Mirrors the app's own boot check in main.js.
+      - name: Verify staged bundle resolves
+        shell: bash
+        working-directory: desktop
+        run: |
+          node -e "const path = require('path');
+            const roots = [process.cwd(), path.join(process.cwd(), 'node_modules', 'merrymen')];
+            for (const r of ['merrymen/package.json', '@next/env', '@esbuild/linux-x64/package.json', 'tsx/package.json'])
+              if (!roots.some((root) => { try { require.resolve(r, { paths: [root] }); return true; } catch { return false; } })) throw new Error('unresolvable: ' + r);"
+          test -f node_modules/merrymen/worker/src/index.ts
+          test -f loading.html
+          echo "bundle resolves"
+
       - name: Build the installer for this OS
         shell: bash
         working-directory: desktop

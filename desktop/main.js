@@ -76,6 +76,75 @@ function ensureWritableApp() {
   return dest;
 }
 const APP_DIR = ensureWritableApp();
+
+// ── boot sentinels: never launch children from a broken copy ───────────────
+// A first-launch copy can die halfway (Ctrl+C during the ~1.4GB copy is the
+// classic) leaving node_modules without @next/env or @esbuild/linux-x64 —
+// exactly the "Cannot find module" crash loop. Verify the load-bearing pieces
+// resolve from the copy; on failure wipe + re-copy once, and if still broken
+// say which piece is missing instead of booting half an app.
+const BOOT_SENTINELS = [
+  "build/icon.png",
+  "loading.html",
+  "node_modules/merrymen/package.json",
+  "node_modules/merrymen/worker/src/index.ts",
+];
+function canResolveFrom(request, dir) {
+  // Both known layouts: CI hoists deps to the app top level, local staging
+  // nests them under node_modules/merrymen. Node never descends into a nested
+  // package's node_modules on its own, so try both roots.
+  const roots = [dir, path.join(dir, "node_modules", "merrymen")];
+  return roots.some((root) => {
+    try {
+      require.resolve(request, { paths: [root] });
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+function missingBootPieces(dir) {
+  const missing = BOOT_SENTINELS.filter((f) => {
+    try {
+      accessSync(path.join(dir, f));
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  // Plain package resolutions only — deep subpaths (tsx/dist/cli.mjs) hit
+  // exports maps; presence of the package is the correct check here.
+  for (const request of ["@next/env", "@esbuild/linux-x64/package.json", "tsx/package.json"]) {
+    if (!canResolveFrom(request, dir)) missing.push(`module:${request}`);
+  }
+  return missing;
+}
+function ensureBootableApp() {
+  let missing = missingBootPieces(APP_DIR);
+  if (missing.length && APP_DIR !== __dirname) {
+    // One repair attempt: the copy is corrupt, redo it from the bundle.
+    try {
+      rmSync(path.join(HOME, "app"), { recursive: true, force: true });
+      ensureWritableApp(); // fingerprint is gone with the dir → full re-copy
+      missing = missingBootPieces(APP_DIR);
+    } catch {
+      /* fall through to the dialog with the original list */
+    }
+  }
+  if (missing.length) {
+    dialog.showMessageBoxSync({
+      type: "error",
+      title: "merrymen — broken install",
+      message: "The app copy is incomplete and can't start.",
+      detail: `Missing: ${missing.join(", ")}. Reinstall the AppImage; if it persists, report these names.`,
+      buttons: ["Quit"],
+    });
+    quitting = true;
+    app.quit();
+    return false;
+  }
+  return true;
+}
 const PAUSED_MARKER = path.join(HOME, "paused"); // present = agent paused (worker honors it)
 const ICON = path.join(APP_DIR, "build", "icon.png");
 
@@ -511,6 +580,7 @@ if (!app.requestSingleInstanceLock()) {
     Menu.setApplicationMenu(null); // app-like; the dashboard is the whole UI
     makeSplash();
     try {
+      if (!ensureBootableApp()) return;
       if (!(await ensurePortFree())) return;
       startBackend();
       await waitForServer();
