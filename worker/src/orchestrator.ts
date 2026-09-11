@@ -37,7 +37,7 @@
  * budget counters — noted at store.ts's fail-closed write and at the arm site.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
@@ -62,7 +62,7 @@ import { replayLines, scoreDecision, type Observation, type PricedDecision } fro
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
-import { TELEGRAM_STATE_DDL, publishTenantTelegram } from "./telegram-store";
+import { TELEGRAM_STATE_DDL, publishTenantTelegram, readTenantTelegram } from "./telegram-store";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
 import { makeNewsDesk, type NewsDesk } from "./research-pass";
@@ -465,6 +465,51 @@ function readChildTelegram(tenant: string): {
  * the dashboard still works, because the child only ever reports chats it has
  * just linked, and a code cannot be reused once it has rotated.
  */
+/**
+ * PUT THE TENANT'S TELEGRAM LINK BACK, before the child starts.
+ *
+ * The counterpart to `publishChildTelegram`, and its absence was a real defect
+ * rather than an omission of convenience. `childHome()` is ephemeral — the
+ * orchestrator runs with no volume — so every redeploy destroyed
+ * `telegram.json`, and `ownerId` is the ONLY recipient the notifier will send
+ * to (`state.ownerId === null` returns early). Grant, settings and bootstrap
+ * were all seeded back on spawn; the telegram link was not, and it is the one
+ * that decides whether an owner ever hears from their agent again.
+ *
+ * The symptom was silent and easy to misread: the bot still answered /status,
+ * because a reply goes to whoever sent the message, while every ping, alert and
+ * daily report stopped. The link code had rotated too, so the owner's old one
+ * no longer worked and re-linking meant a trip to the dashboard nobody
+ * suggested.
+ *
+ * ONLY WHEN THE CHILD HAS NO FILE. A running child is the authority on its own
+ * link — it may have just been re-linked to a different chat — and this must
+ * restore a lost link, never overwrite a live one.
+ */
+async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db): Promise<void> {
+  const file = path.join(childHome(tenant), "telegram.json");
+  if (existsSync(file)) return;
+  const url = process.env.DATABASE_URL;
+  if (!url && !shared) return;
+  try {
+    const tg = await readTenantTelegram(shared ?? (await makePgDb(url!)), tenant);
+    // No row is "never linked"; a row with no ownerId is "linked once, then
+    // unlinked". Neither is worth writing a file for — there is no recipient to
+    // restore, and an empty file would only mask a later genuine publish.
+    if (!tg?.ownerId) return;
+    mkdirSync(childHome(tenant), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify({ linkCode: tg.linkCode ?? "", ownerId: tg.ownerId, linkedAt: tg.linkedAt ?? 0 }, null, 2),
+    );
+    log(`${tenant}: telegram link restored from the shared record — the owner keeps receiving alerts`);
+  } catch (e) {
+    // Never fatal. A child with no telegram link still trades; it just cannot
+    // tell anyone about it, which is the status quo this repairs.
+    log(`${tenant}: could not restore telegram state — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function publishChildTelegram(tenant: `0x${string}`, shared: Db): Promise<void> {
   const tg = readChildTelegram(tenant);
   if (!tg) return;
@@ -798,6 +843,10 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   // closed, so the agent would run with contributions marked unknown for no
   // reason other than a race.
   await writeBootstrapForChild(tenant, smartAccount);
+  // AFTER the anchor and BEFORE spawn, with the others: a link restored once the
+  // child is already polling would be read from a file the child has by then
+  // replaced with a fresh, unlinked default.
+  await writeTelegramForChild(tenant);
   const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
   const staleSec = staleThresholdSec(tickSeconds);
   const firstBeatSec = firstBeatGraceSec(tickSeconds);

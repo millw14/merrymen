@@ -64,6 +64,41 @@ export interface TenantTelegram {
 }
 
 /**
+ * READ ONE TENANT'S PUBLISHED TELEGRAM STATE — the direction this table was
+ * missing.
+ *
+ * The mirror was write-only. `publishTenantTelegram` copied a child's
+ * `telegram.json` up to Postgres and nothing ever copied it back, which was
+ * survivable only while a child's home outlived a deploy. It does not: the
+ * orchestrator has no volume, so `childHome()` is wiped on every redeploy, and
+ * `ownerId` — the single recipient every alert, ping and daily report is sent
+ * to — lives nowhere else.
+ *
+ * So every redeploy silently unlinked every hosted tenant. The bot kept
+ * answering commands, because a command replies to whoever sent it, but nothing
+ * the agent initiated could reach anyone again, and the link code had rotated
+ * so the owner's old one no longer worked either. Nobody was told; the notifier
+ * simply returns at `state.ownerId === null`.
+ *
+ * Returns null when there is no row, which is honestly "never linked" — and is
+ * NOT the same as a row whose owner_id is null, which is "linked once, then
+ * unlinked". The caller must be able to tell those apart.
+ */
+export async function readTenantTelegram(db: Db, tenant: string): Promise<TenantTelegram | null> {
+  const row = (await db
+    .prepare("SELECT link_code, owner_id, linked_at FROM tenant_telegram WHERE tenant = ?")
+    .get(tenant.toLowerCase())) as
+    | { link_code: string | null; owner_id: number | null; linked_at: number | null }
+    | undefined;
+  if (!row) return null;
+  return {
+    linkCode: row.link_code ?? null,
+    ownerId: row.owner_id === null || row.owner_id === undefined ? null : Number(row.owner_id),
+    linkedAt: row.linked_at === null || row.linked_at === undefined ? null : Number(row.linked_at),
+  };
+}
+
+/**
  * Publish one tenant's telegram runtime state.
  *
  * Unconditional overwrite, never a ratchet. The code ROTATES on every
