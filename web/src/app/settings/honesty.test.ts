@@ -128,7 +128,11 @@ describe("every control survives the restyle", () => {
     // control is what makes OFF reachable at all, and it is also the only place
     // an owner learns the coin list exists. A missing opt-out is worse than a
     // missing opt-in: the behaviour happens either way.
-    assert.equal(count(/type="checkbox"/g), 13, "checkboxes");
+    // 14 since the class route's own switch. It had a type, a PUT-allowlist
+    // entry and a worker read, and no control at all — so it could not be
+    // turned on from the app by anyone, and the factory field sitting alone in
+    // Connections made the page look as though the feature were reachable.
+    assert.equal(count(/type="checkbox"/g), 14, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
@@ -144,7 +148,7 @@ describe("every control survives the restyle", () => {
     assert.equal(count(/<select/g), 5, "selects");
   });
 
-  it("sends exactly the 19 fields save() guards", () => {
+  it("sends exactly the 20 fields save() guards", () => {
     // Every guard is "the user did not touch this, so do not overwrite it".
     // One dropped guard silently resets a setting to whatever the form had.
     //
@@ -153,7 +157,11 @@ describe("every control survives the restyle", () => {
     // send would write `false` for every owner who opened this screen and saved
     // anything at all — silently opting the fleet out of the coin list by
     // visiting a page.
-    assert.equal((code.match(/!== null\)/g) ?? []).length, 19);
+    // 20 since classSnipeEnabled. Same reasoning as officialCoinsEnabled above,
+    // pointing the other way: unguarded, an owner who opened this screen and
+    // saved anything would send `false` and silently switch a running class
+    // canary off mid-position.
+    assert.equal((code.match(/!== null\)/g) ?? []).length, 20);
   });
 });
 

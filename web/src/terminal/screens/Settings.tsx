@@ -78,6 +78,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   // Scout mode is a boolean, so it can't ride the string `draft`.
   const [deskEnabled, setDeskEnabled] = useState<boolean | null>(null);
   const [scoutEnabled, setScoutEnabled] = useState<boolean | null>(null);
+  const [classSnipe, setClassSnipe] = useState<boolean | null>(null);
   const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
   const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
   const [officialCoins, setOfficialCoins] = useState<boolean | null>(null);
@@ -248,6 +249,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
     if (virtualsEnabled !== null) body.virtualsEnabled = virtualsEnabled;
     if (deskEnabled !== null) body.deskEnabled = deskEnabled;
     if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
+    if (classSnipe !== null) body.classSnipeEnabled = classSnipe;
     if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
     if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
     if (officialCoins !== null) body.officialCoinsEnabled = officialCoins;
@@ -351,6 +353,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const virtualsEnabledVal = virtualsEnabled ?? view.values.virtualsEnabled ?? d.virtualsEnabled;
   const deskEnabledVal = deskEnabled ?? view.values.deskEnabled ?? d.deskEnabled;
   const scoutEnabledVal = scoutEnabled ?? view.values.scoutEnabled ?? d.scoutEnabled;
+  const classSnipeVal = classSnipe ?? view.values.classSnipeEnabled ?? d.classSnipeEnabled;
   const discoveryEnabledVal = discoveryEnabled ?? view.values.discoveryEnabled ?? d.discoveryEnabled;
   const trencherLiveVal = trencherLive ?? view.values.trencherLiveEnabled ?? d.trencherLiveEnabled;
   // `?? d.officialCoinsEnabled` is doing real work here, not defensive padding:
@@ -885,6 +888,84 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               </>
             )}
           </div>
+
+          {/* ── THE CLASS ROUTE ────────────────────────────────────────────
+              Four settings that had a type, a PUT-allowlist entry and a worker
+              read, and NO control — so the only way to configure the route was
+              to call the API by hand, and `classSnipeEnabled` could not be
+              turned on at all. The factory field alone sat in Connections,
+              which made the page look like the feature was reachable when
+              nothing downstream of it could be set.
+
+              Deliberately BELOW the scout block and after its warning: a class
+              buy is gated by the scout budget, so an owner who has not read
+              that paragraph is not ready to read this one. */}
+          <div className="mm-subtle mono">class route · buying a coin nobody listed</div>
+          <p className="mm-hint" style={{ marginTop: 0 }}>
+            Buy a token straight off a Pons bonding curve, held in your own vault so it can be sold
+            again. Needs a class vault factory in Connections and a re-signed key — and the scout
+            budget above still bounds it.
+          </p>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">class route</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={classSnipeVal}
+                  onChange={(e) => setClassSnipe(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {classSnipeVal ? "may buy newly launched coins" : "off — no coin is bought unless you listed it"}
+                </span>
+              </span>
+              <span className="mm-hint">
+                Separate from sealing a vault at /grant. That says this key COULD reach one; this
+                says go and do it.
+              </span>
+            </label>
+            <Field
+              label="per entry (USDG)"
+              hint="Spent on a single class entry. 0 means nothing is bought, whatever the switch says."
+            >
+              <input
+                value={v("classPerEntryUsdg")}
+                inputMode="numeric"
+                placeholder={String(d.classPerEntryUsdg)}
+                onChange={set("classPerEntryUsdg")}
+              />
+            </Field>
+            <Field
+              label="max open positions"
+              hint="How many class positions may be held at once. 0 = no limit beyond the scout budget."
+            >
+              <input
+                value={v("classMaxPositions")}
+                inputMode="numeric"
+                placeholder={String(d.classMaxPositions)}
+                onChange={set("classMaxPositions")}
+              />
+            </Field>
+            <Field
+              label="minimum curve depth (USDG)"
+              hint="Real money raised into the curve, excluding the virtual seed it opens with. Below this, an entry is refused."
+            >
+              <input
+                value={v("classMinDepthUsdg")}
+                inputMode="numeric"
+                placeholder={String(d.classMinDepthUsdg)}
+                onChange={set("classMinDepthUsdg")}
+              />
+            </Field>
+          </div>
+          {classSnipeVal && Number(v("classPerEntryUsdg") || d.classPerEntryUsdg) === 0 && (
+            <div className="mm-danger">
+              The class route is on but the size is <b>0</b>, so nothing will be bought. Two
+              switches rather than one, because they fail differently — set a size or turn the
+              route back off.
+            </div>
+          )}
 
           </details>
           <details className="settings-group" id="telegram"><summary>Telegram</summary>
