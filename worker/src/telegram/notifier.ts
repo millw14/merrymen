@@ -251,6 +251,11 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       const last = st.firedAlerts[key] ?? 0;
       if (now() - last < CONDITION_COOLDOWN_SEC) return;
       await sendMessage({ token }, chatId, message);
+      // THE KEY ONLY, NEVER THE MESSAGE. An alert that fires invisibly cannot
+      // be verified by anyone: asked whether an owner had actually been told,
+      // there was nothing to look at but the absence of a complaint. The key
+      // is enough to answer that and carries no chat content into the log.
+      console.log(`[notify] condition alert sent — ${key}`);
       deps.stateRef.set({ ...st, firedAlerts: { ...st.firedAlerts, [key]: now() } });
     };
 
@@ -295,8 +300,41 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
           `and check <b>LLM max per action</b> in /settings — whichever is lower is the one that binds.`,
       );
     }
+    // ── APPROACHING THE BREAKER, AND HAVING ALREADY HIT IT ─────────────────
+    //
+    // These were one message and they are not one event. Below the line the
+    // agent is still trading and the owner is being warned; at or above it the
+    // agent has STOPPED BUYING and its OWNER was never told. checkPolicy's
+    // `drawdown-breaker` refusal writes a rejected row and logs
+    // `[policy] REJECTED ...` for an operator — but it raises no event and
+    // sends no message. An operator log is not a notification: from the
+    // owner's side an agent refusing every entry looks exactly like one that
+    // has found nothing to do.
+    //
+    // That cost hours on a live canary: it proposed a qualifying trade every
+    // tick for an afternoon, each one refused at 17.6% against a 5% cap, and
+    // the only thing its owner ever saw was the same "drawdown warning" they
+    // had already read at 2.5%.
+    //
+    // The halt message must also say what CLEARS it, because the answer is not
+    // obvious: the high-water mark is a one-way ratchet on equity, so waiting
+    // does nothing on its own — either equity recovers past the mark, or the
+    // cap is re-signed higher. Exits are exempt throughout, which is why this
+    // says "buying" and not "trading".
     if (inputs.drawdownBps !== null && inputs.breakerBps !== null && inputs.breakerBps > 0) {
-      if (inputs.drawdownBps >= inputs.breakerBps / 2) {
+      if (inputs.drawdownBps >= inputs.breakerBps) {
+        await fire(
+          // Keyed on the cap, so re-signing a higher one and still being halted
+          // alerts afresh rather than being swallowed by the old cooldown.
+          `drawdown-halted:${inputs.breakerBps}`,
+          `🛑 I have <b>stopped buying</b>. You are ${(inputs.drawdownBps / 100).toFixed(1)}% below your high-water mark ` +
+            `and your breaker trips at ${(inputs.breakerBps / 100).toFixed(1)}% — so every entry I propose is being turned back, ` +
+            `and will be until this clears. Nothing is broken; this is the drawdown limit doing its job. ` +
+            `I can still SELL, so exits are unaffected. Two things clear it: equity recovering back above the ` +
+            `high-water mark, or re-signing a wider drawdown limit at the dashboard <b>/grant</b>. ` +
+            `Waiting alone will not — the high-water mark only ever ratchets up.`,
+        );
+      } else if (inputs.drawdownBps >= inputs.breakerBps / 2) {
         await fire(
           "drawdown",
           `📉 drawdown warning: ${(inputs.drawdownBps / 100).toFixed(1)}% off the high-water mark (breaker trips at ${(inputs.breakerBps / 100).toFixed(1)}%). /pause if you want the band to hold.`,

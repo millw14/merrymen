@@ -129,3 +129,58 @@ test("the ceiling reported is the one that BINDS, not whichever is handier", () 
   assert.match(expr, /active\s*\?/, "an unarmed agent has no ceiling to report");
   assert.match(expr, /:\s*null/);
 });
+
+/**
+ * APPROACHING THE BREAKER AND HAVING ALREADY HIT IT ARE NOT ONE EVENT.
+ *
+ * Below the line the agent is still buying and the owner is being warned.
+ * At or above it the agent has STOPPED buying — and its OWNER was never told.
+ * The `drawdown-breaker` refusal writes a rejected row and logs
+ * `[policy] REJECTED ...` for an operator, but raises no event and sends no
+ * message. An operator log is not a notification: from the owner's side an
+ * agent refusing every entry looks exactly like one with nothing to do.
+ *
+ * Measured on a live canary: it proposed a qualifying trade every tick for an
+ * afternoon, each refused at 17.59% against a 5% cap, and the only thing its
+ * owner ever saw was the same "drawdown warning" already read at 2.5%.
+ */
+test("a TRIPPED breaker gets its own message, not the same warning as 2.5%", () => {
+  const block = NOTIFIER.slice(NOTIFIER.indexOf("APPROACHING THE BREAKER"));
+  const arm = block.slice(0, block.indexOf("} else if"));
+  assert.match(arm, /inputs\.drawdownBps >= inputs\.breakerBps\b/, "the halt arm tests the full cap");
+  assert.match(arm, /stopped buying/i, "and says plainly that buying has stopped");
+  // The warning arm must still exist, at half, and must not have been widened.
+  const warn = block.slice(block.indexOf("} else if"));
+  assert.match(warn, /inputs\.breakerBps \/ 2/, "the early warning still fires at half");
+  assert.match(warn, /drawdown warning/);
+});
+
+test("the halt message says what CLEARS it, because waiting does not", () => {
+  // The high-water mark is a one-way ratchet on equity (`setAgentHwm` is
+  // MAX(hwm, ?)), so sitting still never lowers the reference. An owner told
+  // only "you are in drawdown" will reasonably wait for a recovery that the
+  // arithmetic does not provide.
+  const block = NOTIFIER.slice(NOTIFIER.indexOf("drawdown-halted:"));
+  const body = block.slice(0, block.indexOf("`,\n        );"));
+  assert.match(body, /high-water mark/, "names the reference");
+  assert.match(body, /\/grant/, "re-signing a wider limit");
+  assert.match(body, /ratchets up/, "and why waiting alone is not a remedy");
+  assert.match(body, /[Nn]othing is broken/, "correct behaviour must not read as a fault");
+  // Exits are exempt in policy.ts, so the message must not claim trading has
+  // stopped outright — an owner who believes they cannot sell may panic.
+  assert.match(body, /still SELL|exits are unaffected/i, "selling is still allowed and must be said");
+});
+
+test("the halt key carries the cap, so re-signing and still halting re-alerts", () => {
+  assert.match(NOTIFIER, /`drawdown-halted:\$\{inputs\.breakerBps\}`/);
+});
+
+test("every condition alert that fires is observable", () => {
+  // An alert that fires invisibly cannot be verified by anyone: asked whether
+  // an owner had actually been told, there was nothing to look at but the
+  // absence of a complaint. The KEY only — never the message body, which is
+  // chat content.
+  const fire = NOTIFIER.slice(NOTIFIER.indexOf("const fire = "), NOTIFIER.indexOf("if (inputs.grantExpiresAt"));
+  assert.match(fire, /console\.log\(`\[notify\] condition alert sent — \$\{key\}`\)/);
+  assert.doesNotMatch(fire, /console\.log\([^)]*\$\{message\}/, "the message body must not reach the log");
+});
