@@ -13,6 +13,9 @@ import {
   resolveClassVault,
   TRADEABLE_V2,
   buildWallPolicies,
+  buildCallPermissions,
+  wallShape,
+  wallSignable,
   WALL_POLICY_FLAG,
   robinhoodChain,
   usableExtraTokens,
@@ -172,9 +175,7 @@ export async function signGrant(args: {
     );
   }
 
-  const { policies, now, expiresAt } = buildWallPolicies({
-    caps: args.caps,
-    smartAccount: sudoOnlyAccount.address,
+  const wallOpts = {
     extraTokens: args.extraTokens,
     allowUniswapV4,
     v4AdapterAddress: args.v4AdapterAddress,
@@ -184,6 +185,20 @@ export async function signGrant(args: {
     // factory — two of three class permissions is a key that can reach a vault
     // it can never create, and a CALL to a codeless address succeeds silently.
     ponsClassVaultFactoryAddress: args.ponsClassVaultFactory,
+  };
+
+  // CAN THIS WALL EVER BE INSTALLED? The same question the other signer asks,
+  // through the same function, over the same permission objects — because a cap
+  // only one signer enforces is not a cap. Both signers already move in lockstep
+  // on what they MINT (signer-lockstep.test.ts); this is the same rule applied
+  // to what they REFUSE.
+  const signable = wallSignable(wallShape(buildCallPermissions(args.caps, sudoOnlyAccount.address, wallOpts)));
+  if (!signable.ok) throw new Error(signable.why);
+
+  const { policies, now, expiresAt } = buildWallPolicies({
+    caps: args.caps,
+    smartAccount: sudoOnlyAccount.address,
+    ...wallOpts,
   });
 
   say("attaching the permissions");

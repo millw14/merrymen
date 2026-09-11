@@ -73,6 +73,9 @@ import {
   buildWallPolicies,
   WALL_POLICY_FLAG,
   usableExtraTokens,
+  buildCallPermissions,
+  wallShape,
+  wallSignable,
   chainForId,
   robinhoodChain,
   
@@ -383,9 +386,7 @@ async function mintGrant(
     );
   }
 
-  const { policies, now, expiresAt } = buildWallPolicies({
-    caps,
-    smartAccount: sudoOnlyAccount.address,
+  const wallOpts = {
     extraTokens,
     allowUniswapV4,
     v4AdapterAddress,
@@ -395,6 +396,30 @@ async function mintGrant(
     // without one — two of three class permissions is a key that can reach a
     // vault it can never create.
     ponsClassVaultFactoryAddress: ponsClassVaultFactory,
+  };
+
+  // ── CAN THIS WALL EVER BE INSTALLED? ASKED BEFORE A SIGNATURE EXISTS ──────
+  //
+  // A session key installs its validator lazily: the enable data rides in the
+  // signature of the first operation the key signs, so that one operation
+  // carries the whole wall. It therefore has its own gas ceiling — and until
+  // now signing had no idea that ceiling existed. The product minted grants
+  // whose first UserOp the executor was already designed to refuse, and two
+  // funded agents sat retrying one every ~97 seconds, forever, for a reason
+  // that was knowable before anyone contacted a bundler.
+  //
+  // THE SAME FUNCTION THE EXECUTOR CALLS, over the SAME permission objects the
+  // signature is about to be made over — not the same arithmetic reproduced
+  // here. Two implementations of one policy is exactly how the two sides came
+  // to disagree, and `wall-policy-lockstep.test.ts` fails if either grows its
+  // own.
+  const signable = wallSignable(wallShape(buildCallPermissions(caps, sudoOnlyAccount.address, wallOpts)));
+  if (!signable.ok) throw new Error(signable.why);
+
+  const { policies, now, expiresAt } = buildWallPolicies({
+    caps,
+    smartAccount: sudoOnlyAccount.address,
+    ...wallOpts,
   });
 
   const permissionValidator = await toPermissionValidator(publicClient, {
