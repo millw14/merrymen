@@ -3373,20 +3373,53 @@ async function main() {
     // offers every one of them, so an owner could select a stock the signature
     // couldn't sell without ever touching the custom-token flow.
     const uncoveredStocks = uncoveredBasketSymbols(cfg.basketSymbols, grant);
+    // AND THE PLATFORM'S OWN LISTINGS, which reach the watch set without the
+    // owner touching anything — so they are the one category whose coverage gap
+    // the owner has NO WAY to discover. Everything else here they chose; this
+    // they were given. Left out, an official coin would be watched, priced,
+    // treated as a tradable leg, and refused at the wall in silence, which is
+    // the precise shape of the bug this whole listing feature exists to end.
+    //
+    // Gated on the SAME opt-out that governs the watch set, so an owner who
+    // declined the category is not nagged about coverage for coins their agent
+    // is not watching.
+    const { uncovered: uncoveredOfficial } = tokenCoverage(
+      officialCoins().map((c) => ({ symbol: c.symbol, address: c.address, decimals: c.decimals })),
+      grant,
+    );
     const names = [...uncoveredStocks, ...uncovered.map((t) => t.symbol)];
-    const key = names.slice().sort().join(",");
+    const officialNames = uncoveredOfficial.map((t) => t.symbol);
+    const key = [...names, ...officialNames].slice().sort().join(",");
     if (key === lastCoverageKey) return;
     lastCoverageKey = key;
-    if (!names.length) return;
-    const list = names.join(", ");
-    console.log(`[worker] grant does not cover ${list} — re-sign at /grant to trade them`);
-    await addEvent(
-      agentId,
-      "warn",
-      `your key can't sell ${list}, so buys of ${names.length === 1 ? "it are" : "them are"} refused — ` +
-        `entering a position you can't exit is the one thing no cap protects you from. ` +
-        `The tradable list is sealed into the signature; re-sign at /grant (free, same wallet, same funds).`,
-    );
+    if (names.length) {
+      const list = names.join(", ");
+      console.log(`[worker] grant does not cover ${list} — re-sign at /grant to trade them`);
+      await addEvent(
+        agentId,
+        "warn",
+        `your key can't sell ${list}, so buys of ${names.length === 1 ? "it are" : "them are"} refused — ` +
+          `entering a position you can't exit is the one thing no cap protects you from. ` +
+          `The tradable list is sealed into the signature; re-sign at /grant (free, same wallet, same funds).`,
+      );
+    }
+    // A SEPARATE SENTENCE, because it is a different fact with a different
+    // remedy. The list above is "what you picked, your key can't sell"; this is
+    // "the platform listed a coin after your key was signed". Merging them would
+    // tell an owner they misconfigured something they never configured.
+    if (officialNames.length) {
+      const list = officialNames.join(", ");
+      console.log(`[worker] official coin(s) ${list} postdate this grant — re-sign at /grant to trade them`);
+      await addEvent(
+        agentId,
+        "warn",
+        `${list} ${officialNames.length === 1 ? "is" : "are"} on the platform's coin list, which your key was ` +
+          `signed before — so ${officialNames.length === 1 ? "it stays" : "they stay"} watched but untradable. ` +
+          `Coins trade around the clock, which is what lets your agent keep working when the stock market is ` +
+          `shut. Re-sign at /grant to turn ${officialNames.length === 1 ? "it" : "them"} on (free, same wallet, ` +
+          `same funds, nothing moves), or switch the coin list off in /settings.`,
+      );
+    }
   }
 
   /**
