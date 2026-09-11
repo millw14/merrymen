@@ -80,6 +80,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const [scoutEnabled, setScoutEnabled] = useState<boolean | null>(null);
   const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
   const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
+  const [officialCoins, setOfficialCoins] = useState<boolean | null>(null);
   const [allowlist, setAllowlist] = useState<number[] | null>(null);
   const [tgTest, setTgTest] = useState<string | null>(null);
   // PC control: master + capability set + string allowlists (also can't ride `draft`).
@@ -249,6 +250,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
     if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
     if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
     if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
+    if (officialCoins !== null) body.officialCoinsEnabled = officialCoins;
     if (allowlist !== null) body.telegramAllowlist = allowlist;
     if (pcEnabled !== null) body.telegramPcControlEnabled = pcEnabled;
     if (caps !== null) body.telegramCapabilities = caps;
@@ -351,6 +353,12 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const scoutEnabledVal = scoutEnabled ?? view.values.scoutEnabled ?? d.scoutEnabled;
   const discoveryEnabledVal = discoveryEnabled ?? view.values.discoveryEnabled ?? d.discoveryEnabled;
   const trencherLiveVal = trencherLive ?? view.values.trencherLiveEnabled ?? d.trencherLiveEnabled;
+  // `?? d.officialCoinsEnabled` is doing real work here, not defensive padding:
+  // this is the one setting whose default is ON, so an owner who has never saved
+  // it has NO stored value, and falling through to `false` would render the
+  // checkbox unticked while the worker traded the list. The control would then be
+  // lying about the system's actual behaviour.
+  const officialCoinsVal = officialCoins ?? view.values.officialCoinsEnabled ?? d.officialCoinsEnabled;
   const allowlistVal = allowlist ?? view.values.telegramAllowlist ?? [];
   const pcEnabledVal = pcEnabled ?? view.values.telegramPcControlEnabled ?? d.telegramPcControlEnabled;
   const agentEnabledVal = agentEnabled ?? view.values.telegramAgentEnabled ?? d.telegramAgentEnabled;
@@ -752,6 +760,32 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               </span>
               <span className="mm-hint">
                 Allows live Trencher trades in tokens covered by your trading permissions.
+              </span>
+            </label>
+            {/* THE ONE TOGGLE ON THIS SCREEN THAT STARTS ON.
+                Everything around it opts INTO something discovered; this opts OUT
+                of a list the platform curates and stands behind, which is why it
+                defaults the other way. Its job here is to be findable: without a
+                control, "off" is unreachable and the checkbox is the only place
+                an owner learns the list exists at all. */}
+            <label className="mm-field">
+              <span className="mm-label">trade the platform coin list</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={officialCoinsVal}
+                  onChange={(e) => setOfficialCoins(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {officialCoinsVal ? "coins are in your basket" : "stocks only"}
+                </span>
+              </span>
+              <span className="mm-hint">
+                Verified coins we publish, watched and traded without you adding them. Coins trade
+                around the clock, so your agent keeps working when the stock market is shut. Your
+                caps, budgets and trading permissions still apply — and a coin listed after you
+                signed needs a free re-sign at /grant before your key can touch it.
               </span>
             </label>
             <Field

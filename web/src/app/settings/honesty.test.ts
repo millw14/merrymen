@@ -123,7 +123,12 @@ describe("every control survives the restyle", () => {
     // the worker while missing from BOTH the settings route's field list and
     // this screen — so the one setting that turns an agent from answering into
     // thinking could not be turned on by anybody.
-    assert.equal(count(/type="checkbox"/g), 12, "checkboxes");
+    // 13 since "trade the platform coin list". Added deliberately, and it is the
+    // only checkbox on the page that starts ON — so unlike its siblings the
+    // control is what makes OFF reachable at all, and it is also the only place
+    // an owner learns the coin list exists. A missing opt-out is worse than a
+    // missing opt-in: the behaviour happens either way.
+    assert.equal(count(/type="checkbox"/g), 13, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
@@ -139,10 +144,16 @@ describe("every control survives the restyle", () => {
     assert.equal(count(/<select/g), 5, "selects");
   });
 
-  it("sends exactly the 18 fields save() guards", () => {
+  it("sends exactly the 19 fields save() guards", () => {
     // Every guard is "the user did not touch this, so do not overwrite it".
     // One dropped guard silently resets a setting to whatever the form had.
-    assert.equal((code.match(/!== null\)/g) ?? []).length, 18);
+    //
+    // 19 since officialCoinsEnabled, and the guard matters more for it than for
+    // any of the eighteen: it is the one field that defaults ON, so an unguarded
+    // send would write `false` for every owner who opened this screen and saved
+    // anything at all — silently opting the fleet out of the coin list by
+    // visiting a page.
+    assert.equal((code.match(/!== null\)/g) ?? []).length, 19);
   });
 });
 
