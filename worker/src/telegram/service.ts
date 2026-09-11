@@ -43,6 +43,7 @@ import {
   readReport,
   readStatus,
   readTrades,
+  readWallet,
   readWhyEvidence,
   type StatusContext,
 } from "./reads";
@@ -431,6 +432,16 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         trades: () => readTrades(statusCtx().agentId),
         report: () => readReport(statusCtx()),
         brag: () => readBrag(statusCtx()),
+        // NEVER WIRED, SO NEVER CALLED. `readWallet` has existed and been
+        // correct the whole time; executor.ts:147 reads
+        // `deps.reads.wallet ? … : WALLET_TEXT`, and with this key absent every
+        // one of /wallet, /fund, /grant, /recover, /restore and /reconnect fell
+        // through to the static signpost — which tells the reader to open
+        // http://localhost:3100 "on the machine running merrymen". On the
+        // hosted fleet there is no such machine, so the instruction cannot be
+        // followed at all, and "fund your agent" is the commonest thing anyone
+        // is ever told to do.
+        wallet: () => readWallet(statusCtx().agentId),
         why: async () => {
           const ev = readWhyEvidence(statusCtx().agentId);
           const llm = resolveLlm(cfg);

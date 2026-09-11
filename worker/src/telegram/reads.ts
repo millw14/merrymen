@@ -13,7 +13,7 @@ import { gasQualifier } from "../equity";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
 // the note in service.ts). isHostedMode decides whether a missing agent id may
 // fall back to the single-tenant guess, or must refuse.
-import { priceSourceNote, priceSourceTag, isHostedMode } from "../../../packages/core/src/index";
+import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode } from "../../../packages/core/src/index";
 
 function openRO(): DatabaseSync | null {
   const file = homePaths.db();
@@ -279,7 +279,7 @@ export function readPnl(passedId?: string | null): string {
   if (!db) return "no ledger yet.";
   try {
     const agentId = resolveAgent(db, passedId);
-    if (!agentId) return "📈 no agent yet — grant one at localhost:3100/grant.";
+    if (!agentId) return `📈 no agent yet — grant one at ${dashboardBase()}/grant.`;
     const epoch = agentEpoch(db, agentId);
     const eq = db
       .prepare("SELECT equity_usdg FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at ASC, id ASC")
@@ -489,7 +489,7 @@ export function readReport(ctx: StatusContext, publicSafe = false): string {
   if (!db) return "🔥 no ledger yet — the band hasn't ridden. Nothing to report.";
   try {
     const agentId = resolveAgent(db, ctx.agentId);
-    if (!agentId) return "🔥 no agent yet — grant one at localhost:3100/grant.";
+    if (!agentId) return `🔥 no agent yet — grant one at ${dashboardBase()}/grant.`;
     const midnight = localMidnightUnix();
     const all = equitySeries(db, agentId);
     const today = equitySeries(db, agentId, midnight);
@@ -580,7 +580,7 @@ export function readBrag(ctx: StatusContext): string {
   if (!db) return "🏹 no ledger yet — nothing to brag about (yet).";
   try {
     const agentId = resolveAgent(db, ctx.agentId);
-    if (!agentId) return "🏹 no agent yet — grant one at localhost:3100/grant.";
+    if (!agentId) return `🏹 no agent yet — grant one at ${dashboardBase()}/grant.`;
     const all = equitySeries(db, agentId);
     if (all.length < 2) return "🏹 the band just saddled up — give it a few ticks, then we'll brag.";
     const first = all[0]!;
@@ -623,12 +623,74 @@ export function readBrag(ctx: StatusContext): string {
  * events recorded around it. Works with no LLM; the service may hand this to
  * Claude for an in-character retelling.
  */
+/**
+ * WHY THE AGENT IS NOT TRADING — the question `/why` is actually asked.
+ *
+ * `/why` explains the LAST TRADE. An owner whose agent has never traded is
+ * exactly the owner who types it, and the honest-but-useless answer they got
+ * was "I haven't made a trade yet — nothing to explain." The reason is known:
+ * `liveBlocker()` decides it every tick and it is written to `agents.live_blocker`.
+ * It simply had no route into Telegram — /status does not carry it either, so
+ * the one place an owner can learn why their agent is idle is the dashboard,
+ * and the bot they are already talking to changes the subject.
+ *
+ * Returns null when there is no verdict to give: no ledger, no agent, an
+ * un-migrated column, or a blocker string we do not recognise. Null means "I
+ * have nothing to add", never "nothing is wrong".
+ */
+export function readLiveBlocker(agentId?: string | null): string | null {
+  const db = openRO();
+  if (!db) return null;
+  try {
+    const who = resolveAgent(db, agentId);
+    if (!who) return null;
+    const row = db
+      .prepare("SELECT live_blocker FROM agents WHERE smart_account = ?")
+      .get(who) as { live_blocker: string | null } | undefined;
+    const rule = row?.live_blocker?.trim();
+    if (!rule) return null;
+    const said = liveBlockerText(rule as never);
+    // liveBlockerText falls through to a generic string for anything it does
+    // not know; an unrecognised rule is better reported as its own name than
+    // dressed up in a sentence that does not fit it.
+    return said && said.length > 0 ? said : rule;
+  } catch {
+    // Pre-migration ledger has no live_blocker column. Unknown, not clear.
+    return null;
+  } finally {
+    try {
+      db.close();
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
 export function readWhyEvidence(agentId?: string | null): { text: string; hasTrade: boolean } {
   const db = openRO();
   if (!db) return { text: "no ledger yet — I haven't made a trade to explain.", hasTrade: false };
+  /**
+   * The no-trade answer, with the blocker when we have one. Built here so both
+   * early returns below give the same reply — the first draft fixed only the
+   * second, and the "no agent resolved" path kept the dead end.
+   */
+  const nothingYet = (): { text: string; hasTrade: boolean } => {
+    const why = readLiveBlocker(agentId);
+    if (!why) return { text: "🧾 I haven't made a trade yet — nothing to explain.", hasTrade: false };
+    return {
+      text: [
+        "🧾 I haven't made a trade yet — but I know why.",
+        "",
+        `• ${esc(why)}`,
+        "",
+        `Fix it at <b>${esc(dashboardBase())}</b> — the banner on your agent says which button.`,
+      ].join("\n"),
+      hasTrade: false,
+    };
+  };
   try {
     const who = resolveAgent(db, agentId);
-    if (!who) return { text: "🧾 I haven't made a trade yet — nothing to explain.", hasTrade: false };
+    if (!who) return nothingYet();
     const t = db
       .prepare(
         "SELECT kind, amount_usdg, status, reject_rule, tx_hash, created_at, decision_id FROM trades WHERE agent_id = ? ORDER BY id DESC LIMIT 1",
@@ -636,7 +698,7 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
       .get(who) as
       | { kind: string; amount_usdg: number; status: string; reject_rule: string | null; tx_hash: string | null; created_at: string | number; decision_id: string | null }
       | undefined;
-    if (!t) return { text: "🧾 I haven't made a trade yet — nothing to explain.", hasTrade: false };
+    if (!t) return nothingYet();
     const lines = [
       `🧾 <b>my last move</b>`,
       `• ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG — ${esc(t.status)}${t.reject_rule ? ` (${esc(t.reject_rule)})` : ""}`,
@@ -765,8 +827,28 @@ export const WALLET_TEXT = WALLET_TEXT_LINES.join("\n");
  * round. This is also why it became a function — the static export could not
  * reach the ledger to know the address.
  */
+/**
+ * WHERE THIS OWNER'S DASHBOARD ACTUALLY IS.
+ *
+ * Every signpost in this file was written for a self-hosted operator and hard-
+ * coded `http://localhost:3100`. On the hosted fleet that is not merely
+ * unhelpful, it is wrong: there is no server on the reader's machine, so the
+ * instruction cannot be followed at all. `/wallet`, `/fund`, `/grant`,
+ * `/recover`, `/restore` and `/reconnect` all land on that text, and "fund your
+ * agent" is the single commonest thing anyone is ever told to do.
+ *
+ * Order: an explicit env override wins, then hosted-mode (the orchestrator sets
+ * MERRYMEN_HOSTED on every child), then the self-hosted default — which stays
+ * exactly what it was, because for a self-hosted operator it was always right.
+ */
+export function dashboardBase(): string {
+  const override = process.env.MERRYMEN_DASHBOARD_URL?.trim();
+  if (override) return override.replace(/\/+$/, "");
+  return isHostedMode() ? "https://app.merrymen.dev" : "http://localhost:3100";
+}
+
 export function readWallet(agentId?: string | null, dashboardUrl?: string): string {
-  const base = dashboardUrl ?? "http://localhost:3100";
+  const base = dashboardUrl ?? dashboardBase();
   const signpost = WALLET_TEXT_LINES.map((l) =>
     l.split("http://localhost:3100").join(base),
   );
