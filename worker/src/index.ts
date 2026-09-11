@@ -316,6 +316,7 @@ import {
   clearTrenchEntry,
   getTrenchEntry,
   markPoolSeen,
+  classCandidateCensus,
   recentCandidates,
   pruneDiscovered,
   curveFor,
@@ -788,7 +789,9 @@ async function main() {
     // feed, a chat message) breaks the property checkPolicy's curve-provenance
     // rule rests on, and for a class trade that rule is the ONLY thing vouching
     // for the output token.
-    const rows = await recentCandidates(6 * 3600, 40);
+    const CLASS_WINDOW_SEC = 6 * 3600;
+    const CLASS_LIMIT = 40;
+    const rows = await recentCandidates(CLASS_WINDOW_SEC, CLASS_LIMIT);
     const candidates = rows
       .filter((r) => !alreadyHeld.has(r.address.toLowerCase()))
       .flatMap((r) => {
@@ -809,6 +812,40 @@ async function main() {
           },
         ];
       });
+    // THE READ SIDE OF THE FUNNEL.
+    //
+    // Emitted BEFORE the early return below, because `candidates.length === 0`
+    // is the branch that has been taken and the only silent one on this path:
+    // an empty slice, a slice of rows that carry no curve, and a route that is
+    // switched off all return here identically.
+    //
+    // Keyed on the COUNTS only. The ages move every tick, so keying on the
+    // whole census would print a line each tick and the change-on-change
+    // discipline would buy nothing.
+    const cc = await classCandidateCensus(CLASS_WINDOW_SEC, CLASS_LIMIT);
+    if (cc) {
+      const key =
+        `${cc.allWithCurve}/${cc.inWindow}/${cc.returned}·` +
+        `${cc.usdgAll}/${cc.usdgInWindow}/${cc.usdgReturned}·${candidates.length}`;
+      if (key !== lastClassCensusKey) {
+        lastClassCensusKey = key;
+        const age = (s: number | null) => (s === null ? "—" : `${(s / 3600).toFixed(1)}h`);
+        console.log(
+          `[class census] curve rows ${cc.allWithCurve} all → ${cc.inWindow} in 6h → ${cc.returned} after LIMIT ${CLASS_LIMIT} · ` +
+            `usdg ${cc.usdgAll} → ${cc.usdgInWindow} → ${cc.usdgReturned} · ` +
+            `returned mix usdg ${cc.usdgReturned}/native ${cc.nativeReturned}/other ${cc.otherReturned} · ` +
+            `oldest returned ${age(cc.cutoffAgeSec)} · newest usdg anywhere ${age(cc.newestUsdgAgeSec)} · ` +
+            `producer got ${candidates.length} (${rows.length} rows, ${rows.length - candidates.length} without a curve or held)`,
+        );
+      }
+    } else {
+      // Null is the census failing, not a table of zeroes. Saying so costs one
+      // line and stops a read error from being read as "there is nothing there".
+      if (lastClassCensusKey !== "unreadable") {
+        lastClassCensusKey = "unreadable";
+        console.log(`[class census] the candidate census could not be read — counts below are unavailable, not zero`);
+      }
+    }
     if (candidates.length === 0) return [];
 
     const { legs, refused } = await readClassLegs({
@@ -896,6 +933,8 @@ async function main() {
   let lastClassCostUsdg = 0n;
   /** Last class-refusal tally, so the reason is logged on change and not per tick. */
   let lastClassRefusalKey: string | null = null;
+  /** Diagnostic dedupe for the candidate census — counts only, never ages. */
+  let lastClassCensusKey: string | null = null;
   /** Quote-token decimals, learned once and kept for the life of the process. */
   const classQuoteDecimals = new Map<string, number>();
 
@@ -3145,6 +3184,30 @@ async function main() {
         return;
       }
       lastPonsAt = nowSec;
+
+      // THE WRITE SIDE OF THE FUNNEL, one line per pass.
+      //
+      // Placed before the early return below, because the pass that finds
+      // nothing is the pass that has been happening and the one whose shape
+      // nobody could see. A ratio ("2 of 40") cannot distinguish a window full
+      // of shallow launches from a window the dedupe ate, and cannot show the
+      // quote mix at all — which is the number under suspicion.
+      //
+      // console.log, not addEvent: this is instrumentation aimed at an operator
+      // reading logs, and at ~475 launches/hour a per-pass event would bury the
+      // owner's feed for a question that is not theirs.
+      const cs = scan.census;
+      const mix = (m: { usdg: number; native: number; other: number }) =>
+        `usdg ${m.usdg}/native ${m.native}/other ${m.other}`;
+      console.log(
+        `[pons census] window ${window.elapsedSec}s · ${lookback} blocks · ` +
+          `launched ${scan.scanned} → considered ${cs.considered}` +
+          (scan.skipped > 0 ? ` (capped, ${scan.skipped} unread)` : "") +
+          ` → evaluated ${cs.considered - cs.dropSeen} [${mix(cs.quoteIn)}] · ` +
+          `dropped seen ${cs.dropSeen}, unreadable ${cs.dropUnreadable}, graduated ${cs.dropGraduated}, ` +
+          `shallow ${cs.dropShallow} · wrote ${scan.found.length} [${mix(cs.quoteOut)}]` +
+          (cs.depthPct.length ? ` at ${cs.depthPct.join("%, ")}% of graduation` : ""),
+      );
 
       if (scan.clamped || scan.skipped > 0) {
         // Told to the OWNER, not just the log. This is the one case where the

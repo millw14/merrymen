@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
 import {
+  CASH,
   officialCoinCurve,
   officialCoinsFor,
   robinhoodChain,
@@ -3151,6 +3152,136 @@ export async function poolKeysFor(
  * Filtered in SQL rather than after the fact, because the LIMIT is applied by
  * the database: dropping them in JavaScript would still leave the window full.
  */
+/**
+ * WHERE THE USDG CANDIDATES GO — a read-only census, for one question.
+ *
+ * Milla's class producer surfaced USDG-quoted candidates at ~0.5% while the
+ * chain, the launch parser and the depth filter all independently put them near
+ * 10-18%. Every layer reachable from outside the container tested clean, so the
+ * remaining suspects are this table's contents and the window/LIMIT this query
+ * applies to them — neither observable without being inside the worker.
+ *
+ * The census counts the same rows at THREE points, which is what separates the
+ * four possible answers:
+ *
+ *   all rows, any age       0 USDG -> they are NEVER WRITTEN
+ *   inside the age window   0 here, >0 above -> they AGED OUT
+ *   after ORDER BY + LIMIT  0 here, >0 above -> DISPLACED by newer rows
+ *   (producer sees them)    >0 here -> they arrive and fail a LATER guard
+ *
+ * Diagnostic only: nothing reads this to make a decision, and it changes no
+ * behaviour. It exists to be deleted once the question is answered.
+ */
+export interface CandidateCensus {
+  /** Rows carrying a curve, at each narrowing stage. */
+  allWithCurve: number;
+  inWindow: number;
+  returned: number;
+  /** USDG-quoted counts at the same three stages. */
+  usdgAll: number;
+  usdgInWindow: number;
+  usdgReturned: number;
+  /** Native-ETH and everything-else, for the returned slice only. */
+  nativeReturned: number;
+  otherReturned: number;
+  /** Seconds since the OLDEST row the producer actually received — the cutoff. */
+  cutoffAgeSec: number | null;
+  /** Seconds since the newest USDG row in the table, at any age. Null if none. */
+  newestUsdgAgeSec: number | null;
+}
+
+export async function classCandidateCensus(
+  maxAgeSec: number,
+  limit: number,
+): Promise<CandidateCensus | null> {
+  const USDG = (CASH.USDG as string).toLowerCase();
+  try {
+    const db = getDb();
+    const one = async (sql: string, ...args: unknown[]): Promise<number> => {
+      const r = (await db.prepare(sql).get(...args)) as { n?: number } | undefined;
+      return Number(r?.n ?? 0);
+    };
+    // ONE DEFINITION OF "CARRIES A CURVE", used by every stage.
+    //
+    // `recentCandidates` requires all three columns together, because a curve
+    // without a threshold cannot be read as money and is dropped on the way
+    // out. The first draft of this census tested `curve IS NOT NULL` at the
+    // earlier stages and `quote_token != null` at the last one, so a row
+    // missing a threshold counted as a candidate at one stage and not the next
+    // — the census would have reported a drop that was only its own definition
+    // changing, and sent me hunting it in code that was behaving.
+    const HAS_CURVE = `curve IS NOT NULL AND quote_token IS NOT NULL AND graduation_threshold IS NOT NULL`;
+    const allWithCurve = await one(`SELECT COUNT(*) AS n FROM discovered_pools WHERE ${HAS_CURVE}`);
+    const usdgAll = await one(
+      `SELECT COUNT(*) AS n FROM discovered_pools WHERE ${HAS_CURVE} AND LOWER(quote_token) = ?`,
+      USDG,
+    );
+    const inWindow = await one(
+      `SELECT COUNT(*) AS n FROM discovered_pools WHERE ${HAS_CURVE} AND first_seen > unixepoch() - ?`,
+      maxAgeSec,
+    );
+    const usdgInWindow = await one(
+      `SELECT COUNT(*) AS n FROM discovered_pools
+        WHERE ${HAS_CURVE} AND LOWER(quote_token) = ? AND first_seen > unixepoch() - ?`,
+      USDG,
+      maxAgeSec,
+    );
+    // The returned slice, reproduced EXACTLY as recentCandidates builds it —
+    // same window, same ORDER BY, same LIMIT. A census that ordered differently
+    // would answer a question nobody asked.
+    const slice = (await db
+      .prepare(
+        `SELECT curve, quote_token, graduation_threshold, first_seen FROM discovered_pools
+          WHERE first_seen > unixepoch() - ? ORDER BY first_seen DESC LIMIT ?`,
+      )
+      .all(maxAgeSec, limit)) as {
+      curve: string | null;
+      quote_token: string | null;
+      graduation_threshold: string | null;
+      first_seen: number | null;
+    }[];
+    // The SAME predicate as HAS_CURVE above, in JS because the LIMIT is applied
+    // by the database: filtering in SQL here would refill the window from older
+    // rows and measure a slice the producer never receives.
+    const withCurve = slice.filter(
+      (r) => r.curve != null && r.quote_token != null && r.graduation_threshold != null,
+    );
+    let usdgReturned = 0;
+    let nativeReturned = 0;
+    let otherReturned = 0;
+    for (const r of withCurve) {
+      const q = String(r.quote_token).toLowerCase();
+      if (q === USDG) usdgReturned += 1;
+      else if (/^0x0{40}$/.test(q)) nativeReturned += 1;
+      else otherReturned += 1;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const oldestReturned = withCurve.length
+      ? Math.min(...withCurve.map((r) => Number(r.first_seen ?? now)))
+      : null;
+    const newestUsdg = (await db
+      .prepare(
+        `SELECT MAX(first_seen) AS n FROM discovered_pools WHERE ${HAS_CURVE} AND LOWER(quote_token) = ?`,
+      )
+      .get(USDG)) as { n?: number | null } | undefined;
+    return {
+      allWithCurve,
+      inWindow,
+      returned: withCurve.length,
+      usdgAll,
+      usdgInWindow,
+      usdgReturned,
+      nativeReturned,
+      otherReturned,
+      cutoffAgeSec: oldestReturned === null ? null : now - oldestReturned,
+      newestUsdgAgeSec: newestUsdg?.n ? now - Number(newestUsdg.n) : null,
+    };
+  } catch {
+    // A diagnostic must never be the thing that breaks a tick.
+    return null;
+  }
+}
+
 export async function recentCandidates(
   maxAgeSec: number,
   limit = 25,

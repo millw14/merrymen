@@ -294,6 +294,48 @@ export interface PonsDiscoveryDeps {
  */
 export const PONS_MAX_EVALUATE = 400;
 
+/**
+ * WHERE THE LAUNCHES WENT, per pass.
+ *
+ * Written because a measurement did not add up and nothing in the worker could
+ * say why. On-chain, 9.6–17.6% of Pons launches are quoted in USDG; in the
+ * class producer's candidate feed, USDG reached ~0.5%. Four stages sit between
+ * those two numbers and every one of them was silent — the rolled-up
+ * "N of M launches worth a look" line reports a ratio and discards the shape.
+ *
+ * These are COUNTS OF WHAT WAS DROPPED AND WHY, tallied at the drop itself
+ * rather than reconstructed afterwards, plus the quote-asset mix on both sides
+ * of the filter. If the mix going in matches the chain and the mix coming out
+ * does not, the bias is in this function; if both match, it is downstream and
+ * this file is exonerated. Either answer is worth more than another guess.
+ *
+ * No extra RPC: every field is already in hand at the point it is counted.
+ */
+export interface QuoteMix {
+  usdg: number;
+  native: number;
+  other: number;
+}
+
+export interface PonsScanCensus {
+  /** Launches the cap actually let through to the filter loop. */
+  considered: number;
+  /** Dropped before any read: already discovered, already watched, or a dupe. */
+  dropSeen: number;
+  /** getReserves() returned nothing — not a judgement, an unanswered question. */
+  dropUnreadable: number;
+  /** Already graduated, so its market has moved to a pool. */
+  dropGraduated: number;
+  /** Real, readable, and under the depth fraction. The intended filter. */
+  dropShallow: number;
+  /** Quote mix of everything considered, BEFORE any depth filtering. */
+  quoteIn: QuoteMix;
+  /** Quote mix of the survivors actually written. */
+  quoteOut: QuoteMix;
+  /** Survivor depth as % of graduation, so "deep enough" has a number. */
+  depthPct: number[];
+}
+
 export interface PonsScanResult {
   found: Discovery[];
   /** Launches read this pass, before filtering — the denominator for the log. */
@@ -304,6 +346,17 @@ export interface PonsScanResult {
   clamped: boolean;
   /** Launches inside the window that the per-pass cap left unevaluated. */
   skipped: number;
+  /** Diagnostic only — never read by a decision. See PonsScanCensus. */
+  census: PonsScanCensus;
+}
+
+/** Which of the three buckets a quote token falls in, for the census only. */
+function bumpQuote(mix: QuoteMix, quoteToken: `0x${string}`): void {
+  const q = quoteToken.toLowerCase();
+  if (q === (CASH.USDG as string).toLowerCase()) mix.usdg += 1;
+  else if (q === "0x0000000000000000000000000000000000000000" || q === (CASH.WETH as string).toLowerCase())
+    mix.native += 1;
+  else mix.other += 1;
 }
 
 /**
@@ -321,8 +374,21 @@ export interface PonsScanResult {
  * and any USD figure are read only for the handful that survive.
  */
 export async function discoverPonsLaunches(deps: PonsDiscoveryDeps): Promise<PonsScanResult> {
+  const census: PonsScanCensus = {
+    considered: 0,
+    dropSeen: 0,
+    dropUnreadable: 0,
+    dropGraduated: 0,
+    dropShallow: 0,
+    quoteIn: { usdg: 0, native: 0, other: 0 },
+    quoteOut: { usdg: 0, native: 0, other: 0 },
+    depthPct: [],
+  };
   const scan = await recentPonsLaunches(deps.client, deps.lookbackBlocks);
-  if (scan.failed) return { found: [], scanned: 0, failed: true, clamped: scan.clamped, skipped: 0 };
+  // An empty census on the failed path, matching `found`: nothing was measured,
+  // so every count is a real zero rather than a stand-in for an unread window.
+  // The caller must not print it, and does not — it returns before the line.
+  if (scan.failed) return { found: [], scanned: 0, failed: true, clamped: scan.clamped, skipped: 0, census };
 
   const knownAddrs = new Set(deps.known.map((t) => t.address.toLowerCase()));
   const minFraction = deps.minDepthFraction ?? PONS_MIN_DEPTH_FRACTION;
@@ -333,24 +399,43 @@ export async function discoverPonsLaunches(deps: PonsDiscoveryDeps): Promise<Pon
   const seenThisPass = new Set<string>();
   const survivors: { launch: PonsLaunch; reserves: CurveReserves; fraction: number }[] = [];
 
+  census.considered = considered.length;
+
   for (const launch of considered) {
     const key = launch.token.toLowerCase();
-    if (deps.seen.has(key) || knownAddrs.has(key) || seenThisPass.has(key)) continue;
+    if (deps.seen.has(key) || knownAddrs.has(key) || seenThisPass.has(key)) {
+      census.dropSeen += 1;
+      continue;
+    }
     seenThisPass.add(key);
+    // Counted AFTER the dedupe and before any read, so `quoteIn` is the mix of
+    // launches this pass genuinely evaluated — comparable against the chain.
+    bumpQuote(census.quoteIn, launch.quoteToken);
 
     // Decimals are placeholders here and that is exact, not sloppy: the depth
     // fraction is realQuote/threshold, both in the same raw units, so it is
     // independent of what those units are. Real decimals are read below, only
     // for what survives.
     const reserves = await readCurveReserves(deps.client, launch, { quote: 18, token: 18 });
-    if (!reserves) continue;
+    if (!reserves) {
+      census.dropUnreadable += 1;
+      continue;
+    }
     // A graduated curve resets — token side emptied, quote side back to the
     // virtual seed — so it reads EXACTLY like a launch nobody bought. Announcing
     // one as a new launch would be announcing a token whose market has already
     // moved to a pool the ordinary discoverer handles.
-    if (curveGraduated(reserves)) continue;
+    if (curveGraduated(reserves)) {
+      census.dropGraduated += 1;
+      continue;
+    }
     const fraction = curveDepthFraction(reserves);
-    if (fraction === null || fraction < minFraction) continue;
+    if (fraction === null || fraction < minFraction) {
+      census.dropShallow += 1;
+      continue;
+    }
+    bumpQuote(census.quoteOut, launch.quoteToken);
+    census.depthPct.push(Number((fraction * 100).toFixed(1)));
     survivors.push({ launch, reserves, fraction });
   }
 
@@ -409,7 +494,7 @@ export async function discoverPonsLaunches(deps: PonsDiscoveryDeps): Promise<Pon
     });
   }
 
-  return { found, scanned: scan.launches.length, failed: false, clamped: scan.clamped, skipped };
+  return { found, scanned: scan.launches.length, failed: false, clamped: scan.clamped, skipped, census };
 }
 
 /**
