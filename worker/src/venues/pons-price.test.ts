@@ -500,3 +500,85 @@ describe("curve quotes", () => {
     assert.equal(CURVE_FEE_BPS, 99n);
   });
 });
+
+/**
+ * THE IMPACT GUARD COULD NOT MEASURE THE ONLY ASSET IT GUARDED.
+ *
+ * `curveBuyImpactBps` returned null for EVERY USDG-quoted curve, at every
+ * depth and every size. The class route is USDG-only by design and refuses a
+ * candidate whose impact cannot be computed, so it could not have bought a
+ * curve at any price — the route was structurally dead, and silently, because
+ * the refusal was a bare `return []`.
+ *
+ * The cause was one expression. It divided `quoteRaw * 1e12 / tokenRaw` before
+ * comparing, and USDG is a 6-decimal quote against an 18-decimal token: a
+ * quoteRaw around 3.5e9 against a tokenRaw around 1e27 makes that scale of 1e12
+ * exactly the decimal gap, so it floored to zero and the `spotScaled <= 0n`
+ * guard returned null.
+ *
+ * Native-quoted curves never failed — an 18-decimal quote leaves the ratio
+ * representable — they just got a degenerate 0 that passed every ceiling. One
+ * expression, two different wrong answers, split by the quote asset's decimals.
+ */
+describe("price impact on a 6-decimal quote", () => {
+  const THRESH = 8090n * 1_000_000n;
+  const SEED = (THRESH * 4000n) / 10_000n;
+  const TOKENS = 1_000_000_000n * 10n ** 18n;
+  const usdgCurve = (realUsd: number) =>
+    ({
+      quoteRaw: SEED + BigInt(realUsd) * 1_000_000n,
+      tokenRaw: TOKENS,
+      graduationThresholdRaw: THRESH,
+      quoteDecimals: 6,
+      tokenDecimals: 18,
+    }) as never;
+
+  it("is COMPUTABLE for a USDG curve — the whole defect", () => {
+    // Null here is not a small number; it is the class route refusing to trade
+    // at all, for ever, on the only quote asset it accepts.
+    for (const depth of [250, 500, 1000, 3000]) {
+      const bps = curveBuyImpactBps(usdgCurve(depth), 5n * 1_000_000n);
+      assert.notEqual(bps, null, `a USDG curve at $${depth} real depth must be measurable`);
+      assert.ok(bps! >= 0, "and not negative");
+    }
+  });
+
+  it("gives a SMALL number for a small buy, so the cap does not refuse it", () => {
+    // A $5 entry against the $250 depth floor. If this ever exceeds the 300bps
+    // default ceiling, the floor and the entry size have drifted apart.
+    const bps = curveBuyImpactBps(usdgCurve(250), 5n * 1_000_000n)!;
+    assert.ok(bps < 300, `a $5 entry at the depth floor moved ${bps}bps, over the 300bps default`);
+  });
+
+  it("still RISES with size, so the ceiling means something", () => {
+    // The old code's other failure was a degenerate 0 that passed everything.
+    // A guard that cannot refuse is not a guard.
+    const small = curveBuyImpactBps(usdgCurve(250), 5n * 1_000_000n)!;
+    const large = curveBuyImpactBps(usdgCurve(250), 500n * 1_000_000n)!;
+    assert.ok(large > small * 10, `impact must scale with size: ${small} then ${large}`);
+    assert.ok(large > 300, "and a buy that large must be refusable");
+  });
+
+  it("is monotonic in depth — a deeper curve moves less", () => {
+    const shallow = curveBuyImpactBps(usdgCurve(250), 25n * 1_000_000n)!;
+    const deep = curveBuyImpactBps(usdgCurve(3000), 25n * 1_000_000n)!;
+    assert.ok(deep < shallow, `deeper must move less: $250 → ${shallow}bps, $3000 → ${deep}bps`);
+  });
+
+  it("no longer returns a degenerate zero for a native curve", () => {
+    const nat = {
+      quoteRaw: (42n * 10n ** 17n * 4000n) / 10_000n + 10n ** 18n,
+      tokenRaw: TOKENS,
+      graduationThresholdRaw: 42n * 10n ** 17n,
+      quoteDecimals: 18,
+      tokenDecimals: 18,
+    } as never;
+    assert.ok(curveBuyImpactBps(nat, 10n ** 15n)! > 0, "a real buy always moves the price somewhat");
+  });
+
+  it("still refuses the genuinely unmeasurable", () => {
+    const empty = { quoteRaw: 0n, tokenRaw: TOKENS, graduationThresholdRaw: THRESH, quoteDecimals: 6, tokenDecimals: 18 } as never;
+    assert.equal(curveBuyImpactBps(empty, 5n * 1_000_000n), null);
+    assert.equal(curveBuyImpactBps(usdgCurve(250), 0n), null, "a zero-size buy has no impact to measure");
+  });
+});

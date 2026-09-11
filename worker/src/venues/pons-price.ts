@@ -289,13 +289,27 @@ export function curveBuyImpactBps(r: CurveReserves, quoteInRaw: bigint): number 
   const tokensOut = r.tokenRaw - newToken;
   if (tokensOut <= 0n) return null;
 
-  // Effective price paid vs the spot price before the trade, in bps. Scaled up
-  // before dividing for the same precision reason as above.
-  const SCALE = 1_000_000_000_000n;
-  const spotScaled = (r.quoteRaw * SCALE) / r.tokenRaw;
-  const paidScaled = (quoteInRaw * SCALE) / tokensOut;
-  if (spotScaled <= 0n) return null;
-  const bps = ((paidScaled - spotScaled) * 10_000n) / spotScaled;
+  // Effective price paid vs the spot price before the trade, in bps — as ONE
+  // exact ratio, never two scaled divisions.
+  //
+  //   paid/spot = (quoteIn / tokensOut) / (quoteRaw / tokenRaw)
+  //             = (quoteIn * tokenRaw) / (tokensOut * quoteRaw)
+  //
+  // THE OLD FORM COULD NOT MEASURE A USDG CURVE AT ALL, and returned null for
+  // every one of them. It divided `quoteRaw * 1e12 / tokenRaw` first, and USDG
+  // is a 6-decimal quote against an 18-decimal token: quoteRaw is ~3.5e9 raw
+  // against a tokenRaw of ~1e27, so that scale of 1e12 is exactly the decimal
+  // gap and the result floored to zero. `spotScaled <= 0n` then returned null,
+  // at EVERY depth, for the only quote asset the class route is allowed to
+  // trade. The route could not have bought a curve at any price.
+  //
+  // Native-quoted curves did not fail — an 18-decimal quote leaves the ratio
+  // representable — they merely got a degenerate 0 that passed every ceiling.
+  // So the symptom differed by quote asset while the cause was one expression.
+  //
+  // Doing the multiplications first keeps it exact: JavaScript bigints do not
+  // overflow, so there is nothing to trade away for the precision.
+  const bps = (quoteInRaw * r.tokenRaw * 10_000n) / (tokensOut * r.quoteRaw) - 10_000n;
   return Number(bps);
 }
 
