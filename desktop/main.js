@@ -149,6 +149,65 @@ function ensureBootableApp() {
 const PAUSED_MARKER = path.join(HOME, "paused"); // present = agent paused (worker honors it)
 const ICON = path.join(APP_DIR, "build", "icon.png");
 
+// ── OS integration self-repair: the launcher tile ──────────────────────────
+// The in-app updater replaces ONLY the AppImage file — never the launcher
+// entry or the icon. Without this, updater users keep a stale (or generic)
+// tile forever; only install.sh users would see a fixed one. So the app
+// maintains its own integration on every boot: icon file into hicolor +
+// desktop entry with Icon=, rewritten whenever stale. Best effort throughout
+// — a missing tile must never block boot. Same content install.sh writes,
+// except Exec= points at the running AppImage when there is one.
+function desiredDesktopEntry() {
+  const execTarget = process.env.APPIMAGE || path.join(APP_DIR, "merrymen-desktop");
+  return [
+    "[Desktop Entry]",
+    "Type=Application",
+    "Name=merrymen desktop",
+    "Comment=Autonomous agents for Robinhood Chain — dashboard + worker",
+    `Exec=${execTarget} %U`,
+    "Icon=merrymen-desktop",
+    "Terminal=false",
+    "Categories=Finance;",
+    "StartupWMClass=merrymen-desktop",
+    "",
+  ].join("\n");
+}
+function ensureDesktopIntegration() {
+  if (process.platform !== "linux") return;
+  try {
+    const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
+    try {
+      const want = statSync(ICON).size;
+      let have = -1;
+      try {
+        have = statSync(path.join(dataHome, "icons", "hicolor", "1024x1024", "apps", "merrymen-desktop.png")).size;
+      } catch {
+        /* missing — copy below */
+      }
+      if (have !== want) {
+        mkdirSync(path.join(dataHome, "icons", "hicolor", "1024x1024", "apps"), { recursive: true });
+        cpSync(ICON, path.join(dataHome, "icons", "hicolor", "1024x1024", "apps", "merrymen-desktop.png"));
+      }
+    } catch {
+      /* icon unavailable (dev checkout without the asset?) — tile falls back */
+    }
+    if (!process.env.APPIMAGE) return; // dev runs have no stable Exec= target
+    const file = path.join(dataHome, "applications", "merrymen-desktop.desktop");
+    let current = "";
+    try {
+      current = readFileSync(file, "utf8");
+    } catch {
+      /* missing — write below */
+    }
+    if (current !== desiredDesktopEntry()) {
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, desiredDesktopEntry(), "utf8");
+    }
+  } catch {
+    /* best effort — never block boot over a tile */
+  }
+}
+
 let mainWin = null;
 let splashWin = null;
 let tray = null;
@@ -296,6 +355,7 @@ function makeSplash() {
     frame: false,
     resizable: false,
     backgroundColor: "#0b0b0d",
+    icon: ICON,
     webPreferences: { contextIsolation: true },
   });
   splashWin.loadFile(path.join(APP_DIR, "loading.html"));
@@ -582,6 +642,7 @@ if (!app.requestSingleInstanceLock()) {
     makeSplash();
     try {
       if (!ensureBootableApp()) return;
+      ensureDesktopIntegration(); // tile + icon self-repair (best effort)
       if (!(await ensurePortFree())) return;
       startBackend();
       await waitForServer();

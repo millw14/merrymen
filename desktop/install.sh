@@ -5,6 +5,9 @@
 #
 # Installs the latest published merrymen desktop AppImage to ~/.local/bin
 # (or $XDG_BIN_HOME), makes it executable, and checks the FUSE prerequisite.
+# Also installs the app icon + launcher entry, so the tile shows in app
+# launchers (the same files the app itself refreshes on boot — reinstalling
+# or updating never leaves a stale tile).
 # Safe to re-run: re-installs/updates to the latest release. Override with:
 #   MERRY_MEN_VERSION=desktop-beta-v0.1.8-dev.1 curl -fsSL ... | bash  # pin a version
 #   MERRY_MEN_CHANNEL=beta curl -fsSL ... | bash  # latest beta pre-release
@@ -48,22 +51,32 @@ fi
 if [ -n "${MERRY_MEN_VERSION:-}" ]; then
   API="https://api.github.com/repos/$REPO/releases/tags/$TAG"
   say "resolving $APP release ($TAG)…"
-  URL="$(curl -fsSL "$API" | grep -o '"browser_download_url": *"[^"]*\.AppImage"' | head -n 1 | cut -d'"' -f4)"
+  JSON="$(curl -fsSL "$API")"
+  URL="$(printf '%s' "$JSON" | grep -o '"browser_download_url": *"[^"]*\.AppImage"' | head -n 1 | cut -d'"' -f4)"
+  ICON_URL="$(printf '%s' "$JSON" | grep -o '"browser_download_url": *"[^"]*/icon\.png"' | head -n 1 | cut -d'"' -f4)"
 elif [ "$CHANNEL" = "beta" ]; then
   command -v python3 >/dev/null 2>&1 || die "MERRY_MEN_CHANNEL=beta needs python3 to read the releases list"
   API="https://api.github.com/repos/$REPO/releases"
   say "resolving $APP latest beta pre-release…"
-  URL="$(curl -fsSL "$API" | python3 -c 'import json,sys
+  URLS="$(curl -fsSL "$API" | python3 -c 'import json,sys
 for r in json.load(sys.stdin):
     if r.get("prerelease") and not r.get("draft"):
+        app = icon = ""
         for a in r.get("assets", []):
-            if a.get("name", "").endswith(".AppImage"):
-                print(a["browser_download_url"]); break
-        break')"
+            if a.get("name", "").endswith(".AppImage") and not app:
+                app = a["browser_download_url"]
+            if a.get("name") == "icon.png" and not icon:
+                icon = a["browser_download_url"]
+        if app:
+            print(app); print(icon); break')"
+  URL="$(printf '%s' "$URLS" | sed -n '1p')"
+  ICON_URL="$(printf '%s' "$URLS" | sed -n '2p')"
 elif [ "$CHANNEL" = "stable" ]; then
   API="https://api.github.com/repos/$REPO/releases/latest"
   say "resolving $APP release (latest stable)…"
-  URL="$(curl -fsSL "$API" | grep -o '"browser_download_url": *"[^"]*\.AppImage"' | head -n 1 | cut -d'"' -f4)"
+  JSON="$(curl -fsSL "$API")"
+  URL="$(printf '%s' "$JSON" | grep -o '"browser_download_url": *"[^"]*\.AppImage"' | head -n 1 | cut -d'"' -f4)"
+  ICON_URL="$(printf '%s' "$JSON" | grep -o '"browser_download_url": *"[^"]*/icon\.png"' | head -n 1 | cut -d'"' -f4)"
 else
   die "MERRY_MEN_CHANNEL must be stable or beta (got: $CHANNEL)"
 fi
@@ -79,17 +92,28 @@ mkdir -p "$BIN_DIR"
 mv "$TMP/merrymen.AppImage" "$BIN_DIR/merrymen-desktop"
 chmod +x "$BIN_DIR/merrymen-desktop"
 
-# Desktop entry so launchers find it (no icon shipped — launcher shows a
-# generic glyph; harmless and removable).
+# Desktop entry + icon so launchers show the real tile (not a generic glyph).
+# Same content the app itself refreshes on boot — either writer converges.
+ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/1024x1024/apps"
+if [ -n "${ICON_URL:-}" ]; then
+  mkdir -p "$ICON_DIR"
+  say "installing icon…"
+  curl -fsSL -o "$ICON_DIR/merrymen-desktop.png" "$ICON_URL" || say "note: icon download failed — tile falls back to generic"
+else
+  say "note: no icon asset on this release — tile falls back to generic"
+fi
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 mkdir -p "$DESKTOP_DIR"
 cat > "$DESKTOP_DIR/merrymen-desktop.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=merrymen desktop
+Comment=Autonomous agents for Robinhood Chain — dashboard + worker
 Exec=$BIN_DIR/merrymen-desktop %U
+Icon=merrymen-desktop
 Terminal=false
 Categories=Finance;
+StartupWMClass=merrymen-desktop
 EOF
 
 say "installed to $BIN_DIR/merrymen-desktop"

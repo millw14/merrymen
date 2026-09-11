@@ -86,6 +86,7 @@ jobs:
           path: |
             desktop/dist/*.AppImage
             desktop/dist/latest-linux.yml
+            desktop/build/icon.png
 
       # Stable (`desktop-v*`) ships as a full release; beta tags
       # (`desktop-beta-v*`) ship as prereleases so only beta-channel apps
@@ -160,3 +161,4 @@ jobs:
           files: |
             desktop/dist/*.AppImage
             desktop/dist/latest-linux.yml
+            desktop/build/icon.png
