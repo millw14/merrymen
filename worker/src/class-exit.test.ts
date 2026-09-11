@@ -139,6 +139,35 @@ describe("every refusal fails in the safe direction", () => {
   });
 });
 
+describe("the entry producer says why it took nothing", () => {
+  // `readClassLegs` builds six owner-vocabulary reasons — native quote, wrong
+  // quote, no threshold, unreadable reserves, graduated, too thin — and the
+  // caller destructured only `legs`, throwing every one of them away. So the
+  // overwhelmingly common outcome of the whole route, "considered some and took
+  // none", was indistinguishable from a quiet launchpad AND from the route
+  // being switched off. During a canary that is the difference between evidence
+  // and a shrug.
+  const ENTRY = (() => {
+    const at = INDEX.indexOf("async function proposeClassEntries");
+    return INDEX.slice(at, INDEX.indexOf("\n  /**", at + 100));
+  })();
+
+  it("destructures the refusals rather than discarding them", () => {
+    assert.match(ENTRY, /const \{ legs, refused \} = await readClassLegs/);
+  });
+
+  it("reports them, tallied, so one bad candidate is not six lines", () => {
+    assert.match(ENTRY, /none taken/, "the line must say what happened");
+    assert.match(ENTRY, /tally/, "and group identical reasons");
+  });
+
+  it("logs on CHANGE, because this producer runs every tick", () => {
+    // A line per tick is a line nobody reads — the same discipline the token
+    // coverage notice keeps.
+    assert.match(ENTRY, /lastClassRefusalKey/);
+  });
+});
+
 describe("the hold clock is real and cannot be reset", () => {
   it("classPositions selects the clock and the money, not just the candidate", () => {
     // Asserted by column rather than by the whole SELECT string, which grew

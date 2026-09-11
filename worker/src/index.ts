@@ -811,13 +811,34 @@ async function main() {
       });
     if (candidates.length === 0) return [];
 
-    const { legs } = await readClassLegs({
+    const { legs, refused } = await readClassLegs({
       client: active.client,
       candidates,
       usdg: CASH.USDG as `0x${string}`,
       minRealDepthUsdg: usdg(cfg.classMinDepthUsdg),
       maxReads: CLASS_MAX_READS,
     });
+    // WHY NOTHING QUALIFIED, WHICH WAS THROWN AWAY.
+    //
+    // `readClassLegs` builds six distinct owner-vocabulary reasons — native
+    // quote, wrong quote, no threshold, unreadable reserves, graduated, too
+    // thin — and the caller destructured only `legs`. So the overwhelmingly
+    // common outcome of this whole route, "considered some and took none", was
+    // indistinguishable from "the launchpad was quiet", and both looked exactly
+    // like the route being switched off.
+    //
+    // Logged on CHANGE rather than per tick: the producer runs every tick and
+    // the answer is usually the same one, so a line each time is a line nobody
+    // reads. Same discipline as the token-coverage notice.
+    if (refused.length > 0) {
+      const tally = new Map<string, number>();
+      for (const r of refused) tally.set(r.reason, (tally.get(r.reason) ?? 0) + 1);
+      const key = [...tally].sort().map(([r, n]) => `${n}×${r}`).join(" · ");
+      if (key !== lastClassRefusalKey) {
+        lastClassRefusalKey = key;
+        console.log(`[class] ${refused.length} candidate(s) considered, none taken — ${key}`);
+      }
+    }
     if (legs.length === 0) return [];
 
     // ONE ENTRY PER TICK. The caps would bound a burst anyway, but a single
@@ -873,6 +894,8 @@ async function main() {
   let lastClassBalances: ReadonlyMap<string, bigint> = new Map<string, bigint>();
   /** What the OPEN class positions actually cost, from the chain. Scout budget. */
   let lastClassCostUsdg = 0n;
+  /** Last class-refusal tally, so the reason is logged on change and not per tick. */
+  let lastClassRefusalKey: string | null = null;
   /** Quote-token decimals, learned once and kept for the life of the process. */
   const classQuoteDecimals = new Map<string, number>();
 
