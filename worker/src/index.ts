@@ -893,17 +893,37 @@ async function main() {
     const leg = legs[0]!;
     const size = usdg(cfg.classPerEntryUsdg);
     const spend = size < active.limits.perTradeUsdg ? size : active.limits.perTradeUsdg;
-    if (spend <= 0n) return [];
+
+    // THE LAST FIVE SILENT REFUSALS ON THIS PATH.
+    //
+    // Everything upstream of here now says why it turned a candidate back — the
+    // census, the quote filter, the depth floor. These five were bare
+    // `return []`, so a tick that found eight qualifying legs and then rejected
+    // the best one was indistinguishable, from outside, from a tick that found
+    // nothing. That gap cost an evening: the producer reported "8 still in
+    // play" and the executor was never reached, with nothing in between.
+    //
+    // Logged on CHANGE, like the refusal tally above: the answer is usually the
+    // same one and a line per tick is a line nobody reads.
+    const refuse = (why: string): TradeIntent[] => {
+      if (why !== lastClassSizingKey) {
+        lastClassSizingKey = why;
+        console.log(`[class] ${leg.symbol}: ${why}`);
+      }
+      return [];
+    };
+    if (spend <= 0n) return refuse(`nothing to spend — entry size ${cfg.classPerEntryUsdg} against a per-trade cap of ${Number(active.limits.perTradeUsdg) / 1e6}`);
 
     // Quoted, impact-checked and floored HERE, because this is where the
     // reserves are — the executor holds only an intent. Every existing curve
     // producer makes the same three checks in the same order.
     const quoted = curveBuyOut(leg.reserves, spend);
-    if (quoted === null || quoted <= 0n) return [];
+    if (quoted === null || quoted <= 0n) return refuse("its curve would not quote a buy at this size");
     const impact = curveBuyImpactBps(leg.reserves, spend);
-    if (impact === null || impact > cfg.maxImpactBps) return [];
+    if (impact === null) return refuse("its price impact could not be computed");
+    if (impact > cfg.maxImpactBps) return refuse(`a ${Number(spend) / 1e6} USDG buy would move it ${impact}bps, over the ${cfg.maxImpactBps}bps ceiling`);
     const floor = curveMinOut(quoted, cfg.slippageBps);
-    if (floor === null || floor <= 0n) return [];
+    if (floor === null || floor <= 0n) return refuse("no minimum-output floor could be set, so the buy would be unprotected");
 
     // THE ON-RAMP CHECK THE WALL CANNOT PROVIDE. Everywhere else `no-exit`
     // refuses a buy the key could not sell; here the key CAN sell, so the
@@ -911,8 +931,12 @@ async function main() {
     // a side, so a round trip cannot beat ~200 bps and a curve where it is much
     // worse than that is one nobody should be entering.
     const roundTrip = curveSellOut(leg.reserves, quoted);
-    if (roundTrip === null || roundTrip * 10_000n < spend * BigInt(10_000 - CLASS_MAX_ROUND_TRIP_BPS)) {
-      return [];
+    if (roundTrip === null) return refuse("its curve would not quote the sell back, so the round trip is unknown");
+    if (roundTrip * 10_000n < spend * BigInt(10_000 - CLASS_MAX_ROUND_TRIP_BPS)) {
+      return refuse(
+        `buying and immediately selling would return ${(Number(roundTrip) / 1e6).toFixed(2)} of ` +
+          `${Number(spend) / 1e6} USDG — worse than the ${CLASS_MAX_ROUND_TRIP_BPS}bps round trip this route accepts`,
+      );
     }
 
     return [
@@ -943,6 +967,8 @@ async function main() {
   let lastClassRefusalKey: string | null = null;
   /** Diagnostic dedupe for the candidate census — counts only, never ages. */
   let lastClassCensusKey: string | null = null;
+  /** Last sizing refusal, so the reason is logged on change and not per tick. */
+  let lastClassSizingKey: string | null = null;
   /** Quote-token decimals, learned once and kept for the life of the process. */
   const classQuoteDecimals = new Map<string, number>();
 
