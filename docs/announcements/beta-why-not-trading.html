@@ -1,0 +1,28 @@
+📣 <b>A note from the merrymen team</b> — not from your agent. We're borrowing its chat once because it's the only way to reach everyone; it'll go back to speaking for itself straight after.
+
+<b>Why your agent probably isn't trading yet.</b>
+
+We measured the whole fleet tonight: 43 agents running, 9 trading for real, 29 sitting in simulation. Almost none of that is breakage — it's four setup states, and each has a different fix. Doing the wrong one costs you a signature and changes nothing, so the specific line at the bottom of this message matters more than the general list.
+
+<b>1 · "no USDG" — 15 agents</b>
+Armed, right chain, gas covered by us. Nothing to trade with.
+→ Send USDG to your agent's smart-account address — the "Copy deposit address" button on the funding panel, not your own wallet address.
+→ You do <b>not</b> need to send ETH. Gas is sponsored for every hosted agent now. If you sent some on our older instructions it isn't lost, just unnecessary.
+
+<b>2 · "wrong network" — 7 agents</b>
+Your key was signed on the testnet (46630) instead of Robinhood Chain (4663). It arms, prices and simulates perfectly happily, which is exactly why it looks fine.
+→ Re-sign at app.merrymen.dev/grant <b>with the network set to Robinhood Chain</b>. Re-signing on whichever network the page offers is a no-op and the banner comes straight back — one of you hit that and reported it, fairly, as our bug.
+→ Anything funded on the testnet is not on mainnet.
+
+<b>3 · "signed before a fix" — 6 agents</b>
+Your key carries an old permission policy that can't reach the chain. Funding won't help.
+→ Re-sign at /grant. Free, instant, off-chain — a signature, not a transaction. Same wallet, same address, same balances; nothing moves and no gas is paid.
+
+<b>4 · "expired" — 5 agents</b>
+Keys last 7 days by design. Same page, same "nothing moves".
+
+<b>If your agent is already live and still quiet</b>, it's usually the daily spend cap being used up (lower "buy amount per check" in /settings to spread it, or raise the cap at /grant), stock feeds being stale because the US market is shut (stocks are 24/5 — clears at the open), or a per-trade cap small enough that the strategist keeps deciding nothing is worth buying at that size.
+
+<b>What we changed this week.</b> Your agent now tells you when one of your own limits is why it's doing nothing — a per-trade cap too small to act on, or a drawdown limit that has actually stopped it buying rather than just warning you. Both used to happen in silence, which is how a working agent came to look like a dead one. We also fixed /wallet and /fund, which were printing a localhost address that meant nothing on the hosted service.
+
+Questions go to the beta group, not to this chat — your agent is clever but it doesn't work here. 🏹

@@ -298,3 +298,47 @@ describe("the personalised line", () => {
     assert.match(line, /app\.merrymen\.dev/);
   });
 });
+
+describe("the phone-fireable trigger on the orchestrator", () => {
+  const ORCH = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+  const BLOCK = ORCH.slice(
+    ORCH.indexOf("async function runAnnouncementIfAsked"),
+    ORCH.indexOf("async function runIdentityAuditIfAsked"),
+  );
+
+  it("exists and is anchored", () => {
+    assert.ok(BLOCK.length > 400, "the announcement one-shot moved — re-point this test, do not delete it");
+  });
+
+  it("ARMING and SENDING are two different variables", () => {
+    // MERRYMEN_ANNOUNCE_ID alone is a dry run. Messaging 43 real people must
+    // never be one variable set by muscle memory.
+    assert.match(BLOCK, /MERRYMEN_ANNOUNCE_ID/);
+    assert.match(BLOCK, /MERRYMEN_ANNOUNCE_CONFIRM \?\? ""\)\.trim\(\) === id/);
+  });
+
+  it("is safe to leave set, because Railway restarts services freely", () => {
+    // It runs on the reconcile loop, so it re-enters on every restart. The
+    // per-recipient record in `announcements` is what makes that harmless —
+    // without it, a redeploy loop would message everyone repeatedly.
+    assert.match(ORCH, /if \(cohortPasses === 1\) await runAnnouncementIfAsked\(\);/);
+    assert.match(code, /SELECT tenant FROM announcements WHERE announce_id = \$1/);
+  });
+
+  it("refuses a body Telegram would silently mangle, before any send", () => {
+    assert.match(BLOCK, /illegalTags\(body\)/);
+    assert.match(BLOCK, /refusing/);
+  });
+
+  it("never lets a thrown error object reach the log", () => {
+    // A pg or fetch error can carry request context, and in this process that
+    // context can include a bot token.
+    assert.match(BLOCK, /e instanceof Error \? e\.message : String\(e\)/);
+    assert.doesNotMatch(BLOCK, /log\(`[^`]*\$\{e\}/, "never interpolate the error object itself");
+  });
+
+  it("shouts when the per-agent lookup failed rather than reporting a clean run", () => {
+    assert.match(BLOCK, /blockerJoinError/);
+    assert.match(BLOCK, /every message would be generic/);
+  });
+});

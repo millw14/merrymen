@@ -1666,6 +1666,94 @@ async function runBrainDatasetIfAsked(): Promise<void> {
  * here deduplicates: two rows claiming one account is a question about which
  * person owns an agent.
  */
+/**
+ * THE ONE-OFF PLATFORM ANNOUNCEMENT, FIREABLE WITHOUT A TERMINAL.
+ *
+ * `announce-cli.ts` is the same job for someone with a shell on this service.
+ * This exists because an operator away from their machine has no shell — and
+ * Railway's own dashboard, which sets these variables, works from a phone.
+ *
+ * TWO KEYS, DELIBERATELY. `MERRYMEN_ANNOUNCE_ID` arms a DRY RUN, which resolves
+ * every recipient, builds every message and contacts Telegram zero times.
+ * Sending additionally requires `MERRYMEN_ANNOUNCE_CONFIRM` to equal that same
+ * id, so the difference between a rehearsal and messaging every beta tester is
+ * never one variable set by muscle memory.
+ *
+ * SAFE TO LEAVE SET. This runs on the reconcile loop and Railway restarts
+ * services freely, so it must be harmless to re-enter: `runAnnouncement` skips
+ * anyone already recorded in `announcements`, per recipient, so a redeploy
+ * re-runs and sends nothing new. The body ships in the repo because there is no
+ * other way to hand this process a file.
+ */
+async function runAnnouncementIfAsked(): Promise<void> {
+  const id = (process.env.MERRYMEN_ANNOUNCE_ID ?? "").trim();
+  if (!id) return;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("announcement asked for, but there is no DATABASE_URL");
+    return;
+  }
+  if (!process.env.MERRYMEN_STORE_DEK) {
+    log("announcement asked for, but there is no MERRYMEN_STORE_DEK — bot tokens are sealed");
+    return;
+  }
+  try {
+    const { readFileSync } = await import("node:fs");
+    const { illegalTags, runAnnouncement } = await import("./announce");
+    const body = readFileSync(
+      path.resolve(ROOT, "docs/announcements", `${id}.html`),
+      "utf8",
+    ).trim();
+    const bad = illegalTags(body);
+    if (bad.length > 0) {
+      log(`announcement ${id}: body uses tags Telegram rejects (${bad.join(", ")}) — refusing`);
+      return;
+    }
+    if (body.length > 3600) {
+      log(`announcement ${id}: body is ${body.length} chars, over the 3600 budget — refusing`);
+      return;
+    }
+    // @ts-expect-error pg is runtime-only here, as everywhere else in this repo
+    const pg = (await import("pg")) as unknown as {
+      Client: new (c: { connectionString: string }) => {
+        query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+        connect(): Promise<void>;
+        end(): Promise<void>;
+      };
+    };
+    const client = new pg.Client({ connectionString: url });
+    await client.connect();
+    try {
+      const confirmed = (process.env.MERRYMEN_ANNOUNCE_CONFIRM ?? "").trim() === id;
+      const out = await runAnnouncement({ client, announceId: id, body, confirmed });
+      log(
+        `announcement ${id}: ${out.dryRun ? "DRY RUN, nothing sent" : "SENT"} — ` +
+          `${out.considered} tenants, ${out.eligible} eligible, ${out.sent} ${out.dryRun ? "would receive" : "delivered"}, ` +
+          `${out.personalised} with their own reason · skipped: ${out.skippedNoChat} no chat, ` +
+          `${out.skippedNoToken} no bot, ${out.skippedDisabled} tg off, ${out.skippedNotifyOff} pushes off, ` +
+          `${out.skippedAlreadySent} already had it · ${out.failed.length} failed`,
+      );
+      // "Nobody is blocked" and "the join broke" are the same empty map and
+      // opposite facts. Only one of them is safe to send on.
+      if (out.blockerJoinError) {
+        log(`announcement ${id}: !! per-agent blocker lookup FAILED (${out.blockerJoinError}) — every message would be generic`);
+      }
+      const tally = new Map<string, number>();
+      for (const f of out.failed) tally.set(f.reason, (tally.get(f.reason) ?? 0) + 1);
+      // Reasons without recipients: enough to act on, never enough to identify
+      // anyone or reconstruct a credential.
+      for (const [reason, n] of tally) log(`announcement ${id}:   ${n}× ${reason}`);
+      if (out.dryRun) log(`announcement ${id}: to send, set MERRYMEN_ANNOUNCE_CONFIRM=${id}`);
+    } finally {
+      await client.end();
+    }
+  } catch (e) {
+    // The message only. A pg or fetch error object can carry request context,
+    // and in this process that context can include a bot token.
+    log(`announcement ${id} failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function runIdentityAuditIfAsked(): Promise<void> {
   if ((process.env.MERRYMEN_IDENTITY_AUDIT ?? "").trim() !== "1") return;
   const url = process.env.DATABASE_URL;
@@ -2423,6 +2511,11 @@ export async function runOrchestrator(): Promise<void> {
       // simply dropped them, and a report whose absence looks identical to a
       // clean fleet is not a report. A separate pass puts it in its own quiet
       // moment, where only the routine mirror lines share the stream.
+      // Before the audits, and on the FIRST pass rather than a delayed one: an
+      // operator who sets the variable and redeploys is watching the log now,
+      // and a dry run that appears twenty minutes later reads as nothing having
+      // happened. It is idempotent, so running early costs nothing.
+      if (cohortPasses === 1) await runAnnouncementIfAsked();
       if (cohortPasses === IDENTITY_AUDIT_AFTER_PASSES) await runIdentityAuditIfAsked();
       if (cohortPasses === COHORT_VET_AFTER_PASSES) {
         await runCohortVettingIfAsked();
