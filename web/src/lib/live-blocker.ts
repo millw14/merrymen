@@ -55,6 +55,14 @@ const ADVICE: Readonly<Record<string, BlockerAdvice>> = Object.freeze({
     say: "This agent's permission is for a different network than the one trading happens on. It needs a new grant on Robinhood Chain; funds sent here will sit unused.",
     funding: false,
   },
+  "grant-too-wide": {
+    // NAMES THE TWO LEVERS, because "too wide" alone is a dead end. The cost
+    // grows with tokens AND venues together — every venue you allow is pinned
+    // on every token you allow — so an owner who only hears "too many tokens"
+    // may remove five and still be refused.
+    say: "This agent's permission set covers too many tokens and venues to install on-chain, so its first operation can never be signed. Re-signing with fewer of either is free and fixes it — adding funds will not, because nothing has been spent.",
+    funding: false,
+  },
   "not-armed": {
     say: "This agent's trading key is not active yet, so it has no permission to trade with. It arms itself on the next pass — nothing to send.",
     funding: false,

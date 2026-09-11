@@ -314,6 +314,10 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   // is why it drifted.
   "not-armed": "it has no signed trading key yet",
   "dead-policy": "its signature seals a policy contract that is not on this chain",
+  // Said as a SIZE, not a fault. The owner did nothing wrong — the product let
+  // them sign a permission set it could never install, and the remedy is a
+  // narrower one rather than anything they need to undo.
+  "grant-too-wide": "its permission set is too wide to install on-chain",
   "no-executor": "no bundler is configured to submit anything",
   "wrong-chain": "its key was signed for a different network",
   "no-cash": "the account held no USDG to trade with",

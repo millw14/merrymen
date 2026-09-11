@@ -37,6 +37,7 @@
 export type RefuseRule =
   | "not-armed"
   | "dead-policy"
+  | "grant-too-wide"
   | "no-executor"
   | "wrong-chain"
   | "no-gas"
@@ -54,6 +55,12 @@ export function liveBlockerText(rule: RefuseRule): string {
       return "your trading key is not active yet — the agent has no permission to trade with";
     case "dead-policy":
       return "this trading key was signed before a fix and cannot reach the chain; re-signing it is free and instant";
+    case "grant-too-wide":
+      return (
+        "this key's permission set is too wide to install on-chain — its first operation would cost more " +
+        "gas than we will sign for, so it can never reach the chain. Re-signing with fewer tokens or " +
+        "fewer venues fixes it, and costs nothing"
+      );
     case "no-executor":
       return "no bundler is configured, so nothing can be submitted to the chain";
     case "wrong-chain":
@@ -84,6 +91,7 @@ export type AutonomyState = "live" | "paper" | "blocked" | "idle";
 /** Blockers only the OWNER can clear. Everything else is ours to fix. */
 const OWNER_ACTION: ReadonlySet<RefuseRule> = new Set<RefuseRule>([
   "dead-policy",
+  "grant-too-wide",
   "wrong-chain",
   "not-armed",
 ]);
@@ -228,6 +236,7 @@ function normaliseRule(v: RefuseRule | string | null | undefined): RefuseRule | 
   switch (v) {
     case "not-armed":
     case "dead-policy":
+    case "grant-too-wide":
     case "no-executor":
     case "wrong-chain":
     case "no-gas":

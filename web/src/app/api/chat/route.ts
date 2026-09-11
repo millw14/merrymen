@@ -36,6 +36,7 @@ Reply AS YOURSELF:
   · \`no-cash\` — no USDG to trade with. Send USDG to the same address.
   · \`dead-policy\` — the permission was signed before a fix and cannot reach the chain. Re-signing is free; propose resign. ADDING MONEY WILL NOT HELP and you must say so.
   · \`wrong-chain\` — the permission is for a different network from the one trading happens on. It needs a new grant; funds sent here sit unused. Say that plainly.
+  · \`grant-too-wide\` — the permission set covers too many tokens and venues to install on-chain, so the FIRST operation can never be signed and nothing has been spent. Re-signing with fewer of either is free and fixes it; propose resign. ADDING MONEY WILL NOT HELP. Name BOTH levers — every venue allowed is pinned on every token allowed, so cutting tokens alone may not be enough.
   · \`not-armed\` — the key is not active yet; it arms itself on the next pass. Nothing to send.
   · \`no-executor\` — ours to fix, not theirs. Say so.
   A NULL \`liveBlocker\` IS TWO ANSWERS AND NEITHER IS A PROBLEM: trading for real, or not yet beaten. Never read null as "everything is fine" if the tape is also empty — say you can see nothing blocking you and look at the other causes above.

@@ -142,6 +142,24 @@ export interface ExecInputs {
    * dropping it is the most damaging single edit available to this file.
    */
   gasSponsored: boolean;
+  /**
+   * Is this grant's permission wall too wide to ever install, AND the account
+   * still undeployed?
+   *
+   * DETERMINISTIC, AND KNOWN BEFORE ANY BUNDLER IS CONTACTED. The first
+   * operation a session key signs carries the whole wall, so its cost is a
+   * function of the wall's size — which the grant already fixes. When that
+   * exceeds what the product will sign for, no estimate can change the answer,
+   * and asking anyway is what produced ~16 bundler calls every 97 seconds,
+   * forever, on two funded agents.
+   *
+   * ONLY MEANINGFUL WHILE UNDEPLOYED. An account whose wall is already
+   * installed never signs another first-enable, so a wall that would be refused
+   * today says nothing about an agent that is already trading. The caller is
+   * responsible for that half — see index.ts — and getting it wrong would
+   * retire working agents for a rule that cannot apply to them.
+   */
+  wallTooWide?: boolean;
   /** Permission to simulate. NOT a request to: it never moves a working agent. */
   paperTradingEnabled: boolean;
 }
@@ -173,7 +191,8 @@ export function canTradeForReal(a: ExecInputs): boolean {
     a.chainId === TRADEABLE_CHAIN_ID &&
     !readAsBroke &&
     !readAsGasless &&
-    !a.deadPolicy
+    !a.deadPolicy &&
+    !a.wallTooWide
   );
 }
 
@@ -198,6 +217,16 @@ export function execModeOf(a: ExecInputs): ExecMode {
   // an unexplained dead end.
   const blocker = liveBlocker(a);
 
+  // A WALL THAT CANNOT BE INSTALLED IS NOT SIMULATED EITHER.
+  //
+  // Every other blocker here is a condition the world might fix — money
+  // arrives, a chain is switched, a bundler is configured — and simulating
+  // meanwhile is exactly what paper is for. This one cannot: the grant's own
+  // shape proves its first operation will never be signed, and writing
+  // pretend fills against it tells the owner their agent is working while the
+  // one thing that would make it work goes unsaid.
+  if (blocker === "grant-too-wide") return { mode: "refuse", rule: blocker };
+
   // Simulating is the better answer when the owner has allowed it — that is the
   // whole point of paper.
   if (a.paperTradingEnabled) return { mode: "paper", rule: blocker };
@@ -218,6 +247,10 @@ export function execModeOf(a: ExecInputs): ExecMode {
 export function liveBlocker(a: ExecInputs): RefuseRule {
   if (!a.armed) return "not-armed";
   if (a.deadPolicy) return "dead-policy";
+  // Beside dead-policy because the remedy is the same shape — only the owner can
+  // fix it — but it is NARROWER: re-signing the same wall changes nothing, so
+  // the owner has to sign a smaller one.
+  if (a.wallTooWide) return "grant-too-wide";
   if (!a.executor) return "no-executor";
   if (a.chainId !== TRADEABLE_CHAIN_ID) return "wrong-chain";
   // GAS BEFORE CASH. Both are fixed by sending money, so the tie-break is

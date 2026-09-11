@@ -406,6 +406,16 @@ interface ActiveAgent {
    * be rendered as one.
    */
   accountDeployed: boolean | null;
+  /**
+   * Is this grant's wall wider than the product will ever sign a first-enable
+   * for? Read once at arm, because it is a property of a frozen signature.
+   *
+   * PAIRED WITH accountDeployed BY THE READER, never here. A wall already
+   * installed is never installed again, so this says nothing about an agent
+   * that is already trading — and retiring one for a rule that cannot apply to
+   * it would be the worst possible reading of a deterministic refusal.
+   */
+  wallOverMax: boolean;
   /** True only when breakerAddress has CODE on the grant chain — otherwise the
    * on-chain read would silently fail open (.catch → "not tripped"). */
   breakerLive: boolean;
@@ -502,6 +512,13 @@ async function main() {
       gasWei: lastGasWei,
       gasSponsored: gasSponsored(),
       deadPolicy: active?.deadPolicy ?? false,
+      // KNOWN BEFORE ANY BUNDLER IS ASKED, and only while UNDEPLOYED.
+      //
+      // `accountDeployed === false` is a positive answer, not an absence: null
+      // means the chain would not say, and refusing on that would retire a
+      // working agent because a read failed. A deployed account never signs
+      // another first-enable, so its historical wall cannot block it.
+      wallTooWide: (active?.wallOverMax ?? false) && active?.accountDeployed === false,
       paperTradingEnabled: cfg.paperTradingEnabled,
     });
   const paperActive = () => execMode().mode === "paper";
@@ -3541,55 +3558,56 @@ async function main() {
       );
     }
 
+    let firstEnable: { allowedMaxBounded: bigint; expectedBounded: bigint; stubBytes: number; withinHardMax: boolean } | undefined;
+    // ARMING CAN FAIL, AND THE FAILURE MUST BE VISIBLE.
+    //
+    // This used to throw straight out of syncGrant, out of tick, into
+    // runLoop's `.catch(e => console.error(...))` — a stack trace on stdout
+    // and nothing else. No event, no status, and heartbeat() never ran
+    // because it is called AFTER syncGrant, so even the staleness signal was
+    // absent. Ten hosted agents sat in that loop for hours and the only way
+    // anyone found out was reading container logs by hand.
+    //
+    // A grant that cannot be deserialized is a real and permanent condition
+    // — an unrecognised policy, a corrupt blob, a permission id that does not
+    // reproduce. Retrying it every 60 seconds forever is not recovery, it is
+    // noise. So: record it where the owner will see it, leave the agent
+    // unarmed, and let the tick continue so the heartbeat still beats and the
+    // dashboard can say IDLE rather than going silent.
+    // WHAT THIS GRANT'S OWN WALL COSTS TO INSTALL, computed here because this
+    // is where the StoredGrant is. The executor holds only the serialized
+    // account, whose policies are opaque once deserialized.
+    //
+    // Built from the SAME inputs the signature was made over, through the same
+    // `grantWallOptions` the signing path uses — so the ceiling the executor
+    // applies and the ceiling the signer enforced are the same number by
+    // construction rather than by agreement.
+    firstEnable = (() => {
+      try {
+        const shape = wallShape(
+          buildCallPermissions(grant.caps, grant.smartAccount, {
+            ...grantWallOptions(grant),
+            ...(grantV4Adapter(grant) ? { v4AdapterAddress: grantV4Adapter(grant)! } : {}),
+            ...(grantPonsAdapter(grant) ? { ponsAdapterAddress: grantPonsAdapter(grant)! } : {}),
+            ...(grantPonsClassVault(grant) ? { ponsClassVaultAddress: grantPonsClassVault(grant)! } : {}),
+          }) as never,
+        );
+        const env = firstEnableEnvelope(shape);
+        console.log(
+          `[gas] wall ${shape.permissions} permission(s) · ${shape.oneOfEntries} ONE_OF entr(ies) · ` +
+            `${shape.stubBytes}B stub · first-enable expected ${env.expectedBounded} · ` +
+            `allowed ${env.allowedMaxBounded}${env.withinHardMax ? "" : " · OVER THE PRODUCT MAXIMUM — needs a narrower wall"}`,
+        );
+        return { allowedMaxBounded: env.allowedMaxBounded, expectedBounded: env.expectedBounded, stubBytes: shape.stubBytes, withinHardMax: env.withinHardMax };
+      } catch (e) {
+        // A shape we cannot compute must not silently widen anything. Absent
+        // means the executor keeps the flat ceiling — today's behaviour.
+        console.log(`[gas] could not size this wall (${e instanceof Error ? e.message : String(e)}) — using the flat first-enable ceiling`);
+        return undefined;
+      }
+    })();
     let executor: AgentExecutor | null = null;
     if (bundlerUrl) {
-      // ARMING CAN FAIL, AND THE FAILURE MUST BE VISIBLE.
-      //
-      // This used to throw straight out of syncGrant, out of tick, into
-      // runLoop's `.catch(e => console.error(...))` — a stack trace on stdout
-      // and nothing else. No event, no status, and heartbeat() never ran
-      // because it is called AFTER syncGrant, so even the staleness signal was
-      // absent. Ten hosted agents sat in that loop for hours and the only way
-      // anyone found out was reading container logs by hand.
-      //
-      // A grant that cannot be deserialized is a real and permanent condition
-      // — an unrecognised policy, a corrupt blob, a permission id that does not
-      // reproduce. Retrying it every 60 seconds forever is not recovery, it is
-      // noise. So: record it where the owner will see it, leave the agent
-      // unarmed, and let the tick continue so the heartbeat still beats and the
-      // dashboard can say IDLE rather than going silent.
-      // WHAT THIS GRANT'S OWN WALL COSTS TO INSTALL, computed here because this
-      // is where the StoredGrant is. The executor holds only the serialized
-      // account, whose policies are opaque once deserialized.
-      //
-      // Built from the SAME inputs the signature was made over, through the same
-      // `grantWallOptions` the signing path uses — so the ceiling the executor
-      // applies and the ceiling the signer enforced are the same number by
-      // construction rather than by agreement.
-      const firstEnable = (() => {
-        try {
-          const shape = wallShape(
-            buildCallPermissions(grant.caps, grant.smartAccount, {
-              ...grantWallOptions(grant),
-              ...(grantV4Adapter(grant) ? { v4AdapterAddress: grantV4Adapter(grant)! } : {}),
-              ...(grantPonsAdapter(grant) ? { ponsAdapterAddress: grantPonsAdapter(grant)! } : {}),
-              ...(grantPonsClassVault(grant) ? { ponsClassVaultAddress: grantPonsClassVault(grant)! } : {}),
-            }) as never,
-          );
-          const env = firstEnableEnvelope(shape);
-          console.log(
-            `[gas] wall ${shape.permissions} permission(s) · ${shape.oneOfEntries} ONE_OF entr(ies) · ` +
-              `${shape.stubBytes}B stub · first-enable expected ${env.expectedBounded} · ` +
-              `allowed ${env.allowedMaxBounded}${env.withinHardMax ? "" : " · OVER THE PRODUCT MAXIMUM — needs a narrower wall"}`,
-          );
-          return { allowedMaxBounded: env.allowedMaxBounded, expectedBounded: env.expectedBounded, stubBytes: shape.stubBytes };
-        } catch (e) {
-          // A shape we cannot compute must not silently widen anything. Absent
-          // means the executor keeps the flat ceiling — today's behaviour.
-          console.log(`[gas] could not size this wall (${e instanceof Error ? e.message : String(e)}) — using the flat first-enable ceiling`);
-          return undefined;
-        }
-      })();
       try {
         executor = await createAgentExecutor({
           chain,
@@ -3928,6 +3946,11 @@ async function main() {
       agentId,
       client,
       executor,
+      // Whether this grant's wall can EVER be installed — decided from the
+      // signed shape alone, so the answer is the same before and after any
+      // bundler is contacted. Paired with `accountDeployed` at the read site,
+      // never here: a wall already on-chain is never installed again.
+      wallOverMax: firstEnable !== undefined && !firstEnable.withinHardMax,
       // Live brokerage execution is step 6 of the adapter plan; until the
       // Agentic account exists and tools/list has been read, equity orders can
       // only paper-fill.
