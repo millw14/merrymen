@@ -6,7 +6,7 @@
  *   1. shows a loading splash,
  *   2. spawns the merrymen dashboard (next start) + agent worker (tsx) as child
  *      processes, using Electron-as-Node (ELECTRON_RUN_AS_NODE) — no system Node,
- *   3. waits for the dashboard on 127.0.0.1:3100,
+  *   3. waits for the dashboard on 127.0.0.1:17430,
  *   4. loads it in a native window.
  *
  * CONTROL (same as the CLI, without a terminal): a system-tray icon lets you
@@ -27,9 +27,10 @@ const path = require("node:path");
 
 const HOST = "127.0.0.1";
 // Env override first: a fixed port that is already taken must never be a
-// silent exit. See ensurePortFree below — the default stays 3100 so existing
-// installs keep working.
-const PORT = Number(process.env.MERRYMEN_PORT) || 3100;
+// silent exit. See ensurePortFree below — the default is 17430 (NOT 3100: the
+// CLI dashboard and half the dev-tool ecosystem live there, and the desktop
+// app sharing it meant a daily port fight). MERRYMEN_PORT overrides.
+const PORT = Number(process.env.MERRYMEN_PORT) || 17430;
 // Shared with the CLI (~/.merrymen); honor an override so data can be relocated.
 const HOME = process.env.MERRYMEN_HOME || path.join(os.homedir(), ".merrymen");
 // ── writable app copy (the AppImage squashfs is read-only) ────────────────
@@ -160,7 +161,7 @@ const children = [];
 // The dashboard binds a fixed port and the app used to discover a conflict by
 // exiting 0 with no window and no message. Probe first; on conflict offer
 // Retry (the holder may be shutting down) or Quit. MERRYMEN_PORT is the
-// escape hatch for a permanently busy 3100.
+// escape hatch for a permanently busy 17430.
 function isPortFree() {
   return new Promise((resolve) => {
     const probe = net.createServer();
@@ -252,7 +253,7 @@ function startDashboard() {
 function startWorker() {
   const root = merrymenRoot();
   const tsxCli = findTool(path.join("tsx", "dist", "cli.mjs"), nmRoots(root), "tsx");
-  workerChild = runNode(tsxCli, [path.join(root, "worker", "src", "index.ts")], { cwd: root, env: { MERRYMEN_HOME: HOME }, tag: "worker" });
+  workerChild = runNode(tsxCli, [path.join(root, "worker", "src", "index.ts")], { cwd: root, env: { MERRYMEN_HOME: HOME, MERRYMEN_PORT: String(PORT) }, tag: "worker" });
 }
 function startBackend() {
   startDashboard();

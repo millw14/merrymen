@@ -578,7 +578,11 @@ async function start() {
   // network access explicitly with MERRYMEN_HOST=0.0.0.0 (e.g. phone on your
   // home WiFi) — only on a network you trust.
   const host = process.env.MERRYMEN_HOST || "127.0.0.1";
-  const url = "http://localhost:3100";
+  // MERRYMEN_PORT override first: the CLI default stays 3100 (docs, bookmarks,
+  // Docker all assume it), but an exported port must win for the dashboard,
+  // the browser URL, and the worker's grant links alike.
+  const tavernPort = process.env.MERRYMEN_PORT?.trim() || "3100";
+  const url = `http://localhost:${tavernPort}`;
   await banner(workerOnly ? "the band rides out (headless)" : "the band rides out");
   const web = path.join(ROOT, "web");
   // Serve the prebuilt production app (next start), not dev-mode — the robust
@@ -616,7 +620,7 @@ async function start() {
   const specs = [
     ...(workerOnly
       ? []
-      : [{ name: "tavern", bin: localBin("next"), args: ["start", "-p", "3100", "-H", host], cwd: web, supervise: false }]),
+      : [{ name: "tavern", bin: localBin("next"), args: ["start", "-p", tavernPort, "-H", host], cwd: web, supervise: false }]),
     { name: "band  ", bin: localBin("tsx"), args: [path.join(ROOT, "worker", "src", "index.ts")], cwd: ROOT, supervise: true },
   ];
 

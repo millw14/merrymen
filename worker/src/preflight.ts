@@ -30,6 +30,7 @@ import {
   sellableAssets,
   type StoredGrant,
 } from "../../packages/core/src/index";
+import { dashboardBase } from "./telegram/reads";
 
 /** Mainnet. Anything else cannot execute a real swap — see the chain check. */
 export const TRADEABLE_CHAIN_ID = 4663;
@@ -155,7 +156,7 @@ export function preflight(input: PreflightInput): Check[] {
       id: "grant",
       level: "blocker",
       title: "no grant signed",
-      detail: "Sign one at http://localhost:3100/grant — that is what gives the agent its bounded key.",
+      detail: `Sign one at ${dashboardBase()}/grant — that is what gives the agent its bounded key.`,
     });
     return out; // every check below reads the grant
   }
