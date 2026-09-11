@@ -6,6 +6,15 @@ appId: dev.merrymen.desktop
 productName: merrymen
 copyright: merrymen
 
+# Update feed for electron-updater (read at RUNTIME, not build time — CI keeps
+# --publish never). Owner/repo overridable for fork-based testing:
+# MERRYMEN_UPDATE_OWNER=aor-rex + a test release on the fork validates the
+# whole flow without touching upstream. Defaults serve millw14/merrymen.
+publish:
+  provider: github
+  owner: ${env.MERRYMEN_UPDATE_OWNER-millw14}
+  repo: ${env.MERRYMEN_UPDATE_REPO-merrymen}
+
 # The whole point: bundle Node + merrymen + its deps so nothing is fetched at
 # runtime. asar is OFF because Next/tsx read many files from disk and don't run
 # cleanly from inside an asar archive (optimize later with asarUnpack if wanted).

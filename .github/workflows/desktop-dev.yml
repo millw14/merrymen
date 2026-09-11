@@ -1,0 +1,101 @@
+name: Desktop dev channel
+
+# Rolling prereleases for testing the in-app updater — NOT for users.
+#
+# Pushes to feat/desktop-* branches (or manual dispatch) build the Linux
+# AppImage and upsert it into ONE published prerelease (`desktop-dev`).
+# - Beta-channel test builds pointed here get offered each new build.
+# - Stable channel ignores it (prereleases are filtered out).
+# - Drafts are never offered by electron-updater, so keep this published.
+#
+# Version climbs per run (0.1.8-dev.<run_number>) via extraMetadata, so the
+# updater always sees forward motion. Nothing is committed for this — the
+# repo's version fields stay untouched.
+#
+# To retire: delete the `desktop-dev` release on GitHub. Fleet clients fall
+# back to "up to date" once no higher version resolves.
+
+on:
+  push:
+    branches:
+      - "feat/desktop-*"
+    paths:
+      - "desktop/**"
+      - "web/**"
+      - "worker/**"
+      - "packages/**"
+      - "cli/**"
+      - "package.json"
+  workflow_dispatch:
+    inputs:
+      suffix:
+        description: "Prerelease version suffix after 0.1.8- (default: dev.<run_number>)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write # upsert the rolling desktop-dev prerelease
+
+jobs:
+  dev-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install root deps + build dashboard
+        shell: bash
+        run: npm install
+
+      - name: Pack merrymen (symlink-free copy)
+        shell: bash
+        run: npm pack
+
+      - name: Install desktop deps
+        shell: bash
+        working-directory: desktop
+        run: |
+          npm install
+          npm install ../merrymen-*.tgz
+
+      - name: Resolve dev version
+        id: ver
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.suffix }}" ]; then
+            echo "version=0.1.8-${{ inputs.suffix }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.1.8-dev.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the AppImage
+        shell: bash
+        working-directory: desktop
+        run: npx --no-install electron-builder --linux --publish never --config.extraMetadata.version=${{ steps.ver.outputs.version }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upsert the rolling desktop-dev prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="desktop-dev"
+          # Drop the previous prerelease's assets (keep the release itself, so
+          # watchers get one thread, not a new one per build).
+          OLD_IDS=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" --jq '.assets[].id' 2>/dev/null || true)
+          if [ -z "$OLD_IDS" ]; then
+            gh release create "$TAG" --prerelease --title "Desktop dev builds (rolling)" \
+              --notes "Rolling prerelease for updater testing. Beta channel only; rebuilt on every push." \
+              --repo "${{ github.repository }}"
+          else
+            for id in $OLD_IDS; do
+              gh api -X DELETE "repos/${{ github.repository }}/releases/assets/$id" >/dev/null
+            done
+          fi
+          gh release upload "$TAG" desktop/dist/*.AppImage desktop/dist/latest-linux.yml desktop/dist/*.blockmap \
+            --repo "${{ github.repository }}" --clobber

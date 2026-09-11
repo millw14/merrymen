@@ -311,12 +311,34 @@ function trayMenu() {
   const paused = isPaused();
   return Menu.buildFromTemplate([
     { label: "Open dashboard", click: showWindow },
+    { label: `merrymen ${app.getVersion()}`, enabled: false },
     { type: "separator" },
     { label: `Agent: ${paused ? "PAUSED" : "running"}`, enabled: false },
     paused
       ? { label: "▶  Resume agent (allow trades)", click: () => { setPaused(false); refreshTray(); } }
       : { label: "⏸  Pause agent (no trades)", click: () => { setPaused(true); refreshTray(); } },
     { label: "↻  Restart agent", click: restartWorker },
+    { type: "separator" },
+    {
+      label:
+        updateState.status === "available"
+          ? `⬇  Download update ${updateState.version || ""}`.trim()
+          : updateState.status === "ready"
+            ? `↻  Restart to install ${updateState.version || "update"}`.trim()
+            : updateState.status === "checking" || updateState.status === "downloading"
+              ? "…  Checking for updates"
+              : "⟳  Check for updates",
+      click: () => void checkForUpdates(true),
+    },
+    {
+      label: "Beta channel (offer pre-releases)",
+      type: "checkbox",
+      checked: readDesktopPrefs().betaChannel,
+      click: (item) => {
+        writeDesktopPrefs({ betaChannel: item.checked });
+        refreshTray();
+      },
+    },
     { type: "separator" },
     {
       // Auto-start, via Electron's own login-item API rather than the CLI's
@@ -348,6 +370,123 @@ function makeTray() {
   refreshTray();
 }
 
+// ── updates (GitHub releases via electron-updater) ──────────────────────────
+// Manual-download only: we check (on boot, delayed + non-blocking, and from
+// the tray), but nothing downloads without an explicit click, and nothing
+// installs without an explicit restart. Drafts are never offered (the updater
+// only considers published releases); the beta channel additionally offers
+// published prereleases. Stable-only by default.
+const DESKTOP_PREFS = path.join(HOME, "desktop.json");
+function readDesktopPrefs() {
+  try {
+    const raw = require("node:fs").readFileSync(DESKTOP_PREFS, "utf8");
+    const p = JSON.parse(raw);
+    return { betaChannel: p.betaChannel === true };
+  } catch {
+    return { betaChannel: false };
+  }
+}
+function writeDesktopPrefs(prefs) {
+  try {
+    mkdirSync(HOME, { recursive: true });
+    writeFileSync(DESKTOP_PREFS, JSON.stringify({ betaChannel: !!prefs.betaChannel }, null, 2), "utf8");
+  } catch {
+    /* prefs are convenience — a failed write just doesn't stick */
+  }
+}
+let updateState = { status: "unchecked", version: null };
+function loadUpdater() {
+  try {
+    // Lazy: dev checkouts without the dep installed must still boot.
+    return require("electron-updater").autoUpdater;
+  } catch {
+    return null;
+  }
+}
+async function checkForUpdates(manual) {
+  const autoUpdater = loadUpdater();
+  if (!autoUpdater) {
+    if (manual) dialog.showMessageBoxSync({ type: "info", title: "merrymen — updates", message: "Updater unavailable in this build." });
+    return;
+  }
+  const beta = readDesktopPrefs().betaChannel;
+  autoUpdater.allowPrerelease = beta;
+  autoUpdater.autoDownload = false;
+  // Fork-based testing without touching upstream: point the feed at a fork
+  // that carries test releases. Unset = millw14/merrymen (the default).
+  if (process.env.MERRYMEN_UPDATE_OWNER || process.env.MERRYMEN_UPDATE_REPO) {
+    autoUpdater.setFeedURL({
+      provider: "github",
+      owner: process.env.MERRYMEN_UPDATE_OWNER || "millw14",
+      repo: process.env.MERRYMEN_UPDATE_REPO || "merrymen",
+    });
+  }
+  updateState = { status: "checking", version: null };
+  refreshTray();
+  try {
+    const found = await autoUpdater.checkForUpdates();
+    const info = found && found.updateInfo;
+    if (!info || info.version === app.getVersion()) {
+      updateState = { status: "current", version: null };
+      if (manual) {
+        dialog.showMessageBoxSync({ type: "info", title: "merrymen — updates", message: `You're on the latest version (${app.getVersion()}).` });
+      }
+    } else {
+      updateState = { status: "available", version: info.version };
+      const choice = dialog.showMessageBoxSync({
+        type: "question",
+        title: "merrymen — update available",
+        message: `Version ${info.version} is available (you have ${app.getVersion()}).`,
+        detail: "Download now? Nothing installs until you restart.",
+        buttons: ["Download", "Later"],
+        defaultId: 0,
+        cancelId: 1,
+      });
+      if (choice === 0) {
+        updateState = { status: "downloading", version: info.version };
+        refreshTray();
+        await autoUpdater.downloadUpdate();
+        // update-downloaded handler below prompts the restart.
+      } else {
+        refreshTray();
+      }
+    }
+  } catch (e) {
+    updateState = { status: "error", version: null };
+    if (manual) {
+      dialog.showMessageBoxSync({ type: "warning", title: "merrymen — updates", message: `Update check failed: ${e && e.message ? e.message : e}` });
+    }
+  }
+  refreshTray();
+}
+function wireUpdaterEvents() {
+  const autoUpdater = loadUpdater();
+  if (!autoUpdater || autoUpdater.__merrymenWired) return;
+  autoUpdater.__merrymenWired = true;
+  autoUpdater.on("update-downloaded", (info) => {
+    updateState = { status: "ready", version: (info && info.version) || null };
+    refreshTray();
+    const choice = dialog.showMessageBoxSync({
+      type: "question",
+      title: "merrymen — update ready",
+      message: `Version ${updateState.version || "new"} downloaded. Restart now to install?`,
+      buttons: ["Restart now", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (choice === 0) {
+      quitting = true;
+      autoUpdater.quitAndInstall(false, true);
+    }
+  });
+  autoUpdater.on("error", () => {
+    // Background-check noise stays out of the user's face; manual checks
+    // report their own errors in checkForUpdates.
+    updateState = { status: "error", version: null };
+    refreshTray();
+  });
+}
+
 // ── process control ──────────────────────────────────────────────────────────
 function killChild(c) {
   if (!c || c.killed) return;
@@ -377,6 +516,9 @@ if (!app.requestSingleInstanceLock()) {
       await waitForServer();
       makeMain();
       makeTray();
+      wireUpdaterEvents();
+      // Delayed background check: never blocks boot, never downloads alone.
+      setTimeout(() => void checkForUpdates(false), 90000);
     } catch (e) {
       dialog.showErrorBox("merrymen couldn't start", String(e && e.message ? e.message : e));
       quitting = true;
