@@ -29,7 +29,7 @@ const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-census-"));
 process.env.MERRYMEN_HOME = HOME;
 
 const { initStore, classCandidateCensus, recentCandidates, recordCandidate } = await import("./store");
-const { CASH } = await import("@merrymen/core");
+const { CASH } = await import("../../packages/core/src/index");
 
 await initStore();
 after(() => {

@@ -873,7 +873,15 @@ async function main() {
       const key = [...tally].sort().map(([r, n]) => `${n}×${r}`).join(" · ");
       if (key !== lastClassRefusalKey) {
         lastClassRefusalKey = key;
-        console.log(`[class] ${refused.length} candidate(s) considered, none taken — ${key}`);
+        // "none taken" ONLY when none were, which is not the same as "some were
+        // refused". The first version said it unconditionally and printed on
+        // any refusal, so a pass that refused 13 and found a perfectly good
+        // 14th read as a total washout — and the missing candidate then looks
+        // like a candidate that vanished, which is the one shape this route's
+        // logging must never invent. It cost me a search for a leak that was a
+        // sentence.
+        const outcome = legs.length === 0 ? "none taken" : `${legs.length} still in play`;
+        console.log(`[class] ${refused.length} of ${candidates.length} candidate(s) turned back, ${outcome} — ${key}`);
       }
     }
     if (legs.length === 0) return [];
@@ -4024,6 +4032,24 @@ async function main() {
             ...(grantV4Adapter(grant) ? { v4AdapterAddress: grantV4Adapter(grant)! } : {}),
             ...(grantPonsAdapter(grant) ? { ponsAdapterAddress: grantPonsAdapter(grant)! } : {}),
             ...(grantPonsClassVault(grant) ? { ponsClassVaultAddress: grantPonsClassVault(grant)! } : {}),
+            // THE FACTORY TRAVELS WITH THE VAULT, ALWAYS.
+            //
+            // Omitted here, and `wallShape` threw on its own two-of-three
+            // guard — the one that refuses a vault nothing can deploy. The
+            // throw was caught, so the only symptom was a log line saying the
+            // wall could not be sized, and the executor quietly fell back to
+            // the flat first-enable ceiling instead of this grant's measured
+            // envelope. Every other capability on this call is passed as a
+            // pair with its own accessor; the class route was passed as half
+            // of one.
+            //
+            // It matters most for exactly the agent it was breaking: the first
+            // class buy is the operation that carries the session-key enable,
+            // so the one trade whose ceiling has to be right is the one this
+            // fallback was sizing by guesswork.
+            ...(grantPonsClassVaultFactory(grant)
+              ? { ponsClassVaultFactoryAddress: grantPonsClassVaultFactory(grant)! }
+              : {}),
           }) as never,
         );
         const env = firstEnableEnvelope(shape);
