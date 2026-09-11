@@ -96,6 +96,50 @@ const OWNER_ACTION: ReadonlySet<RefuseRule> = new Set<RefuseRule>([
   "not-armed",
 ]);
 
+/**
+ * The headline and the button, PER RULE — because "the owner can fix it" and
+ * "the owner fixes it the same way" are different claims, and only the first is
+ * true of this set.
+ *
+ * Three distinct remedies hide in four rules:
+ *   dead-policy / not-armed  a fresh signature of the same shape — a renewal
+ *   wrong-chain              a signature on a DIFFERENT NETWORK; renewing on
+ *                            the current one is a guaranteed no-op, and the
+ *                            grant screen syncs its selector to the key being
+ *                            replaced, so the owner repeats it forever
+ *   grant-too-wide           a SMALLER wall; same network, same freshness, and
+ *                            still a no-op unless something is removed
+ */
+function ownerRemedy(rule: RefuseRule | "expired"): {
+  headline: string;
+  action: { label: string; kind: "renew-grant" | "add-funds" };
+} {
+  switch (rule) {
+    case "wrong-chain":
+      return {
+        headline: "Your Merryman's permission is for a different network.",
+        // Names the network, because the fix is to CHANGE one and the screen
+        // opens on the one being replaced.
+        action: { label: "Re-sign on Robinhood Chain", kind: "renew-grant" },
+      };
+    case "grant-too-wide":
+      return {
+        headline: "Your Merryman's permission covers too much to be installed.",
+        action: { label: "Sign a smaller permission", kind: "renew-grant" },
+      };
+    case "expired":
+      return {
+        headline: "Your Merryman's trading permission has expired.",
+        action: { label: "Renew permission", kind: "renew-grant" },
+      };
+    default:
+      return {
+        headline: "Your Merryman needs a free permission renewal to trade autonomously.",
+        action: { label: "Renew permission", kind: "renew-grant" },
+      };
+  }
+}
+
 export interface AutonomyInput {
   /** What the worker published: paper | live | idle. Null when never heard from. */
   mode: "paper" | "live" | "idle" | null;
@@ -121,6 +165,26 @@ export interface Autonomy {
   rule: RefuseRule | "expired" | null;
   /** True when the owner — and only the owner — can clear this. */
   needsOwnerAction: boolean;
+  /**
+   * The headline sentence for the blocked banner.
+   *
+   * HERE RATHER THAN IN THE SURFACE, because the surface printed ONE sentence —
+   * "Your Merryman needs a free permission renewal to trade autonomously" — for
+   * every rule in OWNER_ACTION, and it is false for two of them.
+   *
+   * A tester hit exactly that: his key was signed for another network, the
+   * banner told him to renew, renewing on the same network changed nothing, and
+   * the banner came back. He reported it as "I'm resigning but this banner keeps
+   * appearing", which is the shape of a remedy that cannot work being offered as
+   * the only one. `grant-too-wide` has the same defect, and exec-mode.ts says so
+   * in its own words: "re-signing the same wall changes nothing, so the owner
+   * has to sign a smaller one".
+   *
+   * A remedy that cannot fix the named cause is worse than no remedy: it costs
+   * the owner a signature, teaches them the product is broken, and hides the
+   * real fix.
+   */
+  headline: string | null;
   /** The button to render, when there is one worth rendering. */
   action: { label: string; kind: "renew-grant" | "add-funds" } | null;
   /**
@@ -149,26 +213,30 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
   const rule = normaliseRule(input.liveBlocker);
 
   if (input.expired === true) {
+    const remedy = ownerRemedy("expired");
     return {
       state: "blocked",
       label: "BLOCKED",
       reason: "this trading permission has expired, so the agent can no longer act for you",
       rule: "expired",
       needsOwnerAction: true,
-      action: { label: "Renew permission", kind: "renew-grant" },
+      headline: remedy.headline,
+      action: remedy.action,
       simulated: input.mode === "paper",
       moneyLabel: input.mode === "paper" ? SIMULATED_LABEL : REAL_LABEL,
     };
   }
 
   if (rule && OWNER_ACTION.has(rule)) {
+    const remedy = ownerRemedy(rule);
     return {
       state: "blocked",
       label: "BLOCKED",
       reason: liveBlockerText(rule),
       rule,
       needsOwnerAction: true,
-      action: { label: "Renew permission", kind: "renew-grant" },
+      headline: remedy.headline,
+      action: remedy.action,
       // A blocked agent is usually ALSO on paper, and its balance is still
       // simulated. Both facts are true and the owner needs both.
       simulated: input.mode === "paper",
@@ -186,6 +254,7 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
       reason: rule ? liveBlockerText(rule) : null,
       rule,
       needsOwnerAction: false,
+      headline: null,
       action: unfunded ? { label: "Add funds", kind: "add-funds" } : null,
       simulated: true,
       moneyLabel: SIMULATED_LABEL,
@@ -199,6 +268,7 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
       reason: null,
       rule: null,
       needsOwnerAction: false,
+      headline: null,
       action: null,
       simulated: false,
       moneyLabel: REAL_LABEL,
@@ -214,6 +284,7 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
     reason: rule ? liveBlockerText(rule) : null,
     rule,
     needsOwnerAction: false,
+    headline: null,
     action: input.realCashUsd === 0 ? { label: "Add funds", kind: "add-funds" } : null,
     simulated: false,
     moneyLabel: REAL_LABEL,

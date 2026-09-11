@@ -130,11 +130,21 @@ describe("the owner is told, in the shared vocabulary", () => {
     assert.ok(!say.includes("grant-too-wide"), "never the slug echoed back");
   });
 
-  it("RAISES THE RENEWAL CTA, because only the owner can fix it", () => {
+  it("RAISES AN OWNER SIGNATURE CTA — and one that says SMALLER, not just again", () => {
     const a = autonomyOf({ mode: "idle", liveBlocker: "grant-too-wide" });
     assert.equal(a.state, "blocked");
     assert.equal(a.needsOwnerAction, true);
-    assert.deepEqual(a.action, { label: "Renew permission", kind: "renew-grant" });
+    assert.equal(a.action?.kind, "renew-grant");
+    // THE LABEL CHANGED AND THE REASON IS IN THIS FILE'S OWN SUBJECT.
+    //
+    // It asserted `{label: "Renew permission"}`, which contradicted the rule it
+    // is testing: liveBlockerText says "Re-signing with fewer tokens or fewer
+    // venues fixes it", and exec-mode.ts says "re-signing the same wall changes
+    // nothing, so the owner has to sign a smaller one". A button reading
+    // "Renew permission" invites precisely the no-op both of those warn about.
+    assert.notEqual(a.action?.label, "Renew permission");
+    assert.match(a.action!.label, /smaller/i);
+    assert.ok(a.headline && !/free permission renewal/i.test(a.headline));
   });
 
   it("and never offers funding, which would change nothing", () => {

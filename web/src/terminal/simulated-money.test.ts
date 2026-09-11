@@ -91,7 +91,18 @@ describe("an owner who needs to re-sign is told so where the money is", () => {
   it("the renewal is rendered, and only when the owner alone can clear it", () => {
     const desktop = SURFACES["Desktop.tsx"];
     assert.match(desktop, /needsOwnerAction/, "the CTA must be gated on the verdict, not on mode");
-    assert.match(desktop, /free permission renewal/i, "the sentence the owner reads must be present");
+    // THE SENTENCE COMES FROM THE VERDICT NOW, and this assertion moved with it.
+    //
+    // It used to require the literal "free permission renewal" in this file.
+    // That pinned the surface to ONE sentence for every owner-clearable rule,
+    // which is exactly the defect a tester hit: told to renew a key whose
+    // problem was the network, he renewed, nothing changed, and the banner
+    // returned. Requiring the hardcoded string here would have kept the fix out.
+    assert.match(desktop, /autonomy\.headline/, "the headline takes its words from the verdict");
+    assert.ok(
+      !/free permission renewal/.test(desktop.replace(/\{\/\*[\s\S]*?\*\/\}/g, "")),
+      "no surface may hardcode a remedy — it cannot know which rule it is rendering",
+    );
     assert.match(desktop, /autonomy\.action\.label/, "the button takes its words from the verdict");
   });
 
