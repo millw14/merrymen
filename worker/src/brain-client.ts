@@ -92,6 +92,30 @@ export interface BrainDecision {
     confidence: number;
     evidence_strength: number;
   }[];
+  /**
+   * WHAT THE PORTFOLIO GATE DECIDED — carried from the Brain, never re-derived.
+   *
+   * The gate lives in `services/brain/brain/gate.py` and that is where it stays:
+   * a second implementation here is exactly what the canonical snapshot exists
+   * to prevent, and it would be a second opinion on whether a book may be sized.
+   * So the worker READS this and does not compute it.
+   *
+   * Optional because an older Brain build does not send it — and absent is
+   * carried as absent rather than defaulted, because "the service did not say"
+   * and "the gate was open" are different facts.
+   */
+  gate_verdict?: "proceed" | "downgrade-to-hold" | "refuse" | null;
+  gate_why?: string | null;
+  gate_caveat_count?: number | null;
+  /**
+   * WHY A HOLD WAS A HOLD. Null when the action was not a hold.
+   *
+   * `graph.py` applies a shut gate by overwriting `action, delta = "hold", 0`
+   * after parsing, so without this a gate-forced hold and a model's own hold
+   * are byte-identical. One agent held six times running and production could
+   * not say which kind any of them were.
+   */
+  hold_kind?: "MODEL_HOLD" | "GATE_FORCED_HOLD" | null;
   cost: BrainCost;
   models: { node: string; provider: string; model: string }[];
 }

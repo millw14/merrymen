@@ -935,3 +935,70 @@ def test_caveat_margin_is_not_spent_on_statements_that_were_never_true():
         shut = assess(book(quarantined_assets_present=True, **{third: False}))
         assert len(shut.caveats) == 3, (third, shut.caveats)
         assert not shut.may_size, f"{third} must still be able to force a hold"
+
+
+def test_a_forced_hold_is_distinguishable_from_a_chosen_one():
+    """
+    TWO HOLDS THAT MEANT OPPOSITE THINGS AND PRINTED THE SAME.
+
+    `graph.py` applies a shut gate by overwriting `action, delta = "hold", 0`
+    AFTER parsing — deliberately, because "a model told it may not size a
+    position will still sometimes size one, and the difference between 'asked
+    nicely' and 'cannot' is the whole point". Correct, and it meant a
+    gate-forced hold and a model's own considered hold were byte-identical in
+    the response.
+
+    One agent held six times running while its owner asked whether the product
+    was broken, and nothing outside this service could say whether it had
+    decided to hold or been forbidden from doing anything else. Those have
+    completely different remedies.
+    """
+    from brain.gate import assess
+    from brain.schemas import PortfolioQuality, PortfolioState
+
+    def book(**q):
+        base = dict(
+            audit_passed=None, contributions_known=True, equity_complete=True,
+            gas_basis="net", position_history_available=True,
+            quarantined_assets_present=False,
+            current_accounting_history_auditable=True, epoch=1,
+        )
+        base.update(q)
+        return PortfolioState(
+            snapshot_id="s", as_of=1, cash_usdg=300_000_000, equity_usdg=300_000_000,
+            net_contributions_usdg=300_000_000, pnl_publishable=True,
+            quality=PortfolioQuality(**base),
+        )
+
+    # The label is computed from exactly the `may_size` that forced the action,
+    # so the two cannot drift. This mirrors graph.py's expression.
+    def hold_kind(gate, action):
+        if action != "hold":
+            return None
+        return "MODEL_HOLD" if gate.may_size else "GATE_FORCED_HOLD"
+
+    open_gate = assess(book())
+    assert open_gate.may_size
+    assert hold_kind(open_gate, "hold") == "MODEL_HOLD", (
+        "an open gate means the model chose this"
+    )
+
+    # Three real problems shut it, and the hold is then not the model's.
+    shut = assess(book(equity_complete=False, quarantined_assets_present=True))
+    assert not shut.may_size
+    assert hold_kind(shut, "hold") == "GATE_FORCED_HOLD"
+
+    # A refusal is also not the model's choice.
+    refused = assess(book(contributions_known=False))
+    assert refused.verdict == "refuse"
+    assert hold_kind(refused, "hold") == "GATE_FORCED_HOLD"
+
+    # And the distinction is only about holds — a buy is a buy.
+    assert hold_kind(open_gate, "buy") is None
+
+    # THE VERDICT AND ITS REASON TRAVEL TOO, so telemetry says why and not
+    # merely that. A gate that forces a hold without naming a reason is the
+    # silence this whole line of work exists to remove.
+    assert shut.why and len(shut.why) > 0
+    assert refused.why and len(refused.why) > 0
+    assert len(shut.caveats) == 3

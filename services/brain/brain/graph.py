@@ -514,6 +514,22 @@ class BrainGraph:
             expected_edge_usdg=edge,
             economics=economics,
             expected_trade_gas_usdg=req.market.expected_trade_gas_usdg,
+            # THE GATE'S VERDICT, CARRIED OUT. See BrainDecision.gate_verdict.
+            #
+            # `hold_kind` is computed from the same `gate.may_size` that forced
+            # the action above, in the same scope, so the label and the coercion
+            # cannot drift: if the gate shut it, it is GATE_FORCED_HOLD, and if
+            # the model chose to hold with the gate open it is MODEL_HOLD. Null
+            # for anything that is not a hold, because the distinction is only
+            # about holds.
+            gate_verdict=gate.verdict,
+            gate_why=gate.why,
+            gate_caveat_count=len(gate.caveats),
+            hold_kind=(
+                None
+                if action != "hold"
+                else ("MODEL_HOLD" if gate.may_size else "GATE_FORCED_HOLD")
+            ),
             cost=budget.cost(),
             models=budget.models,
         )

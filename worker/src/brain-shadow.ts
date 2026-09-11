@@ -154,6 +154,25 @@ export function buildShadowSnapshot(i: ShadowInputs): PortfolioSnapshot {
 }
 
 /**
+ * MODEL_HOLD OR GATE_FORCED_HOLD, as a tag on the action itself.
+ *
+ * The distinction has to be on the line a reader actually scans. An owner
+ * asking "why is my agent not trading" is answered completely differently by
+ * "it looked and decided not to" and "it was not permitted to size anything",
+ * and until now both printed as plain HOLD.
+ *
+ * Empty when the Brain did not report — an older build, or a non-hold action.
+ * Absent is rendered as absent rather than guessed, because "the service did
+ * not say" is not the same as "the gate was open".
+ */
+function holdKindTag(d: { action: string; hold_kind?: string | null }): string {
+  if (d.action !== "hold") return "";
+  if (d.hold_kind === "GATE_FORCED_HOLD") return "[GATE_FORCED]";
+  if (d.hold_kind === "MODEL_HOLD") return "[MODEL]";
+  return "[kind-unreported]";
+}
+
+/**
  * Run one shadow decision, if anything is worth thinking about.
  *
  * Returns without calling Brain when the trigger says nothing changed — which
@@ -393,13 +412,23 @@ async function persist(
     )
     .join(" ");
   log(
-    `[brain] ${d.action.toUpperCase()} ${d.symbol} conf=${d.confidence.toFixed(2)} ` +
+    `[brain] ${d.action.toUpperCase()}${holdKindTag(d)} ${d.symbol} conf=${d.confidence.toFixed(2)} ` +
       `delta=${d.suggested_delta_usdg} · depth=${d.depth_used}` +
       (d.escalation_reasons.length ? ` (escalated: ${d.escalation_reasons.join(", ")})` : "") +
       ` · ${d.cost.model_calls} calls ${d.cost.tokens_in + d.cost.tokens_out} tok ` +
       `$${d.cost.usd.toFixed(4)} ${result.seconds.toFixed(1)}s · decision ${d.decision_id}`,
   );
   if (lenses) log(`[brain] lenses ${lenses}`);
+  // THE GATE, ON ITS OWN LINE, because "the model chose to hold" and "the book
+  // was not allowed to be sized" are different events with different remedies
+  // and they used to render identically. `may_size` is the gate's own property
+  // (verdict === "proceed"), read rather than recomputed here.
+  log(
+    `[brain] gate ${d.gate_verdict ?? "not-reported"}` +
+      ` may_size=${d.gate_verdict === undefined || d.gate_verdict === null ? "unknown" : d.gate_verdict === "proceed"}` +
+      ` caveats=${d.gate_caveat_count ?? "unknown"}` +
+      (d.gate_why ? ` · ${d.gate_why}` : ""),
+  );
   log(
     `[brain] economics ${d.economics ?? "unknown"} · edge ${d.expected_edge_usdg ?? "—"} vs gas ` +
       `${d.expected_trade_gas_usdg ?? "unpriced"} micro-USDG (advisory; nothing enforces it yet)`,

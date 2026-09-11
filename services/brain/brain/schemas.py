@@ -262,6 +262,26 @@ class BrainDecision(BaseModel):
     economics: Literal["viable", "marginal", "uneconomic", "unknown"] = "unknown"
     #: The marginal gas this verdict was reached against, micro-USDG.
     expected_trade_gas_usdg: int | None = None
+    #: WHAT THE PORTFOLIO GATE DECIDED, carried out so it can be observed.
+    #:
+    #: `assess` is pure and its verdict shaped everything downstream, but it
+    #: never left this process — and `graph.py` applies a shut gate by
+    #: overwriting `action, delta = "hold", 0` AFTER parsing, deliberately,
+    #: because a model told it may not size will still sometimes size one. The
+    #: consequence was that a gate-forced hold and a model's own considered hold
+    #: were byte-identical in the response. One agent held six times running and
+    #: nothing outside this service could say which kind any of them were.
+    #:
+    #: Carried, not re-derived: the gate keeps its single home here, and the
+    #: worker reads the verdict rather than growing a second opinion about
+    #: whether a book may be sized.
+    gate_verdict: Literal["proceed", "downgrade-to-hold", "refuse"] | None = None
+    #: The gate's own sentence, so telemetry says WHY and not merely that.
+    gate_why: str | None = None
+    #: How many quality caveats it counted. Three is the downgrade threshold.
+    gate_caveat_count: int | None = None
+    #: THE ONE FIELD THIS EXISTS FOR. Null when the action is not a hold.
+    hold_kind: Literal["MODEL_HOLD", "GATE_FORCED_HOLD"] | None = None
     cost: Cost
     models: list[ModelUse] = Field(default_factory=list)
 
