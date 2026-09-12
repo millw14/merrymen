@@ -11,7 +11,7 @@ shares the same home (`~/.merrymen`), so it's fully interchangeable with
 Electron ships its own Node runtime. On launch, `main.js`:
 1. shows a splash,
 2. spawns the dashboard (`next start`) + agent worker (`tsx`) using Electron-as-Node,
-3. waits for `127.0.0.1:3100`,
+3. waits for `127.0.0.1:17430`,
 4. loads it in a native window.
 
 The `merrymen` npm package is a dependency, so `npm install` pulls the **prebuilt**
@@ -63,7 +63,9 @@ and I'll add it.
 
 - Data home is `~/.merrymen` (shared with the CLI). Change `HOME` in `main.js` to
   isolate the app's data instead.
-- Port is `3100`. If it's taken, the app waits and times out — make it configurable
+- Port is `17430` (override with `MERRYMEN_PORT`). The CLI dashboard stays on
+  `3100` — the desktop deliberately lives elsewhere so the two never fight.
+  If the port's taken, the app offers Retry or Quit instead of failing silent.
   if you expect conflicts.
 - `asar: false` keeps Next/tsx happy (they read files from disk). The installer is
   larger (~200–300 MB) because it bundles Node + all deps — that's the tradeoff for

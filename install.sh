@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # merrymen installer for macOS/Linux — installs Node (if needed) + merrymen.
 #
+# For the desktop app (bundled Electron AppImage), see desktop/install.sh
+# instead — this script installs the CLI only.
+#
 #   curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | bash
 #
 # Safe to re-run. Installs Node only via a package manager you already have

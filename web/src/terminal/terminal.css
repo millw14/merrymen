@@ -4815,6 +4815,23 @@
 :where(.terminal-host) .desktop-portfolio {
   display: none;
 }
+/* ── middle tier: tablets + small windows (700–1099px) ────────────────────────
+ * Below 1100 there is no desktop rail/sidebar — App.tsx switches layout by
+ * matchMedia("(min-width: 1100px)"). Without this tier the phone column
+ * (430px) floats centered in an ocean of background on any tablet or small
+ * laptop window. One rule: the column grows with the viewport and the
+ * floating chrome (tab bar, bottom sheets, fades, chat dock) follows it.
+ * Phone (<700) keeps the 430 column; desktop (≥1100) is untouched — the
+ * explicit range means this can never leak across either boundary no matter
+ * the source order. Inner content needs no changes: forms already cap at
+ * 820 with 2-col grids; it was always the outer column starving them. */
+@media (min-width: 700px) and (max-width: 1099.98px) {
+  :where(.terminal-host) .app { max-width: 720px; }
+  :where(.terminal-host) .tabbar { max-width: 560px; }
+  :where(.terminal-host) .token-body::after { max-width: 720px; }
+  :where(.terminal-host) .feed-sheet { max-width: 720px; }
+  :where(.terminal-host) .desk-chat-bottom { max-width: 680px; }
+}
 @media (min-width: 1100px) {
   .terminal-host,
   .terminal-host,

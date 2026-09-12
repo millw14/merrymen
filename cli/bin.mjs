@@ -569,18 +569,27 @@ async function start() {
   ensureHome();
   warnIfOldNode();
   const noOpen = process.argv.includes("--no-open");
+  // Headless mode: run the supervised worker without the dashboard. The tavern
+  // is never booted (no port bound, no first-run build), so this fits a VPS or
+  // a terminal you close — the band keeps playing without a room.
+  const workerOnly = process.argv.includes("--worker-only");
   // Bind localhost-only by default: the dashboard has no login and holds your
   // trading controls, so it must not be reachable from the LAN. Opt into
   // network access explicitly with MERRYMEN_HOST=0.0.0.0 (e.g. phone on your
   // home WiFi) — only on a network you trust.
   const host = process.env.MERRYMEN_HOST || "127.0.0.1";
-  const url = "http://localhost:3100";
-  await banner("the band rides out");
+  // MERRYMEN_PORT override first: the CLI default stays 3100 (docs, bookmarks,
+  // Docker all assume it), but an exported port must win for the dashboard,
+  // the browser URL, and the worker's grant links alike.
+  const tavernPort = process.env.MERRYMEN_PORT?.trim() || "3100";
+  const url = `http://localhost:${tavernPort}`;
+  await banner(workerOnly ? "the band rides out (headless)" : "the band rides out");
   const web = path.join(ROOT, "web");
   // Serve the prebuilt production app (next start), not dev-mode — the robust
   // distribution model. If the build is missing (a source install where the
-  // prepare hook didn't run), build it once under a spinner.
-  if (!existsSync(path.join(web, ".next", "BUILD_ID"))) {
+  // prepare hook didn't run), build it once under a spinner. Skipped entirely
+  // in --worker-only: the tavern never boots, so never build it.
+  if (!workerOnly && !existsSync(path.join(web, ".next", "BUILD_ID"))) {
     try {
       await withSpinner("raising the tavern (first-run build, ~15s)", async () => {
         const b = toolSpawn(localBin("next"), ["build"], { cwd: web }, true);
@@ -594,7 +603,7 @@ async function start() {
 
   let opened = false;
   const openOnce = () => {
-    if (opened || noOpen) return;
+    if (opened || noOpen || workerOnly) return;
     opened = true;
     console.log(`\n  ${c.green(c.arrow)} tavern's open — ${c.bold(url)} ${dim("(opening your browser…)")}\n`);
     openBrowser(url);
@@ -609,7 +618,9 @@ async function start() {
   let bandRestarts = 0;
 
   const specs = [
-    { name: "tavern", bin: localBin("next"), args: ["start", "-p", "3100", "-H", host], cwd: web, supervise: false },
+    ...(workerOnly
+      ? []
+      : [{ name: "tavern", bin: localBin("next"), args: ["start", "-p", tavernPort, "-H", host], cwd: web, supervise: false }]),
     { name: "band  ", bin: localBin("tsx"), args: [path.join(ROOT, "worker", "src", "index.ts")], cwd: ROOT, supervise: true },
   ];
 
@@ -1543,6 +1554,7 @@ switch (cmd) {
   ${bold("merrymen setup")}          check your rig — node, npm, PATH (with fixes)
   ${bold("merrymen onboard")}        gather the band (keys, strategy, basket)
   ${bold("merrymen start")}          open the tavern (localhost:3100) + loose the worker
+  ${bold("merrymen start --worker-only")}  headless band, no dashboard (VPS-friendly)
   ${bold("merrymen doctor")}         muster check — node/keys/RPC/bundler/grant/db
   ${bold("merrymen status")}         what the band's up to — heartbeat, grant, trades, equity
   ${bold("merrymen strategy new")}   forge your own outlaw in ~/.merrymen/strategies

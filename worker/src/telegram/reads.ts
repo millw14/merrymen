@@ -30,6 +30,17 @@ function usd(n: number): string {
 }
 
 /**
+ * Dashboard base URL for signpost links. The desktop app spawns the worker
+ * with MERRYMEN_PORT set to its dashboard port (default 17430); the CLI
+ * dashboard stays on 3100, so unset means 3100. One source — every grant
+ * link in chat follows whichever dashboard actually serves this worker.
+ */
+export function dashboardBase(): string {
+  const port = Number(process.env.MERRYMEN_PORT) || 3100;
+  return `http://localhost:${port}`;
+}
+
+/**
  * Whose numbers these are. merrymen is one agent per install, but re-granting
  * mints a NEW smart account and leaves the old one's rows in the same tables —
  * and every figure in this file used to read the lot, unfiltered, so two
@@ -807,8 +818,12 @@ const WALLET_TEXT_LINES = [
   "Why not here? Your owner key never touches chat — wallet actions stay on your machine.",
 ];
 
-/** The signpost alone, for callers with no ledger to read. */
-export const WALLET_TEXT = WALLET_TEXT_LINES.join("\n");
+/** The signpost alone, for callers with no ledger to read. Resolved against the
+ * live dashboard port at import — the worker process env is set at spawn,
+ * before any import runs, so this follows MERRYMEN_PORT like everything else. */
+export const WALLET_TEXT = WALLET_TEXT_LINES.map((l) =>
+  l.split("http://localhost:3100").join(dashboardBase()),
+).join("\n");
 
 /**
  * `/wallet`, leading with the ONE fact that resolves the confusion: the address.
