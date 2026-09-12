@@ -17,7 +17,7 @@
  * kill switch. Data lives in ~/.merrymen (shared with the CLI).
  */
 
-const { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog } = require("electron");
+const { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog, ipcMain } = require("electron");
 const { spawn } = require("node:child_process");
 const { accessSync, constants, cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } = require("node:fs");
 const http = require("node:http");
@@ -87,6 +87,7 @@ const APP_DIR = ensureWritableApp();
 const BOOT_SENTINELS = [
   "build/icon.png",
   "loading.html",
+  "preload.js",
   "node_modules/merrymen/package.json",
   "node_modules/merrymen/worker/src/index.ts",
 ];
@@ -391,9 +392,11 @@ function makeMain() {
     backgroundColor: "#0b0b0d",
     title: "merrymen",
     icon: ICON,
-    // Renderer stays fully sandboxed: no Node, isolated context, no preload. Even
-    // a compromised dashboard page can't reach the host — it's just a web view.
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    // Renderer stays fully sandboxed: no Node, isolated context. The ONLY
+    // privileged surface is preload.js (thin contextBridge forwarding) — even
+    // a compromised dashboard page holds nothing else. Browser/CLI users never
+    // load it, so their UI must gate on `window.merrymenDesktop` existing.
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, preload: path.join(__dirname, "preload.js") },
   });
   mainWin.loadURL(`http://${HOST}:${PORT}`);
   mainWin.once("ready-to-show", () => {
@@ -524,7 +527,7 @@ function writeDesktopPrefs(prefs) {
     /* prefs are convenience — a failed write just doesn't stick */
   }
 }
-let updateState = { status: "unchecked", version: null };
+let updateState = { status: "unchecked", version: null, percent: null };
 function loadUpdater() {
   try {
     // Lazy: dev checkouts without the dep installed must still boot.
@@ -533,12 +536,15 @@ function loadUpdater() {
     return null;
   }
 }
-async function checkForUpdates(manual) {
+/**
+ * Dialog-free update check: the shared core behind the tray dialogs AND the
+ * dashboard control surface (desktop IPC). Returns {ok} / {ok:false, reason};
+ * the resulting updateState is the single source both callers read. Tray
+ * behavior is byte-for-byte what it was — see checkForUpdates below.
+ */
+async function checkForUpdatesCore() {
   const autoUpdater = loadUpdater();
-  if (!autoUpdater) {
-    if (manual) dialog.showMessageBoxSync({ type: "info", title: "merrymen — updates", message: "Updater unavailable in this build." });
-    return;
-  }
+  if (!autoUpdater) return { ok: false, reason: "unavailable" };
   const beta = readDesktopPrefs().betaChannel;
   autoUpdater.allowPrerelease = beta;
   autoUpdater.autoDownload = false;
@@ -551,40 +557,61 @@ async function checkForUpdates(manual) {
       repo: process.env.MERRYMEN_UPDATE_REPO || "merrymen",
     });
   }
-  updateState = { status: "checking", version: null };
+  updateState = { status: "checking", version: null, percent: null };
   refreshTray();
   try {
     const found = await autoUpdater.checkForUpdates();
     const info = found && found.updateInfo;
     if (!info || info.version === app.getVersion()) {
-      updateState = { status: "current", version: null };
-      if (manual) {
-        dialog.showMessageBoxSync({ type: "info", title: "merrymen — updates", message: `You're on the latest version (${app.getVersion()}).` });
-      }
+      updateState = { status: "current", version: null, percent: null };
     } else {
-      updateState = { status: "available", version: info.version };
-      const choice = dialog.showMessageBoxSync({
-        type: "question",
-        title: "merrymen — update available",
-        message: `Version ${info.version} is available (you have ${app.getVersion()}).`,
-        detail: "Download now? Nothing installs until you restart.",
-        buttons: ["Download", "Later"],
-        defaultId: 0,
-        cancelId: 1,
-      });
-      if (choice === 0) {
-        updateState = { status: "downloading", version: info.version };
-        refreshTray();
-        await autoUpdater.downloadUpdate();
-        // update-downloaded handler below prompts the restart.
-      } else {
-        refreshTray();
-      }
+      updateState = { status: "available", version: info.version, percent: null };
     }
   } catch (e) {
-    updateState = { status: "error", version: null };
+    updateState = { status: "error", version: null, percent: null };
+    refreshTray();
+    return { ok: false, reason: String((e && e.message) || e) };
+  }
+  refreshTray();
+  return { ok: true };
+}
+async function checkForUpdates(manual) {
+  const autoUpdater = loadUpdater();
+  if (!autoUpdater) {
+    if (manual) dialog.showMessageBoxSync({ type: "info", title: "merrymen — updates", message: "Updater unavailable in this build." });
+    return;
+  }
+  const r = await checkForUpdatesCore();
+  if (!r.ok) {
+    if (manual) dialog.showMessageBoxSync({ type: "warning", title: "merrymen — updates", message: `Update check failed: ${r.reason}` });
+    return;
+  }
+  if (updateState.status === "current") {
     if (manual) {
-      dialog.showMessageBoxSync({ type: "warning", title: "merrymen — updates", message: `Update check failed: ${e && e.message ? e.message : e}` });
+      dialog.showMessageBoxSync({ type: "info", title: "merrymen — updates", message: `You're on the latest version (${app.getVersion()}).` });
+    }
+  } else if (updateState.status === "available") {
+    const choice = dialog.showMessageBoxSync({
+      type: "question",
+      title: "merrymen — update available",
+      message: `Version ${updateState.version} is available (you have ${app.getVersion()}).`,
+      detail: "Download now? Nothing installs until you restart.",
+      buttons: ["Download", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (choice === 0) {
+      updateState = { status: "downloading", version: updateState.version, percent: 0 };
+      refreshTray();
+      try {
+        await autoUpdater.downloadUpdate();
+      } catch (e) {
+        updateState = { status: "error", version: null, percent: null };
+        if (manual) dialog.showMessageBoxSync({ type: "warning", title: "merrymen — updates", message: `Update check failed: ${String((e && e.message) || e)}` });
+      }
+      // update-downloaded handler below prompts the restart.
+    } else {
+      refreshTray();
     }
   }
   refreshTray();
@@ -594,7 +621,7 @@ function wireUpdaterEvents() {
   if (!autoUpdater || autoUpdater.__merrymenWired) return;
   autoUpdater.__merrymenWired = true;
   autoUpdater.on("update-downloaded", (info) => {
-    updateState = { status: "ready", version: (info && info.version) || null };
+    updateState = { status: "ready", version: (info && info.version) || null, percent: 100 };
     refreshTray();
     const choice = dialog.showMessageBoxSync({
       type: "question",
@@ -612,9 +639,81 @@ function wireUpdaterEvents() {
   autoUpdater.on("error", () => {
     // Background-check noise stays out of the user's face; manual checks
     // report their own errors in checkForUpdates.
-    updateState = { status: "error", version: null };
+    updateState = { status: "error", version: null, percent: null };
     refreshTray();
   });
+  // Progress feeds updateState only — the tray shows no percent, so no
+  // refreshTray churn here; dashboard pollers read it via desktop:get-state.
+  autoUpdater.on("download-progress", (p) => {
+    if (updateState.status === "downloading") {
+      updateState.percent = Math.round((p && p.percent) || 0);
+    }
+  });
+}
+
+// ── desktop IPC: the in-dashboard control surface ──────────────────────────
+// Same backends the tray drives (updateState, prefs, pause, worker, quit) —
+// data instead of dialogs. No new backend logic; the renderer polls get-state
+// (5s while an update is active, 20s idle) instead of push events.
+function desktopSnapshot() {
+  return {
+    status: updateState.status,
+    version: updateState.version,
+    percent: typeof updateState.percent === "number" ? updateState.percent : null,
+    appVersion: app.getVersion(),
+    beta: readDesktopPrefs().betaChannel,
+    paused: isPaused(),
+  };
+}
+function wireDesktopIpc() {
+  ipcMain.handle("desktop:get-state", () => desktopSnapshot());
+  ipcMain.handle("desktop:check", async () => {
+    await checkForUpdatesCore();
+    return desktopSnapshot();
+  });
+  ipcMain.handle("desktop:download", async () => {
+    const autoUpdater = loadUpdater();
+    if (autoUpdater && updateState.status === "available") {
+      updateState = { status: "downloading", version: updateState.version, percent: 0 };
+      refreshTray();
+      try {
+        await autoUpdater.downloadUpdate();
+      } catch {
+        updateState = { status: "error", version: null, percent: null };
+        refreshTray();
+      }
+    }
+    return desktopSnapshot();
+  });
+  ipcMain.handle("desktop:install", () => {
+    const autoUpdater = loadUpdater();
+    if (autoUpdater && updateState.status === "ready") {
+      quitting = true;
+      autoUpdater.quitAndInstall(false, true);
+    }
+    return desktopSnapshot();
+  });
+  ipcMain.handle("desktop:get-beta", () => readDesktopPrefs().betaChannel);
+  ipcMain.handle("desktop:set-beta", (_e, on) => {
+    writeDesktopPrefs({ betaChannel: on === true });
+    refreshTray();
+    return readDesktopPrefs().betaChannel;
+  });
+  ipcMain.handle("desktop:get-paused", () => isPaused());
+  ipcMain.handle("desktop:set-paused", (_e, paused) => {
+    setPaused(paused === true);
+    refreshTray();
+    return isPaused();
+  });
+  ipcMain.handle("desktop:restart-worker", () => {
+    restartWorker();
+    return true;
+  });
+  ipcMain.handle("desktop:quit", () => {
+    quitting = true;
+    app.quit();
+  });
+  ipcMain.handle("desktop:app-version", () => app.getVersion());
 }
 
 // ── process control ──────────────────────────────────────────────────────────
@@ -649,6 +748,7 @@ if (!app.requestSingleInstanceLock()) {
       makeMain();
       makeTray();
       wireUpdaterEvents();
+      wireDesktopIpc();
       // Delayed background check: never blocks boot, never downloads alone.
       setTimeout(() => void checkForUpdates(false), 90000);
     } catch (e) {

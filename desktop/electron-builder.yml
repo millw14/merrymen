@@ -28,6 +28,7 @@ directories:
 # The prebuilt dashboard (merrymen/web/.next) and the worker source ride along.
 files:
   - main.js
+  - preload.js
   - loading.html
   - build/icon.png # bundled at RUNTIME too — used for the window + tray icon
   - "node_modules/**/*"
