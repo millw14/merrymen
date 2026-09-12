@@ -30,7 +30,7 @@ import {
   type MerrymenSettings,
   type StoredGrant,
 } from "@merrymen/core";
-import { planRecovery, recoverFunds } from "@merrymen/recover";
+import { ownerFromPrivateKey, planRecovery, recoverFunds } from "@merrymen/recover";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -99,7 +99,7 @@ export async function GET() {
   try {
     const plan = await planRecovery({
       chain: chainForId(chainId),
-      ownerPrivateKey: grant.demoOwnerPrivateKey,
+      owner: ownerFromPrivateKey(grant.demoOwnerPrivateKey),
       rpcUrl: rpcFor(settings, chainId),
       expectedSmartAccount: grant.smartAccount,
       // The owner's own tokens, including every quarantined scout buy. Without
@@ -159,7 +159,7 @@ export async function POST(req: Request) {
     if (mode === "plan") {
       const plan = await planRecovery({
         chain: chainForId(chainId),
-        ownerPrivateKey: ownerKey,
+        owner: ownerFromPrivateKey(ownerKey),
         rpcUrl,
         expectedSmartAccount: expected,
         extraTokens: settings.customTokens ?? [],
@@ -189,7 +189,7 @@ export async function POST(req: Request) {
     }
     const res = await recoverFunds({
       chain: chainForId(chainId),
-      ownerPrivateKey: ownerKey,
+      owner: ownerFromPrivateKey(ownerKey),
       bundlerUrl,
       rpcUrl,
       to: body.to,

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { listSavedWallets } from "@/lib/session";
 import { isAddr, normalizeAddr } from "@/lib/address";
 import { planFromBrowser, sweepFromBrowser, redact, type BrowserWallet } from "@/lib/recover-client";
+import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 
 /**
  * "Get my money out" — the one-click counterpart to `merrymen recover`.
@@ -100,6 +101,14 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
   const [loadingCtx, setLoadingCtx] = useState(false);
 
   const [ownerKey, setOwnerKey] = useState(initialOwnerKey);
+  /**
+   * The signed-in embedded wallet, or null for a browser-key wallet.
+   *
+   * Null is the legacy path unchanged — every branch below falls back to the
+   * pasted/stored key exactly as before, so this cannot alter recovery for a
+   * wallet that has a key.
+   */
+  const privyOwner = usePrivyOwner();
   const [chainId, setChainId] = useState<number>(MAINNET);
   const [plan, setPlan] = useState<PlanRes | null>(null);
 
@@ -130,6 +139,31 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
    * empty form and one red line.
    */
   function browserWallet(): BrowserWallet | null {
+    // A PRIVY-OWNED AGENT HAS NO KEY, AND ASKING FOR ONE STRANDS IT.
+    //
+    // Its owner is an embedded wallet whose key is never exported — the point of
+    // it — so this form used to demand something that does not exist and the
+    // account could not be recovered at all. `usePrivyOwner` hands back a viem
+    // LocalAccount that signs without exposing anything, which is the same
+    // signer minting already uses for this owner.
+    if (privyOwner) {
+      const saved = (() => {
+        try {
+          return listSavedWallets().find(
+            (w) => w.smartAccount.toLowerCase() === (smartAccount ?? "").toLowerCase(),
+          );
+        } catch {
+          return undefined;
+        }
+      })();
+      if (!smartAccount) return null;
+      return {
+        smartAccount: smartAccount as `0x${string}`,
+        ownerAccount: privyOwner.account,
+        chainId: saved?.chainId ?? chainId,
+        grantTokens: (saved as { grantTokens?: string[] } | undefined)?.grantTokens,
+      };
+    }
     const key = ownerKey.trim();
     if (!isKey(key)) return null;
     // Prefer the stored wallet, so grantTokens (and therefore the sweep list)
@@ -383,7 +417,13 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
       ) : (
         <>
           {/* Killed/expired: no stored key — ask for the backed-up one. */}
-          {ctx && !ctx.hasStoredKey && !plan && (
+          {ctx && !ctx.hasStoredKey && !plan && privyOwner && (
+            <p className="recover-sub">
+              Recovery will be authorised by your signed-in wallet. There is no key to enter — your
+              embedded wallet signs it, and merrymen never sees it.
+            </p>
+          )}
+          {ctx && !ctx.hasStoredKey && !plan && !privyOwner && (
             <>
               <p className="recover-sub">
                 Enter the recovery key you saved when creating this wallet.

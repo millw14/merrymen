@@ -28,7 +28,8 @@ import {
   type Address,
   type Chain,
 } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+import { privateKeyToAccount, toAccount } from "viem/accounts";
+import type { LocalAccount } from "viem";
 import { createKernelAccount, createKernelAccountClient } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
@@ -240,14 +241,125 @@ export async function classifyBalance(io: {
 }
 
 /**
- * Rebuild the smart account from the owner key and read what it holds. Read-only
+ * WHO AUTHORISES A RECOVERY — a signer, not a key.
+ *
+ * This module took a raw `ownerPrivateKey` because there was only one kind of
+ * owner: a keypair generated in a browser or written to ~/.merrymen. A hosted
+ * agent owned by a PRIVY EMBEDDED WALLET has no such key and never will — the
+ * whole point of it — so those accounts were structurally unrecoverable by the
+ * one path that exists to get money out. Measured 2026-09-12 on a funded
+ * account holding 1,063,408.141815 DOGGOS.
+ *
+ * `web/src/lib/session.ts:199` already solved this for MINTING, with the same
+ * shape and for the same reason; this is that seam reaching recovery.
+ *
+ * NOT AN EIP-1193 PROVIDER, and that is load-bearing rather than stylistic.
+ * ZeroDev's `toSigner` resolves a provider's address with
+ * `Promise.any([eth_requestAccounts, eth_accounts])` and takes [0] — whichever
+ * RPC answers first. The owner address is the ONLY free variable in the Kernel
+ * CREATE2 preimage, so that race would decide which account you derive, and on
+ * a recovery path deriving the wrong account means signing a sweep of an empty
+ * one while the real funds sit untouched. Privy's `toViemAccount({ wallet })`
+ * returns a LocalAccount with a fixed address instead; `usePrivyOwner` already
+ * does this and refuses rather than guessing.
+ */
+export type RecoveryOwner =
+  /** A browser- or disk-held key. The existing CLI path. */
+  | { kind: "private-key"; privateKey: `0x${string}` }
+  /** A LocalAccount that signs without exposing a key — a Privy embedded wallet. */
+  | { kind: "signer"; account: LocalAccount }
+  /**
+   * An ADDRESS ONLY, which can derive but never sign.
+   *
+   * This is what keeps the planner honest: reconstruction needs the owner's
+   * address and nothing more, so a read-only caller can prove which account an
+   * owner controls without holding anything capable of authorising a transfer.
+   * `recoverFunds` refuses it before it touches a bundler.
+   */
+  | { kind: "address"; address: Address };
+
+export const ownerFromPrivateKey = (privateKey: `0x${string}`): RecoveryOwner => ({
+  kind: "private-key",
+  privateKey,
+});
+export const ownerFromSigner = (account: LocalAccount): RecoveryOwner => ({ kind: "signer", account });
+export const ownerFromAddress = (address: Address): RecoveryOwner => ({ kind: "address", address });
+
+/**
+ * The viem account the Kernel derivation reads its address from.
+ *
+ * For `address` the signing methods throw rather than returning something
+ * plausible: derivation only ever reads `.address` (the validator's
+ * `getEnableData` returns exactly that), so a stub is enough to reconstruct —
+ * and anything that tries to SIGN with it must fail loudly rather than
+ * silently produce a signature the owner never authorised.
+ */
+function ownerAccountOf(owner: RecoveryOwner): LocalAccount {
+  if (owner.kind === "private-key") return privateKeyToAccount(owner.privateKey);
+  if (owner.kind === "signer") return owner.account;
+  const refuse = (): never => {
+    throw new Error(
+      "this recovery owner is address-only: it can reconstruct the account but cannot sign for it.",
+    );
+  };
+  return toAccount({
+    address: owner.address,
+    signMessage: refuse,
+    signTransaction: refuse,
+    signTypedData: refuse,
+  }) as LocalAccount;
+}
+
+/** The owner's address, for every kind — no signing capability required. */
+export const ownerAddressOf = (owner: RecoveryOwner): Address =>
+  owner.kind === "private-key"
+    ? privateKeyToAccount(owner.privateKey).address
+    : owner.kind === "signer"
+      ? owner.account.address
+      : owner.address;
+
+/**
+ * THE ONE PLACE THE KERNEL ACCOUNT IS RECONSTRUCTED.
+ *
+ * `planRecovery` and `recoverFunds` each built this independently with the same
+ * three arguments. Identical today, and exactly the kind of duplication that
+ * drifts: the plan would show one account's contents and the sweep would sign
+ * for another, with nothing in between to notice. The address is a CREATE2
+ * derivation whose preimage is (kernelVersion, entryPoint, validator, index,
+ * owner address) — so a single differing argument silently produces a different,
+ * empty account, and a recovery that "succeeds" having moved nothing.
+ *
+ * No `index`, no `address` override, no factory overrides: the SDK's defaults
+ * (index 0n, useMetaFactory true) are what every other construction in this
+ * repo uses, so this reproduces an account minted by web/src/lib/session.ts.
+ */
+async function deriveKernelAccount(chain: Chain, rpcUrl: string | undefined, ownerAccount: LocalAccount) {
+  const publicClient = createPublicClient({ chain, transport: http(rpcUrl) });
+  const entryPoint = getEntryPoint("0.7");
+  const ecdsaValidator = await signerToEcdsaValidator(publicClient, {
+    signer: ownerAccount,
+    entryPoint,
+    kernelVersion: KERNEL_V3_3,
+  });
+  return createKernelAccount(publicClient, {
+    entryPoint,
+    kernelVersion: KERNEL_V3_3,
+    plugins: { sudo: ecdsaValidator },
+  });
+}
+
+/**
+ * Rebuild the smart account from the owner and read what it holds. Read-only
  * — no bundler, no signing. Use this to show the user what recovery will move
- * (and to verify the owner key actually controls the expected account) before
+ * (and to verify the owner actually controls the expected account) before
  * they commit.
+ *
+ * SIGNER-INDEPENDENT: it reads the owner's ADDRESS and never asks it to sign,
+ * so `ownerFromAddress` is a first-class way to call it.
  */
 export async function planRecovery(opts: {
   chain: Chain;
-  ownerPrivateKey: `0x${string}`;
+  owner: RecoveryOwner;
   rpcUrl?: string;
   /** If given, throw when the derived account doesn't match (wrong owner key). */
   expectedSmartAccount?: Address;
@@ -255,30 +367,19 @@ export async function planRecovery(opts: {
   extraTokens?: readonly unknown[];
 }): Promise<RecoverPlan> {
   const publicClient = createPublicClient({ chain: opts.chain, transport: http(opts.rpcUrl) });
-  const entryPoint = getEntryPoint("0.7");
-  const ownerAccount = privateKeyToAccount(opts.ownerPrivateKey);
-
-  const ecdsaValidator = await signerToEcdsaValidator(publicClient, {
-    signer: ownerAccount,
-    entryPoint,
-    kernelVersion: KERNEL_V3_3,
-  });
-  const account = await createKernelAccount(publicClient, {
-    entryPoint,
-    kernelVersion: KERNEL_V3_3,
-    plugins: { sudo: ecdsaValidator },
-  });
+  const ownerAccount = ownerAccountOf(opts.owner);
+  const account = await deriveKernelAccount(opts.chain, opts.rpcUrl, ownerAccount);
 
   // A sweep aimed at the zero address would be a signed transaction to nothing.
-  assertDerivedAccount(account.address, "that owner key does not derive an account");
+  assertDerivedAccount(account.address, "that owner does not derive an account");
 
   if (
     opts.expectedSmartAccount &&
     account.address.toLowerCase() !== opts.expectedSmartAccount.toLowerCase()
   ) {
     throw new Error(
-      `this owner key controls ${account.address}, not the expected ${opts.expectedSmartAccount}. ` +
-        `Wrong key, or the account was created with a different Kernel version.`,
+      `this owner controls ${account.address}, not the expected ${opts.expectedSmartAccount}. ` +
+        `Wrong owner, or the account was created with a different Kernel version.`,
     );
   }
 
@@ -481,16 +582,26 @@ export function nativeSweep(heldWei: bigint, gasPriceWei: bigint): { sweep: bigi
 
 export async function recoverFunds(opts: {
   chain: Chain;
-  ownerPrivateKey: `0x${string}`;
+  owner: RecoveryOwner;
   bundlerUrl: string;
   rpcUrl?: string;
   to: Address;
   expectedSmartAccount?: Address;
   extraTokens?: readonly unknown[];
 }): Promise<RecoverResult> {
+  // REFUSED BEFORE ANYTHING ELSE. An address-only owner can reconstruct the
+  // account but cannot authorise a transfer, and finding that out at signing
+  // time would mean having already read balances, priced gas and built calls
+  // against money it was never entitled to move.
+  if (opts.owner.kind === "address") {
+    throw new Error(
+      "recovery needs an owner that can sign: this one is address-only, which can reconstruct " +
+        "the account but not authorise moving anything out of it.",
+    );
+  }
   const plan = await planRecovery({
     chain: opts.chain,
-    ownerPrivateKey: opts.ownerPrivateKey,
+    owner: opts.owner,
     rpcUrl: opts.rpcUrl,
     expectedSmartAccount: opts.expectedSmartAccount,
     extraTokens: opts.extraTokens,
@@ -526,19 +637,22 @@ export async function recoverFunds(opts: {
   if (plan.balances.length === 0 && nativeSweptWei === 0n && plan.classHoldings.length === 0) {
     return { ...plan, txHash: null, to: opts.to, skipped: [], nativeSweptWei: 0n, nativeReservedWei };
   }
-  const entryPoint = getEntryPoint("0.7");
-  const ownerAccount = privateKeyToAccount(opts.ownerPrivateKey);
-  const ecdsaValidator = await signerToEcdsaValidator(publicClient, {
-    signer: ownerAccount,
-    entryPoint,
-    kernelVersion: KERNEL_V3_3,
-  });
-  const account = await createKernelAccount(publicClient, {
-    entryPoint,
-    kernelVersion: KERNEL_V3_3,
-    plugins: { sudo: ecdsaValidator },
-  });
-  assertDerivedAccount(account.address, "that owner key does not derive an account");
+  const ownerAccount = ownerAccountOf(opts.owner);
+  const account = await deriveKernelAccount(opts.chain, opts.rpcUrl, ownerAccount);
+  assertDerivedAccount(account.address, "that owner does not derive an account");
+  // DERIVED TWICE, CHECKED TWICE. `planRecovery` already compared this against
+  // `expectedSmartAccount`, but that was a different derivation a moment
+  // earlier; re-asserting here means the account about to be SIGNED FOR is the
+  // one the owner was shown, not merely one that matched once.
+  if (
+    opts.expectedSmartAccount &&
+    account.address.toLowerCase() !== opts.expectedSmartAccount.toLowerCase()
+  ) {
+    throw new Error(
+      `this owner controls ${account.address}, not the expected ${opts.expectedSmartAccount}. ` +
+        "Refusing to sign a recovery for a different account.",
+    );
+  }
   const client = createKernelAccountClient({
     account,
     chain: opts.chain,

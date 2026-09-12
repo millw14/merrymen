@@ -33,15 +33,47 @@
  */
 
 import { privateKeyToAccount } from "viem/accounts";
+import type { LocalAccount } from "viem";
 import { robinhoodChain, robinhoodTestnet } from "@merrymen/core";
-import { planRecovery, recoverFunds, type RecoverPlan } from "@merrymen/recover";
+import {
+  ownerFromPrivateKey,
+  ownerFromSigner,
+  planRecovery,
+  recoverFunds,
+  type RecoverPlan,
+  type RecoveryOwner,
+} from "@merrymen/recover";
 
 export interface BrowserWallet {
   smartAccount: `0x${string}`;
-  ownerKey: `0x${string}`;
+  /**
+   * A browser-held owner key, for wallets that have one.
+   *
+   * ABSENT FOR A PRIVY-OWNED AGENT, which is the whole reason `ownerAccount`
+   * exists beside it: an embedded wallet's key is never exported, so a recovery
+   * path that could only take hex left those accounts unrecoverable.
+   */
+  ownerKey?: `0x${string}`;
+  /** A signer that needs no key — `toViemAccount({ wallet })` from Privy. */
+  ownerAccount?: LocalAccount;
   chainId: number;
   /** Addresses the grant covers, used as the sweep list. */
   grantTokens?: readonly string[];
+}
+
+/**
+ * The wallet's owner as the engine wants it — and a refusal if it has neither.
+ *
+ * Deliberately NOT a silent fallback to some other owner: deriving a Kernel
+ * account from the wrong signer produces a different, empty account, and a
+ * sweep of it would report success having moved nothing.
+ */
+function ownerOf(w: BrowserWallet): RecoveryOwner {
+  if (w.ownerAccount) return ownerFromSigner(w.ownerAccount);
+  if (w.ownerKey) return ownerFromPrivateKey(w.ownerKey);
+  throw new Error(
+    "this wallet has no owner signer: it has no stored recovery key, and no signed-in embedded wallet was supplied.",
+  );
 }
 
 const chainOf = (id: number) => (id === robinhoodTestnet.id ? robinhoodTestnet : robinhoodChain);
@@ -83,8 +115,12 @@ export async function getRecoveryTicket(w: BrowserWallet): Promise<void> {
   if (!chal.ok) throw new Error("could not start recovery — the site did not issue a challenge");
   const { nonce, message } = (await chal.json()) as { nonce: string; message: string };
 
-  // Signed HERE. The key never leaves this function's scope, let alone the tab.
-  const signature = await privateKeyToAccount(w.ownerKey).signMessage({ message });
+  // Signed HERE. A browser key never leaves this function's scope, let alone the
+  // tab; a Privy embedded wallet signs inside its own iframe and this code never
+  // sees key material at all. Either way the signature is produced locally.
+  const signer = w.ownerAccount ?? (w.ownerKey ? privateKeyToAccount(w.ownerKey) : null);
+  if (!signer) throw new Error("no owner signer: nothing here can sign the recovery challenge.");
+  const signature = await signer.signMessage({ message });
 
   const res = await fetch("/api/recover/ticket", {
     method: "POST",
@@ -120,7 +156,7 @@ export interface BrowserPlan extends RecoverPlan {
 export async function planFromBrowser(w: BrowserWallet): Promise<BrowserPlan> {
   const plan = (await planRecovery({
     chain: chainOf(w.chainId),
-    ownerPrivateKey: w.ownerKey,
+    owner: ownerOf(w),
     // ALWAYS passed: the server route cannot check this for a pasted key, but
     // the browser knows which account this wallet is meant to be, so a wrong key
     // fails loudly instead of sweeping a stranger's empty account.
@@ -144,7 +180,7 @@ export async function sweepFromBrowser(w: BrowserWallet, to: `0x${string}`) {
 
   return recoverFunds({
     chain: chainOf(w.chainId),
-    ownerPrivateKey: w.ownerKey,
+    owner: ownerOf(w),
     bundlerUrl: relayUrl(w.chainId),
     to,
     expectedSmartAccount: w.smartAccount,
