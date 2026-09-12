@@ -436,6 +436,15 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
                 onChange={(e) => setOwnerKey(e.target.value)}
                 autoComplete="off"
               />
+            </>
+          )}
+          {/* THE CHAIN PICKER AND THE CHECK BUTTON BELONG TO BOTH PATHS.
+              Nested inside the key branch above, a Privy-owned agent got the
+              "no key needed" sentence and then no way to do anything — the
+              screen said recovery was authorised by their wallet and offered
+              them nothing to press. */}
+          {ctx && !ctx.hasStoredKey && !plan && (
+            <>
               <div className="recover-chain">
                 <label>
                   <input type="radio" checked={chainId === MAINNET} onChange={() => setChainId(MAINNET)} /> mainnet · 4663

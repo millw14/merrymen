@@ -181,6 +181,32 @@ describe("what the refactor must not have loosened", () => {
     );
   });
 
+  it("a Privy owner is still given a way to START recovery", () => {
+    // Caught live on the deployed build: the chain picker and the "check what's
+    // in it" button were nested inside the key-entry branch, so hiding that
+    // branch for a Privy owner left them the sentence "recovery will be
+    // authorised by your signed-in wallet" and nothing to press. A screen that
+    // says the exit is open and offers no door is worse than the old one.
+    const PANEL = readFileSync(
+      path.join(__dirname, "..", "..", "web", "src", "components", "RecoverPanel.tsx"),
+      "utf8",
+    );
+    const panel = code(PANEL);
+    const keyBranch = panel.indexOf("!plan && !privyOwner");
+    const checkButton = panel.indexOf("check what's in it");
+    const sharedBranch = panel.lastIndexOf("!ctx.hasStoredKey && !plan &&", checkButton);
+    assert.ok(keyBranch >= 0 && checkButton >= 0, "both branches must exist");
+    assert.ok(
+      sharedBranch > keyBranch,
+      "the check button must live in a branch that does NOT exclude privyOwner",
+    );
+    assert.doesNotMatch(
+      panel.slice(keyBranch, checkButton),
+      /check what's in it/,
+      "the button must not be inside the !privyOwner branch",
+    );
+  });
+
   it("the EIP-1193 hazard is written down where the next person will look", () => {
     // If this explanation is deleted, someone will "simplify" the signer to
     // accept a provider and reintroduce the address race.
