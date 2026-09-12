@@ -1228,6 +1228,20 @@ async function recover() {
   // was told it held nothing while its whole balance sat there.
   const heldWei = BigInt(plan.result.gasWei ?? "0");
   const heldEth = Number(heldWei) / 1e18;
+  // MONEY THE ACCOUNT DOES NOT HOLD, and which this prompt used to omit.
+  //
+  // A class position lives in a separate PonsClassVault contract, so it appears
+  // in no `balances` entry. The engine has always swept it — recover.ts:591-638
+  // encodes `vault.sweep(token)` — and recover-cli puts the holdings on the wire
+  // at :112-116. This file simply never read them.
+  //
+  // Measured 2026-09-12 on Shogun: the owner would have been asked to type
+  // `sweep` against the words "20.000000 USDG" while the operation also moved
+  // 1,063,408.141815 DOGGOS out of the vault. The engine was right; the
+  // disclosure was not, and a confirmation that understates what it moves is
+  // not a confirmation.
+  const classHoldings = plan.result.classHoldings ?? [];
+  const classVault = plan.result.classVault ?? null;
   // A BALANCE WE COULD NOT READ IS NOT A ZERO, and this is the one place that
   // forgot. The child already refuses to say "empty" when anything was
   // unreadable — recover-cli writes "that is NOT a zero balance. Check the RPC
@@ -1238,7 +1252,12 @@ async function recover() {
   // It matters most on the path where being wrong costs the most: an owner told
   // their account is empty stops looking for the money.
   const unreadable = plan.result.unreadable ?? [];
-  if (balances.length === 0 && heldWei === 0n) {
+  // `classHoldings` counts here too, for the same reason ETH does: an account
+  // whose whole book is class tokens was told it held nothing and returned
+  // BEFORE the sweep prompt, so recovery was unreachable for exactly the
+  // positions the vault exists to hold. recover.ts:526 already tests all three;
+  // this line was the one that did not.
+  if (balances.length === 0 && heldWei === 0n && classHoldings.length === 0) {
     p.close();
     if (unreadable.length) {
       warn(`could not read ${unreadable.join(", ")} for ${plan.result.smartAccount}.`);
@@ -1256,13 +1275,39 @@ async function recover() {
     warn(`heads up: ${unreadable.join(", ")} could not be read, so there may be more here than this shows.`);
   }
 
-  const parts = balances.map((b) => `${b.amount} ${b.symbol}`);
-  if (heldWei > 0n) parts.push(`${heldEth.toFixed(6)} ETH ${dim("(minus gas)")}`);
-  const list = parts.join(", ");
+  // ── THE DISCLOSURE, BY CUSTODY ──────────────────────────────────────────
+  //
+  // Grouped by WHERE the money sits rather than flattened into one sentence,
+  // because the two custodies behave differently: the vault is emptied by a
+  // first operation and the account by a second, and an owner reading a single
+  // comma-separated list cannot see that a whole contract is being drained.
+  const accountParts = balances.map((b) => `${b.amount} ${b.symbol}`);
+  if (heldWei > 0n) accountParts.push(`${heldEth.toFixed(6)} ETH ${dim("(minus gas)")}`);
+  const classParts = classHoldings.map((h) => `${h.amount} ${h.symbol}`);
+  // Kept for the success line, and now it names everything that moved.
+  const list = [...classParts, ...accountParts].join(", ");
   console.log();
-  warn(`about to sweep ${bold(list)}`);
-  console.log(`  from ${dim(plan.result.smartAccount)}`);
-  console.log(`  to   ${bold(to)}`);
+  warn("about to sweep — read this before confirming:");
+  if (classParts.length) {
+    console.log();
+    console.log(`  ${bold("CLASS VAULT")}${classVault ? ` ${dim(classVault)}` : ""}`);
+    for (const line of classParts) console.log(`  ${bold(line)}`);
+  }
+  if (accountParts.length) {
+    console.log();
+    console.log(`  ${bold("SMART ACCOUNT")} ${dim(plan.result.smartAccount)}`);
+    for (const line of accountParts) console.log(`  ${bold(line)}`);
+  }
+  console.log();
+  console.log(`  ${bold("DESTINATION")}`);
+  console.log(`  ${bold(to)}`);
+  console.log();
+  if (plan.result.classNote) console.log(dim(`  note: ${plan.result.classNote}`));
+  if (classParts.length) {
+    console.log(
+      dim("  the vault is emptied into the account first, then everything moves in a second operation."),
+    );
+  }
   console.log(dim("  real and irreversible. a little ETH stays behind to pay for this operation.\n"));
   const confirm = (await p.ask(`  type ${bold("sweep")} to confirm: `)).trim().toLowerCase();
   p.close();

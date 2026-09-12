@@ -19,6 +19,17 @@ interface Balance {
   symbol: string;
   amount: string;
 }
+/**
+ * A holding in the account's class vault — a SEPARATE contract, so it appears
+ * in no `Balance`. `token` rather than `symbol` is the key because a class
+ * token's symbol is frequently unreadable and falls back to a short address,
+ * which is not unique.
+ */
+interface ClassHolding {
+  token: string;
+  symbol: string;
+  amount: string;
+}
 interface Ctx {
   hasStoredKey: boolean;
   hasBundler: boolean;
@@ -27,6 +38,9 @@ interface Ctx {
   smartAccount?: string;
   ownerAddress?: string;
   balances?: Balance[];
+  /** The class vault's contents, and the vault itself. Absent is not empty. */
+  classHoldings?: ClassHolding[];
+  classVault?: string | null;
   /** Labels whose balance could not be READ. Never conflate with "not held". */
   unreadable?: string[];
   error?: string;
@@ -41,6 +55,9 @@ interface PlanRes {
   explorer: string;
   chainId: number;
   balances: Balance[];
+  /** The class vault's contents, and the vault itself. Absent is not empty. */
+  classHoldings?: ClassHolding[];
+  classVault?: string | null;
   /** Labels whose balance could not be READ. Never conflate with "not held". */
   unreadable?: string[];
   error?: string;
@@ -224,6 +241,13 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
 
   // Balances/addresses come from the pasted-key plan if present, else the GET ctx.
   const balances = plan?.balances ?? ctx?.balances ?? [];
+  // MONEY THE ACCOUNT DOES NOT HOLD. A class position sits in a separate
+  // PonsClassVault contract, so it is in no `balances` entry — and this panel
+  // never mentioned the vault at all. The engine has always swept it
+  // (recover.ts:591-638); the screen simply did not say so, which on a
+  // withdrawal confirmation is the difference between consent and a surprise.
+  const classHoldings = plan?.classHoldings ?? ctx?.classHoldings ?? [];
+  const classVault = plan?.classVault ?? ctx?.classVault ?? null;
   const smartAccount = plan?.smartAccount ?? ctx?.smartAccount;
   const explorer = plan?.explorer ?? ctx?.explorer;
   const activeChain = plan?.chainId ?? ctx?.chainId ?? chainId;
@@ -242,8 +266,9 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
   // read. Saying an account is empty because an RPC blinked is how somebody
   // concludes their money is gone.
   const unreadable = (ctx?.unreadable ?? plan?.unreadable ?? []) as string[];
-  const empty = known && balances.length === 0 && unreadable.length === 0;
-  const blind = known && balances.length === 0 && unreadable.length > 0;
+  // A vault holding is something to recover, so it cannot be "empty" either.
+  const empty = known && balances.length === 0 && classHoldings.length === 0 && unreadable.length === 0;
+  const blind = known && balances.length === 0 && classHoldings.length === 0 && unreadable.length > 0;
 
   async function sweep() {
     setError(null);
@@ -251,8 +276,30 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
       setError("enter a valid destination address (0x + 40 hex).");
       return;
     }
-    const list = balances.map((b) => `${b.amount} ${b.symbol}`).join(", ") || "the balance";
-    if (!window.confirm(`Sweep ${list} to ${normalizeAddr(to)}?\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.`)) {
+    // GROUPED BY CUSTODY, not flattened. The vault is emptied by a first
+    // operation and the account by a second; one comma-separated list cannot
+    // show an owner that a whole contract is being drained.
+    const lines: string[] = [];
+    if (classHoldings.length) {
+      lines.push("CLASS VAULT" + (classVault ? ` ${classVault}` : ""));
+      for (const h of classHoldings) lines.push(`  ${h.amount} ${h.symbol}`);
+      lines.push("");
+    }
+    if (balances.length) {
+      lines.push(`SMART ACCOUNT ${smartAccount ?? ""}`.trimEnd());
+      for (const b of balances) lines.push(`  ${b.amount} ${b.symbol}`);
+      lines.push("");
+    }
+    lines.push("DESTINATION", `  ${normalizeAddr(to)}`);
+    const list =
+      [...classHoldings.map((h) => `${h.amount} ${h.symbol}`), ...balances.map((b) => `${b.amount} ${b.symbol}`)].join(
+        ", ",
+      ) || "the balance";
+    if (
+      !window.confirm(
+        `Sweep:\n\n${lines.join("\n")}\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.`,
+      )
+    ) {
       return;
     }
     setBusy("sweeping");
@@ -392,6 +439,30 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
                 </p>
               ) : (
                 <>
+                  {classHoldings.length > 0 && (
+                    <>
+                      <p className="recover-sub">
+                        <strong>Class vault</strong>
+                        {classVault ? <> · <span className="mono">{short(classVault)}</span></> : null}
+                      </p>
+                      <div className="recover-holdings mono">
+                        {classHoldings.map((h) => (
+                          <span key={h.token} className="recover-hold">
+                            {h.amount} {h.symbol}
+                          </span>
+                        ))}
+                      </div>
+                      <p className="recover-sub">
+                        Held in a separate contract, not in the account. Recovery empties it into the
+                        account first, then moves everything in a second operation.
+                      </p>
+                    </>
+                  )}
+                  {balances.length > 0 && classHoldings.length > 0 && (
+                    <p className="recover-sub">
+                      <strong>Smart account</strong>
+                    </p>
+                  )}
                   <div className="recover-holdings mono">
                     {balances.map((b) => (
                       <span key={b.symbol} className="recover-hold">
