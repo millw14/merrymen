@@ -90,6 +90,71 @@ export interface GasBounds {
    * crossing it means the operation is not the operation we think it is.
    */
   absoluteMax: bigint;
+  /**
+   * The WALL'S OWN ALLOWANCE, judged against the enable half alone.
+   *
+   * A FIRST ENABLE IS TWO OPERATIONS IN ONE TRENCHCOAT, and this file spent its
+   * first version pretending otherwise. Kernel installs the permission wall
+   * inside validation, so `verificationGasLimit + preVerificationGas` is what
+   * the WALL costs; `callGasLimit` is the trade that happens to be riding along.
+   * `firstEnableEnvelope` predicts the first from the wall's stub bytes and
+   * knows nothing whatever about the second — it cannot, because the wall is
+   * sealed weeks before anyone picks a trade.
+   *
+   * The allowance was nonetheless compared against the TOTAL, which is the wall
+   * plus a payload the prediction never saw. That held for every wall shipped
+   * so far only because their payloads were single swaps: ~50,180 raw call gas,
+   * 0.65% of the estimate, small enough to hide inside the 1.20 tolerance.
+   *
+   * MEASURED, 2026-09-12, the canary Shogun: a class first enable's payload is
+   * deploy + approve + buy — 1,307,017 raw call gas, 13.1% of the estimate,
+   * 2,614,034 once `callHeadroomBps` doubles it. That is 19.5% of the wall's
+   * allowance spent on something the allowance was never sized for, against a
+   * tolerance of 20%. Seventeen consecutive estimates SIMULATED SUCCESSFULLY
+   * and were refused `gas-absurd` against a ceiling of 13,388,275, at a signed
+   * total of 13,541,572 — still 458,428 UNDER the 14,000,000 hard maximum. Not
+   * one was ever signed, so the route that installs the wall could never
+   * install it.
+   *
+   * (That total includes 46,457 of SPONSOR gas: the account is paymaster-paid,
+   * and `totalGas` counts the paymaster's two fields because the EntryPoint's
+   * prefund counts them. They are counted in the total here for the same reason
+   * and are deliberately absent from the enable half below — a sponsor's cost
+   * is neither the wall's nor the trade's.)
+   *
+   * So the comparison is made like for like: the enable half against the wall's
+   * envelope, the payload against the payload ceiling below, and the sum against
+   * the hard product maximum. NO NUMBER THIS FILE SIGNS CHANGES — the per-field
+   * headroom is untouched and every previously signable operation signs for the
+   * identical gas. What changes is which ceiling each part is held to.
+   *
+   * OPTIONAL, AND ABSENT MEANS ABSENT. Steady-state operations install no wall,
+   * so they have no enable half and `GAS_BOUNDS` does not set this. A missing
+   * value skips the check rather than defaulting to a number, because a wall we
+   * were not told the size of is not a wall of size zero.
+   *
+   * (The envelope's fit was made over whole first-operation estimates, whose
+   * call gas was that ~50,180 — so judging the enable half against it is loose
+   * by roughly 63,000 bounded gas, 0.5%. Stated rather than silently kept.)
+   */
+  enableMax?: bigint;
+  /**
+   * The PAYLOAD'S ceiling, judged against `callGasLimit` alone.
+   *
+   * Splitting the comparison above would otherwise leave the call gas of a first
+   * enable bounded by nothing but the hard maximum — a fifth of it, unexamined,
+   * on the one operation that carries an owner's whole wall. This is the half
+   * that says what the trade may cost.
+   *
+   * DERIVED, NOT PICKED: a first enable may not carry a call this account could
+   * not make on any other day, and on any other day `GAS_BOUNDS.absoluteMax`
+   * bounds the entire operation, call included. So the ordinary ceiling is the
+   * payload's ceiling. It is a necessary condition rather than the full
+   * steady-state test — which also counts verification — and it is the whole of
+   * what can be checked here, since at a first enable the verification belongs
+   * to the wall.
+   */
+  callMax?: bigint;
 }
 
 export const GAS_BOUNDS: GasBounds = {
@@ -360,6 +425,38 @@ export function boundGas(
     ...(pmVer > 0n ? { paymasterVerificationGasLimit: pmVer } : {}),
     ...(pmPost > 0n ? { paymasterPostOpGasLimit: pmPost } : {}),
   };
+  // ── THREE CEILINGS, EACH OVER THE THING IT WAS DERIVED FROM ─────────────
+  //
+  // Named narrowest-first so the refusal says which one was crossed. All three
+  // keep `rule: "gas-absurd"` — callers branch on the rule and every one of
+  // these means the same thing to them: refused before signing, nothing spent.
+  //
+  // The paymaster fields appear in NEITHER of the first two. They belong to the
+  // sponsor, not to the wall and not to the trade; they are counted once, in the
+  // total, because that is what the EntryPoint's prefund counts.
+  if (bounds.enableMax !== undefined) {
+    const enablePart = gas.verificationGasLimit + gas.preVerificationGas;
+    if (enablePart > bounds.enableMax) {
+      return {
+        ok: false,
+        rule: "gas-absurd",
+        detail:
+          `installing this permission wall wants ${enablePart} gas (verification ${gas.verificationGasLimit} ` +
+          `plus pre-verification ${gas.preVerificationGas}), past the ${bounds.enableMax} its own shape allows. ` +
+          "The wall being installed is not the wall we sized, so this refuses rather than signs. Nothing was spent.",
+      };
+    }
+  }
+  if (bounds.callMax !== undefined && gas.callGasLimit > bounds.callMax) {
+    return {
+      ok: false,
+      rule: "gas-absurd",
+      detail:
+        `the operation riding along with this enable wants ${gas.callGasLimit} call gas, past the ` +
+        `${bounds.callMax} an ordinary operation is allowed. A first enable may not carry a call this ` +
+        "account could not make on any other day. Refused before signing — nothing was spent.",
+    };
+  }
   // Counts the paymaster fields too, because the prefund does.
   const total = totalGas(gas);
   if (total > bounds.absoluteMax) {

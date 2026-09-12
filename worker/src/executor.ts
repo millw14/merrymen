@@ -19,7 +19,7 @@ import { createKernelAccountClient } from "@zerodev/sdk";
 import { SponsorRefused, assertBoundsHeld, type Sponsor } from "./paymaster";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { deserializeFlaggedPermissionAccount } from "./session-account";
-import { WALL_POLICY_FLAG } from "../../packages/core/src/index";
+import { FIRST_ENABLE_HARD_MAX_BOUNDED, WALL_POLICY_FLAG } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
 import { getUserOperationHash } from "viem/account-abstraction";
 import {
@@ -613,9 +613,23 @@ export async function createAgentExecutor(opts: {
       // GAS_BOUNDS exactly as before, so nothing here can widen a steady-state
       // ceiling. The enlarged allowance belongs to the enable and expires with
       // it — the next operation this account signs is judged at 3,000,000.
+      //
+      // AND THE WALL'S ALLOWANCE IS JUDGED AGAINST THE WALL, NOT AGAINST THE
+      // WALL PLUS WHATEVER IS RIDING ALONG. `allowedMaxBounded` is a prediction
+      // made from stub bytes, weeks before a trade exists; it moved from
+      // `absoluteMax` to `enableMax` so it is compared against the half it
+      // predicts. See GasBounds.enableMax for the seventeen refused estimates
+      // that showed the difference. The hard product maximum now binds the total
+      // directly, which is what it always meant, and the payload gets the same
+      // ceiling every ordinary operation gets.
       const bounds = firstEnable
         ? opts.firstEnable
-          ? { ...FIRST_ENABLE_GAS_BOUNDS, absoluteMax: opts.firstEnable.allowedMaxBounded }
+          ? {
+              ...FIRST_ENABLE_GAS_BOUNDS,
+              absoluteMax: FIRST_ENABLE_HARD_MAX_BOUNDED,
+              enableMax: opts.firstEnable.allowedMaxBounded,
+              callMax: GAS_BOUNDS.absoluteMax,
+            }
           : FIRST_ENABLE_GAS_BOUNDS
         : GAS_BOUNDS;
 

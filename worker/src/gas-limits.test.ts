@@ -485,10 +485,29 @@ test("THE CALL SITE: the ceiling is keyed on the OPERATION, and the deploy state
   // before, so this cannot widen a steady-state ceiling.
   assert.match(src, /const bounds = firstEnable/, "the ceiling is still keyed on the operation");
   assert.match(src, /:\s*GAS_BOUNDS;/, "anything that is not a fresh enable gets the ordinary ceiling");
+  // AND THE WALL'S ALLOWANCE IS COMPARED AGAINST THE WALL.
+  //
+  // This pinned `absoluteMax: opts.firstEnable.allowedMaxBounded`, which put a
+  // prediction made from stub bytes onto the TOTAL — wall plus whatever trade
+  // rides along with the enable. Measured 2026-09-12: twelve class first-enable
+  // estimates simulated cleanly and were refused at 13,495,115, under the
+  // 14,000,000 maximum, because a 2,614,034 payload the prediction never saw ate
+  // the tolerance. The allowance now sits on `enableMax`, which boundGas judges
+  // against verification + preVerification alone.
   assert.match(
     src,
-    /absoluteMax: opts\.firstEnable\.allowedMaxBounded/,
-    "and the enable's ceiling comes from ITS OWN wall",
+    /enableMax: opts\.firstEnable\.allowedMaxBounded/,
+    "and the enable's ceiling comes from ITS OWN wall, judged against the enable half",
+  );
+  assert.match(
+    src,
+    /absoluteMax: FIRST_ENABLE_HARD_MAX_BOUNDED/,
+    "with the hard product maximum binding the total directly",
+  );
+  assert.match(
+    src,
+    /callMax: GAS_BOUNDS\.absoluteMax/,
+    "and the payload held to the ceiling every ordinary operation gets",
   );
   assert.match(
     src,
