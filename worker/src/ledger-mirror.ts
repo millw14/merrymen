@@ -778,18 +778,43 @@ export async function mirrorTenant(args: {
              (agent_id, token, symbol, decimals, curve, quote_token, first_seen,
               vault, entry_tx, exit_tx, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, state)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           -- THE EXISTING-ROW SIDE MUST BE QUALIFIED, and sqlite will not tell you.
+           --
+           -- Inside ON CONFLICT ... DO UPDATE SET, Postgres has TWO relations in
+           -- scope — the target table and the "excluded" pseudo-relation — and
+           -- both expose every one of these columns. A bare "symbol" is therefore
+           -- ambiguous and Postgres refuses to PARSE the statement. sqlite
+           -- resolves it to the target row instead, so the mirror's own test
+           -- suite (which uses sqlite as the destination) passed throughout.
+           --
+           -- Measured 2026-09-12: the first class position the fleet ever opened
+           -- (Shogun, Doggos, tx 0xd860ac46...) produced
+           --     ledger mirror: 0x8e93ba... STALLED — snapshots: column reference "symbol" is ambiguous
+           -- and "symbol" only because it is FIRST in this SET list. Every line
+           -- below was equally wrong.
+           --
+           -- AND IT WAS NEVER GOING TO SELF-HEAL. PgDb.prepare sends nothing to
+           -- the server (db.ts:181-186); the statement is parsed on its first
+           -- .run(), which executes only when there is a class row to write. So
+           -- this lay dormant from the day it was written until the day the
+           -- capability was first used, and then failed on every attempt — a
+           -- parse error rejects a brand-new non-conflicting row exactly as it
+           -- rejects a conflicting one.
+           --
+           -- The agents upsert above already does this correctly (agents.epoch),
+           -- which is the in-repo precedent this now matches.
            ON CONFLICT(agent_id, token) DO UPDATE SET
-             symbol = COALESCE(excluded.symbol, symbol),
+             symbol = COALESCE(excluded.symbol, class_positions.symbol),
              decimals = excluded.decimals,
-             curve = COALESCE(excluded.curve, curve),
-             quote_token = COALESCE(excluded.quote_token, quote_token),
-             vault = COALESCE(excluded.vault, vault),
-             entry_tx = COALESCE(excluded.entry_tx, entry_tx),
-             exit_tx = COALESCE(excluded.exit_tx, exit_tx),
-             cost_usdg = COALESCE(excluded.cost_usdg, cost_usdg),
-             qty_raw = COALESCE(excluded.qty_raw, qty_raw),
-             proceeds_usdg = COALESCE(excluded.proceeds_usdg, proceeds_usdg),
-             opened_at_block = COALESCE(excluded.opened_at_block, opened_at_block),
+             curve = COALESCE(excluded.curve, class_positions.curve),
+             quote_token = COALESCE(excluded.quote_token, class_positions.quote_token),
+             vault = COALESCE(excluded.vault, class_positions.vault),
+             entry_tx = COALESCE(excluded.entry_tx, class_positions.entry_tx),
+             exit_tx = COALESCE(excluded.exit_tx, class_positions.exit_tx),
+             cost_usdg = COALESCE(excluded.cost_usdg, class_positions.cost_usdg),
+             qty_raw = COALESCE(excluded.qty_raw, class_positions.qty_raw),
+             proceeds_usdg = COALESCE(excluded.proceeds_usdg, class_positions.proceeds_usdg),
+             opened_at_block = COALESCE(excluded.opened_at_block, class_positions.opened_at_block),
              state = excluded.state`,
         );
         for (const c of classRows) {
