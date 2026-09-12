@@ -1,10 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { listSavedWallets } from "@/lib/session";
+import { listSavedWallets, loadGrant } from "@/lib/session";
 import { isAddr, normalizeAddr } from "@/lib/address";
 import { planFromBrowser, sweepFromBrowser, redact, type BrowserWallet } from "@/lib/recover-client";
-import { usePrivyOwner } from "@/terminal/usePrivyOwner";
+import { usePrivyOwner, type PrivyOwner } from "@/terminal/usePrivyOwner";
 
 /**
  * "Get my money out" — the one-click counterpart to `merrymen recover`.
@@ -96,11 +96,24 @@ const TESTNET = 46630;
  * the wallet, which is the case the paste field exists for.
  */
 export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: string } = {}) {
-  const [open, setOpen] = useState(false);
-  const [ctx, setCtx] = useState<Ctx | null>(null);
-  const [loadingCtx, setLoadingCtx] = useState(false);
+  // THE HOOK LIVES HERE AND NOWHERE ELSE. `usePrivy` throws outside a
+  // PrivyProvider, and `Providers` renders none when Privy is disabled — so a
+  // component that calls it cannot be rendered in a test without standing up
+  // Privy itself. Keeping the hook in a one-line wrapper leaves the whole flow
+  // below reachable, which is what lets `recover-privy-flow.test.ts` drive it.
+  return <RecoverPanelView initialOwnerKey={initialOwnerKey} privyOwner={usePrivyOwner()} />;
+}
 
-  const [ownerKey, setOwnerKey] = useState(initialOwnerKey);
+export function RecoverPanelView({
+  initialOwnerKey = "",
+  privyOwner,
+  /**
+   * Injected ONLY so the flow test does not need a chain. Defaults to the real
+   * engine, so every production render is unchanged.
+   */
+  planFn = planFromBrowser,
+}: {
+  initialOwnerKey?: string;
   /**
    * The signed-in embedded wallet, or null for a browser-key wallet.
    *
@@ -108,7 +121,14 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
    * pasted/stored key exactly as before, so this cannot alter recovery for a
    * wallet that has a key.
    */
-  const privyOwner = usePrivyOwner();
+  privyOwner: PrivyOwner | null;
+  planFn?: typeof planFromBrowser;
+}) {
+  const [open, setOpen] = useState(false);
+  const [ctx, setCtx] = useState<Ctx | null>(null);
+  const [loadingCtx, setLoadingCtx] = useState(false);
+
+  const [ownerKey, setOwnerKey] = useState(initialOwnerKey);
   const [chainId, setChainId] = useState<number>(MAINNET);
   const [plan, setPlan] = useState<PlanRes | null>(null);
 
@@ -147,21 +167,29 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
     // LocalAccount that signs without exposing anything, which is the same
     // signer minting already uses for this owner.
     if (privyOwner) {
+      // THE ACCOUNT COMES FROM THE BROWSER'S OWN GRANT, not from `ctx`.
+      //
+      // Hosted, `/api/recover` returns `clientSide: true` and NO smartAccount —
+      // the server holds no grant file by construction, which is the whole
+      // reason this path exists. Reading it from `ctx` therefore yielded
+      // undefined before a plan existed, `browserWallet()` returned null, and
+      // the panel told a signed-in owner "this browser doesn't hold that
+      // wallet" about their own agent. `loadGrant()` is where the hosted mint
+      // actually put it.
       const saved = (() => {
         try {
-          return listSavedWallets().find(
-            (w) => w.smartAccount.toLowerCase() === (smartAccount ?? "").toLowerCase(),
-          );
+          return loadGrant();
         } catch {
-          return undefined;
+          return null;
         }
       })();
-      if (!smartAccount) return null;
+      const account = (smartAccount ?? saved?.smartAccount) as `0x${string}` | undefined;
+      if (!account) return null;
       return {
-        smartAccount: smartAccount as `0x${string}`,
+        smartAccount: account,
         ownerAccount: privyOwner.account,
         chainId: saved?.chainId ?? chainId,
-        grantTokens: (saved as { grantTokens?: string[] } | undefined)?.grantTokens,
+        grantTokens: (saved as { grantTokens?: string[] } | null)?.grantTokens,
       };
     }
     const key = ownerKey.trim();
@@ -197,14 +225,31 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
     }
     setBusy("checking");
     try {
-      const b = await planFromBrowser(w);
+      const b = await planFn(w);
       setPlan({
         smartAccount: b.smartAccount,
+        ownerAddress: b.ownerAddress,
         chainId: w.chainId,
         // TokenBalance already carries the display string as `amount`, and the
         // panel renders exactly that shape — so pass it through rather than
         // rebuilding it and losing `note` along the way.
         balances: b.balances,
+        // THE CLASS BOOK, WHICH THIS DROPPED ON THE FLOOR.
+        //
+        // Restating a type is how you lose the parts of it you were not
+        // thinking about — the note above `BrowserPlan` says exactly that about
+        // `unreadable`, and then this object literal did it again to the class
+        // vault. `as unknown as PlanRes` is why the compiler never said so.
+        //
+        // The consequence was silent and total: the engine reported the vault,
+        // the disclosure knew how to render it, and the browser path threw the
+        // data away in between — so a Privy owner recovering 1,063,408 DOGGOS
+        // would have confirmed a sweep whose screen said "20.000000 USDG".
+        classHoldings: b.classHoldings,
+        classVault: b.classVault,
+        // Same reason `unreadable` exists at all: absence and ignorance are
+        // different facts, and the panel cannot tell them apart without this.
+        unreadable: b.unreadable,
       } as unknown as PlanRes);
       // The one thing that stops a sweep dead, said BEFORE they press it.
       if (b.needsGas) {

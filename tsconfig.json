@@ -16,6 +16,11 @@
       // terminal module needed a value from web/src/lib.
       "@/*": ["web/src/*"],
       "@merrymen/core": ["packages/core/src/index.ts"],
+      // Reached from web/src/lib/recover-client.ts, which RecoverPanel imports.
+      // Same reason as `@/*` above: without it the panel cannot be imported by
+      // a test at all, and the recovery flow is the one place where "it renders
+      // but does nothing" costs somebody their money.
+      "@merrymen/recover": ["worker/src/recover.ts"],
       "@merrymen/thesis": ["worker/src/thesis-policy.ts"],
       "@merrymen/identity-store": ["worker/src/identity-store.ts"]
     }
