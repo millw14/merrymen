@@ -37,6 +37,7 @@ import {
   type OwnerPreview,
   type SavedWallet,
 } from "@/lib/session";
+import { SignOut } from "../SignOut";
 import { conceptTooltip } from "@merrymen/core";
 import { canStart } from "@/lib/can-start";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
@@ -1047,6 +1048,26 @@ export default function GrantPage() {
       )}
 
         <div className="grant-shell">
+        {/* ─── WHO YOU ARE SIGNED IN AS, AND THE WAY OUT ──────────────────────
+            This page is titled "Wallet & permissions" and is where anyone looking
+            to change accounts arrives — it had neither the signed-in address nor
+            a sign-out. The owner hit exactly that: "I don't know my tenant/login
+            wallet address offhand" and then "no logout button".
+
+            The address is PUBLIC — it is the tenant id, already on every log line
+            — and it is the one fact that says which account you are operating.
+            It is never a key: `session` here is `{hosted, address}` and nothing
+            else. `SignOut` ends the Privy session before the server one, which
+            is what stops the prove-on-authenticated effect signing you straight
+            back in. */}
+        {session?.hosted && session.address && (
+          <div className="grant-session">
+            <span>
+              signed in as <code>{session.address}</code>
+            </span>
+            <SignOut after={() => window.location.reload()} className="flow-secondary" />
+          </div>
+        )}
         {/* ─── desync banner: browser has a wallet the server no longer holds ── */}
         {desynced && (
           <div className="grant-panel desync-panel">

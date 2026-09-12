@@ -1,6 +1,7 @@
 "use client";
 import { usePathname, useRouter } from "next/navigation";
 import { AccountEntry, FundingPanel, LimitsPanel, requestJson, type AccountState } from "./HostedControls";
+import { SignOut } from "./SignOut";
 import {
   applyTokenQuotes,
   loadTokenQuotes,
@@ -436,7 +437,32 @@ export function App() {
             mine={mine}
           />
         )}
-        {screen.kind === "tab" && screen.tab === "you" && <div className="profile-session-actions">{!account?.status.exists && <a href="/create">Create agent</a>}{account?.session.hosted && account.session.address && <button onClick={()=>{void requestJson("/api/auth/logout",{method:"POST"}).then(()=>{setLive(seedLive());setAccount(null);setTurns([]);setChatDraft("");refreshAccount();}).catch(e=>setLoadError(e.message));}}>Sign out</button>}</div>}
+        {/* WHO YOU ARE SIGNED IN AS, next to the way out.
+            "I don't know my tenant/login wallet address offhand" — and nothing
+            in the product showed it. It is a public address and the one thing
+            that identifies which account you are operating, so it belongs
+            beside the sign-out rather than only in an API response. */}
+        {screen.kind === "tab" && screen.tab === "you" && (
+          <div className="profile-session-actions">
+            {!account?.status.exists && <a href="/create">Create agent</a>}
+            {account?.session.hosted && account.session.address && (
+              <>
+                <span className="profile-session-who" title={account.session.address}>
+                  signed in as <code>{account.session.address}</code>
+                </span>
+                <SignOut
+                  after={() => {
+                    setLive(seedLive());
+                    setAccount(null);
+                    setTurns([]);
+                    setChatDraft("");
+                    refreshAccount();
+                  }}
+                />
+              </>
+            )}
+          </div>
+        )}
         {/* THREE STATES, NOT ONE — see `liveLoaded`. Waiting is not failing, and
             a market list that came back without this address is a fact about the
             address rather than a fact about the request. */}

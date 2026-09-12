@@ -226,3 +226,15 @@
   .terminal-host .desktop-sidebar .blank { min-height: 210px; padding: 24px 16px; }
   .terminal-host .desktop-sidebar .blank > strong { font-size: 15px; }
 }
+
+/* WHO YOU ARE SIGNED IN AS — beside the way out, on both screens that offer one.
+   The tenant address is public (it is the log tag on every line) and is the one
+   fact that says which account you are operating. It was in no UI at all: the
+   owner had to be told it from an API response. Monospace and breakable because
+   it is 42 characters that must be readable and copyable on a phone. */
+.terminal-host .profile-session-who { display:block; font-size:13px; opacity:.75; margin-bottom:8px; }
+.terminal-host .profile-session-who code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; overflow-wrap:anywhere; user-select:all; }
+.grant-session { display:flex; flex-wrap:wrap; align-items:center; gap:12px; justify-content:space-between;
+  margin:0 0 20px; padding:12px 14px; border:1px solid rgba(255,255,255,.12); border-radius:10px; font-size:13px; opacity:.85; }
+.grant-session code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; overflow-wrap:anywhere; user-select:all; }
+.grant-session button { min-height:40px; }
