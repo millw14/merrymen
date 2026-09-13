@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { quarantineOf, scoutAllows, type ScoutLimits } from "./quarantine";
+import { quarantineOf, scoutAllows, scoutGateShut, type ScoutLimits } from "./quarantine";
 
 const U = (n: number) => BigInt(Math.round(n * 1e6));
 
@@ -103,5 +103,32 @@ describe("scoutAllows — fails closed", () => {
     // Full budget used → refused. Sell out (quarantined back to 0) → allowed.
     assert.equal(scoutAllows({ ...base, quarantinedUsdg: U(100) }, limits()).ok, false);
     assert.equal(scoutAllows({ ...base, quarantinedUsdg: 0n }, limits()).ok, true);
+  });
+});
+
+describe("scoutGateShut — deterministic refusal, for the pre-proposal gate", () => {
+  it("mirrors scoutAllows' unconditional branches exactly", () => {
+    // Off → shut no matter the spend. The gate must agree with the wall on
+    // every input where the wall doesn't need per-token state.
+    assert.equal(scoutGateShut({ limits: limits({ enabled: false }), buyUnpriceable: true }), true);
+    assert.equal(
+      scoutAllows({ spendUsdg: U(1), existingCostUsdg: 0n, quarantinedUsdg: 0n }, limits({ enabled: false })).ok,
+      false,
+    );
+    // Zero budget → shut.
+    assert.equal(scoutGateShut({ limits: limits({ budgetUsdg: 0n }), buyUnpriceable: true }), true);
+    assert.equal(
+      scoutAllows({ spendUsdg: U(1), existingCostUsdg: 0n, quarantinedUsdg: 0n }, limits({ budgetUsdg: 0n })).ok,
+      false,
+    );
+    // Funded + enabled → open (the wall may still refuse on spend — not ours to judge here).
+    assert.equal(scoutGateShut({ limits: limits(), buyUnpriceable: true }), false);
+  });
+
+  it("never shuts a priceable buy, whatever the budget", () => {
+    assert.equal(
+      scoutGateShut({ limits: limits({ enabled: false, budgetUsdg: 0n }), buyUnpriceable: false }),
+      false,
+    );
   });
 });

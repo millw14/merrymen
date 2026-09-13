@@ -182,7 +182,14 @@ describe("the tick uses the custody seam", () => {
     // be in — so the flag read false and policy.ts skipped the WHOLE scout
     // block. The budget meant to bound the least priceable assets on the chain
     // was not connected to them at all.
-    assert.match(CODE, /const buyUnpriceable = isClassBuy \|\| lastUnpriceable\.has/);
+    //
+    // Now shared, not inline: scoutBuyUnpriceable holds the class leg so the
+    // pre-proposal gate and the wall's context cannot drift apart. Assert the
+    // helper carries the unconditional class leg AND both call sites use it.
+    assert.match(CODE, /function scoutBuyUnpriceable\(/);
+    assert.match(CODE, /const isClassBuy =/);
+    assert.match(CODE, /return \{ buyUnpriceable: isClassBuy \|\| unpriceable\.has\(buyToken\.toLowerCase\(\)\)/);
+    assert.match(CODE, /const \{ buyUnpriceable, isClassBuy \} = scoutBuyUnpriceable\(intent, active, lastUnpriceable\)/);
   });
 
   it("the per-token scout cap can find a class token's basis", () => {

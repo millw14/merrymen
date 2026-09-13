@@ -118,4 +118,22 @@ export function scoutAllows(
   return { ok: true };
 }
 
+/**
+ * Is a scout-gated refusal DETERMINISTIC from the limits alone — i.e. would
+ * scoutAllows refuse no matter the spend? Takes the same shape scoutAllows
+ * judges (the ScoutContext minus the spend-dependent reads), so a proposer
+ * can ask this BEFORE building an intent instead of proposing, recording, and
+ * announcing a swap the wall was always going to turn back. Only the
+ * unconditional branches (off / zero budget) count: per-token and total caps
+ * depend on the moving book and can clear, so only the wall may judge those.
+ *
+ * The incident this exists for: a strategy proposing the same scout buy every
+ * tick with the budget at 0, each refusal writing a ledger row and each row
+ * pinging Telegram — the same sentence, three times a tick, forever.
+ */
+export function scoutGateShut(scout: { limits: ScoutLimits; buyUnpriceable: boolean }): boolean {
+  if (!scout.buyUnpriceable) return false;
+  return !scout.limits.enabled || scout.limits.budgetUsdg <= 0n;
+}
+
 const fmt = (v: bigint) => `${(Number(v) / 1e6).toFixed(2)} USDG`;

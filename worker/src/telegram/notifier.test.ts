@@ -184,3 +184,22 @@ test("every condition alert that fires is observable", () => {
   assert.match(fire, /console\.log\(`\[notify\] condition alert sent — \$\{key\}`\)/);
   assert.doesNotMatch(fire, /console\.log\([^)]*\$\{message\}/, "the message body must not reach the log");
 });
+
+/**
+ * REPEAT REFUSAL PINGS — the incident this exists for.
+ *
+ * A strategy proposed the same scout-blocked swap every tick with the budget
+ * at 0. Each refusal wrote a ledger row and each row pinged Telegram: the
+ * same sentence, three times a tick, for hours. The proposer gate (index.ts)
+ * stops the deterministic cases at the source; this cooldown is the defense
+ * for every other rule that can refuse on repeat. First occurrence always
+ * fires, a different rule always fires — only the same rule inside the window
+ * is skipped. Landed/paper rows are untouched: money moving is always news.
+ */
+test("refusalPingDue fires first, suppresses repeats inside the window, re-fires after", async () => {
+  const { refusalPingDue, REFUSAL_PING_COOLDOWN_SEC } = await import("./notifier");
+  assert.equal(refusalPingDue("scout-budget", undefined, 1_000_000), true);
+  assert.equal(refusalPingDue("scout-budget", 1_000_000, 1_000_000 + REFUSAL_PING_COOLDOWN_SEC - 1), false);
+  assert.equal(refusalPingDue("scout-budget", 1_000_000, 1_000_000 + REFUSAL_PING_COOLDOWN_SEC), true);
+  assert.equal(refusalPingDue("scout-budget", 1_000_000, 1_000_000 + REFUSAL_PING_COOLDOWN_SEC + 1), true);
+});

@@ -160,6 +160,27 @@ function periodLabel(min: number): string {
 }
 
 /**
+ * Cooldown between repeat refusal pings for the same rule. Trade pings were
+ * the one notify path with no cooldown (condition alerts have one, idle
+ * reasons and owner refusal lines fire on change only) — so a deterministic
+ * refusal wrote an identical ping every tick, forever. First occurrence of a
+ * rule always fires; a different rule always fires; only the same rule inside
+ * the window is skipped. Landed/paper rows are unaffected — money moving is
+ * always news.
+ *
+ * In-memory, deliberately: a restart may re-ping one refusal, which is the
+ * cheap direction to fail. The cursor (lastNotifiedTradeId) is what must
+ * never regress, and it still advances on skipped rows.
+ */
+export const REFUSAL_PING_COOLDOWN_SEC = 3600;
+const lastRefusalPingAt = new Map<string, number>();
+/** Pure + exported for tests: should this refusal ping, given the last ping time? */
+export function refusalPingDue(rule: string, lastAt: number | undefined, nowSec: number): boolean {
+  if (lastAt === undefined) return true;
+  return nowSec - lastAt >= REFUSAL_PING_COOLDOWN_SEC;
+}
+
+/**
  * Quiet mode: one line summarising the trades since the last flush, instead of a
  * ping per fill. Pure + exported for tests. Only non-empty status buckets show.
  */
@@ -217,7 +238,19 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
             )
             .all(state.lastNotifiedTradeId, agentId) as unknown as TradeRowLite[];
           for (const t of rows) {
+            if (t.status === "rejected") {
+              const rule = t.reject_rule ?? "policy";
+              if (!refusalPingDue(rule, lastRefusalPingAt.get(rule), now())) {
+                // Cursor still advances — the row is recorded, just not
+                // re-announced. Otherwise the same row would re-fire next tick
+                // and the cooldown would never actually quiet anything.
+                deps.stateRef.set({ ...deps.stateRef.get(), lastNotifiedTradeId: t.id });
+                continue;
+              }
+              lastRefusalPingAt.set(rule, now());
+            }
             await sendMessage({ token }, chatId, tradeLine(t, explorer));
+            console.log(`[notify] trade ping sent — id=${t.id} rule=${t.reject_rule ?? t.status}`);
             deps.stateRef.set({ ...deps.stateRef.get(), lastNotifiedTradeId: t.id });
           }
         } else {
@@ -229,7 +262,10 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
               .all(st.lastNotifiedTradeId, agentId) as unknown as TradeAgg[];
             const maxRow = db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM trades").get() as { m: number } | undefined;
             const total = agg.reduce((n, r) => n + r.c, 0);
-            if (total > 0) await sendMessage({ token }, chatId, tradeDigestLine(agg, periodMin));
+            if (total > 0) {
+              await sendMessage({ token }, chatId, tradeDigestLine(agg, periodMin));
+              console.log(`[notify] digest sent — ${total} trades over ${periodMin}m`);
+            }
             deps.stateRef.set({
               ...deps.stateRef.get(),
               lastNotifiedTradeId: Math.max(st.lastNotifiedTradeId, maxRow?.m ?? st.lastNotifiedTradeId),
