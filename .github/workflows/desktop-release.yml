@@ -185,6 +185,13 @@ jobs:
 
             ${{ env.CHANNEL_LINE }}
 
+            ### Install
+            <!-- post-#106-merge: switch the raw URL below from feat/desktop-linux-appimage to main -->
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/aor-rex/merrymen/feat/desktop-linux-appimage/desktop/install.sh | MERRY_MEN_VERSION=${{ github.ref_name }} bash
+            ```
+            Latest beta without pinning: replace `MERRY_MEN_VERSION=${{ github.ref_name }}` with `MERRY_MEN_CHANNEL=beta`.
+
             ### What's changed
             ${{ env.CHANGELOG }}
 
