@@ -13,6 +13,7 @@ import { MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncovere
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 import SetupChecklist from "../SetupChecklist";
+import DesktopAppSection, { isDesktopApp } from "../DesktopApp";
 // QUARANTINED alongside /grant. A settings form is not a surface anybody shares
 // from a phone, and its ~30 fields are styled against the old sheet — so it
 // keeps it, and the sheet no longer reaches anything else.
@@ -791,6 +792,10 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               You can still type a model name below and save; the list is a convenience, not a requirement.
             </p>
           )}
+          {/* Desktop app controls: updates, channel, pause/restart/quit. Renders
+              ONLY inside the real Electron window (no tray on tray-less
+              Wayland) — browser/CLI users never see it. */}
+          {isDesktopApp() && <DesktopAppSection />}
           <div className="mm-section">Trading basket</div>
           {/* GROUPED, because one undifferentiated run of chips is what an owner
               meant by "trading basket in settings is full of all stocks". It was

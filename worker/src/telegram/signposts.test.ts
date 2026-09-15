@@ -50,7 +50,14 @@ describe("the wallet signpost points somewhere real", () => {
     assert.match(body, /MERRYMEN_DASHBOARD_URL/, "an explicit override must win");
     assert.match(body, /isHostedMode\(\)/, "hosted must not default to localhost");
     assert.match(body, /app\.merrymen\.dev/);
-    assert.match(body, /localhost:3100/, "and self-hosted keeps the answer that was always right for it");
+    // Self-hosted stays on localhost — via MERRYMEN_PORT when the desktop app
+    // spawns the worker with its dashboard port (default 17430), else the
+    // 3100 that was always right for a self-hosted operator. A literal
+    // "localhost:3100" assertion would forbid the port fallback, so assert
+    // the shape instead: localhost host, numeric port, 3100 default.
+    assert.match(body, /http:\/\/localhost:\$\{port\}/, "self-hosted stays on localhost");
+    assert.match(body, /MERRYMEN_PORT/, "following the dashboard port when set");
+    assert.match(body, /\|\| 3100/, "unset means the 3100 that was always right");
   });
 
   it("no owner-facing reply hardcodes localhost any more", () => {

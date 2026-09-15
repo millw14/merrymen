@@ -6,6 +6,17 @@ appId: dev.merrymen.desktop
 productName: merrymen
 copyright: merrymen
 
+# Update feed for electron-updater. These values are baked into app-update.yml
+# at BUILD time — electron-builder performs NO substitution of any kind here,
+# so an ${env.…} template would ship verbatim and 404 every update check
+# (shipped broken once; the CI gate below exists because of it). Literals only.
+# Fork-based testing stays available at RUNTIME via main.js setFeedURL
+# (MERRYMEN_UPDATE_OWNER / MERRYMEN_UPDATE_REPO), which overrides these.
+publish:
+  provider: github
+  owner: millw14
+  repo: merrymen
+
 # The whole point: bundle Node + merrymen + its deps so nothing is fetched at
 # runtime. asar is OFF because Next/tsx read many files from disk and don't run
 # cleanly from inside an asar archive (optimize later with asarUnpack if wanted).
@@ -19,6 +30,7 @@ directories:
 # The prebuilt dashboard (merrymen/web/.next) and the worker source ride along.
 files:
   - main.js
+  - preload.js
   - loading.html
   - build/icon.png # bundled at RUNTIME too — used for the window + tray icon
   - "node_modules/**/*"
