@@ -128,7 +128,29 @@ describe("every control survives the restyle", () => {
     // control is what makes OFF reachable at all, and it is also the only place
     // an owner learns the coin list exists. A missing opt-out is worse than a
     // missing opt-in: the behaviour happens either way.
-    assert.equal(count(/type="checkbox"/g), 13, "checkboxes");
+    // 14 since the class route's own switch. It had a type, a PUT-allowlist
+    // entry and a worker read, and no control at all — so it could not be
+    // turned on from the app by anyone, and the factory field sitting alone in
+    // Connections made the page look as though the feature were reachable.
+    // 15 since LIVE TRADING — the switch that decides whether any of this costs
+    // real money, and the one this page went longest without. Two other screens
+    // told owners to change paper/live "in Settings" while no such control
+    // existed here; worse, until `liveTradingEnabled` became a required term of
+    // canTradeForReal there was nothing to bind it to, so a funded agent traded
+    // real money whatever its owner had chosen. First on the page, because it
+    // outranks every control below it.
+    // 16 since "Trade this one too", beside the add-token form. Adding a token
+    // and trading it are two different writes — `customTokens` says "know about
+    // this", `basketSymbols` says "trade it" — and only the first was ever
+    // offered here. The second existed as an unselected chip at the end of
+    // twenty-five stock chips and as a JSX comment, so an owner pasted an
+    // address, saved, re-signed, and asked the group why his agent still traded
+    // only stocks. Deliberately a control rather than an automatic write: the
+    // rule it respects (strategies/registry.ts, "a token added to be tracked
+    // must not start being bought on its own") protects owners from the
+    // PLATFORM widening what gets bought, and a person typing an address is not
+    // the platform — so the choice is theirs, visible, and defaulted on.
+    assert.equal(count(/type="checkbox"/g), 16, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
@@ -141,10 +163,14 @@ describe("every control survives the restyle", () => {
     // save is how ponsAdapterAddress spent a release being undocumentedly dead.
     assert.equal(count(/type="text"/g), 13, "text inputs");
     assert.equal(count(/type="url"/g), 3, "url inputs");
-    assert.equal(count(/<select/g), 5, "selects");
+    // 6 since ASSET MODE — All assets / Stocks only / Crypto only. Several
+    // owners asked for it at once ("there should be an option mode for stocks
+    // only, crypto only..."), and it is a filter over what may be BOUGHT, never
+    // over what is watched: a class switched off stays priced and sellable.
+    assert.equal(count(/<select/g), 6, "selects");
   });
 
-  it("sends exactly the 19 fields save() guards", () => {
+  it("sends exactly the 21 fields save() guards", () => {
     // Every guard is "the user did not touch this, so do not overwrite it".
     // One dropped guard silently resets a setting to whatever the form had.
     //
@@ -153,7 +179,21 @@ describe("every control survives the restyle", () => {
     // send would write `false` for every owner who opened this screen and saved
     // anything at all — silently opting the fleet out of the coin list by
     // visiting a page.
-    assert.equal((code.match(/!== null\)/g) ?? []).length, 19);
+    // 20 since classSnipeEnabled. Same reasoning as officialCoinsEnabled above,
+    // pointing the other way: unguarded, an owner who opened this screen and
+    // saved anything would send `false` and silently switch a running class
+    // canary off mid-position.
+    // 21 since liveTradingEnabled, and this guard is load-bearing in a way none
+    // of the others are: unguarded, an owner who opened this screen and saved
+    // anything at all would send whatever the form happened to hold for the
+    // consent flag — either switching a live agent to paper mid-position, or
+    // granting permission to spend real money. No other field here can do the
+    // second thing.
+    // 22 since assetMode. Unguarded, an owner who opened this screen and saved
+    // anything at all would send whatever the form happened to hold and could
+    // silently narrow what their agent trades — the same class of failure as the
+    // consent flag above, one step less dangerous.
+    assert.equal((code.match(/!== null\)/g) ?? []).length, 22);
   });
 });
 

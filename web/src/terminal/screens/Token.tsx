@@ -4,6 +4,7 @@ import { Boundary } from "../Boundary";
 import { useEffect, useMemo, useState } from "react";
 import {
   loadBars,
+  type BarsRead,
   type Bar,
   type ChartKind,
   type Seat,
@@ -44,6 +45,8 @@ export function Token({
   const [span, setSpan] = useState<WindowId>("1D");
   const [kind, setKind] = useState<ChartKind>("candle");
   const [bars, setBars] = useState<Bar[]>([]);
+  /** WHY the chart is empty, when it is. See bars.ts BarsRead. */
+  const [chart, setChart] = useState<{ state: BarsRead["state"]; reason: BarsRead["reason"]; stale: boolean }>({ state: "ok", reason: null, stale: false });
   const [loading, setLoading] = useState(true);
   const watchlist = useWatchlist();
   const starred = watchlist.ids.includes(token.id);
@@ -113,7 +116,8 @@ export function Token({
     setLoading(true);
     void loadBars(token, span).then((next) => {
       if (alive) {
-        setBars(next);
+        setBars(next.bars);
+        setChart({ state: next.state, reason: next.reason, stale: next.stale });
         setLoading(false);
       }
     });
@@ -244,7 +248,42 @@ export function Token({
         </div>
       </div>
         <div className="token-plot">
-          {bars.length === 0 ? <p className="meta" role="status">{loading ? "Loading the chart…" : "Price history unavailable. Try another timeframe."}</p> : kind === "line" ? (
+          {bars.length === 0 ? (
+            <p className="meta" role="status">
+              {loading
+                ? "Loading the chart…"
+                : /**
+                   * ONE SENTENCE PER STATE. This was a single line for all four
+                   * — "Price history unavailable. Try another timeframe." — and
+                   * that advice is true only for `none` on a short window,
+                   * while for `refused` it blamed the token for our outage.
+                   * read-candles.ts keeps the states apart precisely so this
+                   * screen can say the right one.
+                   */
+                  chart.state === "refused"
+                  ? chart.reason === "rate-limited"
+                    ? "We're being rate-limited by the price index right now. That's our outage, not this token's — the chart should be back within a minute."
+                    : chart.reason === "unreadable"
+                      ? "The price index answered with something we couldn't read. That's ours to fix."
+                      : "We couldn't reach the price index just now. That's our outage, not this token's."
+                  : chart.state === "mismatch"
+                    ? `This pool's price history is quoted for the other side of the pair, so we won't chart it as ${token.symbol}.`
+                    : span === "1H" || span === "4H"
+                      ? "Nothing has traded in this window. Try a longer timeframe."
+                      : "No price history has printed on this pool yet."}
+            </p>
+          ) : (
+            <>
+              {chart.stale && (
+                /* SERVING AN OLD SERIES MUST NEVER BE SILENT. Keeping the last
+                   good bars through a refusal is right — a blank chart over one
+                   429 is worse — but unsaid it trades an honest blank for a
+                   quiet lie about the price. */
+                <p className="meta" role="status">
+                  Showing the last prices we could read — the index isn&apos;t answering right now.
+                </p>
+              )}
+              {kind === "line" ? (
             <Boundary label="token-chart"><DitherChart
               key={`${token.id}-${span}-${chartRevision}`}
               riders={seats.filter(seat=>seat.time >= bars[0]!.time && seat.time <= bars[bars.length-1]!.time && seat.price>0).map((seat) => ({
@@ -274,6 +313,8 @@ export function Token({
               down={down}
               onAgent={onProfile}
             /></Boundary>
+              )}
+            </>
           )}
           <div className="tv-tools">
             <div className="tv-windows">

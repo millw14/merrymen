@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { listSavedWallets } from "@/lib/session";
+import { listSavedWallets, loadGrant } from "@/lib/session";
 import { isAddr, normalizeAddr } from "@/lib/address";
 import { planFromBrowser, sweepFromBrowser, redact, type BrowserWallet } from "@/lib/recover-client";
+import { usePrivyOwner, type PrivyOwner } from "@/terminal/usePrivyOwner";
 
 /**
  * "Get my money out" — the one-click counterpart to `merrymen recover`.
@@ -19,6 +20,17 @@ interface Balance {
   symbol: string;
   amount: string;
 }
+/**
+ * A holding in the account's class vault — a SEPARATE contract, so it appears
+ * in no `Balance`. `token` rather than `symbol` is the key because a class
+ * token's symbol is frequently unreadable and falls back to a short address,
+ * which is not unique.
+ */
+interface ClassHolding {
+  token: string;
+  symbol: string;
+  amount: string;
+}
 interface Ctx {
   hasStoredKey: boolean;
   hasBundler: boolean;
@@ -27,6 +39,9 @@ interface Ctx {
   smartAccount?: string;
   ownerAddress?: string;
   balances?: Balance[];
+  /** The class vault's contents, and the vault itself. Absent is not empty. */
+  classHoldings?: ClassHolding[];
+  classVault?: string | null;
   /** Labels whose balance could not be READ. Never conflate with "not held". */
   unreadable?: string[];
   error?: string;
@@ -41,6 +56,12 @@ interface PlanRes {
   explorer: string;
   chainId: number;
   balances: Balance[];
+  /** The class vault's contents, and the vault itself. Absent is not empty. */
+  classHoldings?: ClassHolding[];
+  classVault?: string | null;
+  /** The ETH leg: what would move, and what stays to pay for the move. */
+  nativeRecoverableWei?: string;
+  nativeReserveWei?: string;
   /** Labels whose balance could not be READ. Never conflate with "not held". */
   unreadable?: string[];
   error?: string;
@@ -78,6 +99,34 @@ const TESTNET = 46630;
  * the wallet, which is the case the paste field exists for.
  */
 export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: string } = {}) {
+  // THE HOOK LIVES HERE AND NOWHERE ELSE. `usePrivy` throws outside a
+  // PrivyProvider, and `Providers` renders none when Privy is disabled — so a
+  // component that calls it cannot be rendered in a test without standing up
+  // Privy itself. Keeping the hook in a one-line wrapper leaves the whole flow
+  // below reachable, which is what lets `recover-privy-flow.test.ts` drive it.
+  return <RecoverPanelView initialOwnerKey={initialOwnerKey} privyOwner={usePrivyOwner()} />;
+}
+
+export function RecoverPanelView({
+  initialOwnerKey = "",
+  privyOwner,
+  /**
+   * Injected ONLY so the flow test does not need a chain. Defaults to the real
+   * engine, so every production render is unchanged.
+   */
+  planFn = planFromBrowser,
+}: {
+  initialOwnerKey?: string;
+  /**
+   * The signed-in embedded wallet, or null for a browser-key wallet.
+   *
+   * Null is the legacy path unchanged — every branch below falls back to the
+   * pasted/stored key exactly as before, so this cannot alter recovery for a
+   * wallet that has a key.
+   */
+  privyOwner: PrivyOwner | null;
+  planFn?: typeof planFromBrowser;
+}) {
   const [open, setOpen] = useState(false);
   const [ctx, setCtx] = useState<Ctx | null>(null);
   const [loadingCtx, setLoadingCtx] = useState(false);
@@ -113,6 +162,39 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
    * empty form and one red line.
    */
   function browserWallet(): BrowserWallet | null {
+    // A PRIVY-OWNED AGENT HAS NO KEY, AND ASKING FOR ONE STRANDS IT.
+    //
+    // Its owner is an embedded wallet whose key is never exported — the point of
+    // it — so this form used to demand something that does not exist and the
+    // account could not be recovered at all. `usePrivyOwner` hands back a viem
+    // LocalAccount that signs without exposing anything, which is the same
+    // signer minting already uses for this owner.
+    if (privyOwner) {
+      // THE ACCOUNT COMES FROM THE BROWSER'S OWN GRANT, not from `ctx`.
+      //
+      // Hosted, `/api/recover` returns `clientSide: true` and NO smartAccount —
+      // the server holds no grant file by construction, which is the whole
+      // reason this path exists. Reading it from `ctx` therefore yielded
+      // undefined before a plan existed, `browserWallet()` returned null, and
+      // the panel told a signed-in owner "this browser doesn't hold that
+      // wallet" about their own agent. `loadGrant()` is where the hosted mint
+      // actually put it.
+      const saved = (() => {
+        try {
+          return loadGrant();
+        } catch {
+          return null;
+        }
+      })();
+      const account = (smartAccount ?? saved?.smartAccount) as `0x${string}` | undefined;
+      if (!account) return null;
+      return {
+        smartAccount: account,
+        ownerAccount: privyOwner.account,
+        chainId: saved?.chainId ?? chainId,
+        grantTokens: (saved as { grantTokens?: string[] } | null)?.grantTokens,
+      };
+    }
     const key = ownerKey.trim();
     if (!isKey(key)) return null;
     // Prefer the stored wallet, so grantTokens (and therefore the sweep list)
@@ -146,14 +228,36 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
     }
     setBusy("checking");
     try {
-      const b = await planFromBrowser(w);
+      const b = await planFn(w);
       setPlan({
         smartAccount: b.smartAccount,
+        ownerAddress: b.ownerAddress,
         chainId: w.chainId,
         // TokenBalance already carries the display string as `amount`, and the
         // panel renders exactly that shape — so pass it through rather than
         // rebuilding it and losing `note` along the way.
         balances: b.balances,
+        // THE CLASS BOOK, WHICH THIS DROPPED ON THE FLOOR.
+        //
+        // Restating a type is how you lose the parts of it you were not
+        // thinking about — the note above `BrowserPlan` says exactly that about
+        // `unreadable`, and then this object literal did it again to the class
+        // vault. `as unknown as PlanRes` is why the compiler never said so.
+        //
+        // The consequence was silent and total: the engine reported the vault,
+        // the disclosure knew how to render it, and the browser path threw the
+        // data away in between — so a Privy owner recovering 1,063,408 DOGGOS
+        // would have confirmed a sweep whose screen said "20.000000 USDG".
+        classHoldings: b.classHoldings,
+        classVault: b.classVault,
+        // THE ETH LEG. It moves on every recovery and was in neither
+        // classHoldings nor balances, so the confirmation listed the tokens and
+        // silently omitted it.
+        nativeRecoverableWei: String(b.nativeRecoverableWei),
+        nativeReserveWei: String(b.nativeReserveWei),
+        // Same reason `unreadable` exists at all: absence and ignorance are
+        // different facts, and the panel cannot tell them apart without this.
+        unreadable: b.unreadable,
       } as unknown as PlanRes);
       // The one thing that stops a sweep dead, said BEFORE they press it.
       if (b.needsGas) {
@@ -178,7 +282,28 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
       setError("this browser doesn't hold that wallet.");
       return;
     }
-    const list = balances.map((b) => `${b.amount} ${b.symbol}`).join(", ") || "the balance";
+    /**
+     * THE CLASS VAULT GOES IN THE CONFIRMATION, because it goes in the sweep.
+     *
+     * This listed `balances` alone — the SMART ACCOUNT's tokens — while the
+     * operation beneath it also empties the class vault, whose contents are
+     * usually the largest thing an owner is moving. The panel body shows them
+     * under "Held in a separate contract"; the dialog that actually takes the
+     * decision did not, so the last thing anyone read before signing named a
+     * strict subset of what they were signing for.
+     *
+     * The server path (`sweep`, below) already lists both. Two confirmations
+     * for one operation must not disclose different things, and the one that
+     * disclosed less was the one hosted owners actually use.
+     *
+     * Class holdings come FIRST, matching the server path and the order of
+     * operations: the vault is emptied into the account, then everything moves.
+     */
+    const list =
+      [
+        ...classHoldings.map((h) => `${h.amount} ${h.symbol}`),
+        ...balances.map((b) => `${b.amount} ${b.symbol}`),
+      ].join(", ") || "the balance";
     if (
       !window.confirm(
         `Sweep ${list} to ${normalizeAddr(to)}?\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.`,
@@ -188,7 +313,20 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
     }
     setBusy("sweeping");
     try {
-      const r = await sweepFromBrowser(w, normalizeAddr(to) as `0x${string}`);
+      // WHAT WAS DISCLOSED IS WHAT IS ATTEMPTED. The engine re-plans
+      // internally; handing it the class leg from the plan the owner just
+      // approved is what stops the two diverging. Identity only — the engine
+      // re-reads the vault balance before signing — and its failure is fatal
+      // rather than a skipped line, so the account sweep cannot proceed
+      // without the holding the confirmation named.
+      const approvedClass =
+        classVault && classHoldings.length > 0
+          ? {
+              vault: classVault as `0x${string}`,
+              tokens: classHoldings.map((h) => h.token as `0x${string}`),
+            }
+          : undefined;
+      const r = await sweepFromBrowser(w, normalizeAddr(to) as `0x${string}`, approvedClass);
       setResult(r as unknown as SweepRes);
     } catch (e) {
       setError(redact(e, w.ownerKey));
@@ -224,6 +362,13 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
 
   // Balances/addresses come from the pasted-key plan if present, else the GET ctx.
   const balances = plan?.balances ?? ctx?.balances ?? [];
+  // MONEY THE ACCOUNT DOES NOT HOLD. A class position sits in a separate
+  // PonsClassVault contract, so it is in no `balances` entry — and this panel
+  // never mentioned the vault at all. The engine has always swept it
+  // (recover.ts:591-638); the screen simply did not say so, which on a
+  // withdrawal confirmation is the difference between consent and a surprise.
+  const classHoldings = plan?.classHoldings ?? ctx?.classHoldings ?? [];
+  const classVault = plan?.classVault ?? ctx?.classVault ?? null;
   const smartAccount = plan?.smartAccount ?? ctx?.smartAccount;
   const explorer = plan?.explorer ?? ctx?.explorer;
   const activeChain = plan?.chainId ?? ctx?.chainId ?? chainId;
@@ -242,8 +387,26 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
   // read. Saying an account is empty because an RPC blinked is how somebody
   // concludes their money is gone.
   const unreadable = (ctx?.unreadable ?? plan?.unreadable ?? []) as string[];
-  const empty = known && balances.length === 0 && unreadable.length === 0;
-  const blind = known && balances.length === 0 && unreadable.length > 0;
+  /**
+   * The ETH leg, formatted once for both the dialog and the screen.
+   *
+   * Null when there is nothing recoverable OR the gas price could not be read —
+   * and those are deliberately the same answer HERE, because in both cases the
+   * honest disclosure is to say nothing about ETH rather than to promise a
+   * figure. `unreadable` already carries "gas price" when it was the latter.
+   */
+  const ethLeg = (() => {
+    const raw = plan?.nativeRecoverableWei;
+    if (raw === undefined) return null;
+    const wei = BigInt(raw);
+    if (wei <= 0n) return null;
+    const fmt = (v: bigint) => (Number(v) / 1e18).toFixed(9);
+    return { recoverable: fmt(wei), reserve: fmt(BigInt(plan?.nativeReserveWei ?? "0")) };
+  })();
+
+  // A vault holding is something to recover, so it cannot be "empty" either.
+  const empty = known && balances.length === 0 && classHoldings.length === 0 && unreadable.length === 0;
+  const blind = known && balances.length === 0 && classHoldings.length === 0 && unreadable.length > 0;
 
   async function sweep() {
     setError(null);
@@ -251,8 +414,42 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
       setError("enter a valid destination address (0x + 40 hex).");
       return;
     }
-    const list = balances.map((b) => `${b.amount} ${b.symbol}`).join(", ") || "the balance";
-    if (!window.confirm(`Sweep ${list} to ${normalizeAddr(to)}?\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.`)) {
+    // GROUPED BY CUSTODY, not flattened. The vault is emptied by a first
+    // operation and the account by a second; one comma-separated list cannot
+    // show an owner that a whole contract is being drained.
+    const lines: string[] = [];
+    if (classHoldings.length) {
+      lines.push("CLASS VAULT" + (classVault ? ` ${classVault}` : ""));
+      for (const h of classHoldings) lines.push(`  ${h.amount} ${h.symbol}`);
+      lines.push("");
+    }
+    if (balances.length) {
+      lines.push(`SMART ACCOUNT ${smartAccount ?? ""}`.trimEnd());
+      for (const b of balances) lines.push(`  ${b.amount} ${b.symbol}`);
+      lines.push("");
+    }
+    // NATIVE ETH, which moves on every recovery and was in neither list above.
+    // Derived from the engine's own `nativeSweep`, not recomputed here — so the
+    // number the owner agrees to and the number the sweep sends come from one
+    // rule. "approximately" because the gas price is read again at execution.
+    if (ethLeg) {
+      lines.push(
+        "NATIVE ETH",
+        `  approximately ${ethLeg.recoverable} ETH recoverable`,
+        `  reserve remaining on the account approximately ${ethLeg.reserve} ETH`,
+        "",
+      );
+    }
+    lines.push("DESTINATION", `  ${normalizeAddr(to)}`);
+    const list =
+      [...classHoldings.map((h) => `${h.amount} ${h.symbol}`), ...balances.map((b) => `${b.amount} ${b.symbol}`)].join(
+        ", ",
+      ) || "the balance";
+    if (
+      !window.confirm(
+        `Sweep:\n\n${lines.join("\n")}\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.`,
+      )
+    ) {
       return;
     }
     setBusy("sweeping");
@@ -336,7 +533,13 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
       ) : (
         <>
           {/* Killed/expired: no stored key — ask for the backed-up one. */}
-          {ctx && !ctx.hasStoredKey && !plan && (
+          {ctx && !ctx.hasStoredKey && !plan && privyOwner && (
+            <p className="recover-sub">
+              Recovery will be authorised by your signed-in wallet. There is no key to enter — your
+              embedded wallet signs it, and merrymen never sees it.
+            </p>
+          )}
+          {ctx && !ctx.hasStoredKey && !plan && !privyOwner && (
             <>
               <p className="recover-sub">
                 Enter the recovery key you saved when creating this wallet.
@@ -349,6 +552,15 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
                 onChange={(e) => setOwnerKey(e.target.value)}
                 autoComplete="off"
               />
+            </>
+          )}
+          {/* THE CHAIN PICKER AND THE CHECK BUTTON BELONG TO BOTH PATHS.
+              Nested inside the key branch above, a Privy-owned agent got the
+              "no key needed" sentence and then no way to do anything — the
+              screen said recovery was authorised by their wallet and offered
+              them nothing to press. */}
+          {ctx && !ctx.hasStoredKey && !plan && (
+            <>
               <div className="recover-chain">
                 <label>
                   <input type="radio" checked={chainId === MAINNET} onChange={() => setChainId(MAINNET)} /> mainnet · 4663
@@ -392,6 +604,30 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
                 </p>
               ) : (
                 <>
+                  {classHoldings.length > 0 && (
+                    <>
+                      <p className="recover-sub">
+                        <strong>Class vault</strong>
+                        {classVault ? <> · <span className="mono">{short(classVault)}</span></> : null}
+                      </p>
+                      <div className="recover-holdings mono">
+                        {classHoldings.map((h) => (
+                          <span key={h.token} className="recover-hold">
+                            {h.amount} {h.symbol}
+                          </span>
+                        ))}
+                      </div>
+                      <p className="recover-sub">
+                        Held in a separate contract, not in the account. Recovery empties it into the
+                        account first, then moves everything in a second operation.
+                      </p>
+                    </>
+                  )}
+                  {balances.length > 0 && classHoldings.length > 0 && (
+                    <p className="recover-sub">
+                      <strong>Smart account</strong>
+                    </p>
+                  )}
                   <div className="recover-holdings mono">
                     {balances.map((b) => (
                       <span key={b.symbol} className="recover-hold">
@@ -399,6 +635,14 @@ export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: strin
                       </span>
                     ))}
                   </div>
+                  {ethLeg && (
+                    <p className="recover-sub">
+                      <strong>Native ETH</strong> · approximately{" "}
+                      <span className="mono">{ethLeg.recoverable}</span> ETH recoverable, leaving about{" "}
+                      <span className="mono">{ethLeg.reserve}</span> ETH on the account to pay for the
+                      withdrawal itself.
+                    </p>
+                  )}
 
                   {!canSubmit && (
                     <p className="recover-warn">

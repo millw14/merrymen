@@ -134,7 +134,12 @@ describe("how often it is written", () => {
     const block = INDEX.indexOf("if (idleNow !== lastIdleReason) {");
     const at = INDEX.indexOf("await addDecision({", block);
     const call = INDEX.slice(at, INDEX.indexOf("});", at) + 3);
-    assert.match(call, /source: `strategy:\$\{strategy\.name\}`/);
+    // Through the helper, not the template. The template spelled the source
+    // `strategy:llm-strategist(anthropic:claude-opus-4)` for the strategist —
+    // a key SOURCE_POLICY has never contained — so this very sentence, the one
+    // written to prove the agent was thinking rather than idle, published
+    // nothing at all. See strategist-publish.test.ts.
+    assert.match(call, /source: publicationSourceFor\(strategy\.name\)/);
     assert.match(call, /reason: idleNow/);
     // No action, no symbol, no size — that absence is what makes it a view,
     // and `outcomeOf` is what turns the absence into the word.

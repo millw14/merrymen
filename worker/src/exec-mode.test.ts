@@ -28,6 +28,10 @@ const base: ExecInputs = {
   gasSponsored: false,
   deadPolicy: false,
   paperTradingEnabled: true,
+  // CONSENT GIVEN. Every case in this file is about the RAIL — which leg of the
+  // machinery carries a trade and which stops it — so the owner's own decision
+  // is held constant at yes. The cases where it is NO live in live-intent.test.ts.
+  liveTradingEnabled: true,
 };
 
 /** What every caller in index.ts derives. */
@@ -184,6 +188,12 @@ test("every input lands in exactly one mode — there is no fourth state", () =>
            for (const gasSponsored of [false, true]) {
             for (const deadPolicy of [false, true]) {
              for (const paperTradingEnabled of [true, false]) {
+              // CONSENT IS A DIMENSION OF THE SPACE, not a constant held at the
+              // convenient value. It was added as a required term of
+              // canTradeForReal, and the entire purpose of this test is that a
+              // new term cannot open a fourth state unnoticed — which it would
+              // do here if the enumeration simply pinned it to true.
+              for (const liveTradingEnabled of [true, false]) {
               const a: ExecInputs = {
                 armed,
                 executor,
@@ -193,6 +203,7 @@ test("every input lands in exactly one mode — there is no fourth state", () =>
                 gasSponsored,
                 deadPolicy,
                 paperTradingEnabled,
+                liveTradingEnabled,
               };
               const m = execModeOf(a);
               assert.ok(
@@ -217,7 +228,13 @@ test("every input lands in exactly one mode — there is no fourth state", () =>
                   "a sponsored agent's mode must not move with its ETH balance",
                 );
               }
+              // NOBODY GOES LIVE WITHOUT ASKING — asserted over the whole space
+              // rather than in one hand-picked case, because the defect this
+              // term fixes was precisely that some corner of the space reached
+              // the live rail without anyone choosing it.
+              if (!liveTradingEnabled) assert.notEqual(m.mode, "live", "consent is required");
               modes.add(m.mode);
+              }
              }
             }
            }

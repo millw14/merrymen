@@ -95,7 +95,9 @@ export function Agent({
   onWithdraw,
   onLimits,
   onResign,
+  onSettings,
   liveBlocker,
+  staleBlocker,
 }: {
   mine: LiveMine | null;
   tokens: LiveToken[];
@@ -113,12 +115,30 @@ export function Agent({
   /** Point at the ONE signing control — see Proposals.tsx. */
   onResign: () => void;
   /**
+   * Open Settings, where the Live trading switch lives.
+   *
+   * Separate from `onResign` because they are opposite errands: one repairs a
+   * permission, the other changes a decision. Routing "start live trading" at
+   * the signer was the original confusion in miniature.
+   */
+  onSettings: () => void;
+  /**
    * WHAT IS STOPPING THIS AGENT TRADING FOR REAL, as the child resolved it.
    *
    * Null is two answers and neither is a problem: trading for real, or never
    * beaten. See AgentStatus.liveBlocker.
    */
   liveBlocker?: string | null;
+  /**
+   * True when that verdict was reached about a key the owner has since
+   * replaced — `grant.grantedAt > workerAliveAt`.
+   *
+   * A corrected grant takes up to ~5.5 minutes to reach this screen (the
+   * orchestrator's ferry, the child's tick, the mirror, the browser's poll), and
+   * for all of it the panel below told an owner who had just re-signed to
+   * re-sign. One of them did, repeatedly, and reported the product as broken.
+   */
+  staleBlocker?: boolean;
 }) {
   const [sending,setSending]=useState(false);
   const [chatError,setChatError]=useState("");
@@ -247,7 +267,7 @@ export function Agent({
         const v = sizeOf[k] ?? (settings?.defaults as Record<string, unknown> | undefined)?.[k];
         return typeof v === "number" ? v : null;
       };
-      const response = await fetch("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},signal:AbortSignal.timeout(45000),body:JSON.stringify({message:question.trim(),state:JSON.stringify({name:mine.name,equity:mine.equity,strategy:settings?.values?.strategy ?? settings?.defaults?.strategy ?? mine.glance.id,basketSymbols:(settings?.values?.basketSymbols ?? settings?.defaults?.basketSymbols ?? null) as string[]|null,paperTradingEnabled:settings?.values?.paperTradingEnabled ?? settings?.defaults?.paperTradingEnabled ?? null,workerStatus:mine.statusLabel ?? "Unknown",liveBlocker:liveBlocker ?? null,positions:(mine.positions ?? []).map(p=>({symbol:p.symbol,valueUsd:p.valueUsd,costUsd:p.costUsd,unrealisedPct:p.pnlPct===null?null:Math.round(p.pnlPct*10)/10,priceStale:p.stale,
+      const response = await fetch("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},signal:AbortSignal.timeout(45000),body:JSON.stringify({message:question.trim(),state:JSON.stringify({name:mine.name,equity:mine.equity,strategy:settings?.values?.strategy ?? settings?.defaults?.strategy ?? mine.glance.id,basketSymbols:(settings?.values?.basketSymbols ?? settings?.defaults?.basketSymbols ?? null) as string[]|null,paperTradingEnabled:settings?.values?.paperTradingEnabled ?? settings?.defaults?.paperTradingEnabled ?? null,liveTradingEnabled:settings?.values?.liveTradingEnabled ?? settings?.defaults?.liveTradingEnabled ?? null,workerStatus:mine.statusLabel ?? "Unknown",liveBlocker:liveBlocker ?? null,positions:(mine.positions ?? []).map(p=>({symbol:p.symbol,valueUsd:p.valueUsd,costUsd:p.costUsd,unrealisedPct:p.pnlPct===null?null:Math.round(p.pnlPct*10)/10,priceStale:p.stale,
         // THIS holding's own stop, graded when it was bought. Null means it
         // carries no grade and the book-wide `stopLossBps` below applies — the
         // distinction matters because "what would make you sell THIS" is the
@@ -452,6 +472,17 @@ export function Agent({
   };
 
   const blocked = blockerAdvice(liveBlocker);
+  /**
+   * DO NOT REPEAT A VERDICT ABOUT A KEY THE OWNER HAS ALREADY REPLACED.
+   *
+   * The desktop banner gets this from `autonomyOf`, which this screen never
+   * touches — it reads the raw rule string — so the same fact has to be applied
+   * here or the phone keeps showing the stale panel that started all of this.
+   * Deliberately wrapping the RENDER rather than folding it into `blocked`
+   * above, which `live-blocker.test.ts` pins literally as the child's verdict
+   * arriving unmodified.
+   */
+  const blockerIsStale = staleBlocker === true;
   return (
     <div className="desk-page">
       {/* WHAT IS STOPPING THIS AGENT, ON THE SCREEN ITS OWNER OPENS.
@@ -463,14 +494,29 @@ export function Agent({
           to trade. Their owners are the ones reporting "it doesn't trade".
           Only they can fix it — a re-sign needs their signature — so the least
           this screen can do is say so and point at the control. */}
-      {blocked && (
-        <section className="desk-blocked" role="status">
+      {blocked && !blockerIsStale && (
+        /* AN ALARM ONLY WHEN SOMETHING IS WRONG. This panel is red, and it was
+           rendered for every blocker there is — including the one that means
+           "your agent is practising, exactly as you asked". An owner who had
+           deliberately chosen Paper mode read a red warning telling him his
+           agent was blocked, and reasonably concluded the product was broken. */
+        <section className={blocked.fault ? "desk-blocked" : "desk-note"} role="status">
           <p>{blocked.say}</p>
-          {/* Money is not the fix for wrong-chain, dead-policy or not-armed —
-              blockerAdvice says which — so only those get sent to the signer. */}
-          {!blocked.funding && (
+          {/* ASK THE ADVICE, DO NOT INFER FROM `funding`. This used to render on
+              `!blocked.funding`, which is not the same question and got two rules
+              wrong: `no-executor` is ours to fix and was offering the owner a
+              signature anyway, and `live-not-enabled` is not broken at all. */}
+          {blocked.resign && (
             <button type="button" onClick={onResign}>
               Fix it — re-sign my permission →
+            </button>
+          )}
+          {/* THE ONE CONTROL THAT ACTUALLY CHANGES THIS STATE. Without it the
+              screen names a switch and offers no way to reach it, which is the
+              shape of the original complaint. */}
+          {liveBlocker === "live-not-enabled" && (
+            <button type="button" onClick={onSettings}>
+              Start live trading →
             </button>
           )}
         </section>

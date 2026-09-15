@@ -68,6 +68,24 @@ export interface CandleRead {
    * state something about a token out of our own outage.
    */
   state: "ok" | "none" | "mismatch" | "refused";
+  /**
+   * WHY it would not answer. Null unless `state` is `refused`.
+   *
+   * The three producers are not the same fact and must not share a TTL. A 429
+   * is EVIDENCE about the bucket and deserves the full window — caching it is
+   * the whole reason this cache exists. A dropped connection or a timeout says
+   * nothing about the bucket, and holding it for thirty seconds silenced a
+   * token, for every viewer, over one blip. A shape we cannot parse will not
+   * parse three seconds later either.
+   */
+  reason: "rate-limited" | "unreachable" | "unreadable" | null;
+  /**
+   * True when these bars are the last good read and the index has since
+   * refused. The chart draws, and the caption says so.
+   */
+  stale?: boolean;
+  /** When that refusal happened, so the backoff is measured from it. */
+  refusedAt?: number;
   candles: Candle[];
   /** The base token the bars are actually about, lowercased. Null when unread. */
   base: string | null;
@@ -95,8 +113,13 @@ export interface CandleRead {
   lastBarAgeSec: number | null;
 }
 
-const refused = (): CandleRead => ({
+/**
+ * A refusal, and WHY — the reason decides how long it is held and what the
+ * screen is allowed to say about the token.
+ */
+const refused = (reason: NonNullable<CandleRead["reason"]>): CandleRead => ({
   state: "refused",
+  reason,
   candles: [],
   base: null,
   quoteSymbol: null,
@@ -123,8 +146,26 @@ const TTL_MS: Readonly<Record<CandleWindow, number>> = {
   "1d": 30 * 60_000,
 };
 
-/** A refusal is kept briefly, so a rate-limited page does not earn another. */
-const REFUSED_TTL_MS = 30_000;
+/**
+ * How long a refusal is kept, BY WHAT IT TELLS US — and the asymmetry is the
+ * point, so do not collapse these back into one number.
+ *
+ * One value applied to every producer is what silenced a token for thirty
+ * seconds, for every viewer, over a single dropped connection. A 429 is
+ * evidence that the bucket is empty and re-asking inside the window is exactly
+ * what earns another; a timeout says nothing about the bucket at all, and the
+ * only thing worth guarding against there is a stampede, which single-flight
+ * already handles for concurrent callers.
+ *
+ * SHORTENING `rate-limited` WOULD RE-CREATE THE PROBLEM THIS CACHE EXISTS FOR.
+ * The extra requests permitted below happen only when we are NOT being
+ * rate-limited — which is precisely when there is budget to spend.
+ */
+const REFUSED_TTL_MS: Readonly<Record<NonNullable<CandleRead["reason"]>, number>> = {
+  "rate-limited": 60_000,
+  unreadable: 60_000,
+  unreachable: 3_000,
+};
 
 const cache = new Map<string, { at: number; read: CandleRead }>();
 const inFlight = new Map<string, Promise<CandleRead>>();
@@ -151,7 +192,14 @@ export async function readCandles(
   const key = `${poolId.toLowerCase()}:${window}`;
   const hit = cache.get(key);
   if (hit) {
-    const ttl = hit.read.state === "refused" ? REFUSED_TTL_MS : TTL_MS[window];
+    // A kept-but-stale series is held only as long as the refusal that caused
+    // it, so the chart re-reads as soon as the index is worth asking again.
+    const ttl =
+      hit.read.state === "refused"
+        ? REFUSED_TTL_MS[hit.read.reason ?? "unreachable"]
+        : hit.read.stale
+          ? REFUSED_TTL_MS.unreachable
+          : TTL_MS[window];
     if (Date.now() - hit.at < ttl) return hit.read;
   }
 
@@ -164,6 +212,31 @@ export async function readCandles(
   // same instant genuinely is one request.
   const started = fetchCandles(poolId, token, window)
     .then((read) => {
+      /**
+       * A REFUSAL MUST NOT DESTROY A SERIES WE ALREADY HAVE.
+       *
+       * This wrote unconditionally, so one rate-limited request replaced a good
+       * chart with an empty one — and because the refusal is then cached, every
+       * viewer of that pool lost the chart for the next thirty seconds.
+       * Reported as "for some tokens the chart did not load on first try. but
+       * now it is resolved for some reason hahaah. maybe it was my browser."
+       * It was not his browser: this cache is a module-level Map on the server
+       * and is shared by everyone looking at the same pool.
+       *
+       * Keeping the bars costs nothing against the rate budget — the request
+       * has already been spent — and it is strictly more honest than a blank
+       * chart, PROVIDED the staleness is said out loud. `stale` is what the
+       * caption is drawn from; serving an old series silently would trade an
+       * honest blank for a quiet lie about the price.
+       */
+      const previous = cache.get(key);
+      if (read.state === "refused" && previous?.read.state === "ok") {
+        // The timestamp still advances, so the backoff below is measured from
+        // this refusal rather than from the last good read.
+        const kept: CandleRead = { ...previous.read, stale: true, refusedAt: Date.now() };
+        cache.set(key, { at: Date.now(), read: kept });
+        return kept;
+      }
       cache.set(key, { at: Date.now(), read });
       return read;
     })
@@ -173,6 +246,26 @@ export async function readCandles(
 
   inFlight.set(key, started);
   return started;
+}
+
+/**
+ * The cache's one seam, for tests.
+ *
+ * The cache is deliberately module-level — it is shared across viewers, which
+ * is the whole point and also half of the bug it was involved in — so a test
+ * needs a way to clear it, and a way to AGE an entry rather than waiting out a
+ * real TTL. `age` backdates the stored timestamp; `keepLastRead` keeps the entry
+ * so the next call sees a lapsed-but-present read, which is the state the
+ * stale-series case is about.
+ */
+export function __resetCandleCacheForTest(opts?: { keepLastRead?: boolean; age?: number }): void {
+  inFlight.clear();
+  if (!opts?.keepLastRead) {
+    cache.clear();
+    return;
+  }
+  const back = opts.age ?? 0;
+  for (const [k, v] of cache) cache.set(k, { ...v, at: v.at - back });
 }
 
 async function fetchCandles(
@@ -193,21 +286,23 @@ async function fetchCandles(
       headers: { accept: "application/json" },
       next: { revalidate: 60 },
     });
-    if (!res.ok) return refused(); // 429 included, and it is the common one
+    // 429 is the common one, and it is the only refusal that is EVIDENCE about
+    // the bucket — so it is the only one cached for the full window.
+    if (!res.ok) return refused(res.status === 429 ? "rate-limited" : "unreachable");
     const j = (await res.json()) as {
       data?: { attributes?: { ohlcv_list?: unknown[][] } };
       meta?: { base?: { address?: string; symbol?: string }; quote?: { symbol?: string } };
     };
 
     const list = j.data?.attributes?.ohlcv_list;
-    if (!Array.isArray(list)) return refused(); // a shape we cannot read is a refusal
+    if (!Array.isArray(list)) return refused("unreadable"); // a shape we cannot read is a refusal
 
     // THE GUARD FAILS CLOSED. It used to read `if (base && base !== token)`, so
     // a response that named no base at all skipped the check entirely and
     // charted an unverified series — the exact outcome the check exists to
     // prevent. Not being told what the bars are about is a refusal.
     const base = (j.meta?.base?.address ?? "").toLowerCase();
-    if (!base) return refused();
+    if (!base) return refused("unreadable");
 
     const quoteSymbol = j.meta?.quote?.symbol ?? null;
 
@@ -217,6 +312,7 @@ async function fetchCandles(
     if (base !== token.toLowerCase()) {
       return {
         state: "mismatch",
+        reason: null,
         candles: [],
         base,
         quoteSymbol,
@@ -249,6 +345,7 @@ async function fetchCandles(
     if (!candles.length) {
       return {
         state: "none",
+        reason: null,
         candles: [],
         base,
         quoteSymbol,
@@ -267,6 +364,7 @@ async function fetchCandles(
 
     return {
       state: "ok",
+      reason: null,
       candles,
       base,
       quoteSymbol,
@@ -276,6 +374,8 @@ async function fetchCandles(
       lastBarAgeSec: Math.max(0, Math.floor(Date.now() / 1000) - last),
     };
   } catch {
-    return refused();
+    // A throw: network, abort, or the client timeout. Says nothing about the
+    // bucket, so it gets the short backoff rather than the full window.
+    return refused("unreachable");
   }
 }

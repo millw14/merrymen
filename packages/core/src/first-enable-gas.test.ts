@@ -5,6 +5,7 @@ import {
   firstEnableEnvelope,
   wallShape,
   wallSignable,
+  FIRST_ENABLE_GAS_MODEL,
 } from "./first-enable-gas";
 import { buildCallPermissions } from "./wall";
 import type { GrantCaps } from "./grant";
@@ -197,36 +198,107 @@ describe("the hard maximum binds, and is derived from a measured failure point",
     );
   });
 
+  /** Every caller now states the account's real deployment state. */
+  const signableNow = (shape: Parameters<typeof wallSignable>[0], deploying = true) =>
+    wallSignable(shape, { deploying });
+
   it("a wall at the cliff cannot be signed", () => {
-    const v = wallSignable(withTokens(40));
+    const v = signableNow(withTokens(40));
     assert.equal(v.ok, false);
-    if (!v.ok) {
-      assert.match(v.why, /too wide/);
-      assert.match(v.why, /Remove some custom tokens|turn off a venue/);
-    }
+    if (!v.ok) assert.match(v.why, /too large to sign safely/);
   });
 
-  it("and the refusal tells the owner which way to narrow it", () => {
-    // "Too wide" with no remedy is a dead end. The sentence has to name both
-    // levers, because the cost grows with tokens AND capabilities together.
-    const v = wallSignable(withTokens(40));
+  it("AND THE REFUSAL NAMES THE OWNER'S OWN NUMBER, not a general principle", () => {
+    // "Remove some custom tokens, or turn off a venue you are not using" was
+    // true and useless: it named no figure, and on 4663 the largest removable
+    // item — the class vault — CANNOT be turned off, so the one lever it
+    // pointed at was the one lever the owner did not have.
+    const v = wallSignable(withTokens(40), {
+      deploying: true,
+      basket: { count: 40, shapeWith: (n) => withTokens(n) },
+    });
     assert.equal(v.ok, false);
-    if (!v.ok) assert.ok(v.why.includes("custom tokens") && v.why.includes("venue"));
+    if (v.ok) return;
+    assert.ok(typeof v.maxTokens === "number" && v.maxTokens > 0, "a real maximum, from the builder");
+    assert.equal(v.removeAtLeast, 40 - (v.maxTokens as number));
+    assert.match(v.why, /You have 40 custom tokens/);
+    assert.match(v.why, new RegExp(`the most that fits with the features you have enabled is ${v.maxTokens}`));
+    assert.match(v.why, new RegExp(`Remove at least ${v.removeAtLeast} custom tokens`));
+    // AND IT NO LONGER SENDS THEM AT A LEVER THEY DO NOT HAVE.
+    assert.doesNotMatch(v.why, /venue/);
+  });
+
+  it("the maximum it reports actually fits, and one more does not", () => {
+    // The number is only worth printing if it is the true boundary. Checked
+    // against the same builder rather than against the sentence.
+    const v = wallSignable(withTokens(40), {
+      deploying: true,
+      basket: { count: 40, shapeWith: (n) => withTokens(n) },
+    });
+    assert.equal(v.ok, false);
+    if (v.ok || v.maxTokens === null) return;
+    assert.equal(signableNow(withTokens(v.maxTokens)).ok, true, "the reported maximum must fit");
+    assert.equal(signableNow(withTokens(v.maxTokens + 1)).ok, false, "and it must be the LAST that fits");
   });
 
   it("an ordinary wall is signable", () => {
-    for (const n of [0, 1, 5]) assert.equal(wallSignable(withTokens(n)).ok, true, `n=${n}`);
+    for (const n of [0, 1, 5]) assert.equal(signableNow(withTokens(n)).ok, true, `n=${n}`);
+  });
+
+  describe("a re-sign is not charged for a deployment it will never pay", () => {
+    it("UNDEPLOYED: the allowance is included", () => {
+      const s = withTokens(5);
+      assert.equal(
+        firstEnableEnvelope(s, { deploying: true }).expectedRaw -
+          firstEnableEnvelope(s, { deploying: false }).expectedRaw,
+        BigInt(FIRST_ENABLE_GAS_MODEL.deployAllowanceRaw),
+        "a first install pays CREATE2 and initCode",
+      );
+    });
+
+    it("DEPLOYED: the allowance is excluded, and it is worth 316,250 bounded", () => {
+      // The measured size of the bug: an owner sitting anywhere in this band
+      // was refused a wall that fits. A beta user was told to delete a fifth
+      // token when four was the true answer.
+      const s = withTokens(6);
+      const a = firstEnableEnvelope(s, { deploying: true }).expectedBounded;
+      const b = firstEnableEnvelope(s, { deploying: false }).expectedBounded;
+      assert.equal(a - b, 316_250n);
+    });
+
+    it("and it changes the ANSWER, not just the arithmetic", () => {
+      // The whole point. There must exist a wall that is refused as a first
+      // install and signable as a re-sign, or the flag would be cosmetic.
+      // ROB'S ACTUAL SHAPE: class vault sealed, which is every grant on 4663
+      // because `sealedClassFactory` falls back to the chain's own factory.
+      const asRob = (n: number) =>
+        withTokens(n, {
+          ponsClassVaultAddress: "0x3fcdde6e011769ca05f0115f1543290862473216",
+          ponsClassVaultFactoryAddress: "0x48a5603712d3d4f4e6e4e1cbd4f4f5d1c9e6ab3d",
+        });
+      const straddling = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30, 40].filter(
+        (n) => !signableNow(asRob(n), true).ok && signableNow(asRob(n), false).ok,
+      );
+      assert.ok(straddling.length > 0, "no token count straddles the ceiling — the flag would be inert");
+      // And it is the count the beta owner was sitting on.
+      assert.ok(straddling.includes(6), `expected 6 tokens to straddle, got ${straddling.join(",")}`);
+    });
   });
 
   it("THE SIGNING CAP AND THE EXECUTOR CAP ARE THE SAME FUNCTION", () => {
     // The defect this whole change exists to close: the product minted grants
     // whose first operation the executor was already designed to refuse. If
-    // these two could disagree, that comes straight back.
-    for (const n of [0, 5, 9, 20, 40]) {
-      const s = withTokens(n);
-      const signable = wallSignable(s).ok;
-      const deployable = firstEnableEnvelope(s).withinHardMax;
-      assert.equal(signable, deployable, `n=${n}: signing and execution disagree`);
+    // these two could disagree, that comes straight back. Checked in BOTH
+    // deployment states, because the flag now moves the boundary.
+    for (const deploying of [true, false]) {
+      for (const n of [0, 5, 9, 20, 40]) {
+        const s = withTokens(n);
+        assert.equal(
+          signableNow(s, deploying).ok,
+          firstEnableEnvelope(s, { deploying }).withinHardMax,
+          `n=${n} deploying=${deploying}: signing and execution disagree`,
+        );
+      }
     }
   });
 });

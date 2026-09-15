@@ -31,7 +31,7 @@ export interface AgentSnapshot {
   name: string;
   /** What the worker reports it is doing. `idle` means it is not running. */
   mode: "live" | "paper" | "idle";
-  /** Practice chain — nothing here is real, whatever else is true. */
+  /** The TESTNET (46630) — nothing here is real, whatever else is true. Not to be confused with Paper, which is simulated trading on any chain. */
   testnet: boolean;
   /**
    * Is somebody else paying this agent's gas?
@@ -103,7 +103,7 @@ function firstSentence(s: string, max = 160): string {
  * wanted.
  */
 function network(testnet: boolean): string {
-  return testnet ? "the practice chain" : "Robinhood Chain";
+  return testnet ? "the testnet" : "Robinhood Chain";
 }
 
 /**
@@ -222,21 +222,21 @@ export function statusLine(a: AgentSnapshot): StatusLine {
         };
   }
 
-  // ── Practice ─────────────────────────────────────────────────────────────
+  // ── Testnet: the NETWORK, not the mode ───────────────────────────────────
   if (a.testnet) {
     return {
-      headline: `${name} is on the practice chain, so none of this is real money.`,
-      next: "Move it to real money from the wallet page when you're ready — it's free and takes one signature.",
+      headline: `${name} is on the testnet, so none of this is real money.`,
+      next: "Re-sign its key for Robinhood Chain from the wallet page when you are ready — it is free and takes one signature.",
       tone: "waiting",
     };
   }
   if (a.mode === "paper") {
     return {
-      headline: `${name} is practising — real prices, pretend money.`,
+      headline: `${name} is on Paper — real prices, pretend money.`,
       next:
         a.cashUsdg > 0
           ? "It's watching the market and showing you what it would do. Everything below is a simulation until it goes live."
-          : "Add some USDG and it starts trading for real. Until then it practises so you can watch it work first.",
+          : "Turn on Live trading in Settings when you want it to trade real funds — adding money alone will not start it. Until then it trades on paper so you can watch it work first.",
       tone: "waiting",
     };
   }

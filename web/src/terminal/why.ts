@@ -1,3 +1,4 @@
+import { REASON_MAX } from "@merrymen/thesis";
 import type { Thesis } from "./live";
 
 export type WhyView =
@@ -85,10 +86,23 @@ export function takeFor(posted?: string | null, standing?: string | null): strin
   return (posted ?? "").trim() || (standing ?? "").trim() || "";
 }
 
+/**
+ * ONE CAP, AND IT IS THE PUBLISHED ONE.
+ *
+ * This used to clip at 90 while publication allows REASON_MAX (220) and the
+ * card and Android feed both render the full 220 — so the rail was the only
+ * place throwing text away, and any sentence with a second clause died in it
+ * mid-thought. The agent was writing a view and the feed was showing a fragment.
+ *
+ * Still capped rather than unbounded: a strategy source publishes UNCAPPED (see
+ * the policy split in thesis-policy.ts), so without a limit here one long
+ * deterministic reason could take the whole rail. The truncation stays visible
+ * — an ellipsis, never a silent cut.
+ */
 function shortWhy(text: string): string {
   const r = text.trim();
-  if (r.length <= 90) return r;
-  return `${r.slice(0, 87).trimEnd()}…`;
+  if (r.length <= REASON_MAX) return r;
+  return `${r.slice(0, REASON_MAX - 3).trimEnd()}…`;
 }
 
 /** One line for the feed. Book weight is not a thesis — use thesisLine for that. */

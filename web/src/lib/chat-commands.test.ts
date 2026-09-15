@@ -73,9 +73,9 @@ describe("what the model actually says, and what survives it", () => {
     // command.
     assert.equal(splitCommand("<<CMD set-size {buyPerTickUsdg: 25}>>").command, undefined);
     // A command whose value is its OWN, though, is still complete with nothing:
-    // go-live means `paperTradingEnabled: false` whatever the model sent.
+    // go-live means `liveTradingEnabled: true` whatever the model sent.
     assert.deepEqual(splitCommand("<<CMD go-live {oops}>>").command, { id: "go-live", args: {} });
-    assert.deepEqual(commandPayload(commandFor("go-live")!, {}), { paperTradingEnabled: false });
+    assert.deepEqual(commandPayload(commandFor("go-live")!, {}), { liveTradingEnabled: true });
   });
 
   it("ONE PROPOSAL PER REPLY, and it is the one the reply ENDS on", () => {
@@ -164,14 +164,25 @@ describe("a command cannot write a field it did not declare", () => {
   });
 
   it("A COMMAND WHOSE MEANING IS THE VALUE SUPPLIES IT ITSELF", () => {
-    // go-live IS `paperTradingEnabled: false`. If the model chose the boolean,
-    // an empty `{}` would write nothing while the card said "stop simulating",
-    // and the wrong boolean would do the opposite of the sentence confirmed.
-    assert.deepEqual(commandPayload(commandFor("go-live")!, {}), { paperTradingEnabled: false });
-    assert.deepEqual(commandPayload(commandFor("go-paper")!, {}), { paperTradingEnabled: true });
+    // go-live IS `liveTradingEnabled: true` — the owner's consent, and the only
+    // thing that lets real orders reach the chain. If the model chose the
+    // boolean, an empty `{}` would write nothing while the card said "trade for
+    // real", and the wrong boolean would do the opposite of what was confirmed.
+    //
+    // IT NO LONGER WRITES `paperTradingEnabled: false`. That field was never the
+    // gate — it grants permission to SIMULATE when the live rail is down — and
+    // switching it off here would only delete the safety net while leaving the
+    // owner's actual decision unrecorded.
+    assert.deepEqual(commandPayload(commandFor("go-live")!, {}), { liveTradingEnabled: true });
+    // go-paper writes BOTH: keep simulating, and withhold consent. The second
+    // half is the one that was missing, and the one the owner is asking for.
+    assert.deepEqual(commandPayload(commandFor("go-paper")!, {}), {
+      paperTradingEnabled: true,
+      liveTradingEnabled: false,
+    });
     // And the command beats the model even when the model insists.
-    assert.deepEqual(commandPayload(commandFor("go-live")!, { paperTradingEnabled: true }), {
-      paperTradingEnabled: false,
+    assert.deepEqual(commandPayload(commandFor("go-live")!, { liveTradingEnabled: false }), {
+      liveTradingEnabled: true,
     });
   });
 
@@ -252,13 +263,27 @@ describe("the sentence an owner confirms is ours", () => {
   });
 
   it("and it says what the setting ACTUALLY does, not what its name suggests", () => {
-    // paperTradingEnabled is permission to simulate, not a request to —
-    // execModeOf asks canTradeForReal first. "Switch to paper" would promise
-    // something this setting does not do, which is the exact confusion a
-    // tester reported when they went looking for a switch.
+    // THIS ASSERTION USED TO RUN THE OTHER WAY, and the change is the fix.
+    //
+    // It required go-paper to admit it was "not a switch to paper" and that "if
+    // every leg is available I still trade for real" — honest copy for a
+    // setting that could not do what owners asked of it, because
+    // `paperTradingEnabled` only ever granted permission to SIMULATE and
+    // nothing withheld permission to TRADE.
+    //
+    // `liveTradingEnabled` is now a required term of canTradeForReal, so the
+    // request CAN be honoured, and the apology would itself be the lie. What is
+    // pinned instead is the promise: no real orders, whatever is in the account.
     const paper = commandFor("go-paper")!.say({});
-    assert.match(paper, /not a switch to paper/i);
-    assert.match(paper, /if every leg is available I still trade for real/i);
+    assert.doesNotMatch(paper, /not a switch to paper/i, "it is a switch now");
+    assert.doesNotMatch(paper, /still trade for real/i, "and it must not say it might");
+    assert.match(paper, /no real orders/i, "it promises what it now delivers");
+    assert.match(paper, /whatever is in the account/i, "including that funding cannot override it");
+
+    // And its opposite is unambiguous about what it turns on.
+    const live = commandFor("go-live")!.say({});
+    assert.match(live, /real money/i);
+    assert.match(live, /caps/i, "bounded by the signature, and it says so");
   });
 });
 

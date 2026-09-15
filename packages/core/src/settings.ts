@@ -155,6 +155,40 @@ export interface MerrymenSettings {
   paperTradingEnabled?: boolean;
   /** Starting paper cash, USDG. */
   paperStartUsdg?: number;
+  /**
+   * WHICH KINDS OF THING THE AGENT MAY BUY — "all" | "stocks" | "crypto".
+   *
+   * A FILTER OVER TRADE LEGS, NOT OVER THE WATCH SET, and the distinction is
+   * the whole safety of the feature. See `assetModeAllows` in tokens.ts: the
+   * watch set is what `snap.holdings` is built from, and every stop-loss and
+   * take-profit iterates that. A class switched off stays watched, priced,
+   * valued and sellable — only new buys of it stop.
+   *
+   * SETTINGS-ONLY, NO RE-SIGNATURE. Narrowing off-chain is always safe —
+   * policy.ts: "a mirror STRICTER than the chain, which is the one direction
+   * that is always safe." The shipped precedent is `officialCoinsEnabled`,
+   * which filters a token set that is sealed into every grant. Note the
+   * corollary: "crypto" cannot make the wall stop covering the stock tokens
+   * without a re-sign, and does not need to — nothing on-chain initiates a
+   * trade, so refusing off-chain is sufficient.
+   */
+  assetMode?: "all" | "stocks" | "crypto";
+  /**
+   * THE OWNER'S CONSENT TO SPEND REAL MONEY. Off until they say otherwise.
+   *
+   * Separate from `paperTradingEnabled` because they answer different
+   * questions: this one is "may real orders reach the chain", that one is
+   * "when they may not, should I simulate instead". For a while there was only
+   * the second, and it could not do this job — it is consulted only after the
+   * live rail has already failed, so an agent whose rail was healthy traded for
+   * real no matter what its owner had chosen. Funding an account was enough to
+   * cross that line, which is not a thing funding should be able to do.
+   *
+   * A REQUIRED TERM of `canTradeForReal` (worker/src/exec-mode.ts), not a
+   * fallback — see the long note on `ExecInputs.liveTradingEnabled` for why the
+   * distinction is the whole fix.
+   */
+  liveTradingEnabled?: boolean;
 
   // ── trading ────────────────────────────────────────────────────────────
   /** Builtin ("steady-basket" | "weekend-gap" | "llm-strategist") or the
@@ -730,8 +764,27 @@ export type PcCapability = (typeof PC_CAPABILITIES)[number];
 export const SLIPPAGE_BPS_MAX = 1_000;
 
 export const SETTINGS_DEFAULTS = {
+  /**
+   * EVERYTHING THE GRANT COVERS. The only default that changes nothing for
+   * anybody who never touches it — which is the bar a filter added to a live
+   * fleet has to clear.
+   */
+  assetMode: "all" as const,
   paperTradingEnabled: true,
   paperStartUsdg: 1000,
+  /**
+   * OFF. The only safe default for a term that means "spend my money", and the
+   * one place in this file where the default is a promise rather than a
+   * preference: no agent trades for real until a person says so.
+   *
+   * MIGRATION — this default is why the rollout is two deploys, not one.
+   * `worker/src/settings.ts` resolves an absent field to the default, so
+   * shipping enforcement and this default together would move every existing
+   * tenant to paper at once, including agents whose owners are watching them
+   * trade real money right now. The backfill in `scripts/backfill-live-intent`
+   * writes the flag explicitly for anyone already live BEFORE enforcement lands.
+   */
+  liveTradingEnabled: false,
   rialtoApiKeyHeader: "x-api-key",
   strategy: "steady-basket" as const,
   swapVenue: "uniswap" as const,

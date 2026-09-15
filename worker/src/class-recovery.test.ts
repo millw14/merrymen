@@ -8,7 +8,8 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { findClassVault, planClassSweep, readClassHoldings } from "./class-recovery";
+import { formatUnits } from "viem";
+import { classSweepCandidates, findClassVault, planClassSweep, readClassHoldings } from "./class-recovery";
 
 const ACCOUNT = "0x00000000000000000000000000000000000000a1" as const;
 const VAULT = "0x00000000000000000000000000000000000000c0" as const;
@@ -180,5 +181,111 @@ describe("planning the sweep", () => {
 
   it("an all-empty vault plans nothing rather than an empty batch", async () => {
     assert.deepEqual(planClassSweep([{ token: PEPE, symbol: "PEPE", raw: 0n }]), []);
+  });
+});
+
+/**
+ * THE ASSET THE LOGS CANNOT NAME.
+ *
+ * `ClassBuy`/`ClassSell`/`Swept` carry the class token and the quote only as an
+ * AMOUNT — the quote asset's address is in no event this contract emits. So a
+ * candidate list built from logs alone can never contain USDG, and a vault
+ * holding stranded quote enumerates as holding only its class tokens. That is
+ * what an owner is shown, and the sweep moves exactly what was shown.
+ *
+ * Measured on mainnet: Shogun's vault holds 1,063,408.141815 DOGGOS and
+ * 5.785344 USDG. Only the DOGGOS was ever disclosed.
+ */
+describe("what to ask the vault about", () => {
+  const REGISTRY = [
+    { address: "0x5fc5360d0400a0fd4f2af552add042d716f1d168", symbol: "USDG" },
+    { address: "0x0000000000000000000000000000000000000ee1", symbol: "WIF" },
+  ];
+
+  it("INCLUDES THE QUOTE ASSET, which appears in no log event", () => {
+    const out = classSweepCandidates([PEPE], REGISTRY);
+    const usdg = out.find((c) => c.symbol === "USDG");
+    assert.ok(usdg, "a vault holding stranded USDG would otherwise enumerate as holding none");
+    assert.equal(usdg.token, "0x5fc5360d0400a0fd4f2af552add042d716f1d168");
+  });
+
+  it("keeps the log-derived token, which the registry cannot name", () => {
+    const out = classSweepCandidates([PEPE], REGISTRY);
+    const pepe = out.find((c) => c.token === PEPE);
+    assert.ok(pepe, "the class token is the one the vault was built to hold");
+    // A launch token is not in the registry, so the short address is the only
+    // name available — better than omitting it.
+    assert.match(pepe.symbol, /^0x[0-9a-f]{8}…$/);
+  });
+
+  it("and log tokens come first, so a registry entry cannot rename one", () => {
+    const out = classSweepCandidates([WIF], REGISTRY);
+    const wif = out.filter((c) => c.token.toLowerCase() === WIF.toLowerCase());
+    assert.equal(wif.length, 1, "a token in both lists is asked about once");
+    assert.match(wif[0]!.symbol, /…$/, "the log entry wins");
+  });
+
+  it("dedupes case-insensitively, because addresses arrive in both cases", () => {
+    const out = classSweepCandidates(
+      [PEPE, PEPE.toUpperCase() as `0x${string}`],
+      [{ address: PEPE.toUpperCase(), symbol: "PEPE" }],
+    );
+    assert.equal(out.filter((c) => c.token.toLowerCase() === PEPE.toLowerCase()).length, 1);
+  });
+
+  it("and an empty vault history still asks about the registry", () => {
+    // The case that matters after a rebuild: no logs in the window, but the
+    // vault may still hold quote. An empty answer here would be a false "empty".
+    const out = classSweepCandidates([], REGISTRY);
+    assert.equal(out.length, 2);
+  });
+});
+
+/**
+ * THE AMOUNT AN OWNER READS BEFORE THEY SIGN.
+ *
+ * `planRecovery` formatted every class holding at 18dp — correct while a vault
+ * could only hold Pons launch tokens, and wrong the moment the enumeration also
+ * asked about the quote asset. USDG is 6dp, so Shogun's real 5.785344 USDG was
+ * shown as 0.000000000005785344 USDG: the right money, misstated by twelve
+ * orders of magnitude, on the screen where the decision is made.
+ *
+ * The sweep was never affected — `sweep(token)` takes no amount and moves the
+ * whole balance — which is precisely what made it dangerous. A disclosure
+ * defect with no execution symptom is one nothing downstream can catch.
+ */
+describe("a holding is formatted at its own decimals", () => {
+  const USDG_ADDR = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+
+  it("CARRIES THE REGISTRY'S DECIMALS, not the launchpad's", () => {
+    const out = classSweepCandidates([PEPE], [{ address: USDG_ADDR, symbol: "USDG", decimals: 6 }]);
+    const usdg = out.find((c) => c.symbol === "USDG");
+    assert.equal(usdg?.decimals, 6, "6dp, or 5.785344 USDG reads as 0.000000000005785344");
+  });
+
+  it("and a log-derived launch token stays 18dp", () => {
+    // Every Pons launch is 18 decimals, and a log-derived token is a launch by
+    // construction — readClassLog reads the vault's own events and nothing else
+    // writes them.
+    const out = classSweepCandidates([PEPE], []);
+    assert.equal(out.find((c) => c.token === PEPE)?.decimals, 18);
+  });
+
+  it("formats the real Shogun figures correctly", () => {
+    // The exact numbers from the vault, so this test fails if either side of
+    // the pairing regresses.
+    assert.equal(formatUnits(5_785_344n, 6), "5.785344");
+    assert.equal(
+      formatUnits(1_063_408_141_815_259_059_579_834n, 18),
+      "1063408.141815259059579834",
+    );
+  });
+
+  it("and the sweep does not require decimals at all", () => {
+    // planClassSweep builds calls; decimals are a display concern. Requiring
+    // them there would make every caller carry a number the sweep never reads —
+    // and that pressure is what produced the hard-coded 18 in the first place.
+    const kept = planClassSweep([{ token: PEPE, symbol: "PEPE", raw: 5n }]);
+    assert.equal(kept.length, 1);
   });
 });

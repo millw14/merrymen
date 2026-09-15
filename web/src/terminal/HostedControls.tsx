@@ -23,7 +23,18 @@ export interface AccountState {
    * the only figure that may decide whether real money exists. The book's cash
    * is the simulated balance in paper mode, which is the whole confusion.
    */
-  status: {exists: boolean; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; balances?: {ethWei: string; cashUsdg: string; vaultUsdg: string}; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number}};
+  /**
+   * `workerAliveAt` and `grant.grantedAt` travel together for ONE comparison:
+   * whether the blocker on this row was resolved against a key the owner has
+   * since replaced. Both were already on the wire from /api/grants and were
+   * simply not declared here, so the shell could not see them.
+   *
+   * They come from the same response but not the same source — `grantedAt` from
+   * the grant store the POST writes synchronously, `workerAliveAt` from the
+   * mirrored `agents` row that also carries `liveBlocker`. That pairing is what
+   * makes the comparison sound: the blocker and the beat are the same row.
+   */
+  status: {exists: boolean; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; balances?: {ethWei: string; cashUsdg: string; vaultUsdg: string}; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number; grantedAt?:number}};
 }
 export async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {...init, cache:"no-store", signal: AbortSignal.timeout(20000)});

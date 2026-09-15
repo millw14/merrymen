@@ -79,14 +79,45 @@ val COMMANDS: Map<String, CommandSpec> = listOf(
   CommandSpec("set-basket", Via.SETTINGS, listOf("basketSymbols"), weighty = true) {
     "Trade this basket from now on: ${it["basketSymbols"] ?: "—"}. Anything not on that list I stop buying."
   },
+  // ── THE TWO THAT DECIDE WHETHER REAL MONEY MOVES ────────────────────────
+  //
+  // Mirrors of web/src/lib/chat-commands.ts, which is the authority. They drifted
+  // once and it is worth saying how, because the shape recurs: BOTH used to write
+  // `paperTradingEnabled` alone, back when that was the only field there was.
+  //
+  // `paperTradingEnabled` is permission to SIMULATE. It is consulted only after
+  // `canTradeForReal` has already failed, and it is never a term of it
+  // (worker/src/exec-mode.ts). So writing it alone means "go-paper" did not stop
+  // real orders and "go-live" did not start them — the first left an owner who
+  // asked for practice still spending real money, and the second, once the
+  // consent gate landed, left an agent that neither trades nor practises.
+  //
+  // `liveTradingEnabled` is the mode. It is the half both commands were asking
+  // for, and the half neither of them wrote.
   CommandSpec(
-    "go-paper", Via.SETTINGS, listOf("paperTradingEnabled"),
-    fixed = mapOf("paperTradingEnabled" to JsonPrimitive(true)), weighty = true,
-  ) { "Let me fall back to practice fills when I cannot trade for real." },
+    "go-paper", Via.SETTINGS, listOf("paperTradingEnabled", "liveTradingEnabled"),
+    fixed = mapOf(
+      "paperTradingEnabled" to JsonPrimitive(true),
+      "liveTradingEnabled" to JsonPrimitive(false),
+    ),
+    weighty = true,
+  ) {
+    "Paper mode from now on: I will practise with simulated money at live prices and place no " +
+      "real orders, whatever is in the account. If I am holding anything bought with real funds " +
+      "I will stop managing it too — no stop-loss, no take-profit — until you turn Live trading " +
+      "back on. Nothing is sold either way."
+  },
+  // NOT `paperTradingEnabled: false`, deliberately, and the same as the web
+  // registry: falling back to practice when a leg breaks is still the kinder
+  // behaviour, and it is no longer how anyone ends up trading real money by
+  // accident.
   CommandSpec(
-    "go-live", Via.SETTINGS, listOf("paperTradingEnabled"),
-    fixed = mapOf("paperTradingEnabled" to JsonPrimitive(false)), weighty = true,
-  ) { "Stop simulating. If I cannot trade for real I will do nothing instead of practising." },
+    "go-live", Via.SETTINGS, listOf("liveTradingEnabled"),
+    fixed = mapOf("liveTradingEnabled" to JsonPrimitive(true)), weighty = true,
+  ) {
+    "Trade for real from now on, within the caps you signed — real money, real orders on " +
+      "Robinhood Chain. Say \"go paper\" to put me back to practising."
+  },
   CommandSpec("set-slippage", Via.SETTINGS, listOf("slippageBps"), weighty = true) {
     "Refuse a fill worse than ${it["slippageBps"] ?: "—"} bps off the quote."
   },

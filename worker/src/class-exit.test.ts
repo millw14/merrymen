@@ -207,3 +207,54 @@ describe("the hold clock is real and cannot be reset", () => {
     assert.ok(!/\+=/.test(body), "a budget-feeding write must not accumulate");
   });
 });
+
+/**
+ * THE LAST FIVE SILENT REFUSALS ON THE ENTRY PATH.
+ *
+ * Everything upstream of the sizing block already says why it turned a
+ * candidate back — the candidate census, the quote filter, the depth floor. The
+ * five guards AFTER the leg is chosen were bare `return []`, so a tick that
+ * found eight qualifying legs and then rejected the best one looked, from
+ * outside, exactly like a tick that found nothing.
+ *
+ * That gap cost an evening on a live canary: the producer logged "8 still in
+ * play", the executor was never reached, and there was nothing in between to
+ * read. Every one of them now names itself.
+ */
+const ENTRY_SRC = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+const SIZING = ENTRY_SRC.slice(
+  ENTRY_SRC.indexOf("THE LAST FIVE SILENT REFUSALS ON THIS PATH"),
+  ENTRY_SRC.indexOf('kind: "curve-trade"'),
+);
+
+describe("the entry sizing block explains itself", () => {
+  it("every refusal after the leg is chosen names itself", () => {
+  assert.ok(SIZING.length > 400, "the sizing block moved — re-point this test, do not delete it");
+  // Not one bare exit may remain between choosing a leg and returning an intent.
+  //
+  // The `refuse` helper's OWN body ends in a bare return — that is the single
+  // correct one, and stripping it is the difference between testing the guards
+  // and testing the thing that reports them.
+  const code = SIZING.replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "")
+    .replace(/const refuse = [\s\S]*?\n    \};/, "");
+  assert.doesNotMatch(code, /return \[\];/, "a bare return is a refusal with no reason");
+  // Each of the five conditions routes through the naming helper.
+  assert.ok((code.match(/return refuse\(/g) ?? []).length >= 6, "every guard reports");
+  });
+
+  it("the reasons carry the NUMBERS, not just the verdict", () => {
+  // "over the ceiling" sends someone to read code. "would move it 412bps, over
+  // the 300bps ceiling" tells them whether to change a setting or wait for a
+  // deeper curve — which is the whole decision.
+  assert.match(SIZING, /\$\{impact\}bps, over the \$\{cfg\.maxImpactBps\}bps ceiling/);
+  assert.match(SIZING, /would return \$\{\(Number\(roundTrip\) \/ 1e6\)\.toFixed\(2\)\}/);
+  });
+
+  it("it logs on CHANGE, not every tick", () => {
+  // The producer runs every tick and the answer is usually the same one; a line
+  // per tick is a line nobody reads. Same discipline as the refusal tally.
+  assert.match(SIZING, /if \(why !== lastClassSizingKey\)/);
+  assert.match(SIZING, /lastClassSizingKey = why;/);
+  });
+});

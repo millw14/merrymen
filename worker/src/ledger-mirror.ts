@@ -525,7 +525,7 @@ export async function mirrorTenant(args: {
         // they rendered as a confident zero.
         `SELECT smart_account, name, owner_address, session_key_address, chain_id, caps,
                 granted_at, expires_at, status, created_at, mode, beat_at, sponsor_gas, live_blocker, x_handle, x_verified,
-                epoch, hwm_usdg, accrued_fee_usdg,
+                epoch, hwm_usdg, hwm_withdrawn_usdg, accrued_fee_usdg,
                 contributions_known, contributions_why, gas_accounting, quality_at FROM agents`,
       )
       .all()) as Record<string, unknown>[];
@@ -534,9 +534,10 @@ export async function mirrorTenant(args: {
         const ins = db.prepare(
           `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id,
                                caps, granted_at, expires_at, status, created_at, mode, beat_at,
-                               sponsor_gas, live_blocker, x_handle, x_verified, epoch, hwm_usdg, accrued_fee_usdg,
+                               sponsor_gas, live_blocker, x_handle, x_verified, epoch, hwm_usdg,
+                               hwm_withdrawn_usdg, accrued_fee_usdg,
                                contributions_known, contributions_why, gas_accounting, quality_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (smart_account) DO UPDATE SET
              name = excluded.name, status = excluded.status, caps = excluded.caps,
              expires_at = excluded.expires_at, mode = excluded.mode,
@@ -567,6 +568,24 @@ export async function mirrorTenant(args: {
              -- in Postgres, and GREATEST does not exist in sqlite.
              epoch = CASE WHEN excluded.epoch > agents.epoch THEN excluded.epoch ELSE agents.epoch END,
              hwm_usdg = CASE WHEN excluded.hwm_usdg > agents.hwm_usdg THEN excluded.hwm_usdg ELSE agents.hwm_usdg END,
+             -- THE HALF THAT LETS THE PEAK COME DOWN, and it is a ratchet too.
+             --
+             -- The peak has to fall when capital leaves, or an owner who
+             -- withdraws is permanently "in drawdown" by what they took home and
+             -- the breaker refuses every buy forever. But the line above cannot
+             -- be relaxed to allow it: a rebuilt child reports hwm 0, and that
+             -- zero would erase the durable peak, hand the whole principal to
+             -- accrueAboveHwm as profit, and charge a fee on the owner's own
+             -- money — the exact failure the ratchet was added to stop.
+             --
+             -- So the reduction travels as its own MONOTONIC total instead. A
+             -- rebuilt child reports 0 here as well and this ratchet ignores it,
+             -- exactly like the one above; a child that has booked a withdrawal
+             -- reports a LARGER total and it carries. The effective peak is
+             -- hwm_usdg − hwm_withdrawn_usdg (store.getAgentFinancials), so it
+             -- falls without any statement anywhere being able to write it down.
+             hwm_withdrawn_usdg = CASE WHEN excluded.hwm_withdrawn_usdg > agents.hwm_withdrawn_usdg
+                                       THEN excluded.hwm_withdrawn_usdg ELSE agents.hwm_withdrawn_usdg END,
              accrued_fee_usdg = CASE WHEN excluded.accrued_fee_usdg > agents.accrued_fee_usdg
                                      THEN excluded.accrued_fee_usdg ELSE agents.accrued_fee_usdg END,
              -- DELIBERATELY NOT MONOTONIC, unlike the three above. Quality is a
@@ -596,7 +615,7 @@ export async function mirrorTenant(args: {
             // These three have NOT NULL DEFAULTs at the source, so a null here
             // means a pre-migration child rather than an absent value — fall back
             // to the same defaults the schema would have applied.
-            a.epoch ?? 1, a.hwm_usdg ?? 0, a.accrued_fee_usdg ?? 0,
+            a.epoch ?? 1, a.hwm_usdg ?? 0, a.hwm_withdrawn_usdg ?? 0, a.accrued_fee_usdg ?? 0,
             // NULL means NEVER ASSESSED, which is not the same as false. An agent
             // that has not armed since quality shipped has made no claim about
             // its own book, and a reader must render that as unknown rather than
@@ -763,7 +782,8 @@ export async function mirrorTenant(args: {
       const classRows = (await child
         .prepare(
           `SELECT agent_id, token, symbol, decimals, curve, quote_token, first_seen,
-                  vault, entry_tx, exit_tx, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, state
+                  vault, entry_tx, exit_tx, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, state,
+                  swept_raw
              FROM class_positions`,
         )
         .all()
@@ -776,21 +796,53 @@ export async function mirrorTenant(args: {
         const ins = db.prepare(
           `INSERT INTO class_positions
              (agent_id, token, symbol, decimals, curve, quote_token, first_seen,
-              vault, entry_tx, exit_tx, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, state)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              vault, entry_tx, exit_tx, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, state,
+              swept_raw)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           -- THE EXISTING-ROW SIDE MUST BE QUALIFIED, and sqlite will not tell you.
+           --
+           -- Inside ON CONFLICT ... DO UPDATE SET, Postgres has TWO relations in
+           -- scope — the target table and the "excluded" pseudo-relation — and
+           -- both expose every one of these columns. A bare "symbol" is therefore
+           -- ambiguous and Postgres refuses to PARSE the statement. sqlite
+           -- resolves it to the target row instead, so the mirror's own test
+           -- suite (which uses sqlite as the destination) passed throughout.
+           --
+           -- Measured 2026-09-12: the first class position the fleet ever opened
+           -- (Shogun, Doggos, tx 0xd860ac46...) produced
+           --     ledger mirror: 0x8e93ba... STALLED — snapshots: column reference "symbol" is ambiguous
+           -- and "symbol" only because it is FIRST in this SET list. Every line
+           -- below was equally wrong.
+           --
+           -- AND IT WAS NEVER GOING TO SELF-HEAL. PgDb.prepare sends nothing to
+           -- the server (db.ts:181-186); the statement is parsed on its first
+           -- .run(), which executes only when there is a class row to write. So
+           -- this lay dormant from the day it was written until the day the
+           -- capability was first used, and then failed on every attempt — a
+           -- parse error rejects a brand-new non-conflicting row exactly as it
+           -- rejects a conflicting one.
+           --
+           -- The agents upsert above already does this correctly (agents.epoch),
+           -- which is the in-repo precedent this now matches.
            ON CONFLICT(agent_id, token) DO UPDATE SET
-             symbol = COALESCE(excluded.symbol, symbol),
+             symbol = COALESCE(excluded.symbol, class_positions.symbol),
              decimals = excluded.decimals,
-             curve = COALESCE(excluded.curve, curve),
-             quote_token = COALESCE(excluded.quote_token, quote_token),
-             vault = COALESCE(excluded.vault, vault),
-             entry_tx = COALESCE(excluded.entry_tx, entry_tx),
-             exit_tx = COALESCE(excluded.exit_tx, exit_tx),
-             cost_usdg = COALESCE(excluded.cost_usdg, cost_usdg),
-             qty_raw = COALESCE(excluded.qty_raw, qty_raw),
-             proceeds_usdg = COALESCE(excluded.proceeds_usdg, proceeds_usdg),
-             opened_at_block = COALESCE(excluded.opened_at_block, opened_at_block),
-             state = excluded.state`,
+             curve = COALESCE(excluded.curve, class_positions.curve),
+             quote_token = COALESCE(excluded.quote_token, class_positions.quote_token),
+             vault = COALESCE(excluded.vault, class_positions.vault),
+             entry_tx = COALESCE(excluded.entry_tx, class_positions.entry_tx),
+             exit_tx = COALESCE(excluded.exit_tx, class_positions.exit_tx),
+             cost_usdg = COALESCE(excluded.cost_usdg, class_positions.cost_usdg),
+             qty_raw = COALESCE(excluded.qty_raw, class_positions.qty_raw),
+             proceeds_usdg = COALESCE(excluded.proceeds_usdg, class_positions.proceeds_usdg),
+             opened_at_block = COALESCE(excluded.opened_at_block, class_positions.opened_at_block),
+             state = excluded.state,
+             -- COALESCE, like the other money columns. A child that has not
+             -- re-read the vault's log yet reports null here, and null must not
+             -- erase the record that the owner took this position home — that
+             -- record is the only thing separating a withdrawal from a sale
+             -- that returned nothing.
+             swept_raw = COALESCE(excluded.swept_raw, class_positions.swept_raw)`,
         );
         for (const c of classRows) {
           await ins.run(
@@ -809,6 +861,7 @@ export async function mirrorTenant(args: {
             c.proceeds_usdg,
             c.opened_at_block,
             c.state,
+            c.swept_raw ?? null,
           );
         }
       });

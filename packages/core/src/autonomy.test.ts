@@ -221,3 +221,76 @@ describe("the remedy offered must be able to fix the cause", () => {
     assert.ok(/too much/i.test(wide.headline!) && /smaller/i.test(wide.action!.label));
   });
 });
+
+/**
+ * THE BANNER THAT OUTLIVED THE SIGNATURE.
+ *
+ * A corrected grant takes four hops to reach a screen — the orchestrator's 15s
+ * ferry, the child's 240s tick, the 15s mirror, the browser's 60s poll — about
+ * five and a half minutes at worst. For all of it the page went on asserting
+ * the OLD blocker, so an owner who had just done exactly what the banner asked
+ * was told to do it again. One did, repeatedly, and reported the product as
+ * broken. He was right to: the remedy offered could not have worked, because it
+ * had already been applied.
+ *
+ * The fix cannot make it faster. It stops the screen claiming to know something
+ * it cannot know yet.
+ */
+describe("a verdict about a replaced key is not repeated back at its owner", () => {
+  const stale = (rule: string) =>
+    autonomyOf({ mode: "paper", liveBlocker: rule, blockerPredatesGrant: true });
+
+  it("STOPS ASKING FOR THE SIGNATURE IT ALREADY GOT", () => {
+    const a = stale("wrong-chain");
+    assert.equal(a.state, "checking");
+    assert.equal(a.label, "CHECKING");
+    assert.equal(a.needsOwnerAction, false, "they have already acted");
+    assert.equal(a.action, null, "offering the button again is how it gets pressed three times");
+    assert.equal(a.headline, null, "and no banner");
+  });
+
+  it("but it never claims the agent is FINE", () => {
+    // The difference between this and a suppression. "We have not heard yet" is
+    // a fact; "nothing is wrong" would be a guess, and it would be wrong for
+    // every owner who re-signed onto the sandbox a second time.
+    const a = stale("wrong-chain");
+    assert.notEqual(a.state, "live");
+    assert.match(a.reason!, /have not heard/i);
+    assert.equal(a.rule, "wrong-chain", "the rule is still carried, not erased");
+  });
+
+  it("and the money stays labelled by what it IS, not by how fresh the news is", () => {
+    assert.equal(stale("wrong-chain").simulated, true);
+    assert.equal(
+      autonomyOf({ mode: "live", liveBlocker: "wrong-chain", blockerPredatesGrant: true }).simulated,
+      false,
+    );
+  });
+
+  it("only gates the rules a SIGNATURE could have changed", () => {
+    // no-cash and no-gas are not about the key, so a fresh one says nothing
+    // about them and they must go on reporting normally. Gating them would hide
+    // a real, current problem behind an unrelated act.
+    for (const rule of ["no-cash", "no-gas"] as const) {
+      const a = autonomyOf({ mode: "paper", liveBlocker: rule, blockerPredatesGrant: true, realCashUsd: 0 });
+      assert.notEqual(a.state, "checking", `${rule} is not about the key`);
+    }
+  });
+
+  it("and the window closes on the first beat, whatever the beat says", () => {
+    // Bounded by construction: the flag is `grantedAt > workerAliveAt`, so one
+    // beat ends it. If the owner re-signed onto the sandbox again, they are told
+    // so in full rather than left in a permanent soft state.
+    const spoken = autonomyOf({ mode: "paper", liveBlocker: "wrong-chain", blockerPredatesGrant: false });
+    assert.equal(spoken.state, "blocked");
+    assert.equal(spoken.needsOwnerAction, true);
+    assert.ok(spoken.headline);
+  });
+
+  it("defaults to reporting, not to silence, when the timestamps are missing", () => {
+    // An absent timestamp is not a fresh signature. Defaulting the other way
+    // would turn "we don't know" into "nothing to see".
+    const a = autonomyOf({ mode: "paper", liveBlocker: "wrong-chain" });
+    assert.equal(a.state, "blocked");
+  });
+});

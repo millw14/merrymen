@@ -87,10 +87,14 @@ test("the wrong-chain warning is on the gas asks, where the mistake happens", ()
   }
 });
 
-test("on the practice chain it does not say Robinhood Chain", () => {
+test("on the TESTNET it does not say Robinhood Chain", () => {
   // Rule 2: do not send somebody to mainnet from a testnet screen.
   const l = statusLine({ ...base, testnet: true, hasGas: false, cashUsdg: 0 });
-  assert.match(l.next, /practice chain/);
+  // The word moved from "practice chain" to "testnet" deliberately: the product
+  // used "practice" for BOTH this network and for simulated trading, so an owner
+  // who wanted the second could pick the first and end up with a key that can
+  // never trade. Three words, three meanings, no overlap.
+  assert.match(l.next, /testnet/);
   assert.doesNotMatch(l.next, /Robinhood Chain/);
 });
 
@@ -131,9 +135,10 @@ test("NEVER CLAIMS THE MARKET IS CLOSED, because it cannot see a clock", () => {
   }
 });
 
-test("practice is called practice, in words a person uses", () => {
+test("paper is called Paper, and the testnet is called the testnet", () => {
   const paper = statusLine({ ...base, mode: "paper" });
-  assert.match(paper.headline, /practising/);
+  assert.match(paper.headline, /on Paper/);
+  assert.doesNotMatch(paper.headline, /practis/i, "the ambiguous word is retired");
   assert.match(paper.headline, /pretend money/);
 
   const testnet = statusLine({ ...base, testnet: true });

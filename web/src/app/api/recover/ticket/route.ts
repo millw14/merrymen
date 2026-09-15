@@ -27,11 +27,11 @@
  */
 
 import { NextResponse } from "next/server";
-import { recoverMessageAddress } from "viem";
+import { createPublicClient, http, recoverMessageAddress } from "viem";
 import { consumeChallengeNonce, issueChallengeNonce, requestOrigin } from "@/lib/auth";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 import { mintTicket, recoveryChallengeMessage, TICKET_TTL_MS } from "@/lib/recovery-ticket";
-import { robinhoodChain, robinhoodTestnet } from "@merrymen/core";
+import { PONS_CLASS_VAULT_FACTORY, resolveClassVault, robinhoodChain, robinhoodTestnet } from "@merrymen/core";
 
 export const runtime = "nodejs";
 
@@ -99,6 +99,31 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "could not derive the account for that owner" }, { status: 502 });
   }
 
+  /**
+   * THIS ACCOUNT'S CLASS VAULT, resolved here so the relay never has to.
+   *
+   * The relay admits a `sweep(address)` leg only when its target equals this,
+   * and it reads it out of the ticket's own hmac-signed body — so the pinning
+   * costs no chain read on the money path and cannot be edited by the caller.
+   *
+   * A FAILURE HERE MUST NOT BLOCK AN ORDINARY WITHDRAWAL. `vaultFor` is a view
+   * on a factory that may be absent on this chain (testnet has none) or simply
+   * unreachable this second. Either way the right answer is a ticket that
+   * blesses no vault: the USDG and ETH still sweep, and only the class leg —
+   * which most owners do not have — is refused, with a reason that says so.
+   */
+  let classVault: `0x${string}` | null = null;
+  const factory = PONS_CLASS_VAULT_FACTORY[chainId];
+  if (factory) {
+    try {
+      const chain = chainId === robinhoodChain.id ? robinhoodChain : robinhoodTestnet;
+      const client = createPublicClient({ chain, transport: http() });
+      classVault = await resolveClassVault(client, factory as `0x${string}`, smartAccount);
+    } catch {
+      classVault = null;
+    }
+  }
+
   // SET AS A COOKIE, not returned for the client to attach.
   //
   // The relay is reached through viem's own http transport inside
@@ -111,7 +136,7 @@ export async function POST(req: Request) {
   // so no other site can cause it to be sent; and short-lived by the ticket's
   // own expiry, which is what actually bounds it.
   const res = NextResponse.json({ smartAccount, expiresInMs: TICKET_TTL_MS });
-  res.cookies.set("merrymen_recovery", mintTicket({ smartAccount, chainId }), {
+  res.cookies.set("merrymen_recovery", mintTicket({ smartAccount, chainId, classVault }), {
     httpOnly: true,
     secure: true,
     sameSite: "strict",

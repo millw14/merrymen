@@ -109,15 +109,19 @@ describe("a vault sweep is two operations, and fails safely", () => {
     // a send. An oversized transfer reverts, and the batch is atomic — it would
     // take the USDG and the ETH with it.
     const arm = RECOVER.slice(RECOVER.indexOf("OP 1: EMPTY THE CLASS VAULT"));
-    assert.match(arm.slice(0, 3000), /functionName: "balanceOf"/, "op 2 must size from a fresh read");
+    assert.match(arm.slice(0, 9000), /functionName: "balanceOf"/, "op 2 must size from a fresh read");
   });
 
-  it("a failed vault sweep does not stop the rest of the recovery", () => {
+  it("a failed vault sweep does not stop the rest of the recovery — WHEN IT WAS NOT APPROVED", () => {
+    // Best-effort is the DEFAULT branch only. When a browser confirmation
+    // disclosed the class sweep, the opposite is required and the failure is
+    // fatal — see recovery-approved-class.test.ts. Best-effort is right for a
+    // caller who approved no class leg, and wrong for one who did.
     // A vault that will not give up its tokens must not strand the USDG and ETH
     // an owner can see. Reported in `skipped`, never silent.
     const arm = RECOVER.slice(RECOVER.indexOf("OP 1: EMPTY THE CLASS VAULT"));
-    assert.match(arm.slice(0, 3000), /skipped\.push/, "the failure is reported and survived");
-    assert.match(arm.slice(0, 3000), /still in the vault/, "and the owner is told what to do");
+    assert.match(arm.slice(0, 9000), /skipped\.push/, "the failure is reported and survived");
+    assert.match(arm.slice(0, 9000), /still in the vault/, "and the owner is told what to do");
   });
 
   it("an unreadable vault is NOT reported as an empty one", () => {

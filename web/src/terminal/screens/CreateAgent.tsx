@@ -2,7 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, Eye, EyeOff } from "lucide-react";
-import { isValidCustomToken, type CustomToken } from "@merrymen/core";
+import {
+  DEFAULT_BASKET_SYMBOLS,
+  STOCK_TOKENS,
+  isValidCustomToken,
+  type CustomToken,
+  isWallTooWide,
+} from "@merrymen/core";
 import { createAgentWallet, createPrivyOwnedWallet, isPrivyOwned, loadGrant, type Grant, type GrantCaps } from "@/lib/session";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 import { verifiedAdapter } from "@/lib/verified-adapter";
@@ -45,9 +51,29 @@ const EXAMPLES:Record<string,string>={
 };
 const INITIAL_CAPS: GrantCaps={perTradeUsdg:10,dailyUsdg:50,expiryDays:7,maxDrawdownPct:5,maxOpsPerDay:24};
 export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:AccountState|null;onRefresh:()=>void;onBack:()=>void;onDone:()=>void;onFund:(grant:Grant)=>void}) {
-  const [step,setStep]=useState<"agent"|"limits"|"backup"|"fund">("agent");
+  const [step,setStep]=useState<"agent"|"market"|"limits"|"backup"|"fund">("agent");
   const [name,setName]=useState("");
   const [strategy,setStrategy]=useState("steady-basket");
+  /**
+   * WHAT IT TRADES, ASKED DURING SETUP — and the reason this step exists at all.
+   *
+   * The wizard never asked. A new agent got the three-symbol equity default and
+   * every universe decision was deferred to Settings, where an owner then found
+   * a basket "full of all stocks", added a coin, and discovered it still would
+   * not trade. Asking here costs one screen and removes that whole journey.
+   *
+   * THE SEQUENCING WIN IS THE POINT. `create()` seals `extraTokens` into the
+   * grant it mints, so a coin named HERE is covered by the FIRST signature —
+   * no re-sign, no coverage banner, no "why isn't it trading". The same coin
+   * added afterwards needs a second signature before it can be sold, which is
+   * the `no-exit` rule and the whole reason that journey is painful.
+   */
+  const [assetMode,setAssetMode]=useState<"all"|"stocks"|"crypto">("all");
+  const [basket,setBasket]=useState<string[]>([...DEFAULT_BASKET_SYMBOLS]);
+  /** Coins added in this wizard. Merged LOCALLY into the mint — see create(). */
+  const [wizardTokens,setWizardTokens]=useState<CustomToken[]>([]);
+  const [newCoin,setNewCoin]=useState({symbol:"",address:"",decimals:"18"});
+  const [coinError,setCoinError]=useState("");
   /**
    * THIS READER STANDING AGAINST THE RULE, not the rule.
    *
@@ -75,7 +101,7 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
   const [error,setError]=useState("");
   useEffect(()=>{
     if(!account?.status.grant)return;
-    void requestJson<{values:{paperTradingEnabled?:boolean;agentName?:string;strategy?:string}}>("/api/settings").then(({values})=>{setPaper(values.paperTradingEnabled ?? true);setName(values.agentName ?? "");setStrategy(values.strategy ?? "steady-basket");}).catch(()=>{});
+    void requestJson<{values:{liveTradingEnabled?:boolean;agentName?:string;strategy?:string}}>("/api/settings").then(({values})=>{setPaper(!(values.liveTradingEnabled ?? false));setName(values.agentName ?? "");setStrategy(values.strategy ?? "steady-basket");}).catch(()=>{});
     const local=loadGrant();
     if(local?.smartAccount.toLowerCase()===account.status.grant.smartAccount.toLowerCase()) {
       setGrant(local);setArmed(account.status.exists);
@@ -103,8 +129,21 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
       const settings=await requestJson<{values:{customTokens?:unknown[];v4AdapterAddress?:string;ponsAdapterAddress?:string;ponsClassVaultFactory?:string}}>("/api/settings");
       const address=(value?:string)=>value&&/^0x[0-9a-fA-F]{40}$/.test(value) ? value as `0x${string}` : undefined;
       const pons=await verifiedAdapter(address(settings.values.ponsAdapterAddress),4663,setStatus);
-      await requestJson("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({agentName:name.trim(),strategy,paperTradingEnabled:paper})});
-      const mintOptions={caps:{...INITIAL_CAPS,perTradeUsdg:Number(trade),dailyUsdg:Number(day)},chainId:4663,extraTokens:(settings.values.customTokens??[]).filter(isValidCustomToken) as CustomToken[],v4AdapterAddress:address(settings.values.v4AdapterAddress),ponsAdapterAddress:pons,ponsClassVaultFactory:address(settings.values.ponsClassVaultFactory),hostedAs:account?.session.hosted ? account.session.address as `0x${string}` : undefined,onStatus:setStatus};
+      // The market answers ride the settings write that was already happening —
+      // one round trip, not four.
+      await requestJson("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({agentName:name.trim(),strategy,paperTradingEnabled:true,liveTradingEnabled:!paper,assetMode,basketSymbols:basket,customTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens]})});
+      /**
+       * MERGED LOCALLY, NOT RE-READ — and getting this wrong would silently
+       * undo the whole point of the step.
+       *
+       * `settings` was fetched BEFORE the PUT above, so re-reading
+       * `settings.values.customTokens` here would miss every coin the owner just
+       * named in the wizard. They would be stored, and then left out of the
+       * signature that is about to be minted — so the agent would watch them and
+       * refuse to buy them on `no-exit`, which is precisely the journey this
+       * step exists to remove.
+       */
+      const mintOptions={caps:{...INITIAL_CAPS,perTradeUsdg:Number(trade),dailyUsdg:Number(day)},chainId:4663,extraTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens].filter(isValidCustomToken) as CustomToken[],v4AdapterAddress:address(settings.values.v4AdapterAddress),ponsAdapterAddress:pons,ponsClassVaultFactory:address(settings.values.ponsClassVaultFactory),hostedAs:account?.session.hosted ? account.session.address as `0x${string}` : undefined,onStatus:setStatus};
       // WHO OWNS THIS MERRYMAN. A Privy session owns it with the embedded
       // wallet it signed in with; everything else keeps the browser-generated
       // key. Same Kernel, same wall, same session key either way.
@@ -123,11 +162,11 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
       setArmed(true);onRefresh();
     }catch(e){setError(e instanceof Error ? e.message : "Could not activate your agent.");}finally{setBusy(false);}
   }
-  const index=["agent","limits","backup","fund"].indexOf(step);
+  const index=["agent","market","limits","backup","fund"].indexOf(step);
   return <section className="create-agent">
-    <header className="create-heading"><button aria-label="Back" disabled={busy||step==="backup"} onClick={()=>step==="limits"?setStep("agent"):onBack()}><ArrowLeft size={18}/></button><span>Create an agent</span></header>
-    <ol className="create-steps" aria-label="Setup progress">{["Agent","Limits","Backup","Ready"].map((label,i)=><li key={label} aria-current={i===index?"step":undefined}><span>{i<index?<Check size={12}/>:i+1}</span>{label}</li>)}</ol>
-    {step==="agent" && <><div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Meet your next agent.</h1><p>A name, a strategy, and room to make its own moves.</p></div><form onSubmit={e=>{e.preventDefault();if(!name.trim()){setError("Give your agent a name.");return;}setError("");setStep("limits");}}><label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} placeholder="What should we call it?" onChange={e=>setName(e.target.value)} required/><fieldset className="create-strategies"><legend>How should it trade?</legend>{STRATEGIES.map(s=><label className={strategy===s.id?"selected":""} key={s.id}><input type="radio" name="strategy" value={s.id} checked={strategy===s.id} onChange={()=>setStrategy(s.id)}/><span><strong>{s.name}{s.circle&&<i className="tag holders" title="Runs only while you hold $MERRYMEN">holders</i>}</strong><small>{s.description}{s.circle?" Runs only while you hold $MERRYMEN — pick it now and it stays idle until you do.":""}</small></span><span className="create-radio" aria-hidden>{strategy===s.id&&<Check size={13}/>}</span></label>)}</fieldset><div className="create-example" aria-live="polite"><span>Strategy example</span><p>{EXAMPLES[strategy]}</p></div>
+    <header className="create-heading"><button aria-label="Back" disabled={busy||step==="backup"} onClick={()=>step==="limits"?setStep("market"):step==="market"?setStep("agent"):onBack()}><ArrowLeft size={18}/></button><span>Create an agent</span></header>
+    <ol className="create-steps" aria-label="Setup progress">{["Agent","Market","Limits","Backup","Ready"].map((label,i)=><li key={label} aria-current={i===index?"step":undefined}><span>{i<index?<Check size={12}/>:i+1}</span>{label}</li>)}</ol>
+    {step==="agent" && <><div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Meet your next agent.</h1><p>A name, a strategy, and room to make its own moves.</p></div><form onSubmit={e=>{e.preventDefault();if(!name.trim()){setError("Give your agent a name.");return;}setError("");setStep("market");}}><label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} placeholder="What should we call it?" onChange={e=>setName(e.target.value)} required/><fieldset className="create-strategies"><legend>How should it trade?</legend>{STRATEGIES.map(s=><label className={strategy===s.id?"selected":""} key={s.id}><input type="radio" name="strategy" value={s.id} checked={strategy===s.id} onChange={()=>setStrategy(s.id)}/><span><strong>{s.name}{s.circle&&<i className="tag holders" title="Runs only while you hold $MERRYMEN">holders</i>}</strong><small>{s.description}{s.circle?" Runs only while you hold $MERRYMEN — pick it now and it stays idle until you do.":""}</small></span><span className="create-radio" aria-hidden>{strategy===s.id&&<Check size={13}/>}</span></label>)}</fieldset><div className="create-example" aria-live="polite"><span>Strategy example</span><p>{EXAMPLES[strategy]}</p></div>
             {/* THE READER'S STANDING, not the rule. The badge above states the
                 requirement; this says whether THEY meet it, which is the only
                 half that decides whether to press the button. "I had to go to
@@ -154,7 +193,59 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
                   )}
                 </div>
               )}<button className="flow-primary" type="submit">Set trading limits <ArrowRight size={16}/></button></form></>}
-    {step==="limits" && <><div className="create-intro"><h1>A little freedom.<br/>Clear limits.</h1><p>Start small. You can change these limits with a new signature later.</p></div><div className="create-limits"><label>Per trade, USD<input className="create-input" inputMode="decimal" value={trade} onChange={e=>setTrade(e.target.value)} maxLength={12}/></label><label>Per day, USD<input className="create-input" inputMode="decimal" value={day} onChange={e=>setDay(e.target.value)} maxLength={12}/></label></div><dl className="fund-breakdown"><div><dt>Trading permission</dt><dd>7 days</dd></div><div><dt>Drawdown limit</dt><dd>5%</dd></div><div><dt>Maximum operations</dt><dd>24 per day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl><fieldset className="create-mode"><legend>Start with</legend><label><input type="radio" name="mode" checked={paper} onChange={()=>setPaper(true)}/> Paper trading · recommended</label><label><input type="radio" name="mode" checked={!paper} onChange={()=>setPaper(false)}/> Live trading</label></fieldset><p className="create-note">{paper?"Practice with simulated funds and live market prices. This is a setting, not a different network — your agent stays on Robinhood Chain either way, and you can switch it off any time without a new signature.":"Your agent will trade the real funds you deposit, within these limits."}</p>{!paper&&<label className="create-check"><input type="checkbox" checked={ack} onChange={e=>setAck(e.target.checked)}/>I understand this agent can trade real funds.</label>}<button className="flow-primary" disabled={busy} onClick={()=>void create()}>{busy?"Creating your agent…":"Create agent"}</button></>}
+    {step==="market" && <>
+      {/* WHAT IT TRADES, ASKED ONCE, AT THE ONLY MOMENT IT IS FREE.
+          Every answer here rides the settings write create() already makes, and
+          any coin named here is sealed into the FIRST signature — so it needs
+          no re-sign, no coverage banner, and none of the "why isn't it trading"
+          journey that sent several owners to the group. */}
+      <div className="create-intro"><h1>What should it trade?</h1><p>You can change any of this later — coins added here are covered by the permission you sign in a moment.</p></div>
+      <fieldset className="create-mode">
+        <legend>Markets</legend>
+        <label><input type="radio" name="assetMode" checked={assetMode==="all"} onChange={()=>setAssetMode("all")}/> All assets · recommended</label>
+        <label><input type="radio" name="assetMode" checked={assetMode==="stocks"} onChange={()=>setAssetMode("stocks")}/> Stocks only</label>
+        <label><input type="radio" name="assetMode" checked={assetMode==="crypto"} onChange={()=>setAssetMode("crypto")}/> Crypto only</label>
+      </fieldset>
+      <p className="create-note">{assetMode==="stocks"?"Tokenised equities and ETFs only. Your agent will be idle while US markets are shut.":assetMode==="crypto"?"Coins only. Add at least one below, or your agent will have nothing to trade.":"Everything you pick below, stocks and coins alike."}</p>
+
+      {assetMode!=="crypto" && <>
+        <label className="create-label">Stocks &amp; ETFs</label>
+        <div className="mm-chips">{STOCK_TOKENS.filter(t=>t.kind!=="memecoin").map(t=>
+          <button key={t.symbol} type="button" className={`mm-toggle${basket.includes(t.symbol)?" on":""}`} aria-pressed={basket.includes(t.symbol)} onClick={()=>setBasket(b=>b.includes(t.symbol)?b.filter(s=>s!==t.symbol):[...b,t.symbol])}>{t.symbol}</button>)}
+        </div>
+      </>}
+
+      {assetMode!=="stocks" && <>
+        <label className="create-label">Coins</label>
+        {wizardTokens.length===0
+          ? <p className="create-note">None yet. Paste a contract address below to add one — it will be covered by the permission you sign next, with no second signature needed.</p>
+          : <div className="mm-chips">{wizardTokens.map(t=>
+              <button key={t.address} type="button" className={`mm-toggle${basket.includes(t.symbol)?" on":""}`} aria-pressed={basket.includes(t.symbol)} onClick={()=>setBasket(b=>b.includes(t.symbol)?b.filter(s=>s!==t.symbol):[...b,t.symbol])}>{t.symbol}</button>)}
+            </div>}
+        <div className="create-limits">
+          <label>Symbol<input className="create-input" value={newCoin.symbol} maxLength={12} placeholder="CATE" onChange={e=>setNewCoin(n=>({...n,symbol:e.target.value}))}/></label>
+          <label>Contract address<input className="create-input" value={newCoin.address} placeholder="0x…" onChange={e=>setNewCoin(n=>({...n,address:e.target.value}))}/></label>
+          <label>Decimals<input className="create-input" inputMode="numeric" value={newCoin.decimals} onChange={e=>setNewCoin(n=>({...n,decimals:e.target.value}))}/></label>
+        </div>
+        <button type="button" className="copy-btn" onClick={()=>{
+          setCoinError("");
+          const candidate={symbol:newCoin.symbol.trim(),address:newCoin.address.trim(),decimals:Number(newCoin.decimals)};
+          if(!isValidCustomToken(candidate)){setCoinError("Needs a short symbol, a full 0x… address (42 characters) and whole-number decimals.");return;}
+          if(wizardTokens.some(t=>t.address.toLowerCase()===candidate.address.toLowerCase())){setCoinError("That address is already on the list.");return;}
+          // BOTH WRITES, as everywhere else: added AND selected. The distinction
+          // between "know about this" and "trade it" is real, but hiding the
+          // second half is what made it a trap.
+          setWizardTokens(t=>[...t,candidate as CustomToken]);
+          setBasket(b=>b.includes(candidate.symbol)?b:[...b,candidate.symbol]);
+          setNewCoin({symbol:"",address:"",decimals:"18"});
+        }}>add coin</button>
+        {coinError && <p className="create-note" role="alert">{coinError}</p>}
+      </>}
+
+      {basket.length===0 && <p className="create-note" role="status">Pick at least one thing to trade, or your agent will have nothing to do.</p>}
+      <button className="flow-primary" disabled={basket.length===0} onClick={()=>{setError("");setStep("limits");}}>Continue</button>
+    </>}
+    {step==="limits" && <><div className="create-intro"><h1>A little freedom.<br/>Clear limits.</h1><p>Start small. You can change these limits with a new signature later.</p></div><div className="create-limits"><label>Per trade, USD<input className="create-input" inputMode="decimal" value={trade} onChange={e=>setTrade(e.target.value)} maxLength={12}/></label><label>Per day, USD<input className="create-input" inputMode="decimal" value={day} onChange={e=>setDay(e.target.value)} maxLength={12}/></label></div><dl className="fund-breakdown"><div><dt>Trading permission</dt><dd>7 days</dd></div><div><dt>Drawdown limit</dt><dd>5%</dd></div><div><dt>Maximum operations</dt><dd>24 per day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl><fieldset className="create-mode"><legend>Start with</legend><label><input type="radio" name="mode" checked={paper} onChange={()=>setPaper(true)}/> Paper trading · recommended</label><label><input type="radio" name="mode" checked={!paper} onChange={()=>setPaper(false)}/> Live trading</label></fieldset><p className="create-note">{paper?"Paper trading: simulated fills at live market prices, and no real orders. This is a setting, not a different network — your agent stays on Robinhood Chain either way, and you can turn on Live trading any time in Settings, without a new signature.":"Live trading: your agent places real orders with the funds you deposit, within these limits. You can switch back to Paper any time in Settings."}</p>{!paper&&<label className="create-check"><input type="checkbox" checked={ack} onChange={e=>setAck(e.target.checked)}/>I understand this agent can trade real funds.</label>}<button className="flow-primary" disabled={busy} onClick={()=>void create()}>{busy?"Creating your agent…":"Create agent"}</button></>}
     {/* TWO OWNER MODELS, TWO DIFFERENT TRUTHS TO TELL.
         A Privy-owned account has NO key here, by design — showing dots and
         asking somebody to confirm they saved them is asking them to lie, and
@@ -163,6 +254,6 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
     {step==="backup"&&grant&&isPrivyOwned(grant)&&<><div className="create-intro"><h1>Your agent has a home.</h1><p>Your X login holds the key that owns this account. There is nothing here to write down — merrymen never sees it, so it cannot show it to you or lose it.</p></div><div className="create-secret"><code>Held by your Privy login</code></div><label className="create-check"><input type="checkbox" checked={backupAck} onChange={e=>setBackupAck(e.target.checked)}/>I understand: if I lose access to this X account, merrymen cannot recover these funds for me.</label><button className="flow-primary" disabled={!backupAck} onClick={()=>{localStorage.setItem(`merrymen.backup.${grant.smartAccount.toLowerCase()}`,"1");setStep("fund");}}>Continue</button></>}
     {step==="backup"&&grant&&!isPrivyOwned(grant)&&<><div className="create-intro"><h1>Your agent has a home.</h1><p>Save the recovery key before you go. It lets you recover this wallet if you lose this device.</p></div><label className="create-label">Recovery key</label><div className="create-secret"><code>{reveal ? grant.demoOwnerPrivateKey : "•••• •••• •••• •••• •••• ••••"}</code><button aria-label={reveal?"Hide recovery key":"Reveal recovery key"} onClick={()=>setReveal(!reveal)}>{reveal?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><label className="create-check"><input type="checkbox" checked={backupAck} onChange={e=>setBackupAck(e.target.checked)}/>I saved my recovery key somewhere safe.</label><button className="flow-primary" disabled={!backupAck} onClick={()=>{localStorage.setItem(`merrymen.backup.${grant.smartAccount.toLowerCase()}`,"1");setReveal(false);setStep("fund");}}>Continue</button></>}
     {step==="fund"&&grant&&<><div className="create-intro"><h1>{armed?"Ready when you are.":"One last connection."}</h1><p>{armed?(paper ? "Your wallet is connected. Open your agent to check its status and follow paper trades." : "Your wallet is connected. Add trading funds, then open your agent to check its status."):"Your wallet is saved. Retry activation to connect it to your agent."}</p></div>{armed?<><dl className="fund-breakdown"><div><dt>Agent</dt><dd>{name || "Your agent"}</dd></div><div><dt>Strategy</dt><dd>{STRATEGIES.find(s=>s.id===strategy)?.name ?? strategy}</dd></div><div><dt>Trading mode</dt><dd>{paper ? "Paper trading" : "Live trading"}</dd></div></dl>{strategy==="llm-strategist"&&<p className="create-note">Check your AI provider in <a href="/settings">Settings</a> before your strategist starts.</p>}{!paper&&<button className="flow-primary" onClick={()=>onFund(grant)}>Add trading funds</button>}<button className="flow-primary" onClick={()=>{onRefresh();onDone();}}>Open your agent</button></>:<button className="flow-primary" disabled={busy} onClick={()=>void retryActivation()}>Retry activation</button>}</>}
-    {status&&<p role="status" className="create-note">{status}</p>}{error&&<p role="alert" className="flow-error">{error}</p>}
+    {status&&<p role="status" className="create-note">{status}</p>}{error&&<p role="alert" className="flow-error">{error}{isWallTooWide(error)&&<> <a href="/settings">Review custom tokens</a></>}</p>}
   </section>;
 }

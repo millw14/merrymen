@@ -118,10 +118,24 @@ const PROPOSE_TOOL = {
             action: { type: "string", enum: ["buy", "sell", "hold"] },
             symbol: { type: "string" },
             sizeUsdg: { type: "number" },
-            reason: { type: "string" },
+            reason: {
+              type: "string",
+              // UNDESCRIBED UNTIL NOW, WHICH IS WHY THE FEED READ LIKE A LEDGER.
+              // This string IS the thesis for every tenant not running the desk
+              // — which is most of them — and the schema asked for it without
+              // saying what it was for, so models returned a restatement of the
+              // action ("buy NVDA") or nothing. Same wording as the desk's
+              // thesis field so the two rails sound like one agent.
+              description:
+                "One sentence for THIS action, in your own voice, citing the figures that decided " +
+                "it. This is published — write it for a reader who was not here. Grounded only in " +
+                "what you were shown; no invented numbers and no predictions you cannot support.",
+            },
           },
           // "reason" optional: Groq validates arguments server-side and llama
-          // sometimes omits it; parseProposals defaults it to "" anyway.
+          // sometimes omits it; parseProposals defaults it to "" anyway. The
+          // description above guides it without requiring it — making it
+          // required would break the provider production actually runs on.
           required: ["action", "symbol", "sizeUsdg"],
           additionalProperties: false,
         },

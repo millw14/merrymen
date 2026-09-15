@@ -37,7 +37,7 @@
  * budget counters — noted at store.ts's fail-closed write and at the arm site.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
@@ -59,10 +59,11 @@ import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort
 import { datasetLines, viewRun } from "./brain-dataset";
 import { auditIdentity, type GrantClaimLite, type IdentityRowLite } from "./identity-audit";
 import { replayLines, scoreDecision, type Observation, type PricedDecision } from "./replay";
+import { custodyAddressesOf } from "./custody";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
-import { TELEGRAM_STATE_DDL, publishTenantTelegram } from "./telegram-store";
+import { TELEGRAM_STATE_DDL, publishTenantTelegram, readTenantTelegram } from "./telegram-store";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
 import { makeNewsDesk, type NewsDesk } from "./research-pass";
@@ -465,6 +466,83 @@ function readChildTelegram(tenant: string): {
  * the dashboard still works, because the child only ever reports chats it has
  * just linked, and a code cannot be reused once it has rotated.
  */
+/**
+ * PUT THE TENANT'S TELEGRAM LINK BACK, before the child starts.
+ *
+ * The counterpart to `publishChildTelegram`, and its absence was a real defect
+ * rather than an omission of convenience. `childHome()` is ephemeral — the
+ * orchestrator runs with no volume — so every redeploy destroyed
+ * `telegram.json`, and `ownerId` is the ONLY recipient the notifier will send
+ * to (`state.ownerId === null` returns early). Grant, settings and bootstrap
+ * were all seeded back on spawn; the telegram link was not, and it is the one
+ * that decides whether an owner ever hears from their agent again.
+ *
+ * The symptom was silent and easy to misread: the bot still answered /status,
+ * because a reply goes to whoever sent the message, while every ping, alert and
+ * daily report stopped. The link code had rotated too, so the owner's old one
+ * no longer worked and re-linking meant a trip to the dashboard nobody
+ * suggested.
+ *
+ * ONLY WHEN THE CHILD HAS NO FILE. A running child is the authority on its own
+ * link — it may have just been re-linked to a different chat — and this must
+ * restore a lost link, never overwrite a live one.
+ */
+async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db): Promise<void> {
+  const file = path.join(childHome(tenant), "telegram.json");
+  if (existsSync(file)) return;
+  const url = process.env.DATABASE_URL;
+  if (!url && !shared) return;
+  try {
+    const tg = await readTenantTelegram(shared ?? (await makePgDb(url!)), tenant);
+    let ownerId = tg?.ownerId ?? null;
+
+    // THE MIRROR IS USUALLY EMPTY TOO, so fall back to the allowlist.
+    //
+    // `tenant_telegram.owner_id` is only ever written while a child HAS a
+    // telegram.json — and the file is destroyed by the same redeploy that this
+    // function exists to repair. Measured on the fleet: 4 tenants hold a bot
+    // token, 2 completed a link, and 0 had a live owner_id. The mirror had
+    // nothing to give back.
+    //
+    // `telegramAllowlist` is in the SEALED SETTINGS and survives. It is
+    // populated by `publishChildTelegram` promoting every chat that ran /link,
+    // so a positive id in it is a person who explicitly linked their own DM —
+    // Telegram gives users positive ids and groups negative ones, and restoring
+    // a group as the owner would start sending an agent's private reports to a
+    // room. The lowest positive id is the earliest linker, which is the same
+    // chat `/link` would have made the owner.
+    //
+    // A heuristic, and logged as one, because it recovers a recipient rather
+    // than reading one.
+    if (!ownerId) {
+      const stored = await getSettingsStore().get(tenant);
+      const list = Array.isArray(stored?.telegramAllowlist) ? stored.telegramAllowlist : [];
+      const dm = list.filter((c) => typeof c === "number" && c > 0).sort((a, b) => a - b)[0];
+      if (dm !== undefined) {
+        ownerId = dm;
+        log(`${tenant}: telegram owner recovered from the stored allowlist — no mirrored link survived`);
+      }
+    }
+    // Nothing to restore is the ordinary state of a tenant who never linked.
+    // An empty file would only mask a later genuine publish.
+    if (!ownerId) return;
+    mkdirSync(childHome(tenant), { recursive: true });
+    writeFileSync(
+      file,
+      // `ownerId` is the recovered one, which may have come from the allowlist
+      // rather than the mirror. The link CODE is not recovered — it rotates on
+      // every link and a stale one would be worse than none, so the child mints
+      // a fresh code and the dashboard shows it.
+      JSON.stringify({ linkCode: tg?.linkCode ?? "", ownerId, linkedAt: tg?.linkedAt ?? 0 }, null, 2),
+    );
+    log(`${tenant}: telegram link restored — the owner keeps receiving alerts`);
+  } catch (e) {
+    // Never fatal. A child with no telegram link still trades; it just cannot
+    // tell anyone about it, which is the status quo this repairs.
+    log(`${tenant}: could not restore telegram state — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function publishChildTelegram(tenant: `0x${string}`, shared: Db): Promise<void> {
   const tg = readChildTelegram(tenant);
   if (!tg) return;
@@ -798,6 +876,10 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   // closed, so the agent would run with contributions marked unknown for no
   // reason other than a race.
   await writeBootstrapForChild(tenant, smartAccount);
+  // AFTER the anchor and BEFORE spawn, with the others: a link restored once the
+  // child is already polling would be read from a file the child has by then
+  // replaced with a fresh, unlinked default.
+  await writeTelegramForChild(tenant);
   const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
   const staleSec = staleThresholdSec(tickSeconds);
   const firstBeatSec = firstBeatGraceSec(tickSeconds);
@@ -1666,6 +1748,1508 @@ async function runBrainDatasetIfAsked(): Promise<void> {
  * here deduplicates: two rows claiming one account is a question about which
  * person owns an agent.
  */
+/**
+ * THE ONE-OFF PLATFORM ANNOUNCEMENT, FIREABLE WITHOUT A TERMINAL.
+ *
+ * `announce-cli.ts` is the same job for someone with a shell on this service.
+ * This exists because an operator away from their machine has no shell — and
+ * Railway's own dashboard, which sets these variables, works from a phone.
+ *
+ * TWO KEYS, DELIBERATELY. `MERRYMEN_ANNOUNCE_ID` arms a DRY RUN, which resolves
+ * every recipient, builds every message and contacts Telegram zero times.
+ * Sending additionally requires `MERRYMEN_ANNOUNCE_CONFIRM` to equal that same
+ * id, so the difference between a rehearsal and messaging every beta tester is
+ * never one variable set by muscle memory.
+ *
+ * SAFE TO LEAVE SET. This runs on the reconcile loop and Railway restarts
+ * services freely, so it must be harmless to re-enter: `runAnnouncement` skips
+ * anyone already recorded in `announcements`, per recipient, so a redeploy
+ * re-runs and sends nothing new. The body ships in the repo because there is no
+ * other way to hand this process a file.
+ */
+/**
+ * GRANT LIVE INTENT TO THE PEOPLE WHO ALREADY HAD IT, ONCE, BEFORE ENFORCEMENT.
+ *
+ * `liveTradingEnabled` defaults FALSE and `worker/src/settings.ts` resolves an
+ * absent field to the default, so the deploy that enforces the consent gate
+ * would otherwise move every agent in the fleet to paper — including the ones
+ * whose owners are watching them trade real funds. See backfill-live-intent.ts
+ * for what counts as consent already given, and what deliberately does not.
+ *
+ * TWO STEPS, OPERATOR-DRIVEN, because this writes settings on other people's
+ * agents and the report is the only chance to notice it is wrong:
+ *
+ *   MERRYMEN_BACKFILL_LIVE_INTENT=report   read, decide, print, write nothing
+ *   MERRYMEN_BACKFILL_LIVE_INTENT=apply    the same, then write the grants
+ *
+ * Idempotent either way: once applied, every tenant it touched carries the
+ * field explicitly and the next plan is empty.
+ */
+let liveIntentBackfillRan = false;
+let tenantInspectRan = false;
+let hwmRepairRan = false;
+
+/**
+ * WHAT THE FLEET'S HIGH-WATER MARKS SHOULD BE, AND WHY. REPORT ONLY.
+ *
+ * `MERRYMEN_REPAIR_HWM=report` prints one plan per tenant and writes nothing.
+ * There is deliberately no apply path in this commit: the figures it proposes
+ * are what the drawdown breaker divides by and what the performance fee is
+ * measured against, and a tool that could write them the moment it was armed is
+ * one typo away from halting a fleet or charging owners on their own principal.
+ *
+ * It derives rather than assumes — see `hwm-repair.ts` for the rule and the two
+ * clamps. What lives HERE is only the gathering: the roster from the grant
+ * store, the durable figures from Postgres, and the capital totals from a
+ * full-history chain sweep classified by `classifyUsdgMovement`.
+ *
+ * THE MANAGED SYSTEM IS THE ACCOUNT *AND* ITS CLASS VAULT. Both are scanned and
+ * their capital totals summed, because money can enter custody without ever
+ * touching the account — Shogun's vault was paid 5.785344 USDG directly by a
+ * DOGGOS-linked contract, which no account-scoped scan can see. Movements
+ * BETWEEN the two are classified `internal` or as trade legs and contribute
+ * nothing, so summing cannot double-count them.
+ */
+async function runHwmRepairIfAsked(): Promise<void> {
+  const mode = (process.env.MERRYMEN_REPAIR_HWM ?? "").trim().toLowerCase();
+  if (!mode) return;
+  if (hwmRepairRan) return;
+  hwmRepairRan = true;
+
+  if (mode !== "report" && mode !== "apply") {
+    // NAMED, NOT ASSUMED. A typo must be told plainly rather than read as
+    // `report` — or worse, as `apply`.
+    log(`hwm| MERRYMEN_REPAIR_HWM=${mode} is not a mode. Use "report" or "apply"; nothing was done.`);
+    return;
+  }
+  const applying = mode === "apply";
+  // A FLEET-WIDE APPLY IS NOT A THING. Every write here moves the figure the
+  // drawdown breaker divides by and the performance fee is measured against, so
+  // it happens to tenants somebody named, one at a time, having read their
+  // numbers. `report` may sweep the fleet; `apply` may not.
+  if (applying && !(process.env.MERRYMEN_REPAIR_HWM_ONLY ?? "").trim()) {
+    log("hwm| REFUSING to apply without MERRYMEN_REPAIR_HWM_ONLY — name the tenants explicitly");
+    return;
+  }
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("hwm| asked for, but there is no DATABASE_URL");
+    return;
+  }
+
+  try {
+    const { hwmWriteTargets, planHwmRepair, repairLines } = await import("./hwm-repair");
+    const shared = await makePgDb(url);
+    // THE SCHEMA FIRST, because this pass runs BEFORE `mirrorLedgers`, and the
+    // mirror is the only thing that applies the ledger DDL to the shared
+    // database. On the first boot after a migration this read asked for
+    // `hwm_withdrawn_usdg` a few seconds before anything created it, failed, and
+    // — because the once-per-process guard had already fired — never retried.
+    // Idempotent, and it makes the tool independent of what else ran first.
+    await applyLedgerSchema(shared);
+
+    const agentRows = (await shared
+      .prepare(
+        "SELECT smart_account, name, hwm_usdg, hwm_withdrawn_usdg FROM agents",
+      )
+      .all()) as unknown as Record<string, unknown>[];
+    const agentBy = new Map(agentRows.map((a) => [String(a.smart_account).toLowerCase(), a]));
+
+    const equityRows = (await shared
+      .prepare("SELECT agent_id, equity_usdg FROM equity ORDER BY agent_id, at DESC, id DESC")
+      .all()) as unknown as Record<string, unknown>[];
+    const equityBy = new Map<string, number>();
+    // THE BEST MARK THIS BOOK EVER HAD, which is what bounds a claim about
+    // profit: a peak is a peak OF EQUITY, so profit genuinely earned had to be
+    // marked at the time.
+    const maxEquityBy = new Map<string, number>();
+    for (const e of equityRows) {
+      const k = String(e.agent_id).toLowerCase();
+      const v = Number(e.equity_usdg);
+      if (!equityBy.has(k)) equityBy.set(k, v);
+      if (!maxEquityBy.has(k) || v > (maxEquityBy.get(k) as number)) maxEquityBy.set(k, v);
+    }
+
+    // THE PEAK'S PERFORMANCE COMPONENT. `fee_accruals` is the only durable
+    // record of the mark being raised by profit rather than by capital, so it
+    // is what keeps a genuine earner's peak from being cut down to their
+    // deposits — which would re-charge them for profit already paid on.
+    const feeRows = (await shared
+      .prepare("SELECT agent_id, SUM(profit_usdg) AS profit FROM fee_accruals GROUP BY agent_id")
+      .all()) as unknown as Record<string, unknown>[];
+    const profitBy = new Map(feeRows.map((r) => [String(r.agent_id).toLowerCase(), Number(r.profit ?? 0)]));
+
+    // Class positions the owner swept home. Non-USDG capital leaving custody,
+    // which no USDG log names — valued at COST, never at a curve mark.
+    const classRows = (await shared
+      .prepare("SELECT agent_id, token, state, cost_usdg FROM class_positions")
+      .all()) as unknown as Record<string, unknown>[];
+    const sweptCostBy = new Map<string, number>();
+    const sweptUnknownBy = new Map<string, number>();
+    const cashToken = String(CASH.USDG).toLowerCase();
+    for (const c of classRows) {
+      if (String(c.state ?? "") !== "swept") continue;
+      // A QUOTE-TOKEN ROW IS NOT A POSITION, and counting it here would both
+      // double-count and block the whole tenant.
+      //
+      // This adjustment exists for capital the USDG scanner is BLIND to —
+      // memecoins leaving the vault as tokens, in transactions no USDG log
+      // mentions. USDG stranded in a vault is not blind to it: it goes
+      // vault→account→owner as USDG and the chain sweep already counts it as a
+      // withdrawal. Shogun has exactly such a row, enumerated by the recovery
+      // planner with no cost basis, and it alone made the tenant unproposable.
+      if (String(c.token ?? "").toLowerCase() === cashToken) continue;
+      const k = String(c.agent_id).toLowerCase();
+      const raw = c.cost_usdg === null || c.cost_usdg === undefined ? null : String(c.cost_usdg);
+      if (raw === null) {
+        sweptUnknownBy.set(k, (sweptUnknownBy.get(k) ?? 0) + 1);
+        continue;
+      }
+      sweptCostBy.set(k, (sweptCostBy.get(k) ?? 0) + Number(raw) / 1e6);
+    }
+
+    // ── the roster, from the grant store ─────────────────────────────────
+    const roster: { tenant: string; account: string; vaults: readonly string[]; capBps: number | null }[] = [];
+    const gs = getGrantStore();
+    for (const tenant of await gs.listTenants()) {
+      const g = await gs.get(tenant);
+      const acct = g?.smartAccount ? String(g.smartAccount) : null;
+      if (!acct) {
+        log(`hwm| tenant ${tenant} holds a grant with no smart account — skipped`);
+        continue;
+      }
+      const caps = (g as unknown as { caps?: Record<string, unknown> })?.caps ?? null;
+      const pct = caps && typeof caps.maxDrawdownPct === "number" ? caps.maxDrawdownPct : null;
+      roster.push({ tenant, account: acct, vaults: custodyAddressesOf(g), capBps: pct === null ? null : pct * 100 });
+    }
+    log(`hwm| roster: ${roster.length} tenant(s) with a grant`);
+
+    // SCOPE, because `railway logs` is a ~500-line snapshot rather than a
+    // stream and the ledger mirror alone writes a couple of hundred lines a
+    // minute. A 45-tenant report is ~450 lines and pushes its own head out of
+    // the window before it can be read — a report that cannot be retrieved is
+    // not a report. Names TENANTS, not accounts, because that is what an
+    // operator has in front of them.
+    const only = new Set(
+      (process.env.MERRYMEN_REPAIR_HWM_ONLY ?? "")
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter((s) => s.startsWith("0x")),
+    );
+    const scoped = only.size ? roster.filter((r) => only.has(r.tenant.toLowerCase())) : roster;
+    if (only.size && scoped.length !== only.size) {
+      // LOUD. A named tenant that is not in the roster silently does nothing,
+      // and "2 examined" after naming 3 gives an operator no way to tell which.
+      log(`hwm| WARNING: ${only.size} tenant(s) named but ${scoped.length} found in the roster`);
+    }
+    roster.length = 0;
+    roster.push(...scoped);
+
+    // ── the chain, full history, accounts AND their vaults ───────────────
+    const rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
+    let rpcId = 1;
+    const rpc = async (method: string, params: unknown[]): Promise<unknown> => {
+      const r = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method, params }),
+      });
+      const j = (await r.json()) as { result?: unknown; error?: { message?: string } };
+      if (j.error) throw new Error(j.error.message ?? "rpc error");
+      return j.result ?? null;
+    };
+    const head = BigInt((await rpc("eth_blockNumber", [])) as string);
+    const custodyOf = new Map<string, readonly string[]>();
+    for (const r of roster) if (r.vaults.length) custodyOf.set(r.account.toLowerCase(), r.vaults);
+    const scanTargets = [...new Set(roster.flatMap((r) => [r.account, ...r.vaults]))];
+    log(`hwm| scanning ${scanTargets.length} address(es) to block ${head} (accounts and their class vaults)`);
+
+    const chain = await scanFleetCapital(rpc, {
+      accounts: scanTargets,
+      usdgToken: String(CASH.USDG),
+      fromBlock: 0n,
+      toBlock: head,
+      custodyAddressesFor: (a) => custodyOf.get(a.toLowerCase()),
+      log: (m) => log(`hwm| ${m}`),
+    });
+
+    // AN OPERATOR JUDGEMENT, PER NAMED TENANT. Not a rule and not a heuristic:
+    // a tenant appears here because somebody read its numbers and concluded its
+    // recorded fee-history profit is legacy residue. Shogun is the case it
+    // exists for — 24.915968 of recorded profit against a book never marked
+    // above 25.000000 and a chain lifetime result of 0.000000.
+    const phantomProfit = new Set(
+      (process.env.MERRYMEN_REPAIR_HWM_PHANTOM_PROFIT ?? "")
+        .split(",")
+        .map((t) => t.trim().toLowerCase())
+        .filter((t) => t.startsWith("0x")),
+    );
+    if (phantomProfit.size) {
+      log(
+        `hwm| operator declares the fee history phantom for ${phantomProfit.size} named tenant(s): ` +
+          [...phantomProfit].join(", "),
+      );
+    }
+
+    const plans = roster.map((r) => {
+      const key = r.account.toLowerCase();
+      const a = agentBy.get(key);
+      const gross = a?.hwm_usdg === undefined || a?.hwm_usdg === null ? null : Number(a.hwm_usdg);
+      const withdrawn = a?.hwm_withdrawn_usdg === undefined || a?.hwm_withdrawn_usdg === null ? 0 : Number(a.hwm_withdrawn_usdg);
+
+      // SUMMED ACROSS THE ACCOUNT AND ITS VAULT, which together are the
+      // managed system. `complete` is AND-ed: one unread window anywhere in
+      // custody makes the whole derivation for this tenant unsafe.
+      let deposits: number | null = 0;
+      let withdrawals: number | null = 0;
+      let internalMoves = 0;
+      let tradeLegs = 0;
+      let ambiguousMoves = 0;
+      let complete = true;
+      const notes: string[] = [];
+      for (const addr of [r.account, ...r.vaults]) {
+        const c = chain.get(addr.toLowerCase());
+        if (!c) {
+          complete = false;
+          notes.push(`no scan result for ${addr}`);
+          continue;
+        }
+        if (!c.complete) complete = false;
+        deposits = deposits === null ? null : deposits + Number(BigInt(c.totals.grossContributionsRaw)) / 1e6;
+        withdrawals = withdrawals === null ? null : withdrawals + Number(BigInt(c.totals.grossWithdrawalsRaw)) / 1e6;
+        internalMoves += c.totals.internal;
+        tradeLegs += c.totals.tradeLegs;
+        ambiguousMoves += c.totals.ambiguous;
+        notes.push(...c.notes);
+      }
+
+      return planHwmRepair({
+        tenant: r.tenant,
+        smartAccount: r.account,
+        name: a?.name === undefined || a?.name === null ? null : String(a.name),
+        equityUsdg: equityBy.get(key) ?? null,
+        currentHwmUsdg: gross === null ? null : Math.max(0, gross - withdrawn),
+        maxDrawdownBps: r.capBps,
+        depositsUsdg: deposits,
+        withdrawalsUsdg: withdrawals,
+        internalMoves,
+        tradeLegs,
+        ambiguousMoves,
+        sweptAtCostUsdg: sweptCostBy.get(key) ?? 0,
+        sweptUnpriceable: sweptUnknownBy.get(key) ?? 0,
+        ratchetedProfitUsdg: profitBy.get(key) ?? 0,
+        maxEquityUsdg: maxEquityBy.get(key) ?? null,
+        scanComplete: complete,
+        scanNote: notes.length ? notes.slice(0, 2).join("; ") : null,
+      }, { treatProfitAsPhantom: phantomProfit.has(r.tenant.toLowerCase()) });
+    });
+
+    for (const line of repairLines(plans)) log(`hwm| ${line}`);
+
+    if (!applying) {
+      log("hwm| REPORT ONLY — nothing was written. Remove MERRYMEN_REPAIR_HWM now.");
+      return;
+    }
+
+    // ── the apply ────────────────────────────────────────────────────────
+    //
+    // EXPRESSED ENTIRELY AS RAISES. The effective peak is
+    // `hwm_usdg − hwm_withdrawn_usdg` and both halves are one-way ratchets, so
+    // lowering a peak means raising the second faster than the first. Nothing
+    // here gains the ability to write a peak DOWN, which matters because such a
+    // door would then be available to every future caller — including a rebuilt
+    // child reporting its schema defaults.
+    for (const plan of plans) {
+      const acct = plan.facts.smartAccount;
+      const a = agentBy.get(acct.toLowerCase());
+      const current = {
+        grossUsdg: a?.hwm_usdg === null || a?.hwm_usdg === undefined ? 0 : Number(a.hwm_usdg),
+        withdrawnUsdg:
+          a?.hwm_withdrawn_usdg === null || a?.hwm_withdrawn_usdg === undefined
+            ? 0
+            : Number(a.hwm_withdrawn_usdg),
+      };
+      const t = hwmWriteTargets(plan, current);
+      if ("refused" in t) {
+        log(`hwm| ${plan.facts.tenant} NOT APPLIED — ${t.refused}`);
+        continue;
+      }
+      const alreadyRight =
+        t.grossUsdg === current.grossUsdg && t.withdrawnUsdg === current.withdrawnUsdg;
+
+      // THE EVIDENCE GOES IN FIRST, and on the AGENT'S OWN event log rather than
+      // only into this process's stdout. A repair whose only record is a log
+      // line in a 500-line rolling window is a repair nobody can audit later —
+      // and this figure is one an owner is entitled to see explained.
+      //
+      // WRITTEN EVEN WHEN NOTHING NEEDS CHANGING, because the point of an
+      // operator-approved repair is the RECORD, not the mutation. "This peak is
+      // 25.487111 because the chain shows these deposits and these withdrawals"
+      // is worth exactly as much when the figure already agrees — more, in fact,
+      // since the alternative is a durable number whose only explanation is that
+      // several bugs happened to cancel.
+      await shared
+        .prepare("INSERT INTO events (agent_id, level, message) VALUES (?, ?, ?)")
+        .run(
+          acct,
+          "ok",
+          alreadyRight ? `${t.evidence} (verified: the durable figures already match)` : t.evidence,
+        );
+
+      if (alreadyRight) {
+        log(
+          `hwm| ${plan.facts.tenant} VERIFIED — the durable figures already equal the derivation ` +
+            `(gross ${t.grossUsdg.toFixed(6)}, withdrawn ${t.withdrawnUsdg.toFixed(6)}, ` +
+            `effective peak ${t.effectiveUsdg.toFixed(6)} USDG). Evidence recorded; nothing written.`,
+        );
+        log(`hwm| ${plan.facts.tenant} evidence: ${t.evidence}`);
+        continue;
+      }
+
+      await shared
+        .prepare(
+          `UPDATE agents
+              SET hwm_usdg = CASE WHEN ? > hwm_usdg THEN ? ELSE hwm_usdg END,
+                  hwm_withdrawn_usdg = CASE WHEN ? > hwm_withdrawn_usdg
+                                            THEN ? ELSE hwm_withdrawn_usdg END
+            WHERE lower(smart_account) = lower(?)`,
+        )
+        .run(t.grossUsdg, t.grossUsdg, t.withdrawnUsdg, t.withdrawnUsdg, acct);
+
+      // READ IT BACK. A write that reported success and changed nothing is the
+      // failure this whole milestone keeps running into.
+      const after = (await shared
+        .prepare("SELECT hwm_usdg, hwm_withdrawn_usdg FROM agents WHERE lower(smart_account) = lower(?)")
+        .get(acct)) as { hwm_usdg: number; hwm_withdrawn_usdg: number } | undefined;
+      const gotGross = after === undefined ? null : Number(after.hwm_usdg);
+      const gotWithdrawn = after === undefined ? null : Number(after.hwm_withdrawn_usdg);
+      const effective =
+        gotGross === null || gotWithdrawn === null ? null : Math.max(0, gotGross - gotWithdrawn);
+      const ok =
+        effective !== null && Math.abs(effective - t.effectiveUsdg) < 0.000001;
+      log(
+        ok
+          ? `hwm| ${plan.facts.tenant} APPLIED — gross ${current.grossUsdg.toFixed(6)} → ` +
+            `${(gotGross ?? 0).toFixed(6)}, withdrawn ${current.withdrawnUsdg.toFixed(6)} → ` +
+            `${(gotWithdrawn ?? 0).toFixed(6)}, effective peak ${effective.toFixed(6)} USDG`
+          : `hwm| ${plan.facts.tenant} *** VERIFY FAILED — read back ` +
+            `gross ${gotGross} withdrawn ${gotWithdrawn}, wanted effective ${t.effectiveUsdg.toFixed(6)} ***`,
+      );
+      log(`hwm| ${plan.facts.tenant} evidence: ${t.evidence}`);
+    }
+    log("hwm| APPLY COMPLETE. Remove MERRYMEN_REPAIR_HWM now.");
+  } catch (e) {
+    log(`hwm| FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+let enableClassRan = false;
+let haltClassEntriesRan = false;
+let resumeClassEntriesRan = false;
+
+/**
+ * TURN NEW CLASS ENTRIES BACK ON FOR ONE TENANT. One field, the inverse of the
+ * halt, and the same read-back on both halves — that entries actually resumed,
+ * and that nothing an exit depends on moved while they did.
+ */
+async function runResumeClassEntriesIfAsked(): Promise<void> {
+  const want = (process.env.MERRYMEN_RESUME_CLASS_ENTRIES_FOR ?? "").trim().toLowerCase();
+  if (!want) return;
+  if (resumeClassEntriesRan) return;
+  resumeClassEntriesRan = true;
+  if (!/^0x[0-9a-f]{40}$/.test(want)) {
+    log("resume-entries: MERRYMEN_RESUME_CLASS_ENTRIES_FOR is not an address — refusing to guess");
+    return;
+  }
+  try {
+    const { HALT_MUST_PRESERVE, mergeResumeEntries } = await import("./enable-class");
+    const { getSettingsStore } = await import("./settings-store");
+    const store = getSettingsStore();
+    const current = (await store.get(want as `0x${string}`)) as unknown as Record<string, unknown> | null;
+    const before = Object.fromEntries(HALT_MUST_PRESERVE.map((k) => [k, current?.[k]]));
+    log(`resume-entries: classSnipeEnabled ${JSON.stringify(current?.classSnipeEnabled)} -> true for ${want}`);
+    await store.put(want as `0x${string}`, mergeResumeEntries(current) as never);
+    const after = (await store.get(want as `0x${string}`)) as unknown as Record<string, unknown> | null;
+    const moved = HALT_MUST_PRESERVE.filter((k) => JSON.stringify(after?.[k]) !== JSON.stringify(before[k]));
+    log(
+      after?.classSnipeEnabled === true
+        ? "resume-entries: WROTE and verified classSnipeEnabled=true"
+        : "resume-entries: *** VERIFY FAILED — classSnipeEnabled did not stick ***",
+    );
+    log(
+      moved.length === 0
+        ? `resume-entries: every exit setting preserved (${HALT_MUST_PRESERVE.join(", ")})`
+        : `resume-entries: *** ${moved.join(", ")} CHANGED ***`,
+    );
+    log("resume-entries: remove MERRYMEN_RESUME_CLASS_ENTRIES_FOR now.");
+  } catch (e) {
+    log(`resume-entries: FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+let classPnlRepairRan = false;
+
+/**
+ * BOOK THE RESULT OF CLASS ROUND TRIPS THAT COMPLETED WITHOUT ONE.
+ *
+ * `MERRYMEN_REPAIR_CLASS_PNL=report` prints and writes nothing; `apply` writes,
+ * and refuses without `MERRYMEN_REPAIR_CLASS_PNL_ONLY` naming the tenants. Same
+ * shape as the high-water-mark repair beside it, for the same reason: every
+ * write here lands on a figure an owner reads as their result.
+ *
+ * THE EVIDENCE IS THE CHAIN. For each closed class position the vault's own
+ * `ClassBuy`/`ClassSell` events are re-read and folded — the same
+ * `foldClassEvents` the worker uses, so the repair and the engine cannot reach
+ * different numbers from the same tape. A balance is never consulted: the vault
+ * also holds unrelated reward USDG, and a balance would turn Shogun's 1.77 loss
+ * into a gain.
+ *
+ * IDEMPOTENT ON CHAIN IDENTITY. The write lands on the `curve-trade` row the
+ * EXIT TRANSACTION identifies, and only where that row has no realised figure
+ * yet. Running twice is a no-op; running after the live path has booked the same
+ * trip is refused by the planner rather than doubled. The `swap` row the
+ * orphan-receipt reconciler writes for the same transaction is execution
+ * evidence and is never touched — a result on both rows is the double count this
+ * exists to avoid, which is why the planner refuses unless exactly one
+ * `curve-trade` row carries that hash.
+ */
+async function runClassPnlRepairIfAsked(): Promise<void> {
+  const mode = (process.env.MERRYMEN_REPAIR_CLASS_PNL ?? "").trim().toLowerCase();
+  if (!mode) return;
+  if (classPnlRepairRan) return;
+  classPnlRepairRan = true;
+
+  if (mode !== "report" && mode !== "apply") {
+    log(`class-pnl| MERRYMEN_REPAIR_CLASS_PNL=${mode} is not a mode. Use "report" or "apply".`);
+    return;
+  }
+  const applying = mode === "apply";
+  const only = new Set(
+    (process.env.MERRYMEN_REPAIR_CLASS_PNL_ONLY ?? "")
+      .split(",")
+      .map((t) => t.trim().toLowerCase())
+      .filter((t) => t.startsWith("0x")),
+  );
+  if (applying && only.size === 0) {
+    log("class-pnl| REFUSING to apply without MERRYMEN_REPAIR_CLASS_PNL_ONLY — name the tenants");
+    return;
+  }
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("class-pnl| asked for, but there is no DATABASE_URL");
+    return;
+  }
+
+  try {
+    const { planClassPnlRepair, classPnlRepairLines } = await import("./class-pnl-repair");
+    const { foldClassEvents, parseClassLogs } = await import("./venues/class-log");
+    const shared = await makePgDb(url);
+    await applyLedgerSchema(shared);
+
+    const rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
+    let rpcId = 1;
+    const rpc = async (method: string, params: unknown[]): Promise<unknown> => {
+      const r = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method, params }),
+      });
+      const j = (await r.json()) as { result?: unknown; error?: { message?: string } };
+      if (j.error) throw new Error(j.error.message ?? "rpc error");
+      return j.result ?? null;
+    };
+
+    const gs = getGrantStore();
+    const plans: Awaited<ReturnType<typeof planClassPnlRepair>>[] = [];
+    const targets: { plan: (typeof plans)[number]; account: string }[] = [];
+
+    for (const tenant of await gs.listTenants()) {
+      if (only.size && !only.has(tenant.toLowerCase())) continue;
+      const g = await gs.get(tenant);
+      const acct = g?.smartAccount ? String(g.smartAccount) : null;
+      const vault = custodyAddressesOf(g)[0] ?? null;
+      if (!acct || !vault) continue;
+
+      const rows = (await shared
+        .prepare(
+          `SELECT token, symbol, state, entry_tx, exit_tx
+             FROM class_positions WHERE lower(agent_id) = lower($1)`,
+        )
+        .all(acct)) as unknown as Record<string, unknown>[];
+      if (rows.length === 0) continue;
+
+      // THE WHOLE TAPE, ONCE. Folded by the same function the worker uses, so
+      // the repair cannot reach a different number from the same evidence.
+      type Entry = { costRaw: bigint; proceedsRaw: bigint; soldRaw: bigint; sweptRaw: bigint };
+      let folded: Map<string, Entry> | null = null;
+      try {
+        const head = BigInt((await rpc("eth_blockNumber", [])) as string);
+        const logs = (await rpc("eth_getLogs", [
+          { address: vault, fromBlock: "0x0", toBlock: "0x" + head.toString(16) },
+        ])) as { topics: string[]; data: string; blockNumber: string; transactionHash: string; logIndex: string }[];
+        const events = parseClassLogs(
+          logs.map((l) => ({
+            topics: l.topics,
+            data: l.data,
+            blockNumber: BigInt(l.blockNumber),
+            transactionHash: l.transactionHash,
+            logIndex: Number(l.logIndex),
+          })),
+        );
+        folded = foldClassEvents(events) as unknown as Map<string, Entry>;
+      } catch (e) {
+        log(`class-pnl| ${tenant}: vault log unreadable — ${e instanceof Error ? e.message.slice(0, 90) : e}`);
+      }
+
+      for (const r of rows) {
+        const token = String(r.token).toLowerCase();
+        const entry = folded?.get(token) ?? null;
+        const exitTx = r.exit_tx === null || r.exit_tx === undefined ? null : String(r.exit_tx);
+
+        // THE ROW THE RESULT WOULD LAND ON, identified by the EXIT TRANSACTION.
+        let intentRows = 0;
+        let recorded: number | null = null;
+        if (exitTx) {
+          const t = (await shared
+            .prepare(
+              `SELECT id, realized_pnl_usdg FROM trades
+                WHERE lower(agent_id) = lower($1) AND lower(tx_hash) = lower($2) AND kind = 'curve-trade'`,
+            )
+            .all(acct, exitTx)) as unknown as Record<string, unknown>[];
+          intentRows = t.length;
+          const v = t[0]?.realized_pnl_usdg;
+          recorded = v === null || v === undefined ? null : Number(v);
+        }
+        const b = (await shared
+          .prepare(
+            `SELECT qty_raw, cost_usdg FROM cost_basis
+              WHERE lower(agent_id) = lower($1) AND mode = 'live' AND symbol = $2`,
+          )
+          .get(acct, String(r.symbol ?? ""))) as { cost_usdg: string } | undefined;
+
+        const plan = planClassPnlRepair({
+          tenant,
+          smartAccount: acct,
+          token,
+          symbol: String(r.symbol ?? token),
+          entryTx: r.entry_tx === null || r.entry_tx === undefined ? null : String(r.entry_tx),
+          exitTx,
+          costRaw: entry ? entry.costRaw : null,
+          proceedsRaw: entry ? entry.proceedsRaw : null,
+          qtySoldRaw: entry ? entry.soldRaw : null,
+          sweptRaw: entry ? entry.sweptRaw : null,
+          state: String(r.state ?? "?"),
+          exitIntentRows: intentRows,
+          recordedRealizedUsdg: recorded,
+          basisRemainingRaw: b === undefined ? 0n : BigInt(b.cost_usdg || "0"),
+          scanComplete: folded !== null,
+        });
+        plans.push(plan);
+        targets.push({ plan, account: acct });
+      }
+    }
+
+    if (plans.length === 0) {
+      log("class-pnl| no class round trips found for the named tenant(s)");
+      return;
+    }
+    for (const line of classPnlRepairLines(plans)) log(`class-pnl| ${line}`);
+
+    if (!applying) {
+      log("class-pnl| REPORT ONLY — nothing was written. Remove MERRYMEN_REPAIR_CLASS_PNL now.");
+      return;
+    }
+
+    for (const { plan, account } of targets) {
+      const x = plan.facts;
+
+      // ── THE STALE SHARED BASIS, CLEARED FIRST AND ON ITS OWN TERMS ──────
+      //
+      // BEFORE the `ambiguous` guard, deliberately. A position whose result is
+      // already booked still has this row to clean up, and gating the cleanup on
+      // "did the P&L need writing" means the very run that books a result is the
+      // only run that can ever clear it — so the second attempt, after the first
+      // one's SQL failed, would skip it forever.
+      //
+      // The child holds NO cost_basis row: `setBasis` deletes at zero rather
+      // than zeroing, and the mirror reports `cost_basis 0` for this tenant on
+      // every pass. But the mirror skips its own `DELETE FROM cost_basis`
+      // whenever the child is flagged `rebuilt` — it cannot tell "I closed this"
+      // from "I have forgotten everything" — so the deletion had nothing to
+      // upsert over and the shared row sits there indefinitely, reading as a
+      // position still carrying cost that closed hours ago.
+      //
+      // Safe outright, and it stays deleted: there is no child row to re-push
+      // and the mirror's upsert only writes rows the child has. Idempotent — a
+      // DELETE of a row that is not there is a no-op.
+      if (x.state === "closed" || x.state === "swept") {
+        await shared
+          .prepare(
+            `DELETE FROM cost_basis
+              WHERE lower(agent_id) = lower($1) AND mode = 'live' AND symbol = $2`,
+          )
+          .run(account, x.symbol);
+        log(`class-pnl| ${x.symbol} stale shared cost basis cleared (${x.state}; the child holds none)`);
+      }
+
+      if (plan.ambiguous || plan.realizedRaw === null) continue;
+      const realized = Number(plan.realizedRaw) / 1e6;
+
+      // THE GUARD IS IN THE WRITE ITSELF, not only in the planner. The predicate
+      // is the chain's own identity for this trip — its exit transaction — plus
+      // the requirement that no result is there yet, so a concurrent booking by
+      // the live path cannot be overwritten and a second run changes nothing.
+      const res = (await shared
+        .prepare(
+          `UPDATE trades
+              SET realized_pnl_usdg = $1, fill_side = 'sell', fill_qty_raw = $2,
+                  fill_cash_usdg = $3, basis_source = 'receipt'
+            WHERE lower(agent_id) = lower($4) AND lower(tx_hash) = lower($5)
+              AND kind = 'curve-trade' AND realized_pnl_usdg IS NULL`,
+        )
+        .run(
+          realized,
+          x.qtySoldRaw === null ? null : x.qtySoldRaw.toString(),
+          x.proceedsRaw === null ? null : Number(x.proceedsRaw) / 1e6,
+          account,
+          x.exitTx,
+        )) as unknown;
+      void res;
+
+      const after = (await shared
+        .prepare(
+          `SELECT realized_pnl_usdg, fill_side FROM trades
+            WHERE lower(agent_id) = lower($1) AND lower(tx_hash) = lower($2) AND kind = 'curve-trade'`,
+        )
+        .all(account, x.exitTx)) as unknown as Record<string, unknown>[];
+      const got = after[0]?.realized_pnl_usdg;
+      const ok = after.length === 1 && got !== null && got !== undefined && Math.abs(Number(got) - realized) < 1e-9;
+
+
+      await shared
+        .prepare("INSERT INTO events (agent_id, level, message) VALUES (?, ?, ?)")
+        .run(
+          account,
+          "ok",
+          `class P&L repair: ${x.symbol} booked ${realized.toFixed(6)} USDG realised on exit ${x.exitTx}. ` +
+            `${plan.reason}. Derived from the vault's own events, never from a balance — this vault also ` +
+            `holds unrelated reward USDG.`,
+        );
+
+      log(
+        ok
+          ? `class-pnl| ${x.tenant} ${x.symbol} APPLIED — realised ${realized.toFixed(6)} USDG on ${x.exitTx}`
+          : `class-pnl| ${x.tenant} ${x.symbol} *** VERIFY FAILED — read back ${String(got)} across ` +
+            `${after.length} row(s), wanted ${realized.toFixed(6)} ***`,
+      );
+    }
+    log("class-pnl| APPLY COMPLETE. Remove MERRYMEN_REPAIR_CLASS_PNL now.");
+  } catch (e) {
+    log(`class-pnl| FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+
+/**
+ * TURN THE CLASS ROUTE ON FOR ONE NAMED TENANT.
+ *
+ * Same shape as the consent migration and the tenant inspector: one tenant named
+ * explicitly, once per process, reported in full. The settings store is in a
+ * Postgres reachable only from inside Railway, so there is no other way to set
+ * these.
+ *
+ * MERGES. `put` writes the whole blob, so a naive write erases every setting the
+ * owner chose. Remove the variable as soon as the write is confirmed.
+ */
+async function runEnableClassIfAsked(): Promise<void> {
+  const want = (process.env.MERRYMEN_ENABLE_CLASS_FOR ?? "").trim().toLowerCase();
+  if (!want) return;
+  if (enableClassRan) return;
+  enableClassRan = true;
+
+  if (!/^0x[0-9a-f]{40}$/.test(want)) {
+    log("enable-class: MERRYMEN_ENABLE_CLASS_FOR is not an address — refusing to guess");
+    return;
+  }
+  try {
+    const { CANARY, DAVE_CLASS, classEnableBlockers, describeCanaryChange, mergeCanary } =
+      await import("./enable-class");
+    const { getSettingsStore } = await import("./settings-store");
+    const { grantPonsClassVault, PONS_CLASS_VAULT_FACTORY } = await import("../../packages/core/src/index");
+    const store = getSettingsStore();
+
+    // WHICH CONFIGURATION. Named per tenant rather than one set for everyone:
+    // the numbers were agreed per owner, and `scoutBudgetUsdg` differs between
+    // them for a reason a shared constant would quietly erase.
+    const preset = (process.env.MERRYMEN_ENABLE_CLASS_PRESET ?? "canary").trim().toLowerCase();
+    if (preset !== "canary" && preset !== "dave") {
+      log(`enable-class: MERRYMEN_ENABLE_CLASS_PRESET=${preset} is not a preset. Use "canary" or "dave".`);
+      return;
+    }
+    const values = preset === "dave" ? DAVE_CLASS : CANARY;
+    log(`enable-class: preset ${preset}`);
+
+    // ── THE GRANT MUST BE ABLE TO EXECUTE WHAT THIS SWITCHES ON ─────────
+    //
+    // Enabling the route without a sealed vault is not merely inert: the agent
+    // scouts, scores, qualifies and builds entry intents its own key can never
+    // sign, every tick, forever. The owner sees an agent working and no trades,
+    // which is the most expensive failure shape this product has.
+    //
+    // Read through the SAME accessors the executor and the policy use, so the
+    // vault this check approves and the vault the wall pins cannot be two
+    // different addresses.
+    const url0 = process.env.DATABASE_URL;
+    if (!url0) {
+      log("enable-class: no DATABASE_URL — cannot read the grant to check it can execute this");
+      return;
+    }
+    let sealedVault: string | null = null;
+    let derivedVault: string | null = null;
+    try {
+      const g = await getGrantStore().get(want as `0x${string}`);
+      sealedVault = (grantPonsClassVault(g as never) as string | null) ?? null;
+      const acct = g && g.smartAccount ? String(g.smartAccount) : null;
+      const factory = PONS_CLASS_VAULT_FACTORY[Number(g && g.chainId ? g.chainId : 4663)];
+      if (acct && factory) {
+        const { createPublicClient, http } = await import("viem");
+        const rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
+        const c = createPublicClient({ transport: http(rpcUrl) });
+        derivedVault = String(
+          await c.readContract({
+            address: factory as `0x${string}`,
+            abi: [
+              {
+                type: "function",
+                name: "vaultFor",
+                stateMutability: "view",
+                inputs: [{ name: "owner_", type: "address" }],
+                outputs: [{ type: "address" }],
+              },
+            ],
+            functionName: "vaultFor",
+            args: [acct as `0x${string}`],
+          }),
+        );
+      }
+    } catch (e) {
+      log(`enable-class: could not read the grant (${e instanceof Error ? e.message.slice(0, 90) : e})`);
+      return;
+    }
+    const blockers = classEnableBlockers({ sealedVault, derivedVault });
+    if (blockers.length > 0) {
+      for (const b of blockers) log(`enable-class: REFUSING — ${b}`);
+      log("enable-class: nothing was written.");
+      return;
+    }
+    log(`enable-class: grant seals ${sealedVault} and it matches this account's vault`);
+
+    const current = (await store.get(want as `0x${string}`)) as unknown as Record<
+      string,
+      unknown
+    > | null;
+    for (const line of describeCanaryChange(current, values)) log(`enable-class: ${line}`);
+
+    const next = mergeCanary(current, values);
+    await store.put(want as `0x${string}`, next as never);
+
+    // READ IT BACK. A write that reported success and changed nothing is the
+    // failure this whole milestone keeps running into.
+    const after = (await store.get(want as `0x${string}`)) as unknown as Record<
+      string,
+      unknown
+    > | null;
+    const wrong = Object.entries(values).filter(([k, v]) => after?.[k] !== v);
+    log(
+      wrong.length === 0
+        ? `enable-class: WROTE and verified all ${Object.keys(values).length} fields for ${want}`
+        : `enable-class: *** VERIFY FAILED — ${wrong.map(([k]) => k).join(", ")} did not stick ***`,
+    );
+    log("enable-class: remove MERRYMEN_ENABLE_CLASS_FOR now.");
+  } catch (e) {
+    log(`enable-class: FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * SWITCH OFF NEW CLASS ENTRIES FOR ONE TENANT, AND NOTHING ELSE.
+ *
+ * The case this exists for: an agent holding a live class position that needs to
+ * stop opening new ones while it keeps managing the one it has. Those are
+ * different switches, and conflating them strands money in a book that can no
+ * longer close it.
+ *
+ * `classSnipeEnabled` gates `proposeClassEntries` and nothing else. The exit
+ * path reads `classMaxHoldSec` and `classExitAtGraduationPct` and never consults
+ * it, so an agent with entries off still sells on the clock and still sells at
+ * the graduation cliff. That asymmetry is verified, not assumed — it is why one
+ * field is the right lever and why `HALT_MUST_PRESERVE` names the exit triggers
+ * so a test can prove they were untouched.
+ *
+ * MERGE, NEVER REPLACE, for the reason `enable-class.ts` gives at length: `put`
+ * writes the whole blob, so a naive write erases every setting the owner chose.
+ */
+async function runHaltClassEntriesIfAsked(): Promise<void> {
+  const want = (process.env.MERRYMEN_HALT_CLASS_ENTRIES_FOR ?? "").trim().toLowerCase();
+  if (!want) return;
+  if (haltClassEntriesRan) return;
+  haltClassEntriesRan = true;
+
+  if (!/^0x[0-9a-f]{40}$/.test(want)) {
+    log("halt-entries: MERRYMEN_HALT_CLASS_ENTRIES_FOR is not an address — refusing to guess");
+    return;
+  }
+  try {
+    const { HALT_ENTRIES, HALT_MUST_PRESERVE, mergeHaltEntries } = await import("./enable-class");
+    const { getSettingsStore } = await import("./settings-store");
+    const store = getSettingsStore();
+
+    const current = (await store.get(want as `0x${string}`)) as unknown as Record<
+      string,
+      unknown
+    > | null;
+    const before = Object.fromEntries(HALT_MUST_PRESERVE.map((k) => [k, current?.[k]]));
+    log(
+      `halt-entries: classSnipeEnabled ${JSON.stringify(current?.classSnipeEnabled)} -> false ` +
+        `for ${want}`,
+    );
+
+    await store.put(want as `0x${string}`, mergeHaltEntries(current) as never);
+
+    // READ IT BACK, and check BOTH halves: that entries actually stopped, and
+    // that nothing an exit depends on moved. A halt that silently took the exit
+    // with it would look identical in the log to one that did not.
+    const after = (await store.get(want as `0x${string}`)) as unknown as Record<
+      string,
+      unknown
+    > | null;
+    const stuck = after?.classSnipeEnabled === false;
+    const moved = HALT_MUST_PRESERVE.filter((k) => JSON.stringify(after?.[k]) !== JSON.stringify(before[k]));
+    log(
+      stuck
+        ? `halt-entries: WROTE and verified classSnipeEnabled=false (${Object.keys(HALT_ENTRIES).length} field)`
+        : `halt-entries: *** VERIFY FAILED — classSnipeEnabled did not stick ***`,
+    );
+    log(
+      moved.length === 0
+        ? `halt-entries: every exit setting preserved (${HALT_MUST_PRESERVE.join(", ")})`
+        : `halt-entries: *** ${moved.join(", ")} CHANGED — the exit path may be affected ***`,
+    );
+    log("halt-entries: remove MERRYMEN_HALT_CLASS_ENTRIES_FOR now.");
+  } catch (e) {
+    log(`halt-entries: FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * PRINT ONE TENANT'S CLASS-ROUTE CONFIGURATION, ONCE, AND WRITE NOTHING.
+ *
+ * The grant and settings live in a Postgres reachable only from inside Railway,
+ * so this is the only way to answer "does this owner's signed wall carry a class
+ * vault?" without guessing. It reads through the SAME stores the worker uses —
+ * no second decoder to drift.
+ *
+ * ONCE PER PROCESS and named explicitly: the variable carries a single tenant
+ * address, there is no "all" mode, and the guard below stops it reprinting every
+ * fifteen seconds. It still prints on every RESTART while the variable is set,
+ * which is why the runbook says to remove it as soon as the answer is captured.
+ *
+ * It cannot leak: `describeTenant` is handed a flat record of the thirteen
+ * fields asked for, never the settings object, so nothing else is in scope where
+ * the strings are built.
+ */
+async function runTenantInspectIfAsked(): Promise<void> {
+  const want = (process.env.MERRYMEN_INSPECT_TENANT ?? "").trim().toLowerCase();
+  if (!want) return;
+  if (tenantInspectRan) return;
+  tenantInspectRan = true;
+
+  if (!/^0x[0-9a-f]{40}$/.test(want)) {
+    log(`inspect: MERRYMEN_INSPECT_TENANT is not an address — refusing to guess`);
+    return;
+  }
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("inspect: asked for, but there is no DATABASE_URL");
+    return;
+  }
+
+  try {
+    const { describeTenant, describeAccounting, describeLedger, describeMovements, type: _t } = (await import(
+      "./inspect-tenant"
+    )) as never as {
+      describeTenant: (f: Record<string, unknown>) => string[];
+      describeAccounting: (f: Record<string, unknown>) => string[];
+      describeLedger: (f: Record<string, unknown>) => string[];
+      describeMovements: (f: Record<string, unknown>) => string[];
+      type?: never;
+    };
+    void _t;
+    const { grantPonsClassVault, PONS_CLASS_VAULT_FACTORY } = await import(
+      "../../packages/core/src/index"
+    );
+    const { getSettingsStore } = await import("./settings-store");
+
+    // @ts-expect-error pg is runtime-only here, as everywhere else in this repo
+    const pg = (await import("pg")) as unknown as {
+      Client: new (c: { connectionString: string }) => {
+        query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+        connect(): Promise<void>;
+        end(): Promise<void>;
+      };
+    };
+    const client = new pg.Client({ connectionString: url });
+    await client.connect();
+    let grant: Record<string, unknown> | null = null;
+    // THE ACCOUNTING HALF, read from the same connection. Everything the
+    // drawdown breaker divides by lives in this database and nowhere an
+    // operator can reach, which is the whole reason for the round trip.
+    const acct: {
+      durableHwmUsdg: number | null;
+      durableHwmGrossUsdg: number | null;
+      durableHwmWithdrawnUsdg: number | null;
+      durableAccruedFeeUsdg: number | null;
+      durableEpoch: number | null;
+      equityUsdg: number | null;
+      flows:
+        | {
+            direction: string;
+            amountUsdg: number;
+            source: string;
+            txHash: string | null;
+            blockNumber: number | null;
+          }[]
+        | null;
+      trades: number | null;
+      error: string | null;
+    } = {
+      durableHwmUsdg: null,
+      durableHwmGrossUsdg: null,
+      durableHwmWithdrawnUsdg: null,
+      durableAccruedFeeUsdg: null,
+      durableEpoch: null,
+      equityUsdg: null,
+      flows: null,
+      trades: null,
+      error: null,
+    };
+    const ledger: {
+      tradesByStatus: Record<string, number> | null;
+      openPositions: { symbol: string; custody: string; qty: string }[] | null;
+      classPositions:
+        | { symbol: string; state: string; costUsdg: string | null; proceedsUsdg: string | null }[]
+        | null;
+      error: string | null;
+    } = { tradesByStatus: null, openPositions: null, classPositions: null, error: null };
+    const moves: {
+      landed:
+        | { kind: string; target: string; amountUsdg: number; status: string; txHash: string | null }[]
+        | null;
+      classRows:
+        | {
+            token: string;
+            symbol: string | null;
+            state: string;
+            costUsdg: string | null;
+            proceedsUsdg: string | null;
+            qtyRaw: string | null;
+            entryTx: string | null;
+            exitTx: string | null;
+          }[]
+        | null;
+      error: string | null;
+    } = { landed: null, classRows: null, error: null };
+    try {
+      const { rows } = await client.query(
+        "SELECT grant_json FROM grants WHERE lower(tenant) = lower($1)",
+        [want],
+      );
+      const raw = rows[0]?.grant_json;
+      grant =
+        typeof raw === "string"
+          ? (JSON.parse(raw) as Record<string, unknown>)
+          : ((raw as Record<string, unknown>) ?? null);
+
+      const acctAddr = typeof grant?.smartAccount === "string" ? grant.smartAccount : null;
+      if (acctAddr) {
+        try {
+          const a = await client.query(
+            "SELECT hwm_usdg, hwm_withdrawn_usdg, accrued_fee_usdg, epoch FROM agents WHERE lower(smart_account) = lower($1)",
+            [acctAddr],
+          );
+          const r = a.rows[0];
+          if (r) {
+            // THE EFFECTIVE PEAK, which is what the breaker actually divides
+            // by — gross minus what withdrawals have taken out of it. Reading
+            // the raw column here printed "5470bps — REFUSING every buy" about
+            // an account the engine was reading at 0bps, which is precisely the
+            // confidently-wrong number this module exists to stop.
+            acct.durableHwmUsdg = Math.max(
+              0,
+              Number(r.hwm_usdg) - Number(r.hwm_withdrawn_usdg ?? 0),
+            );
+            acct.durableHwmGrossUsdg = Number(r.hwm_usdg);
+            acct.durableHwmWithdrawnUsdg = Number(r.hwm_withdrawn_usdg ?? 0);
+            acct.durableAccruedFeeUsdg = Number(r.accrued_fee_usdg);
+            acct.durableEpoch = Number(r.epoch);
+          }
+          const e = await client.query(
+            "SELECT equity_usdg FROM equity WHERE lower(agent_id) = lower($1) ORDER BY at DESC LIMIT 1",
+            [acctAddr],
+          );
+          if (e.rows[0]) acct.equityUsdg = Number(e.rows[0].equity_usdg);
+          const fl = await client.query(
+            `SELECT direction, amount_usdg, source, tx_hash, block_number
+               FROM flows WHERE lower(agent_id) = lower($1) ORDER BY at ASC, id ASC`,
+            [acctAddr],
+          );
+          acct.flows = fl.rows.map((x) => ({
+            direction: String(x.direction),
+            amountUsdg: Number(x.amount_usdg),
+            source: String(x.source),
+            txHash: x.tx_hash === null ? null : String(x.tx_hash),
+            blockNumber: x.block_number === null ? null : Number(x.block_number),
+          }));
+          const t = await client.query(
+            "SELECT count(*)::int AS n FROM trades WHERE lower(agent_id) = lower($1)",
+            [acctAddr],
+          );
+          acct.trades = Number(t.rows[0]?.n ?? 0);
+        } catch (e) {
+          // UNREADABLE, not empty. A failed count must never render as zero
+          // trades, because zero trades is the premise of the verdict below.
+          acct.error = e instanceof Error ? e.message : String(e);
+        }
+
+        // ITS OWN TRY, deliberately. Folded into the block above, one bad
+        // column name in the ledger half reported the ACCOUNTING half as
+        // unreadable too — after it had already read correctly. A later failure
+        // must not retract an earlier fact.
+        try {
+          const ts = await client.query(
+            "SELECT status, count(*)::int AS n FROM trades WHERE lower(agent_id) = lower($1) GROUP BY status",
+            [acctAddr],
+          );
+          ledger.tradesByStatus = Object.fromEntries(
+            ts.rows.map((x) => [String(x.status), Number(x.n)]),
+          );
+          const ps = await client.query(
+            "SELECT symbol, custody, value_usdg FROM positions WHERE lower(agent_id) = lower($1)",
+            [acctAddr],
+          );
+          ledger.openPositions = ps.rows.map((x) => ({
+            symbol: String(x.symbol),
+            custody: String(x.custody ?? "account"),
+            qty: `${Number(x.value_usdg).toFixed(6)} USDG`,
+          }));
+          const cp = await client.query(
+            "SELECT symbol, state, cost_usdg, proceeds_usdg FROM class_positions WHERE lower(agent_id) = lower($1)",
+            [acctAddr],
+          );
+          ledger.classPositions = cp.rows.map((x) => ({
+            symbol: String(x.symbol ?? "?"),
+            state: String(x.state ?? "?"),
+            costUsdg: x.cost_usdg === null ? null : String(x.cost_usdg),
+            proceedsUsdg: x.proceeds_usdg === null ? null : String(x.proceeds_usdg),
+          }));
+        } catch (e) {
+          ledger.error = e instanceof Error ? e.message : String(e);
+        }
+
+        try {
+          const lt = await client.query(
+            `SELECT kind, target, amount_usdg, status, tx_hash, realized_pnl_usdg, fill_side, basis_source FROM trades
+              WHERE lower(agent_id) = lower($1) AND status <> 'rejected'
+              ORDER BY created_at ASC`,
+            [acctAddr],
+          );
+          moves.landed = lt.rows.map((x) => ({
+            kind: String(x.kind),
+            target: String(x.target),
+            amountUsdg: Number(x.amount_usdg),
+            status: String(x.status),
+            txHash: x.tx_hash === null ? null : String(x.tx_hash),
+            realizedPnlUsdg:
+              x.realized_pnl_usdg === null || x.realized_pnl_usdg === undefined
+                ? null
+                : Number(x.realized_pnl_usdg),
+            fillSide: x.fill_side === null || x.fill_side === undefined ? null : String(x.fill_side),
+            basisSource:
+              x.basis_source === null || x.basis_source === undefined ? null : String(x.basis_source),
+          }));
+          const cr = await client.query(
+            `SELECT token, symbol, state, cost_usdg, proceeds_usdg, qty_raw, opened_at_block, first_seen, curve, quote_token, entry_tx, exit_tx
+               FROM class_positions WHERE lower(agent_id) = lower($1)`,
+            [acctAddr],
+          );
+          moves.classRows = cr.rows.map((x) => ({
+            token: String(x.token),
+            symbol: x.symbol === null ? null : String(x.symbol),
+            state: String(x.state ?? "?"),
+            costUsdg: x.cost_usdg === null ? null : String(x.cost_usdg),
+            proceedsUsdg: x.proceeds_usdg === null ? null : String(x.proceeds_usdg),
+            qtyRaw: x.qty_raw === null ? null : String(x.qty_raw),
+            // `?? null` as well as the null check: a column absent from the
+            // result set arrives as UNDEFINED, and String(undefined) prints the
+            // word "undefined" as though it were a value. That is exactly the
+            // unknown-rendered-as-something this module exists to prevent, and it
+            // is what this line printed on its first run.
+            openedAtBlock:
+              x.opened_at_block === null || x.opened_at_block === undefined
+                ? null
+                : String(x.opened_at_block),
+            firstSeen:
+              x.first_seen === null || x.first_seen === undefined ? null : Number(x.first_seen),
+            curve: x.curve === null || x.curve === undefined ? null : String(x.curve),
+            quoteToken:
+              x.quote_token === null || x.quote_token === undefined ? null : String(x.quote_token),
+            entryTx: x.entry_tx === null ? null : String(x.entry_tx),
+            exitTx: x.exit_tx === null ? null : String(x.exit_tx),
+          }));
+        } catch (e) {
+          moves.error = e instanceof Error ? e.message : String(e);
+        }
+      }
+    } finally {
+      await client.end();
+    }
+
+    if (!grant) {
+      log(`inspect: no grant row for ${want}`);
+      return;
+    }
+
+    const smartAccount = typeof grant.smartAccount === "string" ? grant.smartAccount : null;
+    const chainId = Number(grant.chainId);
+    const grantClassVault = (grantPonsClassVault(grant as never) as string | null) ?? null;
+
+    // The DERIVED vault, which exists as an address whether or not it was
+    // sealed — so a NO on sealing can still say which vault is being discussed.
+    let derivedClassVault: string | null = null;
+    let vaultDeployed: boolean | null = null;
+    const factory = PONS_CLASS_VAULT_FACTORY[chainId];
+    if (factory && smartAccount) {
+      try {
+        const { createPublicClient, http } = await import("viem");
+        // The same default the announcement pass uses, so one operator
+        // variable governs every read this process makes.
+        const rpcUrl =
+          (chainId === 4663
+            ? process.env.MERRYMEN_RPC_MAINNET
+            : process.env.MERRYMEN_RPC_TESTNET) ?? "https://rpc.mainnet.chain.robinhood.com";
+        const client2 = createPublicClient({ transport: http(rpcUrl) });
+        derivedClassVault = (await client2.readContract({
+          address: factory as `0x${string}`,
+          abi: [
+            {
+              type: "function",
+              name: "vaultFor",
+              stateMutability: "view",
+              inputs: [{ name: "owner_", type: "address" }],
+              outputs: [{ type: "address" }],
+            },
+          ] as const,
+          functionName: "vaultFor",
+          args: [smartAccount as `0x${string}`],
+        })) as string;
+        const target = (grantClassVault ?? derivedClassVault) as `0x${string}`;
+        const code = await client2.getBytecode({ address: target });
+        vaultDeployed = code !== undefined && code !== "0x";
+      } catch {
+        // UNKNOWN, not false. The whole point of this module is that somebody
+        // was about to act on the difference.
+        vaultDeployed = null;
+      }
+    }
+
+    let settingsMissing = false;
+    let settingsError: string | null = null;
+    let s: Record<string, unknown> = {};
+    try {
+      const got = (await getSettingsStore().get(want as `0x${string}`)) as unknown as Record<
+        string,
+        unknown
+      > | null;
+      if (got === null) settingsMissing = true;
+      else s = got;
+    } catch (e) {
+      settingsError = e instanceof Error ? e.message : String(e);
+    }
+
+    // ONE FIELD AT A TIME, BY NAME. This is the line that makes a leak
+    // impossible: the report never receives `s`.
+    const pick = <T>(k: string): T | null => (s[k] === undefined ? null : (s[k] as T));
+    const facts = {
+      tenant: want,
+      smartAccount,
+      grantClassVault,
+      derivedClassVault,
+      vaultDeployed,
+      assetMode: pick("assetMode"),
+      liveTradingEnabled: pick("liveTradingEnabled"),
+      discoveryEnabled: pick("discoveryEnabled"),
+      classSnipeEnabled: pick("classSnipeEnabled"),
+      classPerEntryUsdg: pick("classPerEntryUsdg"),
+      classMaxPositions: pick("classMaxPositions"),
+      scoutEnabled: pick("scoutEnabled"),
+      scoutBudgetUsdg: pick("scoutBudgetUsdg"),
+      scoutPerTokenUsdg: pick("scoutPerTokenUsdg"),
+      classMinDepthUsdg: pick("classMinDepthUsdg"),
+      maxImpactBps: pick("maxImpactBps"),
+      slippageBps: pick("slippageBps"),
+      classMaxHoldSec: pick("classMaxHoldSec"),
+      classExitAtGraduationPct: pick("classExitAtGraduationPct"),
+      settingsMissing,
+      settingsError,
+    };
+
+    for (const line of describeTenant(facts)) log(`inspect: ${line}`);
+
+    // The signed ceiling, read off the grant's own caps — the same derivation
+    // limits.ts makes, so the number printed is the one the breaker compares
+    // against rather than a default that resembles it.
+    const caps = (grant.caps ?? null) as Record<string, unknown> | null;
+    const pct = caps && typeof caps.maxDrawdownPct === "number" ? caps.maxDrawdownPct : null;
+    for (const line of describeAccounting({
+      smartAccount,
+      durableHwmUsdg: acct.durableHwmUsdg,
+      durableHwmGrossUsdg: acct.durableHwmGrossUsdg,
+      durableHwmWithdrawnUsdg: acct.durableHwmWithdrawnUsdg,
+      durableAccruedFeeUsdg: acct.durableAccruedFeeUsdg,
+      durableEpoch: acct.durableEpoch,
+      equityUsdg: acct.equityUsdg,
+      maxDrawdownBps: pct === null ? null : pct * 100,
+      flows: acct.flows,
+      trades: acct.trades,
+      error: acct.error,
+    }))
+      log(`inspect: ${line}`);
+    for (const line of describeLedger(ledger)) log(`inspect: ${line}`);
+    for (const line of describeMovements(moves)) log(`inspect: ${line}`);
+
+    // THE CEILING'S OWN ARITHMETIC. Keyed by smart account, like every other
+    // row in `class_positions` — `agent_id` IS the smart account, and joining
+    // on the tenant would silently return nothing.
+    if (smartAccount) {
+      try {
+        const { describeClassPositions } = (await import("./inspect-tenant")) as never as {
+          describeClassPositions: (c: { states: readonly (string | null)[]; ceiling: number | null }) => string[];
+        };
+        const pos = await client.query(`SELECT state FROM class_positions WHERE agent_id = $1`, [
+          smartAccount,
+        ]);
+        const ceiling = facts.classMaxPositions;
+        for (const line of describeClassPositions({
+          states: pos.rows.map((r) => (r.state === null || r.state === undefined ? null : String(r.state))),
+          ceiling: typeof ceiling === "number" ? ceiling : null,
+        }))
+          log(`inspect: ${line}`);
+      } catch (e) {
+        // Said out loud. An unreadable position table is not an empty one, and
+        // "the ceiling is fine" is exactly the wrong thing to infer from a
+        // failed read on the gate that shuts the route silently.
+        log(`inspect: class positions COULD NOT BE READ — ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    log("inspect: READ ONLY — nothing was written. Remove MERRYMEN_INSPECT_TENANT now.");
+  } catch (e) {
+    log(`inspect: FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+async function runLiveIntentBackfillIfAsked(): Promise<void> {
+  const mode = (process.env.MERRYMEN_BACKFILL_LIVE_INTENT ?? "").trim();
+  if (mode !== "report" && mode !== "apply") return;
+  // ONCE PER PROCESS. It moved ahead of `reconcile()` so the apply lands before
+  // any child reads settings, and that put it on every pass rather than the
+  // first — which in report mode would re-print the whole fleet every fifteen
+  // seconds, and this repo already carries the incident where 1,242 identical
+  // rows told nobody anything.
+  if (liveIntentBackfillRan) return;
+  liveIntentBackfillRan = true;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("live-intent backfill asked for, but there is no DATABASE_URL");
+    return;
+  }
+  try {
+    const { applyLiveIntentBackfill, describeBackfill, planLiveIntentBackfill } = await import(
+      "./backfill-live-intent"
+    );
+    const { getSettingsStore } = await import("./settings-store");
+    // @ts-expect-error pg is runtime-only here, as everywhere else in this repo
+    const pg = (await import("pg")) as unknown as {
+      Client: new (c: { connectionString: string }) => {
+        query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+        connect(): Promise<void>;
+        end(): Promise<void>;
+      };
+    };
+    const client = new pg.Client({ connectionString: url });
+    await client.connect();
+    try {
+      /**
+       * TENANT → SMART ACCOUNT, the same index announce.ts uses and for the same
+       * reason: `trades` is keyed by `agent_id`, which is the smart account, and
+       * nothing in it knows what a tenant is. `grants` is keyed by tenant and
+       * carries the account, so it is the only bridge.
+       *
+       * Deliberately NOT `agents.owner_address` — that is a browser-generated
+       * key for every hosted tenant, so the join would return zero rows and the
+       * whole fleet would read as "never traded for real".
+       */
+      const ids = new Map<string, string>();
+      const { rows } = await client.query(
+        `SELECT tenant, grant_json->>'smartAccount' AS smart_account FROM grants`,
+      );
+      for (const r of rows) {
+        if (typeof r.smart_account === "string") {
+          ids.set(String(r.tenant).toLowerCase(), r.smart_account);
+        }
+      }
+      log(`live-intent backfill: ${ids.size} tenant(s) have a grant with an account`);
+
+      const store = getSettingsStore();
+      const plan = await planLiveIntentBackfill({
+        settings: store as never,
+        db: client,
+        agentIdOf: (t) => ids.get(t.toLowerCase()) ?? null,
+        // The union — see planLiveIntentBackfill. The first report showed 46
+        // tenants with a grant against 39 covered by the settings store alone.
+        grantTenants: [...ids.keys()] as `0x${string}`[],
+      });
+      for (const line of describeBackfill(plan).split("\n")) log(`live-intent backfill: ${line}`);
+
+      if (mode !== "apply") {
+        log("live-intent backfill: REPORT ONLY — nothing written. Set =apply to write these grants.");
+        return;
+      }
+      const out = await applyLiveIntentBackfill(plan, store as never);
+      log(`live-intent backfill: APPLIED — ${out.written.length} granted, ${out.skipped.length} skipped`);
+      for (const s of out.skipped) log(`live-intent backfill:   SKIP ${s.tenant} — ${s.why}`);
+    } finally {
+      await client.end();
+    }
+  } catch (e) {
+    // Loud, and never silently "done". A backfill that failed and said nothing
+    // is indistinguishable from one that found nothing to do — and the second
+    // is a green light to deploy enforcement.
+    log(`live-intent backfill: FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+async function runAnnouncementIfAsked(): Promise<void> {
+  const id = (process.env.MERRYMEN_ANNOUNCE_ID ?? "").trim();
+  if (!id) return;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("announcement asked for, but there is no DATABASE_URL");
+    return;
+  }
+  if (!process.env.MERRYMEN_STORE_DEK) {
+    log("announcement asked for, but there is no MERRYMEN_STORE_DEK — bot tokens are sealed");
+    return;
+  }
+  try {
+    const { readFileSync, existsSync, readdirSync } = await import("node:fs");
+    const { illegalTags, runAnnouncement } = await import("./announce");
+    // ── A PER-AGENT CAMPAIGN IS A DIRECTORY, A BROADCAST IS A FILE ─────────
+    //
+    // `docs/announcements/<id>.html`            one body for everyone
+    // `docs/announcements/<id>/<tenant>.html`   one body per named owner
+    //
+    // The directory form makes the recipient list and the prepared-text list
+    // THE SAME LIST, so it is structurally impossible to select somebody whose
+    // message was never written — the failure that would mail one owner another
+    // owner's circumstances.
+    const dir = path.resolve(ROOT, "docs/announcements", id);
+    const perAgent = existsSync(dir);
+    const bodies: Record<string, string> = {};
+    let body = "";
+    if (perAgent) {
+      for (const f of readdirSync(dir)) {
+        if (!f.endsWith(".html")) continue;
+        bodies[f.slice(0, -5).toLowerCase()] = readFileSync(path.join(dir, f), "utf8").trim();
+      }
+      if (Object.keys(bodies).length === 0) {
+        log(`announcement ${id}: ${dir} has no .html bodies — refusing`);
+        return;
+      }
+    } else {
+      body = readFileSync(path.resolve(ROOT, "docs/announcements", `${id}.html`), "utf8").trim();
+    }
+    // Every body is checked, not just the first: one bad tag anywhere would be
+    // silently flattened to plain text by telegram/api.ts and reported as a
+    // clean delivery.
+    for (const [who, text] of perAgent ? Object.entries(bodies) : [["all", body] as const]) {
+      const bad = illegalTags(text);
+      if (bad.length > 0) {
+        log(`announcement ${id}: ${who} uses tags Telegram rejects (${bad.join(", ")}) — refusing`);
+        return;
+      }
+      if (text.length > 3600) {
+        log(`announcement ${id}: ${who} is ${text.length} chars, over the 3600 budget — refusing`);
+        return;
+      }
+    }
+    // @ts-expect-error pg is runtime-only here, as everywhere else in this repo
+    const pg = (await import("pg")) as unknown as {
+      Client: new (c: { connectionString: string }) => {
+        query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+        connect(): Promise<void>;
+        end(): Promise<void>;
+      };
+    };
+    const client = new pg.Client({ connectionString: url });
+    await client.connect();
+    try {
+      const confirmed = (process.env.MERRYMEN_ANNOUNCE_CONFIRM ?? "").trim() === id;
+      const out = await runAnnouncement({
+        client,
+        announceId: id,
+        body,
+        confirmed,
+        ...(perAgent ? { bodies, tenants: Object.keys(bodies) } : {}),
+      });
+      // THE DRY RUN HAS TO SHOW THE TEXT, not a count. An operator approving a
+      // per-agent campaign is approving three different claims about three
+      // different people's money; "3 would receive" is not something anybody
+      // can check. No token is printed — the chat is its last four digits.
+      for (const p of out.preview) {
+        log(
+          `announcement ${id}:   ${p.tenant} · ${p.name ?? "(no name)"} · chat ${p.chatRedacted} · ` +
+            `${p.blocker ?? "no blocker"} · ${p.chars} chars`,
+        );
+        for (const line of p.body.split("\n")) log(`announcement ${id}:     | ${line}`);
+      }
+      log(
+        `announcement ${id}: ${out.dryRun ? "DRY RUN, nothing sent" : "SENT"} — ` +
+          `${out.considered} tenants, ${out.eligible} eligible, ${out.sent} ${out.dryRun ? "would receive" : "delivered"}, ` +
+          `${out.personalised} with their own reason · ` +
+          `${out.withAllowlist} have linked at some point, ${out.withBotToken} hold a bot token · ` +
+          `skipped: ${out.skippedNoChat} no chat, ${out.skippedNoToken} no bot, ${out.skippedDisabled} tg off, ${out.skippedNotifyOff} pushes off, ` +
+          `${out.skippedAlreadySent} already had it · ${out.failed.length} failed`,
+      );
+      // "Nobody is blocked" and "the join broke" are the same empty map and
+      // opposite facts. Only one of them is safe to send on.
+      if (out.blockerJoinError) {
+        log(`announcement ${id}: !! per-agent blocker lookup FAILED (${out.blockerJoinError}) — every message would be generic`);
+      }
+      const tally = new Map<string, number>();
+      for (const f of out.failed) tally.set(f.reason, (tally.get(f.reason) ?? 0) + 1);
+      // Reasons without recipients: enough to act on, never enough to identify
+      // anyone or reconstruct a credential.
+      for (const [reason, n] of tally) log(`announcement ${id}:   ${n}× ${reason}`);
+      if (out.dryRun) log(`announcement ${id}: to send, set MERRYMEN_ANNOUNCE_CONFIRM=${id}`);
+    } finally {
+      await client.end();
+    }
+  } catch (e) {
+    // The message only. A pg or fetch error object can carry request context,
+    // and in this process that context can include a bot token.
+    log(`announcement ${id} failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function runIdentityAuditIfAsked(): Promise<void> {
   if ((process.env.MERRYMEN_IDENTITY_AUDIT ?? "").trim() !== "1") return;
   const url = process.env.DATABASE_URL;
@@ -1765,6 +3349,8 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     // than absent.
     const tenantByAccount = new Map<string, string>();
     const byAccount = new Map<string, Record<string, unknown>>();
+    /** account → the class vault holding its assets, for the classifier. */
+    const custodyVaults = new Map<string, readonly string[]>();
     for (const a of ledgerAgents) byAccount.set(String(a.smart_account ?? "").toLowerCase(), a);
 
     let rosterOnly = 0;
@@ -1779,6 +3365,12 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
           continue;
         }
         tenantByAccount.set(acct.toLowerCase(), tenant);
+        // FROM THE GRANT, which is the only place a class vault can honestly
+        // come from: it is CREATE2-salted with one smart account, so there is no
+        // fleet-wide list, and a settings-sourced value would point one owner's
+        // reader at another owner's vault (custody.ts).
+        const vaults = custodyAddressesOf(g);
+        if (vaults.length > 0) custodyVaults.set(acct.toLowerCase(), vaults);
         if (byAccount.has(acct.toLowerCase())) continue;
         rosterOnly += 1;
         byAccount.set(acct.toLowerCase(), {
@@ -1873,6 +3465,21 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
       usdgToken,
       fromBlock: 0n,
       toBlock: head,
+      // WITHOUT THIS EVERY CLASS BUY READS AS A WITHDRAWAL.
+      //
+      // A class buy moves USDG account→vault and the token curve→vault, so the
+      // token never touches the account at all. `classifyUsdgMovement`'s primary
+      // rule looks for a paired token moving the other way into somewhere that
+      // is OURS, and without the vault in that set nothing pairs: the leg falls
+      // through to `no-pair-external` and is booked `capital-out` — the owner's
+      // own money recorded as having left.
+      //
+      // `chain-capital.ts` says exactly this about omitting it ("the fleet-scale
+      // version of the same bug deposit-log carries per agent") and the argument
+      // was simply never passed. It matters here and now because this scan feeds
+      // a repair: a trade counted as a withdrawal moves the peak the drawdown
+      // breaker divides by, in the direction that halts a healthy account.
+      custodyAddressesFor: (a) => custodyVaults.get(a.toLowerCase()),
       log: (m) => log(`recon| ${m}`),
     });
 
@@ -2399,6 +4006,27 @@ export async function runOrchestrator(): Promise<void> {
         for (const t of [...leases.keys()]) await releaseLease(t);
       }
     } else {
+      /**
+       * BEFORE `reconcile()`, AND THAT ORDERING IS THE WHOLE SAFETY OF IT.
+       *
+       * `reconcile()` spawns children and ferries them their settings. Run the
+       * backfill after it and the first cohort starts with the consent flag
+       * still absent — so every live agent drops to paper for a tick or two,
+       * and a live agent on the paper rail loses its stop-loss and take-profit
+       * as well, because holdings there come from the paper book.
+       *
+       * Ahead of it, the grants are written before any child reads settings and
+       * the apply step has no window at all. It is idempotent and returns
+       * immediately when the variable is unset, so it costs a healthy fleet one
+       * comparison per pass.
+       */
+      await runLiveIntentBackfillIfAsked();
+      await runTenantInspectIfAsked();
+      await runHwmRepairIfAsked();
+      await runEnableClassIfAsked();
+      await runHaltClassEntriesIfAsked();
+      await runResumeClassEntriesIfAsked();
+      await runClassPnlRepairIfAsked();
       await reconcile();
       watchdog();
       await mirrorLedgers();
@@ -2423,6 +4051,11 @@ export async function runOrchestrator(): Promise<void> {
       // simply dropped them, and a report whose absence looks identical to a
       // clean fleet is not a report. A separate pass puts it in its own quiet
       // moment, where only the routine mirror lines share the stream.
+      // Before the audits, and on the FIRST pass rather than a delayed one: an
+      // operator who sets the variable and redeploys is watching the log now,
+      // and a dry run that appears twenty minutes later reads as nothing having
+      // happened. It is idempotent, so running early costs nothing.
+      if (cohortPasses === 1) await runAnnouncementIfAsked();
       if (cohortPasses === IDENTITY_AUDIT_AFTER_PASSES) await runIdentityAuditIfAsked();
       if (cohortPasses === COHORT_VET_AFTER_PASSES) {
         await runCohortVettingIfAsked();

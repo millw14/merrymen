@@ -151,6 +151,109 @@ export async function getUpdates(
   return { messages, nextOffset };
 }
 
+/**
+ * The commands shown in the Telegram "/" menu. Mirrors /help (reads.ts) as
+ * Telegram BotCommand entries: 1-32 lowercase alphanumeric/underscore, no
+ * leading slash, plain-text descriptions (no HTML). This is the FULL menu —
+ * pushed to each allowlisted chat so owners keep discoverability. Strangers
+ * see the trimmed publicBotCommands subset instead.
+ */
+export const BOT_COMMANDS: { command: string; description: string }[] = [
+  { command: "help", description: "list every command" },
+  { command: "status", description: "what the band is doing now" },
+  { command: "positions", description: "current positions and P&L" },
+  { command: "depth", description: "liquidity map for one SYMBOL" },
+  { command: "pnl", description: "profit and loss" },
+  { command: "trades", description: "recent trades" },
+  { command: "report", description: "today's campfire report" },
+  { command: "why", description: "why I made my last trade" },
+  { command: "brag", description: "your scorecard" },
+  { command: "pause", description: "hold trading" },
+  { command: "resume", description: "resume trading" },
+  { command: "strategy", description: "switch strategy" },
+  { command: "cap", description: "set the per-action chat ceiling (USDG)" },
+  { command: "buy", description: "buy SYMBOL for USDG (passes the wall)" },
+  { command: "sell", description: "sell SYMBOL for USDG" },
+  { command: "transfer", description: "send USDG out (asks to /confirm)" },
+  { command: "confirm", description: "approve a pending send or PC action" },
+  { command: "cancel", description: "cancel a pending action" },
+  { command: "kill", description: "destroy the grant, stand the band down" },
+  { command: "alert", description: "ping me at a price" },
+  { command: "alerts", description: "list price alerts" },
+  { command: "unalert", description: "remove an alert" },
+  { command: "name", description: "give your merryman a name" },
+  { command: "remember", description: "keep a fact about you" },
+  { command: "forget", description: "wipe what I know about you" },
+  { command: "soul", description: "who I am and what I know" },
+  { command: "wallet", description: "create, restore, or recover a wallet" },
+  { command: "link", description: "pair this chat with a link code" },
+  { command: "shot", description: "take a screenshot" },
+  { command: "look", description: "what am I looking at?" },
+  { command: "ls", description: "list files in a directory" },
+  { command: "open", description: "open an app or URL" },
+  { command: "sys", description: "system info" },
+  { command: "vol", description: "volume up/down/mute" },
+  { command: "media", description: "media play/pause/next/prev" },
+  { command: "notify", description: "send a notification" },
+  { command: "lock", description: "lock the machine" },
+  { command: "sleep", description: "sleep the machine" },
+  { command: "shutdown", description: "shut the machine down" },
+  { command: "get", description: "send a file to this chat" },
+  { command: "clip", description: "read or set the clipboard" },
+  { command: "run", description: "run an allowlisted shell command" },
+  { command: "type", description: "type into the active window" },
+  { command: "key", description: "press a key combo (ctrl+s)" },
+  { command: "pc", description: "what remote control is enabled" },
+  { command: "watch", description: "watch cpu/file/proc" },
+  { command: "watchers", description: "list watchers" },
+  { command: "unwatch", description: "remove a watcher" },
+  { command: "remind", description: "set a reminder in 20m/2h/90s" },
+  { command: "reminders", description: "list reminders" },
+  { command: "unremind", description: "remove a reminder" },
+  { command: "agent", description: "run a multi-step task on your PC" },
+];
+
+/**
+ * What an arbitrary stranger sees in the "/" menu. Pure reads + onboarding
+ * signposts only — the remote-control surface (shell/keyboard/power/files,
+ * agent) and the trading controls stay OUT of the public menu so the bot
+ * doesn't advertise what it can do to a computer. Every command is still
+ * gated at runtime; this is about not painting the target, while owners get
+ * the full menu pushed to their own allowlisted chats (service.ts).
+ */
+const PUBLIC_COMMAND_NAMES = new Set([
+  "help",
+  "status",
+  "positions",
+  "depth",
+  "pnl",
+  "trades",
+  "report",
+  "why",
+  "brag",
+  "alerts",
+  "reminders",
+  "soul",
+  "wallet",
+  "link",
+]);
+
+export const publicBotCommands = BOT_COMMANDS.filter((c) => PUBLIC_COMMAND_NAMES.has(c.command));
+
+/** Push the command menu to Telegram. Best-effort — never throws.
+ * scope takes a chat_id for the per-allowlisted-chat full-menu push. */
+export async function setMyCommands(
+  opts: TelegramOpts,
+  commands?: { command: string; description: string }[],
+  scope?: { type: string; chat_id?: number },
+): Promise<{ ok: boolean; reason?: string }> {
+  const { result, reason } = await call(opts, "setMyCommands", {
+    commands: commands ?? BOT_COMMANDS,
+    ...(scope ? { scope } : {}),
+  });
+  return result != null ? { ok: true } : { ok: false, reason };
+}
+
 /** Resolve a Telegram file_id to a downloadable URL (getFile → file_path). */
 export async function getFileUrl(opts: TelegramOpts, fileId: string): Promise<{ url: string | null; reason?: string }> {
   const { result, reason } = await call(opts, "getFile", { file_id: fileId });

@@ -61,6 +61,52 @@ describe("start over starts the chain over too", () => {
   });
 });
 
+describe("the re-sign button's promise reaches the screen it opens", () => {
+  /**
+   * EVERY FIX IN THIS FILE SO FAR IS PREVENTIVE — they stop an owner LANDING on
+   * testnet. None of them helps someone already there, and that is the case a
+   * second beta owner reported: "I'm resigning but this banner keeps appearing."
+   *
+   * His agent's grant was on 46630. The banner said "Re-sign on Robinhood
+   * Chain". The button opened this screen, whose mount effect pins the selector
+   * to the grant being replaced — so the prominent control read "re-sign this
+   * key (free)" and sealed another testnet grant, forever.
+   */
+  it("THE SCREEN READS THE CHAIN IT WAS ASKED TO OPEN ON", () => {
+    assert.match(SRC, /function requestedChain\(\)/, "the intent has to be readable here");
+    assert.match(SRC, /searchParams|URLSearchParams/, "and it arrives as a query");
+  });
+
+  it("BOTH mount arms honour it — not just the localStorage one", () => {
+    // The second arm serves a hosted Privy owner signed in from a browser that
+    // did not mint the agent, which is most of them and exactly the cohort with
+    // no other way to re-sign. An intent applied to one arm would miss them.
+    assert.equal(
+      (SRC.match(/requestedChain\(\) \?\?/g) ?? []).length,
+      2,
+      "the stored-grant arm AND the server-grant arm",
+    );
+  });
+
+  it("but a URL still cannot sign anything", () => {
+    // It PRE-SELECTS and nothing more. The move stays an explicit ticked
+    // checkbox, the mainnet acknowledgement stays required, and the button still
+    // renames itself — otherwise a link would be able to walk somebody onto
+    // real money, which is a worse bug than the one being fixed.
+    assert.match(
+      SRC,
+      /disabled=\{renewing \|\| \(chainId === MAINNET && grant\.chainId !== MAINNET && !mainnetAck\)\}/,
+      "the acknowledgement gate must survive",
+    );
+    assert.match(SRC, /checked=\{chainId !== grant\.chainId\}/, "and the move stays visible as a tick");
+  });
+
+  it("and an unrecognised chain in the URL is ignored, not trusted", () => {
+    // It is input. The fallback is the behaviour that was already correct.
+    assert.match(SRC, /id === MAINNET \|\| id === TESTNET \? id : null/);
+  });
+});
+
 describe("the chain a hosted owner cannot use says so before they pick it", () => {
   it("THE PRACTICE CARD WARNS ON THE HOSTED SERVICE", () => {
     // The worker trades Robinhood Chain, so a hosted key signed for the sandbox

@@ -264,6 +264,46 @@ export function wallShapeOfGrant<C>(
 }
 
 /**
+ * THE MARKER A SURFACE KEYS ITS REMEDY OFF.
+ *
+ * Every too-wide refusal opens with this, so a screen can offer the owner a way
+ * to act on it without parsing prose or re-deriving the verdict. Matching on a
+ * sentence fragment is how a remedy quietly stops appearing the day somebody
+ * rewords the copy.
+ */
+export const WALL_TOO_WIDE = "your trading permission is too large to sign safely";
+
+/** Does this error carry a too-wide refusal? For surfaces that only see a message. */
+export function isWallTooWide(message: string | null | undefined): boolean {
+  return typeof message === "string" && message.toLowerCase().includes(WALL_TOO_WIDE);
+}
+
+/** What a refusal can tell the owner about their own basket. */
+export interface TooWideBasket {
+  /** Custom tokens this wall carries right now. */
+  count: number;
+  /**
+   * The same wall with `n` custom tokens, built by the CALLER'S OWN builder.
+   *
+   * A callback rather than a formula, and that is the whole point: the maximum
+   * has to come from `buildCallPermissions` over the owner's ACTUAL features —
+   * their venues, their adapters, whether a class vault is sealed — because
+   * every one of those changes the per-token price. A hard-coded token limit
+   * would be wrong for everybody who is not the owner it was measured on.
+   */
+  shapeWith: (n: number) => WallShape;
+}
+
+export interface WallSignableRefusal {
+  ok: false;
+  why: string;
+  /** Most custom tokens that would fit, at this owner's feature set. Null when unknown. */
+  maxTokens: number | null;
+  /** How many to remove. Null when unknown. */
+  removeAtLeast: number | null;
+}
+
+/**
  * May this wall be signed at all?
  *
  * Asked BEFORE a signature exists, so an owner cannot mint a grant whose first
@@ -271,19 +311,92 @@ export function wallShapeOfGrant<C>(
  * defect: the ceiling was behaving exactly as documented while signing had no
  * idea the ceiling existed.
  *
- * Returns a sentence for the owner when it refuses, because "too wide" without
- * a remedy is a dead end — they need to know which way to narrow it.
+ * ── `deploying` IS A FACT ABOUT THE ACCOUNT, NOT A CONSTANT ────────────────
+ *
+ * It used to be hardcoded `true` here, which charged every RE-SIGN for a CREATE2
+ * and an initCode it will never pay — 316,250 bounded gas, measured — because a
+ * renewal installs the same wall on an account that already exists. That is not
+ * a rounding error at this ceiling: it is the difference between signable and
+ * refused for an owner sitting anywhere in a ~316k band, and a beta user was
+ * told to delete a fifth token when four was the true answer.
+ *
+ * REQUIRED, not defaulted, so a caller has to state which case it is. A caller
+ * that cannot find out must pass `true`: an unreadable account might be
+ * undeployed, and over-charging refuses a wall that would have fitted, while
+ * under-charging mints one whose first operation the executor then refuses
+ * forever. Only one of those is recoverable by the owner.
+ *
+ * ── AND A REFUSAL HAS TO BE ACTIONABLE ────────────────────────────────────
+ *
+ * "Remove some custom tokens, or turn off a venue you are not using" was true
+ * and useless. It named no number, and on chain 4663 the largest removable item
+ * — the class vault, 1,361,964 gas, about three tokens' worth — CANNOT be turned
+ * off: `sealedClassFactory` falls back to the chain's own factory and the
+ * settings field can only override the address, never clear it. So the one lever
+ * the sentence pointed at was the one lever the owner did not have.
+ *
+ * Given a basket, this now descends through the caller's own builder to find the
+ * largest token count that actually fits, and says that. Not a formula and not a
+ * constant — the same `buildCallPermissions` the signature is about to be made
+ * over, so the number is true for THIS owner's features.
  */
-export function wallSignable(shape: WallShape): { ok: true } | { ok: false; why: string } {
-  const env = firstEnableEnvelope(shape, { deploying: true });
+export function wallSignable(
+  shape: WallShape,
+  opts: { deploying: boolean; basket?: TooWideBasket },
+): { ok: true } | WallSignableRefusal {
+  const env = firstEnableEnvelope(shape, { deploying: opts.deploying });
   if (env.withinHardMax) return { ok: true };
+
+  // THE OWNER'S OWN ARITHMETIC, from the builder rather than from a rule.
+  //
+  // Linear descent, not a binary search: the range is a handful of tokens, cost
+  // is monotonic in the count, and a wrong answer here tells somebody to delete
+  // part of their basket. Cheap and obviously correct beats clever.
+  let maxTokens: number | null = null;
+  if (opts.basket) {
+    for (let n = opts.basket.count - 1; n >= 0; n--) {
+      if (firstEnableEnvelope(opts.basket.shapeWith(n), { deploying: opts.deploying }).withinHardMax) {
+        maxTokens = n;
+        break;
+      }
+    }
+    // Still refused at zero tokens: the basket is not what is over the ceiling,
+    // and telling the owner to delete all of it would be a lie as well as a
+    // loss. Reported as unknown so the sentence below stays general.
+    if (maxTokens === null) maxTokens = null;
+  }
+  const removeAtLeast = maxTokens === null || opts.basket === undefined ? null : opts.basket.count - maxTokens;
+
+  const head =
+    `${WALL_TOO_WIDE}: installing it would need about ` +
+    `${env.expectedBounded.toLocaleString()} gas against a limit of ` +
+    `${FIRST_ENABLE_HARD_MAX_BOUNDED.toLocaleString()}.`;
+
+  if (opts.basket && maxTokens !== null && removeAtLeast !== null && removeAtLeast > 0) {
+    return {
+      ok: false,
+      maxTokens,
+      removeAtLeast,
+      why:
+        `${head} You have ${opts.basket.count} custom token${opts.basket.count === 1 ? "" : "s"}; the most ` +
+        `that fits with the features you have enabled is ${maxTokens}. Remove at least ` +
+        `${removeAtLeast} custom token${removeAtLeast === 1 ? "" : "s"}, then sign again.`,
+    };
+  }
+
+  // NO BASKET TO BLAME, or it is over even when empty. Every capability is
+  // pinned on every token, so the cost grows with both — but do not send an
+  // owner to delete tokens that are not the cause.
   return {
     ok: false,
+    maxTokens,
+    removeAtLeast,
     why:
-      `this permission set is too wide to install: its first operation would need about ` +
-      `${env.expectedBounded.toLocaleString()} gas against a limit of ` +
-      `${FIRST_ENABLE_HARD_MAX_BOUNDED.toLocaleString()}. Every capability you enable is pinned on ` +
-      `each token you allow, so the cost grows with both together. Remove some custom tokens, or ` +
-      `turn off a venue you are not using, and sign again.`,
+      `${head} Every capability you enable is pinned on each token you allow, so the cost grows with ` +
+      `both together.` +
+      (opts.basket
+        ? ` Your ${opts.basket.count} custom token${opts.basket.count === 1 ? "" : "s"} are not the whole ` +
+          `cause — this wall is over the limit even with none of them — so removing them will not be enough.`
+        : ` Remove some custom tokens and sign again.`),
   };
 }

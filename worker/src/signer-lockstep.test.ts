@@ -201,14 +201,18 @@ test("both signers seal the FACTORY alongside the vault", () => {
     ["web/src/lib/session.ts", WEB],
     ["mobile/src/crypto/signGrant.ts", MOBILE],
   ] as const) {
+    // EITHER SPELLING. The web signer now defaults an absent setting to the
+    // platform deploy constant and records the RESOLVED value, so pinning the
+    // raw setting name would forbid the fix that makes a re-sign seal anything
+    // at all. What matters is that the factory RECORDED is the one forwarded,
+    // which the pair of assertions below still enforces.
+    const FACTORY_VAR = /ponsClassVaultFactoryAddress:\s*(args\.)?(ponsClassVaultFactory|sealedClassFactory)/;
+    const FACTORY_PERSISTED =
+      /ponsClassVaultFactoryAddress:\s*(args\.)?(ponsClassVaultFactory|sealedClassFactory)!?\.toLowerCase\(\)/;
+    assert.match(src, FACTORY_VAR, `${name} must forward the factory into the wall`);
     assert.match(
       src,
-      /ponsClassVaultFactoryAddress:\s*(args\.)?ponsClassVaultFactory/,
-      `${name} must forward the factory into the wall`,
-    );
-    assert.match(
-      src,
-      /ponsClassVaultFactoryAddress:\s*(args\.)?ponsClassVaultFactory!?\.toLowerCase\(\)/,
+      FACTORY_PERSISTED,
       `${name} must persist the sealed factory — the worker reads it to build the deploy call`,
     );
   }

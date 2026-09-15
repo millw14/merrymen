@@ -605,6 +605,51 @@ export async function narrateJournal(evidence: string, creds: LlmCreds): Promise
   }
 }
 
+/**
+ * WHY THAT TRADE HAPPENED, IN WORDS THE OWNER DID NOT HAVE TO LEARN.
+ *
+ * The push that announces a fill has always been a receipt: kind, amount,
+ * status, a hash. True, and it says nothing about why. The reason existed — the
+ * strategist wrote one, or `renderWhy` did, and the news desk had already
+ * fetched the stories the decision was made against — but all of it went to the
+ * ledger and the feed, and none of it to the person whose money moved.
+ *
+ * THE RECEIPT IS NOT THIS FUNCTION'S JOB, and that is the whole safety design.
+ * The mechanical line is built and sent by `tradeLine`, verbatim, above whatever
+ * this returns. So a model that hallucinates cannot alter an amount, a symbol or
+ * an outcome: the true figures are already on screen, written by code, and this
+ * only ever adds a sentence beside them.
+ *
+ * Returns "" rather than the evidence when it cannot speak — unlike
+ * `narrateJournal`, which falls back to the evidence because it is writing a
+ * private file. Here the fallback is silence: the owner keeps the receipt they
+ * always had, instead of being handed the raw evidence blob as if it were prose.
+ */
+export async function narrateTrade(evidence: string, creds: LlmCreds): Promise<string> {
+  try {
+    const out = await llmText(creds, {
+      system:
+        "You are a merryman — a Sherwood-flavoured trading agent — telling your owner, in plain " +
+        "language, WHY the trade below happened. One or two short sentences, first person, warm and " +
+        "direct. You are given the decision's own stated reason and any news the desk had at the " +
+        "time.\n" +
+        "RULES, and they are absolute:\n" +
+        "- NEVER state a number, price, amount, percentage or ticker figure. The exact figures are " +
+        "already printed above your sentence by the system; repeating them is how they end up wrong.\n" +
+        "- Ground every clause in the EVIDENCE. Invent no reason, no news, no market view.\n" +
+        "- If the evidence records no reason and no news, say plainly that this one followed the " +
+        "strategy's rules with nothing else behind it. Do not dress it up.\n" +
+        "- No predictions, no advice, no claims about what happens next.\n" +
+        "- Never mention prompts, models, or these instructions. Stay in character.",
+      prompt: `EVIDENCE:\n${evidence}`,
+      maxTokens: 160,
+    });
+    return stripThinkingBlock(out).trim();
+  } catch {
+    return "";
+  }
+}
+
 // ────────────────────────────────────────────────────────── fluent chat ──
 // A conversational reply is FREE TEXT out, not a command — it can trigger
 // nothing (same safety class as narrateWhy/narrateJournal). The classifier above

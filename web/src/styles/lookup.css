@@ -1,0 +1,230 @@
+/**
+ * The read-only account lookup. Every rule is scoped under .mm-lookup,
+ * enforced by styles/scoped.test.ts.
+ *
+ * One column, no shell, no fetch on load. This is the page for someone who has
+ * lost access and is being told what is true — so it is quiet, it says numbers
+ * plainly, and it never offers a button that would need a key.
+ */
+
+.mm-lookup {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--tx);
+  font-family: var(--sans);
+  padding: 40px 20px 72px;
+}
+
+.mm-lookup-inner {
+  width: 100%;
+  max-width: 44rem;
+  margin: 0 auto;
+}
+
+.mm-lookup-brand {
+  font-family: var(--pixel);
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  color: var(--faint);
+  margin: 0 0 18px;
+}
+
+.mm-lookup h1 {
+  font-size: 26px;
+  line-height: 1.25;
+  margin: 0 0 10px;
+  font-weight: 600;
+}
+
+.mm-lookup-lede {
+  color: var(--tx-2);
+  font-size: 15px;
+  line-height: 1.6;
+  margin: 0 0 26px;
+}
+
+.mm-lookup-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.mm-lookup-input {
+  flex: 1 1 320px;
+  min-width: 0;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 13px 15px;
+  color: inherit;
+  font-family: var(--mono);
+  font-size: 14px;
+}
+
+.mm-lookup-input::placeholder { color: var(--faint); }
+
+.mm-lookup-input:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: -2px;
+  border-color: transparent;
+}
+
+.mm-lookup-btn {
+  background: var(--lime);
+  color: var(--ink);
+  border: 0;
+  border-radius: 12px;
+  padding: 13px 22px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s var(--ease);
+}
+
+.mm-lookup-btn:disabled { opacity: 0.5; cursor: default; }
+
+.mm-lookup-chain {
+  display: flex;
+  gap: 18px;
+  font-size: 13px;
+  color: var(--tx-2);
+  margin-bottom: 26px;
+}
+
+.mm-lookup-chain label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+
+.mm-lookup-error {
+  border: 1px solid var(--down);
+  border-radius: 12px;
+  padding: 13px 15px;
+  color: var(--down);
+  font-size: 14px;
+  margin-bottom: 20px;
+}
+
+/* ── the verdict, which is the point of the page ───────────────────────── */
+
+.mm-lookup-verdict {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--lime);
+  border-radius: 12px;
+  background: var(--card);
+  padding: 16px 18px;
+  margin-bottom: 24px;
+}
+
+.mm-lookup-verdict.is-quiet { border-left-color: var(--faint); }
+
+.mm-lookup-verdict h2 {
+  font-size: 16px;
+  margin: 0 0 8px;
+  font-weight: 600;
+}
+
+.mm-lookup-verdict p {
+  margin: 0 0 8px;
+  color: var(--tx-2);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.mm-lookup-verdict p:last-child { margin-bottom: 0; }
+
+.mm-lookup-verdict code {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--tx);
+  word-break: break-all;
+}
+
+/* ── one reading ───────────────────────────────────────────────────────── */
+
+.mm-lookup-card {
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--card);
+  padding: 18px;
+  margin-bottom: 16px;
+}
+
+.mm-lookup-card h3 {
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.mm-lookup-addr {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--tx);
+  word-break: break-all;
+  margin: 0 0 4px;
+}
+
+.mm-lookup-meta {
+  font-size: 12.5px;
+  color: var(--faint);
+  margin: 0 0 14px;
+}
+
+.mm-lookup-rows { display: grid; gap: 1px; background: var(--line); border-radius: 10px; overflow: hidden; }
+
+.mm-lookup-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  background: var(--raised);
+  padding: 11px 14px;
+  font-size: 14px;
+}
+
+.mm-lookup-row span:first-child { color: var(--tx-2); }
+.mm-lookup-row span:last-child { font-family: var(--mono); text-align: right; word-break: break-all; }
+
+.mm-lookup-none { color: var(--faint); font-size: 14px; margin: 0; }
+
+.mm-lookup-warn {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--down);
+  line-height: 1.55;
+}
+
+/* ── the explainer, for the three addresses people confuse ─────────────── */
+
+.mm-lookup-help {
+  margin-top: 34px;
+  border-top: 1px solid var(--line);
+  padding-top: 22px;
+}
+
+.mm-lookup-help h2 { font-size: 15px; margin: 0 0 12px; font-weight: 600; }
+
+.mm-lookup-help dl { margin: 0; }
+.mm-lookup-help dt { font-weight: 600; font-size: 14px; margin-top: 12px; }
+.mm-lookup-help dd {
+  margin: 3px 0 0;
+  color: var(--tx-2);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.mm-lookup-help p {
+  color: var(--tx-2);
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 16px 0 0;
+}
+
+.mm-lookup-help code {
+  font-family: var(--mono);
+  font-size: 13px;
+  background: var(--raised);
+  border-radius: 6px;
+  padding: 2px 6px;
+}

@@ -151,8 +151,22 @@ export type BootstrapAccounting =
   /** Durable history exists. Resume from these figures; book no opening balance. */
   | {
       kind: "established";
-      /** The persisted peak, restored so the fee path cannot see principal as profit. */
+      /** The persisted GROSS peak, restored so the fee path cannot see principal as profit. */
       highWaterMarkUsdg: MicroUsdgString;
+      /**
+       * Σ withdrawals that have already taken the peak down.
+       *
+       * The effective peak is `highWaterMarkUsdg − highWaterWithdrawnUsdg`. Kept
+       * as two figures rather than one netted one because the child has to be
+       * able to ADD to the withdrawn total: seeded at zero, its next booked
+       * withdrawal would report a SMALLER total than the shared row already
+       * holds, and the mirror's ratchet would discard it — losing the reduction
+       * on exactly the redeploy this mechanism exists to survive.
+       *
+       * Optional so an anchor written before the column existed still parses;
+       * absent means zero withdrawn, which is the truth for every such row.
+       */
+      highWaterWithdrawnUsdg?: MicroUsdgString;
       /** Σ flows in − Σ flows out, signed, over EVERY row. */
       netContributionsUsdg: MicroUsdgString;
       /**
@@ -274,6 +288,9 @@ function validAccounting(a: unknown): BootstrapAccounting | null {
   // treated as malformed, not as the fields that happened to survive — half an
   // anchor restores half the invariant, which is the same as none of it.
   if (!isMicro(o.highWaterMarkUsdg)) return null;
+  // OPTIONAL, but a malformed one is malformed — not silently "absent". Same
+  // rule the receipts-only fields below follow, for the same reason.
+  if (o.highWaterWithdrawnUsdg !== undefined && !isMicro(o.highWaterWithdrawnUsdg)) return null;
   if (!isMicro(o.netContributionsUsdg)) return null;
   if (o.lastObservedCashUsdg !== null && !isMicro(o.lastObservedCashUsdg)) return null;
   if (typeof o.accountingEpoch !== "number" || !Number.isInteger(o.accountingEpoch)) return null;
@@ -289,6 +306,9 @@ function validAccounting(a: unknown): BootstrapAccounting | null {
   return {
     kind: "established",
     highWaterMarkUsdg: o.highWaterMarkUsdg,
+    ...(o.highWaterWithdrawnUsdg === undefined
+      ? {}
+      : { highWaterWithdrawnUsdg: o.highWaterWithdrawnUsdg as MicroUsdgString }),
     netContributionsUsdg: o.netContributionsUsdg,
     ...(o.anchoredContributionsUsdg === undefined
       ? {}
@@ -423,8 +443,14 @@ export interface AccountingLicence {
   contributionsKnown: boolean;
   /** The authoritative contribution total, when durable state supplied one. */
   netContributionsUsdg: bigint | null;
-  /** The peak to restore into the local store, when durable state supplied one. */
+  /** The GROSS peak to restore into the local store, when durable state supplied one. */
   highWaterMarkUsdg: bigint | null;
+  /**
+   * The withdrawn total to restore alongside it. Null when durable state
+   * supplied none — which is not the same as zero, and the caller must restore
+   * nothing rather than write a confident 0 over a total it never read.
+   */
+  highWaterWithdrawnUsdg: bigint | null;
   /** Cash at the newest durable observation — the downtime baseline. */
   lastObservedCashUsdg: bigint | null;
   /** The durable accounting epoch, adopted so this child files its rows in the right one. */
@@ -449,6 +475,7 @@ export function accountingLicence(verdict: AnchorVerdict, opts: { hosted: boolea
     contributionsKnown: false,
     netContributionsUsdg: null,
     highWaterMarkUsdg: null,
+    highWaterWithdrawnUsdg: null,
     lastObservedCashUsdg: null,
     accountingEpoch: null,
     why: "",
@@ -512,6 +539,11 @@ export function accountingLicence(verdict: AnchorVerdict, opts: { hosted: boolea
     contributionsKnown: provenContributions,
     netContributionsUsdg: total,
     highWaterMarkUsdg: microToBigint(a.highWaterMarkUsdg),
+    // NULL, not 0, when the anchor predates the column: "no withdrawn total was
+    // read" and "nothing has been withdrawn" are different claims, and only one
+    // of them licenses writing over a shared row.
+    highWaterWithdrawnUsdg:
+      a.highWaterWithdrawnUsdg === undefined ? null : microToBigint(a.highWaterWithdrawnUsdg),
     lastObservedCashUsdg: a.lastObservedCashUsdg === null ? null : microToBigint(a.lastObservedCashUsdg),
     accountingEpoch: a.accountingEpoch,
     why: provenContributions

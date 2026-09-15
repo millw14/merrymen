@@ -16,7 +16,7 @@ before(() => {
 
 describe("recovery tickets", () => {
   it("round-trips the account and chain it was minted for", () => {
-    const t = readTicket(mintTicket({ smartAccount: ACCOUNT, chainId: 4663 }));
+    const t = readTicket(mintTicket({ smartAccount: ACCOUNT, chainId: 4663, classVault: null }));
     assert.ok(t);
     assert.equal(t!.smartAccount, ACCOUNT);
     assert.equal(t!.chainId, 4663);
@@ -24,7 +24,7 @@ describe("recovery tickets", () => {
 
   it("EXPIRES — a leaked ticket must not be useful tomorrow", () => {
     const now = Date.now();
-    const t = mintTicket({ smartAccount: ACCOUNT, chainId: 4663 }, now);
+    const t = mintTicket({ smartAccount: ACCOUNT, chainId: 4663, classVault: null }, now);
     assert.ok(readTicket(t, now + TICKET_TTL_MS - 1_000), "still valid inside the window");
     assert.equal(readTicket(t, now + TICKET_TTL_MS + 1_000), null, "and dead after it");
   });
@@ -32,21 +32,21 @@ describe("recovery tickets", () => {
   it("refuses a tampered account — the signature covers the payload", () => {
     // The whole point: the relay trusts ticket.smartAccount, so editing it must
     // invalidate the token rather than redirect the permission.
-    const t = mintTicket({ smartAccount: ACCOUNT, chainId: 4663 });
+    const t = mintTicket({ smartAccount: ACCOUNT, chainId: 4663, classVault: null });
     const parts = t.split(".");
     parts[0] = "0x1111111111111111111111111111111111111111";
     assert.equal(readTicket(parts.join(".")), null);
   });
 
   it("refuses a tampered chain id", () => {
-    const t = mintTicket({ smartAccount: ACCOUNT, chainId: 46630 });
+    const t = mintTicket({ smartAccount: ACCOUNT, chainId: 46630, classVault: null });
     const parts = t.split(".");
     parts[1] = "4663";
     assert.equal(readTicket(parts.join(".")), null);
   });
 
   it("refuses an extended expiry", () => {
-    const t = mintTicket({ smartAccount: ACCOUNT, chainId: 4663 });
+    const t = mintTicket({ smartAccount: ACCOUNT, chainId: 4663, classVault: null });
     const parts = t.split(".");
     parts[2] = String(Date.now() + 10 * 365 * 24 * 3600 * 1000);
     assert.equal(readTicket(parts.join(".")), null);
@@ -84,5 +84,42 @@ describe("the challenge text", () => {
     // money. They deserve a sentence rather than a hex blob.
     const m = recoveryChallengeMessage("https://app.merrymen.dev", "N");
     assert.match(m, /moves no funds/i);
+  });
+});
+
+/**
+ * THE VAULT TRAVELS INSIDE THE SIGNATURE.
+ *
+ * The relay admits a `sweep(address)` leg only when its target equals the vault
+ * named here, so this field is a capability. If it were appended outside the
+ * hmac a caller could edit which vault their ticket blesses, which is precisely
+ * what the pin exists to prevent.
+ */
+describe("the class vault a ticket blesses", () => {
+  const VAULT = "0x3fcdde6e011769ca05f0115f1543290862473216" as const;
+
+  it("round-trips", () => {
+    const t = readTicket(mintTicket({ smartAccount: ACCOUNT, chainId: 4663, classVault: VAULT }));
+    assert.equal(t?.classVault, VAULT);
+  });
+
+  it("and null stays null — most accounts have no vault", () => {
+    const t = readTicket(mintTicket({ smartAccount: ACCOUNT, chainId: 4663, classVault: null }));
+    assert.equal(t?.classVault, null);
+  });
+
+  it("CANNOT BE EDITED without breaking the signature", () => {
+    const token = mintTicket({ smartAccount: ACCOUNT, chainId: 4663, classVault: VAULT });
+    const parts = token.split(".");
+    parts[2] = "0x2222222222222222222222222222222222222222";
+    assert.equal(readTicket(parts.join(".")), null, "a swapped vault must not verify");
+  });
+
+  it("and a ticket in the old four-field shape does not parse", () => {
+    // The format changed when the vault joined the body. An old ticket failing
+    // closed costs one re-signature inside a 15-minute TTL; an old ticket
+    // parsing as "no vault" would strand a class sweep with a confusing reason.
+    const body = `${ACCOUNT.toLowerCase()}.4663.${Date.now() + 60_000}`;
+    assert.equal(readTicket(`${body}.whatever`), null);
   });
 });

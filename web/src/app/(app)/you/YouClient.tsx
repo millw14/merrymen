@@ -10,6 +10,7 @@ import { KillSwitch } from "@/components/KillSwitch";
 import { railNotices } from "@/lib/rail-notices";
 import { rankPnl, unrankedLabel } from "@/lib/rank-pnl";
 import { statusLine, type AgentSnapshot } from "@/lib/status-line";
+import { rejectRuleLabel } from "@merrymen/thesis";
 import { timeAgo } from "@/lib/time";
 import type { PublicThesis } from "@/lib/thesis";
 
@@ -330,7 +331,7 @@ export function YouClient() {
                   <li key={i} className={t.status}>
                     <span className="k mono">{t.kind}</span>
                     <span className="a mono">{money(Number(t.amount_usdg ?? 0))}</span>
-                    <span className="s mono">{t.reject_rule ?? t.status}</span>
+                    <span className="s mono" title={t.reject_rule ?? undefined}>{rejectRuleLabel(t.reject_rule) ?? t.reject_rule ?? t.status}</span>
                     <span className="w mono">{timeAgo(Date.parse(`${t.created_at}Z`) / 1000)}</span>
                   </li>
                 ))}

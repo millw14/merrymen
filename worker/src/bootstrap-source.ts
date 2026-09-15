@@ -47,6 +47,16 @@ export function usdgRealToMicro(v: number): bigint {
 
 interface AgentRow {
   hwm_usdg: number | string | null;
+  /**
+   * Σ withdrawals that have already taken the peak down (store.ts).
+   *
+   * Carried into the anchor so a child STARTS from the durable total. Seeded at
+   * zero instead, a child that books a further withdrawal would report a
+   * SMALLER total than the shared row already holds, and the mirror's ratchet —
+   * correctly, on its own terms — would discard it. The reduction would then be
+   * lost on exactly the redeploy this whole mechanism exists to survive.
+   */
+  hwm_withdrawn_usdg: number | string | null;
   epoch: number | string | null;
 }
 interface FlowAgg {
@@ -101,7 +111,7 @@ export async function deriveBootstrapAccounting(
   const agentId = smartAccount.toLowerCase();
   try {
     const agent = (await shared
-      .prepare("SELECT hwm_usdg, epoch FROM agents WHERE LOWER(smart_account) = ?")
+      .prepare("SELECT hwm_usdg, hwm_withdrawn_usdg, epoch FROM agents WHERE LOWER(smart_account) = ?")
       .get(agentId)) as AgentRow | undefined;
 
     // Direction carries the sign and `amount_usdg` is always positive, so the
@@ -172,6 +182,7 @@ export async function deriveBootstrapAccounting(
       .get(agentId)) as CountRow | undefined;
 
     const hwm = usdgRealToMicro(num(agent?.hwm_usdg));
+    const hwmWithdrawn = usdgRealToMicro(num(agent?.hwm_withdrawn_usdg));
     const flowCount = num(flows?.n);
     const accrualCount = num(accruals?.n);
     const hasEquity = equity !== undefined && equity !== null;
@@ -209,7 +220,11 @@ export async function deriveBootstrapAccounting(
 
     return {
       kind: "established",
+      // GROSS, with the withdrawn total beside it rather than folded in. The
+      // child needs both halves to keep contributing to a ratchet it did not
+      // start; a single pre-netted figure cannot be added to.
       highWaterMarkUsdg: bigintToMicro(hwm),
+      highWaterWithdrawnUsdg: bigintToMicro(hwmWithdrawn),
       netContributionsUsdg: bigintToMicro(usdgRealToMicro(num(flows?.net))),
       // The receipts-only total, and how many rows are NOT receipts. Together
       // they are what makes "contributions are known" a checkable claim rather

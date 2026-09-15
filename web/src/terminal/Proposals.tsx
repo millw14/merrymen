@@ -1,26 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Proposal, ProposalsResponse } from "@/app/api/proposals/route";
 import { compactUsd } from "../lib/format";
+import { basketNow, withSymbol } from "./basket";
 
-/**
- * THE BASKET AS IT STANDS, WHICH IS NOT THE SAME AS THE BASKET THEY TYPED.
- *
- * `values.basketSymbols` is only set once an owner has EDITED their basket.
- * For everyone else it is undefined and the agent trades `defaults` — the
- * ~24-symbol equity basket — implicitly. Reading `values.basketSymbols ?? []`
- * therefore did not read "no basket", it read "the default basket" as empty,
- * and the read-modify-write below then PUT an explicit basket containing only
- * the coin just approved. Approving one memecoin silently narrowed the agent's
- * whole universe to that memecoin, for every owner who had never opened the
- * basket editor — which is most of them, because the default is the point.
- *
- * The same "absent is not empty" rule the rest of this repo is built on. An
- * unset basket is a question nobody answered, and the answer is the default.
- */
-const basketNow = (s: {
-  values?: { basketSymbols?: unknown[] };
-  defaults?: { basketSymbols?: unknown[] };
-}): string[] => (s.values?.basketSymbols ?? s.defaults?.basketSymbols ?? []) as string[];
+// basketNow moved to ./basket — Settings.tsx needed the same reasoning and
+// had been doing it wrong.
 
 /** Which proposal set the owner folded away. One key: only one set is live at a time. */
 const FOLD_KEY = "merrymen.proposals.folded.v1";
@@ -144,7 +128,7 @@ export function Proposals({ onResign }: { onResign: () => void }) {
       const nextTokens = already
         ? tokens
         : [...tokens, { symbol: p.symbol, address: p.token, decimals: p.decimals }];
-      const nextBasket = basket.includes(p.symbol) ? basket : [...basket, p.symbol];
+      const nextBasket = withSymbol(basket, p.symbol);
 
       const put = await fetch("/api/settings", {
         method: "PUT",

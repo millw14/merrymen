@@ -212,7 +212,38 @@ export async function signGrant(args: {
   // only one signer enforces is not a cap. Both signers already move in lockstep
   // on what they MINT (signer-lockstep.test.ts); this is the same rule applied
   // to what they REFUSE.
-  const signable = wallSignable(wallShape(buildCallPermissions(args.caps, sudoOnlyAccount.address, wallOpts)));
+  // AND ON THE SAME FACT ABOUT THE ACCOUNT. `deploying` was hardcoded inside
+  // `wallSignable`, so both signers charged every re-sign for a CREATE2 and an
+  // initCode it will never pay. A cap only one signer gets right is not a cap,
+  // and neither is a cap both get wrong the same way.
+  //
+  // Unreadable counts as undeployed: over-charging refuses a wall the owner can
+  // retry, under-charging mints one the executor refuses forever.
+  let alreadyDeployed = false;
+  try {
+    const code = await publicClient.getBytecode({ address: sudoOnlyAccount.address });
+    alreadyDeployed = code !== undefined && code !== "0x";
+  } catch {
+    alreadyDeployed = false;
+  }
+
+  const sealedForWall = (wallOpts.extraTokens ?? []) as readonly unknown[];
+  const signable = wallSignable(
+    wallShape(buildCallPermissions(args.caps, sudoOnlyAccount.address, wallOpts)),
+    {
+      deploying: !alreadyDeployed,
+      basket: {
+        count: sealedForWall.length,
+        shapeWith: (n) =>
+          wallShape(
+            buildCallPermissions(args.caps, sudoOnlyAccount.address, {
+              ...wallOpts,
+              extraTokens: sealedForWall.slice(0, n) as never,
+            }),
+          ),
+      },
+    },
+  );
   if (!signable.ok) throw new Error(signable.why);
 
   const { policies, now, expiresAt } = buildWallPolicies({

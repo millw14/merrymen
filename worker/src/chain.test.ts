@@ -19,8 +19,11 @@ describe("/status chain line — you always know which mode the band rides", () 
   it("mainnet reads as REAL FUNDS", () => {
     assert.match(readStatus(statusCtx(4663)), /mainnet 4663 · REAL FUNDS/);
   });
-  it("testnet reads as practice only", () => {
-    assert.match(readStatus(statusCtx(46630)), /testnet 46630 — <b>practice only<\/b>/);
+  it("testnet reads as simulated only", () => {
+    // "practice only" retired: the product used "practice" for this NETWORK and
+    // for simulated trading alike, and an owner who wanted the second picked the
+    // first. The `• mode:` line above carries Paper/Live; this line is the chain.
+    assert.match(readStatus(statusCtx(46630)), /testnet 46630 — <b>simulated only<\/b>/);
   });
   // People fund testnet, see 0, and think merrymen is broken. /status must say why.
   it("testnet explains that funded balances are neither used nor shown", () => {

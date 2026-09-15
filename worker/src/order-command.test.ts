@@ -109,7 +109,7 @@ describe("the receipt says what the ledger says", () => {
     // half of that sentence is why, not the practice trade.
     const say = CODE.slice(CODE.indexOf("function sayTradeOutcome"), CODE.indexOf("async function submitChatTrade"));
     const paper = say.slice(say.indexOf('case "paper"'), say.indexOf('case "reverted"'));
-    assert.match(paper, /practised/);
+    assert.match(paper, /simulated/);
     assert.match(paper, /Your money did not move/);
     assert.ok(!/\bbought\b|\bsold\b/.test(paper));
   });

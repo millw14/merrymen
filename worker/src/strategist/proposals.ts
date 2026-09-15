@@ -285,7 +285,27 @@ export function proposalsToIntents(
       continue;
     }
 
-    const token = universe.legs.get(p.symbol);
+    /**
+     * AN EXIT MUST ALWAYS BE ATTEMPTABLE, and this line refused one.
+     *
+     * `universe.legs` is what may be BOUGHT — it is narrowed by the basket, and
+     * now by the owner's asset mode. Judging a SELL against it means an agent
+     * holding a position can be refused the way out by our own boundary, while
+     * the wall itself would have allowed it: `policy.ts` says in as many words
+     * that "Sells are never blocked by this rule" and judges direction "by what
+     * is being BOUGHT".
+     *
+     * THIS IS A LATENT BUG, NOT A NEW ONE. Any owner who un-ticks a basket
+     * symbol while holding it is already in this state today; the asset mode
+     * only makes it easy to reach. So a sell resolves its address from
+     * `snap.holdings` — the chain read — when the leg set does not carry it.
+     *
+     * Strictly narrower than widening `legs`: it can only ever produce a SELL of
+     * something the account demonstrably holds, and it cannot create a buy.
+     */
+    const token =
+      universe.legs.get(p.symbol) ??
+      (p.action === "sell" ? snap.holdings.get(p.symbol)?.token : undefined);
     if (!token) {
       rejected.push(`#${i} ${p.symbol}: not in the tradable universe`);
       continue;

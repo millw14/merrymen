@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
 import {
+  CASH,
   officialCoinCurve,
   officialCoinsFor,
   robinhoodChain,
@@ -587,6 +588,37 @@ const SQLITE_ALTERS: string[] = [
     // Unix seconds of the assessment. A quality flag with no timestamp cannot be
     // told from a stale one, and stale quality is exactly what a redeploy leaves.
     "ALTER TABLE agents ADD COLUMN quality_at INTEGER",
+    // ── THE PEAK HAS TO BE ABLE TO COME DOWN, WITHOUT BEING WRITABLE DOWN ──
+    //
+    // `adjustAgentHwm` lowers the peak when capital LEAVES, and it must: leave
+    // the peak up and the account is permanently "in drawdown" by the amount its
+    // owner took home, which trips the breaker on every buy forever. That is not
+    // a hypothetical — it is Shogun, refused at 5008bps against a 500bps cap
+    // with 24.915968 USDG of equity and nothing lost.
+    //
+    // But the reduction could never reach the shared database. The mirror copies
+    // `agents` with an UPWARD-ONLY ratchet, for its own good reason: a hosted
+    // child rebuilt by a redeploy recreates its row at the schema default of
+    // hwm 0, and an unconditional write would clobber durable history with that
+    // zero. So the ratchet is right and the reduction is right, and they
+    // contradict each other the moment a redeploy lands.
+    //
+    // THE FIX IS NOT TO RELAX THE RATCHET. It is to split the figure so that
+    // BOTH halves only ever grow:
+    //
+    //   hwm_usdg            Σ every upward move — deposits and booked profit
+    //   hwm_withdrawn_usdg  Σ every withdrawal that moved the peak down
+    //   effective peak      hwm_usdg − hwm_withdrawn_usdg
+    //
+    // A rebuilt child reports 0 and 0, and neither ratchet moves, so durable
+    // history survives exactly as before. A child that books a withdrawal
+    // reports a LARGER withdrawn total, which the ratchet carries. The peak can
+    // come down, and nothing can write it down: the only way to lower it is to
+    // raise an append-only total that a flow row has to justify.
+    //
+    // Clamped at `hwm_usdg` so the effective peak can never go negative, which
+    // is what `MAX(0, hwm + delta)` did before and what two tests pin.
+    "ALTER TABLE agents ADD COLUMN hwm_withdrawn_usdg REAL NOT NULL DEFAULT 0",
     // ── CHAIN-DERIVED FLOWS CANNOT BE IMPORTED TWICE ─────────────────────
     //
     // A chain-log row's identity is the LOG that produced it, not the row: the
@@ -770,6 +802,23 @@ const SQLITE_ALTERS: string[] = [
   // WHERE A POSITION SITS. 'account' for everything that existed before this
   // column, which is every row: the default is the truth for them, not a guess.
   "ALTER TABLE positions ADD COLUMN custody TEXT NOT NULL DEFAULT 'account'",
+  // ── A SWEEP IS A WITHDRAWAL, NOT A SALE FOR ZERO ──────────────────────
+  //
+  // `state` had one value for "gone": `closed`. A position the owner swept out
+  // through the Recover panel landed there beside genuine liquidations, with
+  // `proceeds_usdg = '0'` next to a real cost — which reads as a position that
+  // was sold and returned nothing, i.e. a total loss of everything it cost.
+  //
+  // Shogun's DOGGOS is the live case: cost 5.000000, proceeds 0, closed, and
+  // the owner is holding 1,063,408 DOGGOS in their own wallet. Nothing computed
+  // a realised -5 from it, but equity fell by the full 5.000000 the moment the
+  // balance hit zero, with no flow row to say where it went — so the peak did
+  // not follow it, and the drawdown breaker widened by exactly that much.
+  //
+  // The chain always said which it was: `foldClassEvents` has counted Swept
+  // amounts since the class ledger shipped, and then dropped them on the floor.
+  // This is where they land, so the difference survives the fold.
+  "ALTER TABLE class_positions ADD COLUMN swept_raw TEXT",
 ];
 
 /** Open node:sqlite, run the schema SYNCHRONOUSLY, and wrap it as the async Db.
@@ -1044,14 +1093,44 @@ export async function ensureAgent(grant: StoredGrant): Promise<string> {
   return grant.smartAccount;
 }
 
-/** Persisted HWM + accrued fees, loaded at arm time. */
-export async function getAgentFinancials(
-  agentId: string,
-): Promise<{ hwmUsdg: number; accruedFeeUsdg: number }> {
-  const row = await getDb()
-    .prepare("SELECT hwm_usdg, accrued_fee_usdg FROM agents WHERE smart_account = ?")
-    .get(agentId) as { hwm_usdg: number; accrued_fee_usdg: number } | undefined;
-  return { hwmUsdg: row?.hwm_usdg ?? 0, accruedFeeUsdg: row?.accrued_fee_usdg ?? 0 };
+/**
+ * Persisted HWM + accrued fees, loaded at arm time.
+ *
+ * `hwmUsdg` is the EFFECTIVE peak — gross minus what withdrawals have taken out
+ * of it — because that is the figure every caller actually wants: the drawdown
+ * breaker divides by it and the performance fee accrues above it. The two
+ * components come back beside it for the surfaces that have to explain the
+ * number rather than just use it.
+ *
+ * Before `hwm_withdrawn_usdg` existed every account had 0 withdrawn, so this
+ * returns exactly what it returned before for all existing data.
+ */
+export async function getAgentFinancials(agentId: string): Promise<{
+  hwmUsdg: number;
+  /** Σ every upward move. Monotonic. */
+  hwmGrossUsdg: number;
+  /** Σ every withdrawal that moved the peak down. Monotonic, clamped at gross. */
+  hwmWithdrawnUsdg: number;
+  accruedFeeUsdg: number;
+}> {
+  const row = (await getDb()
+    .prepare(
+      "SELECT hwm_usdg, hwm_withdrawn_usdg, accrued_fee_usdg FROM agents WHERE smart_account = ?",
+    )
+    .get(agentId)) as
+    | { hwm_usdg: number; hwm_withdrawn_usdg: number | null; accrued_fee_usdg: number }
+    | undefined;
+  const gross = row?.hwm_usdg ?? 0;
+  // `?? 0` for the pre-migration row shape, not as a guess: the column is NOT
+  // NULL DEFAULT 0, so a null here means a database the ALTER has not reached,
+  // and zero withdrawn is the truth for every row written before it existed.
+  const withdrawn = row?.hwm_withdrawn_usdg ?? 0;
+  return {
+    hwmUsdg: Math.max(0, gross - withdrawn),
+    hwmGrossUsdg: gross,
+    hwmWithdrawnUsdg: withdrawn,
+    accruedFeeUsdg: row?.accrued_fee_usdg ?? 0,
+  };
 }
 
 /** Ratchet the persisted HWM (monotonic — ignores values below the stored peak). */
@@ -1085,11 +1164,30 @@ export async function setAgentEpoch(agentId: string, epoch: number): Promise<boo
   }
 }
 
+/**
+ * Ratchet the persisted peak to an EFFECTIVE figure.
+ *
+ * Callers hand this the peak they want measured against — `accrueAboveHwm`'s
+ * `newHwmUsdg`, the anchor's restored mark — which is an effective figure, while
+ * the column stores the gross. So the stored value is the effective one with
+ * what withdrawals have already taken added back, and the ratchet then compares
+ * gross to gross. Without the `+ hwm_withdrawn_usdg` the first fee accrual after
+ * any withdrawal would quietly write the effective figure into the gross column
+ * and subtract the withdrawals a second time.
+ *
+ * CASE, not MAX. `MAX(a, b)` is a scalar in sqlite and an aggregate in Postgres,
+ * and `translateQuery` does not rewrite it — the same reason the mirror's upsert
+ * gives for avoiding it.
+ */
 export async function setAgentHwm(agentId: string, hwmUsdg: number): Promise<boolean> {
   try {
     await getDb()
-      .prepare("UPDATE agents SET hwm_usdg = MAX(hwm_usdg, ?) WHERE smart_account = ?")
-      .run(hwmUsdg, agentId);
+      .prepare(
+        `UPDATE agents SET hwm_usdg =
+           CASE WHEN ? + hwm_withdrawn_usdg > hwm_usdg THEN ? + hwm_withdrawn_usdg ELSE hwm_usdg END
+         WHERE smart_account = ?`,
+      )
+      .run(hwmUsdg, hwmUsdg, agentId);
     return true;
   } catch (e) {
     // A swallowed HWM update lets the persisted peak lag the true one, so the
@@ -1112,11 +1210,79 @@ export async function setAgentHwm(agentId: string, hwmUsdg: number): Promise<boo
  * withdrawal is the mirror: leave the peak up and the account is permanently
  * "in drawdown" by the amount its owner took home, which trips the breaker.
  */
+/**
+ * Restore BOTH halves of the peak from the accounting anchor. Ratchets, never assigns.
+ *
+ * Separate from `setAgentHwm` because the two speak different units and mixing
+ * them is the bug this whole split is guarding against: `setAgentHwm` takes an
+ * EFFECTIVE peak and adds the withdrawn total back before storing, while the
+ * anchor carries the GROSS and the withdrawn total as they sit in the shared
+ * row. Passing one to the other adds the withdrawals twice.
+ *
+ * Each half is a one-way door on its own, so a child whose local figures are
+ * already higher keeps them — a restore can only ever fill in what a rebuilt
+ * database has forgotten.
+ */
+export async function restoreAgentHwmParts(
+  agentId: string,
+  parts: { grossUsdg: number | null; withdrawnUsdg: number | null },
+): Promise<void> {
+  try {
+    const db = getDb();
+    // WITHDRAWN FIRST. `hwm_usdg` is the clamp for the withdrawn total, so
+    // raising the gross first can only ever admit more of the withdrawal, never
+    // less — the safe order. The reverse can clamp a legitimate total against a
+    // gross that is about to grow.
+    if (parts.grossUsdg !== null) {
+      await db
+        .prepare(
+          `UPDATE agents SET hwm_usdg = CASE WHEN ? > hwm_usdg THEN ? ELSE hwm_usdg END
+           WHERE smart_account = ?`,
+        )
+        .run(parts.grossUsdg, parts.grossUsdg, agentId);
+    }
+    // NULL MEANS THE ANCHOR NEVER READ ONE, which is not a claim that nothing
+    // was withdrawn. Writing 0 here would be that claim, and on a shared row it
+    // would be one this process has no evidence for.
+    if (parts.withdrawnUsdg !== null) {
+      await db
+        .prepare(
+          `UPDATE agents SET hwm_withdrawn_usdg =
+             CASE WHEN ? > hwm_withdrawn_usdg THEN ? ELSE hwm_withdrawn_usdg END
+           WHERE smart_account = ?`,
+        )
+        .run(parts.withdrawnUsdg, parts.withdrawnUsdg, agentId);
+    }
+  } catch (e) {
+    console.error("[store] hwm restore failed:", e);
+  }
+}
+
 export async function adjustAgentHwm(agentId: string, deltaUsdg: number): Promise<void> {
   try {
-    await getDb()
-      .prepare("UPDATE agents SET hwm_usdg = MAX(0, hwm_usdg + ?) WHERE smart_account = ?")
-      .run(deltaUsdg, agentId);
+    const db = getDb();
+    if (deltaUsdg >= 0) {
+      // A DEPOSIT RAISES THE GROSS, exactly as before.
+      await db
+        .prepare("UPDATE agents SET hwm_usdg = hwm_usdg + ? WHERE smart_account = ?")
+        .run(deltaUsdg, agentId);
+      return;
+    }
+    // A WITHDRAWAL RAISES THE WITHDRAWN TOTAL INSTEAD, which lowers the
+    // effective peak by the same amount while leaving both stored figures
+    // monotonic — so the mirror's upward-only ratchet carries the reduction
+    // instead of discarding it. See the ALTER for hwm_withdrawn_usdg.
+    //
+    // Clamped at the gross so the effective peak floors at zero, which is what
+    // `MAX(0, hwm + delta)` did and what flows.integration.test.ts pins.
+    const amount = -deltaUsdg;
+    await db
+      .prepare(
+        `UPDATE agents SET hwm_withdrawn_usdg =
+           CASE WHEN hwm_withdrawn_usdg + ? > hwm_usdg THEN hwm_usdg ELSE hwm_withdrawn_usdg + ? END
+         WHERE smart_account = ?`,
+      )
+      .run(amount, amount, agentId);
   } catch (e) {
     console.error("[store] hwm adjust failed:", e);
   }
@@ -1531,6 +1697,40 @@ export async function addFlow(flow: FlowRow): Promise<boolean> {
   } catch (e) {
     console.error("[store] flow insert failed:", e);
     return false;
+  }
+}
+
+/**
+ * Has this exact chain log already been booked as a flow?
+ *
+ * `addFlow` CANNOT ANSWER THIS. It inserts `ON CONFLICT DO NOTHING` and then
+ * returns `true` whenever the statement did not throw — so a duplicate and a
+ * fresh insert are indistinguishable to its caller. That is harmless for the
+ * deposit scanner, which pre-filters on `knownFlowKeys` and whose `true` only
+ * has to mean "nothing failed". It is NOT harmless for a caller that moves the
+ * high-water mark on the strength of that return: it books the same withdrawal
+ * again on every pass. Measured on Shogun — one 5.000000 sweep took 10.000000
+ * off the peak across two arms, and `adjustAgentHwm`'s clamp would have walked
+ * it to zero in a few more, switching the drawdown breaker off entirely, since
+ * `policy.ts` only applies it while the peak is above zero.
+ *
+ * NULL WHEN THE QUESTION COULD NOT BE ASKED, and a caller must treat that as
+ * "do not book". An unreadable ledger is not an empty one, and the cost of
+ * waiting a tick is nothing next to the cost of double-counting capital.
+ */
+export async function hasChainFlow(
+  agentId: string,
+  txHash: string,
+  logIndex: number,
+): Promise<boolean | null> {
+  try {
+    const row = await getDb()
+      .prepare("SELECT 1 AS n FROM flows WHERE agent_id = ? AND tx_hash = ? AND log_index = ? LIMIT 1")
+      .get(agentId, txHash.toLowerCase(), logIndex);
+    return row !== undefined && row !== null;
+  } catch (e) {
+    console.error("[store] flow lookup failed:", e);
+    return null;
   }
 }
 
@@ -3151,6 +3351,136 @@ export async function poolKeysFor(
  * Filtered in SQL rather than after the fact, because the LIMIT is applied by
  * the database: dropping them in JavaScript would still leave the window full.
  */
+/**
+ * WHERE THE USDG CANDIDATES GO — a read-only census, for one question.
+ *
+ * Milla's class producer surfaced USDG-quoted candidates at ~0.5% while the
+ * chain, the launch parser and the depth filter all independently put them near
+ * 10-18%. Every layer reachable from outside the container tested clean, so the
+ * remaining suspects are this table's contents and the window/LIMIT this query
+ * applies to them — neither observable without being inside the worker.
+ *
+ * The census counts the same rows at THREE points, which is what separates the
+ * four possible answers:
+ *
+ *   all rows, any age       0 USDG -> they are NEVER WRITTEN
+ *   inside the age window   0 here, >0 above -> they AGED OUT
+ *   after ORDER BY + LIMIT  0 here, >0 above -> DISPLACED by newer rows
+ *   (producer sees them)    >0 here -> they arrive and fail a LATER guard
+ *
+ * Diagnostic only: nothing reads this to make a decision, and it changes no
+ * behaviour. It exists to be deleted once the question is answered.
+ */
+export interface CandidateCensus {
+  /** Rows carrying a curve, at each narrowing stage. */
+  allWithCurve: number;
+  inWindow: number;
+  returned: number;
+  /** USDG-quoted counts at the same three stages. */
+  usdgAll: number;
+  usdgInWindow: number;
+  usdgReturned: number;
+  /** Native-ETH and everything-else, for the returned slice only. */
+  nativeReturned: number;
+  otherReturned: number;
+  /** Seconds since the OLDEST row the producer actually received — the cutoff. */
+  cutoffAgeSec: number | null;
+  /** Seconds since the newest USDG row in the table, at any age. Null if none. */
+  newestUsdgAgeSec: number | null;
+}
+
+export async function classCandidateCensus(
+  maxAgeSec: number,
+  limit: number,
+): Promise<CandidateCensus | null> {
+  const USDG = (CASH.USDG as string).toLowerCase();
+  try {
+    const db = getDb();
+    const one = async (sql: string, ...args: unknown[]): Promise<number> => {
+      const r = (await db.prepare(sql).get(...args)) as { n?: number } | undefined;
+      return Number(r?.n ?? 0);
+    };
+    // ONE DEFINITION OF "CARRIES A CURVE", used by every stage.
+    //
+    // `recentCandidates` requires all three columns together, because a curve
+    // without a threshold cannot be read as money and is dropped on the way
+    // out. The first draft of this census tested `curve IS NOT NULL` at the
+    // earlier stages and `quote_token != null` at the last one, so a row
+    // missing a threshold counted as a candidate at one stage and not the next
+    // — the census would have reported a drop that was only its own definition
+    // changing, and sent me hunting it in code that was behaving.
+    const HAS_CURVE = `curve IS NOT NULL AND quote_token IS NOT NULL AND graduation_threshold IS NOT NULL`;
+    const allWithCurve = await one(`SELECT COUNT(*) AS n FROM discovered_pools WHERE ${HAS_CURVE}`);
+    const usdgAll = await one(
+      `SELECT COUNT(*) AS n FROM discovered_pools WHERE ${HAS_CURVE} AND LOWER(quote_token) = ?`,
+      USDG,
+    );
+    const inWindow = await one(
+      `SELECT COUNT(*) AS n FROM discovered_pools WHERE ${HAS_CURVE} AND first_seen > unixepoch() - ?`,
+      maxAgeSec,
+    );
+    const usdgInWindow = await one(
+      `SELECT COUNT(*) AS n FROM discovered_pools
+        WHERE ${HAS_CURVE} AND LOWER(quote_token) = ? AND first_seen > unixepoch() - ?`,
+      USDG,
+      maxAgeSec,
+    );
+    // The returned slice, reproduced EXACTLY as recentCandidates builds it —
+    // same window, same ORDER BY, same LIMIT. A census that ordered differently
+    // would answer a question nobody asked.
+    const slice = (await db
+      .prepare(
+        `SELECT curve, quote_token, graduation_threshold, first_seen FROM discovered_pools
+          WHERE first_seen > unixepoch() - ? ORDER BY first_seen DESC LIMIT ?`,
+      )
+      .all(maxAgeSec, limit)) as {
+      curve: string | null;
+      quote_token: string | null;
+      graduation_threshold: string | null;
+      first_seen: number | null;
+    }[];
+    // The SAME predicate as HAS_CURVE above, in JS because the LIMIT is applied
+    // by the database: filtering in SQL here would refill the window from older
+    // rows and measure a slice the producer never receives.
+    const withCurve = slice.filter(
+      (r) => r.curve != null && r.quote_token != null && r.graduation_threshold != null,
+    );
+    let usdgReturned = 0;
+    let nativeReturned = 0;
+    let otherReturned = 0;
+    for (const r of withCurve) {
+      const q = String(r.quote_token).toLowerCase();
+      if (q === USDG) usdgReturned += 1;
+      else if (/^0x0{40}$/.test(q)) nativeReturned += 1;
+      else otherReturned += 1;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const oldestReturned = withCurve.length
+      ? Math.min(...withCurve.map((r) => Number(r.first_seen ?? now)))
+      : null;
+    const newestUsdg = (await db
+      .prepare(
+        `SELECT MAX(first_seen) AS n FROM discovered_pools WHERE ${HAS_CURVE} AND LOWER(quote_token) = ?`,
+      )
+      .get(USDG)) as { n?: number | null } | undefined;
+    return {
+      allWithCurve,
+      inWindow,
+      returned: withCurve.length,
+      usdgAll,
+      usdgInWindow,
+      usdgReturned,
+      nativeReturned,
+      otherReturned,
+      cutoffAgeSec: oldestReturned === null ? null : now - oldestReturned,
+      newestUsdgAgeSec: newestUsdg?.n ? now - Number(newestUsdg.n) : null,
+    };
+  } catch {
+    // A diagnostic must never be the thing that breaks a tick.
+    return null;
+  }
+}
+
 export async function recentCandidates(
   maxAgeSec: number,
   limit = 25,
@@ -3444,6 +3774,7 @@ export async function classPositions(agentId: string): Promise<ClassPositionRow[
       proceeds_usdg: string | null;
       opened_at_block: string | null;
       state: string | null;
+      swept_raw: string | null;
     }[];
     // NULL STAYS NULL through this map. Every one of these is money or the
     // clock money is measured against, and `?? 0n` on any of them would turn
@@ -3470,6 +3801,7 @@ export async function classPositions(agentId: string): Promise<ClassPositionRow[
       proceedsRaw: big(r.proceeds_usdg),
       openedAtBlock: big(r.opened_at_block),
       state: r.state ?? "open",
+      sweptRaw: big(r.swept_raw),
       // A NULL clock reads as "right now", not as 1970. The column has a
       // default so this should not happen, but a zero would make every position
       // instantly older than any hold window and force an immediate exit — an
@@ -3522,15 +3854,24 @@ export async function writeClassLedger(
     openedAtBlock: bigint | null;
     entryTx: string | null;
     exitTx: string | null;
-    state: "open" | "closed" | "recovered";
+    state: "open" | "closed" | "recovered" | "swept";
+    /**
+     * Tokens the owner swept out. Null when the tape could not say.
+     *
+     * Stored so "gone because it was sold" and "gone because the owner took it
+     * home" stay distinguishable after the fact. The row is the only place that
+     * difference survives, and every consequence of the position turns on it:
+     * a sale has proceeds and a result, a withdrawal has neither.
+     */
+    sweptRaw: bigint | null;
   },
 ): Promise<void> {
   try {
     await getDb()
       .prepare(
         `INSERT INTO class_positions
-           (agent_id, token, vault, curve, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, entry_tx, exit_tx, state)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (agent_id, token, vault, curve, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, entry_tx, exit_tx, state, swept_raw)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(agent_id, token) DO UPDATE SET
            vault = COALESCE(excluded.vault, vault),
            curve = COALESCE(excluded.curve, curve),
@@ -3540,7 +3881,8 @@ export async function writeClassLedger(
            opened_at_block = COALESCE(excluded.opened_at_block, opened_at_block),
            entry_tx = COALESCE(excluded.entry_tx, entry_tx),
            exit_tx = COALESCE(excluded.exit_tx, exit_tx),
-           state = excluded.state`,
+           state = excluded.state,
+           swept_raw = COALESCE(excluded.swept_raw, swept_raw)`,
       )
       .run(
         agentId,
@@ -3556,6 +3898,7 @@ export async function writeClassLedger(
         row.entryTx,
         row.exitTx,
         row.state,
+        row.sweptRaw === null ? null : row.sweptRaw.toString(),
       );
   } catch (e) {
     console.error("[store] class ledger write failed:", e);
@@ -3761,5 +4104,36 @@ export async function positionsExplained(agentId: string, tokens: readonly strin
     return want.every((t) => seen.has(t));
   } catch {
     return false;
+  }
+}
+
+/**
+ * Correct a class position's hold clock to when the chain says it opened.
+ *
+ * SEPARATE FROM `upsertClassPosition` ON PURPOSE. That function excludes the
+ * clock, and its comment says why: a re-record on a top-up must not rejuvenate a
+ * position past its exit. This is the one legitimate exception — restoring a
+ * clock that a container rebuild reset is the opposite of rejuvenating it — so
+ * it gets its own narrow function rather than a flag on the general one.
+ *
+ * ONLY EVER EARLIER. Guarded in SQL rather than by the caller: a write that
+ * could move a clock FORWARD is a write that could postpone an exit, and the
+ * whole point of the hold timer is that it cannot be postponed.
+ */
+export async function setClassFirstSeen(
+  agentId: string,
+  token: string,
+  firstSeen: number,
+): Promise<void> {
+  if (!Number.isFinite(firstSeen) || firstSeen <= 0) return;
+  try {
+    await getDb()
+      .prepare(
+        `UPDATE class_positions SET first_seen = ?
+          WHERE agent_id = ? AND LOWER(token) = LOWER(?) AND first_seen > ?`,
+      )
+      .run(Math.floor(firstSeen), agentId, token, Math.floor(firstSeen));
+  } catch (e) {
+    console.error("[store] class first_seen update failed:", e);
   }
 }

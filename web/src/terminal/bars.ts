@@ -64,30 +64,71 @@ export const WINDOW_SECONDS: Record<WindowId, number> = {
   ALL: Number.POSITIVE_INFINITY,
 };
 
+/**
+ * WHY THE CHART IS EMPTY, not merely that it is.
+ *
+ * `read-candles.ts` separates four states and argues the split at length:
+ * `none` and `mismatch` are facts about the POOL, `refused` is a fact about US,
+ * and "rendering it as either of the others would state something about a token
+ * out of our own outage". This function dropped `state` on the floor — it read
+ * `data.candles?.candles ?? []` and returned bars — so all four arrived at the
+ * screen as one empty array under one sentence: "Price history unavailable. Try
+ * another timeframe." Advice that is true only for `none` on a short window, and
+ * a claim about the token when the truth was a 429 on our side.
+ *
+ * The Yahoo rail is mapped onto the same vocabulary, so both speak one language.
+ */
+export interface BarsRead {
+  bars: Bar[];
+  state: "ok" | "none" | "mismatch" | "refused";
+  reason: "rate-limited" | "unreachable" | "unreadable" | null;
+  /** These bars are the last good read; the index has since refused. */
+  stale: boolean;
+}
+
 export async function loadBars(
   token: LiveToken,
   window: WindowId,
-): Promise<Bar[]> {
+): Promise<BarsRead> {
   if (token.kind === "memecoin") {
     try {
       const r=await fetch(`/api/tokens/${encodeURIComponent(token.id)}?window=${window==="1H"||window==="4H"?"15m":window==="ALL"||window==="1M"?"1d":"1h"}`, {signal:AbortSignal.timeout(20000)});
-      if(!r.ok)return [];
+      // Our own route failing is our outage, not a fact about the pool.
+      if(!r.ok)return { bars: [], state: "refused", reason: "unreachable", stale: false };
       const data=await r.json();
-      const bars: Bar[] = (data.candles?.candles ?? []).map((b:{t:number;o:number;h:number;l:number;c:number})=>({time:b.t,open:b.o,high:b.h,low:b.l,close:b.c}));
+      const read = data.candles as
+        | { state?: BarsRead["state"]; reason?: BarsRead["reason"]; stale?: boolean; candles?: unknown[] }
+        | null
+        | undefined;
+      const bars: Bar[] = ((read?.candles ?? []) as {t:number;o:number;h:number;l:number;c:number}[]).map((b)=>({time:b.t,open:b.o,high:b.h,low:b.l,close:b.c}));
       const durations = WINDOW_SECONDS;
       const end = bars.at(-1)?.time ?? 0;
-      return bars.filter(bar=>bar.time >= end - durations[window]);
-    } catch {return [];}
+      return {
+        bars: bars.filter(bar=>bar.time >= end - durations[window]),
+        // A null `candles` — the route returns one when the market read has no
+        // coin — is not an empty pool either. It is us, again.
+        state: read?.state ?? (read ? "none" : "refused"),
+        reason: read?.reason ?? (read ? null : "unreachable"),
+        stale: read?.stale === true,
+      };
+    } catch {return { bars: [], state: "refused", reason: "unreachable", stale: false };}
   }
   const bars = await yahooBars(token.symbol, window);
   const multiplier = token.uiMultiplier ?? 1;
-  return bars.map((bar) => ({
-    ...bar,
-    open: bar.open * multiplier,
-    high: bar.high * multiplier,
-    low: bar.low * multiplier,
-    close: bar.close * multiplier,
-  }));
+  return {
+    bars: bars.map((bar) => ({
+      ...bar,
+      open: bar.open * multiplier,
+      high: bar.high * multiplier,
+      low: bar.low * multiplier,
+      close: bar.close * multiplier,
+    })),
+    // The equity rail has no state channel of its own: an empty series there is
+    // genuinely "nothing printed in this window", which is `none`.
+    state: bars.length ? "ok" : "none",
+    reason: null,
+    stale: false,
+  };
 }
 
 async function yahooBars(symbol: string, window: WindowId): Promise<Bar[]> {

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { CircleHelp } from "lucide-react";
 import { HolderLink } from "../HolderLink";
+import { basketAfterAdd, basketNow } from "../basket";
 import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
@@ -79,6 +80,11 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   // Scout mode is a boolean, so it can't ride the string `draft`.
   const [deskEnabled, setDeskEnabled] = useState<boolean | null>(null);
   const [scoutEnabled, setScoutEnabled] = useState<boolean | null>(null);
+  const [classSnipe, setClassSnipe] = useState<boolean | null>(null);
+  /** The owner's consent to spend real money. Null = untouched this session. */
+  const [liveTrading, setLiveTrading] = useState<boolean | null>(null);
+  /** Which kinds of thing the agent may BUY. Null = untouched this session. */
+  const [assetMode, setAssetMode] = useState<"all" | "stocks" | "crypto" | null>(null);
   const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
   const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
   const [officialCoins, setOfficialCoins] = useState<boolean | null>(null);
@@ -96,6 +102,24 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   // either. null = untouched this session; the server value stands.
   const [tokens, setTokens] = useState<CustomToken[] | null>(null);
   const [newToken, setNewToken] = useState({ symbol: "", address: "", decimals: "18" });
+  /**
+   * SHOULD THE AGENT TRADE THIS ONE, as well as know about it?
+   *
+   * Defaulted ON, and shown right beside the address box rather than assumed.
+   * Adding a token and trading it are two different writes — `customTokens` says
+   * "know about this", `basketSymbols` says "trade it" — and the second was
+   * offered nowhere an owner would find it: the chip renders unselected at the
+   * end of twenty-five identical stock chips, and the rule itself lived only in
+   * a JSX comment. An owner pasted an address, saved, re-signed, and asked the
+   * group why his agent still traded only stocks. He had done nothing wrong.
+   *
+   * NOT made automatic, because `strategies/registry.ts` is deliberate about it:
+   * "a token added to be tracked must not start being bought on its own." That
+   * rule protects an owner from the PLATFORM widening what gets bought. A person
+   * typing forty-two hex characters and pressing a button is not the platform —
+   * so the choice is theirs, made visible, made here, and reversible.
+   */
+  const [tradeNewToken, setTradeNewToken] = useState(true);
   const [tokenError, setTokenError] = useState<string | null>(null);
   // The grant the browser holds, so the basket can say which symbols this
   // signature can actually get back out of. null = none stored yet.
@@ -104,6 +128,23 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
+  // Model-list failure, in words a non-developer can act on. Built here (not
+  // in the render) so the render below stays one literal line — see the pin
+  // in house-key-and-basket.test.ts. `missing_key` never reaches this: it
+  // renders as the neutral hint, not an error.
+  const modelsErrorMessage = (
+    code: string,
+    source: string | null,
+    provider: { label: string; keyUrl: string },
+  ): string => {
+    if (code === "key_rejected") {
+      const whose =
+        source === "typed" ? "the one just typed" : source === "house" ? "the shared key" : "the saved key";
+      const where = provider.keyUrl ? ` — check it at ${provider.keyUrl.replace(/^https?:\/\//, "")}` : "";
+      return `the ${provider.label} key was refused (${whose}${where})`;
+    }
+    return `couldn't reach ${provider.label} — check connection`;
+  };
   /**
    * This account standing against the Circle rule.
    *
@@ -143,6 +184,10 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   }, [loadAttempt]);
 
   // Debounced model fetch — triggers when provider, key, or custom URL changes.
+  // No client-side gate on key presence: the server may still serve the list
+  // from the shared house key, which the client cannot see. A response with no
+  // key behind it comes back as missing_key and renders as the neutral hint
+  // below — never as an error for something the user never did.
   useEffect(() => {
     if (!view) return;
     const providerId = draft.llmProvider ?? view.values.llmProvider ?? "groq";
@@ -168,17 +213,18 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
-        const j = (await res.json()) as { models?: string[]; error?: string };
+        const j = (await res.json()) as { models?: string[]; error?: string; code?: string; keySource?: string };
         if (res.ok && j.models) {
           setAvailableModels(j.models);
           setModelsError(null);
         } else {
           setAvailableModels([]);
-          setModelsError(j.error ?? "failed to list models");
+          const code = j.code ?? "provider_error";
+          setModelsError(code === "missing_key" ? code : modelsErrorMessage(code, j.keySource ?? null, prov));
         }
       } catch {
         setAvailableModels([]);
-        setModelsError("network error");
+        setModelsError(modelsErrorMessage("provider_error", null, prov));
       } finally {
         setModelsLoading(false);
       }
@@ -228,6 +274,21 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
       return;
     }
     setTokens([...current, candidate]);
+    // THE SECOND WRITE, which never happened here. `Proposals.tsx` has always
+    // done both in one click; this screen wrote only `customTokens`, so a token
+    // was added and never selected, and the basket stayed on its stocks-only
+    // default. `basketNow` rather than `values.basketSymbols ?? []` because an
+    // unset basket is the DEFAULT basket, not an empty one — reading it as
+    // empty would narrow the agent's whole universe to the coin just added.
+    // `symbols` first: an edit made in this session has not been saved yet, and
+    // rebuilding from `view` would silently throw it away.
+    setSymbols(
+      basketAfterAdd({
+        saved: symbols ?? basketNow({ values: view?.values, defaults: view?.defaults }),
+        symbol: candidate.symbol,
+        trade: tradeNewToken,
+      }),
+    );
     setNewToken({ symbol: "", address: "", decimals: "18" });
   }
 
@@ -249,6 +310,9 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
     if (virtualsEnabled !== null) body.virtualsEnabled = virtualsEnabled;
     if (deskEnabled !== null) body.deskEnabled = deskEnabled;
     if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
+    if (classSnipe !== null) body.classSnipeEnabled = classSnipe;
+    if (liveTrading !== null) body.liveTradingEnabled = liveTrading;
+    if (assetMode !== null) body.assetMode = assetMode;
     if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
     if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
     if (officialCoins !== null) body.officialCoinsEnabled = officialCoins;
@@ -313,11 +377,17 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
 
   const d = view.defaults;
   const activeSymbols = symbols ?? view.values.basketSymbols ?? d.basketSymbols;
+  /** What is actually listed on this chain — not whether the setting is on. */
+  const listedCoins = view.officialCoins ?? [];
   const activeTokens =
     tokens ?? ((view.values.customTokens as CustomToken[] | undefined) ?? []);
   // Read the grant straight from localStorage — this page has no other handle on
   // it, and what matters is the signature the browser actually holds.
-  const unsellable = uncoveredBasketSymbols(activeSymbols, storedGrant);
+  // WITH THE OWNER'S OWN TOKENS, so the banner can fire for a memecoin — the
+  // token most likely to have been added after the grant was signed, and the one
+  // this warning could never reach. Unlike Wallet.tsx and the worker's coverage
+  // note, this screen has no `tokenCoverage` union of its own to double-report.
+  const unsellable = uncoveredBasketSymbols(activeSymbols, storedGrant, activeTokens);
   const secretPlaceholder = (s: { set: boolean; hint: string | null }) =>
     s.set ? `saved ····${s.hint ?? ""} — type to replace` : "not set";
 
@@ -352,6 +422,9 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const virtualsEnabledVal = virtualsEnabled ?? view.values.virtualsEnabled ?? d.virtualsEnabled;
   const deskEnabledVal = deskEnabled ?? view.values.deskEnabled ?? d.deskEnabled;
   const scoutEnabledVal = scoutEnabled ?? view.values.scoutEnabled ?? d.scoutEnabled;
+  const classSnipeVal = classSnipe ?? view.values.classSnipeEnabled ?? d.classSnipeEnabled;
+  const liveTradingVal = liveTrading ?? view.values.liveTradingEnabled ?? d.liveTradingEnabled;
+  const assetModeVal = assetMode ?? view.values.assetMode ?? d.assetMode;
   const discoveryEnabledVal = discoveryEnabled ?? view.values.discoveryEnabled ?? d.discoveryEnabled;
   const trencherLiveVal = trencherLive ?? view.values.trencherLiveEnabled ?? d.trencherLiveEnabled;
   // `?? d.officialCoinsEnabled` is doing real work here, not defensive padding:
@@ -414,6 +487,124 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
         {/* Setup steps live here after the /app muster is done — a quiet, honest
             status strip read from real state, and a fast way back to fund or re-key. */}
         <SetupChecklist onFund={onFund} paper={view.values.paperTradingEnabled ?? view.defaults.paperTradingEnabled}/>
+
+          {/* ── PAPER OR LIVE ───────────────────────────────────────────────
+              THE SWITCH THAT DID NOT EXIST.
+
+              Two other screens have been telling owners to "turn paper trading
+              on in Settings" for months. There was no control here — not for
+              paper, not for live — so the only way to change how an agent
+              treated real money was a chat command most owners never found.
+              Worse, it would not have helped: until `liveTradingEnabled` was
+              added, nothing anywhere withheld permission to trade for real, and
+              a funded agent on mainnet traded real money whatever its owner had
+              chosen in the create wizard.
+
+              FIRST ON THE PAGE because it outranks everything below it. A
+              strategy, a cap or a venue only matters once you know whether the
+              money is real. */}
+          <div className="mm-section">Trading mode</div>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">live trading</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={liveTradingVal}
+                  onChange={(e) => setLiveTrading(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {liveTradingVal
+                    ? "ON — real orders, real money, within your signed caps"
+                    : "OFF — Paper mode: practising with simulated money at live prices"}
+                </span>
+              </span>
+              <span className="mm-hint">
+                {liveTradingVal
+                  ? "Your agent places real orders on Robinhood Chain with the funds in its account. Turn this off and it goes back to practising immediately — no signature needed either way."
+                  : "Nothing your agent does costs real money while this is off. Funding the account does NOT turn it on, and neither does re-signing your permission: this switch is the only thing that does."}
+              </span>
+            </label>
+          </div>
+          {!liveTradingVal && (view.values.liveTradingEnabled ?? d.liveTradingEnabled) && (
+            /* TURNING IT OFF IS NOT A NEUTRAL ACT IF REAL MONEY IS ALREADY OUT.
+               On the paper rail the tick values the PAPER BOOK — positions come
+               from `paperPositionsOf(bookRow.shares)` and nothing reads the
+               chain — so tokens bought with real funds become invisible to the
+               agent: no stop-loss, no take-profit, no exit of any kind, and a
+               screen showing a tidy simulated book over the top of them.
+               Nothing warns about it anywhere else, and switching back is the
+               only thing that restores it. */
+            <p className="mm-hint" style={{ marginTop: 8 }}>
+              <b>If your agent holds positions bought with real funds, read this first.</b> In Paper
+              mode it stops managing them — no stop-loss, no take-profit, no exits — and the screen
+              shows its simulated book instead. The tokens stay in the account and nothing is sold;
+              they are simply left alone until you turn Live trading back on. If you want out of a
+              real position, close it first and switch afterwards.
+            </p>
+          )}
+          {liveTradingVal && !(view.values.liveTradingEnabled ?? d.liveTradingEnabled) && (
+            /* SAID BEFORE IT IS TRUE, not after. The owner has ticked the box
+               but not yet pressed save, which is the last moment this sentence
+               can still be useful to them. */
+            <p className="mm-hint" style={{ marginTop: 8 }}>
+              <b>This spends real money.</b> Once you save, your agent can open positions with the
+              funds in its account, up to the per-trade and daily caps in the permission you signed.
+              It will not exceed those caps, and you can switch back to Paper at any time.
+            </p>
+          )}
+
+          {/* ── WHAT IT TRADES ──────────────────────────────────────────────
+              Asked for by several owners at once: "there should be an option
+              mode for stocks only, crypto only, combo, or meme coin only", and
+              "it's great to toggle between stocks and crypto mode — sometimes
+              trading stocks is better when crypto bear is here".
+
+              FOUR CARDS, THREE MODES. `instrumentClassOf` can only tell an
+              equity from everything else, so shipping "crypto" and "meme coins"
+              as separate modes would be two names for one filter. The fourth
+              card writes `crypto` plus the switches that already govern buying
+              things nobody can price, and says so on the card rather than
+              implying a classification that does not exist.
+
+              A FILTER OVER WHAT MAY BE BOUGHT, never over what is watched. A
+              class you switch off stays priced, valued and sellable — see
+              assetModeAllows in core for why the other way round would brick a
+              live account. */}
+          <div className="mm-section">What it trades</div>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">asset mode</span>
+              <span className="mm-input">
+                <select
+                  value={assetModeVal}
+                  onChange={(e) => setAssetMode(e.target.value as "all" | "stocks" | "crypto")}
+                >
+                  <option value="all">All assets</option>
+                  <option value="stocks">Stocks only</option>
+                  <option value="crypto">Crypto only</option>
+                </select>
+              </span>
+              <span className="mm-hint">
+                {assetModeVal === "stocks"
+                  ? "Only tokenised equities and ETFs. Your agent will be idle while US markets are shut, and it will not buy coins even if they are in your basket."
+                  : assetModeVal === "crypto"
+                    ? "Only coins. Stocks in your basket stay priced and sellable — they just stop being bought."
+                    : "Everything your basket and your signed permission allow."}
+              </span>
+            </label>
+          </div>
+          {assetModeVal !== "all" && (
+            /* SAID BEFORE IT BITES. Narrowing the pool re-splits every surviving
+               leg's weight, and even-keel acts on a 500bps band — so this is a
+               dropdown that moves real money for some owners. */
+            <p className="mm-hint" style={{ marginTop: 8 }}>
+              Anything you already hold stays priced, valued and sellable — including its
+              stop-loss and take-profit. This only changes what your agent may <b>buy</b>.
+              {activeSymbols.length > 0 && " If it leaves you with nothing to buy, your agent will say so rather than going quiet."}
+            </p>
+          )}
 
           {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
           <div className="mm-section">Agent settings</div>
@@ -504,7 +695,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             <Field
                 label="Pimlico API key"
                 action={{ href: "https://dashboard.pimlico.io", label: "Get a free key" }}
-                hint="Required for live trading on mainnet. Leave blank for paper trading or testnet."
+                hint="Required for real trading on Robinhood Chain. Not needed for Paper, or on the testnet."
               >
                 <input
                   type="password"
@@ -586,23 +777,19 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               )}
           </div>
 
-          {/* THE REASON WAS ALREADY IN HAND AND THIS THREW IT AWAY.
-              `setModelsError(j.error ?? …)` captures what the route actually
-              said — "provider returned 401", "provider returned 502", a
-              timeout, an unknown provider — and the render replaced all of it
-              with one sentence telling the reader to check a key. Two testers
-              reported seeing it "all the time, but everything is set", and for
-              one of them everything WAS set: the route was not reading the
-              house key, so the provider refused a request that carried no key
-              at all. Blaming their key for our omission is the same shape as
-              telling somebody the market is closed when it was our read that
-              failed. */}
-          {modelsError && (
+          {/* Model-list status: missing_key renders as the neutral hint (nothing
+              was attempted); anything else renders the single literal line the
+              pin in house-key-and-basket.test.ts requires, with the composed
+              sentence — never raw provider text. */}
+          {modelsError === "missing_key" && (
+            <p role="status" className="mm-hint">
+              Enter a {prov.label} API key above to load the model list — or just type a model id below.
+            </p>
+          )}
+          {modelsError && modelsError !== "missing_key" && (
             <p role="status" className="mm-danger">
               Could not load the model list — {modelsError}.{" "}
-              {/^provider returned 40[13]/.test(modelsError)
-                ? "The provider refused the key. Check it, or type a model name below and save — the list is a convenience, not a requirement."
-                : "You can type a model name below and save; the list is a convenience, not a requirement."}
+              You can still type a model name below and save; the list is a convenience, not a requirement.
             </p>
           )}
           {/* Desktop app controls: updates, channel, pause/restart/quit. Renders
@@ -610,23 +797,46 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               Wayland) — browser/CLI users never see it. */}
           {isDesktopApp() && <DesktopAppSection />}
           <div className="mm-section">Trading basket</div>
-          <div className="mm-chips">
-            {/* Owner-added tokens sit alongside the registry ones. Selecting is
-                still an explicit act: adding a token means "know about this",
-                putting it in the basket means "trade it". */}
-            {[...view.knownSymbols, ...activeTokens.map((t) => t.symbol)].map((sym) => (
-              <button
-                key={sym}
-                type="button"
-                className={`mm-toggle${activeSymbols.includes(sym) ? " on" : ""}`}
-                /* In the basket or not, said rather than only shaded. */
-                aria-pressed={activeSymbols.includes(sym)}
-                onClick={() => toggleSymbol(sym)}
-              >
-                {sym}
-              </button>
-            ))}
-          </div>
+          {/* GROUPED, because one undifferentiated run of chips is what an owner
+              meant by "trading basket in settings is full of all stocks". It was
+              twenty-five registry symbols with his own coin unselected at the
+              end, and nothing said the two kinds were different or that the last
+              one was his. Two headed groups cost nothing and answer that. */}
+          {(
+            [
+              ["Stocks & ETFs", view.knownSymbols],
+              ["Coins", activeTokens.map((t) => t.symbol)],
+            ] as const
+          ).map(([heading, syms]) => (
+            <div key={heading}>
+              <div className="mm-subtle mono" style={{ marginTop: 10 }}>
+                {heading.toLowerCase()}
+              </div>
+              {syms.length === 0 ? (
+                /* An empty group rendered as nothing is how an owner concludes
+                   the feature does not exist. Say it is empty and where to
+                   start. */
+                <div className="mm-hint">
+                  None yet — add one below, or take a suggestion from your agent.
+                </div>
+              ) : (
+                <div className="mm-chips">
+                  {syms.map((sym) => (
+                    <button
+                      key={sym}
+                      type="button"
+                      className={`mm-toggle${activeSymbols.includes(sym) ? " on" : ""}`}
+                      /* In the basket or not, said rather than only shaded. */
+                      aria-pressed={activeSymbols.includes(sym)}
+                      onClick={() => toggleSymbol(sym)}
+                    >
+                      {sym}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
           <div className="mm-hint">
             {activeSymbols.length === 0
               ? "select at least one symbol (empty falls back to the default basket)"
@@ -685,6 +895,20 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               />
             </Field>
           </div>
+          {/* THE SECOND GATE, MADE VISIBLE. Adding a token means "know about
+              this"; trading it is a separate decision that lived only in a code
+              comment and in an unselected chip at the end of twenty-five stock
+              chips. Offered here, defaulted on, one click to decline. */}
+          <label className="ack-row" style={{ marginTop: 10 }}>
+            <input
+              type="checkbox"
+              checked={tradeNewToken}
+              onChange={(e) => setTradeNewToken(e.target.checked)}
+            />
+            <span>
+              Trade this one too — add it to the trading basket, not just the watch list.
+            </span>
+          </label>
           <button type="button" className="copy-btn" onClick={addToken}>
             add token
           </button>
@@ -718,8 +942,16 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               />
             </Field>
           </div>
+          {/* ALL THREE STEPS, because naming two of them is how an owner ends
+              up doing everything he was told and getting nowhere. This said
+              "save your tokens, then update trading permissions" and omitted
+              the basket entirely — the one gate that was invisible. */}
           <div className="mm-hint">
-            Save your tokens, then update <Link href="/grant">trading permissions</Link> to enable trading them.
+            Three things have to be true before your agent buys a token you added:
+            it&apos;s <b>in your trading basket</b> above (the checkbox does that when you
+            add it), you&apos;ve <b>saved</b>, and your{" "}
+            <Link href="/grant">trading permission</Link> covers it — re-sign after
+            saving, and it will. Adding a token on its own only means &ldquo;watch this&rdquo;.
           </div>
 
           {/* ── DISCOVERY ──────────────────────────────────────────────────
@@ -760,7 +992,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                   style={{ width: "auto" }}
                 />
                 <span className="mm-unit">
-                  {trencherLiveVal ? "trencher can open real positions" : "practice only"}
+                  {trencherLiveVal ? "trencher can open real positions" : "paper only"}
                 </span>
               </span>
               <span className="mm-hint">
@@ -783,11 +1015,24 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                   style={{ width: "auto" }}
                 />
                 <span className="mm-unit">
-                  {officialCoinsVal ? "coins are in your basket" : "stocks only"}
+                  {/* THREE STATES, NOT TWO. This read off the SETTING and said
+                      "coins are in your basket" whenever it was on — which is the
+                      default — while OFFICIAL_COINS[4663] is empty, so there are
+                      none. official-coins.ts already names the distinction the UI
+                      was collapsing: "An empty list is the honest state for a chain
+                      with no verified listing, and is a different fact from
+                      'official coins are turned off' — which is a setting." */}
+                  {!officialCoinsVal
+                    ? "stocks only"
+                    : listedCoins.length > 0
+                      ? `${listedCoins.length} in your basket: ${listedCoins.join(", ")}`
+                      : "on — but none are listed on this chain yet"}
                 </span>
               </span>
               <span className="mm-hint">
-                Verified coins we publish, watched and traded without you adding them. Coins trade
+                {listedCoins.length > 0
+                  ? "Verified coins we publish, watched and traded without you adding them. Coins trade"
+                  : "When we publish verified coins on this chain they appear here automatically. There are none yet, so this setting changes nothing today. Coins trade"}{" "}
                 around the clock, so your agent keeps working when the stock market is shut. Your
                 caps, budgets and trading permissions still apply — and a coin listed after you
                 signed needs a free re-sign at /grant before your key can touch it.
@@ -890,6 +1135,84 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               </>
             )}
           </div>
+
+          {/* ── THE CLASS ROUTE ────────────────────────────────────────────
+              Four settings that had a type, a PUT-allowlist entry and a worker
+              read, and NO control — so the only way to configure the route was
+              to call the API by hand, and `classSnipeEnabled` could not be
+              turned on at all. The factory field alone sat in Connections,
+              which made the page look like the feature was reachable when
+              nothing downstream of it could be set.
+
+              Deliberately BELOW the scout block and after its warning: a class
+              buy is gated by the scout budget, so an owner who has not read
+              that paragraph is not ready to read this one. */}
+          <div className="mm-subtle mono">class route · buying a coin nobody listed</div>
+          <p className="mm-hint" style={{ marginTop: 0 }}>
+            Buy a token straight off a Pons bonding curve, held in your own vault so it can be sold
+            again. Needs a class vault factory in Connections and a re-signed key — and the scout
+            budget above still bounds it.
+          </p>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">class route</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={classSnipeVal}
+                  onChange={(e) => setClassSnipe(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {classSnipeVal ? "may buy newly launched coins" : "off — no coin is bought unless you listed it"}
+                </span>
+              </span>
+              <span className="mm-hint">
+                Separate from sealing a vault at /grant. That says this key COULD reach one; this
+                says go and do it.
+              </span>
+            </label>
+            <Field
+              label="per entry (USDG)"
+              hint="Spent on a single class entry. 0 means nothing is bought, whatever the switch says."
+            >
+              <input
+                value={v("classPerEntryUsdg")}
+                inputMode="numeric"
+                placeholder={String(d.classPerEntryUsdg)}
+                onChange={set("classPerEntryUsdg")}
+              />
+            </Field>
+            <Field
+              label="max open positions"
+              hint="How many class positions may be held at once. 0 = no limit beyond the scout budget."
+            >
+              <input
+                value={v("classMaxPositions")}
+                inputMode="numeric"
+                placeholder={String(d.classMaxPositions)}
+                onChange={set("classMaxPositions")}
+              />
+            </Field>
+            <Field
+              label="minimum curve depth (USDG)"
+              hint="Real money raised into the curve, excluding the virtual seed it opens with. Below this, an entry is refused."
+            >
+              <input
+                value={v("classMinDepthUsdg")}
+                inputMode="numeric"
+                placeholder={String(d.classMinDepthUsdg)}
+                onChange={set("classMinDepthUsdg")}
+              />
+            </Field>
+          </div>
+          {classSnipeVal && Number(v("classPerEntryUsdg") || d.classPerEntryUsdg) === 0 && (
+            <div className="mm-danger">
+              The class route is on but the size is <b>0</b>, so nothing will be bought. Two
+              switches rather than one, because they fail differently — set a size or turn the
+              route back off.
+            </div>
+          )}
 
           </details>
           <details className="settings-group" id="telegram"><summary>Telegram</summary>
@@ -1282,7 +1605,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </Field>
             <Field
               label="Class vault factory contract"
-              hint="PonsClassVaultFactory on your wallet’s network. This lets your agent buy tokens that did not exist when you signed — they are held in a vault of your own, because a token your account holds directly cannot be sold. Setting this alone changes nothing: it has to be sealed by updating trading permissions, and buying only starts when you also turn on the class route below."
+              hint="PonsClassVaultFactory on your wallet’s network. This lets your agent buy tokens that did not exist when you signed — they are held in a vault of your own, because a token your account holds directly cannot be sold. Setting this alone changes nothing: it has to be sealed by updating trading permissions, and buying only starts when you also turn on the class route, which is in “Custom tokens & discovery” above — not here."
             >
               <input
                 type="text"

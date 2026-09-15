@@ -16,8 +16,21 @@ export interface Elapsed {
   text: string;
 }
 
-export function elapsed(at: number, now: number): Elapsed {
-  const s = Math.max(0, Math.floor((now - at) / 1000));
+/**
+ * BOTH ARGUMENTS ARE MILLISECONDS, and the parameter names now say so.
+ *
+ * They were `at` and `now`, and the omission was the whole of the `20688d`
+ * defect: the rail handed this epoch SECONDS for `atMs` and milliseconds for
+ * `nowMs`, so the subtraction produced roughly the current epoch and every row
+ * in the feed printed the same ~56-year age. Nothing threw, nothing looked
+ * empty, and the number was plausible enough to survive review.
+ *
+ * The repo's convention is unit suffixes in names — `nowSec`, `DAY_SEC`,
+ * `lastBarAgeSec`, `LULL_MS`, `stepMs` — so this follows it rather than
+ * inventing a branded type, of which there is no precedent here.
+ */
+export function elapsed(atMs: number, nowMs: number): Elapsed {
+  const s = Math.max(0, Math.floor((nowMs - atMs) / 1000));
   if (s < 60) return { value: s, unit: "s", text: `${s}s` };
   const m = Math.floor(s / 60);
   if (m < 60) return { value: m, unit: "m", text: `${m}m` };
@@ -67,4 +80,31 @@ export function nextRun(id: StrategyId, now: number): number {
 /** Share of the cadence still to run, 1 just after a slot and 0 at the next one. */
 export function runLeft(id: StrategyId, now: number): number {
   return (nextRun(id, now) - now) / CADENCE_MS[id];
+}
+
+/**
+ * How long ago, for the feed rail — "now" under a minute, else the figure.
+ *
+ * MOVED HERE FROM `wire.tsx`, AND THAT MOVE IS THE POINT. It was a private
+ * function in a `.tsx` file, and the test runner globs `*.test.ts` only — there
+ * is not one `.test.tsx` in the repo — so nothing in that file was reachable
+ * from a test. The `20688d` bug lived in its one call site for as long as it
+ * did because no test could have been written against it without this move.
+ *
+ * Milliseconds, like everything else in this module.
+ */
+export function whenOf(atMs: number, nowMs: number): string {
+  const age = elapsed(atMs, nowMs);
+  switch (age.unit) {
+    case "s":
+      return "now";
+    case "m":
+    case "h":
+    case "d":
+      return age.text;
+    default: {
+      const _x: never = age.unit;
+      return _x;
+    }
+  }
 }

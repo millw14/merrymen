@@ -73,7 +73,7 @@ export function Feed({
     // not shuffle under the reader on every poll. Sorted in a COPY: `beats` is
     // memoised and shared with the other pills.
     return [...kept].sort(
-      (a, b) => (counts?.[b.postId!] ?? 0) - (counts?.[a.postId!] ?? 0) || b.at - a.at,
+      (a, b) => (counts?.[b.postId!] ?? 0) - (counts?.[a.postId!] ?? 0) || b.atMs - a.atMs,
     );
   }, [beats, active, replies, counts, likes, sort]);
   const lanes = useMemo(() => lanesOf(shown), [shown]);

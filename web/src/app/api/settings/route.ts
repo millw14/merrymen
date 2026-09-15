@@ -21,6 +21,8 @@ import {
   STOCK_TOKENS,
   isHostedMode,
   isValidCustomToken,
+  officialCoinsFor,
+  robinhoodChain,
   type LlmProviderInfo,
   type MerrymenSettings,
 } from "@merrymen/core";
@@ -53,6 +55,15 @@ export interface SettingsView {
   values: Omit<MerrymenSettings, "bundlerApiKey" | "groqApiKey" | "anthropicApiKey" | "llmApiKey" | "rialtoApiKey" | "telegramBotToken" | "telegramTranscribeKey" | "virtualsApiKey" | "bitqueryApiKey" | "merrymenToken">;
   defaults: typeof SETTINGS_DEFAULTS;
   knownSymbols: string[];
+  /**
+   * THE VERIFIED COINS ACTUALLY LISTED ON THIS CHAIN, which is a different fact
+   * from whether the setting is on. official-coins.ts: "An empty list is the
+   * honest state for a chain with no verified listing, and is a different fact
+   * from official coins are turned off — which is a setting." The screen had
+   * only the setting, so it affirmed "coins are in your basket" on a chain where
+   * the list is empty. A constant read; it costs nothing.
+   */
+  officialCoins: string[];
   strategies: { builtin: string[]; custom: string[] };
   /** The AI providers the brain can run on — powers the Settings picker. */
   llmProviders: LlmProviderInfo[];
@@ -141,6 +152,7 @@ export async function GET(req: Request) {
     values: safeValues,
     defaults: SETTINGS_DEFAULTS,
     knownSymbols: STOCK_TOKENS.map((t) => t.symbol),
+    officialCoins: officialCoinsFor(robinhoodChain.id).map((c) => c.symbol),
     strategies: { builtin: BUILTIN_STRATEGIES, custom: await listCustomStrategies() },
     llmProviders: LLM_PROVIDERS,
   };
@@ -214,6 +226,16 @@ const NUM_FIELDS: Record<string, [number, number]> = {
 };
 const BOOL_FIELDS = [
   "paperTradingEnabled",
+  // THE CONSENT FLAG, and it must be here or the "Start live trading" control
+  // is a button that returns {ok:true} and changes nothing — the exact silent
+  // drop this file's own comment above warns about, on the one field where
+  // failing silently means an owner believes they went live and did not.
+  //
+  // Tenant-settable ON PURPOSE, and therefore deliberately absent from core's
+  // host-only allowlist beside sponsorGasEnabled: this is the owner's decision
+  // about the owner's money, and the one thing the house must not decide for
+  // them.
+  "liveTradingEnabled",
   // LET THE STRATEGIST RESEARCH BEFORE IT DECIDES, instead of answering in one
   // shot from a fixed blob of numbers — it can pull depth, check what a
   // position cost, and read back its own past decisions before it commits.
@@ -544,6 +566,26 @@ export async function PUT(req: Request) {
     } else if (v === "" || v === null || v === undefined) setOrClear("telegramTranscribeBase", undefined);
     else if (typeof v === "string" && /^https?:\/\/.+/.test(v.trim())) setOrClear("telegramTranscribeBase", v.trim());
     else errors.push("telegramTranscribeBase: must be an http(s) URL");
+  }
+
+  /**
+   * ── asset mode ────────────────────────────────────────────────────────
+   *
+   * ITS OWN BRANCH, because it is a string enum and fits neither `BOOL_FIELDS`
+   * nor `NUM_FIELDS`. A field missing from every branch here is "silently
+   * dropped while the PUT returns {ok:true}" — this file's own warning, earned
+   * three times already — and this is the one where the owner would be told
+   * their agent had changed what it trades when it had not.
+   *
+   * Deliberately NOT in `HOSTED_FORBIDDEN_SETTING_FIELDS`: which kinds of thing
+   * to trade is the owner's decision about the owner's money, unlike the house
+   * keys and the sponsorship flag that list exists to protect.
+   */
+  if ("assetMode" in body) {
+    const v = body.assetMode;
+    if (v === null || v === undefined || v === "") setOrClear("assetMode", undefined);
+    else if (v === "all" || v === "stocks" || v === "crypto") setOrClear("assetMode", v as never);
+    else errors.push("assetMode: must be all, stocks or crypto");
   }
 
   // ── booleans (telegram toggles) ─────────────────────────────────────────

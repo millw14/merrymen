@@ -99,7 +99,12 @@ test("practice is still reachable — simplification is not removal", () => {
   // A user who wants to watch before risking anything must still be able to.
   const src = readFileSync("web/src/terminal/screens/Wallet.tsx", "utf8");
   assert.match(src, /setChainId\(TESTNET\)/, "the practice card must still be clickable");
-  assert.match(src, /Practice \(testnet\)/);
+  // "Testnet (46630)", not "Practice (testnet)". The card named the network with
+  // the word the product also used for simulated trading, so choosing it felt
+  // like choosing a mode — and its sibling said "Real money (mainnet)", naming
+  // the other network with a money word. Both now name the network and nothing
+  // else; Paper and Live are a setting, and they live in Settings.
+  assert.match(src, /Testnet \(46630\)/);
 });
 
 test("the real-money acknowledgement survives the flip", () => {

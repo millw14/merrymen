@@ -107,9 +107,22 @@ export default function AppPage() {
               <div className="scr-list">
                 <div className="scr-li"><span>QQQ</span><span className="scr-ok">landed · buy 16.60</span></div>
                 <div className="scr-li"><span>WIF</span><span className="scr-ok">landed · buy 25.00</span></div>
-                <div className="scr-li"><span>PEPE</span><span className="scr-no">refused · no-exit</span></div>
+                {/*
+                  REFUSALS READ AS WORDS HERE BECAUSE THEY DO IN THE PRODUCT.
+                  These rows used to show the raw rule slugs — `no-exit`,
+                  `daily-cap` — which is exactly what a beta owner pasted back
+                  to us asking what it meant. The terminal now renders
+                  `rejectRuleLabel(rule)` (web/src/terminal/live.ts), so a mock
+                  showing slugs advertises a product that no longer exists.
+
+                  Shortened from the real labels in worker/src/thesis-policy.ts,
+                  which is the authority — this page is a standalone Vercel app
+                  with no workspace dependency, so it cannot import them. Keep
+                  them faithful by hand, or drop the row.
+                */}
+                <div className="scr-li"><span>PEPE</span><span className="scr-no">refused · permission cannot sell it</span></div>
                 <div className="scr-li"><span>QQQ</span><span className="scr-ok">vault · park 50.00</span></div>
-                <div className="scr-li scr-fade"><span>TSLA</span><span className="scr-no">refused · daily-cap</span></div>
+                <div className="scr-li scr-fade"><span>TSLA</span><span className="scr-no">refused · past today&apos;s spending cap</span></div>
               </div>
             </div>
           </div>

@@ -389,3 +389,61 @@ describe("discoverTrending", () => {
     assert.equal(res.picks.length, 1);
   });
 });
+
+/**
+ * A RESTART MUST NOT BLIND THE SCANNER.
+ *
+ * A child rebuilds its sqlite on redeploy, so its candidate table starts empty.
+ * The class route reads a SIX HOUR candidate window; the scan interval is five
+ * minutes. With a cold start treated as "one interval has passed", the first
+ * pass reached back about six minutes of chain — so a restarted agent was blind
+ * to everything that launched before it booted and needed six hours of
+ * five-minute scans to rebuild what it already knew.
+ *
+ * The launch feed is derived from factory logs, so the chain is authoritative
+ * and the table is only a cache. A cache that empties is refilled from the
+ * source, not waited out.
+ */
+describe("the first scan after a restart reaches back over the whole window", () => {
+  const SIX_HOURS = 6 * 3600;
+  const base = { nowSec: 1_000_000, intervalSec: 300, blocksPerSec: 10n };
+
+  it("REACHES THE FULL WINDOW on a cold start, not one interval", () => {
+    const w = ponsScanWindow({ ...base, lastSuccessAt: 0, coldStartSec: SIX_HOURS });
+    assert.equal(w.coldStart, true);
+    assert.equal(w.due, true, "a cold start must scan immediately");
+    // (21600 + 60 overlap) * 10 blocks/sec
+    assert.equal(w.lookbackBlocks, BigInt((SIX_HOURS + 60) * 10));
+  });
+
+  it("and that reach is inside the node's log cap", () => {
+    // MAX_LOOKBACK_BLOCKS is 300,000 (~8.4h), sized to stay under the 10,000-log
+    // response cap at the measured 474.8 launches/hour. A warm-up that exceeded
+    // it would be clamped — correct, but it would also mean the window the class
+    // route reads can no longer be refilled in one pass.
+    const w = ponsScanWindow({ ...base, lastSuccessAt: 0, coldStartSec: SIX_HOURS });
+    assert.ok(w.lookbackBlocks <= 300_000n, `warm-up of ${w.lookbackBlocks} blocks would be clamped`);
+  });
+
+  it("but a WARM pass still reaches back only as far as it has been away", () => {
+    // The whole point of widening only the first pass: conflating reach with
+    // elapsed time would make every subsequent scan re-read six hours it has
+    // already seen, every five minutes, forever.
+    const w = ponsScanWindow({ ...base, lastSuccessAt: base.nowSec - 300, coldStartSec: SIX_HOURS });
+    assert.equal(w.coldStart, false);
+    assert.equal(w.lookbackBlocks, BigInt((300 + 60) * 10));
+  });
+
+  it("and without a coldStartSec the old behaviour is unchanged", () => {
+    // Every other caller of this function keeps what it had.
+    const w = ponsScanWindow({ ...base, lastSuccessAt: 0 });
+    assert.equal(w.lookbackBlocks, BigInt((300 + 60) * 10));
+  });
+
+  it("a cold start never reaches back LESS than a normal pass would", () => {
+    // If an operator set a coldStartSec smaller than the interval, the warm-up
+    // must not become a narrowing.
+    const w = ponsScanWindow({ ...base, lastSuccessAt: 0, coldStartSec: 60 });
+    assert.ok(w.lookbackBlocks >= BigInt((300 + 60) * 10));
+  });
+});

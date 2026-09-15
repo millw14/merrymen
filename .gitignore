@@ -19,3 +19,4 @@ web/public/_probe/
 
 # Sampling scratch from incident work — never committed.
 *.log
+worker/src/tmp-*.ts

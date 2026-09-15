@@ -131,8 +131,19 @@ function scrub(s: string): string {
  *
  * Codes are in the JSON-RPC application range (-32000 block), which is what a
  * bundler uses for its own refusals.
+ *
+ * -32099 AND NOT -32001, WHICH SWALLOWED THE REASON. viem maps the low codes to
+ * its own error classes with FIXED text: -32001 becomes ResourceNotFoundRpcError,
+ * whose message is "Requested resource not found." So a class-vault sweep that
+ * this relay refused for a precise, stated reason reached the owner as a
+ * four-word string about a missing resource, and diagnosing it took a decode of
+ * the callData and a read of this file.
+ *
+ * -32099 is inside the same implementation-defined range and is mapped by
+ * nothing, so the message written here is the message the caller sees. A
+ * refusal that cannot say why is barely better than a hang.
  */
-function refuse(id: unknown, message: string, code = -32_001) {
+function refuse(id: unknown, message: string, code = -32_099) {
   // Logged so the next failure is diagnosable from the server rather than from
   // a screenshot of a phone.
   console.warn(`[relay] refused: ${message}`);
@@ -194,7 +205,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ chainId: strin
     }
 
     const callData = typeof op.callData === "string" ? (op.callData as `0x${string}`) : "0x";
-    const shape = isRecoveryShape(callData);
+    const shape = isRecoveryShape(callData, { classVault: ticket.classVault });
     if (!shape.ok) {
       return refuse(rpc.id, `this relay only carries withdrawals — ${shape.why}`);
     }

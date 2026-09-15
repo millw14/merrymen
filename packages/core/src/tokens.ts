@@ -346,6 +346,48 @@ export function instrumentClassOf(address: string): InstrumentClass {
 }
 
 /**
+ * WHICH KINDS OF THING THE OWNER WANTS TRADED.
+ *
+ * Asked for in the beta by several people at once: "there should be an option
+ * mode for stocks only, crypto only, combo, or meme coin only" — and, from
+ * someone whose agent kept answering about a basket of stocks he did not care
+ * about, "i still can't understand how let the agent trade tokens and not only
+ * stocks".
+ *
+ * THREE VALUES, NOT FOUR, and the missing fourth is deliberate.
+ * `instrumentClassOf` can only ever return `equity-token` or `memecoin` — the
+ * rule is "in STOCK_TOKENS ⇒ equity, else memecoin", so `crypto-native` and
+ * `stablecoin` are declared arms it never produces. Shipping "crypto only" and
+ * "meme coins only" as separate modes would be two names for one filter: a
+ * control that cannot do what its label says. The picker still offers a
+ * meme-coin card; it writes `crypto` plus the switches that already govern
+ * buying things nobody can price, and says so on the card.
+ */
+export type AssetMode = "all" | "stocks" | "crypto";
+
+/**
+ * May this asset mode trade this token?
+ *
+ * ADDRESS-KEYED, inheriting the reason `instrumentClassOf` gives above: "A
+ * discovered token may call itself AAPL. The address is the identity, and
+ * matching on the name would let a launchpad token pick its own research desk."
+ * Symbol-keyed, a coin named NVDA would pick its own asset mode.
+ *
+ * WHAT THIS MUST NEVER BE USED FOR: deciding what to WATCH. `snap.holdings` is
+ * the watch set intersected with real balances, and every mechanical exit —
+ * stop-loss, take-profit — iterates it. Filtering the watch set would strip a
+ * held position of its exits AND drop equity by that position's value in one
+ * tick, against a high-water mark that only ratchets up, tripping the drawdown
+ * breaker. A settings checkbox that bricks a live account. This filters what may
+ * be BOUGHT; a class switched off stays watched, priced, valued and sellable.
+ */
+export function assetModeAllows(mode: AssetMode, address: string): boolean {
+  if (mode === "all") return true;
+  const equity = instrumentClassOf(address) === "equity-token";
+  return mode === "stocks" ? equity : !equity;
+}
+
+/**
  * Does this instrument's price come from a market that closes?
  *
  * A tokenised equity tracks a 24/5 Chainlink feed, so outside US market hours

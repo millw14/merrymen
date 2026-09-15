@@ -270,9 +270,45 @@ describe("S4 — the scope register is not decoration", () => {
 
   it("the HWM is NOT epoch-scoped, deliberately", () => {
     // Resetting a monotonic peak at a boundary would re-charge the owner for
-    // profit already paid on. setAgentHwm is MAX() in SQL for the same reason.
+    // profit already paid on.
     assert.equal(EPOCH_SCOPED.includes("hwmUsdg" as never), false);
+    // ITS WITHDRAWN HALF IS THE SAME KIND OF FIGURE and must not be scoped
+    // either: an epoch boundary does not un-withdraw the owner's money, and
+    // resetting it would restore the peak to a level the capital no longer
+    // supports — the stale-peak failure, arriving through the boundary instead
+    // of through the mirror.
+    assert.equal(EPOCH_SCOPED.includes("hwmWithdrawnUsdg" as never), false);
+  });
+
+  /**
+   * BOTH STORED HALVES OF THE PEAK ARE RATCHETS, asserted as a property rather
+   * than as one literal statement.
+   *
+   * The old version of this test pinned the exact string
+   * `UPDATE agents SET hwm_usdg = MAX(hwm_usdg, ?)`, which made it a spelling
+   * test: it went red when that statement was rewritten as a CASE (because
+   * `MAX(a, b)` is scalar in sqlite and an AGGREGATE in Postgres, and nothing
+   * translates it), while a genuine regression — replacing the ratchet with a
+   * plain assignment — would have gone equally red and been indistinguishable.
+   *
+   * What actually matters is that no statement in the store assigns either
+   * column a value that could be LOWER than what is stored. So that is what is
+   * checked, on every UPDATE of either column.
+   */
+  it("neither half of the peak can be written downward", () => {
     const store = readFileSync(new URL("./store.ts", import.meta.url), "utf8");
-    assert.match(store, /UPDATE agents SET hwm_usdg = MAX\(hwm_usdg, \?\)/);
+    const updates = store.match(/UPDATE agents SET (?:hwm_usdg|hwm_withdrawn_usdg)[^;`]*/g) ?? [];
+    assert.ok(updates.length >= 3, `expected the set/adjust/restore statements, found ${updates.length}`);
+    for (const u of updates) {
+      const flat = u.replace(/\s+/g, " ");
+      // A ratchet either compares (CASE/MAX) or accumulates (`col = col + ?`).
+      // An assignment of a bare placeholder is the regression this guards.
+      const ratchets = /CASE WHEN/.test(flat) || /MAX\(/.test(flat);
+      const accumulates = /hwm_usdg = hwm_usdg \+ \?/.test(flat);
+      assert.ok(
+        ratchets || accumulates,
+        `this statement can lower a monotonic figure: ${flat.slice(0, 160)}`,
+      );
+    }
   });
 });

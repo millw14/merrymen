@@ -7318,20 +7318,35 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  /* THE CARD MUST NOT EAT THE PAGE.
-     `.desk-page` is a viewport-height flex column whose only scroller is the
-     conversation, and `.body` above it is `overflow: hidden`. So a tall sibling
-     does not push the page into scrolling — it is CLIPPED, silently. Measured
-     with four proposals on a 1536x742 desktop: the card was 906px inside a
-     662px body, the page overflowed by 754px, the document was not scrollable
-     at all, and the conversation had been squeezed to twelve pixels. A tester
-     reported exactly this — "i cant scroll down, the bottom is cut off".
-     Bounding the LIST rather than the card keeps the heading and the re-sign
-     button — the thing an owner has to press to act on any of this — always in
-     view, and lets a long list scroll where a long list belongs. */
-  max-height: min(40vh, 320px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
+  /* NO SCROLLER HERE. THE CONVERSATION IS THE ONLY ONE IN THE CHAT.
+
+     This block used to cap the list at `min(40vh, 320px)` with `overflow-y:
+     auto` and `overscroll-behavior: contain`, and the reasoning was about a
+     tall SIBLING being clipped by a `.body` that is `overflow: hidden`. That
+     was true when it was written (3a1a13f, "The proposals card could not be
+     scrolled to"). It stopped being true the next day: 1b4ea3e moved
+     `<Proposals>` INSIDE `.desk-conversation`, and said so itself — "Inside the
+     scroller they cannot take the conversation's height at all. Nothing is
+     hidden, nothing can overflow." A child of an `overflow-y: auto` box cannot
+     clip its parent and cannot squeeze a flex sibling.
+
+     So the cap prevented nothing and cost something. It made a second, nested
+     scroller, and with containment the wheel stopped dead at the list's end
+     instead of passing to the conversation — a region of the card where
+     scrolling did nothing at all. Reported: "i could not scroll completely down
+     to read the rest of the last recommendation of 'LLM'. I had to hover my
+     mousepointer to the top at 'Add all 3 to my watchlist' to be able to scroll
+     down further." That workaround is the diagnosis: the button sits OUTSIDE
+     the <ol>, so the wheel reached the real scroller from there. The same dead
+     zone hid `.proposals-next` — the re-sign button, which the cap's own
+     comment claimed to be keeping in view.
+
+     The card is bounded by CONTENT instead, and already was: the API serves at
+     most five proposals. A content bound survives a layout change; a `vh` bound
+     measured against the viewport inside a panel-sized scroller does not.
+
+     Containment belongs on overlays that cover what is behind them —
+     `.feed-sheet`, `.portfolio-dialog` — never on an inline card. */
 }
 
 :where(.terminal-host) .proposal {
@@ -7504,11 +7519,39 @@
 }
 
 
-:where(.terminal-host) .desk-blocked p {
+/* THE SAME PANEL, FOR A STATE THAT IS NOT A FAULT.
+   Identical geometry to .desk-blocked so the layout does not jump, and a
+   deliberately neutral palette instead of --down: an owner who chose Paper mode
+   is being told what their agent is doing, not warned about it. Rendering that
+   sentence in the red box is what convinced a beta owner his agent was broken
+   while it was practising exactly as he had asked. */
+:where(.terminal-host) .desk-note {
+  margin: 0 0 14px;
+  padding: 13px 15px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r);
+  background: color-mix(in srgb, var(--tx) 5%, transparent);
+}
+
+:where(.terminal-host) .desk-blocked p,
+:where(.terminal-host) .desk-note p {
   margin: 0;
   font-size: 13px;
   line-height: 1.6;
   color: var(--tx);
+}
+
+:where(.terminal-host) .desk-note button {
+  margin-top: 11px;
+  margin-right: 8px;
+  padding: 8px 15px;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--tx);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 :where(.terminal-host) .desk-blocked button {

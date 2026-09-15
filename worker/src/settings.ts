@@ -64,7 +64,18 @@ export interface ResolvedConfig {
   ponsAdapterAddress: `0x${string}` | undefined;
   /** The PonsClassVaultFactory. A HINT for signing; the grant is the authority. */
   ponsClassVaultFactory: `0x${string}` | undefined;
+  /** Which kinds of thing may be BOUGHT. Never filters the watch set. */
+  assetMode: "all" | "stocks" | "crypto";
   paperTradingEnabled: boolean;
+  /** The owner's explicit consent to put real orders on chain. Default false. */
+  liveTradingEnabled: boolean;
+  /**
+   * Is the consent gate in force yet? False ONLY while the one-time migration
+   * that populates `liveTradingEnabled` is still in report mode — see
+   * `ExecInputs.enforceLiveIntent` for why a gate with a safe default is an
+   * outage until somebody has written the field for the people mid-trade.
+   */
+  enforceLiveIntent: boolean;
   paperStartUsdg: number;
   /** Builtin name, or a user strategy filename (strategies/<name>.ts). */
   strategy: string;
@@ -326,7 +337,41 @@ export function mergeSettings(
     v4AdapterAddress,
     ponsAdapterAddress,
     ponsClassVaultFactory,
+    assetMode: oneOf(file.assetMode, env.MERRYMEN_ASSET_MODE, ["all", "stocks", "crypto"] as const, d.assetMode),
     paperTradingEnabled: bool(file.paperTradingEnabled, env.MERRYMEN_PAPER_TRADING, d.paperTradingEnabled),
+    // NO ENVIRONMENT OVERRIDE, and the omission is the point.
+    //
+    // Every sibling here takes `env.MERRYMEN_*` as a middle term, which is right
+    // for operational knobs: the house may set a bundler, a tick rate, a fee. It
+    // is wrong for this one. `MERRYMEN_LIVE_TRADING=true` on the orchestrator
+    // would be the house granting consent to spend real money on behalf of every
+    // owner in the fleet simultaneously — the exact implicit promotion this
+    // field was added to prevent, available as a single deploy variable.
+    //
+    // So consent is read from the tenant's OWN settings or not at all. `bool`
+    // is still the reader, with `undefined` for the env slot, so an absent
+    // field falls to the default (false) rather than to anything ambient.
+    liveTradingEnabled: bool(file.liveTradingEnabled, undefined, d.liveTradingEnabled),
+    // NOT a tenant setting and not in the file: this is an operator-controlled
+    // migration state.
+    //
+    // IT USED TO READ `MERRYMEN_BACKFILL_LIVE_INTENT !== "report"`, so that
+    // asking the migration to REPORT also switched the gate off. That was right
+    // exactly once — before the migration had run, when the field was absent
+    // fleet-wide and enforcing it would have moved every live agent to paper.
+    //
+    // After the migration it inverts into a hazard: the fleet now has 46 grant
+    // tenants whose consent IS recorded, and re-running the report to check a
+    // detail would quietly un-gate every one of them for the length of the run
+    // — reopening the original bug (funding implying consent) as a side effect
+    // of asking a read-only question. A dry run must not change behaviour; that
+    // is the entire meaning of the word.
+    //
+    // So standing down is now its own deliberate act, on its own variable, and
+    // `=report` is inert. Set this ONLY on a deployment whose owners have no
+    // `liveTradingEnabled` recorded yet — a fresh self-hosted upgrade — and
+    // remove it in the same session, as docs/live-trading-consent.md sets out.
+    enforceLiveIntent: (env.MERRYMEN_LIVE_INTENT_STAND_DOWN ?? "").trim() !== "1",
     paperStartUsdg: num(file.paperStartUsdg, env.MERRYMEN_PAPER_START_USDG, d.paperStartUsdg, 1, 10_000_000),
     // Any sane token is a valid strategy name — builtins resolve directly,
     // everything else resolves to strategies/<name>.* (missing file = honest
@@ -524,6 +569,16 @@ export function strategyKey(cfg: ResolvedConfig): string {
     // rebuild it — otherwise a token added mid-run is never read or priced until
     // the next restart, and the owner sees nothing happen.
     cfg.customTokens.map((t) => `${t.symbol}:${t.address.toLowerCase()}:${t.decimals}`).join(","),
+    // WITHOUT THIS THE SETTING IS INERT. `watchTokens` and the strategy are only
+    // rebuilt when this key changes, so a mode the owner flips would do nothing
+    // until some other strategy field happened to move.
+    cfg.assetMode,
+    // AND `officialCoinsEnabled` WAS ALREADY IN THAT STATE — a pre-existing bug
+    // found while adding the line above. Its own doc promises that turning it
+    // off "removes the listings from the watch set entirely", and the rebuild
+    // that would do so sits behind this key. Masked only because
+    // OFFICIAL_COINS[4663] is empty, so there has been nothing to remove.
+    cfg.officialCoinsEnabled,
     cfg.buyPerTickUsdg,
     cfg.idleFloorUsdg,
     cfg.gapEnterBudgetUsdg,

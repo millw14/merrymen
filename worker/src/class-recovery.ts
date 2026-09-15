@@ -135,6 +135,23 @@ export interface ClassHolding {
   token: `0x${string}`;
   symbol: string;
   raw: bigint;
+  /**
+   * The token's OWN decimals, carried because the vault is no longer all one
+   * shape.
+   *
+   * `planRecovery` formatted every class holding at 18dp — correct while the
+   * only things a vault held were Pons launch tokens, and wrong the moment the
+   * enumeration started asking about the quote asset too. USDG is 6dp, so a
+   * real 5.785344 USDG was disclosed to an owner as 0.000000000005785344 USDG:
+   * the right money, misstated by twelve orders of magnitude, on the screen
+   * where they decide whether to sign.
+   *
+   * The sweep itself was never affected — `sweep(token)` takes no amount and
+   * moves the whole balance — which is exactly what makes this dangerous. It is
+   * a disclosure bug with no execution symptom, so nothing else would have
+   * caught it.
+   */
+  decimals: number;
 }
 
 export type ClassContents =
@@ -154,10 +171,59 @@ export type ClassContents =
  * prints "there may be more here than this shows" rather than an empty list, for
  * the same reason `planRecovery` carries `unreadable` at all.
  */
+/**
+ * WHAT TO ASK THE VAULT ABOUT — from its logs AND from the token registry.
+ *
+ * THE LOGS CANNOT NAME THE QUOTE ASSET. `ClassBuy`/`ClassSell`/`Swept` carry
+ * the CLASS token in `token` and the quote only as an amount; the quote asset's
+ * address appears in no event this contract emits. So a candidate list built
+ * from logs alone can never include USDG, and a vault holding stranded quote
+ * enumerates as holding nothing but its class tokens — which is what an owner
+ * is then shown, and what the sweep then moves.
+ *
+ * Measured: Shogun's vault holds 1,063,408.141815 DOGGOS and 5.785344 USDG. The
+ * DOGGOS came from a ClassBuy; the USDG from a refund leg that did not land.
+ * Only the first was ever disclosed.
+ *
+ * The registry list is the same one the ACCOUNT sweep enumerates, which is right
+ * twice over: it certainly contains the quote asset, and "the assets we already
+ * check on the account" stays true as the registry changes, where a hard-coded
+ * USDG address would go stale on the next chain.
+ *
+ * Log-derived tokens come FIRST and win the symbol, because a class token's
+ * real symbol is not in the registry and the short-address placeholder is
+ * better than nothing; a registry token keeps its proper name.
+ */
+export function classSweepCandidates(
+  logTokens: readonly `0x${string}`[],
+  registry: readonly { address: string; symbol: string; decimals?: number }[],
+): { token: `0x${string}`; symbol: string; decimals: number }[] {
+  const seen = new Set<string>();
+  const out: { token: `0x${string}`; symbol: string; decimals: number }[] = [];
+  for (const token of logTokens) {
+    const k = token.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    // 18dp is the launchpad's shape: every Pons launch is 18 decimals, and a
+    // log-derived token is a launch by construction — `readClassLog` reads the
+    // vault's own ClassBuy/ClassSell events and nothing else writes them.
+    out.push({ token, symbol: `${token.slice(0, 10)}…`, decimals: 18 });
+  }
+  for (const t of registry) {
+    const k = t.address.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    // The registry KNOWS its decimals — USDG is 6 — and that is the whole
+    // reason this branch exists separately from the one above.
+    out.push({ token: t.address as `0x${string}`, symbol: t.symbol, decimals: t.decimals ?? 18 });
+  }
+  return out;
+}
+
 export async function readClassHoldings(args: {
   client: Pick<PublicClient, "readContract">;
   vault: `0x${string}`;
-  candidates: readonly { token: `0x${string}`; symbol: string }[];
+  candidates: readonly { token: `0x${string}`; symbol: string; decimals?: number }[];
 }): Promise<ClassContents> {
   const holdings: ClassHolding[] = [];
   const failed: string[] = [];
@@ -169,7 +235,7 @@ export async function readClassHoldings(args: {
         functionName: "balanceOf",
         args: [args.vault],
       })) as bigint;
-      if (raw > 0n) holdings.push({ token: c.token, symbol: c.symbol, raw });
+      if (raw > 0n) holdings.push({ token: c.token, symbol: c.symbol, raw, decimals: c.decimals ?? 18 });
     } catch {
       failed.push(c.symbol);
     }
@@ -210,7 +276,12 @@ export async function readClassHoldings(args: {
  * contradict PonsClassVault's own "no owner-admin, no pause, no upgrade, no
  * rescue-to-anywhere", and add a deploy and an audit to a recovery path.
  */
-export function planClassSweep(holdings: readonly ClassHolding[]): ClassHolding[] {
+/** What the sweep needs to know. Deliberately NOT the whole holding: decimals
+ * are a display concern and this builds calls, so requiring them here would make
+ * every caller and fixture carry a number the sweep never reads. */
+export type SweepableHolding = Pick<ClassHolding, "token" | "symbol" | "raw">;
+
+export function planClassSweep<T extends SweepableHolding>(holdings: readonly T[]): T[] {
   // ZERO BALANCES ARE FILTERED OUT, not skipped later. `sweep` reverts
   // ZeroAmount() on an empty balance, and the sweep batch is atomic — so one
   // empty token would revert the whole thing. Unlike recover.ts's per-token

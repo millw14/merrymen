@@ -75,6 +75,17 @@ export interface TelegramState {
   lastNotifiedTradeId: number;
   /** Unix seconds of the last batched trade summary (quiet mode). */
   lastTradeDigestAt: number;
+  /**
+   * The reject rule whose REMEDY was last pushed to the owner.
+   *
+   * A refusal repeats every tick the strategist re-proposes the same leg, so
+   * the instruction for fixing it must not. The refusal line still goes out
+   * each time — it is a measurement, and a suppressed one is a lie about how
+   * often this is happening — but "re-sign at /grant" is said once per rule and
+   * then held until the rule changes. Adding a remedy without this turns one
+   * confusing push per tick into one paragraph per tick.
+   */
+  lastRemedyRule: string | null;
   /** Condition-episode dedupe: key → unix seconds last fired. */
   firedAlerts: Record<string, number>;
   /** YYYY-MM-DD of the last daily digest sent. */
@@ -100,6 +111,7 @@ const DEFAULT: TelegramState = {
   messageCount: 0,
   lastNotifiedTradeId: -1,
   lastTradeDigestAt: 0,
+  lastRemedyRule: null,
   firedAlerts: {},
   lastDigestDate: "",
   lastJournalDate: "",
@@ -125,6 +137,7 @@ export function loadTelegramState(): TelegramState {
       messageCount: typeof s.messageCount === "number" ? s.messageCount : 0,
       lastNotifiedTradeId: typeof s.lastNotifiedTradeId === "number" ? s.lastNotifiedTradeId : -1,
       lastTradeDigestAt: typeof s.lastTradeDigestAt === "number" ? s.lastTradeDigestAt : 0,
+      lastRemedyRule: typeof s.lastRemedyRule === "string" ? s.lastRemedyRule : null,
       firedAlerts: s.firedAlerts && typeof s.firedAlerts === "object" ? (s.firedAlerts as Record<string, number>) : {},
       lastDigestDate: typeof s.lastDigestDate === "string" ? s.lastDigestDate : "",
       lastJournalDate: typeof s.lastJournalDate === "string" ? s.lastJournalDate : "",

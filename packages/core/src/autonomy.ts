@@ -39,6 +39,18 @@ export type RefuseRule =
   | "dead-policy"
   | "grant-too-wide"
   | "no-executor"
+  /**
+   * THE ONE THAT IS NOT A FAULT. The owner has not asked for real execution,
+   * so nothing is broken and there is nothing to repair — the agent is doing
+   * exactly what it was told. It sits in this union because every surface
+   * already knows how to carry a rule, and inventing a parallel channel for it
+   * would guarantee some surface forgot to read one of the two.
+   *
+   * It is deliberately ABSENT from `OWNER_ACTION` below. That set drives the
+   * red BLOCKED pill and the re-sign banner, and a practising owner is neither
+   * blocked nor in need of a signature.
+   */
+  | "live-not-enabled"
   | "wrong-chain"
   | "no-gas"
   | "no-cash";
@@ -63,6 +75,22 @@ export function liveBlockerText(rule: RefuseRule): string {
       );
     case "no-executor":
       return "no bundler is configured, so nothing can be submitted to the chain";
+    case "live-not-enabled":
+      // Present tense, no remedy, no urgency. This is a description of a
+      // working agent doing what it was asked, and the one sentence here that
+      // must never read like a problem.
+      //
+      // AND IT MUST NOT CLAIM SIMULATION, because this rule reaches TWO
+      // different states. With `paperTradingEnabled` on it is a paper verdict
+      // and the agent simulates; with it off, `execModeOf` returns `refuse` and
+      // the agent does nothing at all. The first draft said "it is practising
+      // with simulated money" for both, which put this sentence next to
+      // `simulated: false` and "Available cash" in the idle arm below — one
+      // object asserting both halves of a contradiction.
+      //
+      // So this says only what is true either way. Whether anything is being
+      // simulated is carried by `mode`, which every caller already has.
+      return "live trading is off, so no real orders are placed — turn it on in Settings when you want it to trade for real";
     case "wrong-chain":
       return "this key is for a different network than the one trading happens on";
     case "no-gas":
@@ -86,7 +114,7 @@ export function liveBlockerText(rule: RefuseRule): string {
  * word "paper" is how nine owners sat in practice mode without being told that a
  * free signature would end it.
  */
-export type AutonomyState = "live" | "paper" | "blocked" | "idle";
+export type AutonomyState = "live" | "paper" | "blocked" | "idle" | "checking";
 
 /** Blockers only the OWNER can clear. Everything else is ours to fix. */
 const OWNER_ACTION: ReadonlySet<RefuseRule> = new Set<RefuseRule>([
@@ -112,7 +140,7 @@ const OWNER_ACTION: ReadonlySet<RefuseRule> = new Set<RefuseRule>([
  */
 function ownerRemedy(rule: RefuseRule | "expired"): {
   headline: string;
-  action: { label: string; kind: "renew-grant" | "add-funds" };
+  action: { label: string; kind: "renew-grant" | "add-funds"; chain?: number };
 } {
   switch (rule) {
     case "wrong-chain":
@@ -120,7 +148,15 @@ function ownerRemedy(rule: RefuseRule | "expired"): {
         headline: "Your Merryman's permission is for a different network.",
         // Names the network, because the fix is to CHANGE one and the screen
         // opens on the one being replaced.
-        action: { label: "Re-sign on Robinhood Chain", kind: "renew-grant" },
+        //
+        // AND NOW CARRIES IT. Naming the network in the label was only half a
+        // remedy: the button said "Re-sign on Robinhood Chain" and opened a
+        // screen whose selector syncs to the grant being replaced — so the
+        // prominent control there read "re-sign this key (free)" and minted
+        // another testnet grant. The owner re-signed, the banner came back, and
+        // he reported the product as broken. `chain` is the intent travelling
+        // with the button so the destination can honour what the label promised.
+        action: { label: "Re-sign on Robinhood Chain", kind: "renew-grant", chain: 4663 },
       };
     case "grant-too-wide":
       return {
@@ -153,6 +189,32 @@ export interface AutonomyInput {
    * Null means unreadable, which is not zero and must not render as zero.
    */
   realCashUsd?: number | null;
+  /**
+   * WAS THIS VERDICT REACHED ABOUT A KEY THAT NO LONGER EXISTS?
+   *
+   * True when the owner signed a new grant more recently than the worker last
+   * spoke — i.e. `grant.grantedAt > workerAliveAt`. Both facts already travel on
+   * `AgentStatus`, from the grant store the POST wrote synchronously and from
+   * the mirrored `agents` row, so this asks nothing new of any service.
+   *
+   * WHY IT HAS TO EXIST. A corrected grant takes four hops to reach this
+   * screen — the orchestrator's 15s ferry, the child's 240s tick, the 15s
+   * mirror, the browser's 60s poll — about five and a half minutes at worst.
+   * For all of it the page kept asserting the OLD blocker, so an owner who had
+   * just done exactly what they were told watched the same banner tell them to
+   * do it again. One of them re-signed repeatedly and reported the product as
+   * broken; he was right to.
+   *
+   * THIS DOES NOT MAKE IT FASTER. It stops the screen claiming to know
+   * something it cannot know yet, which is the only honest move available — the
+   * remedy is a latency nobody can shorten from here.
+   *
+   * DELIBERATELY NOT A SUPPRESSION. It never says the agent is fine; it says we
+   * have not heard since the signature. The instant the worker beats, whatever
+   * it reports is shown in full — including "still wrong-chain", if the owner
+   * re-signed onto the sandbox again.
+   */
+  blockerPredatesGrant?: boolean;
 }
 
 export interface Autonomy {
@@ -186,7 +248,13 @@ export interface Autonomy {
    */
   headline: string | null;
   /** The button to render, when there is one worth rendering. */
-  action: { label: string; kind: "renew-grant" | "add-funds" } | null;
+  /**
+   * `start-live` is the odd one out, deliberately: the other two REPAIR
+   * something, this one CHANGES A DECISION. It has to exist for "the owner
+   * explicitly turned real trading on" to be a thing an owner can actually do —
+   * without an affordance, consent would be required and ungrantable.
+   */
+  action: { label: string; kind: "renew-grant" | "add-funds" | "start-live"; chain?: number } | null;
   /**
    * Is the money on this screen simulated?
    *
@@ -227,6 +295,37 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
     };
   }
 
+  /**
+   * A VERDICT ABOUT A KEY THE OWNER HAS ALREADY REPLACED IS NOT NEWS.
+   *
+   * Placed ahead of the OWNER_ACTION arm because that arm is the one that
+   * renders the red pill and asks for a signature — and asking for the
+   * signature they just gave is precisely the loop being closed here.
+   *
+   * Only the owner-clearable rules are gated. `no-cash` and `no-gas` are not
+   * about the key at all, so a fresh signature says nothing about them and they
+   * carry on reporting normally.
+   */
+  if (input.blockerPredatesGrant === true && rule && OWNER_ACTION.has(rule)) {
+    return {
+      state: "checking",
+      label: "CHECKING",
+      reason:
+        "we have not heard from your agent since you re-signed — this usually takes a few minutes, " +
+        "and what it reports next will be about the new key",
+      rule,
+      // NOT an owner action: they have already taken it. Offering the button
+      // again is how the same signature gets made three times.
+      needsOwnerAction: false,
+      headline: null,
+      action: null,
+      // Unchanged from every other arm: what the money IS does not depend on
+      // how fresh our news about it is.
+      simulated: input.mode === "paper",
+      moneyLabel: input.mode === "paper" ? SIMULATED_LABEL : REAL_LABEL,
+    };
+  }
+
   if (rule && OWNER_ACTION.has(rule)) {
     const remedy = ownerRemedy(rule);
     return {
@@ -248,6 +347,16 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
     // NO REAL MONEY AND NO OWNER ACTION: the honest reading is "you have not
     // funded this yet", and the remedy is money, not a signature.
     const unfunded = input.realCashUsd === 0;
+    /**
+     * PRACTISING ON PURPOSE IS NOT A FUNDING PROBLEM, and offering "Add funds"
+     * here was how the confusion started: a deliberately-practising owner was
+     * shown a money button, so money is what he assumed was missing. It is not,
+     * and after this change money cannot promote him anyway.
+     *
+     * The honest control for someone already doing what they chose is the one
+     * that changes the choice.
+     */
+    const byChoice = rule === "live-not-enabled";
     return {
       state: "paper",
       label: "PAPER",
@@ -255,7 +364,11 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
       rule,
       needsOwnerAction: false,
       headline: null,
-      action: unfunded ? { label: "Add funds", kind: "add-funds" } : null,
+      action: byChoice
+        ? { label: "Start live trading", kind: "start-live" }
+        : unfunded
+          ? { label: "Add funds", kind: "add-funds" }
+          : null,
       simulated: true,
       moneyLabel: SIMULATED_LABEL,
     };
@@ -293,7 +406,17 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
 
 /** The two money labels, named once so no surface can invent a third. */
 export const REAL_LABEL = "Available cash";
-export const SIMULATED_LABEL = "Practice balance (not real money)";
+/**
+ * "PAPER", NOT "PRACTICE", and the word matters more than it looks.
+ *
+ * The product used "practice" for two unrelated things: simulated trading on any
+ * chain, and the testnet itself — the wallet screen literally offered "Move this
+ * key to practice (testnet 46630)". An owner who wanted the first could pick the
+ * second and end up with a grant that can never trade, which is exactly what
+ * happened. Three words now mean three things and nothing else: TESTNET is the
+ * 46630 network, PAPER is simulated trading, LIVE is real money.
+ */
+export const SIMULATED_LABEL = "Paper balance (not real money)";
 
 /**
  * The blocker as it arrives from the API: a TEXT column, so it can hold anything.
@@ -309,6 +432,12 @@ function normaliseRule(v: RefuseRule | string | null | undefined): RefuseRule | 
     case "dead-policy":
     case "grant-too-wide":
     case "no-executor":
+    // MUST BE LISTED, and the failure if it is not is the quiet kind: this
+    // function drops anything it does not recognise to null, and a null rule
+    // renders as an agent with nothing to say about itself. The one state whose
+    // whole purpose is to explain that practising is deliberate would arrive as
+    // no explanation at all.
+    case "live-not-enabled":
     case "wrong-chain":
     case "no-gas":
     case "no-cash":

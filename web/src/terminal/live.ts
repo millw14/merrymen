@@ -1,5 +1,6 @@
 import { loadTokenQuotes, applyTokenQuotes } from "./quotes";
 import { STOCK_TOKENS } from "@merrymen/core";
+import { rejectRuleLabel } from "@merrymen/thesis";
 import { parseStrategy, strategyLabel, type StrategyGlance } from "./strategy";
 import { whyLine } from "./why";
 
@@ -163,7 +164,19 @@ export interface Thesis {
    * that could have made something happen.
    */
   shadow?: boolean;
+  /**
+   * HOW MANY TIMES this exact thesis was said in the window. A COUNT, not a
+   * time — `worker/src/thesis-policy.ts` declares it that way and `ThesisCard`
+   * renders it as `×{said}`.
+   */
   said?: number;
+  /**
+   * EPOCH SECONDS. The worker's own mirror of this field says so
+   * (`thesis-policy.ts`: "Epoch seconds. Formatted by the page, so this module
+   * stays pure") and this copy carried no annotation at all — which is the
+   * proximate cause of the `20688d` bug, where the feed rail handed it to a
+   * millisecond formatter and printed a ~56-year age on every row.
+   */
   at?: number;
   /**
    * A STABLE NAME FOR THIS POST, so a like can be cast against it.
@@ -332,11 +345,27 @@ export function money(n: number | null): string {
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-/** How long ago this printed. Snapshot `said` is seconds-ago, not a unix time. */
+/**
+ * How long ago this printed.
+ *
+ * `said` IS NOT A FALLBACK FOR `at`, and it used to be one. The comment here
+ * read "Snapshot `said` is seconds-ago, not a unix time" — but `said` is a
+ * REPEAT COUNT (see its declaration above, and `ThesisCard`'s `×{said}`). Two
+ * modules held two meanings for one field name, and on any row with no `at`
+ * this formatted "said 3 times" as an age. A row with no timestamp has no age;
+ * saying so is the honest answer and it is what every other reader does.
+ *
+ * THE UNIT HEURISTIC BELOW STAYS CONFINED TO THIS FUNCTION. It exists because
+ * `ageOf` also reads snapshot fixtures, which are not always in publisher
+ * units. It is deliberately NOT promoted to a shared helper: a formatter that
+ * silently accepts either unit cannot fail when handed the wrong one, which is
+ * precisely how the feed rail printed `20688d` for weeks. Callers that know
+ * their unit use `elapsed`/`whenOf` in `clock.ts`, which do not guess.
+ */
 export function ageOf(t: Thesis, now = Date.now()): string {
   if (t.when) return t.when;
 
-  const raw = t.at ?? t.said;
+  const raw = t.at;
   if (raw == null) return "";
   const ms = raw < 1e12 ? raw * 1000 : raw;
   return relSec((now - ms) / 1000);
@@ -819,7 +848,17 @@ function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
         // floor. `/api/feed` selects `reject_rule` deliberately; without it
         // every refused trade of the owner's own rendered "No explanation
         // available", which is a statement about us and not about the wall.
-        outcomeText:t.reject_rule ?? null,
+        // AND IN WORDS, not as the slug. The rule reached the screen but the
+        // sentence for it did not, so an owner read `no-exit` and had to come
+        // and ask what it meant. `rejectRuleLabel` is the same map the public
+        // tape renders, so the owner's feed and a stranger's cannot disagree
+        // about the same refusal; an unrecognised rule still falls back to the
+        // slug rather than to nothing, because a name is more use than silence.
+        //
+        // This also makes `why.ts`'s `stampOf` work for the first time: it
+        // matches on phrases in `outcomeText` ("per-trade", "spending",
+        // "drawdown") which could never match a slug.
+        outcomeText:rejectRuleLabel(t.reject_rule) ?? t.reject_rule ?? null,
       };
     }),
     glance: {

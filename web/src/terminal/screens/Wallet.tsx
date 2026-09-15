@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { verifiedAdapter } from "@/lib/verified-adapter";
+import { isWallTooWide } from "@merrymen/core";
 import { useCallback, useEffect, useState } from "react";
 import { createPublicClient, formatEther, http } from "viem";
 import { Info } from "@/components/Info";
@@ -37,6 +38,7 @@ import {
   type OwnerPreview,
   type SavedWallet,
 } from "@/lib/session";
+import { SignOut } from "../SignOut";
 import { conceptTooltip } from "@merrymen/core";
 import { canStart } from "@/lib/can-start";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
@@ -207,6 +209,36 @@ const TESTNET = robinhoodTestnet.id; // 46630 — the sandbox
 
 const MAINNET = robinhoodChain.id; // 4663 — real funds
 
+/**
+ * WHICH CHAIN THE PAGE WAS ASKED TO OPEN ON, from `?chain=`.
+ *
+ * A banner elsewhere says "Re-sign on Robinhood Chain" and, until this existed,
+ * opened a screen that pinned its selector to the testnet grant being replaced
+ * — so the obvious control here read "re-sign this key (free)" and minted
+ * another testnet grant. The owner re-signed, the banner came back, and he
+ * reported the product as broken. The button's promise now arrives with it.
+ *
+ * A QUERY RATHER THAN A PROP, because the descriptor cannot survive the trip:
+ * `pathForScreen` flattens `{kind:"grant"}` to the string "/grant" and the
+ * screen is re-hydrated from `usePathname()`, which carries no query — and the
+ * phone's route is a full page load besides, where props do not exist at all.
+ *
+ * IT ONLY PRE-SELECTS. Everything downstream is unchanged: the move is still an
+ * explicit ticked checkbox (derived from `chainId !== grant.chainId`), the
+ * mainnet acknowledgement is still required, the button still renames itself to
+ * "move to Robinhood Chain & re-sign", and the change line still lists the move. A
+ * link cannot sign anything; it can only open the form on the right page.
+ *
+ * Unrecognised values are ignored rather than trusted — this comes from a URL,
+ * so it is input, and the fallback is the behaviour that was already correct.
+ */
+function requestedChain(): number | null {
+  if (typeof window === "undefined") return null;
+  const raw = new URLSearchParams(window.location.search).get("chain");
+  const id = Number(raw);
+  return id === MAINNET || id === TESTNET ? id : null;
+}
+
 function short(a: string): string {
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
 }
@@ -333,11 +365,11 @@ export default function GrantPage() {
 
     This only became safe once paper mode was keyed on capability rather than
     on a missing bundler key: a new mainnet grant with no funds is now genuinely
-    in practice mode, so "watch it work before risking anything" survives the
+    on paper, so "watch it work before risking anything" survives the
     flip instead of being deleted by it. Do not restore this default without
     also reverting that.
 
-    Practice stays on the menu, one click away, and the real-money
+    Paper stays on the menu, one click away, and the real-money
     acknowledgement is untouched.
   */
   const [chainId, setChainId] = useState<number>(MAINNET);
@@ -399,7 +431,7 @@ export default function GrantPage() {
     // follow for the same reason: the form should open showing what the
     // current key actually carries.
     if (stored) {
-      setChainId(stored.chainId);
+      setChainId(requestedChain() ?? stored.chainId);
       setCaps(stored.caps);
     }
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
@@ -466,7 +498,12 @@ export default function GrantPage() {
            */
           if (s.grant) {
             setGrant(s.grant);
-            setChainId(s.grant.chainId);
+            // THE SAME INTENT ON THE OTHER ARM. This branch serves a hosted
+            // Privy owner signed in from any browser that did not mint the
+            // agent — which is most of them — so an intent applied only to the
+            // localStorage arm above would miss exactly the cohort that cannot
+            // re-sign any other way.
+            setChainId(requestedChain() ?? s.grant.chainId);
             setCaps(s.grant.caps);
             // NOTHING TO WRITE DOWN *HERE*, which is not the same as backed
             // up. A Privy agent has no owner key in any browser; a legacy one
@@ -617,6 +654,21 @@ export default function GrantPage() {
         ...tokenCoverage(customTokens, grant).uncovered.map((t) => t.symbol),
       ]
     : [];
+
+  /**
+   * TOKENS THE OWNER ADDED AND NEVER PUT IN THE BASKET.
+   *
+   * A different problem from `uncoveredNames`, with a different remedy, and the
+   * panel below promised the wrong one for it: "Re-signing fixes it: same
+   * wallet, same funds, same caps, free and instant." For a token that is not in
+   * the basket, re-signing fixes NOTHING — the grant will cover it and no
+   * strategy will ever propose it, because `legsForUniverse` intersects the
+   * watch set with `basketSymbols`. An owner who followed that sentence signed,
+   * waited, and came back to ask why his agent still only traded stocks.
+   */
+  const watchedNotTraded = customTokens
+    .map((t) => t.symbol)
+    .filter((sym) => !basketSymbols.includes(sym));
 
   const isMainnet = chainId === MAINNET;
   // Mainnet is real money — the create button stays locked until the user
@@ -888,7 +940,7 @@ export default function GrantPage() {
      * IT NOW ASKS THE WORKER TO DO IT. /api/paper-reset queues the one command
      * the child can act on, and the child REFUSES IT ON THE LIVE RAIL: real
      * positions and trades are never deleted by anything here. On paper it puts
-     * the practice cash back, drops the simulated positions, and closes the old
+     * the paper cash back, drops the simulated positions, and closes the old
      * fills into a new accounting epoch — kept on disk for forensics, counted
      * toward nothing. Queued unconditionally because only the worker knows which
      * rail it is on; this screen would be guessing.
@@ -898,7 +950,7 @@ export default function GrantPage() {
         `Starting over forgets the signed key, and your account address does not change.\n\n` +
           `It comes from the login you signed in with, so the next agent lands on the same ` +
           `address.\n\n` +
-          `If you are PRACTISING, the practice book restarts: cash back to the starting stake, ` +
+          `If you are on PAPER, the paper book restarts: cash back to the starting stake, ` +
           `positions cleared, and earlier paper trades kept on file but no longer counted.\n\n` +
           `If you are trading for REAL, nothing is deleted — your positions, trades and P&L stay ` +
           `exactly as they are.\n\nStart over anyway?`,
@@ -909,7 +961,7 @@ export default function GrantPage() {
     // Also destroy the worker-side handoff — otherwise the "discarded" grant
     // stays armed and the worker keeps trading on it (kill-switch semantics).
     void fetch("/api/grants", { method: "DELETE" }).catch(() => {});
-    // Ask the child to restart the practice book. Best-effort and
+    // Ask the child to restart the paper book. Best-effort and
     // unconditional: only the worker knows which rail it is on, and it refuses
     // this outright when the agent is live, so nothing real can be cleared.
     void fetch("/api/paper-reset", { method: "POST" }).catch(() => {});
@@ -968,7 +1020,7 @@ export default function GrantPage() {
    */
   const allChanges =
     grant && chainId !== grant.chainId
-      ? [`chain ${grant.chainId === MAINNET ? "mainnet" : "practice"} → ${chainId === MAINNET ? "mainnet" : "practice"}`, ...capChanges]
+      ? [`chain ${grant.chainId === MAINNET ? "Robinhood Chain" : "testnet"} → ${chainId === MAINNET ? "Robinhood Chain" : "testnet"}`, ...capChanges]
       : capChanges;
   const anyChange = allChanges.length > 0;
 
@@ -1047,6 +1099,26 @@ export default function GrantPage() {
       )}
 
         <div className="grant-shell">
+        {/* ─── WHO YOU ARE SIGNED IN AS, AND THE WAY OUT ──────────────────────
+            This page is titled "Wallet & permissions" and is where anyone looking
+            to change accounts arrives — it had neither the signed-in address nor
+            a sign-out. The owner hit exactly that: "I don't know my tenant/login
+            wallet address offhand" and then "no logout button".
+
+            The address is PUBLIC — it is the tenant id, already on every log line
+            — and it is the one fact that says which account you are operating.
+            It is never a key: `session` here is `{hosted, address}` and nothing
+            else. `SignOut` ends the Privy session before the server one, which
+            is what stops the prove-on-authenticated effect signing you straight
+            back in. */}
+        {session?.hosted && session.address && (
+          <div className="grant-session">
+            <span>
+              signed in as <code>{session.address}</code>
+            </span>
+            <SignOut after={() => window.location.reload()} className="flow-secondary" />
+          </div>
+        )}
         {/* ─── desync banner: browser has a wallet the server no longer holds ── */}
         {desynced && (
           <div className="grant-panel desync-panel">
@@ -1060,7 +1132,7 @@ export default function GrantPage() {
                 which is every desync. A refusal here was therefore invisible no
                 matter which path produced it, and pressing re-arm looked like a
                 button that did nothing. */}
-            {error && <div className="grant-error mono">{error}</div>}
+            {error && <div className="grant-error mono">{error}{isWallTooWide(error) && <> <a href="/settings">Review custom tokens</a></>}</div>}
             {/* WHAT IS ACTUALLY IN IT, and the key to it. A wallet reaches this
                 panel precisely when the server won't arm it, which is also when
                 someone is most likely to think their money has vanished. The
@@ -1167,7 +1239,7 @@ export default function GrantPage() {
                 className={`chain-card ${!isMainnet ? "selected" : ""}`}
                 onClick={() => setChainId(TESTNET)}
               >
-                <span className="chain-card-title"><GI d="tree" size={16} /> Practice (testnet)</span>
+                <span className="chain-card-title"><GI d="tree" size={16} /> Testnet (46630)</span>
                 <span className="chain-card-body">
                   {/* SAID AT THE POINT OF CHOICE, not afterwards in the chat.
                       The hosted worker trades Robinhood Chain, so a key signed
@@ -1176,7 +1248,7 @@ export default function GrantPage() {
                       unused". Practice mode on this service is PAPER TRADING,
                       which is a setting and needs no separate chain. */}
                   {session?.hosted
-                    ? "Not for this service — your agent trades Robinhood Chain, so a key signed here cannot trade at all. For practice, keep paper trading on in Settings instead."
+                    ? "Not for this service — your agent trades Robinhood Chain, so a key signed here cannot trade at all. For simulated trading, turn Paper on in Settings instead."
                     : "Simulated trading at live prices. No real deposits needed."}
                 </span>
               </button>
@@ -1185,7 +1257,7 @@ export default function GrantPage() {
                 className={`chain-card danger ${isMainnet ? "selected" : ""}`}
                 onClick={() => setChainId(MAINNET)}
               >
-                <span className="chain-card-title"><GI d="coin" size={16} /> Real money (mainnet)</span>
+                <span className="chain-card-title"><GI d="coin" size={16} /> Robinhood Chain (4663)</span>
                 <span className="chain-card-body">
                   The real Robinhood Chain — real funds, real trades. Only when you&apos;re ready.
                 </span>
@@ -1312,7 +1384,7 @@ export default function GrantPage() {
             </div>
 
             <div className="grant-summary">
-              In {isMainnet ? "live trading" : "practice mode"}, this agent can trade
+              On {isMainnet ? "Robinhood Chain" : "the testnet"}, this agent can trade
               at most <b>{caps.perTradeUsdg} USDG</b> per trade, <b>{caps.dailyUsdg} USDG</b> per day,
               and <b>{caps.maxOpsPerDay}</b> trades per day. It stops itself if it&apos;s down{" "}
               <b>{caps.maxDrawdownPct}%</b>, and its key auto-expires in <b>{caps.expiryDays} days</b>.
@@ -1343,7 +1415,7 @@ export default function GrantPage() {
                 {status ??
                   (createBlocked
                     ? "acknowledge the real-funds warning above first"
-                    : `Create my agent (${isMainnet ? "real money" : "practice"})`)}
+                    : `Create my agent on ${isMainnet ? "Robinhood Chain" : "the testnet"}`)}
               </button>
             ) : (
               <>
@@ -1379,7 +1451,7 @@ export default function GrantPage() {
                 </button>
               </>
             )}
-            {error && <div className="grant-error mono">{error}</div>}
+            {error && <div className="grant-error mono">{error}{isWallTooWide(error) && <> <a href="/settings">Review custom tokens</a></>}</div>}
 
           </div>
         )}
@@ -1473,6 +1545,22 @@ export default function GrantPage() {
                 position with no way out, and no cap protects you from that.
                 <br />
                 Re-signing fixes it: same wallet, same funds, same caps, free and instant.
+                {watchedNotTraded.length > 0 && (
+                  /* AND WHAT RE-SIGNING WILL NOT FIX. Coverage and selection are
+                     two different gates; this panel only ever spoke about the
+                     first, so an owner could do exactly what it said and still
+                     have an agent that never touches the token. */
+                  <>
+                    <br />
+                    <br />
+                    One more thing, and a signature won&apos;t do it:{" "}
+                    <b>{watchedNotTraded.join(", ")}</b>{" "}
+                    {watchedNotTraded.length === 1 ? "is" : "are"} on your watch list but not in
+                    your <b>trading basket</b>, so your agent will follow{" "}
+                    {watchedNotTraded.length === 1 ? "it" : "them"} and never buy. Tick{" "}
+                    {watchedNotTraded.length === 1 ? "it" : "them"} on in Settings → Trading basket.
+                  </>
+                )}
                 {/*
                   SCROLLS, does not sign — the same correction the expiry prompt
                   below already got, and for the same reason. This button called
@@ -1537,7 +1625,7 @@ export default function GrantPage() {
             <p className="grant-sub">
               {grantIsTestnet ? (
                 <>
-                  Send only <b>testnet ETH</b> to this address. Practice trades use simulated funds.
+                  Send only <b>testnet ETH</b> to this address. Trades here use simulated funds.
                 </>
               ) : (
                 <>
@@ -1598,7 +1686,7 @@ export default function GrantPage() {
                 </span>
                 <span className="fund-bal-s">
                   {grantIsTestnet
-                    ? "not tracked on practice — merrymen only knows the mainnet USDG address"
+                    ? "not tracked on the testnet — merrymen only knows the mainnet USDG address"
                     : usdgFunded
                       ? "funded ✓"
                       : "the agent's trading capital"}
@@ -1660,7 +1748,7 @@ export default function GrantPage() {
 
                   Shown from the moment GAS lands rather than waiting for capital,
                   because the agent is already doing something at that point: with
-                  no USDG it runs in practice mode, which is exactly what somebody
+                  no USDG it runs on paper, which is exactly what somebody
                   who has just funded gas wants to watch.
                 */}
                 <Link
@@ -1891,14 +1979,14 @@ export default function GrantPage() {
                       <span>
                         {grant.chainId === MAINNET ? (
                           <>
-                            Move this key to <b>practice (testnet {TESTNET})</b> — it will stop being
+                            Move this key to <b>the testnet ({TESTNET})</b> — it will stop being
                             able to trade
                             {session?.hosted
-                              ? ", and on this service it cannot be used for anything: your agent trades Robinhood Chain. Turn paper trading on in Settings instead."
+                              ? ", and on this service it cannot be used for anything: your agent trades Robinhood Chain. Turn Paper on in Settings instead."
                               : "."}
                           </>
                         ) : (
-                          <>Move this key to <b>live trading (mainnet {MAINNET})</b> — where your agent actually trades.</>
+                          <>Move this key to <b>Robinhood Chain ({MAINNET})</b> — the network your agent trades on.</>
                         )}
                       </span>
                     </label>
@@ -1951,8 +2039,8 @@ export default function GrantPage() {
                       ? "re-signing…"
                       : chainId !== grant.chainId
                         ? chainId === MAINNET
-                          ? "move to real money & re-sign"
-                          : "move to practice & re-sign"
+                          ? "move to Robinhood Chain & re-sign"
+                          : "move to the testnet & re-sign"
                         : "re-sign this key (free)"}
                   </button>
                 </>

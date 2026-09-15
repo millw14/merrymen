@@ -5,7 +5,7 @@
  * changes settings.
  */
 
-import { CASH, MORPHO, STOCK_TOKENS, isHostedMode, type StockToken } from "../../../packages/core/src/index";
+import { CASH, MORPHO, STOCK_TOKENS, assetModeAllows, isHostedMode, type AssetMode, type StockToken } from "../../../packages/core/src/index";
 import type { LlmCreds } from "../llm";
 import { createDriver, nullDriver } from "../strategist/driver";
 import { makeLlmStrategist, type StrategistDecision } from "../strategist/strategy";
@@ -31,6 +31,11 @@ export function isCircleStrategy(name: string): boolean {
 }
 
 export interface StrategyBuildOpts {
+  /**
+   * Which kinds of thing the owner wants traded. Absent = "all", so a host that
+   * does not set it is unchanged.
+   */
+  assetMode?: AssetMode;
   /**
    * The bonding-curve legs available right now, re-read per decision.
    *
@@ -204,8 +209,22 @@ export function legsForUniverse(
   symbols: readonly string[],
   universe?: readonly StockToken[],
   alwaysSymbols: readonly string[] = [],
+  /**
+   * WHICH KINDS OF THING MAY BE TRADED — the owner's asset mode.
+   *
+   * Applied to the POOL, before the basket intersection, so it narrows what can
+   * be proposed without touching what is watched. This is the highest-leverage
+   * line of the feature: every builtin resolves its legs through here, and the
+   * strategist derives `tradableSymbols` from the result — so an excluded class
+   * stops being named in the model's prompt at all, rather than being proposed
+   * and then refused. That is the direct fix for "it continue to answer me about
+   * the stock basket".
+   *
+   * Defaulted to "all" so every existing caller and test is unchanged.
+   */
+  mode: AssetMode = "all",
 ) {
-  const pool = universe ?? STOCK_TOKENS;
+  const pool = (universe ?? STOCK_TOKENS).filter((t) => assetModeAllows(mode, t.address));
   // Deduplicated, because an owner who ALSO put the official symbol in their
   // basket must not get the leg twice — that would halve every other leg's
   // weight and silently double the coin's target allocation.
@@ -219,8 +238,10 @@ export function legsForUniverse(
 }
 
 export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
+  // ONE PLACE THE MODE IS APPLIED for every builtin. They all resolve legs
+  // through this closure, so the filter cannot be forgotten by one of them.
   const legsFor = (symbols: readonly string[]) =>
-    legsForUniverse(symbols, opts.universe, opts.alwaysSymbols);
+    legsForUniverse(symbols, opts.universe, opts.alwaysSymbols, opts.assetMode);
   // Not a builtin → a user-written strategy file in strategies/ (lazy-loaded,
   // hot-reloading, crash-isolated; every intent is shape-validated and then
   // policy-checked like any other).

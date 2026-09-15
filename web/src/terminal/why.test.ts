@@ -61,10 +61,21 @@ describe("no line is ever invented", () => {
   });
 
   it("a take is capped, and the cap is visible", () => {
-    const long = "x".repeat(200);
+    const long = "x".repeat(400);
     const out = takeFor(long, null);
-    assert.ok(out.length <= 90, `capped, got ${out.length}`);
+    assert.ok(out.length <= 220, `capped, got ${out.length}`);
     assert.ok(out.endsWith("…"), "and the truncation is shown rather than hidden");
+  });
+
+  it("AND THE RAIL NO LONGER CLIPS TIGHTER THAN PUBLICATION DOES", () => {
+    // It used to cap at 90 while publication allows 220 and the card beside it
+    // renders the full 220 — so a two-clause view died mid-thought in the rail
+    // only. A real sentence of ~150 characters must now survive whole.
+    const view =
+      "Bought on the earnings gap rather than the trend: the move is large enough " +
+      "to matter and the volume behind it says it was not one desk marking a close.";
+    assert.ok(view.length > 90 && view.length < 220, `fixture must sit between the caps, got ${view.length}`);
+    assert.equal(takeFor(view, null), view, "no ellipsis, nothing lost");
   });
 });
 

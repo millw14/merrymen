@@ -31,6 +31,27 @@ export interface BlockerAdvice {
   say: string;
   /** True when sending money to the deposit address is what clears it. */
   funding: boolean;
+  /**
+   * True when a FRESH SIGNATURE is what clears it.
+   *
+   * Its own field because callers were inferring it as `!funding`, and that
+   * inference is false in both directions. `no-executor` is neither — this
+   * file's own entry says "ours to fix, not yours" — and yet the agent screen
+   * has been offering its owner a re-sign button for it. `live-not-enabled` is
+   * the second counterexample and the reason this got noticed: nothing is
+   * broken, so a signature would be a ceremony that changes nothing and teaches
+   * the owner the product is stuck.
+   */
+  resign: boolean;
+  /**
+   * Is anything actually WRONG?
+   *
+   * False for a deliberate state. Surfaces use it to choose between an alarm
+   * and a note — a red panel telling a practising owner their agent is fine is
+   * still a red panel, and it is what made one of them think the product was
+   * broken while it did exactly what he asked.
+   */
+  fault: boolean;
 }
 
 const ADVICE: Readonly<Record<string, BlockerAdvice>> = Object.freeze({
@@ -39,10 +60,14 @@ const ADVICE: Readonly<Record<string, BlockerAdvice>> = Object.freeze({
   "no-gas": {
     say: "Your agent has no ETH, and every trade pays a network fee before it reaches the chain. Send a small amount of ETH to the same address — a few dollars covers a lot of trades.",
     funding: true,
+    resign: false,
+    fault: true,
   },
   "no-cash": {
     say: "Your agent has no USDG to trade with. Send USDG to the address below.",
     funding: true,
+    resign: false,
+    fault: true,
   },
   // MONEY IS NOT THE FIX FOR THESE THREE, and saying "add funds" would be the
   // exact failure this codebase keeps refusing: a screen that looks like it is
@@ -50,10 +75,14 @@ const ADVICE: Readonly<Record<string, BlockerAdvice>> = Object.freeze({
   "dead-policy": {
     say: "This agent's trading permission was signed before a fix and cannot reach the chain. Re-signing it is free and takes a moment — adding funds will not help until you do.",
     funding: false,
+    resign: true,
+    fault: true,
   },
   "wrong-chain": {
     say: "This agent's permission is for a different network than the one trading happens on. It needs a new grant on Robinhood Chain; funds sent here will sit unused.",
     funding: false,
+    resign: true,
+    fault: true,
   },
   "grant-too-wide": {
     // NAMES THE TWO LEVERS, because "too wide" alone is a dead end. The cost
@@ -62,14 +91,34 @@ const ADVICE: Readonly<Record<string, BlockerAdvice>> = Object.freeze({
     // may remove five and still be refused.
     say: "This agent's permission set covers too many tokens and venues to install on-chain, so its first operation can never be signed. Re-signing with fewer of either is free and fixes it — adding funds will not, because nothing has been spent.",
     funding: false,
+    resign: true,
+    fault: true,
   },
   "not-armed": {
     say: "This agent's trading key is not active yet, so it has no permission to trade with. It arms itself on the next pass — nothing to send.",
     funding: false,
+    resign: false,
+    fault: false,
+  },
+  // NOT A PROBLEM, AND THE COPY MUST NOT INVENT ONE. Everything else in this
+  // map describes something wrong; this describes an agent doing what it was
+  // told. `funding: false` because money is emphatically not the fix — sending
+  // USDG to a practising agent was the misreading that started all of this.
+  "live-not-enabled": {
+    // NEUTRAL ABOUT SIMULATION, deliberately. This advice is keyed on the rule
+    // alone, and the rule reaches two states: an agent with paper trading on is
+    // simulating, one with it off is doing nothing at all. Claiming the first
+    // for both would tell a stopped agent's owner it was practising.
+    say: "Live trading is off, so this agent places no real orders. Nothing is wrong and nothing needs sending. Turn on Live trading in Settings when you want it to trade your real funds.",
+    funding: false,
+    resign: false,
+    fault: false,
   },
   "no-executor": {
     say: "No bundler is configured on this deployment, so nothing can be submitted to the chain. That is ours to fix, not yours.",
     funding: false,
+    resign: false,
+    fault: true,
   },
 });
 

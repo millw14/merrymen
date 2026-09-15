@@ -24,7 +24,18 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
-const CSS = readFileSync(new URL("./terminal.css", import.meta.url), "utf8");
+/**
+ * The stylesheet with its COMMENTS REMOVED.
+ *
+ * These assertions are about declarations, and this file's comments quote
+ * declarations at length — including the retired ones, which is how a rule gets
+ * "found" in the prose explaining why it was deleted. Stripping them first is
+ * what makes a `doesNotMatch` mean anything here.
+ */
+const CSS = readFileSync(new URL("./terminal.css", import.meta.url), "utf8").replace(
+  /\/\*[\s\S]*?\*\//g,
+  " ",
+);
 
 /** The declaration block for a selector, so a rule cannot be matched from a neighbour's. */
 const block = (selector: string): string => {
@@ -54,15 +65,45 @@ describe("the page can be scrolled to its end", () => {
     assert.match(conv, /overflow-y:\s*auto/);
   });
 
-  it("AND A LONG PROPOSAL LIST SCROLLS INSIDE ITS CARD", () => {
-    // Bounding the LIST rather than the card keeps the heading and the re-sign
-    // button — the control an owner has to press to act on any of it — in view
-    // at every length.
+  it("AND THE CONVERSATION IS THE ONLY SCROLLER IN THE CHAT", () => {
+    /**
+     * THIS ASSERTION USED TO RUN THE OTHER WAY, and the reversal is the fix
+     * rather than a weakening.
+     *
+     * It required `.proposal-list` to carry `max-height: min(40vh, 320px)`,
+     * `overflow-y: auto` and `overscroll-behavior: contain`, and the reasoning
+     * was sound for the layout it was written against (3a1a13f): `.proposals`
+     * was a SIBLING, `.body` is `overflow: hidden`, and a tall sibling was
+     * clipped rather than scrolled.
+     *
+     * 1b4ea3e moved the card INSIDE `.desk-conversation` the following day. A
+     * child of an `overflow-y: auto` box cannot clip its parent, so the cap
+     * prevented nothing — while the containment turned the list into a wheel
+     * trap. Reported: "i could not scroll completely down to read the rest of
+     * the last recommendation… I had to hover my mousepointer to the top at
+     * 'Add all 3 to my watchlist'." That button is outside the <ol>, which is
+     * why moving there reached the real scroller.
+     *
+     * The two blocks above — the ones that actually fixed the first report —
+     * are untouched.
+     */
     const list = block(":where(.terminal-host) .proposal-list {");
-    assert.match(list, /max-height:\s*min\(40vh,\s*320px\)/);
-    assert.match(list, /overflow-y:\s*auto/);
-    // A nested scroller that chains to the page pulls the whole screen when the
-    // list ends, which reads as the card jumping.
-    assert.match(list, /overscroll-behavior:\s*contain/);
+    assert.doesNotMatch(list, /max-height/);
+    assert.doesNotMatch(list, /overflow-y:\s*auto/);
+    assert.doesNotMatch(list, /overscroll-behavior/);
+  });
+
+  it("AND NOTHING INLINE IN THE CHAT SWALLOWS THE WHEEL", () => {
+    // Generic rather than per-selector, and that is the strengthening: the next
+    // inline card cannot reintroduce this, and it is pinned as a PROPERTY of the
+    // chat rather than as three declarations on one class.
+    //
+    // Containment is for overlays that cover what is behind them — a sheet, a
+    // dialog — where chaining to the page underneath is the bug. An inline card
+    // has nothing behind it to protect.
+    for (const cls of ["proposal-list", "proposals", "desk-notice", "desk-note", "desk-blocked"]) {
+      const re = new RegExp(`\\.${cls}\\s*\\{[^}]*overscroll-behavior:\\s*contain`, "s");
+      assert.doesNotMatch(CSS, re, `${cls} must not trap the wheel`);
+    }
   });
 });

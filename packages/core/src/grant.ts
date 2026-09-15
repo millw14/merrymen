@@ -559,19 +559,38 @@ export function tokenCoverage(
 }
 
 /**
- * Registry symbols the owner has selected that this grant cannot sell.
+ * Basket symbols the owner has selected that this grant cannot sell.
  *
- * The settings UI offers every symbol in the registry, but only the ones baked
- * into the signature can be approved for a sell — and approving USDG is generic,
- * so the buy side works regardless. That asymmetry is what let someone pick AAPL
- * and end up holding it forever. Reported, and refused at the wall.
+ * Only the tokens baked into the signature can be approved for a sell —
+ * approving USDG is generic, so the buy side works regardless. That asymmetry is
+ * what let someone pick AAPL and end up holding it forever. Reported, and
+ * refused at the wall by the `no-exit` rule.
+ *
+ * IT LOOKED ONLY AT THE REGISTRY, which made the warning structurally incapable
+ * of firing for the case that needs it most. The settings screen has offered
+ * CUSTOM symbols as basket entries since `route.ts` widened its validator, and a
+ * custom token found no match in `STOCK_TOKENS` and simply fell out of the
+ * filter — so the red "update your trading permissions to buy or sell X" banner
+ * never appeared for a memecoin, which is exactly the token an owner is most
+ * likely to have added after signing.
+ *
+ * `customTokens` DEFAULTS TO EMPTY on purpose. The two existing callers —
+ * `Wallet.tsx` and the worker's coverage note — already union in
+ * `tokenCoverage()` themselves, and passing custom tokens here as well would
+ * report every one of them twice. Only the Settings screen, which had no such
+ * compensation, passes them.
  */
 export function uncoveredBasketSymbols(
   basketSymbols: readonly string[],
   grant: Pick<StoredGrant, "grantFeatures" | "grantTokens"> | null | undefined,
+  customTokens: readonly { symbol: string; address: string }[] = [],
 ): string[] {
   const sellable = sellableAssets(grant ?? null);
-  return STOCK_TOKENS.filter(
-    (t) => basketSymbols.includes(t.symbol) && !sellable.has(t.address.toLowerCase()),
-  ).map((t) => t.symbol);
+  const known = [
+    ...STOCK_TOKENS.map((t) => ({ symbol: t.symbol, address: t.address })),
+    ...customTokens,
+  ];
+  return known
+    .filter((t) => basketSymbols.includes(t.symbol) && !sellable.has(t.address.toLowerCase()))
+    .map((t) => t.symbol);
 }

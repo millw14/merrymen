@@ -59,8 +59,8 @@ export type ExecMode =
    * SIMULATE, not a request to, and it never moves a working agent. The thing
    * they needed was the sentence this field carries.
    */
-  | { mode: "paper"; rule: RefuseRule }
-  | { mode: "refuse"; rule: RefuseRule }
+  | { mode: "paper"; rule: RefuseRule; wouldBlockLive?: RefuseRule | null }
+  | { mode: "refuse"; rule: RefuseRule; wouldBlockLive?: RefuseRule | null }
   | { mode: "live" };
 
 /**
@@ -162,7 +162,82 @@ export interface ExecInputs {
   wallTooWide?: boolean;
   /** Permission to simulate. NOT a request to: it never moves a working agent. */
   paperTradingEnabled: boolean;
+  /**
+   * HAS THE OWNER ASKED FOR REAL MONEY TO MOVE? The only term here that is
+   * about a person rather than a machine.
+   *
+   * Every other field is a fact about the world — is there cash, is the chain
+   * right, will the wall install. Those answer "could this trade". None of them
+   * answers "was it wanted", and for a while nothing did: a beta owner picked
+   * "Paper trading" in the wizard, said in as many words that he had not given
+   * permission to trade for real, and was one deposit away from doing exactly
+   * that. `paperTradingEnabled` could not save him because it is consulted only
+   * AFTER this predicate fails — it grants permission to SIMULATE, and a
+   * healthy rail never reaches it.
+   *
+   * So consent is a TERM, not a fallback. A fallback is routed around whenever
+   * the world improves; a term cannot be. Funding an account, moving a grant to
+   * mainnet, or the house switching gas sponsorship on are all changes to the
+   * world, and not one of them is a person agreeing to anything.
+   *
+   * DELIBERATELY NOT `!paperTradingEnabled`. The two are orthogonal questions —
+   * "may real money move" and "when it may not, should I simulate instead" —
+   * and collapsing them would make "stop showing me pretend fills" mean "start
+   * spending my money", which is the same implicit promotion in a new costume.
+   *
+   * AND DELIBERATELY NO ENVIRONMENT OVERRIDE, unlike every sibling setting:
+   * `MERRYMEN_LIVE_TRADING=true` on the orchestrator would be the house
+   * consenting to real execution on behalf of every owner in the fleet at once.
+   * `worker/src/settings.ts` reads this field from the tenant's own settings
+   * only, and says so there.
+   */
+  liveTradingEnabled: boolean;
+  /**
+   * IS THE CONSENT GATE IN FORCE YET? True everywhere except during the
+   * migration that populates it.
+   *
+   * A safe default is a fleet outage until somebody has written the field for
+   * the people who are mid-trade. `liveTradingEnabled` defaults FALSE and
+   * `settings.ts` resolves an absent field to the default, so the deploy that
+   * first carries this gate would move every agent in the fleet to paper on its
+   * next tick — and a live agent moved to paper loses its stop-loss and
+   * take-profit too, because the paper rail builds holdings from the paper book.
+   *
+   * The orchestrator spawns children BEFORE the backfill runs, so even a
+   * report-only run would open that window. This closes it: while
+   * `MERRYMEN_LIVE_INTENT_STAND_DOWN=1` is set, the rail behaves exactly as it
+   * did before the gate existed.
+   *
+   * NOT AN ESCAPE HATCH, and the difference matters. It grants nothing new — it
+   * restores the PREVIOUS behaviour for the length of one migration. There is
+   * deliberately no way to switch consent off on its own; see
+   * `liveTradingEnabled` above for why an env override of THAT would be the
+   * house consenting on every owner's behalf.
+   *
+   * ON ITS OWN VARIABLE, deliberately, and no longer on the backfill's.
+   * Standing down used to be a side effect of asking the migration to REPORT,
+   * which was correct while the field was absent fleet-wide and became a hazard
+   * the moment it was not: once consent is recorded, re-running the report to
+   * check a detail would un-gate the whole fleet for the length of a read-only
+   * question. A dry run must not change behaviour.
+   *
+   * So this is set ONLY on a deployment whose owners have no `liveTradingEnabled`
+   * recorded yet, and removed in the same session. On an already-migrated fleet
+   * it must never be set again — there is nobody left for it to protect, and
+   * everybody for it to expose.
+   */
+  enforceLiveIntent?: boolean;
 }
+
+/**
+ * Consent, as the rail sees it during a migration.
+ *
+ * One helper so `canTradeForReal`, `liveBlocker` and `execModeOf` cannot answer
+ * this question three different ways — which is the drift that made the original
+ * paper/live fork wrong in two places at once.
+ */
+const consented = (a: ExecInputs): boolean =>
+  a.liveTradingEnabled || a.enforceLiveIntent === false;
 
 /** Could this agent put a real order on-chain right now? */
 export function canTradeForReal(a: ExecInputs): boolean {
@@ -186,6 +261,10 @@ export function canTradeForReal(a: ExecInputs): boolean {
   // observed", and unknown is not unfunded.
   const readAsGasless = !a.gasSponsored && a.gasWei !== null && a.gasWei === 0n;
   return (
+    // CONSENT FIRST, and first for a reason: it is the only term whose absence
+    // is not a defect. Everything below is something we could fix or the owner
+    // could fund; this one we must be given.
+    consented(a) &&
     a.armed &&
     a.executor &&
     a.chainId === TRADEABLE_CHAIN_ID &&
@@ -210,6 +289,33 @@ export function execModeOf(a: ExecInputs): ExecMode {
   if (!a.armed) return { mode: "refuse", rule: "not-armed" };
 
   if (canTradeForReal(a)) return { mode: "live" };
+
+  /**
+   * PAPER BY CHOICE IS NOT PAPER BY FAILURE, and until now the product could
+   * not tell them apart — so it told an owner who had deliberately chosen to
+   * practise that he was BLOCKED, and offered him a signature he did not need.
+   *
+   * Checked before the rail is judged because when nobody asked for real
+   * execution, no amount of broken machinery is the reason it is not happening.
+   * The rail's health is still worth KNOWING, though — an owner practising on a
+   * testnet grant will hit that wall the day they opt in — so it is measured
+   * anyway and carried alongside as `wouldBlockLive` rather than presented as
+   * today's problem.
+   *
+   * Note this also means a too-wide wall no longer refuses an owner who never
+   * asked to go live. The refusal below exists so pretend fills cannot imply a
+   * working live rail; for someone who is not trying to use one, that implication
+   * was never made, and `wouldBlockLive` says the wall is there.
+   */
+  if (!consented(a)) {
+    // Asked with consent forced ON, so the answer is about the machinery alone
+    // and never circularly about the consent we already know is missing.
+    const probe = { ...a, liveTradingEnabled: true };
+    const wouldBlockLive = canTradeForReal(probe) ? null : liveBlocker(probe);
+    return a.paperTradingEnabled
+      ? { mode: "paper", rule: "live-not-enabled", wouldBlockLive }
+      : { mode: "refuse", rule: "live-not-enabled", wouldBlockLive };
+  }
 
   // Something is wrong with the live rail, and whichever answer we give — a
   // simulated fill or a refusal — the owner is owed the same sentence about
@@ -246,6 +352,13 @@ export function execModeOf(a: ExecInputs): ExecMode {
  */
 export function liveBlocker(a: ExecInputs): RefuseRule {
   if (!a.armed) return "not-armed";
+  // NOT A FAULT, AND THAT IS WHY IT IS SECOND. Every other answer here names
+  // something broken; this one names something never asked for. Reporting a
+  // fault ahead of it would send an owner to repair machinery they had no
+  // intention of using — which is precisely the loop that made a practising
+  // owner re-sign his key over and over to clear a banner about a network he
+  // was not trying to trade on.
+  if (!consented(a)) return "live-not-enabled";
   if (a.deadPolicy) return "dead-policy";
   // Beside dead-policy because the remedy is the same shape — only the owner can
   // fix it — but it is NARROWER: re-signing the same wall changes nothing, so

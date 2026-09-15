@@ -69,13 +69,31 @@ export function recoveryChallengeMessage(origin: string, nonce: string): string 
 export interface Ticket {
   smartAccount: `0x${string}`;
   chainId: number;
+  /**
+   * This account's class vault, resolved at mint time. Null when there is none
+   * on this chain, or when the factory would not answer.
+   *
+   * IN THE TICKET, NOT DERIVED PER REQUEST, and that is the point. The relay
+   * admits a `sweep(address)` leg ONLY when its target equals this — so the
+   * pinning is carried by the same HMAC that already binds the account, and the
+   * relay needs no chain read on a money path to know which vault is legitimate
+   * for this caller. A ticket that names no vault admits no sweep at all.
+   */
+  classVault: `0x${string}` | null;
   exp: number;
 }
+
+/** The wire spelling of "this ticket names no vault". */
+const NO_VAULT = "none";
 
 /** Stateless: the ticket IS its own proof, so no server-side store to keep or leak. */
 export function mintTicket(t: Omit<Ticket, "exp">, now = Date.now()): string {
   const exp = now + TICKET_TTL_MS;
-  const body = `${t.smartAccount.toLowerCase()}.${t.chainId}.${exp}`;
+  // The vault is INSIDE the signed body. Appending it outside the hmac would
+  // let a caller edit which vault their ticket blesses, which is the whole
+  // thing this field exists to prevent.
+  const vault = t.classVault ? t.classVault.toLowerCase() : NO_VAULT;
+  const body = `${t.smartAccount.toLowerCase()}.${t.chainId}.${vault}.${exp}`;
   return `${body}.${hmac(body, secretOrThrow())}`;
 }
 
@@ -83,9 +101,13 @@ export function mintTicket(t: Omit<Ticket, "exp">, now = Date.now()): string {
 export function readTicket(token: string | undefined | null, now = Date.now()): Ticket | null {
   if (!token) return null;
   const parts = token.split(".");
-  if (parts.length !== 4) return null;
-  const [account, chain, exp, sig] = parts as [string, string, string, string];
-  const body = `${account}.${chain}.${exp}`;
+  // FIVE FIELDS SINCE THE VAULT JOINED THE BODY. A ticket in the old four-field
+  // shape does not parse and the owner signs the challenge again — which costs
+  // them one click, bounded by a 15-minute TTL, and is the correct treatment
+  // for a credential whose meaning changed.
+  if (parts.length !== 5) return null;
+  const [account, chain, vault, exp, sig] = parts as [string, string, string, string, string];
+  const body = `${account}.${chain}.${vault}.${exp}`;
   let want: Buffer;
   let got: Buffer;
   try {
@@ -101,5 +123,15 @@ export function readTicket(token: string | undefined | null, now = Date.now()): 
   if (!Number.isFinite(expMs) || expMs <= now) return null;
   if (!Number.isFinite(chainId)) return null;
   if (!/^0x[0-9a-f]{40}$/.test(account)) return null;
-  return { smartAccount: account as `0x${string}`, chainId, exp: expMs };
+  // A MALFORMED VAULT IS NOT "NO VAULT". The hmac already proves we wrote it, so
+  // anything here that is neither an address nor the literal absence marker
+  // means this codec and its minter disagree — and silently reading that as
+  // "no class sweep" would strand a vault rather than fail loudly.
+  if (vault !== NO_VAULT && !/^0x[0-9a-f]{40}$/.test(vault)) return null;
+  return {
+    smartAccount: account as `0x${string}`,
+    chainId,
+    classVault: vault === NO_VAULT ? null : (vault as `0x${string}`),
+    exp: expMs,
+  };
 }

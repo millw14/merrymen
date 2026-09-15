@@ -185,21 +185,36 @@ const REGISTRY: ChatCommand[] = [
   {
     id: "go-paper",
     via: "settings",
-    writes: ["paperTradingEnabled"],
-    fixed: { paperTradingEnabled: true },
+    // BOTH FIELDS, because "put me in Paper mode" is now a thing that can
+    // actually be done. It used to write only `paperTradingEnabled`, and the
+    // sentence below had to admit the request had not been honoured — the
+    // setting granted permission to SIMULATE and nothing withheld permission to
+    // TRADE, so an owner who asked for paper and had a healthy rail kept
+    // trading real money. `liveTradingEnabled: false` is the half that was
+    // missing, and it is the half they were asking for.
+    writes: ["paperTradingEnabled", "liveTradingEnabled"],
+    fixed: { paperTradingEnabled: true, liveTradingEnabled: false },
     weighty: true,
-    // PAPER IS PERMISSION TO SIMULATE, NOT A REQUEST TO — execModeOf asks
-    // canTradeForReal first. Saying "switch to paper" would promise something
-    // this setting does not do.
-    say: () => `Let me fall back to practice fills when I cannot trade for real. It is not a switch to paper — if every leg is available I still trade for real.`,
+    // NAMES WHAT IT STOPS DOING, not just what it starts. On the paper rail the
+    // tick values the paper book and never reads the chain, so any position
+    // bought with real funds goes unmanaged — no stop-loss, no take-profit, no
+    // exit — while the screen shows a tidy simulated book over the top of it.
+    // An owner confirming this card is entitled to know that before they tap.
+    say: () => `Paper mode from now on: I will practise with simulated money at live prices and place no real orders, whatever is in the account. If I am holding anything bought with real funds I will stop managing it too — no stop-loss, no take-profit — until you turn Live trading back on. Nothing is sold either way.`,
   },
   {
     id: "go-live",
     via: "settings",
-    writes: ["paperTradingEnabled"],
-    fixed: { paperTradingEnabled: false },
+    // THE CONSENT FLAG IS THE POINT OF THIS COMMAND NOW. It previously wrote
+    // `paperTradingEnabled: false`, which only removed the simulator — real
+    // trading had never been gated on anything the owner said. Note it does NOT
+    // turn the simulator off: falling back to practice when a leg breaks is
+    // still the kinder behaviour, and it is no longer how anyone ends up
+    // trading real money by accident.
+    writes: ["liveTradingEnabled"],
+    fixed: { liveTradingEnabled: true },
     weighty: true,
-    say: () => `Stop simulating. If I cannot trade for real I will do nothing instead of practising.`,
+    say: () => `Trade for real from now on, within the caps you signed — real money, real orders on Robinhood Chain. Say "go paper" to put me back to practising.`,
   },
   {
     id: "set-slippage",

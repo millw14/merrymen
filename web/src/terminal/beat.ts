@@ -24,7 +24,23 @@ interface Core {
    * every tick, so `id` advances every few minutes on a post nobody touched.
    */
   postId: string | null;
-  at: number;
+  /**
+   * MILLISECONDS, and the name says so because the unit was the bug.
+   *
+   * `Thesis.at` is epoch SECONDS — `worker/src/thesis-policy.ts:151` says so,
+   * and `read-theses.ts` compares it against `Math.floor(Date.now()/1000)`.
+   * This field was assigned from it raw and then handed to `whenOf(at, now)`
+   * with a `now` in milliseconds, so `elapsed` divided a number roughly the
+   * size of the current epoch by a day and printed the same wrong age on every
+   * row in the feed. An owner reported it as: "it says 20688d while when i
+   * click the agent itself it tells the trade was 2 minutes ago."
+   *
+   * The agent screen was right because it goes through `ageOf`, which
+   * normalises (`live.ts`). The rail had no such step. So the seconds contract
+   * ends HERE, at the one place a published row becomes an internal `Beat`,
+   * rather than at each of the places that render one.
+   */
+  atMs: number;
   actor: Actor;
   /** The agent's own take, already run through `takeFor`. May be empty. */
   reason: string;
@@ -214,7 +230,10 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
     if (t.at == null) continue;
     const actor = actorOf(t, bySlug);
     if (!actor) continue;
-    const at = t.at;
+    // THE ONE CONVERSION.  is epoch seconds (thesis-policy.ts:151);
+    // everything downstream of here is milliseconds and says so in its name.
+    const atSec = t.at;
+    const atMs = atSec * 1000;
     const reason = takeFor(t.reason, bySlug.get(actor.slug)?.thesis);
     // Carried from the published row. `shadow` is set by the publisher; the
     // `outcome` check is the belt to it, for a row written before the flag
@@ -236,9 +255,12 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
       const symbol = t.symbol.toUpperCase();
       out.push({
         kind: "trade",
-        id: `${symbol}-${action}-${actor.slug}-${at}`,
+        // Built from atSec, deliberately: the id is a React key and a like
+        // target, and re-basing it to milliseconds would churn every key in the
+        // feed for a cosmetic fix.
+        id: `${symbol}-${action}-${actor.slug}-${atSec}`,
         postId,
-        at,
+        atMs,
         actor,
         reason,
         sizeUsd,
@@ -260,9 +282,9 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
     const symbol = t.symbol ? t.symbol.toUpperCase() : null;
     out.push({
       kind: "view",
-      id: `view-${actor.slug}-${at}-${symbol ?? ""}`,
+      id: `view-${actor.slug}-${atSec}-${symbol ?? ""}`,
       postId,
-      at,
+      atMs,
       actor,
       reason,
       sizeUsd,
@@ -275,7 +297,7 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
     });
   }
 
-  out.sort((a, b) => b.at - a.at);
+  out.sort((a, b) => b.atMs - a.atMs);
   return out;
 }
 
@@ -286,7 +308,7 @@ export function lanesOf(beats: Beat[]): Lane[] {
 
   beats.forEach((beat, i) => {
     const prev = beats[i - 1];
-    const gap = prev ? prev.at - beat.at : 0;
+    const gap = prev ? prev.atMs - beat.atMs : 0;
     if (gap >= LULL_MS) out.push({ kind: "lull", id: `lull-${beat.id}`, ms: gap });
     out.push({ kind: "beat", id: beat.id, beat });
   });

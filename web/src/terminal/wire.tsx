@@ -1,5 +1,5 @@
 import { verbOf, whoOf, type Beat, type Lane } from "./beat";
-import { elapsed, useNow } from "./clock";
+import { elapsed, useNow, whenOf } from "./clock";
 import { money, type LiveToken } from "./live";
 import { Coin, Delta, FaceOn } from "./ui";
 
@@ -164,7 +164,7 @@ function BeatRow({
                   beat.outcome === "dropped") && (
                   <i className="wire-refused">— {beat.outcomeText}</i>
                 )}{" "}
-              <em className="wire-when">{whenOf(beat.at, now)}</em>
+              <em className="wire-when">{whenOf(beat.atMs, now)}</em>
             </span>
           </span>
         </button>
@@ -262,18 +262,4 @@ function Heart({ filled }: { filled: boolean }) {
   );
 }
 
-function whenOf(at: number, now: number): string {
-  const age = elapsed(at, now);
-  switch (age.unit) {
-    case "s":
-      return "now";
-    case "m":
-    case "h":
-    case "d":
-      return age.text;
-    default: {
-      const _x: never = age.unit;
-      return _x;
-    }
-  }
-}
+

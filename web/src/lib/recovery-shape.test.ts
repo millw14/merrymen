@@ -173,3 +173,106 @@ describe("what it refuses — the reason this file exists", () => {
     assert.equal(isRecoveryShape("0x").ok, false);
   });
 });
+
+/**
+ * THE CLASS VAULT SWEEP, AND WHY THE RELAY MAY CARRY IT.
+ *
+ * The hosted relay could never carry one: `isRecoveryShape` admitted only ERC-20
+ * `transfer()` and one native leg, so a `sweep(address)` on the vault was
+ * refused as "a call this relay cannot decode as an ERC-20 transfer". That is
+ * why Shogun's DOGGOS sat in its vault through two recovery attempts — the first
+ * skipped the leg silently, the second failed loudly once the leg was made
+ * mandatory.
+ *
+ * `PonsClassVault.sweep` takes NO recipient. It pays `owner`, fixed at
+ * construction to the smart account, and is gated by `only`. So a relayed sweep
+ * moves tokens between two addresses the same owner already controls — strictly
+ * less power than the `transfer()` legs above, which do name a destination.
+ *
+ * It is pinned anyway, to the vault named in the ticket's hmac-signed body.
+ */
+const VAULT = "0x3fcdde6e011769ca05f0115f1543290862473216" as const;
+const DOGGOS = "0x15e498ff2dbca95e8648a1f025cbbd12c2525461" as const;
+const SWEEP_ABI = [
+  {
+    type: "function",
+    name: "sweep",
+    inputs: [{ name: "token", type: "address" }],
+    outputs: [{ type: "uint256" }],
+    stateMutability: "nonpayable",
+  },
+] as const;
+const sweep = (token: `0x${string}`) =>
+  encodeFunctionData({ abi: SWEEP_ABI, functionName: "sweep", args: [token] });
+
+describe("the class vault sweep", () => {
+  it("IS CARRIED when it targets the vault this ticket names", async () => {
+    const cd = await batch([
+      { to: VAULT, value: 0n, data: sweep(DOGGOS) },
+      { to: VAULT, value: 0n, data: sweep(USDG) },
+    ]);
+    const v = isRecoveryShape(cd, { classVault: VAULT });
+    assert.equal(v.ok, true, v.ok ? "" : v.why);
+    assert.equal(v.ok && v.classSweep, true, "and is reported as the vault shape, not a transfer");
+    assert.equal(v.ok && v.tokenLegs, 2, "both assets");
+  });
+
+  it("and as a SINGLE call too, since one token is not a batch", async () => {
+    const cd = await single({ to: VAULT, value: 0n, data: sweep(DOGGOS) });
+    assert.equal(isRecoveryShape(cd, { classVault: VAULT }).ok, true);
+  });
+
+  it("IS REFUSED when the ticket names no vault", async () => {
+    // The default. Most owners have no class vault, and a ticket that does not
+    // name one must not bless a sweep at any address.
+    const cd = await batch([{ to: VAULT, value: 0n, data: sweep(DOGGOS) }]);
+    const v = isRecoveryShape(cd, {});
+    assert.equal(v.ok, false);
+    assert.match(v.ok ? "" : v.why, /does not name a class vault/);
+  });
+
+  it("IS REFUSED when aimed at a vault that is not this account's", async () => {
+    // The pin. Without it a ticket holder could call sweep(address) on any
+    // contract that happens to have that selector.
+    const cd = await batch([{ to: OTHER, value: 0n, data: sweep(DOGGOS) }]);
+    const v = isRecoveryShape(cd, { classVault: VAULT });
+    assert.equal(v.ok, false);
+    assert.match(v.ok ? "" : v.why, /other than this account's own class vault/);
+  });
+
+  it("IS REFUSED when it carries native value", async () => {
+    const cd = await batch([{ to: VAULT, value: 1n, data: sweep(DOGGOS) }]);
+    assert.equal(isRecoveryShape(cd, { classVault: VAULT }).ok, false);
+  });
+
+  it("IS REFUSED when mixed with a transfer", async () => {
+    // The two shapes are two operations by design — planClassSweep explains
+    // why. Allowing them together would widen one allowance into two.
+    const cd = await batch([
+      { to: VAULT, value: 0n, data: sweep(DOGGOS) },
+      { to: USDG, value: 0n, data: xfer(DEST, 5n) },
+    ]);
+    const v = isRecoveryShape(cd, { classVault: VAULT });
+    assert.equal(v.ok, false);
+    assert.match(v.ok ? "" : v.why, /cannot be mixed/);
+  });
+
+  it("IS REFUSED when the selector is right but the arguments are not", async () => {
+    // Four bytes are not a function. A longer payload wearing the same prefix
+    // is a different call.
+    const cd = await batch([{ to: VAULT, value: 0n, data: `${sweep(DOGGOS)}deadbeef` as `0x${string}` }]);
+    assert.equal(isRecoveryShape(cd, { classVault: VAULT }).ok, false);
+  });
+
+  it("and an ordinary withdrawal is unaffected by any of this", async () => {
+    // The regression that would hurt most people: the class allowance must not
+    // change what a plain sweep of USDG and ETH is allowed to do.
+    const cd = await batch([
+      { to: USDG, value: 0n, data: xfer(DEST, 318_000000n) },
+      { to: DEST, value: 4_000_000_000_000_000n, data: "0x" },
+    ]);
+    const v = isRecoveryShape(cd, { classVault: VAULT });
+    assert.equal(v.ok, true, v.ok ? "" : v.why);
+    assert.equal(v.ok && v.classSweep, false);
+  });
+});

@@ -33,7 +33,7 @@ const SRC = [
   // moved zero rows. Which is the failure the comment further down records
   // having already happened once with price_source.
   "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, hold_kind TEXT, at INTEGER);",
-  "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, sponsor_gas INTEGER, live_blocker TEXT, x_handle TEXT, x_verified INTEGER DEFAULT 0, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0, contributions_known INTEGER, contributions_why TEXT, gas_accounting TEXT, quality_at INTEGER);",
+  "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, sponsor_gas INTEGER, live_blocker TEXT, x_handle TEXT, x_verified INTEGER DEFAULT 0, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0, hwm_withdrawn_usdg REAL NOT NULL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0, contributions_known INTEGER, contributions_why TEXT, gas_accounting TEXT, quality_at INTEGER);",
   "CREATE TABLE positions (agent_id TEXT, symbol TEXT, token TEXT, raw_balance TEXT, ui_multiplier TEXT, price_usd REAL, price_stale INTEGER, price_source TEXT DEFAULT 'chainlink', value_usdg REAL, updated_at INTEGER, PRIMARY KEY (agent_id, symbol));",
   "CREATE TABLE cost_basis (agent_id TEXT, mode TEXT, symbol TEXT, qty_raw TEXT, cost_usdg TEXT, updated_at INTEGER, PRIMARY KEY (agent_id, mode, symbol));",
   // THE GRADED FLOOR, which this fixture has never had — so the snapshot pass
@@ -47,7 +47,7 @@ const SRC = [
   // The class book. Money the ACCOUNT does not hold — it sits in a separate
   // contract — so it appears in no other table here, and without the mirror the
   // shared ledger cannot see a class position at all.
-  "CREATE TABLE class_positions (agent_id TEXT, token TEXT, symbol TEXT, decimals INTEGER DEFAULT 18, curve TEXT, quote_token TEXT, first_seen INTEGER, vault TEXT, entry_tx TEXT, exit_tx TEXT, cost_usdg TEXT, qty_raw TEXT, proceeds_usdg TEXT, opened_at_block TEXT, state TEXT DEFAULT 'open', PRIMARY KEY (agent_id, token));",
+  "CREATE TABLE class_positions (agent_id TEXT, token TEXT, symbol TEXT, decimals INTEGER DEFAULT 18, curve TEXT, quote_token TEXT, first_seen INTEGER, vault TEXT, entry_tx TEXT, exit_tx TEXT, cost_usdg TEXT, qty_raw TEXT, proceeds_usdg TEXT, opened_at_block TEXT, state TEXT DEFAULT 'open', swept_raw TEXT, PRIMARY KEY (agent_id, token));",
 ].join("\n");
 
 /** The destination, with the same shape a Postgres ledger has. */

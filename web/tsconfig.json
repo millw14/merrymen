@@ -43,7 +43,8 @@
       "@merrymen/limits": ["../worker/src/limits.ts"],
       "@merrymen/playground-api": ["../worker/src/playground-api.ts"],
       "@merrymen/wall-battery": ["../worker/src/wall-battery.ts"],
-      "@merrymen/strategies/*": ["../worker/src/strategies/*"]
+      "@merrymen/strategies/*": ["../worker/src/strategies/*"],
+      "@merrymen/pnl-card": ["../worker/src/pnl-card.ts"]
     }
   },
   "include": [

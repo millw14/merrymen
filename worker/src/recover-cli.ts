@@ -15,7 +15,7 @@
 
 import { chainForId, pimlicoBundlerUrl, robinhoodChain } from "../../packages/core/src/index";
 import { resolveConfig } from "./settings";
-import { planRecovery, recoverFunds } from "./recover";
+import { ownerFromPrivateKey, planRecovery, recoverFunds } from "./recover";
 
 const say = (s: string) => process.stderr.write(`${s}\n`);
 const emit = (obj: unknown) => process.stdout.write(`__RESULT__${JSON.stringify(obj)}\n`);
@@ -52,7 +52,7 @@ async function main() {
     if (mode === "plan") {
       const plan = await planRecovery({
         chain,
-        ownerPrivateKey: ownerKey,
+        owner: ownerFromPrivateKey(ownerKey),
         rpcUrl,
         expectedSmartAccount: expect,
         extraTokens: cfg.customTokens,
@@ -129,7 +129,7 @@ async function main() {
     say(`  sweeping to ${to} …`);
     const res = await recoverFunds({
       chain,
-      ownerPrivateKey: ownerKey,
+      owner: ownerFromPrivateKey(ownerKey),
       bundlerUrl,
       rpcUrl,
       to,

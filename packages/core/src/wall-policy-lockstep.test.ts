@@ -106,3 +106,66 @@ describe("every caller imports the policy rather than reproducing it", () => {
     assert.match(limits, /FIRST_ENABLE_GAS_BOUNDS/, "the flat fallback must survive");
   });
 });
+
+/**
+ * THE CLASS VAULT IS A PLATFORM ANSWER, NOT A THING EACH OWNER MUST TYPE.
+ *
+ * `session.ts` read the factory from the tenant's own settings and skipped the
+ * whole vault block when it was absent — which it is for everyone, because
+ * nothing ever asked them for it. So the class route, whose entire purpose is
+ * trading a launch that did not exist at signing, could only be reached by an
+ * owner who had somehow learned a deploy address and pasted it in. A re-sign
+ * would have sealed nothing and reported success.
+ *
+ * This is NOT the adapter, and the difference is the safety case:
+ * `ponsAdapterForSigning` refuses to default because `tradeExactIn` takes the
+ * curve as a caller-supplied argument the wall cannot pin and hands it a live
+ * allowance. The wall pins a class VAULT as a literal target, and the vault's
+ * `sweep` has no recipient — it pays `owner`, fixed at construction.
+ */
+describe("a re-sign actually seals a class vault", () => {
+  const SESSION = strip(read(SITES["web signer"]));
+
+  it("FALLS BACK TO THE PLATFORM FACTORY when the owner has not named one", () => {
+    assert.match(
+      SESSION,
+      /ponsClassVaultFactory\s*\?\?\s*\(\(PONS_CLASS_VAULT_FACTORY\[chainId\]/,
+      "the deploy constant must be the default",
+    );
+  });
+
+  it("and the owner's own choice still wins", () => {
+    // Grant-first precedence, exactly as the adapter path does.
+    const at = SESSION.indexOf("const sealedClassFactory");
+    const line = SESSION.slice(at, at + 200);
+    assert.match(line, /ponsClassVaultFactory\s*\?\?/, "settings are consulted before the constant");
+  });
+
+  it("and the vault and factory travel TOGETHER into the grant", () => {
+    // buildCallPermissions throws when a vault is sealed without a factory —
+    // two of three is a key that can reach a vault it can never create. So
+    // every remaining use must follow the resolved value, not the raw setting.
+    assert.doesNotMatch(
+      SESSION,
+      /ponsClassVaultFactoryAddress: ponsClassVaultFactory/,
+      "the grant record must carry the factory that was actually used",
+    );
+    assert.match(SESSION, /ponsClassVaultFactoryAddress: sealedClassFactory/);
+  });
+
+  it("but the ADAPTER still refuses to default — that one is unsafe", () => {
+    // The distinction this whole change rests on. If someone ever "makes these
+    // consistent", this fails.
+    const protocols = strip(read("../../../packages/core/src/protocols.ts"));
+    assert.match(
+      protocols,
+      /export function ponsAdapterForSigning[\s\S]*?if \(!fromSettings/,
+      "the adapter must still require an explicit setting",
+    );
+    assert.doesNotMatch(
+      protocols,
+      /return PONS_SELF_TRADE\[chainId\]/,
+      "the adapter must never fall back to the deploy constant",
+    );
+  });
+});

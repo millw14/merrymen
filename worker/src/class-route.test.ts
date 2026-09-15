@@ -255,10 +255,176 @@ describe("three layers must hold before an agent reaches for a class token", () 
     // The caps would bound a burst anyway; one proposal keeps the decision
     // legible instead of producing a wall of refusals from a batch that could
     // only ever have filled its first member.
-    assert.match(PRODUCER, /const leg = legs\[0\]!/);
+    //
+    // This used to pin `legs[0]`, which proved one-per-tick by proving the
+    // route took whichever candidate the launch scan happened to return first —
+    // an ordering by discovery time and by nothing else. The singleness was
+    // real; the selection was not. It now scores every eligible leg and takes
+    // the best, so the property is asserted directly: exactly one pick, and one
+    // returned intent.
+    assert.match(PRODUCER, /choice\.pick/, "the entry comes from a scored choice");
+    assert.doesNotMatch(PRODUCER, /const leg = legs\[0\]/, "never first-past-the-post again");
+    /**
+     * Counted as INTENTS and scoped to the ENTRY producer alone.
+     *
+     * Two things made a naive count wrong. The candidate builder's `flatMap`
+     * also returns an array literal, so counting `return [{` caught a shape
+     * that was never an entry. And `PRODUCER` is sliced as far as
+     * `curveLegsNow`, which means it also contains `proposeClassExits` — whose
+     * `curve-trade` is the EXIT. Neither is a second entry path.
+     */
+    const entryOnly = PRODUCER.slice(0, PRODUCER.indexOf("async function proposeClassExits"));
+    assert.ok(entryOnly.length > 0, "the entry producer must be separable from the exit producer");
+    const intents = [...entryOnly.matchAll(/kind: "curve-trade"/g)].length;
+    assert.equal(intents, 1, `exactly one entry intent is constructed, found ${intents}`);
+  });
+
+  it("SCORES every eligible leg rather than taking the first", () => {
+    // The scorer is where fail-closed lives: an unreadable depth, impact or
+    // graduation figure is a refusal there, never a zero. Taking legs[0] walked
+    // straight past all of it.
+    assert.match(PRODUCER, /chooseEntry\(/);
+    assert.match(PRODUCER, /minRealDepthRaw: usdg\(cfg\.classMinDepthUsdg\)/, "depth floor is the owner's");
+    assert.match(PRODUCER, /maxCostBps: cfg\.maxImpactBps/, "impact ceiling is the owner's");
+    assert.match(PRODUCER, /maxGraduationBps/, "and the graduation ceiling is applied in scoring too");
+  });
+
+  it("LOOKS AT THE MARKET EVEN WHEN BUYING IS SWITCHED OFF", () => {
+    /**
+     * The complaint this milestone exists for: an owner whose bot "doesn't want
+     * to trade alone". With the execution gates above every read, an agent with
+     * the route off did not look at the market at all and had nothing to say
+     * about it — indistinguishable from a broken one.
+     *
+     * Those three settings say DO NOT BUY, not do not look. They must therefore
+     * come AFTER the scan and its report.
+     */
+    const scan = PRODUCER.indexOf("reportClassScan(");
+    const snipe = PRODUCER.indexOf("if (!cfg.classSnipeEnabled) return [];");
+    const size = PRODUCER.indexOf("if (cfg.classPerEntryUsdg <= 0) return [];");
+    const positions = PRODUCER.indexOf("cfg.classMaxPositions > 0 && held.length >= cfg.classMaxPositions");
+    assert.ok(scan > 0, "the scan must report");
+    for (const [name, at] of [
+      ["classSnipeEnabled", snipe],
+      ["classPerEntryUsdg", size],
+      ["classMaxPositions", positions],
+    ] as const) {
+      assert.ok(at > 0, `${name} must still gate execution`);
+      assert.ok(at > scan, `${name} must gate EXECUTION, not the scan`);
+    }
   });
 
   it("targets the sealed vault, so the executor's fork and the mirror agree", () => {
     assert.match(PRODUCER, /target: vault/);
+  });
+});
+
+/**
+ * PROVENANCE MUST BE A LIVE READ, NOT AN ARM-TIME SNAPSHOT.
+ *
+ * `curve-provenance` is the ONLY thing vouching for a class token — its output
+ * leg is deliberately un-enumerated, so no wall and no allowlist names it. The
+ * rule checks `limits.knownCurves`, and `limitsFromGrant` built that list at
+ * ARM TIME and refreshed it only when strategy settings changed.
+ *
+ * So the one route whose entire purpose is trading a launch that did not exist
+ * at signing could only ever have traded a launch that DID. On a hosted child
+ * it was total rather than narrow: `discovered_pools` lives in the child's
+ * ephemeral home, so the table is EMPTY when the agent arms, the snapshot was
+ * empty, and every class buy was refused `curve-provenance` for ever.
+ *
+ * Observed on the live canary: the producer found candidates from the
+ * factory-filtered scan, sized one, proposed it, and policy refused the very
+ * curve the scan had written minutes earlier.
+ */
+describe("class provenance is re-read every tick", () => {
+  const SRC = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  const BLOCK = SRC.slice(SRC.indexOf("PROVENANCE IS RE-READ HERE, EVERY TICK"), SRC.indexOf("await proposeClassExits()"));
+
+  it("refreshes before the producers run, not at arm time only", () => {
+    assert.ok(BLOCK.length > 300, "the refresh moved — re-point this test, do not delete it");
+    assert.match(BLOCK, /provenanceCurves\(await knownCurves\(\), await classPositionCurves\(active\.agentId\)\)/);
+  });
+
+  it("replaces the list WHOLE, never patches it", () => {
+    // provenanceCurves returns undefined if either read failed, and undefined
+    // means the rule cannot run — which for a class trade is a refusal. A
+    // partial list would silently refuse exactly the positions it dropped,
+    // including a position's own exit.
+    assert.match(BLOCK, /if \(fresh\) active\.limits = \{ \.\.\.active\.limits, knownCurves: fresh \};/);
+  });
+
+  it("keeps the old list when the read fails, rather than emptying it", () => {
+    // An empty list is not a safe default here: it refuses every class trade
+    // including an exit. Keeping the previous answer is the conservative one.
+    assert.doesNotMatch(BLOCK, /knownCurves: fresh \?\? \[\]/);
+    assert.doesNotMatch(BLOCK, /knownCurves: \[\]/);
+  });
+});
+
+/**
+ * THE QUIET BRANCH, WHICH WAS THE SILENT ONE.
+ *
+ * `candidates.length === 0` is the commonest outcome of this whole route — a
+ * quiet launchpad, or a child whose candidate table was rebuilt by a redeploy —
+ * and it returned without saying anything. An owner watching an agent that has
+ * discovered nothing yet is precisely the owner most likely to conclude it is
+ * broken, which is the complaint this milestone exists to answer.
+ */
+describe("an empty launchpad is reported, not silently returned", () => {
+  const ENTRY = (() => {
+    const start = CODE.indexOf("async function proposeClassEntries()");
+    return CODE.slice(start, CODE.indexOf("async function proposeClassExits", start));
+  })();
+
+  it("reports before returning on an empty candidate set", () => {
+    const emptyBranch = ENTRY.indexOf("if (candidates.length === 0)");
+    assert.ok(emptyBranch > 0, "the empty-candidates branch must exist");
+    const afterBranch = ENTRY.slice(emptyBranch, emptyBranch + 600);
+    assert.match(afterBranch, /reportClassScan\(/, "it must report before it returns");
+  });
+
+  it("and every path out of the scan has reported first", () => {
+    // Two reporting sites: the empty-candidate branch and the scored pass. If a
+    // third early return ever appears between them it will not be covered, so
+    // this pins the count rather than the positions.
+    const reports = [...ENTRY.matchAll(/reportClassScan\(/g)].length;
+    assert.equal(reports, 2, `expected both scan exits to report, found ${reports}`);
+  });
+});
+
+/**
+ * SCANNING AND PAUSED ARE TWO FACTS, AND BOTH ARE TRUE.
+ *
+ * An agent with autonomous buying switched off is not idle and it is not
+ * broken — it is looking and not acting, a state the product had no way to
+ * express. Saying only "scanning" hides that nothing will be bought; saying
+ * only "paused" hides that it is still working.
+ */
+describe("the owner is told both what it is doing and that it will not buy", () => {
+  const REPORT = (() => {
+    const start = CODE.indexOf("function reportClassScan(");
+    assert.ok(start > 0, "the reporter must exist");
+    return CODE.slice(start, CODE.indexOf("async function proposeClassEntries", start));
+  })();
+
+  it("appends the paused state when buying is off", () => {
+    assert.match(REPORT, /Trading is paused\./);
+    assert.match(REPORT, /a\.buying \?/, "and only when it is actually off");
+  });
+
+  it("and the scanning half is said either way", () => {
+    // The sentence is built once and the paused clause appended, rather than
+    // two parallel sets of copy that can drift.
+    assert.match(REPORT, /const sentence = a\.buying \? `\$\{held\}\$\{scanning\}`/);
+  });
+
+  it("carries no technical codes into the owner's sentence", () => {
+    const forbidden = /no-exit|wrong-chain|live-not-enabled|classSnipeEnabled|scout-budget|grant-too-wide/;
+    const sentences = [...REPORT.matchAll(/scanning = `([^`]*)`/g)].map((m) => m[1]!);
+    assert.ok(sentences.length >= 4, `expected the owner sentences, found ${sentences.length}`);
+    for (const s of sentences) {
+      assert.doesNotMatch(s, forbidden, `owner sentence leaked a code: ${s}`);
+    }
   });
 });
