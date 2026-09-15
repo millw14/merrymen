@@ -83,6 +83,12 @@ export type Command =
   | { kind: "resume" }
   | { kind: "strategy"; name: string }
   | { kind: "cap"; usdg: number }
+  /** Stage a custom token for the settings list — parked for /confirm like a transfer. */
+  | { kind: "addtoken"; address: `0x${string}`; symbol?: string }
+  /** Flip the new-pair discovery feed. Single-shot; reversible. */
+  | { kind: "discover"; on: boolean }
+  /** List the owner-staged custom tokens. Read-only. */
+  | { kind: "tokens" }
   | { kind: "buy"; symbol: string; usdg: number }
   | { kind: "sell"; symbol: string; usdg: number }
   | { kind: "transfer"; to: `0x${string}`; usdg: number }
@@ -139,6 +145,10 @@ export const CONTROL_KINDS = new Set([
   "sell",
   "transfer",
   "kill",
+  // Settings writes, like strategy/cap above: staging a token or flipping the
+  // discovery feed changes what the worker may price. /tokens only reads.
+  "addtoken",
+  "discover",
 ]);
 
 /** PC-control kinds → the capability group each requires (gated by telegramPcControlEnabled
@@ -230,6 +240,31 @@ export function parseSlash(text: string): Command | null {
         ? { kind: "cap", usdg: n }
         : { kind: "unknown", text: "usage: /cap <usdg> — sets the per-action ceiling for chat trades" };
     }
+    case "addtoken":
+    case "add-token":
+    case "token": {
+      // /addtoken 0x… [SYM] stages; a bare "yes" with no address confirms a
+      // staged token through the shared /confirm slot (kind-tagged, so it can
+      // never fire a transfer or anything else parked there).
+      const parts = rest.filter(Boolean);
+      const address = parts.find((p) => ADDRESS_RE.test(p));
+      if (!address && parts.some((p) => /^(yes|confirm)$/i.test(p))) return { kind: "confirm" };
+      const symbol = parts
+        .filter((p) => !ADDRESS_RE.test(p) && !/^(yes|confirm)$/i.test(p))
+        .find((p) => /^[A-Za-z0-9._-]{1,16}$/.test(p))
+        ?.toUpperCase();
+      return address
+        ? { kind: "addtoken", address: address as `0x${string}`, ...(symbol ? { symbol } : {}) }
+        : { kind: "unknown", text: "usage: /addtoken <0x address> [SYMBOL] — I'll show what I found before saving" };
+    }
+    case "discover":
+    case "discovery": {
+      if (/^(on|yes|true|enable|start)$/i.test(arg)) return { kind: "discover", on: true };
+      if (/^(off|no|false|disable|stop)$/i.test(arg)) return { kind: "discover", on: false };
+      return { kind: "unknown", text: "usage: /discover on|off — watch for newly launched pairs" };
+    }
+    case "tokens":
+      return { kind: "tokens" };
     case "buy":
     case "sell": {
       // /buy QQQ 10  or  /buy 10 QQQ

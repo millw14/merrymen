@@ -23,7 +23,9 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 // tsconfigs; inside the installed package tsx can't resolve it and the worker
 // dies at startup (which silently kills Telegram). Never alias-import in worker/.
 import { PC_CAPABILITIES } from "../../../packages/core/src/index";
-import { patchSettingsFile, type ResolvedConfig } from "../settings";
+import { patchSettingsFile, resolveConfig, type ResolvedConfig } from "../settings";
+import { saveTokenSettings } from "./tokens";
+import type { CustomToken } from "../../../packages/core/src/tokens";
 import { ensureHome, homePaths } from "../home";
 import { loadGrantFile } from "../grant";
 import { esc, getFileUrl, getMe, getUpdates, sendMessage, type TgMessage } from "./api";
@@ -91,6 +93,10 @@ export interface TelegramServiceDeps {
   submitTransfer: (to: `0x${string}`, usdg: number) => Promise<string>;
   /** Delete the grant (kill switch). */
   kill: () => { ok: boolean; reason?: string };
+  /** This process's tenant (grant smart account, lowercased) — null when idle. */
+  getTenantId: () => `0x${string}` | null;
+  /** Token metadata read on-chain (decimals + canonical symbol). */
+  readTokenMeta: (address: `0x${string}`) => Promise<{ decimals: number; symbol: string } | { error: string }>;
   /** Mirror a /name change into the agents table (dashboard display). */
   onNameChange?: (name: string) => void;
   /** Injectable for tests. */
@@ -469,6 +475,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const r = deps.kill();
         if (r.ok) deps.note("warn", `Telegram: KILL by chat ${msg.chatId}`);
         return r;
+      },
+      getTenantId: () => deps.getTenantId(),
+      listTokens: (): CustomToken[] => resolveConfig().customTokens ?? [],
+      readTokenMeta: (address) => deps.readTokenMeta(address),
+      saveTokenSettings: async (patch) => {
+        const r = await saveTokenSettings(deps.getTenantId(), patch);
+        if (r.ok) deps.note("ok", `Telegram: token settings updated by chat ${msg.chatId}`);
+        return r.ok ? { ok: true as const } : { ok: false as const, reason: r.reason };
       },
       link: linkDep,
       trade: deps.submitTrade,

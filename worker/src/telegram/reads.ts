@@ -904,6 +904,8 @@ export const HELP_TEXT = [
   "/buy &lt;SYM&gt; &lt;usdg&gt; · /sell &lt;SYM&gt; &lt;usdg&gt; — trade (passes the policy wall)",
   "/transfer &lt;0x…&gt; &lt;usdg&gt; — send USDG out (asks you to /confirm; enable in dashboard)",
   "/alert &lt;SYM&gt; &gt; &lt;price&gt; — ping me at a price · /alerts · /unalert &lt;n&gt;",
+  "/addtoken &lt;0x…&gt; [SYMBOL] — stage a token (I show it back; /confirm saves; the grant covers it at /grant)",
+  "/discover on|off — watch for newly launched pairs · /tokens — your staged tokens",
   "/wallet — create, restore, or recover a wallet (points you to the dashboard)",
   "/kill — destroy the grant, stand the band down",
   "",

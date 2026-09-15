@@ -71,6 +71,37 @@ describe("parseSlash — pure slash parser", () => {
     assert.deepEqual(parseSlash("/sell 5 aapl"), { kind: "sell", symbol: "AAPL", usdg: 5 });
   });
 
+  it("parses /addtoken with address and optional symbol", () => {
+    assert.deepEqual(parseSlash("/addtoken 0x1111111111111111111111111111111111111111"), {
+      kind: "addtoken",
+      address: "0x1111111111111111111111111111111111111111",
+    });
+    assert.deepEqual(parseSlash("/addtoken 0x1111111111111111111111111111111111111111 ruben"), {
+      kind: "addtoken",
+      address: "0x1111111111111111111111111111111111111111",
+      symbol: "RUBEN",
+    });
+    assert.deepEqual(parseSlash("/addtoken ruben 0x1111111111111111111111111111111111111111")?.kind, "addtoken");
+  });
+
+  it("routes a bare /addtoken yes through the shared /confirm slot", () => {
+    // Kind-tagged pending means yes/confirm can never fire anything but the
+    // staged token — the slot, not the word, decides what runs.
+    assert.deepEqual(parseSlash("/addtoken yes"), { kind: "confirm" });
+    assert.deepEqual(parseSlash("/ADDTOKEN YES"), { kind: "confirm" });
+  });
+
+  it("parses /discover on|off and /tokens", () => {
+    assert.deepEqual(parseSlash("/discover on"), { kind: "discover", on: true });
+    assert.deepEqual(parseSlash("/discover off"), { kind: "discover", on: false });
+    assert.deepEqual(parseSlash("/discovery enable"), { kind: "discover", on: true });
+    assert.deepEqual(parseSlash("/tokens"), { kind: "tokens" });
+    assert.equal(parseSlash("/addtoken")?.kind, "unknown");
+    assert.equal(parseSlash("/addtoken notanaddress")?.kind, "unknown");
+    assert.equal(parseSlash("/discover")?.kind, "unknown");
+    assert.equal(parseSlash("/discover sometimes")?.kind, "unknown");
+  });
+
   it("returns unknown (with usage) for malformed args, never throws", () => {
     assert.equal(parseSlash("/cap abc")?.kind, "unknown");
     assert.equal(parseSlash("/strategy")?.kind, "unknown");
@@ -99,6 +130,15 @@ describe("coerceLlmCommand — the model can only pick from the enum", () => {
   it("unknown/garbage kind becomes chat, never a side effect", () => {
     const c = coerceLlmCommand({ kind: "sudo_send_everything", symbol: "", name: "", usdg: 0, reply: "" } as never);
     assert.equal(c.kind, "chat");
+  });
+
+  it("token staging is unreachable from model output — slash commands only", () => {
+    // A crafted message must never get the model to stage an attacker's token:
+    // these kinds degrade to chat no matter what fields arrive.
+    for (const kind of ["addtoken", "discover", "tokens"]) {
+      const c = coerceLlmCommand({ kind, symbol: "", name: "", usdg: 0, reply: "", address: "0x1111111111111111111111111111111111111111" });
+      assert.equal(c.kind, "chat", `${kind} must not be model-reachable`);
+    }
   });
 
   it("maps a multi-step request to kind=agent carrying the task", () => {
@@ -290,6 +330,93 @@ describe("executeCommand — code disposes", () => {
     assert.deepEqual(d.calls, ["pend:kill"]);
     assert.doesNotMatch(asked, /destroyed/);
     assert.match(asked, /confirm kill/i);
+  });
+
+  // ── token staging (/addtoken, /discover, /tokens) ─────────────────────────
+  // Staging writes nothing: the save happens at /confirm through the shared
+  // kind-tagged slot, re-vetted. Either way no permission is conferred — only
+  // a re-signed grant can cover a token.
+  function tokenDeps(over: Partial<CommandDeps> = {}) {
+    const d = deps(over);
+    const store: { symbol: string; address: `0x${string}`; decimals: number }[] = [];
+    d.getTenantId = () => "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    d.listTokens = () => [...store];
+    d.readTokenMeta = async () => ({ decimals: 18, symbol: "RUBEN" });
+    d.saveTokenSettings = async (patch) => {
+      d.calls.push(`save:${JSON.stringify(patch)}`);
+      if (patch.customTokens) {
+        store.length = 0;
+        store.push(...patch.customTokens);
+      }
+      return { ok: true };
+    };
+    return { d, store };
+  }
+  const ADDR = "0x1111111111111111111111111111111111111111" as const;
+
+  it("/addtoken stages (pending, echoed back) and saves nothing yet", async () => {
+    const { d } = tokenDeps();
+    const r = await executeCommand({ kind: "addtoken", address: ADDR }, d);
+    assert.deepEqual(d.calls, ["pend:addtoken"]);
+    assert.match(r, /RUBEN/);
+    assert.match(r, /18 decimals/);
+    assert.match(r, new RegExp(ADDR));
+    assert.match(r, /re-sign trading permissions/i);
+    assert.ok(!d.calls.some((c) => c.startsWith("save:")));
+  });
+
+  it("/addtoken refuses duplicates, bad reads, no tenant, and gated control", async () => {
+    const { d, store } = tokenDeps();
+    store.push({ symbol: "RUBEN", address: ADDR, decimals: 18 });
+    assert.match(await executeCommand({ kind: "addtoken", address: ADDR }, d), /already listed as RUBEN/);
+    const { d: d2 } = tokenDeps();
+    d2.readTokenMeta = async () => ({ error: "no contract there" });
+    assert.match(await executeCommand({ kind: "addtoken", address: ADDR }, d2), /couldn't read that contract/);
+    const { d: d3 } = tokenDeps();
+    d3.getTenantId = () => null;
+    assert.match(await executeCommand({ kind: "addtoken", address: ADDR }, d3), /no agent armed/);
+    const { d: d4 } = tokenDeps({ controlEnabled: false });
+    assert.match(await executeCommand({ kind: "addtoken", address: ADDR }, d4), /control commands are turned off/i);
+    assert.match(await executeCommand({ kind: "discover", on: true }, d4), /control commands are turned off/i);
+  });
+
+  it("/confirm fires the staged save once, re-vetted", async () => {
+    const { d, store } = tokenDeps();
+    await executeCommand({ kind: "addtoken", address: ADDR }, d);
+    const r = await executeCommand({ kind: "confirm" }, d);
+    assert.match(r, /saved.*RUBEN/);
+    assert.match(r, /re-sign trading permissions/i);
+    assert.equal(store.length, 1);
+    assert.equal(store[0]!.address, ADDR);
+    // Second confirm finds an empty slot — no double save.
+    assert.match(await executeCommand({ kind: "confirm" }, d), /nothing pending/);
+  });
+
+  it("confirm re-vets: dashboard-added duplicates and a closed gate refuse", async () => {
+    const { d, store } = tokenDeps();
+    await executeCommand({ kind: "addtoken", address: ADDR }, d);
+    store.push({ symbol: "RUBEN", address: ADDR, decimals: 18 }); // added elsewhere mid-window
+    assert.match(await executeCommand({ kind: "confirm" }, d), /already listed/);
+    const { d: d2 } = tokenDeps();
+    await executeCommand({ kind: "addtoken", address: ADDR }, d2);
+    (d2 as { controlEnabled: boolean }).controlEnabled = false;
+    assert.match(await executeCommand({ kind: "confirm" }, d2), /control was turned off/i);
+  });
+
+  it("/discover toggles with the credential warning; /tokens lists or stays empty", async () => {
+    const { d } = tokenDeps();
+    const on = await executeCommand({ kind: "discover", on: true }, d);
+    assert.match(on, /discovery on/);
+    assert.match(on, /Bitquery/);
+    assert.ok(d.calls.some((c) => c.startsWith("save:") && c.includes('"discoveryEnabled":true')));
+    assert.match(await executeCommand({ kind: "discover", on: false }, d), /discovery off/);
+    assert.match(await executeCommand({ kind: "tokens" }, d), /no custom tokens staged/);
+    const { d: d2 } = tokenDeps();
+    await executeCommand({ kind: "addtoken", address: ADDR }, d2);
+    await executeCommand({ kind: "confirm" }, d2);
+    const listed = await executeCommand({ kind: "tokens" }, d2);
+    assert.match(listed, /RUBEN/);
+    assert.match(listed, /not permissioned/);
   });
 
   it("kill fires only after /confirm, and says where the owner key went", async () => {
