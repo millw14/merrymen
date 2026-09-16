@@ -24,18 +24,29 @@
  * a profile made of enum words has nothing to sanitise, and the settings route
  * can validate it by membership the way it validates `assetMode`.
  */
+import {
+  PROFILE_HOLDS,
+  PROFILE_LIQUIDITIES,
+  PROFILE_MOMENTUMS,
+  PROFILE_TURNOVERS,
+  SETTINGS_DEFAULTS,
+  type ProfileHold,
+  type ProfileLiquidity,
+  type ProfileMomentum,
+  type ProfileTurnover,
+} from "../../packages/core/src/index";
 import type { RiskStyle } from "./venues/candidate-score";
 import { isRiskStyle } from "./venues/candidate-score";
 import type { CurveTrend } from "./venues/pons-tape";
 
 /** When in a move the agent likes to enter. */
-export type MomentumTaste = "early" | "confirming" | "late";
+export type MomentumTaste = ProfileMomentum;
 /** How much real depth it insists on before caring about anything else. */
-export type LiquidityTaste = "thin-ok" | "prefer-deep";
+export type LiquidityTaste = ProfileLiquidity;
 /** How busy a market it wants. */
-export type TurnoverTaste = "low" | "medium" | "high";
+export type TurnoverTaste = ProfileTurnover;
 /** How long it means to stay. */
-export type HoldTaste = "quick" | "ride";
+export type HoldTaste = ProfileHold;
 
 export interface TradingProfile {
   /** Sent to the Brain as `risk_appetite`; it already understands the three words. */
@@ -50,20 +61,47 @@ export interface TradingProfile {
   researchTopN: number;
 }
 
-export const MOMENTUM_TASTES: readonly MomentumTaste[] = ["early", "confirming", "late"];
-export const LIQUIDITY_TASTES: readonly LiquidityTaste[] = ["thin-ok", "prefer-deep"];
-export const TURNOVER_TASTES: readonly TurnoverTaste[] = ["low", "medium", "high"];
-export const HOLD_TASTES: readonly HoldTaste[] = ["quick", "ride"];
+/** The vocabulary lives in core so the settings route and the worker cannot drift. */
+export const MOMENTUM_TASTES: readonly MomentumTaste[] = PROFILE_MOMENTUMS;
+export const LIQUIDITY_TASTES: readonly LiquidityTaste[] = PROFILE_LIQUIDITIES;
+export const TURNOVER_TASTES: readonly TurnoverTaste[] = PROFILE_TURNOVERS;
+export const HOLD_TASTES: readonly HoldTaste[] = PROFILE_HOLDS;
 
+/** The defaults are core's defaults — one source, the same one the settings page shows. */
 export const PROFILE_DEFAULTS: TradingProfile = Object.freeze({
-  riskAppetite: "balanced",
-  momentum: "confirming",
-  liquidity: "prefer-deep",
-  turnover: "medium",
-  hold: "ride",
-  convictionMin: 0.6,
-  researchTopN: 3,
+  riskAppetite: SETTINGS_DEFAULTS.profileRiskAppetite,
+  momentum: SETTINGS_DEFAULTS.profileMomentum,
+  liquidity: SETTINGS_DEFAULTS.profileLiquidity,
+  turnover: SETTINGS_DEFAULTS.profileTurnover,
+  hold: SETTINGS_DEFAULTS.profileHold,
+  convictionMin: SETTINGS_DEFAULTS.profileConvictionMin,
+  researchTopN: SETTINGS_DEFAULTS.profileResearchTopN,
 });
+
+/**
+ * The profile as the worker's resolved settings carry it — the durable seat.
+ * `ResolvedConfig` has already validated every field against the enums and
+ * bounds, so this is a rename, not a second parse.
+ */
+export function profileFromSettings(cfg: {
+  profileRiskAppetite: RiskStyle;
+  profileMomentum: MomentumTaste;
+  profileLiquidity: LiquidityTaste;
+  profileTurnover: TurnoverTaste;
+  profileHold: HoldTaste;
+  profileConvictionMin: number;
+  profileResearchTopN: number;
+}): TradingProfile {
+  return {
+    riskAppetite: cfg.profileRiskAppetite,
+    momentum: cfg.profileMomentum,
+    liquidity: cfg.profileLiquidity,
+    turnover: cfg.profileTurnover,
+    hold: cfg.profileHold,
+    convictionMin: cfg.profileConvictionMin,
+    researchTopN: cfg.profileResearchTopN,
+  };
+}
 
 const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
   typeof v === "string" && (allowed as readonly string[]).includes(v) ? (v as T) : fallback;
