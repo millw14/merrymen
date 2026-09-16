@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { CASH, STOCK_TOKENS } from "../../../packages/core/src/index";
-import { FEED_STALE_AFTER_SEC, classifyQuote, depthUsd6, readQuotePrices, spendInQuoteRaw } from "./quote-assets";
+import { FEED_STALE_AFTER_SEC, classifyQuote, depthUsd6, readQuotePrices, spendInQuoteRaw, unpricedWhy } from "./quote-assets";
 
 /**
  * PRICEABLE AND EXECUTABLE ARE DIFFERENT QUESTIONS, and this module keeps
@@ -90,8 +90,10 @@ describe("reading quote prices", () => {
       },
     };
     const quotes = [classifyQuote(CASH.USDG as `0x${string}`), classifyQuote(NVDA.address), classifyQuote("0x0000000000000000000000000000000000000000")];
-    const prices = await readQuotePrices(client as never, quotes, now);
+    const { prices, outcomes } = await readQuotePrices(client as never, quotes, now);
     assert.deepEqual(prices.get(quotes[0]!.address), { usd8: 100_000000n, uiMultiplier: 10n ** 18n, updatedAt: null, stale: false, source: "constant" });
+    assert.equal(outcomes.get(quotes[0]!.address), "constant");
+    assert.equal(outcomes.get(quotes[1]!.address), "ok");
     assert.equal(prices.get(quotes[1]!.address)?.usd8, 180_00000000n);
     assert.equal(prices.get(quotes[1]!.address)?.uiMultiplier, 10n ** 18n, "a stock quote carries its ERC-8056 multiplier");
     assert.equal(prices.get(quotes[1]!.address)?.stale, false);
@@ -105,7 +107,21 @@ describe("reading quote prices", () => {
         return contracts.map((c) => (c.functionName === "uiMultiplier" ? { status: "failure" } : { status: "success", result: [1n, 180_00000000n, 0n, BigInt(now), 1n] }));
       },
     };
-    const prices = await readQuotePrices(client as never, [classifyQuote(NVDA.address)], now);
+    const { prices, outcomes } = await readQuotePrices(client as never, [classifyQuote(NVDA.address)], now);
     assert.equal(prices.get(NVDA.address.toLowerCase()), undefined);
+    assert.equal(outcomes.get(NVDA.address.toLowerCase()), "no-multiplier");
+  });
+
+  it("a feed that failed THIS RUN is not an asset that has no feed — the outcomes keep them apart", async () => {
+    const now = 1_800_000_000;
+    const dead = { async multicall() { throw new Error("rpc down"); } };
+    const eth = classifyQuote("0x0000000000000000000000000000000000000000");
+    const unknown = classifyQuote("0x1234567890123456789012345678901234567890");
+    const { prices, outcomes } = await readQuotePrices(dead as never, [eth, unknown], now);
+    assert.equal(prices.size, 0);
+    assert.equal(outcomes.get(eth.address), "feed-failed");
+    assert.equal(outcomes.get(unknown.address), "no-feed");
+    assert.match(unpricedWhy(eth, "feed-failed"), /feed did not answer this run/);
+    assert.match(unpricedWhy(unknown, "no-feed"), /not in the registry/);
   });
 });

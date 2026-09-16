@@ -51,7 +51,16 @@ import {
   type CurveTrend,
   type TapeHole,
 } from "./venues/pons-tape";
-import { UI_ONE, classifyQuote, depthUsd6, readQuotePrices, type QuoteAsset, type QuotePrice } from "./venues/quote-assets";
+import { USDG_DECIMALS } from "../../packages/core/src/index";
+import {
+  UI_ONE,
+  classifyQuote,
+  depthUsd6,
+  readQuotePrices,
+  type QuoteAsset,
+  type QuotePrice,
+  type QuotePriceOutcome,
+} from "./venues/quote-assets";
 
 /** The windows the brief asks for, in seconds, shortest first. */
 export const TRENDING_WINDOWS_SEC: readonly number[] = [300, 900, 3600];
@@ -61,6 +70,58 @@ export const TRENDING_LAUNCH_WINDOW_SEC = 6 * 3600;
 export const FALLBACK_SEC_PER_BLOCK = 0.1;
 /** How many trending curves get a reserves read. One Multicall3 batch either way. */
 export const TRENDING_TOP_N = 32;
+/**
+ * Executable slots RESERVED in the shortlist, whatever the trending score says.
+ *
+ * The trending score is quote-blind, and on the live tape ETH-quoted curves
+ * carry most of the trading, so a top-N cut by score can hold zero USDG
+ * curves — the first live run of the widened universe read 24 candidates and
+ * not one was executable. The deterministic path the shadow exists to compare
+ * against then never ran, and "agrees with deterministic" was a comparison of
+ * nothing with nothing. Eight is the tick's own `CLASS_MAX_READS`: the
+ * executable universe it would have read is always in the list, tagged as
+ * such, beside whatever the score put there.
+ */
+export const TRENDING_EXECUTABLE_RESERVE = 8;
+
+/** Why a curve is on the shortlist. */
+export type ShortlistedBy = "trending" | "executable-reserve";
+
+/**
+ * The top-N by score UNION the top-K executable by score, PURE. Order is the
+ * score order; a curve in both sets is listed once, tagged "trending".
+ * Returns how many executable curves were left OUT too, so the report can
+ * say what the tick would have seen that this pass did not read.
+ */
+export function pickShortlist<T extends { score: number; executable: boolean }>(
+  ranked: readonly T[],
+  topN: number,
+  reserve: number,
+): { picked: { item: T; by: ShortlistedBy }[]; executableOutside: number } {
+  const picked: { item: T; by: ShortlistedBy }[] = [];
+  const chosen = new Set<T>();
+  for (const item of ranked.slice(0, topN)) {
+    picked.push({ item, by: "trending" });
+    chosen.add(item);
+  }
+  let reserved = 0;
+  let executableOutside = 0;
+  for (const item of ranked) {
+    if (!item.executable) continue;
+    if (chosen.has(item)) {
+      reserved++;
+      continue;
+    }
+    if (reserved < reserve) {
+      picked.push({ item, by: "executable-reserve" });
+      chosen.add(item);
+      reserved++;
+    } else {
+      executableOutside++;
+    }
+  }
+  return { picked, executableOutside };
+}
 
 const SEL_SYMBOL = "0x95d89b41" as const;
 const SEL_DECIMALS = "0x313ce567" as const;
@@ -82,9 +143,19 @@ export interface TrendingCandidate {
   /** What the curve is priced in, classified, with executability and its reason. */
   quote: QuoteAsset;
   quoteIsUsdg: boolean;
+  /** Why this curve is on the list — the score, or the reserved executable slots. */
+  shortlistedBy: ShortlistedBy;
+  /**
+   * The quote's decimals. Guessed 18 ONLY when `quoteDecimalsKnown` is false,
+   * and in that case `reserves` is null too — no figure is derived from a
+   * guessed scale. USDG and native ETH are known without a read.
+   */
   quoteDecimals: number;
+  quoteDecimalsKnown: boolean;
   /** USD per whole quote UI unit, 8dp. Null when the quote has no price. */
   quoteUsd8: bigint | null;
+  /** Why the quote is or is not priced this run — see quote-assets.ts. */
+  quotePriceWhy: QuotePriceOutcome;
   /** ERC-8056 multiplier for a stock quote, 1e18 otherwise. See quote-assets.ts. */
   quoteUiMultiplier: bigint;
   quotePriceStale: boolean;
@@ -123,13 +194,21 @@ export interface TrendingSnapshot {
   /** How many of the candidates the live route cannot execute today. */
   unexecutable: number;
   /**
+   * Executable (USDG-quoted) curves that traded this hour but did not make
+   * the shortlist even with the reserved slots. Non-zero means the tick's own
+   * universe was wider than what this pass read.
+   */
+  executableOutsideShortlist: number;
+  /** Every priced quote failed to price this run — a dead RPC round, not a quiet hour. */
+  allFeedsFailed: boolean;
+  /**
    * Where the hour's trading actually was, by quote asset — every traded
    * curve, not only the shortlist. The line that says how small the
    * executable universe is.
    */
   quoteBreakdown: { quote: string; curves: number; trades: number; executable: boolean }[];
-  /** Every distinct quote asset among the candidates, with its price if any. */
-  quotes: { asset: QuoteAsset; price: QuotePrice | null; decimals: number | null }[];
+  /** Every distinct quote asset among the candidates, with its price if any and why. */
+  quotes: { asset: QuoteAsset; price: QuotePrice | null; why: QuotePriceOutcome; decimals: number | null }[];
   candidates: TrendingCandidate[];
 }
 
@@ -185,8 +264,18 @@ export async function buildTrendingSnapshot(deps: SnapshotDeps): Promise<Trendin
 
   // 2. the launch set — the allow-list
   const wantLookback = blocksFor(deps.launchWindowSec ?? TRENDING_LAUNCH_WINDOW_SEC);
-  const scan = await recentPonsLaunches(deps.client, wantLookback);
-  if (scan.failed) throw new Error("the factory launch scan failed; no allow-list, no snapshot");
+  // ONE RETRY, same window. Half of a six-run live loop lost its snapshot to
+  // a refused launch scan on the public RPC — a transient, not a cap (the 6h
+  // window holds ~2,200 launches against the node's 10,000-log ceiling). A
+  // narrower window would silently shrink the allow-list, so the retry asks
+  // for exactly the same thing and the failure, if it repeats, is still a
+  // failure and not a smaller universe.
+  let scan = await recentPonsLaunches(deps.client, wantLookback);
+  if (scan.failed) {
+    await new Promise((r) => setTimeout(r, 2_000));
+    scan = await recentPonsLaunches(deps.client, wantLookback);
+  }
+  if (scan.failed) throw new Error("the factory launch scan failed twice; no allow-list, no snapshot");
   const launchByCurve = new Map<string, PonsLaunch>();
   for (const l of scan.launches) launchByCurve.set(l.curve.toLowerCase(), l);
 
@@ -207,21 +296,25 @@ export async function buildTrendingSnapshot(deps: SnapshotDeps): Promise<Trendin
     .sort((a, b) => b.score - a.score || (a.t.curve < b.t.curve ? -1 : 1));
 
   const byQuote = new Map<string, { asset: QuoteAsset; curves: number; trades: number }>();
-  const shortlist: { launch: PonsLaunch; trend: CurveTrend; score: number; quote: QuoteAsset }[] = [];
-  for (const { t, score } of ranked) {
+  const universe = ranked.map(({ t, score }) => {
     const launch = launchByCurve.get(t.curve)!;
     const quote = classifyQuote(launch.quoteToken);
     const agg = byQuote.get(quote.address) ?? { asset: quote, curves: 0, trades: 0 };
     agg.curves++;
     agg.trades += t.windows[t.windows.length - 1]!.trades;
     byQuote.set(quote.address, agg);
-    if (shortlist.length < topN) shortlist.push({ launch, trend: t, score, quote });
-  }
+    return { launch, trend: t, score, quote, executable: quote.executable };
+  });
+  const { picked, executableOutside } = pickShortlist(universe, topN, TRENDING_EXECUTABLE_RESERVE);
+  const shortlist = picked.map(({ item, by }) => ({ ...item, by }));
 
   // 5. one batch: symbol, decimals, reserves — plus decimals() per distinct quote
   const distinctQuotes = [...new Map(shortlist.map((s) => [s.quote.address, s.quote])).values()];
+  // USDG and native ETH need no read: 6 and 18 by registry fact, the same way
+  // the tick hard-codes `{ quote: 6 }` for the one quote it trades. The
+  // executable universe must never depend on a batch leg that can fail.
   const quoteDecCalls = distinctQuotes
-    .filter((q) => q.kind !== "native-eth")
+    .filter((q) => q.kind !== "native-eth" && q.kind !== "usdg")
     .map((q) => ({ target: q.address, callData: SEL_DECIMALS as `0x${string}` }));
   const calls = [
     ...shortlist.flatMap(({ launch }) => [
@@ -235,7 +328,10 @@ export async function buildTrendingSnapshot(deps: SnapshotDeps): Promise<Trendin
   const batchOk = res.length === calls.length;
 
   const quoteDecimals = new Map<string, number>();
-  for (const q of distinctQuotes) if (q.kind === "native-eth") quoteDecimals.set(q.address, 18);
+  for (const q of distinctQuotes) {
+    if (q.kind === "native-eth") quoteDecimals.set(q.address, 18);
+    if (q.kind === "usdg") quoteDecimals.set(q.address, USDG_DECIMALS);
+  }
   if (batchOk) {
     const base = shortlist.length * 3;
     quoteDecCalls.forEach((c, i) => {
@@ -246,9 +342,11 @@ export async function buildTrendingSnapshot(deps: SnapshotDeps): Promise<Trendin
   }
 
   // 6. one price batch for the distinct quotes
-  const prices = await readQuotePrices(deps.client, distinctQuotes, asOf);
+  const { prices, outcomes } = await readQuotePrices(deps.client, distinctQuotes, asOf);
+  const feedQuotes = distinctQuotes.filter((q) => q.feed !== null);
+  const allFeedsFailed = feedQuotes.length > 0 && feedQuotes.every((q) => outcomes.get(q.address) === "feed-failed");
 
-  const candidates: TrendingCandidate[] = shortlist.map(({ launch, trend, score, quote }, i) => {
+  const candidates: TrendingCandidate[] = shortlist.map(({ launch, trend, score, quote, by }, i) => {
     const id = `c${String(i + 1).padStart(2, "0")}`;
     const sym = batchOk ? res[i * 3] : undefined;
     const dec = batchOk ? res[i * 3 + 1] : undefined;
@@ -285,8 +383,11 @@ export async function buildTrendingSnapshot(deps: SnapshotDeps): Promise<Trendin
       quoteToken: launch.quoteToken,
       quote,
       quoteIsUsdg: quote.kind === "usdg",
+      shortlistedBy: by,
       quoteDecimals: qDec ?? 18,
+      quoteDecimalsKnown: qDec !== undefined,
       quoteUsd8: price?.usd8 ?? null,
+      quotePriceWhy: outcomes.get(quote.address) ?? "no-feed",
       quoteUiMultiplier: mult,
       quotePriceStale: price?.stale ?? false,
       graduationThresholdRaw: launch.graduationThresholdRaw,
@@ -316,11 +417,18 @@ export async function buildTrendingSnapshot(deps: SnapshotDeps): Promise<Trendin
     tape: { trades: tape.trades.length, from: tape.from, to: tape.to, holes: tape.holes },
     tradedCurves: trends.size,
     unexecutable: candidates.filter((c) => !c.quote.executable).length,
+    executableOutsideShortlist: executableOutside,
+    allFeedsFailed,
     quoteBreakdown: [...byQuote.values()]
       .map((v) => ({ quote: v.asset.symbol, curves: v.curves, trades: v.trades, executable: v.asset.executable }))
       .sort((a, b) => b.trades - a.trades)
       .slice(0, 10),
-    quotes: distinctQuotes.map((asset) => ({ asset, price: prices.get(asset.address) ?? null, decimals: quoteDecimals.get(asset.address) ?? null })),
+    quotes: distinctQuotes.map((asset) => ({
+      asset,
+      price: prices.get(asset.address) ?? null,
+      why: outcomes.get(asset.address) ?? "no-feed",
+      decimals: quoteDecimals.get(asset.address) ?? null,
+    })),
     candidates,
   };
 }

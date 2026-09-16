@@ -250,13 +250,16 @@ function candidateTable(s: TrendingSnapshot): string {
     const [w5, w15, w60] = [c.trend.windows[0]!, c.trend.windows[1]!, c.trend.windows[2]!];
     const age = c.ageSec === null ? "?" : `${Math.floor(c.ageSec / 60)}m`;
     const f = (x: number | null, dp = 2) => (x === null ? "?" : x.toFixed(dp));
-    const quote = `${c.quote.symbol}${c.quotePriceStale ? " (stale)" : ""}`;
+    const quote = `${c.quote.symbol}${c.quotePriceStale ? " (stale)" : ""}${c.quoteUsd8 === null ? " (unpriced)" : ""}`;
+    // The same expression the lenses use: raw → UI units through the ERC-8056
+    // multiplier; "?" when the decimals were never read.
+    const vol1h = c.reserves === null && !c.quoteDecimalsKnown ? "?" : ((Number(w60.volume) / 10 ** c.quoteDecimals) * (Number(c.quoteUiMultiplier) / 1e18)).toPrecision(3);
     return (
-      `| ${c.id} | ${c.symbol} | ${quote} | ${c.quote.executable ? "yes" : "no"} | ${age} | ${c.depthUsd === null ? "?" : c.depthUsd.toFixed(0)} | ` +
+      `| ${c.id}${c.shortlistedBy === "executable-reserve" ? "*" : ""} | ${c.symbol} | ${quote} | ${c.quote.executable ? "yes" : "no"} | ${age} | ${c.depthUsd === null ? "?" : c.depthUsd.toFixed(0)} | ` +
       `${c.graduationBps === null ? "?" : (c.graduationBps / 100).toFixed(1)}% | ` +
       `${w5.trades}/${w15.trades}/${w60.trades} | ${w5.traders}/${w60.traders} | ` +
       `${f(c.trend.tradeAcceleration)}x | ${f(c.trend.volumeAcceleration)}x | ` +
-      `${(Number(w60.volume) / 10 ** c.quoteDecimals).toPrecision(3)} | ${w5.imbalanceQuote === null ? "?" : ((w5.imbalanceQuote + 1) / 2 * 100).toFixed(0) + "%"} | ` +
+      `${vol1h} | ${w5.imbalanceQuote === null ? "?" : ((w5.imbalanceQuote + 1) / 2 * 100).toFixed(0) + "%"} | ` +
       `${w15.momentum === null ? "?" : f(w15.momentum * 100, 1) + "%"} | ${c.trendingScore} |`
     );
   });
@@ -264,6 +267,8 @@ function candidateTable(s: TrendingSnapshot): string {
     "| id | symbol | quote | exec | age | depth USD | grad | trades 5m/15m/1h | traders 5m/1h | trade accel | vol accel | vol 1h (quote units) | buy share 5m | mom 15m | trend score |",
     "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ...rows,
+    "",
+    "_`*` = on the list through the reserved executable slots (the tick's own universe), not by trending score._",
   ].join("\n");
 }
 
@@ -291,9 +296,15 @@ function agentSection(run: AgentShadowRun, sim: ClassSimResult | null, portfolio
     lines.push(`| ${l.candidate.id} | ${l.candidate.symbol} (${l.candidate.quote.symbol}${l.executable ? "" : ", not executable"}) | ${l.ok ? "eligible" : `refused: ${l.refusal!.kind}`} | ${l.ok ? `score ${l.score}` : l.refusal!.reason} |`);
   }
   lines.push("");
+  const eligible = run.legs.filter((l) => l.ok).length;
+  const eligibleExec = run.legs.filter((l) => l.ok && l.executable).length;
   lines.push(
-    `**Deterministic pick (\`chooseEntry\`, the existing path):** ` +
-      (run.deterministicPick ? `${run.deterministicPick.symbol} (${run.deterministicPick.candidateId}), score ${run.deterministicPick.score}` : "none — nothing qualified"),
+    `**Deterministic pick (\`chooseEntry\`, the existing path, executable legs only):** ` +
+      (run.deterministicPick
+        ? `${run.deterministicPick.symbol} (${run.deterministicPick.candidateId}), score ${run.deterministicPick.score}`
+        : eligible === 0
+          ? "none — nothing qualified"
+          : `none — ${eligible} eligible, ${eligibleExec} of them executable (USDG-quoted)`),
   );
   lines.push("");
   lines.push("### Profile ranking of the survivors");
@@ -341,12 +352,18 @@ function agentSection(run: AgentShadowRun, sim: ClassSimResult | null, portfolio
     lines.push("");
     lines.push(
       `**Best opportunity across every quote:** ${b.symbol} (${b.candidateId}) quoted in ${b.quoteSymbol}, confidence ${b.confidence.toFixed(2)} — ` +
-        (b.executable ? "executable on the live route." : `**NOT executable today**: ${b.executableWhy}`),
+        (b.executable ? "quoted in USDG, so the live route CAN reach it; see Deterministic policy below for whether this entry passed." : `**NOT executable today**: ${b.executableWhy}`),
     );
     if (!b.executable) lines.push(`> ${b.thesis}`);
   } else if (d.action === "hold") {
     lines.push("");
-    lines.push("**Best opportunity across every quote:** none cleared the profile's conviction floor.");
+    // Only the under-floor hold ever compared a confidence to the floor; the
+    // other kinds evaluated no buy at all, and the sentence must say so.
+    lines.push(
+      d.holdKind === "under-floor"
+        ? "**Best opportunity across every quote:** none cleared the profile's conviction floor."
+        : `**Best opportunity across every quote:** not evaluated — ${d.holdKind ?? "hold"}.`,
+    );
   }
   if (d.action === "buy" && d.holdWhy) lines.push(`\n_${d.holdWhy}_`);
   lines.push("");
@@ -361,7 +378,9 @@ function agentSection(run: AgentShadowRun, sim: ClassSimResult | null, portfolio
     lines.push(`Simulation (eth_simulateV1): ${sim === null ? "not run" : sim.ok ? `ok — ${sim.tokensOut} raw tokens out, ${sim.gasUsed} gas` : `refused — ${sim.reason}`}`);
   }
   lines.push("");
-  lines.push(`**Agrees with the deterministic path:** ${run.agreesWithDeterministic ? "yes" : "NO"}`);
+  lines.push(
+    `**Agrees with the deterministic path:** ${run.agreesWithDeterministic === null ? "n/a — no executable candidate this pass, so the deterministic path never ran" : run.agreesWithDeterministic ? "yes" : "NO"}`,
+  );
   lines.push("");
   return lines.join("\n");
 }
@@ -478,7 +497,9 @@ async function runOnce(
   md.push("");
   md.push(`Where the hour's trading was, by quote asset: ${snapshot.quoteBreakdown.map((q) => `${q.quote} ${q.curves} curves / ${q.trades} trades${q.executable ? "" : " (not executable)"}`).join(" · ")}.`);
   md.push("");
-  md.push(`Quote prices used: ${snapshot.quotes.map((q) => `${q.asset.symbol} ${q.price ? (Number(q.price.usd8) / 1e8).toFixed(2) + " USD" + (q.price.stale ? " (STALE)" : "") : "unpriced"}`).join(" · ")}.`);
+  md.push(`Quote prices used: ${snapshot.quotes.map((q) => `${q.asset.symbol} ${q.price ? (Number(q.price.usd8) / 1e8).toFixed(2) + " USD" + (q.price.stale ? " (STALE)" : "") : `unpriced (${q.why})`}`).join(" · ")}.`);
+  if (snapshot.allFeedsFailed) md.push("\n> **EVERY PRICE FEED FAILED THIS RUN.** This is a dead RPC round, not a quiet hour: every non-USDG candidate below is unpriced for that reason alone.");
+  if (snapshot.executableOutsideShortlist > 0) md.push(`\n_${snapshot.executableOutsideShortlist} USDG-quoted curve(s) traded this hour but did not make the shortlist even with the reserved executable slots._`);
   md.push("");
   md.push(candidateTable(snapshot));
   md.push("");
@@ -488,7 +509,7 @@ async function runOnce(
   md.push("| | " + runs.map((r) => r.run.name).join(" | ") + " |");
   md.push("|---|" + runs.map(() => "---").join("|") + "|");
   const row = (label: string, f: (r: { run: AgentShadowRun; sim: ClassSimResult | null }) => string) => md.push(`| ${label} | ${runs.map(f).join(" | ")} |`);
-  row("eligible after prefilter", (r) => `${r.run.legs.filter((l) => l.ok).length} of ${r.run.legs.length}`);
+  row("eligible after prefilter (executable)", (r) => `${r.run.legs.filter((l) => l.ok).length} of ${r.run.legs.length} (${r.run.legs.filter((l) => l.ok && l.executable).length})`);
   row("deterministic pick", (r) => r.run.deterministicPick?.symbol ?? "none");
   row("profile #1", (r) => r.run.ranked[0]?.symbol ?? "none");
   row("best opportunity (any quote)", (r) =>
@@ -499,7 +520,7 @@ async function runOnce(
   row("Brain decision (executable only)", (r) => (r.run.decision.action === "buy" ? `BUY ${r.run.decision.symbol} @${r.run.decision.confidence.toFixed(2)}` : "HOLD"));
   row("policy", (r) => (r.run.policy ? (r.run.policy.ok ? "allowed" : `refused ${r.run.policy.rule}`) : "—"));
   row("simulation", (r) => (r.sim ? (r.sim.ok ? "ok" : "refused") : "—"));
-  row("agrees with deterministic", (r) => (r.run.agreesWithDeterministic ? "yes" : "no"));
+  row("agrees with deterministic", (r) => (r.run.agreesWithDeterministic === null ? "n/a (no executable candidate)" : r.run.agreesWithDeterministic ? "yes" : "no"));
   md.push("");
   const report = md.join("\n");
   writeFileSync(path.join(OUT, "report.md"), report);
@@ -531,10 +552,10 @@ async function main() {
       if (REPEAT > 1) {
         const cells = runs.map(
           ({ run }) =>
-            `${run.legs.filter((l) => l.ok).length}/${run.legs.length} | ${run.deterministicPick?.symbol ?? "none"} | ` +
+            `${run.legs.filter((l) => l.ok).length}/${run.legs.length} (${run.legs.filter((l) => l.ok && l.executable).length} exec) | ${run.deterministicPick?.symbol ?? "none"} | ` +
             `${run.decision.bestOpportunity ? `${run.decision.bestOpportunity.symbol} in ${run.decision.bestOpportunity.quoteSymbol} @${run.decision.bestOpportunity.confidence.toFixed(2)}${run.decision.bestOpportunity.executable ? "" : " (NOT exec)"}` : "none"} | ` +
             `${run.decision.action === "buy" ? `BUY ${run.decision.symbol} @${run.decision.confidence.toFixed(2)}` : "HOLD"} | ` +
-            `${run.policy ? (run.policy.ok ? "allowed" : `refused ${run.policy.rule}`) : "—"} | ${run.agreesWithDeterministic ? "yes" : "NO"}`,
+            `${run.policy ? (run.policy.ok ? "allowed" : `refused ${run.policy.rule}`) : "—"} | ${run.agreesWithDeterministic === null ? "n/a" : run.agreesWithDeterministic ? "yes" : "NO"}`,
         );
         writeFileSync(rollup, `| ${i + 1} | ${snapshot.head} | ${snapshot.candidates.length} (${snapshot.candidates.length - snapshot.unexecutable}) | ${cells.join(" | ")} |\n`, { flag: "a" });
       }

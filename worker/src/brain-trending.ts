@@ -63,7 +63,7 @@ import { chooseEntry, scoreLeg, type RefusalKind, type StyleThresholds } from ".
 import { buildClassEntry, classSpendFor, type ClassEntryResult } from "./venues/class-entry";
 import { ACTIVITY_GATE } from "./venues/pons-activity";
 import { curveBuyOut, curveSellOut, realQuoteRaw } from "./venues/pons-price";
-import { depthUsd6, quoteRawToUsd6, spendInQuoteRaw } from "./venues/quote-assets";
+import { classifyQuote, depthUsd6, quoteRawToUsd6, spendInQuoteRaw, unpricedWhy } from "./venues/quote-assets";
 import type { VenueLeg, VenueQuote } from "./venues/venue";
 
 /** The owner's numbers the class route already enforces. Nothing new. */
@@ -108,8 +108,14 @@ export interface PrefilteredLeg {
   refusal: { kind: RefusalKind; reason: string } | null;
   /** The deterministic scorer's own ordering figure. */
   score: number;
-  /** May the LIVE route enter this today? False for every non-USDG quote. */
+  /**
+   * May the LIVE route enter this today? False for every non-USDG quote.
+   * RE-DERIVED from the curve's quote token by `prefilter`, never read from
+   * the candidate record — a replayed file can claim anything.
+   */
   executable: boolean;
+  /** The reason when `executable` is false, from the same derivation. */
+  executableWhy: string | null;
 }
 
 /** The best buy the Brain found, whether or not the route can reach it. */
@@ -151,11 +157,27 @@ export interface TrendingBrainDecision {
   /** Why a hold was a hold, in one sentence. */
   holdWhy: string | null;
   /**
+   * The hold's KIND, so a report can tell "the floor was not cleared" from
+   * "no buy was ever evaluated" — five of the hold paths never compare a
+   * confidence to anything, and printing the floor sentence for them would
+   * be a claim about a comparison that did not happen. Null for a buy.
+   */
+  holdKind: HoldKind | null;
+  /**
    * The best buy across EVERYTHING researched, executable or not. When it is
    * not executable this differs from the action above, and `holdWhy` says so.
    */
   bestOpportunity: BestOpportunity | null;
 }
+
+export type HoldKind =
+  | "no-survivors"
+  | "nothing-researched"
+  | "no-answer"
+  | "mismatched"
+  | "all-held"
+  | "under-floor"
+  | "unexecutable";
 
 export interface ResearchedCandidate {
   candidateId: string;
@@ -184,8 +206,13 @@ export interface AgentShadowRun {
   entry: ClassEntryResult | null;
   intent: TradeIntent | null;
   policy: PolicyVerdict | null;
-  /** True when the Brain landed on the same candidate `chooseEntry` did (or both held). */
-  agreesWithDeterministic: boolean;
+  /**
+   * True when the Brain landed on the same candidate `chooseEntry` did (or
+   * both held). NULL when no executable candidate existed this pass — then
+   * the deterministic path never ran and there is nothing to agree with; a
+   * report renders that as "n/a", never as a yes.
+   */
+  agreesWithDeterministic: boolean | null;
 }
 
 export interface ResearchDeps {
@@ -256,24 +283,51 @@ export function prefilter(snapshot: TrendingSnapshot, cfg: ClassRouteConfig, spe
       const costBps = back === null ? null : Math.max(0, Number(((spendQuoteRaw - back) * 10_000n) / spendQuoteRaw));
       entry = outRaw === null || outRaw <= 0n ? null : { amountOutRaw: outRaw, costBps };
     }
-    const base = { candidate: c, leg, entry, spendQuoteRaw, executable: c.quote.executable };
-    if (c.reserves && c.quoteUsd8 === null) {
-      out.push({
-        ...base,
-        ok: false,
-        refusal: {
-          kind: "unpriceable",
-          reason: `${c.symbol} is quoted in ${c.quote.symbol}, which has no USD price, so its depth cannot be judged against the owner's floor`,
-        },
-        score: 0,
-      });
+    // EXECUTABILITY IS RE-DERIVED FROM THE ADDRESS HERE, never trusted from
+    // the record. A snapshot can be replayed from a file, and a file can say
+    // anything; the one fact that decides whether an intent may be built is
+    // the quote token the curve actually names.
+    const quoteNow = classifyQuote(c.quoteToken);
+    const executable = quoteNow.executable;
+    const base = { candidate: c, leg, entry, spendQuoteRaw, executable, executableWhy: quoteNow.executableWhy };
+    const refuse = (kind: RefusalKind, reason: string) => out.push({ ...base, ok: false, refusal: { kind, reason }, score: 0 });
+    if (quoteNow.address !== c.quote.address) {
+      refuse("venue", `${c.symbol}: the record's quote (${c.quote.symbol}) does not match the curve's quote token — refused`);
+      continue;
+    }
+    // UNREAD IS NOT ZERO. A curve whose reserves (or whose quote's decimals)
+    // could not be read has no depth figure at all; handing scoreLeg a 0n
+    // would print "only 0.00 USDG of real liquidity" about a measurement
+    // that was never made. The tick's own words for the same condition.
+    if (!c.reserves) {
+      refuse(
+        "unpriceable",
+        c.quoteDecimalsKnown
+          ? `${c.symbol}: its curve would not report reserves this pass`
+          : `${c.symbol}: its quote's (${c.quote.symbol}) decimals could not be read this pass, so no figure from its curve is real`,
+      );
+      continue;
+    }
+    if (c.quoteUsd8 === null || depth6 === null) {
+      refuse(
+        "unpriceable",
+        `${c.symbol} is quoted in ${c.quote.symbol} and ${unpricedWhy(c.quote, c.quotePriceWhy)}, so its depth cannot be judged against the owner's floor`,
+      );
       continue;
     }
     const v = scoreLeg(leg, t, entry);
+    // scoreLeg formats its depth refusal in USDG, which is the right word for
+    // the one quote it was written for and the wrong word for every other:
+    // an NVDA-quoted curve holds no USDG at all. Restate the same refusal in
+    // USD with the quote-unit figure beside it.
+    const reason =
+      v.ok || v.kind !== "depth" || c.quote.kind === "usdg"
+        ? v.reason
+        : `only ${fmtUsd(depth6)} of real liquidity (${c.depthQuote === null ? "?" : c.depthQuote.toPrecision(4)} ${c.quote.symbol}) — the owner's floor is ${fmtUsd(t.minRealDepthRaw)}`;
     out.push({
       ...base,
       ok: v.ok,
-      refusal: v.ok ? null : { kind: v.kind ?? "venue", reason: v.reason ?? "did not qualify" },
+      refusal: v.ok ? null : { kind: v.kind ?? "venue", reason: reason ?? "did not qualify" },
       score: v.score,
     });
   }
@@ -380,7 +434,19 @@ const ADDRESSY = /0x[0-9a-fA-F]{16,}/;
 
 /** Refuse to SEND anything address-shaped, the mirror of what the client refuses to accept. */
 function assertNoAddresses(args: DecideArgs): void {
-  const fields = [args.market.instrument_id, args.market.symbol, args.persona ?? "", ...Object.values(args.market.signals), ...(args.memory ?? [])];
+  // Every string the client serialises, including the ids — a replayed
+  // snapshot file could name itself anything.
+  const fields = [
+    args.runId,
+    args.triggerId,
+    args.market.snapshot_id,
+    args.market.price_usd ?? "",
+    args.market.instrument_id,
+    args.market.symbol,
+    args.persona ?? "",
+    ...Object.values(args.market.signals),
+    ...(args.memory ?? []),
+  ];
   for (const f of fields) {
     if (ADDRESSY.test(f)) throw new Error("refusing to send the Brain an address-shaped string");
   }
@@ -461,7 +527,7 @@ export async function researchForAgent(
       candidateId: c.id,
       symbol: c.symbol,
       quoteSymbol: c.quote.symbol,
-      executable: c.quote.executable,
+      executable: leg.executable,
       profileRank: i + 1,
       request: { instrumentId, persona, signals, riskAppetite: agent.profile.riskAppetite },
       result,
@@ -475,9 +541,13 @@ export async function researchForAgent(
   let policy: PolicyVerdict | null = null;
   if (decision.action === "buy" && decision.candidateId) {
     const leg = survivors.find((l) => l.candidate.id === decision.candidateId)!;
-    // A buy is only ever chosen from executable candidates — the quote is
-    // USDG, so `spend` is already in the curve's units.
-    entry = buildClassEntry({
+    // A buy is only ever chosen from executable candidates — and that is
+    // checked AGAIN here against the curve's own quote token, because this is
+    // the one place an intent comes into existence. `spend` is USDG raw, so
+    // it is in the curve's units exactly when the quote is USDG.
+    if (classifyQuote(leg.candidate.quoteToken).kind !== "usdg") {
+      entry = { ok: false, why: `${leg.candidate.symbol} is quoted in ${leg.candidate.quote.symbol}; the live route funds entries in USDG only, so no intent is built` };
+    } else entry = buildClassEntry({
       leg: {
         token: leg.candidate.token,
         symbol: leg.candidate.symbol,
@@ -514,9 +584,11 @@ export async function researchForAgent(
     }
   }
 
-  const agrees =
-    (decision.action === "hold" && deterministicPick === null) ||
-    (decision.action === "buy" && deterministicPick !== null && decision.candidateId === deterministicPick.candidateId);
+  const agrees: boolean | null =
+    executableLegs.length === 0
+      ? null
+      : (decision.action === "hold" && deterministicPick === null) ||
+        (decision.action === "buy" && deterministicPick !== null && decision.candidateId === deterministicPick.candidateId);
 
   return {
     agentId: agent.agentId,
@@ -553,7 +625,7 @@ export function chooseDecision(
   order: readonly RankedCandidate[],
   survivors: readonly PrefilteredLeg[],
 ): TrendingBrainDecision {
-  const hold = (why: string, best: BestOpportunity | null = null): TrendingBrainDecision => ({
+  const hold = (kind: HoldKind, why: string, best: BestOpportunity | null = null): TrendingBrainDecision => ({
     action: "hold",
     candidateId: null,
     token: null,
@@ -568,26 +640,29 @@ export function chooseDecision(
     invalidation: [],
     decisionId: null,
     holdWhy: why,
+    holdKind: kind,
     bestOpportunity: best,
   });
-  if (survivors.length === 0) return hold("no candidate passed the deterministic prefilter");
-  if (researched.length === 0) return hold("nothing was researched");
+  if (survivors.length === 0) return hold("no-survivors", "no candidate passed the deterministic prefilter");
+  if (researched.length === 0) return hold("nothing-researched", "nothing was researched");
 
   const answered = researched.filter((r): r is ResearchedCandidate & { result: { ok: true; decision: BrainDecision; seconds: number } } => r.result.ok);
   if (answered.length === 0) {
     const why = researched.map((r) => (r.result.ok ? "" : `${r.symbol}: ${r.result.kind}${"detail" in r.result ? ` (${r.result.detail.slice(0, 120)})` : ""}`)).filter(Boolean);
-    return hold(`the Brain gave no usable answer — ${why.join("; ")}`);
+    return hold("no-answer", `the Brain gave no usable answer — ${why.join("; ")}`);
   }
 
   const rankOf = (id: string) => order.findIndex((o) => o.key === id);
   const byConfidence = (a: ResearchedCandidate & { result: { decision: BrainDecision } }, b: ResearchedCandidate & { result: { decision: BrainDecision } }) =>
     b.result.decision.confidence - a.result.decision.confidence || rankOf(a.candidateId) - rankOf(b.candidateId);
 
-  const buys = answered
-    .filter((r) => r.result.decision.action === "buy")
-    // The Brain must have answered about the candidate it was asked about.
-    .filter((r) => r.result.decision.instrument_id === r.request.instrumentId)
-    .sort(byConfidence);
+  // The Brain must have answered about the candidate it was asked about. An
+  // answer about something else is not a hold and not a buy — it is a
+  // mismatch, and the record says so rather than filing it under "held".
+  const mismatched = answered.filter((r) => r.result.decision.instrument_id !== r.request.instrumentId);
+  const echoed = answered.filter((r) => r.result.decision.instrument_id === r.request.instrumentId);
+  const buys = echoed.filter((r) => r.result.decision.action === "buy").sort(byConfidence);
+  const held = echoed.filter((r) => r.result.decision.action !== "buy");
   const confident = buys.filter((r) => r.result.decision.confidence >= agent.profile.convictionMin);
 
   const bestOf = (r: (typeof buys)[number]): BestOpportunity => {
@@ -598,7 +673,7 @@ export function chooseDecision(
       quoteSymbol: r.quoteSymbol,
       confidence: r.result.decision.confidence,
       executable: leg.executable,
-      executableWhy: leg.candidate.quote.executableWhy,
+      executableWhy: leg.executableWhy,
       thesis: r.result.decision.thesis,
       decisionId: r.result.decision.decision_id,
     };
@@ -610,16 +685,30 @@ export function chooseDecision(
     if (best && !best.executable) {
       const others = confident.length > 1 ? ` (${confident.length - 1} further confident buy${confident.length > 2 ? "s" : ""}, none executable)` : "";
       return hold(
+        "unexecutable",
         `the best opportunity is ${best.symbol} quoted in ${best.quoteSymbol} at ${best.confidence.toFixed(2)} confidence, ` +
           `and the live route cannot execute it: ${best.executableWhy}${others}`,
         best,
       );
     }
     const top = buys[0];
+    if (top) {
+      const topLeg = survivors.find((l) => l.candidate.id === top.candidateId)!;
+      return hold(
+        "under-floor",
+        `the Brain's best buy was ${top.symbol} at ${top.result.decision.confidence.toFixed(2)} confidence, under the ${agent.profile.convictionMin.toFixed(2)} this profile acts on` +
+          (topLeg.executable ? "" : ` — and it is quoted in ${top.quoteSymbol}, which the live route could not have executed either: ${topLeg.executableWhy}`),
+        best,
+      );
+    }
+    const mismatchNote = mismatched.length
+      ? `the Brain answered about a different instrument than it was asked for ${mismatched.map((r) => `${r.symbol} (echoed ${r.result.decision.instrument_id})`).join(", ")}`
+      : "";
+    if (held.length === 0) return hold("mismatched", mismatchNote, best);
     return hold(
-      top
-        ? `the Brain's best buy was ${top.symbol} at ${top.result.decision.confidence.toFixed(2)} confidence, under the ${agent.profile.convictionMin.toFixed(2)} this profile acts on`
-        : `the Brain held on every researched candidate (${answered.map((r) => `${r.symbol}: ${r.result.decision.hold_kind ?? r.result.decision.action}`).join(", ")})`,
+      "all-held",
+      `the Brain held on every researched candidate (${held.map((r) => `${r.symbol}: ${r.result.decision.hold_kind ?? r.result.decision.action}`).join(", ")})` +
+        (mismatchNote ? `; ${mismatchNote}` : ""),
       best,
     );
   }
@@ -641,6 +730,7 @@ export function chooseDecision(
     risks: d.risks,
     invalidation: d.invalidation,
     decisionId: d.decision_id,
+    holdKind: null,
     // Names the better pick the route could not reach, when there is one.
     holdWhy:
       best && best.candidateId !== win.candidateId && !best.executable

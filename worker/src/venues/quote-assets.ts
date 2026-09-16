@@ -157,26 +157,44 @@ export function quoteRawToUsd6(raw: bigint, quoteDecimals: number, quoteUsd8: bi
 }
 
 /**
+ * WHY a quote asset has, or has not, a price this run. "no-feed" is a fact
+ * about the registry and will be true next run too; "feed-failed" is a fact
+ * about this RPC round and says nothing about the asset. A report that
+ * printed both as "no USD price" would send an owner to the wrong place.
+ */
+export type QuotePriceOutcome = "constant" | "ok" | "no-feed" | "feed-failed" | "bad-answer" | "no-multiplier";
+
+export interface QuotePrices {
+  prices: Map<string, QuotePrice>;
+  /** One outcome per quote asset asked about, priced or not. */
+  outcomes: Map<string, QuotePriceOutcome>;
+}
+
+/**
  * Price every distinct quote asset in one round trip. USDG is a constant; the
  * rest go through their Chainlink feed with the worker's 2h staleness rule.
- * A feed that will not answer yields NO entry — absent is "unpriced", which
- * every consumer treats as unknown rather than as zero.
+ * A feed that will not answer yields NO price — absent is "unpriced", which
+ * every consumer treats as unknown rather than as zero — and an OUTCOME that
+ * says why, so a dead RPC round and a feedless asset never read the same.
  */
 export async function readQuotePrices(
   client: Pick<PublicClient, "multicall">,
   quotes: readonly QuoteAsset[],
   nowSec: number,
-): Promise<Map<string, QuotePrice>> {
+): Promise<QuotePrices> {
   const out = new Map<string, QuotePrice>();
+  const outcomes = new Map<string, QuotePriceOutcome>();
   const feeds: { address: `0x${string}`; feed: `0x${string}`; stock: boolean }[] = [];
   for (const q of quotes) {
     if (q.kind === "usdg") {
       out.set(q.address, { usd8: 100_000_000n, uiMultiplier: UI_ONE, updatedAt: null, stale: false, source: "constant" });
+      outcomes.set(q.address, "constant");
       continue;
     }
     if (q.feed) feeds.push({ address: q.address, feed: q.feed, stock: q.kind === "stock" });
+    else outcomes.set(q.address, "no-feed");
   }
-  if (feeds.length === 0) return out;
+  if (feeds.length === 0) return { prices: out, outcomes };
   // One round trip: every feed's latestRoundData, then every stock quote's
   // uiMultiplier. A stock whose multiplier will not read is left UNPRICED —
   // a price without its multiplier is a wrong price, not an approximate one.
@@ -192,7 +210,10 @@ export async function readQuotePrices(
   } catch {
     results = null;
   }
-  if (!results) return out;
+  if (!results) {
+    for (const f of feeds) outcomes.set(f.address, "feed-failed");
+    return { prices: out, outcomes };
+  }
   const multipliers = new Map<string, bigint>();
   stocks.forEach((f, i) => {
     const r = results![feeds.length + i];
@@ -200,13 +221,26 @@ export async function readQuotePrices(
   });
   feeds.forEach((f, i) => {
     const r = results![i];
-    if (!r || r.status !== "success" || !Array.isArray(r.result) || r.result.length < 4) return;
+    if (!r || r.status !== "success") {
+      outcomes.set(f.address, "feed-failed");
+      return;
+    }
+    if (!Array.isArray(r.result) || r.result.length < 4) {
+      outcomes.set(f.address, "bad-answer");
+      return;
+    }
     const round = r.result as unknown as readonly [bigint, bigint, bigint, bigint, bigint];
     const answer = round[1];
     const updatedAt = round[3];
-    if (typeof answer !== "bigint" || typeof updatedAt !== "bigint" || answer <= 0n) return;
+    if (typeof answer !== "bigint" || typeof updatedAt !== "bigint" || answer <= 0n) {
+      outcomes.set(f.address, "bad-answer");
+      return;
+    }
     const uiMultiplier = f.stock ? multipliers.get(f.address) : UI_ONE;
-    if (uiMultiplier === undefined) return;
+    if (uiMultiplier === undefined) {
+      outcomes.set(f.address, "no-multiplier");
+      return;
+    }
     out.set(f.address, {
       usd8: answer,
       uiMultiplier,
@@ -214,6 +248,25 @@ export async function readQuotePrices(
       stale: nowSec - Number(updatedAt) > FEED_STALE_AFTER_SEC,
       source: "chainlink",
     });
+    outcomes.set(f.address, "ok");
   });
-  return out;
+  return { prices: out, outcomes };
+}
+
+/** The owner-facing sentence for an unpriced quote, by outcome. */
+export function unpricedWhy(q: QuoteAsset, outcome: QuotePriceOutcome | undefined): string {
+  switch (outcome) {
+    case "feed-failed":
+      return `the ${q.symbol}/USD feed did not answer this run`;
+    case "bad-answer":
+      return `the ${q.symbol}/USD feed returned something unreadable this run`;
+    case "no-multiplier":
+      return `${q.symbol}'s share multiplier could not be read this run, so its price cannot be applied`;
+    case "no-feed":
+      return q.kind === "unknown"
+        ? `${q.symbol} is not in the registry and has no price feed`
+        : `${q.symbol} has no Chainlink feed in the registry`;
+    default:
+      return `${q.symbol} has no USD price`;
+  }
 }

@@ -99,8 +99,11 @@ function candidate(
     quoteToken: quoteAddr,
     quote,
     quoteIsUsdg: kind === "usdg",
+    shortlistedBy: "trending",
     quoteDecimals,
+    quoteDecimalsKnown: true,
     quoteUsd8: usd8,
+    quotePriceWhy: usd8 === null ? "no-feed" : kind === "usdg" ? "constant" : "ok",
     quoteUiMultiplier: 10n ** 18n,
     quotePriceStale: false,
     graduationThresholdRaw: threshold,
@@ -130,6 +133,8 @@ function snapshot(candidates: TrendingCandidate[]): TrendingSnapshot {
     tape: { trades: 100, from: 0n, to: 1000n, holes: [] },
     tradedCurves: candidates.length,
     unexecutable: candidates.filter((c) => !c.quote.executable).length,
+    executableOutsideShortlist: 0,
+    allFeedsFailed: false,
     quoteBreakdown: [],
     quotes: [],
     candidates,
@@ -263,12 +268,14 @@ describe("the prefilter is the class route's own scorer", () => {
       [
         ["c01", false, "depth"],
         ["c02", false, "activity"],
-        ["c03", false, "depth"],
+        ["c03", false, "unpriceable"],
         ["c04", true, null],
       ],
     );
     assert.match(legs[0]!.refusal!.reason, /only 100\.00 USDG of real liquidity/);
     assert.match(legs[1]!.refusal!.reason, /4 trades recently/);
+    // Unread is not zero: the tick says "would not report reserves", not "0.00 of liquidity".
+    assert.match(legs[2]!.refusal!.reason, /would not report reserves this pass/);
   });
 });
 
@@ -319,12 +326,25 @@ describe("the Brain reorders survivors; the deterministic layer keeps the veto",
     assert.ok(a.market.signals.liquidity!.includes("real depth 800.00 USD (800.0 USDG)"), "depth is stated in USD and in the quote asset");
   });
 
-  it("the Brain answering about something it was not asked about is ignored", async () => {
+  it("the Brain answering about something it was not asked about is a MISMATCH, not a hold", async () => {
     const snap = snapshot([candidate(1, { realUsd: 800 })]);
     const brain = fakeBrain({ "pons:c01:tok1": { action: "buy", confidence: 0.9, suggested_delta_usdg: 5_000_000, instrument_id: "pons:c09:other" } });
     const run = await researchForAgent(snap, agent(), deps(brain.decideFn));
     assert.equal(run.decision.action, "hold");
-    assert.match(run.decision.holdWhy ?? "", /held on every researched candidate|no usable answer|under the/);
+    assert.equal(run.decision.holdKind, "mismatched");
+    assert.match(run.decision.holdWhy ?? "", /answered about a different instrument than it was asked for TOK1 \(echoed pons:c09:other\)/);
+    assert.doesNotMatch(run.decision.holdWhy ?? "", /held on every/);
+  });
+
+  it("every hold carries its kind, so a report never prints a floor sentence for a hold that evaluated no buy", async () => {
+    const none = await researchForAgent(snapshot([candidate(1, { realUsd: 100 })]), agent(), deps(fakeBrain({}).decideFn));
+    assert.equal(none.decision.holdKind, "no-survivors");
+    const unreachable = await researchForAgent(snapshot([candidate(1, { realUsd: 800 })]), agent(), deps(fakeBrain({ "pons:c01:tok1": "unreachable" }).decideFn));
+    assert.equal(unreachable.decision.holdKind, "no-answer");
+    const held = await researchForAgent(snapshot([candidate(1, { realUsd: 800 })]), agent(), deps(fakeBrain({ "pons:c01:tok1": { action: "hold" } }).decideFn));
+    assert.equal(held.decision.holdKind, "all-held");
+    const floor = await researchForAgent(snapshot([candidate(1, { realUsd: 800 })]), agent({ profile: { convictionMin: 0.9 } }), deps(fakeBrain({ "pons:c01:tok1": { action: "buy", confidence: 0.5, suggested_delta_usdg: 5_000_000 } }).decideFn));
+    assert.equal(floor.decision.holdKind, "under-floor");
   });
 
   it("a buy under the profile's conviction floor is a hold that says so", async () => {
@@ -394,11 +414,27 @@ describe("research is wider than execution", () => {
     assert.doesNotMatch(sig.liquidity! + sig.onchain! + sig.technical!, /executable|cannot execute/i, "executability is not a market fact");
   });
 
+  it("a thin NVDA-quoted curve is refused in USD, with the NVDA figure beside it — it holds no USDG", () => {
+    const legs = prefilter(snapshot([candidate(1, { realUsd: 200, quote: "nvda" })]), cfg, 5_000_000n);
+    assert.equal(legs[0]!.refusal?.kind, "depth");
+    assert.match(legs[0]!.refusal?.reason ?? "", /only 200\.00 USD of real liquidity \(1\.111 NVDA\) — the owner's floor is 250\.00 USD/);
+    assert.doesNotMatch(legs[0]!.refusal?.reason ?? "", /USDG/);
+  });
+
+  it("a replayed record that CLAIMS executable is re-derived from the curve's quote token — no intent for an NVDA quote, ever", async () => {
+    const forged = candidate(1, { realUsd: 800, quote: "nvda" });
+    (forged.quote as { executable: boolean }).executable = true;
+    const run = await researchForAgent(snapshot([forged]), agent(), deps(fakeBrain({ "pons:c01:tok1": { action: "buy", confidence: 0.95, suggested_delta_usdg: 5_000_000 } }).decideFn));
+    assert.equal(run.legs[0]!.executable, false, "executability comes from classifyQuote(quoteToken), not the record");
+    assert.equal(run.intent, null);
+    assert.equal(run.decision.action, "hold");
+  });
+
   it("a quote with no USD price is refused as unpriceable — a depth nobody can value is not a small depth", () => {
     const legs = prefilter(snapshot([candidate(1, { realUsd: 800, quote: "unknown" })]), cfg, 5_000_000n);
     assert.equal(legs[0]!.ok, false);
     assert.equal(legs[0]!.refusal?.kind, "unpriceable");
-    assert.match(legs[0]!.refusal?.reason ?? "", /no USD price/);
+    assert.match(legs[0]!.refusal?.reason ?? "", /not in the registry and has no price feed/);
   });
 
   it("when the best opportunity is unexecutable the decision is a HOLD that names it and the reason", async () => {
@@ -410,8 +446,10 @@ describe("research is wider than execution", () => {
     assert.equal(run.decision.bestOpportunity?.executable, false);
     assert.equal(run.decision.bestOpportunity?.quoteSymbol, "NVDA");
     assert.match(run.decision.holdWhy ?? "", /best opportunity is TOK1 quoted in NVDA at 0\.85 confidence, and the live route cannot execute it: quoted in NVDA/);
+    assert.equal(run.decision.holdKind, "unexecutable");
     assert.equal(run.entry, null, "no intent is ever built for an unexecutable quote");
     assert.equal(run.deterministicPick, null, "chooseEntry sees executable legs only");
+    assert.equal(run.agreesWithDeterministic, null, "no executable candidate: the deterministic path never ran, so there is nothing to agree with");
   });
 
   it("when an executable buy also clears conviction, it is the action — and the better unexecutable one is still named", async () => {
