@@ -514,6 +514,13 @@ export function checkPolicy(
   // Sells are untouched at both venues: the caller only ever reports
   // `buyUnpriceable` about the asset being ACQUIRED, so getting out of an
   // unpriceable position is never blocked by this.
+  //
+  // THAT SENTENCE WAS ONCE FALSE. The caller decided "class buy" from the
+  // target alone, so a vault SELL arrived here flagged unpriceable and its
+  // proceeds were budgeted as a purchase. The side is now judged from the
+  // intent's assets in class-side.ts (`scoutFlagsFor`), and class-side.test.ts
+  // drives that classifier into this rule — so the invariant above is enforced
+  // upstream rather than assumed here.
   // The two venues that ACQUIRE an asset. Named explicitly rather than relying
   // on `scout` being undefined elsewhere: a vault movement has no notional to
   // judge, and a future kind that does should have to opt in here on purpose.

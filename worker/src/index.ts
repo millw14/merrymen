@@ -326,6 +326,7 @@ import {
 } from "./venues/pons-price";
 import { chooseEntry, type RefusalKind } from "./venues/candidate-score";
 import { classFunnelKey, classFunnelLine, classFunnelStages } from "./venues/class-funnel";
+import { scoutFlagsFor } from "./class-side";
 import {
   activeClassPositions,
   ceilingBlocks,
@@ -5712,11 +5713,20 @@ async function main() {
     // than by this tick's luck. Deciding it by measurement would mean a curve
     // that briefly quoted turned the budget off for the buy that followed —
     // `quarantine.ts` fails closed on every ambiguity and so does this.
-    const isClassBuy =
-      intent.kind === "curve-trade" &&
-      active.limits.ponsClassVault !== undefined &&
-      intent.target.toLowerCase() === active.limits.ponsClassVault.toLowerCase();
-    const buyUnpriceable = isClassBuy || lastUnpriceable.has(buyToken.toLowerCase());
+    //
+    // AND THE SIDE COMES FROM THE ASSETS, NEVER THE TARGET ALONE. This used to
+    // read `kind === "curve-trade" && target === ponsClassVault`, which a class
+    // SELL satisfies just as well as a buy — so an exit was judged an unpriceable
+    // purchase and its proceeds were charged against the scout budget on top of
+    // the class cost already held. Under the canary preset that refused any exit
+    // whose proceeds exceeded `budget - heldCost`; with three positions held,
+    // nothing could exit at all. The classification now lives in class-side.ts,
+    // where it is tested against the real intent shapes.
+    const { isClassBuy, buyUnpriceable } = scoutFlagsFor(intent, {
+      vault: active.limits.ponsClassVault,
+      cash: CASH.USDG as `0x${string}`,
+      lastUnpriceable,
+    });
     return {
       limits: {
         enabled: cfg.scoutEnabled,

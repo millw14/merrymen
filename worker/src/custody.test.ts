@@ -182,7 +182,20 @@ describe("the tick uses the custody seam", () => {
     // be in — so the flag read false and policy.ts skipped the WHOLE scout
     // block. The budget meant to bound the least priceable assets on the chain
     // was not connected to them at all.
-    assert.match(CODE, /const buyUnpriceable = isClassBuy \|\| lastUnpriceable\.has/);
+    //
+    // The expression moved to class-side.ts when the side classification was
+    // extracted (a class SELL was being judged a buy from the target alone),
+    // so this pins it where it lives now: scoutContextFor takes its flags from
+    // scoutFlagsFor, and scoutFlagsFor still ORs the class-buy fact ahead of
+    // the measured list.
+    assert.match(CODE, /scoutFlagsFor\(intent, \{/, "scoutContextFor no longer takes its flags from class-side.ts");
+    const side = readFileSync(new URL("./class-side.ts", import.meta.url), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .replace(/\/\/[^\n]*/g, " ");
+    assert.match(side, /const buyUnpriceable = isClassBuy \|\| \(buyToken !== null && deps\.lastUnpriceable\.has/);
+    // And the half that was missing: a sell acquires cash, so it never reaches
+    // the tape at all — stated as an early return, not left to coincidence.
+    assert.match(side, /if \(side === "sell"\) return \{ side, isClassBuy: false, buyUnpriceable: false \}/);
   });
 
   it("the per-token scout cap can find a class token's basis", () => {
