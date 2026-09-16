@@ -157,8 +157,8 @@ export interface RankableCandidate {
   /** Opaque key the caller maps back to its leg. */
   key: string;
   symbol: string;
-  /** Real quote depth, whole USDG. */
-  depthUsdg: number;
+  /** Real depth in whole USD, whatever the curve is quoted in. */
+  depthUsd: number;
   /** Measured round-trip cost at the agent's entry size, bps. */
   costBps: number;
   /** 0..10000 along the curve. */
@@ -263,7 +263,7 @@ export function featureWeights(p: TradingProfile): FeatureSpec[] {
       feature: "real depth",
       weight: deep ? 2.5 : 0.5,
       higherIsBetter: true,
-      value: (c) => c.depthUsdg,
+      value: (c) => c.depthUsd,
     },
     {
       feature: "round-trip cost",

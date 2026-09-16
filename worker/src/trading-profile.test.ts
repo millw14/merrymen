@@ -60,7 +60,7 @@ function trend(o: { n5?: number; n15?: number; n60?: number; traders5?: number; 
 const cand = (key: string, o: Partial<RankableCandidate> & { trend?: CurveTrend } = {}): RankableCandidate => ({
   key,
   symbol: key.toUpperCase(),
-  depthUsdg: 500,
+  depthUsd: 500,
   costBps: 250,
   graduationBps: 3000,
   ageSec: 1800,
@@ -95,20 +95,20 @@ describe("parsing a profile", () => {
 
 describe("ranking is deterministic and profile-driven", () => {
   it("the same profile on the same candidates gives the same order, every time", () => {
-    const cs = [cand("a", { trend: trend({ accel: 3 }) }), cand("b", { depthUsdg: 2000 }), cand("c", { ageSec: 60 })];
+    const cs = [cand("a", { trend: trend({ accel: 3 }) }), cand("b", { depthUsd: 2000 }), cand("c", { ageSec: 60 })];
     const first = rankForProfile(cs, EARLY).map((r) => r.key);
     for (let i = 0; i < 20; i++) assert.deepEqual(rankForProfile(cs, EARLY).map((r) => r.key), first);
   });
 
   it("two profiles can disagree on the same survivors — that is the point", () => {
-    const young = cand("young", { ageSec: 120, depthUsdg: 260, trend: trend({ accel: 4, new5: 6, n60: 30 }) });
-    const proven = cand("proven", { ageSec: 7200, depthUsdg: 3000, trend: trend({ accel: 0.8, n60: 200, mom15: 0.2 }) });
+    const young = cand("young", { ageSec: 120, depthUsd: 260, trend: trend({ accel: 4, new5: 6, n60: 30 }) });
+    const proven = cand("proven", { ageSec: 7200, depthUsd: 3000, trend: trend({ accel: 0.8, n60: 200, mom15: 0.2 }) });
     assert.equal(rankForProfile([young, proven], EARLY)[0]!.key, "young");
     assert.equal(rankForProfile([young, proven], LATE)[0]!.key, "proven");
   });
 
   it("the membership never changes — only the order does", () => {
-    const cs = [cand("a"), cand("b", { depthUsdg: 9000 }), cand("c", { costBps: 50 })];
+    const cs = [cand("a"), cand("b", { depthUsd: 9000 }), cand("c", { costBps: 50 })];
     for (const p of [EARLY, LATE, PROFILE_DEFAULTS]) {
       assert.deepEqual(rankForProfile(cs, p).map((r) => r.key).sort(), ["a", "b", "c"]);
     }
@@ -120,7 +120,7 @@ describe("ranking is deterministic and profile-driven", () => {
   });
 
   it("every term is named, weighted and ranked, so the reasoning is auditable", () => {
-    const r = rankForProfile([cand("a", { depthUsdg: 1 }), cand("b", { depthUsdg: 5000 })], LATE);
+    const r = rankForProfile([cand("a", { depthUsd: 1 }), cand("b", { depthUsd: 5000 })], LATE);
     const b = r.find((x) => x.key === "b")!;
     const depth = b.terms.find((t) => t.feature === "real depth")!;
     assert.equal(depth.rank, 1);

@@ -8,6 +8,8 @@ import type { AgentLimits, AgentState } from "./policy";
 import { PROFILE_DEFAULTS, type TradingProfile } from "./trading-profile";
 import type { TrendingCandidate, TrendingSnapshot } from "./trending-snapshot";
 import type { CurveTrend } from "./venues/pons-tape";
+import { classifyQuote } from "./venues/quote-assets";
+import { CASH, STOCK_TOKENS } from "../../packages/core/src/index";
 
 /**
  * THE BRAIN CHOOSES AMONG SURVIVORS, AND THE DETERMINISTIC LAYER STILL SAYS
@@ -22,7 +24,9 @@ import type { CurveTrend } from "./venues/pons-tape";
  * carries an address.
  */
 
-const USDG = "0x3333333333333333333333333333333333333333" as const;
+// The REAL cash token, so classifyQuote recognises it as the executable quote
+// and the policy fixture below judges the same address the tick would.
+const USDG = CASH.USDG.toLowerCase() as `0x${string}`;
 const VAULT = "0x9999999999999999999999999999999999999999" as const;
 const addr = (n: number) => `0x${String(n).padStart(40, "0")}` as `0x${string}`;
 
@@ -57,13 +61,32 @@ function trend(n15: number, accel: number): CurveTrend {
   };
 }
 
-/** A candidate with a healthy, readable curve. `realUsdg` is real depth on top of the seed. */
-function candidate(i: number, o: { realUsdg: number; n15?: number; accel?: number; ageSec?: number }): TrendingCandidate {
-  const threshold = 10_000_000_000n;
+const NVDA = STOCK_TOKENS.find((t) => t.symbol === "NVDA")!;
+const NVDA_USD8 = 180_00000000n;
+
+/**
+ * A candidate with a healthy, readable curve. `realUsd` is real depth in USD
+ * on top of the seed; for a non-USDG quote the reserves are stated in that
+ * quote's units at the feed price, so the USD depth is the same figure.
+ */
+function candidate(
+  i: number,
+  o: { realUsd: number; n15?: number; accel?: number; ageSec?: number; quote?: "usdg" | "nvda" | "unknown" },
+): TrendingCandidate {
+  const kind = o.quote ?? "usdg";
+  const quoteAddr = kind === "usdg" ? USDG : kind === "nvda" ? (NVDA.address.toLowerCase() as `0x${string}`) : addr(999);
+  const quote = classifyQuote(quoteAddr);
+  const quoteDecimals = kind === "usdg" ? 6 : 18;
+  // NVDA at 180 USD: a 10,000 USD threshold is 55.55… NVDA; the unknown quote
+  // has the same raw shape as NVDA and no price.
+  const usd8 = kind === "usdg" ? 100_000_000n : kind === "nvda" ? NVDA_USD8 : null;
+  const usdToRaw = (usd: number) =>
+    kind === "usdg" ? BigInt(Math.round(usd * 1e6)) : (BigInt(Math.round(usd * 1e6)) * 10n ** 18n * 100n) / NVDA_USD8;
+  const threshold = usdToRaw(10_000);
   const reserves = {
-    quoteRaw: 4_000_000_000n + BigInt(Math.round(o.realUsdg * 1e6)),
+    quoteRaw: (threshold * 4n) / 10n + usdToRaw(o.realUsd),
     tokenRaw: 800_000_000n * 10n ** 18n,
-    quoteDecimals: 6,
+    quoteDecimals,
     tokenDecimals: 18,
     graduationThresholdRaw: threshold,
   };
@@ -73,15 +96,21 @@ function candidate(i: number, o: { realUsdg: number; n15?: number; accel?: numbe
     symbol: `TOK${i}`,
     decimals: 18,
     curve: addr(200 + i),
-    quoteToken: USDG,
-    quoteIsUsdg: true,
+    quoteToken: quoteAddr,
+    quote,
+    quoteIsUsdg: kind === "usdg",
+    quoteDecimals,
+    quoteUsd8: usd8,
+    quoteUiMultiplier: 10n ** 18n,
+    quotePriceStale: false,
     graduationThresholdRaw: threshold,
     launchBlock: 1n,
     ageSec: o.ageSec ?? 1200,
     reserves,
-    depthUsdg: o.realUsdg,
-    graduationBps: Math.round((o.realUsdg / 10_000) * 10_000),
-    priceUsd: "0.00000500",
+    depthQuote: kind === "usdg" ? o.realUsd : o.realUsd / 180,
+    depthUsd: usd8 === null ? null : o.realUsd,
+    graduationBps: Math.round((o.realUsd / 10_000) * 10_000),
+    priceUsd: usd8 === null ? null : "0.00000500",
     trend: trend(o.n15 ?? 40, o.accel ?? 1),
     trendingScore: 10,
   };
@@ -100,8 +129,9 @@ function snapshot(candidates: TrendingCandidate[]): TrendingSnapshot {
     launchScanClamped: false,
     tape: { trades: 100, from: 0n, to: 1000n, holes: [] },
     tradedCurves: candidates.length,
-    droppedNonUsdg: 0,
+    unexecutable: candidates.filter((c) => !c.quote.executable).length,
     quoteBreakdown: [],
+    quotes: [],
     candidates,
   };
 }
@@ -220,10 +250,10 @@ describe("the prefilter is the class route's own scorer", () => {
   it("refuses thin, quiet and unreadable candidates with the tick's own words", () => {
     const legs = prefilter(
       snapshot([
-        candidate(1, { realUsdg: 100 }),
-        candidate(2, { realUsdg: 800, n15: 4 }),
-        { ...candidate(3, { realUsdg: 800 }), reserves: null },
-        candidate(4, { realUsdg: 800 }),
+        candidate(1, { realUsd: 100 }),
+        candidate(2, { realUsd: 800, n15: 4 }),
+        { ...candidate(3, { realUsd: 800 }), reserves: null },
+        candidate(4, { realUsd: 800 }),
       ]),
       cfg,
       5_000_000n,
@@ -245,7 +275,7 @@ describe("the prefilter is the class route's own scorer", () => {
 describe("the Brain reorders survivors; the deterministic layer keeps the veto", () => {
   it("a survivor the Brain prefers over the argmax becomes the pick, and passes the real wall", async () => {
     // c01 is deeper (chooseEntry's favourite); c02 is accelerating (the Brain's).
-    const snap = snapshot([candidate(1, { realUsdg: 2_000 }), candidate(2, { realUsdg: 600, accel: 4 })]);
+    const snap = snapshot([candidate(1, { realUsd: 2_000 }), candidate(2, { realUsd: 600, accel: 4 })]);
     const brain = fakeBrain({
       "pons:c01:tok1": { action: "hold", confidence: 0.4 },
       "pons:c02:tok2": { action: "buy", confidence: 0.8, suggested_delta_usdg: 9_000_000, thesis: "waking up", catalysts: ["4x trade acceleration"] },
@@ -266,7 +296,7 @@ describe("the Brain reorders survivors; the deterministic layer keeps the veto",
   });
 
   it("a refused candidate is never shown to the Brain", async () => {
-    const snap = snapshot([candidate(1, { realUsdg: 100 }), candidate(2, { realUsdg: 800 })]);
+    const snap = snapshot([candidate(1, { realUsd: 100 }), candidate(2, { realUsd: 800 })]);
     const brain = fakeBrain({ "pons:c02:tok2": { action: "hold" } });
     await researchForAgent(snap, agent(), deps(brain.decideFn));
     assert.deepEqual(
@@ -277,7 +307,7 @@ describe("the Brain reorders survivors; the deterministic layer keeps the veto",
   });
 
   it("nothing sent to the Brain carries an address, and the profile travels as risk_appetite", async () => {
-    const snap = snapshot([candidate(1, { realUsdg: 800 })]);
+    const snap = snapshot([candidate(1, { realUsd: 800 })]);
     const brain = fakeBrain({ "pons:c01:tok1": { action: "hold" } });
     await researchForAgent(snap, agent({ profile: { riskAppetite: "aggressive" } }), deps(brain.decideFn));
     const a = brain.asked[0]!;
@@ -286,11 +316,11 @@ describe("the Brain reorders survivors; the deterministic layer keeps the veto",
     assert.equal(a.riskAppetite, "aggressive");
     assert.match(a.persona ?? "", /You are Tester, a Merryman/);
     assert.ok(a.market.signals.onchain!.includes("Last 5 minutes"), "the tape is rendered, not the addresses");
-    assert.ok(a.market.signals.liquidity!.includes("real depth 800.00 USDG"));
+    assert.ok(a.market.signals.liquidity!.includes("real depth 800.00 USD (800.0 USDG)"), "depth is stated in USD and in the quote asset");
   });
 
   it("the Brain answering about something it was not asked about is ignored", async () => {
-    const snap = snapshot([candidate(1, { realUsdg: 800 })]);
+    const snap = snapshot([candidate(1, { realUsd: 800 })]);
     const brain = fakeBrain({ "pons:c01:tok1": { action: "buy", confidence: 0.9, suggested_delta_usdg: 5_000_000, instrument_id: "pons:c09:other" } });
     const run = await researchForAgent(snap, agent(), deps(brain.decideFn));
     assert.equal(run.decision.action, "hold");
@@ -298,7 +328,7 @@ describe("the Brain reorders survivors; the deterministic layer keeps the veto",
   });
 
   it("a buy under the profile's conviction floor is a hold that says so", async () => {
-    const snap = snapshot([candidate(1, { realUsdg: 800 })]);
+    const snap = snapshot([candidate(1, { realUsd: 800 })]);
     const brain = fakeBrain({ "pons:c01:tok1": { action: "buy", confidence: 0.5, suggested_delta_usdg: 5_000_000 } });
     const run = await researchForAgent(snap, agent({ profile: { convictionMin: 0.7 } }), deps(brain.decideFn));
     assert.equal(run.decision.action, "hold");
@@ -306,7 +336,7 @@ describe("the Brain reorders survivors; the deterministic layer keeps the veto",
   });
 
   it("an unreachable Brain is a hold — and the deterministic pick is still on record", async () => {
-    const snap = snapshot([candidate(1, { realUsdg: 800 })]);
+    const snap = snapshot([candidate(1, { realUsd: 800 })]);
     const brain = fakeBrain({ "pons:c01:tok1": "unreachable" });
     const run = await researchForAgent(snap, agent(), deps(brain.decideFn));
     assert.equal(run.decision.action, "hold");
@@ -315,14 +345,14 @@ describe("the Brain reorders survivors; the deterministic layer keeps the veto",
   });
 
   it("no Brain configured is a dry run, not a crash", async () => {
-    const snap = snapshot([candidate(1, { realUsdg: 800 })]);
+    const snap = snapshot([candidate(1, { realUsd: 800 })]);
     const run = await researchForAgent(snap, agent(), { ...deps(fakeBrain({}).decideFn), brain: null });
     assert.equal(run.decision.action, "hold");
     assert.equal(run.researched[0]!.result.ok, false);
   });
 
   it("the wall still refuses: a curve outside provenance, and a scout budget already spent", async () => {
-    const snap = snapshot([candidate(1, { realUsdg: 800 })]);
+    const snap = snapshot([candidate(1, { realUsd: 800 })]);
     const buy = { "pons:c01:tok1": { action: "buy" as const, confidence: 0.9, suggested_delta_usdg: 5_000_000 } };
     const noProvenance = await researchForAgent(snap, agent({ knownCurves: [] }), deps(fakeBrain(buy).decideFn));
     assert.equal(noProvenance.decision.action, "buy", "the Brain said buy…");
@@ -335,9 +365,9 @@ describe("the Brain reorders survivors; the deterministic layer keeps the veto",
 
   it("two profiles on the SAME snapshot can research different candidates", async () => {
     const snap = snapshot([
-      candidate(1, { realUsdg: 3_000, accel: 0.8, ageSec: 7200 }),
-      candidate(2, { realUsdg: 300, accel: 4, ageSec: 120 }),
-      candidate(3, { realUsdg: 900, accel: 1.5, ageSec: 1800 }),
+      candidate(1, { realUsd: 3_000, accel: 0.8, ageSec: 7200 }),
+      candidate(2, { realUsd: 300, accel: 4, ageSec: 120 }),
+      candidate(3, { realUsd: 900, accel: 1.5, ageSec: 1800 }),
     ]);
     const early = fakeBrain({});
     const late = fakeBrain({});
@@ -345,6 +375,66 @@ describe("the Brain reorders survivors; the deterministic layer keeps the veto",
     await researchForAgent(snap, agent({ profile: { momentum: "late", liquidity: "prefer-deep", hold: "ride", researchTopN: 1 } }), deps(late.decideFn));
     assert.equal(early.asked[0]!.market.instrument_id, "pons:c02:tok2");
     assert.equal(late.asked[0]!.market.instrument_id, "pons:c01:tok1");
+  });
+});
+
+describe("research is wider than execution", () => {
+  it("an NVDA-quoted curve is judged in USD and can pass the prefilter; the Brain is asked about it like any other", async () => {
+    const snap = snapshot([candidate(1, { realUsd: 800, quote: "nvda" })]);
+    const legs = prefilter(snap, cfg, 5_000_000n);
+    assert.equal(legs[0]!.ok, true, legs[0]!.refusal?.reason);
+    assert.equal(legs[0]!.executable, false);
+    // 5 USD is 5/180 NVDA in raw units — the spend the curve is actually quoted for.
+    assert.equal(legs[0]!.spendQuoteRaw, (5_000_000n * 10n ** 18n * 100n) / NVDA_USD8);
+    const brain = fakeBrain({ "pons:c01:tok1": { action: "hold" } });
+    await researchForAgent(snap, agent(), deps(brain.decideFn));
+    const sig = brain.asked[0]!.market.signals;
+    assert.match(sig.liquidity!, /quoted in NVDA, priced at 180\.00 USD/);
+    assert.match(sig.onchain!, /NVDA/);
+    assert.doesNotMatch(sig.liquidity! + sig.onchain! + sig.technical!, /executable|cannot execute/i, "executability is not a market fact");
+  });
+
+  it("a quote with no USD price is refused as unpriceable — a depth nobody can value is not a small depth", () => {
+    const legs = prefilter(snapshot([candidate(1, { realUsd: 800, quote: "unknown" })]), cfg, 5_000_000n);
+    assert.equal(legs[0]!.ok, false);
+    assert.equal(legs[0]!.refusal?.kind, "unpriceable");
+    assert.match(legs[0]!.refusal?.reason ?? "", /no USD price/);
+  });
+
+  it("when the best opportunity is unexecutable the decision is a HOLD that names it and the reason", async () => {
+    const snap = snapshot([candidate(1, { realUsd: 800, quote: "nvda", accel: 4 })]);
+    const brain = fakeBrain({ "pons:c01:tok1": { action: "buy", confidence: 0.85, suggested_delta_usdg: 5_000_000, thesis: "waking up" } });
+    const run = await researchForAgent(snap, agent(), deps(brain.decideFn));
+    assert.equal(run.decision.action, "hold");
+    assert.equal(run.decision.bestOpportunity?.candidateId, "c01");
+    assert.equal(run.decision.bestOpportunity?.executable, false);
+    assert.equal(run.decision.bestOpportunity?.quoteSymbol, "NVDA");
+    assert.match(run.decision.holdWhy ?? "", /best opportunity is TOK1 quoted in NVDA at 0\.85 confidence, and the live route cannot execute it: quoted in NVDA/);
+    assert.equal(run.entry, null, "no intent is ever built for an unexecutable quote");
+    assert.equal(run.deterministicPick, null, "chooseEntry sees executable legs only");
+  });
+
+  it("when an executable buy also clears conviction, it is the action — and the better unexecutable one is still named", async () => {
+    const snap = snapshot([candidate(1, { realUsd: 800, quote: "nvda", accel: 4 }), candidate(2, { realUsd: 600 })]);
+    const brain = fakeBrain({
+      "pons:c01:tok1": { action: "buy", confidence: 0.9, suggested_delta_usdg: 5_000_000 },
+      "pons:c02:tok2": { action: "buy", confidence: 0.7, suggested_delta_usdg: 5_000_000 },
+    });
+    const run = await researchForAgent(snap, agent(), deps(brain.decideFn));
+    assert.equal(run.decision.action, "buy");
+    assert.equal(run.decision.candidateId, "c02");
+    assert.equal(run.decision.quoteSymbol, "USDG");
+    assert.equal(run.decision.bestOpportunity?.candidateId, "c01");
+    assert.match(run.decision.holdWhy ?? "", /a better opportunity, TOK1 quoted in NVDA at 0\.90, was not executable/);
+    assert.deepEqual(run.policy, { ok: true });
+  });
+
+  it("the live execution universe is unchanged: only a USDG-quoted candidate can become an intent", async () => {
+    const snap = snapshot([candidate(1, { realUsd: 800, quote: "nvda" }), candidate(2, { realUsd: 800 })]);
+    const brain = fakeBrain({ "pons:c01:tok1": { action: "buy", confidence: 0.95, suggested_delta_usdg: 5_000_000 }, "pons:c02:tok2": { action: "hold" } });
+    const run = await researchForAgent(snap, agent(), deps(brain.decideFn));
+    assert.equal(run.intent, null);
+    assert.equal(run.decision.action, "hold");
   });
 });
 

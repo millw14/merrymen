@@ -14,23 +14,27 @@
  *                              a launch's age is real seconds (pons-card.ts)
  *   2. the launch set          one factory-filtered eth_getLogs over the class
  *                              window — the allow-list of legitimate emitters
- *                              AND the source of every curve's threshold and
- *                              launch block (pons.ts)
+ *                              AND the source of every curve's threshold,
+ *                              quote asset and launch block (pons.ts)
  *   3. the tape                every curve trade for the last hour in 3,000-
  *                              block chunks, holes reported not hidden
  *                              (pons-tape.ts)
  *   4. the trending universe   curves in the launch set ranked by a profile-
- *                              independent "waking up" score; the top N
- *                              USDG-quoted ones go on to
+ *                              independent "waking up" score — EVERY quote
+ *                              asset, since the owner's ruling of 2026-09-16
  *   5. one Multicall3 batch    symbol, decimals and getReserves for the whole
- *                              shortlist in a single round trip (pons-meta.ts)
+ *                              shortlist, plus decimals() for each distinct
+ *                              quote asset, in a single round trip
+ *   6. one price batch         USD for each distinct quote asset — a constant
+ *                              for USDG, a Chainlink feed for ETH and every
+ *                              registry stock/ETF, nothing for the rest
  *
- * The class producer in index.ts sees the 40 newest candidate rows within 6h
- * and reads reserves for the 8 newest USDG ones. This universe is different by
- * design: it is driven by what is TRADING, not by what was recently launched,
- * and it inherits neither the 5% discovery depth floor nor the eight-read cap.
- * Whether a trending curve is also ELIGIBLE is not decided here — that is the
- * deterministic prefilter, with the owner's own thresholds, in the next step.
+ * RESEARCH IS WIDER THAN EXECUTION, ON PURPOSE. The live class route enters one
+ * hop from USDG only, and on the live tape that is under 1% of curve trading.
+ * Every candidate here carries `quote.executable` and a stated reason when it
+ * is false; the deterministic layer downstream refuses to build an intent for
+ * an unexecutable quote and the report says which opportunity was missed and
+ * why. Widening `executable` is a route design with a canary, never a flag.
  *
  * NOTHING HERE IS A BUY SIGNAL. Every field is a measurement; the snapshot is
  * data for two layers that come after it, and both of them can say no.
@@ -47,6 +51,7 @@ import {
   type CurveTrend,
   type TapeHole,
 } from "./venues/pons-tape";
+import { UI_ONE, classifyQuote, depthUsd6, readQuotePrices, type QuoteAsset, type QuotePrice } from "./venues/quote-assets";
 
 /** The windows the brief asks for, in seconds, shortest first. */
 export const TRENDING_WINDOWS_SEC: readonly number[] = [300, 900, 3600];
@@ -55,12 +60,11 @@ export const TRENDING_LAUNCH_WINDOW_SEC = 6 * 3600;
 /** Fallback cadence when the clock cannot be read; ~0.1 s/block on this chain. */
 export const FALLBACK_SEC_PER_BLOCK = 0.1;
 /** How many trending curves get a reserves read. One Multicall3 batch either way. */
-export const TRENDING_TOP_N = 24;
+export const TRENDING_TOP_N = 32;
 
 const SEL_SYMBOL = "0x95d89b41" as const;
 const SEL_DECIMALS = "0x313ce567" as const;
 const SEL_GET_RESERVES = "0x0902f1ac" as const;
-const ZERO = /^0x0{40}$/i;
 
 export interface TrendingCandidate {
   /**
@@ -75,18 +79,28 @@ export interface TrendingCandidate {
   decimals: number;
   curve: `0x${string}`;
   quoteToken: `0x${string}`;
+  /** What the curve is priced in, classified, with executability and its reason. */
+  quote: QuoteAsset;
   quoteIsUsdg: boolean;
+  quoteDecimals: number;
+  /** USD per whole quote UI unit, 8dp. Null when the quote has no price. */
+  quoteUsd8: bigint | null;
+  /** ERC-8056 multiplier for a stock quote, 1e18 otherwise. See quote-assets.ts. */
+  quoteUiMultiplier: bigint;
+  quotePriceStale: boolean;
   graduationThresholdRaw: bigint;
   launchBlock: bigint;
   /** Seconds since launch, from the measured clock. Null when unclocked. */
   ageSec: number | null;
   /** Null when the batch could not read this curve. */
   reserves: CurveReserves | null;
-  /** Real depth in whole USDG (6dp scaled). Null when unreadable or not USDG. */
-  depthUsdg: number | null;
+  /** Real depth in whole units of the QUOTE asset. Null when unreadable. */
+  depthQuote: number | null;
+  /** Real depth in whole USD. Null when unreadable or the quote is unpriced. */
+  depthUsd: number | null;
   /** 0..10000 along the curve. Null when unreadable. */
   graduationBps: number | null;
-  /** USD per token as a decimal string, for a USDG-quoted curve. */
+  /** USD per token as a decimal string. Null when unpriced. */
   priceUsd: string | null;
   trend: CurveTrend;
   trendingScore: number;
@@ -106,14 +120,16 @@ export interface TrendingSnapshot {
   tape: { trades: number; from: bigint; to: bigint; holes: TapeHole[] };
   /** Curves in the launch set that traded in the tape window. */
   tradedCurves: number;
-  /** How many of the ranked universe were skipped for not being USDG-quoted. */
-  droppedNonUsdg: number;
+  /** How many of the candidates the live route cannot execute today. */
+  unexecutable: number;
   /**
-   * Where the hour's trading actually was, by quote asset. The class route can
-   * only reach USDG-quoted curves (one hop from cash), and on the live tape
-   * those are a small minority — this is the line that says how small.
+   * Where the hour's trading actually was, by quote asset — every traded
+   * curve, not only the shortlist. The line that says how small the
+   * executable universe is.
    */
-  quoteBreakdown: { quote: string; curves: number; trades: number }[];
+  quoteBreakdown: { quote: string; curves: number; trades: number; executable: boolean }[];
+  /** Every distinct quote asset among the candidates, with its price if any. */
+  quotes: { asset: QuoteAsset; price: QuotePrice | null; decimals: number | null }[];
   candidates: TrendingCandidate[];
 }
 
@@ -142,7 +158,7 @@ function word(hex: string, i: number): bigint | null {
 
 export interface SnapshotDeps {
   client: PublicClient;
-  /** The account's cash token; only curves quoted in it get a reserves read. */
+  /** The account's cash token. Kept for the id and the breakdown label. */
   usdg: `0x${string}`;
   windowsSec?: readonly number[];
   topN?: number;
@@ -164,6 +180,7 @@ export async function buildTrendingSnapshot(deps: SnapshotDeps): Promise<Trendin
   const clock: BlockClock | null = await readBlockClock(deps.client);
   const secPerBlock = clock?.secPerBlock ?? FALLBACK_SEC_PER_BLOCK;
   const head = clock?.latest ?? (await deps.client.getBlockNumber());
+  const asOf = clock?.latestTimeSec ?? now();
   const blocksFor = (sec: number) => BigInt(Math.max(1, Math.round(sec / secPerBlock)));
 
   // 2. the launch set — the allow-list
@@ -178,7 +195,7 @@ export async function buildTrendingSnapshot(deps: SnapshotDeps): Promise<Trendin
   const tapeFrom = head > blocksFor(longest) ? head - blocksFor(longest) + 1n : 0n;
   const tape = await readCurveTrades(deps.client, { from: tapeFrom, to: head });
 
-  // 4. the universe
+  // 4. the universe — every quote asset
   const trends = windowFeatures(tape, {
     head,
     secPerBlock,
@@ -189,35 +206,49 @@ export async function buildTrendingSnapshot(deps: SnapshotDeps): Promise<Trendin
     .map((t) => ({ t, score: trendingScore(t) }))
     .sort((a, b) => b.score - a.score || (a.t.curve < b.t.curve ? -1 : 1));
 
-  const usdg = deps.usdg.toLowerCase();
-  const shortlist: { launch: PonsLaunch; trend: CurveTrend; score: number }[] = [];
-  let droppedNonUsdg = 0;
-  const byQuote = new Map<string, { curves: number; trades: number }>();
+  const byQuote = new Map<string, { asset: QuoteAsset; curves: number; trades: number }>();
+  const shortlist: { launch: PonsLaunch; trend: CurveTrend; score: number; quote: QuoteAsset }[] = [];
   for (const { t, score } of ranked) {
     const launch = launchByCurve.get(t.curve)!;
-    const q = ZERO.test(launch.quoteToken) ? "ETH (native)" : launch.quoteToken.toLowerCase() === usdg ? "USDG" : launch.quoteToken.toLowerCase();
-    const agg = byQuote.get(q) ?? { curves: 0, trades: 0 };
+    const quote = classifyQuote(launch.quoteToken);
+    const agg = byQuote.get(quote.address) ?? { asset: quote, curves: 0, trades: 0 };
     agg.curves++;
     agg.trades += t.windows[t.windows.length - 1]!.trades;
-    byQuote.set(q, agg);
-    if (ZERO.test(launch.quoteToken) || launch.quoteToken.toLowerCase() !== usdg) {
-      droppedNonUsdg++;
-      continue;
-    }
-    shortlist.push({ launch, trend: t, score });
-    if (shortlist.length >= topN) break;
+    byQuote.set(quote.address, agg);
+    if (shortlist.length < topN) shortlist.push({ launch, trend: t, score, quote });
   }
 
-  // 5. one batch: symbol, decimals, reserves
-  const calls = shortlist.flatMap(({ launch }) => [
-    { target: launch.token, callData: SEL_SYMBOL as `0x${string}` },
-    { target: launch.token, callData: SEL_DECIMALS as `0x${string}` },
-    { target: launch.curve, callData: SEL_GET_RESERVES as `0x${string}` },
-  ]);
+  // 5. one batch: symbol, decimals, reserves — plus decimals() per distinct quote
+  const distinctQuotes = [...new Map(shortlist.map((s) => [s.quote.address, s.quote])).values()];
+  const quoteDecCalls = distinctQuotes
+    .filter((q) => q.kind !== "native-eth")
+    .map((q) => ({ target: q.address, callData: SEL_DECIMALS as `0x${string}` }));
+  const calls = [
+    ...shortlist.flatMap(({ launch }) => [
+      { target: launch.token, callData: SEL_SYMBOL as `0x${string}` },
+      { target: launch.token, callData: SEL_DECIMALS as `0x${string}` },
+      { target: launch.curve, callData: SEL_GET_RESERVES as `0x${string}` },
+    ]),
+    ...quoteDecCalls,
+  ];
   const res = await aggregate3(deps.client, calls);
   const batchOk = res.length === calls.length;
 
-  const candidates: TrendingCandidate[] = shortlist.map(({ launch, trend, score }, i) => {
+  const quoteDecimals = new Map<string, number>();
+  for (const q of distinctQuotes) if (q.kind === "native-eth") quoteDecimals.set(q.address, 18);
+  if (batchOk) {
+    const base = shortlist.length * 3;
+    quoteDecCalls.forEach((c, i) => {
+      const r = res[base + i];
+      const d = r?.success ? word(r.returnData, 0) : null;
+      if (d !== null && d >= 0n && d <= 36n) quoteDecimals.set(c.target, Number(d));
+    });
+  }
+
+  // 6. one price batch for the distinct quotes
+  const prices = await readQuotePrices(deps.client, distinctQuotes, asOf);
+
+  const candidates: TrendingCandidate[] = shortlist.map(({ launch, trend, score, quote }, i) => {
     const id = `c${String(i + 1).padStart(2, "0")}`;
     const sym = batchOk ? res[i * 3] : undefined;
     const dec = batchOk ? res[i * 3 + 1] : undefined;
@@ -225,22 +256,26 @@ export async function buildTrendingSnapshot(deps: SnapshotDeps): Promise<Trendin
     const symbol = safeSymbol(sym?.success ? decodeErc20String(sym.returnData) : "", `T${id.toUpperCase()}`);
     const decWord = dec?.success ? word(dec.returnData, 0) : null;
     const decimals = decWord !== null && decWord >= 0n && decWord <= 36n ? Number(decWord) : 18;
+    const qDec = quoteDecimals.get(quote.address);
+    const price = prices.get(quote.address) ?? null;
     let reserves: CurveReserves | null = null;
-    if (rv?.success) {
+    // Without the quote's decimals no figure derived from this curve is real;
+    // a guessed 18 would silently scale a USDG-quoted depth by 10^12.
+    if (rv?.success && qDec !== undefined) {
       const q = word(rv.returnData, 0);
       const t = word(rv.returnData, 1);
       if (q !== null && t !== null) {
-        reserves = {
-          quoteRaw: q,
-          tokenRaw: t,
-          quoteDecimals: 6, // USDG by the filter above — verified, not assumed
-          tokenDecimals: decimals,
-          graduationThresholdRaw: launch.graduationThresholdRaw,
-        };
+        reserves = { quoteRaw: q, tokenRaw: t, quoteDecimals: qDec, tokenDecimals: decimals, graduationThresholdRaw: launch.graduationThresholdRaw };
       }
     }
     const progress = reserves ? curveDepthFraction(reserves) : null;
-    const price = reserves ? curvePrice(reserves, 100_000_000n) : null;
+    const real = reserves ? realQuoteRaw(reserves) : null;
+    const mult = price?.uiMultiplier ?? UI_ONE;
+    const usd6 = real !== null && qDec !== undefined ? depthUsd6(real, qDec, price?.usd8 ?? null, mult) : null;
+    // The curve pricer wants USD per RAW quote unit; the feed gives USD per UI
+    // unit, so fold the multiplier into the price it is handed.
+    const rawUsd8 = price ? (price.usd8 * price.uiMultiplier) / UI_ONE : null;
+    const tokenPrice = reserves && rawUsd8 && rawUsd8 > 0n ? curvePrice(reserves, rawUsd8) : null;
     return {
       id,
       token: launch.token,
@@ -248,14 +283,20 @@ export async function buildTrendingSnapshot(deps: SnapshotDeps): Promise<Trendin
       decimals,
       curve: launch.curve,
       quoteToken: launch.quoteToken,
-      quoteIsUsdg: true,
+      quote,
+      quoteIsUsdg: quote.kind === "usdg",
+      quoteDecimals: qDec ?? 18,
+      quoteUsd8: price?.usd8 ?? null,
+      quoteUiMultiplier: mult,
+      quotePriceStale: price?.stale ?? false,
       graduationThresholdRaw: launch.graduationThresholdRaw,
       launchBlock: launch.blockNumber,
       ageSec: ageSecOf(clock, launch.blockNumber),
       reserves,
-      depthUsdg: reserves ? Number(realQuoteRaw(reserves)) / 1e6 : null,
+      depthQuote: real !== null && qDec !== undefined ? (Number(real) / 10 ** qDec) * (Number(mult) / 1e18) : null,
+      depthUsd: usd6 === null ? null : Number(usd6) / 1e6,
       graduationBps: progress === null ? null : Math.round(progress * 10_000),
-      priceUsd: price ? (Number(price.price8) / 1e8).toPrecision(6) : null,
+      priceUsd: tokenPrice ? (Number(tokenPrice.price8) / 1e8).toPrecision(6) : null,
       trend,
       trendingScore: score,
     };
@@ -265,7 +306,7 @@ export async function buildTrendingSnapshot(deps: SnapshotDeps): Promise<Trendin
   return {
     id,
     head,
-    asOf: clock?.latestTimeSec ?? now(),
+    asOf,
     secPerBlock,
     clockMeasured: clock !== null,
     windowsSec,
@@ -274,11 +315,12 @@ export async function buildTrendingSnapshot(deps: SnapshotDeps): Promise<Trendin
     launchScanClamped: scan.clamped,
     tape: { trades: tape.trades.length, from: tape.from, to: tape.to, holes: tape.holes },
     tradedCurves: trends.size,
-    droppedNonUsdg,
-    quoteBreakdown: [...byQuote.entries()]
-      .map(([quote, v]) => ({ quote, ...v }))
+    unexecutable: candidates.filter((c) => !c.quote.executable).length,
+    quoteBreakdown: [...byQuote.values()]
+      .map((v) => ({ quote: v.asset.symbol, curves: v.curves, trades: v.trades, executable: v.asset.executable }))
       .sort((a, b) => b.trades - a.trades)
-      .slice(0, 8),
+      .slice(0, 10),
+    quotes: distinctQuotes.map((asset) => ({ asset, price: prices.get(asset.address) ?? null, decimals: quoteDecimals.get(asset.address) ?? null })),
     candidates,
   };
 }
