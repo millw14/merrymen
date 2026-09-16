@@ -20,3 +20,6 @@ web/public/_probe/
 # Sampling scratch from incident work — never committed.
 *.log
 worker/src/tmp-*.ts
+
+# tools/brain-trending-shadow.mts default output
+.shadow-runs/
