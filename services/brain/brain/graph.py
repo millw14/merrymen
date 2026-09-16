@@ -267,6 +267,7 @@ class BrainGraph:
                 '  "evidence": [{"source": "...", "ref": "...", "claim": "..."}],\n'
                 '  "bull_case": "...", "bear_case": "...",\n'
                 '  "risks": ["..."], "invalidation": ["what would prove this wrong"],\n'
+                '  "catalysts": ["what is driving it NOW — the observations that make this timely"],\n'
                 '  "time_horizon": "e.g. 3-5 days",\n'
                 '  "changed_view": null\n'
                 "}"
@@ -484,6 +485,7 @@ class BrainGraph:
             bear_case=(bear or str(data.get("bear_case") or ""))[:1200],
             risks=[str(x)[:240] for x in (data.get("risks") or [])][:6],
             invalidation=[str(x)[:240] for x in (data.get("invalidation") or [])][:6],
+            catalysts=[str(x)[:240] for x in (data.get("catalysts") or [])][:6],
             time_horizon=str(data.get("time_horizon") or "")[:120],
             changed_view=None,
             tier=req.tier,
