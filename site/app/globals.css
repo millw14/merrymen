@@ -562,7 +562,7 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
   font-size: 15px;
 }
 .beta-input::placeholder { color: #7f958b; }
-.beta-input:focus-visible { outline: 2px solid #34d399; outline-offset: 2px; border-color: transparent; }
+.beta-input:focus-visible { outline: 2px solid #34d399; outline-offset: -2px; border-color: transparent; }
 .beta-input[aria-invalid="true"] { border-color: rgba(251, 113, 133, 0.55); }
 
 /* The honeypot. Positioned off-screen rather than display:none — some bots skip
