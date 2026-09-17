@@ -561,6 +561,27 @@ export interface MerrymenSettings {
    * above the maximum a curve can ever hold.
    */
   classMinDepthUsdg?: number;
+
+  // ── trading profile (the agent's TASTE; selection, never safety) ────────
+  /**
+   * How this Merryman chooses among candidates the owner's limits already
+   * permit. Five closed-enum words and two numbers, and NOTHING here can move
+   * a threshold: the prefilter reads classMinDepthUsdg / maxImpactBps /
+   * classExitAtGraduationPct above and the wall reads the grant; the profile
+   * only orders the survivors and shapes what the Brain is told. Enum words
+   * rather than free text because the profile is rendered into a prompt.
+   *
+   * Deliberately NOT house keys: an owner's taste is the owner's.
+   */
+  profileRiskAppetite?: ProfileRiskAppetite;
+  profileMomentum?: ProfileMomentum;
+  profileLiquidity?: ProfileLiquidity;
+  profileTurnover?: ProfileTurnover;
+  profileHold?: ProfileHold;
+  /** Brain confidence a buy must reach before the profile acts on it, 0..1. */
+  profileConvictionMin?: number;
+  /** How many ranked survivors the Brain researches per pass, 1..5. */
+  profileResearchTopN?: number;
   /** Master switch — OFF by default. When on (and a key is set), landed/rejected
    * trades and the daily report are PUBLISHED to your agent's Virtuals page.
    * Outbound + public: nothing streams until you turn this on. */
@@ -763,6 +784,26 @@ export type PcCapability = (typeof PC_CAPABILITIES)[number];
  */
 export const SLIPPAGE_BPS_MAX = 1_000;
 
+/** The trading profile's vocabulary. The settings route validates by membership. */
+export const PROFILE_RISK_APPETITES = ["conservative", "balanced", "aggressive"] as const;
+export const PROFILE_MOMENTUMS = ["early", "confirming", "late"] as const;
+export const PROFILE_LIQUIDITIES = ["thin-ok", "prefer-deep"] as const;
+export const PROFILE_TURNOVERS = ["low", "medium", "high"] as const;
+export const PROFILE_HOLDS = ["quick", "ride"] as const;
+export type ProfileRiskAppetite = (typeof PROFILE_RISK_APPETITES)[number];
+export type ProfileMomentum = (typeof PROFILE_MOMENTUMS)[number];
+export type ProfileLiquidity = (typeof PROFILE_LIQUIDITIES)[number];
+export type ProfileTurnover = (typeof PROFILE_TURNOVERS)[number];
+export type ProfileHold = (typeof PROFILE_HOLDS)[number];
+/** Enum-valued profile fields, for the one loop that validates them. */
+export const PROFILE_ENUM_FIELDS = {
+  profileRiskAppetite: PROFILE_RISK_APPETITES,
+  profileMomentum: PROFILE_MOMENTUMS,
+  profileLiquidity: PROFILE_LIQUIDITIES,
+  profileTurnover: PROFILE_TURNOVERS,
+  profileHold: PROFILE_HOLDS,
+} as const;
+
 export const SETTINGS_DEFAULTS = {
   /**
    * EVERYTHING THE GRANT COVERS. The only default that changes nothing for
@@ -853,6 +894,15 @@ export const SETTINGS_DEFAULTS = {
   // trencher's $25,000 — that is a POOL figure and sits 2.4x above the most a
   // Pons curve can ever hold.
   classMinDepthUsdg: 250,
+  // The taste every Merryman starts with: the middle word of every enum, a
+  // conviction floor a model has to earn, and three candidates researched.
+  profileRiskAppetite: "balanced" as ProfileRiskAppetite,
+  profileMomentum: "confirming" as ProfileMomentum,
+  profileLiquidity: "prefer-deep" as ProfileLiquidity,
+  profileTurnover: "medium" as ProfileTurnover,
+  profileHold: "ride" as ProfileHold,
+  profileConvictionMin: 0.6,
+  profileResearchTopN: 3,
   strategistStopLossBps: 0,
   takeProfitBps: 0,
   buyPerTickUsdg: 25,

@@ -217,6 +217,12 @@ class BrainDecision(BaseModel):
     bear_case: str = ""
     risks: list[str] = Field(default_factory=list)
     invalidation: list[str] = Field(default_factory=list)
+    #: WHAT IS DRIVING IT NOW. A thesis says why this instrument; the catalysts
+    #: say why this week and not any other — the observations that would have
+    #: to be true for the thesis to be timely. Distinct from `evidence` (cited
+    #: facts) and from `bull_case` (an argument): a catalyst is the thing that
+    #: is HAPPENING. Defaults empty so an older caller's reply still validates.
+    catalysts: list[str] = Field(default_factory=list)
     time_horizon: str = ""
     changed_view: ChangedView | None = None
 
@@ -290,7 +296,7 @@ class BrainDecision(BaseModel):
     def _no_executables(cls, v: str) -> str:
         return _reject_executable(v, "field")
 
-    @field_validator("risks", "invalidation")
+    @field_validator("risks", "invalidation", "catalysts")
     @classmethod
     def _no_executables_in_list(cls, v: list[str]) -> list[str]:
         for item in v:
