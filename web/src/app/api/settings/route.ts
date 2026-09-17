@@ -592,6 +592,7 @@ export async function PUT(req: Request) {
     if (v === null || v === undefined || v === "") setOrClear("assetMode", undefined);
     else if (v === "all" || v === "stocks" || v === "crypto") setOrClear("assetMode", v as never);
     else errors.push("assetMode: must be all, stocks or crypto");
+  }
   // ── manual one-shot swap handoff (written by the /swap page) ────────────
   // Digits-only wei + a tight id shape, validated again at consume time.
   // Rejected here with an error (not silently dropped) so a malformed submit
