@@ -8,6 +8,7 @@ import "@/terminal/forms.css";
 import "@/terminal/polish.css";
 import "@/terminal/root.css";
 import { RegisterSW } from "@/components/RegisterSW";
+import { TelegramLinkModal } from "@/components/TelegramLinkModal";
 
 /**
  * THE PRODUCT'S FACES.
@@ -110,6 +111,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body style={{margin:0}}>
         {children}
         <RegisterSW />
+        <TelegramLinkModal />
       </body>
     </html>
   );
