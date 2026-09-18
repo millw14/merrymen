@@ -15,6 +15,8 @@ import { esc } from "./api";
 import { CONTROL_KINDS, PC_CAP_OF, PC_KINDS, type Command } from "./interpreter";
 import { resolveInRoot, shellAllowed, type PcActions } from "./pc";
 import { WALLET_TEXT } from "./reads";
+import { stageToken, MAX_CUSTOM_TOKENS } from "./tokens";
+import type { CustomToken } from "../../../packages/core/src/tokens";
 
 /** A vetted action awaiting the user's explicit /confirm. Widened from the
  * original transfer-only store so a pending PC action and a pending transfer
@@ -34,7 +36,14 @@ export type PendingAction =
    * key — so a misread instruction was a permanent loss of funds. A transfer of
    * $5 asks first; ending the agent should too.
    */
-  | { kind: "kill"; expiresAt: number };
+  | { kind: "kill"; expiresAt: number }
+  /**
+   * A staged custom token, parked for /confirm like a transfer. Staging writes
+   * nothing — the save happens at confirm time, re-vetted (the token may have
+   * been added in the dashboard meanwhile). Either way it confers no
+   * permission: only a re-signed grant can cover it.
+   */
+  | { kind: "addtoken"; address: `0x${string}`; symbol: string; decimals: number; expiresAt: number };
 
 export interface CommandDeps {
   controlEnabled: boolean;
@@ -63,6 +72,16 @@ export interface CommandDeps {
   setStrategy(name: string): { ok: boolean; reason?: string };
   setCap(usdg: number): void;
   setPaused(paused: boolean): void;
+  /** This process's tenant (grant smart account, lowercased) — null when idle.
+   * Optional so older hosts and fixtures that predate token staging keep
+   * working; absent reads as "no agent armed". */
+  getTenantId?(): `0x${string}` | null;
+  /** This tenant's staged custom tokens (resolved config). */
+  listTokens?(): CustomToken[];
+  /** Token metadata read on-chain (decimals + canonical symbol). */
+  readTokenMeta?(address: `0x${string}`): Promise<{ decimals: number; symbol: string } | { error: string }>;
+  /** Durable settings write for token/discovery changes (store hosted, file self-host). */
+  saveTokenSettings?(patch: { customTokens?: CustomToken[]; discoveryEnabled?: boolean }): Promise<{ ok: boolean; reason?: string }>;
   /** Destroy the grant. Archives the owner key first — `archived` names the account kept. */
   kill(): { ok: boolean; reason?: string; archived?: string | null };
   link(code: string): { ok: boolean; reason?: string };
@@ -182,6 +201,43 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       deps.setCap(usdg);
       return `🧢 chat per-action ceiling set to ${usdg} USDG${note}.`;
     }
+    case "addtoken": {
+      const tenant = deps.getTenantId?.() ?? null;
+      if (!tenant) return "no agent armed here yet — grant one in the dashboard first, then stage tokens.";
+      if (!deps.readTokenMeta || !deps.listTokens) {
+        return "token staging isn't wired in this build — add it in settings for now.";
+      }
+      const meta = await deps.readTokenMeta(cmd.address);
+      const staged = stageToken(deps.listTokens(), cmd.address, cmd.symbol, meta);
+      if (!staged.ok) return staged.reason;
+      const t = staged.token;
+      deps.setPending({ kind: "addtoken", address: t.address, symbol: t.symbol, decimals: t.decimals, expiresAt: now() + CONFIRM_TTL_SEC });
+      return [
+        `🪙 <b>stage token</b>`,
+        `<b>${esc(t.symbol)}</b> — ${t.decimals} decimals`,
+        `<code>${esc(t.address)}</code>`,
+        ``,
+        `Check it carefully — /confirm to save (${CONFIRM_TTL_SEC}s) or /cancel. Saved tokens still can't trade until you re-sign trading permissions at /grant.`,
+      ].join("\n");
+    }
+    case "discover": {
+      if (!deps.saveTokenSettings) {
+        return "discovery toggle isn't wired in this build — flip it in settings for now.";
+      }
+      const r = await deps.saveTokenSettings({ discoveryEnabled: cmd.on });
+      if (!r.ok) return `couldn't save: ${esc(r.reason ?? "unknown")}.`;
+      return cmd.on
+        ? "🔭 discovery on — I'll tell you when new pairs launch. Needs a Bitquery key or Merry Circle token in Connections — without one the feed stays empty."
+        : "🔭 discovery off.";
+    }
+    case "tokens": {
+      const list = deps.listTokens?.() ?? [];
+      if (!list.length) return "no custom tokens staged. /addtoken 0x… [SYMBOL] to stage one.";
+      return (
+        ["🪙 <b>staged tokens</b>", ...list.map((t) => `• <b>${esc(t.symbol)}</b> <code>${esc(t.address)}</code> (${t.decimals}dp)`)].join("\n") +
+        "\n\nStaged, not permissioned — cover one in a re-signed grant to trade it."
+      );
+    }
     case "buy":
     case "sell": {
       let usdg = cmd.usdg;
@@ -242,6 +298,12 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           deps.clearPending();
           return "🔒 control was turned off before you confirmed — the grant is untouched.";
         }
+      } else if (p.kind === "addtoken") {
+        // Same shape as kill: a control-gated staging, re-vetted at fire time.
+        if (!deps.controlEnabled) {
+          deps.clearPending();
+          return "🔒 control was turned off before you confirmed — nothing saved.";
+        }
       } else {
         const refusal = pcRefusal({ kind: p.kind } as Command, deps);
         if (refusal) {
@@ -273,6 +335,27 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
               : `⚠️ nothing could be archived — if this account held funds, check ~/.merrymen/grants/ before re-granting.`) +
             `\nRe-grant in the dashboard to ride again.`
           );
+        }
+        case "addtoken": {
+          // Re-vet at fire time: the token may have been added in the
+          // dashboard during the 90s window — saving twice is harmless but
+          // lying about it ("saved!") would be worse than refusing.
+          const tenant = deps.getTenantId?.() ?? null;
+          if (!tenant) return "no agent armed here anymore — nothing saved.";
+          if (!deps.listTokens || !deps.saveTokenSettings) {
+            return "token staging isn't wired in this build — nothing saved.";
+          }
+          const listed = deps.listTokens();
+          const dup = listed.find((t) => t.address.toLowerCase() === p.address.toLowerCase());
+          if (dup) return `already listed as ${esc(dup.symbol)} — nothing saved.`;
+          if (listed.length >= MAX_CUSTOM_TOKENS) {
+            return `token list is full (${MAX_CUSTOM_TOKENS}) — remove one in settings first.`;
+          }
+          const r = await deps.saveTokenSettings({
+            customTokens: [...listed, { symbol: p.symbol, address: p.address, decimals: p.decimals }],
+          });
+          if (!r.ok) return `couldn't save: ${esc(r.reason ?? "unknown")}.`;
+          return `🪙 saved <b>${esc(p.symbol)}</b> — staged, not permissioned. Re-sign trading permissions at /grant to enable it.`;
         }
       }
     }
