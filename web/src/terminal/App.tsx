@@ -46,6 +46,7 @@ import Wallet from "./screens/Wallet";
 
 import { Profile } from "./screens/Profile";
 import { Search } from "./screens/Search";
+import { Swap } from "./screens/Swap";
 import { Token } from "./screens/Token";
 import { You } from "./screens/You";
 import { TabIcon } from "./ui";
@@ -461,6 +462,7 @@ export function App() {
             onDesk={() => goTab("agent")}
             onDeposit={() => openScreen({ kind: "deposit" })}
             onWithdraw={() => openScreen({ kind: "withdraw" })}
+            onSwap={() => openScreen({ kind: "swap" })}
             stopped={stopped}
             perTrade={perTrade}
             perDay={perDay}
@@ -579,6 +581,7 @@ export function App() {
         {screen.kind === "limits" && (
           <LimitsPanel account={account} onClose={()=>goTab(tab)}/>
         )}
+        {screen.kind === "swap" && <Swap />}
       </div>
       {desktop && money ? (
         <aside
@@ -652,3 +655,4 @@ export function App() {
     </div></div>
   );
 }
+
