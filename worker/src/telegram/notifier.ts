@@ -441,6 +441,7 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
             // P&L. After the receipt on purpose: the text is the record and
             // goes out whatever happens to the image.
             await sendCardFor(t, token, chatId, false);
+            console.log(`[notify] trade ping sent — id=${t.id} rule=${t.reject_rule ?? t.status}`);
             deps.stateRef.set({
               ...deps.stateRef.get(),
               lastNotifiedTradeId: t.id,
@@ -456,7 +457,10 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
               .all(st.lastNotifiedTradeId, agentId) as unknown as TradeAgg[];
             const maxRow = db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM trades").get() as { m: number } | undefined;
             const total = agg.reduce((n, r) => n + r.c, 0);
-            if (total > 0) await sendMessage({ token }, chatId, tradeDigestLine(agg, periodMin));
+            if (total > 0) {
+              await sendMessage({ token }, chatId, tradeDigestLine(agg, periodMin));
+              console.log(`[notify] digest sent — ${total} trades over ${periodMin}m`);
+            }
             // A CLOSE STILL GETS ITS CARD ON A DIGEST. Quiet mode exists to
             // stop a strategist that re-proposes the same refused leg from
             // pinging every tick; a realised sale is rate-limited by the thing

@@ -173,7 +173,7 @@ import { readTokenMeta } from "./venues/pons-meta";
 import { createDepthReader } from "./venues/depth-cache";
 import { ensureSoul, getName, setName } from "./soul";
 import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
-import { quarantineOf } from "./quarantine";
+import { quarantineOf, scoutGateShut } from "./quarantine";
 import {
   describeDiscovery,
   describeTrending,
@@ -698,6 +698,14 @@ async function main() {
    * human-facing line that benefits from being said once.
    */
   let lastPolicyRefusal: string | null = null;
+  /**
+   * The last deterministically-shut scout proposal the owner was TOLD about,
+   * so THAT fires on change only too. Fourth sibling of the three above, and
+   * the quietest: unlike a wall refusal (attempted and blocked) a gated skip
+   * was never attempted, so there is no tape row — this feed line is the only
+   * record, and one line per configuration (not per tick) is the whole point.
+   */
+  let lastScoutSkipKey: string | null = null;
   /**
    * Rules that are about the account's own state, not about an asset.
    *
@@ -6007,8 +6015,49 @@ async function main() {
     return rows?.find((r) => r.token === token.toLowerCase())?.symbol ?? undefined;
   }
 
+  /**
+   * Is the token this intent BUYS unpriceable this cycle — the sync half of
+   * scoutContextFor below, extracted so the tick can ask the same question
+   * BEFORE proposing (gate) that policy asks AFTER (wall), with zero drift
+   * between the two answers.
+   *
+   * AND FOR A CLASS TOKEN THE GATE DID NOT RUN AT ALL (history, kept with the
+   * code because the alternative is relearning it): `lastUnpriceable` is built
+   * from `watchTokens`, and a class token is not in `watchTokens` BY
+   * DEFINITION — it postdates the grant, so nobody enumerated it. Without the
+   * unconditional class leg, `buyUnpriceable` came back false and policy.ts
+   * gated the ENTIRE scout block on that flag: `scoutAllows` never ran, the
+   * budget never bound, and the same unpriceable token could be bought forever.
+   *
+   * TRUE UNCONDITIONALLY, not measured: a class token has no oracle, no pool
+   * deep enough to trust and no TWAP; it is unpriceable by construction rather
+   * than by this tick's luck.
+   */
+  /**
+   * Sync wrapper over scoutFlagsFor for the pre-proposal gate: the same
+   * question the wall asks (via scoutContextFor above), zero drift by
+   * construction — the class/side logic lives in class-side.ts, not here.
+   * (An earlier version of this helper carried its own target-only class
+   * rule; #110 proved that rule misjudged sells, so it delegates now.)
+   */
+  function scoutBuyUnpriceable(
+    intent: TradeIntent,
+    agent: ActiveAgent | null,
+    unpriceable: Set<string>,
+  ): { buyUnpriceable: boolean; isClassBuy: boolean } {
+    const no: { buyUnpriceable: boolean; isClassBuy: boolean } = { buyUnpriceable: false, isClassBuy: false };
+    if (!agent) return no;
+    if (intent.kind !== "swap" && intent.kind !== "curve-trade") return no;
+    const flags = scoutFlagsFor(intent, {
+      vault: agent.limits.ponsClassVault,
+      cash: CASH.USDG as `0x${string}`,
+      lastUnpriceable: unpriceable,
+    });
+    return { buyUnpriceable: flags.buyUnpriceable, isClassBuy: flags.isClassBuy };
+  }
+
   async function scoutContextFor(intent: TradeIntent): Promise<ScoutContext | undefined> {
-    // ── BOTH VENUES, NOT JUST THE POOL ONE ────────────────────────────────
+    // ── BOTH VENUES, NOT JUST THE POOL ONE ─────────────────────────────────
     //
     // This returned undefined for anything that was not a swap, and the scout
     // block in policy.ts sat inside `if (intent.kind === "swap")` — so a
@@ -10347,6 +10396,38 @@ async function main() {
     }
 
     for (const [proposedAt, intent] of proposed.entries()) {
+      // ── DON'T PROPOSE WHAT THE WALL DETERMINISTICALLY REFUSES ──────────
+      // scoutGateShut mirrors scoutAllows' unconditional branches (off / zero
+      // budget): proposing anyway writes a rejected row and pings Telegram
+      // every tick, forever, for a swap that can never clear. Skip before
+      // decision and ledger — a skip was never attempted, so unlike a wall
+      // refusal there is no tape row; the once-per-change feed line below is
+      // the only record. See lastScoutSkipKey.
+      if (
+        scoutGateShut(
+          {
+            limits: {
+              enabled: cfg.scoutEnabled,
+              budgetUsdg: usdg(cfg.scoutBudgetUsdg),
+              perTokenUsdg: usdg(cfg.scoutPerTokenUsdg),
+            },
+            buyUnpriceable: scoutBuyUnpriceable(intent, active, lastUnpriceable).buyUnpriceable,
+          },
+        )
+      ) {
+        const shutToken =
+          intent.kind === "swap" ? intent.buyToken : intent.kind === "curve-trade" ? intent.assetOut : null;
+        const shutKey = `scout-budget:${(shutToken ?? "unknown").toLowerCase()}`;
+        if (shutKey !== lastScoutSkipKey) {
+          lastScoutSkipKey = shutKey;
+          const shutMsg =
+            `strategy keeps proposing a scout buy with the scout budget at 0 — ` +
+            `nothing will trade until one is set in /settings`;
+          console.log(`[tick] skipping deterministically-refused intent — ${shutMsg}`);
+          await addEvent(agentId, "warn", shutMsg);
+        }
+        continue;
+      }
       // The LLM strategist already journaled + stamped its survivors; this covers
       // deterministic strategies so every trade still links to a decision.
       //
@@ -10422,6 +10503,35 @@ async function main() {
     }
     const entries = await proposeClassEntries();
     for (const [at, intent] of entries.intents.entries()) {
+      // Gate BEFORE the decision write: a skipped intent was never attempted,
+      // so no decision row (the feed renders decision rows — a row here would
+      // publish a trade that never happened). The once-per-change warn event
+      // below is the only record, same as the strategy loop above.
+      if (
+        scoutGateShut(
+          {
+            limits: {
+              enabled: cfg.scoutEnabled,
+              budgetUsdg: usdg(cfg.scoutBudgetUsdg),
+              perTokenUsdg: usdg(cfg.scoutPerTokenUsdg),
+            },
+            buyUnpriceable: scoutBuyUnpriceable(intent, active, lastUnpriceable).buyUnpriceable,
+          },
+        )
+      ) {
+        const shutToken =
+          intent.kind === "swap" ? intent.buyToken : intent.kind === "curve-trade" ? intent.assetOut : null;
+        const shutKey = `scout-budget:${(shutToken ?? "unknown").toLowerCase()}`;
+        if (shutKey !== lastScoutSkipKey) {
+          lastScoutSkipKey = shutKey;
+          const shutMsg =
+            `strategy keeps proposing a scout buy with the scout budget at 0 — ` +
+            `nothing will trade until one is set in /settings`;
+          console.log(`[tick] skipping deterministically-refused intent — ${shutMsg}`);
+          await addEvent(agentId, "warn", shutMsg);
+        }
+        continue;
+      }
       await ensureDecision(intent, "class-route", ...classDecision(entries.why[at]));
       await processIntent(intent, equityUsdg, !bookIncomplete);
     }

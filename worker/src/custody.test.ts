@@ -196,6 +196,12 @@ describe("the tick uses the custody seam", () => {
     // And the half that was missing: a sell acquires cash, so it never reaches
     // the tape at all — stated as an early return, not left to coincidence.
     assert.match(side, /if \(side === "sell"\) return \{ side, isClassBuy: false, buyUnpriceable: false \}/);
+    // And the pre-proposal gate asks the SAME question through the same
+    // function: scoutBuyUnpriceable delegates to scoutFlagsFor rather than
+    // carrying its own class rule, so gate and wall cannot drift apart —
+    // including on sells, which must never be gate-skipped.
+    assert.match(CODE, /function scoutBuyUnpriceable\(/);
+    assert.match(CODE, /scoutFlagsFor\(intent, \{/);
   });
 
   it("the per-token scout cap can find a class token's basis", () => {

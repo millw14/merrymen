@@ -5,7 +5,9 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { quarantineOf, scoutAllows, type ScoutLimits } from "./quarantine";
+import { quarantineOf, scoutAllows, scoutGateShut, type ScoutLimits } from "./quarantine";
+import { scoutFlagsFor } from "./class-side";
+import type { TradeIntent } from "./policy";
 
 const U = (n: number) => BigInt(Math.round(n * 1e6));
 
@@ -103,5 +105,52 @@ describe("scoutAllows — fails closed", () => {
     // Full budget used → refused. Sell out (quarantined back to 0) → allowed.
     assert.equal(scoutAllows({ ...base, quarantinedUsdg: U(100) }, limits()).ok, false);
     assert.equal(scoutAllows({ ...base, quarantinedUsdg: 0n }, limits()).ok, true);
+  });
+});
+
+describe("scoutGateShut — deterministic refusal, for the pre-proposal gate", () => {
+  it("mirrors scoutAllows' unconditional branches exactly", () => {
+    // Off → shut no matter the spend. The gate must agree with the wall on
+    // every input where the wall doesn't need per-token state.
+    assert.equal(scoutGateShut({ limits: limits({ enabled: false }), buyUnpriceable: true }), true);
+    assert.equal(
+      scoutAllows({ spendUsdg: U(1), existingCostUsdg: 0n, quarantinedUsdg: 0n }, limits({ enabled: false })).ok,
+      false,
+    );
+    // Zero budget → shut.
+    assert.equal(scoutGateShut({ limits: limits({ budgetUsdg: 0n }), buyUnpriceable: true }), true);
+    assert.equal(
+      scoutAllows({ spendUsdg: U(1), existingCostUsdg: 0n, quarantinedUsdg: 0n }, limits({ budgetUsdg: 0n })).ok,
+      false,
+    );
+    // Funded + enabled → open (the wall may still refuse on spend — not ours to judge here).
+    assert.equal(scoutGateShut({ limits: limits(), buyUnpriceable: true }), false);
+  });
+
+  it("never shuts a priceable buy, whatever the budget", () => {
+    assert.equal(
+      scoutGateShut({ limits: limits({ enabled: false, budgetUsdg: 0n }), buyUnpriceable: false }),
+      false,
+    );
+  });
+
+  it("never shuts an exit, even with the budget at zero", () => {
+    // The #110 regression in gate terms: a class SELL targets the vault just
+    // like a buy, so a target-only rule judges it an unpriceable purchase and
+    // the gate would silently drop every exit. The flags come from
+    // scoutFlagsFor (asset-side aware), never from the target alone.
+    const USDG = "0x5fc5360d0400a0fd4f2af552ADD042D716F1d168" as const;
+    const TOKEN = "0x1111111111111111111111111111111111111111" as const;
+    const VAULT = "0x9999999999999999999999999999999999999999" as const;
+    const sell = {
+      kind: "curve-trade",
+      target: VAULT,
+      assetIn: TOKEN,
+      assetOut: USDG,
+    } as unknown as TradeIntent;
+    const shut = limits({ enabled: false, budgetUsdg: 0n });
+    const flags = scoutFlagsFor(sell, { vault: VAULT, cash: USDG, lastUnpriceable: new Set([TOKEN]) });
+    assert.equal(flags.buyUnpriceable, false, "a sell acquires cash — precondition, not the gate");
+    assert.equal(scoutGateShut({ limits: shut, buyUnpriceable: flags.buyUnpriceable }), false);
   });
 });
