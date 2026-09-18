@@ -36,7 +36,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdtempSync, readdirSync, renameSync, rmSync, unlinkSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -183,11 +183,23 @@ const extracted = path.join(tmp, "package");
 if (!existsSync(extracted)) die("tarball did not contain package/");
 
 clearStaged(); // the file:.. symlink, or a previous staging
-renameSync(extracted, STAGED);
+try {
+  renameSync(extracted, STAGED);
+} catch (e) {
+  // Cross-device move (/tmp on tmpfs is the classic): rename can't cross
+  // filesystems, so copy + remove instead. Same result, no new dependency.
+  if (!e || e.code !== "EXDEV") throw e;
+  cpSync(extracted, STAGED, { recursive: true });
+  rmSync(extracted, { recursive: true, force: true });
+}
 
 // npm never packs dependencies; point the staged copy back at the repo's, the
-// same resolution the symlink gave us.
-execFileSync("cmd", ["/c", "mklink", "/J", INNER_NM, ROOT_NM], { encoding: "utf8" });
+// same resolution the symlink gave us. Junction on Windows, symlink elsewhere.
+if (process.platform === "win32") {
+  execFileSync("cmd", ["/c", "mklink", "/J", INNER_NM, ROOT_NM], { encoding: "utf8" });
+} else {
+  symlinkSync(ROOT_NM, INNER_NM, "dir");
+}
 
 const banned = ["desktop", ".data", "site", "gateway", "contracts", "scripts", ".claude", ".git", ".env"];
 const leaked = banned.filter((d) => existsSync(path.join(STAGED, d)));

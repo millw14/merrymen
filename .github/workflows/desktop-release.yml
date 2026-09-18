@@ -1,13 +1,24 @@
 name: Desktop release
 
-# Push a tag like `desktop-v0.1.0` and this builds the installers on GitHub's own
-# Windows + macOS runners and publishes them to a Release. Also downloadable as
-# run artifacts (Actions → the run → Artifacts) even before the release is cut.
-# Or trigger manually from the Actions tab (workflow_dispatch).
+# Push a tag like `v0.1.9` (stable) or `v0.1.9-beta.1` (pre-release) and this
+# builds the installers on GitHub's own runners and publishes them to a
+# Release. Also downloadable as run artifacts (Actions → the run → Artifacts)
+# even before the release is cut. Or trigger manually from the Actions tab
+# (workflow_dispatch).
+#
+# Tag names MUST stay bare semver (`v` + version, optional `-beta.N`): the
+# in-app updater (electron-updater GitHub provider) skips every tag that fails
+# semver.valid(), so a prefixed tag (desktop-v*, mobile-v*) is invisible to
+# update checks and they fail with "No published versions on GitHub". Beta
+# releases use the `-beta.N` prerelease identifier specifically (not `-dev.N`):
+# the provider only auto-follows alpha/beta/same-channel tags, so a `dev`
+# channel is a one-way trap that can never see stable releases again.
+# Linux-only for now: Windows/macOS stay out of the matrix until they can be
+# tested on real hardware. Re-add them when ready.
 on:
   push:
     tags:
-      - "desktop-v*"
+      - "v*"
   workflow_dispatch: {}
 
 permissions:
@@ -18,10 +29,13 @@ jobs:
     strategy:
       fail-fast: false # one OS failing shouldn't cancel the other
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # changelog step needs tag history to diff against
+          fetch-tags: true # tags are the range endpoints — a shallow tag list breaks PREV
 
       - uses: actions/setup-node@v4
         with:
@@ -46,6 +60,20 @@ jobs:
           npm install                      # electron + electron-builder + deps
           npm install ../merrymen-*.tgz    # replace file:.. with the packed copy
 
+      # Gate: a bundle that can't resolve its sentinels must fail the run,
+      # not ship as a release. Mirrors the app's own boot check in main.js.
+      - name: Verify staged bundle resolves
+        shell: bash
+        working-directory: desktop
+        run: |
+          node -e "const path = require('path');
+            const roots = [process.cwd(), path.join(process.cwd(), 'node_modules', 'merrymen')];
+            for (const r of ['merrymen/package.json', '@next/env', '@esbuild/linux-x64/package.json', 'tsx/package.json'])
+              if (!roots.some((root) => { try { require.resolve(r, { paths: [root] }); return true; } catch { return false; } })) throw new Error('unresolvable: ' + r);"
+          test -f node_modules/merrymen/worker/src/index.ts
+          test -f loading.html
+          echo "bundle resolves"
+
       - name: Build the installer for this OS
         shell: bash
         working-directory: desktop
@@ -56,7 +84,24 @@ jobs:
           # trying to sign. (Add CSC_LINK/CSC_KEY_PASSWORD later to sign.)
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
-      # Always available: download the .exe/.dmg from the run itself.
+      # Gate: the update feed must contain literals, never templates.
+      # electron-builder performs NO ${env.…} substitution in `publish`, so a
+      # template ships verbatim into app-update.yml and every update check
+      # 404s on a URL containing literal "${env…}". Shipped broken once.
+      - name: Verify update feed has no templates
+        shell: bash
+        working-directory: desktop
+        run: |
+          test -f dist/linux-unpacked/resources/app-update.yml
+          if grep -q '${' dist/linux-unpacked/resources/app-update.yml; then
+            echo "app-update.yml contains an unexpanded template:"; cat dist/linux-unpacked/resources/app-update.yml
+            exit 1
+          fi
+          grep -E "^owner: millw14$" dist/linux-unpacked/resources/app-update.yml
+          grep -E "^repo: merrymen$" dist/linux-unpacked/resources/app-update.yml
+          echo "update feed is literal"
+
+      # Always available: download the .AppImage from the run itself.
       - name: Upload run artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -64,29 +109,99 @@ jobs:
           name: merrymen-${{ matrix.os }}
           if-no-files-found: warn
           path: |
-            desktop/dist/*.exe
-            desktop/dist/*.dmg
             desktop/dist/*.AppImage
+            desktop/dist/latest-linux.yml
+
+      # Stable (`vX.Y.Z`) ships as a full release; beta tags (`vX.Y.Z-beta.N`)
+      # ship as prereleases so only beta-channel apps (in-app toggle →
+      # allowPrerelease) are offered them.
+      # Titles follow the maintainer style ("Desktop 0.1.7"), derived from
+      # the tag instead of echoing it raw.
+      # Changelog: desktop-scoped commit subjects since the previous `v*`
+      # tag, so every release note lists what actually changed. Unscoped the
+      # range drowns in unrelated mainline history (600+ commits); the desktop
+      # release only names what it ships. A commit appears if it touches any
+      # of these paths — so a change spanning cli/ + desktop/ still shows.
+      # web/src/terminal is in scope because the desktop bundles the dashboard:
+      # a terminal layout fix ships in the AppImage. Broader web/ is not — it
+      # would drown the notes in non-desktop web history.
+      # First tag (or a rebuild with no new commits) falls back to an explicit
+      # line, never blank-mysterious.
+      - name: Build changelog
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          REF="${{ github.ref }}"
+          # pipefail is on: an empty grep (first v* tag ever — only itself
+          # matches, then self-exclusion empties it) must not kill the step.
+          PREV="$(git tag --list 'v*' --sort=-creatordate | grep -v "${REF#refs/tags/}" | head -n 1 || true)"
+          if [ -z "$PREV" ]; then
+            # Bridge from the old scheme: the first v* tag diffs against the
+            # last desktop-beta-v* tag so its notes list real changes.
+            PREV="$(git tag --list 'desktop-beta-v*' --sort=-creatordate | head -n 1 || true)"
+          fi
+          SCOPE="desktop web/src/terminal .github/workflows/desktop-release.yml .github/workflows/desktop-dev.yml"
+          {
+            echo "PREV_TAG=$PREV"
+            echo "CHANGELOG<<EOF"
+            if [ -n "$PREV" ] && [ -n "$(git log --oneline "$PREV..HEAD" -- $SCOPE 2>/dev/null)" ]; then
+              git log --format='- %s (%h)' "$PREV..HEAD" -- $SCOPE
+            else
+              echo "(rebuild — no desktop changes since ${PREV:-the beginning})"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Set channel (stable vs beta)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          REF="${{ github.ref }}"
+          # Beta = -beta.N, plus one-off -dev.N bridge tags (a dev-channel
+          # install can only see same-channel tags, so the channel migration
+          # rode a -dev tag carrying a -beta version — see the v0.1.9-dev.2 notes).
+          if [[ "$REF" == refs/tags/v*-beta.* || "$REF" == refs/tags/v*-dev.* ]]; then
+            echo "IS_PRERELEASE=true" >> "$GITHUB_ENV"
+            echo "CHANNEL_LINE=**Channel:** beta — offered only to apps with the beta toggle on." >> "$GITHUB_ENV"
+            echo "DISPLAY_NAME=Desktop ${REF#refs/tags/v}" >> "$GITHUB_ENV"
+          else
+            echo "IS_PRERELEASE=false" >> "$GITHUB_ENV"
+            echo "CHANNEL_LINE=**Channel:** stable." >> "$GITHUB_ENV"
+            echo "DISPLAY_NAME=Desktop ${REF#refs/tags/v}" >> "$GITHUB_ENV"
+          fi
 
       # On a tag: attach the installers to a public GitHub Release.
       - name: Publish to the Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          name: merrymen desktop ${{ github.ref_name }}
+          name: ${{ env.DISPLAY_NAME }}
           tag_name: ${{ github.ref_name }}
           draft: false
+          prerelease: ${{ env.IS_PRERELEASE }}
           fail_on_unmatched_files: false
           body: |
             **merrymen desktop** — the one-click app. Double-click to install; no terminal, no Node.
 
-            - **Windows:** download the `.exe`. It's **unsigned**, so Windows SmartScreen shows
-              "Windows protected your PC" → **More info → Run anyway**. (We'll sign it later.)
-            - **macOS:** download the `.dmg`. It's **unsigned/un-notarized**, so right-click the app
-              → **Open** (or System Settings → Privacy & Security → Open Anyway) the first time.
+            ${{ env.CHANNEL_LINE }}
+
+            ### Install
+            <!-- post-#106-merge: switch the raw URL below from feat/desktop-linux-appimage to main -->
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/aor-rex/merrymen/feat/desktop-linux-appimage/desktop/install.sh | MERRY_MEN_VERSION=${{ github.ref_name }} bash
+            ```
+            Latest beta without pinning: replace `MERRY_MEN_VERSION=${{ github.ref_name }}` with `MERRY_MEN_CHANNEL=beta`.
+
+            ### What's changed
+            ${{ env.CHANGELOG }}
+
+            - **Linux:** download the `.AppImage`, make it executable (`chmod +x`), and run it.
+              It needs FUSE to mount — Ubuntu 22.04+: `sudo apt install libfuse2`;
+              Arch: `sudo pacman -S fuse2`.
+            - **Windows/macOS:** not built in this release — coming once they can be
+              tested on real hardware.
 
             Shares its home (`~/.merrymen`) with the `npm i -g merrymen` CLI.
           files: |
-            desktop/dist/*.exe
-            desktop/dist/*.dmg
             desktop/dist/*.AppImage
+            desktop/dist/latest-linux.yml
