@@ -451,6 +451,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
     { id: "clipboard", label: "📋 clipboard" },
     { id: "shell", label: "🖥️ shell" },
     { id: "keyboard", label: "⌨️ keyboard" },
+    { id: "install", label: "📦 install" },
     { id: "voice", label: "🎙️ voice" },
     { id: "watchers", label: "👀 watchers" },
   ];
@@ -1387,8 +1388,8 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
             <b>This lets Telegram touch this computer.</b> With it on, an allowlisted chat can take
             screenshots, open apps, browse a folder you pick, and — if you enable them — run
             allowlisted shell commands and type keystrokes. Everything is <b>off by default</b>,
-            enabled one capability at a time, and the sharp ones (shell, keyboard, files, power)
-            always ask you to <code>/confirm</code> first. Only turn on what you want.
+            enabled one capability at a time, and the sharp ones (shell, keyboard, files, power,
+            install) always ask you to <code>/confirm</code> first. Only turn on what you want.
           </div>
           <label className="mm-field">
             <span className="mm-label">enable remote control</span>
@@ -1431,11 +1432,14 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
             <span className="mm-hint">Click to toggle. Only enabled groups work; the rest are refused. “vision” and “voice” need extra keys below.</span>
           </div>
 
-          {pcEnabledVal && (capsVal.includes("shell") || capsVal.includes("keyboard")) && (
+          {pcEnabledVal && (capsVal.includes("shell") || capsVal.includes("keyboard") || capsVal.includes("install")) && (
             <div className="mm-danger">
               ⚠️ <b>This is remote control of your computer.</b> <b>Keyboard</b> types keystrokes into
               whatever window is focused, and <b>shell</b> runs your allowlisted commands — together
-              they can do essentially anything you can. Allowlisting an <b>interpreter</b> (python,
+              they can do essentially anything you can. <b>Install</b> runs your distro's package
+              manager with passwordless sudo, which installs system packages <b>as root</b> (package
+              scripts run as root too) — the most privileged thing on this page, off by default.
+              Allowlisting an <b>interpreter</b> (python,
               node, bash, powershell, git…) hands over <b>everything that program can do</b>, not just
               one command. Only enable these on a machine you trust, keep the shell allowlist as
               narrow as possible, and note each one still asks for <code>/confirm</code> first.

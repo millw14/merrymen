@@ -34,7 +34,35 @@ export type PendingAction =
    * key — so a misread instruction was a permanent loss of funds. A transfer of
    * $5 asks first; ending the agent should too.
    */
-  | { kind: "kill"; expiresAt: number };
+  | { kind: "kill"; expiresAt: number }
+  | { kind: "install"; tool: string; package: string; argv: string[]; expiresAt: number }
+  | { kind: "service"; tool: string; argv: string[]; expiresAt: number };
+
+/** One short phrase naming what a parked action WOULD do — fed to the LLM so it
+ * can tell the owner exactly what's waiting to be confirmed ("press ctrl+s",
+ * "transfer 20 USDG → 0x…", …). */
+export function describePending(p: PendingAction): string {
+  switch (p.kind) {
+    case "transfer":
+      return `transfer ${p.usdg} USDG → ${p.to}`;
+    case "shell":
+      return `run shell command "${p.cmd}"`;
+    case "getfile":
+      return `send file ${p.path}`;
+    case "type":
+      return `type "${p.text}"`;
+    case "hotkey":
+      return `press ${p.combo}`;
+    case "power":
+      return `power ${p.action}`;
+    case "install":
+      return `install ${p.package}`;
+    case "service":
+      return `start the ${p.tool} daemon`;
+    case "kill":
+      return "destroy the grant (kill switch)";
+  }
+}
 
 export interface CommandDeps {
   controlEnabled: boolean;
@@ -243,6 +271,11 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           return "🔒 control was turned off before you confirmed — the grant is untouched.";
         }
       } else {
+        // Every PC kind — including install/service, which pcRefusal gates on
+        // the master switch plus the "install" capability. Revoking "install"
+        // after parking refuses the confirm, even though the argv was fixed at
+        // park time: apt/pacman run maintainer scripts as root, so the gate
+        // must be re-checked, not just the plan.
         const refusal = pcRefusal({ kind: p.kind } as Command, deps);
         if (refusal) {
           deps.clearPending();
@@ -274,6 +307,10 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
             `\nRe-grant in the dashboard to ride again.`
           );
         }
+        case "install":
+          return await deps.pc.install({ argv: p.argv, package: p.package });
+        case "service":
+          return await deps.pc.startService({ tool: p.tool, argv: p.argv });
       }
     }
     case "cancel": {

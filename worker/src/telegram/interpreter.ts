@@ -161,6 +161,11 @@ export const PC_CAP_OF: Record<string, string> = {
   shell: "shell",
   type: "keyboard",
   hotkey: "keyboard",
+  // Installs and daemon-starts run package-manager / system commands as root —
+  // strictly more dangerous than the capability that triggered the offer, so
+  // they get their own group (default off) rather than riding on e.g. "system".
+  install: "install",
+  service: "install",
   watch: "watchers",
   watchers: "watchers",
   unwatch: "watchers",

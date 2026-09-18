@@ -26,12 +26,13 @@ import { PC_CAPABILITIES } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { ensureHome, homePaths } from "../home";
 import { loadGrantFile } from "../grant";
-import { esc, getFileUrl, getMe, getUpdates, sendMessage, setMyCommands, publicBotCommands, type TgMessage } from "./api";
+import { answerCallbackQuery, editMessageText, esc, getFileUrl, getMe, getUpdates, sendMessage, setMyCommands, publicBotCommands, type TgCallback, type TgInlineKeyboard, type TgMessage } from "./api";
 import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
 import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
+import * as pcp from "../pc/platform";
 import { transcribeVoice } from "./voice";
 import { fmtReminders, fmtWatchers, parseWatchSpec, parseWhenSec } from "./watchers";
 import {
@@ -117,6 +118,18 @@ const LINK_MAX_FAILS = 5;
 const LINK_LOCKOUT_SEC = 600;
 const HISTORY_TURNS = 6; // user+assistant pairs kept per chat for follow-ups
 
+/** Inline Confirm/Cancel row attached to every parked-action reply, so the
+ * user taps instead of typing /confirm. Only the same chat+fromId that parked
+ * the action is ever allowed to resolve it (see handleCallback). */
+const CONFIRM_MARKUP: TgInlineKeyboard = {
+  inline_keyboard: [
+    [
+      { text: "✅ Confirm", callback_data: "confirm" },
+      { text: "✖ Cancel", callback_data: "cancel" },
+    ],
+  ],
+};
+
 /** Escape a name so it can sit inside a RegExp. */
 function escapeRe(v: string): string {
   return v.replace(/[.*+?^${}()|[\]\\]/g, (m) => `\\${m}`);
@@ -180,6 +193,301 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    */
   // One detached /agent task per chat; /agent stop flips the flag mid-run.
   const agentRuns = new Map<number, { stopped: boolean }>();
+
+  /**
+   * Who a message/callback is FROM. The pending-confirm store and the deps are
+   * keyed on this so an inline-button tap can resolve the exact action the
+   * SAME user parked — a group member can't tap another member's confirm.
+   */
+  type Peer = { chatId: number; fromId: number; fromUsername?: string };
+
+  /**
+   * Shared /link implementation, parameterized over the peer (chat/from). Used
+   * from executeCommand's "link" branch for messages; callbacks never link.
+   */
+  const linkDep = (cfg: ResolvedConfig, peer: Peer, code: string): { ok: boolean; reason?: string } => {
+    const token = cfg.telegramBotToken!;
+    const lock = linkFails.get(peer.chatId);
+    if (lock && lock.fails >= LINK_MAX_FAILS && now() < lock.until) {
+      return { ok: false, reason: "too many attempts — try again in a few minutes" };
+    }
+    let state = ensureLinkCode(stateRef.get(), token);
+    if (!code || code.toUpperCase() !== state.linkCode.toUpperCase()) {
+      const prev = lock && now() < lock.until ? lock.fails : 0;
+      linkFails.set(peer.chatId, { fails: prev + 1, until: now() + LINK_LOCKOUT_SEC });
+      return { ok: false, reason: "bad or expired code" };
+    }
+    linkFails.delete(peer.chatId);
+    // First-come owner + allowlist the chat; the code is consumed (rotates).
+    // linkedAt marks day zero of the relationship — the bond grows from here.
+    const next = new Set(cfg.telegramAllowlist);
+    next.add(peer.chatId);
+    patchSettingsFile({ telegramAllowlist: [...next] });
+    state = rotateLinkCode(
+      {
+        ...state,
+        ownerId: state.ownerId ?? peer.fromId,
+        linkedAt: state.linkedAt ?? now(),
+        // AND IN THE ONE FILE NOBODY OVERWRITES. patchSettingsFile above
+        // wrote the chat into the child's settings.json, which the hosted
+        // orchestrator replaces wholesale from the tenant store every 15
+        // seconds — so the link above, on its own, is undone before the
+        // owner can send a second command, and the code that bought it has
+        // already been consumed by this very rotation. This file is
+        // child-owned; the parent reads it and unions these ids back into
+        // the stored allowlist, which is what makes the link durable.
+        linkedChats: state.linkedChats.includes(peer.chatId)
+          ? state.linkedChats
+          : [...state.linkedChats, peer.chatId],
+      },
+      token,
+    );
+    stateRef.set(state);
+    if (peer.fromUsername) rememberOwnerFact(`Their Telegram handle is @${peer.fromUsername}.`, now());
+    deps.note("ok", `Telegram: linked chat ${peer.chatId}${peer.fromUsername ? ` (@${peer.fromUsername})` : ""}`);
+    return { ok: true };
+  };
+
+  /**
+   * The executor's dependencies for a given peer. Shared by message handling
+   * and inline-button resolution, so /confirm-from-a-button and
+   * /confirm-typed land on the exact same code path (same re-vetting, same
+   * gates) — there is no second, weaker confirmation route.
+   */
+  const buildCmdDeps = (cfg: ResolvedConfig, peer: Peer): CommandDeps => {
+    const key = `${peer.chatId}:${peer.fromId}`;
+    const statusCtx = () => deps.buildStatusContext();
+    return {
+      controlEnabled: cfg.telegramControlEnabled,
+      maxActionUsdg: cfg.telegramMaxActionUsdg,
+      grantPerTradeUsdg: deps.grantPerTradeUsdg(),
+      transferEnabled: cfg.telegramTransferEnabled,
+      grantHasTransfer: deps.grantHasTransfer(),
+      reads: {
+        status: () => readStatus(statusCtx()),
+        positions: () => readPositions(),
+        depth: (symbol: string) => deps.readDepth(symbol),
+        pnl: () => readPnl(),
+        trades: () => readTrades(),
+        report: () => readReport(statusCtx()),
+        brag: () => readBrag(statusCtx()),
+        why: async () => {
+          const ev = readWhyEvidence();
+          const llm = resolveLlm(cfg);
+          if (!ev.hasTrade || !llm) return ev.text;
+          return narrateWhy(ev.text.replace(/<[^>]+>/g, ""), llm);
+        },
+      },
+      setStrategy: (name) => {
+        const r = deps.setStrategy(name);
+        if (r.ok) {
+          patchSettingsFile({ strategy: name });
+          deps.note("ok", `Telegram: strategy → ${name}`);
+        }
+        return r;
+      },
+      setCap: (usdg) => {
+        patchSettingsFile({ telegramMaxActionUsdg: usdg });
+        deps.note("ok", `Telegram: chat cap → ${usdg} USDG`);
+      },
+      setPaused: (paused) => {
+        setPaused(paused);
+        deps.note("warn", `Telegram: ${paused ? "paused" : "resumed"} by chat ${peer.chatId}`);
+      },
+      kill: () => {
+        const r = deps.kill();
+        if (r.ok) deps.note("warn", `Telegram: KILL by chat ${peer.chatId}`);
+        return r;
+      },
+      link: (code) => linkDep(cfg, peer, code),
+      trade: deps.submitTrade,
+      transfer: async (to, usdg) => {
+        deps.note("warn", `Telegram: transfer ${usdg} USDG → ${to} confirmed by chat ${peer.chatId}`);
+        return deps.submitTransfer(to, usdg);
+      },
+      getPending: () => pending.get(key) ?? null,
+      setPending: (p) => pending.set(key, p),
+      clearPending: () => pending.delete(key),
+      addAlert: (symbol, op, price) => {
+        const st = stateRef.get();
+        if (st.priceAlerts.length >= 20) return "you're at the 20-alert limit — /unalert one first.";
+        const id = st.priceAlerts.reduce((m, a) => Math.max(m, a.id), 0) + 1;
+        stateRef.set({ ...st, priceAlerts: [...st.priceAlerts, { id, symbol: symbol.toUpperCase(), op, price }] });
+        return `🔔 alert #${id} set — I'll ping you when ${esc(symbol.toUpperCase())} goes ${op === ">" ? "above" : "below"} ${price}. (fires once; needs the worker running)`;
+      },
+      listAlerts: () => {
+        const st = stateRef.get();
+        if (!st.priceAlerts.length) return "no price alerts set. Try: /alert QQQ &gt; 600";
+        return ["🔔 <b>price alerts</b>", ...st.priceAlerts.map((a) => `#${a.id} — ${esc(a.symbol)} ${a.op === ">" ? "&gt;" : "&lt;"} ${a.price}`)].join("\n");
+      },
+      removeAlert: (id) => {
+        const st = stateRef.get();
+        const next = st.priceAlerts.filter((a) => a.id !== id);
+        if (next.length === st.priceAlerts.length) return `no alert #${id}. /alerts lists them.`;
+        stateRef.set({ ...st, priceAlerts: next });
+        return `🔕 alert #${id} removed.`;
+      },
+      setName: (name) => {
+        const r = setSoulName(name);
+        if (r.ok) {
+          deps.onNameChange?.(r.name);
+          deps.note("ok", `Telegram: the merryman is now called ${r.name}`);
+        }
+        return r;
+      },
+      remember: (fact) => rememberOwnerFact(fact, now()),
+      soulInfo: () => {
+        const st = stateRef.get();
+        const rel = relationship(st.linkedAt, st.messageCount, now());
+        const facts = ownerFacts();
+        return [
+          `🌳 <b>${esc(getName())}</b> of the merrymen`,
+          `• ${ageDays(now())} days old · born ${getBornDate()} · ${rel.stage}`,
+          `• ${rel.daysTogether} day(s) riding with you · ${rel.messageCount} messages shared`,
+          facts.length
+            ? `• what I know about you:\n${facts.slice(-8).map((f) => `  ${esc(f.replace(/^- /, "· "))}`).join("\n")}`
+            : `• I don't know much about you yet — tell me things, or /remember them for me`,
+          ``,
+          `my soul lives in ~/.merrymen/soul/ — read it, edit it, it's yours. /name renames me · /forget wipes what I know.`,
+        ].join("\n");
+      },
+      // /forget must now clear the CONVERSATION too, not just OWNER.md —
+      // turns persist to disk since chat_turns, so wiping only the facts while
+      // the transcript survived would make the reply ("I've let go of what I
+      // knew about you") untrue.
+      forgetOwner: () => {
+        forgetOwner();
+        clearChatTurns(peer.chatId);
+        history.delete(peer.chatId);
+        stickyIds.delete(peer.chatId);
+      },
+      // ── PC control ─────────────────────────────────────────────────────
+      pcControlEnabled: cfg.telegramPcControlEnabled,
+      capabilities: new Set(cfg.telegramCapabilities),
+      filesRoot: cfg.telegramFilesRoot,
+      shellAllowlist: cfg.telegramShellAllowlist,
+      pc: makePcActions(
+        { token: cfg.telegramBotToken! },
+        peer.chatId,
+        {
+          filesRoot: cfg.telegramFilesRoot,
+          shellAllowlist: cfg.telegramShellAllowlist,
+          appAllowlist: cfg.telegramAppAllowlist,
+          anthropicApiKey: cfg.anthropicApiKey,
+          llmModel: cfg.llmModel,
+          requestInstall: (tool) => {
+            // Park an install offer bound to this peer; returns the package
+            // name so pc.ts can format the offer text. The service's parked
+            // detection then attaches the Confirm/Cancel buttons, and the tap
+            // resolves through the same executor path as a typed /confirm.
+            // Refused outright when the "install" capability is off — the
+            // confirm-time re-vet stays as the backstop for revocations
+            // parked earlier.
+            if (!cfg.telegramCapabilities.includes("install")) return null;
+            const plan = pcp.installPlanFor(tool);
+            if (!plan) return null;
+            pending.set(key, { kind: "install", tool, package: plan.package, argv: plan.argv, expiresAt: now() + 90 });
+            deps.note("ok", `Telegram: offered to install ${plan.package}`);
+            return plan.package;
+          },
+          requestServiceStart: (tool, argv) => {
+            // Park a daemon-start offer bound to this peer; returns the service
+            // name so pc.ts can format the offer text. Same buttoned/confirmed
+            // path as an install.
+            if (!cfg.telegramCapabilities.includes("install")) return null;
+            pending.set(key, { kind: "service", tool, argv, expiresAt: now() + 90 });
+            deps.note("ok", `Telegram: offered to start the ${tool} daemon`);
+            return tool;
+          },
+        },
+        deps.note,
+      ),
+      pcStatus: () => {
+        const on = cfg.telegramPcControlEnabled;
+        const caps = new Set(cfg.telegramCapabilities);
+        const rows = PC_CAPABILITIES.map((c) => `${caps.has(c) ? "✅" : "▫️"} ${c}`).join("  ");
+        const doc = pcp.pcDoctor();
+        const have = doc.tools.filter((t) => t.present).map((t) => t.name).join(", ");
+        const missing = doc.tools.filter((t) => !t.present).map((t) => t.name).join(", ");
+        const doctorLine =
+          doc.platform === "linux"
+            ? `session: ${doc.session} · have: ${have || "—"} · missing: ${missing || "—"}`
+            : `platform: ${doc.platform} — tools are built in, nothing to probe`;
+        // Typical install path for the detected package manager, for the
+        // NOPASSWD hint below (such rules must name the real binary path).
+        // The hint names the one user account this process runs as — never
+        // %wheel (a passwordless package manager is effectively passwordless
+        // root, so the rule must cover exactly merrymen's account) — and it
+        // is prose, not a copy-pasteable tee command.
+        const pmPath: Record<string, string> = { pacman: "/usr/bin/pacman", "apt-get": "/usr/bin/apt-get", dnf: "/usr/bin/dnf", apk: "/sbin/apk" };
+        const detectedPm = pcp.detectPm();
+        const pmBin = detectedPm ? pmPath[detectedPm] ?? "/usr/bin/" + detectedPm : "/usr/bin/<your-pm>";
+        const me = pcp.runAsUser();
+        const nopasswdHint =
+          doc.platform === "linux" && missing && !pcp.canSudoNonInteractive()
+            ? `some tools are missing (${missing}) — install them yourself (e.g. \`sudo ${detectedPm ?? "<your-pm>"} install ${missing}\`), or give the user I run as (${me}) passwordless sudo for just the package-manager binary (a file under /etc/sudoers.d/ with \`${me} ALL=(ALL) NOPASSWD: ${pmBin}\`) and I can install them on /confirm.`
+            : "";
+        return [
+          `🖥️ <b>remote control</b> — master ${on ? "ON" : "OFF"}`,
+          rows,
+          on
+            ? `enabled: ${[...caps].join(", ") || "(none — turn some on in the dashboard)"}`
+            : `turn it on in the dashboard → settings → remote control.`,
+          doctorLine,
+          ...(nopasswdHint ? [nopasswdHint] : []),
+          `shell + type + files + power always ask for /confirm first.`,
+        ].join("\n");
+      },
+      addReminder: (when, text) => {
+        const sec = parseWhenSec(when);
+        if (sec === null) return "when? e.g. /remind 20m stretch (s/m/h/d).";
+        const st = stateRef.get();
+        if (st.reminders.length >= 20) return "you're at the 20-reminder limit — /unremind one first.";
+        const id = st.nextId;
+        stateRef.set({
+          ...st,
+          nextId: id + 1,
+          reminders: [...st.reminders, { id, fireAt: now() + sec, text: text.slice(0, 300) }],
+        });
+        return `⏰ reminder #${id} set — I'll ping you in ${when}. (needs the worker running)`;
+      },
+      listReminders: () => fmtReminders(stateRef.get().reminders, now()),
+      removeReminder: (id) => {
+        const st = stateRef.get();
+        const next = st.reminders.filter((r) => r.id !== id);
+        if (next.length === st.reminders.length) return `no reminder #${id}. /reminders lists them.`;
+        stateRef.set({ ...st, reminders: next });
+        return `🗑️ reminder #${id} removed.`;
+      },
+      addWatcher: (spec) => {
+        const parsed = parseWatchSpec(spec);
+        if (!parsed) return "watch what? e.g. cpu>80, file &lt;path&gt;, proc &lt;name&gt;";
+        if (parsed.kind === "file") {
+          const res = resolveInRoot(cfg.telegramFilesRoot, parsed.arg);
+          if (!res.ok) return `🔒 ${esc(res.reason)}`;
+        }
+        const st = stateRef.get();
+        if (st.watchers.length >= 20) return "you're at the 20-watcher limit — /unwatch one first.";
+        const id = st.nextId;
+        stateRef.set({
+          ...st,
+          nextId: id + 1,
+          watchers: [...st.watchers, { id, kind: parsed.kind, arg: parsed.kind === "cpu" ? "" : parsed.arg, threshold: parsed.kind === "cpu" ? parsed.threshold : undefined }],
+        });
+        return `👀 watcher #${id} set. (needs the worker running)`;
+      },
+      listWatchers: () => fmtWatchers(stateRef.get().watchers),
+      removeWatcher: (id) => {
+        const st = stateRef.get();
+        const next = st.watchers.filter((w) => w.id !== id);
+        if (next.length === st.watchers.length) return `no watcher #${id}. /watchers lists them.`;
+        stateRef.set({ ...st, watchers: next });
+        return `🗑️ watcher #${id} removed.`;
+      },
+      help: () => HELP_TEXT,
+      now,
+    };
+  };
 
   /**
    * The in-memory map is now a CACHE over the sqlite log, not the source of
@@ -336,6 +644,17 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         },
         note: deps.note,
         remember: (n) => rememberNote(n, now()),
+        offerInstall: (tool) => {
+          if (!cfg.telegramCapabilities.includes("install")) return null;
+          const plan = pcp.installPlanFor(tool);
+          if (!plan) return null;
+          const key = `${msg.chatId}:${msg.fromId}`;
+          pending.set(key, { kind: "install", tool, package: plan.package, argv: plan.argv, expiresAt: now() + 90 });
+          const caveat = pcp.installCaveat(tool);
+          void sendMessage({ token }, msg.chatId, `📦 I can install <b>${esc(plan.package)}</b> for you. Tap ✅ to install (or /confirm) — or /cancel.${caveat ? `\n<code>${esc(caveat)}</code>` : ""}`, CONFIRM_MARKUP);
+          deps.note("ok", `Telegram agent: offered to install ${plan.package}`);
+          return plan.package;
+        },
         soulBlock,
         stopFlag,
       }).finally(() => agentRuns.delete(msg.chatId));
@@ -380,48 +699,6 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         return;
       }
     }
-
-    const linkDep = (code: string): { ok: boolean; reason?: string } => {
-      const lock = linkFails.get(msg.chatId);
-      if (lock && lock.fails >= LINK_MAX_FAILS && now() < lock.until) {
-        return { ok: false, reason: "too many attempts — try again in a few minutes" };
-      }
-      let state = ensureLinkCode(stateRef.get(), token);
-      if (!code || code.toUpperCase() !== state.linkCode.toUpperCase()) {
-        const prev = lock && now() < lock.until ? lock.fails : 0;
-        linkFails.set(msg.chatId, { fails: prev + 1, until: now() + LINK_LOCKOUT_SEC });
-        return { ok: false, reason: "bad or expired code" };
-      }
-      linkFails.delete(msg.chatId);
-      // First-come owner + allowlist the chat; the code is consumed (rotates).
-      // linkedAt marks day zero of the relationship — the bond grows from here.
-      const next = new Set(cfg.telegramAllowlist);
-      next.add(msg.chatId);
-      patchSettingsFile({ telegramAllowlist: [...next] });
-      state = rotateLinkCode(
-        {
-          ...state,
-          ownerId: state.ownerId ?? msg.fromId,
-          linkedAt: state.linkedAt ?? now(),
-          // AND IN THE ONE FILE NOBODY OVERWRITES. patchSettingsFile above
-          // wrote the chat into the child’s settings.json, which hosted the
-          // orchestrator replaces wholesale from the tenant store every 15
-          // seconds — so the link above, on its own, is undone before the
-          // owner can send a second command, and the code that bought it has
-          // already been consumed by this very rotation. This file is
-          // child-owned; the parent reads it and unions these ids back into
-          // the stored allowlist, which is what makes the link durable.
-          linkedChats: state.linkedChats.includes(msg.chatId)
-            ? state.linkedChats
-            : [...state.linkedChats, msg.chatId],
-        },
-        token,
-      );
-      stateRef.set(state);
-      if (msg.fromUsername) rememberOwnerFact(`Their Telegram handle is @${msg.fromUsername}.`, now());
-      deps.note("ok", `Telegram: linked chat ${msg.chatId}${msg.fromUsername ? ` (@${msg.fromUsername})` : ""}`);
-      return { ok: true };
-    };
 
     const statusCtx = () => deps.buildStatusContext();
     const cmdDeps: CommandDeps = {
@@ -476,7 +753,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         if (r.ok) deps.note("warn", `Telegram: KILL by chat ${msg.chatId}`);
         return r;
       },
-      link: linkDep,
+      link: (code) => linkDep(cfg, { chatId: msg.chatId, fromId: msg.fromId }, code),
       trade: deps.submitTrade,
       transfer: async (to, usdg) => {
         deps.note("warn", `Telegram: transfer ${usdg} USDG → ${to} confirmed by chat ${msg.chatId}`);
@@ -552,6 +829,23 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           appAllowlist: cfg.telegramAppAllowlist,
           anthropicApiKey: cfg.anthropicApiKey,
           llmModel: cfg.llmModel,
+          requestInstall: (tool) => {
+            // Same peer-bound park as the buildCmdDeps path above, keyed on
+            // this message's chat+user so one member can't confirm another's
+            // install in a group. Same "install"-capability gate.
+            if (!cfg.telegramCapabilities.includes("install")) return null;
+            const plan = pcp.installPlanFor(tool);
+            if (!plan) return null;
+            pending.set(`${msg.chatId}:${msg.fromId}`, { kind: "install", tool, package: plan.package, argv: plan.argv, expiresAt: now() + 90 });
+            deps.note("ok", `Telegram: offered to install ${plan.package}`);
+            return plan.package;
+          },
+          requestServiceStart: (tool, argv) => {
+            if (!cfg.telegramCapabilities.includes("install")) return null;
+            pending.set(`${msg.chatId}:${msg.fromId}`, { kind: "service", tool, argv, expiresAt: now() + 90 });
+            deps.note("ok", `Telegram: offered to start the ${tool} daemon`);
+            return tool;
+          },
         },
         deps.note,
       ),
@@ -752,6 +1046,13 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
 
     // A failed command must still answer — silence reads as a dead bot.
     let reply: string;
+    const pendingKey = `${msg.chatId}:${msg.fromId}`;
+    // Snapshot what was parked before this command. A fresh park can come from
+    // a plain command (/type) OR from resolving one (a /confirm that runs typeText
+    // and parks an install offer) — in both cases the user must see buttons, so
+    // "parked" means "the pending slot now holds a DIFFERENT action than before",
+    // not merely "something appeared".
+    const beforePending = pending.get(pendingKey);
     try {
       reply = await executeCommand(cmd, cmdDeps);
     } catch (e) {
@@ -779,6 +1080,60 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       strippedReply ||
         "that came back as reasoning with no answer in it — say it again, or use a slash command like /status.",
     );
+    const afterPending = pending.get(pendingKey);
+    const parked = !!afterPending && afterPending !== beforePending;
+    if (!slash) pushHistory(msg.chatId, "assistant", reply.replace(/<[^>]+>/g, ""), turnMemoryIds);
+    await sendMessage({ token }, msg.chatId, reply, parked ? CONFIRM_MARKUP : undefined);
+  };
+
+  /**
+   * Resolve an inline-button tap (Confirm/Cancel) into the parked action it
+   * belongs to. The pending slot is keyed chat:from, so only the SAME user who
+   * parked the action can confirm or cancel it — a group member can't tap
+   * another member's confirm button. Runs through the exact same executor
+   * confirm/cancel branch as typing /confirm (same re-vetting, same gates).
+   * The parked message is edited in place to the outcome (buttons removed) and
+   * the tap is acknowledged with a toast.
+   */
+  const handleCallback = async (cb: TgCallback, cfg: ResolvedConfig): Promise<void> => {
+    const token = cfg.telegramBotToken!;
+    const { chatId, fromId } = cb;
+    const key = `${chatId}:${fromId}`;
+    const action: Command | null =
+      cb.data === "confirm" ? { kind: "confirm" }
+      : cb.data === "cancel" ? { kind: "cancel" }
+      : null;
+
+    // No parked action (or a different user's — same chat but the slot is bound
+    // to the parker, so a stranger tapping finds nothing): drop the buttons and
+    // say so, but still acknowledge the tap so the button stops spinning.
+    if (!action || !pending.has(key)) {
+      await answerCallbackQuery({ token }, cb.queryId, {});
+      await editMessageText({ token }, chatId, cb.messageId, "nothing pending to confirm — the ask has expired or already resolved.");
+      return;
+    }
+
+    let reply: string;
+    const beforePending = pending.get(key);
+    try {
+      reply = await executeCommand(action, buildCmdDeps(cfg, { chatId, fromId }));
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      deps.note("warn", `Telegram: ${cb.data} callback failed — ${m}`);
+      reply = `🚫 that ${cb.data} failed: ${esc(m.slice(0, 200))}`;
+    }
+    await answerCallbackQuery({ token }, cb.queryId, {
+      text: cb.data === "confirm" ? "Confirmed ✓" : "Cancelled",
+    });
+    // Resolving a confirm can itself park a NEW action (a confirm that runs
+    // typeText and lands on an install offer). When it does, re-attach the
+    // Confirm/Cancel buttons to the edited message so the fresh ask stays
+    // tappable — otherwise the offer appears buttonless and forces a typed
+    // /confirm. Resolution that clears the slot gets plain text (default).
+    const afterPending = pending.get(key);
+    const parkedFresh = !!afterPending && afterPending !== beforePending;
+    const edited = await editMessageText({ token }, chatId, cb.messageId, reply, parkedFresh ? CONFIRM_MARKUP : undefined);
+    if (!edited.ok) await sendMessage({ token }, chatId, reply, parkedFresh ? CONFIRM_MARKUP : undefined);
   };
 
   const pollOnce = async (): Promise<void> => {

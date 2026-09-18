@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { appAllowed, isUrl, resolveInRoot, shellAllowed } from "./pc";
+import { appAllowed, isUrl, pcResultReply, resolveInRoot, shellAllowed } from "./pc";
 import { parseWatchSpec, parseWhenSec } from "./watchers";
 
 // ── shell allowlist — the sharpest edge ─────────────────────────────────────
@@ -118,5 +118,33 @@ describe("parseWatchSpec", () => {
   it("rejects nonsense and bad thresholds", () => {
     assert.equal(parseWatchSpec("cpu>200"), null);
     assert.equal(parseWatchSpec("whatever"), null);
+  });
+});
+
+// ── offer precedence — a failed platform result becomes the right reply ─────
+describe("pcResultReply — missing install > daemon start > plain failure", () => {
+  const offer = (t: string) => (t === "ydotool" ? `OFFER ${t}` : null);
+  const offerService = (t: string) => `SERVICE ${t}`;
+  const fail = (r?: string) => `FAIL ${r ?? ""}`;
+
+  it("a missing tool wins — even when a service offer is also present", () => {
+    const r = { missing: { tool: "ydotool" }, needsService: { tool: "ydotool", argv: ["systemctl", "--user", "enable", "--now", "ydotool"] } };
+    assert.equal(pcResultReply(r, offer, offerService, fail), "OFFER ydotool");
+  });
+
+  it("a service offer wins when there's no install offer", () => {
+    const r = { needsService: { tool: "ydotool", argv: ["systemctl", "--user", "enable", "--now", "ydotool"] } };
+    assert.equal(pcResultReply(r, offer, offerService, fail), "SERVICE ydotool");
+  });
+
+  it("falls through to the service offer when the install offer is null", () => {
+    // missing present but offer() refuses (e.g. no package/sudo) → still try the daemon
+    const r = { missing: { tool: "wtype" }, needsService: { tool: "ydotool", argv: ["systemctl", "--user", "enable", "--now", "ydotool"] } };
+    assert.equal(pcResultReply(r, offer, offerService, fail), "SERVICE ydotool");
+  });
+
+  it("plain failure when nothing is offerable", () => {
+    assert.equal(pcResultReply({}, offer, offerService, fail), "FAIL ");
+    assert.equal(pcResultReply({ reason: "boom" }, offer, offerService, fail), "FAIL boom");
   });
 });

@@ -726,7 +726,10 @@ export const HOSTED_FORBIDDEN_SETTING_FIELDS = [
   ...RCE_SETTING_FIELDS,
 ] as const;
 
-/** The PC-control capability groups a user can enable, in dashboard order. */
+/** The PC-control capability groups a user can enable, in dashboard order.
+ * "install" covers installing system packages (root) and starting daemons —
+ * the most privileged thing PC control can do, so it gets its own switch,
+ * defaulting off like everything else (telegramCapabilities defaults to []). */
 export const PC_CAPABILITIES = [
   "screen",
   "vision",
@@ -736,6 +739,7 @@ export const PC_CAPABILITIES = [
   "clipboard",
   "shell",
   "keyboard",
+  "install",
   "voice",
   "watchers",
 ] as const;
