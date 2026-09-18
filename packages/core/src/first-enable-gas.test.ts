@@ -53,13 +53,17 @@ describe("the size model reproduces the recorded stub sweep", () => {
    * MEASURED, ON THIS CHAIN, AGAINST THIS BUNDLER — and recorded in the repo
    * before this module existed. If the wall's encoding ever changes, these fail
    * here rather than silently shifting every envelope downstream.
+   *
+   * Re-measured with the native-input rule present (default wall): +1,248
+   * bytes fixed for the rule itself, +32 per custom token for its ONE_OF
+   * adapterAssets entry — verified linear across 0/1/5/15/40 tokens.
    */
   const RECORDED: Record<number, number> = {
-    0: 10_932,
-    1: 11_444,
-    5: 13_492,
-    15: 18_612,
-    40: 31_412,
+    0: 12_180,
+    1: 12_724,
+    5: 14_900,
+    15: 20_340,
+    40: 33_940,
   };
 
   for (const [tokens, stub] of Object.entries(RECORDED)) {
@@ -73,7 +77,7 @@ describe("the size model reproduces the recorded stub sweep", () => {
     // wall, and two descriptions drift the moment a capability adds a
     // permission. These come from the objects the signature is made over.
     const s = withTokens(0);
-    assert.equal(s.permissions, 18, "the documented default wall");
+    assert.equal(s.permissions, 19, "the documented default wall plus the native-input rule");
     assert.ok(s.rules > 0 && s.oneOfEntries > 0);
     assert.equal(
       s.policyBlobBytes,
@@ -82,11 +86,12 @@ describe("the size model reproduces the recorded stub sweep", () => {
     );
   });
 
-  it("a custom token costs 512 bytes on a default wall", () => {
-    // The figure gas-limits.ts quotes, arrived at independently here: 512 bytes
-    // × 700.945 gas/byte = 358,884, its stated per-token gas cost.
-    assert.equal(withTokens(1).stubBytes - withTokens(0).stubBytes, 512);
-    assert.equal(withTokens(6).stubBytes - withTokens(5).stubBytes, 512);
+  it("a custom token costs 544 bytes on a default wall", () => {
+    // 512 bytes of base wall per token (the figure gas-limits.ts quotes,
+    // arrived at independently here) + 32 for the native rule's ONE_OF
+    // adapterAssets entry, which grows with the same list.
+    assert.equal(withTokens(1).stubBytes - withTokens(0).stubBytes, 544);
+    assert.equal(withTokens(6).stubBytes - withTokens(5).stubBytes, 544);
   });
 });
 
@@ -137,10 +142,11 @@ describe("the envelope comes from the shape, never from the estimate", () => {
 
   it("AN ANOMALOUS ESTIMATE FOR A NARROW WALL IS STILL REFUSED", () => {
     // The property the old flat ceiling had and must not lose. A wall that
-    // should cost ~9.7M may not be signed for 13M just because something said
-    // so — its own envelope binds first, well below the hard maximum.
+    // should cost ~10.9M may not be signed for 13.5M just because something
+    // said so — its own envelope binds first, well below the hard maximum.
+    // (Threshold moved with the native rule: narrow allowance is now ~13.08M.)
     const narrow = firstEnableEnvelope(withTokens(0));
-    const anomalous = 13_000_000n;
+    const anomalous = 13_500_000n;
     assert.ok(anomalous < FIRST_ENABLE_HARD_MAX_BOUNDED, "under the product cap");
     assert.ok(anomalous > narrow.allowedMaxBounded, "but over THIS wall's allowance");
   });
@@ -280,8 +286,9 @@ describe("the hard maximum binds, and is derived from a measured failure point",
         (n) => !signableNow(asRob(n), true).ok && signableNow(asRob(n), false).ok,
       );
       assert.ok(straddling.length > 0, "no token count straddles the ceiling — the flag would be inert");
-      // And it is the count the beta owner was sitting on.
-      assert.ok(straddling.includes(6), `expected 6 tokens to straddle, got ${straddling.join(",")}`);
+      // The native rule widened every wall, so the straddle point moved from
+      // the 6 the beta owner was sitting on to 4. Same property, new calibration.
+      assert.ok(straddling.includes(4), `expected 4 tokens to straddle, got ${straddling.join(",")}`);
     });
   });
 

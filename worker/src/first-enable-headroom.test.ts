@@ -125,17 +125,22 @@ const bound = (g: UserOpGas, bounds: ReturnType<typeof firstEnableBounds> | type
   boundGas(g, g, bounds, sponsoredOf(g));
 
 describe("the observed estimates, reproduced", () => {
-  it("Shogun's wall is 12,468 stub bytes — the recorded default plus three slots", () => {
-    assert.equal(DEFAULT_WALL.stubBytes, 10_932, "the recorded 0-token sweep point");
-    assert.equal(SHOGUN_WALL.stubBytes, 12_468);
-    assert.equal(SHOGUN_WALL.stubBytes - DEFAULT_WALL.stubBytes, 3 * 512);
+  it("Shogun's wall is 13,812 stub bytes — the recorded default plus three slots", () => {
+    // Re-measured with the native-input rule present (+1,248 fixed, +32 per
+    // token — see first-enable-gas.test.ts). The SHOGUN gas estimates below
+    // are untouched history; only wall-derived numbers move.
+    assert.equal(DEFAULT_WALL.stubBytes, 12_180, "the recorded 0-token sweep point");
+    assert.equal(SHOGUN_WALL.stubBytes, 13_812);
+    assert.equal(SHOGUN_WALL.stubBytes - DEFAULT_WALL.stubBytes, 3 * 544);
   });
 
   it("the envelope predicts the WALL, and the wall fits it with room to spare", () => {
     const env = firstEnableEnvelope(SHOGUN_WALL);
-    assert.equal(env.expectedRaw, 8_819_681n);
-    assert.equal(env.expectedBounded, 11_156_896n);
-    assert.equal(env.allowedMaxBounded, 13_388_275n);
+    assert.equal(env.expectedRaw, 9_761_751n);
+    assert.equal(env.expectedBounded, 12_348_615n);
+    // The bigger wall pushes the allowance onto the hard-maximum cap — the
+    // envelope still binds below it everywhere it isn't capped.
+    assert.equal(env.allowedMaxBounded, 14_000_000n);
     assert.equal(env.withinHardMax, true, "this wall was always installable");
 
     // The enable half — what the envelope actually predicts — against what it
@@ -156,9 +161,16 @@ describe("the observed estimates, reproduced", () => {
     // Pinned so the defect cannot come back silently. The old bounds put the
     // model's allowance on the TOTAL — wall plus payload plus sponsor — and the
     // payload was never in the prediction.
+    //
+    // FROZEN HISTORY, not a live derivation: RECORDED_ALLOWANCE is the
+    // allowance production enforced that day (asserted live two tests above
+    // before the native rule moved it). The gas numbers are transcribed logs;
+    // both are inputs, and the defect under test is what the old comparison
+    // DID with them — which no wall change can alter.
+    const RECORDED_ALLOWANCE = 13_388_275n;
     const env = firstEnableEnvelope(SHOGUN_WALL);
     for (const est of SHOGUN) {
-      const old = boundGas(est, est, { ...FIRST_ENABLE_GAS_BOUNDS, absoluteMax: env.allowedMaxBounded }, true);
+      const old = boundGas(est, est, { ...FIRST_ENABLE_GAS_BOUNDS, absoluteMax: RECORDED_ALLOWANCE }, true);
       assert.equal(old.ok, false, "this is what production did");
       assert.equal(old.ok === false ? old.rule : null, "gas-absurd");
     }
@@ -167,9 +179,10 @@ describe("the observed estimates, reproduced", () => {
     assert.equal(signedTotal(SHOGUN[1]!), 13_525_460n);
     for (const est of SHOGUN) {
       assert.ok(signedTotal(est) < FIRST_ENABLE_HARD_MAX_BOUNDED, "under the hard maximum");
-      assert.ok(signedTotal(est) > env.allowedMaxBounded, "over the model's allowance");
+      assert.ok(signedTotal(est) > RECORDED_ALLOWANCE, "over the allowance production enforced");
     }
     assert.equal(FIRST_ENABLE_HARD_MAX_BOUNDED - signedTotal(SHOGUN[0]!), 458_428n, "the margin that was thrown away");
+    void env;
   });
 
   it("THE NEW COMPARISON SIGNS BOTH, at the same gas it always would have", () => {
@@ -209,7 +222,10 @@ describe("what must not regress", () => {
     // size, even though the total is nowhere near the hard maximum. Splitting
     // the comparison must not have handed it a way through.
     const env = firstEnableEnvelope(DEFAULT_WALL);
-    const anomalous: UserOpGas = { ...ORDINARY, verificationGasLimit: 10_000_000n };
+    // Anomalous relative to THIS wall: over its ~13.08M allowance, under the
+    // 14M product cap. (Was 10M verification before the native rule widened
+    // the wall; the property is the window, not the number.)
+    const anomalous: UserOpGas = { ...ORDINARY, verificationGasLimit: 10_600_000n };
     assert.ok(signedTotal(anomalous) < FIRST_ENABLE_HARD_MAX_BOUNDED, "under the product cap");
     const v = boundGas(anomalous, anomalous, firstEnableBounds(env.allowedMaxBounded), false);
     assert.equal(v.ok, false, "but over THIS wall's allowance");

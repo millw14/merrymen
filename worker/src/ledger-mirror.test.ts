@@ -56,6 +56,7 @@ const SRC = [
   // contract — so it appears in no other table here, and without the mirror the
   // shared ledger cannot see a class position at all.
   "CREATE TABLE class_positions (agent_id TEXT, token TEXT, symbol TEXT, decimals INTEGER DEFAULT 18, curve TEXT, quote_token TEXT, first_seen INTEGER, vault TEXT, entry_tx TEXT, exit_tx TEXT, cost_usdg TEXT, qty_raw TEXT, proceeds_usdg TEXT, opened_at_block TEXT, state TEXT DEFAULT 'open', swept_raw TEXT, PRIMARY KEY (agent_id, token));",
+  "CREATE TABLE convert_state (agent_id TEXT PRIMARY KEY, fired_at_ms INTEGER NOT NULL DEFAULT 0, considered_wei TEXT NOT NULL DEFAULT '0', completed_ids TEXT NOT NULL DEFAULT '[]', updated_at_ms INTEGER NOT NULL DEFAULT 0);",
 ].join("\n");
 
 /** The destination, with the same shape a Postgres ledger has. */

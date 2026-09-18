@@ -173,6 +173,7 @@ const SRC = [
   "CREATE TABLE cost_basis (agent_id TEXT, mode TEXT, symbol TEXT, qty_raw TEXT, cost_usdg TEXT, updated_at INTEGER, PRIMARY KEY (agent_id, mode, symbol));",
   "CREATE TABLE position_floors (agent_id TEXT, mode TEXT, symbol TEXT, stop_bps INTEGER, rung INTEGER, why TEXT, at INTEGER, PRIMARY KEY (agent_id, mode, symbol));",
   "CREATE TABLE class_positions (agent_id TEXT, token TEXT, symbol TEXT, decimals INTEGER DEFAULT 18, curve TEXT, quote_token TEXT, first_seen INTEGER, vault TEXT, entry_tx TEXT, exit_tx TEXT, cost_usdg TEXT, qty_raw TEXT, proceeds_usdg TEXT, opened_at_block TEXT, state TEXT DEFAULT 'open', swept_raw TEXT, PRIMARY KEY (agent_id, token));",
+  "CREATE TABLE convert_state (agent_id TEXT PRIMARY KEY, fired_at_ms INTEGER NOT NULL DEFAULT 0, considered_wei TEXT NOT NULL DEFAULT '0', completed_ids TEXT NOT NULL DEFAULT '[]', updated_at_ms INTEGER NOT NULL DEFAULT 0);",
 ].join("\n");
 
 const DEST = SRC + MIRROR_STATE_DDL;
