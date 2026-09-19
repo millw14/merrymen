@@ -55,9 +55,10 @@ describe("the shadow path cannot reach execution", () => {
     const raw = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     assert.match(
       raw,
-      /if \(\(shadowBrainEnabledFor\(agentId\) \|\| brainLiveEnabledFor\(agentId\)\) && cfg\.brainUrl && cfg\.brainToken/,
-      "three guards: the agent is named AND the house configured a Brain",
+      /if \(\(fastTrencher \|\| shadowBrainEnabledFor\(agentId\) \|\| brainLiveEnabledFor\(agentId\)\) && cfg\.brainUrl && cfg\.brainToken && !bookIncomplete/,
+      "Brain requires enrollment or explicit Trencher opt-in, configuration and complete accounting",
     );
+    assert.match(raw, /const fastTrencher = cfg\.strategy === "trencher" && cfg\.trencherFastEnabled/);
   });
 
   it("brain-live carries no execution either — it returns three scalars", () => {
@@ -92,13 +93,13 @@ describe("the shadow path cannot reach execution", () => {
  * can happen" but the four things that make the connection safe, each of which
  * a careless edit could remove without any of the above failing.
  */
-describe("execution is connected in exactly one gated place", () => {
+describe("direct Brain execution remains gated separately from Trencher strategy intents", () => {
   const tick = () => readFileSync(new URL("./index.ts", import.meta.url), "utf8");
 
   it("ONE CALL SITE, AND IT IS GATED ON ITS OWN ALLOWLIST", () => {
     const raw = tick();
     assert.equal(
-      (raw.match(/if \(outcome\.ran && outcome\.result\.ok && brainLiveEnabledFor\(agentId\) && !isPaused\(\)\)/g) ?? []).length,
+      (raw.match(/if \(!fastTrencher && outcome\.ran && outcome\.result\.ok && brainLiveEnabledFor\(agentId\) && !isPaused\(\)\)/g) ?? []).length,
       1,
       "one execution guard, with live enrollment and the pause switch both enforced",
     );

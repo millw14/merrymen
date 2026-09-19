@@ -3,9 +3,9 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 
-const RELEASE = "merrymen:trencher-fast:v1";
+const RELEASE = "merrymen:trencher-fast:v2";
 const TITLE = "Trencher mode is here";
-const MESSAGE = "Let your Merryman hunt volatile memecoins with 15-second checks and automatic exit rules. Review and opt in from Settings. Trading limits still apply.";
+const MESSAGE = "Trencher now screens high-volume memecoins and asks Brain to approve trades, with 15-second execution checks and independent automatic exits. Review and opt in from Settings. Trading limits still apply.";
 
 /** A release notice, not a command to activate a user's trading strategy. */
 export function TrencherAnnouncement() {

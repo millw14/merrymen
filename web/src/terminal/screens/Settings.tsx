@@ -582,8 +582,9 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
           <div className="mm-section">What it trades</div>
           <div className="mm-hint">
             <b id="trencher-mode">Trencher mode · fast memecoin setup</b>
-            <p>Your Merryman hunts newly launched memecoins and checks entries and exits every 15 seconds, without waiting for an LLM.
-              The fast profile attempts exits at −10%, +20%, or after 30 minutes. Liquidity loss can trigger an earlier exit.</p>
+            <p>Your Merryman tracks active memecoin pools with at least $100,000 in daily volume, 20 distinct buyers, recent activity and both buys and sells.
+              Brain reviews eligible coins in the background about once a minute; execution and exit checks run every 15 seconds.
+              New buys need a fresh Brain approval. Brain can also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is unavailable. Liquidity loss can trigger an earlier exit.</p>
             <p>Entries remain $5, subject to your budget and signed limits. Only discovered, priced pools that pass the liquidity, age and valuation checks qualify.
               Your custom coins are included in the basket; existing positions remain sellable.</p>
             <button type="button" className="mm-btn" onClick={() => {
@@ -604,7 +605,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
               No coins are configured yet. Add a discovered pool token under Custom tokens &amp; discovery. Trencher uses swap pools; ungraduated bonding curves use a separate route. Discovery alone does not authorize a purchase.
             </p>}
             <p>Save changes below, then <Link href="/grant">update trading permission</Link> for any newly added coins.
-              For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed.</p>
+              Brain must be connected and the recorded portfolio must pass its accounting checks. For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed.</p>
           </div>
           <div className="mm-grid">
             <label className="mm-field">

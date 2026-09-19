@@ -17,6 +17,8 @@ import {
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
 import { wrapSqlite, makePgDb, type Db } from "./db";
+import { paperBrainCapital } from "./paper-brain-capital";
+export const getPaperBrainCapital = (agentId: string, epoch: number) => paperBrainCapital(getDb(), agentId, epoch);
 import { readDecisionLifecycle, type DecisionLifecycle } from "./decision-lifecycle";
 export type { DecisionLifecycle } from "./decision-lifecycle";
 // The one definition of a flow's identity. Imported rather than restated so

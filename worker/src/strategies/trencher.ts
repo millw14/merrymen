@@ -22,6 +22,7 @@
 import type { TradeIntent } from "../policy";
 import type { Snapshot, Strategy, Tick } from "./types";
 import type { Why } from "./reasons";
+import type { TrenchBrainOrder } from "../trencher-brain";
 
 /** What the tick knows about a token it might enter. All chain-derived. */
 export interface Candidate {
@@ -37,6 +38,7 @@ export interface Candidate {
   /** Seconds since the pool was initialized. */
   ageSec: number;
   price8: bigint;
+  volume24hUsd?: number;
 }
 
 /** What we remember about something already held, so exits can be judged. */
@@ -102,6 +104,8 @@ export const TRENCHER_FAST: TrencherConfig = {
   stopLossBps: 1_000,
   takeProfitBps: 2_000,
   maxHoldSec: 30 * 60,
+  // Active older memecoins are eligible too; volume, depth and price still gate entry.
+  maxAgeSec: Number.MAX_SAFE_INTEGER,
 };
 
 /**
@@ -183,6 +187,9 @@ export function priceMoveBps(entry8: bigint, now8: bigint): number {
 }
 
 export interface TrencherDeps {
+  /** When required, no rule-based entry may bypass a fresh Brain approval. */
+  brainRequired?: boolean;
+  brainOrder?: (symbol: string, token: string, price8: bigint, held: boolean) => TrenchBrainOrder | null;
   cfg: TrencherConfig;
   swapRouter: `0x${string}`;
   usdgToken: `0x${string}`;
@@ -246,27 +253,35 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
           },
           deps.cfg,
         );
-        if (!verdict.exit) continue;
-        deps.onNote?.("warn", `trencher: selling ${pos.symbol} — ${verdict.why}`);
+        const brain = !verdict.exit && quote && !quote.stale ? deps.brainOrder?.(pos.symbol, pos.token, quote.price8, true) : null;
+        if (!verdict.exit && brain?.side !== "sell") continue;
+        const available = held?.valueUsdg ?? pos.costUsdg;
+        const brainNotional = brain ? BigInt(Math.round(brain.usdgAmount * 1e6)) : available;
+        const notional = brainNotional < available ? brainNotional : available;
+        const raw = held?.rawBalance ?? pos.qtyRaw;
+        const amount = verdict.exit ? raw : available > 0n ? raw * notional / available : 0n;
+        if (amount <= 0n) continue;
+        deps.onNote?.("warn", `trencher: selling ${pos.symbol} — ${verdict.exit ? verdict.why : "Brain exit"}`);
         intents.push({
+          ...(brain ? { decisionId: brain.decisionId } : {}),
           kind: "swap",
           target: deps.swapRouter,
           sellToken: pos.token,
           buyToken: deps.usdgToken,
           // The whole position; partials leave a tail. From the ledger when
           // there is no priced holding to read it from.
-          sellAmountRaw: held?.rawBalance ?? pos.qtyRaw,
+          sellAmountRaw: amount,
           // Cost is the honest stand-in for a position with no mark — the same
           // substitution quarantine makes when it carries an unvaluable
           // holding into equity at what was paid for it.
-          notionalUsdg: held?.valueUsdg ?? pos.costUsdg,
+          notionalUsdg: notional,
         });
-        why.push({
+        why.push(verdict.exit ? {
           code: "trench-exit",
           symbol: pos.symbol,
           cause: verdict.cause,
           pct: verdict.pct,
-        });
+        } : null);
       }
 
       // ── entries, only with what's left ─────────────────────────────────
@@ -284,12 +299,15 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
           deps.onNote?.("ok", `trencher: passing on ${c.symbol} — ${verdict.why}`);
           continue;
         }
+        const brain = deps.brainRequired ? deps.brainOrder?.(c.symbol, c.token, c.price8, false) : null;
+        if (deps.brainRequired && (brain?.side !== "buy" || brain.usdgAmount * 1e6 < Number(size))) continue;
         deps.onNote?.(
           "ok",
           `trencher: entering ${c.symbol} — $${Math.round(c.liquidityUsd).toLocaleString()} deep, ` +
             `FDV $${Math.round(c.fdvUsd).toLocaleString()}, ${Math.round(c.ageSec / 60)}m old`,
         );
         intents.push({
+          ...(brain ? { decisionId: brain.decisionId } : {}),
           kind: "swap",
           target: deps.swapRouter,
           sellToken: deps.usdgToken,

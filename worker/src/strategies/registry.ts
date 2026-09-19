@@ -16,6 +16,7 @@ import { evenKeelTick, type EvenKeelConfig } from "./even-keel";
 import { makeDipHunter, type DipHunterConfig } from "./dip-hunter";
 import { makeTrencher, TRENCHER_DEFAULTS, TRENCHER_FAST, type Candidate, type OpenPosition } from "./trencher";
 import type { Strategy } from "./types";
+import type { TrenchBrainOrder } from "../trencher-brain";
 
 /** Free, open strategies — available to everyone. */
 const FREE_STRATEGIES = ["steady-basket", "weekend-gap", "llm-strategist", "trencher"] as const;
@@ -101,6 +102,7 @@ export interface StrategyBuildOpts {
    * a fixture should get.
    */
   trench?: {
+    brainOrder?: (symbol: string, token: string, price8: bigint, held: boolean) => TrenchBrainOrder | null;
     usdgToken: `0x${string}`;
     candidates: () => readonly Candidate[] | Promise<readonly Candidate[]>;
     open: () => readonly OpenPosition[] | Promise<readonly OpenPosition[]>;
@@ -306,6 +308,8 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
     const t = opts.trench;
     return makeTrencher({
       cfg: opts.trencherFastEnabled ? TRENCHER_FAST : TRENCHER_DEFAULTS,
+      brainRequired: opts.trencherFastEnabled === true,
+      brainOrder: t?.brainOrder,
       swapRouter: opts.swapRouter,
       usdgToken: t?.usdgToken ?? (CASH.USDG as `0x${string}`),
       candidates: t?.candidates ?? (() => []),

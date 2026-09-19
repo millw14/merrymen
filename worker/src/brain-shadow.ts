@@ -35,6 +35,7 @@ import {
   type TriggerInputs,
   type TriggerState,
   type TriggerVerdict,
+  type TriggerConfig,
 } from "./brain-trigger";
 import { addDecision, addEvent, loadTriggerState, newDecisionId, saveTriggerState } from "./store";
 
@@ -176,6 +177,7 @@ export async function runShadow(
   cfg: BrainConfig | null,
   i: ShadowInputs,
   log: (m: string) => void,
+  options: { triggers?: TriggerConfig; tier?: "pulse" | "research" } = {},
 ): Promise<ShadowOutcome> {
   const idle: TriggerVerdict = { fire: false, reason: null, detail: "brain not configured", candidates: [] };
   if (!cfg || !cfg.url || !cfg.token) {
@@ -208,12 +210,12 @@ export async function runShadow(
     userRequested: i.userRequested ?? false,
   };
 
-  const trigger = shouldWake(state, triggerInput);
+  const trigger = shouldWake(state, triggerInput, options.triggers);
   if (!trigger.fire) {
     // Persist anyway when this is the first sighting, so a cold start's seeded
     // cooldowns survive the next restart rather than being re-seeded forever.
     if (!stored) await saveTriggerState(i.agentId, state);
-    return { ran: false, why: trigger.detail, trigger, nextReviewAt: nextReviewAt(state, i.now) };
+    return { ran: false, why: trigger.detail, trigger, nextReviewAt: nextReviewAt(state, i.now, options.triggers) };
   }
 
   // THE STATE IS SAVED BEFORE THE CALL, not after.
@@ -293,11 +295,11 @@ export async function runShadow(
     },
     persona: i.persona,
     memory: i.memory,
-    tier: "research",
+    tier: options.tier ?? "research",
   });
 
   await persistBrainDecision(i.agentId, i.decisionSource ?? "brain-shadow", runId, triggerId, trigger, snapshot, result, i.market, log);
-  return { ran: true, trigger, snapshot, result, nextReviewAt: nextReviewAt(firedState, i.now) };
+  return { ran: true, trigger, snapshot, result, nextReviewAt: nextReviewAt(firedState, i.now, options.triggers) };
 }
 
 /** Parse a stored blob, or say it is unusable. A partial state is not a state. */

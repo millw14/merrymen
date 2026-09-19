@@ -339,6 +339,11 @@ class BrainGraph:
         # budget is a running total and a fan-out would race it past the
         # ceiling before any of them checked.
         lenses = _lenses_for(req.market.instrument_class)
+        if req.tier == "pulse":
+            # Reserve one of the four calls for the decision. Previously four
+            # analysts consumed the entire pulse budget before it could decide.
+            # Prefer lenses with actual evidence; missing material costs no call.
+            lenses = [lens for lens in lenses if req.market.signals.get(lens)][:3]
         reports: list[NodeOutput] = []
         views: list[AnalystView] = []
         for lens in lenses:
@@ -373,7 +378,7 @@ class BrainGraph:
         # situation is one where a second opinion has anything to work with.
         # The candidate costs one call; the committee costs forty-five, so
         # asking first is cheap even when the answer is yes.
-        stages = req.stages
+        stages = "adaptive" if req.tier == "pulse" else req.stages
         candidate_action: str | None = None
         escalation = EscalationVerdict(False, [], "fixed depth, no escalation decision taken")
         if stages == "adaptive":
@@ -393,6 +398,8 @@ class BrainGraph:
                 # about the evidence rather than about their verdict.
                 disagree=disagreement(views),
             )
+            if req.tier == "pulse":
+                escalation = EscalationVerdict(False, [], "pulse keeps one bounded analyst pass; no committee escalation")
             if not escalation.escalate:
                 # Finish here. The candidate IS the decision — no second pass,
                 # no second bill.

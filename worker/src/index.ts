@@ -113,9 +113,11 @@ import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeCons
 import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
-import { runShadow, type ShadowInputs } from "./brain-shadow";
+import { runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
+import { TrenchBrainReview, highVolumePools, TRENCH_TAPE_MAX_AGE_MS } from "./trencher-brain";
+import { getPaperBrainCapital } from "./store";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
-import { scheduledInterval } from "./brain-trigger";
+import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
 import { boundedRead } from "./optional-read-deadline";
 import { recoverReceiptBasis } from "./receipt-basis-recovery";
 import { MarketReviewClock } from "./market-review";
@@ -163,7 +165,7 @@ import {
   type ResolvedConfig,
 } from "./settings";
 import { BUILTIN_STRATEGIES, buildStrategy, isCircleStrategy, legsForUniverse, watchTokensFor } from "./strategies/registry";
-import { TRENCHER_DEFAULTS, type Candidate, type OpenPosition } from "./strategies/trencher";
+import { TRENCHER_DEFAULTS, TRENCHER_FAST, shouldEnter, type Candidate, type OpenPosition } from "./strategies/trencher";
 import { createPoolPriceReader } from "./venues/pool-prices";
 import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy, Tick } from "./strategies/types";
@@ -192,7 +194,7 @@ import {
   quoteUsdOf,
   resolveBitquery,
 } from "./discovery";
-import { fetchGeckoPools, type ScreenLimits } from "./venues/geckoterminal";
+import { fetchGeckoPools, type ScreenLimits, type GeckoPool } from "./venues/geckoterminal";
 import { createMemecoinScout, nullScout } from "./strategist/memecoin-scout";
 import { readCurvePrices } from "./venues/curve-prices";
 import { createV4KeyBook, keysForToken } from "./venues/v4-keys";
@@ -645,6 +647,27 @@ async function main() {
    * only a READ zero counts.
    */
   let lastPrices: Map<string, PriceQuote> = new Map();
+  const trenchBrain = new TrenchBrainReview();
+  let trenchTape: GeckoPool[] = [];
+  let trenchTapeAt = 0;
+  let trenchTapeRequestedAt = 0;
+  let trenchTapePending = false;
+  let lastTrenchNotice = "";
+  function trenchNotice(agentId: string, message: string) {
+    if (message === lastTrenchNotice) return;
+    lastTrenchNotice = message;
+    if (message) void addEvent(agentId, "warn", `Trencher: ${message}`).catch(() => {});
+  }
+  function refreshTrenchTape() {
+    if (trenchTapePending || Date.now() - trenchTapeRequestedAt < 60_000) return;
+    trenchTapePending = true;
+    trenchTapeRequestedAt = Date.now();
+    void Promise.all([fetchGeckoPools("trending_pools"), fetchGeckoPools("pools")]).then(feeds => {
+      trenchTape = highVolumePools(feeds.flat());
+      trenchTapeAt = Date.now();
+    }).catch(() => {}).finally(() => { trenchTapePending = false; });
+  }
+  const freshTrenchTape = () => Date.now() - trenchTapeAt <= TRENCH_TAPE_MAX_AGE_MS ? trenchTape : [];
   /**
    * Which rail this agent is on, asked in ONE place.
    *
@@ -2491,6 +2514,7 @@ async function main() {
       // filtered against a setting the owner has since changed.
       assetMode: c.assetMode,
       trench: {
+        brainOrder: (symbol, token, price8, held) => trenchBrain.take(symbol, token, price8, Math.min(c.llmMaxActionUsdg, active ? Number(active.limits.perTradeUsdg) / 1e6 : 0), held),
         usdgToken: CASH.USDG as `0x${string}`,
         candidates: trenchCandidates,
         open: trenchOpen,
@@ -4068,6 +4092,7 @@ async function main() {
   /** Same once-per-arm discipline, for the asset-mode arm of the same feed. */
   let trencherStocksAnnounced = false;
   async function trenchCandidates(): Promise<Candidate[]> {
+    if (cfg.trencherFastEnabled) refreshTrenchTape();
     // THE RAIL, MADE EXPLICIT rather than removed.
     //
     // This was `if (!paperActive()) return []`, and `paperActive` is the ABSENCE
@@ -4129,6 +4154,21 @@ async function main() {
     }
     const nowSec = Math.floor(Date.now() / 1000);
     const out: Candidate[] = [];
+    if (cfg.trencherFastEnabled) {
+      const allowed = new Set(active?.limits.allowedAssets.map(a => a.toLowerCase()) ?? []);
+      // Do not require a historical discovery row: trending records used to
+      // carry firstSeen=0, so that age-window query silently excluded them all.
+      for (const p of freshTrenchTape()) {
+        const t = watchTokens.find(t => t.kind === "memecoin" && t.address.toLowerCase() === p.tokenAddress.toLowerCase());
+        if (!t || !allowed.has(t.address.toLowerCase()) || !p.createdAt || p.createdAt > nowSec || !p.fdvUsd) continue;
+        const quote = lastPrices.get(t.symbol);
+        out.push({ symbol: t.symbol, token: t.address, decimals: t.decimals ?? 18,
+          priceable: !!quote && !quote.stale && quote.price8 > 0n && quote.source === "pool",
+          price8: quote?.price8 ?? 0n, liquidityUsd: lastLiquidityUsd.get(t.address.toLowerCase()) ?? 0,
+          fdvUsd: p.fdvUsd, ageSec: nowSec - p.createdAt, volume24hUsd: p.volume24hUsd! });
+      }
+      return out;
+    }
     for (const c of await recentCandidates(TRENCHER_DEFAULTS.maxAgeSec, 25, { poolsOnly: true })) {
       // Look the price up by ADDRESS, not by the symbol alone. `lastPrices` is
       // symbol-keyed and filled only from watchTokens, while a candidate's
@@ -4138,7 +4178,7 @@ async function main() {
       // memecoin depth. The asset allowlist stops the buy, but the strategy
       // still burns its one entry per tick on it, every tick, forever.
       const sameToken = watchTokens.find(
-        (t) => t.symbol === c.symbol && t.address.toLowerCase() === c.address.toLowerCase(),
+        (t) => t.kind === "memecoin" && t.symbol === c.symbol && t.address.toLowerCase() === c.address.toLowerCase(),
       );
       const quote = sameToken ? lastPrices.get(c.symbol) : undefined;
       out.push({
@@ -4147,7 +4187,7 @@ async function main() {
         decimals: c.decimals,
         // Priceable means THIS tick could price it, not that discovery once
         // could — a pool that has since thinned must not still read as fine.
-        priceable: !!quote && quote.price8 > 0n,
+        priceable: !!quote && !quote.stale && quote.price8 > 0n,
         liquidityUsd: lastLiquidityUsd.get(c.address.toLowerCase()) ?? c.liquidityUsd,
         fdvUsd: c.fdvUsd,
         ageSec: Math.max(0, nowSec - c.firstSeen),
@@ -4581,6 +4621,7 @@ async function main() {
       };
     }
     await resetPaperLedger(id, cfg.paperStartUsdg);
+    trenchBrain.reset();
     const opened = await openNextEpoch(id, cfg.paperStartUsdg);
     await addEvent(
       id,
@@ -8551,6 +8592,12 @@ async function main() {
   async function tick() {
     const tickStartedAt = Date.now();
     let brainOrderAccepted = false;
+    const fastTrencher = cfg.strategy === "trencher" && cfg.trencherFastEnabled;
+    const trenchContext = fastTrencher && active ? `${active.agentId}:${paperActive() ? "paper" : "live"}:${active.grant.grantedAt}:${cfg.brainUrl}` : "";
+    trenchBrain.reset(trenchContext);
+    if (fastTrencher && active && (!cfg.brainUrl || !cfg.brainToken)) {
+      trenchNotice(active.agentId, "Brain is not connected, so new buys are paused. Automatic exits remain active.");
+    }
     // BEAT FIRST, BEFORE ANY NETWORK CALL. See heartbeat() for why this line
     // moved: everything below can fail on somebody else’s rate limit, and none
     // of it changes whether this process is alive.
@@ -9664,7 +9711,7 @@ async function main() {
       nextMarketReviewAt = clock.nextAt;
     };
 
-    if ((shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)) && cfg.brainUrl && cfg.brainToken && !bookIncomplete) {
+    if ((fastTrencher || shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)) && cfg.brainUrl && cfg.brainToken && !bookIncomplete) {
       try {
         const epochNow = await getAgentEpoch(agentId);
         const netContrib = await getNetContributionsUsdg(agentId);
@@ -9708,9 +9755,13 @@ async function main() {
         const feedFor = (token: string): `0x${string}` | null =>
           STOCK_TOKENS.find((t) => t.address.toLowerCase() === token.toLowerCase())?.chainlinkFeed ?? null;
 
+        const trenchEligible = fastTrencher ? await trenchCandidates() : [];
+        const trenchHeld = fastTrencher ? new Set((await trenchOpen()).map(p => p.token.toLowerCase())) : new Set<string>();
+        const trenchSymbols = new Set(trenchEligible.filter(c => !positions.some(p => p.token.toLowerCase() === c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter).slice(0, 1).map(c => c.symbol));
+        if (fastTrencher) trenchNotice(agentId, trenchSymbols.size ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Add eligible coins and sign their trading permissions; automatic exits remain active.");
         const focus = chooseFocus({
           agentId,
-          positions: positions.map((p) => ({
+          positions: positions.filter(p => !fastTrencher || trenchHeld.has(p.token.toLowerCase())).map((p) => ({
             symbol: p.symbol,
             token: p.token,
             valueUsdg: Number(p.valueUsdg),
@@ -9718,7 +9769,7 @@ async function main() {
             priceStale: p.priceStale,
             priceSource: p.priceSource,
           })),
-          universe: watchTokens.map((t) => ({ symbol: t.symbol, address: t.address })),
+          universe: watchTokens.filter(t => !fastTrencher || trenchSymbols.has(t.symbol)).map((t) => ({ symbol: t.symbol, address: t.address })),
           prices: market.prices,
           paused: market.pausedTokens,
         });
@@ -9806,12 +9857,12 @@ async function main() {
           // Awaited here rather than inside the object so the cost is visible:
           // this is the one lens that reads the chain, and it does so at most
           // once per token every fifteen minutes.
-          const curveOnchain = await onchainLensFor(focus.symbol);
+          const curveOnchain = fastTrencher ? null : await onchainLensFor(focus.symbol);
           const inputs: ShadowInputs = {
             agentId,
             // A brain-live agent CAN reach a trade, so its thinking must not be
             // filed under a source this codebase lists as unable to.
-            decisionSource: brainLiveEnabledFor(agentId) ? "brain" : "brain-shadow",
+            decisionSource: fastTrencher || brainLiveEnabledFor(agentId) ? "brain" : "brain-shadow",
             now: Math.floor(Date.now() / 1000),
             epoch: epochNow,
             // A HEADLINE MAY WAKE THE AGENT — the half of the loop that had no
@@ -9941,7 +9992,7 @@ async function main() {
               // about nothing, which is worse than no analyst: it arrives looking
               // like evidence.
               instrumentClass: instrumentClassOf(focus.token),
-              priceUsd: (Number(focus.price8) / 1e8).toFixed(4),
+              priceUsd: String(Number(focus.price8) / 1e8),
               priceStale: focus.priceStale,
               // WHAT THE WORKER CAN HONESTLY SEE, and nothing more. A lens with
               // no data is OMITTED rather than filled with a plausible sentence
@@ -10027,7 +10078,33 @@ async function main() {
           };
           reviewPreparationMs = Math.max(reviewPreparationMs, Date.now() - tickStartedAt);
           inputs.reviewPreparationMs = reviewPreparationMs;
-          const outcome = await runShadow(
+          if (fastTrencher) {
+            if (paper) {
+              const capital = await getPaperBrainCapital(agentId, epochNow);
+              inputs.netContributionsUsdg = capital;
+              inputs.grossContributionsUsdg = capital;
+              inputs.grossWithdrawalsUsdg = 0;
+              inputs.gasUsdg = 0;
+              inputs.expectedTradeGasUsdg = 0;
+              inputs.quality.contributionsKnown = capital !== null;
+              inputs.quality.currentAccountingHistoryAuditable = capital !== null;
+              inputs.quality.gasBasis = "net";
+              inputs.memory = [...(inputs.memory ?? []), "This is the paper ledger. Capital is its recorded cash-only opening, not the live wallet's deposits. Paper fills include configured slippage."];
+            }
+            const tape = freshTrenchTape().find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase());
+            inputs.persona = "Trencher: short-horizon memecoin trading. Evaluate real volume, two-sided flow, liquidity, costs and reversal risk. Maximum new entry is 5 USDG, also bounded by the owner's limits. Hold if evidence or net edge is insufficient. Existing positions may be sold. Never invent activity or prices.";
+            if (tape) {
+              inputs.market.signals.technical = JSON.stringify({ observedAt: Math.floor(trenchTapeAt / 1000), volume24hUsd: tape.volume24hUsd, volume5mUsd: tape.buckets.m5.volumeUsd, change1hPct: tape.change1hPct, change24hPct: tape.change24hPct });
+              inputs.market.signals.social = JSON.stringify({ distinctBuyers24h: tape.buyers24h, buys24h: tape.buys24h, sells24h: tape.sells24h });
+              inputs.market.signals.liquidity = JSON.stringify({ indexedReserveUsd: tape.reserveUsd, onchainDepthUsd: lastLiquidityUsd.get(focus.token.toLowerCase()) ?? null, fdvUsd: tape.fdvUsd });
+            }
+            const brainConfig = { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 25_000 };
+            trenchBrain.launch(trenchContext, inputs, focus.token, () => runShadow(brainConfig, inputs,
+              m => console.log(`[${short(agentId)}] ${m}`),
+              { tier: "pulse", triggers: { ...DEFAULT_TRIGGERS, scheduledIntervalSec: 60, cooldownSec: { ...DEFAULT_TRIGGERS.cooldownSec, "scheduled-review": 30 } } }),
+              m => console.log(`[trencher] ${m}`));
+          }
+          const outcome: ShadowOutcome = fastTrencher ? { ran: false, why: "Trencher Brain review runs off the trading tick", nextReviewAt: Math.floor(Date.now() / 1000) + 60, trigger: { fire: false, reason: null, detail: "background review", candidates: [] } } : await runShadow(
             { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 90_000 },
             inputs,
             (m) => console.log(`[${short(agentId)}] ${m}`),
@@ -10109,7 +10186,7 @@ async function main() {
               at: Math.floor(Date.now() / 1000),
             });
           }
-          if (outcome.ran && outcome.result.ok && brainLiveEnabledFor(agentId) && !isPaused()) {
+          if (!fastTrencher && outcome.ran && outcome.result.ok && brainLiveEnabledFor(agentId) && !isPaused()) {
             const d = outcome.result.decision;
             const ceiling = Math.min(cfg.llmMaxActionUsdg, Number(active.limits.perTradeUsdg) / 1e6);
             const want = orderFromDecision(d, { maxUsdg: ceiling, minUsdg: BRAIN_MIN_TRADE_USDG });
