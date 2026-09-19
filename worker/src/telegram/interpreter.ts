@@ -169,6 +169,38 @@ export const PC_CAP_OF: Record<string, string> = {
 export const PC_DANGEROUS = new Set(["shell", "getfile", "type", "hotkey", "power"]);
 export const PC_KINDS = new Set([...Object.keys(PC_CAP_OF), "pc"]);
 
+/**
+ * Resolve owner-named withdrawal doors ("cold wallet" → 0x…) in message text
+ * BEFORE interpretation (slash parse and LLM alike), so the verbatim-address
+ * rules downstream still see a real address.
+ *
+ * Pure and conservative: longest names first, whole words only
+ * (case-insensitive). The `(?<![\w/])` guard means a name can never match
+ * inside a slash command's head (`/transfer` stays `/transfer` even if a door
+ * were named "transfer" — which registration rejects anyway) nor inside an
+ * existing 0x address (hex chars are word chars, so "dead" never matches
+ * inside "0xdead…"). At worst an unknown word is left untouched.
+ */
+export function substituteWithdrawalNames(
+  text: string,
+  doors: readonly { name: string; address: string }[],
+): string {
+  if (!doors.length || !text) return text;
+  const sorted = [...doors].sort((a, b) => b.name.length - a.name.length);
+  let out = text;
+  for (const d of sorted) {
+    const name = d.name.trim();
+    if (!name) continue;
+    const re = new RegExp(`(?<![\\w/])${escapeRegExp(name)}(?![\\w])`, "gi");
+    out = out.replace(re, d.address);
+  }
+  return out;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /** Pure parser for slash commands. Returns null when the text isn't a slash command. */
 export function parseSlash(text: string): Command | null {
   const t = text.trim();
@@ -254,7 +286,7 @@ export function parseSlash(text: string): Command | null {
         .find((n) => Number.isFinite(n) && n > 0);
       return to && usdg
         ? { kind: "transfer", to: to as `0x${string}`, usdg }
-        : { kind: "unknown", text: "usage: /transfer <0x address> <usdg> — I'll ask you to /confirm before anything moves" };
+        : { kind: "unknown", text: "usage: /transfer <0x address or registered door name> <usdg> — I'll ask you to /confirm before anything moves" };
     }
     case "confirm":
     case "yes":

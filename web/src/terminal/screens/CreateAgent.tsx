@@ -9,7 +9,7 @@ import {
   type CustomToken,
   isWallTooWide,
 } from "@merrymen/core";
-import { createAgentWallet, createPrivyOwnedWallet, isPrivyOwned, loadGrant, type Grant, type GrantCaps } from "@/lib/session";
+import { createAgentWallet, createPrivyOwnedWallet, isPrivyOwned, loadGrant, normalizeWithdrawals, MAX_WITHDRAWAL_DOORS, type Grant, type GrantCaps } from "@/lib/session";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 import { verifiedAdapter } from "@/lib/verified-adapter";
 import { requestJson, SignIn, type AccountState } from "../HostedControls";
@@ -91,6 +91,17 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
   const [paper,setPaper]=useState(true);
   const [trade,setTrade]=useState("10");
   const [day,setDay]=useState("50");
+  /**
+   * WITHDRAWAL DOORS, ASKED AT THE ONLY MOMENT THEY ARE FREE — same sequencing
+   * win as the market step above. A door named here is sealed into the FIRST
+   * signature; adding one afterwards means re-signing the grant. Empty means
+   * the wall carries no transfer permission at all (the agent can't send money
+   * anywhere); the owner key can always withdraw regardless.
+   */
+  const [doors,setDoors]=useState<{name:string;address:string}[]>([]);
+  const [newDoor,setNewDoor]=useState({name:"",address:""});
+  const [doorError,setDoorError]=useState("");
+  const doorCheck=normalizeWithdrawals(doors);
   const [ack,setAck]=useState(false);
   const [backupAck,setBackupAck]=useState(false);
   const [reveal,setReveal]=useState(false);
@@ -122,6 +133,7 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
     if(busy || grant)return;
     if(!validAmount(trade)||!validAmount(day)||Number(trade)>Number(day)){setError("Enter positive amounts. The per-trade limit cannot exceed the daily limit.");return;}
     if(!paper&&!ack){setError("Confirm live trading before creating your agent.");return;}
+    if(doorCheck.error){setError(doorCheck.error);return;}
     setBusy(true);setError("");
     try {
       const current=await requestJson<AccountState["status"]>("/api/grants");
@@ -143,7 +155,7 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
        * refuse to buy them on `no-exit`, which is precisely the journey this
        * step exists to remove.
        */
-      const mintOptions={caps:{...INITIAL_CAPS,perTradeUsdg:Number(trade),dailyUsdg:Number(day)},chainId:4663,extraTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens].filter(isValidCustomToken) as CustomToken[],v4AdapterAddress:address(settings.values.v4AdapterAddress),ponsAdapterAddress:pons,ponsClassVaultFactory:address(settings.values.ponsClassVaultFactory),hostedAs:account?.session.hosted ? account.session.address as `0x${string}` : undefined,onStatus:setStatus};
+      const mintOptions={caps:{...INITIAL_CAPS,perTradeUsdg:Number(trade),dailyUsdg:Number(day)},chainId:4663,extraTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens].filter(isValidCustomToken) as CustomToken[],v4AdapterAddress:address(settings.values.v4AdapterAddress),ponsAdapterAddress:pons,ponsClassVaultFactory:address(settings.values.ponsClassVaultFactory),hostedAs:account?.session.hosted ? account.session.address as `0x${string}` : undefined,withdrawalAddresses:doorCheck.doors,onStatus:setStatus};
       // WHO OWNS THIS MERRYMAN. A Privy session owns it with the embedded
       // wallet it signed in with; everything else keeps the browser-generated
       // key. Same Kernel, same wall, same session key either way.
@@ -245,7 +257,11 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
       {basket.length===0 && <p className="create-note" role="status">Pick at least one thing to trade, or your agent will have nothing to do.</p>}
       <button className="flow-primary" disabled={basket.length===0} onClick={()=>{setError("");setStep("limits");}}>Continue</button>
     </>}
-    {step==="limits" && <><div className="create-intro"><h1>A little freedom.<br/>Clear limits.</h1><p>Start small. You can change these limits with a new signature later.</p></div><div className="create-limits"><label>Per trade, USD<input className="create-input" inputMode="decimal" value={trade} onChange={e=>setTrade(e.target.value)} maxLength={12}/></label><label>Per day, USD<input className="create-input" inputMode="decimal" value={day} onChange={e=>setDay(e.target.value)} maxLength={12}/></label></div><dl className="fund-breakdown"><div><dt>Trading permission</dt><dd>7 days</dd></div><div><dt>Drawdown limit</dt><dd>5%</dd></div><div><dt>Maximum operations</dt><dd>24 per day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl><fieldset className="create-mode"><legend>Start with</legend><label><input type="radio" name="mode" checked={paper} onChange={()=>setPaper(true)}/> Paper trading · recommended</label><label><input type="radio" name="mode" checked={!paper} onChange={()=>setPaper(false)}/> Live trading</label></fieldset><p className="create-note">{paper?"Paper trading: simulated fills at live market prices, and no real orders. This is a setting, not a different network — your agent stays on Robinhood Chain either way, and you can turn on Live trading any time in Settings, without a new signature.":"Live trading: your agent places real orders with the funds you deposit, within these limits. You can switch back to Paper any time in Settings."}</p>{!paper&&<label className="create-check"><input type="checkbox" checked={ack} onChange={e=>setAck(e.target.checked)}/>I understand this agent can trade real funds.</label>}<button className="flow-primary" disabled={busy} onClick={()=>void create()}>{busy?"Creating your agent…":"Create agent"}</button></>}
+    {step==="limits" && <><div className="create-intro"><h1>A little freedom.<br/>Clear limits.</h1><p>Start small. You can change these limits with a new signature later.</p></div><div className="create-limits"><label>Per trade, USD<input className="create-input" inputMode="decimal" value={trade} onChange={e=>setTrade(e.target.value)} maxLength={12}/></label><label>Per day, USD<input className="create-input" inputMode="decimal" value={day} onChange={e=>setDay(e.target.value)} maxLength={12}/></label></div><fieldset className="create-mode"><legend>Where may money leave to? (optional)</legend><p className="create-note">Named doors the agent may send to — sealed into the permission you sign next. Empty means it can&apos;t send anywhere. Your owner key can always withdraw regardless; chat can never add a door.</p>{doors.map((d,i)=><div className="create-limits" key={`${d.address}-${i}`}><label>Name<input className="create-input" value={d.name} maxLength={24} onChange={e=>setDoors(ds=>ds.map((x,j)=>j===i?{...x,name:e.target.value}:x))}/></label><label>Address<input className="create-input" value={d.address} placeholder="0x…" onChange={e=>setDoors(ds=>ds.map((x,j)=>j===i?{...x,address:e.target.value}:x))}/></label><button type="button" className="copy-btn" aria-label={`Remove ${d.name||"door"}`} onClick={()=>setDoors(ds=>ds.filter((_,j)=>j!==i))}>✕</button></div>)}
+      {doors.length<MAX_WITHDRAWAL_DOORS && <div className="create-limits"><label>Name<input className="create-input" value={newDoor.name} maxLength={24} placeholder="Cold wallet" onChange={e=>setNewDoor(n=>({...n,name:e.target.value}))}/></label><label>Address<input className="create-input" value={newDoor.address} placeholder="0x…" onChange={e=>setNewDoor(n=>({...n,address:e.target.value}))}/></label><button type="button" className="copy-btn" onClick={()=>{const r=normalizeWithdrawals([...doors,newDoor]);if(r.error){setDoorError(r.error);return;}setDoorError("");setDoors(r.doors.map(d=>({name:d.name,address:d.address})));setNewDoor({name:"",address:""});}}>add door</button></div>}
+      {doorError && <p className="create-note" role="alert">{doorError}</p>}
+      {doorCheck.error && <p className="create-note" role="alert">{doorCheck.error}</p>}
+      <p className="create-note" aria-live="polite">{doorCheck.doors.length===0?"No doors: the agent won't be able to send money anywhere.":`Money can leave only to: ${doorCheck.doors.map(d=>d.name).join(", ")}. Nowhere else, no matter what the chat says.`}</p></fieldset><dl className="fund-breakdown"><div><dt>Trading permission</dt><dd>7 days</dd></div><div><dt>Drawdown limit</dt><dd>5%</dd></div><div><dt>Maximum operations</dt><dd>24 per day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl><fieldset className="create-mode"><legend>Start with</legend><label><input type="radio" name="mode" checked={paper} onChange={()=>setPaper(true)}/> Paper trading · recommended</label><label><input type="radio" name="mode" checked={!paper} onChange={()=>setPaper(false)}/> Live trading</label></fieldset><p className="create-note">{paper?"Paper trading: simulated fills at live market prices, and no real orders. This is a setting, not a different network — your agent stays on Robinhood Chain either way, and you can turn on Live trading any time in Settings, without a new signature.":"Live trading: your agent places real orders with the funds you deposit, within these limits. You can switch back to Paper any time in Settings."}</p>{!paper&&<label className="create-check"><input type="checkbox" checked={ack} onChange={e=>setAck(e.target.checked)}/>I understand this agent can trade real funds.</label>}<button className="flow-primary" disabled={busy} onClick={()=>void create()}>{busy?"Creating your agent…":"Create agent"}</button></>}
     {/* TWO OWNER MODELS, TWO DIFFERENT TRUTHS TO TELL.
         A Privy-owned account has NO key here, by design — showing dots and
         asking somebody to confirm they saved them is asking them to lie, and

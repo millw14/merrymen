@@ -11132,6 +11132,11 @@ async function main() {
     // The shared reader, not a bare string match — the chat gate and the policy
     // mirror must answer this question the same way or one of them is lying.
     grantHasTransfer: () => grantCarriesTransfer(active?.grant),
+    // Owner-named withdrawal doors sealed at signing, for resolving "send 50
+    // to cold wallet" before interpretation. Sourced from the SIGNED GRANT —
+    // never settings, never chat — so substitution below cannot smuggle new
+    // destinations in (see substituteWithdrawalNames's reserved-name rule).
+    grantWithdrawals: () => active?.grant.grantWithdrawals ?? [],
     readDepth: readDepthFor,
     // Telegram wants a sentence; the order path wants a verdict. One
     // implementation, adapted here rather than duplicated.

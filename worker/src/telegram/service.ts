@@ -30,7 +30,7 @@ import { esc, getFileUrl, getMe, getUpdates, sendMessage, setMyCommands, publicB
 import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
-import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
+import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, substituteWithdrawalNames, type Command } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
 import { transcribeVoice } from "./voice";
 import { fmtReminders, fmtWatchers, parseWatchSpec, parseWhenSec } from "./watchers";
@@ -83,6 +83,14 @@ export interface TelegramServiceDeps {
   grantPerTradeUsdg: () => number | undefined;
   /** Does the armed grant carry the on-chain transfer permission? */
   grantHasTransfer: () => boolean;
+  /**
+   * Owner-named withdrawal doors sealed at signing (possibly empty). Used to
+   * resolve "send 50 to cold wallet" into the address BEFORE interpretation,
+   * so the LLM's verbatim-address rule still sees a real address. Sourced from
+   * the signed grant — never user text — so substitution can't smuggle new
+   * destinations in.
+   */
+  grantWithdrawals?: () => { name: string; address: string }[];
   /** Liquidity depth for a ticker, read from the chain. Lives in index.ts because
    * this file deliberately owns no chain client. */
   readDepth: (symbol: string) => Promise<string>;
@@ -261,6 +269,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       msg = { ...msg, text: t.text };
       await sendMessage({ token }, msg.chatId, `🎙️ <i>heard:</i> ${esc(t.text)}`);
     }
+
+    // Owner-named withdrawal doors ("cold wallet" → 0x…) resolve here, once,
+    // before BOTH slash parse and the LLM classifier — so the verbatim-address
+    // rules downstream still see a real address. Sourced from the signed grant.
+    msg = { ...msg, text: substituteWithdrawalNames(msg.text, deps.grantWithdrawals?.() ?? []) };
 
     const slash = parseSlash(msg.text);
 

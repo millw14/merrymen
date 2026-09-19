@@ -15,11 +15,11 @@ import {
  * THE MIRROR MAY NEVER BE LOOSER THAN THE CHAIN.
  *
  * packages/core/src/wall.ts emits a USDG `transfer` permission only for
- * withdrawal addresses registered at signing, and NEITHER signer registers any
- * — so no grant this repo can mint carries one. Both signers nonetheless wrote
- * the literal string "transfer" into grantFeatures, and limits.ts never set
- * `withdrawalAddresses` at all, which policy.ts reads as "pre-allowlist grant,
- * still free-form" and permits.
+ * withdrawal addresses registered at signing. The dashboard signer now seals
+ * doors into grantWithdrawals (with the GRANT_TRANSFER marker, lockstep); a
+ * grant without sealed doors carries no transfer permission, and limits.ts
+ * must mirror exactly that — [] for signed-with-no-doors, the list for sealed
+ * doors, undefined only for pre-allowlist free-form grants.
  *
  * So the worker believed it could send, built the UserOp, and the account
  * contract refused it: gas spent to be told no, with a revert reason that
@@ -29,7 +29,11 @@ import {
  * These tests assert the two halves against each other, not against prose.
  */
 
-const grantWith = (features: string[], grantedAt = 1_000_000): StoredGrant =>
+const grantWith = (
+  features: string[],
+  grantedAt = 1_000_000,
+  grantWithdrawals?: { name: string; address: string }[],
+): StoredGrant =>
   ({
     smartAccount: "0x00000000000000000000000000000000000000a1",
     owner: "0x00000000000000000000000000000000000000b1",
@@ -40,6 +44,7 @@ const grantWith = (features: string[], grantedAt = 1_000_000): StoredGrant =>
     expiresAt: Math.floor(Date.now() / 1000) + 86_400,
     chainId: 4663,
     grantFeatures: features,
+    ...(grantWithdrawals === undefined ? {} : { grantWithdrawals }),
   }) as unknown as StoredGrant;
 
 const CALM: AgentState = {
@@ -93,6 +98,28 @@ test("a pre-allowlist grant still works — absent must not be read as legacy", 
   assert.equal(limits.withdrawalAddresses, undefined, "left free-form, exactly as before");
   const verdict = checkPolicy(sendTo("0x00000000000000000000000000000000000000ee"), limits, CALM);
   assert.equal(verdict.ok, true, "a legacy grant keeps the capability its signature actually carries");
+});
+
+test("a grant with sealed doors mirrors exactly those doors — and nothing else", () => {
+  const COLD = "0x1111111111111111111111111111111111111111";
+  const limits = limitsFromGrant(
+    grantWith([GRANT_TRANSFER, "tradeable-v2"], WITHDRAWAL_ALLOWLIST_LANDED_AT + 1, [
+      { name: "cold wallet", address: COLD },
+    ]),
+  );
+  assert.deepEqual(limits.withdrawalAddresses, [COLD]);
+  assert.equal(checkPolicy(sendTo(COLD as `0x${string}`), limits, CALM).ok, true, "a sealed door opens");
+  const refused = checkPolicy(sendTo("0x00000000000000000000000000000000000000ee"), limits, CALM);
+  assert.equal(refused.ok, false, "an unlisted door stays shut");
+  assert.equal(refused.rule, "transfer-recipient-allowlist");
+});
+
+test("a post-allowlist marker WITHOUT sealed doors is evidence of nothing", () => {
+  // The 24-day window: marker present, no doors recorded. The mirror must read
+  // this as no transfer permission (like the chain does), not free-form.
+  const limits = limitsFromGrant(grantWith([GRANT_TRANSFER, "tradeable-v2"], WITHDRAWAL_ALLOWLIST_LANDED_AT + 1, []));
+  assert.deepEqual(limits.withdrawalAddresses, []);
+  assert.equal(checkPolicy(sendTo("0x00000000000000000000000000000000000000ee"), limits, CALM).ok, false);
 });
 
 test("swaps and vault moves are untouched by any of this", () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { coerceLlmCommand, narrateChat, parseSlash, type Command } from "./interpreter";
+import { coerceLlmCommand, narrateChat, parseSlash, substituteWithdrawalNames, type Command } from "./interpreter";
 import { executeCommand, type CommandDeps } from "./executor";
 import type { LlmCreds } from "../llm";
 
@@ -602,5 +602,48 @@ describe("PC control — gating, confirm-park, and injection safety", () => {
   it("/pc status works even when everything is off (no capability needed)", async () => {
     const d = deps({ pcControlEnabled: false, capabilities: new Set() });
     assert.equal(await executeCommand({ kind: "pc" }, d), "PCSTATUS");
+  });
+});
+
+describe("substituteWithdrawalNames — door labels become addresses before interpretation", () => {
+  const doors = [
+    { name: "cold wallet", address: "0x1111111111111111111111111111111111111111" },
+    { name: "exchange", address: "0x2222222222222222222222222222222222222222" },
+  ];
+
+  it("replaces a door name with its address, longest first", () => {
+    assert.equal(
+      substituteWithdrawalNames("send 50 to cold wallet", doors),
+      "send 50 to 0x1111111111111111111111111111111111111111",
+    );
+  });
+
+  it("is case-insensitive and matches whole words only", () => {
+    assert.equal(substituteWithdrawalNames("SEND 50 TO COLD WALLET", doors).includes("0x1111"), true);
+    // "wallets" (plural) is not the door "wallet" — left untouched.
+    assert.equal(substituteWithdrawalNames("my wallets are fine", [{ name: "wallet", address: "0x1" }]), "my wallets are fine");
+  });
+
+  it("never matches inside a slash command head or an existing address", () => {
+    // A door named "transfer" must not rewrite "/transfer".
+    assert.equal(
+      substituteWithdrawalNames("/transfer 0x1111111111111111111111111111111111111111 50", [{ name: "transfer", address: "0x9" }]),
+      "/transfer 0x1111111111111111111111111111111111111111 50",
+    );
+    // ...but it DOES fill the argument slot (the head is protected, args aren't).
+    assert.equal(
+      substituteWithdrawalNames("/transfer exchange 50", doors),
+      "/transfer 0x2222222222222222222222222222222222222222 50",
+    );
+    // Hex containment: "dead" never matches inside "0xdead…".
+    assert.equal(
+      substituteWithdrawalNames("send 1 to 0xdead111111111111111111111111111111111111", [{ name: "dead", address: "0x9" }]),
+      "send 1 to 0xdead111111111111111111111111111111111111",
+    );
+  });
+
+  it("no doors, no text → untouched", () => {
+    assert.equal(substituteWithdrawalNames("send 50 to cold wallet", []), "send 50 to cold wallet");
+    assert.equal(substituteWithdrawalNames("", doors), "");
   });
 });
