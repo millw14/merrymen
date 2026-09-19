@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { TrenchBrainReview, highVolumePools, trenchBrainPersona } from "./trencher-brain";
+import { TrenchBrainReview, fetchTrenchTape, highVolumePools, trenchBrainPersona } from "./trencher-brain";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
 import { makeTrencher, TRENCHER_FAST, type Candidate, type OpenPosition } from "./strategies/trencher";
@@ -23,6 +23,43 @@ const pool = (over: Partial<GeckoPool> = {}): GeckoPool => ({
   tokenAddress: TOKEN, volume24hUsd: 200_000, buyers24h: 50, buys24h: 100, sells24h: 80,
   buckets: { ...emptyGeckoBuckets(), m5: { changePct: 2, volumeUsd: 1000, buys: 10, sells: 8, buyers: 9, sellers: 8 } }, ...over,
 } as GeckoPool);
+
+test("discovery includes later pages, deduplicates pools and survives partial outages", async () => {
+  const calls: string[] = [];
+  const later = pool({ tokenAddress: ROUTER, poolAddress: ROUTER });
+  const tape = await fetchTrenchTape(async (feed, opts) => {
+    calls.push(`${feed}:${opts?.page}`);
+    if (opts?.page === 3) throw new Error("page unavailable");
+    return { failed: false, pools: opts?.page === 2 ? [later] : [pool()] };
+  });
+  assert.equal(calls.length, 6);
+  assert.equal(new Set(calls).size, 6);
+  assert.equal(tape.length, 2);
+  assert.ok(tape.some(p => p.tokenAddress === ROUTER));
+  await assert.rejects(fetchTrenchTape(async () => ({ failed: true, pools: [] })), /All Trencher/);
+});
+
+test("HOLD rotates review to other eligible tokens without overlapping model calls", async () => {
+  let now = 1000;
+  const review = new TrenchBrainReview(() => now);
+  const candidates = [{ token: TOKEN }, { token: ROUTER }];
+  review.reset("live");
+  assert.equal(review.candidate(candidates)?.token, TOKEN);
+  review.launch("live", input, TOKEN, async () => answer({ action: "hold" }), () => {});
+  await setImmediate();
+  assert.equal(review.candidate(candidates)?.token, ROUTER);
+  let calls = 0;
+  review.launch("live", input, ROUTER, async () => { calls++; return answer({ action: "hold" }); }, () => {});
+  assert.equal(calls, 0, "cooldown must not consume the next candidate");
+  now += 60_000;
+  review.launch("live", input, ROUTER, async () => { calls++; return answer({ action: "hold" }); }, () => {});
+  await setImmediate();
+  assert.equal(calls, 1);
+  assert.equal(review.candidate(candidates)?.token, TOKEN);
+  assert.equal(review.candidate([candidates[1]!])?.token, ROUTER, "ineligible tokens cannot be selected");
+  review.reset("new-grant");
+  assert.equal(review.candidate(candidates)?.token, TOKEN);
+});
 
 test("volume screening rejects missing, thin, inactive and one-sided tape; ranks and deduplicates", () => {
   assert.equal(highVolumePools([pool({ volume24hUsd: null }), pool({ volume24hUsd: 99_999 }), pool({ buyers24h: 19 }), pool({ sells24h: 0 }), pool({ buckets: emptyGeckoBuckets() })]).length, 0);

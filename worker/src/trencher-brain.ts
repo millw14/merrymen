@@ -2,10 +2,20 @@ import type { BrainDecision } from "./brain-client";
 import { orderFromDecision } from "./brain-live";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
 import type { GeckoPool } from "./venues/geckoterminal";
+import { fetchGeckoPoolsResult } from "./venues/geckoterminal";
 import { CASH, instrumentClassOf } from "../../packages/core/src/index";
 
 export const TRENCH_VOLUME_MIN = 100_000;
 export const TRENCH_TAPE_MAX_AGE_MS = 120_000;
+
+/** Six bounded requests per refresh; a failed page cannot erase healthy pages. */
+export async function fetchTrenchTape(fetchPage = fetchGeckoPoolsResult): Promise<GeckoPool[]> {
+  const results = await Promise.allSettled([1, 2, 3].flatMap(page =>
+    (["trending_pools", "pools"] as const).map(feed => fetchPage(feed, { page }))));
+  const healthy = results.flatMap(r => r.status === "fulfilled" && !r.value.failed ? [r.value] : []);
+  if (!healthy.length) throw new Error("All Trencher discovery pages failed");
+  return highVolumePools(healthy.flatMap(r => r.pools), true);
+}
 
 /** Volume ranks opportunities; on-chain depth and wallet policy still gate trades. */
 export function highVolumePools(pools: readonly GeckoPool[], perPool = false): GeckoPool[] {
@@ -42,6 +52,8 @@ export class TrenchBrainReview {
   private ready: Ready | null = null;
   private context = "";
   private generation = 0;
+  private reviewed = new Map<string, number>();
+  private reviewSequence = 0;
   constructor(private now = Date.now) {}
 
   reset(context = "") {
@@ -50,12 +62,23 @@ export class TrenchBrainReview {
     this.generation++;
     this.ready = null;
     this.nextAt = 0;
+    this.reviewed.clear();
+    this.reviewSequence = 0;
+  }
+
+  /** Oldest review first, with incoming volume order breaking ties. */
+  candidate<T extends { token: string }>(eligible: readonly T[]): T | undefined {
+    const current = new Set(eligible.map(c => c.token.toLowerCase()));
+    for (const key of this.reviewed.keys()) if (!current.has(key)) this.reviewed.delete(key);
+    return eligible.reduce<T | undefined>((best, c) => !best ||
+      (this.reviewed.get(c.token.toLowerCase()) ?? 0) < (this.reviewed.get(best.token.toLowerCase()) ?? 0) ? c : best, undefined);
   }
 
   launch(context: string, input: ShadowInputs, token: string, run: () => Promise<ShadowOutcome>, note: (s: string) => void) {
     this.reset(context);
     if (this.pending || this.now() < this.nextAt) return;
     this.pending = true;
+    this.reviewed.set(token.toLowerCase(), ++this.reviewSequence);
     const started = this.now();
     const generation = this.generation;
     this.nextAt = started + 60_000;

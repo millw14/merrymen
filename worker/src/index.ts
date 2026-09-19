@@ -117,7 +117,7 @@ import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
-import { TrenchBrainReview, highVolumePools, trenchBrainPersona, TRENCH_TAPE_MAX_AGE_MS } from "./trencher-brain";
+import { TrenchBrainReview, fetchTrenchTape, highVolumePools, trenchBrainPersona, TRENCH_TAPE_MAX_AGE_MS } from "./trencher-brain";
 import { getPaperBrainCapital } from "./store";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
 import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
@@ -681,9 +681,8 @@ async function main() {
     if (trenchTapePending || Date.now() - trenchTapeRequestedAt < 60_000) return;
     trenchTapePending = true;
     trenchTapeRequestedAt = Date.now();
-    void Promise.all([fetchGeckoPools("trending_pools"), fetchGeckoPools("pools")]).then(feeds => {
-      // Preserve venue alternatives until custody-specific route selection.
-      trenchTape = highVolumePools(feeds.flat(), true);
+    void fetchTrenchTape().then(tape => {
+      trenchTape = tape;
       trenchTapeAt = Date.now();
     }).catch(() => {}).finally(() => { trenchTapePending = false; });
   }
@@ -9861,7 +9860,8 @@ async function main() {
 
         const trenchEligible = fastTrencher ? await trenchCandidates() : [];
         const trenchHeld = fastTrencher ? new Set((await trenchOpen()).map(p => p.token.toLowerCase())) : new Set<string>();
-        const trenchSymbols = new Set(trenchEligible.filter(c => !positions.some(p => p.token.toLowerCase() === c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter).slice(0, 1).map(c => c.symbol));
+        const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => !market.pausedTokens.has(c.symbol) && !positions.some(p => p.token.toLowerCase() === c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter));
+        const trenchSymbols = new Set(trenchCandidate ? [trenchCandidate.symbol] : []);
         if (fastTrencher) trenchNotice(agentId, trenchSymbols.size ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Discovery will retry; automatic exits remain active.");
         const focus = chooseFocus({
           agentId,
