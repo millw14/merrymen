@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { TrenchBrainReview, fetchTrenchTape, highVolumePools, trenchBrainPersona } from "./trencher-brain";
+import { TrenchBrainReview, fetchTrenchTape, highVolumePools, trenchBrainPersona, trenchBrainSignals, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
 import { makeTrencher, TRENCHER_FAST, type Candidate, type OpenPosition } from "./strategies/trencher";
@@ -23,6 +23,23 @@ const pool = (over: Partial<GeckoPool> = {}): GeckoPool => ({
   tokenAddress: TOKEN, volume24hUsd: 200_000, buyers24h: 50, buys24h: 100, sells24h: 80,
   buckets: { ...emptyGeckoBuckets(), m5: { changePct: 2, volumeUsd: 1000, buys: 10, sells: 8, buyers: 9, sellers: 8 } }, ...over,
 } as GeckoPool);
+
+test("Brain receives short-window momentum and depth in dollars without fabricating missing measurements", () => {
+  const p = pool({ reserveUsd: 5_000_000, fdvUsd: 400_000_000 });
+  const s = trenchBrainSignals(p, 120_000, 250_000);
+  const technical = JSON.parse(s.technical), social = JSON.parse(s.social), liquidity = JSON.parse(s.liquidity);
+  assert.equal(technical.windows.m5.changePct, 2);
+  assert.equal(technical.windows.h1.changePct, null);
+  assert.equal(social.windows.m5.buys, 10);
+  assert.equal(social.windows.m5.sellers, 8);
+  assert.equal(liquidity.onchainRouteDepthUsd, 250_000);
+  assert.equal(liquidity.maxEntryAsPercentOfRouteDepth, .002);
+  for (const depth of [null, NaN, Infinity, -1]) {
+    const l = JSON.parse(trenchBrainSignals(p, 120_000, depth).liquidity);
+    assert.equal(l.onchainRouteDepthUsd, null);
+    assert.equal(l.maxEntryAsPercentOfRouteDepth, null);
+  }
+});
 
 test("discovery includes later pages, deduplicates pools and survives partial outages", async () => {
   const calls: string[] = [];
@@ -51,7 +68,7 @@ test("HOLD rotates review to other eligible tokens without overlapping model cal
   let calls = 0;
   review.launch("live", input, ROUTER, async () => { calls++; return answer({ action: "hold" }); }, () => {});
   assert.equal(calls, 0, "cooldown must not consume the next candidate");
-  now += 60_000;
+  now += TRENCH_REVIEW_INTERVAL_MS;
   review.launch("live", input, ROUTER, async () => { calls++; return answer({ action: "hold" }); }, () => {});
   await setImmediate();
   assert.equal(calls, 1);

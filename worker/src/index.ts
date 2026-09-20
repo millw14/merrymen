@@ -117,7 +117,7 @@ import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
-import { TrenchBrainReview, fetchTrenchTape, highVolumePools, trenchBrainPersona, TRENCH_TAPE_MAX_AGE_MS } from "./trencher-brain";
+import { TrenchBrainReview, fetchTrenchTape, highVolumePools, trenchBrainPersona, trenchBrainSignals, TRENCH_REVIEW_INTERVAL_MS, TRENCH_TAPE_MAX_AGE_MS } from "./trencher-brain";
 import { getPaperBrainCapital } from "./store";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
 import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
@@ -10200,14 +10200,12 @@ async function main() {
             const tape = freshTape.find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase() && (!verifiedPool || p.poolAddress === verifiedPool.poolAddress));
             inputs.persona = trenchBrainPersona(focus.symbol, focus.held);
             if (tape) {
-              inputs.market.signals.technical = JSON.stringify({ observedAt: Math.floor(trenchTapeAt / 1000), volume24hUsd: tape.volume24hUsd, volume5mUsd: tape.buckets.m5.volumeUsd, change1hPct: tape.change1hPct, change24hPct: tape.change24hPct });
-              inputs.market.signals.social = JSON.stringify({ distinctBuyers24h: tape.buyers24h, buys24h: tape.buys24h, sells24h: tape.sells24h });
-              inputs.market.signals.liquidity = JSON.stringify({ indexedReserveUsd: tape.reserveUsd, onchainDepthUsd: lastLiquidityUsd.get(focus.token.toLowerCase()) ?? null, fdvUsd: tape.fdvUsd });
+              Object.assign(inputs.market.signals, trenchBrainSignals(tape, trenchTapeAt, lastLiquidityUsd.get(focus.token.toLowerCase()) ?? null));
             }
             const brainConfig = { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 25_000 };
             trenchBrain.launch(trenchContext, inputs, focus.token, () => runShadow(brainConfig, inputs,
               m => console.log(`[${short(agentId)}] ${m}`),
-              { tier: "pulse", triggers: { ...DEFAULT_TRIGGERS, scheduledIntervalSec: 60, cooldownSec: { ...DEFAULT_TRIGGERS.cooldownSec, "scheduled-review": 30 } } }),
+              { tier: "pulse", triggers: { ...DEFAULT_TRIGGERS, scheduledIntervalSec: TRENCH_REVIEW_INTERVAL_MS / 1000, cooldownSec: { ...DEFAULT_TRIGGERS.cooldownSec, "scheduled-review": 30 } } }),
               m => console.log(`[trencher] ${m}`));
           }
           const outcome: ShadowOutcome = fastTrencher ? { ran: false, why: "Trencher Brain review runs off the trading tick", nextReviewAt: Math.floor(Date.now() / 1000) + 60, trigger: { fire: false, reason: null, detail: "background review", candidates: [] } } : await runShadow(

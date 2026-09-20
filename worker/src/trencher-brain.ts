@@ -7,6 +7,21 @@ import { CASH, instrumentClassOf } from "../../packages/core/src/index";
 
 export const TRENCH_VOLUME_MIN = 100_000;
 export const TRENCH_TAPE_MAX_AGE_MS = 120_000;
+export const TRENCH_REVIEW_INTERVAL_MS = 30_000;
+
+/** Measured tape, with explicit units and windows; never substitute missing data with zero. */
+export function trenchBrainSignals(p: GeckoPool, observedAtMs: number, depthUsd: number | null) {
+  const common = { source: "GeckoTerminal indexed pool tape", observedAt: Math.floor(observedAtMs / 1000), poolAddress: p.poolAddress, units: "USD amounts; percent price changes; transaction/address counts" };
+  const windows = Object.fromEntries((["m5", "h1", "h6", "h24"] as const).map(w => [w, p.buckets[w]]));
+  const depth = depthUsd !== null && Number.isFinite(depthUsd) && depthUsd >= 0 ? depthUsd : null;
+  return {
+    technical: JSON.stringify({ ...common, windows, volume24hUsd: p.volume24hUsd, change1hPct: p.change1hPct, change24hPct: p.change24hPct }),
+    social: JSON.stringify({ ...common, evidenceType: "Observed trading activity, not social-media sentiment or independent opinions", windows, distinctBuyers24h: p.buyers24h, buys24h: p.buys24h, sells24h: p.sells24h }),
+    liquidity: JSON.stringify({ ...common, indexedReserveUsd: p.reserveUsd, onchainRouteDepthUsd: depth, fdvUsd: p.fdvUsd,
+      maxEntryUsd: 5, maxEntryAsPercentOfRouteDepth: depth !== null && depth > 0 ? 500 / depth : null,
+      interpretation: "Reserve and route depth are USD, not token quantities. Entry/depth is a scale comparison, not a slippage quote. Null means unknown, not zero. FDV is valuation, not available liquidity." }),
+  };
+}
 
 /** Six bounded requests per refresh; a failed page cannot erase healthy pages. */
 export async function fetchTrenchTape(fetchPage = fetchGeckoPoolsResult): Promise<GeckoPool[]> {
@@ -81,7 +96,7 @@ export class TrenchBrainReview {
     this.reviewed.set(token.toLowerCase(), ++this.reviewSequence);
     const started = this.now();
     const generation = this.generation;
-    this.nextAt = started + 60_000;
+    this.nextAt = started + TRENCH_REVIEW_INTERVAL_MS;
     void run().then(outcome => {
       if (this.context !== context || this.generation !== generation) return;
       if (outcome.ran && outcome.result.ok) {
