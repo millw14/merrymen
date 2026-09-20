@@ -5,6 +5,7 @@ import { takeFor } from "./why";
 export type Action = "buy" | "sell" | "hold";
 
 export interface Actor {
+  trencher?: boolean;
   slug: string;
   name: string;
   handle: string;
@@ -204,6 +205,7 @@ function actorOf(t: Thesis, agents: Map<string, LiveAgent>): Actor | null {
   return {
     slug,
     name: t.name,
+    trencher: t.trencher === true,
     handle: t.handle ?? t.name,
     strategy: strategyForSlug(slug, agents.get(slug)?.glance.id),
   };

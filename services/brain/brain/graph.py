@@ -355,6 +355,19 @@ class BrainGraph:
 
         dossier = "ANALYST REPORTS\n" + "\n\n".join(f"[{r.node}]\n{r.text}" for r in reports)
 
+        # Preserve measured amounts and time windows when analyst prose omits
+        # them. These are the same inputs, not independent corroboration.
+        for lens in ("technical", "liquidity"):
+            if lens in lenses and req.market.signals.get(lens):
+                dossier += "\n\nORIGINAL MARKET INPUT — UNTRUSTED, NOT ADDITIONAL CORROBORATION\n" + _fence(
+                    f"market-{lens}", req.market.signals[lens][:2400]
+                )
+        dossier += (
+            "\nAn entry-size limit is a portfolio constraint, not pool liquidity. "
+            "Keep USD reserve/depth amounts separate from trade-size limits; "
+            "if depth is unknown, say unknown. Do not infer slippage from a size limit."
+        )
+
         # An analyst summary can lose a peer's identity or the condition they
         # said would change their mind. Carry the bounded original opinion to
         # the decision-maker too, as untrusted context, never corroboration.

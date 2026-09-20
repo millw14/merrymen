@@ -14,12 +14,18 @@ test("profile posts resolve mixed-case accounts and retain posts older than the 
       INSERT INTO agents VALUES ('0xABC','SirSendIt',NULL,'live');`);
     await db.prepare("INSERT INTO decisions VALUES ('d','0xABC','hold','USAR',NULL,'brain','Watching the price range before entering.',NULL,NULL,?)").run(Math.floor(Date.now()/1000)-172800);
     const identities = async () => [{tenant:'0x1' as const, slug:'ems76d3cncwbt3dz', accounts:['0xabc' as const], createdAt:1, updatedAt:1}];
-    const global = await readTheses({}, fn => fn(db), identities);
+    const settings = async () => ({ trencherFastEnabled: true, groqApiKey: 'must-not-be-public' });
+    const global = await readTheses({}, fn => fn(db), identities, settings);
     assert.equal(global.theses.length, 0);
-    const profile = await readTheses({agentSlug:'ems76d3cncwbt3dz'}, fn => fn(db), identities);
+    const profile = await readTheses({agentSlug:'ems76d3cncwbt3dz'}, fn => fn(db), identities, settings);
     assert.equal(profile.theses.length, 1);
     assert.equal(profile.theses[0].symbol, 'USAR');
     assert.equal(profile.theses[0].slug, 'ems76d3cncwbt3dz');
+    assert.equal(profile.theses[0].trencher, true);
+    assert.ok(!JSON.stringify(profile).includes('must-not-be-public'));
+    const unavailable = await readTheses({agentSlug:'ems76d3cncwbt3dz'}, fn => fn(db), identities, async () => { throw new Error('unavailable'); });
+    assert.equal(unavailable.theses.length, 1);
+    assert.equal(unavailable.theses[0].trencher, false);
     assert.equal((await readTheses({agentSlug:'another-agent'}, fn => fn(db), identities)).theses.length, 0);
   } finally { raw.close(); }
 });

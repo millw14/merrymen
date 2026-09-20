@@ -132,6 +132,8 @@ export interface LiveAgent {
 }
 
 export interface Thesis {
+  /** Current author mode supplied by the server. */
+  trencher?: boolean;
   name: string;
   slug: string | null;
   handle: string | null;

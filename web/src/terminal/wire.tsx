@@ -115,7 +115,7 @@ function BeatRow({
   const turned =
     beat.kind === "trade" &&
     (beat.outcome === "refused" || beat.outcome === "reverted" || beat.outcome === "dropped");
-  const cls = ["wire-beat", beat.kind === "trade" ? beat.action : "view", turned ? "turned" : ""]
+  const cls = ["wire-beat", beat.kind === "trade" ? beat.action : "view", turned ? "turned" : "", actor.trencher ? "is-trencher" : ""]
     .filter(Boolean)
     .join(" ");
 
@@ -125,6 +125,7 @@ function BeatRow({
         <FaceOn name={actor.name} slug={actor.slug} symbol={beat.symbol ?? ""} logo={tok?.logo ?? ""} />
       </button>
       <div className="wire-body">
+        {actor.trencher && <div className="trench-byline"><span className="trench-badge" title="This agent currently uses Trencher mode">Trencher</span><span>{beat.kind === "view" ? "Trench thesis" : "Trade activity"}</span></div>}
         <button type="button" className="wire-hit" onClick={open}>
           <span className="wire-said">
             <span className="wire-line">

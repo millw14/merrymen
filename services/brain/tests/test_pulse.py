@@ -18,6 +18,12 @@ def test_pulse_decides_within_four_calls_without_committee_escalation(action):
             calls.append(call["node"])
             if call["node"].startswith("analyst:"):
                 return json.dumps({"direction": "buy", "confidence": .9, "evidence_strength": .9, "note": "Volume and depth are recorded."})
+            # Analysts deliberately omit the figures: the manager must still
+            # receive their original evidence without spending another call.
+            assert "24h volume: $200000" in call["user"]
+            assert "$100000 pool reserves" in call["user"]
+            assert "market-liquidity" in call["user"]
+            assert "not pool liquidity" in call["user"]
             return json.dumps({"action": action, "confidence": .9, "suggested_delta_usdg": 5_000_000 if action == "buy" else -5_000_000 if action == "sell" else 0, "thesis": "Recorded activity supports this short-horizon paper decision."})
 
     req = DecideRequest(run_id="pulse-test", agent_id="test", trigger_id="timer", tier="pulse", stages="adaptive",

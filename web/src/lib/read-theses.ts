@@ -40,6 +40,7 @@ import { withReadDb } from "@/lib/ledger";
 import { postIdOf } from "@/lib/post-id";
 import { PUBLISHABLE_SOURCES, publishableThesis, type PublicThesis, type ThesisRow } from "@/lib/thesis";
 import { getIdentityStore } from "@merrymen/identity-store";
+import { getSettingsStore } from "@merrymen/settings-store";
 
 /** How far back a post can be and still be news. */
 export const WINDOW_SEC = 24 * 3600;
@@ -71,6 +72,8 @@ const SOURCES: readonly string[] = PUBLISHABLE_SOURCES;
 export type FeedThesis = PublicThesis & {
   /** Null when the agent has no public slug — an unslugged post is not likeable. */
   postId: string | null;
+  /** Current agent mode, not a claim about the mode when an older post was written. */
+  trencher?: boolean;
 };
 
 export interface ThesesRead {
@@ -87,7 +90,7 @@ export interface ReadThesesOptions {
   limit?: number;
 }
 
-export async function readTheses(opts: ReadThesesOptions = {}, readDb = withReadDb, identities = () => getIdentityStore().all()): Promise<ThesesRead> {
+export async function readTheses(opts: ReadThesesOptions = {}, readDb = withReadDb, identities = () => getIdentityStore().all(), settings = (tenant: `0x${string}`) => getSettingsStore().get(tenant)): Promise<ThesesRead> {
   const limit = Math.min(opts.limit ?? SHOW, 200);
 
   return readDb(async (db): Promise<ThesesRead> => {
@@ -100,9 +103,11 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     // resolve to the same slug rather than splitting into two strangers.
     const slugFor = new Map<string, string>();
     const accountsFor = new Map<string, string[]>();
+    const tenantFor = new Map<string, `0x${string}`>();
     try {
       for (const id of await identities()) {
         accountsFor.set(id.slug, id.accounts.map((a) => a.toLowerCase()));
+        tenantFor.set(id.slug, id.tenant);
         for (const acct of id.accounts) slugFor.set(acct.toLowerCase(), id.slug);
       }
     } catch {
@@ -181,13 +186,26 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     // the id is returned in, so the id cannot disclose anything the post does
     // not already say — which is what an adversarial review found was NOT true
     // when the row's `source` was an input. See post-id.ts.
+    // Resolve only authors in this response, once per tenant. Only this public
+    // mode bit leaves the server; never spread settings (which contain secrets).
+    const modeFor = new Map<string, boolean>();
+    const slugs = [...new Set(rows.map(r => slugFor.get(String(r.agent_id).toLowerCase())).filter((s): s is string => !!s))];
+    await Promise.all(slugs.map(async slug => {
+      const tenant = tenantFor.get(slug);
+      if (!tenant) return;
+      try {
+        const config = await settings(tenant);
+        modeFor.set(slug, config?.trencherFastEnabled === true || config?.strategy === "trencher");
+      } catch { /* Unknown mode must not acquire a badge or hide a post. */ }
+    }));
     const theses = rows
-      .map((r) => {
+      .map((r): FeedThesis | null => {
         const slug = slugFor.get(String(r.agent_id).toLowerCase()) ?? null;
         const post = publishableThesis({ ...r, slug });
         if (!post) return null;
         return {
           ...post,
+          trencher: slug ? modeFor.get(slug) === true : false,
           postId: postIdOf({
             slug: post.slug,
             action: post.action,

@@ -8097,3 +8097,38 @@
 :where(.terminal-host) .mm-hint.mm-bad {
   color: var(--down);
 }
+
+/* Strategy identity is amber; buy/sell colours still describe outcomes. */
+:where(.terminal-host) .wire-beat.is-trencher {
+  border: 1px solid #695629;
+  border-radius: 14px;
+  padding: 18px 16px;
+  background: linear-gradient(115deg, #242012 0%, #12130d 70%);
+  margin-block: 10px;
+}
+:where(.terminal-host) .trench-byline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  color: #d4c398;
+  font-size: 12px;
+  letter-spacing: .04em;
+}
+:where(.terminal-host) .trench-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #b7913f;
+  border-radius: 5px;
+  padding: 3px 7px;
+  color: #ffe0a0;
+  background: #342b16;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+:where(.terminal-host) .wire-beat.is-trencher.view .wire-body {
+  border-left: 2px solid #b7913f;
+  padding-left: 14px;
+  min-width: 0;
+}
