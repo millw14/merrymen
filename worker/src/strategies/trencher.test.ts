@@ -171,6 +171,14 @@ describe("fast Trencher exits", () => {
     assert.equal(shouldExit(fresh(), mark(0.0012), TRENCHER_FAST).exit, true);
     assert.equal(shouldExit(fresh(), mark(0.0012), TRENCHER_DEFAULTS).exit, false);
   });
+
+  it("allows established high-value memecoins in fast mode while rejecting invalid data", () => {
+    assert.equal(shouldEnter(candidate({ fdvUsd: 400_000_000, ageSec: 365 * 86400 }), TRENCHER_FAST, NOW).enter, true);
+    for (const fdvUsd of [NaN, Infinity, -Infinity]) {
+      assert.equal(shouldEnter(candidate({ fdvUsd }), TRENCHER_FAST, NOW).enter, false);
+    }
+    assert.equal(shouldEnter(candidate({ fdvUsd: 400_000_000, liquidityUsd: 5000 }), TRENCHER_FAST, NOW).enter, false);
+  });
   it("exits after 30 minutes even at a flat price", () => {
     assert.equal(shouldExit(fresh(), mark(0.001, NOW + 1800), TRENCHER_FAST).exit, true);
     assert.equal(shouldExit(fresh(), mark(0.001, NOW + 1800), TRENCHER_DEFAULTS).exit, false);

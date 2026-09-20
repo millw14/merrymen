@@ -108,6 +108,8 @@ export const TRENCHER_FAST: TrencherConfig = {
   maxHoldSec: 30 * 60,
   // Active older memecoins are eligible too; volume, depth and price still gate entry.
   maxAgeSec: Number.MAX_SAFE_INTEGER,
+  // Volume-led trading includes established memecoins, not only small launches.
+  maxFdvUsd: Number.POSITIVE_INFINITY,
 };
 
 /**
@@ -118,6 +120,9 @@ export const TRENCHER_FAST: TrencherConfig = {
  * "nothing qualified" from "nothing was checked".
  */
 export function shouldEnter(c: Candidate, cfg: TrencherConfig, nowSec: number): EntryVerdict {
+  if (![c.liquidityUsd, c.fdvUsd, c.ageSec].every(Number.isFinite)) {
+    return { enter: false, why: "incomplete market data" };
+  }
   if (!c.priceable) return { enter: false, why: "can't be priced — the pool guards refused it" };
   if (c.liquidityUsd < cfg.minLiquidityUsd) {
     return { enter: false, why: `only $${Math.round(c.liquidityUsd).toLocaleString()} deep` };
