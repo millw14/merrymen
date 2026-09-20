@@ -29,7 +29,7 @@
  */
 
 import { readBoundedJson } from "../bounded-read";
-import { FleetFeedCache } from "./fleet-feed-cache";
+import { FleetFeedCache, type FeedResult } from "./fleet-feed-cache";
 import path from "node:path";
 
 const GECKO_BASE = "https://api.geckoterminal.com/api/v2";
@@ -295,6 +295,16 @@ export async function fetchGeckoPoolsResult(
   }
 }
 let fleetCache: FleetFeedCache | undefined;
+
+/** Detail reads spend the same fleet quota as discovery, including cooldowns. */
+export async function cachedGeckoDetail<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T): Promise<T> {
+  const home = process.env.MERRYMEN_FLEET_HOME?.trim();
+  if (!home) return request();
+  try {
+    if (!fleetCache) fleetCache = new FleetFeedCache(path.join(home, geckoSource().id));
+    return await fleetCache.get(`${GECKO_NETWORK}:detail:${key}`, request, unavailable);
+  } catch { return unavailable("cache-unavailable"); }
+}
 
 async function requestGeckoPools(feed: PoolFeed, opts: { timeoutMs?: number; page?: number }): Promise<GeckoFetch> {
   const observedAt = Date.now();

@@ -1,3 +1,6 @@
+import { TokenActivity } from "../TokenActivity";
+import type { PoolEvidence } from "../../../../worker/src/venues/pool-evidence";
+import type { DiscoveryRow } from "@/lib/read-discoveries";
 import { ChartArea, RotateCcw, ArrowDown } from "lucide-react";
 import { DitherChart } from "../DitherChart";
 import { Boundary } from "../Boundary";
@@ -59,15 +62,17 @@ export function Token({
   const [holderError,setHolderError]=useState("");
   const [holderCoverage,setHolderCoverage]=useState<{published:number;total:number}|null>(null);
   const [symbolClash,setSymbolClash]=useState(false);
+  const [activity,setActivity]=useState<{coin: DiscoveryRow | null; evidence: PoolEvidence | null; loading: boolean}>({coin:null,evidence:null,loading:true});
   useEffect(()=>{
-    let alive=true;setSeats([]);setHolderError("");setHolderCoverage(null);setSymbolClash(false);
-    fetch(`/api/tokens/${encodeURIComponent(token.id)}`).then(r=>{if(!r.ok)throw new Error("Could not load public holdings.");return r.json();}).then((data:{ledger:import("@/lib/read-token").TokenRead;market:{symbolClash:boolean}})=>{
+    let alive=true;setActivity({coin:null,evidence:null,loading:true});setSeats([]);setHolderError("");setHolderCoverage(null);setSymbolClash(false);
+    fetch(`/api/tokens/${encodeURIComponent(token.id)}?activity=1`).then(r=>{if(!r.ok)throw new Error("Could not load public holdings.");return r.json();}).then((data:{ledger:import("@/lib/read-token").TokenRead;market:{symbolClash:boolean;coin:DiscoveryRow|null};evidence:PoolEvidence|null})=>{
       if(!alive)return;
       setSymbolClash(data.market.symbolClash);
+      setActivity({coin:data.market.coin,evidence:data.evidence,loading:false});
       if(!data.ledger.fillsRead){setHolderError("Public holdings are unavailable right now.");return;}
       setHolderCoverage({published:data.ledger.holders.length,total:data.ledger.holders.length+data.ledger.privateHolders});
       setSeats(data.ledger.holders.filter(h=>h.slug).map(h=>({paper:h.paper,basisSource:h.basisSource,slug:h.slug!,name:h.name,handle:h.handle,owner:null,strategy:"",strategyId:"custom",position:h.valueUsdg,pnlBps:h.pnlBps,avgEntry:h.entryPriceUsd ?? 0,thesis:data.market.symbolClash ? "" : theses.find(t=>t.slug===h.slug && t.symbol?.toUpperCase()===token.symbol.toUpperCase())?.reason ?? "",time:h.enteredAt ?? 0,price:h.entryPriceUsd ?? 0})));
-    }).catch(e=>{if(alive)setHolderError(e.message);});
+    }).catch(e=>{if(alive){setHolderError(e.message);setActivity({coin:null,evidence:null,loading:false});}});
     return()=>{alive=false;};
   },[token.id,token.symbol,theses]);
   const orderedSeats = useMemo(
@@ -358,6 +363,8 @@ export function Token({
             </div>
           </div>
         </div>
+
+      {token.kind === "memecoin" && <TokenActivity {...activity} />}
 
       <section className="held-sec">
         {holderError && <p role="status">{holderError}</p>}

@@ -1,3 +1,4 @@
+import { readPoolEvidence, summarizeEvidence } from "./venues/pool-evidence";
 /**
  * merrymen worker — the 24/7 loop.
  *
@@ -10217,9 +10218,21 @@ async function main() {
               Object.assign(inputs.market.signals, trenchBrainSignals(tape, trenchTapeAt, lastLiquidityUsd.get(focus.token.toLowerCase()) ?? null));
             }
             const brainConfig = { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 25_000 };
-            trenchBrain.launch(trenchContext, inputs, focus.token, () => runShadow(brainConfig, inputs,
+            trenchBrain.launch(trenchContext, inputs, focus.token, async () => {
+              // Enrichment cannot block the trading tick or mutate a review after its deadline.
+              if (tape) {
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                const evidence = await Promise.race([
+                  readPoolEvidence(tape.poolId, focus.token).catch(() => null),
+                  new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 5000); }),
+                ]).finally(() => { if (timer) clearTimeout(timer); });
+                const detail = evidence ? JSON.stringify(summarizeEvidence(evidence)) : 'Detailed candles and trade sample unavailable within the review budget; do not infer zero activity.';
+                inputs.market.signals.technical += `\n${detail}`;
+                console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: candles=${evidence ? evidence.candles.failure ?? evidence.candles.data.length : 'budget'} trades=${evidence ? evidence.trades.failure ?? evidence.trades.data.length : 'budget'}`);
+              }
+              return runShadow(brainConfig, inputs,
               m => console.log(`[${short(agentId)}] ${m}`),
-              { tier: "pulse", triggers: { ...DEFAULT_TRIGGERS, scheduledIntervalSec: TRENCH_REVIEW_INTERVAL_MS / 1000, cooldownSec: { ...DEFAULT_TRIGGERS.cooldownSec, "scheduled-review": 30 } } }),
+              { tier: "pulse", triggers: { ...DEFAULT_TRIGGERS, scheduledIntervalSec: TRENCH_REVIEW_INTERVAL_MS / 1000, cooldownSec: { ...DEFAULT_TRIGGERS.cooldownSec, "scheduled-review": 30 } } }); },
               m => console.log(`[trencher] ${m}`));
           }
           const outcome: ShadowOutcome = fastTrencher ? { ran: false, why: "Trencher Brain review runs off the trading tick", nextReviewAt: Math.floor(Date.now() / 1000) + 60, trigger: { fire: false, reason: null, detail: "background review", candidates: [] } } : await runShadow(

@@ -1,3 +1,4 @@
+import { readPoolEvidence } from "../../../../../../worker/src/venues/pool-evidence";
 import { NextResponse } from "next/server";
 import { readToken } from "@/lib/read-token";
 import { readTokenMarket } from "@/lib/read-token-market";
@@ -10,6 +11,10 @@ export async function GET(req:Request,{params}:{params:Promise<{address:string}>
   const market=await readTokenMarket(address,ledger.symbol);
   const requested=new URL(req.url).searchParams.get("window");
   const window=requested==="15m" || requested==="4h" || requested==="1d" ? requested : "1h";
-  const candles=market.coin ? await readCandles(market.coin.poolId,address,window) : null;
-  return NextResponse.json({ledger,market,candles});
+  const [candles, evidence] = await Promise.all([
+    market.coin ? readCandles(market.coin.poolId,address,window) : null,
+    market.coin && new URL(req.url).searchParams.get("activity") === "1"
+      ? readPoolEvidence(market.coin.poolId,address).catch(() => null) : null,
+  ]);
+  return NextResponse.json({ledger,market,candles,evidence});
 }
