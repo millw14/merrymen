@@ -282,6 +282,17 @@ describe("the unpriceable exit, once it can actually be reached", () => {
     assert.equal(intents.length, 1);
     assert.equal((intents[0] as { sellAmountRaw: bigint }).sellAmountRaw, 3n * 10n ** 18n);
   });
+
+  it("respects smaller Brain-approved entries without increasing them to five dollars", async () => {
+    for (const amount of [2, 5, 10, 0, NaN, Infinity]) {
+      const d = deps({ open: () => [], candidates: () => [candidate()], brainRequired: true,
+        brainOrder: () => ({ side: "buy", usdgAmount: amount, decisionId: "approved" }) });
+      const orders = await run(makeTrencher(d as never), snap());
+      if (!Number.isFinite(amount) || amount <= 0) assert.equal(orders.length, 0);
+      else assert.equal(orders[0]?.notionalUsdg, BigInt(Math.min(amount, 5) * 1e6));
+      assert.equal((await run(makeTrencher(d as never), snap({ perTradeCapUsdg: 1_000_000n }))).length, 0);
+    }
+  });
   it("exits only the vault quantity when the same asset also sits in the account", async () => {
     const custodyVault="0x00000000000000000000000000000000000000f1" as const;
     const holdings=new Map([["CATE",{symbol:"CATE",token:HELD,rawBalance:10n*10n**18n,valueUsdg:10_000_000n,decimals:18}]]);

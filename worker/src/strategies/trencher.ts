@@ -297,18 +297,23 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
       for (const c of await deps.candidates()) {
         if (heldSymbols.has(c.symbol)) continue;
         if (snap.pausedTokens.has(c.token.toLowerCase())) continue;
-        const size = deps.cfg.perEntryUsdg;
+        let size = deps.cfg.perEntryUsdg;
         // Respect the daily headroom as a sizing hint, exactly as other
         // strategies do — the wall still refuses anything over, this just stops
         // the same oversized intent being re-proposed every tick forever.
-        if (size > snap.spendHeadroomUsdg || size > snap.perTradeCapUsdg) continue;
+        if (!deps.brainRequired && (size > snap.spendHeadroomUsdg || size > snap.perTradeCapUsdg)) continue;
         const verdict = shouldEnter(c, deps.cfg, nowSec);
         if (!verdict.enter) {
           deps.onNote?.("ok", `trencher: passing on ${c.symbol} — ${verdict.why}`);
           continue;
         }
         const brain = deps.brainRequired ? deps.brainOrder?.(c.symbol, c.token, c.price8, false) : null;
-        if (deps.brainRequired && (brain?.side !== "buy" || brain.usdgAmount * 1e6 < Number(size))) continue;
+        if (deps.brainRequired) {
+          if (brain?.side !== "buy" || !Number.isFinite(brain.usdgAmount) || brain.usdgAmount <= 0) continue;
+          const approved = BigInt(Math.floor(brain.usdgAmount * 1e6));
+          if (approved < size) size = approved;
+          if (size <= 0n || size > snap.spendHeadroomUsdg || size > snap.perTradeCapUsdg) continue;
+        }
         deps.onNote?.(
           "ok",
           `trencher: entering ${c.symbol} — $${Math.round(c.liquidityUsd).toLocaleString()} deep, ` +
