@@ -29,6 +29,7 @@
  */
 
 import { readBoundedJson } from "../bounded-read";
+import { FleetFeedCache } from "./fleet-feed-cache";
 
 const GECKO_BASE = "https://api.geckoterminal.com/api/v2";
 
@@ -259,6 +260,8 @@ export interface GeckoFetch {
   failed: boolean;
   /** Safe diagnostic codes only; never provider bodies or credential-bearing URLs. */
   failure?: string;
+  observedAt?: number;
+  retryAfterMs?: number;
 }
 
 /**
@@ -269,6 +272,21 @@ export async function fetchGeckoPoolsResult(
   feed: PoolFeed,
   opts: { timeoutMs?: number; page?: number } = {},
 ): Promise<GeckoFetch> {
+  const home = process.env.MERRYMEN_FLEET_HOME?.trim();
+  if (!home) return requestGeckoPools(feed, opts);
+  try {
+    if (!fleetCache) fleetCache = new FleetFeedCache(home);
+    return await fleetCache.get(`${GECKO_NETWORK}:${feed}:${opts.page ?? 1}`,
+      () => requestGeckoPools(feed, opts), failure => ({ pools: [], failed: true, failure }));
+  } catch {
+    // A broken coordination store must not fan out into an unbounded fleet retry.
+    return { pools: [], failed: true, failure: "cache-unavailable" };
+  }
+}
+let fleetCache: FleetFeedCache | undefined;
+
+async function requestGeckoPools(feed: PoolFeed, opts: { timeoutMs?: number; page?: number }): Promise<GeckoFetch> {
+  const observedAt = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 10_000);
   try {
@@ -276,7 +294,12 @@ export async function fetchGeckoPoolsResult(
       headers: { accept: "application/json" },
       signal: controller.signal,
     });
-    if (!res.ok) return { pools: [], failed: true, failure: `http-${res.status}` };
+    if (!res.ok) {
+      const retry = res.headers.get("retry-after");
+      const parsed = retry === null ? 0 : /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+      await res.body?.cancel().catch(() => {});
+      return { pools: [], failed: true, failure: `http-${res.status}`, retryAfterMs: Number.isFinite(parsed) ? Math.max(0, parsed) : 0 };
+    }
     // Bounded: an unbounded read hands a third party this worker's memory
     // ceiling. A refusal reads as `failed`, which is already the "we could not
     // learn anything" branch — never as an empty market.
@@ -289,6 +312,7 @@ export async function fetchGeckoPoolsResult(
     return {
       pools: body.data.map(parseGeckoPool).filter((p): p is GeckoPool => p !== null),
       failed: false,
+      observedAt,
     };
   } catch {
     return { pools: [], failed: true, failure: controller.signal.aborted ? "timeout" : "network" };

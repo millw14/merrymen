@@ -37,9 +37,9 @@ export class TrenchTapeReader {
         try {
           const r = await this.fetchPage(feed, { page });
           if (r.failed) {
-            const code = /^(http-\d{3}|timeout|network|invalid-body|invalid-shape)$/.test(r.failure ?? "") ? r.failure : "unavailable";
+            const code = /^(http-\d{3}|timeout|network|invalid-body|invalid-shape|cache-unavailable)$/.test(r.failure ?? "") ? r.failure : "unavailable";
             failures.push(`${key}=${code}`);
-          } else this.pages.set(key, { pools: r.pools, at: this.now() });
+          } else this.pages.set(key, { pools: r.pools, at: r.observedAt ?? this.now() });
         } catch { failures.push(`${key}=unavailable`); }
       })));
     return { ...this.snapshot(), failures };

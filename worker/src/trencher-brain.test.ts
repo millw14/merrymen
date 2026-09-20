@@ -54,6 +54,14 @@ test("healthy empty and newer ineligible observations remove old opportunities",
   assert.equal((await reader.refresh()).pools.length, 0);
 });
 
+test("shared feed cache hits cannot renew the tape's observation time", async () => {
+  let now = 60_000;
+  const reader = new TrenchTapeReader(async () => ({ failed: false, pools: [pool()], observedAt: 1000 }), () => now);
+  assert.equal((await reader.refresh()).observedAt, 1000);
+  now = 121001;
+  assert.equal((await reader.refresh()).pools.length, 0);
+});
+
 test("Brain receives short-window momentum and depth in dollars without fabricating missing measurements", () => {
   const p = pool({ reserveUsd: 5_000_000, fdvUsd: 400_000_000 });
   const s = trenchBrainSignals(p, 120_000, 250_000);
