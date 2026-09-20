@@ -117,7 +117,7 @@ import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
-import { TrenchBrainReview, fetchTrenchTape, highVolumePools, trenchBrainPersona, trenchBrainSignals, TRENCH_REVIEW_INTERVAL_MS, TRENCH_TAPE_MAX_AGE_MS } from "./trencher-brain";
+import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { getPaperBrainCapital } from "./store";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
 import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
@@ -667,7 +667,7 @@ async function main() {
       if (autoTrenchContext===context) autoTrench=result;
     }).catch(()=>trenchNotice(current.agentId,"Autonomous discovery could not verify its pool or custody data. Retrying; no new token authorized.")).finally(()=>{autoTrenchPending=false;});
   }
-  let trenchTape: GeckoPool[] = [];
+  const trenchTapeReader = new TrenchTapeReader();
   let trenchTapeAt = 0;
   let trenchTapeRequestedAt = 0;
   let trenchTapePending = false;
@@ -684,15 +684,23 @@ async function main() {
     if (trenchTapePending || Date.now() - trenchTapeRequestedAt < 60_000) return;
     trenchTapePending = true;
     trenchTapeRequestedAt = Date.now();
-    void fetchTrenchTape().then(tape => {
-      trenchTape = tape;
-      trenchTapeAt = Date.now();
+    void trenchTapeReader.refresh().then(result => {
+      trenchTapeAt = result.observedAt;
+      if (result.failures.length) console.warn(`[trencher] Market tape pages failed: ${result.failures.join(", ")}; ${result.pools.length} fresh pools retained.`);
+      // Discovery otherwise runs against the preceding tape and then waits a
+      // full minute even though a new tape has just arrived.
+      autoTrenchNext = 0;
+      refreshAutoTrench();
     }).catch(() => {
       // No provider URL or response body: those may contain credentials.
       console.warn("[trencher] Market tape refresh failed; retaining the last tape within its freshness limit.");
     }).finally(() => { trenchTapePending = false; });
   }
-  const freshTrenchTape = () => Date.now() - trenchTapeAt <= TRENCH_TAPE_MAX_AGE_MS ? trenchTape : [];
+  const freshTrenchTape = () => {
+    const snapshot = trenchTapeReader.snapshot();
+    trenchTapeAt = snapshot.observedAt;
+    return snapshot.pools;
+  };
   /**
    * Which rail this agent is on, asked in ONE place.
    *

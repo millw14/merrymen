@@ -9,6 +9,43 @@ export const TRENCH_VOLUME_MIN = 100_000;
 export const TRENCH_TAPE_MAX_AGE_MS = 120_000;
 export const TRENCH_REVIEW_INTERVAL_MS = 30_000;
 
+/** Keep each page on its own clock: partial outages must not erase fresh pages
+ * or renew the age of old observations. Healthy empty pages replace old data. */
+export class TrenchTapeReader {
+  private pages = new Map<string, { pools: GeckoPool[]; at: number }>();
+  constructor(private fetchPage = fetchGeckoPoolsResult, private now = Date.now) {}
+
+  snapshot() {
+    const pages = [...this.pages.values()].filter(p => this.now() - p.at <= TRENCH_TAPE_MAX_AGE_MS);
+    // Prefer the newest observation of a pool across overlapping feeds.
+    const unique = new Map<string, GeckoPool>();
+    for (const page of pages.sort((a, b) => b.at - a.at)) {
+      for (const p of page.pools) {
+        const key = `${p.tokenAddress}:${p.dex}:${p.poolAddress ?? p.poolId}`.toLowerCase();
+        if (!unique.has(key)) unique.set(key, p);
+      }
+    }
+    return { pools: highVolumePools([...unique.values()], true),
+      observedAt: pages.length ? Math.min(...pages.map(p => p.at)) : 0 };
+  }
+
+  async refresh() {
+    const failures: string[] = [];
+    await Promise.all([1, 2, 3].flatMap(page =>
+      (["trending_pools", "pools"] as const).map(async feed => {
+        const key = `${feed}:${page}`;
+        try {
+          const r = await this.fetchPage(feed, { page });
+          if (r.failed) {
+            const code = /^(http-\d{3}|timeout|network|invalid-body|invalid-shape)$/.test(r.failure ?? "") ? r.failure : "unavailable";
+            failures.push(`${key}=${code}`);
+          } else this.pages.set(key, { pools: r.pools, at: this.now() });
+        } catch { failures.push(`${key}=unavailable`); }
+      })));
+    return { ...this.snapshot(), failures };
+  }
+}
+
 /** Measured tape, with explicit units and windows; never substitute missing data with zero. */
 export function trenchBrainSignals(p: GeckoPool, observedAtMs: number, depthUsd: number | null) {
   const common = { source: "GeckoTerminal indexed pool tape", observedAt: Math.floor(observedAtMs / 1000), poolAddress: p.poolAddress, units: "USD amounts; percent price changes; transaction/address counts" };

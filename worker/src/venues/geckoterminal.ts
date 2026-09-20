@@ -257,6 +257,8 @@ export interface GeckoFetch {
    * activity map read as a quiet launchpad.
    */
   failed: boolean;
+  /** Safe diagnostic codes only; never provider bodies or credential-bearing URLs. */
+  failure?: string;
 }
 
 /**
@@ -274,22 +276,22 @@ export async function fetchGeckoPoolsResult(
       headers: { accept: "application/json" },
       signal: controller.signal,
     });
-    if (!res.ok) return { pools: [], failed: true };
+    if (!res.ok) return { pools: [], failed: true, failure: `http-${res.status}` };
     // Bounded: an unbounded read hands a third party this worker's memory
     // ceiling. A refusal reads as `failed`, which is already the "we could not
     // learn anything" branch — never as an empty market.
     const read = await readBoundedJson<{ data?: unknown[] }>(res);
-    if (!read.ok) return { pools: [], failed: true };
+    if (!read.ok) return { pools: [], failed: true, failure: "invalid-body" };
     const body = read.value;
     // A body with no `data` array is a shape we do not understand, not an empty
     // market. An empty `data` array IS an empty market, and reads as one.
-    if (!Array.isArray(body?.data)) return { pools: [], failed: true };
+    if (!Array.isArray(body?.data)) return { pools: [], failed: true, failure: "invalid-shape" };
     return {
       pools: body.data.map(parseGeckoPool).filter((p): p is GeckoPool => p !== null),
       failed: false,
     };
   } catch {
-    return { pools: [], failed: true };
+    return { pools: [], failed: true, failure: controller.signal.aborted ? "timeout" : "network" };
   } finally {
     clearTimeout(timer);
   }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { TrenchBrainReview, fetchTrenchTape, highVolumePools, trenchBrainPersona, trenchBrainSignals, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { TrenchBrainReview, TrenchTapeReader, fetchTrenchTape, highVolumePools, trenchBrainPersona, trenchBrainSignals, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
 import { makeTrencher, TRENCHER_FAST, type Candidate, type OpenPosition } from "./strategies/trencher";
@@ -23,6 +23,36 @@ const pool = (over: Partial<GeckoPool> = {}): GeckoPool => ({
   tokenAddress: TOKEN, volume24hUsd: 200_000, buyers24h: 50, buys24h: 100, sells24h: 80,
   buckets: { ...emptyGeckoBuckets(), m5: { changePct: 2, volumeUsd: 1000, buys: 10, sells: 8, buyers: 9, sellers: 8 } }, ...over,
 } as GeckoPool);
+
+test("partial tape refresh retains fresh failed pages without renewing them, then expires them", async () => {
+  let now = 1000, round = 0;
+  const reader = new TrenchTapeReader(async (feed, opts) => {
+    if (feed !== "pools" || opts?.page !== 1) return { failed: false, pools: [] };
+    return round === 0 ? { failed: false, pools: [pool()] } : { failed: true, pools: [], failure: "http-429" };
+  }, () => now);
+  assert.equal((await reader.refresh()).pools.length, 1);
+  round++; now += 60_000;
+  const partial = await reader.refresh();
+  assert.equal(partial.pools.length, 1);
+  assert.equal(partial.observedAt, 1000);
+  assert.deepEqual(partial.failures, ["pools:1=http-429"]);
+  now = 121001;
+  assert.equal(reader.snapshot().pools.length, 0, "expiry applies between refreshes too");
+});
+
+test("healthy empty and newer ineligible observations remove old opportunities", async () => {
+  let now = 1000, round = 0;
+  const reader = new TrenchTapeReader(async (feed) => {
+    if (round === 0) return { failed: false, pools: [pool()] };
+    if (feed === "pools") return { failed: true, pools: [] };
+    return { failed: false, pools: round === 1 ? [pool({ volume24hUsd: 0 })] : [] };
+  }, () => now);
+  await reader.refresh();
+  round = 1; now += 1000;
+  assert.equal((await reader.refresh()).pools.length, 0, "newer failing screen wins over older high volume");
+  round = 2; now = 122001;
+  assert.equal((await reader.refresh()).pools.length, 0);
+});
 
 test("Brain receives short-window momentum and depth in dollars without fabricating missing measurements", () => {
   const p = pool({ reserveUsd: 5_000_000, fdvUsd: 400_000_000 });
