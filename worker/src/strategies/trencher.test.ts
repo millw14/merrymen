@@ -289,7 +289,11 @@ describe("the unpriceable exit, once it can actually be reached", () => {
         brainOrder: () => ({ side: "buy", usdgAmount: amount, decisionId: "approved" }) });
       const orders = await run(makeTrencher(d as never), snap());
       if (!Number.isFinite(amount) || amount <= 0) assert.equal(orders.length, 0);
-      else assert.equal(orders[0]?.notionalUsdg, BigInt(Math.min(amount, 5) * 1e6));
+      else {
+        const order = orders[0];
+        assert.ok(order?.kind === "swap");
+        assert.equal(order.notionalUsdg, BigInt(Math.min(amount, 5) * 1e6));
+      }
       assert.equal((await run(makeTrencher(d as never), snap({ perTradeCapUsdg: 1_000_000n }))).length, 0);
     }
   });
