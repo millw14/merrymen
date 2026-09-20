@@ -5,8 +5,24 @@ import {
   screenPools,
   fetchGeckoPools,
   fetchGeckoPoolsResult,
+  geckoSource,
   type GeckoPool,
 } from "./geckoterminal";
+
+describe("authenticated CoinGecko market source", () => {
+  it("uses the public feed with no configured credential", () => {
+    const source = geckoSource({ MERRYMEN_COINGECKO_PRO_API_KEY: "  " });
+    assert.equal(source.base, "https://api.geckoterminal.com/api/v2");
+    assert.deepEqual(source.headers, { accept: "application/json" });
+  });
+  it("uses the Pro onchain endpoint and a header rather than a key in the URL", () => {
+    const source = geckoSource({ MERRYMEN_COINGECKO_PRO_API_KEY: " test-private-key " });
+    assert.equal(source.id, "coingecko-pro");
+    assert.equal(source.base, "https://pro-api.coingecko.com/api/v3/onchain");
+    assert.equal(source.headers["x-cg-pro-api-key"], "test-private-key");
+    assert.ok(!source.base.includes("test-private-key"));
+  });
+});
 
 /**
  * Reading the market the agent could not see.
@@ -280,6 +296,32 @@ describe("fetchGeckoPoolsResult separates a refusal from an empty market", () =>
         assert.deepEqual(r.pools, []);
       },
     );
+  });
+
+  it("sends Pro credentials only in headers and does not fall back when they are refused", async () => {
+    const oldKey = process.env.MERRYMEN_COINGECKO_PRO_API_KEY;
+    const oldHome = process.env.MERRYMEN_FLEET_HOME;
+    process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "test-private-key";
+    delete process.env.MERRYMEN_FLEET_HOME;
+    let calls = 0;
+    try {
+      await withFetch((async (url, init) => {
+        calls++;
+        assert.equal(String(url), "https://pro-api.coingecko.com/api/v3/onchain/networks/robinhood/pools?page=2");
+        assert.equal(new Headers(init?.headers).get("x-cg-pro-api-key"), "test-private-key");
+        assert.equal(init?.redirect, "error");
+        return new Response("refused", { status: 401 });
+      }) as typeof globalThis.fetch, async () => {
+        const result = await fetchGeckoPoolsResult("pools", { page: 2 });
+        assert.equal(result.failure, "http-401");
+        assert.equal(result.failed, true);
+        assert.ok(!JSON.stringify(result).includes("test-private-key"));
+      });
+      assert.equal(calls, 1);
+    } finally {
+      if (oldKey === undefined) delete process.env.MERRYMEN_COINGECKO_PRO_API_KEY; else process.env.MERRYMEN_COINGECKO_PRO_API_KEY = oldKey;
+      if (oldHome === undefined) delete process.env.MERRYMEN_FLEET_HOME; else process.env.MERRYMEN_FLEET_HOME = oldHome;
+    }
   });
 
   it("a genuinely empty list is NOT failed", async () => {

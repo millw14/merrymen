@@ -30,8 +30,17 @@
 
 import { readBoundedJson } from "../bounded-read";
 import { FleetFeedCache } from "./fleet-feed-cache";
+import path from "node:path";
 
 const GECKO_BASE = "https://api.geckoterminal.com/api/v2";
+
+/** Credentials go only to CoinGecko's fixed server-side origin, in headers. */
+export function geckoSource(env: NodeJS.ProcessEnv = process.env) {
+  const key = env.MERRYMEN_COINGECKO_PRO_API_KEY?.trim();
+  return key
+    ? { id: "coingecko-pro", base: "https://pro-api.coingecko.com/api/v3/onchain", headers: { accept: "application/json", "x-cg-pro-api-key": key } as Record<string, string> }
+    : { id: "geckoterminal-public", base: GECKO_BASE, headers: { accept: "application/json" } as Record<string, string> };
+}
 
 /** The network slug for Robinhood Chain (4663) in GeckoTerminal's namespace. */
 export const GECKO_NETWORK = "robinhood";
@@ -275,7 +284,9 @@ export async function fetchGeckoPoolsResult(
   const home = process.env.MERRYMEN_FLEET_HOME?.trim();
   if (!home) return requestGeckoPools(feed, opts);
   try {
-    if (!fleetCache) fleetCache = new FleetFeedCache(home);
+    // Separate quota/cooldown state: the public provider's cooldown must not
+    // suppress a newly configured authenticated subscription.
+    if (!fleetCache) fleetCache = new FleetFeedCache(path.join(home, geckoSource().id));
     return await fleetCache.get(`${GECKO_NETWORK}:${feed}:${opts.page ?? 1}`,
       () => requestGeckoPools(feed, opts), failure => ({ pools: [], failed: true, failure }));
   } catch {
@@ -287,11 +298,13 @@ let fleetCache: FleetFeedCache | undefined;
 
 async function requestGeckoPools(feed: PoolFeed, opts: { timeoutMs?: number; page?: number }): Promise<GeckoFetch> {
   const observedAt = Date.now();
+  const source = geckoSource();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 10_000);
   try {
-    const res = await fetch(`${GECKO_BASE}/networks/${GECKO_NETWORK}/${feed}?page=${opts.page ?? 1}`, {
-      headers: { accept: "application/json" },
+    const res = await fetch(`${source.base}/networks/${GECKO_NETWORK}/${feed}?page=${opts.page ?? 1}`, {
+      headers: source.headers,
+      redirect: "error",
       signal: controller.signal,
     });
     if (!res.ok) {
