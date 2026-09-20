@@ -14,7 +14,7 @@ test("profile posts resolve mixed-case accounts and retain posts older than the 
       INSERT INTO agents VALUES ('0xABC','SirSendIt',NULL,'live');`);
     await db.prepare("INSERT INTO decisions VALUES ('d','0xABC','hold','USAR',NULL,'brain','Watching the price range before entering.',NULL,NULL,?)").run(Math.floor(Date.now()/1000)-172800);
     const identities = async () => [{tenant:'0x1' as const, slug:'ems76d3cncwbt3dz', accounts:['0xabc' as const], createdAt:1, updatedAt:1}];
-    const settings = async () => ({ trencherFastEnabled: true, groqApiKey: 'must-not-be-public' });
+    const settings = async () => ({ strategy: 'trencher' as const, trencherFastEnabled: true, groqApiKey: 'must-not-be-public' });
     const global = await readTheses({}, fn => fn(db), identities, settings);
     assert.equal(global.theses.length, 0);
     const profile = await readTheses({agentSlug:'ems76d3cncwbt3dz'}, fn => fn(db), identities, settings);
@@ -23,6 +23,8 @@ test("profile posts resolve mixed-case accounts and retain posts older than the 
     assert.equal(profile.theses[0].slug, 'ems76d3cncwbt3dz');
     assert.equal(profile.theses[0].trencher, true);
     assert.ok(!JSON.stringify(profile).includes('must-not-be-public'));
+    const switched = await readTheses({agentSlug:'ems76d3cncwbt3dz'}, fn => fn(db), identities, async () => ({ strategy: 'steady-basket', trencherFastEnabled: true }));
+    assert.equal(switched.theses[0].trencher, false, 'an inactive saved toggle does not identify the current strategy');
     const unavailable = await readTheses({agentSlug:'ems76d3cncwbt3dz'}, fn => fn(db), identities, async () => { throw new Error('unavailable'); });
     assert.equal(unavailable.theses.length, 1);
     assert.equal(unavailable.theses[0].trencher, false);

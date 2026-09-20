@@ -195,7 +195,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
       if (!tenant) return;
       try {
         const config = await settings(tenant);
-        modeFor.set(slug, config?.trencherFastEnabled === true || config?.strategy === "trencher");
+        modeFor.set(slug, config?.strategy === "trencher");
       } catch { /* Unknown mode must not acquire a badge or hide a post. */ }
     }));
     const theses = rows
