@@ -675,7 +675,10 @@ async function main() {
   function trenchNotice(agentId: string, message: string) {
     if (message === lastTrenchNotice) return;
     lastTrenchNotice = message;
-    if (message) void addEvent(agentId, "warn", `Trencher: ${message}`).catch(() => {});
+    if (message) {
+      console.warn(`[trencher] ${message}`);
+      void addEvent(agentId, "warn", `Trencher: ${message}`).catch(() => {});
+    }
   }
   function refreshTrenchTape() {
     if (trenchTapePending || Date.now() - trenchTapeRequestedAt < 60_000) return;
@@ -684,7 +687,10 @@ async function main() {
     void fetchTrenchTape().then(tape => {
       trenchTape = tape;
       trenchTapeAt = Date.now();
-    }).catch(() => {}).finally(() => { trenchTapePending = false; });
+    }).catch(() => {
+      // No provider URL or response body: those may contain credentials.
+      console.warn("[trencher] Market tape refresh failed; retaining the last tape within its freshness limit.");
+    }).finally(() => { trenchTapePending = false; });
   }
   const freshTrenchTape = () => Date.now() - trenchTapeAt <= TRENCH_TAPE_MAX_AGE_MS ? trenchTape : [];
   /**

@@ -54,7 +54,10 @@ export function highVolumePools(pools: readonly GeckoPool[], perPool = false): G
 export type TrenchBrainOrder = { side: "buy" | "sell"; usdgAmount: number; decisionId: string };
 
 export function trenchBrainPersona(symbol: string, held: boolean): string {
-  return "Trencher: short-horizon memecoin trading. Evaluate real volume, two-sided flow, liquidity, costs and reversal risk. Maximum new entry is 5 USDG, also bounded by the owner's limits. Hold if evidence or net edge is insufficient. Never invent activity or prices. " +
+  return "Trencher: short-horizon memecoin trading. Evaluate real volume, two-sided flow, liquidity, costs and reversal risk. Maximum new entry is 5 USDG, also bounded by the owner's limits. " +
+    "The entry cap is a sizing ceiling, not evidence of poor liquidity or absent edge. Assess expected percentage return and dollar costs separately: a small entry can still have positive or negative net edge. Do not reject solely because the cap is small; do not invent an expected return to justify entry. " +
+    "Judge the current short-window setup using the measured 5-minute and 1-hour price and flow data, with 6-hour and 24-hour data as context. A negative daily return alone is neither a veto nor a buy signal. An external news catalyst or technical crossover is not mandatory, especially when no such data was supplied. Explain which observed evidence supports the decision and what remains unknown. " +
+    "Hold if evidence or net edge is insufficient. Never invent activity or prices. " +
     (held ? `You hold ${symbol}; evaluate holding or selling the existing position.`
       : `You hold zero ${symbol}. This is an entry review: choose BUY or HOLD. A bearish view means HOLD, not SELL; short selling is not supported.`);
 }
