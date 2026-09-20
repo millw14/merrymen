@@ -205,6 +205,7 @@ export async function runShadow(
     now: i.now,
     reviewPreparationMs: i.reviewPreparationMs,
     priceUsd: i.market.priceUsd === null ? null : Number(i.market.priceUsd),
+    instrumentId: i.market.instrumentId,
     equityUsdg: snapshot.equityUsdg,
     newsKey: i.newsKey ?? null,
     userRequested: i.userRequested ?? false,
@@ -311,6 +312,7 @@ function readTriggerState(raw: Record<string, unknown> | null): TriggerState | n
   return {
     lastFiredAt: fired as TriggerState["lastFiredAt"],
     lastPriceUsd: num(raw.lastPriceUsd),
+    ...(typeof raw.lastInstrumentId === "string" ? { lastInstrumentId: raw.lastInstrumentId } : {}),
     lastEquityUsdg: num(raw.lastEquityUsdg),
     lastNewsKey: typeof raw.lastNewsKey === "string" ? raw.lastNewsKey : null,
   };

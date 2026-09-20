@@ -44,6 +44,14 @@ const settled = (over: Partial<TriggerState> = {}): TriggerState => ({
 });
 
 describe("Brain sleeps when nothing happened", () => {
+  it("does not mistake a different instrument or a legacy baseline for a price move", () => {
+    const next = input({ instrumentId: "GOOD", priceUsd: 37, newsKey: "n1" });
+    assert.equal(shouldWake(settled({ lastInstrumentId: "IF" }), next).fire, false);
+    assert.equal(shouldWake(settled(), next).fire, false);
+    const saved = afterFiring(settled(), "scheduled-review", next);
+    assert.equal(saved.lastInstrumentId, "GOOD");
+    assert.equal(shouldWake(saved, { ...next, now: T0 + 120, priceUsd: 41 }).reason, "price-move");
+  });
   it("does not fire on a quiet tick", () => {
     const v = shouldWake(settled(), input({ newsKey: "n1" }));
     assert.equal(v.fire, false);

@@ -23,6 +23,7 @@ export interface TriggerState {
   lastFiredAt: Partial<Record<TriggerReason, number>>;
   /** What the world looked like when Brain last ran. */
   lastPriceUsd: number | null;
+  lastInstrumentId?: string;
   lastEquityUsdg: number | null;
   lastNewsKey: string | null;
 }
@@ -32,6 +33,7 @@ export interface TriggerInputs {
   /** Observed time needed to prepare a tick; permits a bounded early review. */
   reviewPreparationMs?: number;
   priceUsd: number | null;
+  instrumentId?: string;
   equityUsdg: number;
   /** A stable identity for the latest material news item, or null. */
   newsKey: string | null;
@@ -126,7 +128,8 @@ export function shouldWake(
 
   if (input.newsKey && input.newsKey !== state.lastNewsKey) candidates.push("news-event");
 
-  const priceMove = pctMove(input.priceUsd, state.lastPriceUsd);
+  const priceMove = input.instrumentId === state.lastInstrumentId
+    ? pctMove(input.priceUsd, state.lastPriceUsd) : 0;
   if (priceMove >= cfg.priceMovePct) candidates.push("price-move");
 
   const lastAny = Math.max(0, ...Object.values(state.lastFiredAt).filter((v): v is number => v !== undefined));
@@ -184,6 +187,7 @@ export function afterFiring(
     // scheduled review leaves an old price in place and the next tick reads the
     // same drift as a fresh move — one real movement billing twice.
     lastPriceUsd: input.priceUsd,
+    ...(input.instrumentId ? { lastInstrumentId: input.instrumentId } : {}),
     lastEquityUsdg: input.equityUsdg,
     lastNewsKey: input.newsKey,
   };
