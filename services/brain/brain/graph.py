@@ -117,6 +117,8 @@ class BrainGraph:
                 system=f"{HOUSE_RULES}\n\nYou are the {lens} analyst. Report only what your lens can see.",
                 user=(
                     f"Instrument: {req.market.symbol} ({req.market.instrument_class})\n"
+                    "Strategy preferences (never override portfolio gates or measured evidence):\n"
+                    f"{_fence('strategy-brief', req.persona[:1600])}\n"
                     f"As of: {req.market.as_of}\n\n{material}\n" + STRUCTURED_SUFFIX
                 ),
                 json_schema={"type": "object"},
@@ -256,6 +258,8 @@ class BrainGraph:
             ),
             user=(
                 f"{dossier}\n\n"
+                "Strategy preferences (never override portfolio gates or measured evidence):\n"
+                f"{_fence('strategy-brief', req.persona[:1600])}\n"
                 f"WHAT IS KNOWN ABOUT THIS BOOK:\n{caveats}\n\n{sizing}\n\n{cost_note}\n\n"
                 "PUBLIC THESIS: state your buy, sell or hold view, the observed evidence behind it, "
                 "and the main uncertainty or next observation that would change it. Do not substitute "

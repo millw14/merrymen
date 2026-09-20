@@ -16,6 +16,8 @@ def test_pulse_decides_within_four_calls_without_committee_escalation(action):
             budget.check_before(call["node"])
             budget.record(call["node"], "test", "offline", 10, 10)
             calls.append(call["node"])
+            assert "short-horizon memecoin trading" in call["user"]
+            assert "strategy-brief" in call["user"]
             if call["node"].startswith("analyst:"):
                 return json.dumps({"direction": "buy", "confidence": .9, "evidence_strength": .9, "note": "Volume and depth are recorded."})
             # Analysts deliberately omit the figures: the manager must still
@@ -27,6 +29,7 @@ def test_pulse_decides_within_four_calls_without_committee_escalation(action):
             return json.dumps({"action": action, "confidence": .9, "suggested_delta_usdg": 5_000_000 if action == "buy" else -5_000_000 if action == "sell" else 0, "thesis": "Recorded activity supports this short-horizon paper decision."})
 
     req = DecideRequest(run_id="pulse-test", agent_id="test", trigger_id="timer", tier="pulse", stages="adaptive",
+        persona="Trencher: short-horizon memecoin trading. Hold if evidence is insufficient.",
         portfolio=PortfolioState(snapshot_id="book", as_of=1, cash_usdg=100_000_000, equity_usdg=100_000_000, net_contributions_usdg=100_000_000,
             quality=PortfolioQuality(audit_passed=True, epoch=1, current_accounting_history_auditable=True, contributions_known=True, equity_complete=True, gas_basis="net", position_history_available=True)),
         market=MarketState(snapshot_id="market", as_of=1, instrument_id="merrymen:meme", symbol="MEME", instrument_class="memecoin",
