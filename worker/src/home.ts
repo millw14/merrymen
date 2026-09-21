@@ -34,6 +34,12 @@ export const homePaths = {
   telegram: () => path.join(merrymenHome(), "telegram.json"),
   /** Virtuals Terminal streamer cursor: last-streamed trade id + last report date. */
   virtuals: () => path.join(merrymenHome(), "virtuals.json"),
+  /** Convert-latch seed — written by the orchestrator at spawn from the shared
+   * database, consumed once by the worker at arm (adopted into its ledger row,
+   * then deleted). Lets a redeployed child resume the durable marker instead
+   * of starting empty. Absent self-hosted, where the ledger row itself is the
+   * truth. */
+  convertSeed: () => path.join(merrymenHome(), "convert-seed.json"),
   /** Pause marker — present = trading halted (toggled from Telegram/dashboard). */
   paused: () => path.join(merrymenHome(), "paused"),
   /** Scratch dir for transient PC-control artifacts (screenshots, voice notes). */

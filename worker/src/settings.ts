@@ -67,6 +67,13 @@ export interface ResolvedConfig {
   ponsClassVaultFactory: `0x${string}` | undefined;
   /** Which kinds of thing may be BOUGHT. Never filters the watch set. */
   assetMode: "all" | "stocks" | "crypto";
+  autoConvertEnabled: boolean;
+  autoConvertReservePct: number;
+  /** Manual one-shot swap handoff from the /swap page (wei string + id).
+   * Consumed and cleared by the worker tick once execution lands; validated
+   * again at consume time. Tenant-writable by design. */
+  manualSwapWei: string | undefined;
+  manualSwapId: string | undefined;
   paperTradingEnabled: boolean;
   /** The owner's explicit consent to put real orders on chain. Default false. */
   liveTradingEnabled: boolean;
@@ -340,6 +347,13 @@ export function mergeSettings(
     ponsAdapterAddress,
     ponsClassVaultFactory,
     assetMode: oneOf(file.assetMode, env.MERRYMEN_ASSET_MODE, ["all", "stocks", "crypto"] as const, d.assetMode),
+    autoConvertEnabled: bool(file.autoConvertEnabled, env.MERRYMEN_AUTO_CONVERT, d.autoConvertEnabled),
+    autoConvertReservePct: num(file.autoConvertReservePct, env.MERRYMEN_AUTO_CONVERT_RESERVE_PCT, d.autoConvertReservePct, 1, 50),
+    // Handoff fields: file only, no env (an env var that spends gas on every
+    // boot is a footgun), no default (absent = no request). Shape-checked at
+    // consume time, not here.
+    manualSwapWei: str(file.manualSwapWei, undefined),
+    manualSwapId: str(file.manualSwapId, undefined),
     paperTradingEnabled: bool(file.paperTradingEnabled, env.MERRYMEN_PAPER_TRADING, d.paperTradingEnabled),
     // NO ENVIRONMENT OVERRIDE, and the omission is the point.
     //

@@ -354,7 +354,36 @@ export interface WallOptions extends TrencherPermission {
    * covers.
    */
   ponsAdapterAddress?: Address;
+  /**
+   * Native value the SwapRouter02 exactInputSingle rule may carry, in wei.
+   * Default NATIVE_SWAP_VALUE_LIMIT_WEI (0.5 ETH) so every newly signed wall
+   * can run the ETH→USDG convert; an explicit 0n restores the old no-native
+   * wall exactly.
+   *
+   * WHY THE CEILING LIVES ON THE GENERAL RULE, not a second WETH-pinned one.
+   * Kernel's CallPolicy refuses a repeated (callType, target, selector) with
+   * AA23 — two exactInputSingle rules on the router, however carefully
+   * disjoint their args, produce a wall that can never be installed (the
+   * f96ddd9 trencher episode proved it on a duplicated approve). So there is
+   * exactly one exactInputSingle rule and the ceiling covers every swap it
+   * admits. The exposure this adds over a 0n rule is bounded and narrow: the
+   * worker sends value only on native converts, and anything else carrying up
+   * to the ceiling burns gas for a call the router did not ask for. A
+   * compromised key cannot move value OUT through this rule — the recipient
+   * is pinned self and there is no transfer permission — only swap badly
+   * within the ceiling.
+   */
+  nativeSwapValueLimitWei?: bigint;
 }
+
+/**
+ * The ceiling on native value the native-input exactInputSingle rule may
+ * carry — the bound that makes the ETH→USDG convert expressible at all.
+ * 0.5 ETH is far above any conversion a sane reserve split produces and far
+ * below "the account's whole balance" for anything but a dust account, where
+ * the worker's own reserve arithmetic never proposes the op anyway.
+ */
+export const NATIVE_SWAP_VALUE_LIMIT_WEI = 500_000_000_000_000_000n; // 0.5 ETH
 
 /**
  * Owner-added tokens that are safe to seal into a policy.
@@ -519,6 +548,12 @@ export function buildCallPermissions(
     ...extras.map((t) => t.address as Address),
   ];
   const self = { condition: ParamCondition.EQUAL, value: smartAccount } as const;
+  // The native-input ceiling, defaulting to the sealed constant. An explicit
+  // 0n omits the native rule below — the "0n restores the old wall" escape
+  // hatch, and it must stay STRUCTURAL (rule absent) rather than a 0n limit
+  // on a present rule, so old and new walls differ visibly in the permission
+  // list a test can read.
+  const nativeSwapValueLimit = opts.nativeSwapValueLimitWei ?? NATIVE_SWAP_VALUE_LIMIT_WEI;
   // Deduped and lowercased so a list with the same address twice doesn't bloat
   // the on-chain policy, and a case difference can't read as a second address.
   const withdrawals = [
@@ -642,8 +677,16 @@ export function buildCallPermissions(
       // Cost: one bytes32 per allowed address per rule, so two legs over the
       // default 15-address list is ~960 bytes of extra enable-data, paid once
       // on the first UserOp of each session key.
+      //
+      // VALUE CEILING, ONE RULE. valueLimit caps the native ETH a swap may
+      // carry — the bound that makes the ETH→USDG convert expressible. It
+      // lives here, on the single exactInputSingle rule, because Kernel
+      // refuses a repeated (callType, target, selector): a second WETH-pinned
+      // rule would make the whole wall uninstallable (AA23). The worker sends
+      // value only on native converts; see nativeSwapValueLimitWei above for
+      // the exposure analysis. Explicit 0n restores the old no-value wall.
       target: UNISWAP.swapRouter02 as Address,
-      valueLimit: 0n,
+      valueLimit: nativeSwapValueLimit,
       abi: UNISWAP_SWAP_ROUTER_ABI,
       functionName: "exactInputSingle",
       args: [
@@ -1014,6 +1057,13 @@ export function buildWallPolicies(args: {
         ponsClassVaultFactoryAddress: args.ponsClassVaultFactoryAddress,
         trencherVaultAddress: args.trencherVaultAddress,
         trencherFactoryAddress: args.trencherFactoryAddress,
+        // Forwarded, never defaulted here: buildCallPermissions owns the
+        // default, and a second default here would let the two disagree
+        // silently — the exact "silent drop" shape this forwarding exists to
+        // prevent. An explicit 0n omits the native rule (old wall, exactly).
+        ...(args.nativeSwapValueLimitWei !== undefined
+          ? { nativeSwapValueLimitWei: args.nativeSwapValueLimitWei }
+          : {}),
       }) as never,
     }),
   ];

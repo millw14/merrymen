@@ -92,6 +92,7 @@ import {
   GRANT_PONS_CLASS,
   resolveClassVault,
   probeClassFactory,
+  GRANT_NATIVE_SWAP,
   bindingMessage,
   TRADEABLE_V2,
   USDG_DECIMALS,
@@ -693,6 +694,12 @@ async function prepareGrantCore(
     grantFeatures: [
       ...(trencherFactory ? [GRANT_TRENCHER] : []),
       TRADEABLE_V2,
+      // Minted unconditionally: the wall's NATIVE-INPUT router rule (tokenIn
+      // EQUAL WETH, sealed value ceiling) ships by default, so every key this
+      // signer issues CAN run the ETH->USDG convert. Marker and permission move
+      // together — the lockstep rule GRANT_V4 established. An explicit 0n
+      // value limit omits the rule; such keys simply lack this marker.
+      GRANT_NATIVE_SWAP,
       ...(allowUniswapV4 ? [GRANT_V4] : []),
       ...(v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
       ...(sealedPonsAdapter ? [GRANT_PONS_ADAPTER] : []),
