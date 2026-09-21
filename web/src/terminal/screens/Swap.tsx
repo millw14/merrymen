@@ -7,10 +7,10 @@
  * amount persistence, no URL state.
  */
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { formatEther } from "viem";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
-import "./swap.css";
+import { createQuoteGuard } from "./quote-guard";
 import "./swap.css";
 
 interface SwapQuote {
@@ -81,15 +81,23 @@ export function Swap() {
 
   const wei = ethToWei(amount);
 
+  // Generation guard against stale quotes: the debounce cancels only the
+  // timer, not an in-flight fetch, so request A (older amount) can resolve
+  // after request B (newer amount) and pair the current input with A's
+  // preview. Only the latest generation writes state (see quote-guard.ts).
+  const quoteGuard = useRef(createQuoteGuard());
   const refreshQuote = useCallback(async (weiStr: string) => {
+    const gen = quoteGuard.current.next();
     setQuoteLoading(true);
     try {
       const r = await fetch(`/api/swap/quote?wei=${weiStr}`);
+      if (!quoteGuard.current.isCurrent(gen)) return; // superseded — a newer amount won
       setQuote((await r.json()) as SwapQuote);
     } catch {
+      if (!quoteGuard.current.isCurrent(gen)) return;
       setQuote(null);
     } finally {
-      setQuoteLoading(false);
+      if (quoteGuard.current.isCurrent(gen)) setQuoteLoading(false);
     }
   }, []);
 
@@ -113,9 +121,12 @@ export function Swap() {
     setReviewing(false);
   };
 
-  // Debounced preview as the amount is typed.
+  // Debounced preview as the amount is typed. The previous quote is cleared
+  // the moment the input changes (never show A's preview under B's amount),
+  // which also retires any in-flight fetch via the guard.
   useEffect(() => {
     if (wei === null || wei <= 0n) {
+      quoteGuard.current.invalidate(); // a cleared field kills its own fetch
       setQuote(null);
       return;
     }
