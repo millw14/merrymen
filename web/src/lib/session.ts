@@ -90,6 +90,7 @@ import {
   GRANT_V4_ADAPTER,
   GRANT_PONS_ADAPTER,
   GRANT_PONS_CLASS,
+  GRANT_TRANSFER,
   resolveClassVault,
   probeClassFactory,
   bindingMessage,
@@ -226,6 +227,80 @@ export type OwnerSigner =
       did: string;
     };
 
+/** One named withdrawal door: a human label plus the address it opens. */
+export interface WithdrawalDoor {
+  name: string;
+  address: `0x${string}`;
+}
+
+/** Cap on doors per grant — a long allowlist is a smell, and each entry grows
+ * the on-chain wall (see the signable ceiling check below). */
+export const MAX_WITHDRAWAL_DOORS = 5;
+
+/**
+ * Names a door may not take: anything the chat could read as a command or a
+ * confirmation. The service substitutes door names into message text before
+ * interpretation, so a door named "cancel" would eat real /cancel intents.
+ */
+const RESERVED_DOOR_NAMES = new Set([
+  "cancel", "confirm", "yes", "no", "help", "start", "status", "transfer",
+  "send", "withdraw", "agent", "pc", "link", "stop", "remember", "forget",
+]);
+
+const ADDRESS_RE_STRICT = /^0x[0-9a-fA-F]{40}$/;
+
+/**
+ * Validate + normalize owner-supplied withdrawal doors for sealing into the
+ * wall. Pure — shared by the grant form (live validation) and the signing
+ * path (fail loudly before any signature). Returns the sealed form (trimmed
+ * names, lowercased addresses) or the first human-readable error.
+ */
+export function normalizeWithdrawals(
+  input: readonly { name: string; address: string }[] | undefined,
+): { doors: WithdrawalDoor[]; error?: string } {
+  const list = (input ?? []).filter((d) => d.name.trim() !== "" || d.address.trim() !== "");
+  if (list.length > MAX_WITHDRAWAL_DOORS) {
+    return { doors: [], error: `at most ${MAX_WITHDRAWAL_DOORS} withdrawal doors per grant` };
+  }
+  const seenNames = new Set<string>();
+  const seenAddrs = new Set<string>();
+  const doors: WithdrawalDoor[] = [];
+  for (const raw of list) {
+    const name = raw.name.trim();
+    const address = raw.address.trim();
+    if (!name) return { doors: [], error: "every withdrawal door needs a name" };
+    if (name.length < 2 || name.length > 24) return { doors: [], error: `door name "${name}" must be 2–24 characters` };
+    if (!/^[a-z0-9][a-z0-9 _-]*$/i.test(name)) return { doors: [], error: `door name "${name}" may only use letters, numbers, spaces, dashes and underscores` };
+    if (/^0x/i.test(name)) return { doors: [], error: `door name "${name}" must not look like an address` };
+    // A bare number collides with AMOUNTS, not commands: substitution is
+    // whole-word, so a door named "50" rewrites the "50" in "send 50 to cold
+    // wallet" into an address. Names must contain at least one letter.
+    if (!/[a-z]/i.test(name)) return { doors: [], error: `door name "${name}" must contain a letter — a bare number would rewrite transfer amounts` };
+    if (RESERVED_DOOR_NAMES.has(name.toLowerCase())) return { doors: [], error: `door name "${name}" is reserved — pick another label` };
+    if (!ADDRESS_RE_STRICT.test(address)) return { doors: [], error: `"${address}" is not a valid 0x address` };
+    const addr = address.toLowerCase() as `0x${string}`;
+    if (seenNames.has(name.toLowerCase())) return { doors: [], error: `duplicate door name "${name}"` };
+    if (seenAddrs.has(addr)) return { doors: [], error: `duplicate door address ${addr}` };
+    seenNames.add(name.toLowerCase());
+    seenAddrs.add(addr);
+    doors.push({ name, address: addr });
+  }
+  return { doors };
+}
+
+/**
+ * Signing-path wrapper: a signature must never seal a door the owner didn't
+ * mean, so invalid input throws instead of returning. The grant form validates
+ * live with normalizeWithdrawals; this is the backstop at the point of no return.
+ */
+export function normalizeWithdrawalsOrThrow(
+  input: readonly { name: string; address: string }[] | undefined,
+): WithdrawalDoor[] {
+  const { doors, error } = normalizeWithdrawals(input);
+  if (error) throw new Error(`invalid withdrawal doors: ${error}`);
+  return doors;
+}
+
 async function prepareGrantCore(
   ownerSigner: OwnerSigner | { account: LocalAccount; binding: "external-owner" },
   caps: GrantCaps,
@@ -292,6 +367,15 @@ async function prepareGrantCore(
    */
   ponsClassVaultFactory?: `0x${string}`,
   trencherFactory?: `0x${string}`,
+  /**
+   * Owner-named withdrawal doors to seal into the wall. Validated + normalized
+   * below (normalizeWithdrawals throws on the first problem — a signature must
+   * never seal a door the owner didn't mean).
+   *
+   * APPENDED AT THE END on purpose. The comment on MintOptions records what
+   * inserting an optional address in the middle of this list cost last time.
+   */
+  withdrawals?: readonly { name: string; address: string }[],
 ): Promise<Grant> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
@@ -554,6 +638,11 @@ async function prepareGrantCore(
     // without one — two of three class permissions is a key that can reach a
     // vault it can never create.
     ponsClassVaultFactoryAddress: sealedClassFactory,
+    // Owner-named withdrawal doors, validated below. The wall grows with every
+    // door (each is an allowlist entry), and the signable ceiling check runs
+    // over these same objects — so an over-long list refuses BEFORE any
+    // signature, never as a UserOp reverting at the wall afterwards.
+    withdrawalAddresses: normalizeWithdrawalsOrThrow(withdrawals).map((d) => d.address),
   };
 
   // ── CAN THIS WALL EVER BE INSTALLED? ASKED BEFORE A SIGNATURE EXISTS ──────
@@ -696,6 +785,11 @@ async function prepareGrantCore(
       ...(allowUniswapV4 ? [GRANT_V4] : []),
       ...(v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
       ...(sealedPonsAdapter ? [GRANT_PONS_ADAPTER] : []),
+      // GRANT_TRANSFER is minted ONLY when doors were sealed — marker and
+      // permission move together (the lockstep rule above). The sealed doors
+      // ride with it in grantWithdrawals because the marker alone is a claim,
+      // not evidence (see the 24-day window in grant.ts).
+      ...(normalizeWithdrawalsOrThrow(withdrawals).length > 0 ? [GRANT_TRANSFER] : []),
       // GRANT_PONS_CLASS is minted from `ponsClassVaultAddress`, NOT from
       // `ponsClassVaultFactory`. The factory is what the owner asked for; the
       // vault address is what the wall actually pinned, and only the second one
@@ -718,6 +812,11 @@ async function prepareGrantCore(
     // the policy actually covers cannot disagree — the worker compares this
     // against the owner's configured tokens and warns when they've drifted.
     grantTokens: usableExtraTokens(sealedTokens).map((t) => t.address.toLowerCase()),
+    // The withdrawal doors sealed above, names included so chat can resolve
+    // "send 50 to cold wallet" without pasted hex. ALWAYS recorded (possibly
+    // []) — absent must keep meaning "predates the field", while [] means the
+    // owner signed with no doors and the wall carries no transfer permission.
+    grantWithdrawals: normalizeWithdrawalsOrThrow(withdrawals),
     demoSessionPrivateKey: sessionPrivateKey,
     // THE CUSTODY LINE. Self-hosted keeps the owner key on the grant object: it
     // is a localhost round-trip to a 0600 file on the user's own machine, which
@@ -751,10 +850,11 @@ async function mintGrant(
   expectAccount?: Address,
   ponsClassVaultFactory?: `0x${string}`,
   trencherFactory?: `0x${string}`,
+  withdrawals?: readonly { name: string; address: string }[],
 ): Promise<MintedGrant> {
   const grant = await prepareGrantCore(
     ownerSigner, caps, onStatus, chainId, extraTokens, v4AdapterAddress,
-    ponsAdapterAddress, hostedAs, expectAccount, ponsClassVaultFactory, trencherFactory,
+    ponsAdapterAddress, hostedAs, expectAccount, ponsClassVaultFactory, trencherFactory, withdrawals,
   );
 
   // HOSTED: prove this account belongs to the signed-in wallet before offering
@@ -1130,6 +1230,14 @@ export interface MintOptions {
    */
   ponsClassVaultFactory?: `0x${string}`;
   trencherFactory?: `0x${string}`;
+  /**
+   * Owner-named withdrawal doors to seal into the wall (max 5, names
+   * required). Validated by normalizeWithdrawals; empty/absent means the wall
+   * carries no transfer permission at all.
+   *
+   * APPENDED AT THE END on purpose — see the note above.
+   */
+  withdrawalAddresses?: readonly { name: string; address: string }[];
 }
 
 /**
@@ -1156,6 +1264,7 @@ export async function prepareAgentGrant(owner: LocalAccount, o: PrepareAgentOpti
     o.expectAccount,
     o.ponsClassVaultFactory,
     o.trencherFactory,
+    o.withdrawalAddresses,
   );
 }
 
@@ -1174,6 +1283,7 @@ export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
     o.expectAccount,
     o.ponsClassVaultFactory,
     o.trencherFactory,
+    o.withdrawalAddresses,
   );
 }
 
@@ -1212,6 +1322,7 @@ export async function createPrivyOwnedWallet(
     o.expectAccount,
     o.ponsClassVaultFactory,
     o.trencherFactory,
+    o.withdrawalAddresses,
   );
 }
 
@@ -1247,6 +1358,7 @@ export async function restoreAgentWallet(
     o.expectAccount,
     o.ponsClassVaultFactory,
     o.trencherFactory,
+    o.withdrawalAddresses,
   );
 }
 

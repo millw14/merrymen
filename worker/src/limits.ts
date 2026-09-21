@@ -118,18 +118,21 @@ export function limitsFromGrant(
       return a ? { ponsClassVault: a } : {};
     })(),
     // THE TRANSFER PERMISSION, MIRRORED. checkPolicy has always known how to
-    // judge this — it was simply never told. A grant without the transfer
-    // marker has NO USDG transfer permission in its call policy:
-    // buildCallPermissions emits one only for withdrawal addresses registered
-    // at signing, and neither signer registers any.
-    //
-    // EMPTY, not undefined. undefined means "a pre-allowlist grant, still
-    // free-form" and is deliberately permissive; conflating the two is exactly
-    // what let the worker build a transfer the chain refuses. This is the
-    // load-bearing half of the fix, because it covers EVERY producer of a
-    // transfer intent rather than just the Telegram command — and it turns an
-    // opaque on-chain revert into the sentence checkPolicy already writes.
-    ...(grantHasTransfer(grant) ? {} : { withdrawalAddresses: [] as string[] }),
+    // judge this — it was simply never told. Three states, and they are not
+    // interchangeable:
+    // - doors sealed at signing → that exact list (chain and mirror agree);
+    // - signed with no doors → [] (no transfer permission anywhere);
+    // - predates the field → key absent (free-form, grandfathered).
+    // Collapsing the last two is what let the worker build a transfer the
+    // chain refuses; collapsing the first into the third would let it build
+    // one the chain refuses for unlisted recipients. This covers EVERY
+    // producer of a transfer intent, and turns opaque on-chain reverts into
+    // the sentence checkPolicy already writes.
+    ...((): { withdrawalAddresses?: string[] } => {
+      const doors = grant?.grantWithdrawals?.map((w) => w.address);
+      if (doors !== undefined) return { withdrawalAddresses: doors };
+      return grantHasTransfer(grant) ? {} : { withdrawalAddresses: [] };
+    })(),
     // So the breaker can tell a de-risking sell (swap INTO cash) from a buy.
     cashToken: CASH.USDG as string,
     maxDrawdownBps: grant.caps.maxDrawdownPct * 100,

@@ -201,14 +201,12 @@ export const GRANT_TRANSFER = "transfer";
 /**
  * Does this signature carry an on-chain USDG transfer permission?
  *
- * READ, NEVER WRITTEN — and that asymmetry is the whole point.
- * buildCallPermissions emits a transfer permission ONLY for withdrawal
- * addresses registered at signing time, and neither signer registers any. So
- * no grant minted today carries this marker, and none should: a grant that
- * claims it while the wall omits the permission is a mirror LOOSER than the
- * chain, which is the one direction that is never safe. The worker believes
- * it can send, builds the UserOp, and the account contract refuses it — gas
- * spent to be told no, with a revert reason that explains nothing.
+ * Marker PLUS evidence, never the marker alone. buildCallPermissions emits a
+ * transfer permission ONLY for withdrawal addresses registered at signing
+ * time, and the signer records those doors in grantWithdrawals alongside the
+ * GRANT_TRANSFER marker (lockstep, like every other venue marker). A grant
+ * that claims it while the wall omits the permission is a mirror LOOSER than
+ * the chain, which is the one direction that is never safe.
  *
  * It is still honoured for grants signed BEFORE the withdrawal allowlist
  * landed, whose transfer permission had a free-form recipient. Absent means
@@ -233,13 +231,16 @@ export const GRANT_TRANSFER = "transfer";
 export const WITHDRAWAL_ALLOWLIST_LANDED_AT = 1_785_630_924;
 
 export function grantHasTransfer(
-  grant: Pick<StoredGrant, "grantFeatures" | "grantedAt"> | null | undefined,
+  grant: Pick<StoredGrant, "grantFeatures" | "grantedAt" | "grantWithdrawals"> | null | undefined,
 ): boolean {
   if (!grant?.grantFeatures?.includes(GRANT_TRANSFER)) return false;
   // Signed before the allowlist existed: the permission really is there, with a
   // free-form recipient. Tightening these would make the mirror STRICTER than
   // the chain and break a working wallet.
-  return (grant.grantedAt ?? 0) < WITHDRAWAL_ALLOWLIST_LANDED_AT;
+  if ((grant.grantedAt ?? 0) < WITHDRAWAL_ALLOWLIST_LANDED_AT) return true;
+  // Signed after: the marker alone is not evidence (see the 24-day window
+  // above) — only sealed doors prove the wall carries the permission.
+  return (grant.grantWithdrawals?.length ?? 0) > 0;
 }
 
 export interface GrantCaps {
@@ -397,6 +398,21 @@ export interface StoredGrant {
    * thought they'd enabled it.
    */
   grantTokens?: string[];
+  /**
+   * Owner-named withdrawal destinations (addresses lowercase) this grant's
+   * on-chain call policy covers for USDG `transfer`, beyond no permission at
+   * all. Names are required and owner-chosen at signing — chat resolves "send
+   * 50 to cold wallet" through them, and nothing else can add to this list
+   * without a fresh signature.
+   *
+   * ABSENT means the grant predates the field (old free-form transfer
+   * permission, grandfathered) — NOT the same as an empty array, which means
+   * the owner signed with no doors and the wall carries no transfer permission
+   * at all. Recorded for the same reason as grantTokens: so the worker can
+   * tell "you named a door at signing" apart from "this key may send there",
+   * instead of discovering the difference as a UserOp revert at the wall.
+   */
+  grantWithdrawals?: { name: string; address: string }[];
   /**
    * The V4SelfSwap adapter this signature's `swapExactIn` permission was
    * sealed against, lowercased. Per-deploy and per-chain, so it lives on the

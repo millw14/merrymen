@@ -20,9 +20,10 @@ const PRIVATE_KEY = `0x${"11".repeat(32)}` as `0x${string}`;
  *  the marker and the field agree, because grantPonsClassVault demands both. */
 const CLASS_VAULT = "0x00000000000000000000000000000000000000c0" as const;
 
-function grant(grantFeatures: string[], grantedAt?: number, ponsClassVaultAddress?: string): StoredGrant {
+function grant(grantFeatures: string[], grantedAt?: number, ponsClassVaultAddress?: string, grantWithdrawals?: { name: string; address: string }[]): StoredGrant {
   return {
     ...(ponsClassVaultAddress ? { ponsClassVaultAddress } : {}),
+    ...(grantWithdrawals === undefined ? {} : { grantWithdrawals }),
     smartAccount: "0x0000000000000000000000000000000000000001",
     owner: "0x0000000000000000000000000000000000000002",
     sessionKeyAddress: "0x0000000000000000000000000000000000000003",
@@ -145,8 +146,29 @@ describe("runWallBattery", () => {
     }
   });
 
-  it("uses the requested watchlist as allowedAssets without widening sell permissions", () => {
-    const aapl = STOCK_TOKENS.find((token) => token.symbol === "AAPL")!;
+  it("a grant with sealed doors holds the prompt-injected stranger at the allowlist", () => {
+    // The fourth population: marker + sealed doors. The injected transfer goes
+    // to 0xdEaD — a stranger to every door list — so the rule must be
+    // transfer-recipient-allowlist, not the cap and not not-permitted.
+    const COLD = "0x00000000000000000000000000000000000000c0";
+    const g = grant(["transfer", TRADEABLE_V2], undefined, undefined, [{ name: "cold wallet", address: COLD }]);
+    const result = runWallBattery(g, NOW);
+    assert.equal(result.allHeld, true);
+    assert.equal(result.cases[0]?.rule, "transfer-recipient-allowlist");
+  });
+
+  it("a newly signed grant with NO doors holds at not-permitted, not the allowlist", () => {
+    // The actual new-grant shape: marker present (lockstep), doors recorded as
+    // []. The policy returns transfer-not-permitted before ever reaching the
+    // allowlist check — the battery must expect exactly that, or it cries
+    // BREACH about the safest possible grant.
+    const g = grant(["transfer", TRADEABLE_V2], undefined, undefined, []);
+    const result = runWallBattery(g, NOW);
+    assert.equal(result.allHeld, true);
+    assert.equal(result.cases[0]?.rule, "transfer-not-permitted");
+  });
+
+  it("uses the requested watchlist as allowedAssets without widening sell permissions", () => {    const aapl = STOCK_TOKENS.find((token) => token.symbol === "AAPL")!;
     const legacy = grant(["transfer"]);
     const limits = limitsFromGrant(legacy, [aapl]);
 
