@@ -820,8 +820,12 @@ const WALLET_TEXT_LINES = [
   "Why not here? Your owner key never touches chat — wallet actions stay on your machine.",
 ];
 
-/** The signpost alone, for callers with no ledger to read. */
-export const WALLET_TEXT = WALLET_TEXT_LINES.join("\n");
+/** The signpost alone, for callers with no ledger to read. Resolved against the
+ * live dashboard port at import — the worker process env is set at spawn,
+ * before any import runs, so this follows MERRYMEN_PORT like everything else. */
+export const WALLET_TEXT = WALLET_TEXT_LINES.map((l) =>
+  l.split("http://localhost:3100").join(dashboardBase()),
+).join("\n");
 
 /**
  * `/wallet`, leading with the ONE fact that resolves the confusion: the address.
@@ -851,13 +855,18 @@ export const WALLET_TEXT = WALLET_TEXT_LINES.join("\n");
  * agent" is the single commonest thing anyone is ever told to do.
  *
  * Order: an explicit env override wins, then hosted-mode (the orchestrator sets
- * MERRYMEN_HOSTED on every child), then the self-hosted default — which stays
- * exactly what it was, because for a self-hosted operator it was always right.
+ * MERRYMEN_HOSTED on every child), then the self-hosted dashboard — which
+ * follows MERRYMEN_PORT (the desktop app spawns the worker with its dashboard
+ * port, default 17430; the CLI stays on 3100, so unset means 3100). One
+ * source: every grant link in chat follows whichever dashboard actually
+ * serves this worker.
  */
 export function dashboardBase(): string {
   const override = process.env.MERRYMEN_DASHBOARD_URL?.trim();
   if (override) return override.replace(/\/+$/, "");
-  return isHostedMode() ? "https://app.merrymen.dev" : "http://localhost:3100";
+  if (isHostedMode()) return "https://app.merrymen.dev";
+  const port = Number(process.env.MERRYMEN_PORT) || 3100;
+  return `http://localhost:${port}`;
 }
 
 export function readWallet(agentId?: string | null, dashboardUrl?: string): string {

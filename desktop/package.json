@@ -1,9 +1,13 @@
 {
   "name": "merrymen-desktop",
-  "version": "0.1.7",
+  "version": "0.1.9-beta.2",
   "private": true,
   "description": "merrymen — the one-click desktop app. Bundles Node, boots the agent worker + dashboard, opens it in a native window. No terminal, no npm.",
   "author": "merrymen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/millw14/merrymen.git"
+  },
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -17,7 +21,8 @@
     "check:runtime": "node check-runtime.mjs"
   },
   "dependencies": {
-    "merrymen": "file:.."
+    "merrymen": "file:..",
+    "electron-updater": "^6.6.2"
   },
   "devDependencies": {
     "electron": "^44.4.2",

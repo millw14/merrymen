@@ -6,7 +6,7 @@
  *   1. shows a loading splash,
  *   2. spawns the merrymen dashboard (next start) + agent worker (tsx) as child
  *      processes, using Electron-as-Node (ELECTRON_RUN_AS_NODE) — no system Node,
- *   3. waits for the dashboard on 127.0.0.1:3100,
+  *   3. waits for the dashboard on 127.0.0.1:17430,
  *   4. loads it in a native window.
  *
  * CONTROL (same as the CLI, without a terminal): a system-tray icon lets you
@@ -17,19 +17,245 @@
  * kill switch. Data lives in ~/.merrymen (shared with the CLI).
  */
 
-const { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog } = require("electron");
+const { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog, ipcMain } = require("electron");
 const { spawn } = require("node:child_process");
-const { existsSync, mkdirSync, rmSync, writeFileSync } = require("node:fs");
+const { accessSync, constants, cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } = require("node:fs");
 const http = require("node:http");
+const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 
 const HOST = "127.0.0.1";
-const PORT = 3100;
+// Env override first: a fixed port that is already taken must never be a
+// silent exit. See ensurePortFree below — the default is 17430 (NOT 3100: the
+// CLI dashboard and half the dev-tool ecosystem live there, and the desktop
+// app sharing it meant a daily port fight). MERRYMEN_PORT overrides.
+const PORT = Number(process.env.MERRYMEN_PORT) || 17430;
 // Shared with the CLI (~/.merrymen); honor an override so data can be relocated.
 const HOME = process.env.MERRYMEN_HOME || path.join(os.homedir(), ".merrymen");
+// ── writable app copy (the AppImage squashfs is read-only) ────────────────
+// Next's runtime cache (.next/cache) — and any future state the backend
+// writes — fails inside the mount with ENOENT. So on launch: if this
+// directory is writable (dev checkout, classic installer), run in place;
+// otherwise copy the app tree once to ~/.merrymen/app/ and run from the copy.
+// Re-copies when the bundle changes (fingerprinted on main.js); the marker
+// makes repeat launches free. DATA is untouched — the ledger/settings stay in
+// ~/.merrymen directly. This is code, not data: never the reverse.
+function bundleFingerprint() {
+  try {
+    const st = statSync(__filename);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return `fallback-${Date.now()}`;
+  }
+}
+function ensureWritableApp() {
+  try {
+    accessSync(__dirname, constants.W_OK);
+    return __dirname;
+  } catch {
+    /* read-only mount — fall through to the copy */
+  }
+  const dest = path.join(HOME, "app");
+  let current = "";
+  try {
+    current = readFileSync(path.join(dest, ".bundle-fingerprint"), "utf8");
+  } catch {
+    /* first launch — nothing copied yet */
+  }
+  if (current !== bundleFingerprint()) {
+    rmSync(dest, { recursive: true, force: true });
+    mkdirSync(dest, { recursive: true });
+    cpSync(__dirname, dest, {
+      recursive: true,
+      // The dashboard rebuilds its cache on boot; copying hundreds of MB of
+      // stale cache only slows first launch.
+      filter: (src) => !src.includes(`${path.sep}.next${path.sep}cache`),
+    });
+    writeFileSync(path.join(dest, ".bundle-fingerprint"), bundleFingerprint(), "utf8");
+  }
+  return dest;
+}
+const APP_DIR = ensureWritableApp();
+
+// ── boot sentinels: never launch children from a broken copy ───────────────
+// A first-launch copy can die halfway (Ctrl+C during the ~1.4GB copy is the
+// classic) leaving node_modules without @next/env or @esbuild/linux-x64 —
+// exactly the "Cannot find module" crash loop. Verify the load-bearing pieces
+// resolve from the copy; on failure wipe + re-copy once, and if still broken
+// say which piece is missing instead of booting half an app.
+const BOOT_SENTINELS = [
+  "build/icon.png",
+  "loading.html",
+  "preload.js",
+  "node_modules/merrymen/package.json",
+  "node_modules/merrymen/worker/src/index.ts",
+];
+function canResolveFrom(request, dir) {
+  // Both known layouts: CI hoists deps to the app top level, local staging
+  // nests them under node_modules/merrymen. Node never descends into a nested
+  // package's node_modules on its own, so try both roots.
+  const roots = [dir, path.join(dir, "node_modules", "merrymen")];
+  return roots.some((root) => {
+    try {
+      require.resolve(request, { paths: [root] });
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+function missingBootPieces(dir) {
+  const missing = BOOT_SENTINELS.filter((f) => {
+    try {
+      accessSync(path.join(dir, f));
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  // Plain package resolutions only — deep subpaths (tsx/dist/cli.mjs) hit
+  // exports maps; presence of the package is the correct check here.
+  for (const request of ["@next/env", "@esbuild/linux-x64/package.json", "tsx/package.json"]) {
+    if (!canResolveFrom(request, dir)) missing.push(`module:${request}`);
+  }
+  return missing;
+}
+function ensureBootableApp() {
+  let missing = missingBootPieces(APP_DIR);
+  if (missing.length && APP_DIR !== __dirname) {
+    // One repair attempt: the copy is corrupt, redo it from the bundle.
+    try {
+      rmSync(path.join(HOME, "app"), { recursive: true, force: true });
+      ensureWritableApp(); // fingerprint is gone with the dir → full re-copy
+      missing = missingBootPieces(APP_DIR);
+    } catch {
+      /* fall through to the dialog with the original list */
+    }
+  }
+  if (missing.length) {
+    dialog.showMessageBoxSync({
+      type: "error",
+      title: "merrymen — broken install",
+      message: "The app copy is incomplete and can't start.",
+      detail: `Missing: ${missing.join(", ")}. Reinstall the AppImage; if it persists, report these names.`,
+      buttons: ["Quit"],
+    });
+    quitting = true;
+    app.quit();
+    return false;
+  }
+  return true;
+}
 const PAUSED_MARKER = path.join(HOME, "paused"); // present = agent paused (worker honors it)
-const ICON = path.join(__dirname, "build", "icon.png");
+const ICON = path.join(APP_DIR, "build", "icon.png");
+// Advisory single-worker lock, shared with the CLI (`merrymen start` honors
+// the same file): the desktop is the canonical launcher, but a terminal left
+// over from before can still spawn a second worker against the same HOME —
+// two workers, one account, double trades. Exclusive-create wins; a stale PID
+// is stolen, a live one refuses loudly. Released on quit.
+const WORKER_LOCK = path.join(HOME, ".lock");
+function lockAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function acquireWorkerLock() {
+  try {
+    mkdirSync(HOME, { recursive: true });
+    writeFileSync(WORKER_LOCK, String(process.pid), { flag: "wx" });
+    return { ok: true };
+  } catch {
+    /* taken — read the holder below */
+  }
+  let holder = 0;
+  try {
+    holder = Number(readFileSync(WORKER_LOCK, "utf8").trim());
+  } catch {
+    return { ok: false, holder: 0 };
+  }
+  if (!lockAlive(holder)) {
+    try {
+      writeFileSync(WORKER_LOCK, String(process.pid));
+      return { ok: true, stole: true };
+    } catch {
+      return { ok: false, holder };
+    }
+  }
+  return { ok: false, holder };
+}
+function releaseWorkerLock() {
+  try {
+    if (readFileSync(WORKER_LOCK, "utf8").trim() === String(process.pid)) {
+      rmSync(WORKER_LOCK, { force: true });
+    }
+  } catch {
+    /* best effort — a stale file self-heals on next acquire */
+  }
+}
+
+// ── OS integration self-repair: the launcher tile ──────────────────────────
+// The in-app updater replaces ONLY the AppImage file — never the launcher
+// entry or the icon. Without this, updater users keep a stale (or generic)
+// tile forever; only install.sh users would see a fixed one. So the app
+// maintains its own integration on every boot: icon file into hicolor +
+// desktop entry with Icon=, rewritten whenever stale. Best effort throughout
+// — a missing tile must never block boot. Same content install.sh writes,
+// except Exec= points at the running AppImage when there is one.
+function desiredDesktopEntry() {
+  const execTarget = process.env.APPIMAGE || path.join(APP_DIR, "merrymen-desktop");
+  return [
+    "[Desktop Entry]",
+    "Type=Application",
+    "Name=merrymen desktop",
+    "Comment=Autonomous agents for Robinhood Chain — dashboard + worker",
+    `Exec=${execTarget} %U`,
+    "Icon=merrymen-desktop",
+    "Terminal=false",
+    "Categories=Finance;",
+    "StartupWMClass=merrymen-desktop",
+    "",
+  ].join("\n");
+}
+function ensureDesktopIntegration() {
+  if (process.platform !== "linux") return;
+  try {
+    const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
+    try {
+      const want = statSync(ICON).size;
+      let have = -1;
+      try {
+        have = statSync(path.join(dataHome, "icons", "hicolor", "1024x1024", "apps", "merrymen-desktop.png")).size;
+      } catch {
+        /* missing — copy below */
+      }
+      if (have !== want) {
+        mkdirSync(path.join(dataHome, "icons", "hicolor", "1024x1024", "apps"), { recursive: true });
+        cpSync(ICON, path.join(dataHome, "icons", "hicolor", "1024x1024", "apps", "merrymen-desktop.png"));
+      }
+    } catch {
+      /* icon unavailable (dev checkout without the asset?) — tile falls back */
+    }
+    if (!process.env.APPIMAGE) return; // dev runs have no stable Exec= target
+    const file = path.join(dataHome, "applications", "merrymen-desktop.desktop");
+    let current = "";
+    try {
+      current = readFileSync(file, "utf8");
+    } catch {
+      /* missing — write below */
+    }
+    if (current !== desiredDesktopEntry()) {
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, desiredDesktopEntry(), "utf8");
+    }
+  } catch {
+    /* best effort — never block boot over a tile */
+  }
+}
 
 let mainWin = null;
 let splashWin = null;
@@ -38,6 +264,39 @@ let quitting = false;
 let closeHintShown = false;
 let workerChild = null;
 const children = [];
+
+// ── port: probe before binding, never fail silent ──────────────────────────
+// The dashboard binds a fixed port and the app used to discover a conflict by
+// exiting 0 with no window and no message. Probe first; on conflict offer
+// Retry (the holder may be shutting down) or Quit. MERRYMEN_PORT is the
+// escape hatch for a permanently busy 17430.
+function isPortFree() {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once("error", () => resolve(false));
+    probe.once("listening", () => probe.close(() => resolve(true)));
+    probe.listen(PORT, HOST);
+  });
+}
+async function ensurePortFree() {
+  for (;;) {
+    if (await isPortFree()) return true;
+    const choice = dialog.showMessageBoxSync({
+      type: "warning",
+      title: "merrymen — port in use",
+      message: `Port ${PORT} is already in use on this machine.`,
+      detail: "The dashboard needs it. Free the port (or set MERRYMEN_PORT to another one), then Retry — or Quit.",
+      buttons: ["Retry", "Quit"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (choice !== 0) {
+      quitting = true;
+      app.quit();
+      return false;
+    }
+  }
+}
 
 // ── pause control (the same marker the worker's tick loop + Telegram /pause use) ─
 function isPaused() {
@@ -58,6 +317,10 @@ function setPaused(paused) {
 
 // ── resolve the bundled merrymen + its tool bins (hoisting-safe) ─────────────
 function merrymenRoot() {
+  // Prefer the writable copy: the dashboard's cwd lives under it, so its
+  // runtime cache writes land on disk instead of the read-only mount.
+  const cand = path.join(APP_DIR, "node_modules", "merrymen", "package.json");
+  if (existsSync(cand)) return path.dirname(cand);
   return path.dirname(require.resolve("merrymen/package.json"));
 }
 // Locate a tool binary ON DISK, not via require.resolve — packages like tsx have
@@ -98,15 +361,41 @@ function startDashboard() {
 function startWorker() {
   const root = merrymenRoot();
   const tsxCli = findTool(path.join("tsx", "dist", "cli.mjs"), nmRoots(root), "tsx");
-  workerChild = runNode(tsxCli, [path.join(root, "worker", "src", "index.ts")], { cwd: root, env: { MERRYMEN_HOME: HOME }, tag: "worker" });
+  workerChild = runNode(tsxCli, [path.join(root, "worker", "src", "index.ts")], { cwd: root, env: { MERRYMEN_HOME: HOME, MERRYMEN_PORT: String(PORT) }, tag: "worker" });
 }
 function startBackend() {
   startDashboard();
   startWorker();
 }
-function restartWorker() {
-  killChild(workerChild);
-  startWorker();
+/**
+ * Restart the worker WITHOUT overlapping the old one — sequencing lives in
+ * worker-lifecycle.cjs (testable; this file needs Electron). Single-flight,
+ * exit-awaited, SIGKILL-escalated: see there for why each piece exists.
+ */
+const { createRestarter } = require("./worker-lifecycle.cjs");
+const restartWorkerOp = createRestarter({
+  getCurrent: () => workerChild,
+  setCurrent: (c) => {
+    workerChild = c;
+  },
+  startWorker: () => {
+    startWorker();
+    return workerChild;
+  },
+  killGraceful: (c) => killChild(c),
+  killForce: (c) => {
+    try {
+      c.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  },
+  onEvent: (e) => {
+    if (e === "escalate") console.log("[worker] SIGTERM ignored — escalating to SIGKILL");
+  },
+});
+async function restartWorker() {
+  await restartWorkerOp.restart();
   refreshTray();
 }
 
@@ -141,9 +430,10 @@ function makeSplash() {
     frame: false,
     resizable: false,
     backgroundColor: "#0b0b0d",
+    icon: ICON,
     webPreferences: { contextIsolation: true },
   });
-  splashWin.loadFile(path.join(__dirname, "loading.html"));
+  splashWin.loadFile(path.join(APP_DIR, "loading.html"));
 }
 
 function showWindow() {
@@ -176,9 +466,11 @@ function makeMain() {
     backgroundColor: "#0b0b0d",
     title: "merrymen",
     icon: ICON,
-    // Renderer stays fully sandboxed: no Node, isolated context, no preload. Even
-    // a compromised dashboard page can't reach the host — it's just a web view.
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    // Renderer stays fully sandboxed: no Node, isolated context. The ONLY
+    // privileged surface is preload.js (thin contextBridge forwarding) — even
+    // a compromised dashboard page holds nothing else. Browser/CLI users never
+    // load it, so their UI must gate on `window.merrymenDesktop` existing.
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, preload: path.join(__dirname, "preload.js") },
   });
   mainWin.loadURL(`http://${HOST}:${PORT}`);
   mainWin.once("ready-to-show", () => {
@@ -203,8 +495,10 @@ function makeMain() {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
   });
   // Closing the window keeps the agent running in the tray — only "Quit" stops it.
+  // Tray-less exception (see trayNoHost): with nowhere for the tray to display,
+  // hiding would orphan a headless agent nothing can quit, so close quits.
   mainWin.on("close", (e) => {
-    if (quitting) return;
+    if (quitting || trayNoHost) return;
     e.preventDefault();
     mainWin.hide();
     if (process.platform === "win32" && tray && !closeHintShown) {
@@ -226,12 +520,34 @@ function trayMenu() {
   const paused = isPaused();
   return Menu.buildFromTemplate([
     { label: "Open dashboard", click: showWindow },
+    { label: `merrymen ${app.getVersion()}`, enabled: false },
     { type: "separator" },
     { label: `Agent: ${paused ? "PAUSED" : "running"}`, enabled: false },
     paused
       ? { label: "▶  Resume agent (allow trades)", click: () => { setPaused(false); refreshTray(); } }
       : { label: "⏸  Pause agent (no trades)", click: () => { setPaused(true); refreshTray(); } },
     { label: "↻  Restart agent", click: restartWorker },
+    { type: "separator" },
+    {
+      label:
+        updateState.status === "available"
+          ? `⬇  Download update ${updateState.version || ""}`.trim()
+          : updateState.status === "ready"
+            ? `↻  Restart to install ${updateState.version || "update"}`.trim()
+            : updateState.status === "checking" || updateState.status === "downloading"
+              ? "…  Checking for updates"
+              : "⟳  Check for updates",
+      click: () => void checkForUpdates(true),
+    },
+    {
+      label: "Beta channel (offer pre-releases)",
+      type: "checkbox",
+      checked: readDesktopPrefs().betaChannel,
+      click: (item) => {
+        writeDesktopPrefs({ betaChannel: item.checked });
+        refreshTray();
+      },
+    },
     { type: "separator" },
     {
       // Auto-start, via Electron's own login-item API rather than the CLI's
@@ -260,7 +576,240 @@ function makeTray() {
   if (!img.isEmpty()) img = img.resize({ width: 16, height: 16 });
   tray = new Tray(img);
   tray.on("click", showWindow); // left-click reopens the dashboard
+  trayNoHost = isTrayHostMissing();
   refreshTray();
+}
+// Best-effort tray-host detection: on tray-less Wayland compositors the Tray
+// constructs fine but has nowhere to display — and close→hide then leaves an
+// unkillable headless agent (no tray menu, no menu bar). When no host is
+// found, closing the window quits instead; the dashboard Quit button covers
+// the same path deliberately. Tray users see zero behavior change.
+let trayNoHost = false;
+function isTrayHostMissing() {
+  // Destroyed right after creation = nowhere to display. Anything else (real
+  // display, or an inconclusive answer) keeps the classic hide behavior.
+  try {
+    if (tray && typeof tray.isDestroyed === "function" && tray.isDestroyed()) return true;
+  } catch {
+    /* inconclusive — keep hide */
+  }
+  if (process.platform === "linux" && !process.env.XDG_CURRENT_DESKTOP && !process.env.DESKTOP_SESSION) {
+    return true;
+  }
+  return false;
+}
+
+// ── updates (GitHub releases via electron-updater) ──────────────────────────
+// Manual-download only: we check (on boot, delayed + non-blocking, and from
+// the tray), but nothing downloads without an explicit click, and nothing
+// installs without an explicit restart. Drafts are never offered (the updater
+// only considers published releases); the beta channel additionally offers
+// published prereleases. Stable-only by default.
+const DESKTOP_PREFS = path.join(HOME, "desktop.json");
+function readDesktopPrefs() {
+  try {
+    const raw = require("node:fs").readFileSync(DESKTOP_PREFS, "utf8");
+    const p = JSON.parse(raw);
+    return { betaChannel: p.betaChannel === true };
+  } catch {
+    return { betaChannel: false };
+  }
+}
+function writeDesktopPrefs(prefs) {
+  try {
+    mkdirSync(HOME, { recursive: true });
+    writeFileSync(DESKTOP_PREFS, JSON.stringify({ betaChannel: !!prefs.betaChannel }, null, 2), "utf8");
+  } catch {
+    /* prefs are convenience — a failed write just doesn't stick */
+  }
+}
+let updateState = { status: "unchecked", version: null, percent: null };
+function loadUpdater() {
+  try {
+    // Lazy: dev checkouts without the dep installed must still boot.
+    return require("electron-updater").autoUpdater;
+  } catch {
+    return null;
+  }
+}
+/**
+ * Dialog-free update check: the shared core behind the tray dialogs AND the
+ * dashboard control surface (desktop IPC). Returns {ok} / {ok:false, reason};
+ * the resulting updateState is the single source both callers read. Tray
+ * behavior is byte-for-byte what it was — see checkForUpdates below.
+ */
+async function checkForUpdatesCore() {
+  const autoUpdater = loadUpdater();
+  if (!autoUpdater) return { ok: false, reason: "unavailable" };
+  const beta = readDesktopPrefs().betaChannel;
+  autoUpdater.allowPrerelease = beta;
+  autoUpdater.autoDownload = false;
+  // Fork-based testing without touching upstream: point the feed at a fork
+  // that carries test releases. Unset = millw14/merrymen (the default).
+  if (process.env.MERRYMEN_UPDATE_OWNER || process.env.MERRYMEN_UPDATE_REPO) {
+    autoUpdater.setFeedURL({
+      provider: "github",
+      owner: process.env.MERRYMEN_UPDATE_OWNER || "millw14",
+      repo: process.env.MERRYMEN_UPDATE_REPO || "merrymen",
+    });
+  }
+  updateState = { status: "checking", version: null, percent: null };
+  refreshTray();
+  try {
+    const found = await autoUpdater.checkForUpdates();
+    const info = found && found.updateInfo;
+    if (!info || info.version === app.getVersion()) {
+      updateState = { status: "current", version: null, percent: null };
+    } else {
+      updateState = { status: "available", version: info.version, percent: null };
+    }
+  } catch (e) {
+    updateState = { status: "error", version: null, percent: null };
+    refreshTray();
+    return { ok: false, reason: String((e && e.message) || e) };
+  }
+  refreshTray();
+  return { ok: true };
+}
+async function checkForUpdates(manual) {
+  const autoUpdater = loadUpdater();
+  if (!autoUpdater) {
+    if (manual) dialog.showMessageBoxSync({ type: "info", title: "merrymen — updates", message: "Updater unavailable in this build." });
+    return;
+  }
+  const r = await checkForUpdatesCore();
+  if (!r.ok) {
+    if (manual) dialog.showMessageBoxSync({ type: "warning", title: "merrymen — updates", message: `Update check failed: ${r.reason}` });
+    return;
+  }
+  if (updateState.status === "current") {
+    if (manual) {
+      dialog.showMessageBoxSync({ type: "info", title: "merrymen — updates", message: `You're on the latest version (${app.getVersion()}).` });
+    }
+  } else if (updateState.status === "available") {
+    const choice = dialog.showMessageBoxSync({
+      type: "question",
+      title: "merrymen — update available",
+      message: `Version ${updateState.version} is available (you have ${app.getVersion()}).`,
+      detail: "Download now? Nothing installs until you restart.",
+      buttons: ["Download", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (choice === 0) {
+      updateState = { status: "downloading", version: updateState.version, percent: 0 };
+      refreshTray();
+      try {
+        await autoUpdater.downloadUpdate();
+      } catch (e) {
+        updateState = { status: "error", version: null, percent: null };
+        if (manual) dialog.showMessageBoxSync({ type: "warning", title: "merrymen — updates", message: `Update check failed: ${String((e && e.message) || e)}` });
+      }
+      // update-downloaded handler below prompts the restart.
+    } else {
+      refreshTray();
+    }
+  }
+  refreshTray();
+}
+function wireUpdaterEvents() {
+  const autoUpdater = loadUpdater();
+  if (!autoUpdater || autoUpdater.__merrymenWired) return;
+  autoUpdater.__merrymenWired = true;
+  autoUpdater.on("update-downloaded", (info) => {
+    updateState = { status: "ready", version: (info && info.version) || null, percent: 100 };
+    refreshTray();
+    const choice = dialog.showMessageBoxSync({
+      type: "question",
+      title: "merrymen — update ready",
+      message: `Version ${updateState.version || "new"} downloaded. Restart now to install?`,
+      buttons: ["Restart now", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (choice === 0) {
+      quitting = true;
+      autoUpdater.quitAndInstall(false, true);
+    }
+  });
+  autoUpdater.on("error", () => {
+    // Background-check noise stays out of the user's face; manual checks
+    // report their own errors in checkForUpdates.
+    updateState = { status: "error", version: null, percent: null };
+    refreshTray();
+  });
+  // Progress feeds updateState only — the tray shows no percent, so no
+  // refreshTray churn here; dashboard pollers read it via desktop:get-state.
+  autoUpdater.on("download-progress", (p) => {
+    if (updateState.status === "downloading") {
+      updateState.percent = Math.round((p && p.percent) || 0);
+    }
+  });
+}
+
+// ── desktop IPC: the in-dashboard control surface ──────────────────────────
+// Same backends the tray drives (updateState, prefs, pause, worker, quit) —
+// data instead of dialogs. No new backend logic; the renderer polls get-state
+// (5s while an update is active, 20s idle) instead of push events.
+function desktopSnapshot() {
+  return {
+    status: updateState.status,
+    version: updateState.version,
+    percent: typeof updateState.percent === "number" ? updateState.percent : null,
+    appVersion: app.getVersion(),
+    beta: readDesktopPrefs().betaChannel,
+    paused: isPaused(),
+  };
+}
+function wireDesktopIpc() {
+  ipcMain.handle("desktop:get-state", () => desktopSnapshot());
+  ipcMain.handle("desktop:check", async () => {
+    await checkForUpdatesCore();
+    return desktopSnapshot();
+  });
+  ipcMain.handle("desktop:download", async () => {
+    const autoUpdater = loadUpdater();
+    if (autoUpdater && updateState.status === "available") {
+      updateState = { status: "downloading", version: updateState.version, percent: 0 };
+      refreshTray();
+      try {
+        await autoUpdater.downloadUpdate();
+      } catch {
+        updateState = { status: "error", version: null, percent: null };
+        refreshTray();
+      }
+    }
+    return desktopSnapshot();
+  });
+  ipcMain.handle("desktop:install", () => {
+    const autoUpdater = loadUpdater();
+    if (autoUpdater && updateState.status === "ready") {
+      quitting = true;
+      autoUpdater.quitAndInstall(false, true);
+    }
+    return desktopSnapshot();
+  });
+  ipcMain.handle("desktop:get-beta", () => readDesktopPrefs().betaChannel);
+  ipcMain.handle("desktop:set-beta", (_e, on) => {
+    writeDesktopPrefs({ betaChannel: on === true });
+    refreshTray();
+    return readDesktopPrefs().betaChannel;
+  });
+  ipcMain.handle("desktop:get-paused", () => isPaused());
+  ipcMain.handle("desktop:set-paused", (_e, paused) => {
+    setPaused(paused === true);
+    refreshTray();
+    return isPaused();
+  });
+  ipcMain.handle("desktop:restart-worker", () => {
+    restartWorker();
+    return true;
+  });
+  ipcMain.handle("desktop:quit", () => {
+    quitting = true;
+    app.quit();
+  });
+  ipcMain.handle("desktop:app-version", () => app.getVersion());
 }
 
 // ── process control ──────────────────────────────────────────────────────────
@@ -287,10 +836,35 @@ if (!app.requestSingleInstanceLock()) {
     Menu.setApplicationMenu(null); // app-like; the dashboard is the whole UI
     makeSplash();
     try {
+      if (!ensureBootableApp()) return;
+      ensureDesktopIntegration(); // tile + icon self-repair (best effort)
+      const lock = acquireWorkerLock();
+      if (!lock.ok) {
+        // Second launcher: the CLI or another desktop holds the worker lock.
+        // Refuse loudly instead of double-trading one account — same message
+        // shape as the port conflict below.
+        const holder = lock.holder ? ` (held by PID ${lock.holder})` : "";
+        dialog.showMessageBoxSync({
+          type: "warning",
+          title: "merrymen — already running",
+          message: "Another merrymen worker is already running.",
+          detail: `Quit it first (tray → Quit, or kill PID ${lock.holder || "?"}), then launch again.${holder}`,
+          buttons: ["Quit"],
+        });
+        quitting = true;
+        app.quit();
+        return;
+      }
+      if (lock.stole) console.log("[main] stole a stale worker lock — previous run did not release it");
+      if (!(await ensurePortFree())) return;
       startBackend();
       await waitForServer();
       makeMain();
       makeTray();
+      wireUpdaterEvents();
+      wireDesktopIpc();
+      // Delayed background check: never blocks boot, never downloads alone.
+      setTimeout(() => void checkForUpdates(false), 90000);
     } catch (e) {
       dialog.showErrorBox("merrymen couldn't start", String(e && e.message ? e.message : e));
       quitting = true;
@@ -305,6 +879,10 @@ if (!app.requestSingleInstanceLock()) {
   app.on("before-quit", () => {
     quitting = true;
     killBackend();
+    releaseWorkerLock();
   });
 }
-process.on("exit", killBackend);
+process.on("exit", () => {
+  killBackend();
+  releaseWorkerLock();
+});
