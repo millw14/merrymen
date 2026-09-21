@@ -470,6 +470,8 @@ import { reconcileClassBook, scoutCostOf } from "./class-reconcile";
 const BREAKER_ABI = parseAbi(["function isTripped(address account) view returns (bool)"]);
 /** The one read the onchain reconstruction checks itself against. */
 const SUPPLY_ABI = parseAbi(["function totalSupply() view returns (uint256)"]);
+/** Minimal ERC-20 surface for token staging reads (symbol + decimals only). */
+const ERC20_META_ABI = parseAbi(["function symbol() view returns (string)", "function decimals() view returns (uint8)"]);
 const VAULT_ABI = parseAbi([
   "function deposit(uint256 assets, address receiver) returns (uint256)",
   "function withdraw(uint256 assets, address receiver, address owner) returns (uint256)",
@@ -11517,6 +11519,31 @@ async function main() {
     // mirror must answer this question the same way or one of them is lying.
     grantHasTransfer: () => grantCarriesTransfer(active?.grant),
     readDepth: readDepthFor,
+    // This process's tenant for settings-store writes: the armed grant's smart
+    // account, the same key the stores use (tenantId: smartAccount). Null when
+    // idle — callers refuse rather than write unscoped.
+    getTenantId: () => {
+      const sa = active?.grant?.smartAccount;
+      return sa ? (sa.toLowerCase() as `0x${string}`) : null;
+    },
+    // Token metadata for /addtoken staging: symbol + decimals straight from
+    // the contract on the read client. Read-only; failure is a sentence, and
+    // the executor validates the shape before anything is staged.
+    readTokenMeta: async (address) => {
+      try {
+        const client = mainnetClient();
+        const [decimals, symbol] = await Promise.all([
+          client.readContract({ address, abi: ERC20_META_ABI, functionName: "decimals" }) as Promise<number>,
+          client.readContract({ address, abi: ERC20_META_ABI, functionName: "symbol" }) as Promise<string>,
+        ]);
+        if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
+          return { error: "contract returned bad decimals" };
+        }
+        return { decimals, symbol: String(symbol) };
+      } catch (e) {
+        return { error: e instanceof Error ? e.message : String(e) };
+      }
+    },
     // Telegram wants a sentence; the order path wants a verdict. One
     // implementation, adapted here rather than duplicated.
     submitTrade: (side: "buy" | "sell", symbol: string, usdg: number) =>
