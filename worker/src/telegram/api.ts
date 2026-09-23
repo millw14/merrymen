@@ -43,6 +43,40 @@ export interface TgBotInfo {
   username: string;
 }
 
+/** One inline button. callback_data must be ≤ 64 bytes — our values are short. */
+export interface TgInlineButton {
+  text: string;
+  callback_data?: string;
+  url?: string;
+}
+
+/** reply_markup for an inline keyboard row group (used for confirm/cancel). */
+export type TgInlineKeyboard = { inline_keyboard: TgInlineButton[][] };
+
+/** One inbound callback_query (an inline-button tap). */
+export interface TgCallback {
+  updateId: number;
+  chatId: number;
+  fromId: number;
+  /** message_id of the message that carried the button row. */
+  messageId: number;
+  /** The button's callback_data — for us always "confirm" or "cancel". */
+  data: string;
+  /** Token to acknowledge the tap with answerCallbackQuery. */
+  queryId: string;
+}
+
+/**
+ * May this tap be resolved? Same rule as messages (chat OR sender
+ * allowlisted) — minus the /link exception, which makes no sense for taps: a
+ * tap can only ever resolve an action, never authorize one. Pure so the poll
+ * loop's dispatch gate is unit-testable (an untested gate is how the buttons
+ * once shipped wired to nothing).
+ */
+export function isCallbackSenderAllowed(cb: Pick<TgCallback, "chatId" | "fromId">, allowlist: readonly number[]): boolean {
+  return allowlist.includes(cb.chatId) || allowlist.includes(cb.fromId);
+}
+
 function short(token: string): string {
   return token.length > 8 ? `…${token.slice(-6)}` : "…";
 }
@@ -98,24 +132,28 @@ export async function getMe(opts: TelegramOpts): Promise<{ bot: TgBotInfo | null
   return { bot: { id: r.id, username: r.username } };
 }
 
-/** Long-poll for new messages. `offset` is the last handled updateId + 1. */
+/** Long-poll for new messages AND inline-button taps. `offset` is the last handled updateId + 1. */
 export async function getUpdates(
   opts: TelegramOpts,
   offset: number,
   timeoutSec = 25,
-): Promise<{ messages: TgMessage[]; nextOffset: number; reason?: string }> {
+): Promise<{ messages: TgMessage[]; callbacks: TgCallback[]; nextOffset: number; reason?: string }> {
   const { result, reason } = await call(opts, "getUpdates", {
     offset,
     timeout: timeoutSec,
-    allowed_updates: ["message"],
+    // BOTH routes into the bot: typed messages AND Confirm/Cancel taps.
+    // Subscribing "message" only would deliver the keyboards while silently
+    // dropping every tap on them (the buttons would spin forever).
+    allowed_updates: ["message", "callback_query"],
   });
-  if (!Array.isArray(result)) return { messages: [], nextOffset: offset, reason };
+  if (!Array.isArray(result)) return { messages: [], callbacks: [], nextOffset: offset, reason };
 
   const messages: TgMessage[] = [];
+  const callbacks: TgCallback[] = [];
   let nextOffset = offset;
   for (const raw of result) {
     if (!raw || typeof raw !== "object") continue;
-    const u = raw as { update_id?: unknown; message?: unknown };
+    const u = raw as { update_id?: unknown; message?: unknown; callback_query?: unknown };
     if (typeof u.update_id === "number") nextOffset = Math.max(nextOffset, u.update_id + 1);
     const m = u.message as
       | {
@@ -127,28 +165,57 @@ export async function getUpdates(
           audio?: { file_id?: unknown };
         }
       | undefined;
-    if (!m) continue;
-    const chatId = m.chat?.id;
-    const fromId = m.from?.id;
-    if (typeof chatId !== "number" || typeof fromId !== "number") continue;
-    // Accept text messages OR voice/audio notes (for transcription). Voice notes
-    // may carry no text; text falls back to the caption then empty.
-    const voiceFileId =
-      typeof m.voice?.file_id === "string" ? m.voice.file_id
-      : typeof m.audio?.file_id === "string" ? m.audio.file_id
-      : undefined;
-    const text = typeof m.text === "string" ? m.text : typeof m.caption === "string" ? m.caption : "";
-    if (!text && !voiceFileId) continue; // ignore stickers/photos/etc.
-    messages.push({
+    if (m) {
+      const chatId = m.chat?.id;
+      const fromId = m.from?.id;
+      if (typeof chatId === "number" && typeof fromId === "number") {
+        // Accept text messages OR voice/audio notes (for transcription). Voice notes
+        // may carry no text; text falls back to the caption then empty.
+        const voiceFileId =
+          typeof m.voice?.file_id === "string" ? m.voice.file_id
+          : typeof m.audio?.file_id === "string" ? m.audio.file_id
+          : undefined;
+        const text = typeof m.text === "string" ? m.text : typeof m.caption === "string" ? m.caption : "";
+        if (text || voiceFileId) {
+          messages.push({
+            updateId: typeof u.update_id === "number" ? u.update_id : 0,
+            chatId,
+            fromId,
+            fromUsername: typeof m.from?.username === "string" ? m.from.username : undefined,
+            text,
+            voiceFileId,
+          });
+        }
+        // else: stickers/photos/etc. — ignored, like before.
+      }
+    }
+    // Inline-button tap: resolve through the same confirm/cancel path as a
+    // typed /confirm (see handleCallback in service.ts). Taps without a
+    // message context (e.g. from an inline-mode button) carry no chat to
+    // resolve against and are dropped — the button just spins, once.
+    const q = u.callback_query as
+      | {
+          id?: unknown;
+          from?: { id?: unknown };
+          message?: { chat?: { id?: unknown }; message_id?: unknown };
+          data?: unknown;
+        }
+      | undefined;
+    const queryId = q?.id;
+    const qFrom = q?.from?.id;
+    const qChat = q?.message?.chat?.id;
+    const qMsg = q?.message?.message_id;
+    if (typeof queryId !== "string" || typeof qFrom !== "number" || typeof qChat !== "number" || typeof qMsg !== "number") continue;
+    callbacks.push({
       updateId: typeof u.update_id === "number" ? u.update_id : 0,
-      chatId,
-      fromId,
-      fromUsername: typeof m.from?.username === "string" ? m.from.username : undefined,
-      text,
-      voiceFileId,
+      chatId: qChat,
+      fromId: qFrom,
+      messageId: qMsg,
+      data: typeof q?.data === "string" ? q.data : "",
+      queryId,
     });
   }
-  return { messages, nextOffset };
+  return { messages, callbacks, nextOffset };
 }
 
 /**
@@ -276,21 +343,81 @@ export function esc(s: string): string {
  * Send a message. Best-effort — returns a reason on failure, never throws.
  * Sends with HTML parse mode (formatters use <b>/<code>); if Telegram rejects
  * the entities, retries as plain text so a formatting bug never eats a reply.
+ * An optional `markup` attaches an inline keyboard (confirm/cancel buttons).
  */
 export async function sendMessage(
   opts: TelegramOpts,
   chatId: number,
   text: string,
+  markup?: TgInlineKeyboard,
 ): Promise<{ ok: boolean; reason?: string }> {
   // Telegram caps message text at 4096 chars.
   const body = text.length > 4096 ? text.slice(0, 4090) + "\n…" : text;
-  const html = await call(opts, "sendMessage", { chat_id: chatId, text: body, parse_mode: "HTML" });
+  const params = { chat_id: chatId, text: body, parse_mode: "HTML", ...(markup ? { reply_markup: markup } : {}) };
+  const html = await call(opts, "sendMessage", params);
   if (html.result != null) return { ok: true };
   if (html.reason && /parse|entit|tag/i.test(html.reason)) {
-    const plain = await call(opts, "sendMessage", { chat_id: chatId, text: body.replace(/<[^>]+>/g, "") });
+    const plain = await call(opts, "sendMessage", {
+      chat_id: chatId,
+      text: body.replace(/<[^>]+>/g, ""),
+      ...(markup ? { reply_markup: markup } : {}),
+    });
     return plain.result != null ? { ok: true } : { ok: false, reason: plain.reason };
   }
   return { ok: false, reason: html.reason };
+}
+
+/**
+ * Replace a message in place — used to resolve a parked confirm/cancel message
+ * into its outcome. By default the buttons are removed (an empty inline_keyboard
+ * strips them); pass `markup` to instead attach a fresh keyboard (used when
+ * resolving one parked action parks another, e.g. a confirm that lands on an
+ * install offer). Mirrors sendMessage's HTML→plain retry discipline.
+ */
+export async function editMessageText(
+  opts: TelegramOpts,
+  chatId: number,
+  messageId: number,
+  text: string,
+  markup?: TgInlineKeyboard,
+): Promise<{ ok: boolean; reason?: string }> {
+  const body = text.length > 4096 ? text.slice(0, 4090) + "\n…" : text;
+  const params = {
+    chat_id: chatId,
+    message_id: messageId,
+    text: body,
+    parse_mode: "HTML",
+    reply_markup: markup ?? { inline_keyboard: [] },
+  };
+  const html = await call(opts, "editMessageText", params);
+  if (html.result != null) return { ok: true };
+  if (html.reason && /parse|entit|tag/i.test(html.reason)) {
+    const plain = await call(opts, "editMessageText", {
+      ...params,
+      parse_mode: undefined,
+      text: body.replace(/<[^>]+>/g, ""),
+    });
+    return plain.result != null ? { ok: true } : { ok: false, reason: plain.reason };
+  }
+  return { ok: false, reason: html.reason };
+}
+
+/**
+ * Acknowledge an inline-button tap. Telegram expects an answer to every
+ * callback_query; the optional `text` shows as a brief toast on the user's
+ * phone (≤ 64 chars).
+ */
+export async function answerCallbackQuery(
+  opts: TelegramOpts,
+  callbackQueryId: string,
+  extra?: { text?: string; alert?: boolean },
+): Promise<{ ok: boolean; reason?: string }> {
+  const { result, reason } = await call(opts, "answerCallbackQuery", {
+    callback_query_id: callbackQueryId,
+    ...(extra?.text ? { text: extra.text } : {}),
+    ...(extra?.alert ? { show_alert: true } : {}),
+  });
+  return result != null ? { ok: true } : { ok: false, reason };
 }
 
 /**

@@ -113,7 +113,10 @@ describe("the link survives the orchestrator's next pass", () => {
     // second command, with the code already spent by the rotation. telegram.json
     // is child-owned and never written from above.
     assert.match(STATE, /linkedChats: number\[\]/);
-    assert.match(SERVICE, /linkedChats: state\.linkedChats\.includes\(msg\.chatId\)/);
+    // msg or peer: linkDep was parameterized over the peer (chat/from) so both
+    // message and inline-button paths share it — the variable name moved, the
+    // durability contract didn't.
+    assert.match(SERVICE, /linkedChats: state\.linkedChats\.includes\((msg|peer)\.chatId\)/);
   });
 
   it("and the orchestrator promotes it into the stored allowlist", () => {

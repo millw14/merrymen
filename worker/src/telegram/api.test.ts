@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { BOT_COMMANDS, esc, getMe, getUpdates, sendMessage, setMyCommands, publicBotCommands, type FetchLike } from "./api";
+import { BOT_COMMANDS, esc, getMe, getUpdates, isCallbackSenderAllowed, sendMessage, setMyCommands, publicBotCommands, type FetchLike } from "./api";
 import { parseSlash } from "./interpreter";
 
 /** Fake fetch capturing the last call, returning a canned envelope. */
@@ -86,6 +86,45 @@ describe("getUpdates", () => {
     assert.deepEqual(messages, []);
     assert.equal(nextOffset, 9);
     assert.match(reason!, /flood/);
+  });
+
+  it("subscribes to callback queries and splits taps from messages", async () => {
+    const f = fakeFetch(
+      200,
+      OK([
+        {
+          update_id: 200,
+          message: { text: "hi", chat: { id: 555 }, from: { id: 555 } },
+        },
+        {
+          update_id: 201,
+          callback_query: {
+            id: "q1",
+            from: { id: 555 },
+            message: { chat: { id: 555 }, message_id: 77 },
+            data: "confirm",
+          },
+        },
+        // Tap with no message context (inline-mode button) — dropped, but the
+        // offset still advances past it so the poll never re-reads it.
+        { update_id: 202, callback_query: { id: "q2", from: { id: 555 }, data: "confirm" } },
+        { update_id: 203, edited_message: { text: "edit" } },
+      ]),
+    );
+    const { messages, callbacks, nextOffset } = await getUpdates({ token: "t", fetchFn: f }, 200);
+    assert.equal(messages.length, 1);
+    assert.equal(callbacks.length, 1);
+    assert.deepEqual(callbacks[0], {
+      updateId: 201,
+      chatId: 555,
+      fromId: 555,
+      messageId: 77,
+      data: "confirm",
+      queryId: "q1",
+    });
+    assert.equal(nextOffset, 204);
+    // The subscription is the fix: message-only would silently drop every tap.
+    assert.match(f.lastBody!, /"callback_query"/);
   });
 });
 
@@ -343,5 +382,17 @@ describe("publicBotCommands — what strangers see", () => {
     for (const pub of publicBotCommands) {
       assert.ok(BOT_COMMANDS.includes(pub), `/${pub.command} missing from the full menu`);
     }
+  });
+});
+
+describe("isCallbackSenderAllowed — taps use the message rule minus /link", () => {
+  const cb = { chatId: 555, fromId: 777, messageId: 1, data: "confirm", queryId: "q", updateId: 1 };
+  it("allows allowlisted chat or sender", () => {
+    assert.equal(isCallbackSenderAllowed(cb, [555]), true);
+    assert.equal(isCallbackSenderAllowed(cb, [777]), true);
+  });
+  it("refuses strangers (no link exception — a tap can only resolve, never authorize)", () => {
+    assert.equal(isCallbackSenderAllowed(cb, [999]), false);
+    assert.equal(isCallbackSenderAllowed(cb, []), false);
   });
 });
