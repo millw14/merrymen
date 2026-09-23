@@ -9,6 +9,11 @@
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import {
   HOUSE_KEY_FIELDS,
+  PROFILE_HOLDS,
+  PROFILE_LIQUIDITIES,
+  PROFILE_MOMENTUMS,
+  PROFILE_RISK_APPETITES,
+  PROFILE_TURNOVERS,
   SETTINGS_DEFAULTS,
   SLIPPAGE_BPS_MAX,
   STOCK_TOKENS,
@@ -16,6 +21,11 @@ import {
   isValidCustomToken,
   type CustomToken,
   type MerrymenSettings,
+  type ProfileHold,
+  type ProfileLiquidity,
+  type ProfileMomentum,
+  type ProfileRiskAppetite,
+  type ProfileTurnover,
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
 import { MAX_DECISION_INTERVAL_SEC } from "./decision-cadence";
@@ -128,6 +138,14 @@ export interface ResolvedConfig {
   /** The class EXIT. See MerrymenSettings.classMaxHoldSec — a clock, not a price. */
   classMaxHoldSec: number;
   classExitAtGraduationPct: number;
+  /** The trading profile. See MerrymenSettings.profileRiskAppetite — taste, never a limit. */
+  profileRiskAppetite: ProfileRiskAppetite;
+  profileMomentum: ProfileMomentum;
+  profileLiquidity: ProfileLiquidity;
+  profileTurnover: ProfileTurnover;
+  profileHold: ProfileHold;
+  profileConvictionMin: number;
+  profileResearchTopN: number;
   /**
    * The platform's official coins. See MerrymenSettings.officialCoinsEnabled —
    * ON by default, and the only member of this block that is.
@@ -424,6 +442,13 @@ export function mergeSettings(
     // to bound a hold, not to forbid one.
     classMaxHoldSec: num(file.classMaxHoldSec, env.MERRYMEN_CLASS_MAX_HOLD_SEC, d.classMaxHoldSec, 60, 30 * 86_400),
     classExitAtGraduationPct: num(file.classExitAtGraduationPct, env.MERRYMEN_CLASS_EXIT_GRAD_PCT, d.classExitAtGraduationPct, 1, 100),
+    profileRiskAppetite: oneOf(file.profileRiskAppetite, env.MERRYMEN_PROFILE_RISK, PROFILE_RISK_APPETITES, d.profileRiskAppetite),
+    profileMomentum: oneOf(file.profileMomentum, env.MERRYMEN_PROFILE_MOMENTUM, PROFILE_MOMENTUMS, d.profileMomentum),
+    profileLiquidity: oneOf(file.profileLiquidity, env.MERRYMEN_PROFILE_LIQUIDITY, PROFILE_LIQUIDITIES, d.profileLiquidity),
+    profileTurnover: oneOf(file.profileTurnover, env.MERRYMEN_PROFILE_TURNOVER, PROFILE_TURNOVERS, d.profileTurnover),
+    profileHold: oneOf(file.profileHold, env.MERRYMEN_PROFILE_HOLD, PROFILE_HOLDS, d.profileHold),
+    profileConvictionMin: num(file.profileConvictionMin, env.MERRYMEN_PROFILE_CONVICTION_MIN, d.profileConvictionMin, 0, 1),
+    profileResearchTopN: num(file.profileResearchTopN, env.MERRYMEN_PROFILE_RESEARCH_TOP_N, d.profileResearchTopN, 1, 5),
     officialCoinsEnabled: bool(file.officialCoinsEnabled, env.MERRYMEN_OFFICIAL_COINS, d.officialCoinsEnabled),
     // 0 disables it; the ceiling is 100x, past which it is not a take-profit
     // rule, it is a number nobody will ever hit.

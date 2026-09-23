@@ -239,3 +239,29 @@ describe("mergeSettings — the basket can name an owner-added token", () => {
     assert.deepEqual(c.basketSymbols, [...SETTINGS_DEFAULTS.basketSymbols]);
   });
 });
+
+describe("the trading profile resolves like every other setting — file > env > default", () => {
+  it("defaults are core's defaults, and they are the middle of every enum", () => {
+    const c = mergeSettings({}, {});
+    assert.equal(c.profileRiskAppetite, "balanced");
+    assert.equal(c.profileMomentum, "confirming");
+    assert.equal(c.profileLiquidity, "prefer-deep");
+    assert.equal(c.profileTurnover, "medium");
+    assert.equal(c.profileHold, "ride");
+    assert.equal(c.profileConvictionMin, SETTINGS_DEFAULTS.profileConvictionMin);
+    assert.equal(c.profileResearchTopN, SETTINGS_DEFAULTS.profileResearchTopN);
+  });
+
+  it("a written taste is kept; an unknown word or an out-of-range number is the default, never free text", () => {
+    const c = mergeSettings(
+      { profileMomentum: "early", profileLiquidity: "thin-ok", profileConvictionMin: 0.8, profileResearchTopN: 9, profileHold: "yolo" as never },
+      { MERRYMEN_PROFILE_RISK: "aggressive" },
+    );
+    assert.equal(c.profileMomentum, "early");
+    assert.equal(c.profileLiquidity, "thin-ok");
+    assert.equal(c.profileConvictionMin, 0.8);
+    assert.equal(c.profileResearchTopN, 3, "9 is over the ceiling of 5 — each researched candidate is a paid run");
+    assert.equal(c.profileHold, "ride", "a word outside the enum cannot reach a prompt");
+    assert.equal(c.profileRiskAppetite, "aggressive", "env fills what the file left out");
+  });
+});
