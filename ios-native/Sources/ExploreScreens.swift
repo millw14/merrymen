@@ -31,7 +31,7 @@ struct HomeScreen: View {
                 } }
             }
         }
-        Button { store.path.append(.markets) } label: { Label("Explore markets", systemImage: "chart.bar.xaxis") }.buttonStyle(.borderedProminent)
+        Button { store.path.append(.markets) } label: { Label("Explore markets", systemImage: "chart.bar.xaxis") }.buttonStyle(PrimaryButtonStyle())
         Text("The leaderboard").font(.title2.bold())
         Remote(path: "/api/leaderboard") { data in
             if data["source"].string == "none" { Text("Rankings are temporarily unavailable.") }
@@ -147,7 +147,7 @@ struct AgentScreen: View {
             if a["handleVerified"].bool == true, let url = URL(string: "https://x.com/\(escaped(handle.replacingOccurrences(of: "@", with: "")))") { Link("@\(handle) · verified", destination: url) }
             else { Text("@\(handle)").foregroundStyle(.secondary) }
         }
-        Button(store.following.contains(slug) ? "Unfollow agent" : "Follow agent") { Task { await store.toggleFollow(slug) } }.buttonStyle(.borderedProminent).disabled(store.owner == nil)
+        Button(store.following.contains(slug) ? "Unfollow agent" : "Follow agent") { Task { await store.toggleFollow(slug) } }.buttonStyle(PrimaryButtonStyle()).disabled(store.owner == nil)
         Card {
             Metric(label: "Evidenced return", value: bps(a["pnlBps"].number))
             if let reason = a["unrankedWhy"].string { Text(reason.replacingOccurrences(of: "-", with: " ")).font(.caption).foregroundStyle(.secondary) }
@@ -201,7 +201,7 @@ struct TokenScreen: View {
                 CandleChart(data: token["candles"], token: address)
                 Metric(label: "24h change", value: m["change24hPct"].number.map { "\($0)%" } ?? "—")
                 if let symbol = market["symbol"].string, market["symbolClash"].bool != true {
-                    Button("Trade \(symbol)") { store.path.append(.trade(symbol)) }.buttonStyle(.borderedProminent)
+                    Button("Trade \(symbol)") { store.path.append(.trade(symbol)) }.buttonStyle(PrimaryButtonStyle())
                 }
                 if m["onCurve"].bool == true { Text("On its launch curve. Reported reserve includes a virtual seed and is not available exit liquidity.").font(.caption).foregroundStyle(.orange) }
                 else if m["reserveUsd"] != .null { Metric(label: "Indexed pool reserve", value: usd(m["reserveUsd"].number)) }

@@ -17,6 +17,7 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
     private var operation = ""
     private var account = ""
     private var recipient = ""
+    private var challengeNonce: String?
     private lazy var rpc: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = false; config.httpCookieStorage = nil; config.urlCache = nil
@@ -34,7 +35,7 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
         guard let user = await store.privy?.getUser(), user.embeddedEthereumWallets.contains(where: { $0.address.lowercased() == owner.lowercased() }) else {
             throw fail("Sign in to the embedded wallet that owns this account.")
         }
-        did = user.id; operation = name
+        did = user.id; operation = name; challengeNonce = nil
         var fields = input.object
         fields["owner"] = .string(owner); fields["tenant"] = .string(owner); fields["did"] = .string(did)
         account = fields["smartAccount"]?.text ?? fields["expectAccount"]?.text ?? ""
@@ -114,7 +115,7 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
             let request: EthereumRpcRequest
             if op == "signMessage" {
                 let hex = args["hex"].text
-                guard hex.range(of: "^0x([0-9a-fA-F]{2}){1,8192}$", options: .regularExpression) != nil else { throw fail("Invalid signing payload.") }
+                guard WalletSignaturePolicy.permitsPersonalSign(hex: hex, operation: operation, owner: identity, did: did, expectedAccount: account, nonce: challengeNonce) else { throw fail("The wallet challenge does not match the action you reviewed.") }
                 request = EthereumRpcRequest(method: "personal_sign", params: [hex, wallet.address])
             } else {
                 guard operation != "reconcile" else { throw fail("Receipt checks cannot sign spending permissions.") }
@@ -159,6 +160,11 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
             data = bytes; response = http
         }
         guard data.count <= 8_000_000 else { throw fail("The wallet response exceeds its size limit.") }
+        if method == "GET", ["/api/auth/challenge", "/api/recover/ticket"].contains(url.path), response.statusCode == 200 {
+            let challenge = try JSONDecoder().decode(J.self, from: data)
+            if url.path == "/api/auth/challenge", challenge["origin"].text != API.origin.absoluteString { throw fail("The grant challenge names another origin.") }
+            challengeNonce = challenge["nonce"].string
+        }
         if rpcMethod == "eth_getUserOperationReceipt", let response = try? JSONDecoder().decode(J.self, from: data), response["result"] != .null {
             try recordReceipt(hash: requestJSON["params"].array.first?.text ?? "", receipt: response["result"])
         }

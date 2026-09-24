@@ -56,7 +56,7 @@ struct WithdrawScreen: View {
                         Card {
                             TextField("Recipient address (0x…)", text: $recipient).textInputAutocapitalization(.never).autocorrectionDisabled()
                             Toggle("I checked the recipient and Robinhood network", isOn: $acknowledged)
-                            Button("Review withdrawal") { prepare() }.buttonStyle(.borderedProminent).disabled(wallet.busy || !acknowledged || plan["needsGas"].bool == true || !plan["unreadable"].array.isEmpty)
+                            Button("Review withdrawal") { prepare() }.buttonStyle(PrimaryButtonStyle()).disabled(wallet.busy || !acknowledged || plan["needsGas"].bool == true || !plan["unreadable"].array.isEmpty)
                         }
                     }
                 }
@@ -95,7 +95,7 @@ struct WithdrawScreen: View {
                     Text("Robinhood Chain · 4663").font(.headline)
                     Text("This transfers recoverable tokens and ETH above the gas reserve. Amounts and gas are read again immediately before signing. Assets that cannot transfer are reported individually.")
                     if reviewed["approvedClass"] != .null { Text("Includes the reviewed class vault: \(reviewed["approvedClass"]["vault"].text)") }
-                    Button("Sign withdrawal", role: .destructive) { Task { await withdraw(reviewed) } }.buttonStyle(.borderedProminent).disabled(wallet.busy)
+                    Button("Sign withdrawal", role: .destructive) { Task { await withdraw(reviewed) } }.buttonStyle(PrimaryButtonStyle()).disabled(wallet.busy)
                     if wallet.busy { ProgressView("Waiting for the wallet and receipt…") }
                 }
                 Button("Cancel", role: .cancel) { confirming = false }.disabled(wallet.busy)

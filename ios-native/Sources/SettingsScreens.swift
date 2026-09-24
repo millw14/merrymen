@@ -78,7 +78,7 @@ struct SettingsScreen: View {
                     if settings["telegramBotToken"]["set"].bool == true { Button("Clear saved bot token", role: .destructive) { draft["telegramBotToken"] = .string("") } }
                     Text("The linking code and connection status are available in Telegram connection below.").font(.caption)
                 }
-                Button("Review changes") { confirm = true }.buttonStyle(.borderedProminent).disabled(draft.isEmpty || busy)
+                Button("Review changes") { confirm = true }.buttonStyle(PrimaryButtonStyle()).disabled(draft.isEmpty || busy)
                 NavigationLink("Telegram connection", value: Route.telegram)
                 NavigationLink("Wallet & signed limits", value: Route.permissions)
             } else if data.refreshing { ProgressView() }
@@ -88,7 +88,7 @@ struct SettingsScreen: View {
             NavigationStack { Page {
                 Text("Review settings").font(.title2.bold())
                 ForEach(draft.keys.sorted(), id: \.self) { key in Metric(label: label(key), value: reviewValue(key)) }
-                Button("Save changes") { Task { await save() } }.buttonStyle(.borderedProminent).disabled(busy)
+                Button("Save changes") { Task { await save() } }.buttonStyle(PrimaryButtonStyle()).disabled(busy)
                 Button("Cancel") { confirm = false }.disabled(busy)
             }.navigationTitle("Confirm") }
         }
@@ -228,6 +228,11 @@ struct CircleScreen: View {
 }
 
 struct ProposalsScreen: View {
+    @EnvironmentObject var store: AppStore
+    @State private var selected: J?
+    @State private var confirm = false
+    @State private var busy = false
+    @State private var error: String?
     var body: some View {
         Page { Remote(path: "/api/proposals") { data in
             Text("Coins to consider").font(.largeTitle.bold())
@@ -239,8 +244,39 @@ struct ProposalsScreen: View {
                 Metric(label: "Price", value: usd(row["priceUsd"].number))
                 if row["onCurve"].bool == true { Text("Still on its launch curve").foregroundStyle(.orange) }
                 Text(row["watched"].bool == true ? "Already watched; permission still required." : "Adding this token needs settings and a new signed permission.").font(.caption)
-                NavigationLink("Review permission", value: Route.limits)
+                Button("Review adding this coin") { selected = row; confirm = true }.disabled(store.owner == nil)
             } }
         } }.navigationTitle("Coins to consider")
+        .sheet(isPresented: $confirm) {
+            NavigationStack { Page {
+                Text("Add coin to the basket?").font(.title.bold())
+                if let row = selected {
+                    Text(row["symbol"].text).font(.headline)
+                    Text(row["token"].text).font(.caption.monospaced()).textSelection(.enabled)
+                    Text("This saves the coin in your settings and basket. You will review a new signed permission next. Research is not a promise of return.")
+                    Button("Save and review permission") { Task { await add(row) } }.buttonStyle(PrimaryButtonStyle()).disabled(busy)
+                }
+                if let error { Text(error).foregroundStyle(.orange) }
+                Button("Cancel") { confirm = false }.disabled(busy)
+            } }.interactiveDismissDisabled(busy)
+        }
+    }
+    private func add(_ row: J) async {
+        guard !busy else { return }; busy = true; defer { busy = false }; error = nil
+        do {
+            let owner = store.owner; try await store.verifyOwner(owner)
+            guard row["token"].text.range(of: "^0x[0-9a-fA-F]{40}$", options: .regularExpression) != nil,
+                  row["symbol"].text.range(of: "^[A-Za-z0-9._-]{1,16}$", options: .regularExpression) != nil,
+                  let decimals = row["decimals"].number, (0...36).contains(decimals), decimals.rounded() == decimals else { throw APIError(status: 0, message: "This proposal is missing valid token metadata.") }
+            let settings = try await store.api.request("/api/settings")
+            guard settings["owner"].string?.lowercased() == owner?.lowercased() else { throw APIError(status: 0, message: "Your account changed.") }
+            var tokens = settings.setting("customTokens").array
+            if !tokens.contains(where: { $0["address"].text.lowercased() == row["token"].text.lowercased() }) {
+                tokens.append(.object(["symbol": row["symbol"], "address": row["token"], "decimals": row["decimals"]]))
+            }
+            let basket = Set(settings.setting("basketSymbols").array.compactMap(\.string)).union([row["symbol"].text])
+            _ = try await store.perform("/api/settings", method: "PUT", body: .object(["owner": owner.map(J.string) ?? .null, "customTokens": .array(tokens), "basketSymbols": .array(basket.sorted().map(J.string))]), expectedOwner: owner)
+            confirm = false; store.path.append(.limits)
+        } catch { self.error = error.localizedDescription }
     }
 }

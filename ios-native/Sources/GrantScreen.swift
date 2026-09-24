@@ -67,7 +67,7 @@ struct GrantScreen: View {
                         Text("Network: Robinhood Chain (4663)").font(.caption)
                         if let address = grant?["smartAccount"].string { Text(address).font(.caption.monospaced()).textSelection(.enabled) }
                     }
-                    Button("Review permission") { Task { await prepareReview() } }.buttonStyle(.borderedProminent).disabled(wallet.busy)
+                    Button("Review permission") { Task { await prepareReview() } }.buttonStyle(PrimaryButtonStyle()).disabled(wallet.busy)
                     Button("Reload account and saved settings") { Task { await load() } }.disabled(wallet.busy)
                 }
                 if wallet.busy { ProgressView(wallet.status.isEmpty ? "Preparing permission…" : wallet.status) }
@@ -97,7 +97,7 @@ struct GrantScreen: View {
                     Metric(label: "Trencher vault", value: review["autonomousTrencher"].bool == true ? "Enabled" : "Disabled")
                     Text("You authorize automated trading within these limits. Signing does not deposit or withdraw funds. Your trading mode remains \(creating ? (paper ? "paper" : "live") : "as currently configured").")
                     if store.privy == nil { Text("This build needs the public Privy iOS Client ID before it can sign.").foregroundStyle(.orange) }
-                    Button("Sign and activate") { Task { await activate(review) } }.buttonStyle(.borderedProminent).disabled(submitting || wallet.busy || store.privy == nil)
+                    Button("Sign and activate") { Task { await activate(review) } }.buttonStyle(PrimaryButtonStyle()).disabled(submitting || wallet.busy || store.privy == nil)
                     if wallet.busy { ProgressView(wallet.status) }
                 }
                 Button("Cancel", role: .cancel) { confirming = false }.disabled(submitting || wallet.busy)

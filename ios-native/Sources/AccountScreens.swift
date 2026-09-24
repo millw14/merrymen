@@ -31,6 +31,7 @@ struct AccountScreen: View {
                     }
                 }
                 NavigationLink("Settings", value: Route.settings)
+                NavigationLink("Verify your X profile", value: Route.xProof)
                 NavigationLink("Telegram", value: Route.telegram)
                 NavigationLink("The Merry Circle", value: Route.circle)
                 Button("Sign out", role: .destructive) { signOut = true }

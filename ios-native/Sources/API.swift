@@ -20,7 +20,7 @@ final class API: NSObject, URLSessionTaskDelegate {
         c.urlCache = nil
         c.timeoutIntervalForRequest = 45
         #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("-ui-testing") { c.protocolClasses = [PreviewTransport.self] }
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing") || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { c.protocolClasses = [PreviewTransport.self] }
         #endif
         return URLSession(configuration: c, delegate: self, delegateQueue: nil)
     }()

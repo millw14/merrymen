@@ -9,14 +9,26 @@ enum Brand {
     static let down = Color(red: 1, green: 92/255, blue: 113/255)
 }
 
+struct PrimaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.font(.custom("DMSans-9ptRegular", size: 17, relativeTo: .body).weight(.semibold))
+            .foregroundStyle(Color.black).padding(.horizontal, 16).padding(.vertical, 12)
+            .frame(minHeight: 44)
+            .background(configuration.role == .destructive ? Brand.down : Brand.accent, in: RoundedRectangle(cornerRadius: 12))
+            .opacity(enabled ? (configuration.isPressed ? 0.75 : 1) : 0.45)
+    }
+}
+
 func usd(_ value: Double?) -> String { value.map { $0.formatted(.currency(code: "USD")) } ?? "—" }
 func bps(_ value: Double?) -> String { value.map { ($0 / 100).formatted(.number.precision(.fractionLength(2))) + "%" } ?? "—" }
 func escaped(_ value: String) -> String { value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "" }
 
 struct NativeShell: View {
     @EnvironmentObject var store: AppStore
-    @AppStorage("tourComplete") private var tourComplete = false
+    @StateObject private var tourProgress = TourProgress()
     @State private var tour = false
+    @State private var replaying = false
     var body: some View {
         NavigationStack(path: $store.path) {
             TabView(selection: $store.tab) {
@@ -39,7 +51,7 @@ struct NativeShell: View {
                         Button("Group chat") { store.path.append(.groupchat) }
                         Button("Coins to consider") { store.path.append(.proposals) }
                         Button("The Merry Circle") { store.path.append(.circle) }
-                        Button("Replay tour") { tour = true }
+                        Button("Replay tour") { replaying = true; tour = true }
                         Button("Settings") { store.path.append(.settings) }
                     } label: { Image(systemName: "ellipsis.circle") }.accessibilityLabel("More")
                 }
@@ -56,6 +68,7 @@ struct NativeShell: View {
                 case .circle: CircleScreen()
                 case .groupchat: GroupChatScreen()
                 case .proposals: ProposalsScreen()
+                case .xProof: XProofScreen()
                 case .trade(let symbol): TradeScreen(symbol: symbol)
                 case .deposit: DepositScreen()
                 case .permissions: PermissionsScreen()
@@ -69,12 +82,13 @@ struct NativeShell: View {
                 }.id(store.generation)
             }
         }.background(Brand.background)
-        .task {
-            await store.refreshSession()
-            if let state = try? await store.api.request("/api/tour"), state["done"].bool == true { tourComplete = true }
-            if !tourComplete { tour = true }
+        .task { await store.refreshSession() }
+        .task(id: store.generation) {
+            await tourProgress.activate(store)
+            if !replaying { tour = !tourProgress.done }
         }
-        .sheet(isPresented: $tour) { TourScreen() }
+        .environmentObject(tourProgress)
+        .sheet(isPresented: $tour, onDismiss: { replaying = false }) { TourScreen().environmentObject(tourProgress) }
         .alert("Merrymen", isPresented: Binding(get: { store.notice != nil }, set: { if !$0 { store.notice = nil } })) {
             Button("OK", role: .cancel) { store.notice = nil }
         } message: { Text(store.notice ?? "") }
@@ -151,36 +165,33 @@ struct Avatar: View {
 struct TourScreen: View {
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var store: AppStore
-    @AppStorage("tourComplete") private var complete = false
+    @EnvironmentObject var progress: TourProgress
+    @AppStorage("language") private var language = "en"
     @State private var step = 0
-    let stops = [
-        ("Meet your band", "Browse real agent theses in Feed. Paper activity and completed trades are labelled separately."),
-        ("Home", "See your portfolio, positions, markets, and agent rankings. A dash means the value is unknown."),
-        ("Chat", "Ask your agent about its decisions. Proposed actions need your explicit confirmation."),
-        ("Group chat", "Read what agents are discussing, post as an owner, and follow up on their theses."),
-        ("Profile", "Find your agent, add funds, inspect permissions, and manage your account."),
-        ("You set the limits", "Trading caps and permissions remain enforced by the server and smart account."),
-        ("Stay curious", "Explore tokens, follow agents, save a watchlist, and unlock Alpha through the Merry Circle.")
-    ]
+    private func words(_ key: String) -> String { Language.text(key, locale: language) }
+    private func key(_ index: Int, _ part: String) -> String { "tour.stop\(String(format: "%02d", index + 1)).\(part)" }
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Spacer(); Image("Brand").resizable().scaledToFit().frame(width: 70, height: 70)
-            Text(stops[step].0).font(.largeTitle.bold())
-            Text(stops[step].1).font(.title3).foregroundStyle(.secondary)
-            Spacer(); Text("\(step + 1) of \(stops.count)").font(.caption)
-            Button(step == stops.count - 1 ? "Finish" : "Next") { if step < stops.count - 1 { step += 1 } else { finish() } }.buttonStyle(.borderedProminent)
-            Button("Skip tour") { finish() }
-        }.padding(30).background(Brand.background)
+        ScrollView { VStack(alignment: .leading, spacing: 24) {
+            HStack {
+                Image("Brand").resizable().scaledToFit().frame(width: 70, height: 70)
+                Spacer()
+                Picker("Language", selection: $language) { ForEach(Language.options, id: \.0) { code, name in Text(name).tag(code) } }
+            }
+            Picker(words("tour.topics"), selection: $step) { ForEach(0..<26, id: \.self) { index in Text(words(key(index, "title"))).tag(index) } }
+            Text(words(key(step, "title"))).font(.largeTitle.bold())
+            Text(words(key(step, "copy"))).font(.title3).foregroundStyle(.secondary)
+            Text(Language.text("tour.stepOf", locale: language, vars: ["current": String(step + 1), "total": "26"])).font(.caption)
+            HStack {
+                if step > 0 { Button(words("tour.back")) { step -= 1 } }
+                Spacer()
+                Button(words(step == 25 ? "tour.finish" : "tour.next")) { if step < 25 { step += 1 } else { finish() } }.buttonStyle(PrimaryButtonStyle())
+            }
+            Button(words("tour.skip")) { finish() }.accessibilityIdentifier("Skip tour")
+            if progress.syncFailed { Button(words("tour.retrySync")) { Task { await progress.sync(store) } } }
+        }.padding(30) }.background(Brand.background)
+        .onChange(of: step) { _, step in progress.move(step) }
     }
     private func finish() {
-        complete = true; dismiss()
-        Task {
-            do {
-                let state = try await store.api.request("/api/tour")
-                if state["signedIn"].bool == true {
-                    _ = try await store.perform("/api/tour", body: .object(["tenant": state["tenant"], "version": state["version"]]), expectedOwner: store.owner)
-                }
-            } catch { store.notice = "Tour closed on this device. Account sync could not be confirmed: \(error.localizedDescription)" }
-        }
+        progress.finish(store); dismiss()
     }
 }

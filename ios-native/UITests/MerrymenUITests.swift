@@ -28,4 +28,18 @@ final class MerrymenUITests: XCTestCase {
     private func capture(_ app: XCUIApplication, _ name: String) {
         let screenshot = XCTAttachment(screenshot: app.screenshot()); screenshot.name = name; screenshot.lifetime = .keepAlways; add(screenshot)
     }
+    func testTimedOutOrderIsReconciledAndCannotReplayAfterRelaunch() {
+        let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-order-timeout", "-reset-order", "-reset-tour"]; app.launch()
+        if app.buttons["Skip tour"].waitForExistence(timeout: 8) { app.buttons["Skip tour"].tap() }
+        let amount = app.textFields["Amount in USDG, e.g. 5.00"]
+        XCTAssertTrue(amount.waitForExistence(timeout: 8)); amount.tap(); amount.typeText("5.00")
+        app.buttons["Review order"].tap()
+        XCTAssertTrue(app.buttons["Submit order"].waitForExistence(timeout: 5)); app.buttons["Submit order"].tap()
+        XCTAssertTrue(app.staticTexts["Queued"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["Review order"].isEnabled)
+        capture(app, "Uncertain order reconciled without resubmission")
+        app.terminate(); app.launchArguments = ["-ui-testing", "-order-timeout"]; app.launch()
+        XCTAssertTrue(app.staticTexts["Queued"].waitForExistence(timeout: 12))
+        XCTAssertFalse(app.buttons["Review order"].isEnabled)
+    }
 }

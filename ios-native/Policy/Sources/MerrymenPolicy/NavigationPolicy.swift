@@ -1,6 +1,6 @@
 import Foundation
 
-/// No tokens, cookies, private keys or signing operations cross a JavaScript bridge.
+/// Deep links select product screens and never carry an executable action.
 public struct NavigationPolicy {
     public let origin = URL(string: "https://app.merrymen.dev")!
 
@@ -14,18 +14,6 @@ public struct NavigationPolicy {
     public func isHTTPS(_ url: URL) -> Bool {
         url.scheme?.lowercased() == "https" && url.host != nil &&
             url.user == nil && url.password == nil
-    }
-
-    /// Top-level authentication redirects only. Third-party iframe resources are
-    /// managed by WebKit and the site's CSP, not this list.
-    public func isAuthentication(_ url: URL) -> Bool {
-        guard isHTTPS(url), url.port == nil || url.port == 443 else { return false }
-        return ["auth.privy.io", "privy.io", "x.com", "twitter.com", "api.x.com", "api.twitter.com"]
-            .contains(url.host?.lowercased() ?? "")
-    }
-
-    public func canOpenExternally(_ url: URL) -> Bool {
-        isHTTPS(url) || ["mailto", "tel", "tg", "wc"].contains(url.scheme?.lowercased() ?? "")
     }
 
     // Only public/product routes can be deep-linked. Never route a custom URL
@@ -72,4 +60,3 @@ public struct NavigationPolicy {
         return result.isEmpty || result == "." || result == ".." ? "download" : String(result)
     }
 }
-

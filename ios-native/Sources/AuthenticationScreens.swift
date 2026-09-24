@@ -7,7 +7,7 @@ struct SignInCard: View {
         Card {
             Text("Your agent. Your rules.").font(.title2.bold())
             Text("Sign in to manage your agent, follow its decisions, and take part in the band.").foregroundStyle(.secondary)
-            Button("Sign in") { store.path.append(.signIn) }.buttonStyle(.borderedProminent)
+            Button("Sign in") { store.path.append(.signIn) }.buttonStyle(PrimaryButtonStyle())
         }
     }
 }

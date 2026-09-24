@@ -15,6 +15,8 @@ struct TradeScreen: View {
     @State private var orderId: String?
     @State private var result: J?
     @State private var error: String?
+    @State private var statusReady = false
+    @State private var ceiling: Double?
     private var key: String { "pendingOrder.\(store.owner?.lowercased() ?? "none")" }
     var body: some View {
         Page {
@@ -26,11 +28,13 @@ struct TradeScreen: View {
                     Text("Use at most two decimal places and no thousands separators. This asks the agent to trade; it still checks the signed caps, available assets, and risk limits.").font(.caption).foregroundStyle(.secondary)
                     Button("Review order") {
                         guard let owner = store.owner, let body = TradeInput.body(side: side, symbol: symbol, amount: amount, owner: owner) else { error = "Enter a valid ticker and positive amount in USDG, with at most two decimal places."; return }
+                        guard let ceiling, body["usdgAmount"].number! <= ceiling else { error = "That amount exceeds your current order ceiling."; return }
                         confirmationOwner = owner; confirmationBody = body; confirm = true
-                    }.buttonStyle(.borderedProminent).disabled(busy || attempted)
+                    }.buttonStyle(PrimaryButtonStyle()).disabled(busy || attempted || !statusReady || ceiling == nil)
+                    Metric(label: "Current order ceiling", value: ceiling.map { usd($0) + " USDG" } ?? "Unread")
                 }
                 if busy { ProgressView("Submitting once…") }
-                if let error { Text(error).foregroundStyle(Brand.down) }
+                if let error { Text(error).foregroundStyle(Brand.down); Button("Retry status read") { Task { await readStatus() } }.disabled(busy) }
                 if let result { OrderResult(result: result) }
                 if attempted {
                     Text("This request will never be resubmitted automatically. Status checks only read the ledger.").font(.caption).foregroundStyle(.secondary)
@@ -45,7 +49,10 @@ struct TradeScreen: View {
         }.navigationTitle("Trade")
         .task(id: "\(store.generation)|\(phase == .active)") {
             guard store.owner != nil, phase == .active else { return }
-            if let saved = UserDefaults.standard.string(forKey: key) { attempted = true; orderId = saved == "unknown" ? nil : saved }
+            do {
+                if let old = UserDefaults.standard.string(forKey: key) { try savePending(old, key: key); UserDefaults.standard.removeObject(forKey: key) }
+                if let data = try SecureStore.read("dev.merrymen.orders", key), let saved = String(data: data, encoding: .utf8) { attempted = true; orderId = saved == "unknown" ? nil : saved }
+            } catch { self.error = error.localizedDescription; attempted = true; return }
             // Detect an order placed on another device before enabling another request.
             await readStatus()
             while !Task.isCancelled {
@@ -62,7 +69,7 @@ struct TradeScreen: View {
                     Metric(label: "USDG amount", value: usd(body["usdgAmount"].number))
                     Text(confirmationOwner ?? "").font(.caption.monospaced())
                     Text("This may move real funds when your agent is live. A queued order is not a completed trade.")
-                    Button("Submit order") { submit(body) }.buttonStyle(.borderedProminent).disabled(busy)
+                    Button("Submit order") { submit(body) }.buttonStyle(PrimaryButtonStyle()).disabled(busy)
                 }
                 Button("Cancel", role: .cancel) { confirm = false }.disabled(busy)
             } }.interactiveDismissDisabled(busy)
@@ -74,31 +81,46 @@ struct TradeScreen: View {
         Task { defer { busy = false; confirm = false }; do {
             try await store.verifyOwner(owner)
             // Durable before sending: a timeout or process kill must not silently enable retry.
-            attempted = true; UserDefaults.standard.set("unknown", forKey: pendingKey)
+            attempted = true; try savePending("unknown", key: pendingKey)
             let placed = try await store.api.request("/api/orders", method: "POST", body: body)
             guard let id = placed["id"].string, placed["queued"].bool == true else { throw APIError(status: 0, message: "The server did not confirm an order identifier.") }
-            orderId = id; UserDefaults.standard.set(id, forKey: pendingKey)
+            try savePending(id, key: pendingKey)
+            guard owner == store.owner else { return }
+            orderId = id
             result = .object(["state": .string("queued")]); await readStatus()
         } catch {
             self.error = error.localizedDescription
             // Validation/auth rejections are definitive; timeouts and server failures aren't.
-            if let api = error as? APIError, [400, 401, 403].contains(api.status) { attempted = false; UserDefaults.standard.removeObject(forKey: pendingKey) }
+            if let api = error as? APIError, [400, 401, 403].contains(api.status) {
+                do { try SecureStore.remove("dev.merrymen.orders", pendingKey); attempted = false }
+                catch { self.error = error.localizedDescription }
+            }
         } }
     }
     private func readStatus() async {
         guard let owner = store.owner else { return }; let generation = store.generation
         do {
+            if ceiling == nil {
+                let limit = try await store.api.request("/api/orders/ceiling")
+                guard let value = limit["ceilingUsdg"].number, value > 0 else { throw APIError(status: 0, message: "The order ceiling could not be read.") }
+                guard generation == store.generation else { return }; ceiling = value
+            }
             var path = "/api/orders?owner=\(escaped(owner))"
             if let orderId { path += "&id=\(escaped(orderId))" }
             let status = try await store.api.request(path)
             guard generation == store.generation else { return }
+            guard ["none", "queued", "running", "done", "expired"].contains(status["state"].text) else { throw APIError(status: 0, message: "Order status could not be read.") }
             if ["queued", "running"].contains(status["state"].text), let id = status["id"].string {
-                attempted = true; orderId = id; UserDefaults.standard.set(id, forKey: key)
+                try savePending(id, key: key); attempted = true; orderId = id
             }
-            result = status; error = nil
+            result = status; error = nil; statusReady = true
         } catch { self.error = error.localizedDescription }
     }
-    private func clear() { UserDefaults.standard.removeObject(forKey: key); attempted = false; orderId = nil; result = nil; error = nil; amount = "" }
+    private func savePending(_ value: String, key: String) throws { try SecureStore.write("dev.merrymen.orders", key, Data(value.utf8)) }
+    private func clear() {
+        do { try SecureStore.remove("dev.merrymen.orders", key); attempted = false; orderId = nil; result = nil; error = nil; amount = ""; statusReady = false; Task { await readStatus() } }
+        catch { self.error = error.localizedDescription }
+    }
 }
 
 struct OrderResult: View {

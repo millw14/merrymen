@@ -6,7 +6,7 @@ enum Tab: String, CaseIterable { case home = "Home", chat = "Chat", feed = "Feed
     var icon: String { switch self { case .home: "chart.xyaxis.line"; case .chat: "bubble.left.and.bubble.right"; case .feed: "leaf.fill"; case .alpha: "sparkles"; case .profile: "person.crop.circle" } }
 }
 enum Route: Hashable {
-    case markets, search, agent(String), token(String), settings, telegram, circle, groupchat, proposals
+    case markets, search, agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof
     case trade(String), deposit, permissions, create, limits, withdraw, signIn, siteAccess, tour
 }
 
@@ -26,7 +26,17 @@ final class AppStore: ObservableObject {
 
     init() {
         #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-reset-tour") { UserDefaults.standard.removeObject(forKey: "tourComplete") }
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-reset-tour") {
+            for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("merrymen.native.tour.") { UserDefaults.standard.removeObject(forKey: key) }
+            UserDefaults.standard.set("en", forKey: "language")
+        }
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-order-timeout") {
+            path = [.trade("NVDA")]
+            if ProcessInfo.processInfo.arguments.contains("-reset-order") {
+                UserDefaults.standard.removeObject(forKey: "uiTest.orderPlaced")
+                try? SecureStore.remove("dev.merrymen.orders", "pendingOrder.0x1111111111111111111111111111111111111111")
+            }
+        }
         #endif
         let app = Bundle.main.object(forInfoDictionaryKey: "PrivyAppID") as? String ?? ""
         let client = Bundle.main.object(forInfoDictionaryKey: "PrivyClientID") as? String ?? ""

@@ -36,7 +36,7 @@ jobs:
           xcodebuild test -project Merrymen.xcodeproj -scheme Merrymen \
             -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.5' \
             -derivedDataPath DerivedData -resultBundlePath TestResults.xcresult \
-            CODE_SIGNING_ALLOWED=NO | tee build.log
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= | tee build.log
       - name: Export simulator screenshots
         if: always()
         working-directory: ios-native
