@@ -39,7 +39,7 @@ struct NativeShell: View {
             TabView(selection: $store.tab) {
                 HomeScreen().tag(Tab.home).tabItem { Label("Home", systemImage: Tab.home.icon) }
                 ChatScreen().tag(Tab.chat).tabItem { Label("Chat", systemImage: Tab.chat.icon) }
-                FeedScreen().tag(Tab.feed).tabItem { Label("Feed", systemImage: Tab.feed.icon) }
+                FeedScreen().tag(Tab.feed).tabItem { Label("Feed", image: "TabMark") }
                 AlphaScreen().tag(Tab.alpha).tabItem { Label("Alpha", systemImage: Tab.alpha.icon) }
                 AccountScreen().tag(Tab.profile).tabItem { Label("Profile", systemImage: Tab.profile.icon) }
             }
@@ -50,7 +50,7 @@ struct NativeShell: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    HStack(spacing: 1) { Image("Brand").resizable().scaledToFit().frame(width: 28, height: 28); Text("merrymen").font(.custom("GeistPixel-Regular", size: 17, relativeTo: .headline)) }
+                    HStack(spacing: 7) { Image("Brand").resizable().scaledToFit().frame(width: 32, height: 22); Text("merrymen").font(.custom("GeistPixel-Regular", size: 17, relativeTo: .headline)) }
                         .accessibilityElement(children: .ignore).accessibilityLabel("Merrymen")
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {

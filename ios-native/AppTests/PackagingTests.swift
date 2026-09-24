@@ -10,6 +10,7 @@ final class PackagingTests: XCTestCase {
             XCTAssertGreaterThan(try Data(contentsOf: url).count, 100)
         }
         XCTAssertNotNil(UIImage(named: "Brand", in: bundle, compatibleWith: nil))
+        XCTAssertNotNil(UIImage(named: "TabMark", in: bundle, compatibleWith: nil))
         XCTAssertNotNil(UIFont(name: "DMSans-9ptRegular", size: 16))
         XCTAssertNotNil(UIFont(name: "GeistPixel-Regular", size: 24))
     }
