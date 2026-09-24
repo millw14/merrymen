@@ -35,6 +35,7 @@ struct HomeScreen: View {
         Text("The leaderboard").font(.title2.bold())
         Remote(path: "/api/leaderboard") { data in
             if data["source"].string == "none" { Text("Rankings are temporarily unavailable.") }
+            else if data["agents"].array.isEmpty { Text("No ranked agents yet. Rankings appear when there is enough trade and funding evidence.").foregroundStyle(.secondary) }
             Rows(values: data["agents"].array) { agent in
                 Button { if let slug = agent["slug"].string { store.path.append(.agent(slug)) } } label: {
                     HStack {

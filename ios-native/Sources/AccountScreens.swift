@@ -2,12 +2,14 @@ import SwiftUI
 import PhotosUI
 import CoreImage.CIFilterBuiltins
 import UIKit
+import ImageIO
 
 struct AccountScreen: View {
     @EnvironmentObject var store: AppStore
     @State private var signOut = false
     var body: some View {
         Page {
+            LanguagePicker()
             if let error = store.sessionError { Text(error).foregroundStyle(.orange); Button("Retry session") { Task { await store.refreshSession() } } }
             if let owner = store.owner {
                 Card { Text("Signed in").font(.headline); Text(owner).font(.caption.monospaced()).textSelection(.enabled) }
@@ -21,8 +23,8 @@ struct AccountScreen: View {
                             HStack { NavigationLink("Add funds", value: Route.deposit); Spacer(); NavigationLink("Withdraw", value: Route.withdraw) }
                             NavigationLink("Trading limits", value: Route.limits)
                         }
-                        Remote(path: "/api/groupchat/me") { me in
-                            if let slug = me["slug"].string { NavigationLink("View public profile", value: Route.agent(slug)); ProfileImages(slug: slug) }
+                        Remote(path: "/api/feed") { feed in
+                            if let slug = feed["agent"]["slug"].string { NavigationLink("View public profile", value: Route.agent(slug)); ProfileImages(slug: slug) }
                         }
                     } else {
                         Card { Text("Meet your next agent.").font(.title2.bold()); NavigationLink("Create agent", value: Route.create) }
@@ -66,7 +68,9 @@ struct ProfileImages: View {
             guard let photo else { return }; busy = true; let target = kind; let owner = store.owner
             Task { defer { busy = false; item = nil }; do {
                 guard let data = try await photo.loadTransferable(type: Data.self), data.count <= 10 * 1024 * 1024,
-                      let image = UIImage(data: data), let jpeg = image.jpegData(compressionQuality: 0.85) else {
+                      let source = CGImageSourceCreateWithData(data as CFData, nil),
+                      let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: target == "avatar" ? 1600 : 3200] as CFDictionary),
+                      let jpeg = UIImage(cgImage: thumbnail).jpegData(compressionQuality: 0.85), jpeg.count <= (target == "avatar" ? 5 : 8) * 1024 * 1024 else {
                     throw APIError(status: 0, message: "Choose a supported image smaller than 10 MB.")
                 }
                 try await store.verifyOwner(owner)
@@ -83,7 +87,7 @@ struct DepositScreen: View {
         Page {
             if store.owner == nil { SignInCard() } else {
                 Remote(path: "/api/grants") { status in
-                    if status["exists"].bool == true, let address = status["grant"]["smartAccount"].string {
+                    if status["exists"].bool == true, status["grant"]["chainId"].number == 4663, let address = status["grant"]["smartAccount"].string {
                         Card {
                             Text("Add funds").font(.largeTitle.bold())
                             Text("Send USDG to this agent account on Robinhood Chain. Confirm the network in your sending wallet.")
@@ -149,19 +153,5 @@ struct PermissionsScreen: View {
                 } catch { store.notice = error.localizedDescription } }
             }
         } message: { Text("The agent will stop managing positions. This does not sell them or revoke permissions on-chain.") }
-    }
-}
-
-// This preview deliberately has no signing bridge. Shipping an invented or partially
-// ported ZeroDev permission builder would change the account's custody guarantees.
-struct SigningScreen: View {
-    enum Kind: String { case create = "Create agent", limits = "Trading limits", withdraw = "Withdraw" }
-    let kind: Kind
-    var body: some View {
-        Page { Card {
-            Text(kind.rawValue).font(.largeTitle.bold())
-            Label("Native signing is still in development", systemImage: "hammer")
-            Text("This preview cannot create an agent, sign new limits, or withdraw funds yet. These actions need the native smart-account integration before release.")
-        } }.navigationTitle(kind.rawValue)
     }
 }

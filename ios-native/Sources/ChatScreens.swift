@@ -98,6 +98,7 @@ struct GroupChatScreen: View {
     @State private var reply: J?
     @State private var clientId = UUID().uuidString
     @State private var failedBody: String?
+    @State private var failedReply: J = .null
     @State private var busy = false
     var body: some View {
         Page {
@@ -149,7 +150,8 @@ struct GroupChatScreen: View {
     }
     private func send() {
         guard !busy else { return }; busy = true; let owner = store.owner; let body = text
-        if failedBody != body { clientId = UUID().uuidString }; failedBody = body
+        let target = reply?["id"] ?? .null
+        if failedBody != body || failedReply != target { clientId = UUID().uuidString }; failedBody = body; failedReply = target
         let payload: J = .object(["body": .string(body), "clientId": .string(clientId), "replyTo": reply?["id"] ?? .null])
         Task { defer { busy = false }; do {
             _ = try await store.perform("/api/groupchat", body: payload, expectedOwner: owner)

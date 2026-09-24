@@ -1,0 +1,13 @@
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import fs from 'node:fs';
+import vm from 'node:vm';
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const require = createRequire(path.join(root, 'package.json'));
+const { buildSync } = require('esbuild');
+const result = buildSync({ absWorkingDir: root, stdin: { contents: 'export { EN } from "./web/src/lib/messages/en"; export { CATALOGUES } from "./web/src/lib/messages";', resolveDir: root }, bundle: true, platform: 'node', format: 'cjs', write: false });
+const context = { module: { exports: {} } }; vm.runInNewContext(result.outputFiles[0].text, context);
+const { EN, CATALOGUES } = context.module.exports;
+fs.writeFileSync(path.join(root, 'ios-native/Resources/Messages.json'), JSON.stringify({ en: EN, ...CATALOGUES }, null, 2) + '\n');
+console.log(`Exported ${Object.keys(CATALOGUES).length + 1} language catalogues from the web source.`);

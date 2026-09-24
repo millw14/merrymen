@@ -133,7 +133,7 @@ struct WithdrawScreen: View {
     private func withdraw(_ input: J) async {
         guard !wallet.busy else { return }
         do { result = try await wallet.call("withdraw", input: input, store: store); plan = nil }
-        catch { error = "Withdrawal was not confirmed: \(error.localizedDescription) Check the recorded receipt before retrying." }
+        catch { self.error = "Withdrawal was not confirmed: \(error.localizedDescription) Check the recorded receipt before retrying." }
         if let owner = store.owner { do { try readRecords(owner) } catch { self.error = error.localizedDescription; unresolved = true } }
         confirming = false
     }

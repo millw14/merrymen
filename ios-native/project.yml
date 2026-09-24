@@ -22,8 +22,11 @@ targets:
   Merrymen:
     type: application
     platform: iOS
-    sources: [Sources]
-    resources: [Resources]
+    sources:
+      - path: Sources
+      - path: Resources
+        excludes: [Info.plist]
+        buildPhase: resources
     info:
       path: Resources/Info.plist
       properties:
@@ -64,10 +67,20 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.merrymen.app.uitests
     dependencies:
       - target: Merrymen
+  MerrymenAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [AppTests]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.merrymen.app.tests
+    dependencies:
+      - target: Merrymen
 schemes:
   Merrymen:
     build:
       targets:
         Merrymen: all
     test:
-      targets: [MerrymenUITests]
+      targets: [MerrymenAppTests, MerrymenUITests]
