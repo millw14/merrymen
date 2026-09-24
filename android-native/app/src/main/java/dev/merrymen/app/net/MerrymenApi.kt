@@ -36,8 +36,12 @@ sealed interface ApiResult<out T> {
    * The server answered, and said no. `status` is load-bearing. `message` is a
    * sentence the server wrote for a person, or "HTTP <code>" / the generic 5xx
    * line when it wrote none — never a raw body.
+   *
+   * [retryAfterSec] is the Retry-After header in seconds, when a rate limit
+   * sent one (group chat's 429 does), so "slow down, try again in 7s" can say
+   * the real number instead of a guess. Null when absent or not in seconds.
    */
-  data class Refused(val status: Int, val message: String) : ApiResult<Nothing>
+  data class Refused(val status: Int, val message: String, val retryAfterSec: Long? = null) : ApiResult<Nothing>
   /**
    * We never got an answer we could read. Not the same as being told no.
    *
@@ -127,7 +131,8 @@ class MerrymenApi(
             if (r.isSuccessful) {
               cont.resume(ApiResult.Ok(body))
             } else {
-              cont.resume(ApiResult.Refused(r.code, refusalMessage(r.code, body)))
+              val retryAfter = r.header("retry-after")?.trim()?.toLongOrNull()?.takeIf { it >= 0 }
+              cont.resume(ApiResult.Refused(r.code, refusalMessage(r.code, body), retryAfter))
             }
           }
         }

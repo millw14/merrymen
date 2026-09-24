@@ -49,6 +49,19 @@ class ApiResultTest {
     assertEquals(ApiResult.Refused(401, "not signed in"), api.feed())
   }
 
+  @Test fun aRateLimitCarriesItsRetryAfter() = runBlocking {
+    server.enqueue(
+      okhttp3.mockwebserver.MockResponse().setResponseCode(429).setHeader("Retry-After", "7")
+        .setHeader("content-type", "application/json")
+        .setBody("""{"error":"You're posting fast. Wait a few seconds and try again."}"""),
+    )
+    val r = api.getJson<kotlinx.serialization.json.JsonElement>("/api/groupchat")
+    assertEquals(ApiResult.Refused(429, "You're posting fast. Wait a few seconds and try again.", 7), r)
+    // Absent is null, never a guessed wait.
+    server.answer("""{"error":"not signed in"}""", 401)
+    assertEquals(null, (api.feed() as ApiResult.Refused).retryAfterSec)
+  }
+
   @Test fun noAnswerIsUnreachableNotRefused() = runBlocking {
     server.shutdown()
     assertTrue(api.version() is ApiResult.Unreachable)

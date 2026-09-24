@@ -74,6 +74,11 @@ dependencies {
   implementation(libs.androidx.activity.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
+  // Refreshing only while a screen is RESUMED (the feed every 10s, the room
+  // every 3s) needs LocalLifecycleOwner and repeatOnLifecycle from here. Compose
+  // already pulls it in transitively; declaring it means a screen that imports
+  // it does not depend on another library's dependency list.
+  implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.datastore.preferences)
   // Custom Tabs, for opening an owner's X profile in the user's own browser
