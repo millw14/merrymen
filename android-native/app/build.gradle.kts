@@ -13,8 +13,11 @@ android {
     applicationId = "dev.merrymen.app"
     minSdk = 26
     targetSdk = 35
-    versionCode = 1
-    versionName = "0.1.0"
+    // 0.2.0 is the first build written against the server as it stood on
+    // 2026-09-24. The user-agent carries this name (merrymen-android/0.2.0), so
+    // a server log can tell an updated phone from one still on 0.1.0.
+    versionCode = 2
+    versionName = "0.2.0"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
     // THE ORIGIN IS A BUILD INPUT, not a literal in the code. The gateway host

@@ -17,15 +17,42 @@ Jetpack Compose, Material 3, Kotlin 2.2. A native client for the merrymen API.
 > is a compile error, not a warning. Eight call sites had to move to property
 > form.
 
+## Building and testing
+
+The JDK and SDK are Android Studio’s own, and neither is on `PATH`, so set
+both first. `local.properties` is gitignored and not needed when
+`ANDROID_HOME` is set, which also means a fresh worktree builds without
+copying one in.
+
 ```bash
-# from android-native/
-./gradlew assembleDebug
-./gradlew installDebug
+# Git Bash, from android-native/
+export JAVA_HOME="/c/Program Files/Android/Android Studio/jbr"
+export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"
+./gradlew --no-daemon --max-workers=2 assembleDebug testDebugUnitTest
 # point it somewhere else at build time:
-./gradlew assembleDebug -Pmerrymen.origin=http://10.0.2.2:3100
+./gradlew --no-daemon --max-workers=2 assembleDebug -Pmerrymen.origin=http://10.0.2.2:3100
 ```
 
-`minSdk 26`, `targetSdk 35`.
+`--no-daemon --max-workers=2` because this machine is shared: several Gradle
+daemons building in parallel worktrees ran it out of memory once. It costs
+about a minute a build.
+
+`minSdk 26`, `targetSdk 35`, `compileSdk 35`, version 0.2.0 (the user-agent
+says `merrymen-android/0.2.0`).
+
+**Tests are JVM unit tests** under `app/src/test/`, run by
+`testDebugUnitTest`. They drive the real `MerrymenApi` against a
+`MockWebServer` (`apiFor(server)` in `net/TestKit.kt`) and decode production
+answers captured on 2026-09-24 (`src/test/resources/fixtures/probe-*.json`,
+read with `Fixtures.text(name)`). `DecodeFixturesTest` refuses a fixture that
+has no route, so a new capture has to be decoded somewhere. CI does not build
+this app yet, so run them before you push.
+
+**Adding an endpoint** does not touch `MerrymenApi.kt`: write it as an
+extension in your own `net/<Area>Wire.kt` over the shared plumbing,
+`suspend fun MerrymenApi.ceiling(): ApiResult<Ceiling> = getJson("/api/orders/ceiling")`,
+and it gets the same three-state result, refusal wording and decode-failure
+handling as everything else.
 
 ---
 
@@ -251,17 +278,34 @@ API 35 `google_apis` matches the app exactly (`compileSdk`/`targetSdk` 35,
 ### Boot, install, drive
 
 ```bash
+export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"
+ADB="$ANDROID_HOME/platform-tools/adb.exe"
 "$ANDROID_HOME/emulator/emulator.exe" -avd merrymen35 \
   -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect &
-adb wait-for-device
-adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
-adb install -r -t app/build/outputs/apk/debug/app-debug.apk
-adb shell am start -n 'dev.merrymen.app.debug/dev.merrymen.app.MainActivity'
+"$ADB" wait-for-device
+"$ADB" shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
+"$ADB" install -r -t app/build/outputs/apk/debug/app-debug.apk
+MSYS2_ARG_CONV_EXCL='*' "$ADB" shell am start -n 'dev.merrymen.app.debug/dev.merrymen.app.MainActivity'
 ```
+
+One AVD and one `.debug` package serve every branch, so install one build at a
+time and say which one is on the device.
 
 There is no site password to enter any more: the server removed it on
 2026-09-16 (46c852d1), so a fresh install reads the public screens straight
-away and only the owner’s own screens ask for a sign-in.
+away and only the owner’s own screens ask for a sign-in. Signing in happens in
+the WebView and is the owner’s to do; nothing automated types credentials or
+signs anything.
+
+**Which calls were made.** A debug build logs each request line and its status
+(OkHttp `BASIC`, cookie headers redacted, never in a release build), so a run
+can prove a call happened, or did not:
+
+```bash
+"$ADB" logcat -c && "$ADB" logcat -s OkHttp
+# --> GET https://app.merrymen.dev/api/version
+# <-- 200 https://app.merrymen.dev/api/version (212ms, 20-byte body)
+```
 
 Driving it blind by pixel coordinates drifts. Read the real ones:
 

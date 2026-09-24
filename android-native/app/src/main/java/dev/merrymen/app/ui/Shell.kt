@@ -46,6 +46,7 @@ import dev.merrymen.app.ui.screens.AlphaScreen
 import dev.merrymen.app.ui.screens.ChatScreen
 import dev.merrymen.app.ui.screens.CircleScreen
 import dev.merrymen.app.ui.screens.FeedScreen
+import dev.merrymen.app.ui.screens.GroupChatScreen
 import dev.merrymen.app.ui.screens.HomeScreen
 import dev.merrymen.app.ui.screens.LeaderboardScreen
 import dev.merrymen.app.ui.screens.MarketsScreen
@@ -92,6 +93,8 @@ object Routes {
   const val PROPOSALS = "proposals"
   const val TRADE = "trade"
   const val RISK = "risk"
+  /** The fleet room — every hosted Merryman in one chat. Hosted only. */
+  const val GROUPCHAT = "groupchat"
 
   const val TOKEN = "token/{address}"
   fun token(address: String) = "token/$address"
@@ -331,6 +334,7 @@ private fun NavGraphBuilder.graph(nav: NavHostController) {
   composable(Routes.PROPOSALS) { ProposalsScreen(nav) }
   composable(Routes.TRADE) { TradeScreen(nav) }
   composable(Routes.RISK) { RiskScreen(nav) }
+  composable(Routes.GROUPCHAT) { GroupChatScreen(nav) }
 
   composable(Routes.TOKEN) { back ->
     TokenDetailScreen(nav, back.arguments?.getString("address").orEmpty())
