@@ -170,7 +170,7 @@ struct AgentScreen: View {
     @EnvironmentObject var store: AppStore
     let slug: String
     var body: some View { Page { Remote(path: "/api/agents/\(escaped(slug))") { a in
-        AsyncImage(url: URL(string: "https://app.merrymen.dev/api/agent-image/\(escaped(slug))/banner")) { image in image.resizable().scaledToFill().frame(height: 140).clipped() } placeholder: { Rectangle().fill(Brand.card).frame(height: 70) }
+        AsyncImage(url: URL(string: "https://app.merrymen.dev/api/agent-image/\(escaped(slug))/banner?v=\(store.imageRevision.uuidString)")) { image in image.resizable().scaledToFill().frame(height: 140).clipped() } placeholder: { Rectangle().fill(Brand.card).frame(height: 70) }
         HStack { Avatar(slug: slug, size: 62); VStack(alignment: .leading) { Text(a["name"].text).font(.largeTitle.bold()); Text(a["mode"].text.uppercased()).font(.caption).foregroundStyle(.secondary) }; Spacer() }
         if let handle = a["handle"].string {
             if a["handleVerified"].bool == true, let url = URL(string: "https://x.com/\(escaped(handle.replacingOccurrences(of: "@", with: "")))") { Link("@\(handle) · verified", destination: url) }
@@ -202,14 +202,7 @@ struct AgentScreen: View {
             if row["acting"].bool == true { Text("A corporate action is pending.").font(.caption).foregroundStyle(.orange) }
             if row["priceStale"].bool == true { Text("Stale price").font(.caption).foregroundStyle(.orange) }
         } } }
-        Text("Top trades").font(.title2.bold())
-        if a["topTradesRead"].bool != true { Text("Top trades could not be read.") }
-        else if a["topTrades"].array.isEmpty { Text("No closed trades yet.").foregroundStyle(.secondary) }
-        else { Rows(values: a["topTrades"].array) { ProfileTradeCard(trade: $0, showMoney: a["publicBook"].bool == true) } }
-        Text("Recent fills").font(.title2.bold())
-        if a["activityRead"].bool != true { Text("Recent fills could not be read.").foregroundStyle(.orange) }
-        else if a["recentTrades"].array.isEmpty { Text("No fills in this period.").foregroundStyle(.secondary) }
-        else { Rows(values: a["recentTrades"].array) { ProfileTradeCard(trade: $0, showMoney: a["publicBook"].bool == true) } }
+        ProfileActivity(slug: slug, agent: a)
         Text("Theses").font(.title2.bold())
         if a["thesesRead"].bool == false { Text("Theses could not be read.") }
         Rows(values: a["theses"].array) { ThesisCard(thesis: $0) }
@@ -220,13 +213,14 @@ struct TokenScreen: View {
     @EnvironmentObject var store: AppStore
     let address: String
     @State private var span = "1h"
+    @State private var activity = false
     var body: some View { Page {
         HStack {
             Button { store.toggleWatch(address) } label: { Label(store.watchlist.contains(address) ? "Watching" : "Watch", systemImage: store.watchlist.contains(address) ? "star.fill" : "star") }
             Spacer(); ShareLink(item: API.origin.appendingPathComponent("t/\(address)"))
         }
         Picker("Chart bars", selection: $span) { ForEach(["15m", "1h", "4h", "1d"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
-        Remote(path: "/api/tokens/\(escaped(address))?window=\(span)") { token in
+        Remote(path: "/api/tokens/\(escaped(address))?window=\(span)&activity=\(activity ? "1" : "0")") { token in
             let market = token["market"]
             let m = market["stock"] == .null ? market["coin"] : market["stock"]
             Card {
@@ -237,7 +231,7 @@ struct TokenScreen: View {
                 CandleChart(data: token["candles"], token: address)
                 Metric(label: "24h change", value: m["change24hPct"].number.map { "\($0)%" } ?? "—")
                 if let symbol = market["symbol"].string, market["symbolClash"].bool != true {
-                    Button("Trade \(symbol)") { store.path.append(.trade(symbol)) }.buttonStyle(PrimaryButtonStyle())
+                    Button("Trade \(symbol)") { store.path.append(.tradeRequest(symbol, "buy", "", address)) }.buttonStyle(PrimaryButtonStyle())
                 }
                 if m["onCurve"].bool == true { Text("On its launch curve. Reported reserve includes a virtual seed and is not available exit liquidity.").font(.caption).foregroundStyle(.orange) }
                 else if m["reserveUsd"] != .null { Metric(label: "Indexed pool reserve", value: usd(m["reserveUsd"].number)) }
@@ -245,6 +239,11 @@ struct TokenScreen: View {
             }
             Text(address).font(.caption.monospaced()).textSelection(.enabled)
             Button("Copy address") { UIPasteboard.general.string = address }
+            if market["coin"] != .null {
+                Toggle("Load recent pool trades", isOn: $activity)
+                TokenActivity(coin: market["coin"], evidence: token["evidence"], token: address, showTrades: activity)
+                Button("Find this coin for an order") { store.path.append(.snipe(address, "")) }.buttonStyle(PrimaryButtonStyle())
+            }
             Text("Holders & activity").font(.title2.bold())
             if token["ledger"]["fillsRead"].bool != true { Text("Entry-fill history could not be read.").foregroundStyle(.orange) }
             Rows(values: token["ledger"]["holders"].array) { row in Card {
@@ -254,7 +253,7 @@ struct TokenScreen: View {
                 Text(row["basisSource"].string ?? "Basis unavailable").font(.caption).foregroundStyle(.secondary)
             } }
             if let count = token["ledger"]["privateHolders"].number, count > 0 { Text("\(Int(count)) holders keep their books private.").font(.caption) }
-        }.id(span)
+        }.id("\(span)|\(activity)")
     }.navigationTitle("Token") }
 }
 
@@ -292,15 +291,23 @@ struct DiscoveryCard: View {
         NavigationLink(row["name"].text, value: Route.token(row["token"].text)).font(.headline)
         Metric(label: "Price", value: usd(row["priceUsd"].number))
         Metric(label: "24h volume (index)", value: usd(row["volume24hUsd"].number))
+        Metric(label: "24h buyers", value: row["buyers24h"].number.map { $0.formatted() } ?? "—")
+        Metric(label: "Fully diluted value (index)", value: usd(row["fdvUsd"].number))
+        if let days = row["ageDays"].number { Metric(label: "Age in days", value: days.formatted()) }
+        if row["graduated"].bool == true { Text("Graduated to a pool").font(.caption) }
         if row["onCurve"].bool == true { Text("On launch curve · reserve includes virtual liquidity").font(.caption).foregroundStyle(.orange) }
         else { Metric(label: "Indexed reserve", value: usd(row["reserveUsd"].number)) }
         if let reason = row["verdict"]["reason"].string { Text(reason) }
+        if let conviction = row["verdict"]["conviction"].number { Metric(label: "Scout conviction (1–5)", value: conviction.formatted()); Text("Advisory ranking, not a trade size or safety rating.").font(.caption).foregroundStyle(.secondary) }
         if research {
             if row["research"] == .null { Text("Site research unavailable.").font(.caption) }
             else {
                 Metric(label: "Published site reachable", value: row["research"]["siteReachable"].bool.map { $0 ? "Yes" : "No" } ?? "Unknown")
                 Metric(label: "Site names contract", value: row["research"]["siteNamesContract"].bool.map { $0 ? "Yes" : "No" } ?? "Unknown")
                 Metric(label: "Site text length", value: row["research"]["siteTextLength"].number.map { $0.formatted() } ?? "Unknown")
+                Metric(label: "Outbound domains", value: row["research"]["siteOutboundDomains"].number.map { $0.formatted() } ?? "Unknown")
+                Metric(label: "Hype words", value: row["research"]["siteHypeWords"].number.map { $0.formatted() } ?? "Unknown")
+                Metric(label: "No description or socials", value: row["research"]["publishedNothing"].bool.map { $0 ? "Yes" : "No" } ?? "Unknown")
             }
         }
     } }

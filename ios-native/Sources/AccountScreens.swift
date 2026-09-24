@@ -52,18 +52,18 @@ struct ProfileImages: View {
     @State private var item: PhotosPickerItem?
     @State private var kind = "avatar"
     @State private var busy = false
-    @State private var version = UUID()
     var body: some View {
         Card {
             Text("Profile images").font(.headline)
             Picker("Image", selection: $kind) { Text("Avatar").tag("avatar"); Text("Banner").tag("banner") }.pickerStyle(.segmented)
+            AsyncImage(url: URL(string: "https://app.merrymen.dev/api/agent-image/\(escaped(slug))/\(kind)?v=\(store.imageRevision.uuidString)")) { image in image.resizable().scaledToFit().frame(maxHeight: 140) } placeholder: { Image(systemName: "photo").font(.largeTitle).foregroundStyle(.secondary) }
             PhotosPicker(selection: $item, matching: .images) { Label("Choose photo", systemImage: "photo") }.disabled(busy)
             if busy { ProgressView("Uploading…") }
             Button("Remove \(kind)", role: .destructive) {
                 busy = true; let target = kind; let owner = store.owner
                 Task { defer { busy = false }; do {
                     _ = try await store.perform("/api/agent-image/me/\(target)", method: "DELETE", body: .object([:]), expectedOwner: owner)
-                    version = UUID(); store.notice = "\(target.capitalized) removed."
+                    store.imageRevision = UUID(); store.notice = "\(target.capitalized) removed."
                 } catch { store.notice = error.localizedDescription } }
             }.disabled(busy)
         }.onChange(of: item) { _, photo in
@@ -79,7 +79,7 @@ struct ProfileImages: View {
                 try await store.verifyOwner(owner)
                 _ = try await store.api.bytes("/api/agent-image/me/\(target)", method: "PUT", data: jpeg, contentType: "image/jpeg", expectedSession: session)
                 guard owner == store.owner else { return }
-                version = UUID(); store.notice = "\(target.capitalized) updated."
+                store.imageRevision = UUID(); store.notice = "\(target.capitalized) updated."
             } catch { store.notice = error.localizedDescription } }
         }
     }

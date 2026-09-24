@@ -20,6 +20,7 @@ final class AppStore: ObservableObject {
     @Published var owner: String?
     @Published var sessionError: String?
     @Published var generation = 0
+    @Published var imageRevision = UUID()
     @Published var notice: String?
     @Published var watchlist: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "watchlist") ?? [])
     @Published var likes: Set<String> = []

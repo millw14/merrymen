@@ -27,3 +27,9 @@ assert.equal(profile({ ...agent, growthComplete: false, growth: agent.growth.sli
 assert.equal(profile({ ...agent, how: null }).approach, '');
 assert.equal(profile(agent, 'not-a-window').active, 'ALL');
 console.log('Native profile uses evidenced chart windows, complete-period defaults and published strategy descriptions.');
+const assets = (mode, customTokens = null) => JSON.parse(context.NativeFeed.assets(JSON.stringify({ mode, customTokens })));
+assert.equal(assets('stocks').includes('NVDA'), true);
+assert.equal(assets('crypto').includes('NVDA'), false);
+assert.equal(assets('crypto', [{ symbol: 'NEON', address: '0x2222222222222222222222222222222222222222' }]).includes('NEON'), true);
+assert.equal(assets('stocks', [{ symbol: 'NEON', address: '0x2222222222222222222222222222222222222222' }]).includes('NEON'), false);
+console.log('Native creation keeps stock and crypto basket choices within the selected market mode.');

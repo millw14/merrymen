@@ -1,6 +1,14 @@
 // Share the website's publication presentation rules; SwiftUI draws the rows.
 import { beatsOf, pillBeats, mentionTargets, verbOf, pillOf, watchCount, type Beat, type FeedRow, type Mention, type Pill } from '../../web/src/terminal/beat';
 import { chartWindows, defaultWindow, growthWindow, thesisOfHow, type ChartWindow } from '../../web/src/terminal/profile-view';
+import { STOCK_TOKENS } from '../../packages/core/src/tokens';
+
+export function assets(json: string): string {
+  const { mode, customTokens } = JSON.parse(json);
+  const stocks = STOCK_TOKENS.filter(t => mode === 'all' || (mode === 'crypto' ? t.kind === 'memecoin' : t.kind !== 'memecoin')).map(t => t.symbol);
+  const custom = mode === 'stocks' ? [] : (Array.isArray(customTokens) ? customTokens : []).filter((t: { address: string }) => typeof t.address === 'string' && !STOCK_TOKENS.some(s => s.address.toLowerCase() === t.address.toLowerCase())).map((t: { symbol: string }) => t.symbol);
+  return JSON.stringify([...new Set([...stocks, ...custom])].sort());
+}
 
 export function profile(json: string): string {
   const { agent, picked, nowSec } = JSON.parse(json);

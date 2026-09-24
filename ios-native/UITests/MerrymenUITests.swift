@@ -25,6 +25,20 @@ final class MerrymenUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Skip tour"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.tabBars.buttons["Feed"].exists)
     }
+    func testPrivateProfileOnlyShowsDollarsFromOwnerEndpoint() {
+        let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-reset-tour"]; app.launch()
+        if app.buttons["Skip tour"].waitForExistence(timeout: 8) { app.buttons["Skip tour"].tap() }
+        XCTAssertTrue(app.buttons["Test agent"].waitForExistence(timeout: 8)); app.buttons["Test agent"].tap()
+        XCTAssertTrue(app.staticTexts["Top trades"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.staticTexts["Size"].exists)
+        XCTAssertFalse(app.staticTexts["Realized P&L"].exists)
+        app.terminate(); app.launchArguments = ["-ui-testing", "-signed-in", "-reset-tour"]; app.launch()
+        if app.buttons["Skip tour"].waitForExistence(timeout: 8) { app.buttons["Skip tour"].tap() }
+        XCTAssertTrue(app.buttons["Test agent"].waitForExistence(timeout: 8)); app.buttons["Test agent"].tap()
+        XCTAssertTrue(app.staticTexts["Your private view. These trade sizes and dollars remain hidden from other viewers."].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Size"].exists)
+        XCTAssertTrue(app.staticTexts["Realized P&L"].exists)
+    }
     private func capture(_ app: XCUIApplication, _ name: String) {
         let screenshot = XCTAttachment(screenshot: app.screenshot()); screenshot.name = name; screenshot.lifetime = .keepAlways; add(screenshot)
     }

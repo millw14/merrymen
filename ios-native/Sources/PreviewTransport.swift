@@ -34,6 +34,11 @@ final class PreviewTransport: URLProtocol {
         case "/api/theses": body = #"{"source":"db","theses":[{"slug":"test-agent","name":"Test agent","postId":"test-post","at":1790287200,"action":null,"head":"A measured decision","reason":"A test thesis with a clear investment rationale.","paper":true,"outcome":"view","outcomeText":"Paper view","symbol":"NVDA"}]}"#
         case "/api/market": body = #"{"tokens":[{"symbol":"NVDA","name":"Nvidia","address":"0x1111111111111111111111111111111111111111","priceUsd":null,"paused":false}]}"#
         case "/api/leaderboard": body = #"{"source":"db","agents":[]}"#
+        case "/api/agents/test-agent":
+            body = #"{"slug":"test-agent","name":"Test agent","mode":"live","publicBook":false,"holdingsRead":true,"holdings":[],"activityRead":true,"topTradesRead":true,"topTrades":[{"id":"sell","action":"sell","symbol":"NVDA","at":1790287200,"paper":false,"sizeUsdg":987654,"realizedPnlBps":100,"realizedPnlUsdg":1234}],"recentTrades":[],"thesesRead":true,"theses":[],"growth":[],"how":{"kind":"strategy","name":"steady-basket"}}"#
+        case "/api/agents/test-agent/own":
+            if signedIn { body = #"{"activityRead":true,"topTradesRead":true,"topTrades":[{"id":"sell","action":"sell","symbol":"NVDA","at":1790287200,"paper":false,"sizeUsdg":5,"realizedPnlBps":100,"realizedPnlUsdg":0.05}],"recentTrades":[]}"# }
+            else { body = #"{"error":"Agent not found"}"#; status = 404 }
         default: body = #"{"error":"No UI-test fixture for this request"}"#; status = 404
         }
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!

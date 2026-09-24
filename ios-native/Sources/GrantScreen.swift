@@ -7,6 +7,7 @@ struct GrantScreen: View {
     @AppStorage("language") private var language = "en"
     let creating: Bool
     @StateObject private var wallet = WalletHost()
+    @StateObject private var presentation = FeedPresentation()
     @State private var settings: J?
     @State private var grant: J?
     @State private var owner: String?
@@ -51,10 +52,11 @@ struct GrantScreen: View {
                         Card {
                             Text("What should it trade?").font(.headline)
                             Picker("Markets", selection: $mode) { Text("All").tag("all"); Text("Stocks").tag("stocks"); Text("Crypto").tag("crypto") }
-                            ForEach(Array(Set(settings["knownSymbols"].array.compactMap(\.string) + settings.setting("customTokens").array.compactMap { $0["symbol"].string })).sorted(), id: \.self) { symbol in
+                            ForEach(presentation.assets(settings, mode: mode), id: \.self) { symbol in
                                 Toggle(symbol, isOn: Binding(get: { basket.contains(symbol) }, set: { if $0 { basket.insert(symbol) } else { basket.remove(symbol) } }))
                             }
                             NavigationLink("Add custom coins in settings", value: Route.settings)
+                            if mode == "crypto" && presentation.assets(settings, mode: mode).isEmpty { Text("Add at least one coin to give this agent something to trade.").foregroundStyle(.orange) }
                             Text("Save custom coins in Settings, then return here and reload before reviewing the permission.").font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -95,6 +97,7 @@ struct GrantScreen: View {
         }.navigationTitle(creating ? "Create agent" : "Trading limits")
         .navigationBarBackButtonHidden(wallet.busy)
         .task { await load() }
+        .onChange(of: mode) { _, _ in if let settings { basket.formIntersection(presentation.assets(settings, mode: mode)) } }
         .sheet(item: $review) { selected in
             NavigationStack { Page {
                 Text("Sign this permission?").font(.title.bold())
@@ -153,6 +156,7 @@ struct GrantScreen: View {
             for key in ["v4AdapterAddress", "ponsAdapterAddress", "ponsClassVaultFactory"] { if let value = fresh.setting(key).string, !value.isEmpty { input[key] = .string(value) } }
             if let grant { input["expectAccount"] = grant["smartAccount"]; if let factory = grant["trencherFactoryAddress"].string { input["priorTrencherFactory"] = .string(factory) } }
             if creating {
+                basket.formIntersection(presentation.assets(fresh, mode: mode))
                 guard paper || liveAcknowledged else { throw APIError(status: 0, message: words("create.errAck")) }
                 guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, name.count <= 24, !basket.isEmpty else { throw APIError(status: 0, message: "Choose an agent name up to 24 characters and at least one asset.") }
                 input["settingsToSave"] = .object(["owner": .string(owner ?? ""), "agentName": .string(name.trimmingCharacters(in: .whitespacesAndNewlines)), "strategy": .string(strategy), "assetMode": .string(mode), "basketSymbols": .array(basket.sorted().map(J.string)), "paperTradingEnabled": .bool(true), "liveTradingEnabled": .bool(!paper)])

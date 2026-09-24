@@ -12,6 +12,9 @@ final class FeedPresentation: ObservableObject {
         value(input, function: "render")?.array
     }
     func profile(_ input: J) -> J? { value(input, function: "profile") }
+    func assets(_ settings: J, mode: String) -> [String] {
+        value(.object(["mode": .string(mode), "customTokens": settings.setting("customTokens")]), function: "assets")?.array.compactMap(\.string) ?? []
+    }
     private func value(_ input: J, function: String) -> J? {
         guard let context, context.exception == nil, let data = try? JSONEncoder().encode(input),
               let result = context.objectForKeyedSubscript("NativeFeed")?.objectForKeyedSubscript(function)?.call(withArguments: [String(decoding: data, as: UTF8.self)])?.toString(),

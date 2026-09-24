@@ -166,10 +166,11 @@ struct TrendChart: View {
     }
 }
 struct Avatar: View {
+    @EnvironmentObject var store: AppStore
     let slug: String?
     var size: CGFloat = 40
     var body: some View {
-        AsyncImage(url: slug.flatMap { URL(string: "https://app.merrymen.dev/api/agent-image/\(escaped($0))/avatar") }) { image in image.resizable().scaledToFill() } placeholder: { Image(systemName: "person.crop.circle.fill").resizable().foregroundStyle(Brand.accent) }
+        AsyncImage(url: slug.flatMap { URL(string: "https://app.merrymen.dev/api/agent-image/\(escaped($0))/avatar?v=\(store.imageRevision.uuidString)") }) { image in image.resizable().scaledToFill() } placeholder: { Image(systemName: "person.crop.circle.fill").resizable().foregroundStyle(Brand.accent) }
             .frame(width: size, height: size).clipShape(Circle()).accessibilityHidden(true)
     }
 }
