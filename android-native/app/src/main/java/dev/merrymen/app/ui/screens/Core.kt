@@ -2887,11 +2887,10 @@ fun ProfileScreen(nav: NavHostController) {
   ) {
     PageTitle("You")
 
-    // ONLY WHEN WE KNOW YOU ARE SIGNED OUT. While the gate is shut, identity is
-    // unknown (the session route 401s "gated" like everything else), and a
-    // "Sign in" banner would send the reader to a web sign-in behind the same
-    // closed door. When identity is unknown the feed's own LoadedBlock below
-    // shows the gate notice with "Open settings" instead.
+    // ONLY WHEN WE KNOW YOU ARE SIGNED OUT. While identity is unknown (the
+    // session route has not answered, or the server was unreachable), a "Not
+    // signed in" banner would be a claim about the reader that nobody checked;
+    // the feed's own LoadedBlock below says what actually went wrong instead.
     if (identityKnown && signedIn == null) {
       Notice(
         title = "Not signed in",

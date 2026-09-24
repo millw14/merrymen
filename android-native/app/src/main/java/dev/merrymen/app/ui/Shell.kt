@@ -122,8 +122,8 @@ fun Shell() {
   var start by remember { mutableStateOf<String?>(null) }
   LaunchedEffect(Unit) {
     // THE ROUTE IS DECIDED FROM A LOCAL READ, NOT A NETWORK ONE. welcomedNow()
-    // is a DataStore read (sub-millisecond); bootstrap() is three network
-    // round-trips (open the gate, read version, read identity). Waiting for
+    // is a DataStore read (sub-millisecond); bootstrap() is two network
+    // round-trips (read version, read identity). Waiting for
     // bootstrap before composing ANYTHING left the screen black for the whole
     // network wait — measured as the ~1s "jank" on the welcome page, which was
     // never the logos and never CPU: it was the app refusing to draw until the
@@ -131,9 +131,11 @@ fun Shell() {
     //
     // So: a fresh install that has not been welcomed goes straight to the
     // welcome page with zero network on the critical path, and bootstrap runs
-    // AFTER — the welcome's three doors don't need the gate open. Anyone who has
-    // been welcomed goes to Home, and THERE bootstrap must finish first, because
-    // Home's own reads 401 until the gate is open (Repository.bootstrap).
+    // AFTER — the welcome's three doors need no server. Anyone who has been
+    // welcomed goes to Home, and there bootstrap still finishes first. It no
+    // longer has to (it did while the site gate made Home's reads 401 until it
+    // was open), but it means identity is settled before the first screen that
+    // asks about it composes.
     val welcomed = container.session.welcomedNow()
     if (!welcomed) {
       start = Routes.WELCOME
@@ -153,9 +155,6 @@ fun Shell() {
   // slice of the layout. A Scaffold bottomBar would shorten every screen by the
   // bar's height and change where everything sits.
   Box(Modifier.fillMaxSize().background(MerryColors.bg)) {
-    // Provided once: while the site gate is shut EVERY screen is refused, and
-    // every one of them needs the same way out — the password field in
-    // Settings, not a wallet signature. See LoadedBlock.
     // `LocalContentColor` MUST BE PROVIDED HERE, and dropping the Scaffold is
     // what stopped it being. Material's `Text` falls back to
     // `LocalContentColor.current` when no colour is passed, and that local is
@@ -164,7 +163,6 @@ fun Shell() {
     // did not name a colour vanished while every Text that did stayed lit. On
     // the device that read as a half-rendered screen, not as a missing default.
     CompositionLocalProvider(
-      LocalOpenSettings provides { nav.navigate(Routes.SETTINGS) },
       LocalContentColor provides MerryColors.tx,
       LocalBottomInset provides BOTTOM_INSET,
     ) {

@@ -14,8 +14,8 @@ import java.util.concurrent.TimeUnit
  * A COOKIE JAR THAT SURVIVES A COLD START.
  *
  * OkHttp's default jar is `CookieJar.NO_COOKIES` — it drops everything — and
- * this API is cookie-authenticated twice over: `mm_gate` for the site notice and
- * an HMAC-signed httpOnly session cookie for the account. Without persistence
+ * this API is cookie-authenticated: an HMAC-signed httpOnly session cookie for
+ * the account. Without persistence
  * the app re-authenticates on every process death, which for a trading client
  * means the portfolio is empty every time the user comes back to it.
  *

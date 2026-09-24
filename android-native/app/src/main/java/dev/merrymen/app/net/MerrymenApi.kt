@@ -2,7 +2,6 @@ package dev.merrymen.app.net
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
-import okhttp3.FormBody
 import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -115,58 +114,6 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
     val body: RequestBody = (bodyJson ?: "{}").toRequestBody(jsonType)
     val req = Request.Builder().url(url(path)).method(method, body).build()
     return call(req).map { json.decodeFromString<T>(it) }
-  }
-
-  // ── the doorknob ──────────────────────────────────────────────────────────
-
-  /**
-   * POST /api/gate — FORM DATA, not JSON, and it answers 303.
-   *
-   * The whole deployment sits behind this while it is in beta: every API path
-   * except this one returns 401 {"error":"gated"} without the cookie. (Written
-   * without the glob on purpose — Kotlin nests block comments, so a literal
-   * slash-star inside a KDoc opens a comment that never closes and takes the
-   * whole file down with a syntax error 100 lines away.) The
-   * password is checked with a constant-time compare and the cookie value IS
-   * the password, so it is stored the way a password is.
-   */
-  suspend fun gate(password: String): ApiResult<Unit> {
-    val form = FormBody.Builder().add("password", password).build()
-    val req = Request.Builder().url(url("/api/gate")).post(form).build()
-    /*
-     * REDIRECTS OFF, BECAUSE BOTH ANSWERS ARE A 303.
-     *
-     * The route replies 303 to "/" when the password is right and 303 to
-     * "/gate?again=1" when it is wrong. Following either lands on a 200 HTML
-     * page, so a client that follows redirects reports SUCCESS for a wrong
-     * password — and then stores it, leaving every later request 401 "gated"
-     * with the UI insisting it saved. The destination is the only thing that
-     * distinguishes them, so we have to see it.
-     */
-    val once = http.newBuilder().followRedirects(false).build()
-    return suspendCancellableCoroutine { cont ->
-      val c = once.newCall(req)
-      cont.invokeOnCancellation { c.cancel() }
-      c.enqueue(object : okhttp3.Callback {
-        override fun onFailure(call: okhttp3.Call, e: IOException) {
-          cont.resume(ApiResult.Unreachable(e.message ?: "gate unreachable"))
-        }
-
-        override fun onResponse(call: okhttp3.Call, response: Response) {
-          response.use { r ->
-            val where = r.header("location").orEmpty()
-            cont.resume(
-              when {
-                where.startsWith("/gate") ->
-                  ApiResult.Refused(401, "that password was not accepted")
-                r.isRedirect || r.isSuccessful -> ApiResult.Ok(Unit)
-                else -> ApiResult.Refused(r.code, "HTTP ${r.code}")
-              },
-            )
-          }
-        }
-      })
-    }
   }
 
   // ── sign-in ───────────────────────────────────────────────────────────────

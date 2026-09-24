@@ -34,9 +34,16 @@ fun <T> ApiResult<T>.toLoaded(): Loaded<T> = when (this) {
   is ApiResult.Unreachable -> Loaded.Unreachable(cause)
 }
 
-/** True when the refusal means "you are not signed in", across the API's shapes. */
-fun Loaded<*>.needsSignIn(): Boolean =
-  this is Loaded.Refused && status == 401 && !message.trim().equals("gated", ignoreCase = true)
+/**
+ * True when the refusal means "you are not signed in".
+ *
+ * A plain 401 now. There used to be a second 401 — the site password's, with
+ * the error text gated — which meant "the door is shut", not "you are signed
+ * out", and this had to tell them apart. The password was removed server-side
+ * (46c852d1) and no route sends that error any more, so there is one 401 and it
+ * is about the session.
+ */
+fun Loaded<*>.needsSignIn(): Boolean = this is Loaded.Refused && status == 401
 
 class Repository(
   val api: MerrymenApi,
@@ -52,11 +59,11 @@ class Repository(
    *
    * `signedIn` is null for two different facts a screen must not conflate:
    * "we asked the session route and it said you are signed out" and "we never
-   * got to ask" — because the site gate is shut (every route 401s "gated" until
-   * the password is in) or the server was unreachable. A "Not signed in — sign
-   * in" banner is only true in the FIRST case; in the second it points a reader
-   * at a web sign-in that sits behind the very door that is closed. So this flag
-   * flips true only once `session()` has genuinely answered.
+   * got to ask" — because the server was unreachable or refused for some other
+   * reason. A "Not signed in — sign in" banner is only true in the FIRST case;
+   * in the second it tells a reader something about their account that nobody
+   * checked. So this flag flips true only once `session()` has genuinely
+   * answered.
    */
   private val _identityKnown = MutableStateFlow(false)
   val identityKnown: StateFlow<Boolean> = _identityKnown.asStateFlow()
@@ -68,15 +75,18 @@ class Repository(
   suspend fun setOrigin(value: String) = session.setOrigin(value)
 
   /**
-   * Open the door if a password is stored, then find out who we are.
+   * Is the server there, and who does it say we are.
    *
-   * Order matters: while the site gate is on, EVERY /api path except /api/gate
-   * answers 401 {"error":"gated"} — including the ones that would tell us
-   * whether we are signed in. Asking the identity question first would report
-   * "signed out" for a perfectly good session behind a closed door.
+   * NO DOOR TO OPEN FIRST. This used to POST a stored site password to the
+   * gate route before anything else, because every other route answered 401
+   * until it had. The route was deleted server-side on 2026-09-16 (46c852d1),
+   * so on every cold start that POST was a pointless 404 carrying a password to
+   * a server that no longer asks for one. An install upgraded from that build
+   * still has the password stored, so it is deleted here; on every later start
+   * the delete finds nothing.
    */
   suspend fun bootstrap(): Loaded<Unit> {
-    session.gatePassword()?.let { pw -> api.gate(pw) }
+    session.dropRetiredGatePassword()
     return when (val v = api.version()) {
       is ApiResult.Ok -> {
         refreshIdentity()
@@ -85,23 +95,6 @@ class Repository(
       is ApiResult.Refused -> Loaded.Refused(v.status, v.message)
       is ApiResult.Unreachable -> Loaded.Unreachable(v.cause)
     }
-  }
-
-  suspend fun openGate(password: String): Loaded<Unit> {
-    val r = api.gate(password)
-    if (r is ApiResult.Ok) {
-      session.setGatePassword(password)
-      // THE DOOR IS OPEN NOW, SO ASK WHO WE ARE. bootstrap ran while the gate
-      // was still shut — version answered "gated", so identity was never
-      // checked and stayed unknown. Without this, opening the gate from Settings
-      // left every screen thinking identity was unknown for the rest of the
-      // session: the "Not signed in" banner never appeared (it is gated on
-      // identityKnown), and a signed-in reader who typed the password read as
-      // neither in nor out. /api/auth/session answers 200 {address:null} for a
-      // signed-out visitor, so this resolves to a real, known state.
-      refreshIdentity()
-    }
-    return r.toLoaded()
   }
 
   /**
@@ -119,9 +112,8 @@ class Repository(
     when (val s = api.session()) {
       is ApiResult.Ok -> { _signedIn.value = s.value.address; _identityKnown.value = true }
       // A 401 from the SESSION route is a real "signed out" — we reached it and
-      // it said so. (bootstrap only calls this once the gate is open, so a
-      // "gated" 401 never lands here.) A non-401 refusal or an unreachable
-      // server leaves identity UNKNOWN, not signed-out.
+      // it said so. A non-401 refusal or an unreachable server leaves identity
+      // UNKNOWN, not signed-out.
       is ApiResult.Refused -> if (s.status == 401) { _signedIn.value = null; _identityKnown.value = true }
       is ApiResult.Unreachable -> Unit
     }

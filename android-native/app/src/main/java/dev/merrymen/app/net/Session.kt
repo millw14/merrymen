@@ -16,27 +16,26 @@ private val Context.sessionStore by preferencesDataStore("merrymen-session")
 /**
  * WHAT THIS INSTALL KNOWS ABOUT ITS SERVER, AND ABOUT BEING LET IN.
  *
- * Three things, and they are deliberately different kinds of secret:
+ * Two things, and they are deliberately different kinds of secret:
  *
  *   ORIGIN — not a secret at all. A build input with a default, so pointing the
  *   app at a laptop or a staging deploy is a setting rather than a rebuild.
  *
- *   COOKIES — the session. `mm_gate` opens the "not yet" door, and the SIWE
- *   session cookie is the thing that makes /api/settings answer about YOU. Both
- *   are bearer credentials for this account, which is why they live here and
- *   not in a log line.
+ *   COOKIES — the session. The SIWE session cookie is the thing that makes
+ *   /api/settings answer about YOU. It is a bearer credential for this account,
+ *   which is why it lives here and not in a log line.
  *
- *   GATE PASSWORD — shared, low-value, and stored only so a cold start does not
- *   ask for it again. It is a doorknob, not a lock: one password for everyone,
- *   checked at the edge with no session. Storing it does not weaken anything
- *   that was strong, and the repo says so in as many words.
+ * There used to be a third, the shared site password, stored so a cold start
+ * did not ask for it again. The server stopped asking on 2026-09-16 (46c852d1);
+ * see [dropRetiredGatePassword].
  */
 class Session(private val context: Context) {
 
   private object Keys {
     val ORIGIN = stringPreferencesKey("origin")
     val COOKIES = stringPreferencesKey("cookies")
-    val GATE = stringPreferencesKey("gate")
+    /** The retired site password. Read by nothing; only ever deleted. */
+    val RETIRED_GATE = stringPreferencesKey("gate")
     val TENANT = stringPreferencesKey("tenant")
     val WATCHLIST = stringSetPreferencesKey("watchlist")
     val WELCOMED = androidx.datastore.preferences.core.booleanPreferencesKey("welcomed")
@@ -46,11 +45,10 @@ class Session(private val context: Context) {
    * Whether the welcome page has been past ONCE on this device.
    *
    * A startup page, not a wall: it shows on a cold start until the reader signs
-   * in or chooses to go on as a guest, then never again. The gate is already the
-   * one thing that stops you at the door; this is an introduction, so it must
-   * not become a second gate. Signing in also sets it (the reader has plainly
-   * seen it), and it is device-local like the watchlist — nothing about a first
-   * visit belongs in anyone's ledger.
+   * in or chooses to go on as a guest, then never again. It is an
+   * introduction, so it must not become a gate. Signing in also sets it (the
+   * reader has plainly seen it), and it is device-local like the watchlist —
+   * nothing about a first visit belongs in anyone's ledger.
    */
   val welcomed: Flow<Boolean> = context.sessionStore.data.map { it[Keys.WELCOMED] == true }
   suspend fun welcomedNow(): Boolean = welcomed.first()
@@ -99,19 +97,25 @@ class Session(private val context: Context) {
       if (value == null) p.remove(Keys.TENANT) else p[Keys.TENANT] = value
     }
 
-  suspend fun gatePassword(): String? = context.sessionStore.data.first()[Keys.GATE]
-
-  suspend fun setGatePassword(value: String?) =
-    context.sessionStore.edit { p ->
-      if (value.isNullOrBlank()) p.remove(Keys.GATE) else p[Keys.GATE] = value
-    }
+  /**
+   * DELETE THE SITE PASSWORD AN OLDER BUILD STORED.
+   *
+   * It was a shared beta password, kept so a cold start could re-open the door.
+   * The door is gone, so keeping it only means a secret sits on the device with
+   * nothing left to use it; a stored credential nobody reads is still a
+   * credential. Idempotent: after the first run there is nothing to remove.
+   */
+  suspend fun dropRetiredGatePassword() {
+    if (context.sessionStore.data.first()[Keys.RETIRED_GATE] == null) return
+    context.sessionStore.edit { it.remove(Keys.RETIRED_GATE) }
+  }
 
   suspend fun cookiesRaw(): String? = context.sessionStore.data.first()[Keys.COOKIES]
 
   suspend fun setCookiesRaw(value: String) =
     context.sessionStore.edit { it[Keys.COOKIES] = value }
 
-  /** Sign-out: forget the session, keep the origin and the doorknob. */
+  /** Sign-out: forget the session, keep the origin. */
   suspend fun clearSession() =
     context.sessionStore.edit { p: MutablePreferences ->
       p.remove(Keys.COOKIES)

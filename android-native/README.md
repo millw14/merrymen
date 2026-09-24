@@ -9,7 +9,7 @@ Jetpack Compose, Material 3, Kotlin 2.2. A native client for the merrymen API.
 > (`jbr`, OpenJDK 25) and a full SDK were both installed, just not on `PATH`.
 > The version matrix guessed at the time — AGP 8.7.3 with Kotlin 2.0.21 — could
 > not have worked on Gradle 9.3.1 or JDK 25; it is now AGP 8.13.1 with Kotlin
-> 2.2.20 and `compileSdk` 36.
+> 2.2.20 and `compileSdk` 35.
 >
 > This file also had the OkHttp guidance **backwards**. It said 4.x uses
 > methods rather than properties; that describes 3.x. In 4.x those became
@@ -54,8 +54,8 @@ and the only thing that crosses back out is the cookie.
 
 `WebAuth.harvest()` is the whole trick — a WebView's cookie jar and OkHttp's are
 separate stores, so a cookie set in the page is invisible to the API layer until
-it is copied across. `mm_session` and `mm_gate` are both `httpOnly`, so no page
-script could read them; `CookieManager`, being the platform's own store, can.
+it is copied across. `mm_session` is `httpOnly`, so no page script could read
+it; `CookieManager`, being the platform’s own store, can.
 That is why the bridge is native code and not injected JavaScript.
 
 **What this costs, stated rather than discovered:** arming or re-signing a
@@ -84,7 +84,7 @@ ceremonies. They belong where the key is.
 | How much risk — one word into six settings | `/api/settings` |
 | The Merry Circle | `/api/circle` |
 | Telegram — connection, **link code**, owner chat | `/api/telegram` |
-| Settings — a real editor, plus server, site gate, practice reset | `/api/settings`, `/api/gate`, `/api/paper-reset` |
+| Settings — a real editor, plus server origin, practice reset | `/api/settings`, `/api/paper-reset` |
 
 `MerrymenApi` covers the wider surface too — selftest, models, holder
 link/unlink, grant revoke (the kill switch), wall, wall-tape, discoveries,
@@ -259,9 +259,9 @@ adb install -r -t app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n 'dev.merrymen.app.debug/dev.merrymen.app.MainActivity'
 ```
 
-Then put the **site password** into Settings — every route answers
-`401 {"error":"gated"}` until you do, and that is a different 401 from being
-signed out. The app says which; see `LoadedBlock`.
+There is no site password to enter any more: the server removed it on
+2026-09-16 (46c852d1), so a fresh install reads the public screens straight
+away and only the owner’s own screens ask for a sign-in.
 
 Driving it blind by pixel coordinates drifts. Read the real ones:
 

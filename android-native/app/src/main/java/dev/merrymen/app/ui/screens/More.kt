@@ -1492,7 +1492,6 @@ fun SettingsScreen(nav: NavHostController) {
   val c = LocalContainer.current
   var state by remember { mutableStateOf<Loaded<SettingsEnvelope>>(Loaded.Loading) }
   var origin by remember { mutableStateOf("") }
-  var gate by remember { mutableStateOf("") }
   var note by remember { mutableStateOf<String?>(null) }
   // WHETHER THE LAST THING THAT HAPPENED WENT WRONG. Purely a rendering fact:
   // it changes nothing about what is sent or decided, and exists because one
@@ -1540,36 +1539,20 @@ fun SettingsScreen(nav: NavHostController) {
           value = origin,
           onValueChange = { origin = it },
         )
-        FormField(
-          label = "Site password (beta)",
-          value = gate,
-          onValueChange = { gate = it },
-          password = true,
-        )
+        // NO SITE PASSWORD FIELD. It opened the beta door, and the server
+        // removed that door on 2026-09-16 (46c852d1); anything typed there went
+        // to a route that now 404s and came back as "That password didn't open
+        // the door". The origin is the only thing about this device to set.
         PrimaryButton("Save and reconnect") {
           scope.launch {
             c.repo.setOrigin(origin)
-            // A REFUSAL IS NOT A SAVE. openGate's result was thrown away and the
-            // note said "Saved. Reloading." no matter what — so a WRONG password
-            // read as success (the password is correctly not stored, but the UI
-            // claimed it was). The door only opens on Ok; anything else keeps the
-            // old session and says so, in the error colour, and does not refetch.
-            val opened = if (gate.isNotBlank()) c.repo.openGate(gate) else null
-            when (opened) {
-              is Loaded.Refused -> {
-                note = "That password didn't open the door. Check it and try again."
-                noteBad = true
-              }
-              is Loaded.Unreachable -> {
-                note = "Couldn't reach the server to check that password. " + opened.cause
-                noteBad = true
-              }
-              else -> {
-                note = "Saved. Reloading."
-                noteBad = false
-                state = c.api.settings().toLoaded()
-              }
-            }
+            // A NEW ORIGIN IS A NEW SERVER, so who we are there has to be asked
+            // again before its settings are read — a session from the old
+            // origin says nothing about this one.
+            c.repo.refreshIdentity()
+            note = "Saved. Reloading."
+            noteBad = false
+            state = c.api.settings().toLoaded()
           }
         }
       }

@@ -66,10 +66,10 @@ object WebAuth {
   /**
    * Copy the page's cookies into OkHttp's jar.
    *
-   * `mm_session` and `mm_gate` are BOTH httpOnly, so no page script can read
-   * them — but CookieManager, being the platform's own store, can. That is the
-   * only reason this works, and it is also why the copy has to happen here in
-   * native code rather than through injected JavaScript.
+   * `mm_session` is httpOnly, so no page script can read it — but
+   * CookieManager, being the platform's own store, can. That is the only reason
+   * this works, and it is also why the copy has to happen here in native code
+   * rather than through injected JavaScript.
    */
   fun harvest(origin: String, jar: PersistentCookieJar) {
     val raw = CookieManager.getInstance().getCookie(origin) ?: return
@@ -91,15 +91,14 @@ object WebAuth {
   /**
    * SEED THE WEBVIEW WITH WHAT THE APP ALREADY KNOWS — the reverse of harvest.
    *
-   * The WebView's cookie store and OkHttp's jar are separate, and the sign-in
-   * page is BEHIND THE SITE GATE. The app has already opened that gate (its jar
-   * holds `mm_gate`), but the WebView does not — so loading the sign-in URL
-   * showed the gate's "enter your password" page inside the sign-in screen, and
-   * a reader who typed the site password once was asked for it again before they
-   * could even reach the wallet login. Copying the jar's cookies into
-   * CookieManager before the first load lets the WebView through the same door
-   * the app is already through. `Secure` because the origin is https; the
-   * platform store keeps httpOnly cookies like `mm_gate` faithfully.
+   * The WebView's cookie store and OkHttp's jar are separate, and they can
+   * drift: CookieManager writes to disk lazily, so a process death can cost it a
+   * cookie the jar kept. A handoff page (the grant, the limits, a deposit) that
+   * opened signed out would ask the owner to sign in a second time before it
+   * could act for them. Copying the jar's cookies into CookieManager before the
+   * first load hands the page the session the app is already using. `Secure`
+   * because the origin is https; the platform store keeps httpOnly cookies like
+   * `mm_session` faithfully.
    */
   fun seed(origin: String, jar: PersistentCookieJar) {
     val url = runCatching { origin.toHttpUrl() }.getOrNull() ?: return
@@ -139,8 +138,8 @@ fun WebFlow(
 ) {
   DisposableEffect(Unit) {
     CookieManager.getInstance().setAcceptCookie(true)
-    // Hand the WebView the gate (and any session) cookie the app already holds,
-    // so the sign-in page is not itself gated behind the site password.
+    // Hand the WebView any session cookie the app already holds, so a handoff
+    // page opens signed in as the same wallet the app is.
     WebAuth.seed(origin, jar)
     onDispose { CookieManager.getInstance().flush() }
   }
