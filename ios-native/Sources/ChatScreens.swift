@@ -25,7 +25,12 @@ struct ChatScreen: View {
             }
         }
         .onChange(of: voice.transcript) { _, transcript in text = beforeDictation + (beforeDictation.isEmpty || transcript.isEmpty ? "" : " ") + transcript }
-        .onChange(of: phase) { _, phase in if phase != .active { voice.stop() } }
+        .onChange(of: phase) { _, phase in
+            // Permission dialogs briefly make the app inactive. Keep the
+            // user's pending permission request alive, but never record in
+            // the background or through an interruption once recording starts.
+            if phase == .background || (phase == .inactive && !voice.starting) { voice.stop() }
+        }
         .onDisappear { voice.stop() }
         .toolbar { ToolbarItem(placement: .secondaryAction) { Button("Clear conversation", role: .destructive) { clearHistory = true }.disabled(busy) } }
         .confirmationDialog("Clear the saved conversation on this device?", isPresented: $clearHistory, titleVisibility: .visible) {
