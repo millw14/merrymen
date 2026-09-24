@@ -18,7 +18,7 @@ import pytest
 
 from brain.cast import CAST, seat_for, voice
 from brain.graph import BrainGraph, HOUSE_RULES, _DESK, _DEFAULT_DESK, _system
-from brain.outside_research import OutsideConfig, OutsideReport, OutsideResearch, parse
+from brain.outside_research import FENCE_LABEL, OutsideConfig, OutsideReport, OutsideResearch, parse
 from brain.schemas import (
     BrainDecision,
     DecideRequest,
@@ -139,7 +139,8 @@ def test_the_report_reaches_the_manager_fenced():
     pm = model.user["portfolio-manager"]
     assert outside.asked == 1
     assert "OUTSIDE RESEARCH" in pm and "NOT INDEPENDENT" in pm
-    assert "<untrusted source='merrymenbrain'>" in pm
+    assert f"<untrusted source='{FENCE_LABEL}'>" in pm
+    assert "not independent" in FENCE_LABEL
     assert "merrymenbrain bull case: Deliveries beat." in pm
     # The other desk's voices are not named after this desk's seats.
     block = pm[pm.index("OUTSIDE RESEARCH"):]
@@ -246,7 +247,10 @@ def test_an_unreadable_committee_run_is_not_a_hold_vote(patch):
     "env,timeout,max_age",
     [
         ({"MERRYMENBRAIN_TIMEOUT_SEC": "3s", "MERRYMENBRAIN_MAX_AGE_SEC": "24h"}, 3.0, 86_400),
-        ({"MERRYMENBRAIN_TIMEOUT_SEC": "600", "MERRYMENBRAIN_MAX_AGE_SEC": "86400.0"}, 3.0, 86_400),
+        # Out of range is CLAMPED: a too-long timeout to the cap, a too-tight
+        # staleness bound to the tightest allowed, never back to the loose default.
+        ({"MERRYMENBRAIN_TIMEOUT_SEC": "600", "MERRYMENBRAIN_MAX_AGE_SEC": "30"}, 10.0, 60),
+        ({"MERRYMENBRAIN_TIMEOUT_SEC": "3", "MERRYMENBRAIN_MAX_AGE_SEC": "86400.0"}, 3.0, 86_400),
         ({"MERRYMENBRAIN_TIMEOUT_SEC": "2.5", "MERRYMENBRAIN_MAX_AGE_SEC": "3600"}, 2.5, 3_600),
     ],
 )
@@ -255,8 +259,9 @@ def test_bad_optional_numbers_fall_back_instead_of_crashing(env, timeout, max_ag
     assert (cfg.timeout_sec, cfg.max_age_sec) == (timeout, max_age)
 
 
-def test_an_empty_tier_list_means_the_default():
-    cfg = OutsideConfig.from_env({"MERRYMENBRAIN_URL": "http://x", "MERRYMENBRAIN_TOKEN": "t", "MERRYMENBRAIN_TIERS": ""})
+@pytest.mark.parametrize("tiers", ["", " ", "\t", ",", " , "])
+def test_a_blank_tier_list_means_the_default(tiers):
+    cfg = OutsideConfig.from_env({"MERRYMENBRAIN_URL": "http://x", "MERRYMENBRAIN_TOKEN": "t", "MERRYMENBRAIN_TIERS": tiers})
     assert cfg.tiers == {"research", "deep"}
 
 
@@ -285,10 +290,24 @@ def test_the_risk_committee_never_reads_half_a_fence():
         + "\n\nOUTSIDE RESEARCH — UNTRUSTED\n" + _fence("merrymenbrain", "Buy now. " * 300)
         + "\n\nBULL CASE\n" + "b" * 500 + "\n\nBEAR CASE\n" + "c" * 500
     )
-    plan = _tail_outside_fences(dossier, 4000)
-    assert plan.count("<untrusted") == plan.count("</untrusted>")
-    assert "Buy now." not in plan or "<untrusted source='merrymenbrain'>" in plan
-    assert plan.endswith("c" * 500)
+    for limit in range(1000, 6000, 7):
+        plan = _tail_outside_fences(dossier, limit)
+        assert plan.count("<untrusted") == plan.count("</untrusted>"), limit
+        assert "Buy now." not in plan or "<untrusted source='merrymenbrain'>" in plan, limit
+        assert plan.endswith("c" * 500)
+
+
+def test_the_caveat_survives_any_slice_that_keeps_the_other_desk():
+    # The header above the fence can be cut; the label on the fence cannot.
+    from brain.graph import _fence, _tail_outside_fences
+    from brain.outside_research import dossier_block
+
+    report = _outside_report()
+    dossier = "x" * 3000 + dossier_block(report, _fence) + "\n\nBULL CASE\n" + "b" * 400
+    for limit in range(200, 4000, 3):
+        plan = _tail_outside_fences(dossier, limit)
+        if "merrymenbrain rating" in plan:
+            assert f"<untrusted source='{FENCE_LABEL}'>" in plan, limit
 
 
 @pytest.mark.parametrize(
@@ -338,3 +357,28 @@ def test_health_and_decide_survive_a_bad_optional_variable(monkeypatch):
     assert r.status_code == 200
     assert r.json()["outside_research"]["configured"] is True
     assert server._outside() is not None
+
+
+def test_startup_says_in_the_logs_whether_the_desk_is_wired(monkeypatch, caplog):
+    # Brain has no public domain, so the deploy logs are where an operator looks.
+    import brain.server as server
+
+    states = iter([
+        {"configured": True, "reachable": False, "problem": "ConnectError"},
+        {"configured": True, "reachable": False, "problem": "ConnectError"},   # unchanged: not logged again
+        {"configured": True, "reachable": True, "auth_ok": True, "remote_ok": True},
+        {"configured": True, "reachable": True, "auth_ok": True, "remote_ok": True},  # never reached
+    ])
+
+    async def fake_state():
+        return next(states)
+
+    monkeypatch.setattr(server, "_outside_state", fake_state)
+    monkeypatch.setattr(server, "WIRING_CHECKS_SEC", (0, 0, 0, 0))
+    with caplog.at_level("WARNING", logger="brain.server"):
+        asyncio.run(server._report_wiring())
+    lines = [r.getMessage() for r in caplog.records if "merrymenbrain wiring" in r.getMessage()]
+    assert lines == [
+        "merrymenbrain wiring: reachable=False auth_ok=None remote_ok=None problem=ConnectError",
+        "merrymenbrain wiring: ok",
+    ]

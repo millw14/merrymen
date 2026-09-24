@@ -120,6 +120,10 @@ def _tail_outside_fences(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     start = len(text) - limit
+    # A cut inside a closing tag itself: start just after that tag.
+    straddle = text.rfind(_CLOSE, 0, start + len(_CLOSE) - 1)
+    if straddle != -1 and straddle < start < straddle + len(_CLOSE):
+        return text[straddle + len(_CLOSE):].lstrip("\n")
     close = text.find(_CLOSE, start)
     if close == -1:
         return text[start:]

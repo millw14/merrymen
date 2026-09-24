@@ -107,15 +107,29 @@ never gets a report.
    | `MERRYMENBRAIN_URL` | `http://merrymenbrain.railway.internal:8080` |
    | `MERRYMENBRAIN_TOKEN` | the same secret as step 2 |
    | `MERRYMENBRAIN_TIERS` | optional, default `research,deep` |
-   | `MERRYMENBRAIN_TIMEOUT_SEC` | optional, default `3`, at most `10` |
-   | `MERRYMENBRAIN_MAX_AGE_SEC` | optional, default `86400` |
+   | `MERRYMENBRAIN_TIMEOUT_SEC` | optional, default `3`, clamped to `0.1`–`10` |
+   | `MERRYMENBRAIN_MAX_AGE_SEC` | optional, default `86400`, clamped to `60`–`604800` |
+
+   A value that is not a number falls back to the default and logs a warning.
+   It never stops a decision.
 
    Do not build the URL from `${{merrymenbrain.PORT}}`. Railway injects `PORT`
    into the running container but does not publish it as a variable other
    services can reference, so the reference would come out empty.
 
-4. **Check it from the brain service's `/health`.** It now calls
-   merrymenbrain's token-gated `/v1/ping`, so one look proves the whole path:
+4. **Check it.** Brain has no public domain, so read the answer in one of two
+   places:
+
+   - **Deploy logs.** Open Railway → the brain service → the latest deployment
+     → logs. After boot, brain probes merrymenbrain's token-gated `/v1/ping`
+     (at 0s, 30s, 90s and 5 min, until wired) and logs
+     `merrymenbrain wiring: ok`, or what is wrong, e.g.
+     `merrymenbrain wiring: reachable=True auth_ok=False … problem=MERRYMENBRAIN_TOKEN does not match`.
+   - **On demand.** Run `railway ssh --service <brain service>` and then
+     `python -c "import os,urllib.request as u;print(u.urlopen('http://localhost:'+os.environ.get('PORT','8080')+'/health').read().decode())"`
+     and read the `outside_research` field.
+
+   Either way, the probe proves the whole path:
 
    | `outside_research` shows | Meaning |
    | --- | --- |

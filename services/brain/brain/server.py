@@ -14,6 +14,8 @@ money. Brain is outside the trust domain by construction, not by policy.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 import secrets
@@ -30,8 +32,55 @@ from .outside_research import OutsideConfig, OutsideResearch, probe as probe_out
 from .llm import Llm, LlmConfig
 from .schemas import BrainDecision, DecideRequest, Refusal, SCHEMA_VERSION
 
-app = FastAPI(title="Merrymen Brain", version=SCHEMA_VERSION)
 log = logging.getLogger(__name__)
+
+#: When the startup wiring check re-probes merrymenbrain, in seconds after boot.
+#: The two services deploy independently, so the first probe often runs before
+#: merrymenbrain is up; a few spaced retries catch it without polling forever.
+WIRING_CHECKS_SEC = (0, 30, 90, 300)
+
+
+async def _report_wiring() -> None:
+    """
+    SAY IN THE DEPLOY LOGS WHETHER MERRYMENBRAIN IS WIRED.
+
+    Brain has no public domain, so its /health is not something an operator can
+    open in a browser. The deploy logs are. Each probe result is logged when it
+    changes, until the wiring is complete or the checks run out. Warning level,
+    because that is what reaches Railway's logs without a logging config.
+    """
+    last = None
+    elapsed = 0
+    for at in WIRING_CHECKS_SEC:
+        await asyncio.sleep(at - elapsed)
+        elapsed = at
+        state = await _outside_state()
+        if not state.get("configured"):
+            if state.get("problem"):
+                log.warning("merrymenbrain wiring: not configured (%s)", state["problem"])
+            return
+        wired = state.get("reachable") and state.get("auth_ok") and state.get("remote_ok")
+        summary = "ok" if wired else (
+            f"reachable={state.get('reachable')} auth_ok={state.get('auth_ok')} "
+            f"remote_ok={state.get('remote_ok')} problem={state.get('problem') or state.get('remote_problem')}"
+        )
+        if summary != last:
+            log.warning("merrymenbrain wiring: %s", summary)
+            last = summary
+        if wired:
+            return
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    task = asyncio.create_task(_report_wiring())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+app = FastAPI(title="Merrymen Brain", version=SCHEMA_VERSION, lifespan=_lifespan)
 
 _concurrency = AgentConcurrency()
 
