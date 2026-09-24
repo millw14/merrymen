@@ -1,0 +1,10 @@
+DerivedData/
+*.xcodeproj/
+*.xcarchive/
+*.ipa
+.build/
+.swiftpm/
+ExportOptions.plist
+Config/Signing.xcconfig
+TestResults.xcresult/
+build.log
