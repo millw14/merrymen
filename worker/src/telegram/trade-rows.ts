@@ -138,13 +138,18 @@ export async function loadTradeViews(db: LabelDb, agentId: string, o: TradeViewO
   // its receipt knows — a receipt, a block and a symbol read each, with a
   // timeout apiece. One after another, eight of them on a slow RPC was a
   // minute of silence before /trades answered.
-  const views: TradeView[] = await Promise.all((o.token ? kept : kept.slice(0, limit)).map((r) => view(db, agentId, r, own, o)));
+  //
+  // A restart copy's true time (its receipt's, with a client) is EARLIER than
+  // its row, so while one is among the first `limit` a later trade may belong
+  // in its place: every candidate is read before the cut. Nothing else moves.
+  const head = kept.slice(0, limit);
+  const views: TradeView[] = await Promise.all((o.token || (o.client && head.some(isRestartCopy)) ? kept : head).map((r) => view(db, agentId, r, own, o)));
   const wanted = o.token?.trim().toLowerCase();
   const out = wanted
     ? views.filter((v) => v.token === wanted || v.label.toLowerCase() === wanted || v.label.toLowerCase().startsWith(`${wanted} `))
     : views;
   // A restart copy's true time can put it before rows written earlier.
-  return out.slice(0, limit).sort((a, b) => b.at - a.at || b.id - a.id);
+  return out.sort((a, b) => b.at - a.at || b.id - a.id).slice(0, limit);
 }
 
 async function view(db: LabelDb, agentId: string, r: RawRow, own: readonly string[], o: TradeViewOpts): Promise<TradeView> {

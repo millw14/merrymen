@@ -71,6 +71,10 @@ const LOG_TABLES = [
       // only where nobody can see it is not a proof.
       "decision_id",
       "fill_side",
+      // The coin's name, written with the fill (store.ts fillSymbolOfRow).
+      // Without it the dashboard names a coin only through its decision row,
+      // and a redeploy leaves the chat nothing to name it from at all.
+      "fill_symbol",
       "fill_qty_raw",
       "fill_price_usd",
       "realized_pnl_usdg",
@@ -697,7 +701,7 @@ export async function mirrorTenant(args: {
       .prepare(
         `SELECT agent_id, user_op_hash, tx_hash, status, reject_rule, decision_id,
                 fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                gas_wei, sponsored_gas_wei, gas_usdg, gas_units, fill_cash_usdg
+                gas_wei, sponsored_gas_wei, gas_usdg, gas_units, fill_cash_usdg, fill_symbol
            FROM trades
           WHERE user_op_hash IS NOT NULL AND status <> 'submitted' AND created_at > ?
           ORDER BY id DESC LIMIT ?`,
@@ -715,7 +719,8 @@ export async function mirrorTenant(args: {
                              basis_source = COALESCE(?, basis_source), gas_wei = COALESCE(?, gas_wei),
                              sponsored_gas_wei = COALESCE(?, sponsored_gas_wei),
                              gas_usdg = COALESCE(?, gas_usdg), gas_units = COALESCE(?, gas_units),
-                             fill_cash_usdg = COALESCE(?, fill_cash_usdg)
+                             fill_cash_usdg = COALESCE(?, fill_cash_usdg),
+                             fill_symbol = COALESCE(?, fill_symbol)
             WHERE agent_id IN (?, ?, ?) AND user_op_hash IN (?, ?) AND status = 'submitted'`,
         );
         for (const r of resolved) {
@@ -724,6 +729,7 @@ export async function mirrorTenant(args: {
             r.fill_side ?? null, r.fill_qty_raw ?? null, r.fill_price_usd ?? null,
             r.realized_pnl_usdg ?? null, r.basis_source ?? null, r.gas_wei ?? null,
             r.sponsored_gas_wei ?? null, r.gas_usdg ?? null, r.gas_units ?? null, r.fill_cash_usdg ?? null,
+            r.fill_symbol ?? null,
             ...spellingsOf(r),
           );
           // RunResult.changes is part of the Db contract — node:sqlite reports

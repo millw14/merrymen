@@ -24,6 +24,7 @@ import type { PublicClient } from "viem";
 import {
   CASH,
   STOCK_TOKENS,
+  isEvidencedFlow,
   conceptsFor,
   liveBlockerText,
   renderConcepts,
@@ -37,8 +38,9 @@ import type { ResolvedConfig } from "../settings";
 import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 import { labelText, shortAddr, tokenLabel, tokenLabelSync } from "../token-label";
 import { readTokenMeta, sanitizeMeta, type TokenMeta } from "../venues/pons-meta";
-import { carriedDecisionsFrom, overlayHistory } from "./history-overlay";
-import { agentEpoch, netContributions, openRO, readPositions, resolveAgent, type StatusContext } from "./reads";
+import { carriedDecisionsFrom, carriedHistory, historyFileKey, overlayHistory } from "./history-overlay";
+import { accountSeries, bookOf, periodChange, type PeriodChange } from "../period-pnl";
+import { agentEpoch, openRO, readPositions, resolveAgent, type StatusContext } from "./reads";
 import { settingsListText } from "./settings-chat";
 import { settleFor, signNeed, type SignNeed } from "./sign-prompt";
 import { isActiveClassState, isQuoteTokenRow } from "../class-active";
@@ -81,33 +83,131 @@ function str(v: unknown, max = 64): string {
 }
 
 /**
+ * ONE LEDGER CONNECTION FOR A WHOLE ANSWER.
+ *
+ * Laying the carried history over the ledger copies every trade and decision
+ * this agent has (history-overlay.ts): a quarter of a second on a busy ledger,
+ * synchronous, in the process that trades — and one answer can make twenty
+ * lookups. Inside openToolSession they share one overlaid connection, opened
+ * by the first lookup that needs the ledger and closed when the answer ends.
+ * It is rebuilt whenever the ledger has been written since (PRAGMA
+ * data_version), so a lookup never sees less than a fresh connection would.
+ * Outside a session — /trades, the tests, anything else — every lookup opens
+ * and closes its own, as before.
+ */
+interface ToolSession {
+  db: DatabaseSync | null;
+  /** The ledger's data_version when `db` was opened. */
+  version: number | null;
+  /** The carried history has been laid over `db` (tried once per connection). */
+  overlaid: boolean;
+  /** Which history file was on disk when `db` was opened (history-overlay.ts historyFileKey). */
+  historyKey: string | null;
+}
+
+const sessions = new WeakMap<ToolContext, ToolSession>();
+const sessionCount = { opened: 0, open: 0 };
+
+/** Test seam: session connections opened so far, and open right now. */
+export function toolSessionStatsForTest(): { opened: number; open: number } {
+  return { ...sessionCount };
+}
+
+/** Share one ledger connection across every lookup made with `ctx` until close(). */
+export function openToolSession(ctx: ToolContext): { close(): void } {
+  if (sessions.has(ctx)) return { close() {} }; // an outer session owns it
+  const s: ToolSession = { db: null, version: null, overlaid: false, historyKey: null };
+  sessions.set(ctx, s);
+  return {
+    close() {
+      sessions.delete(ctx);
+      dropSessionDb(s);
+    },
+  };
+}
+
+function dropSessionDb(s: ToolSession): void {
+  if (!s.db) return;
+  try {
+    s.db.close();
+  } catch {
+    /* already closed */
+  }
+  s.db = null;
+  s.version = null;
+  s.overlaid = false;
+  sessionCount.open -= 1;
+}
+
+function dataVersion(db: DatabaseSync): number | null {
+  try {
+    return (db.prepare("PRAGMA data_version").get() as { data_version: number }).data_version;
+  } catch {
+    return null;
+  }
+}
+
+/** This lookup's ledger: the session's, or its own (no session: the lookup closes it). */
+function ledgerFor(ctx: ToolContext): { db: DatabaseSync; session: ToolSession | null } | null {
+  const s = sessions.get(ctx);
+  if (!s) {
+    const db = openRO();
+    return db ? { db, session: null } : null;
+  }
+  // The ledger written since it was opened, or the history file replaced (the
+  // orchestrator re-reads it after its startup repair): start again, as a
+  // fresh lookup would. One stat per lookup.
+  if (s.db && (dataVersion(s.db) !== s.version || historyFileKey() !== s.historyKey)) dropSessionDb(s);
+  if (!s.db) {
+    // The file's key before the overlay reads it, so a file landing in between is caught next time.
+    const key = historyFileKey();
+    const db = openRO();
+    if (!db) return null; // no ledger yet: the next lookup tries again
+    s.db = db;
+    s.version = dataVersion(db);
+    s.historyKey = key;
+    sessionCount.opened += 1;
+    sessionCount.open += 1;
+  }
+  return { db: s.db, session: s };
+}
+
+/** The carried history, laid once per connection. */
+function lay(l: { db: DatabaseSync; session: ToolSession | null }, who: string): void {
+  if (l.session?.overlaid) return;
+  overlayHistory(l.db, who);
+  if (l.session) l.session.overlaid = true;
+}
+
+/**
  * Open the ledger and resolve this owner's agent, or say why not. The trades
  * and decisions from before a hosted redeploy are laid over it
  * (history-overlay.ts), so every lookup here sees the whole tape.
  */
-function withLedger<T>(ctx: ToolContext, fn: (db: DatabaseSync, who: string) => T, none: T): T {
-  const db = openRO();
-  if (!db) return none;
+function withLedger<T>(ctx: ToolContext, fn: (db: DatabaseSync, who: string) => T, none: T, history = true): T {
+  const l = ledgerFor(ctx);
+  if (!l) return none;
   try {
-    const who = resolveAgent(db, ctx.status.agentId);
+    const who = resolveAgent(l.db, ctx.status.agentId);
     if (!who) return none;
-    overlayHistory(db, who);
-    return fn(db, who);
+    // A lookup that reads neither trades nor decisions (the log, the agent row) skips the copy.
+    if (history) lay(l, who);
+    return fn(l.db, who);
   } finally {
-    db.close();
+    if (!l.session) l.db.close();
   }
 }
 
 async function withLedgerAsync(ctx: ToolContext, fn: (db: DatabaseSync, who: string) => Promise<string>, none: string): Promise<string> {
-  const db = openRO();
-  if (!db) return none;
+  const l = ledgerFor(ctx);
+  if (!l) return none;
   try {
-    const who = resolveAgent(db, ctx.status.agentId);
+    const who = resolveAgent(l.db, ctx.status.agentId);
     if (!who) return none;
-    overlayHistory(db, who);
-    return await fn(db, who);
+    lay(l, who);
+    return await fn(l.db, who);
   } finally {
-    db.close();
+    if (!l.session) l.db.close();
   }
 }
 
@@ -340,6 +440,82 @@ function periodStart(period: string, now: number): { since: number; label: strin
   return { since: now - (now % 86_400), label: "today (since 00:00 UTC)" };
 }
 
+/** Readings the P&L breakdown reads at most (about nine days on a fifteen-second tick). */
+const LOCAL_MARKS_MAX = 50_000;
+
+/** When this process started — the chat runs in the process that trades, so its last restart. */
+const PROCESS_START_SEC = Math.floor(Date.now() / 1000 - process.uptime());
+
+/** A restart copy, over an unaliased trades row — isRestartCopy (token-label.ts). */
+const NOT_A_COPY = "NOT (kind = 'swap' AND target IS NOT NULL AND lower(target) = lower(agent_id) AND decision_id IS NULL AND fill_side IS NULL)";
+
+/**
+ * How the account's value moved since `since`, split into money in or out,
+ * trading and price moves, and what no record explains (period-pnl.ts) —
+ * across a hosted redeploy when the orchestrator carried the account over
+ * (history-files.ts HistoryAccount), else on this ledger alone.
+ *
+ * The carried part joins only a ledger that began after it was read — the
+ * ledger this spawn started with — and only in the same accounting epoch;
+ * anything else would count a stretch twice. When the ledger already holds a
+ * reading at or before `since`, the period opens there and the carried part
+ * is not needed at all.
+ */
+function accountChange(db: DatabaseSync, who: string, since: number): PeriodChange {
+  try {
+    const epoch = agentEpoch(db, who);
+    // Where this ledger's own record starts: its first reading OR flow. A run
+    // that booked a deposit and died before its first reading still began then.
+    const firstMark = scalar(db, "SELECT MIN(at) AS t FROM main.equity WHERE agent_id = ? AND epoch = ?", who, epoch);
+    const firstFlow = scalar(db, "SELECT MIN(at) AS t FROM main.flows WHERE agent_id = ? AND epoch = ?", who, epoch);
+    const firstLocal = firstMark === null ? firstFlow : firstFlow === null ? firstMark : Math.min(firstMark, firstFlow);
+    const before = scalar(db, "SELECT MAX(at) AS t FROM main.equity WHERE agent_id = ? AND epoch = ? AND at <= ?", who, epoch, since);
+    const from = before ?? 0;
+    // Newest LOCAL_MARKS_MAX readings at most (about nine days on a fifteen-
+    // second tick): this runs inside the process that trades, and "all" on a
+    // long-lived ledger is every reading it holds.
+    const local = (
+      db
+        .prepare("SELECT at, mode, equity_usdg AS equity, cash_usdg AS cash FROM main.equity WHERE agent_id = ? AND epoch = ? AND at >= ? ORDER BY at DESC, id DESC LIMIT ?")
+        .all(who, epoch, from, LOCAL_MARKS_MAX) as { at: number; mode: string | null; equity: number; cash: number }[]
+    )
+      .reverse()
+      .map((m) => ({ at: m.at, equity: m.equity, cash: m.cash, book: bookOf(m.mode) }));
+    // Cut short, the period opens at the oldest reading read — and the carried
+    // record is not joined: its seam would be judged against that reading, a
+    // stretch of this ledger's own days folded into one step.
+    const cut = local.length >= LOCAL_MARKS_MAX && firstMark !== null && local[0]!.at > firstMark;
+    const acct = before === null && !cut ? carriedHistory(who)?.account : null;
+    const carried = acct && acct.epoch === epoch && acct.points.length && (firstLocal === null || firstLocal >= acct.until) ? acct : null;
+    const localFlows = (
+      db
+        .prepare("SELECT at, direction, amount_usdg, source FROM main.flows WHERE agent_id = ? AND epoch = ? AND at >= ?")
+        .all(who, epoch, from) as { at: number; direction: string; amount_usdg: number; source: string }[]
+    ).map((f) => ({ at: f.at, signed: f.direction === "out" ? -f.amount_usdg : f.amount_usdg, evidenced: isEvidencedFlow(f.source) }));
+    // Trades on the carried history too: the step across the restart asks
+    // whether a trade explains its cash, and those are the old run's — from
+    // EACH book's last carried reading, not just the newest book's.
+    const lastByBook = new Map<string, number>();
+    for (const p of carried?.points ?? []) lastByBook.set(p.book, p.at);
+    const tradeFrom = carried ? Math.min(...lastByBook.values()) : (local[0]?.at ?? from);
+    const trades = db
+      .prepare(`SELECT created_at AS at, status FROM trades WHERE agent_id = ? AND created_at >= ? AND status IN ('landed','submitted','paper') AND ${NOT_A_COPY}`)
+      .all(who, tradeFrom) as { at: number; status: string }[];
+    const series = accountSeries({
+      carried: carried ? carried.points : [],
+      carriedTail: carried ? carried.tail : [],
+      local,
+      localFlows,
+      // A restart that kept this ledger (a crash, the watchdog) is a break in it.
+      localBreaks: [PROCESS_START_SEC],
+      tradeTimes: { paper: trades.filter((t) => t.status === "paper").map((t) => t.at), live: trades.filter((t) => t.status !== "paper").map((t) => t.at) },
+    });
+    return periodChange(series, since);
+  } catch {
+    return { kind: "none" };
+  }
+}
+
 const pnlBreakdown: ChatTool = {
   spec: {
     name: "pnl_breakdown",
@@ -356,47 +532,38 @@ const pnlBreakdown: ChatTool = {
       ctx,
       async (db, who) => {
         const { since, label } = periodStart(str(input.period) || "today", ctx.now);
-        const epoch = agentEpoch(db, who);
         const lines: string[] = [`Period: ${label}.`];
-        type Mark = { equity_usdg: number; at: number; mode: string | null };
-        let open: Mark | undefined;
-        let close: Mark | undefined;
-        try {
-          open =
-            (db.prepare("SELECT equity_usdg, at, mode FROM equity WHERE agent_id = ? AND epoch = ? AND at <= ? ORDER BY at DESC, id DESC LIMIT 1").get(who, epoch, since) as Mark | undefined) ??
-            (db.prepare("SELECT equity_usdg, at, mode FROM equity WHERE agent_id = ? AND epoch = ? AND at >= ? ORDER BY at ASC, id ASC LIMIT 1").get(who, epoch, since) as Mark | undefined);
-          close = db.prepare("SELECT equity_usdg, at, mode FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1").get(who, epoch) as Mark | undefined;
-        } catch {
-          /* no equity */
-        }
-        // Only money moved AFTER the opening mark: anything at or before it is
-        // already inside that mark, and counting it again turned a deposit
-        // made just before the period's first reading into a trading loss.
-        const flows = open ? netContributions(db, who, open.at + 1) : null;
-        if (open && close && (open.mode ?? "") === (close.mode ?? "")) {
-          const change = close.equity_usdg - open.equity_usdg;
-          lines.push(`Account value went from ${dollars(open.equity_usdg)} (${when(open.at)}) to ${dollars(close.equity_usdg)} (${when(close.at)}): ${change >= 0 ? "+" : "−"}${dollars(Math.abs(change))}.`);
-          if (flows !== null && Math.abs(flows) >= 0.005) {
-            const trading = change - flows;
-            lines.push(`Of that, ${flows > 0 ? `${dollars(flows)} was money put in` : `${dollars(-flows)} was money taken out`}, so trading itself made ${trading >= 0 ? "+" : "−"}${dollars(Math.abs(trading))}.`);
-          } else {
-            lines.push("No money was put in or taken out in this period, so the change is all trading and price moves.");
+        const pc = accountChange(db, who, since);
+        const signed = (n: number) => `${n >= 0 ? "+" : "−"}${dollars(Math.abs(n))}`;
+        if (pc.kind === "change") {
+          const { open, close } = pc;
+          lines.push(`Account value went from ${dollars(open.equity)} (${when(open.at)}) to ${dollars(close.equity)} (${when(close.at)}): ${signed(pc.change)}.`);
+          if (open.carried) lines.push("The first figure is from before my last restart; my records are joined across it.");
+          const parts: string[] = [];
+          if (Math.abs(pc.flows) >= 0.005) parts.push(pc.flows > 0 ? `${dollars(pc.flows)} was money put in` : `${dollars(-pc.flows)} was money taken out`);
+          if (Math.abs(pc.unattributed) >= 0.005) {
+            parts.push(`${signed(pc.unattributed)} changed where my records can't say why (usually money moved while I was restarting), so I don't count it as trading`);
           }
-          // Account-value readings are this ledger's own, and a hosted redeploy
-          // restarts them; trades from before one are carried. Said only when
-          // the trades below really do reach further back than the readings,
+          if (parts.length) lines.push(`Of that, ${parts.join(", and ")}, so trading and price moves made ${signed(pc.trading)}.`);
+          else lines.push("No money was put in or taken out in this period, so the change is all trading and price moves.");
+          // Account-value readings can start later than the trades below (a
+          // ledger younger than the period, and no record carried across the
+          // restart). Said only when the trades really do reach further back,
           // so the two are never read as covering the same stretch.
-          const firstTrade = scalar(
-            db,
-            "SELECT MIN(created_at) AS t FROM trades WHERE agent_id = ? AND created_at >= ? AND status IN ('landed','paper')",
-            who,
-            since,
-          );
+          // This book's own trades: after a switch between practice and real
+          // money the other book's are no sign that readings are missing.
+          const statuses = close.book === "paper" ? "('paper')" : close.book === "live" ? "('landed','submitted')" : "('landed','paper')";
+          const firstTrade = scalar(db, `SELECT MIN(created_at) AS t FROM trades WHERE agent_id = ? AND created_at >= ? AND status IN ${statuses}`, who, since);
           if (open.at > since + 3600 && firstTrade !== null && firstTrade < open.at - 3600) {
             lines.push(`My account-value readings only go back to ${when(open.at)}, so the change above starts there, not at the start of the period. The trades below go back further, to ${when(firstTrade)}.`);
           }
-        } else if (open && close) {
-          lines.push("I switched between practice and real money in this period, so the two values can't be compared.");
+          if (pc.also) {
+            lines.push(
+              pc.also === "paper"
+                ? "Part of this period I was in practice mode; practice money is kept separate and isn't in these figures."
+                : "Part of this period I traded real money; these are the practice figures, kept separate from it.",
+            );
+          }
         } else {
           lines.push("I don't have enough account-value history for this period.");
         }
@@ -560,6 +727,7 @@ const recentActivity: ChatTool = {
         return cap(rows.map((r) => `[${when(r.created_at)}] ${eventLabel(r.message)}: ${r.message.slice(0, 220)}`).join("\n"));
       },
       NO_AGENT,
+      false,
     );
   },
 };
@@ -845,6 +1013,7 @@ const permissionStatus: ChatTool = {
         }
       },
       null as string | null,
+      false,
     );
     const lines = [
       `Signed on network ${g.chainId === 4663 ? "Robinhood Chain (real)" : `${g.chainId} (test network — not real money)`}.`,

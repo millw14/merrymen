@@ -57,6 +57,8 @@ function startHistoryRepair(): void {
     await applyLedgerSchema(db);
     const result = await repairHistoricalFills(db, process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com");
     log(`historical fills: ${result.repaired} receipt-backed rows recovered; ${result.pnlRecovered} sale P&Ls recovered; ${result.unavailable} unavailable or ambiguous; reasons ${JSON.stringify(result.reasons)}`);
+    // The chat's history files were read at spawn, before this ran. See refreshHistoryForLiveChildren.
+    if (result.repaired + result.pnlRecovered > 0) await refreshHistoryForLiveChildren();
   })().catch(e=>log(`historical fills: FAILED — ${e instanceof Error ? e.message : String(e)}`));
 }
 import { spawn, type ChildProcess } from "node:child_process";
@@ -978,6 +980,34 @@ async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): P
   }
 }
 
+/**
+ * When a child's own ledger began: its earliest account-value mark, flow,
+ * trade row or decision (a book that cannot be valued writes decisions and
+ * nothing else), or null when it holds none (a home a redeploy just wiped, or
+ * a ledger that cannot be read — the caller then takes the spawn time).
+ * Read-only and synchronous; the child may be writing to it.
+ *
+ * One orchestrator replica is assumed: a ledger kept while ANOTHER replica ran
+ * the tenant would have a hole this start cannot see, and that run's trades
+ * would be neither carried nor in the ledger.
+ */
+function ledgerStartOf(tenant: string): number | null {
+  const file = path.join(childHome(tenant), "merrymen.db");
+  if (!existsSync(file)) return null;
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(file, { readOnly: true });
+    const r = db
+      .prepare("SELECT MIN(t) AS t FROM (SELECT MIN(at) AS t FROM equity UNION ALL SELECT MIN(at) FROM flows UNION ALL SELECT MIN(created_at) FROM trades UNION ALL SELECT MIN(at) FROM decisions)")
+      .get() as { t: number | null } | undefined;
+    return typeof r?.t === "number" ? r.t : null;
+  } catch {
+    return null;
+  } finally {
+    db?.close();
+  }
+}
+
 /** Per tenant, the newest history read — so an older one never lands last. */
 const historyRuns = new Map<string, number>();
 
@@ -994,6 +1024,15 @@ const historyRuns = new Map<string, number>();
 async function writeHistoryForChild(tenant: `0x${string}`, smartAccount: string): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url) return; // self-hosted: the child's own ledger is never wiped
+  // WHERE THIS CHILD'S OWN LEDGER BEGINS — BEFORE ANY AWAIT, and so before a
+  // spawn's child exists. Carried rows and account-value marks are all older
+  // than this, the child's own all at or after it, and the chat joins the two
+  // only on that condition (history-files.ts HistoryAccount). A redeploy wipes
+  // the home, so after one the ledger begins now; a crash, watchdog or lease
+  // restart keeps it, and it began at its first row — the spawn time would put
+  // the old run's rows on both sides, and a deposit in both.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const until = Math.min(nowSec, ledgerStartOf(tenant) ?? nowSec);
   // Two spawns can overlap (a crash restart while the last read is still
   // running), and the older read must not land last — after a re-sign it would
   // be for the old account, and the chat would refuse it until the next spawn.
@@ -1001,13 +1040,31 @@ async function writeHistoryForChild(tenant: `0x${string}`, smartAccount: string)
   historyRuns.set(tenant, run);
   try {
     const { loadHistoryFromShared, writeHistoryFile } = await import("./history-files");
-    const file = await loadHistoryFromShared(await makePgDb(url), smartAccount, Math.floor(Date.now() / 1000));
+    const file = await loadHistoryFromShared(await makePgDb(url), smartAccount, nowSec, { until });
     if (historyRuns.get(tenant) !== run) return;
     // False when the home is gone: the tenant was removed while this was read.
     if (!writeHistoryFile(childHome(tenant), file)) return;
     log(`history: ${tenant} — ${file.trades.length} trades, ${file.decisions.length} decisions carried for the chat`);
   } catch (e) {
     log(`history: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * READ THE HISTORY AGAIN AFTER THE STARTUP REPAIR. Spawn reads each child's
+ * history before startHistoryRepair begins, so what the repair recovers — a
+ * coin's name, a fill side, a sale's P&L — would otherwise reach the chat only
+ * at the next redeploy. Once per orchestrator start, one child at a time,
+ * behind the lease, with each child's CURRENT account (a re-sign updates it in
+ * place). A child replaced meanwhile read the repaired rows at its own spawn.
+ */
+async function refreshHistoryForLiveChildren(): Promise<void> {
+  for (const [tenant, child] of [...children]) {
+    if (stopping) return;
+    const held = leases.get(tenant);
+    if (!held || !held.healthy()) continue;
+    if (children.get(tenant) !== child) continue;
+    await writeHistoryForChild(tenant as `0x${string}`, child.smartAccount);
   }
 }
 

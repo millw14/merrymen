@@ -4,8 +4,9 @@
  * Asked "what are their names", an agent answered "the ledger doesn't list
  * token names, just the USDG amounts", and it was right: `trades.target` is
  * never a token (it is a router, a vault, an adapter, or — on a row recovered
- * after a restart — the account itself), `fill_symbol` is only ever written in
- * the shared Postgres, and a child's sqlite is wiped by every redeploy. The P&L
+ * after a restart — the account itself), `fill_symbol` was only ever written in
+ * the shared Postgres (it is now also written at trade time, see
+ * fillSymbolFor), and a child's sqlite is wiped by every redeploy. The P&L
  * card printed `target` and so showed the owner their own vault's address as
  * if it were the coin.
  *
@@ -108,6 +109,39 @@ export function nonCashLeg(r: { sell_token?: string | null; buy_token?: string |
   const b = r.buy_token?.toLowerCase() ?? null;
   if (s === USDG && b) return b;
   if (b === USDG && s) return s;
+  return null;
+}
+
+/** What may be stored as a fill's name: history-fill-repair's rule — no spaces; the web re-checks it. */
+const FILL_SYMBOL_RE = /^[A-Za-z0-9$._-]{1,32}$/;
+
+/**
+ * The name to store with a fill of `coin` (trades.fill_symbol), or null.
+ *
+ * A curated or owner-chosen ticker for that address first. Otherwise the first
+ * candidate that is a name — not an address, a Trencher id or a placeholder —
+ * and does not copy a trusted ticker: the dashboard shows this column with no
+ * impersonation check of its own, so a launchpad coin calling itself "NVDA" or
+ * "$USDG" must never be stored under that name.
+ */
+export function fillSymbolFor(
+  coin: string | null | undefined,
+  candidates: readonly (string | null | undefined)[],
+  custom: readonly CustomToken[] = [],
+): string | null {
+  const a = (coin ?? "").trim().toLowerCase();
+  if (!ADDR_RE.test(a) || a === USDG || a === WETH) return null;
+  const ok = (s: string) => FILL_SYMBOL_RE.test(s) && !/^0x/i.test(s) && !TID_RE.test(s);
+  const known = tokenLabelSync(null, null, a, { customTokens: custom });
+  if (known.trusted && known.ticker) return ok(known.ticker) ? known.ticker : null;
+  const guard = trustedTickers(custom);
+  for (const c of candidates) {
+    const v = (c ?? "").trim();
+    if (!ok(v)) continue;
+    const owner = guard.get(guardKey(v));
+    if (owner && owner !== a) continue;
+    return v;
+  }
   return null;
 }
 
@@ -229,10 +263,9 @@ export function tokenLabelSync(db: LabelDb | null, agentId: string | null, input
       : undefined;
     const hSym = usable(h?.symbol);
     if (hSym) return untrusted(hSym, null, "position");
-    // 9. The symbol() the shared ledger read off a fill's receipt. Only rows
-    //    the chat carries over from before a redeploy have it — the child
-    //    never writes the column — and it is the coin's own word, exactly as
-    //    a chain read would be.
+    // 9. The name stored with a fill: written at trade time (fillSymbolFor) or
+    //    read off the receipt by the shared ledger's repair. Untrusted unless
+    //    it is a curated ticker — and a curated address was answered above.
     const f = agentId
       ? row<{ fill_symbol: string | null }>(
           db,

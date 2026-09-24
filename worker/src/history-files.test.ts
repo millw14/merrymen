@@ -17,7 +17,7 @@ import { describe, it } from "node:test";
 import { getAddress } from "viem";
 
 import { wrapSqlite } from "./db";
-import { HISTORY_REFUSALS_MAX, loadHistoryFromShared, readHistory, writeHistoryFile, type HistoryTrade } from "./history-files";
+import { HISTORY_REFUSALS_MAX, loadAccountFromShared, loadHistoryFromShared, readHistory, writeHistoryFile, type HistoryTrade } from "./history-files";
 import { applyLedgerSchema } from "./store";
 import { planHistoryMerge } from "./telegram/history-overlay";
 
@@ -166,5 +166,111 @@ describe("planHistoryMerge", () => {
     assert.deepEqual(plan.trades.map((t) => t.status), ["paper"]);
     const empty = planHistoryMerge([row({ status: "rejected", created_at: NOW - 60 })], A, { ops: new Map(), firstAt: null });
     assert.equal(empty.trades.length, 1, "an empty ledger holds nothing to overlap");
+  });
+});
+
+describe("loadAccountFromShared", () => {
+  const H = 3600;
+  const T0 = NOW - 2 * 86_400 - (NOW % H); // on an hour boundary
+
+  async function account() {
+    const { raw, db, t } = await ledger();
+    raw
+      .prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, epoch) VALUES (?, 'o', 's', 4663, '{}', 0, 0, 2)")
+      .run(getAddress(A));
+    const m = (agent: string, at: number, equity: number, cash: number, epoch = 2, mode = "live") =>
+      raw
+        .prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', ?, 0, ?, ?, ?, ?)")
+        .run(agent, cash, equity, at, epoch, mode);
+    const f = (agent: string, at: number, dir: string, amount: number, source: string, tx: string | null = null, li: number | null = null, epoch = 2) =>
+      raw
+        .prepare("INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, log_index, source, at, epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(agent, dir, amount, tx, li, source, at, epoch);
+    // Marks a minute apart; the long gaps between runs are restarts, and only
+    // those steps are judged (period-pnl.ts).
+    m(A, T0 + 0, 100, 60);
+    m(A, T0 + 60, 100.5, 60);
+    m(A, T0 + 120, 101, 60);
+    m(A, T0 + 180, 101, 60);
+    // Restart: an opening balance booked again with flat cash (a phantom).
+    f(A, T0 + 1100, "in", 100, "inferred");
+    m(A, T0 + 1200, 102, 60);
+    m(A, T0 + 1260, 102, 60);
+    // Within the run: a deposit logged on chain — under BOTH spellings of the account.
+    f(A, T0 + 1290, "in", 20, "chain-log", "0xDEP", 3);
+    f(getAddress(A), T0 + 1290, "in", 20, "chain-log", "0xdep", 3);
+    m(getAddress(A), T0 + 1320, 122, 80);
+    // Restart: cash falls with only a RESTART COPY behind it — a copy proves nothing, so unattributed.
+    t(A, { user_op_hash: "0xcopy", created_at: T0 + H + 50 });
+    m(A, T0 + H + 100, 112, 70);
+    m(A, T0 + H + 160, 112, 70);
+    // Restart: cash falls with a real trade behind it — trading.
+    t(A, { target: "0xvault", sell_token: USDG, buy_token: COIN, user_op_hash: "0xreal", fill_side: "buy", created_at: T0 + 2 * H + 10 });
+    m(A, T0 + 2 * H + 100, 110, 60);
+    // A deposit after the last mark, before the bound: the tail.
+    f(A, T0 + 2 * H + 500, "in", 7, "chain-log", "0xtail", 0);
+    // Never carried: another epoch, another tenant, a mark with no mode, at/after the bound.
+    m(A, T0 + 50, 999, 999, 1);
+    m(OTHER, T0 + 50, 999, 999);
+    raw
+      .prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 5, 0, 5, ?, 2, NULL)")
+      .run(A, T0 + 30);
+    const until = T0 + 3 * H;
+    m(A, until, 999, 999);
+    const acct = await loadAccountFromShared(db, A, T0 - 86_400, until);
+    raw.close();
+    return { acct: acct!, until };
+  }
+
+  it("carries each book's first and last marks and hourly closes, with the running attribution", async () => {
+    const { acct, until } = await account();
+    assert.equal(acct.epoch, 2);
+    assert.equal(acct.until, until);
+    assert.equal(acct.complete, true);
+    assert.deepEqual(
+      acct.points.map((p) => [p.at - T0, p.equity]),
+      [[0, 100], [1320, 122], [H + 160, 112], [2 * H + 100, 110]],
+      "the first mark and each hour's close; other epochs, tenants, mode-less marks and marks at the bound never come",
+    );
+    const last = acct.points[acct.points.length - 1]!;
+    // +20 of chain-logged deposit (once, not twice); the phantom +100 dropped;
+    // the −10 with only a copy behind it unattributed; the −2 with a trade is trading.
+    assert.equal(last.flows, 20);
+    assert.equal(last.unattributed, -10);
+    assert.deepEqual(acct.tail, [{ book: "live", evidenced: 7, unevidenced: 0 }]);
+  });
+
+  it("round-trips through the file, and a malformed account costs only the account", async () => {
+    const { acct } = await account();
+    const home = mkdtempSync(path.join(os.tmpdir(), "merrymen-histacct-"));
+    try {
+      const base = { schema: 1 as const, agentId: A, writtenAt: NOW, since: NOW - 30 * 86_400, decisionsFrom: NOW, trades: [], decisions: [] };
+      writeHistoryFile(home, { ...base, account: acct });
+      assert.deepEqual(readHistory(home, A)?.account, acct);
+      const bad = { ...acct, points: [...acct.points, { ...acct.points[0]!, at: acct.until + 5 }] };
+      writeHistoryFile(home, { ...base, account: bad, trades: [row({ created_at: NOW - 60 })] });
+      const back = readHistory(home, A)!;
+      assert.equal(back.account, null, "a point at or after the bound is not ours");
+      assert.equal(back.trades.length, 1, "the trades still come");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the child's own ledger is never carried back to it", () => {
+  it("nothing at or after `until` comes — trades, refusals or decisions", async () => {
+    const { raw, db, t } = await ledger();
+    t(A, { sell_token: USDG, buy_token: COIN, user_op_hash: "0xbefore", fill_side: "buy", created_at: NOW - 3600 });
+    t(A, { sell_token: USDG, buy_token: COIN, user_op_hash: "0xafter", fill_side: "buy", created_at: NOW - 60 });
+    t(A, { status: "rejected", reject_rule: "OLD", created_at: NOW - 3000 });
+    t(A, { status: "rejected", reject_rule: "NEW", created_at: NOW - 30 });
+    raw.prepare("INSERT INTO decisions (id, agent_id, source, action, at) VALUES ('d-old', ?, 'brain', 'buy', ?)").run(A, NOW - 3600);
+    raw.prepare("INSERT INTO decisions (id, agent_id, source, action, at) VALUES ('d-new', ?, 'brain', 'buy', ?)").run(A, NOW - 60);
+    const h = await loadHistoryFromShared(db, A, NOW, { until: NOW - 600 });
+    raw.close();
+    assert.deepEqual(h.trades.map((r) => r.user_op_hash ?? r.reject_rule).sort(), ["0xbefore", "OLD"]);
+    assert.deepEqual(h.decisions.map((d) => d.id), ["d-old"]);
+    assert.equal(h.writtenAt, NOW);
   });
 });

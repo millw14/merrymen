@@ -4,6 +4,7 @@ import { netTokenDeltas } from "./fills";
 import { pickAcquiredLeg } from "./inflight-reconcile";
 import type { Db } from "./db";
 import { recoverReceiptBasis } from "./receipt-basis-recovery";
+import { fillSymbolFor } from "./token-label";
 import type { ReconcileChain, RawLog } from "./inflight-reconcile";
 
 /** Receipt-only repair. Never converts an intended notional or a price mark
@@ -36,16 +37,22 @@ export async function repairHistoricalFills(db:Db, rpcUrl:string, clientOverride
       books.set(`${row.agent_id.toLowerCase()}:${fill.token}`,{account:row.agent_id,token:fill.token as Hex});
       const known=STOCK_TOKENS.find(t=>t.address.toLowerCase()===fill.token.toLowerCase());
       const symbol=known?.symbol ?? await client.readContract({address:fill.token as Hex,abi:erc20Abi,functionName:'symbol'}).catch(()=>null);
-      const safeSymbol=typeof symbol==='string' && /^[A-Za-z0-9$._-]{1,32}$/.test(symbol) && !symbol.startsWith('0x') ? symbol : null;
+      // The same guard the child writes names through: a coin calling itself a stock's
+      // or the cash token's ticker is stored nameless, never under that name.
+      const safeSymbol=fillSymbolFor(fill.token,[typeof symbol==='string' ? symbol : null]);
       stage='fill-update';
-      await db.prepare(`UPDATE trades SET fill_side=COALESCE(fill_side,?),fill_symbol=COALESCE(fill_symbol,?),
+      // Only a row this fills counts as repaired. A coin with no storable name
+      // stays a candidate on every start; counted, it re-read every tenant's
+      // history for the chat each deploy (orchestrator refreshHistoryForLiveChildren).
+      const fills=`(fill_side IS NULL OR buy_token IS NULL OR sell_token IS NULL OR fill_qty_raw IS NULL OR fill_cash_usdg IS NULL${safeSymbol?' OR fill_symbol IS NULL':''})`;
+      const res=await db.prepare(`UPDATE trades SET fill_side=COALESCE(fill_side,?),fill_symbol=COALESCE(fill_symbol,?),
         buy_token=COALESCE(buy_token,?),sell_token=COALESCE(sell_token,?),
         fill_qty_raw=COALESCE(fill_qty_raw,?),fill_cash_usdg=COALESCE(fill_cash_usdg,?),
         basis_source=CASE WHEN fill_qty_raw IS NULL AND fill_cash_usdg IS NULL THEN 'receipt' ELSE basis_source END
-        WHERE id=? AND status='landed' AND tx_hash=?`).run(fill.side,safeSymbol,
+        WHERE id=? AND status='landed' AND tx_hash=? AND ${fills}`).run(fill.side,safeSymbol,
         fill.side==='buy'?fill.token:CASH.USDG,fill.side==='sell'?fill.token:CASH.USDG,
         String(fill.qtyRaw),Number(fill.cashUsdg)/1e6,row.id,row.tx_hash);
-      repaired++;
+      if(res.changes>0) repaired++;
     }catch{unavailableBecause(stage+'-failed');}
   }
   const chain:ReconcileChain={

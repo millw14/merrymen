@@ -30,6 +30,8 @@ import { admitCapitalFlow, tradingModeOf, type TradingMode } from "./paper-bound
 // Which coin ids need a name beside them — the publication module's rule, so
 // the writer and the feed reader look up names for the same set.
 import { DERIVED_ID } from "./thesis-policy";
+// The coin's name a fill is stored with — see fillSymbolOfRow.
+import { fillSymbolFor, nonCashLeg } from "./token-label";
 
 let driver: Db | null = null;
 /** The sqlite handle behind `driver`. Kept ONLY so closeStoreForTest() can release
@@ -1063,6 +1065,8 @@ export interface TradeRow {
   fill_side?: "buy" | "sell";
   /** 18dp raw units filled, as a decimal string. */
   fill_qty_raw?: string;
+  /** The coin's name, display only. Absent: addTrade works it out (fillSymbolOfRow). */
+  fill_symbol?: string;
   /** 6dp USDG that actually moved on this fill — paid on a buy, received on a
    * sell. Stored rather than derived from price × qty so an on-chain check
    * compares an exact figure against an exact figure. */
@@ -2620,6 +2624,41 @@ export async function ownerNotice(agentId: string): Promise<{ message: string; a
 }
 
 /**
+ * THE COIN'S NAME, STORED WITH THE FILL — display only.
+ *
+ * A trade row names its coin by address alone, so every reader had to find a
+ * word for it later, and after a redeploy wiped the ledger the dashboard and
+ * the chat had nothing to find it in. Written here — the one function every
+ * trades row passes through — for the rows that are fills (or about to be):
+ * the address's curated ticker, else the decision behind the trade, else what
+ * discovery read off the coin, through fillSymbolFor's impersonation guard.
+ *
+ * NEVER COSTS THE ROW. addTrade returning false sends the caller down its
+ * fail-closed path; an unreadable name must only ever cost the name.
+ */
+async function fillSymbolOfRow(row: TradeRow): Promise<string | null> {
+  try {
+    if (row.status !== "landed" && row.status !== "paper" && row.status !== "submitted") return null;
+    const coin = nonCashLeg(row);
+    if (!coin) return null;
+    const trusted = fillSymbolFor(coin, []);
+    if (trusted) return trusted;
+    const names: (string | null)[] = [];
+    if (row.decision_id) {
+      const d = (await getDb()
+        .prepare("SELECT symbol, display_name FROM decisions WHERE id = ? AND agent_id = ?")
+        .get(row.decision_id, row.agent_id)) as { symbol: string | null; display_name: string | null } | undefined;
+      names.push(d?.symbol ?? null, d?.display_name ?? null);
+    }
+    const p = (await getDb().prepare("SELECT symbol FROM discovered_pools WHERE address = ?").get(coin)) as { symbol: string | null } | undefined;
+    names.push(p?.symbol ?? null);
+    return fillSymbolFor(coin, names);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Write a trade row. Returns TRUE if it was persisted, FALSE if the write was
  * caught and swallowed — the caller must not mistake a swallowed failure for a
  * recorded fill. On a network-backed ledger a write can fail routinely, and a
@@ -2632,6 +2671,8 @@ export async function ownerNotice(agentId: string): Promise<{ message: string; a
 export async function addTrade(row: TradeRow): Promise<boolean> {
   try {
     const epoch = await epochOf(row.agent_id);
+    // Before any write, and outside the journal's transaction: two reads at most.
+    const fillSymbol = row.fill_symbol ?? (await fillSymbolOfRow(row));
     // Only money-moving rows enter the hash chain. A rejection changes no
     // balance, so its absence cannot distort a performance claim — and there
     // are thousands of them. They stay in `trades` (and in the export, as
@@ -2659,7 +2700,8 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
                     status = ?, reject_rule = ?, sim_quote_out = ?, sim_min_out = ?, sim_fee_tier = ?,
                     sim_gas = ?, decision_id = ?, fill_side = ?, fill_qty_raw = ?, fill_price_usd = ?,
                     realized_pnl_usdg = ?, basis_source = ?, order_id = ?, settlement_status = ?,
-                    gas_wei = ?, fill_slippage_bps = ?, fill_cash_usdg = ?, gas_usdg = ?, gas_units = ?
+                    gas_wei = ?, fill_slippage_bps = ?, fill_cash_usdg = ?, gas_usdg = ?, gas_units = ?,
+                    fill_symbol = COALESCE(?, fill_symbol)
               WHERE agent_id = ? AND user_op_hash = ? AND status = 'submitted'`,
           )
           .run(
@@ -2688,6 +2730,9 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
             row.fill_cash_usdg ?? null,
             row.gas_usdg ?? null,
             row.gas_units ?? null,
+            // COALESCE: a resolution that knows no name (a stranded op resolved
+            // from its receipt) keeps the one the placeholder was written with.
+            fillSymbol,
             row.agent_id,
             row.user_op_hash,
           );
@@ -2702,8 +2747,8 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
                              sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, decision_id,
                              fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
                              order_id, settlement_status, gas_wei, fill_slippage_bps, epoch, fill_cash_usdg, gas_usdg, gas_units,
-                             trade_fee_usdg)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             trade_fee_usdg, fill_symbol)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.agent_id,
@@ -2737,6 +2782,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
         // `?? null`, never `?? 0`: an unassessed fee and a zero fee are
         // different claims, and only one of them is about the trade.
         row.trade_fee_usdg ?? null,
+        fillSymbol,
       );
     };
     if (!moved) {

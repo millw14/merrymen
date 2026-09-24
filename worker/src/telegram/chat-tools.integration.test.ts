@@ -141,12 +141,16 @@ describe("review fixes on a real ledger", () => {
     db.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 100, 0, 100, ?, 1, 'live')").run(CAROL, T);
     db.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 101, 0, 101, ?, 1, 'live')").run(CAROL, NOW - 60);
     db.prepare("INSERT INTO flows (agent_id, direction, amount_usdg, source, at, epoch) VALUES (?, 'in', 100, 'chain-log', ?, 1)").run(CAROL, T - 10);
+    // The +$1 is a trade's: without one in the step, a cash move nothing
+    // explains is reported as unexplained (period-pnl.ts), not as trading.
+    db.prepare("INSERT INTO trades (agent_id, kind, target, amount_usdg, status, created_at) VALUES (?, 'swap', '0xrouter', 1, 'landed', ?)").run(CAROL, T + 5);
     const counted = db.prepare("SELECT COUNT(*) AS n FROM flows WHERE agent_id = ?").get(CAROL) as { n: number };
     db.close();
     assert.equal(counted.n, 1, "the deposit is really on the ledger — this test must not pass by accident");
     const out = await run("pnl_breakdown", { period: "24h" }, CAROL);
     assert.match(out, /\+\$1\.00/);
-    assert.doesNotMatch(out, /trading itself made −/, "a deposit before the mark must not read as a trading loss");
+    assert.doesNotMatch(out, /money put in/, "a deposit before the mark is already inside it");
+    assert.match(out, /the change is all trading and price moves/);
   });
 
   it("positions shows held launch coins, recovered ones included, with the cost read from its 6-decimal text", async () => {

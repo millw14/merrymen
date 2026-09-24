@@ -19,7 +19,7 @@
  */
 
 import { llmAgentTurn, type AgentMsg, type AgentToolUse, type LlmCreds } from "../llm";
-import { CHAT_TOOLS, toolByName, type ToolContext } from "./chat-tools";
+import { CHAT_TOOLS, openToolSession, toolByName, type ToolContext } from "./chat-tools";
 import { stripThinkingBlock } from "./interpreter";
 import { PLAIN_WORDS } from "./plain-words";
 import type { SignReason } from "./sign-prompt";
@@ -99,6 +99,8 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
   const used: string[] = [];
   let needsSignature = false;
   let signReason: SignReason | null = null;
+  // Every lookup this answer makes shares one ledger connection (chat-tools.ts).
+  const session = openToolSession(i.tools);
   try {
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const t = await turn(i.creds, { system, messages, tools, maxTokens: 900 });
@@ -136,5 +138,7 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
   } catch (e) {
     console.error(`[telegram] answer loop failed, falling back: ${e instanceof Error ? e.message : String(e)}`);
     return null;
+  } finally {
+    session.close();
   }
 }
