@@ -14,6 +14,7 @@ money. Brain is outside the trust domain by construction, not by policy.
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 import time
@@ -25,11 +26,12 @@ from .budget import AgentConcurrency, persist_usage, RunBudget, TIERS
 from .credential import CredentialRefused, resolve as resolve_credential
 from .cast import roster
 from .graph import BrainGraph
-from .outside_research import OutsideConfig, from_env as outside_from_env
+from .outside_research import OutsideConfig, OutsideResearch, probe as probe_outside
 from .llm import Llm, LlmConfig
 from .schemas import BrainDecision, DecideRequest, Refusal, SCHEMA_VERSION
 
 app = FastAPI(title="Merrymen Brain", version=SCHEMA_VERSION)
+log = logging.getLogger(__name__)
 
 _concurrency = AgentConcurrency()
 
@@ -48,8 +50,24 @@ _graph_cache: BrainGraph | None = None
 def _graph() -> BrainGraph:
     global _graph_cache
     if _graph_cache is None:
-        _graph_cache = BrainGraph(Llm(LlmConfig.from_env()), outside=outside_from_env())
+        _graph_cache = BrainGraph(Llm(LlmConfig.from_env()), outside=_outside())
     return _graph_cache
+
+
+def _outside() -> OutsideResearch | None:
+    """
+    merrymenbrain's client, or None. NEVER RAISES.
+
+    Outside research is optional, so nothing about it may stop a decision. Its
+    config already falls back on bad numbers; this catches anything else, so a
+    typo in an optional variable costs the second opinion and not the service.
+    """
+    try:
+        cfg = OutsideConfig.from_env()
+    except Exception as e:  # noqa: BLE001
+        log.warning("outside research disabled: %s", type(e).__name__)
+        return None
+    return OutsideResearch(cfg) if cfg else None
 
 
 def _credential_state() -> tuple[bool, str | None]:
@@ -98,16 +116,27 @@ async def health() -> dict:
         "quick_model": os.getenv("BRAIN_QUICK_MODEL", "openai/gpt-oss-20b"),
         "tiers": {k: vars(v) for k, v in TIERS.items()},
         "cast": roster(),
-        "outside_research": _outside_state(),
+        "outside_research": await _outside_state(),
     }
 
 
-def _outside_state() -> dict:
-    """Whether merrymenbrain is wired, and for which tiers. Never the token or URL."""
-    cfg = OutsideConfig.from_env()
-    if cfg is None:
-        return {"configured": False}
-    return {"configured": True, "tiers": sorted(cfg.tiers), "timeout_sec": cfg.timeout_sec}
+async def _outside_state() -> dict:
+    """
+    Whether merrymenbrain is wired AND answering. Never the token or the URL.
+
+    Optional, so it reports rather than decides: `ok` above does not depend on
+    it. Any failure here, including a bad variable, is a field in the answer,
+    never a failed health check.
+    """
+    try:
+        cfg = OutsideConfig.from_env()
+        if cfg is None:
+            return {"configured": False}
+        state = {"configured": True, "tiers": sorted(cfg.tiers), "timeout_sec": cfg.timeout_sec}
+        state.update(await probe_outside(cfg))
+        return state
+    except Exception as e:  # noqa: BLE001
+        return {"configured": False, "problem": type(e).__name__}
 
 
 @app.post("/v1/decide")

@@ -100,6 +100,36 @@ def _fence(label: str, text: str) -> str:
     return f"<untrusted source={label!r}>\n{safe}\n</untrusted>"
 
 
+_OPEN, _CLOSE = "<untrusted", "</untrusted>"
+
+
+def _tail_outside_fences(text: str, limit: int) -> str:
+    """
+    The last `limit` characters, never starting inside a fenced block.
+
+    A raw tail slice could start halfway through a fence and keep its contents
+    and closing tag but lose the opening tag and the UNTRUSTED header above it.
+    The risk committee would then read another desk's recommendation, or
+    scraped text, as unlabelled prose. If the cut lands inside a block, the
+    whole partial block is dropped instead.
+
+    Every `</untrusted>` in the text is a real close, because `_fence` escapes
+    it inside content. So a block's real opening tag is the first `<untrusted`
+    after the previous close, even if the content fakes more of them.
+    """
+    if len(text) <= limit:
+        return text
+    start = len(text) - limit
+    close = text.find(_CLOSE, start)
+    if close == -1:
+        return text[start:]
+    prev_close = text.rfind(_CLOSE, 0, start)
+    block_open = text.find(_OPEN, prev_close + len(_CLOSE) if prev_close != -1 else 0)
+    if block_open != -1 and block_open < start < close + len(_CLOSE):
+        return text[close + len(_CLOSE):].lstrip("\n")
+    return text[start:]
+
+
 @dataclass
 class NodeOutput:
     node: str
@@ -524,7 +554,7 @@ class BrainGraph:
             dossier += f"\n\nBULL CASE\n{bull}\n\nBEAR CASE\n{bear}"
 
         if stages == "full":
-            plan = dossier[-4000:]
+            plan = _tail_outside_fences(dossier, 4000)
             for stance in ("aggressive", "conservative", "neutral"):
                 r = await self._risk(req, budget, stance, plan)
                 dossier += f"\n\nRISK ({stance})\n{r.text}"

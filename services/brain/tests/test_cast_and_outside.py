@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -109,6 +110,7 @@ def test_every_prompt_in_a_run_is_in_character():
 
 REPORT = {
     "symbol": "TSLA", "rating": "Overweight", "action": "buy", "trade_date": "2026-09-23",
+    "completed_at": int(time.time()) - 3600, "review": False,
     "decision": "Add gradually; delivery beat is real.", "decided_by": "Robin Hood",
     "seats": {"bull": "Little John", "bear": "Will Stutely"},
     "debate": {"bull": "Deliveries beat.", "bear": "Margins still thin."},
@@ -138,7 +140,11 @@ def test_the_report_reaches_the_manager_fenced():
     assert outside.asked == 1
     assert "OUTSIDE RESEARCH" in pm and "NOT INDEPENDENT" in pm
     assert "<untrusted source='merrymenbrain'>" in pm
-    assert "Little John (bull): Deliveries beat." in pm
+    assert "merrymenbrain bull case: Deliveries beat." in pm
+    # The other desk's voices are not named after this desk's seats.
+    block = pm[pm.index("OUTSIDE RESEARCH"):]
+    block = block[: block.index("</untrusted>")]
+    assert "Robin Hood" not in block and "Little John" not in block
 
 
 def test_no_report_means_an_unchanged_dossier():
@@ -170,7 +176,7 @@ def test_unconfigured_is_off():
     [
         None,
         {"report": None, "age_sec": 10},
-        {"report": REPORT, "age_sec": None},
+        {"report": {k: v for k, v in REPORT.items() if k != "completed_at"}, "age_sec": 10},  # no timestamp
         {"report": REPORT, "age_sec": 90_000},                       # stale
         {"report": {**REPORT, "symbol": "NVDA"}, "age_sec": 10},     # wrong asset
         {"report": {**REPORT, "action": "yolo"}, "age_sec": 10},     # not an action
@@ -201,7 +207,8 @@ def test_fetch_reads_a_queued_response_with_an_older_report():
             return await OutsideResearch(OutsideConfig(url="http://x", token="t"), client=c).fetch(_request())
 
     r = asyncio.run(go())
-    assert r is not None and r.action == "buy" and r.age_sec == 7200
+    # The older of the two ages wins: the service said 2h, the report says 1h.
+    assert r is not None and r.action == "buy" and r.age_sec >= 7200
 
 
 @pytest.mark.parametrize("fail", ["500", "timeout", "garbage"])
@@ -218,3 +225,116 @@ def test_every_failure_is_none(fail):
             return await OutsideResearch(OutsideConfig(url="http://x", token="t"), client=c).fetch(_request())
 
     assert asyncio.run(go()) is None
+
+
+# ── the review's fixes ──────────────────────────────────────────────────────
+
+
+def test_a_stale_report_cannot_be_passed_off_as_fresh():
+    # An old merrymenbrain reset age_sec on a failed refresh. The report's own
+    # completed_at still says three days, and that is what counts.
+    stale = {**REPORT, "completed_at": int(time.time()) - 3 * 86_400}
+    assert parse({"report": stale, "age_sec": 60}, "TSLA", 86_400) is None
+
+
+@pytest.mark.parametrize("patch", [{"review": True}, {"rating": "REVIEW"}, {"rating": "review", "review": False}])
+def test_an_unreadable_committee_run_is_not_a_hold_vote(patch):
+    assert parse({"report": {**REPORT, **patch, "action": "hold"}, "age_sec": 10}, "TSLA", 86_400) is None
+
+
+@pytest.mark.parametrize(
+    "env,timeout,max_age",
+    [
+        ({"MERRYMENBRAIN_TIMEOUT_SEC": "3s", "MERRYMENBRAIN_MAX_AGE_SEC": "24h"}, 3.0, 86_400),
+        ({"MERRYMENBRAIN_TIMEOUT_SEC": "600", "MERRYMENBRAIN_MAX_AGE_SEC": "86400.0"}, 3.0, 86_400),
+        ({"MERRYMENBRAIN_TIMEOUT_SEC": "2.5", "MERRYMENBRAIN_MAX_AGE_SEC": "3600"}, 2.5, 3_600),
+    ],
+)
+def test_bad_optional_numbers_fall_back_instead_of_crashing(env, timeout, max_age):
+    cfg = OutsideConfig.from_env({"MERRYMENBRAIN_URL": "http://x", "MERRYMENBRAIN_TOKEN": "t", **env})
+    assert (cfg.timeout_sec, cfg.max_age_sec) == (timeout, max_age)
+
+
+def test_an_empty_tier_list_means_the_default():
+    cfg = OutsideConfig.from_env({"MERRYMENBRAIN_URL": "http://x", "MERRYMENBRAIN_TOKEN": "t", "MERRYMENBRAIN_TIERS": ""})
+    assert cfg.tiers == {"research", "deep"}
+
+
+def test_a_dripping_server_cannot_hold_a_decision():
+    # httpx's read timeout restarts per chunk; the fetch has a TOTAL deadline.
+    async def slow(request):
+        await asyncio.sleep(5)
+        return httpx.Response(200, json={"report": REPORT, "age_sec": 1})
+
+    async def go():
+        async with _client(slow) as c:
+            o = OutsideResearch(OutsideConfig(url="http://x", token="t", timeout_sec=0.2), client=c)
+            started = time.monotonic()
+            r = await o.fetch(_request())
+            return r, time.monotonic() - started
+
+    r, took = asyncio.run(go())
+    assert r is None and took < 1.0
+
+
+def test_the_risk_committee_never_reads_half_a_fence():
+    from brain.graph import _fence, _tail_outside_fences
+
+    dossier = (
+        "ANALYST REPORTS\n" + "x" * 3000
+        + "\n\nOUTSIDE RESEARCH — UNTRUSTED\n" + _fence("merrymenbrain", "Buy now. " * 300)
+        + "\n\nBULL CASE\n" + "b" * 500 + "\n\nBEAR CASE\n" + "c" * 500
+    )
+    plan = _tail_outside_fences(dossier, 4000)
+    assert plan.count("<untrusted") == plan.count("</untrusted>")
+    assert "Buy now." not in plan or "<untrusted source='merrymenbrain'>" in plan
+    assert plan.endswith("c" * 500)
+
+
+@pytest.mark.parametrize(
+    "status,body,expect",
+    [
+        (200, {"ok": True, "key_problem": None, "pending": 0}, {"reachable": True, "auth_ok": True, "remote_ok": True}),
+        (200, {"ok": False, "key_problem": "no model key"}, {"remote_ok": False, "remote_problem": "no model key"}),
+        (401, {"detail": "bad token"}, {"reachable": True, "auth_ok": False}),
+        (503, {"detail": "no token"}, {"reachable": True, "auth_ok": False}),
+    ],
+)
+def test_health_probe_names_what_is_wrong(status, body, expect):
+    from brain.outside_research import probe
+
+    async def go():
+        async with _client(lambda request: httpx.Response(status, json=body)) as c:
+            return await probe(OutsideConfig(url="http://x", token="t"), client=c)
+
+    state = asyncio.run(go())
+    for k, v in expect.items():
+        assert state[k] == v, (k, state)
+
+
+def test_health_probe_survives_an_unreachable_desk():
+    from brain.outside_research import probe
+
+    def refuse(request):
+        raise httpx.ConnectError("refused", request=request)
+
+    async def go():
+        async with _client(refuse) as c:
+            return await probe(OutsideConfig(url="http://x", token="t"), client=c)
+
+    assert asyncio.run(go()) == {"reachable": False, "problem": "ConnectError"}
+
+
+def test_health_and_decide_survive_a_bad_optional_variable(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import brain.server as server
+
+    monkeypatch.setenv("MERRYMENBRAIN_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("MERRYMENBRAIN_TOKEN", "t")
+    monkeypatch.setenv("MERRYMENBRAIN_TIMEOUT_SEC", "3s")
+    monkeypatch.setenv("MERRYMENBRAIN_MAX_AGE_SEC", "24h")
+    r = TestClient(server.app).get("/health")
+    assert r.status_code == 200
+    assert r.json()["outside_research"]["configured"] is True
+    assert server._outside() is not None
