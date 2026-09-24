@@ -8,6 +8,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Response
+import okhttp3.logging.HttpLoggingInterceptor
 import java.util.concurrent.TimeUnit
 
 /**
@@ -110,11 +111,34 @@ class MerrymenHeaders : Interceptor {
   }
 }
 
+/**
+ * WHICH CALLS WERE MADE, IN A DEBUG BUILD ONLY — and nothing about who made them.
+ *
+ * An emulator run has to be able to prove a negative: that a cold start sends
+ * no request to a route that was removed, that "Not now" on a confirm card
+ * placed nothing. `adb logcat -s OkHttp` shows it, because this logs the
+ * request line and the status and nothing else.
+ *
+ * BASIC, AND ONLY BASIC. The next level up logs headers, and the headers are
+ * where the session cookie travels: a bearer credential for somebody's trading
+ * account does not belong in a log that every bug report and every
+ * `adb logcat` collects. The two cookie headers are redacted as well, so
+ * raising the level by accident still cannot print one. A release build never
+ * adds this at all.
+ */
+internal fun debugCallLog(): HttpLoggingInterceptor =
+  HttpLoggingInterceptor { line -> android.util.Log.i("OkHttp", line) }.apply {
+    level = HttpLoggingInterceptor.Level.BASIC
+    redactHeader("Cookie")
+    redactHeader("Set-Cookie")
+  }
+
 object Http {
   fun client(session: Session, jar: PersistentCookieJar): OkHttpClient =
     OkHttpClient.Builder()
       .cookieJar(jar)
       .addInterceptor(MerrymenHeaders())
+      .apply { if (dev.merrymen.app.BuildConfig.DEBUG) addInterceptor(debugCallLog()) }
       // A TRADING CLIENT WAITS, IT DOES NOT HANG. The chain reads behind these
       // routes are metered and can queue behind a rate-limit backoff, so a
       // three-second timeout would report "offline" for a server that is merely

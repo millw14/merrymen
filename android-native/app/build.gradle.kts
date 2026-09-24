@@ -57,6 +57,13 @@ android {
     buildConfig = true
   }
   packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+
+  // JVM UNIT TESTS RUN THE REAL CLIENT, not a mock of it: MerrymenApi against a
+  // MockWebServer, the models against captured production answers. Anything
+  // they touch from android.jar (a Log line, a TextUtils call) returns its
+  // default instead of throwing "not mocked", so a test fails on behaviour
+  // rather than on the platform stub.
+  testOptions { unitTests.isReturnDefaultValues = true }
 }
 
 dependencies {
@@ -88,4 +95,6 @@ dependencies {
 
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)
+  // The same OkHttp version as the app, so a test exercises the client that ships.
+  testImplementation(libs.okhttp.mockwebserver)
 }
