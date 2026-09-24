@@ -79,6 +79,18 @@ class PersistentCookieJar(private val session: Session) : CookieJar {
     }
   }
 
+  /**
+   * Forget one cookie by name, in memory and on disk. Goes through the jar
+   * rather than editing the stored blob, because the jar holds its own copy
+   * once loaded and would write a deleted cookie straight back.
+   */
+  fun drop(name: String) {
+    loadOnce()
+    synchronized(this) {
+      if (memory.remove(name) != null) persist()
+    }
+  }
+
   private fun persist() {
     val blob = memory.values.joinToString("\n") { "${it.name}=${it.value}" }
     runBlocking { session.setCookiesRaw(blob) }

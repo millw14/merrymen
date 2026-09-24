@@ -105,9 +105,16 @@ class Repository(
    * a server that no longer asks for one. An install upgraded from that build
    * still has the password stored, so it is deleted here; on every later start
    * the delete finds nothing.
+   *
+   * THE COOKIE GOES TOO. The gate's cookie, mm_gate, carried the password as
+   * its VALUE, and the jar kept sending it on every request to a server that no
+   * longer reads it. Nothing is gained by keeping a credential in flight that
+   * nothing checks.
    */
   suspend fun bootstrap(): Loaded<Unit> {
     session.dropRetiredGatePassword()
+    // Off the main thread: the jar reads and writes DataStore with runBlocking.
+    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { jar.drop("mm_gate") }
     return when (val v = api.version()) {
       is ApiResult.Ok -> {
         refreshIdentity()
