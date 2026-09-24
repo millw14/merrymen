@@ -9,8 +9,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.Cookie
-import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /**
  * SIGNING IN WITHOUT EVER HOLDING A KEY.
@@ -72,20 +75,50 @@ object WebAuth {
    * rather than through injected JavaScript.
    */
   fun harvest(origin: String, jar: PersistentCookieJar) {
+    val url = origin.toHttpUrlOrNull() ?: return
     val raw = CookieManager.getInstance().getCookie(origin) ?: return
-    val url = runCatching { origin.toHttpUrl() }.getOrNull() ?: return
-    val cookies = raw.split(';').mapNotNull { part ->
-      val trimmed = part.trim()
-      val eq = trimmed.indexOf('=')
-      if (eq <= 0) return@mapNotNull null
-      Cookie.Builder()
-        .name(trimmed.substring(0, eq))
-        .value(trimmed.substring(eq + 1))
-        .domain(url.host)
-        .path("/")
-        .build()
-    }
+    val cookies = webCookies(raw, url)
     if (cookies.isNotEmpty()) jar.saveFromResponse(url, cookies)
+  }
+
+  /**
+   * THE PAGE'S `name=value; name=value` LINE as cookies for [url]'s host alone.
+   *
+   * Host-only, because CookieManager's line does not say which were domain
+   * cookies, and the narrower reading is the one that cannot send a session to
+   * a sibling host. A name in [RETIRED_COOKIES] is skipped: an install from
+   * 0.1.0 seeded mm_gate into the WebView, and copying it back here put the old
+   * site password on every API request again after one page load, undoing the
+   * start that had just dropped it.
+   */
+  fun webCookies(raw: String, url: HttpUrl): List<Cookie> = raw.split(';').mapNotNull { part ->
+    val trimmed = part.trim()
+    val eq = trimmed.indexOf('=')
+    if (eq <= 0) return@mapNotNull null
+    val name = trimmed.substring(0, eq)
+    if (name in RETIRED_COOKIES) return@mapNotNull null
+    runCatching {
+      Cookie.Builder().name(name).value(trimmed.substring(eq + 1)).hostOnlyDomain(url.host).path("/").build()
+    }.getOrNull()
+  }
+
+  /**
+   * Cookies nothing reads any more, and that must not come back from the
+   * WebView. mm_gate's VALUE was the retired shared site password
+   * (server-side removal 46c852d1).
+   */
+  val RETIRED_COOKIES: Set<String> = setOf("mm_gate")
+
+  /**
+   * Expire cookie [name] in the WebView's own store for [origin]. The
+   * platform has no delete-one call; a Max-Age of 0 on the same name and path
+   * is the delete.
+   */
+  fun expire(origin: String, name: String) {
+    val url = origin.toHttpUrlOrNull() ?: return
+    val cm = CookieManager.getInstance()
+    cm.setCookie(origin, "$name=; Max-Age=0; Path=/" + if (url.isHttps) "; Secure" else "")
+    cm.flush()
   }
 
   /**
@@ -101,11 +134,13 @@ object WebAuth {
    * `mm_session` faithfully.
    */
   fun seed(origin: String, jar: PersistentCookieJar) {
-    val url = runCatching { origin.toHttpUrl() }.getOrNull() ?: return
+    val url = origin.toHttpUrlOrNull() ?: return
     val cm = CookieManager.getInstance()
     cm.setAcceptCookie(true)
+    // Only what the jar would send to this origin: it is scoped by host now,
+    // so another server's session never lands in this server's page.
     for (c in jar.loadForRequest(url)) {
-      cm.setCookie(origin, "${c.name}=${c.value}; Path=/; Secure")
+      cm.setCookie(origin, "${c.name}=${c.value}; Path=/" + if (url.isHttps) "; Secure" else "")
     }
     cm.flush()
   }
@@ -115,6 +150,65 @@ object WebAuth {
     jar.clear()
     CookieManager.getInstance().removeAllCookies(null)
     CookieManager.getInstance().flush()
+  }
+}
+
+/**
+ * THE TWO COOKIE STORES THIS APP KEEPS IN STEP — OkHttp's jar and the
+ * WebView's — as the three things Repository does to them.
+ *
+ * An interface so Repository runs on the JVM: CookieManager is the platform's,
+ * and a unit test records what was asked of it instead. [DeviceCookies] is the
+ * real one.
+ */
+interface CookieStores {
+  /** Copy the WebView's cookies for [origin] into the jar, as after a sign-in. */
+  suspend fun harvest(origin: String)
+
+  /** Forget cookie [name] in both stores (the WebView's for [origin]). */
+  suspend fun drop(origin: String, name: String)
+
+  /** Forget every cookie in both stores: a sign-out. */
+  suspend fun forgetAll()
+}
+
+/**
+ * The real pair. The jar reads and writes DataStore with runBlocking, so its
+ * side runs on IO; CookieManager is the WebView's, so its side runs on Main.
+ *
+ * EVERY PLATFORM CALL IS CAUGHT. CookieManager.getInstance() throws when the
+ * WebView package is missing or mid-update, and [drop] runs on every cold
+ * start: a start that died there would be a crash on launch, for a cookie
+ * nothing reads.
+ */
+class DeviceCookies(private val jar: PersistentCookieJar) : CookieStores {
+  override suspend fun harvest(origin: String) {
+    val url = origin.toHttpUrlOrNull() ?: return
+    val raw = web("read") { CookieManager.getInstance().getCookie(origin) } ?: return
+    val cookies = WebAuth.webCookies(raw, url)
+    if (cookies.isNotEmpty()) withContext(Dispatchers.IO) { jar.saveFromResponse(url, cookies) }
+  }
+
+  override suspend fun drop(origin: String, name: String) {
+    withContext(Dispatchers.IO) { jar.drop(name) }
+    web("expire $name") { WebAuth.expire(origin, name) }
+  }
+
+  override suspend fun forgetAll() {
+    withContext(Dispatchers.IO) { jar.clear() }
+    web("forget") {
+      CookieManager.getInstance().removeAllCookies(null)
+      CookieManager.getInstance().flush()
+    }
+  }
+
+  private suspend fun <T> web(what: String, block: () -> T): T? = withContext(Dispatchers.Main) {
+    try {
+      block()
+    } catch (e: RuntimeException) {
+      android.util.Log.w("WebAuth", "the WebView cookie store refused: $what", e)
+      null
+    }
   }
 }
 
@@ -136,6 +230,18 @@ fun WebFlow(
   onCookies: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
+  // AN ADDRESS THAT IS NOT ONE gets a sentence, not a WebView error page. An
+  // older build could store a Server with no scheme; loading "app.merrymen.dev/home"
+  // shows the platform's own "webpage not available", which says nothing about
+  // the setting that caused it.
+  if (origin.toHttpUrlOrNull() == null) {
+    dev.merrymen.app.ui.Notice(
+      title = "This server address isn't a web address",
+      body = "\"$origin\" can't be opened. Set the Server in Settings to something like https://app.merrymen.dev.",
+      modifier = modifier,
+    )
+    return
+  }
   DisposableEffect(Unit) {
     CookieManager.getInstance().setAcceptCookie(true)
     // Hand the WebView any session cookie the app already holds, so a handoff

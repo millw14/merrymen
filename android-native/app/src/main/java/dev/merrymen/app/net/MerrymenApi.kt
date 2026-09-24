@@ -2,6 +2,8 @@ package dev.merrymen.app.net
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -66,6 +68,9 @@ const val CANT_REACH = "Can't reach merrymen right now"
 /** What [ApiResult.Unreachable.cause] says when merrymen answered in a shape this app cannot read. */
 const val UNREADABLE_ANSWER = "merrymen sent back something this app couldn't read. Try again in a moment."
 
+/** What [ApiResult.Unreachable.cause] says when the stored Server address cannot be a URL at all. */
+const val NOT_A_WEB_ADDRESS = "the Server address in Settings isn't a web address — fix it there"
+
 /**
  * THE ONE LINE TO SHOW for an answer we did not get, so no screen has to
  * prefix "Couldn't reach merrymen" by hand — which is false for an answer
@@ -102,10 +107,12 @@ fun interface OriginSource {
  *
  *   suspend fun MerrymenApi.ceiling(): ApiResult<Ceiling> = getJson("/api/orders/ceiling")
  *
- * getJson, sendJson, call, url and json are `@PublishedApi internal` for exactly
- * that, so a new route gets the same three-state result, the same refusal
- * wording and the same decode-failure handling as every route here, without
- * this file becoming everybody's merge conflict.
+ * getJson, sendJson, callAt, call, urlFor, decoded and json are
+ * `@PublishedApi internal` for exactly that, so a new route gets the same
+ * three-state result, the same refusal wording and the same decode-failure
+ * handling as every route here, without this file becoming everybody's merge
+ * conflict. A raw body goes through callAt, never
+ * `Request.Builder().url(String)` — see [urlFor] for why.
  */
 class MerrymenApi(
   /** The shared client: one cookie jar, one connection pool, the app's headers. */
@@ -127,7 +134,31 @@ class MerrymenApi(
 
   // ── plumbing ──────────────────────────────────────────────────────────────
 
-  @PublishedApi internal suspend fun url(path: String): String = origins.originNow() + path
+  /**
+   * THE URL FOR [path], OR NULL WHEN THE STORED ORIGIN IS NOT A WEB ADDRESS.
+   *
+   * Never a String handed to Request.Builder.url(String): that overload THROWS
+   * on an address it cannot parse, and it used to run outside anything that
+   * caught, so an owner who typed a server without "https://" crashed the app
+   * on that call and on every launch after. Settings now refuses such an
+   * address, but one stored by an older build is still on the device, so every
+   * request is built from this and a null is [NOT_A_WEB_ADDRESS], not a throw.
+   */
+  @PublishedApi internal suspend fun urlFor(path: String): HttpUrl? = (origins.originNow() + path).toHttpUrlOrNull()
+
+  /**
+   * ONE REQUEST TO [path] that getJson/sendJson do not cover — raw bytes,
+   * another header — built by [build] on a builder whose URL is already set.
+   * A malformed stored origin is Unreachable here too.
+   */
+  @PublishedApi internal suspend inline fun callAt(
+    path: String,
+    client: OkHttpClient = http,
+    build: Request.Builder.() -> Unit,
+  ): ApiResult<String> {
+    val u = urlFor(path) ?: return ApiResult.Unreachable(NOT_A_WEB_ADDRESS)
+    return call(Request.Builder().url(u).apply(build).build(), client)
+  }
 
   /** One request, as the three-state result. [client] is [http] unless a route needs its own timeouts. */
   @PublishedApi internal suspend fun call(req: Request, client: OkHttpClient = http): ApiResult<String> =
@@ -238,7 +269,7 @@ class MerrymenApi(
   }
 
   @PublishedApi internal suspend inline fun <reified T> getJson(path: String): ApiResult<T> =
-    decoded(call(Request.Builder().url(url(path)).get().build()))
+    decoded(callAt(path) { get() })
 
   /** A JSON body (`{}` when null) with any method. [client] as on [call]. */
   @PublishedApi internal suspend inline fun <reified T> sendJson(
@@ -248,8 +279,7 @@ class MerrymenApi(
     client: OkHttpClient = http,
   ): ApiResult<T> {
     val body: RequestBody = (bodyJson ?: "{}").toRequestBody(jsonType)
-    val req = Request.Builder().url(url(path)).method(method, body).build()
-    return decoded(call(req, client))
+    return decoded(callAt(path, client) { this.method(method, body) })
   }
 
   // ── sign-in ───────────────────────────────────────────────────────────────

@@ -14,6 +14,33 @@ import kotlinx.coroutines.flow.map
 private val Context.sessionStore by preferencesDataStore("merrymen-session")
 
 /**
+ * WHAT [dev.merrymen.app.data.Repository] NEEDS FROM THE DEVICE'S STORED
+ * SESSION, and nothing else.
+ *
+ * An interface for the same reason [OriginSource] is one: Session needs a
+ * Context for its DataStore, and the wiring worth testing — sign-out running
+ * every forget hook, a start dropping the retired password, a Server change
+ * ending the wallet's turn — is Repository's, not DataStore's. A JVM test
+ * implements this over plain fields and drives the real Repository.
+ */
+interface SessionStore : OriginSource {
+  /** The stored origin, as it changes. */
+  val origin: Flow<String>
+
+  /** What a blank Server field restores: the build's default origin. */
+  val fallbackOrigin: String
+
+  /** Store an origin [checkOrigin] passed. Only a checked one: see [OriginCheck]. */
+  suspend fun setOrigin(checked: OriginCheck.Ok)
+
+  /** Delete the site password an older build stored. Idempotent. */
+  suspend fun dropRetiredGatePassword()
+
+  /** Sign-out: forget the stored session, keep the origin. */
+  suspend fun clearSession()
+}
+
+/**
  * WHAT THIS INSTALL KNOWS ABOUT ITS SERVER, AND ABOUT BEING LET IN.
  *
  * Two things, and they are deliberately different kinds of secret:
@@ -29,7 +56,7 @@ private val Context.sessionStore by preferencesDataStore("merrymen-session")
  * did not ask for it again. The server stopped asking on 2026-09-16 (46c852d1);
  * see [dropRetiredGatePassword].
  */
-class Session(private val context: Context) : OriginSource {
+class Session(private val context: Context) : SessionStore, CookieBlob {
 
   private object Keys {
     val ORIGIN = stringPreferencesKey("origin")
@@ -54,7 +81,8 @@ class Session(private val context: Context) : OriginSource {
   suspend fun welcomedNow(): Boolean = welcomed.first()
   suspend fun setWelcomed() = context.sessionStore.edit { it[Keys.WELCOMED] = true }
 
-  val origin: Flow<String> = context.sessionStore.data.map { it[Keys.ORIGIN] ?: defaultOrigin }
+  override val origin: Flow<String> = context.sessionStore.data.map { it[Keys.ORIGIN] ?: defaultOrigin }
+  override val fallbackOrigin: String get() = defaultOrigin
   val tenant: Flow<String?> = context.sessionStore.data.map { it[Keys.TENANT] }
 
   /**
@@ -85,11 +113,13 @@ class Session(private val context: Context) : OriginSource {
 
   override suspend fun originNow(): String = origin.first()
 
-  suspend fun setOrigin(value: String) {
-    // Normalised once, here, so every caller can concatenate a path without
-    // wondering whether it will produce a double slash.
-    val trimmed = value.trim().removeSuffix("/")
-    context.sessionStore.edit { it[Keys.ORIGIN] = trimmed.ifEmpty { defaultOrigin } }
+  /**
+   * Only an origin [checkOrigin] accepted reaches the store — the type says so.
+   * It used to take the raw field, trimmed, and a scheme-less address stored
+   * here crashed every launch that followed.
+   */
+  override suspend fun setOrigin(checked: OriginCheck.Ok) {
+    context.sessionStore.edit { it[Keys.ORIGIN] = checked.origin }
   }
 
   suspend fun setTenant(value: String?) =
@@ -105,22 +135,24 @@ class Session(private val context: Context) : OriginSource {
    * nothing left to use it; a stored credential nobody reads is still a
    * credential. Idempotent: after the first run there is nothing to remove.
    */
-  suspend fun dropRetiredGatePassword() {
+  override suspend fun dropRetiredGatePassword() {
     if (context.sessionStore.data.first()[Keys.RETIRED_GATE] == null) return
     context.sessionStore.edit { it.remove(Keys.RETIRED_GATE) }
   }
 
-  suspend fun cookiesRaw(): String? = context.sessionStore.data.first()[Keys.COOKIES]
+  override suspend fun cookiesRaw(): String? = context.sessionStore.data.first()[Keys.COOKIES]
 
-  suspend fun setCookiesRaw(value: String) =
+  override suspend fun setCookiesRaw(value: String) {
     context.sessionStore.edit { it[Keys.COOKIES] = value }
+  }
 
   /** Sign-out: forget the session, keep the origin. */
-  suspend fun clearSession() =
+  override suspend fun clearSession() {
     context.sessionStore.edit { p: MutablePreferences ->
       p.remove(Keys.COOKIES)
       p.remove(Keys.TENANT)
     }
+  }
 
   companion object {
     var defaultOrigin: String = dev.merrymen.app.BuildConfig.DEFAULT_ORIGIN

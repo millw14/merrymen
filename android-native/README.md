@@ -45,14 +45,26 @@ says `merrymen-android/0.2.0`).
 `MockWebServer` (`apiFor(server)` in `net/TestKit.kt`) and decode production
 answers captured on 2026-09-24 (`src/test/resources/fixtures/probe-*.json`,
 read with `Fixtures.text(name)`). `DecodeFixturesTest` refuses a fixture that
-has no route, so a new capture has to be decoded somewhere. CI does not build
-this app yet, so run them before you push.
+has no route, so a new capture has to be decoded somewhere. The wiring that
+decides whose state is held — sign-out, a wallet switch, a Server change, the
+retired password at start — runs against the real `Repository` and cookie jar
+with `MemoryStore` and `MemoryCookies` (also in `TestKit.kt`) standing in for
+DataStore and the WebView's `CookieManager`. CI does not build this app yet,
+so run them before you push.
 
 **Adding an endpoint** does not touch `MerrymenApi.kt`: write it as an
 extension in your own `net/<Area>Wire.kt` over the shared plumbing,
 `suspend fun MerrymenApi.ceiling(): ApiResult<Ceiling> = getJson("/api/orders/ceiling")`,
 and it gets the same three-state result, refusal wording and decode-failure
-handling as everything else.
+handling as everything else. A raw body or an extra header goes through
+`callAt(path) { … }`, never `Request.Builder().url(String)`, which throws on
+an address it cannot parse.
+
+**The Server field** (Settings) takes `https://…`, or plain `http://` only for
+`localhost` and `10.0.2.2` — the hosts `network_security_config.xml` allows in
+the clear. Anything else is refused with a sentence and not saved. Moving to
+another host ends the wallet's turn: per-wallet state is forgotten, and the
+session cookie stays with the host that set it.
 
 ---
 

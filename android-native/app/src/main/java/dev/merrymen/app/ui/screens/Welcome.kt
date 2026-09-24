@@ -61,7 +61,7 @@ import kotlinx.coroutines.launch
  * THE FIRST THING A NEW READER SEES.
  *
  * Built to the mockup the owner supplied, not ported from the web — the web has
- * no such page (its sign-in is an inline notice behind the gate). So this is the
+ * no such page (its sign-in is an inline notice). So this is the
  * one screen with no web counterpart to match; the reference is the mockup and
  * the brand mint `#4AD696`, and the constellation is drawn from the five
  * DITHERED stock marks the owner supplied, which already carry that colour baked
@@ -69,8 +69,9 @@ import kotlinx.coroutines.launch
  *
  * A STARTUP PAGE, NOT A SECOND WALL. It shows on a cold start until the reader
  * signs in or goes on as a guest, then Session marks it seen and it never
- * returns. The gate is the one thing that stops you at the door; an introduction
- * that stopped you every launch would be a worse gate wearing a nicer coat.
+ * returns. Nothing stops a reader at the door any more — the site password was
+ * removed (46c852d1) — and an introduction that stopped you every launch would
+ * put a wall back in a nicer coat.
  *
  * THE THREE DOORS. "Continue with X" and "Continue with wallet" both open the
  * web sign-in — that is where the owner key and Privy live, and this app never

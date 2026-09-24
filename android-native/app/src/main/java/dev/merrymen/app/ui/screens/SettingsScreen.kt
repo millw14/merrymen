@@ -56,6 +56,7 @@ import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
+import dev.merrymen.app.net.OriginCheck
 import dev.merrymen.app.net.SettingsEnvelope
 import dev.merrymen.app.ui.LoadedBlock
 import dev.merrymen.app.ui.LocalBottomInset
@@ -423,14 +424,26 @@ fun SettingsScreen(nav: NavHostController) {
         // the door". The origin is the only thing about this device to set.
         PrimaryButton("Save and reconnect") {
           scope.launch {
-            c.repo.setOrigin(origin)
-            // A NEW ORIGIN IS A NEW SERVER, so who we are there has to be asked
-            // again before its settings are read — a session from the old
-            // origin says nothing about this one.
-            c.repo.refreshIdentity()
-            note = "Saved. Reloading."
-            noteBad = false
-            state = c.api.settings().toLoaded()
+            when (val saved = c.repo.setOrigin(origin)) {
+              // NOTHING WAS SAVED, and the owner is told why in the red line
+              // above the field. A silent refusal would leave them looking at
+              // the address they typed and believing it took.
+              is OriginCheck.Refused -> {
+                note = saved.why
+                noteBad = true
+              }
+              is OriginCheck.Ok -> {
+                // The address as stored, so the field shows what is in use.
+                origin = saved.origin
+                // A NEW ORIGIN IS A NEW SERVER, so who we are there has to be
+                // asked again before its settings are read — a session from the
+                // old origin says nothing about this one.
+                c.repo.refreshIdentity()
+                note = "Saved. Reloading."
+                noteBad = false
+                state = c.api.settings().toLoaded()
+              }
+            }
           }
         }
       }

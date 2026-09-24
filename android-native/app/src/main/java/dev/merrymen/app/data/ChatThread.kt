@@ -21,8 +21,24 @@ import kotlinx.coroutines.flow.asStateFlow
  *   - [unread] counts agent lines and receipts that landed while Chat was not
  *     on screen (the tab bar draws its dot from it);
  *   - [forget] drops everything that belongs to the current wallet. It is
- *     registered as a forget hook here, so it runs on sign-out and on a wallet
- *     switch without any screen having to remember to call it.
+ *     registered as a forget hook here, so it runs on sign-out, on a wallet
+ *     switch and on a move to another server without any screen having to
+ *     remember to call it.
+ *
+ * WHAT [forget] MAY DO, because it runs as a [ForgetHook] inside the moment a
+ * wallet's turn ends (the full rules are on ForgetHook):
+ *   - it runs on Dispatchers.IO, so deleting the thread's file is fine there;
+ *     what it publishes must be safe to write off the main thread;
+ *   - it must never call repo.refreshIdentity(), signOut(), setOrigin(),
+ *     adoptWebSession() or bootstrap() — each waits for the turn [forget] is
+ *     running inside;
+ *   - it does NOT run when a session merely expires (401, or address null), so
+ *     what the Chat tab renders must follow repo.signedIn as well, and a
+ *     thread persisted to disk must be keyed by address.
+ *
+ * Work launched in [appScope] that throws is logged by the scope's handler
+ * rather than killing the process, but a failure the owner must hear about
+ * (an order whose outcome is unknown) has to be caught and said here.
  *
  * The thread itself — streaming, persistence per address, order follow-through
  * and receipts — is filled in behind this contract. Until then it holds

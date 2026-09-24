@@ -1,5 +1,8 @@
 package dev.merrymen.app.net
 
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -48,3 +51,72 @@ fun MockWebServer.answer(body: String, code: Int = 200, type: String = "applicat
 /** A Next.js-style HTML page, the body a 404 or a proxy error really arrives with. */
 const val HTML_PAGE = "<!DOCTYPE html><html><head><title>404: This page could not be found.</title></head>" +
   "<body><div id=\"__next\"><h1>404</h1><h2>This page could not be found.</h2></div></body></html>"
+
+/**
+ * "http://localhost:<port>": the address a MockWebServer answers on, in the
+ * one form [checkOrigin] accepts for a plain-http server (localhost, as the
+ * network security config allows). server.url() may name the loopback by
+ * another hostname, which the check would rightly refuse.
+ */
+fun MockWebServer.origin(): String = "http://localhost:$port"
+
+/**
+ * THE DEVICE'S STORED SESSION, in fields: what [Session] keeps in DataStore,
+ * for a JVM test that drives the real Repository and the real cookie jar.
+ */
+class MemoryStore(
+  initial: String,
+  override val fallbackOrigin: String = "https://app.merrymen.dev",
+) : SessionStore, CookieBlob {
+  val originState = MutableStateFlow(initial)
+  override val origin: Flow<String> = originState
+
+  /** The retired site password, as a 0.1.0 install left it. Null once dropped. */
+  var gatePassword: String? = null
+  /** The jar's blob, exactly as the jar wrote it. */
+  var cookieBlob: String? = null
+  var sessionsCleared = 0
+
+  override suspend fun originNow(): String = originState.value
+  override suspend fun setOrigin(checked: OriginCheck.Ok) {
+    originState.value = checked.origin
+  }
+  override suspend fun dropRetiredGatePassword() {
+    gatePassword = null
+  }
+  override suspend fun clearSession() {
+    sessionsCleared++
+    cookieBlob = null
+  }
+  override suspend fun cookiesRaw(): String? = cookieBlob
+  override suspend fun setCookiesRaw(value: String) {
+    cookieBlob = value
+  }
+}
+
+/**
+ * THE TWO COOKIE STORES, with the WebView's as a map of name to value.
+ *
+ * The jar is the real one. The WebView side stands in for CookieManager, and
+ * the hand-back goes through the real [WebAuth.webCookies], so what a harvest
+ * copies — and what it refuses to — is the production rule.
+ */
+class MemoryCookies(val jar: PersistentCookieJar) : CookieStores {
+  val web = linkedMapOf<String, String>()
+
+  override suspend fun harvest(origin: String) {
+    val url = origin.toHttpUrlOrNull() ?: return
+    val raw = web.entries.joinToString("; ") { "${it.key}=${it.value}" }
+    jar.saveFromResponse(url, WebAuth.webCookies(raw, url))
+  }
+
+  override suspend fun drop(origin: String, name: String) {
+    jar.drop(name)
+    web.remove(name)
+  }
+
+  override suspend fun forgetAll() {
+    jar.clear()
+    web.clear()
+  }
+}

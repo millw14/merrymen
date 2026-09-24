@@ -1,10 +1,13 @@
 package dev.merrymen.app.data
 
 import dev.merrymen.app.net.ApiResult
+import dev.merrymen.app.net.CookieStores
 import dev.merrymen.app.net.MerrymenApi
-import dev.merrymen.app.net.PersistentCookieJar
-import dev.merrymen.app.net.Session
-import dev.merrymen.app.net.WebAuth
+import dev.merrymen.app.net.OriginCheck
+import dev.merrymen.app.net.SessionStore
+import dev.merrymen.app.net.checkOrigin
+import dev.merrymen.app.net.isOtherServer
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
@@ -47,10 +50,18 @@ fun <T> ApiResult<T>.toLoaded(): Loaded<T> = when (this) {
  */
 fun Loaded<*>.needsSignIn(): Boolean = this is Loaded.Refused && status == 401
 
+/**
+ * THE APP'S ONE ACCOUNT OF WHO IT ACTS FOR, against which server.
+ *
+ * Takes its Android pieces as interfaces — the stored session as
+ * [SessionStore], the two cookie stores as [CookieStores] — so the wiring that
+ * decides when a wallet's state goes (sign-out, a switch, a Server change, the
+ * retired password at start) runs in a JVM test against the real class.
+ */
 class Repository(
   val api: MerrymenApi,
-  private val session: Session,
-  private val jar: PersistentCookieJar,
+  private val session: SessionStore,
+  private val cookies: CookieStores,
   /** Who we act for, and the hooks that run when that changes. Pure; see [Identity]. */
   private val identity: Identity = Identity(),
 ) {
@@ -81,23 +92,53 @@ class Repository(
 
   /**
    * REGISTER STATE THAT BELONGS TO ONE WALLET, so it is dropped when that
-   * wallet's turn ends: on [signOut], and when the session route answers with a
+   * wallet's turn ends: on [signOut], when the session route answers with a
    * DIFFERENT address than the one the app holds state for (a wallet switched
-   * in the WebView). Hooks run in registration order, before the new address is
-   * published, and one failing does not stop the rest. Register once, at
-   * construction (AppContainer, or an app-scoped store's init).
+   * in the WebView), and when [setOrigin] moves to another server. Hooks run in
+   * registration order, on Dispatchers.IO, before the new address is published,
+   * and one failing does not stop the rest. Register once, at construction
+   * (AppContainer, or an app-scoped store's init). The rules a hook must keep
+   * are on [ForgetHook]: above all, never call this class's identity methods
+   * from one.
    *
    * Not run on the first answer after a cold start: nothing in memory belongs
    * to anybody yet. A store that PERSISTS per-wallet state must key it by
-   * address for exactly that reason.
+   * address for exactly that reason. Not run when a session merely EXPIRES
+   * (401, or address null) either — so what a screen renders must follow
+   * [signedIn], not only the hook.
    */
   fun addForgetHook(hook: ForgetHook) = identity.addForgetHook(hook)
 
-  val origin get() = session.origin
+  val origin: Flow<String> get() = session.origin
 
   suspend fun originNow() = session.originNow()
 
-  suspend fun setOrigin(value: String) = session.setOrigin(value)
+  /**
+   * SAVE A NEW SERVER ADDRESS — or refuse it, with a sentence the owner reads.
+   *
+   * Refused means NOTHING was saved: [checkOrigin] says why ("Start the address
+   * with https://…"). It used to store whatever was typed, and an address with
+   * no scheme then crashed the app on that save and on every launch after.
+   *
+   * ANOTHER HOST IS THE END OF A WALLET'S TURN. Who the old server said we
+   * were, whether it was hosted, and every per-wallet store all belong to that
+   * server; the forget hooks run and identity goes back to "not asked yet"
+   * ([Identity.serverChanged]). The session cookie stays behind with the host
+   * that set it — the jar is scoped, so it is simply not sent to the new one —
+   * and comes back into use if the owner points the app back.
+   *
+   * The new address is stored BEFORE the turn ends, so an identity read that
+   * starts after it asks the new server, and one that left before it is
+   * dropped by the turn count rather than folded in.
+   */
+  suspend fun setOrigin(value: String): OriginCheck {
+    val checked = checkOrigin(value, session.fallbackOrigin)
+    if (checked !is OriginCheck.Ok) return checked
+    val before = session.originNow()
+    session.setOrigin(checked)
+    if (isOtherServer(before, checked.origin)) identity.serverChanged()
+    return checked
+  }
 
   /**
    * Is the server there, and who does it say we are.
@@ -110,15 +151,16 @@ class Repository(
    * still has the password stored, so it is deleted here; on every later start
    * the delete finds nothing.
    *
-   * THE COOKIE GOES TOO. The gate's cookie, mm_gate, carried the password as
-   * its VALUE, and the jar kept sending it on every request to a server that no
-   * longer reads it. Nothing is gained by keeping a credential in flight that
-   * nothing checks.
+   * THE COOKIE GOES TOO, FROM BOTH STORES. The gate's cookie, mm_gate, carried
+   * the password as its VALUE, and the jar kept sending it on every request to
+   * a server that no longer reads it. Dropping it from the jar alone was undone
+   * by the first WebView page: 0.1.0 had seeded it into the WebView's store,
+   * and the sign-in hand-back copied it straight back. So it is expired there
+   * as well (and the hand-back skips it; see WebAuth.RETIRED_COOKIES).
    */
   suspend fun bootstrap(): Loaded<Unit> {
     session.dropRetiredGatePassword()
-    // Off the main thread: the jar reads and writes DataStore with runBlocking.
-    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { jar.drop("mm_gate") }
+    cookies.drop(session.originNow(), "mm_gate")
     return when (val v = api.version()) {
       is ApiResult.Ok -> {
         refreshIdentity()
@@ -139,19 +181,25 @@ class Repository(
    *
    * Unreachable leaves the answer ALONE. Not knowing is not the same as being
    * signed out, and treating it as such logs people out on a flaky train.
+   *
+   * The turn is read BEFORE asking: an answer that lands after a sign-out or a
+   * Server change describes a session that no longer exists, and is dropped.
    */
-  suspend fun refreshIdentity() = identity.answered(api.session())
+  suspend fun refreshIdentity() {
+    val asOf = identity.turn
+    identity.answered(api.session(), asOf)
+  }
 
   /** Called after the WebView flow settles, to pick up a fresh session cookie. */
   suspend fun adoptWebSession() {
-    WebAuth.harvest(session.originNow(), jar)
+    cookies.harvest(session.originNow())
     refreshIdentity()
   }
 
   /** Sign-out has to reach the SERVER, or the session outlives the app. */
   suspend fun signOut() {
     api.logout()
-    WebAuth.forget(jar)
+    cookies.forgetAll()
     session.clearSession()
     // What this wallet liked, wired and said in chat is not the next wallet's
     // business: every forget hook runs here.

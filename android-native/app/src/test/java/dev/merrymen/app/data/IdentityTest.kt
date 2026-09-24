@@ -70,7 +70,7 @@ class IdentityTest {
     id.answered(ok(true, "0xA"))
     id.answered(ApiResult.Unreachable("timeout"))
     assertEquals("0xA", id.signedIn.value)
-    id.answered(ApiResult.Refused(503, "the server had a problem (HTTP 503)"))
+    id.answered(ApiResult.Refused(503, "merrymen answered with an error (503). Try again in a moment."))
     assertEquals("not knowing is not signed out", "0xA", id.signedIn.value)
     id.answered(ApiResult.Refused(401, "not signed in"))
     assertNull(id.signedIn.value)
@@ -127,5 +127,36 @@ class IdentityTest {
     id.answered(ok(true, "0xAAA"))
     id.signedOut()
     assertTrue(second)
+  }
+
+  // ── the Server moving, and answers that outlive their turn ──────────────
+
+  @Test fun anotherServerUnlearnsEverythingTheOldOneSaid() = runBlocking {
+    val id = Identity()
+    val spy = Spy(id).also { id.addForgetHook(it) }
+    id.answered(ok(true, "0xAAA"))
+    id.serverChanged()
+    assertEquals("the old wallet's state goes, while it is still the one published", listOf<String?>("0xAAA"), spy.seen)
+    assertNull(id.signedIn.value)
+    assertFalse("the new server has not been asked", id.identityKnown.value)
+    assertNull("nor said whether it is hosted", id.hosted.value)
+    assertFalse(id.canOfferSignIn.value)
+    // The new server answers; nothing is held, so this is not a switch.
+    id.answered(ok(false, null))
+    assertEquals(false, id.hosted.value)
+    assertEquals(1, spy.seen.size)
+  }
+
+  @Test fun anAnswerFromBeforeATurnEndedIsDropped() = runBlocking {
+    val id = Identity()
+    id.answered(ok(true, "0xAAA"))
+    val asked = id.turn
+    id.signedOut()
+    // The read that left before the sign-out lands after it, carrying the old
+    // cookie's answer. Folding it in would sign 0xAAA straight back in.
+    id.answered(ok(true, "0xAAA"), asked)
+    assertNull(id.signedIn.value)
+    id.answered(ok(true, "0xBBB"), id.turn)
+    assertEquals("an answer from this turn still lands", "0xBBB", id.signedIn.value)
   }
 }
