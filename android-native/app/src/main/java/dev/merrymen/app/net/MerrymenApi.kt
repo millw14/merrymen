@@ -49,9 +49,30 @@ sealed interface ApiResult<out T> {
    * done the thing, we just cannot say what it said. So for a WRITE this is an
    * UNKNOWN outcome, never a failure — an order whose answer was lost may
    * exist, and the caller must look it up rather than tell the owner it failed.
+   *
+   * [unreadable] tells the two apart for the READER, not for the logic: true
+   * when merrymen DID answer and this app could not read it, false when no
+   * answer came (a timeout, no network, an address that is not a web address).
+   * "Couldn't reach merrymen" is false about the first — the server was
+   * reached. [cause] is a sentence either way, never a type name or a body;
+   * [said] is the whole line to show.
    */
-  data class Unreachable(val cause: String) : ApiResult<Nothing>
+  data class Unreachable(val cause: String, val unreadable: Boolean = false) : ApiResult<Nothing>
 }
+
+/** The web's words for no answer (terminal/request-json.ts UNREACHABLE), less its full stop. */
+const val CANT_REACH = "Can't reach merrymen right now"
+
+/** What [ApiResult.Unreachable.cause] says when merrymen answered in a shape this app cannot read. */
+const val UNREADABLE_ANSWER = "merrymen sent back something this app couldn't read. Try again in a moment."
+
+/**
+ * THE ONE LINE TO SHOW for an answer we did not get, so no screen has to
+ * prefix "Couldn't reach merrymen" by hand — which is false for an answer
+ * that arrived and could not be read.
+ */
+val ApiResult.Unreachable.said: String
+  get() = if (unreadable) cause else "$CANT_REACH: $cause"
 
 inline fun <T, R> ApiResult<T>.map(f: (T) -> R): ApiResult<R> = when (this) {
   is ApiResult.Ok -> ApiResult.Ok(f(value))
@@ -152,7 +173,9 @@ class MerrymenApi(
    * A 5xx is the server failing, and its body is usually a stack's words, so
    * it reads as one generic line — unless the route marked it `ownerFacing`,
    * which is how a 5xx written for the owner ("couldn't check this account's
-   * ownership") says so. That is the web's rule too.
+   * ownership") says so. That is the web's rule too, and the generic line is
+   * the web's own sentence (terminal/request-json.ts), so the two clients say
+   * the same thing about the same outage.
    */
   private fun refusalMessage(code: Int, body: String): String {
     val err = try {
@@ -167,7 +190,7 @@ class MerrymenApi(
         ?: it.why?.takeIf { e -> e.isNotBlank() }
     }
     return if (code >= 500) {
-      if (err?.ownerFacing == true && said != null) said else "the server had a problem (HTTP $code)"
+      if (err?.ownerFacing == true && said != null) said else "merrymen answered with an error ($code). Try again in a moment."
     } else {
       said ?: "HTTP $code"
     }
@@ -187,15 +210,31 @@ class MerrymenApi(
    * [ApiResult.Unreachable] for what that means to a write. And coercion stays
    * off in [json]: coercing would read an unread null as the default, and for
    * a figure the default is a confident 0.
+   *
+   * WHICH MODEL FAILED GOES TO THE LOG, NOT THE SCREEN. It used to be pasted
+   * into the notice — "(ThesesPage)" — which is our name for our type, and in a
+   * release build R8 renames it to a letter. The reader gets the sentence; the
+   * person debugging gets the type and the JSON path in logcat.
    */
   @PublishedApi internal inline fun <reified T> decoded(r: ApiResult<String>): ApiResult<T> = when (r) {
     is ApiResult.Ok -> try {
       ApiResult.Ok(json.decodeFromString<T>(r.value))
     } catch (e: IllegalArgumentException) {
-      ApiResult.Unreachable("the server's answer could not be read (" + (T::class.simpleName ?: "?") + ")")
+      unreadable(T::class.simpleName, e)
     }
     is ApiResult.Refused -> r
     is ApiResult.Unreachable -> r
+  }
+
+  /**
+   * Log why an answer would not decode and say so as [ApiResult.Unreachable].
+   * Only the part of the message BEFORE "JSON input": kotlinx.serialization
+   * appends an excerpt of the body there, and a body can be somebody's book.
+   */
+  @PublishedApi internal fun unreadable(type: String?, e: Exception): ApiResult.Unreachable {
+    val why = (e.message ?: e.javaClass.simpleName).substringBefore("JSON input").trim()
+    android.util.Log.w("MerrymenApi", "could not decode ${type ?: "?"}: $why")
+    return ApiResult.Unreachable(UNREADABLE_ANSWER, unreadable = true)
   }
 
   @PublishedApi internal suspend inline fun <reified T> getJson(path: String): ApiResult<T> =

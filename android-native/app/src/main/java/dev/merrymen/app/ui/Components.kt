@@ -359,8 +359,9 @@ private val NoticeGround = Color(0xFF17170F)
  * wrong" treatments and they mean different things: amber `.stamp` (a rule
  * refused), the `--down` `.desk-blocked` card (nothing can proceed at all), and
  * the quiet `.desk-notice` slab (we are sitting still and here is why). A
- * refusal gets the amber; an unreachable server gets the quiet slab, because it
- * is not a refusal and not a loss — it is us failing to get an answer.
+ * refusal gets the amber; an unreachable server, an unreadable answer and a
+ * 5xx get the quiet slab, because none of them is a refusal or a loss — each
+ * is a failure to get an answer, and each offers Try again.
  */
 @Composable
 fun <T> LoadedBlock(
@@ -385,29 +386,27 @@ fun <T> LoadedBlock(
       )
     }
     is Loaded.Value -> content(state.value)
-    is Loaded.Refused -> {
-      // ONE 401, AND IT IS ABOUT YOUR SESSION. There used to be a second — the
-      // site password's, which needed "Open settings" rather than a wallet
-      // sign-in — but the password was removed server-side (46c852d1) and no
-      // route answers with it any more.
+    // The words live in [noticeFor], where a test holds them: a 5xx is a
+    // failure with Try again, not a refusal; an answer this app could not read
+    // is not "couldn't reach".
+    is Loaded.Refused, is Loaded.Unreachable -> {
+      val copy = noticeFor(state, canSignIn = onSignIn != null, canRetry = onRetry != null) ?: return
       Notice(
-        title = if (state.status == 401) "Sign in to see this" else "The server said no",
-        body = state.message,
-        actionLabel = if (state.status == 401 && onSignIn != null) "Sign in" else null,
-        onAction = onSignIn,
-        tone = RefusalAmber,
+        title = copy.title,
+        body = copy.body,
+        actionLabel = when (copy.action) {
+          NoticeAction.SignIn -> "Sign in"
+          NoticeAction.TryAgain -> "Try again"
+          null -> null
+        },
+        onAction = when (copy.action) {
+          NoticeAction.SignIn -> onSignIn
+          NoticeAction.TryAgain -> onRetry
+          null -> null
+        },
+        tone = if (copy.refusal) RefusalAmber else null,
       )
     }
-    is Loaded.Unreachable -> Notice(
-      title = "Couldn't reach merrymen",
-      // Deliberately OUR failure, in our words. Not "you are offline" — we do
-      // not know that, and telling somebody their connection is broken when the
-      // server is down sends them to reset a router.
-      body = "That's this app failing to get an answer, not a fact about your account. " + state.cause,
-      actionLabel = if (onRetry != null) "Try again" else null,
-      onAction = onRetry,
-      tone = null,
-    )
   }
 }
 

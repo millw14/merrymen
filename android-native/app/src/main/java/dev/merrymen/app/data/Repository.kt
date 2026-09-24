@@ -22,14 +22,18 @@ sealed interface Loaded<out T> {
   data class Value<T>(val value: T) : Loaded<T>
   /** The server said no, and said why. Keep the status: 401 != 503. */
   data class Refused(val status: Int, val message: String) : Loaded<Nothing>
-  /** We never reached it. NOT a fact about the account. */
-  data class Unreachable(val cause: String) : Loaded<Nothing>
+  /**
+   * We never got an answer we could read. NOT a fact about the account.
+   * [unreadable] as on [ApiResult.Unreachable]: merrymen answered and this app
+   * could not read it, which is not "couldn't reach".
+   */
+  data class Unreachable(val cause: String, val unreadable: Boolean = false) : Loaded<Nothing>
 }
 
 fun <T> ApiResult<T>.toLoaded(): Loaded<T> = when (this) {
   is ApiResult.Ok -> Loaded.Value(value)
   is ApiResult.Refused -> Loaded.Refused(status, message)
-  is ApiResult.Unreachable -> Loaded.Unreachable(cause)
+  is ApiResult.Unreachable -> Loaded.Unreachable(cause, unreadable)
 }
 
 /**
@@ -121,7 +125,7 @@ class Repository(
         Loaded.Value(Unit)
       }
       is ApiResult.Refused -> Loaded.Refused(v.status, v.message)
-      is ApiResult.Unreachable -> Loaded.Unreachable(v.cause)
+      is ApiResult.Unreachable -> Loaded.Unreachable(v.cause, v.unreadable)
     }
   }
 

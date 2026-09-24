@@ -4,6 +4,7 @@ import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -33,10 +34,21 @@ class DecodeFailureTest {
 
   // ── a 2xx the model cannot read ───────────────────────────────────────────
 
-  @Test fun anHtml200IsUnreachableNotAThrow() = runBlocking {
+  @Test fun anHtml200IsUnreadableNotAThrow() = runBlocking {
     server.answer(HTML_PAGE, 200, "text/html")
     val r = api.theses()
-    assertEquals(ApiResult.Unreachable("the server's answer could not be read (ThesesPage)"), r)
+    // Unreadable, not unreachable: the server answered. And the sentence names
+    // no type — "(ThesesPage)" was our word for our model, and R8 renames it.
+    assertEquals(ApiResult.Unreachable(UNREADABLE_ANSWER, unreadable = true), r)
+    assertFalse((r as ApiResult.Unreachable).said.contains("ThesesPage"))
+    assertFalse(r.said.contains("reach"))
+  }
+
+  @Test fun noAnswerAtAllIsNotUnreadable() = runBlocking {
+    server.shutdown()
+    val r = api.version() as ApiResult.Unreachable
+    assertFalse(r.unreadable)
+    assertTrue(r.said.startsWith(CANT_REACH))
   }
 
   @Test fun aNullWhereTheModelHasADefaultIsUnreachable() = runBlocking {
@@ -101,12 +113,12 @@ class DecodeFailureTest {
 
   @Test fun a5xxIsTheGenericLine() = runBlocking {
     server.answer("""{"error":"TypeError: cannot read properties of undefined (reading 'x')"}""", 503)
-    assertEquals(ApiResult.Refused(503, "the server had a problem (HTTP 503)"), api.feed())
+    assertEquals(ApiResult.Refused(503, "merrymen answered with an error (503). Try again in a moment."), api.feed())
   }
 
   @Test fun a5xxHtmlPageIsTheGenericLine() = runBlocking {
     server.answer(HTML_PAGE, 502, "text/html")
-    assertEquals(ApiResult.Refused(502, "the server had a problem (HTTP 502)"), api.feed())
+    assertEquals(ApiResult.Refused(502, "merrymen answered with an error (502). Try again in a moment."), api.feed())
   }
 
   @Test fun a5xxWrittenForOwnersIsShown() = runBlocking {
