@@ -88,7 +88,17 @@ data class CircleView(
 // ── alpha ───────────────────────────────────────────────────────────────────
 
 @Serializable
-data class AlphaNeed(val tokens: Int? = null, val name: String? = null, val emoji: String? = null)
+data class AlphaNeed(
+  val tokens: Int? = null,
+  val name: String? = null,
+  val emoji: String? = null,
+  /** What the entry tier unlocks, verbatim from CIRCLE_TIERS, for the locked gate. */
+  val perks: List<String> = emptyList(),
+)
+
+/** The tier that opened Alpha for this reader. Sent only when open. */
+@Serializable
+data class AlphaTier(val id: String? = null, val name: String? = null, val emoji: String? = null)
 
 @Serializable
 data class AlphaToken(val symbol: String? = null, val address: String? = null)
@@ -120,6 +130,26 @@ data class AlphaView(
    * fact about the market out of a failed read.
    */
   val indexUnreachable: Boolean = false,
+  /**
+   * WHY NO ROW CARRIES A VERDICT, when none does: "no-model" or "model-failed"
+   * mean the scout COULD NOT LOOK; null means it looked and passed. The two
+   * render as different sentences — the first is our failure, the second is a
+   * fact about the market — so this travels separately from an empty list.
+   */
+  val verdictsWhy: String? = null,
+  /**
+   * Whether the site research ran at all, said once for the page. Null when the
+   * server did not say (locked, or an older server), which is neither answer.
+   */
+  val researched: Boolean? = null,
+  /** The index cut the sweep short: the list is a PREFIX of the market. */
+  val truncated: Boolean = false,
+  /** A degraded render: short because the read was, not because the market is. */
+  val degraded: Boolean = false,
+  /** Epoch ms the index was read. */
+  val fetchedAt: Long? = null,
+  /** The tier that opened it. Null when locked. */
+  val tier: AlphaTier? = null,
 ) {
   val needTokens: Int? get() = need?.tokens
   val symbol: String? get() = token?.symbol
@@ -178,10 +208,56 @@ data class Thesis(
   val outcomeText: String? = null,
   val shadow: Boolean = false,
   val source: String? = null,
+  /**
+   * THE COIN'S NAME, for a reader. A Trencher coin's `symbol` is an id minted
+   * from its address (T + 11 hex, "T7631DACC21B"), and printing that at a person
+   * is what the server added this to stop. Null when there is no better name
+   * than the symbol.
+   */
+  val displayName: String? = null,
+  /**
+   * The agent's own one-line take, in its voice. Gated server-side so it can
+   * never carry a number or an address. Null when it wrote none.
+   */
+  val post: String? = null,
+  /** How many times this was said in its current stretch — the N in "×N". */
+  val said: Int? = null,
+  /** Epoch seconds of the first copy counted in [said]. */
+  val firstAt: Long? = null,
+  /** A landed buy's fill price. Null when not a landed buy, or unread. */
+  val entryPriceUsd: Double? = null,
+  /** A landed sell's realized return as a PERCENT (not bps). Null when unevidenced. */
+  val realizedPct: Double? = null,
+  /** The same in dollars — PUBLIC BOOKS ONLY. Null on a private book, never 0. */
+  val realizedUsd: Double? = null,
+  /** The price when a view was posted, for "since posted". Null when unread. */
+  val markUsd: Double? = null,
+  /** Market cap at posting. Null is unread, never 0. */
+  val mcapUsd: Double? = null,
+  /** The agent's CURRENT mode is Trencher — not a claim about when this was written. */
+  val trencher: Boolean? = null,
+  /**
+   * Epoch seconds this post began its current unbroken stretch. Null when the
+   * copies are not one stretch, and then "×N · since" would hide a change.
+   */
+  val unchangedSince: Long? = null,
+  /** Views only: this agent named more coins than this page carries, so a count is a floor. */
+  val moreNames: Boolean? = null,
 )
 
 @Serializable
-data class ThesesPage(val theses: List<Thesis> = emptyList(), val source: String? = null)
+data class ThesesPage(
+  val theses: List<Thesis> = emptyList(),
+  /** "sqlite" or "none" — and "none" means the ledger could NOT BE READ, not that nobody posted. */
+  val source: String? = null,
+  /**
+   * Every action group in the window was read and none was cut. Only when this
+   * is true does an empty trades lane mean "no published trades"; a scan that
+   * stopped at its bound says nothing about what lay past it. Null from an
+   * older server, which is not a yes.
+   */
+  val tradesComplete: Boolean? = null,
+)
 
 @Serializable
 data class Position(
@@ -193,9 +269,67 @@ data class Position(
   @SerialName("price_source") val priceSource: String? = null,
   @SerialName("value_usdg") val valueUsdg: Double? = null,
   @SerialName("raw_balance") val rawBalance: String? = null,
+  /**
+   * What the holding cost, in whole USDG. NULL when the ledger has no basis —
+   * never 0, which would make the whole mark read as profit.
+   */
+  @SerialName("cost_usdg") val costUsdg: Double? = null,
+  /**
+   * Whether a fill booked from the pre-trade QUOTE may still be in [costUsdg].
+   * Only an explicit false vouches for the cost; true and null both mean no %
+   * return may be shown against it.
+   */
+  @SerialName("cost_from_quote") val costFromQuote: Boolean? = null,
+  /** This position's own stop, in bps below cost. Null falls back to the owner's setting. */
+  @SerialName("stop_floor_bps") val stopFloorBps: Int? = null,
+  /** The sentence that stop was graded for, written at entry. */
+  @SerialName("stop_floor_why") val stopFloorWhy: String? = null,
 ) {
   val priceStale: Boolean get() = priceStaleRaw != 0
 }
+
+/**
+ * ONE OPERATION ON THE OWNER'S OWN TAPE, as /api/feed sends it (up to 30 over
+ * seven days, a redeploy's re-recorded copies already collapsed server-side).
+ *
+ * EVERY FIELD IS NULLABLE, on purpose. The route's own type marks the newer
+ * ones optional ("absent on an older ledger"), and the rest are ledger columns
+ * a migration has already renamed once. A row that is missing a column must
+ * still decode, with that one fact unread, rather than taking the whole feed
+ * down with it.
+ */
+@Serializable
+data class TradeRecord(
+  val kind: String? = null,
+  @SerialName("sell_token") val sellToken: String? = null,
+  @SerialName("buy_token") val buyToken: String? = null,
+  @SerialName("amount_usdg") val amountUsdg: Double? = null,
+  @SerialName("tx_hash") val txHash: String? = null,
+  /** landed | reverted | rejected | paper. */
+  val status: String? = null,
+  @SerialName("reject_rule") val rejectRule: String? = null,
+  @SerialName("sim_quote_out") val simQuoteOut: String? = null,
+  @SerialName("sim_min_out") val simMinOut: String? = null,
+  @SerialName("sim_fee_tier") val simFeeTier: Int? = null,
+  @SerialName("sim_gas") val simGas: String? = null,
+  @SerialName("created_at") val createdAt: String? = null,
+  /** What the ledger knows the fill WAS: buy | sell. */
+  @SerialName("fill_side") val fillSide: String? = null,
+  /** The fill's symbol, else the decision's. Unsanitised: render it as text, never as markup. */
+  val symbol: String? = null,
+  /** The coin's name, for a Trencher T-id. */
+  @SerialName("display_name") val displayName: String? = null,
+  /** The DECISION's side, so a refusal carries one too. */
+  val action: String? = null,
+  /** The decision's reason. Owner-only; the route sends it only to the owner. */
+  val reason: String? = null,
+  @SerialName("realized_pnl_usdg") val realizedPnlUsdg: Double? = null,
+  /**
+   * True only when BOTH the proceeds and the cost were evidenced. Realized
+   * dollars print only then; anything else is an estimate wearing a figure.
+   */
+  @SerialName("realized_vouched") val realizedVouched: Boolean? = null,
+)
 
 @Serializable
 data class AgentGlance(
@@ -209,6 +343,12 @@ data class AgentGlance(
   val handle: String? = null,
   val handleVerified: Boolean = false,
   val owner: String? = null,
+  /**
+   * settings | ledger | fallback. "fallback" means the name could NOT be read:
+   * it is the house default ("Robin"), and a signed-out /api/feed sends exactly
+   * that. Never present a fallback identity as the reader's own agent.
+   */
+  val nameSource: String? = null,
 )
 
 /**
@@ -238,12 +378,33 @@ data class EventRow(
  */
 @Serializable
 data class Feed(
+  /**
+   * "sqlite" or "none". "none" is UNREADABLE — a signed-out reader, or a ledger
+   * that would not open — and then [agent] is the fallback identity and the
+   * empty lists are not facts about anybody's account.
+   */
   val source: String? = null,
   val agent: AgentGlance? = null,
   val events: List<EventRow> = emptyList(),
-  val trades: List<JsonElement> = emptyList(),
+  val trades: List<TradeRecord> = emptyList(),
   val positions: List<Position> = emptyList(),
   val equity: List<EquityPoint> = emptyList(),
+  /**
+   * Capital put in less capital taken out. P&L is equity minus this minus gas.
+   * NULL when nothing is on record, which is NOT zero: equity minus zero is the
+   * bankroll presented as profit.
+   */
+  val netContributionsUsdg: Double? = null,
+  /** Gas paid, in USDG — only the part that could be priced; see [gasUnpricedTrades]. */
+  val gasUsdg: Double? = null,
+  /** Landed trades whose gas could not be priced. Above 0, [gasUsdg] is a floor. */
+  val gasUnpricedTrades: Int? = null,
+  /** Distinct operations that landed in the current run. 0 means no return to measure. */
+  val landed: Int? = null,
+  /** The worker's verdict on [netContributionsUsdg]: true, false, or null for never assessed. */
+  val contributionsKnown: Boolean? = null,
+  /** {hwm_usdg, accrued_fee_usdg} or null. Kept raw until a screen renders it. */
+  val financials: JsonElement? = null,
 ) {
   /** The newest mark, or null when the curve is empty. Null, never 0.0. */
   val equityNow: Double? get() = equity.lastOrNull()?.equityUsdg
@@ -325,8 +486,17 @@ data class LeaderRow(
   /** Settled fills. NOT "trades", and never rendered as one when it is 0. */
   val landed: Int? = null,
   val refused: Int? = null,
-  /** no-deposit | never-filled | contributions-unevidenced | quality-unknown. */
+  /**
+   * no-deposit | never-filled | contributions-unevidenced | quality-unknown,
+   * and since the board took in every agent, paper | inactive.
+   */
   val unrankedWhy: String? = null,
+  /** live | paper | idle. Only a live row is ranked on [pnlBps]. */
+  val mode: String? = null,
+  /** A paper row's own return, in bps. Labelled Paper wherever it is shown, never ranked. */
+  val paperPnlBps: Int? = null,
+  /** Paper fills, the paper counterpart of [landed]. */
+  val filledPaper: Int? = null,
 )
 
 /**
@@ -356,6 +526,8 @@ data class Leaderboard(
    * empty one. Same class of bug as [LeaderRow]'s, one level up.
    */
   val source: String? = null,
+  /** How many retired, quiet or expired accounts were folded out. Null when not counted. */
+  val retired: Int? = null,
 )
 
 /**
@@ -411,6 +583,19 @@ data class SettingsEnvelope(
   val bundlerApiKey: SecretView = SecretView(),
   val llmApiKey: SecretView = SecretView(),
   val telegramBotToken: SecretView = SecretView(),
+  /**
+   * THE WALLET THESE VALUES WERE READ FOR. Hosted: the tenant, or "" when read
+   * signed out; null self-hosted. A form sends it back on save
+   * ([MerrymenApi.patchSettings]'s `owner`), so a save made after another wallet
+   * signed in is refused (409) instead of landing on the wrong agent.
+   */
+  val owner: String? = null,
+  /**
+   * The verified platform-listed coins. An EMPTY list is a fact ("none listed");
+   * null means the server did not send it. Separate from the
+   * officialCoinsEnabled setting, which is in [values].
+   */
+  val officialCoins: List<String>? = null,
 ) {
   private val v get() = values as? kotlinx.serialization.json.JsonObject
   private val d get() = defaults as? kotlinx.serialization.json.JsonObject
@@ -438,6 +623,25 @@ data class SettingsEnvelope(
       ?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
       ?: emptyList()
 }
+
+/**
+ * WHAT A SUCCESSFUL PUT /api/settings SAYS — not the envelope a GET returns.
+ *
+ * `{ok, appliesWithin, ignored?}`. This used to decode as a [SettingsEnvelope],
+ * which worked only because `errors` defaulted to empty — and threw away
+ * `ignored`, so a key the server dropped still read "Saved." A refusal (400,
+ * 409 OWNER_CHANGED_SETTING) arrives as ApiResult.Refused with the joined
+ * `errors`; [errors] here stays for a 200 that carries them.
+ */
+@Serializable
+data class SettingsSaved(
+  val ok: Boolean? = null,
+  /** e.g. "one worker tick" — when the change takes effect. */
+  val appliesWithin: String? = null,
+  /** Keys the server did NOT save because it does not know them. Non-empty is not "Saved". */
+  val ignored: List<String> = emptyList(),
+  val errors: List<String> = emptyList(),
+)
 
 // ── chat, orders, proposals ─────────────────────────────────────────────────
 
@@ -477,8 +681,14 @@ data class ChatReply(
   val command: ChatCommand? = null,
 )
 
+/**
+ * `owner` is the wallet that tapped Confirm. Hosted, a body whose owner is not
+ * the session's tenant is refused 409 OWNER_CHANGED before anything is placed;
+ * null omits the key (explicitNulls = false) and the server judges by session
+ * alone, as it always did.
+ */
 @Serializable
-data class OrderBody(val side: String, val symbol: String, val usdgAmount: Double)
+data class OrderBody(val side: String, val symbol: String, val usdgAmount: Double, val owner: String? = null)
 
 @Serializable
 data class OrderResult(
@@ -487,15 +697,57 @@ data class OrderResult(
   /** The same order placed twice is one order — the id is the idempotency key. */
   val duplicate: Boolean = false,
   val error: String? = null,
+  /** Server epoch ms. NEVER compared with this device's clock; see [expiresInMs]. */
+  val expiresAt: Long? = null,
+  /**
+   * The order's own window, as a DURATION from this response. A follower counts
+   * it on the device clock from when the reply arrived, so a skewed phone clock
+   * cannot end a follow early or late.
+   */
+  val expiresInMs: Long? = null,
 )
 
-/** GET /api/orders?id= — what became of it. "none" means we have no record. */
+/**
+ * GET /api/orders?id= — what became of it.
+ *
+ * `state` is none | queued | running | done | expired. "expired" is the only
+ * one that means NOTHING WAS SENT; "none" means no record exists. A ledger that
+ * could not be read answers 503, not "none".
+ */
 @Serializable
 data class OrderState(
   val id: String? = null,
   val state: String = "none",
   /** The worker's own sentence about the outcome. */
   val result: String? = null,
+  /** Server epoch ms the order was placed. */
+  val at: Long? = null,
+  /** Server epoch ms. For display only, never compared with the device clock. */
+  val expiresAt: Long? = null,
+  /** What the worker read off the ledger when it finished. Absent from an older worker. */
+  val receipt: OrderReceipt? = null,
+)
+
+/**
+ * WHAT AN ORDER BECAME, AS THE WORKER READ IT OFF THE LEDGER — never model text.
+ *
+ * The one place a receipt line's words may come from ("[Buy] $5.00 CASHCAT ·
+ * Filled"). The server shape-checks every field and sends null for one that
+ * failed, so null here is "unread", never zero: a null [usdgActual] prints no
+ * figure at all.
+ */
+@Serializable
+data class OrderReceipt(
+  /** filled | refused | failed | expired. */
+  val status: String? = null,
+  /** buy | sell. */
+  val side: String? = null,
+  val symbol: String? = null,
+  val token: String? = null,
+  val usdgActual: Double? = null,
+  val txHash: String? = null,
+  /** The wall rule that refused it, as a slug. */
+  val rejectRule: String? = null,
 )
 
 @Serializable
@@ -522,8 +774,9 @@ data class SnipeResult(
   val error: String? = null,
 )
 
+/** `owner` as on [OrderBody]: a mismatch with the session is a 409, and null omits it. */
 @Serializable
-data class SnipeBody(val query: String, val usdgAmount: Double)
+data class SnipeBody(val query: String, val usdgAmount: Double, val owner: String? = null)
 
 @Serializable
 data class Proposal(
@@ -571,12 +824,63 @@ data class CustomToken(val symbol: String, val address: String, val decimals: In
 
 // ── grants ──────────────────────────────────────────────────────────────────
 
+/**
+ * GET /api/grants — the account's status as the WORKER reports it.
+ *
+ * `mode`, `liveBlocker`, `workerAliveAt` and `gasSponsored` are the child's
+ * own verdicts, never recomputed here: a second guess from another process
+ * would eventually disagree with the one that actually refuses trades.
+ */
 @Serializable
 data class GrantView(
   val exists: Boolean = false,
   val gasSponsored: Boolean? = null,
+  /** The stored grant minus its secrets. Raw: read `caps` through [perTradeUsdg] and [dailyUsdg]. */
   val grant: JsonElement? = null,
+  /** paper | live | idle, from the heartbeat. Null when the agent has not said. */
+  val mode: String? = null,
+  /**
+   * What stops it trading for real: no-gas | no-cash | dead-policy |
+   * wrong-chain | not-armed | no-executor. NULL IS TWO ANSWERS (never beaten,
+   * or trading for real) and neither is a blocker; [mode] and [workerAliveAt]
+   * tell them apart.
+   */
+  val liveBlocker: String? = null,
+  /** When the worker was last heard from. Null when never. */
+  val workerAliveAt: Long? = null,
+  val balances: GrantBalances? = null,
 )
+
+/**
+ * Decimal strings as read from the chain, per field. NULL MEANS THE READ
+ * FAILED and "0" is a measured zero — they used to collapse to 0, which told a
+ * funded owner on a slow node to "Add funds".
+ */
+@Serializable
+data class GrantBalances(
+  val ethWei: String? = null,
+  val cashUsdg: String? = null,
+  val vaultUsdg: String? = null,
+)
+
+/**
+ * The signed per-trade cap, when the grant carries it AS A NUMBER.
+ *
+ * Numbers only: the caps are inside the signed payload, and a string or a
+ * missing key is a cap nobody can vouch for — so it reads as null (unread),
+ * never as a guess and never as 0.
+ */
+val GrantView.perTradeUsdg: Double? get() = capNumber("perTradeUsdg")
+
+/** The signed daily cap, numbers only, as [perTradeUsdg]. */
+val GrantView.dailyUsdg: Double? get() = capNumber("dailyUsdg")
+
+private fun GrantView.capNumber(key: String): Double? {
+  val caps = (grant as? kotlinx.serialization.json.JsonObject)?.get("caps") as? kotlinx.serialization.json.JsonObject
+  val p = caps?.get(key) as? kotlinx.serialization.json.JsonPrimitive ?: return null
+  if (p.isString) return null
+  return p.content.toDoubleOrNull()?.takeIf { it.isFinite() }
+}
 
 // ── holder proof ────────────────────────────────────────────────────────────
 
@@ -715,6 +1019,16 @@ data class CandleRead(
   val gaps: Int = 0,
   /** Seconds of the newest bar that have elapsed. It is ALWAYS partial. */
   val lastBarAgeSec: Long? = null,
+  /**
+   * THESE BARS ARE THE LAST GOOD READ and the index has since refused. The
+   * state still says "ok" so the chart can draw — the caption must say they are
+   * not live, and the newest bar is not "still forming".
+   */
+  val stale: Boolean = false,
+  /** rate-limited | unreachable | unreadable. Null unless the index refused. */
+  val reason: String? = null,
+  /** Epoch ms of that refusal. */
+  val refusedAt: Long? = null,
 )
 
 /**
@@ -796,6 +1110,46 @@ data class DiscoveryCoin(
   val graduated: Boolean = false,
   /** Still on its bonding curve — treat `reserveUsd` with suspicion. */
   val onCurve: Boolean = false,
+  /** The scout's {conviction, reason} when it had one. Null is a considered pass. */
+  val verdict: JsonElement? = null,
+  /**
+   * The index's tape per window (5m, 1h, 6h, 24h), raw. A window the index
+   * omitted is null throughout, never zero. Read through [tape].
+   */
+  val buckets: JsonElement? = null,
+  /** The pool as the index names it. A key for the index, never an address to call. */
+  val poolId: String? = null,
+  /** Which venue the figures came from. */
+  val dex: String? = null,
+) {
+  /** The same raw tape as [buckets], by the name the screens use for it. */
+  val tape: JsonElement? get() = buckets
+}
+
+/**
+ * GET /api/discoveries — what is trading on this chain, from the index.
+ *
+ * THE CAVEATS TRAVEL WITH THE LIST. [truncated] means the rows are a PREFIX of
+ * the market, [degraded] that the render is short because the read was, and
+ * [indexUnreachable] that there is nothing to show because we could not ask.
+ * An incomplete list and a small one look identical without them.
+ */
+@Serializable
+data class Discoveries(
+  /** Epoch ms of the read. */
+  val fetchedAt: Long? = null,
+  val scanned: Int? = null,
+  val indexUnreachable: Boolean = false,
+  val rows: List<DiscoveryCoin> = emptyList(),
+  val graduated: Int? = null,
+  /** Freshly launched coins, raw until a screen renders them. */
+  val fresh: JsonElement? = null,
+  /** The chain's own status block, raw. */
+  val chain: JsonElement? = null,
+  /** no-model | model-failed — the scout could not look — or null, it looked. */
+  val verdictsWhy: String? = null,
+  val truncated: Boolean = false,
+  val degraded: Boolean = false,
 )
 
 @Serializable
@@ -804,6 +1158,12 @@ data class TokenDetail(
   val market: TokenMarketRead = TokenMarketRead(),
   /** Null for a token the index never returned — there is no pool to ask about. */
   val candles: CandleRead? = null,
+  /**
+   * Pool evidence — recent pool trades and the tape — sent only when asked for
+   * with `activity = true`, and only for a coin. Raw: {poolId, token, candles,
+   * trades: {failed?, observedAt, data: [...]}}.
+   */
+  val evidence: JsonElement? = null,
 )
 
 /**

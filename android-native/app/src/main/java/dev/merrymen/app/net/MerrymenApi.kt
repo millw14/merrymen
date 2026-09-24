@@ -46,74 +46,110 @@ inline fun <T, R> ApiResult<T>.map(f: (T) -> R): ApiResult<R> = when (this) {
 
 fun <T> ApiResult<T>.valueOrNull(): T? = (this as? ApiResult.Ok)?.value
 
-class MerrymenApi(private val http: OkHttpClient, private val session: Session) {
+/**
+ * WHERE THE SERVER IS, asked at the moment of each call.
+ *
+ * An interface rather than [Session] itself so the whole client runs on the
+ * JVM: Session needs an Android Context for its DataStore, and a unit test
+ * wants to point the real [MerrymenApi] — its decoding, its refusal wording —
+ * at a MockWebServer without an emulator. Session implements it for the app.
+ */
+fun interface OriginSource {
+  /** The origin with no trailing slash, so a path can be appended as-is. */
+  suspend fun originNow(): String
+}
 
-  val json = Json {
+/**
+ * ADDING AN ENDPOINT. New routes do not go in this file. Write them as
+ * extension functions in your own net/<Area>Wire.kt (OrdersWire.kt,
+ * MarketWire.kt, …), over the plumbing below:
+ *
+ *   suspend fun MerrymenApi.ceiling(): ApiResult<Ceiling> = getJson("/api/orders/ceiling")
+ *
+ * getJson, sendJson, call, url and json are `@PublishedApi internal` for exactly
+ * that, so a new route gets the same three-state result and the same refusal
+ * wording as every route here, without this file becoming everybody's merge
+ * conflict.
+ */
+class MerrymenApi(
+  /** The shared client: one cookie jar, one connection pool, the app's headers. */
+  val http: OkHttpClient,
+  private val origins: OriginSource,
+) {
+
+  @PublishedApi internal val json = Json {
     ignoreUnknownKeys = true
     explicitNulls = false
     isLenient = true
     coerceInputValues = false
   }
 
-  private val jsonType: MediaType = "application/json; charset=utf-8".toMediaType()
+  @PublishedApi internal val jsonType: MediaType = "application/json; charset=utf-8".toMediaType()
+
+  /** The origin every call is made against right now — for building a web URL beside an API one. */
+  suspend fun originNow(): String = origins.originNow()
 
   // ── plumbing ──────────────────────────────────────────────────────────────
 
-  private suspend fun url(path: String): String = session.originNow() + path
+  @PublishedApi internal suspend fun url(path: String): String = origins.originNow() + path
 
-  private suspend fun call(req: Request): ApiResult<String> = suspendCancellableCoroutine { cont ->
-    // CANCELLABLE, so a screen that goes away takes its request with it.
-    // suspendCoroutine leaked one in-flight call per abandoned LaunchedEffect.
-    val theCall = http.newCall(req)
-    cont.invokeOnCancellation { theCall.cancel() }
-    theCall.enqueue(object : okhttp3.Callback {
-      override fun onFailure(call: okhttp3.Call, e: IOException) {
-        cont.resume(ApiResult.Unreachable(e.message ?: e.javaClass.simpleName))
-      }
+  /** One request, as the three-state result. [client] is [http] unless a route needs its own timeouts. */
+  @PublishedApi internal suspend fun call(req: Request, client: OkHttpClient = http): ApiResult<String> =
+    suspendCancellableCoroutine { cont ->
+      // CANCELLABLE, so a screen that goes away takes its request with it.
+      // suspendCoroutine leaked one in-flight call per abandoned LaunchedEffect.
+      val theCall = client.newCall(req)
+      cont.invokeOnCancellation { theCall.cancel() }
+      theCall.enqueue(object : okhttp3.Callback {
+        override fun onFailure(call: okhttp3.Call, e: IOException) {
+          cont.resume(ApiResult.Unreachable(e.message ?: e.javaClass.simpleName))
+        }
 
-      override fun onResponse(call: okhttp3.Call, response: Response) {
-        response.use { r ->
-          val body = try {
-            r.body?.string().orEmpty()
-          } catch (e: IOException) {
-            cont.resume(ApiResult.Unreachable(e.message ?: "read failed"))
-            return
-          }
-          if (r.isSuccessful) {
-            cont.resume(ApiResult.Ok(body))
-          } else {
-            // The API answers with several error shapes, and two routes answer
-            // in PLAIN TEXT (the middleware's host and cross-site refusals).
-            // Try JSON, fall back to the raw body, never invent a sentence.
-            // Prefer a VALIDATION list, then a single error/detail, then chat's
-            // `why`; only fall back to the raw body when the JSON says nothing.
-            // The list is what /api/settings and its read-modify-write callers
-            // return, and joining it here means every screen gets clean per-line
-            // messages without each one re-parsing the body.
-            val msg = runCatching { json.decodeFromString<ApiError>(body) }
-              .getOrNull()?.let {
-                it.errors?.takeIf { e -> e.isNotEmpty() }?.joinToString("\n")
-                  ?: it.error ?: it.detail ?: it.why
-              }
-              ?: body.ifBlank { "HTTP ${r.code}" }
-            cont.resume(ApiResult.Refused(r.code, msg))
+        override fun onResponse(call: okhttp3.Call, response: Response) {
+          response.use { r ->
+            val body = try {
+              r.body?.string().orEmpty()
+            } catch (e: IOException) {
+              cont.resume(ApiResult.Unreachable(e.message ?: "read failed"))
+              return
+            }
+            if (r.isSuccessful) {
+              cont.resume(ApiResult.Ok(body))
+            } else {
+              // The API answers with several error shapes, and two routes answer
+              // in PLAIN TEXT (the middleware's host and cross-site refusals).
+              // Try JSON, fall back to the raw body, never invent a sentence.
+              // Prefer a VALIDATION list, then a single error/detail, then chat's
+              // `why`; only fall back to the raw body when the JSON says nothing.
+              // The list is what /api/settings and its read-modify-write callers
+              // return, and joining it here means every screen gets clean per-line
+              // messages without each one re-parsing the body.
+              val msg = runCatching { json.decodeFromString<ApiError>(body) }
+                .getOrNull()?.let {
+                  it.errors?.takeIf { e -> e.isNotEmpty() }?.joinToString("\n")
+                    ?: it.error ?: it.detail ?: it.why
+                }
+                ?: body.ifBlank { "HTTP ${r.code}" }
+              cont.resume(ApiResult.Refused(r.code, msg))
+            }
           }
         }
-      }
-    })
-  }
+      })
+    }
 
-  private suspend inline fun <reified T> getJson(path: String): ApiResult<T> =
+  @PublishedApi internal suspend inline fun <reified T> getJson(path: String): ApiResult<T> =
     call(Request.Builder().url(url(path)).get().build()).map { json.decodeFromString<T>(it) }
 
-  private suspend inline fun <reified T> sendJson(
+  /** A JSON body (`{}` when null) with any method. [client] as on [call]. */
+  @PublishedApi internal suspend inline fun <reified T> sendJson(
     path: String,
     method: String,
     bodyJson: String?,
+    client: OkHttpClient = http,
   ): ApiResult<T> {
     val body: RequestBody = (bodyJson ?: "{}").toRequestBody(jsonType)
     val req = Request.Builder().url(url(path)).method(method, body).build()
-    return call(req).map { json.decodeFromString<T>(it) }
+    return call(req, client).map { json.decodeFromString<T>(it) }
   }
 
   // ── sign-in ───────────────────────────────────────────────────────────────
@@ -151,9 +187,14 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
    * becomes 1h; the six buttons are spans of history, which is a different
    * question. `barSize` below maps one to the other, and the span is applied
    * by trimming — never by padding.
+   *
+   * [activity] adds `&activity=1`, which makes the route attach pool evidence
+   * (recent pool trades, the tape) to a COIN's answer as [TokenDetail.evidence].
+   * Off by default: it is a second upstream read, and only the token page's
+   * market-activity panel needs it.
    */
-  suspend fun token(address: String, window: String = "1h"): ApiResult<TokenDetail> =
-    getJson("/api/tokens/" + address + "?window=" + window)
+  suspend fun token(address: String, window: String = "1h", activity: Boolean = false): ApiResult<TokenDetail> =
+    getJson("/api/tokens/" + address + "?window=" + window + (if (activity) "&activity=1" else ""))
 
   /**
    * A STOCK'S BARS, through our own proxy.
@@ -170,7 +211,7 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
     )
   suspend fun leaderboard(): ApiResult<Leaderboard> = getJson("/api/leaderboard")
   suspend fun agent(slug: String): ApiResult<JsonElement> = getJson("/api/agents/" + slug)
-  suspend fun discoveries(): ApiResult<JsonElement> = getJson("/api/discoveries")
+  suspend fun discoveries(): ApiResult<Discoveries> = getJson("/api/discoveries")
   suspend fun venue(): ApiResult<JsonElement> = getJson("/api/venue")
   suspend fun wall(): ApiResult<JsonElement> = getJson("/api/wall")
   suspend fun wallTape(): ApiResult<JsonElement> = getJson("/api/wall-tape")
@@ -205,9 +246,22 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
    * are left alone. Sending the whole object back would echo masked secrets
    * (GET returns `set`/`hint`, never the value) and overwrite real keys with
    * asterisks.
+   *
+   * [owner] is the wallet the values being saved were READ for — the
+   * [SettingsEnvelope.owner] of the GET behind this write, "" included when that
+   * read was signed out. It is merged into the body; hosted, the server refuses
+   * a mismatch with its session (409 OWNER_CHANGED_SETTING) and writes nothing,
+   * so a form loaded for one wallet cannot save onto another. Null sends no
+   * owner and the save is judged by session alone.
    */
-  suspend fun patchSettings(patch: JsonElement): ApiResult<SettingsEnvelope> =
-    sendJson("/api/settings", "PUT", json.encodeToString(JsonElement.serializer(), patch))
+  suspend fun patchSettings(patch: JsonElement, owner: String? = null): ApiResult<SettingsSaved> {
+    val body = if (owner != null && patch is kotlinx.serialization.json.JsonObject) {
+      kotlinx.serialization.json.JsonObject(patch + ("owner" to kotlinx.serialization.json.JsonPrimitive(owner)))
+    } else {
+      patch
+    }
+    return sendJson("/api/settings", "PUT", json.encodeToString(JsonElement.serializer(), body))
+  }
 
   // ── telegram ──────────────────────────────────────────────────────────────
 
@@ -225,15 +279,28 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
   suspend fun chat(body: ChatBody): ApiResult<ChatReply> =
     sendJson("/api/chat", "POST", json.encodeToString(ChatBody.serializer(), body))
 
-  suspend fun order(side: String, symbol: String, usdg: Double): ApiResult<OrderResult> =
-    sendJson("/api/orders", "POST", json.encodeToString(OrderBody.serializer(), OrderBody(side, symbol, usdg)))
+  /**
+   * Queue one order. [owner] is the wallet that confirmed it (see [OrderBody]);
+   * null leaves it to the session, as before.
+   */
+  suspend fun order(side: String, symbol: String, usdg: Double, owner: String? = null): ApiResult<OrderResult> =
+    sendJson(
+      "/api/orders",
+      "POST",
+      json.encodeToString(OrderBody.serializer(), OrderBody(side, symbol, usdg, owner)),
+    )
 
   /** What became of one order. Polled after placing it. */
   suspend fun orderStatus(id: String): ApiResult<OrderState> =
     getJson("/api/orders?id=" + java.net.URLEncoder.encode(id, "UTF-8"))
 
-  suspend fun snipe(query: String, usdg: Double): ApiResult<SnipeResult> =
-    sendJson("/api/snipe", "POST", json.encodeToString(SnipeBody.serializer(), SnipeBody(query, usdg)))
+  /** Resolve a coin by name, then (on "resolved" only) the caller places the order. [owner] as on [order]. */
+  suspend fun snipe(query: String, usdg: Double, owner: String? = null): ApiResult<SnipeResult> =
+    sendJson(
+      "/api/snipe",
+      "POST",
+      json.encodeToString(SnipeBody.serializer(), SnipeBody(query, usdg, owner)),
+    )
 
   suspend fun selftest(): ApiResult<OrderResult> = sendJson("/api/selftest", "POST", null)
   suspend fun selftestStatus(): ApiResult<JsonElement> = getJson("/api/selftest")

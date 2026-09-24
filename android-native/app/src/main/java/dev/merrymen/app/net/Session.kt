@@ -29,7 +29,7 @@ private val Context.sessionStore by preferencesDataStore("merrymen-session")
  * did not ask for it again. The server stopped asking on 2026-09-16 (46c852d1);
  * see [dropRetiredGatePassword].
  */
-class Session(private val context: Context) {
+class Session(private val context: Context) : OriginSource {
 
   private object Keys {
     val ORIGIN = stringPreferencesKey("origin")
@@ -83,7 +83,7 @@ class Session(private val context: Context) {
     }
   }
 
-  suspend fun originNow(): String = origin.first()
+  override suspend fun originNow(): String = origin.first()
 
   suspend fun setOrigin(value: String) {
     // Normalised once, here, so every caller can concatenate a path without
