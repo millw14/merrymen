@@ -16,9 +16,9 @@ import java.util.concurrent.TimeUnit
  *
  * OkHttp's default jar is `CookieJar.NO_COOKIES` — it drops everything — and
  * this API is cookie-authenticated: an HMAC-signed httpOnly session cookie for
- * the account. Without persistence
- * the app re-authenticates on every process death, which for a trading client
- * means the portfolio is empty every time the user comes back to it.
+ * the account. Without persistence the app re-authenticates on every process
+ * death, which for a trading client means the portfolio is empty every time
+ * the user comes back to it.
  *
  * Serialised as `name=value` pairs against the origin's host. Deliberately NOT a
  * full cookie-attribute round trip: these are host-scoped session cookies for
@@ -103,9 +103,13 @@ class PersistentCookieJar(private val session: Session) : CookieJar {
  */
 class MerrymenHeaders : Interceptor {
   override fun intercept(chain: Interceptor.Chain): Response {
-    val req = chain.request().newBuilder()
-      .header("accept", "application/json")
+    val asked = chain.request()
+    val req = asked.newBuilder()
       .header("user-agent", "merrymen-android/${dev.merrymen.app.BuildConfig.VERSION_NAME}")
+      // JSON UNLESS THE CALL ASKED FOR SOMETHING ELSE. /api/chat streams when a
+      // request accepts text/event-stream, and overwriting that here would
+      // silently turn every streamed read back into a single late JSON answer.
+      .apply { if (asked.header("accept") == null) header("accept", "application/json") }
       .build()
     return chain.proceed(req)
   }

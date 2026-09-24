@@ -332,8 +332,28 @@ class MerrymenApi(
 
   // ── acting ────────────────────────────────────────────────────────────────
 
+  /**
+   * THE CHAT'S OWN CLIENT: the shared one, with the patience a model needs.
+   *
+   * A non-streamed /api/chat sends nothing until the whole completion is done,
+   * and the web waits 60s for it. The shared client's 30s read timeout cut a
+   * slow model off halfway and reported it as "Couldn't reach merrymen" — our
+   * failure, invented out of the model thinking. 90s to read, 120s for the
+   * whole call, so a reply the web would have waited for arrives here too and
+   * a dead connection still ends.
+   *
+   * Derived with newBuilder, so it shares the cookie jar, the headers and the
+   * connection pool. A streamed reader (SSE) should use this client as well.
+   */
+  val chatHttp: OkHttpClient by lazy {
+    http.newBuilder()
+      .readTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
+      .callTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
+      .build()
+  }
+
   suspend fun chat(body: ChatBody): ApiResult<ChatReply> =
-    sendJson("/api/chat", "POST", json.encodeToString(ChatBody.serializer(), body))
+    sendJson("/api/chat", "POST", json.encodeToString(ChatBody.serializer(), body), client = chatHttp)
 
   /**
    * Queue one order. [owner] is the wallet that confirmed it (see [OrderBody]);

@@ -675,10 +675,23 @@ data class ChatCommand(
 @Serializable
 data class ChatReply(
   val reply: String? = null,
-  /** no-llm | llm-error | bad body | empty | not signed in. */
+  /** no-llm | llm-error | cut-off | bad body | empty | not signed in. */
   val why: String? = null,
+  /**
+   * The provider's own line, REDACTED and for debugging only. The server marks
+   * it "never rendered" and the web never shows it; speak [kind] instead.
+   */
   val detail: String? = null,
   val command: ChatCommand? = null,
+  /**
+   * The server's classification of a model failure: key-rejected |
+   * rate-limited | provider-down | unreachable | model-missing | other. It is
+   * what the owner is told, in the agent's voice ("your Groq key was
+   * rejected"), instead of a provider's raw text.
+   */
+  val kind: String? = null,
+  /** Whose model failed, e.g. "Groq", for that sentence. */
+  val provider: String? = null,
 )
 
 /**
