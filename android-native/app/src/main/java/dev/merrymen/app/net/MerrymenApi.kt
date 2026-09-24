@@ -32,9 +32,20 @@ import kotlinx.coroutines.suspendCancellableCoroutine
  */
 sealed interface ApiResult<out T> {
   data class Ok<T>(val value: T) : ApiResult<T>
-  /** The server answered, and said no. `status` is load-bearing. */
+  /**
+   * The server answered, and said no. `status` is load-bearing. `message` is a
+   * sentence the server wrote for a person, or "HTTP <code>" / the generic 5xx
+   * line when it wrote none — never a raw body.
+   */
   data class Refused(val status: Int, val message: String) : ApiResult<Nothing>
-  /** We never got an answer. Not the same as being told no. */
+  /**
+   * We never got an answer we could read. Not the same as being told no.
+   *
+   * That includes a 2xx whose body would not decode: the server may well have
+   * done the thing, we just cannot say what it said. So for a WRITE this is an
+   * UNKNOWN outcome, never a failure — an order whose answer was lost may
+   * exist, and the caller must look it up rather than tell the owner it failed.
+   */
   data class Unreachable(val cause: String) : ApiResult<Nothing>
 }
 
@@ -67,9 +78,9 @@ fun interface OriginSource {
  *   suspend fun MerrymenApi.ceiling(): ApiResult<Ceiling> = getJson("/api/orders/ceiling")
  *
  * getJson, sendJson, call, url and json are `@PublishedApi internal` for exactly
- * that, so a new route gets the same three-state result and the same refusal
- * wording as every route here, without this file becoming everybody's merge
- * conflict.
+ * that, so a new route gets the same three-state result, the same refusal
+ * wording and the same decode-failure handling as every route here, without
+ * this file becoming everybody's merge conflict.
  */
 class MerrymenApi(
   /** The shared client: one cookie jar, one connection pool, the app's headers. */
@@ -116,29 +127,74 @@ class MerrymenApi(
             if (r.isSuccessful) {
               cont.resume(ApiResult.Ok(body))
             } else {
-              // The API answers with several error shapes, and two routes answer
-              // in PLAIN TEXT (the middleware's host and cross-site refusals).
-              // Try JSON, fall back to the raw body, never invent a sentence.
-              // Prefer a VALIDATION list, then a single error/detail, then chat's
-              // `why`; only fall back to the raw body when the JSON says nothing.
-              // The list is what /api/settings and its read-modify-write callers
-              // return, and joining it here means every screen gets clean per-line
-              // messages without each one re-parsing the body.
-              val msg = runCatching { json.decodeFromString<ApiError>(body) }
-                .getOrNull()?.let {
-                  it.errors?.takeIf { e -> e.isNotEmpty() }?.joinToString("\n")
-                    ?: it.error ?: it.detail ?: it.why
-                }
-                ?: body.ifBlank { "HTTP ${r.code}" }
-              cont.resume(ApiResult.Refused(r.code, msg))
+              cont.resume(ApiResult.Refused(r.code, refusalMessage(r.code, body)))
             }
           }
         }
       })
     }
 
+  /**
+   * WHAT A REFUSAL SAYS, in words a person was meant to read — or its status.
+   *
+   * A 4xx: the JSON's validation list (one line each, which is how /api/settings
+   * and its read-modify-write callers refuse), else its error, detail or why. A
+   * body with none of those — plain text from the middleware, a Next 404 page,
+   * JSON that says nothing — gives "HTTP <code>" and is NEVER pasted in: a page
+   * of markup in an amber notice is not a sentence, and it is somebody else's
+   * words in ours.
+   *
+   * A 5xx is the server failing, and its body is usually a stack's words, so
+   * it reads as one generic line — unless the route marked it `ownerFacing`,
+   * which is how a 5xx written for the owner ("couldn't check this account's
+   * ownership") says so. That is the web's rule too.
+   */
+  private fun refusalMessage(code: Int, body: String): String {
+    val err = try {
+      json.decodeFromString<ApiError>(body)
+    } catch (e: IllegalArgumentException) {
+      null
+    }
+    val said = err?.let {
+      it.errors?.filter { e -> e.isNotBlank() }?.takeIf { e -> e.isNotEmpty() }?.joinToString("\n")
+        ?: it.error?.takeIf { e -> e.isNotBlank() }
+        ?: it.detail?.takeIf { e -> e.isNotBlank() }
+        ?: it.why?.takeIf { e -> e.isNotBlank() }
+    }
+    return if (code >= 500) {
+      if (err?.ownerFacing == true && said != null) said else "the server had a problem (HTTP $code)"
+    } else {
+      said ?: "HTTP $code"
+    }
+  }
+
+  /**
+   * A 2xx BODY THAT WILL NOT DECODE IS AN ANSWER WE COULD NOT READ — never a crash.
+   *
+   * It used to decode inside ApiResult.map with nothing catching, so an HTML
+   * 200, a null where a model has a default, a missing required field or a
+   * number past Int threw out of whichever LaunchedEffect asked, and the
+   * process died on whatever screen was open. `IllegalArgumentException` is
+   * what kotlinx.serialization throws for all of those (SerializationException
+   * extends it).
+   *
+   * UNREACHABLE, NOT REFUSED, because nobody refused anything: see
+   * [ApiResult.Unreachable] for what that means to a write. And coercion stays
+   * off in [json]: coercing would read an unread null as the default, and for
+   * a figure the default is a confident 0.
+   */
+  @PublishedApi internal inline fun <reified T> decoded(r: ApiResult<String>): ApiResult<T> = when (r) {
+    is ApiResult.Ok -> try {
+      ApiResult.Ok(json.decodeFromString<T>(r.value))
+    } catch (e: IllegalArgumentException) {
+      ApiResult.Unreachable("the server's answer could not be read (" + (T::class.simpleName ?: "?") + ")")
+    }
+    is ApiResult.Refused -> r
+    is ApiResult.Unreachable -> r
+  }
+
   @PublishedApi internal suspend inline fun <reified T> getJson(path: String): ApiResult<T> =
-    call(Request.Builder().url(url(path)).get().build()).map { json.decodeFromString<T>(it) }
+    decoded(call(Request.Builder().url(url(path)).get().build()))
 
   /** A JSON body (`{}` when null) with any method. [client] as on [call]. */
   @PublishedApi internal suspend inline fun <reified T> sendJson(
@@ -149,7 +205,7 @@ class MerrymenApi(
   ): ApiResult<T> {
     val body: RequestBody = (bodyJson ?: "{}").toRequestBody(jsonType)
     val req = Request.Builder().url(url(path)).method(method, body).build()
-    return call(req, client).map { json.decodeFromString<T>(it) }
+    return decoded(call(req, client))
   }
 
   // ── sign-in ───────────────────────────────────────────────────────────────

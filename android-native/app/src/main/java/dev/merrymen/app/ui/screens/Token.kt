@@ -186,7 +186,16 @@ private fun trim(bars: List<Bar>, seconds: Long?): List<Bar> {
  */
 private fun coinBars(candles: CandleRead?, window: String): List<Bar> {
   val list = candles?.candles ?: return emptyList()
-  val bars = list.map { Bar(it.t, it.o, it.h, it.l, it.c) }
+  // An INCOMPLETE BAR IS DROPPED, the same rule [stockBars] applies to the
+  // venue's nulls: a gap is drawn as a gap, never as a bar to zero.
+  val bars = list.mapNotNull { k ->
+    val t = k.t ?: return@mapNotNull null
+    val o = k.o ?: return@mapNotNull null
+    val h = k.h ?: return@mapNotNull null
+    val l = k.l ?: return@mapNotNull null
+    val c = k.c ?: return@mapNotNull null
+    Bar(t, o, h, l, c)
+  }
   return trim(bars, WINDOW_SECONDS[window])
 }
 
@@ -1035,9 +1044,10 @@ private fun HolderRow(h: TokenHolder, nav: NavHostController) {
         }
         // `{seat.position > 0 ? <b>{money(seat.position)}</b> : null}` — the
         // element is omitted rather than printed as "$0.00".
-        if (h.valueUsdg > 0.0) {
+        val value = h.valueUsdg
+        if (value != null && value > 0.0) {
           Text(
-            text = money(h.valueUsdg),
+            text = money(value),
             style = TextStyle(
               fontFamily = numerals(FontWeight.W600),
               fontSize = 16.sp,

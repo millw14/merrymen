@@ -909,6 +909,12 @@ data class ApiError(
   val errors: List<String>? = null,
   /** /api/chat's refusal carries its reason here (`{"reply":null,"why":"not signed in"}`). */
   val why: String? = null,
+  /**
+   * A 5xx body WRITTEN FOR THE OWNER ("couldn't check this account's
+   * ownership"). Only then is a 5xx's own text shown; any other 5xx body is a
+   * stack's words, not ours, and reads as the generic line.
+   */
+  val ownerFacing: Boolean? = null,
 )
 
 // ── likes and follows ───────────────────────────────────────────────────────
@@ -982,15 +988,21 @@ data class FollowBody(val target: String, val on: Boolean)
  * read-candles.ts measured it: on an on-curve pons-v2 pool the minute candles
  * inside one hour summed to 1.6x the hour bar containing them, and both
  * exceeded that pool's own 24h volume by three to five times. Kept for shape.
+ *
+ * EVERY FIELD IS NULLABLE, and an incomplete bar is dropped where the bars are
+ * drawn. These were required non-null Doubles, so one null in one bar failed
+ * the decode of the whole token document — its holders and its market read
+ * included — over a single price nobody could draw anyway. Defaulting them to
+ * 0.0 instead would draw a bar to zero, a price that never existed.
  */
 @Serializable
 data class Candle(
-  val t: Long,
-  val o: Double,
-  val h: Double,
-  val l: Double,
-  val c: Double,
-  val v: Double = 0.0,
+  val t: Long? = null,
+  val o: Double? = null,
+  val h: Double? = null,
+  val l: Double? = null,
+  val c: Double? = null,
+  val v: Double? = null,
 )
 
 /**
@@ -1044,7 +1056,12 @@ data class TokenHolder(
   val name: String = "",
   val handle: String? = null,
   val paper: Boolean = false,
-  val valueUsdg: Double = 0.0,
+  /**
+   * NULL WHEN UNREAD, not 0.0. The server omits no holder for want of a value,
+   * and a 0.0 default either decoded an unread value as a real zero or — with
+   * an explicit null on the wire — failed the whole token document.
+   */
+  val valueUsdg: Double? = null,
   val costUsdg: Double? = null,
   val pnlBps: Int? = null,
   val enteredAt: Long? = null,
