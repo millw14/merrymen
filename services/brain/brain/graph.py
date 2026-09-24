@@ -32,6 +32,7 @@ than paragraphs away.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -46,9 +47,11 @@ from .analyst import (
     parse_view,
 )
 from .budget import BudgetExceeded, RunBudget, TIERS
+from .cast import voice
 from .escalation import EscalationVerdict, assess as assess_escalation, judge_economics
 from .gate import GateResult, assess
 from .llm import Llm, ProviderError, extract_json
+from .outside_research import OutsideReport, OutsideResearch, dossier_block
 from .schemas import (
     AnalystSignal,
     BrainDecision,
@@ -74,7 +77,21 @@ ABSOLUTE RULES:
 - If the evidence does not support a trade, say so. HOLD is a real answer and
   the desk would rather hold than manufacture a reason to act.
 - Be specific. "Momentum is positive" is not evidence; "the 20-day crossed the
-  50-day on 3x average volume" is."""
+  50-day on 3x average volume" is.
+- Your character sets your tone and focus. It never overrides these rules, the
+  evidence, or the account's signed limits."""
+
+
+def _system(node: str, role: str) -> str:
+    """
+    House rules, then the character in this seat, then the seat's job.
+
+    THE ORDER IS THE POINT. The rules come first so no voice can be read as
+    overriding them; the job comes last so it is the freshest instruction. The
+    character between them sets tone and focus only — see cast.py.
+    """
+    seat = voice(node)
+    return f"{HOUSE_RULES}\n\n{seat}\n\n{role}" if seat else f"{HOUSE_RULES}\n\n{role}"
 
 
 def _fence(label: str, text: str) -> str:
@@ -92,8 +109,11 @@ class NodeOutput:
 class BrainGraph:
     """One decision, start to finish, inside one budget."""
 
-    def __init__(self, llm: Llm) -> None:
+    def __init__(self, llm: Llm, outside: OutsideResearch | None = None) -> None:
         self.llm = llm
+        # merrymenbrain's committee report, when configured. None (the default,
+        # and every test's) means no outside research is ever requested.
+        self.outside = outside
 
     # ── the nodes ───────────────────────────────────────────────────────────
 
@@ -121,7 +141,7 @@ class BrainGraph:
             text = await self.llm.complete(
                 node=f"analyst:{lens}",
                 budget=budget,
-                system=f"{HOUSE_RULES}\n\nYou are the {lens} analyst. Report only what your lens can see.",
+                system=_system(f"analyst:{lens}", f"You are the {lens} analyst. Report only what your lens can see."),
                 user=(
                     f"Instrument: {req.market.symbol} ({req.market.instrument_class})\n"
                     "Strategy preferences (never override portfolio gates or measured evidence):\n"
@@ -176,8 +196,9 @@ class BrainGraph:
             node=f"debate:{side}",
             budget=budget,
             deep=True,
-            system=(
-                f"{HOUSE_RULES}\n\nYou argue the {side} case. Argue it as strongly as the evidence "
+            system=_system(
+                f"debate:{side}",
+                f"You argue the {side} case. Argue it as strongly as the evidence "
                 f"honestly allows — and if the evidence does not support your side, say that plainly "
                 f"rather than inventing support. A debate where both sides always find material is "
                 f"a debate that decides nothing."
@@ -194,7 +215,7 @@ class BrainGraph:
         text = await self.llm.complete(
             node=f"risk:{stance}",
             budget=budget,
-            system=f"{HOUSE_RULES}\n\nYou are the {stance} member of the risk committee.",
+            system=_system(f"risk:{stance}", f"You are the {stance} member of the risk committee."),
             user=(
                 f"The proposed plan:\n{plan}\n\n"
                 f"Cash available: {req.portfolio.cash_usdg / 1e6:.6f} USDG. "
@@ -265,9 +286,10 @@ class BrainGraph:
             node="portfolio-manager",
             budget=budget,
             deep=True,
-            system=(
-                f"{HOUSE_RULES}\n\nYou are the portfolio manager. You make the call and it is "
-                f"final. Reply with a single JSON object and nothing else."
+            system=_system(
+                "portfolio-manager",
+                "You are the portfolio manager. You make the call and it is "
+                "final. Reply with a single JSON object and nothing else.",
             ),
             user=(
                 f"{dossier}\n\n"
@@ -321,8 +343,16 @@ class BrainGraph:
                 cost=budget.cost(),
             )
 
+        # OUTSIDE RESEARCH STARTS NOW AND IS READ LATER. It is an HTTP read with
+        # its own short timeout, not a model call, so it runs beside the
+        # analysts instead of after them and adds no wall-clock when it answers
+        # in time. It never raises; see outside_research.py.
+        outside_task: asyncio.Task[OutsideReport | None] | None = None
+        if self.outside is not None and self.outside.wants(req):
+            outside_task = asyncio.create_task(self.outside.fetch(req))
+
         try:
-            return await self._think(req, budget, gate)
+            return await self._think(req, budget, gate, outside_task)
         except BudgetExceeded as e:
             return Refusal(
                 run_id=req.run_id,
@@ -350,8 +380,18 @@ class BrainGraph:
                 detail=f"{type(e).__name__}: {e}",
                 cost=budget.cost(),
             )
+        finally:
+            # A run that refused early must not leave the read pending.
+            if outside_task is not None and not outside_task.done():
+                outside_task.cancel()
 
-    async def _think(self, req: DecideRequest, budget: RunBudget, gate: GateResult) -> BrainDecision:
+    async def _think(
+        self,
+        req: DecideRequest,
+        budget: RunBudget,
+        gate: GateResult,
+        outside_task: "asyncio.Task[OutsideReport | None] | None" = None,
+    ) -> BrainDecision:
         # ── ANALYSTS. Sequential rather than concurrent, on purpose: the
         # budget is a running total and a fan-out would race it past the
         # ceiling before any of them checked.
@@ -422,6 +462,13 @@ class BrainGraph:
                 dossier += "\n\nSUPPLIED OPINIONS — NOT INDEPENDENT MARKET EVIDENCE\n" + _fence(
                     f"peer-{lens}", req.market.signals[lens][:1600]
                 )
+
+        # A second desk's view, when it had one ready. After our own lenses so
+        # the manager reads the evidence first and the outside rating second.
+        if outside_task is not None:
+            outside = await outside_task
+            if outside is not None:
+                dossier += dossier_block(outside, _fence)
 
         # The adaptive candidate is usually the final decision. Supply memory
         # before that call, rather than only to the uncommon deep pass. Prior

@@ -23,7 +23,9 @@ from fastapi.responses import JSONResponse
 
 from .budget import AgentConcurrency, persist_usage, RunBudget, TIERS
 from .credential import CredentialRefused, resolve as resolve_credential
+from .cast import roster
 from .graph import BrainGraph
+from .outside_research import OutsideConfig, from_env as outside_from_env
 from .llm import Llm, LlmConfig
 from .schemas import BrainDecision, DecideRequest, Refusal, SCHEMA_VERSION
 
@@ -46,7 +48,7 @@ _graph_cache: BrainGraph | None = None
 def _graph() -> BrainGraph:
     global _graph_cache
     if _graph_cache is None:
-        _graph_cache = BrainGraph(Llm(LlmConfig.from_env()))
+        _graph_cache = BrainGraph(Llm(LlmConfig.from_env()), outside=outside_from_env())
     return _graph_cache
 
 
@@ -95,7 +97,17 @@ async def health() -> dict:
         "deep_model": os.getenv("BRAIN_DEEP_MODEL", "openai/gpt-oss-120b"),
         "quick_model": os.getenv("BRAIN_QUICK_MODEL", "openai/gpt-oss-20b"),
         "tiers": {k: vars(v) for k, v in TIERS.items()},
+        "cast": roster(),
+        "outside_research": _outside_state(),
     }
+
+
+def _outside_state() -> dict:
+    """Whether merrymenbrain is wired, and for which tiers. Never the token or URL."""
+    cfg = OutsideConfig.from_env()
+    if cfg is None:
+        return {"configured": False}
+    return {"configured": True, "tiers": sorted(cfg.tiers), "timeout_sec": cfg.timeout_sec}
 
 
 @app.post("/v1/decide")

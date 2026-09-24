@@ -565,6 +565,10 @@ ship — weighted by tier ([governance](https://merrymen.dev/governance)). Thres
   policy layer over synthetic prices.
 - `services/brain` — Python research service: evidence evaluation, structured
   decisions and model budgets; execution remains in the worker.
+  Every seat on its desk is a named Merryman (Little John argues the bull case,
+  Robin Hood decides), and it can read a slower committee report from
+  [merrymenbrain](https://github.com/millw14/merrymenbrain) as untrusted
+  evidence — see `docs/merrymenbrain.md`.
 - `site` — public website and current brand assets.
 - `sdk` — client SDK and build tooling.
 - `contracts` — the on-chain drawdown breaker: `BreakerRegistry` +
