@@ -126,7 +126,7 @@ struct MarketsScreen: View {
         Remote(path: "/api/market") { data in
             Rows(values: data["tokens"].array.filter { (!saved || store.watchlist.contains($0["address"].text)) && (query.isEmpty || ($0["symbol"].text + " " + $0["name"].text).localizedCaseInsensitiveContains(query)) }) { token in
                 Button { if let a = token["address"].string { store.path.append(.token(a)) } } label: {
-                    Card { Metric(label: token["symbol"].text, value: usd(token["priceUsd"].number)); Text(token["name"].text).font(.caption).foregroundStyle(.secondary); if token["paused"].bool == true { Text("Trading paused").foregroundStyle(.orange) } }
+                    Card { Metric(label: token["symbol"].text, value: tokenPrice(token["priceUsd"].number)); Text(token["name"].text).font(.caption).foregroundStyle(.secondary); if token["paused"].bool == true { Text("Trading paused").foregroundStyle(.orange) } }
                 }.buttonStyle(.plain)
             }
         }
@@ -225,7 +225,7 @@ struct TokenScreen: View {
             let m = market["stock"] == .null ? market["coin"] : market["stock"]
             Card {
                 Text(market["symbol"].string ?? token["ledger"]["symbol"].string ?? "Token").font(.largeTitle.bold())
-                Text(usd(m["priceUsd"].number)).font(.largeTitle).monospacedDigit()
+                Text(tokenPrice(m["priceUsd"].number)).font(.largeTitle).monospacedDigit()
                 Text(m["name"].text).foregroundStyle(.secondary)
                 if market["read"].text != "found" { Text(market["read"].text == "unread" ? "Market data could not be read." : "Not found in the index feeds checked.").foregroundStyle(.orange) }
                 CandleChart(data: token["candles"], token: address)
@@ -249,7 +249,7 @@ struct TokenScreen: View {
             Rows(values: token["ledger"]["holders"].array) { row in Card {
                 if let slug = row["slug"].string { NavigationLink(row["name"].text, value: Route.agent(slug)) } else { Text(row["name"].text) }
                 Metric(label: row["paper"].bool == true ? "Paper holding" : "Holding", value: usd(row["valueUsdg"].number))
-                Metric(label: "Entry price", value: usd(row["entryPriceUsd"].number))
+                Metric(label: "Entry price", value: tokenPrice(row["entryPriceUsd"].number))
                 Text(row["basisSource"].string ?? "Basis unavailable").font(.caption).foregroundStyle(.secondary)
             } }
             if let count = token["ledger"]["privateHolders"].number, count > 0 { Text("\(Int(count)) holders keep their books private.").font(.caption) }
@@ -289,7 +289,7 @@ struct DiscoveryCard: View {
     var research = false
     var body: some View { Card {
         NavigationLink(row["name"].text, value: Route.token(row["token"].text)).font(.headline)
-        Metric(label: "Price", value: usd(row["priceUsd"].number))
+        Metric(label: "Price", value: tokenPrice(row["priceUsd"].number))
         Metric(label: "24h volume (index)", value: usd(row["volume24hUsd"].number))
         Metric(label: "24h buyers", value: row["buyers24h"].number.map { $0.formatted() } ?? "—")
         Metric(label: "Fully diluted value (index)", value: usd(row["fdvUsd"].number))

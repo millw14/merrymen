@@ -283,7 +283,7 @@ struct ProposalsScreen: View {
             Rows(values: data["proposals"].array) { row in Card {
                 NavigationLink(row["symbol"].text, value: Route.token(row["token"].text)).font(.headline)
                 Text(row["reason"].text)
-                Metric(label: "Price", value: usd(row["priceUsd"].number))
+                Metric(label: "Price", value: tokenPrice(row["priceUsd"].number))
                 if row["onCurve"].bool == true { Text("Still on its launch curve").foregroundStyle(.orange) }
                 Text(row["watched"].bool == true ? "Already watched; permission still required." : "Adding this token needs settings and a new signed permission.").font(.caption)
                 Button("Review adding this coin") { selected = ReviewValue(value: row) }.disabled(store.owner == nil)

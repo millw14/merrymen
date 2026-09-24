@@ -30,7 +30,7 @@ struct TokenActivity: View {
             Rows(values: Array(tape["data"].array.prefix(12))) { trade in
                 VStack(alignment: .leading, spacing: 6) {
                     Metric(label: trade["side"].text.capitalized, value: usd(trade["usd"].number))
-                    Metric(label: "Token price", value: usd(trade["priceUsd"].number))
+                    Metric(label: "Token price", value: tokenPrice(trade["priceUsd"].number))
                     if let at = trade["time"].number { Text(Date(timeIntervalSince1970: at), style: .time).font(.caption) }
                     if let tx = trade["tx"].string, tx.range(of: "^0x[0-9a-fA-F]{64}$", options: .regularExpression) != nil,
                        let url = URL(string: "https://robinhoodchain.blockscout.com/tx/\(tx)") { Link("View market transaction", destination: url).font(.caption) }
