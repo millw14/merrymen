@@ -73,6 +73,8 @@ struct NativeShell: View {
                 case .groupchat: GroupChatScreen()
                 case .proposals: ProposalsScreen()
                 case .xProof: XProofScreen()
+                case .holderWallet: WalletProofScreen(linking: true)
+                case .walletSignIn: WalletProofScreen(linking: false)
                 case .trade(let symbol): TradeScreen(symbol: symbol)
                 case .tradeRequest(let symbol, let side, let amount, let address): TradeScreen(symbol: symbol, side: side, amount: amount, address: address)
                 case .snipe(let query, let amount): SnipeScreen(query: query, amount: amount)

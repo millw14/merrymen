@@ -4,6 +4,7 @@ import PrivySDK
 
 struct GrantScreen: View {
     @EnvironmentObject var store: AppStore
+    @AppStorage("language") private var language = "en"
     let creating: Bool
     @StateObject private var wallet = WalletHost()
     @State private var settings: J?
@@ -14,6 +15,7 @@ struct GrantScreen: View {
     @State private var mode = "all"
     @State private var basket = Set<String>()
     @State private var paper = true
+    @State private var liveAcknowledged = false
     @State private var trencher = false
     @State private var caps = ["perTradeUsdg": "10", "dailyUsdg": "50", "expiryDays": "7", "maxDrawdownPct": "5", "maxOpsPerDay": "24"]
     @State private var error: String?
@@ -22,6 +24,7 @@ struct GrantScreen: View {
     @State private var loading = true
     @State private var submitting = false
     private let fields = [("perTradeUsdg", "USDG per trade"), ("dailyUsdg", "USDG per day"), ("expiryDays", "Permission lifetime in days"), ("maxDrawdownPct", "Maximum drawdown %"), ("maxOpsPerDay", "Operations per day")]
+    private func words(_ key: String) -> String { Language.text(key, locale: language) }
     var body: some View {
         Page {
             if store.owner == nil { SignInCard() }
@@ -41,8 +44,9 @@ struct GrantScreen: View {
                                     Text(tier["bonusStrategies"].bool == true ? "Your current tier includes this strategy." : "This strategy stays idle until your wallet meets its Merry Circle tier. Choose Steady basket or AI strategist to start without it.").foregroundStyle(.orange)
                                 }
                             }
-                            Toggle("Practice with paper trades", isOn: $paper)
-                            Text(paper ? "Fills are simulated. You can enable live trading later." : "Live trading uses real funds within the permission you sign.").font(.caption)
+                            Picker(words("mode.legend"), selection: $paper) { Text(words("mode.paperOption")).tag(true); Text(words("mode.liveOption")).tag(false) }
+                            Text(words(paper ? "mode.paperNote" : "mode.liveNote")).font(.caption)
+                            if !paper { Toggle(words("mode.ack"), isOn: $liveAcknowledged) }
                         }
                         Card {
                             Text("What should it trade?").font(.headline)
@@ -56,6 +60,12 @@ struct GrantScreen: View {
                     }
                     Card {
                         Text("Bound the permission").font(.title2.bold())
+                        DisclosureGroup("Choose a cap preset") {
+                            Button("Cautious · the scout") { applyPreset(["10", "50", "7", "5", "24"]) }
+                            Button("Balanced · the outlaw") { applyPreset(["50", "500", "14", "10", "48"]) }
+                            Button("Bold · the warlord") { applyPreset(["200", "2000", "30", "15", "96"]) }
+                            Text("A preset fills the limits below. Nothing changes until you review and sign.").font(.caption).foregroundStyle(.secondary)
+                        }
                         ForEach(fields, id: \.0) { key, title in
                             VStack(alignment: .leading) { Text(title).font(.caption); TextField(title, text: Binding(get: { caps[key] ?? "" }, set: { caps[key] = $0 })).keyboardType(.decimalPad) }
                         }
@@ -143,6 +153,7 @@ struct GrantScreen: View {
             for key in ["v4AdapterAddress", "ponsAdapterAddress", "ponsClassVaultFactory"] { if let value = fresh.setting(key).string, !value.isEmpty { input[key] = .string(value) } }
             if let grant { input["expectAccount"] = grant["smartAccount"]; if let factory = grant["trencherFactoryAddress"].string { input["priorTrencherFactory"] = .string(factory) } }
             if creating {
+                guard paper || liveAcknowledged else { throw APIError(status: 0, message: words("create.errAck")) }
                 guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, name.count <= 24, !basket.isEmpty else { throw APIError(status: 0, message: "Choose an agent name up to 24 characters and at least one asset.") }
                 input["settingsToSave"] = .object(["owner": .string(owner ?? ""), "agentName": .string(name.trimmingCharacters(in: .whitespacesAndNewlines)), "strategy": .string(strategy), "assetMode": .string(mode), "basketSymbols": .array(basket.sorted().map(J.string)), "paperTradingEnabled": .bool(true), "liveTradingEnabled": .bool(!paper)])
             }
@@ -151,6 +162,7 @@ struct GrantScreen: View {
             review = ReviewValue(value: .object(input)); error = nil
         } catch { self.error = error.localizedDescription }
     }
+    private func applyPreset(_ values: [String]) { for (field, value) in zip(fields, values) { caps[field.0] = value } }
     private func activate(_ review: J) async {
         guard !submitting else { return }; submitting = true; defer { submitting = false }
         do {

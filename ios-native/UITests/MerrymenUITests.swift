@@ -42,4 +42,21 @@ final class MerrymenUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Queued"].waitForExistence(timeout: 12))
         XCTAssertFalse(app.buttons["Review order"].isEnabled)
     }
+    func testAmbiguousCoinRequiresContractChoiceAndSeparateOrderReview() {
+        let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-signed-in", "-snipe-test", "-reset-tour"]; app.launch()
+        if app.buttons["Skip tour"].waitForExistence(timeout: 8) { app.buttons["Skip tour"].tap() }
+        XCTAssertTrue(app.buttons["Find matching coins"].waitForExistence(timeout: 8)); app.buttons["Find matching coins"].tap()
+        let choice = app.buttons["Check this contract"].firstMatch
+        XCTAssertTrue(choice.waitForExistence(timeout: 8)); choice.tap()
+        let review = app.buttons["Review buy order"]
+        XCTAssertTrue(review.waitForExistence(timeout: 8)); review.tap()
+        XCTAssertTrue(app.textFields["Amount in USDG, e.g. 5.00"].waitForExistence(timeout: 8))
+        XCTAssertEqual(app.textFields["Amount in USDG, e.g. 5.00"].value as? String, "5.00")
+        XCTAssertFalse(app.staticTexts["Queued"].exists)
+        app.buttons["Review order"].tap()
+        XCTAssertTrue(app.buttons["Submit order"].waitForExistence(timeout: 5))
+        capture(app, "Resolved contract awaits explicit order confirmation")
+        app.buttons["Cancel"].tap()
+        XCTAssertFalse(app.staticTexts["Queued"].exists)
+    }
 }

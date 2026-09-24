@@ -7,7 +7,7 @@ import { verifiedAdapter } from "../../web/src/lib/verified-adapter";
 import { isValidCustomToken } from "../../packages/core/src/tokens";
 import { TRENCHER_FACTORY } from "../../web/src/lib/trencher-permission";
 import type { Address, Hex } from "viem";
-import { stringToHex, bytesToHex, getTypesForEIP712Domain } from "viem";
+import { stringToHex, bytesToHex, getTypesForEIP712Domain, recoverMessageAddress } from "viem";
 import { getUserOperationHash } from "viem/account-abstraction";
 import { planFromBrowser, sweepFromBrowser, getRecoveryTicket, relayUrl, type BrowserWallet } from "../../web/src/lib/recover-client";
 
@@ -28,6 +28,11 @@ function signer(address: Address) {
 }
 
 export function capabilities() { return { version: 1, engine: "shared-permission-builder", nativeScreens: true }; }
+
+export async function recoverIdentity(input: { message: string; signature: Hex }) {
+  if (input.message.length > 8192 || !/^0x[0-9a-fA-F]{130}$/.test(input.signature)) throw new Error("Invalid ownership proof.");
+  return { address: await recoverMessageAddress({ message: input.message, signature: input.signature }) };
+}
 
 export async function create(input: {
   owner: Address; tenant: Address; did: string;

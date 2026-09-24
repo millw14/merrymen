@@ -29,6 +29,8 @@ struct SettingsScreen: View {
         ("telegramMaxActionUsdg", "Order ceiling (USDG)"), ("buyPerTickUsdg", "Buy per tick (USDG)"),
         ("idleFloorUsdg", "Cash floor (USDG)"), ("gapEnterBudgetUsdg", "Gap entry budget (USDG)"),
         ("takeProfitBps", "Take profit (basis points)"), ("maxPriceDivergenceBps", "Maximum price divergence (basis points)"),
+        ("strategistStopLossBps", "Strategist stop loss (basis points; 0 disables)"), ("memecoinMinFdvUsd", "Minimum memecoin fully diluted value (USD)"),
+        ("deskMaxSteps", "Maximum research steps per decision"),
         ("minPoolLiquidityUsdg", "Minimum pool liquidity (USDG)"), ("llmIntervalMin", "Strategist interval (minutes)"),
         ("llmMaxActionUsdg", "Strategist action cap (USDG)"), ("discoveryIntervalMin", "Discovery interval (minutes)"),
         ("scoutBudgetUsdg", "Scout budget (USDG)"), ("scoutPerTokenUsdg", "Scout per token (USDG)"),
@@ -252,6 +254,7 @@ struct CircleScreen: View {
                 Metric(label: "$MERRYMEN held", value: circle["balance"].number.map { $0.formatted() } ?? "—")
                 Metric(label: "Performance fee", value: bps(circle["effectiveFeeBps"].number))
                 if let holder = circle["holderAddress"].string { Text(holder).font(.caption.monospaced()).textSelection(.enabled) }
+                if store.owner != nil { NavigationLink("Manage holder wallet", value: Route.holderWallet) }
             }
             Rows(values: circle["tiers"].array) { tier in Card {
                 Text("\(tier["emoji"].text) \(tier["name"].text)").font(.title2.bold())

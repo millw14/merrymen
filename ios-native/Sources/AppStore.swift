@@ -6,6 +6,7 @@ enum Tab: String, CaseIterable { case home = "Home", chat = "Chat", feed = "Feed
     var icon: String { switch self { case .home: "chart.xyaxis.line"; case .chat: "bubble.left.and.bubble.right"; case .feed: "leaf.fill"; case .alpha: "sparkles"; case .profile: "person.crop.circle" } }
 }
 enum Route: Hashable {
+    case holderWallet, walletSignIn
     case snipe(String, String), tradeRequest(String, String, String, String?)
     case markets, search, agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof
     case trade(String), deposit, permissions, create, limits, withdraw, signIn, siteAccess, tour
@@ -37,6 +38,11 @@ final class AppStore: ObservableObject {
                 UserDefaults.standard.removeObject(forKey: "uiTest.orderPlaced")
                 try? SecureStore.remove("dev.merrymen.orders", "pendingOrder.0x1111111111111111111111111111111111111111")
             }
+        }
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-snipe-test") {
+            path = [.snipe("NEON", "5.00")]
+            UserDefaults.standard.removeObject(forKey: "uiTest.orderPlaced")
+            try? SecureStore.remove("dev.merrymen.orders", "pendingOrder.0x1111111111111111111111111111111111111111")
         }
         #endif
         let app = Bundle.main.object(forInfoDictionaryKey: "PrivyAppID") as? String ?? ""

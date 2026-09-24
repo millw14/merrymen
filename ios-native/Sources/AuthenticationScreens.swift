@@ -52,6 +52,7 @@ struct SignInScreen: View {
                 } }.buttonStyle(.bordered)
             }
             if busy { ProgressView("Signing in…") }
+            NavigationLink("Sign in with an existing external wallet", value: Route.walletSignIn)
             if let error { Text(error).foregroundStyle(Brand.down) }
             Text("Signing in proves ownership. It does not authorize a trade or a new trading permission.").font(.caption).foregroundStyle(.secondary)
         }.disabled(busy).navigationTitle("Sign in")

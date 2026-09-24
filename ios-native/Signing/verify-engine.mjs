@@ -91,6 +91,12 @@ context = vm.createContext({
 try {
   vm.runInContext(fs.readFileSync(path.join(root, 'ios-native/Resources/WalletRuntime.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(root, 'ios-native/Resources/WalletEngine.js'), 'utf8'), context);
+  const message = 'Merrymen native ownership proof fixture';
+  const signature = await owner.signMessage({ message });
+  const proof = await context.WalletEngine.recoverIdentity({ message, signature });
+  assert.equal(proof.address.toLowerCase(), owner.address.toLowerCase());
+  const different = await context.WalletEngine.recoverIdentity({ message: message + ' changed', signature });
+  assert.notEqual(different.address.toLowerCase(), owner.address.toLowerCase());
   vm.runInContext('Date.now = () => 1790287200000', context);
   const caps = { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5, maxOpsPerDay: 24 };
   context.__runWallet(1, 'create', JSON.stringify({ owner: owner.address, tenant: owner.address, did: 'did:privy:ios-test', caps, extraTokens: [], autonomousTrencher: trencher }));

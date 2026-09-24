@@ -72,6 +72,6 @@ struct SnipeScreen: View {
             let response = try await store.perform("/api/snipe", body: .object(["query": .string(query), "usdgAmount": .number(value), "owner": owner.map(J.string) ?? .null]), expectedOwner: owner)
             guard self.query.trimmingCharacters(in: .whitespacesAndNewlines) == query, amount == typedAmount else { return }
             resolvedAmount = typedAmount; result = response
-        } catch { error = error.localizedDescription } }
+        } catch { self.error = error.localizedDescription } }
     }
 }

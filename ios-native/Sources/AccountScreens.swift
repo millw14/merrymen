@@ -28,6 +28,7 @@ struct AccountScreen: View {
                         }
                     } else {
                         Card { Text("Meet your next agent.").font(.title2.bold()); NavigationLink("Create agent", value: Route.create) }
+                        NavigationLink("Recover an existing account", value: Route.withdraw)
                     }
                 }
                 NavigationLink("Settings", value: Route.settings)
@@ -98,7 +99,8 @@ struct DepositScreen: View {
                             Metric(label: "USDG balance", value: rawUnits(status["balances"]["cashUsdg"].string, decimals: 6))
                             Metric(label: "Gas sponsorship", value: status["gasSponsored"].bool.map { $0 ? "Trading gas covered" : "Not covered" } ?? "Unknown")
                         }
-                    } else { Text("Create your agent before sending funds."); NavigationLink("Create agent", value: Route.create) }
+                    } else if status["exists"].bool == true { Text("This account uses another network. Its deposit address is not supported by this native build.").foregroundStyle(.orange) }
+                    else { Text("Create your agent before sending funds."); NavigationLink("Create agent", value: Route.create) }
                 }
             }
         }.navigationTitle("Add funds")
