@@ -29,6 +29,25 @@ type Basis = {symbol:string; qty_raw:string; cost_usdg:string};
 const MARK_TOLERANCE_USDG = 0.00001;
 
 /**
+ * BASIS_UNITS — WHAT A PAPER BASIS QUANTITY IS COUNTED IN, AND WHY IT IS TWO THINGS.
+ *
+ * Since d2c652db (2026-09-19) a paper fill books its basis in the SAME
+ * split-invariant units as the book: index.ts passes `qtyRaw: rawShares * 1e18`,
+ * and rawShares is exactly what the book stores. Before it, the basis took the
+ * TRADEABLE quantity at the multiplier of the day. A position bought across the
+ * change holds some of each, so a sound checkpoint's basis lies between
+ * `shares` and `shares × multiplier`.
+ *
+ * The comment below (from 912502b5) read the old half as the whole rule and
+ * compared every basis with `shares × multiplier`. That passed the pre-change
+ * rows and refused every book today's engine writes, as soon as a multiplier
+ * left 1.0 — and a refused checkpoint is an agent the orchestrator never
+ * starts. Production, 2026-09-24: ten paper agents refused on every ferry
+ * pass since the deploy that shipped it, one of them the only agent there with
+ * a Telegram bot, which went silent while the dashboard said connected.
+ */
+
+/**
  * WHAT ONE SPLIT-INVARIANT SHARE IS WORTH IN TRADEABLE UNITS, PER SYMBOL.
  *
  * The two numbers a checkpoint carries are in DIFFERENT UNITS and nothing said
@@ -99,13 +118,17 @@ export function paperCheckpointRejection(row: Checkpoint, multiplierOf: Multipli
       // A snapshot between cash/book and basis writes must not become a restore point.
       if (!b) return `${symbol} is held with no paper cost basis`;
       if (BigInt(b.cost_usdg)<0n) return `${symbol} has a negative cost basis`;
-      // LIKE FOR LIKE. `qty_raw` is tradeable, `shares` is split-invariant, so
-      // one of them has to be converted before they can be compared at all —
-      // see MultiplierOf. The multiply adds one rounding step, which is ~1e-16
-      // relative and nowhere near the bound below.
+      // IN THE UNITS THE ENGINE WROTE — see BASIS_UNITS. Today's fills book the
+      // split-invariant quantity, so basis == shares; fills before 2026-09-19
+      // booked the tradeable quantity, shares × multiplier; a position spanning
+      // both holds a mix. So the basis may sit anywhere between the two, and a
+      // torn write — a book updated past its basis, or a basis booked twice —
+      // lands outside them. The 1e-6 is the engine's own rounding: a sell
+      // rounds the book's shares to 6dp while the basis stays exact.
       const mul = multiplierOf(symbol);
-      const tradeable = p.shares * mul;
-      if (Math.abs(Number(b.qty_raw)/1e18-tradeable)>1e-6) return `${symbol} basis ${b.qty_raw} raw disagrees with ${p.shares} shares at multiplier ${mul}`;
+      const qty = Number(b.qty_raw)/1e18;
+      const lo = p.shares * Math.min(1, mul), hi = p.shares * Math.max(1, mul);
+      if (qty < lo - 1e-6 || qty > hi + 1e-6) return `${symbol} basis ${b.qty_raw} raw disagrees with ${p.shares} shares at multiplier ${mul}`;
     }
     for (const b of basis) {
       if (BigInt(b.qty_raw)<0n || BigInt(b.cost_usdg)<0n) return `${b.symbol} basis is negative`;
@@ -233,18 +256,20 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
     const markDelta = Number(mark.cash_usdg)+Number(mark.vault_usdg)+Number(mark.positions_usdg)-Number(mark.equity_usdg);
     if (Math.abs(markDelta)>MARK_TOLERANCE_USDG) throw new Error(`the recoverable valuation does not add up (cash+vault+positions-equity=${markDelta})`);
     /**
-     * SPLIT-INVARIANT, LIKE THE BOOK THIS IS RESTORING INTO.
+     * SPLIT-INVARIANT, LIKE THE BOOK THIS IS RESTORING INTO — AND A PAPER
+     * `raw_balance` ALREADY IS.
      *
-     * This used to write `raw_balance/1e18` — a TRADEABLE quantity — into a
-     * field the paper engine reads as shares at multiplier 1.0, so the two
-     * restore paths wrote the same field in different units and only agreed
-     * while nothing had split. Nobody had been bitten yet; a post-split
-     * upgrade-path restore would have mis-stated the book by the multiplier,
-     * silently, in the direction of over-reporting the holding.
+     * index.ts writes a paper position's raw balance as `shares * 1e18` ("shares
+     * is split-invariant, so it IS the raw balance in 18dp terms"), so it comes
+     * back as `raw_balance / 1e18` with nothing applied. 912502b5 divided it by
+     * the multiplier as well, reading it as a tradeable on-chain balance: every
+     * restore through here then understated the holding by that multiplier and,
+     * against the basis, disagreed by it twice over — which is how three
+     * agents on this path were refused on every pass.
      */
     const shares=Object.fromEntries(positions.filter(p=>BigInt(String(p.raw_balance))>0n).map(p=>{
       const symbol=String(p.symbol);
-      return [symbol,{token:String(p.token),shares:Number(p.raw_balance)/1e18/multiplierOf(symbol)}];
+      return [symbol,{token:String(p.token),shares:Number(p.raw_balance)/1e18}];
     }));
     const basis=await shared.prepare(`SELECT symbol,qty_raw,cost_usdg FROM cost_basis WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).all(account) as Basis[];
     const peak=await shared.prepare(`SELECT MAX(equity_usdg) AS peak FROM equity WHERE LOWER(agent_id)=LOWER(?) AND epoch=? AND mode='paper'`).get(account,Number(mark.epoch)) as {peak:number};

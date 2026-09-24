@@ -205,7 +205,7 @@ test("an absent or unreadable multiplier is 1.0, so nothing that never split cha
   assert.equal(of('NEVER SEEN'),1);
 });
 
-test("the upgrade path writes shares split-invariant, like the book it restores into", async()=>{
+test("the upgrade path reads a paper raw balance as the split-invariant shares index.ts wrote into it", async()=>{
   const raws=[new DatabaseSync(':memory:'),new DatabaseSync(':memory:')];
   const [shared,fresh]=raws.map(wrapSqlite);
   try {
@@ -218,11 +218,109 @@ test("the upgrade path writes shares split-invariant, like the book it restores 
       CREATE TABLE positions(agent_id TEXT,symbol TEXT,token TEXT,raw_balance TEXT,ui_multiplier TEXT,value_usdg REAL);
       INSERT INTO equity VALUES(1,'a',1,'paper',10,900,0,110,1010);
       INSERT INTO cost_basis VALUES('a','paper','NVDA','2000000000000000000','100000000',10);`);
-    // Two raw units held at a 2.0 multiplier: one split-invariant share.
+    // A paper position's raw balance is `shares * 1e18` (index.ts), whatever the
+    // multiplier: two raw units at a 2.0 multiplier are two split-invariant
+    // shares. Dividing by the multiplier again restored one — half the holding.
     await shared!.prepare(`INSERT INTO positions VALUES('a','NVDA',?,'2000000000000000000','2000000000000000000',110)`).run('0x'+'1'.repeat(40));
     assert.match(await restorePaperCheckpoint(fresh!,shared!,'a'),/restored/);
     const book = await fresh!.prepare('SELECT shares FROM paper_book').get() as {shares:string};
     const held = (JSON.parse(book.shares) as Record<string,{shares:number}>).NVDA!.shares;
-    assert.ok(Math.abs(held-1)<1e-9, `expected 1 split-invariant share, got ${held}`);
+    assert.ok(Math.abs(held-2)<1e-9, `expected the 2 split-invariant shares the book held, got ${held}`);
+  } finally {raws.forEach(r=>r.close());}
+});
+
+/**
+ * ── THE UNITS THE PAPER ENGINE ACTUALLY WRITES ─────────────────────────────
+ *
+ * Since d2c652db (2026-09-19) a paper fill books its basis in SPLIT-INVARIANT
+ * units — index.ts passes `qtyRaw: rawShares * 1e18`, where rawShares is the
+ * quantity the book stores — so a book and a basis written by today's engine
+ * are EQUAL, whatever the multiplier. Before it, the basis took the tradeable
+ * quantity at the multiplier of the day. A position that spans the change
+ * holds a mix, so its basis sits anywhere from 1× to multiplier× its shares.
+ *
+ * Checking `basis == shares × multiplier` (the rule this replaces) passed only
+ * the old half and refused every book today's engine writes — and a refused
+ * book is an agent the orchestrator never starts: no ticks, no trades, and a
+ * Telegram bot that stops answering while the dashboard still says connected.
+ * Production, 2026-09-24: ten paper agents, every ferry pass refused.
+ */
+import { applyPaperIntent } from "./paper";
+
+const NVDA_NOW = 1.0007751591646306;
+const AAPL_NOW = 1.0005660800610925;
+const QQQ_NOW = 1.0007007912414054;
+const TOKEN = ('0x'+'2'.repeat(40)) as `0x${string}`;
+const USDG = ('0x'+'5'.repeat(40)) as `0x${string}`;
+const base = {agent_id:'a',epoch:1,cash_usdg:900,vault_usdg:0,hwm_usdg:1000,updated_at:10};
+const row = (symbol: string, shares: number, qtyRaw: bigint | string) => ({...base,
+  shares: JSON.stringify({[symbol]:{token:TOKEN,shares}}),
+  basis_json: JSON.stringify([{symbol,qty_raw:String(qtyRaw),cost_usdg:'100000000'}]),
+});
+
+test("A BOOK TODAY'S ENGINE WROTE is valid at any multiplier — a buy, then a partial sell, through the real paper fill", ()=>{
+  const opts = {
+    priceUsdOf: () => ({ priceUsd: 180, stale: false }),
+    symbolOf: () => 'NVDA',
+    multiplierOf: () => NVDA_NOW,
+    usdgAddress: USDG,
+    slippageBps: 30,
+    notionalUsdg: 50,
+  };
+  const book = { cashUsdg: 1000, vaultUsdg: 0 };
+  const buy = applyPaperIntent({ kind:'swap', sellToken:USDG, buyToken:TOKEN } as never, book as never, [], opts);
+  assert.ok(buy.ok && buy.fill);
+  // Exactly what index.ts books: the stored (split-invariant) quantity.
+  let qty = BigInt(Math.round(buy.fill!.rawShares * 1e18));
+  const held = buy.positions.find(p=>p.symbol==='NVDA')!.shares;
+  assert.equal(paperCheckpointRejection(row('NVDA', held, qty), ()=>NVDA_NOW), null, 'the buy it just booked');
+
+  const sell = applyPaperIntent({ kind:'swap', sellToken:TOKEN, buyToken:USDG } as never, buy.book, buy.positions, { ...opts, notionalUsdg: 20 });
+  assert.ok(sell.ok && sell.fill);
+  qty -= BigInt(Math.round(sell.fill!.rawShares * 1e18));
+  const left = sell.positions.find(p=>p.symbol==='NVDA')!.shares; // rounded to 6dp by the engine
+  assert.equal(paperCheckpointRejection(row('NVDA', left, qty), ()=>NVDA_NOW), null, 'and after a sell the book rounded');
+});
+
+test("THE TEN THAT WOULD NOT START: their real rows restore, in both units", ()=>{
+  // Today's engine: basis == shares (the AAPL one rounded to 6dp by a sell).
+  assert.equal(paperCheckpointRejection(row('NVDA', 0.7682579240244635, '768257924024463289'), ()=>NVDA_NOW), null, '0xfe0db6');
+  assert.equal(paperCheckpointRejection(row('AAPL', 0.002073, '2072280544600463'), ()=>AAPL_NOW), null, '0x69ae62');
+  assert.equal(paperCheckpointRejection(row('QQQ', 0.0054979829144916085, '5497982914491609'), ()=>QQQ_NOW), null, '0xa222ba');
+  // The engine before 2026-09-19: basis tradeable at the multiplier of the day.
+  assert.equal(paperCheckpointRejection(row('NVDA', 0.046669762062241625, '46705938556015296'), ()=>NVDA_NOW), null, '0x19bd63');
+});
+
+test("WHAT THE CHECK IS FOR still fails: a torn write, a doubled basis, and anything outside the two units", ()=>{
+  // A DCA leg whose book write landed and whose basis write had not.
+  assert.match(paperCheckpointRejection(row('NVDA', 0.1, '70000000000000000'), ()=>NVDA_NOW)!, /disagrees/);
+  // 0xc94b0f: a basis twice its holding at a multiplier of 1.000775 — booked twice, not split.
+  assert.match(paperCheckpointRejection(row('NVDA', 0.03886419304922031, '77848936544902784'), ()=>NVDA_NOW)!, /disagrees/);
+  // Just past each end of the range the two units allow.
+  assert.match(paperCheckpointRejection(row('NVDA', 1, BigInt(Math.round(1e18 * NVDA_NOW)) + 2_000_000_000_000n), ()=>NVDA_NOW)!, /disagrees/);
+  assert.match(paperCheckpointRejection(row('NVDA', 1, 999_990_000_000_000_000n), ()=>NVDA_NOW)!, /disagrees/);
+  // And a holding with no basis is still no restore point.
+  assert.match(paperCheckpointRejection({...base, shares: JSON.stringify({MU:{token:TOKEN,shares:1}}), basis_json:'[]'})!, /MU is held with no paper cost basis/);
+});
+
+test("0x19bd63, THROUGH THE UPGRADE PATH: an old tradeable basis against the raw balance the book wrote restores the holding it had", async()=>{
+  const raws=[new DatabaseSync(':memory:'),new DatabaseSync(':memory:')];
+  const [shared,fresh]=raws.map(wrapSqlite);
+  try {
+    for(const db of [shared!,fresh!]) await db.exec(`CREATE TABLE agents(smart_account TEXT,epoch INTEGER);
+      CREATE TABLE paper_book(agent_id TEXT PRIMARY KEY,cash_usdg REAL,vault_usdg REAL,hwm_usdg REAL,shares TEXT,updated_at INTEGER);
+      CREATE TABLE cost_basis(agent_id TEXT,mode TEXT,symbol TEXT,qty_raw TEXT,cost_usdg TEXT,updated_at INTEGER);
+      INSERT INTO agents VALUES('a',1);`);
+    await shared!.exec(`CREATE TABLE equity(id INTEGER,agent_id TEXT,epoch INTEGER,mode TEXT,at INTEGER,cash_usdg REAL,vault_usdg REAL,positions_usdg REAL,equity_usdg REAL);
+      CREATE TABLE trades(agent_id TEXT,epoch INTEGER,status TEXT,created_at INTEGER);
+      CREATE TABLE positions(agent_id TEXT,symbol TEXT,token TEXT,raw_balance TEXT,ui_multiplier TEXT,value_usdg REAL);
+      INSERT INTO equity VALUES(1,'a',1,'paper',10,990,0,8.4,998.4);
+      INSERT INTO cost_basis VALUES('a','paper','NVDA','46705938556015296','8400000',10);`);
+    // Production numbers, as the mirror holds them.
+    await shared!.prepare(`INSERT INTO positions VALUES('a','NVDA',?,'46669762062241625','1000775159164630600',8.4)`).run('0x'+'1'.repeat(40));
+    assert.match(await restorePaperCheckpoint(fresh!,shared!,'a'),/restored/);
+    const book = await fresh!.prepare('SELECT shares FROM paper_book').get() as {shares:string};
+    const held = (JSON.parse(book.shares) as Record<string,{shares:number}>).NVDA!.shares;
+    assert.ok(Math.abs(held-0.046669762062241625)<1e-12, `the holding the book had, got ${held}`);
   } finally {raws.forEach(r=>r.close());}
 });
