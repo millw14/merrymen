@@ -6,7 +6,7 @@ import { createPrivyOwnedWallet, setPrivyTokenSource, type MintOptions } from ".
 import { verifiedAdapter } from "../../web/src/lib/verified-adapter";
 import { isValidCustomToken } from "../../packages/core/src/tokens";
 import { TRENCHER_FACTORY } from "../../web/src/lib/trencher-permission";
-import type { Address, Hex } from "viem";
+import type { Address, Hex, TypedDataDomain } from "viem";
 import { stringToHex, bytesToHex, getTypesForEIP712Domain, recoverMessageAddress } from "viem";
 import { getUserOperationHash } from "viem/account-abstraction";
 import { planFromBrowser, sweepFromBrowser, getRecoveryTicket, relayUrl, type BrowserWallet } from "../../web/src/lib/recover-client";
@@ -21,7 +21,7 @@ function signer(address: Address) {
       return nativeCall("signMessage", { address, hex }) as Promise<Hex>;
     },
     async signTypedData(typedData) {
-      return nativeCall("signTypedData", { address, typedData: { ...typedData, types: { EIP712Domain: getTypesForEIP712Domain({ domain: typedData.domain }), ...typedData.types } } }) as Promise<Hex>;
+      return nativeCall("signTypedData", { address, typedData: { ...typedData, types: { EIP712Domain: getTypesForEIP712Domain({ domain: typedData.domain as TypedDataDomain | undefined }), ...typedData.types } } }) as Promise<Hex>;
     },
     async signTransaction() { throw new Error("Raw transaction signing is not exposed by the grant builder."); },
   });

@@ -24,6 +24,7 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: node ios-native/Signing/build.mjs --check
+      - run: node node_modules/typescript/bin/tsc --project ios-native/Signing/tsconfig.json --pretty false
       - run: node ios-native/Branding/generate.mjs --check
       - run: node ios-native/Signing/verify-engine.mjs
       - run: node ios-native/Signing/verify-engine.mjs --trencher
