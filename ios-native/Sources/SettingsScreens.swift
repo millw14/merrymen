@@ -6,7 +6,7 @@ struct SettingsScreen: View {
     @StateObject private var data = RemoteData()
     @State private var draft: [String: J] = [:]
     @State private var busy = false
-    @State private var confirm = false
+    @State private var confirm: ReviewValue?
     @State private var loadedOwner: String?
     @State private var models: [String] = []
     @State private var modelStatus: String?
@@ -19,6 +19,7 @@ struct SettingsScreen: View {
         ("publicBook", "Publish holdings, trade sizes and dollar P&L"),
         ("discoveryEnabled", "Market discovery"), ("officialCoinsEnabled", "Include official coins"),
         ("telegramEnabled", "Telegram"), ("telegramControlEnabled", "Telegram controls"),
+        ("telegramTransferEnabled", "Allow Telegram transfers within the daily budget"),
         ("telegramNotifyEnabled", "Telegram notifications"), ("trencherLiveEnabled", "Live Trencher"),
         ("trencherFastEnabled", "Fast Trencher review"), ("deskEnabled", "Trading desk"),
         ("scoutEnabled", "Scout"), ("classSnipeEnabled", "Class sniping")
@@ -33,7 +34,8 @@ struct SettingsScreen: View {
         ("scoutBudgetUsdg", "Scout budget (USDG)"), ("scoutPerTokenUsdg", "Scout per token (USDG)"),
         ("classMaxHoldSec", "Class maximum hold (seconds)"), ("classMaxPositions", "Class maximum positions"),
         ("classMinDepthUsdg", "Class minimum depth (USDG)"), ("classPerEntryUsdg", "Class entry (USDG)"),
-        ("telegramNotifyEveryMin", "Telegram notification interval (minutes)"), ("telegramDigestHour", "Telegram digest hour (UTC)")
+        ("telegramNotifyEveryMin", "Telegram notification interval (minutes)"), ("telegramDigestHour", "Telegram digest hour (local)"),
+        ("telegramTransferDailyUsdg", "Telegram transfer budget per day (USDG)")
     ]
     var body: some View {
         Page {
@@ -56,6 +58,12 @@ struct SettingsScreen: View {
                     if draft["liveTradingEnabled"] != nil {
                         Text("Live mode permits real orders within the existing grant. Switching it off also stops management of existing real positions; it does not sell them.").foregroundStyle(.orange).font(.caption)
                     }
+                    if (draft["scoutEnabled"] ?? settings.setting("scoutEnabled")).bool == true || (draft["classSnipeEnabled"] ?? settings.setting("classSnipeEnabled")).bool == true {
+                        Text("Scout and class positions can remain valued at purchase cost after losing value. The drawdown breaker cannot protect that money; the scout budget limits the amount at risk.").foregroundStyle(.orange).font(.caption)
+                    }
+                    if (draft["telegramTransferEnabled"] ?? settings.setting("telegramTransferEnabled")).bool == true {
+                        Text("Telegram transfers can move real funds. Keep the transfer budget within the amount you authorize your linked chat to spend.").foregroundStyle(.orange).font(.caption)
+                    }
                     DisclosureGroup("Advanced trading settings") { ForEach(numbers, id: \.0) { key, label in
                         VStack(alignment: .leading) { Text(label).font(.caption).foregroundStyle(.secondary); TextField(label, text: text(key, settings)).keyboardType(.decimalPad) }
                     } }
@@ -73,24 +81,33 @@ struct SettingsScreen: View {
                 }
                 customTokens(settings)
                 Card {
+                    DisclosureGroup("Swap connections") {
+                        Picker("Swap venue", selection: text("swapVenue", settings)) { Text("Uniswap").tag("uniswap"); Text("Rialto").tag("rialto") }
+                        ForEach([("v4AdapterAddress", "V4 adapter"), ("ponsAdapterAddress", "Pons adapter"), ("ponsClassVaultFactory", "Class vault factory")], id: \.0) { key, label in
+                            TextField(label, text: text(key, settings)).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        }
+                        Text("Adapter and vault addresses are verified when you sign. Saving a connection does not add it to your current permission.").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Card {
                     Text("Telegram connection").font(.headline)
                     SecureField(settings["telegramBotToken"]["set"].bool == true ? "Bot token saved — type to replace" : "Bot token", text: secret("telegramBotToken"))
                     if settings["telegramBotToken"]["set"].bool == true { Button("Clear saved bot token", role: .destructive) { draft["telegramBotToken"] = .string("") } }
                     Text("The linking code and connection status are available in Telegram connection below.").font(.caption)
                 }
-                Button("Review changes") { confirm = true }.buttonStyle(PrimaryButtonStyle()).disabled(draft.isEmpty || busy)
+                Button("Review changes") { prepareReview() }.buttonStyle(PrimaryButtonStyle()).disabled(draft.isEmpty || busy)
                 NavigationLink("Telegram connection", value: Route.telegram)
                 NavigationLink("Wallet & signed limits", value: Route.permissions)
             } else if data.refreshing { ProgressView() }
             if let error = data.error { Text(error).foregroundStyle(Brand.down); Button("Retry") { Task { await load() } } }
         }.navigationTitle("Settings").task(id: store.generation) { if store.owner != nil { await load() } }
-        .sheet(isPresented: $confirm) {
+        .sheet(item: $confirm) { selection in
             NavigationStack { Page {
                 Text("Review settings").font(.title2.bold())
-                ForEach(draft.keys.sorted(), id: \.self) { key in Metric(label: label(key), value: reviewValue(key)) }
-                Button("Save changes") { Task { await save() } }.buttonStyle(PrimaryButtonStyle()).disabled(busy)
-                Button("Cancel") { confirm = false }.disabled(busy)
-            }.navigationTitle("Confirm") }
+                ForEach(selection.value.object.keys.filter { $0 != "owner" }.sorted(), id: \.self) { key in Metric(label: label(key), value: reviewValue(key, selection.value[key])) }
+                Button("Save changes") { Task { await save(selection.value) } }.buttonStyle(PrimaryButtonStyle()).disabled(busy)
+                Button("Cancel") { confirm = nil }.disabled(busy)
+            }.navigationTitle("Confirm") }.interactiveDismissDisabled(busy)
         }
     }
     private func text(_ key: String, _ settings: J) -> Binding<String> {
@@ -100,11 +117,11 @@ struct SettingsScreen: View {
     private func tokens(_ settings: J) -> [J] { (draft["customTokens"] ?? settings.setting("customTokens")).array }
     private func secret(_ key: String) -> Binding<String> { Binding(get: { draft[key]?.string ?? "" }, set: { draft[key] = .string($0) }) }
     private func label(_ key: String) -> String { (flags + numbers).first { $0.0 == key }?.1 ?? ["agentName": "Agent name", "strategy": "Strategy", "customTokens": "Custom tokens", "basketSymbols": "Basket", "llmProvider": "AI provider", "llmProviderModel": "Model" ][key] ?? key }
-    private func reviewValue(_ key: String) -> String {
-        if key.lowercased().contains("key") || key.lowercased().contains("token") && key != "customTokens" { return draft[key]?.text.isEmpty == true ? "Clear saved override" : "Replace saved credential" }
-        if key == "customTokens" { return "\(draft[key]?.array.count ?? 0) tokens" }
-        if key == "basketSymbols" { return draft[key]?.array.map(\.text).joined(separator: ", ") ?? "" }
-        return draft[key]?.text ?? ""
+    private func reviewValue(_ key: String, _ value: J) -> String {
+        if ["groqApiKey", "anthropicApiKey", "llmApiKey", "telegramBotToken"].contains(key) { return value.text.isEmpty ? "Clear saved override" : "Replace saved credential" }
+        if key == "customTokens" { return value.array.map { $0["symbol"].text + " · " + $0["address"].text }.joined(separator: "\n") }
+        if key == "basketSymbols" { return value.array.map(\.text).joined(separator: ", ") }
+        return value.text
     }
     @ViewBuilder private func aiSettings(_ settings: J) -> some View {
         let provider = (draft["llmProvider"] ?? settings.setting("llmProvider")).string ?? "groq"
@@ -152,7 +169,7 @@ struct SettingsScreen: View {
     private func addToken(_ settings: J) {
         let symbol = tokenSymbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         let address = tokenAddress.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard symbol.range(of: "^[A-Z0-9]{1,12}$", options: .regularExpression) != nil,
+        guard symbol.range(of: "^[A-Z0-9._-]{1,16}$", options: .regularExpression) != nil,
               address.range(of: "^0x[0-9a-fA-F]{40}$", options: .regularExpression) != nil,
               let decimals = Int(tokenDecimals), (0...36).contains(decimals),
               !tokens(settings).contains(where: { $0["address"].text.lowercased() == address.lowercased() })
@@ -161,10 +178,8 @@ struct SettingsScreen: View {
         if tradeNewToken { draft["basketSymbols"] = .array(basket(settings).union([symbol]).sorted().map(J.string)) }
         tokenSymbol = ""; tokenAddress = ""; tokenDecimals = "18"
     }
-    private func load() async { await data.load(store.api, "/api/settings"); loadedOwner = data.value?["owner"].string }
-    private func save() async {
-        guard !busy, !draft.isEmpty else { return }; busy = true
-        defer { busy = false }
+    private func load() async { draft = [:]; confirm = nil; await data.load(store.api, "/api/settings"); loadedOwner = data.value?["owner"].string }
+    private func prepareReview() {
         do {
             var body = draft
             for (key, _) in numbers where body[key] != nil {
@@ -174,14 +189,22 @@ struct SettingsScreen: View {
                 body[key] = .number(value)
             }
             body["owner"] = loadedOwner.map(J.string) ?? .null
-            _ = try await store.perform("/api/settings", method: "PUT", body: .object(body), expectedOwner: loadedOwner)
-            draft = [:]; confirm = false; await load(); store.notice = "Settings saved."
+            confirm = ReviewValue(value: .object(body))
+        } catch { store.notice = error.localizedDescription }
+    }
+    private func save(_ body: J) async {
+        guard !busy else { return }; busy = true; defer { busy = false }
+        do {
+            _ = try await store.perform("/api/settings", method: "PUT", body: body, expectedOwner: body["owner"].string)
+            await load(); store.notice = "Settings saved."
         } catch { store.notice = error.localizedDescription }
     }
 }
 
 struct TelegramScreen: View {
     @EnvironmentObject var store: AppStore
+    @State private var busy = false
+    @State private var result: String?
     var body: some View {
         Page {
             if store.owner == nil { SignInCard() } else { Remote(path: "/api/telegram") { status in
@@ -192,9 +215,21 @@ struct TelegramScreen: View {
                     if let name = status["botUsername"].string, name.range(of: "^[A-Za-z0-9_]+$", options: .regularExpression) != nil {
                         Link("Open @\(name)", destination: URL(string: "https://t.me/\(name)")!)
                     }
-                    if let code = status["linkCode"].string { Text("Send this linking code to your bot:"); Text(code).font(.title3.monospaced()).textSelection(.enabled) }
+                    if let code = status["linkCode"].string {
+                        Text("Send this command to your bot:"); Text("/link " + code).font(.title3.monospaced()).textSelection(.enabled).privacySensitive()
+                        Text("Anyone with this code can control your agent. Keep it private.").font(.caption).foregroundStyle(.orange)
+                    }
                     if status["ownerId"].number != nil { Text("Your Telegram owner is linked.") }
                     if status["hasToken"].bool != true { Text("Configure your Telegram bot token in account settings before linking.") }
+                    Button("Test saved bot connection") {
+                        guard !busy else { return }; busy = true; let owner = store.owner
+                        Task { defer { busy = false }; do {
+                            let value = try await store.perform("/api/telegram", body: .object(["action": .string("test")]), expectedOwner: owner)
+                            result = value["ok"].bool == true ? "Connected to @\(value["username"].text)." : value["reason"].string ?? "Connection could not be verified."
+                        } catch { result = error.localizedDescription } }
+                    }.disabled(busy)
+                    if let result { Text(result).font(.caption) }
+                    NavigationLink("Edit Telegram settings", value: Route.settings)
                 }
             } }
         }.navigationTitle("Telegram")

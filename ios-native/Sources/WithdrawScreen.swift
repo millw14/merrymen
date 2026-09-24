@@ -13,6 +13,7 @@ struct WithdrawScreen: View {
     @State private var records: [J] = []
     @State private var acknowledged = false
     @State private var unresolved = false
+    @State private var trencherVault: String?
     var body: some View {
         Page {
             if store.owner == nil { SignInCard() } else {
@@ -21,6 +22,10 @@ struct WithdrawScreen: View {
                     Text("The owner wallet signs this transfer. Withdrawal gas is paid in ETH by the smart account, even when trading gas is sponsored.")
                     Text("Stand down the agent first if you want it to stop trading while you withdraw.").font(.caption).foregroundStyle(.secondary)
                     NavigationLink("Wallet & permissions", value: Route.permissions)
+                    if let trencherVault {
+                        Text("This account also has a Trencher vault. Its balances and positions are not included in this recovery plan. Withdrawing the smart account does not empty that vault.").foregroundStyle(.orange)
+                        Text(trencherVault).font(.caption.monospaced()).textSelection(.enabled)
+                    }
                 }
                 if input != nil {
                     Button("Read balances and recovery plan") { Task { await readPlan() } }.disabled(wallet.busy || store.privy == nil)
@@ -108,6 +113,7 @@ struct WithdrawScreen: View {
             let grant = status["grant"] != .null ? status["grant"] : local ?? .null
             guard grant["owner"].text.lowercased() == owner.lowercased(), grant["chainId"].number == 4663, grant["binding"]["version"].text == "privy-did-owner-v1" else { throw APIError(status: 0, message: "No recoverable embedded-wallet grant was found. Legacy wallets need their original owner recovery flow.") }
             input = .object(["smartAccount": grant["smartAccount"], "grantTokens": .array(grant["grantTokens"].array)])
+            trencherVault = grant["trencherVaultAddress"].string
             try readRecords(owner)
         } catch { self.error = error.localizedDescription }
     }

@@ -10,6 +10,7 @@ struct HomeScreen: View {
             Remote(path: "/api/feed") { feed in
                 Card {
                     Text(feed["agent"]["name"].string ?? "Your portfolio").font(.headline)
+                    Text(feed["bookMode"].text == "paper" ? "PAPER BOOK" : feed["bookMode"].text == "live" ? "LIVE BOOK" : "Book mode is not supplied by this server. Check the trade labels below.").font(.caption).foregroundStyle(.orange)
                     Text(usd(feed["equity"].array.last?["equity_usdg"].number)).font(.system(size: 40, weight: .medium, design: .rounded)).monospacedDigit()
                     Text("Portfolio value history — deposits and withdrawals affect this line. It is not an investment return.").font(.caption).foregroundStyle(.secondary)
                     TrendChart(values: feed["equity"].array.compactMap { $0["equity_usdg"].number })

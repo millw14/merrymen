@@ -44,6 +44,8 @@ targets:
             CFBundleURLSchemes: [merrymen]
         NSCameraUsageDescription: Take a photo for your Merrymen agent avatar or banner.
         NSPhotoLibraryUsageDescription: Choose a photo for your Merrymen agent avatar or banner.
+        NSMicrophoneUsageDescription: Dictate an editable message to your agent. Recording starts only when you tap the microphone.
+        NSSpeechRecognitionUsageDescription: Transcribe your voice on this device into a draft you review before sending.
         PrivyAppID: $(PRIVY_APP_ID)
         PrivyClientID: $(PRIVY_CLIENT_ID)
         UIAppFonts: [DMSans.ttf, GeistPixel.ttf]

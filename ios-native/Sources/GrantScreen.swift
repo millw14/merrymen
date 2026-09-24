@@ -19,7 +19,6 @@ struct GrantScreen: View {
     @State private var error: String?
     @State private var result: J?
     @State private var review: ReviewValue?
-    @State private var changes: J?
     @State private var loading = true
     @State private var submitting = false
     private let fields = [("perTradeUsdg", "USDG per trade"), ("dailyUsdg", "USDG per day"), ("expiryDays", "Permission lifetime in days"), ("maxDrawdownPct", "Maximum drawdown %"), ("maxOpsPerDay", "Operations per day")]
@@ -48,7 +47,7 @@ struct GrantScreen: View {
                         Card {
                             Text("What should it trade?").font(.headline)
                             Picker("Markets", selection: $mode) { Text("All").tag("all"); Text("Stocks").tag("stocks"); Text("Crypto").tag("crypto") }
-                            ForEach(Array(Set(settings["knownSymbols"].array.compactMap(\.string))).sorted(), id: \.self) { symbol in
+                            ForEach(Array(Set(settings["knownSymbols"].array.compactMap(\.string) + settings.setting("customTokens").array.compactMap { $0["symbol"].string })).sorted(), id: \.self) { symbol in
                                 Toggle(symbol, isOn: Binding(get: { basket.contains(symbol) }, set: { if $0 { basket.insert(symbol) } else { basket.remove(symbol) } }))
                             }
                             NavigationLink("Add custom coins in settings", value: Route.settings)
@@ -77,7 +76,7 @@ struct GrantScreen: View {
                         Text("Your owner key stays in your embedded wallet. The trading permission is stored in this device's Keychain.")
                         if result["handoff"]["ok"].bool != true {
                             Text(result["handoff"]["error"].string ?? "The service did not confirm activation.").foregroundStyle(.orange)
-                            Button("Check activation / retry saved grant") { Task { await retrySaved() } }.disabled(wallet.busy)
+                            Button("Check activation / retry saved grant") { Task { await retrySaved() } }.disabled(wallet.busy || submitting)
                         } else { NavigationLink("Open wallet", value: Route.permissions); NavigationLink("Add funds", value: Route.deposit) }
                     }
                 }
@@ -94,7 +93,12 @@ struct GrantScreen: View {
                     Metric(label: "Account", value: review["expectAccount"].string ?? "Derived from your embedded wallet")
                     Metric(label: "Custom tokens covered", value: String(review["extraTokens"].array.count))
                     Metric(label: "Trencher vault", value: review["autonomousTrencher"].bool == true ? "Enabled" : "Disabled")
-                    Text("You authorize automated trading within these limits. Signing does not deposit or withdraw funds. Your trading mode remains \(creating ? (paper ? "paper" : "live") : "as currently configured").")
+                    if review["settingsToSave"] != .null {
+                        Metric(label: "Agent", value: review["settingsToSave"]["agentName"].text)
+                        Metric(label: "Basket", value: review["settingsToSave"]["basketSymbols"].array.map(\.text).joined(separator: ", "))
+                        Metric(label: "Mode", value: review["settingsToSave"]["liveTradingEnabled"].bool == true ? "Live" : "Paper")
+                    }
+                    Text("You authorize automated trading within these limits. Signing does not deposit or withdraw funds.")
                     if store.privy == nil { Text("This build needs the public Privy iOS Client ID before it can sign.").foregroundStyle(.orange) }
                     Button("Sign and activate") { Task { await activate(review) } }.buttonStyle(PrimaryButtonStyle()).disabled(submitting || wallet.busy || store.privy == nil)
                     if wallet.busy { ProgressView(wallet.status) }
@@ -140,23 +144,30 @@ struct GrantScreen: View {
             if let grant { input["expectAccount"] = grant["smartAccount"]; if let factory = grant["trencherFactoryAddress"].string { input["priorTrencherFactory"] = .string(factory) } }
             if creating {
                 guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, name.count <= 24, !basket.isEmpty else { throw APIError(status: 0, message: "Choose an agent name up to 24 characters and at least one asset.") }
-                changes = .object(["owner": .string(owner ?? ""), "agentName": .string(name.trimmingCharacters(in: .whitespacesAndNewlines)), "strategy": .string(strategy), "assetMode": .string(mode), "basketSymbols": .array(basket.sorted().map(J.string)), "paperTradingEnabled": .bool(true), "liveTradingEnabled": .bool(!paper)])
+                input["settingsToSave"] = .object(["owner": .string(owner ?? ""), "agentName": .string(name.trimmingCharacters(in: .whitespacesAndNewlines)), "strategy": .string(strategy), "assetMode": .string(mode), "basketSymbols": .array(basket.sorted().map(J.string)), "paperTradingEnabled": .bool(true), "liveTradingEnabled": .bool(!paper)])
             }
+            input["reviewOwner"] = owner.map(J.string) ?? .null
+            input["reviewSessionKey"] = grant?["sessionKeyAddress"] ?? .null
             review = ReviewValue(value: .object(input)); error = nil
         } catch { self.error = error.localizedDescription }
     }
     private func activate(_ review: J) async {
         guard !submitting else { return }; submitting = true; defer { submitting = false }
         do {
+            let owner = review["reviewOwner"].string
             try await store.verifyOwner(owner)
             let latest = try await store.api.request("/api/grants")
-            guard creating ? latest["exists"].bool == false : latest["grant"]["sessionKeyAddress"] == grant?["sessionKeyAddress"] else { throw APIError(status: 409, message: "Your grant changed on another device. Reload and review it again.") }
-            if let changes { _ = try await store.perform("/api/settings", method: "PUT", body: changes, expectedOwner: owner) }
-            result = try await wallet.call("create", input: review, store: store)
+            guard creating ? latest["exists"].bool == false : latest["grant"]["sessionKeyAddress"] == review["reviewSessionKey"] else { throw APIError(status: 409, message: "Your grant changed on another device. Reload and review it again.") }
+            if review["settingsToSave"] != .null { _ = try await store.perform("/api/settings", method: "PUT", body: review["settingsToSave"], expectedOwner: owner) }
+            try await store.verifyOwner(owner)
+            var input = review.object
+            for key in ["settingsToSave", "reviewOwner", "reviewSessionKey"] { input.removeValue(forKey: key) }
+            result = try await wallet.call("create", input: .object(input), store: store)
         } catch { self.error = "Permission was not confirmed: \(error.localizedDescription) Any settings already saved remain in effect." }
         self.review = nil
     }
     private func retrySaved() async {
+        guard !submitting else { return }; submitting = true; defer { submitting = false }
         do {
             guard let owner, let saved = try WalletHost.savedGrant(owner: owner) else { throw APIError(status: 0, message: "No saved grant was found.") }
             try await store.verifyOwner(owner)

@@ -17,6 +17,7 @@ public final class WalletRuntime {
     private var next = 0
     private var completions: [Int: CheckedContinuation<JSONValue, Error>] = [:]
     private var timers: [Int: Task<Void, Never>] = [:]
+    private var deadlines: [Int: Task<Void, Never>] = [:]
     private var failure: String?
     public var handle: ((String, JSONValue) async throws -> JSONValue)?
     public var storage: ((String, JSONValue) throws -> JSONValue)?
@@ -24,14 +25,18 @@ public final class WalletRuntime {
     public init(bootstrap: String, library: String) throws {
         guard let context = JSContext() else { throw WalletRuntimeError("Wallet runtime could not start.") }
         self.context = context
-        context.exceptionHandler = { [weak self] _, value in self?.failure = value?.toString() ?? "Wallet runtime exception" }
-        let asyncCall: @convention(block) (Int, String, String) -> Void = { [weak self] id, operation, json in
+        context.exceptionHandler = { [weak self] _, value in
             guard let self else { return }
+            self.fail(value?.toString() ?? "Wallet runtime exception")
+        }
+        let asyncCall: @convention(block) (Int, String, String) -> Void = { [weak self] id, operation, json in
+            guard let self, !self.completions.isEmpty else { return }
             Task { @MainActor in
                 do {
                     guard let handle = self.handle else { throw WalletRuntimeError("Native wallet host is not connected.") }
                     let args = try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8))
                     let result = try await handle(operation, args)
+                    guard !self.completions.isEmpty else { return }
                     let encoded = String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
                     self.context.objectForKeyedSubscript("__settle")?.call(withArguments: [id, true, encoded])
                 } catch { self.context.objectForKeyedSubscript("__settle")?.call(withArguments: [id, false, error.localizedDescription]) }
@@ -57,6 +62,7 @@ public final class WalletRuntime {
         let cancelTimer: @convention(block) (Int) -> Void = { [weak self] id in self?.timers.removeValue(forKey: id)?.cancel() }
         let result: @convention(block) (Int, Bool, String) -> Void = { [weak self] id, ok, text in
             guard let continuation = self?.completions.removeValue(forKey: id) else { return }
+            self?.deadlines.removeValue(forKey: id)?.cancel()
             if !ok { continuation.resume(throwing: WalletRuntimeError(text)); return }
             do { continuation.resume(returning: try JSONDecoder().decode(JSONValue.self, from: Data(text.utf8))) }
             catch { continuation.resume(throwing: error) }
@@ -72,15 +78,35 @@ public final class WalletRuntime {
         if let failure { throw WalletRuntimeError(failure) }
     }
 
-    public func call(_ operation: String, input: JSONValue) async throws -> JSONValue {
+    public func call(_ operation: String, input: JSONValue, timeout: Duration = .seconds(300)) async throws -> JSONValue {
         guard completions.isEmpty else { throw WalletRuntimeError("A wallet operation is already in progress.") }
+        if let failure { throw WalletRuntimeError(failure) }
         next += 1; let id = next
         let json = String(decoding: try JSONEncoder().encode(input), as: UTF8.self)
-        return try await withCheckedThrowingContinuation { continuation in
-            completions[id] = continuation
-            context.objectForKeyedSubscript("__runWallet")?.call(withArguments: [id, operation, json])
-            if let failure, let pending = completions.removeValue(forKey: id) { pending.resume(throwing: WalletRuntimeError(failure)) }
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                completions[id] = continuation
+                deadlines[id] = Task { @MainActor [weak self] in
+                    do { try await Task.sleep(for: timeout) } catch { return }
+                    self?.fail("Wallet operation timed out. Check its saved grant or transaction receipt before retrying; nothing will be resubmitted automatically.")
+                }
+                context.objectForKeyedSubscript("__runWallet")?.call(withArguments: [id, operation, json])
+            }
+        } onCancel: { [weak self] in
+            Task { @MainActor in
+                guard let self, self.completions[id] != nil else { return }
+                self.fail("Wallet operation was interrupted. Check its saved grant or transaction receipt before retrying.")
+            }
         }
+    }
+
+    private func fail(_ message: String) {
+        failure = message
+        let pending = Array(completions.values); completions.removeAll()
+        for timer in timers.values { timer.cancel() }; timers.removeAll()
+        for deadline in deadlines.values { deadline.cancel() }; deadlines.removeAll()
+        for continuation in pending { continuation.resume(throwing: WalletRuntimeError(message)) }
     }
 
     private func sync(_ op: String, _ args: JSONValue) throws -> JSONValue {

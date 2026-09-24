@@ -4,6 +4,26 @@ import XCTest
 
 final class WalletRuntimeTests: XCTestCase {
     @MainActor
+    func testUnfinishedOperationTimesOutAndCannotBeReused() async throws {
+        let runtime = try WalletRuntime(bootstrap: "function __runWallet() {}", library: "")
+        do {
+            _ = try await runtime.call("withdraw", input: .null, timeout: .milliseconds(20))
+            XCTFail("Unfinished operation succeeded")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("timed out")) }
+        do {
+            _ = try await runtime.call("withdraw", input: .null)
+            XCTFail("A timed-out runtime was reused")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("timed out")) }
+    }
+
+    @MainActor
+    func testAsyncExceptionFinishesPendingOperation() async throws {
+        let runtime = try WalletRuntime(bootstrap: "function __runWallet() { throw new Error('test failure'); }", library: "")
+        do { _ = try await runtime.call("plan", input: .null); XCTFail("Exception was ignored") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("test failure")) }
+    }
+
+    @MainActor
     func testShippedWalletLibraryLoadsAndRefusesMismatchedOwnerBeforeSigning() async throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let bootstrap = try String(contentsOf: root.appendingPathComponent("Resources/WalletRuntime.js"), encoding: .utf8)

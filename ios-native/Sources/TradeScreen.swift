@@ -5,6 +5,7 @@ struct TradeScreen: View {
     @EnvironmentObject var store: AppStore
     @Environment(\.scenePhase) var phase
     let symbol: String
+    let address: String?
     @State private var side = "buy"
     @State private var amount = ""
     @State private var review: ReviewValue?
@@ -16,11 +17,17 @@ struct TradeScreen: View {
     @State private var statusReady = false
     @State private var ceiling: Double?
     private var key: String { "pendingOrder.\(store.owner?.lowercased() ?? "none")" }
+    init(symbol: String, side: String = "buy", amount: String = "", address: String? = nil) {
+        self.symbol = symbol; self.address = address
+        _side = State(initialValue: ["buy", "sell"].contains(side) ? side : "buy")
+        _amount = State(initialValue: amount)
+    }
     var body: some View {
         Page {
             if store.owner == nil { SignInCard() } else {
                 Card {
                     Text(symbol).font(.largeTitle.bold())
+                    if let address { Text(address).font(.caption.monospaced()).textSelection(.enabled) }
                     Picker("Side", selection: $side) { Text("Buy").tag("buy"); Text("Sell").tag("sell") }.pickerStyle(.segmented)
                     TextField("Amount in USDG, e.g. 5.00", text: $amount).keyboardType(.decimalPad)
                     Text("Use at most two decimal places and no thousands separators. This asks the agent to trade; it still checks the signed caps, available assets, and risk limits.").font(.caption).foregroundStyle(.secondary)
@@ -64,6 +71,7 @@ struct TradeScreen: View {
                 let body = selected.value
                     Metric(label: "Action", value: body["side"].text.capitalized)
                     Metric(label: "Asset", value: body["symbol"].text)
+                    if let address { Text(address).font(.caption.monospaced()).textSelection(.enabled) }
                     Metric(label: "USDG amount", value: usd(body["usdgAmount"].number))
                     Text(body["owner"].text).font(.caption.monospaced())
                     Text("This may move real funds when your agent is live. A queued order is not a completed trade.")

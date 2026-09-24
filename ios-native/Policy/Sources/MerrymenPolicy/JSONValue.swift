@@ -51,7 +51,7 @@ public enum TradeInput {
         let ticker = symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard ["buy", "sell"].contains(side), let value = self.amount(amount), value >= 0.01,
               value <= 1_000_000_000,
-              ticker.range(of: "^[A-Z0-9]{1,12}$", options: .regularExpression) != nil,
+              ticker.range(of: "^[A-Z0-9._-]{1,16}$", options: .regularExpression) != nil,
               owner.range(of: "^0x[0-9a-fA-F]{40}$", options: .regularExpression) != nil else { return nil }
         return .object(["side": .string(side), "symbol": .string(ticker), "usdgAmount": .number(value), "owner": .string(owner)])
     }

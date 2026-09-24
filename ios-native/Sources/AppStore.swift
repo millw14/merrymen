@@ -6,6 +6,7 @@ enum Tab: String, CaseIterable { case home = "Home", chat = "Chat", feed = "Feed
     var icon: String { switch self { case .home: "chart.xyaxis.line"; case .chat: "bubble.left.and.bubble.right"; case .feed: "leaf.fill"; case .alpha: "sparkles"; case .profile: "person.crop.circle" } }
 }
 enum Route: Hashable {
+    case snipe(String, String), tradeRequest(String, String, String, String?)
     case markets, search, agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof
     case trade(String), deposit, permissions, create, limits, withdraw, signIn, siteAccess, tour
 }
@@ -78,7 +79,7 @@ final class AppStore: ObservableObject {
             "nonce": .string(nonce), "signature": .string(signature), "address": .string(wallet.address), "provider": .string(provider)
         ]), token: token)
         await refreshSession()
-        guard owner != nil else { throw APIError(status: 401, message: sessionError ?? "Sign-in did not establish a session.") }
+        guard owner?.lowercased() == wallet.address.lowercased() else { throw APIError(status: 401, message: sessionError ?? "Sign-in did not establish the expected wallet session.") }
     }
 
     func signOut() async {
@@ -90,8 +91,11 @@ final class AppStore: ObservableObject {
     }
 
     func perform(_ path: String, method: String = "POST", body: J, expectedOwner: String?) async throws -> J {
+        let expectedGeneration = generation
         try await verifyOwner(expectedOwner)
-        return try await api.request(path, method: method, body: body)
+        let result = try await api.request(path, method: method, body: body)
+        guard generation == expectedGeneration, owner == expectedOwner else { throw APIError(status: 409, message: "Your account changed while the request was in progress. Check the previous account before repeating that action.") }
+        return result
     }
 
     func verifyOwner(_ expectedOwner: String?) async throws {

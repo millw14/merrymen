@@ -15,6 +15,8 @@ final class PolicyTests: XCTestCase {
         XCTAssertEqual(TradeInput.body(side: "buy", symbol: "NVDA", amount: "5,25", owner: owner)?["usdgAmount"].number, 5.25)
         XCTAssertNil(TradeInput.body(side: "transfer", symbol: "NVDA", amount: "5", owner: owner))
         XCTAssertNil(TradeInput.body(side: "buy", symbol: "ABC/DEF", amount: "5", owner: owner))
+        XCTAssertEqual(TradeInput.body(side: "buy", symbol: "a.b-c_d", amount: "5", owner: owner)?["symbol"].string, "A.B-C_D")
+        XCTAssertNil(TradeInput.body(side: "buy", symbol: String(repeating: "A", count: 17), amount: "5", owner: owner))
         XCTAssertNil(TradeInput.body(side: "buy", symbol: "NVDA", amount: "5", owner: "someone else"))
     }
     func testNullBalancesAndBooleanValuesAreNotCoerced() throws {

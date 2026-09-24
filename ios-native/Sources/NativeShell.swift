@@ -28,6 +28,7 @@ func escaped(_ value: String) -> String { value.addingPercentEncoding(withAllowe
 
 struct NativeShell: View {
     @EnvironmentObject var store: AppStore
+    @Environment(\.scenePhase) var phase
     @StateObject private var tourProgress = TourProgress()
     @State private var tour = false
     @State private var replaying = false
@@ -51,6 +52,7 @@ struct NativeShell: View {
                     Button { store.path.append(.search) } label: { Image(systemName: "magnifyingglass") }.accessibilityLabel("Search")
                     Menu {
                         Button("Group chat") { store.path.append(.groupchat) }
+                        Button("Find a trade") { store.path.append(.snipe("", "")) }
                         Button("Coins to consider") { store.path.append(.proposals) }
                         Button("The Merry Circle") { store.path.append(.circle) }
                         Button("Replay tour") { replaying = true; tour = true }
@@ -72,6 +74,8 @@ struct NativeShell: View {
                 case .proposals: ProposalsScreen()
                 case .xProof: XProofScreen()
                 case .trade(let symbol): TradeScreen(symbol: symbol)
+                case .tradeRequest(let symbol, let side, let amount, let address): TradeScreen(symbol: symbol, side: side, amount: amount, address: address)
+                case .snipe(let query, let amount): SnipeScreen(query: query, amount: amount)
                 case .deposit: DepositScreen()
                 case .permissions: PermissionsScreen()
                 case .create: GrantScreen(creating: true)
@@ -89,6 +93,7 @@ struct NativeShell: View {
             await tourProgress.activate(store)
             if !replaying { tour = !tourProgress.done }
         }
+        .onChange(of: phase) { _, phase in if phase == .active { Task { await tourProgress.sync(store) } } }
         .environmentObject(tourProgress)
         .sheet(isPresented: $tour, onDismiss: { replaying = false }) { TourScreen().environmentObject(tourProgress) }
         .alert("Merrymen", isPresented: Binding(get: { store.notice != nil }, set: { if !$0 { store.notice = nil } })) {
@@ -191,6 +196,7 @@ struct TourScreen: View {
             Button(words("tour.skip")) { finish() }.accessibilityIdentifier("Skip tour")
             if progress.syncFailed { Button(words("tour.retrySync")) { Task { await progress.sync(store) } } }
         }.padding(30) }.background(Brand.background)
+        .onAppear { step = progress.done ? 0 : progress.step }
         .onChange(of: step) { _, step in progress.move(step) }
     }
     private func finish() {

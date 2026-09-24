@@ -2,6 +2,10 @@ import SwiftUI
 
 struct ChatScreen: View {
     @EnvironmentObject var store: AppStore
+    @Environment(\.scenePhase) var phase
+    @AppStorage("language") private var language = "en"
+    @StateObject private var voice = VoiceDraft()
+    @State private var beforeDictation = ""
     @State private var messages: [J] = []
     @State private var text = ""
     @State private var busy = false
@@ -26,18 +30,28 @@ struct ChatScreen: View {
                 }.padding(18) }
                 .onChange(of: messages.count) { _, count in if count > 0 { withAnimation { scroll.scrollTo(count - 1, anchor: .bottom) } } }
             }
+            if voice.recording { Text("Listening on this device · review the draft before sending").font(.caption).foregroundStyle(Brand.accent) }
+            if let error = voice.error { Text(error).font(.caption).foregroundStyle(.orange).padding(.horizontal) }
             HStack(alignment: .bottom) {
-                TextField("Message your agent", text: $text, axis: .vertical).lineLimit(1...5).padding(12).background(Brand.card, in: RoundedRectangle(cornerRadius: 12))
-                Button { send() } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }.accessibilityLabel("Send message").disabled(busy || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.owner == nil)
+                Button {
+                    if voice.recording { voice.stop() }
+                    else { beforeDictation = text; Task { await voice.start(locale: language) } }
+                } label: { Image(systemName: voice.recording ? "stop.circle.fill" : "mic").frame(minWidth: 44, minHeight: 44) }
+                    .accessibilityLabel(voice.recording ? "Stop dictation" : "Dictate a draft").disabled(busy || voice.starting || store.owner == nil)
+                TextField("Message your agent", text: $text, axis: .vertical).lineLimit(1...5).padding(12).background(Brand.card, in: RoundedRectangle(cornerRadius: 12)).disabled(voice.recording)
+                Button { send() } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }.accessibilityLabel("Send message").disabled(busy || voice.recording || voice.starting || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.owner == nil)
             }.padding()
         }.background(Brand.background)
         .task(id: store.generation) {
-            messages = []; text = ""; partial = ""; error = nil
+            voice.stop(); messages = []; text = ""; partial = ""; error = nil
             if let owner = store.owner {
                 do { if let data = try SecureStore.read("dev.merrymen.chat", owner.lowercased()) { messages = try JSONDecoder().decode([J].self, from: data) } }
                 catch { self.error = "Saved conversation could not be read." }
             }
         }
+        .onChange(of: voice.transcript) { _, transcript in text = beforeDictation + (beforeDictation.isEmpty || transcript.isEmpty ? "" : " ") + transcript }
+        .onChange(of: phase) { _, phase in if phase != .active { voice.stop() } }
+        .onDisappear { voice.stop() }
         .toolbar { ToolbarItem(placement: .secondaryAction) { Button("Clear conversation", role: .destructive) { clearHistory = true }.disabled(busy) } }
         .confirmationDialog("Clear the saved conversation on this device?", isPresented: $clearHistory, titleVisibility: .visible) {
             Button("Clear conversation", role: .destructive) {
@@ -72,7 +86,7 @@ struct CommandCard: View {
             // Model output never chooses an API path or supplies a settings write.
             // Open the native form so its values and confirmation remain authoritative.
             if ["buy", "sell"].contains(command["id"].text) {
-                Button("Review trade") { store.path.append(.trade(command["args"]["symbol"].text)) }
+                Button("Review trade") { store.path.append(.tradeRequest(command["args"]["symbol"].text, command["id"].text, command["args"]["usdgAmount"].text, nil)) }
             } else if ["set-strategy", "set-basket", "go-paper", "go-live", "set-slippage", "set-risk", "set-impact", "set-size", "rename", "open-settings"].contains(command["id"].text) {
                 Button("Review settings") { store.path.append(.settings) }
             } else if ["open-limits", "resign"].contains(command["id"].text) {
@@ -80,7 +94,7 @@ struct CommandCard: View {
             } else if command["id"].text == "open-deposit" { Button("Add funds") { store.path.append(.deposit) }
             } else if command["id"].text == "open-withdraw" { Button("Review withdrawal") { store.path.append(.withdraw) }
             } else if ["show-address", "reveal-key"].contains(command["id"].text) { Button("Open wallet") { store.path.append(.permissions) }
-            } else if command["id"].text == "snipe" { Button("Find and inspect the token") { store.path.append(.search) }
+            } else if command["id"].text == "snipe" { Button("Find and inspect the token") { store.path.append(.snipe(command["args"]["query"].text, command["args"]["usdgAmount"].text)) }
             } else { Text("This action is not available in the native preview yet.").font(.caption).foregroundStyle(.secondary) }
         }.padding(12).background(Brand.background, in: RoundedRectangle(cornerRadius: 10))
     }
@@ -124,6 +138,7 @@ struct GroupChatScreen: View {
     @State private var failedBody: String?
     @State private var failedReply: J = .null
     @State private var busy = false
+    @State private var timeZone = TimeZone.current.identifier
     var body: some View {
         Page {
             Text("The band, together.").font(.largeTitle.bold())
@@ -164,6 +179,12 @@ struct GroupChatScreen: View {
                     Text("Muting the room does not pause trading.").font(.caption).foregroundStyle(.secondary)
                     if let zone = model.me["tz"].string { Text("\(zone) · sleeps \(model.me["sleep"]["from"].text)–\(model.me["sleep"]["to"].text)").font(.caption) }
                     Button("Use this device's time zone") { savePreferences(["tz": .string(TimeZone.current.identifier), "source": .string("owner")]) }.disabled(busy)
+                    DisclosureGroup("Sleep schedule") {
+                        Text("Your agent's sleep window is calculated by the room in the selected time zone. Sleep and mute apply to room conversation, not trading.").font(.caption).foregroundStyle(.secondary)
+                        Picker("Time zone", selection: $timeZone) { ForEach(TimeZone.knownTimeZoneIdentifiers, id: \.self) { Text($0.replacingOccurrences(of: "_", with: " ")).tag($0) } }
+                        Button("Set this time zone") { savePreferences(["tz": .string(timeZone), "source": .string("owner")]) }.disabled(busy)
+                        Button("Keep my agent awake in the room") { savePreferences(["tz": .null, "source": .string("owner")]) }.disabled(busy)
+                    }
                 }
             } else if store.owner == nil { SignInCard() }
         }.navigationTitle("Group chat").task(id: "\(store.generation)|\(phase == .active)") {
