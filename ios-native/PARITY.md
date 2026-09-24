@@ -1,35 +1,43 @@
 # Native iOS parity ledger
 
-Reference: trusted main `40cf77494e04de40eef88ac1113743c6e30c42a9` (2026-09-24). Android and Expo are unchanged. “Implemented” means source exists, not that a live account flow has passed acceptance.
+Reference: trusted main `40cf77494e04de40eef88ac1113743c6e30c42a9`, fetched again on 2026-09-24. Android and Expo are unchanged. **Source implementation is not authenticated acceptance.** Keep PR #165 draft until configuration, feature gaps and release checks below are resolved.
 
-| Web capability | Native state | Remaining verification/work |
+| Capability | Native source | Outstanding acceptance or gap |
 | --- | --- | --- |
-| Five main tabs, menus, search, agent/token links | Implemented | Simulator navigation + iPad/VoiceOver/Dynamic Type audit |
-| Feed theses, paper/outcome labels, follow/like/share | Implemented subset | Counts, filtering parity, signed-in writes, retry behavior |
-| Home portfolio, leaderboard, holdings | Implemented subset | Full accounting/provenance parity, activity and performance details |
-| Stock/ETF market, device watchlist | Implemented | Live response/empty/error checks |
-| Memecoin discovery, chart windows, liquidity caveats | In progress | Complete discovery controls and evidence tabs |
-| Agent profile, banner/avatar, public book, theses | Implemented subset | Top trades, average hold, verified-X proof, owner controls |
-| Alpha picks and research, passed-over coins | In progress | Complete research fields, disclosure and tier acceptance |
-| Privy email/X sign-in | SDK and API wired | Public iOS Client ID missing; callback and returning-DID testing |
-| External-wallet sign-in, linked holder wallet | Missing | Native wallet protocol and proof flow |
-| Chat narration and proposed commands | Implemented subset | Streaming, complete command cards, voice, transcript persistence |
-| Owner buy/sell request | Implemented | Test signed-in, queued/running/receipt/timeout and account switch with a controlled test backend |
-| Group chat | Implemented | Cross-device updates, hide propagation, retries and moderation acceptance |
-| Agent creation, asset selection, first grant | Missing | Native ZeroDev/Kernel signing integration with exact server binding |
-| Signed permission renewal and caps | Missing | Same account derivation, adapter proof, coverage, on-chain policy parity |
-| Deposit address/QR/balances | Implemented | Verify chain/account/units with authenticated fixtures and device |
-| Withdraw / owner recovery | Missing | Signer-based recovery and transaction reconciliation; legacy custody remains a separate path |
-| Stand-down | Implemented | Controlled backend acceptance; distinguish service stand-down from on-chain revocation |
-| Settings | Implemented subset | AI providers/model/keys, token editing, risk profiles, discovery/trencher/advanced controls |
-| Telegram | Status/linking implemented | Native bot token setup/test and remaining permission settings |
-| Merry Circle | Tier/balance reads implemented | Holder wallet proof/link/unlink |
-| Proposals | Read-only | Adding vetted token and resealing permission |
-| Tour | Implemented subset | Pending sync retry and per-account versioned persistence parity |
-| Languages: en, es, pt-BR, id, vi, tr, ru, th, zh-CN, ja, ko | English only | Port localized copy and locale-aware unambiguous amounts |
-| Appearance | Palette/artwork and native layout | Use bundled typography, full screen-by-screen visual acceptance |
-| iOS packaging | XcodeGen + simulator workflow | Apple team, client registration, entitlements, archive, TestFlight and privacy review |
+| Navigation/appearance | Five tabs, native stacks/sheets, menus, search, app links, dark palette, artwork, DM Sans/Geist Pixel | Full visual comparison, iPad, Dynamic Type and VoiceOver |
+| Feed | Shared web grouping and All/Trades/Theses/Holds/Debates/Following filters; real-money/latest/likes; paper/outcome labels; verified mentions; natural posts/Why; follow/like/share | Controlled signed-in writes and interaction acceptance |
+| Home | Portfolio value, positions/trades, leaderboard, deposit/withdraw | API omits an unambiguous portfolio book mode; native UI explains this. Full owner accounting comparison remains |
+| Markets | Stocks, discoveries, fresh launches, watchlist, search | Complete discovery sorting/evidence comparison |
+| Token | OHLC windows, age/gap warnings, holders/activity, trade entry | Complete evidence-field and live empty/error acceptance |
+| Profile | Images, verified X, private-book handling, holdings/fills/top trades, average hold, strategy, heartbeat/joined time, shared evidenced chart windows | Signed-in own-book overlay missing; public view keeps private dollars hidden |
+| Alpha | Tier/lock explanations, picks, passed coins, research/liquidity warnings | Complete research-field and tier acceptance |
+| Privy email/X | SDK, canonical challenge/signature exchange, server-owner checks | **Public iOS Client ID missing**; callbacks, returning identities, account switches and expiry acceptance blocked |
+| External wallet / holder | Manual copy-message/paste-signature proof, local signer recovery, login/link/unlink; embedded-wallet shortcut | No automatic wallet-app/WalletConnect handoff; backend/device acceptance remains |
+| Chat | SSE, reasoning removal, per-owner history, explicit commands, order prefills, coin resolver | Settings commands open the form without all field prefills; conversation/reconnection acceptance |
+| Voice | On-device Apple speech into an editable draft; explicit start/stop/timeout/background cancellation | Physical-device/language acceptance; no server fallback |
+| Orders | Frozen confirmation, exact amount, owner/session binding, pending Keychain record, receipt polling, no automatic replay | Fixture verifies restart after timeout; actual queue/fill/rejection acceptance remains |
+| Snipe | Ambiguous contract choice, read-only resolution, permission explanation, separate order review | Fixture covered; production resolver/permission acceptance |
+| Group chat | History, incremental updates, replies, take-back, stable retry IDs, presence, mute/time zone/never-sleep | Cross-device, moderation and retry acceptance |
+| Create/renew | Canonical Kernel/ZeroDev prep, native signatures, presets/caps, basket/custom tokens, explicit live consent, standard/Class/Trencher custody checks | Offline standard/Trencher fixtures pass; native SDK/backend acceptance blocked. Basket choices do not yet filter by asset mode |
+| Deposit | QR/address, network, exact raw-unit balances | Authenticated device comparison |
+| Withdraw/recovery | Canonical smart account + selected Class vault plan, confirmation, durable journal, receipt reconciliation | **Trencher vault and legacy owner/grant-wallet recovery missing**; no native end-to-end withdrawal performed |
+| Stand-down | Owner-bound confirmation/DELETE; distinct from sale/revocation | Controlled backend acceptance |
+| Settings | Name/strategy/mode, live/paper, public book, AI keys/provider/model, basket/custom tokens, risk/discovery/scout/Class/Trencher, swap connections, Virtuals toggle | Exhaustive tenant-field comparison remains. Hosted house credentials and remote-PC/shell controls intentionally unavailable |
+| Telegram | Bot secret replacement/removal, connection test, private linking command, control/notify/transfer budget | Controlled bot acceptance; no Telegram message sent |
+| Proposals | Review metadata, save token/basket, then separate permission review | Signed-in acceptance; saving is not signing |
+| Uploads / X proof | Native picker, bounded JPEG upload/removal; proof-message/X-post verification | Authenticated upload/cache refresh and proof acceptance |
+| Tour | All 26 topics, versioned per-account local/server dismissal, resume/replay/retry | Restart fixture passed; signed-in cross-device acceptance |
+| Languages | en, es, pt-BR, id, vi, tr, ru, th, zh-CN, ja, ko catalogue; tour/mode/consent localization; dot/comma amounts without grouping | Most screens remain English. Other web languages have fewer keys than English; full-screen localization is not claimed |
+| Distribution | XcodeGen, pinned SDK, simulator CI, source manifest, screenshot artifacts | Apple Team/provisioning, device tests, archive/TestFlight, entitlements and privacy/App Store review |
 
-## Acceptance boundary
+## Evidence and boundaries
 
-Never mark a queued order as a fill, an unread balance as zero, a paper result as live, or a missing permission as enabled. A native action must not widen risk limits, suppress ownership checks, or let a cancelled/timed-out request repeat a financial operation. Review account changes and late responses before permitting any signed-in release.
+- Linux: bundle/source consistency, complete standard/Trencher grant preparation, identity recovery, shared feed/profile rules.
+- macOS policy: decimal/routing rules, network/signature restrictions, complete streams, identity messages, runtime exceptions and terminal timeouts.
+- App tests: bundled resources/fonts, real simulator Keychain updates/deletion, stale-session rejection before transport.
+- UI tests: native guest navigation/thesis, tour dismissal across restart, unknown order reconciliation without replay, ambiguous contract choice followed by separate cancelable confirmation.
+- The all-green run for `dff11ad9` is [36069157655](https://github.com/millw14/merrymen/actions/runs/36069157655). Changes after that commit require their own passing run. Debug fixture transport never forwards requests to production and is excluded from release builds.
+
+Never relabel a queue as a fill, an unread balance as zero, paper as live, private dollars as public, or a partial chart as a full period. Timeout/cancellation must not repeat a financial operation. No live financial operation has been performed; authentication and account-switch acceptance are required before distribution.
+
+Milla will provide the public iOS Client ID and Apple Team later. Remind her at handoff; no secret or certificate is needed in this task.

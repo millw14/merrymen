@@ -1,5 +1,17 @@
 // Share the website's publication presentation rules; SwiftUI draws the rows.
 import { beatsOf, pillBeats, mentionTargets, verbOf, pillOf, watchCount, type Beat, type FeedRow, type Mention, type Pill } from '../../web/src/terminal/beat';
+import { chartWindows, defaultWindow, growthWindow, thesisOfHow, type ChartWindow } from '../../web/src/terminal/profile-view';
+
+export function profile(json: string): string {
+  const { agent, picked, nowSec } = JSON.parse(json);
+  const points = agent.growth ?? [];
+  const windows = chartWindows(points, agent.growthComplete, nowSec);
+  const active: ChartWindow = windows.some(w => w.id === picked && w.available) ? picked : defaultWindow(points, agent.growthComplete, nowSec);
+  const slice = growthWindow(points, active, nowSec, agent.growthComplete);
+  return JSON.stringify({ approach: thesisOfHow(agent.how), windows, active, slice,
+    words: windows.find(w => w.id === active)?.words,
+    points: slice.state === 'ok' ? points.filter((p: { at: number }) => p.at >= slice.from) : [] });
+}
 
 export function render(json: string): string {
   const input = JSON.parse(json) as { rows: FeedRow[]; pill: Pill | 'following'; counts: Record<string, number>; realOnly: boolean; following: string[]; mostLiked: boolean };

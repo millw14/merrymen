@@ -9,10 +9,14 @@ final class FeedPresentation: ObservableObject {
         if let url = Bundle.main.url(forResource: "FeedEngine", withExtension: "js"), let source = try? String(contentsOf: url, encoding: .utf8) { context?.evaluateScript(source) }
     }
     func rows(_ input: J) -> [J]? {
+        value(input, function: "render")?.array
+    }
+    func profile(_ input: J) -> J? { value(input, function: "profile") }
+    private func value(_ input: J, function: String) -> J? {
         guard let context, context.exception == nil, let data = try? JSONEncoder().encode(input),
-              let result = context.objectForKeyedSubscript("NativeFeed")?.objectForKeyedSubscript("render")?.call(withArguments: [String(decoding: data, as: UTF8.self)])?.toString(),
-              let rows = try? JSONDecoder().decode([J].self, from: Data(result.utf8)) else { return nil }
-        return rows
+              let result = context.objectForKeyedSubscript("NativeFeed")?.objectForKeyedSubscript(function)?.call(withArguments: [String(decoding: data, as: UTF8.self)])?.toString(),
+              let value = try? JSONDecoder().decode(J.self, from: Data(result.utf8)) else { return nil }
+        return value
     }
 }
 

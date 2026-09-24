@@ -18,6 +18,7 @@ struct SettingsScreen: View {
         ("liveTradingEnabled", "Trade with real funds"), ("paperTradingEnabled", "Allow paper practice when live trading is unavailable"),
         ("publicBook", "Publish holdings, trade sizes and dollar P&L"),
         ("discoveryEnabled", "Market discovery"), ("officialCoinsEnabled", "Include official coins"),
+        ("virtualsEnabled", "Publish landed trades and activity to Virtuals"),
         ("telegramEnabled", "Telegram"), ("telegramControlEnabled", "Telegram controls"),
         ("telegramTransferEnabled", "Allow Telegram transfers within the daily budget"),
         ("telegramNotifyEnabled", "Telegram notifications"), ("trencherLiveEnabled", "Live Trencher"),
@@ -26,6 +27,7 @@ struct SettingsScreen: View {
     ]
     private let numbers: [(String, String)] = [
         ("tickSeconds", "Decision interval (seconds)"), ("slippageBps", "Slippage (basis points)"),
+        ("maxImpactBps", "Maximum price impact (basis points; 0 disables)"), ("paperStartUsdg", "Paper starting balance (USDG)"),
         ("telegramMaxActionUsdg", "Order ceiling (USDG)"), ("buyPerTickUsdg", "Buy per tick (USDG)"),
         ("idleFloorUsdg", "Cash floor (USDG)"), ("gapEnterBudgetUsdg", "Gap entry budget (USDG)"),
         ("takeProfitBps", "Take profit (basis points)"), ("maxPriceDivergenceBps", "Maximum price divergence (basis points)"),
@@ -65,6 +67,9 @@ struct SettingsScreen: View {
                     }
                     if (draft["telegramTransferEnabled"] ?? settings.setting("telegramTransferEnabled")).bool == true {
                         Text("Telegram transfers can move real funds. Keep the transfer budget within the amount you authorize your linked chat to spend.").foregroundStyle(.orange).font(.caption)
+                    }
+                    if (draft["virtualsEnabled"] ?? settings.setting("virtualsEnabled")).bool == true {
+                        Text("This publishes real activity to the public Virtuals agent page using the server's configured connection.").foregroundStyle(.orange).font(.caption)
                     }
                     DisclosureGroup("Advanced trading settings") { ForEach(numbers, id: \.0) { key, label in
                         VStack(alignment: .leading) { Text(label).font(.caption).foregroundStyle(.secondary); TextField(label, text: text(key, settings)).keyboardType(.decimalPad) }

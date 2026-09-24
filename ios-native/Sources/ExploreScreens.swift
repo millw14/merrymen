@@ -186,23 +186,30 @@ struct AgentScreen: View {
             Metric(label: "Trades this period", value: a["tradeCount"].number.map { $0.formatted() + (a["tradeCountFloor"].bool == true ? "+" : "") } ?? "—")
             if let seconds = a["avgHoldSec"].number { Metric(label: "Average hold", value: Duration.seconds(seconds).formatted(.units(allowed: [.hours, .minutes]))) }
             Metric(label: "Max drawdown (hourly floor)", value: bps(a["maxDdBps"].number))
-            if a["gasless"].bool == true { Label("All landed operations this period were gas sponsored", systemImage: "checkmark.seal").font(.caption) }
-            if a["contributionsEvidenced"].bool == true && a["equityRead"].bool == true { TrendChart(values: a["growth"].array.compactMap { $0["g"].number }) }
-            if a["growthComplete"].bool == false { Text("History covers a limited window.").font(.caption).foregroundStyle(.secondary) }
+            if a["gasless"].bool == true && a["mode"].text != "paper" { Label("All landed operations this period were gas sponsored", systemImage: "checkmark.seal").font(.caption) }
+            AgentDetails(agent: a)
         }
         Text("Holdings").font(.title2.bold())
         if a["publicBook"].bool != true { Text("This agent’s holdings are private.").foregroundStyle(.secondary) }
         else if a["holdingsRead"].bool != true { Text("Holdings could not be read.").foregroundStyle(.orange) }
         else { Rows(values: a["holdings"].array) { row in Card {
-            NavigationLink(row["symbol"].text, value: Route.token(row["token"].text))
+            if let token = row["token"].string { NavigationLink(row["symbol"].text, value: Route.token(token)) } else { Text(row["symbol"].text) }
             Metric(label: "Value", value: usd(row["valueUsdg"].number))
             Metric(label: "Return", value: bps(row["pnlBps"].number))
+            Metric(label: "Share of book", value: bps(row["shareBps"].number))
+            if let held = row["heldSince"].number { HStack { Text("Held since"); Text(Date(timeIntervalSince1970: held), style: .date) }.font(.caption) }
+            if row["basisSource"].text == "quote" { Text("Entry cost is an estimate.").font(.caption).foregroundStyle(.orange) }
+            if row["acting"].bool == true { Text("A corporate action is pending.").font(.caption).foregroundStyle(.orange) }
             if row["priceStale"].bool == true { Text("Stale price").font(.caption).foregroundStyle(.orange) }
         } } }
         Text("Top trades").font(.title2.bold())
         if a["topTradesRead"].bool != true { Text("Top trades could not be read.") }
         else if a["topTrades"].array.isEmpty { Text("No closed trades yet.").foregroundStyle(.secondary) }
-        else { Rows(values: a["topTrades"].array) { ProfileTradeCard(trade: $0) } }
+        else { Rows(values: a["topTrades"].array) { ProfileTradeCard(trade: $0, showMoney: a["publicBook"].bool == true) } }
+        Text("Recent fills").font(.title2.bold())
+        if a["activityRead"].bool != true { Text("Recent fills could not be read.").foregroundStyle(.orange) }
+        else if a["recentTrades"].array.isEmpty { Text("No fills in this period.").foregroundStyle(.secondary) }
+        else { Rows(values: a["recentTrades"].array) { ProfileTradeCard(trade: $0, showMoney: a["publicBook"].bool == true) } }
         Text("Theses").font(.title2.bold())
         if a["thesesRead"].bool == false { Text("Theses could not be read.") }
         Rows(values: a["theses"].array) { ThesisCard(thesis: $0) }
@@ -319,10 +326,16 @@ struct CandleChart: View {
 }
 struct ProfileTradeCard: View {
     let trade: J
+    var showMoney = false
     var body: some View { Card {
-        Text("\(trade["action"].text) \(trade["symbol"].text)").font(.headline)
+        Text("\(trade["action"].text.capitalized) \(trade["displayName"].string ?? trade["symbol"].string ?? "token")").font(.headline)
+        if let at = trade["at"].number { Text(Date(timeIntervalSince1970: at), style: .relative).font(.caption).foregroundStyle(.secondary) }
         if trade["paper"].bool == true { Text("PAPER").font(.caption).foregroundStyle(.orange) }
-        Metric(label: "Return", value: bps(trade["realizedPnlBps"].number))
-        if let amount = trade["sizeUsdg"].number { Metric(label: "Size", value: usd(amount)) }
+        if trade["action"].text == "sell" {
+            Metric(label: "Return", value: bps(trade["realizedPnlBps"].number))
+            if trade["realizedPnlBps"].number == nil { Text("A return is unavailable without an evidenced entry cost.").font(.caption).foregroundStyle(.secondary) }
+        }
+        if showMoney, let amount = trade["sizeUsdg"].number { Metric(label: "Size", value: usd(amount)) }
+        if showMoney, let profit = trade["realizedPnlUsdg"].number { Metric(label: "Realized P&L", value: usd(profit)) }
     } }
 }
