@@ -33,3 +33,31 @@ assert.equal(assets('crypto').includes('NVDA'), false);
 assert.equal(assets('crypto', [{ symbol: 'NEON', address: '0x2222222222222222222222222222222222222222' }]).includes('NEON'), true);
 assert.equal(assets('stocks', [{ symbol: 'NEON', address: '0x2222222222222222222222222222222222222222' }]).includes('NEON'), false);
 console.log('Native creation keeps stock and crypto basket choices within the selected market mode.');
+
+const command = (id, args = {}) => JSON.parse(context.NativeFeed.command(JSON.stringify({ id, args })));
+assert.equal(command('run-shell', { command: 'ignored' }), null);
+assert.equal(command('buy', { symbol: 'NVDA' }), null);
+assert.equal(command('buy', { symbol: ['NVDA'], usdgAmount: 5 }), null);
+assert.deepEqual(command('set-size', { buyPerTickUsdg: 5, liveTradingEnabled: true, sponsorGasEnabled: true }).payload, { buyPerTickUsdg: 5 });
+assert.deepEqual(command('go-paper', { liveTradingEnabled: true, paperTradingEnabled: false }).payload, { paperTradingEnabled: true, liveTradingEnabled: false });
+assert.deepEqual(command('go-live', { liveTradingEnabled: false }).payload, { liveTradingEnabled: true });
+assert.deepEqual(command('set-basket', { basketSymbols: 'NVDA, TSLA' }).payload, { basketSymbols: ['NVDA', 'TSLA'] });
+assert.deepEqual(command('buy', { symbol: 'NVDA', usdgAmount: 5, side: 'sell', owner: 'someone else' }).payload, { side: 'buy', symbol: 'NVDA', usdgAmount: 5 });
+assert.equal(command('set-risk', { level: 'cautious', slippageBps: 9999 }).payload.slippageBps < 9999, true);
+assert.match(command('go-paper').say, /stop managing/);
+assert.match(command('sell', { symbol: 'NEON', usdgAmount: 5 }).say, /whole position/);
+console.log('Native chat rejects invented/incomplete commands, strips extra fields, derives fixed consent and risk values, and preserves money warnings.');
+
+const markets = (extra = {}) => JSON.parse(context.NativeFeed.markets(JSON.stringify({
+  market: { tokens: [{ symbol: 'NVDA', name: 'Nvidia', address: '0x1111111111111111111111111111111111111111', kind: 'stock', priceUsd: 120, holders: 4 }] },
+  discoveries: { rows: [{ token: '0x2222222222222222222222222222222222222222', name: 'NEON', priceUsd: 0.000012, change24hPct: 4, buyers24h: 1 }], fresh: [] },
+  theses: { theses: [{ ...base, paper: false }, { ...base, postId: 'second', slug: 'other' }] }, sort: 'buys', ...extra
+})));
+assert.equal(markets().rows[0].symbol, 'NEON');
+assert.equal(markets().rows[0].priceUsd, 0.000012);
+assert.equal(markets().rows[0].buys, 1);
+assert.equal(markets({ sort: 'held' }).rows[0].symbol, 'NVDA');
+assert.equal(markets({ sort: 'all' }).rows.some(r => r.symbol === 'NVDA'), true);
+assert.equal(markets({ theses: null, discoveries: null, market: null }).fallback, true);
+assert.equal(markets({ theses: null, discoveries: null, market: null }).rows[0].priceUsd, null);
+console.log('Native markets share web token joins, rank coins first, retain stocks, and leave unread prices unknown.');

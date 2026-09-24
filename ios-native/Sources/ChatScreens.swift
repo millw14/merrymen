@@ -12,13 +12,14 @@ struct ChatScreen: View {
     @State private var error: String?
     @State private var partial = ""
     @State private var clearHistory = false
+    @State private var proposal: J?
     var body: some View {
         VStack(spacing: 0) {
             historyView
             composerView
         }.background(Brand.background)
         .task(id: store.generation) {
-            voice.stop(); messages = []; text = ""; partial = ""; error = nil
+            voice.stop(); messages = []; proposal = nil; text = ""; partial = ""; error = nil
             if let owner = store.owner {
                 do { if let data = try SecureStore.read("dev.merrymen.chat", owner.lowercased()) { messages = try JSONDecoder().decode([J].self, from: data) } }
                 catch { self.error = "Saved conversation could not be read." }
@@ -35,7 +36,7 @@ struct ChatScreen: View {
         .toolbar { ToolbarItem(placement: .secondaryAction) { Button("Clear conversation", role: .destructive) { clearHistory = true }.disabled(busy) } }
         .confirmationDialog("Clear the saved conversation on this device?", isPresented: $clearHistory, titleVisibility: .visible) {
             Button("Clear conversation", role: .destructive) {
-                do { if let owner = store.owner { try SecureStore.remove("dev.merrymen.chat", owner.lowercased()) }; messages = [] }
+                do { if let owner = store.owner { try SecureStore.remove("dev.merrymen.chat", owner.lowercased()) }; messages = []; proposal = nil }
                 catch { self.error = error.localizedDescription }
             }
         }
@@ -49,9 +50,9 @@ struct ChatScreen: View {
                         Card {
                             Text(message["role"].text == "user" ? "You" : "Your agent").font(.caption.bold()).foregroundStyle(Brand.accent)
                             Text(message["content"].text).textSelection(.enabled)
-                            if message["command"] != .null { CommandCard(command: message["command"]) }
                         }.id(index)
                     }
+                    if let proposal { CommandCard(command: proposal) { self.proposal = nil } }
                     if busy { if partial.isEmpty { ProgressView("Thinking…") } else { Card { Text("Reply in progress").font(.caption).foregroundStyle(.secondary); Text(partial) } } }
                     if let error { Text(error).foregroundStyle(Brand.down) }
                 }.padding(18) }
@@ -77,6 +78,7 @@ struct ChatScreen: View {
         guard !busy else { return }; let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines); guard !prompt.isEmpty else { return }
         let history = Array(messages.suffix(20)).map { J.object(["role": $0["role"], "content": $0["content"]]) }
         let owner = store.owner; let generation = store.generation
+        proposal = nil
         messages.append(.object(["role": .string("user"), "content": .string(prompt)])); text = ""; busy = true; error = nil; partial = ""
         Task { defer { busy = false; partial = "" }; do {
             let session = store.api.binding()
@@ -84,33 +86,51 @@ struct ChatScreen: View {
             let reply = try await store.api.chat(.object(["message": .string(prompt), "history": .array(history)]), expectedSession: session) { value in if generation == store.generation { partial = value } }
             guard generation == store.generation else { return }
             guard let answer = reply["reply"].string else { throw APIError(status: 0, message: reply["why"].string ?? "No reply was returned.") }
-            messages.append(.object(["role": .string("assistant"), "content": .string(answer), "command": reply["command"]]))
-            if let owner { try SecureStore.write("dev.merrymen.chat", owner.lowercased(), JSONEncoder().encode(Array(messages.suffix(100)))) }
+            messages.append(.object(["role": .string("assistant"), "content": .string(answer)]))
+            if reply["command"] != .null { proposal = reply["command"] }
+            // Persist words only. Old proposals must never become actionable
+            // again when this conversation is restored.
+            if let owner {
+                let transcript = messages.suffix(100).map { J.object(["role": $0["role"], "content": $0["content"]]) }
+                try SecureStore.write("dev.merrymen.chat", owner.lowercased(), JSONEncoder().encode(transcript))
+            }
         } catch { if generation == store.generation { self.error = error.localizedDescription } } }
     }
 }
 
 struct CommandCard: View {
     @EnvironmentObject var store: AppStore
+    @StateObject private var presentation = FeedPresentation()
     let command: J
+    let dismiss: () -> Void
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        if let proposal = presentation.command(command) { VStack(alignment: .leading, spacing: 8) {
             Label("Proposed action — not executed", systemImage: "hand.raised").font(.caption.bold())
-            Text(command["id"].text.replacingOccurrences(of: "-", with: " ")).font(.headline)
-            // Model output never chooses an API path or supplies a settings write.
-            // Open the native form so its values and confirmation remain authoritative.
-            if ["buy", "sell"].contains(command["id"].text) {
-                Button("Review trade") { store.path.append(.tradeRequest(command["args"]["symbol"].text, command["id"].text, command["args"]["usdgAmount"].text, nil)) }
-            } else if ["set-strategy", "set-basket", "go-paper", "go-live", "set-slippage", "set-risk", "set-impact", "set-size", "rename", "open-settings"].contains(command["id"].text) {
-                Button("Review settings") { store.path.append(.settings) }
-            } else if ["open-limits", "resign"].contains(command["id"].text) {
-                Button("Review permission") { store.path.append(.limits) }
-            } else if command["id"].text == "open-deposit" { Button("Add funds") { store.path.append(.deposit) }
-            } else if command["id"].text == "open-withdraw" { Button("Review withdrawal") { store.path.append(.withdraw) }
-            } else if ["show-address", "reveal-key"].contains(command["id"].text) { Button("Open wallet") { store.path.append(.permissions) }
-            } else if command["id"].text == "snipe" { Button("Find and inspect the token") { store.path.append(.snipe(command["args"]["query"].text, command["args"]["usdgAmount"].text)) }
-            } else { Text("This action is not available in the native preview yet.").font(.caption).foregroundStyle(.secondary) }
-        }.padding(12).background(Brand.background, in: RoundedRectangle(cornerRadius: 10))
+            Text(proposal["say"].text)
+            Button("Review proposal") { review(proposal) }
+            Button("Dismiss", role: .cancel, action: dismiss)
+        }.padding(12).background(Brand.card, in: RoundedRectangle(cornerRadius: 10)) }
+    }
+    private func review(_ proposal: J) {
+        let payload = proposal["payload"]
+        switch proposal["via"].text {
+        case "settings":
+            guard let data = try? JSONEncoder().encode(command) else { return }
+            store.path.append(.settingsProposal(String(decoding: data, as: UTF8.self)))
+        case "order": store.path.append(.tradeRequest(payload["symbol"].text, payload["side"].text, payload["usdgAmount"].text, nil))
+        case "snipe": store.path.append(.snipe(payload["query"].text, payload["usdgAmount"].text))
+        case "navigate":
+            switch proposal["id"].text {
+            case "open-settings": store.path.append(.settings)
+            case "open-limits", "resign": store.path.append(.limits)
+            case "open-deposit": store.path.append(.deposit)
+            case "open-withdraw": store.path.append(.withdraw)
+            case "show-address", "reveal-key": store.path.append(.permissions)
+            default: return
+            }
+        default: return
+        }
+        dismiss()
     }
 }
 

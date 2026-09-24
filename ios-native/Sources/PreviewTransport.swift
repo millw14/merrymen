@@ -17,6 +17,17 @@ final class PreviewTransport: URLProtocol {
         case "/api/like-counts": body = #"{"read":true,"counts":{"test-post":2}}"#
         case "/api/follow": body = #"{"read":true,"wired":[]}"#
         case "/api/orders/ceiling": body = #"{"ceilingUsdg":50}"#
+        case "/api/chat": body = #"{"reply":"You can review this name change.","command":{"id":"rename","args":{"agentName":"New native name","liveTradingEnabled":true,"sponsorGasEnabled":true}}}"#
+        case "/api/settings":
+            if request.httpMethod == "PUT" {
+                let input = readBody()
+                if Set(input.keys) != Set(["owner", "agentName"]) || input["agentName"] as? String != "New native name" {
+                    body = #"{"error":"Unexpected fields in reviewed name change"}"#; status = 400
+                } else { UserDefaults.standard.set(true, forKey: "uiTest.settingsSaved"); body = #"{"ok":true}"# }
+            } else {
+                let name = UserDefaults.standard.bool(forKey: "uiTest.settingsSaved") ? "New native name" : "Original name"
+                body = "{\"owner\":\"0x1111111111111111111111111111111111111111\",\"values\":{\"agentName\":\"\(name)\",\"liveTradingEnabled\":false},\"defaults\":{},\"strategies\":{\"builtin\":[\"steady-basket\"]},\"knownSymbols\":[],\"llmProviders\":[]}"
+            }
         case "/api/snipe":
             let input = readBody()
             if input["query"] as? String == "0x2222222222222222222222222222222222222222" {
@@ -33,6 +44,7 @@ final class PreviewTransport: URLProtocol {
         case "/api/tour": body = #"{"done":false,"signedIn":false}"#
         case "/api/theses": body = #"{"source":"db","theses":[{"slug":"test-agent","name":"Test agent","postId":"test-post","at":1790287200,"action":null,"head":"A measured decision","reason":"A test thesis with a clear investment rationale.","paper":true,"outcome":"view","outcomeText":"Paper view","symbol":"NVDA"}]}"#
         case "/api/market": body = #"{"tokens":[{"symbol":"NVDA","name":"Nvidia","address":"0x1111111111111111111111111111111111111111","priceUsd":null,"paused":false}]}"#
+        case "/api/discoveries": body = #"{"source":"db","rows":[],"fresh":[]}"#
         case "/api/leaderboard": body = #"{"source":"db","agents":[]}"#
         case "/api/agents/test-agent":
             body = #"{"slug":"test-agent","name":"Test agent","mode":"live","publicBook":false,"holdingsRead":true,"holdings":[],"activityRead":true,"topTradesRead":true,"topTrades":[{"id":"sell","action":"sell","symbol":"NVDA","at":1790287200,"paper":false,"sizeUsdg":987654,"realizedPnlBps":100,"realizedPnlUsdg":1234}],"recentTrades":[],"thesesRead":true,"theses":[],"growth":[],"how":{"kind":"strategy","name":"steady-basket"}}"#

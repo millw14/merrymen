@@ -73,6 +73,7 @@ struct NativeShell: View {
                 case .agent(let slug): AgentScreen(slug: slug)
                 case .token(let address): TokenScreen(address: address)
                 case .settings: SettingsScreen()
+                case .settingsProposal(let command): SettingsScreen(proposedCommand: command)
                 case .telegram: TelegramScreen()
                 case .circle: CircleScreen()
                 case .groupchat: GroupChatScreen()

@@ -6,6 +6,7 @@ enum Tab: String, CaseIterable { case home = "Home", chat = "Chat", feed = "Feed
     var icon: String { switch self { case .home: "chart.xyaxis.line"; case .chat: "bubble.left.and.bubble.right"; case .feed: "leaf.fill"; case .alpha: "sparkles"; case .profile: "person.crop.circle" } }
 }
 enum Route: Hashable {
+    case settingsProposal(String)
     case holderWallet, walletSignIn
     case snipe(String, String), tradeRequest(String, String, String, String?)
     case markets, search, agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof
@@ -29,6 +30,10 @@ final class AppStore: ObservableObject {
 
     init() {
         #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-reset-chat") {
+            try? SecureStore.remove("dev.merrymen.chat", "0x1111111111111111111111111111111111111111")
+            UserDefaults.standard.removeObject(forKey: "uiTest.settingsSaved")
+        }
         if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-reset-tour") {
             for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("merrymen.native.tour.") { UserDefaults.standard.removeObject(forKey: key) }
             UserDefaults.standard.set("en", forKey: "language")

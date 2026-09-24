@@ -25,6 +25,29 @@ final class MerrymenUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Skip tour"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.tabBars.buttons["Feed"].exists)
     }
+    func testChatProposalPrefillsOnlyAllowedFieldsAndIsNotRestored() {
+        let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-signed-in", "-reset-tour", "-reset-chat"]; app.launch()
+        if app.buttons["Skip tour"].waitForExistence(timeout: 8) { app.buttons["Skip tour"].tap() }
+        app.tabBars.buttons["Chat"].tap()
+        let input = app.textFields["Message your agent"]
+        XCTAssertTrue(input.waitForExistence(timeout: 8)); input.tap(); input.typeText("Rename my agent")
+        app.buttons["Send message"].tap()
+        XCTAssertTrue(app.buttons["Review proposal"].waitForExistence(timeout: 10))
+        app.buttons["Review proposal"].tap()
+        let name = app.textFields["Agent name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 8)); XCTAssertEqual(name.value as? String, "New native name")
+        XCTAssertEqual(app.switches["Trade with real funds"].value as? String, "0")
+        capture(app, "Canonical chat proposal awaits settings confirmation")
+        let review = app.buttons["Review changes"]
+        for _ in 0..<12 { if review.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(review.isHittable); review.tap()
+        XCTAssertTrue(app.buttons["Save changes"].waitForExistence(timeout: 5)); app.buttons["Save changes"].tap()
+        XCTAssertTrue(app.staticTexts["Settings saved."].waitForExistence(timeout: 8))
+        app.terminate(); app.launchArguments = ["-ui-testing", "-signed-in"]; app.launch()
+        app.tabBars.buttons["Chat"].tap()
+        XCTAssertTrue(app.staticTexts["You can review this name change."].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.buttons["Review proposal"].exists)
+    }
     func testPrivateProfileOnlyShowsDollarsFromOwnerEndpoint() {
         let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-reset-tour"]; app.launch()
         if app.buttons["Skip tour"].waitForExistence(timeout: 8) { app.buttons["Skip tour"].tap() }

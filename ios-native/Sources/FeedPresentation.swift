@@ -12,6 +12,11 @@ final class FeedPresentation: ObservableObject {
         value(input, function: "render")?.array
     }
     func profile(_ input: J) -> J? { value(input, function: "profile") }
+    func markets(_ input: J) -> J? { value(input, function: "markets") }
+    func command(_ input: J) -> J? {
+        guard let result = value(input, function: "command"), result != .null else { return nil }
+        return result
+    }
     func assets(_ settings: J, mode: String) -> [String] {
         value(.object(["mode": .string(mode), "customTokens": settings.setting("customTokens")]), function: "assets")?.array.compactMap(\.string) ?? []
     }

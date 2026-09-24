@@ -2,6 +2,41 @@
 import { beatsOf, pillBeats, mentionTargets, verbOf, pillOf, watchCount, type Beat, type FeedRow, type Mention, type Pill } from '../../web/src/terminal/beat';
 import { chartWindows, defaultWindow, growthWindow, thesisOfHow, type ChartWindow } from '../../web/src/terminal/profile-view';
 import { STOCK_TOKENS } from '../../packages/core/src/tokens';
+import { commandFor, commandPayload, isComplete, type CommandArg } from '../../web/src/lib/chat-commands';
+import { seedSources, withRead, liveOf } from '../../web/src/terminal/live';
+
+export function markets(json: string): string {
+  const input = JSON.parse(json);
+  let sources = seedSources();
+  for (const key of ['market', 'discoveries', 'theses'] as const) {
+    if (input[key]) sources = withRead(sources, key, { text: JSON.stringify(input[key]), answered: true }, false);
+  }
+  const tokens = liveOf(sources).tokens;
+  const count = (value: number | null) => value ?? 0;
+  const coinsFirst = (a: { kind: string }, b: { kind: string }) => Number(b.kind === 'memecoin') - Number(a.kind === 'memecoin');
+  const ranked = input.sort === 'buys'
+    ? tokens.filter(t => count(t.buys) > 0 || t.cast.length > 0).sort((a, b) => coinsFirst(a, b) || count(b.buys) - count(a.buys))
+    : tokens.filter(t => count(t.agents) > 0 || t.cast.length > 0).sort((a, b) => coinsFirst(a, b) || count(b.agents) - count(a.agents) || count(b.holders) - count(a.holders));
+  const all = [...tokens].sort((a, b) => coinsFirst(a, b) || count(b.change24hPct) - count(a.change24hPct));
+  return JSON.stringify({ rows: input.sort === 'all' ? all : ranked.length ? ranked : all.slice(0, 8), fallback: input.sort !== 'all' && !ranked.length });
+}
+
+// The model names a registered command, never an API route or arbitrary fields.
+// Swift shows this canonical description and opens an editable native review.
+export function command(json: string): string {
+  const input = JSON.parse(json);
+  const cmd = commandFor(input?.id);
+  if (!cmd) return 'null';
+  const args: Record<string, CommandArg> = {};
+  if (input.args && typeof input.args === 'object' && !Array.isArray(input.args)) {
+    for (const [key, value] of Object.entries(input.args)) {
+      if (typeof value === 'string' || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) args[key] = value;
+    }
+  }
+  if (!isComplete(cmd, args)) return 'null';
+  const payload = commandPayload(cmd, args);
+  return JSON.stringify({ id: cmd.id, via: cmd.via, say: cmd.say(args), payload });
+}
 
 export function assets(json: string): string {
   const { mode, customTokens } = JSON.parse(json);

@@ -3,6 +3,10 @@ import MerrymenPolicy
 
 struct SettingsScreen: View {
     @EnvironmentObject var store: AppStore
+    var proposedCommand: String? = nil
+    @StateObject private var presentation = FeedPresentation()
+    @State private var consumedProposal = false
+    @State private var proposalDescription: String?
     @StateObject private var data = RemoteData()
     @State private var draft: [String: J] = [:]
     @State private var busy = false
@@ -28,6 +32,7 @@ struct SettingsScreen: View {
     private let numbers: [(String, String)] = [
         ("tickSeconds", "Decision interval (seconds)"), ("slippageBps", "Slippage (basis points)"),
         ("maxImpactBps", "Maximum price impact (basis points; 0 disables)"), ("paperStartUsdg", "Paper starting balance (USDG)"),
+        ("perfFeeBps", "Performance fee (basis points)"),
         ("telegramMaxActionUsdg", "Order ceiling (USDG)"), ("buyPerTickUsdg", "Buy per tick (USDG)"),
         ("idleFloorUsdg", "Cash floor (USDG)"), ("gapEnterBudgetUsdg", "Gap entry budget (USDG)"),
         ("takeProfitBps", "Take profit (basis points)"), ("maxPriceDivergenceBps", "Maximum price divergence (basis points)"),
@@ -45,6 +50,11 @@ struct SettingsScreen: View {
         Page {
             if store.owner == nil { SignInCard() }
             else if let settings = data.value {
+                if let proposalDescription { Card {
+                    Text("Suggested changes · not saved").font(.headline)
+                    Text(proposalDescription)
+                    Text("Review or edit the values below, then confirm your changes.").font(.caption).foregroundStyle(.secondary)
+                } }
                 Card {
                     Text("Your agent").font(.title2.bold())
                     TextField("Agent name", text: text("agentName", settings)).textInputAutocapitalization(.words)
@@ -90,7 +100,7 @@ struct SettingsScreen: View {
                 Card {
                     DisclosureGroup("Swap connections") {
                         Picker("Swap venue", selection: text("swapVenue", settings)) { Text("Uniswap").tag("uniswap"); Text("Rialto").tag("rialto") }
-                        ForEach([("v4AdapterAddress", "V4 adapter"), ("ponsAdapterAddress", "Pons adapter"), ("ponsClassVaultFactory", "Class vault factory")], id: \.0) { key, label in
+                        ForEach([("breakerAddress", "Breaker registry"), ("v4AdapterAddress", "V4 adapter"), ("ponsAdapterAddress", "Pons adapter"), ("ponsClassVaultFactory", "Class vault factory")], id: \.0) { key, label in
                             TextField(label, text: text(key, settings)).textInputAutocapitalization(.never).autocorrectionDisabled()
                         }
                         Text("Adapter and vault addresses are verified when you sign. Saving a connection does not add it to your current permission.").font(.caption).foregroundStyle(.secondary)
@@ -185,7 +195,20 @@ struct SettingsScreen: View {
         if tradeNewToken { draft["basketSymbols"] = .array(basket(settings).union([symbol]).sorted().map(J.string)) }
         tokenSymbol = ""; tokenAddress = ""; tokenDecimals = "18"
     }
-    private func load() async { draft = [:]; confirm = nil; await data.load(store.api, "/api/settings"); loadedOwner = data.value?["owner"].string }
+    private func load() async {
+        draft = [:]; confirm = nil; proposalDescription = nil
+        let generation = store.generation
+        await data.load(store.api, "/api/settings")
+        guard generation == store.generation, !Task.isCancelled else { return }
+        loadedOwner = data.value?["owner"].string
+        guard loadedOwner?.lowercased() == store.owner?.lowercased(), loadedOwner != nil,
+              !consumedProposal, let proposedCommand,
+              let input = try? JSONDecoder().decode(J.self, from: Data(proposedCommand.utf8)),
+              let proposal = presentation.command(input), proposal["via"].text == "settings" else { return }
+        consumedProposal = true
+        draft = proposal["payload"].object
+        proposalDescription = proposal["say"].string
+    }
     private func prepareReview() {
         do {
             var body = draft

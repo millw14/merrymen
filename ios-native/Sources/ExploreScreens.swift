@@ -34,6 +34,9 @@ struct HomeScreen: View {
         }
         Button { store.path.append(.markets) } label: { Label("Explore markets", systemImage: "chart.bar.xaxis") }.buttonStyle(PrimaryButtonStyle())
         Text("The leaderboard").font(.title2.bold())
+        DisclosureGroup("How returns are measured") {
+            Text("Only eligible live returns are ranked. Paper returns measure the current paper period and stay outside live rankings. Inactive agents and returns without evidenced capital or completed trades remain unranked.").font(.caption).foregroundStyle(.secondary)
+        }
         Remote(path: "/api/leaderboard") { data in
             if data["source"].string == "none" { Text("Rankings are temporarily unavailable.") }
             else if data["agents"].array.isEmpty { Text("No ranked agents yet. Rankings appear when there is enough trade and funding evidence.").foregroundStyle(.secondary) }
@@ -41,12 +44,18 @@ struct HomeScreen: View {
                 Button { if let slug = agent["slug"].string { store.path.append(.agent(slug)) } } label: {
                     HStack {
                         Avatar(slug: agent["slug"].string)
-                        VStack(alignment: .leading) { Text(agent["name"].text).foregroundStyle(.primary); Text(agent["unrankedWhy"].string?.replacingOccurrences(of: "-", with: " ") ?? "Evidenced return").font(.caption).foregroundStyle(.secondary) }
-                        Spacer(); Text(bps(agent["pnlBps"].number)).monospacedDigit()
+                        VStack(alignment: .leading) {
+                            Text(agent["name"].text).foregroundStyle(.primary)
+                            Text(agent["unrankedWhy"].string?.replacingOccurrences(of: "-", with: " ") ?? "Evidenced return").font(.caption).foregroundStyle(.secondary)
+                            Text(agent["mode"].text == "paper" ? "\(agent["filledPaper"].text) paper fills" : "\(agent["landed"].text) completed trades").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer(); Text(bps(agent["mode"].text == "paper" ? agent["paperPnlBps"].number : agent["pnlBps"].number)).monospacedDigit()
                     }.padding(.vertical, 8)
-                }
+                }.disabled(agent["slug"].string == nil)
             }
+            if let retired = data["retired"].number, retired > 0 { Text("Retired accounts (\(Int(retired)))").font(.caption).foregroundStyle(.secondary) }
         }
+        MarketActivity()
     } }
 }
 
@@ -118,33 +127,11 @@ struct ThesisCard: View {
 }
 
 struct MarketsScreen: View {
-    @EnvironmentObject var store: AppStore
     @State private var query = ""
     @State private var saved = false
     var body: some View { Page {
         Toggle("Watchlist only", isOn: $saved)
-        Remote(path: "/api/market") { data in
-            Rows(values: data["tokens"].array.filter { (!saved || store.watchlist.contains($0["address"].text)) && (query.isEmpty || ($0["symbol"].text + " " + $0["name"].text).localizedCaseInsensitiveContains(query)) }) { token in
-                Button { if let a = token["address"].string { store.path.append(.token(a)) } } label: {
-                    Card { Metric(label: token["symbol"].text, value: tokenPrice(token["priceUsd"].number)); Text(token["name"].text).font(.caption).foregroundStyle(.secondary); if token["paused"].bool == true { Text("Trading paused").foregroundStyle(.orange) } }
-                }.buttonStyle(.plain)
-            }
-        }
-        Text("Memecoins").font(.title2.bold())
-        Remote(path: "/api/discoveries", interval: 120) { data in
-            MarketCaveats(data: data)
-            Rows(values: data["rows"].array.filter { (!saved || store.watchlist.contains($0["token"].text)) && (query.isEmpty || $0["name"].text.localizedCaseInsensitiveContains(query)) }) { DiscoveryCard(row: $0) }
-            if !data["fresh"].array.isEmpty {
-                Text("New launches with activity").font(.headline)
-                Rows(values: data["fresh"].array) { row in Card {
-                    NavigationLink(row["name"].string ?? row["symbol"].text, value: Route.token(row["token"].text)).font(.headline)
-                    Text(row["description"].text)
-                    Metric(label: "Trades / traders", value: "\(row["trades"].text) / \(row["traders"].text)")
-                    Metric(label: "Graduation progress", value: bps(row["progressBps"].number))
-                    Text("Launcher description; not independently verified.").font(.caption).foregroundStyle(.secondary)
-                } }
-            }
-        }
+        MarketActivity(query: query, saved: saved)
     }.navigationTitle("Markets").searchable(text: $query) }
 }
 
