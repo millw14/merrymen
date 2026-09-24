@@ -165,18 +165,26 @@ test("a holding whose multiplier has moved is not a disagreement", async()=>{
   assert.equal(paperCheckpointRejection(row,()=>NVDA_MUL),null);
 });
 
-test("a 2:1 split is not a disagreement either, and could never have been tolerated away", async()=>{
+test("AT A SPLIT, today's units pass exactly — and no range is admitted where it could hide a torn write", async()=>{
   const token = '0x'+'1'.repeat(40);
   const base = {agent_id:'a',epoch:1,cash_usdg:900,vault_usdg:0,hwm_usdg:1000,updated_at:10};
-  // Production, 0xc94b0f: basis 77848936544902784 against 0.03889431898463838 shares —
-  // a ratio of 2.00155, which is why loosening the 1e-6 tolerance was never the
-  // answer. No tolerance that admits this is a tolerance worth having.
-  const row = {...base,
+  // This test once read 0xc94b0f's 2.00155 ratio as a 2:1 split. Production says
+  // otherwise: that agent's NVDA multiplier is 1.000775 (orchestrator log,
+  // 2026-09-24), so its basis is booked twice, and it stays refused (see "WHAT
+  // THE CHECK IS FOR"). At a REAL split a basis in today's units equals the book.
+  const current = {...base,
     shares: JSON.stringify({NVDA:{token,shares:0.03889431898463838}}),
-    basis_json: JSON.stringify([{symbol:'NVDA',qty_raw:'77848936544902784',cost_usdg:'100000000'}]),
+    basis_json: JSON.stringify([{symbol:'NVDA',qty_raw:'38894318984638380',cost_usdg:'100000000'}]),
   };
-  assert.match(paperCheckpointRejection(row)!,/disagrees/);
-  assert.equal(paperCheckpointRejection(row,()=>SPLIT_MUL),null);
+  assert.equal(paperCheckpointRejection(current,()=>SPLIT_MUL),null);
+  // Kaka's review of #164: a sell of 0.4 from one share that updated the book
+  // and crashed before its basis — book 0.6, stale basis 1.0 — sits inside
+  // [0.6, 1.2] at a multiplier of 2. Past dividend-scale drift, no range.
+  const torn = {...base,
+    shares: JSON.stringify({NVDA:{token,shares:0.6}}),
+    basis_json: JSON.stringify([{symbol:'NVDA',qty_raw:'1000000000000000000',cost_usdg:'100000000'}]),
+  };
+  assert.match(paperCheckpointRejection(torn,()=>2)!,/disagrees/);
 });
 
 test("a REAL disagreement still fails once the multiplier is applied", async()=>{
@@ -322,5 +330,67 @@ test("0x19bd63, THROUGH THE UPGRADE PATH: an old tradeable basis against the raw
     const book = await fresh!.prepare('SELECT shares FROM paper_book').get() as {shares:string};
     const held = (JSON.parse(book.shares) as Record<string,{shares:number}>).NVDA!.shares;
     assert.ok(Math.abs(held-0.046669762062241625)<1e-12, `the holding the book had, got ${held}`);
+  } finally {raws.forEach(r=>r.close());}
+});
+
+/**
+ * KAKA'S FIRST FINDING ON #164: admitting a mixed basis is not enough. A sell
+ * takes split-invariant quantity off a basis whose older part is tradeable,
+ * so a legacy position later sold down drifts past shares × multiplier and is
+ * refused on the NEXT restart. The fix is to normalise at every restore, and
+ * in what the mirror writes: after it, basis == shares, and fills keep it so.
+ */
+const SCHEMA = `CREATE TABLE agents(smart_account TEXT,epoch INTEGER);
+  CREATE TABLE paper_book(agent_id TEXT PRIMARY KEY,cash_usdg REAL,vault_usdg REAL,hwm_usdg REAL,shares TEXT,updated_at INTEGER);
+  CREATE TABLE cost_basis(agent_id TEXT,mode TEXT,symbol TEXT,qty_raw TEXT,cost_usdg TEXT,updated_at INTEGER);
+  CREATE TABLE positions(agent_id TEXT,symbol TEXT,token TEXT,raw_balance TEXT,ui_multiplier TEXT,value_usdg REAL);
+  INSERT INTO agents VALUES('a',1);`;
+const NVDA_RAW_MUL = '1000775159164630600';
+
+test("A MIXED BASIS, RESTORED, SURVIVES THE SELL THAT WOULD HAVE KILLED IT — through the mirror, the restore and the real paper sell", async()=>{
+  const raws=[new DatabaseSync(':memory:'),new DatabaseSync(':memory:'),new DatabaseSync(':memory:')];
+  const [child,shared,fresh]=raws.map(wrapSqlite);
+  try {
+    for (const db of [child!,shared!,fresh!]) await db.exec(SCHEMA);
+    for (const db of [child!,shared!]) await db.prepare(`INSERT INTO positions VALUES('a','NVDA',?,'0',?,0)`).run(TOKEN, NVDA_RAW_MUL);
+    // One legacy share (booked tradeable, ×1.000775) plus 0.1 bought today.
+    const legacyQty = BigInt(Math.round(1e18 * NVDA_NOW)) + 100_000_000_000_000_000n;
+    await child!.prepare(`INSERT INTO paper_book VALUES('a',800,0,1000,?,10)`).run(JSON.stringify({NVDA:{token:TOKEN,shares:1.1}}));
+    await child!.prepare(`INSERT INTO cost_basis VALUES('a','paper','NVDA',?,'198000000',10)`).run(String(legacyQty));
+    assert.equal(await mirrorPaperCheckpoints(child!,shared!),1,'a mixed basis at dividend-scale drift is admitted');
+    const stored = await shared!.prepare('SELECT basis_json FROM paper_checkpoints').get() as {basis_json:string};
+    assert.equal((JSON.parse(stored.basis_json) as {qty_raw:string}[])[0]!.qty_raw, String(BigInt(Math.round(1.1 * 1e18))), 'and mirrored in today\'s units');
+
+    // A checkpoint an older mirror wrote still carries the legacy units: the
+    // restore normalises it too, and says so in the orchestrator's log line.
+    await shared!.prepare(`UPDATE paper_checkpoints SET basis_json=?`).run(JSON.stringify([{symbol:'NVDA',qty_raw:String(legacyQty),cost_usdg:'198000000'}]));
+    assert.match(await restorePaperCheckpoint(fresh!,shared!,'a'),/restored \(basis for NVDA moved to split-invariant units\)/);
+    const restored = await fresh!.prepare(`SELECT qty_raw, cost_usdg FROM cost_basis`).get() as {qty_raw:string;cost_usdg:string};
+    assert.equal(restored.qty_raw, String(BigInt(Math.round(1.1 * 1e18))), 'basis == shares after the restore');
+    assert.equal(restored.cost_usdg, '198000000', 'the cost is untouched');
+
+    // Now the sell that pushed an un-normalised basis out of range: most of it.
+    const opts = { priceUsdOf: () => ({ priceUsd: 180, stale: false }), symbolOf: () => 'NVDA', multiplierOf: () => NVDA_NOW, usdgAddress: USDG, slippageBps: 30, notionalUsdg: 162 };
+    const sell = applyPaperIntent({ kind:'swap', sellToken:TOKEN, buyToken:USDG } as never, { cashUsdg: 800, vaultUsdg: 0 } as never, [{ symbol:'NVDA', token:TOKEN, shares:1.1 }], opts);
+    assert.ok(sell.ok && sell.fill);
+    const left = sell.positions.find(p=>p.symbol==='NVDA')!.shares;
+    const after = (q: bigint) => row('NVDA', left, q - BigInt(Math.round(sell.fill!.rawShares * 1e18)));
+    assert.equal(paperCheckpointRejection(after(BigInt(restored.qty_raw)), ()=>NVDA_NOW), null, 'normalised: still valid after the sell');
+    assert.match(paperCheckpointRejection(after(legacyQty), ()=>NVDA_NOW)!, /disagrees/, 'not normalised: refused on the next restart — the finding');
+  } finally {raws.forEach(r=>r.close());}
+});
+
+test("a book that survived the restart keeps its place, and its legacy basis is normalised in place", async()=>{
+  const raws=[new DatabaseSync(':memory:'),new DatabaseSync(':memory:')];
+  const [child,shared]=raws.map(wrapSqlite);
+  try {
+    for (const db of [child!,shared!]) await db.exec(SCHEMA);
+    await shared!.prepare(`INSERT INTO positions VALUES('a','NVDA',?,'0',?,0)`).run(TOKEN, NVDA_RAW_MUL);
+    await child!.prepare(`INSERT INTO paper_book VALUES('a',800,0,1000,?,10)`).run(JSON.stringify({NVDA:{token:TOKEN,shares:1}}));
+    await child!.prepare(`INSERT INTO cost_basis VALUES('a','paper','NVDA',?,'180000000',10)`).run(String(BigInt(Math.round(1e18 * NVDA_NOW))));
+    assert.match(await restorePaperCheckpoint(child!,shared!,'a'),/local book retained \(basis for NVDA moved/);
+    const q = await child!.prepare(`SELECT qty_raw FROM cost_basis`).get() as {qty_raw:string};
+    assert.equal(q.qty_raw, '1000000000000000000');
+    assert.equal(await restorePaperCheckpoint(child!,shared!,'a'), 'local book retained', 'and once normalised, nothing more to say');
   } finally {raws.forEach(r=>r.close());}
 });
