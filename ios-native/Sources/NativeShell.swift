@@ -112,7 +112,7 @@ struct NativeShell: View {
 
 struct Page<Content: View>: View {
     @ViewBuilder var content: Content
-    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 20) { content }.padding(18).frame(maxWidth: 800) }.background(Brand.background) }
+    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 20) { content }.padding(18).frame(maxWidth: 800) }.scrollDismissesKeyboard(.interactively).background(Brand.background) }
 }
 struct Card<Content: View>: View {
     @ViewBuilder var content: Content

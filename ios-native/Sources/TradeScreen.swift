@@ -8,6 +8,7 @@ struct TradeScreen: View {
     let address: String?
     @State private var side = "buy"
     @State private var amount = ""
+    @FocusState private var amountFocused: Bool
     @State private var review: ReviewValue?
     @State private var busy = false
     @State private var attempted = false
@@ -29,9 +30,10 @@ struct TradeScreen: View {
                     Text(symbol).font(.largeTitle.bold())
                     if let address { Text(address).font(.caption.monospaced()).textSelection(.enabled) }
                     Picker("Side", selection: $side) { Text("Buy").tag("buy"); Text("Sell").tag("sell") }.pickerStyle(.segmented)
-                    TextField("Amount in USDG, e.g. 5.00", text: $amount).keyboardType(.decimalPad)
+                    TextField("Amount in USDG, e.g. 5.00", text: $amount).keyboardType(.decimalPad).focused($amountFocused)
                     Text("Use at most two decimal places and no thousands separators. This asks the agent to trade; it still checks the signed caps, available assets, and risk limits.").font(.caption).foregroundStyle(.secondary)
                     Button("Review order") {
+                        amountFocused = false
                         guard let owner = store.owner, let body = TradeInput.body(side: side, symbol: symbol, amount: amount, owner: owner) else { error = "Enter a valid ticker and positive amount in USDG, with at most two decimal places."; return }
                         guard let ceiling, body["usdgAmount"].number! <= ceiling else { error = "That amount exceeds your current order ceiling."; return }
                         review = ReviewValue(value: body)

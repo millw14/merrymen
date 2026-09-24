@@ -58,11 +58,17 @@ struct SettingsScreen: View {
                 Card {
                     Text("Your agent").font(.title2.bold())
                     TextField("Agent name", text: text("agentName", settings)).textInputAutocapitalization(.words)
+                    Text("Strategy").font(.caption).foregroundStyle(.secondary)
                     Picker("Strategy", selection: text("strategy", settings)) {
+                        if text("strategy", settings).wrappedValue.isEmpty { Text("Choose a strategy").tag("") }
                         ForEach(Array(Set((settings["strategies"]["builtin"].array + settings["strategies"]["custom"].array).compactMap(\.string))).sorted(), id: \.self) { name in Text(name).tag(name) }
                     }
                     Text("Some strategies require a Merry Circle tier. Changing strategy does not change signed trading caps.").font(.caption).foregroundStyle(.secondary)
-                    Picker("Markets", selection: text("assetMode", settings)) { Text("All").tag("all"); Text("Stocks").tag("stocks"); Text("Crypto").tag("crypto") }
+                    Text("Markets").font(.caption).foregroundStyle(.secondary)
+                    Picker("Markets", selection: text("assetMode", settings)) {
+                        if text("assetMode", settings).wrappedValue.isEmpty { Text("Choose markets").tag("") }
+                        Text("All").tag("all"); Text("Stocks").tag("stocks"); Text("Crypto").tag("crypto")
+                    }
                 }
                 Card {
                     Text("Controls").font(.headline)
