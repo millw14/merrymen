@@ -12,6 +12,7 @@ struct APIError: LocalizedError {
 }
 
 final class API: NSObject, URLSessionTaskDelegate {
+    struct SessionBinding { fileprivate let header: String; fileprivate let epoch: Int }
     static let origin = URL(string: "https://app.merrymen.dev")!
     private lazy var session: URLSession = {
         let c = URLSessionConfiguration.ephemeral
@@ -41,6 +42,8 @@ final class API: NSObject, URLSessionTaskDelegate {
     }
 
     private func snapshot() -> (header: String, epoch: Int) { lock.lock(); defer { lock.unlock() }; return (cookieHeader, epoch) }
+    func binding() -> SessionBinding { let value = snapshot(); return SessionBinding(header: value.header, epoch: value.epoch) }
+    func matches(_ binding: SessionBinding) -> Bool { let value = snapshot(); return value.epoch == binding.epoch && value.header == binding.header }
     func forget() throws { lock.lock(); defer { lock.unlock() }; epoch += 1; cookieHeader = ""; recoveryCookie = nil; try persistCookies("") }
     private func mergeCookies(_ fresh: [HTTPCookie], expectedEpoch: Int) throws {
         lock.lock(); defer { lock.unlock() }
@@ -54,8 +57,9 @@ final class API: NSObject, URLSessionTaskDelegate {
             else { parts[c.name] = c.value }
         }
         for c in fresh where c.name == "merrymen_recovery" && c.domain == Self.origin.host! && c.path == "/api/bundler" { recoveryCookie = c }
-        let next = parts.map { "\($0.key)=\($0.value)" }.joined(separator: "; ")
+        let next = parts.keys.sorted().map { "\($0)=\(parts[$0]!)" }.joined(separator: "; ")
         try persistCookies(next)
+        if next != cookieHeader { epoch += 1 }
         cookieHeader = next
     }
     private func persistCookies(_ value: String) throws {
@@ -63,16 +67,18 @@ final class API: NSObject, URLSessionTaskDelegate {
         else { try SecureStore.write("dev.merrymen.session", "cookie", Data(value.utf8)) }
     }
 
-    func request(_ path: String, method: String = "GET", body: J? = nil, token: String? = nil) async throws -> J {
+    func request(_ path: String, method: String = "GET", body: J? = nil, token: String? = nil, expectedSession: SessionBinding? = nil) async throws -> J {
         let data = try body.map { try JSONEncoder().encode($0) }
-        return try await bytes(path, method: method, data: data, contentType: "application/json", token: token)
+        return try await bytes(path, method: method, data: data, contentType: "application/json", token: token, expectedSession: expectedSession)
     }
 
     @MainActor
-    func chat(_ body: J, onText: (String) -> Void) async throws -> J {
+    func chat(_ body: J, expectedSession: SessionBinding, onText: (String) -> Void) async throws -> J {
         var request = URLRequest(url: Self.origin.appendingPathComponent("api/chat"))
         request.httpMethod = "POST"; request.httpBody = try JSONEncoder().encode(body)
-        request.setValue(snapshot().header, forHTTPHeaderField: "Cookie")
+        let sent = snapshot()
+        guard sent.epoch == expectedSession.epoch, sent.header == expectedSession.header else { throw APIError(status: 409, message: "Your chat session changed. Send again from the current account.") }
+        request.setValue(sent.header, forHTTPHeaderField: "Cookie")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let (bytes, response) = try await session.bytes(for: request)
@@ -92,11 +98,11 @@ final class API: NSObject, URLSessionTaskDelegate {
         throw ChatStreamError.interrupted
     }
 
-    func bytes(_ path: String, method: String, data: Data?, contentType: String, token: String? = nil) async throws -> J {
-        let (responseData, http) = try await raw(path, method: method, data: data, contentType: contentType, token: token)
+    func bytes(_ path: String, method: String, data: Data?, contentType: String, token: String? = nil, expectedSession: SessionBinding? = nil) async throws -> J {
+        let (responseData, http) = try await raw(path, method: method, data: data, contentType: contentType, token: token, expectedSession: expectedSession)
         return try decode(responseData, http: http, path: path)
     }
-    func raw(_ path: String, method: String, data: Data?, contentType: String = "application/json", token: String? = nil) async throws -> (Data, HTTPURLResponse) {
+    func raw(_ path: String, method: String, data: Data?, contentType: String = "application/json", token: String? = nil, expectedSession: SessionBinding? = nil) async throws -> (Data, HTTPURLResponse) {
         guard path.hasPrefix("/api/"), !path.hasPrefix("//"),
               let url = URL(string: path, relativeTo: Self.origin)?.absoluteURL,
               NavigationPolicy().isApp(url) else { throw APIError(status: 0, message: "Invalid API destination.") }
@@ -106,6 +112,7 @@ final class API: NSObject, URLSessionTaskDelegate {
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue(contentType, forHTTPHeaderField: "Content-Type")
         let sent = snapshot()
+        if let expectedSession, sent.epoch != expectedSession.epoch || sent.header != expectedSession.header { throw APIError(status: 409, message: "Your session changed before the request was sent. Review it again.") }
         req.setValue(sent.header, forHTTPHeaderField: "Cookie")
         if path.hasPrefix("/api/bundler/") {
             let ticket = recoveryHeader()

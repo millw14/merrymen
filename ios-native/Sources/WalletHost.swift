@@ -19,6 +19,7 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
     private var recipient = ""
     private var challengeNonce: String?
     private var runID: UUID?
+    private var sessionBinding: API.SessionBinding?
     private lazy var rpc: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = false; config.httpCookieStorage = nil; config.urlCache = nil
@@ -33,6 +34,7 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
         busy = true; defer { busy = false; operation = ""; runtime = nil; runID = nil }
         guard let owner = store.owner else { throw fail("Sign in before opening your wallet.") }
         self.store = store; identity = owner; generation = store.generation
+        sessionBinding = store.api.binding()
         try await store.verifyOwner(owner)
         guard let user = await store.privy?.getUser(), user.embeddedEthereumWallets.contains(where: { $0.address.lowercased() == owner.lowercased() }) else {
             throw fail("Sign in to the embedded wallet that owns this account.")
@@ -104,19 +106,25 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
     }
 
     private func currentUser() async throws -> any PrivyUser {
+        let callID = runID; let expectedIdentity = identity; let expectedDID = did; let expectedGeneration = generation
         guard let store, store.owner == identity, store.generation == generation,
-              let user = await store.privy?.getUser(), user.id == did else { throw fail("The wallet session changed. Review the action again.") }
+              let user = await store.privy?.getUser(), user.id == expectedDID,
+              runID == callID, store.owner == expectedIdentity, store.generation == expectedGeneration else { throw fail("The wallet session changed. Review the action again.") }
         return user
     }
     private func handle(_ op: String, _ args: J) async throws -> J {
+        let callID = runID
         _ = try await currentUser()
+        guard callID != nil, callID == runID else { throw fail("Wallet operation closed.") }
         switch op {
         case "status": status = args["message"].text; return .null
         case "accessToken": return .string(try await currentUser().getAccessToken())
         case "signMessage", "signTypedData":
             guard operation != "plan", args["address"].text.lowercased() == identity.lowercased(), let store else { throw fail("This operation cannot request that signature.") }
             try await store.verifyOwner(identity)
+            guard callID == runID else { throw fail("Wallet operation closed.") }
             let user = try await currentUser()
+            guard callID == runID else { throw fail("Wallet operation closed.") }
             guard let wallet = user.embeddedEthereumWallets.first(where: { $0.address.lowercased() == identity.lowercased() }) else { throw fail("The owning wallet is unavailable.") }
             let request: EthereumRpcRequest
             if op == "signMessage" {
@@ -146,6 +154,7 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
         let rpcMethod = requestJSON["method"].text
         if rpcMethod == "eth_sendUserOperation" {
             try await store.verifyOwner(identity)
+            guard callID != nil, callID == runID else { throw fail("Wallet operation closed before submission.") }
             let hash = args["metadata"]["hash"].text
             guard hash.range(of: "^0x[0-9a-fA-F]{64}$", options: .regularExpression) != nil,
                   args["metadata"]["sender"].text.lowercased() == account.lowercased() else { throw fail("Withdrawal identity does not match the reviewed account.") }
@@ -157,8 +166,10 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
         let data: Data; let response: HTTPURLResponse
         if url.host == API.origin.host {
             let token = url.path == "/api/grants" ? try await currentUser().getAccessToken() : nil
+            guard callID != nil, callID == runID else { throw fail("Wallet operation closed.") }
             if url.path == "/api/grants" { try await store.verifyOwner(identity) }
-            (data, response) = try await store.api.raw(url.path, method: method, data: body, token: token)
+            guard callID == runID, let sessionBinding else { throw fail("Wallet operation closed.") }
+            (data, response) = try await store.api.raw(url.path, method: method, data: body, token: token, expectedSession: sessionBinding)
         } else {
             var request = URLRequest(url: url); request.httpMethod = method; request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")

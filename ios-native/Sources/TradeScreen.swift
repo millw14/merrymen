@@ -84,10 +84,11 @@ struct TradeScreen: View {
         guard !busy, !attempted else { return }; busy = true; error = nil
         let owner = body["owner"].string; let pendingKey = key
         Task { defer { busy = false; review = nil }; do {
+            let session = store.api.binding()
             try await store.verifyOwner(owner)
             // Durable before sending: a timeout or process kill must not silently enable retry.
             attempted = true; try savePending("unknown", key: pendingKey)
-            let placed = try await store.api.request("/api/orders", method: "POST", body: body)
+            let placed = try await store.api.request("/api/orders", method: "POST", body: body, expectedSession: session)
             guard let id = placed["id"].string, placed["queued"].bool == true else { throw APIError(status: 0, message: "The server did not confirm an order identifier.") }
             try savePending(id, key: pendingKey)
             guard owner == store.owner else { return }

@@ -28,8 +28,15 @@ const result = await build({
   define: { 'process.env.NEXT_PUBLIC_TRENCHER_FACTORY': JSON.stringify(config.trencherFactory), 'process.env.NEXT_PUBLIC_TRENCHER_FACTORY_CODE_HASH': JSON.stringify(config.trencherFactoryCodeHash) },
   metafile: true, legalComments: 'eof', minify: true,
 });
-const sources = Object.keys(result.metafile.inputs).filter(p => !p.includes('node_modules') && fs.existsSync(path.resolve(root, p))).sort();
-sources.push('package-lock.json', 'ios-native/Signing/build.mjs', 'ios-native/Signing/public-config.json', 'ios-native/Resources/WalletEngine.js');
+const feed = await build({
+  absWorkingDir: root, entryPoints: ['ios-native/Signing/feed.ts'],
+  bundle: true, platform: 'browser', target: 'es2020', format: 'iife', globalName: 'NativeFeed',
+  outfile: path.join(root, 'ios-native/Resources/FeedEngine.js'),
+  tsconfig: path.join(root, 'web/tsconfig.json'), nodePaths: [path.join(dependencyRoot, 'node_modules')],
+  metafile: true, legalComments: 'eof', minify: true,
+});
+const sources = [...new Set([...Object.keys(result.metafile.inputs), ...Object.keys(feed.metafile.inputs)])].filter(p => !p.includes('node_modules') && fs.existsSync(path.resolve(root, p))).sort();
+sources.push('package-lock.json', 'ios-native/Signing/build.mjs', 'ios-native/Signing/public-config.json', 'ios-native/Resources/WalletEngine.js', 'ios-native/Resources/WalletRuntime.js', 'ios-native/Resources/FeedEngine.js');
 const manifest = Object.fromEntries(sources.sort().map(p => [p.replaceAll('\\', '/'), hash(p)]));
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
 console.log(`Bundled ${sources.length} shared source files; native signing integration still requires acceptance testing.`);

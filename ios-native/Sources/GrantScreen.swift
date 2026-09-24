@@ -182,12 +182,13 @@ struct GrantScreen: View {
         guard !submitting else { return }; submitting = true; defer { submitting = false }
         do {
             guard let owner, let saved = try WalletHost.savedGrant(owner: owner) else { throw APIError(status: 0, message: "No saved grant was found.") }
+            let session = store.api.binding()
             try await store.verifyOwner(owner)
             let latest = try await store.api.request("/api/grants")
             if latest["grant"]["sessionKeyAddress"] != saved["sessionKeyAddress"] {
                 guard let user = await store.privy?.getUser() else { throw APIError(status: 401, message: "Sign in to your embedded wallet again.") }
                 let token = try await user.getAccessToken()
-                _ = try await store.api.request("/api/grants", method: "POST", body: saved, token: token)
+                _ = try await store.api.request("/api/grants", method: "POST", body: saved, token: token, expectedSession: session)
             }
             result = .object(["smartAccount": saved["smartAccount"], "handoff": .object(["ok": .bool(true)])])
         } catch { self.error = error.localizedDescription }

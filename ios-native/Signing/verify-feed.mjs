@@ -1,0 +1,18 @@
+import fs from 'node:fs';
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+const context = vm.createContext({});
+vm.runInContext(fs.readFileSync(new URL('../Resources/FeedEngine.js', import.meta.url), 'utf8'), context);
+const base = { name: 'Robin', slug: 'robin', handle: null, handleVerified: false, action: 'buy', symbol: 'NVDA', sizeUsdg: 5, at: 1790287200, reason: 'Earnings support this measured entry.', paper: false, head: 'Buy NVDA', postId: 'first', outcome: 'landed', outcomeText: 'Filled', post: 'My own investment thesis.' };
+const rows = [base, { ...base, postId: 'refused', outcome: 'refused', outcomeText: 'Risk limit' }, { ...base, postId: 'paper', paper: true }, { ...base, slug: 'marian', name: 'Marian', postId: 'reply', action: null, outcome: 'view', post: null, reason: 'I disagree with @robin: the margin forecast is too optimistic.' }];
+const render = (extra = {}) => JSON.parse(context.NativeFeed.render(JSON.stringify({ rows, pill: 'all', counts: { first: 2 }, realOnly: false, following: [], mostLiked: false, ...extra })));
+assert.deepEqual(render({ pill: 'trades' }).map(r => r.postId).sort(), ['first', 'paper']);
+assert.deepEqual(render({ pill: 'debate' }).map(r => r.postId), ['reply']);
+assert.equal(render({ pill: 'trades', realOnly: true }).length, 1);
+assert.equal(render({ pill: 'trades' }).find(r => r.postId === 'first').post, base.post);
+assert.equal(render().find(r => r.postId === 'refused').title, 'Robin tried to buy NVDA');
+assert.equal(render().find(r => r.postId === 'refused').count, null);
+assert.equal(render({ mostLiked: true })[0].postId, 'first');
+assert.equal(render({ pill: 'following', following: ['marian'] }).length, 1);
+assert.equal(render({ pill: 'debate', rows: [{ ...base, handle: 'borrowed', handleVerified: false }, { ...rows[3], reason: 'Reply to @borrowed' }] }).length, 0);
+console.log('Native feed preserves real/paper and execution outcomes, verified mentions, natural posts, filtering and unknown like counts.');

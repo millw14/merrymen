@@ -75,8 +75,10 @@ struct ProfileImages: View {
                       let jpeg = UIImage(cgImage: thumbnail).jpegData(compressionQuality: 0.85), jpeg.count <= (target == "avatar" ? 5 : 8) * 1024 * 1024 else {
                     throw APIError(status: 0, message: "Choose a supported image smaller than 10 MB.")
                 }
+                let session = store.api.binding()
                 try await store.verifyOwner(owner)
-                _ = try await store.api.bytes("/api/agent-image/me/\(target)", method: "PUT", data: jpeg, contentType: "image/jpeg")
+                _ = try await store.api.bytes("/api/agent-image/me/\(target)", method: "PUT", data: jpeg, contentType: "image/jpeg", expectedSession: session)
+                guard owner == store.owner else { return }
                 version = UUID(); store.notice = "\(target.capitalized) updated."
             } catch { store.notice = error.localizedDescription } }
         }

@@ -14,6 +14,7 @@ final class PreviewTransport: URLProtocol {
         switch path {
         case "/api/auth/session": body = signedIn ? #"{"hosted":true,"address":"0x1111111111111111111111111111111111111111"}"# : #"{"hosted":true,"address":null}"#
         case "/api/likes": body = #"{"read":true,"liked":[]}"#
+        case "/api/like-counts": body = #"{"read":true,"counts":{"test-post":2}}"#
         case "/api/follow": body = #"{"read":true,"wired":[]}"#
         case "/api/orders/ceiling": body = #"{"ceilingUsdg":50}"#
         case "/api/snipe":
@@ -30,7 +31,7 @@ final class PreviewTransport: URLProtocol {
             }
             body = UserDefaults.standard.bool(forKey: "uiTest.orderPlaced") ? #"{"state":"queued","id":"test-order-1"}"# : #"{"state":"none"}"#
         case "/api/tour": body = #"{"done":false,"signedIn":false}"#
-        case "/api/theses": body = #"{"source":"db","theses":[{"slug":"test-agent","name":"Test agent","head":"A measured decision","reason":"A test thesis with a clear investment rationale.","paper":true,"outcomeText":"Paper fill","symbol":"NVDA"}]}"#
+        case "/api/theses": body = #"{"source":"db","theses":[{"slug":"test-agent","name":"Test agent","postId":"test-post","at":1790287200,"action":null,"head":"A measured decision","reason":"A test thesis with a clear investment rationale.","paper":true,"outcome":"view","outcomeText":"Paper view","symbol":"NVDA"}]}"#
         case "/api/market": body = #"{"tokens":[{"symbol":"NVDA","name":"Nvidia","address":"0x1111111111111111111111111111111111111111","priceUsd":null,"paused":false}]}"#
         case "/api/leaderboard": body = #"{"source":"db","agents":[]}"#
         default: body = #"{"error":"No UI-test fixture for this request"}"#; status = 404

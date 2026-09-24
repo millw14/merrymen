@@ -47,7 +47,10 @@ struct NativeShell: View {
             .navigationTitle(store.tab.rawValue)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) { Image("Brand").resizable().scaledToFit().frame(width: 28, height: 28).accessibilityLabel("Merrymen") }
+                ToolbarItem(placement: .topBarLeading) {
+                    HStack(spacing: 1) { Image("Brand").resizable().scaledToFit().frame(width: 28, height: 28); Text("merrymen").font(.custom("GeistPixel-Regular", size: 17, relativeTo: .headline)) }
+                        .accessibilityElement(children: .ignore).accessibilityLabel("Merrymen")
+                }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button { store.path.append(.search) } label: { Image(systemName: "magnifyingglass") }.accessibilityLabel("Search")
                     Menu {

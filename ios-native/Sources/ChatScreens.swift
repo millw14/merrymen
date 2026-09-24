@@ -14,33 +14,8 @@ struct ChatScreen: View {
     @State private var clearHistory = false
     var body: some View {
         VStack(spacing: 0) {
-            ScrollViewReader { scroll in
-                ScrollView { LazyVStack(alignment: .leading, spacing: 16) {
-                    if store.owner == nil { SignInCard() }
-                    else if messages.isEmpty { Text("Ask your Merryman").font(.largeTitle.bold()); Text("Discuss its thesis, portfolio, or next decision.").foregroundStyle(.secondary) }
-                    ForEach(Array(messages.enumerated()), id: \.offset) { index, message in
-                        Card {
-                            Text(message["role"].text == "user" ? "You" : "Your agent").font(.caption.bold()).foregroundStyle(Brand.accent)
-                            Text(message["content"].text).textSelection(.enabled)
-                            if message["command"] != .null { CommandCard(command: message["command"]) }
-                        }.id(index)
-                    }
-                    if busy { if partial.isEmpty { ProgressView("Thinking…") } else { Card { Text("Reply in progress").font(.caption).foregroundStyle(.secondary); Text(partial) } } }
-                    if let error { Text(error).foregroundStyle(Brand.down) }
-                }.padding(18) }
-                .onChange(of: messages.count) { _, count in if count > 0 { withAnimation { scroll.scrollTo(count - 1, anchor: .bottom) } } }
-            }
-            if voice.recording { Text("Listening on this device · review the draft before sending").font(.caption).foregroundStyle(Brand.accent) }
-            if let error = voice.error { Text(error).font(.caption).foregroundStyle(.orange).padding(.horizontal) }
-            HStack(alignment: .bottom) {
-                Button {
-                    if voice.recording { voice.stop() }
-                    else { beforeDictation = text; Task { await voice.start(locale: language) } }
-                } label: { Image(systemName: voice.recording ? "stop.circle.fill" : "mic").frame(minWidth: 44, minHeight: 44) }
-                    .accessibilityLabel(voice.recording ? "Stop dictation" : "Dictate a draft").disabled(busy || voice.starting || store.owner == nil)
-                TextField("Message your agent", text: $text, axis: .vertical).lineLimit(1...5).padding(12).background(Brand.card, in: RoundedRectangle(cornerRadius: 12)).disabled(voice.recording)
-                Button { send() } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }.accessibilityLabel("Send message").disabled(busy || voice.recording || voice.starting || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.owner == nil)
-            }.padding()
+            historyView
+            composerView
         }.background(Brand.background)
         .task(id: store.generation) {
             voice.stop(); messages = []; text = ""; partial = ""; error = nil
@@ -60,14 +35,48 @@ struct ChatScreen: View {
             }
         }
     }
+    private var historyView: some View {
+            ScrollViewReader { scroll in
+                ScrollView { LazyVStack(alignment: .leading, spacing: 16) {
+                    if store.owner == nil { SignInCard() }
+                    else if messages.isEmpty { Text("Ask your Merryman").font(.largeTitle.bold()); Text("Discuss its thesis, portfolio, or next decision.").foregroundStyle(.secondary) }
+                    ForEach(Array(messages.enumerated()), id: \.offset) { index, message in
+                        Card {
+                            Text(message["role"].text == "user" ? "You" : "Your agent").font(.caption.bold()).foregroundStyle(Brand.accent)
+                            Text(message["content"].text).textSelection(.enabled)
+                            if message["command"] != .null { CommandCard(command: message["command"]) }
+                        }.id(index)
+                    }
+                    if busy { if partial.isEmpty { ProgressView("Thinking…") } else { Card { Text("Reply in progress").font(.caption).foregroundStyle(.secondary); Text(partial) } } }
+                    if let error { Text(error).foregroundStyle(Brand.down) }
+                }.padding(18) }
+                .onChange(of: messages.count) { _, count in if count > 0 { withAnimation { scroll.scrollTo(count - 1, anchor: .bottom) } } }
+            }
+    }
+    private var composerView: some View {
+        VStack(spacing: 8) {
+            if voice.recording { Text("Listening on this device · review the draft before sending").font(.caption).foregroundStyle(Brand.accent) }
+            if let error = voice.error { Text(error).font(.caption).foregroundStyle(.orange).padding(.horizontal) }
+            HStack(alignment: .bottom) {
+                Button {
+                    if voice.recording { voice.stop() }
+                    else { beforeDictation = text; Task { await voice.start(locale: language) } }
+                } label: { Image(systemName: voice.recording ? "stop.circle.fill" : "mic").frame(minWidth: 44, minHeight: 44) }
+                    .accessibilityLabel(voice.recording ? "Stop dictation" : "Dictate a draft").disabled(busy || voice.starting || store.owner == nil)
+                TextField("Message your agent", text: $text, axis: .vertical).lineLimit(1...5).padding(12).background(Brand.card, in: RoundedRectangle(cornerRadius: 12)).disabled(voice.recording)
+                Button { send() } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }.accessibilityLabel("Send message").disabled(busy || voice.recording || voice.starting || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.owner == nil)
+            }.padding()
+        }
+    }
     private func send() {
         guard !busy else { return }; let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines); guard !prompt.isEmpty else { return }
         let history = Array(messages.suffix(20)).map { J.object(["role": $0["role"], "content": $0["content"]]) }
         let owner = store.owner; let generation = store.generation
         messages.append(.object(["role": .string("user"), "content": .string(prompt)])); text = ""; busy = true; error = nil; partial = ""
         Task { defer { busy = false; partial = "" }; do {
+            let session = store.api.binding()
             try await store.verifyOwner(owner)
-            let reply = try await store.api.chat(.object(["message": .string(prompt), "history": .array(history)])) { value in if generation == store.generation { partial = value } }
+            let reply = try await store.api.chat(.object(["message": .string(prompt), "history": .array(history)]), expectedSession: session) { value in if generation == store.generation { partial = value } }
             guard generation == store.generation else { return }
             guard let answer = reply["reply"].string else { throw APIError(status: 0, message: reply["why"].string ?? "No reply was returned.") }
             messages.append(.object(["role": .string("assistant"), "content": .string(answer), "command": reply["command"]]))

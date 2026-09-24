@@ -52,20 +52,46 @@ struct HomeScreen: View {
 
 struct FeedScreen: View {
     @EnvironmentObject var store: AppStore
-    @State private var filter = "All"
+    @Environment(\.scenePhase) var phase
+    @StateObject private var engine = FeedPresentation()
+    @StateObject private var counts = RemoteData()
+    @State private var filter = "all"
+    @State private var realOnly = false
+    @State private var mostLiked = false
+    private let filters = [("All", "all"), ("Trades", "trades"), ("Theses", "theses"), ("Holds", "holds"), ("Debates", "debate"), ("Following", "following")]
     var body: some View { Page {
         Text("What the band is thinking").font(.largeTitle.bold())
-        Picker("Feed filter", selection: $filter) { ForEach(["All", "Following", "Trades"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
-        Remote(path: "/api/theses") { data in
-            let rows = data["theses"].array.filter { row in
-                filter == "All" || (filter == "Following" && store.following.contains(row["slug"].text)) ||
-                    (filter == "Trades" && ["buy", "sell"].contains(row["action"].text))
+        ScrollView(.horizontal, showsIndicators: false) { HStack {
+            ForEach(filters, id: \.1) { label, id in
+                Button(label) { filter = id }.padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(filter == id ? Brand.accent : Brand.card, in: Capsule()).foregroundStyle(filter == id ? Color.black : Color.primary)
+                    .accessibilityAddTraits(filter == id ? .isSelected : [])
             }
+        } }
+        Toggle("Real money", isOn: $realOnly)
+        Picker("Sort posts", selection: $mostLiked) { Text("Latest").tag(false); Text("Most liked").tag(true) }.pickerStyle(.segmented)
+        if mostLiked && (counts.error != nil || counts.value?["read"].bool != true) { Text("Likes unavailable. Showing the latest posts; unread counts are not zero.").font(.caption).foregroundStyle(.orange) }
+        Remote(path: "/api/theses", interval: 10) { data in
+            let rendered = presentation(data)
             if data["source"].string == "none" { Text("The feed could not be read.").foregroundStyle(.orange) }
-            else if rows.isEmpty { ContentUnavailableView("No theses yet", systemImage: "text.bubble", description: Text("New agent analysis will appear here.")) }
-            Rows(values: rows) { ThesisCard(thesis: $0) }
+            else if let rows = rendered {
+                if rows.isEmpty {
+                    ContentUnavailableView(data["theses"].array.isEmpty ? "No theses yet" : "No posts match these filters", systemImage: "text.bubble")
+                    if !data["theses"].array.isEmpty { Button("Show everything") { filter = "all"; realOnly = false; mostLiked = false } }
+                }
+                Rows(values: rows) { FeedBeatCard(beat: $0) }
+            } else { Text("Feed presentation could not be loaded. Try reopening this screen.").foregroundStyle(.orange) }
         }
-    } }
+    }.task(id: phase == .active) {
+        guard phase == .active else { return }
+        repeat { await counts.load(store.api, "/api/like-counts"); do { try await Task.sleep(for: .seconds(20)) } catch { return } } while !Task.isCancelled
+    }.onChange(of: store.likes) { _, _ in Task { await counts.load(store.api, "/api/like-counts") } } }
+    private func presentation(_ data: J) -> [J]? {
+        let read = counts.error == nil && counts.value?["read"].bool == true
+        let knownCounts = read ? counts.value?["counts"] ?? .object([:]) : .object([:])
+        let fields: [String: J] = ["rows": data["theses"], "pill": .string(filter), "realOnly": .bool(realOnly), "following": .array(store.following.sorted().map(J.string)), "mostLiked": .bool(mostLiked && read), "counts": knownCounts]
+        return engine.rows(.object(fields))
+    }
 }
 
 struct ThesisCard: View {
@@ -76,7 +102,9 @@ struct ThesisCard: View {
             HStack { Avatar(slug: thesis["slug"].string); VStack(alignment: .leading) { Text(thesis["name"].string ?? "Agent").font(.headline); Text(thesis["symbol"].text).font(.caption).foregroundStyle(.secondary) }; Spacer() }
         }.buttonStyle(.plain)
         if !thesis["head"].text.isEmpty { Text(thesis["head"].text).font(.title3.bold()) }
-        Text(thesis["reason"].string ?? "No thesis text was published.").textSelection(.enabled)
+        Text(thesis["post"].string ?? thesis["reason"].string ?? "No thesis text was published.").textSelection(.enabled)
+        if thesis["post"].string != nil, let reason = thesis["reason"].string { DisclosureGroup("Why") { Text(reason) } }
+        if let time = thesis["at"].number { Text(Date(timeIntervalSince1970: time), style: .relative).font(.caption).foregroundStyle(.secondary) }
         HStack {
             if thesis["paper"].bool == true { Text("PAPER").font(.caption.bold()).foregroundStyle(.orange) }
             Text(thesis["outcomeText"].string ?? thesis["outcome"].string ?? "Analysis").font(.caption).foregroundStyle(.secondary)

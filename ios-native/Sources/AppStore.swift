@@ -98,16 +98,18 @@ final class AppStore: ObservableObject {
 
     func perform(_ path: String, method: String = "POST", body: J, expectedOwner: String?) async throws -> J {
         let expectedGeneration = generation
+        let session = api.binding()
         try await verifyOwner(expectedOwner)
-        let result = try await api.request(path, method: method, body: body)
+        let result = try await api.request(path, method: method, body: body, expectedSession: session)
         guard generation == expectedGeneration, owner == expectedOwner else { throw APIError(status: 409, message: "Your account changed while the request was in progress. Check the previous account before repeating that action.") }
         return result
     }
 
     func verifyOwner(_ expectedOwner: String?) async throws {
         guard let expectedOwner, expectedOwner == owner else { throw APIError(status: 401, message: "Sign in again before confirming this action.") }
+        let expectedGeneration = generation; let binding = api.binding()
         let session = try await api.request("/api/auth/session")
-        guard session["address"].string?.lowercased() == expectedOwner.lowercased() else {
+        guard expectedGeneration == generation, owner == expectedOwner, api.matches(binding), session["address"].string?.lowercased() == expectedOwner.lowercased() else {
             await refreshSession()
             throw APIError(status: 409, message: "Your account changed. Review this action again.")
         }
