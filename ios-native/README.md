@@ -4,7 +4,7 @@ SwiftUI application for iPhone and iPad, iOS 17+. Product screens are native; th
 
 ## Build
 
-On a Mac with Xcode 16.4 or later and XcodeGen:
+On a Mac with Xcode 26.2 or later and XcodeGen (the pinned Privy binary uses Swift 6.2):
 
 ```sh
 cd ios-native

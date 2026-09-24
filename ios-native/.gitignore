@@ -8,3 +8,4 @@ ExportOptions.plist
 Config/Signing.xcconfig
 TestResults.xcresult/
 build.log
+Screenshots/

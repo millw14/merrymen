@@ -12,6 +12,7 @@ final class PolicyTests: XCTestCase {
         XCTAssertEqual(value?["usdgAmount"].number, 5.25)
         XCTAssertEqual(value?["owner"].string, owner)
         XCTAssertEqual(value?["usdg"], .null)
+        XCTAssertEqual(TradeInput.body(side: "buy", symbol: "NVDA", amount: "5,25", owner: owner)?["usdgAmount"].number, 5.25)
         XCTAssertNil(TradeInput.body(side: "transfer", symbol: "NVDA", amount: "5", owner: owner))
         XCTAssertNil(TradeInput.body(side: "buy", symbol: "ABC/DEF", amount: "5", owner: owner))
         XCTAssertNil(TradeInput.body(side: "buy", symbol: "NVDA", amount: "5", owner: "someone else"))

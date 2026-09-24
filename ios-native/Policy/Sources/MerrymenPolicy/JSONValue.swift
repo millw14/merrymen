@@ -29,22 +29,28 @@ public enum JSONValue: Codable, Equatable, Sendable {
     public var number: Double? { if case .number(let v) = self, v.isFinite { return v }; return nil }
     public var bool: Bool? { if case .bool(let v) = self { return v }; return nil }
     public var text: String {
-        switch self { case .string(let v): return v; case .number(let v): return String(v); case .bool(let v): return String(v); default: return "" }
+        switch self {
+        case .string(let v): return v
+        case .number(let v): return v.isFinite && abs(v) < 9_007_199_254_740_992 && v.rounded() == v ? String(Int64(v)) : String(v)
+        case .bool(let v): return String(v)
+        default: return ""
+        }
     }
     public func setting(_ key: String) -> JSONValue { self["values"][key] == .null ? self["defaults"][key] : self["values"][key] }
 }
 
 public enum TradeInput {
     public static func amount(_ text: String) -> Double? {
-        // No locale guessing for financial writes; the field explains the separator.
-        guard text.range(of: "^[0-9]+(?:\\.[0-9]{1,6})?$", options: .regularExpression) != nil,
-              let value = Double(text), value.isFinite, value > 0 else { return nil }
+        // One decimal separator, no grouping: 10,50 and 10.50 agree. Three
+        // fractional digits are refused rather than guessed as grouped thousands.
+        guard text.range(of: "^[0-9]+(?:[.,][0-9]{1,2})?$", options: .regularExpression) != nil,
+              let value = Double(text.replacingOccurrences(of: ",", with: ".")), value.isFinite, value > 0 else { return nil }
         return value
     }
     public static func body(side: String, symbol: String, amount: String, owner: String) -> JSONValue? {
         let ticker = symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard ["buy", "sell"].contains(side), let value = self.amount(amount), value >= 0.01,
-              value <= 1_000_000_000, amount.range(of: "^[0-9]+(?:\\.[0-9]{1,2})?$", options: .regularExpression) != nil,
+              value <= 1_000_000_000,
               ticker.range(of: "^[A-Z0-9]{1,12}$", options: .regularExpression) != nil,
               owner.range(of: "^0x[0-9a-fA-F]{40}$", options: .regularExpression) != nil else { return nil }
         return .object(["side": .string(side), "symbol": .string(ticker), "usdgAmount": .number(value), "owner": .string(owner)])

@@ -1,4 +1,5 @@
 import SwiftUI
+import MerrymenPolicy
 
 struct SettingsScreen: View {
     @EnvironmentObject var store: AppStore
@@ -7,15 +8,32 @@ struct SettingsScreen: View {
     @State private var busy = false
     @State private var confirm = false
     @State private var loadedOwner: String?
+    @State private var models: [String] = []
+    @State private var modelStatus: String?
+    @State private var tokenSymbol = ""
+    @State private var tokenAddress = ""
+    @State private var tokenDecimals = "18"
+    @State private var tradeNewToken = true
     private let flags: [(String, String)] = [
-        ("liveTradingEnabled", "Trade with real funds"), ("publicBook", "Publish holdings"),
+        ("liveTradingEnabled", "Trade with real funds"), ("paperTradingEnabled", "Allow paper practice when live trading is unavailable"),
+        ("publicBook", "Publish holdings, trade sizes and dollar P&L"),
         ("discoveryEnabled", "Market discovery"), ("officialCoinsEnabled", "Include official coins"),
         ("telegramEnabled", "Telegram"), ("telegramControlEnabled", "Telegram controls"),
-        ("telegramNotifyEnabled", "Telegram notifications")
+        ("telegramNotifyEnabled", "Telegram notifications"), ("trencherLiveEnabled", "Live Trencher"),
+        ("trencherFastEnabled", "Fast Trencher review"), ("deskEnabled", "Trading desk"),
+        ("scoutEnabled", "Scout"), ("classSnipeEnabled", "Class sniping")
     ]
     private let numbers: [(String, String)] = [
         ("tickSeconds", "Decision interval (seconds)"), ("slippageBps", "Slippage (basis points)"),
-        ("telegramMaxActionUsdg", "Order ceiling (USDG)")
+        ("telegramMaxActionUsdg", "Order ceiling (USDG)"), ("buyPerTickUsdg", "Buy per tick (USDG)"),
+        ("idleFloorUsdg", "Cash floor (USDG)"), ("gapEnterBudgetUsdg", "Gap entry budget (USDG)"),
+        ("takeProfitBps", "Take profit (basis points)"), ("maxPriceDivergenceBps", "Maximum price divergence (basis points)"),
+        ("minPoolLiquidityUsdg", "Minimum pool liquidity (USDG)"), ("llmIntervalMin", "Strategist interval (minutes)"),
+        ("llmMaxActionUsdg", "Strategist action cap (USDG)"), ("discoveryIntervalMin", "Discovery interval (minutes)"),
+        ("scoutBudgetUsdg", "Scout budget (USDG)"), ("scoutPerTokenUsdg", "Scout per token (USDG)"),
+        ("classMaxHoldSec", "Class maximum hold (seconds)"), ("classMaxPositions", "Class maximum positions"),
+        ("classMinDepthUsdg", "Class minimum depth (USDG)"), ("classPerEntryUsdg", "Class entry (USDG)"),
+        ("telegramNotifyEveryMin", "Telegram notification interval (minutes)"), ("telegramDigestHour", "Telegram digest hour (UTC)")
     ]
     var body: some View {
         Page {
@@ -38,19 +56,27 @@ struct SettingsScreen: View {
                     if draft["liveTradingEnabled"] != nil {
                         Text("Live mode permits real orders within the existing grant. Switching it off also stops management of existing real positions; it does not sell them.").foregroundStyle(.orange).font(.caption)
                     }
-                    ForEach(numbers, id: \.0) { key, label in
+                    DisclosureGroup("Advanced trading settings") { ForEach(numbers, id: \.0) { key, label in
                         VStack(alignment: .leading) { Text(label).font(.caption).foregroundStyle(.secondary); TextField(label, text: text(key, settings)).keyboardType(.decimalPad) }
-                    }
+                    } }
                 }
+                aiSettings(settings)
                 Card {
                     Text("Basket").font(.headline)
-                    ForEach(settings["knownSymbols"].array.compactMap(\.string), id: \.self) { symbol in
+                    ForEach(Array(Set(settings["knownSymbols"].array.compactMap(\.string) + tokens(settings).compactMap { $0["symbol"].string })).sorted(), id: \.self) { symbol in
                         Toggle(symbol, isOn: Binding(get: { basket(settings).contains(symbol) }, set: { on in
                             var values = basket(settings); if on { values.insert(symbol) } else { values.remove(symbol) }
                             draft["basketSymbols"] = .array(values.sorted().map(J.string))
                         }))
                     }
                     Text("Adding assets may require a new signed permission before the agent can trade them.").font(.caption).foregroundStyle(.secondary)
+                }
+                customTokens(settings)
+                Card {
+                    Text("Telegram connection").font(.headline)
+                    SecureField(settings["telegramBotToken"]["set"].bool == true ? "Bot token saved — type to replace" : "Bot token", text: secret("telegramBotToken"))
+                    if settings["telegramBotToken"]["set"].bool == true { Button("Clear saved bot token", role: .destructive) { draft["telegramBotToken"] = .string("") } }
+                    Text("The linking code and connection status are available in Telegram connection below.").font(.caption)
                 }
                 Button("Review changes") { confirm = true }.buttonStyle(.borderedProminent).disabled(draft.isEmpty || busy)
                 NavigationLink("Telegram connection", value: Route.telegram)
@@ -61,7 +87,7 @@ struct SettingsScreen: View {
         .sheet(isPresented: $confirm) {
             NavigationStack { Page {
                 Text("Review settings").font(.title2.bold())
-                ForEach(draft.keys.sorted(), id: \.self) { key in Metric(label: key, value: draft[key]?.array.isEmpty == false ? draft[key]!.array.map(\.text).joined(separator: ", ") : draft[key]?.text ?? "") }
+                ForEach(draft.keys.sorted(), id: \.self) { key in Metric(label: label(key), value: reviewValue(key)) }
                 Button("Save changes") { Task { await save() } }.buttonStyle(.borderedProminent).disabled(busy)
                 Button("Cancel") { confirm = false }.disabled(busy)
             }.navigationTitle("Confirm") }
@@ -71,6 +97,70 @@ struct SettingsScreen: View {
         Binding(get: { (draft[key] ?? settings.setting(key)).text }, set: { draft[key] = .string($0) })
     }
     private func basket(_ settings: J) -> Set<String> { Set((draft["basketSymbols"] ?? settings.setting("basketSymbols")).array.compactMap(\.string)) }
+    private func tokens(_ settings: J) -> [J] { (draft["customTokens"] ?? settings.setting("customTokens")).array }
+    private func secret(_ key: String) -> Binding<String> { Binding(get: { draft[key]?.string ?? "" }, set: { draft[key] = .string($0) }) }
+    private func label(_ key: String) -> String { (flags + numbers).first { $0.0 == key }?.1 ?? ["agentName": "Agent name", "strategy": "Strategy", "customTokens": "Custom tokens", "basketSymbols": "Basket", "llmProvider": "AI provider", "llmProviderModel": "Model" ][key] ?? key }
+    private func reviewValue(_ key: String) -> String {
+        if key.lowercased().contains("key") || key.lowercased().contains("token") && key != "customTokens" { return draft[key]?.text.isEmpty == true ? "Clear saved override" : "Replace saved credential" }
+        if key == "customTokens" { return "\(draft[key]?.array.count ?? 0) tokens" }
+        if key == "basketSymbols" { return draft[key]?.array.map(\.text).joined(separator: ", ") ?? "" }
+        return draft[key]?.text ?? ""
+    }
+    @ViewBuilder private func aiSettings(_ settings: J) -> some View {
+        let provider = (draft["llmProvider"] ?? settings.setting("llmProvider")).string ?? "groq"
+        let keyField = provider == "groq" ? "groqApiKey" : provider == "anthropic" ? "anthropicApiKey" : "llmApiKey"
+        let modelField = provider == "groq" ? "groqModel" : provider == "anthropic" ? "llmModel" : "llmProviderModel"
+        Card {
+            Text("AI provider").font(.headline)
+            Picker("Provider", selection: Binding(get: { provider }, set: { draft["llmProvider"] = .string($0); models = []; modelStatus = nil })) {
+                ForEach(Array(settings["llmProviders"].array.filter { !["custom", "ollama"].contains($0["id"].text) }.enumerated()), id: \.offset) { _, row in Text(row["label"].text).tag(row["id"].text) }
+            }
+            SecureField(settings[keyField]["set"].bool == true ? "API key saved — type to replace" : "Optional API key", text: secret(keyField))
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            Button("Use shared key") { draft[keyField] = .string(""); models = [] }
+            TextField("Model ID (blank uses provider default)", text: text(modelField, settings)).textInputAutocapitalization(.never).autocorrectionDisabled()
+            Button("Load available models") {
+                guard !busy else { return }; busy = true
+                var body: [String: J] = ["provider": .string(provider)]
+                if let key = draft[keyField]?.string { body["apiKey"] = .string(key); body["useSavedKey"] = .bool(false) }
+                Task { defer { busy = false }; do {
+                    let result = try await store.perform("/api/models", body: .object(body), expectedOwner: loadedOwner)
+                    models = result["models"].array.compactMap(\.string)
+                    modelStatus = result["code"].string == "missing_key" ? "Enter an API key to list models, or type a model ID." : result["error"].string
+                } catch { modelStatus = "The model list could not be loaded. You can still type a model ID." } }
+            }.disabled(busy)
+            if !models.isEmpty { Picker("Available models", selection: text(modelField, settings)) { Text("Provider default").tag(""); ForEach(models, id: \.self) { Text($0).tag($0) } } }
+            if let modelStatus { Text(modelStatus).font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+    @ViewBuilder private func customTokens(_ settings: J) -> some View {
+        Card {
+            DisclosureGroup("Custom tokens") {
+                Rows(values: tokens(settings)) { token in
+                    HStack { Text(token["symbol"].text); Spacer(); Button("Remove", role: .destructive) { draft["customTokens"] = .array(tokens(settings).filter { $0["address"].text.lowercased() != token["address"].text.lowercased() }) } }
+                    Text(token["address"].text).font(.caption.monospaced()).textSelection(.enabled)
+                }
+                TextField("Symbol", text: $tokenSymbol).textInputAutocapitalization(.characters).autocorrectionDisabled()
+                TextField("Contract address (0x…)", text: $tokenAddress).textInputAutocapitalization(.never).autocorrectionDisabled()
+                TextField("Token decimals", text: $tokenDecimals).keyboardType(.numberPad)
+                Toggle("Include in trading basket", isOn: $tradeNewToken)
+                Button("Add to draft") { addToken(settings) }
+                Text("New tokens need a new signed permission before they can trade. Removing a token here does not revoke its on-chain permission.").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+    private func addToken(_ settings: J) {
+        let symbol = tokenSymbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let address = tokenAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard symbol.range(of: "^[A-Z0-9]{1,12}$", options: .regularExpression) != nil,
+              address.range(of: "^0x[0-9a-fA-F]{40}$", options: .regularExpression) != nil,
+              let decimals = Int(tokenDecimals), (0...36).contains(decimals),
+              !tokens(settings).contains(where: { $0["address"].text.lowercased() == address.lowercased() })
+        else { store.notice = "Enter a valid ticker, contract address and whole-number decimals. The address must not already be listed."; return }
+        draft["customTokens"] = .array(tokens(settings) + [.object(["symbol": .string(symbol), "address": .string(address), "decimals": .number(Double(decimals))])])
+        if tradeNewToken { draft["basketSymbols"] = .array(basket(settings).union([symbol]).sorted().map(J.string)) }
+        tokenSymbol = ""; tokenAddress = ""; tokenDecimals = "18"
+    }
     private func load() async { await data.load(store.api, "/api/settings"); loadedOwner = data.value?["owner"].string }
     private func save() async {
         guard !busy, !draft.isEmpty else { return }; busy = true
@@ -78,7 +168,9 @@ struct SettingsScreen: View {
         do {
             var body = draft
             for (key, _) in numbers where body[key] != nil {
-                guard let value = Double(body[key]!.text), value.isFinite, value >= 0 else { throw APIError(status: 0, message: "Enter a valid number for \(key).") }
+                let raw = body[key]!.text
+                let pattern = key.hasSuffix("Usdg") ? "^[0-9]+(?:[.,][0-9]{1,2})?$" : "^[0-9]+$"
+                guard raw.range(of: pattern, options: .regularExpression) != nil, let value = Double(raw.replacingOccurrences(of: ",", with: ".")), value.isFinite, value >= 0 else { throw APIError(status: 0, message: "Enter a valid number without thousands separators for \(label(key)).") }
                 body[key] = .number(value)
             }
             body["owner"] = loadedOwner.map(J.string) ?? .null

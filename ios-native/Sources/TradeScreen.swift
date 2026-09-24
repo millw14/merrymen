@@ -23,7 +23,7 @@ struct TradeScreen: View {
                     Text(symbol).font(.largeTitle.bold())
                     Picker("Side", selection: $side) { Text("Buy").tag("buy"); Text("Sell").tag("sell") }.pickerStyle(.segmented)
                     TextField("Amount in USDG, e.g. 5.00", text: $amount).keyboardType(.decimalPad)
-                    Text("Use a dot and at most two decimal places. This asks the agent to trade; it still checks the signed caps, available assets, and risk limits.").font(.caption).foregroundStyle(.secondary)
+                    Text("Use at most two decimal places and no thousands separators. This asks the agent to trade; it still checks the signed caps, available assets, and risk limits.").font(.caption).foregroundStyle(.secondary)
                     Button("Review order") {
                         guard let owner = store.owner, let body = TradeInput.body(side: side, symbol: symbol, amount: amount, owner: owner) else { error = "Enter a valid ticker and positive amount in USDG, with at most two decimal places."; return }
                         confirmationOwner = owner; confirmationBody = body; confirm = true

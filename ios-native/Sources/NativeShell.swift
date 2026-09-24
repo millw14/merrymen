@@ -45,6 +45,7 @@ struct NativeShell: View {
                 }
             }
             .navigationDestination(for: Route.self) { route in
+                Group {
                 switch route {
                 case .markets: MarketsScreen()
                 case .search: SearchScreen()
@@ -65,6 +66,7 @@ struct NativeShell: View {
                 case .siteAccess: SiteAccessScreen()
                 case .tour: TourScreen()
                 }
+                }.id(store.generation)
             }
         }.background(Brand.background)
         .task {

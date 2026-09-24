@@ -25,6 +25,9 @@ final class AppStore: ObservableObject {
     private(set) var privy: (any Privy)?
 
     init() {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-reset-tour") { UserDefaults.standard.removeObject(forKey: "tourComplete") }
+        #endif
         let app = Bundle.main.object(forInfoDictionaryKey: "PrivyAppID") as? String ?? ""
         let client = Bundle.main.object(forInfoDictionaryKey: "PrivyClientID") as? String ?? ""
         if !app.isEmpty, !client.isEmpty, !app.contains("$("), !client.contains("$(") {
@@ -54,7 +57,11 @@ final class AppStore: ObservableObject {
         else { wallet = try await user.createEthereumWallet() }
         let challenge = try await api.request("/api/auth/privy")
         guard let message = challenge["message"].string, let nonce = challenge["nonce"].string,
-              message.contains(API.origin.host!) else { throw APIError(status: 0, message: "The sign-in challenge is invalid.") }
+              nonce.range(of: "^[A-Za-z0-9_.-]{1,512}$", options: .regularExpression) != nil,
+              message == ["\(API.origin.absoluteString) wants you to sign in with your merrymen wallet.", "",
+                          "This proves you control the owner key. It moves no funds and grants no permissions.", "",
+                          "URI: \(API.origin.absoluteString)", "Nonce: \(nonce)"].joined(separator: "\n")
+        else { throw APIError(status: 0, message: "The sign-in challenge is invalid.") }
         let signature = try await wallet.provider.request(.personalSign(message: message, address: wallet.address))
         let token = try await user.getAccessToken()
         _ = try await api.request("/api/auth/privy", method: "POST", body: .object([

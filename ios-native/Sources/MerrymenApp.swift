@@ -9,6 +9,7 @@ struct MerrymenApp: App {
         WindowGroup {
             NativeShell()
                 .environmentObject(store)
+                .font(.custom("DMSans-9ptRegular", size: 16, relativeTo: .body))
                 .preferredColorScheme(.dark)
                 .tint(Color(red: 0.65, green: 0.81, blue: 0.12))
                 .onOpenURL { store.open($0) }

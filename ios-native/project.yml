@@ -2,7 +2,7 @@ name: Merrymen
 options:
   deploymentTarget:
     iOS: "17.0"
-  xcodeVersion: "16.0"
+  xcodeVersion: "26.2"
 packages:
   Privy:
     url: https://github.com/privy-io/privy-ios
