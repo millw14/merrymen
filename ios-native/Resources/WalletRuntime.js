@@ -42,6 +42,18 @@
     entries() { return this.values.entries(); }
     [Symbol.iterator]() { return this.entries(); }
   };
+  globalThis.URLSearchParams = class {
+    constructor(text = '') { this.items = String(text).replace(/^\?/, '').split('&').filter(Boolean).map(x => { const p = x.split('='); return p.map(v => decodeURIComponent(v.replace(/\+/g, ' '))); }); }
+    get(key) { return this.items.find(p => p[0] === key)?.[1] ?? null; }
+    has(key) { return this.items.some(p => p[0] === key); }
+    set(key, value) { this.items = this.items.filter(p => p[0] !== key); this.items.push([key, String(value)]); }
+    toString() { return this.items.map(p => p.map(encodeURIComponent).join('=')).join('&'); }
+  };
+  globalThis.URL = class {
+    constructor(url, base) { Object.assign(this, sync('parseURL', { url: String(url), base: base ? String(base) : null })); this.searchParams = new URLSearchParams(this.search); }
+    toString() { return sync('formatURL', { scheme: this.protocol.replace(':', ''), host: this.hostname, port: this.port, path: this.pathname, query: this.search.replace(/^\?/, ''), username: this.username, password: this.password }); }
+    get href() { return this.toString(); }
+  };
   globalThis.AbortController = class {
     constructor() { this.signal = { aborted: false, addEventListener() {}, removeEventListener() {}, throwIfAborted() { if (this.aborted) throw new Error('Aborted'); } }; }
     abort() { this.signal.aborted = true; }
@@ -49,7 +61,8 @@
   globalThis.AbortSignal = { timeout(ms) { const c = new AbortController(); setTimeout(() => c.abort(), ms); return c.signal; } };
   globalThis.fetch = async (input, options = {}) => {
     if (options.signal?.aborted) throw new Error('Aborted');
-    const result = await nativeCall('fetch', { url: String(input), method: options.method || 'GET', body: options.body || null, headers: Object.fromEntries(new Headers(options.headers || {})) });
+    const metadata = WalletEngine.rpcMetadata(options.body || null);
+    const result = await nativeCall('fetch', { url: String(input), method: options.method || 'GET', body: options.body || null, metadata, headers: Object.fromEntries(new Headers(options.headers || {})) });
     return { ok: result.status >= 200 && result.status < 300, status: result.status, headers: new Headers(result.headers || {}),
       async text() { return result.body; }, async json() { return JSON.parse(result.body); } };
   };
@@ -63,7 +76,7 @@
   globalThis.window = { location: { origin: 'https://app.merrymen.dev' } };
   globalThis.__runWallet = async (id, operation, input) => {
     try {
-      if (!['capabilities', 'create'].includes(operation)) throw new Error('Unsupported wallet operation');
+      if (!['capabilities', 'create', 'plan', 'withdraw', 'reconcile'].includes(operation)) throw new Error('Unsupported wallet operation');
       const result = await WalletEngine[operation](JSON.parse(input));
       __nativeResult(id, true, JSON.stringify(result, (_, value) => typeof value === 'bigint' ? value.toString() : value));
     } catch (error) { __nativeResult(id, false, error?.message || 'Wallet operation failed'); }

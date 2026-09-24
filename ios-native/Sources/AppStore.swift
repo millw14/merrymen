@@ -75,7 +75,7 @@ final class AppStore: ObservableObject {
         do {
             _ = try await api.request("/api/auth/logout", method: "POST", body: .object([:]))
             if let user = await privy?.getUser() { await user.logout() }
-            api.forget(); owner = nil; path = []; tab = .feed; likes = []; following = []; generation += 1
+            try api.forget(); owner = nil; path = []; tab = .feed; likes = []; following = []; generation += 1
         } catch { notice = "Sign-out could not be confirmed: \(error.localizedDescription)" }
     }
 

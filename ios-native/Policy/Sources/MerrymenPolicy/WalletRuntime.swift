@@ -92,6 +92,18 @@ public final class WalletRuntime {
             }
         }
         switch op {
+        case "parseURL":
+            let base = args["base"].string.flatMap(URL.init(string:))
+            guard let url = URL(string: args["url"].text, relativeTo: base)?.absoluteURL,
+                  let parts = URLComponents(url: url, resolvingAgainstBaseURL: true), let scheme = parts.scheme, let host = parts.host else { throw WalletRuntimeError("Invalid URL.") }
+            return .object(["protocol": .string(scheme + ":"), "hostname": .string(host), "port": .string(parts.port.map(String.init) ?? ""), "pathname": .string(parts.percentEncodedPath), "search": .string(parts.percentEncodedQuery.map { "?" + $0 } ?? ""), "username": .string(parts.user ?? ""), "password": .string(parts.password ?? "")])
+        case "formatURL":
+            var parts = URLComponents(); parts.scheme = args["scheme"].text; parts.host = args["host"].text
+            parts.port = Int(args["port"].text); parts.percentEncodedPath = args["path"].text
+            parts.percentEncodedQuery = args["query"].text.isEmpty ? nil : args["query"].text
+            parts.user = args["username"].text.isEmpty ? nil : args["username"].text
+            parts.password = args["password"].text.isEmpty ? nil : args["password"].text
+            guard let url = parts.url else { throw WalletRuntimeError("Invalid URL.") }; return .string(url.absoluteString)
         case "random":
             guard let count = args["count"].number, (0...65536).contains(count) else { throw WalletRuntimeError("Invalid randomness size.") }
             var values = [UInt8](repeating: 0, count: Int(count))

@@ -18,17 +18,18 @@ if (process.argv.includes('--check')) {
 const dependencyRoot = process.env.MERRYMEN_IOS_DEPENDENCY_ROOT || root;
 const require = createRequire(path.join(dependencyRoot, 'package.json'));
 const { build } = require('esbuild');
+const config = JSON.parse(fs.readFileSync(path.join(root, 'ios-native/Signing/public-config.json'), 'utf8'));
 const result = await build({
   absWorkingDir: root, entryPoints: ['ios-native/Signing/engine.ts'],
   bundle: true, platform: 'browser', target: 'es2020', format: 'iife', globalName: 'WalletEngine',
   outfile: path.join(root, 'ios-native/Resources/WalletEngine.js'),
   tsconfig: path.join(root, 'web/tsconfig.json'),
   nodePaths: [path.join(dependencyRoot, 'node_modules')],
-  define: { 'process.env.NEXT_PUBLIC_TRENCHER_FACTORY': 'undefined', 'process.env.NEXT_PUBLIC_TRENCHER_FACTORY_CODE_HASH': 'undefined' },
+  define: { 'process.env.NEXT_PUBLIC_TRENCHER_FACTORY': JSON.stringify(config.trencherFactory), 'process.env.NEXT_PUBLIC_TRENCHER_FACTORY_CODE_HASH': JSON.stringify(config.trencherFactoryCodeHash) },
   metafile: true, legalComments: 'eof', minify: true,
 });
 const sources = Object.keys(result.metafile.inputs).filter(p => !p.includes('node_modules') && fs.existsSync(path.resolve(root, p))).sort();
-sources.push('package-lock.json', 'ios-native/Signing/build.mjs', 'ios-native/Resources/WalletEngine.js');
+sources.push('package-lock.json', 'ios-native/Signing/build.mjs', 'ios-native/Signing/public-config.json', 'ios-native/Resources/WalletEngine.js');
 const manifest = Object.fromEntries(sources.sort().map(p => [p.replaceAll('\\', '/'), hash(p)]));
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
 console.log(`Bundled ${sources.length} shared source files; native signing integration still requires acceptance testing.`);

@@ -1,7 +1,8 @@
 {
-  "ios-native/Resources/WalletEngine.js": "1e7d16ad584c4975eba47d230fdcbb4e0e85cdf18974bdc7cf93c9f6f5bf59c7",
-  "ios-native/Signing/build.mjs": "366c0bc379f3f8c1ae246ae5d229d1088bc9c4bb03e425fe74ef33d9ca702f57",
-  "ios-native/Signing/engine.ts": "84cf4f2e4aa9376a860cf36d0a7f06860def2020a99b66cdc1b12cd66f069978",
+  "ios-native/Resources/WalletEngine.js": "d2837c8c92ba25b82a1e68feb17724476ad776d2f64e189862151700048b60a7",
+  "ios-native/Signing/build.mjs": "64f2dc319f43501ba0fe89b3455ac1347eb752cac153fe9ad191089835cd0a93",
+  "ios-native/Signing/engine.ts": "33c609f57446069e59a29c86c9c1189fa942fd6a03951f02ec2e14f436ccf033",
+  "ios-native/Signing/public-config.json": "a51e98f7c28774ae8575fd7f27ef71672760f808c04e96481a1c00cf9b79e91e",
   "package-lock.json": "3e5fd4154195f1fbc9ab061f15b3173631e6b5b778d218f96c025fadac797350",
   "packages/core/src/abis.ts": "58167f3ac700682e23b99b060167a4d28fbab1044934aafdb44584583b37b2d5",
   "packages/core/src/agent-name.ts": "61f868ba528b4173815735392571df560ac2bf56731556d205d7ec02317ecb6c",
@@ -36,8 +37,13 @@
   "packages/core/src/trencher-vault.ts": "113ac36925543fbfbd34d0c02fe4df9800df125c388eecbb0b48ad52c05e6a57",
   "packages/core/src/wall-release.ts": "fb39bc772ddcfddad60171a23497f577f261cfe39a14fee2d7d6c68997d66fe2",
   "packages/core/src/wall.ts": "05652ca04082b9413c1f23b862799bf4076177abeebf90d654f5238eefb72571",
+  "web/src/lib/recover-client.ts": "1fe5927d11d1b9bfbb20939711c8ec9a22923ee815b916f3c71887cd408e9fb9",
   "web/src/lib/session.ts": "651626ce8250afdb798895b824ff70fea496fe62d82521e556a89b4c7fa73e67",
   "web/src/lib/trencher-permission.ts": "5f742b52e4e658ac7ff061362dd8a7b6ee3983a777a45146898ed3fdc4710e87",
   "web/src/lib/verified-adapter.ts": "36ca75f006a20e3dcfa398ea351188dbbc3c8bb902b49b7d41139e5ac5061695",
-  "web/src/lib/wallet.ts": "a6b6383384b1c0ed5a8926d73f5049d4aeadbac270272c29c4aebfedabc6694e"
+  "web/src/lib/wallet.ts": "a6b6383384b1c0ed5a8926d73f5049d4aeadbac270272c29c4aebfedabc6694e",
+  "worker/src/class-recovery.ts": "87e2a987769677dfa28ea1fa5d64e540076625c99ad2291af00df7a9f5646818",
+  "worker/src/gas.ts": "26151ec23d111c235d09ddd48ca25325f7b8f5ef18b7ca9546edc24ab291b24c",
+  "worker/src/recover.ts": "95d6997c7a3bfe65d306b3fd33f2ab3adbdb84291b26af92534bc41ec6b116b9",
+  "worker/src/venues/class-log.ts": "d14520eeba5174d8077d8e17df16d98c66b95ef11d04b413d69983ecf60dc2ab"
 }

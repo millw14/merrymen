@@ -27,6 +27,7 @@ final class API: NSObject, URLSessionTaskDelegate {
     private let lock = NSLock()
     private var cookieHeader = ""
     private var epoch = 0
+    private var recoveryCookie: HTTPCookie?
 
     override init() {
         super.init()
@@ -40,8 +41,8 @@ final class API: NSObject, URLSessionTaskDelegate {
     }
 
     private func snapshot() -> (header: String, epoch: Int) { lock.lock(); defer { lock.unlock() }; return (cookieHeader, epoch) }
-    func forget() { lock.lock(); epoch += 1; cookieHeader = ""; persistCookies(""); lock.unlock() }
-    private func mergeCookies(_ fresh: [HTTPCookie], expectedEpoch: Int) {
+    func forget() throws { lock.lock(); defer { lock.unlock() }; epoch += 1; cookieHeader = ""; recoveryCookie = nil; try persistCookies("") }
+    private func mergeCookies(_ fresh: [HTTPCookie], expectedEpoch: Int) throws {
         lock.lock(); defer { lock.unlock() }
         guard epoch == expectedEpoch else { return }
         var parts = Dictionary(cookieHeader.split(separator: ";").compactMap { part -> (String, String)? in
@@ -52,19 +53,14 @@ final class API: NSObject, URLSessionTaskDelegate {
             if c.value.isEmpty || (c.expiresDate.map { $0 < Date() } ?? false) { parts.removeValue(forKey: c.name) }
             else { parts[c.name] = c.value }
         }
-        cookieHeader = parts.map { "\($0.key)=\($0.value)" }.joined(separator: "; ")
-        persistCookies(cookieHeader)
+        for c in fresh where c.name == "merrymen_recovery" && c.domain == Self.origin.host! && c.path == "/api/bundler" { recoveryCookie = c }
+        let next = parts.map { "\($0.key)=\($0.value)" }.joined(separator: "; ")
+        try persistCookies(next)
+        cookieHeader = next
     }
-    private func persistCookies(_ value: String) {
-        let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "dev.merrymen.session", kSecAttrAccount as String: "cookie"]
-        SecItemDelete(q as CFDictionary)
-        if !value.isEmpty {
-            var record = q
-            record[kSecValueData as String] = Data(value.utf8)
-            record[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            SecItemAdd(record as CFDictionary, nil)
-        }
+    private func persistCookies(_ value: String) throws {
+        if value.isEmpty { try SecureStore.remove("dev.merrymen.session", "cookie") }
+        else { try SecureStore.write("dev.merrymen.session", "cookie", Data(value.utf8)) }
     }
 
     func request(_ path: String, method: String = "GET", body: J? = nil, token: String? = nil) async throws -> J {
@@ -73,6 +69,10 @@ final class API: NSObject, URLSessionTaskDelegate {
     }
 
     func bytes(_ path: String, method: String, data: Data?, contentType: String, token: String? = nil) async throws -> J {
+        let (responseData, http) = try await raw(path, method: method, data: data, contentType: contentType, token: token)
+        return try decode(responseData, http: http, path: path)
+    }
+    func raw(_ path: String, method: String, data: Data?, contentType: String = "application/json", token: String? = nil) async throws -> (Data, HTTPURLResponse) {
         guard path.hasPrefix("/api/"), !path.hasPrefix("//"),
               let url = URL(string: path, relativeTo: Self.origin)?.absoluteURL,
               NavigationPolicy().isApp(url) else { throw APIError(status: 0, message: "Invalid API destination.") }
@@ -83,14 +83,26 @@ final class API: NSObject, URLSessionTaskDelegate {
         req.setValue(contentType, forHTTPHeaderField: "Content-Type")
         let sent = snapshot()
         req.setValue(sent.header, forHTTPHeaderField: "Cookie")
+        if path.hasPrefix("/api/bundler/") {
+            let ticket = recoveryHeader()
+            if !ticket.isEmpty { req.setValue([sent.header, ticket].filter { !$0.isEmpty }.joined(separator: "; "), forHTTPHeaderField: "Cookie") }
+        }
         if let data { req.setValue(String(data.count), forHTTPHeaderField: "Content-Length") }
         if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         let (responseData, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else { throw APIError(status: 0, message: "No server response.") }
         if let headers = http.allHeaderFields as? [String: String] {
             let fresh = HTTPCookie.cookies(withResponseHeaderFields: headers, for: url)
-            if !fresh.isEmpty { mergeCookies(fresh, expectedEpoch: sent.epoch) }
+            if !fresh.isEmpty { try mergeCookies(fresh, expectedEpoch: sent.epoch) }
         }
+        return (responseData, http)
+    }
+    private func recoveryHeader() -> String {
+        lock.lock(); defer { lock.unlock() }
+        guard let c = recoveryCookie, let expiry = c.expiresDate, expiry > Date() else { return "" }
+        return "\(c.name)=\(c.value)"
+    }
+    private func decode(_ responseData: Data, http: HTTPURLResponse, path: String) throws -> J {
         if path == "/api/gate", http.statusCode == 303 {
             guard http.value(forHTTPHeaderField: "Location") == "/" else { throw APIError(status: 401, message: "That site password was not accepted.") }
             return .object(["ok": .bool(true)])
