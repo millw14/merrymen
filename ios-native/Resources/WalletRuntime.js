@@ -59,7 +59,12 @@
     abort() { this.signal.aborted = true; }
   };
   globalThis.AbortSignal = { timeout(ms) { const c = new AbortController(); setTimeout(() => c.abort(), ms); return c.signal; } };
+  globalThis.Request = class {
+    constructor(input, options = {}) { this.url = input instanceof Request ? input.url : String(input); Object.assign(this, input instanceof Request ? input : {}, options); this.headers = new Headers(options.headers || this.headers || {}); this.method ||= 'GET'; }
+    toString() { return this.url; }
+  };
   globalThis.fetch = async (input, options = {}) => {
+    if (input instanceof Request) options = { ...input, ...options };
     if (options.signal?.aborted) throw new Error('Aborted');
     const metadata = WalletEngine.rpcMetadata(options.body || null);
     const result = await nativeCall('fetch', { url: String(input), method: options.method || 'GET', body: options.body || null, metadata, headers: Object.fromEntries(new Headers(options.headers || {})) });

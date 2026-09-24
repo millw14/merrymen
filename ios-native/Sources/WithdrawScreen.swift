@@ -9,8 +9,7 @@ struct WithdrawScreen: View {
     @State private var error: String?
     @State private var recipient = ""
     @State private var selectedVault = ""
-    @State private var confirming = false
-    @State private var reviewed: J?
+    @State private var reviewed: ReviewValue?
     @State private var records: [J] = []
     @State private var acknowledged = false
     @State private var unresolved = false
@@ -86,10 +85,10 @@ struct WithdrawScreen: View {
             }
         }.navigationTitle("Withdraw").navigationBarBackButtonHidden(wallet.busy)
         .task { await load() }
-        .sheet(isPresented: $confirming) {
+        .sheet(item: $reviewed) { selected in
             NavigationStack { Page {
                 Text("Confirm withdrawal").font(.title.bold())
-                if let reviewed {
+                let reviewed = selected.value
                     Metric(label: "From", value: reviewed["smartAccount"].text)
                     Metric(label: "Recipient", value: reviewed["to"].text)
                     Text("Robinhood Chain · 4663").font(.headline)
@@ -97,8 +96,7 @@ struct WithdrawScreen: View {
                     if reviewed["approvedClass"] != .null { Text("Includes the reviewed class vault: \(reviewed["approvedClass"]["vault"].text)") }
                     Button("Sign withdrawal", role: .destructive) { Task { await withdraw(reviewed) } }.buttonStyle(PrimaryButtonStyle()).disabled(wallet.busy)
                     if wallet.busy { ProgressView("Waiting for the wallet and receipt…") }
-                }
-                Button("Cancel", role: .cancel) { confirming = false }.disabled(wallet.busy)
+                Button("Cancel", role: .cancel) { self.reviewed = nil }.disabled(wallet.busy)
             } }.interactiveDismissDisabled(wallet.busy)
         }
     }
@@ -128,14 +126,14 @@ struct WithdrawScreen: View {
         if let vault = plan["classVaults"].array.first(where: { $0["vault"].text == selectedVault }), !vault["holdings"].array.isEmpty {
             fields["approvedClass"] = .object(["vault": vault["vault"], "tokens": .array(vault["holdings"].array.map { $0["token"] })])
         }
-        reviewed = .object(fields); confirming = true; error = nil
+        reviewed = ReviewValue(value: .object(fields)); error = nil
     }
     private func withdraw(_ input: J) async {
         guard !wallet.busy else { return }
         do { result = try await wallet.call("withdraw", input: input, store: store); plan = nil }
         catch { self.error = "Withdrawal was not confirmed: \(error.localizedDescription) Check the recorded receipt before retrying." }
         if let owner = store.owner { do { try readRecords(owner) } catch { self.error = error.localizedDescription; unresolved = true } }
-        confirming = false
+        reviewed = nil
     }
     private func reconcile() async {
         guard let input else { return }; error = nil

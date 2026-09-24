@@ -20,6 +20,8 @@ struct PrimaryButtonStyle: ButtonStyle {
     }
 }
 
+struct ReviewValue: Identifiable { let id = UUID(); let value: J }
+
 func usd(_ value: Double?) -> String { value.map { $0.formatted(.currency(code: "USD")) } ?? "—" }
 func bps(_ value: Double?) -> String { value.map { ($0 / 100).formatted(.number.precision(.fractionLength(2))) + "%" } ?? "—" }
 func escaped(_ value: String) -> String { value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "" }

@@ -18,6 +18,7 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
     private var account = ""
     private var recipient = ""
     private var challengeNonce: String?
+    private var runID: UUID?
     private lazy var rpc: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = false; config.httpCookieStorage = nil; config.urlCache = nil
@@ -28,7 +29,8 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
 
     func call(_ name: String, input: J, store: AppStore) async throws -> J {
         guard !busy else { throw fail("A wallet operation is already running.") }
-        busy = true; defer { busy = false; operation = ""; runtime = nil }
+        let callID = UUID(); runID = callID
+        busy = true; defer { busy = false; operation = ""; runtime = nil; runID = nil }
         guard let owner = store.owner else { throw fail("Sign in before opening your wallet.") }
         self.store = store; identity = owner; generation = store.generation
         try await store.verifyOwner(owner)
@@ -46,8 +48,12 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
               let engineURL = Bundle.main.url(forResource: "WalletEngine", withExtension: "js") else { throw fail("The wallet library is missing from this build.") }
         let runtime = try WalletRuntime(bootstrap: String(contentsOf: bootstrapURL, encoding: .utf8), library: String(contentsOf: engineURL, encoding: .utf8))
         self.runtime = runtime
-        runtime.storage = { [weak self] op, args in guard let self else { throw WalletRuntimeError("Wallet closed.") }; return try self.storage(op, args) }
-        runtime.handle = { [weak self] op, args in guard let self else { throw WalletRuntimeError("Wallet closed.") }; return try await self.handle(op, args) }
+        runtime.storage = { [weak self] op, args in guard let self, self.runID == callID else { throw WalletRuntimeError("Wallet operation closed.") }; return try self.storage(op, args) }
+        runtime.handle = { [weak self] op, args in
+            guard let self, self.runID == callID else { throw WalletRuntimeError("Wallet operation closed.") }
+            let result = try await self.handle(op, args)
+            guard self.runID == callID else { throw WalletRuntimeError("Wallet operation closed.") }; return result
+        }
         let result = try await runtime.call(name, input: .object(fields))
         if name == "reconcile" {
             for row in result["receipts"].array where row["receipt"] != .null { try recordReceipt(hash: row["hash"].text, receipt: row["receipt"]) }
@@ -131,6 +137,7 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
     }
 
     private func fetch(_ args: J) async throws -> J {
+        let callID = runID
         let body = args["body"].string.map { Data($0.utf8) }
         let requestJSON = body.flatMap { try? JSONDecoder().decode(J.self, from: $0) } ?? .null
         let method = args["method"].text.uppercased()
@@ -159,6 +166,7 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
             guard let http = http as? HTTPURLResponse else { throw fail("The chain did not respond.") }
             data = bytes; response = http
         }
+        guard callID == runID else { throw fail("This wallet operation has ended. Check its receipt before retrying.") }
         guard data.count <= 8_000_000 else { throw fail("The wallet response exceeds its size limit.") }
         if method == "GET", ["/api/auth/challenge", "/api/recover/ticket"].contains(url.path), response.statusCode == 200 {
             let challenge = try JSONDecoder().decode(J.self, from: data)

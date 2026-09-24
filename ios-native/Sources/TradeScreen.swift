@@ -7,9 +7,7 @@ struct TradeScreen: View {
     let symbol: String
     @State private var side = "buy"
     @State private var amount = ""
-    @State private var confirm = false
-    @State private var confirmationBody: J?
-    @State private var confirmationOwner: String?
+    @State private var review: ReviewValue?
     @State private var busy = false
     @State private var attempted = false
     @State private var orderId: String?
@@ -29,7 +27,7 @@ struct TradeScreen: View {
                     Button("Review order") {
                         guard let owner = store.owner, let body = TradeInput.body(side: side, symbol: symbol, amount: amount, owner: owner) else { error = "Enter a valid ticker and positive amount in USDG, with at most two decimal places."; return }
                         guard let ceiling, body["usdgAmount"].number! <= ceiling else { error = "That amount exceeds your current order ceiling."; return }
-                        confirmationOwner = owner; confirmationBody = body; confirm = true
+                        review = ReviewValue(value: body)
                     }.buttonStyle(PrimaryButtonStyle()).disabled(busy || attempted || !statusReady || ceiling == nil)
                     Metric(label: "Current order ceiling", value: ceiling.map { usd($0) + " USDG" } ?? "Unread")
                 }
@@ -60,25 +58,24 @@ struct TradeScreen: View {
                 if attempted && !busy { await readStatus() }
             }
         }
-        .sheet(isPresented: $confirm) {
+        .sheet(item: $review) { selected in
             NavigationStack { Page {
                 Text("Confirm order").font(.title.bold())
-                if let body = confirmationBody {
+                let body = selected.value
                     Metric(label: "Action", value: body["side"].text.capitalized)
                     Metric(label: "Asset", value: body["symbol"].text)
                     Metric(label: "USDG amount", value: usd(body["usdgAmount"].number))
-                    Text(confirmationOwner ?? "").font(.caption.monospaced())
+                    Text(body["owner"].text).font(.caption.monospaced())
                     Text("This may move real funds when your agent is live. A queued order is not a completed trade.")
                     Button("Submit order") { submit(body) }.buttonStyle(PrimaryButtonStyle()).disabled(busy)
-                }
-                Button("Cancel", role: .cancel) { confirm = false }.disabled(busy)
+                Button("Cancel", role: .cancel) { review = nil }.disabled(busy)
             } }.interactiveDismissDisabled(busy)
         }
     }
     private func submit(_ body: J) {
         guard !busy, !attempted else { return }; busy = true; error = nil
-        let owner = confirmationOwner; let pendingKey = key
-        Task { defer { busy = false; confirm = false }; do {
+        let owner = body["owner"].string; let pendingKey = key
+        Task { defer { busy = false; review = nil }; do {
             try await store.verifyOwner(owner)
             // Durable before sending: a timeout or process kill must not silently enable retry.
             attempted = true; try savePending("unknown", key: pendingKey)

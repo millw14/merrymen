@@ -229,8 +229,7 @@ struct CircleScreen: View {
 
 struct ProposalsScreen: View {
     @EnvironmentObject var store: AppStore
-    @State private var selected: J?
-    @State private var confirm = false
+    @State private var selected: ReviewValue?
     @State private var busy = false
     @State private var error: String?
     var body: some View {
@@ -244,20 +243,19 @@ struct ProposalsScreen: View {
                 Metric(label: "Price", value: usd(row["priceUsd"].number))
                 if row["onCurve"].bool == true { Text("Still on its launch curve").foregroundStyle(.orange) }
                 Text(row["watched"].bool == true ? "Already watched; permission still required." : "Adding this token needs settings and a new signed permission.").font(.caption)
-                Button("Review adding this coin") { selected = row; confirm = true }.disabled(store.owner == nil)
+                Button("Review adding this coin") { selected = ReviewValue(value: row) }.disabled(store.owner == nil)
             } }
         } }.navigationTitle("Coins to consider")
-        .sheet(isPresented: $confirm) {
+        .sheet(item: $selected) { selection in
             NavigationStack { Page {
                 Text("Add coin to the basket?").font(.title.bold())
-                if let row = selected {
+                let row = selection.value
                     Text(row["symbol"].text).font(.headline)
                     Text(row["token"].text).font(.caption.monospaced()).textSelection(.enabled)
                     Text("This saves the coin in your settings and basket. You will review a new signed permission next. Research is not a promise of return.")
                     Button("Save and review permission") { Task { await add(row) } }.buttonStyle(PrimaryButtonStyle()).disabled(busy)
-                }
                 if let error { Text(error).foregroundStyle(.orange) }
-                Button("Cancel") { confirm = false }.disabled(busy)
+                Button("Cancel") { selected = nil }.disabled(busy)
             } }.interactiveDismissDisabled(busy)
         }
     }
@@ -276,7 +274,7 @@ struct ProposalsScreen: View {
             }
             let basket = Set(settings.setting("basketSymbols").array.compactMap(\.string)).union([row["symbol"].text])
             _ = try await store.perform("/api/settings", method: "PUT", body: .object(["owner": owner.map(J.string) ?? .null, "customTokens": .array(tokens), "basketSymbols": .array(basket.sorted().map(J.string))]), expectedOwner: owner)
-            confirm = false; store.path.append(.limits)
+            selected = nil; store.path.append(.limits)
         } catch { self.error = error.localizedDescription }
     }
 }

@@ -18,9 +18,8 @@ struct GrantScreen: View {
     @State private var caps = ["perTradeUsdg": "10", "dailyUsdg": "50", "expiryDays": "7", "maxDrawdownPct": "5", "maxOpsPerDay": "24"]
     @State private var error: String?
     @State private var result: J?
-    @State private var review: J?
+    @State private var review: ReviewValue?
     @State private var changes: J?
-    @State private var confirming = false
     @State private var loading = true
     @State private var submitting = false
     private let fields = [("perTradeUsdg", "USDG per trade"), ("dailyUsdg", "USDG per day"), ("expiryDays", "Permission lifetime in days"), ("maxDrawdownPct", "Maximum drawdown %"), ("maxOpsPerDay", "Operations per day")]
@@ -87,10 +86,10 @@ struct GrantScreen: View {
         }.navigationTitle(creating ? "Create agent" : "Trading limits")
         .navigationBarBackButtonHidden(wallet.busy)
         .task { await load() }
-        .sheet(isPresented: $confirming) {
+        .sheet(item: $review) { selected in
             NavigationStack { Page {
                 Text("Sign this permission?").font(.title.bold())
-                if let review {
+                let review = selected.value
                     ForEach(fields, id: \.0) { key, label in Metric(label: label, value: review["caps"][key].text) }
                     Metric(label: "Account", value: review["expectAccount"].string ?? "Derived from your embedded wallet")
                     Metric(label: "Custom tokens covered", value: String(review["extraTokens"].array.count))
@@ -99,8 +98,7 @@ struct GrantScreen: View {
                     if store.privy == nil { Text("This build needs the public Privy iOS Client ID before it can sign.").foregroundStyle(.orange) }
                     Button("Sign and activate") { Task { await activate(review) } }.buttonStyle(PrimaryButtonStyle()).disabled(submitting || wallet.busy || store.privy == nil)
                     if wallet.busy { ProgressView(wallet.status) }
-                }
-                Button("Cancel", role: .cancel) { confirming = false }.disabled(submitting || wallet.busy)
+                Button("Cancel", role: .cancel) { self.review = nil }.disabled(submitting || wallet.busy)
             } }.interactiveDismissDisabled(submitting || wallet.busy)
         }
     }
@@ -144,7 +142,7 @@ struct GrantScreen: View {
                 guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, name.count <= 24, !basket.isEmpty else { throw APIError(status: 0, message: "Choose an agent name up to 24 characters and at least one asset.") }
                 changes = .object(["owner": .string(owner ?? ""), "agentName": .string(name.trimmingCharacters(in: .whitespacesAndNewlines)), "strategy": .string(strategy), "assetMode": .string(mode), "basketSymbols": .array(basket.sorted().map(J.string)), "paperTradingEnabled": .bool(true), "liveTradingEnabled": .bool(!paper)])
             }
-            review = .object(input); confirming = true; error = nil
+            review = ReviewValue(value: .object(input)); error = nil
         } catch { self.error = error.localizedDescription }
     }
     private func activate(_ review: J) async {
@@ -156,7 +154,7 @@ struct GrantScreen: View {
             if let changes { _ = try await store.perform("/api/settings", method: "PUT", body: changes, expectedOwner: owner) }
             result = try await wallet.call("create", input: review, store: store)
         } catch { self.error = "Permission was not confirmed: \(error.localizedDescription) Any settings already saved remain in effect." }
-        confirming = false
+        self.review = nil
     }
     private func retrySaved() async {
         do {

@@ -68,6 +68,30 @@ final class API: NSObject, URLSessionTaskDelegate {
         return try await bytes(path, method: method, data: data, contentType: "application/json", token: token)
     }
 
+    @MainActor
+    func chat(_ body: J, onText: (String) -> Void) async throws -> J {
+        var request = URLRequest(url: Self.origin.appendingPathComponent("api/chat"))
+        request.httpMethod = "POST"; request.httpBody = try JSONEncoder().encode(body)
+        request.setValue(snapshot().header, forHTTPHeaderField: "Cookie")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else { throw APIError(status: 0, message: "No chat response.") }
+        guard (200..<300).contains(http.statusCode) else { throw APIError(status: http.statusCode, message: "Chat could not complete this request. Check your session and try again.") }
+        if http.value(forHTTPHeaderField: "Content-Type")?.contains("text/event-stream") != true {
+            var data = Data()
+            for try await byte in bytes { guard data.count < 1_000_000 else { throw ChatStreamError.tooLong }; data.append(byte) }
+            return try decode(data, http: http, path: "/api/chat")
+        }
+        var stream = ChatStream()
+        for try await line in bytes.lines {
+            try Task.checkCancellation(); try stream.line(line)
+            onText(stream.visible)
+            if let finished = stream.finished { return finished }
+        }
+        throw ChatStreamError.interrupted
+    }
+
     func bytes(_ path: String, method: String, data: Data?, contentType: String, token: String? = nil) async throws -> J {
         let (responseData, http) = try await raw(path, method: method, data: data, contentType: contentType, token: token)
         return try decode(responseData, http: http, path: path)
