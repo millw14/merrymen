@@ -22,6 +22,7 @@ From the repository root, verify the shared bundles:
 ```sh
 npm ci --ignore-scripts
 node ios-native/Signing/build.mjs --check
+node ios-native/Branding/generate.mjs --check
 node ios-native/Signing/verify-engine.mjs
 node ios-native/Signing/verify-engine.mjs --trencher
 node ios-native/Signing/verify-feed.mjs
@@ -39,11 +40,11 @@ Do not add app secrets, server keys, wallet private keys, signing certificates o
 
 ## Implemented in source
 
-- Five native tabs, menus, search, stock/memecoin markets, token charts, device watchlist, portfolio, leaderboard, public profiles, Alpha and proposals.
+- Five native tabs, menus, search, shared coin-first Buying/Held market views, token charts, watchlist, portfolio, leaderboard, public profiles, Alpha and proposals. The current striped logo is rendered from the web/site vector source for the icon, header, feed tab and onboarding; a source/hash check detects drift.
 - Shared web feed grouping/filtering, real/paper and execution labels, verified mentions, natural thesis text, following/likes/sharing. Unknown counts remain unknown.
-- Profile holdings, fills, top trades, average hold, published strategy and evidenced chart windows. Private-book dollar figures stay hidden.
+- Profile holdings, fills, top trades, average hold, published strategy and evidenced chart windows. Owner portfolio details preserve cost provenance and receipts; daily real usage excludes paper fills. Private-book dollar figures stay hidden.
 - Privy email/X integration; manual external-wallet challenge/signature sign-in; holder proof/link/unlink; Keychain sessions; owner-bound mutations; sign-out and privacy cover.
-- Streaming chat with per-owner history, explicit command reviews, coin resolution and editable on-device voice drafts.
+- Streaming chat with per-owner text history, canonical command reviews and setting prefills, coin resolution and editable on-device voice drafts. Suggestions are cleared on the next message or use and are never restored as actions.
 - Group chat with history, replies, take-back, stable retry IDs, presence, mute, time zone and sleep preferences.
 - Account/AI/token/risk/discovery/Trencher settings, Telegram bot connection/test, Circle, profile uploads and X proof.
 - Permission creation/renewal calls the canonical web Kernel/ZeroDev preparation code with a native signature host. Presets, caps, live consent, ownership, adapter/factory evidence and existing custody are checked before signing.
@@ -52,7 +53,7 @@ Do not add app secrets, server keys, wallet private keys, signing certificates o
 
 ## Verification boundary
 
-The Native iOS run at commit `dff11ad9` passed Linux bundle/fixture checks, macOS policy tests, simulator app tests and four native UI tests: navigation, tour persistence, order timeout across restart and ambiguous coin resolution. Later changes require their own green run; CI artifacts identify the exact tested commit.
+The Native iOS run at commit `4866bf97` passed Linux bundle/fixture checks, 12 macOS policy tests, 3 simulator app tests and 5 native UI tests, including private-profile dollar visibility. Later changes require their own green run; CI artifacts identify the exact tested commit.
 
 Fixtures exercise full standard and Trencher grant preparation with deterministic test keys and recorded public chain reads. They do **not** prove production Privy callbacks, real grants, fills, withdrawal, device microphone behavior or App Store readiness. No live financial operation was performed.
 

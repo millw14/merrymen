@@ -7,29 +7,10 @@ struct HomeScreen: View {
     var body: some View { Page {
         if store.owner == nil { SignInCard() }
         else {
-            Remote(path: "/api/feed") { feed in
-                Card {
-                    Text(feed["agent"]["name"].string ?? "Your portfolio").font(.headline)
-                    Text(feed["bookMode"].text == "paper" ? "PAPER BOOK" : feed["bookMode"].text == "live" ? "LIVE BOOK" : "Book mode is not supplied by this server. Check the trade labels below.").font(.caption).foregroundStyle(.orange)
-                    Text(usd(feed["equity"].array.last?["equity_usdg"].number)).font(.system(size: 40, weight: .medium, design: .rounded)).monospacedDigit()
-                    Text("Portfolio value history — deposits and withdrawals affect this line. It is not an investment return.").font(.caption).foregroundStyle(.secondary)
-                    TrendChart(values: feed["equity"].array.compactMap { $0["equity_usdg"].number })
-                    HStack { Button("Add funds") { store.path.append(.deposit) }; Spacer(); Button("Withdraw") { store.path.append(.withdraw) } }
-                }
-                Text("Positions").font(.title2.bold())
-                if feed["source"].string == "none" { Text("The portfolio could not be read.").foregroundStyle(.orange) }
-                else if feed["positions"].array.isEmpty { Text("No positions in this book.").foregroundStyle(.secondary) }
-                Rows(values: feed["positions"].array) { row in Card {
-                    Metric(label: row["symbol"].text, value: usd(row["value_usdg"].number))
-                    if row["price_stale"].number == 1 { Text("Price is stale").font(.caption).foregroundStyle(.orange) }
-                } }
-                Text("Recent trades").font(.title2.bold())
-                Rows(values: feed["trades"].array.prefix(20).map { $0 }) { trade in Card {
-                    Text("\(trade["fill_side"].string ?? trade["kind"].text) \(trade["symbol"].text)").font(.headline)
-                    Metric(label: trade["status"].text.uppercased(), value: usd(trade["amount_usdg"].number))
-                    if let reason = trade["reason"].string { Text(reason).font(.caption) }
-                    if trade["status"].text == "paper" { Text("Simulated — no real fill").font(.caption).foregroundStyle(.orange) }
-                } }
+            Remote(path: "/api/feed") { OwnerOverview(feed: $0) }
+            Remote(path: "/api/grants") { status in
+                if status["exists"].bool == true { AgentConnections() }
+                else { NavigationLink("Create agent", value: Route.create).buttonStyle(PrimaryButtonStyle()) }
             }
         }
         Button { store.path.append(.markets) } label: { Label("Explore markets", systemImage: "chart.bar.xaxis") }.buttonStyle(PrimaryButtonStyle())

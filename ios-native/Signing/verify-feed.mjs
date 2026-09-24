@@ -58,6 +58,28 @@ assert.equal(markets().rows[0].priceUsd, 0.000012);
 assert.equal(markets().rows[0].buys, 1);
 assert.equal(markets({ sort: 'held' }).rows[0].symbol, 'NVDA');
 assert.equal(markets({ sort: 'all' }).rows.some(r => r.symbol === 'NVDA'), true);
+assert.equal(markets({ sort: 'all', theses: null }).rows.find(r => r.symbol === 'NVDA').buys, null);
+assert.equal(markets({ sort: 'all', theses: null }).rows.find(r => r.symbol === 'NEON').buys, 1);
 assert.equal(markets({ theses: null, discoveries: null, market: null }).fallback, true);
 assert.equal(markets({ theses: null, discoveries: null, market: null }).rows[0].priceUsd, null);
 console.log('Native markets share web token joins, rank coins first, retain stocks, and leave unread prices unknown.');
+
+const now = Date.now();
+const overview = feed => JSON.parse(context.NativeFeed.overview(JSON.stringify({ feed, now })));
+const owned = overview({ agent: { name: 'Owner agent' }, source: 'db', positions: [
+  { symbol: 'NEON', value_usdg: 6, cost_usdg: 5, cost_from_quote: false, price_stale: 0 },
+  { symbol: 'MAYBE', value_usdg: 6, cost_usdg: 5, cost_from_quote: true, price_stale: 0 },
+  { symbol: 'OLD', value_usdg: 6, cost_usdg: 5, cost_from_quote: false, price_stale: 1 },
+], trades: ['landed', 'paper', 'submitted', 'rejected'].map(status => ({ fill_side: 'buy', symbol: 'NEON', amount_usdg: 5, status, created_at: new Date(now).toISOString() })) });
+assert.equal(owned.positions[0].pnl, 20);
+assert.equal(owned.positions[1].pnl, null);
+assert.equal(owned.positions[2].pnl, null);
+assert.equal(owned.spent, 5);
+assert.equal(owned.equity, null);
+assert.equal(overview({ source: 'none' }), null);
+const connections = (telegram, settings) => JSON.parse(context.NativeFeed.connections(JSON.stringify({ telegram, settings })));
+assert.equal(connections(null, null).telegram.kind, 'unread');
+assert.equal(connections({ hasToken: true, enabled: false }, null).telegram.kind, 'off');
+assert.equal(connections({ hasToken: true, enabled: true, connected: true, ownerId: null, linkCode: 'CODE', botUsername: 'bot' }, null).telegram.kind, 'unlinked');
+assert.equal(connections(null, { values: { strategy: 'trencher', assetMode: 'stocks', trencherLiveEnabled: true } }).trencher.kind, 'no-crypto');
+console.log('Native owner views withhold estimated/stale returns, count only landed usage, and distinguish unread connections from disabled ones.');

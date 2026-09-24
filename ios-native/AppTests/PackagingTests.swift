@@ -23,6 +23,12 @@ final class PackagingTests: XCTestCase {
         try SecureStore.remove(service, "test")
         XCTAssertNil(try SecureStore.read(service, "test"))
     }
+    @MainActor
+    func testMalformedPresentationDoesNotPoisonLaterResponses() {
+        let presentation = FeedPresentation()
+        XCTAssertNil(presentation.markets(.object(["market": .object(["tokens": .number(7)])])))
+        XCTAssertEqual(presentation.command(.object(["id": .string("go-paper")]))?["payload"]["liveTradingEnabled"], .bool(false))
+    }
     func testLogoutInvalidatesEarlierMutationBeforeTransport() async throws {
         let api = API(); let binding = api.binding()
         XCTAssertTrue(api.matches(binding))

@@ -3,15 +3,40 @@ import { beatsOf, pillBeats, mentionTargets, verbOf, pillOf, watchCount, type Be
 import { chartWindows, defaultWindow, growthWindow, thesisOfHow, type ChartWindow } from '../../web/src/terminal/profile-view';
 import { STOCK_TOKENS } from '../../packages/core/src/tokens';
 import { commandFor, commandPayload, isComplete, type CommandArg } from '../../web/src/lib/chat-commands';
-import { seedSources, withRead, liveOf } from '../../web/src/terminal/live';
+import { seedSources, withRead, liveOf, mineOf } from '../../web/src/terminal/live';
+import { positionsOf, spentToday } from '../../web/src/terminal/account';
+import { telegramRow, trencherRow } from '../../web/src/terminal/agent-status';
+
+export function overview(json: string): string {
+  const { feed, now } = JSON.parse(json);
+  if (!feed || feed.source === 'none') return 'null';
+  const mine = mineOf(feed, []);
+  // The shared tape calls a completed paper fill "landed" too. Its paper
+  // flag must be checked separately before comparing usage with a real cap.
+  return JSON.stringify(mine ? { ...mine, positions: positionsOf(mine), spent: spentToday({ ...mine, moves: mine.moves.filter(move => !move.paper) }, now) } : null);
+}
+
+export function connections(json: string): string {
+  const { telegram, settings } = JSON.parse(json);
+  return JSON.stringify({ telegram: telegramRow(telegram), trencher: trencherRow(settings?.values) });
+}
 
 export function markets(json: string): string {
   const input = JSON.parse(json);
   let sources = seedSources();
   for (const key of ['market', 'discoveries', 'theses'] as const) {
-    if (input[key]) sources = withRead(sources, key, { text: JSON.stringify(input[key]), answered: true }, false);
+    if (input[key] && input[key].source !== 'none') sources = withRead(sources, key, { text: JSON.stringify(input[key]), answered: true }, false);
   }
   const tokens = liveOf(sources).tokens;
+  if (sources.theses.read !== 'ok') {
+    for (const token of tokens) {
+      token.agents = null;
+      // Discovery can independently know market-wide buyers or launch trades.
+      const discovery = sources.discoveries.body?.rows?.find(r => r.token.toLowerCase() === token.id);
+      const fresh = sources.discoveries.body?.fresh?.find(r => r.token?.toLowerCase() === token.id);
+      token.buys = fresh?.trades ?? discovery?.buyers24h ?? null;
+    }
+  }
   const count = (value: number | null) => value ?? 0;
   const coinsFirst = (a: { kind: string }, b: { kind: string }) => Number(b.kind === 'memecoin') - Number(a.kind === 'memecoin');
   const ranked = input.sort === 'buys'

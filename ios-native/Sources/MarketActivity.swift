@@ -11,6 +11,7 @@ struct MarketActivity: View {
     @State private var showAll = false
     var query = ""
     var saved = false
+    private func readable(_ value: J?) -> Bool { value != nil && value?["source"].text != "none" }
     private var rendered: J? { presentation.markets(.object([
         "market": market.value ?? .null, "discoveries": discoveries.value ?? .null,
         "theses": theses.value ?? .null, "sort": .string(sort)
@@ -27,11 +28,11 @@ struct MarketActivity: View {
             }.pickerStyle(.segmented).onChange(of: sort) { _, _ in showAll = false }
             if let rendered {
                 let rows = rendered["rows"].array.filter { matches($0, address: $0["id"].text) }
-                if market.value == nil && discoveries.value == nil {
+                if !readable(market.value) && !readable(discoveries.value) {
                     if market.refreshing || discoveries.refreshing { ProgressView("Loading markets") }
                     else { Text("Market data could not be read.").foregroundStyle(.orange) }
                 } else {
-                    if rendered["fallback"].bool == true { Text("No buying or holding activity was found. Showing tokens to explore.").font(.caption).foregroundStyle(.secondary) }
+                    if rendered["fallback"].bool == true { Text(readable(theses.value) ? "No buying or holding activity was found. Showing tokens to explore." : "Activity rankings are unavailable. Showing tokens to explore.").font(.caption).foregroundStyle(.secondary) }
                     if rows.isEmpty { Text("No tokens match these filters.").foregroundStyle(.secondary) }
                     Rows(values: showAll ? rows : Array(rows.prefix(8))) { row in
                         NavigationLink(value: Route.token(row["id"].text)) { Card {

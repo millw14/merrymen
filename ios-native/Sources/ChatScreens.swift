@@ -61,6 +61,11 @@ struct ChatScreen: View {
     }
     private var composerView: some View {
         VStack(spacing: 8) {
+            if store.owner != nil { HStack {
+                Button("Portfolio") { store.tab = .home }
+                Spacer()
+                NavigationLink("Trading limits", value: Route.limits)
+            }.font(.caption).padding(.horizontal) }
             if voice.recording { Text("Listening on this device · review the draft before sending").font(.caption).foregroundStyle(Brand.accent) }
             if let error = voice.error { Text(error).font(.caption).foregroundStyle(.orange).padding(.horizontal) }
             HStack(alignment: .bottom) {

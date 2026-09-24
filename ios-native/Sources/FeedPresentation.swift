@@ -13,6 +13,8 @@ final class FeedPresentation: ObservableObject {
     }
     func profile(_ input: J) -> J? { value(input, function: "profile") }
     func markets(_ input: J) -> J? { value(input, function: "markets") }
+    func overview(_ feed: J) -> J? { value(.object(["feed": feed, "now": .number(Date().timeIntervalSince1970 * 1000)]), function: "overview") }
+    func connections(telegram: J?, settings: J?) -> J? { value(.object(["telegram": telegram ?? .null, "settings": settings ?? .null]), function: "connections") }
     func command(_ input: J) -> J? {
         guard let result = value(input, function: "command"), result != .null else { return nil }
         return result
@@ -21,8 +23,12 @@ final class FeedPresentation: ObservableObject {
         value(.object(["mode": .string(mode), "customTokens": settings.setting("customTokens")]), function: "assets")?.array.compactMap(\.string) ?? []
     }
     private func value(_ input: J, function: String) -> J? {
-        guard let context, context.exception == nil, let data = try? JSONEncoder().encode(input),
+        guard let context else { return nil }
+        context.exception = nil
+        defer { context.exception = nil }
+        guard let data = try? JSONEncoder().encode(input),
               let result = context.objectForKeyedSubscript("NativeFeed")?.objectForKeyedSubscript(function)?.call(withArguments: [String(decoding: data, as: UTF8.self)])?.toString(),
+              context.exception == nil,
               let value = try? JSONDecoder().decode(J.self, from: Data(result.utf8)) else { return nil }
         return value
     }

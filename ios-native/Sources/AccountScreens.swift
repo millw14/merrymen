@@ -23,6 +23,7 @@ struct AccountScreen: View {
                             HStack { NavigationLink("Add funds", value: Route.deposit); Spacer(); NavigationLink("Withdraw", value: Route.withdraw) }
                             NavigationLink("Trading limits", value: Route.limits)
                         }
+                        DailyUsage(grant: status["grant"])
                         Remote(path: "/api/feed") { feed in
                             if let slug = feed["agent"]["slug"].string { NavigationLink("View public profile", value: Route.agent(slug)); ProfileImages(slug: slug) }
                         }
@@ -139,6 +140,8 @@ struct PermissionsScreen: View {
                             Metric(label: "Operations per day", value: status["grant"]["caps"]["maxOpsPerDay"].text)
                             Metric(label: "USDG", value: rawUnits(status["balances"]["cashUsdg"].string, decimals: 6))
                             Metric(label: "ETH for gas", value: rawUnits(status["balances"]["ethWei"].string, decimals: 18))
+                            if let heartbeat = status["workerAliveAt"].number { HStack { Text("Last heartbeat"); Text(Date(timeIntervalSince1970: heartbeat), style: .relative) }.font(.caption).foregroundStyle(.secondary) }
+                            if let blocker = status["liveBlocker"].string { Text("Live trading: " + blocker.replacingOccurrences(of: "-", with: " ")).font(.caption).foregroundStyle(.orange) }
                             NavigationLink("Edit signed limits", value: Route.limits)
                             NavigationLink("Add funds", value: Route.deposit)
                             NavigationLink("Withdraw", value: Route.withdraw)
