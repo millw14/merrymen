@@ -10,8 +10,11 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -19,6 +22,7 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -149,6 +153,7 @@ fun Shell() {
   val entry by nav.currentBackStackEntryAsState()
   val current = entry?.destination?.route
   val onTab = TABS.any { it.route == current }
+  val chatUnread by container.chat.unread.collectAsState()
 
   // NOT A Scaffold BOTTOM BAR. The web's `.tabbar` is `position: fixed` and the
   // page scrolls UNDER it, so the bar overlays the content rather than taking a
@@ -185,7 +190,7 @@ fun Shell() {
       }
     }
     if (onTab) {
-      TabBar(current) { route ->
+      TabBar(current, chatUnread) { route ->
         nav.navigate(route) {
           popUpTo(Routes.HOME) { saveState = true }
           launchSingleTop = true
@@ -230,7 +235,7 @@ fun Shell() {
  * of the effect, and that is what is here — stated rather than silently dropped.
  */
 @Composable
-private fun TabBar(current: String?, onSelect: (String) -> Unit) {
+private fun TabBar(current: String?, chatUnread: Int, onSelect: (String) -> Unit) {
   Box(
     Modifier
       .fillMaxSize()
@@ -254,6 +259,7 @@ private fun TabBar(current: String?, onSelect: (String) -> Unit) {
       TABS.forEach { tab ->
         val on = current == tab.route
         val tint = if (on) MerryColors.tx else MerryColors.faint
+        val dot = tab.route == Routes.CHAT && chatUnread > 0
         Box(
           Modifier
             .weight(1f)
@@ -266,7 +272,9 @@ private fun TabBar(current: String?, onSelect: (String) -> Unit) {
               // 24dp pill draws a rectangle through the corners.
               indication = null,
             ) { onSelect(tab.route) }
-            .semantics { contentDescription = tab.label },
+            // The web puts "New in chat" on the dot itself; a dot has no node
+            // here, so the tab says it.
+            .semantics { contentDescription = if (dot) tab.label + ", new in chat" else tab.label },
           contentAlignment = Alignment.Center,
         ) {
           when (tab.route) {
@@ -277,10 +285,32 @@ private fun TabBar(current: String?, onSelect: (String) -> Unit) {
             Routes.ALPHA -> AlphaIcon(tint)
             else -> YouIcon(tint)
           }
+          if (dot) UnreadDot(Modifier.align(Alignment.TopCenter))
         }
       }
     }
   }
+}
+
+/**
+ * THE CHAT TAB'S UNREAD DOT — `chat.css:74-83`: an 8px `--lime` circle, 12px
+ * from the tab's top and 16px right of its centre, ringed 2px in the bar's own
+ * ground so it reads as sitting ON the bar rather than in the icon.
+ *
+ * It is drawn from ChatThread.unread and nothing else. Something arrived that
+ * the owner has not seen; it says no more than that, and never a count.
+ */
+@Composable
+private fun UnreadDot(modifier: Modifier) {
+  Box(
+    modifier
+      // Centre at +12 so the 8dp dot's right edge sits at centre + 16.
+      .offset(x = 12.dp, y = 10.dp)
+      .size(12.dp)
+      .background(MerryColors.card, CircleShape)
+      .padding(2.dp)
+      .background(MerryColors.lime, CircleShape),
+  )
 }
 
 private fun NavGraphBuilder.graph(nav: NavHostController) {

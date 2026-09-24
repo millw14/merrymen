@@ -26,9 +26,15 @@ data class Version(val version: String? = null, val commit: String? = null)
 
 // ── auth ────────────────────────────────────────────────────────────────────
 
-/** GET /api/auth/session — {hosted, address}. address is null when signed out. */
+/**
+ * GET /api/auth/session — {hosted, address}. address is null when signed out.
+ *
+ * `hosted` is null when the route did not say. It used to default to false,
+ * which read a missing key as "self-hosted" — a claim about the server that
+ * nobody made.
+ */
 @Serializable
-data class SessionView(val hosted: Boolean = false, val address: String? = null)
+data class SessionView(val hosted: Boolean? = null, val address: String? = null)
 
 @Serializable
 data class Challenge(val origin: String, val nonce: String, val message: String)

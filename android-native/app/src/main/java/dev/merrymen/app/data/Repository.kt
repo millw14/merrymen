@@ -5,9 +5,7 @@ import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.PersistentCookieJar
 import dev.merrymen.app.net.Session
 import dev.merrymen.app.net.WebAuth
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * WHAT THE APP KNOWS, AND HOW SURE IT IS.
@@ -49,10 +47,10 @@ class Repository(
   val api: MerrymenApi,
   private val session: Session,
   private val jar: PersistentCookieJar,
-  private val social: Social,
+  /** Who we act for, and the hooks that run when that changes. Pure; see [Identity]. */
+  private val identity: Identity = Identity(),
 ) {
-  private val _signedIn = MutableStateFlow<String?>(null)
-  val signedIn: StateFlow<String?> = _signedIn.asStateFlow()
+  val signedIn: StateFlow<String?> = identity.signedIn
 
   /**
    * WHETHER WE HAVE ACTUALLY ASKED "who are you" AND GOT AN ANSWER.
@@ -65,8 +63,31 @@ class Repository(
    * checked. So this flag flips true only once `session()` has genuinely
    * answered.
    */
-  private val _identityKnown = MutableStateFlow(false)
-  val identityKnown: StateFlow<Boolean> = _identityKnown.asStateFlow()
+  val identityKnown: StateFlow<Boolean> = identity.identityKnown
+
+  /** Hosted (true), self-hosted (false), or not yet said (null). */
+  val hosted: StateFlow<Boolean?> = identity.hosted
+
+  /**
+   * Whether offering "Sign in" is true here: hosted AND nobody signed in.
+   * Self-hosted has no sign-in, so no banner, button or LoadedBlock action may
+   * offer one there.
+   */
+  val canOfferSignIn: StateFlow<Boolean> = identity.canOfferSignIn
+
+  /**
+   * REGISTER STATE THAT BELONGS TO ONE WALLET, so it is dropped when that
+   * wallet's turn ends: on [signOut], and when the session route answers with a
+   * DIFFERENT address than the one the app holds state for (a wallet switched
+   * in the WebView). Hooks run in registration order, before the new address is
+   * published, and one failing does not stop the rest. Register once, at
+   * construction (AppContainer, or an app-scoped store's init).
+   *
+   * Not run on the first answer after a cold start: nothing in memory belongs
+   * to anybody yet. A store that PERSISTS per-wallet state must key it by
+   * address for exactly that reason.
+   */
+  fun addForgetHook(hook: ForgetHook) = identity.addForgetHook(hook)
 
   val origin get() = session.origin
 
@@ -108,16 +129,7 @@ class Repository(
    * Unreachable leaves the answer ALONE. Not knowing is not the same as being
    * signed out, and treating it as such logs people out on a flaky train.
    */
-  suspend fun refreshIdentity() {
-    when (val s = api.session()) {
-      is ApiResult.Ok -> { _signedIn.value = s.value.address; _identityKnown.value = true }
-      // A 401 from the SESSION route is a real "signed out" — we reached it and
-      // it said so. A non-401 refusal or an unreachable server leaves identity
-      // UNKNOWN, not signed-out.
-      is ApiResult.Refused -> if (s.status == 401) { _signedIn.value = null; _identityKnown.value = true }
-      is ApiResult.Unreachable -> Unit
-    }
-  }
+  suspend fun refreshIdentity() = identity.answered(api.session())
 
   /** Called after the WebView flow settles, to pick up a fresh session cookie. */
   suspend fun adoptWebSession() {
@@ -128,10 +140,10 @@ class Repository(
   /** Sign-out has to reach the SERVER, or the session outlives the app. */
   suspend fun signOut() {
     api.logout()
-    // What this wallet liked and wired is not the next wallet's business.
-    social.forget()
     WebAuth.forget(jar)
     session.clearSession()
-    _signedIn.value = null
+    // What this wallet liked, wired and said in chat is not the next wallet's
+    // business: every forget hook runs here.
+    identity.signedOut()
   }
 }
