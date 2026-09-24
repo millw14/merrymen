@@ -152,7 +152,11 @@ data class AlphaView(
   val truncated: Boolean = false,
   /** A degraded render: short because the read was, not because the market is. */
   val degraded: Boolean = false,
-  /** Epoch ms the index was read. */
+  /**
+   * EPOCH SECONDS the index was read — the server's nowSec, passed through from
+   * the discoveries read. Not ms: read as ms it dates the page to January 1970.
+   * Null when locked or not sent.
+   */
   val fetchedAt: Long? = null,
   /** The tier that opened it. Null when locked. */
   val tier: AlphaTier? = null,
@@ -457,7 +461,11 @@ data class Token(
 )
 
 @Serializable
-data class TokensPage(val fetchedAt: Long? = null, val tokens: List<Token> = emptyList())
+data class TokensPage(
+  /** EPOCH SECONDS of the read (market.ts: Math.floor(Date.now() / 1000)). */
+  val fetchedAt: Long? = null,
+  val tokens: List<Token> = emptyList(),
+)
 
 /**
  * TWO MORE GUESSED FIELD NAMES, and this pair cost a false statement.
@@ -865,7 +873,11 @@ data class GrantView(
    * tell them apart.
    */
   val liveBlocker: String? = null,
-  /** When the worker was last heard from. Null when never. */
+  /**
+   * When the worker was last heard from, in EPOCH SECONDS: the heartbeat's
+   * `at` or the ledger's beat_at, both written as Math.floor(nowMs / 1000).
+   * Null when never.
+   */
   val workerAliveAt: Long? = null,
   val balances: GrantBalances? = null,
 )
@@ -1172,7 +1184,11 @@ data class DiscoveryCoin(
  */
 @Serializable
 data class Discoveries(
-  /** Epoch ms of the read. */
+  /**
+   * EPOCH SECONDS of the read (read-discoveries.ts sets it to nowSec). The same
+   * unit as [TokensPage.fetchedAt], so the two reads can be compared for which
+   * is newer without converting either.
+   */
   val fetchedAt: Long? = null,
   val scanned: Int? = null,
   val indexUnreachable: Boolean = false,

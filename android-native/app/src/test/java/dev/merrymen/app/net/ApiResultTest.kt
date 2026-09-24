@@ -139,7 +139,7 @@ class ApiResultTest {
 
   @Test fun grantCapsAreReadOnlyWhenTheyAreNumbers() = runBlocking {
     server.answer(
-      """{"exists":true,"mode":"paper","liveBlocker":null,"workerAliveAt":1790284000000,
+      """{"exists":true,"mode":"paper","liveBlocker":null,"workerAliveAt":1790284000,
          "balances":{"ethWei":null,"cashUsdg":"12.5","vaultUsdg":"0"},
          "grant":{"caps":{"perTradeUsdg":5,"dailyUsdg":"50"}}}""",
     )
@@ -150,5 +150,6 @@ class ApiResultTest {
     assertEquals(null, g.balances?.ethWei)
     assertEquals("0", g.balances?.vaultUsdg)
     assertEquals("paper", g.mode)
+    assertEquals("epoch seconds, as the worker writes it", 1790284000L, g.workerAliveAt)
   }
 }

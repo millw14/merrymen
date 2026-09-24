@@ -2,6 +2,7 @@ package dev.merrymen.app.net
 
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import okhttp3.mockwebserver.Dispatcher
@@ -44,6 +45,13 @@ class DecodeFixturesTest {
     "/api/agents/q4sxmmxay96ew2vq" to ("probe-agent.json" to 200),
     "/api/groupchat?limit=2" to ("probe-groupchat_limit_2.json" to 200),
     "/api/orders/ceiling" to ("probe-orders_ceiling.json" to 401),
+    // The four the adversarial review captured signed out, live, on the same
+    // day: the routes whose models F1 changed and nothing pinned.
+    "/api/discoveries" to ("probe-discoveries.json" to 200),
+    "/api/grants" to ("probe-grants-signedout.json" to 200),
+    "/api/settings" to ("probe-settings-signedout.json" to 200),
+    "/api/tokens/$COIN?window=1h&activity=1" to ("probe-token-coin.json" to 200),
+    "/api/tokens/$STOCK?window=1h" to ("probe-token-stock.json" to 200),
   )
 
   @Before fun start() {
@@ -158,8 +166,104 @@ class DecodeFixturesTest {
     assertEquals(ApiResult.Refused(401, "not signed in"), ceiling)
   }
 
+  // ── read times are epoch SECONDS ─────────────────────────────────────────
+
+  /** Within a day of the capture, READ AS SECONDS. Read as ms, the same number is 21 January 1970. */
+  private fun assertCapturedSeconds(what: String, t: Long?) {
+    assertTrue("$what = $t is not the capture day in epoch seconds", t != null && t in CAPTURED_SEC - DAY_SEC..CAPTURED_SEC + DAY_SEC)
+  }
+
+  @Test fun discoveriesAreDatedInSecondsAndCarryTheirCaveats() = runBlocking {
+    val d = ok(api.discoveries())
+    assertCapturedSeconds("discoveries.fetchedAt", d.fetchedAt)
+    assertEquals(161, d.scanned)
+    assertEquals(87, d.rows.size)
+    assertEquals(20, d.graduated)
+    // A complete, undegraded read that looked: the caveats say so rather than
+    // being absent.
+    assertFalse(d.indexUnreachable)
+    assertFalse(d.truncated)
+    assertFalse(d.degraded)
+    assertNull(d.verdictsWhy)
+    assertTrue(d.chain is JsonObject)
+    assertEquals(11, (d.fresh as JsonArray).size)
+    val quanta = d.rows.first()
+    assertEquals("0xf05301a0f49598ba66be16af7207fb365c78a4d7a3cec8ce7ae981ec0e6b5248", quanta.poolId)
+    assertEquals("pons-v2-dex", quanta.dex)
+    assertTrue("the tape is the index buckets", (quanta.tape as JsonObject).containsKey("h24"))
+    assertEquals(4, d.rows.count { it.verdict != null })
+  }
+
+  @Test fun theMarketIsDatedInTheSameUnit() = runBlocking {
+    // /api/market and /api/discoveries can be compared for which read is
+    // newer only because both are seconds.
+    assertCapturedSeconds("market.fetchedAt", ok(api.market()).fetchedAt)
+  }
+
+  // ── signed-out answers of the routes F1 changed ──────────────────────────
+
+  @Test fun signedOutGrantsSayNothingAboutAnAgent() = runBlocking {
+    // 200 {exists:false}, not a 401. Signed out it reads exactly like "no
+    // agent yet", so a screen must tell the two apart by repo.signedIn.
+    val g = ok(api.grants())
+    assertFalse(g.exists)
+    assertNull(g.mode)
+    assertNull(g.liveBlocker)
+    assertNull("never heard from is null, not the epoch", g.workerAliveAt)
+    assertNull("an unread balance is null, not 0", g.balances)
+    assertNull(g.perTradeUsdg)
+    assertNull(g.dailyUsdg)
+  }
+
+  @Test fun signedOutSettingsWereReadForNobody() = runBlocking {
+    val s = ok(api.settings())
+    // "" is "read for nobody", and a save must send it back as that.
+    assertEquals("", s.owner)
+    assertEquals("none listed is an empty list, not unsent", emptyList<String>(), s.officialCoins)
+    assertFalse(s.bundlerApiKey.set)
+    assertEquals("steady-basket", s.str("strategy"))
+    assertEquals(25, s.knownSymbols.size)
+  }
+
+  @Test fun aCoinWithItsPoolEvidence() = runBlocking {
+    val t = ok(api.token(COIN, "1h", activity = true))
+    assertEquals("memecoin", t.market.kind)
+    val coin = t.market.coin!!
+    assertEquals("pons-v2-dex", coin.dex)
+    assertTrue((coin.tape as JsonObject).containsKey("m5"))
+    val evidence = t.evidence as JsonObject
+    assertEquals(setOf("poolId", "token", "candles", "trades"), evidence.keys)
+    val bars = t.candles!!
+    assertEquals("ok", bars.state)
+    assertFalse(bars.stale)
+    assertEquals(28, bars.candles.size)
+    assertTrue(bars.candles.all { it.t != null && it.o != null && it.h != null && it.l != null && it.c != null })
+    assertEquals(3199L, bars.lastBarAgeSec)
+    assertTrue(t.ledger.holders.isEmpty())
+  }
+
+  @Test fun aStockHasNoCoinBarsAndOnePrivateHolder() = runBlocking {
+    val t = ok(api.token(STOCK, "1h"))
+    assertEquals("stock", t.market.kind)
+    assertEquals(false, t.market.stock?.paused)
+    assertCapturedSeconds("stock.priceUpdatedAt", t.market.stock?.priceUpdatedAt)
+    assertNull("a stock's bars come from the venue, not the index", t.candles)
+    assertNull(t.evidence)
+    assertEquals(1, t.ledger.privateHolders)
+  }
+
   @Test fun anUnknownPathIsNotOk() = runBlocking {
     // The dispatcher's own guard: a URL typo must not pass for a decode.
     assertFalse(api.getJson<JsonElement>("/api/nope") is ApiResult.Ok)
+  }
+
+  private companion object {
+    /** QUANTA / WETH on pons-v2-dex, graduated, as captured. */
+    const val COIN = "0x1da81ca017949efbe07972776580d04592ba9b63"
+    /** AAPL. */
+    const val STOCK = "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9"
+    /** 2026-09-24T12:00:00Z, the capture day, in epoch seconds. */
+    const val CAPTURED_SEC = 1_790_251_200L
+    const val DAY_SEC = 86_400L
   }
 }
