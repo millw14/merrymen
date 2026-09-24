@@ -19,7 +19,7 @@ function eligibleFiles(files, count, tree) {
 }
 
 function authorized(reviews, head, base) {
-  const submitted = reviews.filter(r => ['COMMENTED', 'APPROVED', 'CHANGES_REQUESTED'].includes(r.state));
+  const submitted = reviews.filter(r => ['COMMENTED', 'APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state));
   const latest = new Map();
   const decisions = new Map();
   for (const r of [...reviews].sort((a, b) => a.id - b.id)) {
@@ -29,7 +29,8 @@ function authorized(reviews, head, base) {
   if ([...decisions.values()].some(state => state === 'CHANGES_REQUESTED')) return false;
   const review = latest.get(OWNER_ID);
   const match = review?.body?.match(marker);
-  return !!match && review.commit_id === head && match[1] === head && match[2] === base;
+  return !!match && ['COMMENTED', 'APPROVED'].includes(review.state)
+    && review.commit_id === head && match[1] === head && match[2] === base;
 }
 
 function greenJobs(jobs) {

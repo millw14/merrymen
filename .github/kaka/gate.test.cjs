@@ -37,6 +37,7 @@ test('authorization requires exact reviewer ID, head, base and explicit marker',
   assert.equal(authorized([review()], BASE, BASE), false);
   assert.equal(authorized([review()], HEAD, HEAD), false);
   assert.equal(authorized([review(), { ...review(), id: 2, body: 'Needs changes' }], HEAD, BASE), false);
+  assert.equal(authorized([review(), { ...review(), id: 2, state: 'DISMISSED' }], HEAD, BASE), false);
 });
 test('comments do not erase another reviewers change request', () => {
   const request = { id: 2, state: 'CHANGES_REQUESTED', user: { id: 42 } };
