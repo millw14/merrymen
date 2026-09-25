@@ -99,6 +99,7 @@ import type { PublicThesis } from "./thesis-policy";
 import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
 import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand, type FileCommandResult } from "./command-files";
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
+import { makeMcpBackground } from "./mcp/background";
 
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
@@ -5070,6 +5071,9 @@ export function groupChatModelWarning(
 /** The knobs, read once: the environment does not change under a running process. */
 let groupChatKnobs: GroupChatEnv | null = null;
 
+/** The MCP background tick, built on the first reconcile pass (worker/src/mcp/background.ts). */
+let mcpBackground: (() => void) | null = null;
+
 function startGroupChatPass(): void {
   if (groupChatInFlight || stopping) return;
   if (!groupChatKnobs) {
@@ -5252,6 +5256,10 @@ export async function runOrchestrator(): Promise<void> {
       // the room can see, and inside this branch, so FLEET_HALT silences it
       // too. Started, never awaited — see startGroupChatPass.
       startGroupChatPass();
+      // THE MCP SERVER'S BACKGROUND WORK (backtest jobs, alerts, retention).
+      // Started, never awaited, like the room: nothing here is on the trading
+      // path, and each pass has its own budget and in-flight guard.
+      (mcpBackground ??= makeMcpBackground({ shared: () => makePgDb(process.env.DATABASE_URL!), log, rpcUrl: process.env.MERRYMEN_RPC_MAINNET }))();
       // AFTER THE MIRROR HAS SETTLED, NOT AT STARTUP, and once.
       //
       // The mirror REPLACES positions per agent, so between a child restarting

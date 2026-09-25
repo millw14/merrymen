@@ -1,0 +1,117 @@
+/**
+ * Where the MCP server lives and how long its credentials last.
+ *
+ * Every URL here comes from configuration, never from the request's Host
+ * header: the OAuth issuer and the resource URL are what access tokens are
+ * bound to, and a Host-derived value would let whoever controls a proxy header
+ * mint tokens for a different audience. With no configured origin the server
+ * is simply off (fail closed), which is also the state of every self-hosted
+ * install: MCP is a hosted feature, because a self-hosted dashboard has no
+ * login and "whoever reaches localhost" is not a principal we can delegate.
+ */
+import { isHostedMode } from "@merrymen/core";
+
+export interface McpConfig {
+  /** Hosted, backed by shared Postgres, not switched off, and an issuer is configured. */
+  enabled: boolean;
+  /** Why it is off, for the health route and logs. Null when enabled. */
+  disabledWhy: string | null;
+  /** OAuth issuer, e.g. https://app.merrymen.dev (no trailing slash). */
+  issuer: string;
+  /** Canonical MCP resource URL, e.g. https://app.merrymen.dev/mcp. Tokens are bound to exactly this. */
+  resource: string;
+  /** Origins a browser-originated request to /mcp may carry. Requests with no Origin are server-to-server clients. */
+  allowedOrigins: ReadonlySet<string>;
+  /** Hosts /mcp and the OAuth endpoints answer on (DNS-rebinding guard). */
+  allowedHosts: ReadonlySet<string>;
+  /** Tenants (lowercase addresses) that may be granted the staff diagnostics scope. */
+  staffTenants: ReadonlySet<string>;
+  accessTtlSec: number;
+  refreshTtlSec: number;
+  /** A refresh-token family cannot be stretched past this by rotation; the owner re-consents. */
+  refreshFamilyMaxSec: number;
+  codeTtlSec: number;
+  /** How long the consent screen can stay open (sign-in can take a while). */
+  requestTtlSec: number;
+  /** Personal access tokens (for clients without OAuth) may not outlive this. */
+  personalTokenMaxSec: number;
+}
+
+const ADDRESS = /^0x[0-9a-f]{40}$/;
+
+function originOf(raw: string | undefined): URL | null {
+  if (!raw) return null;
+  try {
+    const url = new URL(raw.trim());
+    if (url.username || url.password || url.search || url.hash) return null;
+    if (url.protocol === "https:") return url;
+    // Plain http only for loopback, which is how local development and the
+    // end-to-end client tests run. The MCP authorization spec allows the same.
+    if (url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1")) return url;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function positive(raw: string | undefined, fallback: number, min: number, max: number): number {
+  const n = raw === undefined ? NaN : Number(raw);
+  return Number.isSafeInteger(n) && n >= min && n <= max ? n : fallback;
+}
+
+export function mcpConfig(env: NodeJS.ProcessEnv = process.env): McpConfig {
+  const issuerUrl = originOf(env.MERRYMEN_OAUTH_ISSUER ?? env.MERRYMEN_PUBLIC_ORIGIN);
+  const issuer = issuerUrl ? issuerUrl.origin : "";
+  const resourceUrl = originOf(env.MERRYMEN_MCP_RESOURCE_URL ?? (issuer ? `${issuer}/mcp` : undefined));
+  // The resource keeps its path; normalise away a trailing slash so the
+  // metadata's `resource` matches the URL clients were given exactly.
+  const resource = resourceUrl ? `${resourceUrl.origin}${resourceUrl.pathname.replace(/\/+$/, "") || ""}` : "";
+
+  const extraOrigins = (env.MERRYMEN_MCP_ALLOWED_ORIGINS ?? "")
+    .split(",").map((s) => originOf(s)?.origin).filter((s): s is string => !!s);
+  const allowedOrigins = new Set<string>([issuer, resourceUrl?.origin ?? ""].filter(Boolean).concat(extraOrigins));
+  const allowedHosts = new Set<string>([issuerUrl?.host, resourceUrl?.host].filter((h): h is string => !!h));
+  const staffTenants = new Set(
+    (env.MERRYMEN_MCP_STAFF_TENANTS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter((s) => ADDRESS.test(s)),
+  );
+
+  let disabledWhy: string | null = null;
+  if (!isHostedMode()) disabledWhy = "MCP is available on hosted Merrymen only";
+  else if (!env.DATABASE_URL) disabledWhy = "hosted MCP requires DATABASE_URL";
+  else if (env.MERRYMEN_MCP_ENABLED === "0") disabledWhy = "MCP is switched off (MERRYMEN_MCP_ENABLED=0)";
+  else if (!issuer) disabledWhy = "MERRYMEN_PUBLIC_ORIGIN (or MERRYMEN_OAUTH_ISSUER) must be an https origin";
+  else if (!resource) disabledWhy = "MERRYMEN_MCP_RESOURCE_URL must be an https URL";
+  else if ((env.MERRYMEN_SESSION_SECRET ?? "").length < 32) disabledWhy = "MERRYMEN_SESSION_SECRET is required for owner sign-in";
+
+  return {
+    enabled: disabledWhy === null,
+    disabledWhy,
+    issuer,
+    resource,
+    allowedOrigins,
+    allowedHosts,
+    staffTenants,
+    accessTtlSec: positive(env.MERRYMEN_MCP_ACCESS_TTL_SEC, 3600, 300, 86_400),
+    refreshTtlSec: positive(env.MERRYMEN_MCP_REFRESH_TTL_SEC, 30 * 86_400, 3600, 90 * 86_400),
+    refreshFamilyMaxSec: positive(env.MERRYMEN_MCP_REFRESH_FAMILY_MAX_SEC, 90 * 86_400, 86_400, 365 * 86_400),
+    codeTtlSec: 300,
+    requestTtlSec: 20 * 60,
+    personalTokenMaxSec: 90 * 86_400,
+  };
+}
+
+/** The path part of the resource URL, e.g. "/mcp". */
+export function resourcePath(cfg: McpConfig): string {
+  try {
+    return new URL(cfg.resource).pathname || "/";
+  } catch {
+    return "/mcp";
+  }
+}
+
+/** RFC 9728 well-known URL for the resource: /.well-known/oauth-protected-resource/<path>. */
+export function protectedResourceMetadataUrl(cfg: McpConfig): string {
+  const url = new URL(cfg.resource);
+  const path = url.pathname === "/" ? "" : url.pathname;
+  return `${url.origin}/.well-known/oauth-protected-resource${path}`;
+}

@@ -113,7 +113,7 @@ async function readStored(tenant?: `0x${string}` | null): Promise<MerrymenSettin
   if (tenant) return (await getSettingsStore().get(tenant)) ?? {};
   try {
     // BOM-strip: hand-edited or PowerShell-written files may carry a UTF-8 BOM.
-    return JSON.parse((await readFile(SETTINGS_FILE, "utf8")).replace(/^﻿/, "")) as MerrymenSettings;
+    return JSON.parse((await readFile(SETTINGS_FILE, "utf8")).replace(/^\ufeff/, "")) as MerrymenSettings;
   } catch {
     return {};
   }
@@ -246,6 +246,11 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   classMaxPositions: [0, 1_000],
   classMaxHoldSec: [60, 30 * 86_400],
   classMinDepthUsdg: [0, 10_000_000],
+  // The class exit by curve progress: the worker's clamp (settings.ts, 1-100)
+  // and the chat spec's bounds. It was missing, so a change approved from an
+  // assistant or saved from a client came back {ok:true, ignored:[…]} and
+  // the owner's exit never moved (spec-coverage.test.ts holds the two lists equal).
+  classExitAtGraduationPct: [1, 100],
 };
 const BOOL_FIELDS = [
   "paperTradingEnabled",
