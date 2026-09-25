@@ -590,9 +590,11 @@ internal fun admitName(raw: String?, symbol: String?): String? {
 /**
  * The ledger's "2026-09-24 12:00:00" (UTC, lib/ledger.ts fmtEpoch) as epoch
  * seconds. Null when it will not parse — the web's version returns 0 there,
- * which dates a row to 1970; no age is the honest answer.
+ * which dates a row to 1970; no age is the honest answer. Not [ledgerSeconds]:
+ * the chat's copy in Act.kt keeps the web's 0, because the model is handed
+ * the tape the web hands it, and one package cannot hold both under one name.
  */
-internal fun ledgerSeconds(raw: String?): Long? {
+internal fun ledgerSecondsOrNull(raw: String?): Long? {
   val s = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
   val iso = if (s.contains(' ') && !s.contains('T')) s.replace(' ', 'T') + (if (s.endsWith("Z")) "" else "Z") else s
   return try {
@@ -628,7 +630,7 @@ fun tapeRowsOf(trades: List<TradeRecord>): List<TapeRow> = trades.map { t ->
     status = status,
     symbol = symbol,
     displayName = admitName(t.displayName, symbol),
-    at = ledgerSeconds(t.createdAt),
+    at = ledgerSecondsOrNull(t.createdAt),
     paper = t.status == "paper",
     sizeUsdg = t.amountUsdg,
     realizedUsd = if (side == "sell" && status == TapeStatus.Filled && t.realizedVouched == true) realized else null,
