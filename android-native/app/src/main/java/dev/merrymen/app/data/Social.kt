@@ -2,9 +2,14 @@ package dev.merrymen.app.data
 
 import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.MerrymenApi
+import dev.merrymen.app.net.said
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * LIKES AND FOLLOWS, ONCE PER APP — not once per screen.
@@ -77,10 +82,41 @@ data class WiredState(
    * `why` sentence and nothing to tap, since signing in would not help.
    */
   val signedOut: Boolean = false,
+  /**
+   * A write is on its way, so the control shows itself disabled. For DRAWING
+   * only: the one-write-at-a-time rule itself is kept inside [Social], where a
+   * read that replaces this whole state cannot release it.
+   */
+  val busy: Boolean = false,
 ) {
   fun has(slug: String): Boolean = slug in wired
   val full: Boolean get() = wired.size >= max
+
+  /**
+   * WHETHER A FACE WEARS THE WIRE RING: only on an answer that is KNOWN. The
+   * list is kept through a lost answer — the optimistic change after a failed
+   * look-up, the last wallet's list after a 401 — and a ring drawn from it
+   * would state as a fact that your agent reads this desk while the control
+   * beside it says it could not confirm that.
+   */
+  fun rings(slug: String): Boolean = known && slug in wired
 }
+
+/**
+ * What the last wire write had to say, and WHICH DESK it was about — held by
+ * the store rather than the button, because the write outlives the page that
+ * asked for it: a refusal that lands after the reader has gone back is still
+ * said, on that desk's page, when they return.
+ */
+data class WireNote(val slug: String, val text: String)
+
+/**
+ * What POST /api/follow's `refused: "self"` means, in the reader's words. An
+ * agent ALREADY reads its own published theses — the orchestrator puts them in
+ * its peer file as `own` — so wiring it into itself would spend one of its
+ * prompt slots on a copy of something it has.
+ */
+const val SELF_WIRE = "Your agent already reads its own posts."
 
 /**
  * One fetch, one poll, one truth.
@@ -94,6 +130,26 @@ class Social(private val api: MerrymenApi) {
 
   private val _wired = MutableStateFlow(WiredState())
   val wired: StateFlow<WiredState> = _wired.asStateFlow()
+
+  private val _wireNote = MutableStateFlow<WireNote?>(null)
+  val wireNote: StateFlow<WireNote?> = _wireNote.asStateFlow()
+
+  /**
+   * ONE WIRE WRITE AT A TIME, kept here and not in [WiredState.busy]: a list
+   * read replaces the published state wholesale, and when the guard lived in
+   * it, a screen entry that refreshed mid-write released it and let a second
+   * POST go out with the first still on its way.
+   */
+  private val writing = AtomicBoolean(false)
+
+  /** Bumped as each wire write starts, so a list read can tell it overlapped one. */
+  private val writes = AtomicLong(0)
+
+  /**
+   * Bumped by [forget]. An answer that belongs to the wallet before a sign-out
+   * is never applied to the one after it.
+   */
+  private val wallet = AtomicLong(0)
 
   /**
    * When the per-caller reads last ran.
@@ -167,8 +223,28 @@ class Social(private val api: MerrymenApi) {
    * Optimistic on BOTH halves and rolled back together — a heart that fills
    * while the number stays put reads as a broken button. Returns null when it
    * was stored, or the reason it was not.
+   *
+   * THE WRITE IS SETTLED EVEN IF THE ROW IS GONE. The heart lives on a feed
+   * row, and a row scrolled out of a LazyColumn cancels the scope its tap was
+   * launched in; cancelled mid-write, the answer — a refusal, or a lost one
+   * that needs looking up — was dropped and the optimistic heart and +1 stood
+   * as though stored. So the write and whatever it takes to settle it run to
+   * the end, bounded by the client's own timeouts.
    */
-  suspend fun toggleLike(postId: String, on: Boolean): String? {
+  suspend fun toggleLike(postId: String, on: Boolean): String? = withContext(NonCancellable) {
+    val walletAtStart = wallet.get()
+    val said = likeWrite(postId, on)
+    if (wallet.get() == walletAtStart) {
+      said
+    } else {
+      // Signed out while it was on its way: whatever it wrote about the last
+      // wallet's likes is wiped again, and the new reader's are read afresh.
+      forgetLikes()
+      null
+    }
+  }
+
+  private suspend fun likeWrite(postId: String, on: Boolean): String? {
     val before = _likes.value
     _likes.value = before.copy(
       mine = if (on) before.mine + postId else before.mine - postId,
@@ -225,19 +301,59 @@ class Social(private val api: MerrymenApi) {
           r.message
         }
       }
-      is ApiResult.Unreachable -> {
-        rollBack()
-        "Couldn't reach merrymen: " + r.cause
+      // A LOST ANSWER TO A WRITE IS UNKNOWN. The like may have been stored
+      // and the answer lost on the way back, so it is looked up rather than
+      // rolled back on a guess — and never simply sent again.
+      is ApiResult.Unreachable -> when (val look = api.likes()) {
+        is ApiResult.Ok -> if (look.value.read) {
+          val stored = postId in look.value.liked
+          val s = _likes.value
+          _likes.value = s.copy(
+            mine = look.value.liked.toSet(),
+            mineRead = true,
+            // The optimistic step comes off the count only when the store
+            // says it did not happen.
+            counts = if (stored == on) s.counts else s.counts + (postId to maxOf(0, (s.counts[postId] ?: 0) + if (on) -1 else 1)),
+          )
+          if (stored == on) null else "merrymen didn't answer, and that wasn't saved. Try again."
+        } else {
+          lookupFailed(r)
+        }
+        else -> lookupFailed(r)
       }
     }
   }
 
-  /** What this owner's agent currently reads. */
+  /**
+   * The write's answer was lost AND the look-up failed: we do not know. The
+   * optimistic heart stays, the next read of the reader's likes is not
+   * throttled, and the reader is told exactly that.
+   */
+  private fun lookupFailed(lost: ApiResult.Unreachable): String {
+    lastMineAt = 0L
+    return "We couldn't confirm that was saved. " + lost.said
+  }
+
+  /**
+   * What this owner's agent currently reads.
+   *
+   * AN ANSWER THAT OVERLAPPED A WRITE IS NOT APPLIED. The GET may have been
+   * served before the POST landed or after it, and nothing in the answer says
+   * which; applied, it dropped the optimistic ring mid-write and could land
+   * after the write's own answer with the list from before it. The write's
+   * answer carries the whole stored list, so it — or, when that was lost, its
+   * look-up — is what settles the state.
+   */
   suspend fun refreshWired(force: Boolean = false) {
     val now = System.currentTimeMillis()
     if (!force && now - lastWiredAt < MIN_GAP_MS) return
     lastWiredAt = now
-    when (val r = api.following()) {
+    val quietAtStart = !writing.get()
+    val writesAtStart = writes.get()
+    val walletAtStart = wallet.get()
+    val r = api.following()
+    if (!quietAtStart || writing.get() || writes.get() != writesAtStart || wallet.get() != walletAtStart) return
+    when (r) {
       is ApiResult.Ok -> _wired.value = WiredState(r.value.wired, r.value.max, known = true)
       // `known` STAYS FALSE for every one of these, so nothing claims the
       // viewer follows nobody. It claims not to know, which is the truth.
@@ -250,54 +366,109 @@ class Social(private val api: MerrymenApi) {
           else -> r.message
         },
       )
+      // `said`, not "Couldn't reach" by hand: an answer this app could not
+      // read is not an unreachable server.
       is ApiResult.Unreachable -> _wired.value = _wired.value.copy(
         known = false,
-        why = "Couldn't reach merrymen: " + r.cause,
+        why = r.said,
       )
     }
   }
 
   /**
-   * Wire a desk in, or cut it loose. Returns null when it was stored.
+   * Wire a desk in, or cut it loose. Returns null when it was stored, or the
+   * sentence saying why not.
    *
-   * WHERE THIS PARTS FROM THE WEB, deliberately. `WiredProvider` keeps the
-   * optimistic ring on any failure, reasoning that "the next load corrects it
-   * either way" — true in a tab that reloads. A phone screen can sit on the
-   * back stack for an hour, so a REFUSAL (the server answered, and said no)
-   * rolls back; an UNREACHABLE (we never got an answer) keeps the optimistic
-   * state, because we do not know that it failed. Both say which.
+   * THE SERVER'S ANSWER IS THE STATE. A 200 carries the list it actually
+   * stored, so a refusal with a reason — the cap, or wiring your own agent
+   * into itself — snaps the ring back to that list AND says why. The self
+   * refusal used to fall through as a success: the ring flicked on, snapped
+   * off, and nothing on screen said a word.
+   *
+   * A LOST ANSWER IS UNKNOWN, NOT A FAILURE. The follow may have been stored
+   * and the answer lost on the way back, so the list is read again rather than
+   * the write being retried or the ring left where the optimism put it. If that
+   * read fails too, the control says it does not know (`known = false`) until
+   * the next read settles it.
+   *
+   * ONE WRITE AT A TIME, as the web's toggle is: a second tap while one is on
+   * its way is ignored, so two answers can never land out of order.
+   *
+   * THE WRITE OUTLIVES THE PAGE THAT ASKED FOR IT. The tap is launched in the
+   * wire control's own scope, which is cancelled when the reader leaves the
+   * page — or when the control is withdrawn because /own just said this is
+   * their agent. Cancelled mid-write, the server's answer (a refusal
+   * included) was thrown away, the lost-answer look-up never ran, and the
+   * busy flag was never lowered: the optimistic ring stood on that face
+   * everywhere and every wire control in the app ignored taps until a list
+   * read happened to land. So the write, its look-up and the lowering of the
+   * flag run to the end whatever happens to the caller, and what it had to
+   * say is kept in [wireNote] for that desk's page.
    */
-  suspend fun toggleWire(slug: String, on: Boolean): String? {
-    val before = _wired.value
-    _wired.value = before.copy(
-      wired = if (on) (listOf(slug) + before.wired).distinct() else before.wired.filter { it != slug },
-    )
-    return when (val r = api.follow(slug, on)) {
-      // Reconciled with what the server actually STORED — it is the authority
-      // on the cap, so a refused write snaps back rather than leaving a ring
-      // the agent will not honour.
-      is ApiResult.Ok -> {
-        _wired.value = WiredState(r.value.wired, r.value.max, known = true)
-        if (r.value.refused == "at-capacity") {
-          "Your agent already reads ${r.value.max} desks, which is as many as fit in one prompt. " +
-            "Unwire one to make room."
-        } else {
-          null
+  suspend fun toggleWire(slug: String, on: Boolean): String? = withContext(NonCancellable) {
+    if (!writing.compareAndSet(false, true)) return@withContext null
+    writes.incrementAndGet()
+    val walletAtStart = wallet.get()
+    try {
+      val before = _wired.value
+      _wireNote.value = null
+      _wired.value = before.copy(
+        busy = true,
+        wired = if (on) (listOf(slug) + before.wired).distinct() else before.wired.filter { it != slug },
+      )
+      val (after, said) = when (val r = api.follow(slug, on)) {
+        is ApiResult.Ok -> WiredState(r.value.wired, r.value.max, known = true) to when (r.value.refused) {
+          null -> null
+          "at-capacity" ->
+            "Your agent already reads ${r.value.max} desks, which is as many as fit in one prompt. " +
+              "Unwire one to make room."
+          "self" -> SELF_WIRE
+          // A reason this build does not know is still a refusal: the list
+          // above is what was stored, and the reader is told nothing changed.
+          else -> "merrymen didn't make that change, so nothing changed."
         }
+        is ApiResult.Refused ->
+          before to if (r.status == 401) "Sign in to wire other desks into your agent." else r.message
+        is ApiResult.Unreachable -> lookUpWire(slug, on, r)
       }
-      is ApiResult.Refused -> {
-        _wired.value = before
-        if (r.status == 401) "Sign in to wire other desks into your agent." else r.message
-      }
-      is ApiResult.Unreachable -> "Couldn't reach merrymen: " + r.cause
+      // Signed out (or into another wallet) while this was on its way: the
+      // answer describes the last wallet's agent, and is nobody's business now.
+      if (wallet.get() != walletAtStart) return@withContext null
+      _wired.value = after
+      _wireNote.value = said?.let { WireNote(slug, it) }
+      said
+    } finally {
+      writing.set(false)
+      if (wallet.get() == walletAtStart) _wired.value = _wired.value.copy(busy = false)
     }
   }
 
+  /** After a lost answer: read what is stored, and say which way it went. */
+  private suspend fun lookUpWire(slug: String, on: Boolean, lost: ApiResult.Unreachable): Pair<WiredState, String?> =
+    when (val look = api.following()) {
+      is ApiResult.Ok -> WiredState(look.value.wired, look.value.max, known = true) to
+        if ((slug in look.value.wired) == on) null else "merrymen didn't answer, and that change wasn't saved. Try again."
+      else -> {
+        lastWiredAt = 0L
+        // The list stays where the optimism put it, but NOT KNOWN — so it draws
+        // no ring (see WiredState.rings) and the control says it could not
+        // confirm, until the next read settles it.
+        _wired.value.copy(known = false, signedOut = false, why = "We couldn't confirm whether that change was saved. " + lost.said) to null
+      }
+    }
+
   /** Sign-out clears both, because both are per-wallet facts. */
   fun forget() {
-    _likes.value = LikesState(counts = _likes.value.counts, read = _likes.value.read)
+    wallet.incrementAndGet()
+    forgetLikes()
     _wired.value = WiredState()
-    lastMineAt = 0L
+    _wireNote.value = null
     lastWiredAt = 0L
+  }
+
+  /** The per-wallet half of the likes; the counts are everybody's and stay. */
+  private fun forgetLikes() {
+    _likes.value = LikesState(counts = _likes.value.counts, read = _likes.value.read)
+    lastMineAt = 0L
   }
 }
