@@ -2,7 +2,8 @@
  * The /mcp HTTP endpoint (Streamable HTTP, stateless).
  *
  * Order of checks, cheapest first, each with its own status:
- *   off (404) → Host (421) → Origin (403) → bearer token (401 + discovery
+ *   off (404) → Host (421) → Origin (403) → a person opening the address in a
+ *   browser (307 to the connect help page) → bearer token (401 + discovery
  *   challenge) → per-connection and per-owner request rate (429) → process
  *   concurrency (503) → the SDK handler, which serves both the 2026-07-28
  *   stateless protocol and 2025-era clients through its stateless fallback.
@@ -15,6 +16,7 @@
 import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
 import { mcpConfig, type McpConfig } from "./config";
 import { mcpDb, type McpDb } from "./db";
+import { connectHelpUrl, isBrowserNavigation } from "./landing";
 import { bearerChallenge, jsonResponse } from "./oauth/metadata";
 import { verifyAccessToken, type Principal } from "./oauth/server";
 import { Gate, count, logEvent, pseudonym, rateHit, traceId } from "./observe";
@@ -109,9 +111,19 @@ function releasing(body: ReadableStream<Uint8Array>, release: () => void): Reada
   });
 }
 
+/**
+ * What an assistant shows (and a person reads) when no token came with the
+ * request. Signing in to the website does not help here, which the old text
+ * implied: the assistant has to be given the server first, and it opens the
+ * Merrymen sign-in itself.
+ */
+function noTokenHelp(cfg: McpConfig): string {
+  return `Add this server to your assistant as a connector, then sign in to Merrymen when it asks. Help: ${connectHelpUrl(cfg.issuer)}`;
+}
+
 function unauthorized(cfg: McpConfig, presented: boolean, trace: string): Response {
   return jsonResponse(
-    { error: "unauthorized", error_description: presented ? "The access token is invalid, expired or revoked." : "Sign in to Merrymen to use this server.", trace_id: trace },
+    { error: "unauthorized", error_description: presented ? "The access token is invalid, expired or revoked." : noTokenHelp(cfg), trace_id: trace },
     401,
     { "WWW-Authenticate": bearerChallenge(cfg, presented ? { error: "invalid_token" } : {}), "X-Trace-Id": trace },
   );
@@ -131,6 +143,14 @@ export async function handleMcpRequest(request: Request, deps: EndpointDeps = {}
 
 /** Everything after the Host and Origin checks; the caller adds CORS to whatever this returns. */
 async function answer(request: Request, deps: EndpointDeps, cfg: McpConfig, trace: string): Promise<Response> {
+  // An owner who pasted the server address into a browser gets the page that
+  // explains it, not a JSON 401. Only a page load with no Authorization and
+  // no MCP-Protocol-Version header qualifies (landing.ts), so every client
+  // request still meets the bearer check below, and Host and Origin were
+  // already checked for everyone.
+  if (isBrowserNavigation(request.method, request.headers)) {
+    return new Response(null, { status: 307, headers: { Location: connectHelpUrl(cfg.issuer), "Cache-Control": "no-store", "X-Trace-Id": trace } });
+  }
   const token = bearerOf(request);
   if (token === null) return unauthorized(cfg, false, trace);
 

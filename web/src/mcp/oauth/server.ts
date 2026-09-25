@@ -32,6 +32,13 @@ export interface OAuthDeps {
   agents: AgentDirectory;
   fetcher?: CimdFetcher;
   audit?: (event: AuditEvent) => void | Promise<void>;
+  /**
+   * The owner's own name for their agent, shown on the consent screen only.
+   * Optional and best effort: describeRequest asks it only for the signed-in
+   * owner, and a missing dependency, a failed read or an empty name all mean
+   * the page shows no name.
+   */
+  agentName?: (tenant: Tenant) => Promise<string | null>;
 }
 
 export interface AuditEvent {
@@ -178,12 +185,28 @@ export interface ConsentView {
     local: boolean;
   };
   /** The choices the owner makes. `offline_access` is never one of them: see OFFLINE_ACCESS. */
-  scopes: Array<Pick<ScopeInfo, "id" | "title" | "detail" | "level" | "needsAgent" | "defaultOn">>;
-  agents: Array<{ slug: string; account: string | null }>;
+  scopes: Array<Pick<ScopeInfo, "id" | "title" | "phrase" | "detail" | "level" | "needsAgent" | "defaultOn">>;
+  /**
+   * `name` is the owner's name for the agent, or null. The name is stored per
+   * owner, not per agent, so it is only given when the owner has exactly one
+   * agent (always, today); with several it could label the wrong one.
+   */
+  agents: Array<{ slug: string; account: string | null; name: string | null }>;
   signedIn: boolean;
   expiresAt: number;
   /** A connection lasts at most this many days (the refresh-token family limit) before the owner approves again. */
   maxDays: number;
+  /**
+   * What the owner's ACTIVE connection with this same app already holds, so a
+   * reconnect can start from it. Starting from the defaults instead would
+   * silently drop a sensitive permission the owner ticked before, because
+   * approving overwrites that connection. Cut down to the scopes this request
+   * offers and the agents the owner still has; `partial` is true when the
+   * connection holds a permission this request does not offer (approving
+   * removes it). Null when signed out or when there is no active connection:
+   * an app the owner disconnected starts fresh from the defaults.
+   */
+  previous: { scopes: string[]; agentSlugs: string[]; since: number; partial: boolean } | null;
 }
 
 /**
@@ -214,6 +237,51 @@ function offeredScopes(requested: string[], staff: boolean): string[] {
   });
 }
 
+/**
+ * The owner's name for their agent, best effort. It is decoration on the
+ * consent screen, so nothing about it may fail the page: no dependency, a
+ * throw or an empty name all come back as null.
+ */
+async function agentNameOf(deps: OAuthDeps, tenant: Tenant): Promise<string | null> {
+  if (!deps.agentName) return null;
+  try {
+    const name = await deps.agentName(tenant.toLowerCase() as Tenant);
+    return typeof name === "string" && name.trim() ? name.trim().slice(0, 64) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The owner's active connection with this client, as a starting point for
+ * the consent screen (see ConsentView.previous). The client_id is the parked
+ * request's and the tenant the owner's own sign-in, never caller input. What
+ * the connection holds is read the way a request would still grant it (known
+ * scopes; the staff scope only for staff), so a scope that would be dropped
+ * anyway never counts as one this request takes away.
+ */
+async function previousGrant(d: McpDb, tenant: Tenant, clientId: string, staff: boolean, offered: readonly string[], owned: readonly string[]): Promise<ConsentView["previous"]> {
+  // At most one row: the mcp_connections_one_active unique index.
+  const row = await d.db.prepare(`SELECT scopes, agent_slugs, created_at FROM mcp_connections
+    WHERE tenant = ? AND client_id = ? AND kind = 'oauth' AND status = 'active'`)
+    .get(tenant.toLowerCase(), clientId) as { scopes: string; agent_slugs: string; created_at: number } | undefined;
+  if (!row) return null;
+  const held = offeredScopes(row.scopes.split(" ").filter(Boolean), staff).filter((s) => s !== OFFLINE_ACCESS);
+  let slugs: string[] = [];
+  try {
+    const parsed = JSON.parse(row.agent_slugs);
+    if (Array.isArray(parsed)) slugs = parsed.filter((s): s is string => typeof s === "string");
+  } catch {
+    slugs = [];
+  }
+  return {
+    scopes: offered.filter((s) => held.includes(s)),
+    agentSlugs: owned.filter((s) => slugs.includes(s)),
+    since: row.created_at,
+    partial: held.some((s) => !offered.includes(s)),
+  };
+}
+
 export async function describeRequest(deps: OAuthDeps, requestId: unknown, tenant: Tenant | null): Promise<ConsentView> {
   const now = deps.now();
   const row = await pendingRequest(deps.d, requestId, now);
@@ -223,9 +291,12 @@ export async function describeRequest(deps: OAuthDeps, requestId: unknown, tenan
   const staff = !!tenant && deps.cfg.staffTenants.has(tenant.toLowerCase());
   const scopes = offeredScopes(row.scopes.split(" ").filter(Boolean), staff).filter((id) => id !== OFFLINE_ACCESS).map((id) => {
     const i = scopeInfo(id)!;
-    return { id: i.id, title: i.title, detail: i.detail, level: i.level, needsAgent: i.needsAgent, defaultOn: i.defaultOn };
+    return { id: i.id, title: i.title, phrase: i.phrase, detail: i.detail, level: i.level, needsAgent: i.needsAgent, defaultOn: i.defaultOn };
   });
-  const agents = tenant ? (await deps.agents.agentsFor(tenant)).map((a) => ({ slug: a.slug, account: a.account })) : [];
+  const owned = tenant ? await deps.agents.agentsFor(tenant) : [];
+  const name = tenant && owned.length === 1 ? await agentNameOf(deps, tenant) : null;
+  const agents = owned.map((a) => ({ slug: a.slug, account: a.account, name }));
+  const previous = tenant ? await previousGrant(deps.d, tenant, row.client_id, staff, scopes.map((s) => s.id), owned.map((a) => a.slug)) : null;
   return {
     client: {
       name: client.clientName,
@@ -239,6 +310,7 @@ export async function describeRequest(deps: OAuthDeps, requestId: unknown, tenan
     signedIn: !!tenant,
     expiresAt: row.expires_at,
     maxDays: Math.max(1, Math.floor(deps.cfg.refreshFamilyMaxSec / 86_400)),
+    previous,
   };
 }
 
@@ -269,9 +341,11 @@ export async function decideRequest(deps: OAuthDeps, requestId: unknown, tenant:
       return { location: back({ error: "access_denied", error_description: "the owner declined the connection" }), connectionId: null };
     }
     const requested = offeredScopes(row.scopes.split(" ").filter(Boolean), staff);
-    // No explicit choice means what the consent page starts with ticked, never
-    // every requested scope: clients ask for all of them (see bearerChallenge),
-    // and a sensitive scope is granted only when the owner ticks it.
+    // No explicit choice means what the consent page starts a new connection
+    // with ticked, never every requested scope: clients ask for all of them
+    // (see bearerChallenge), and a sensitive scope is granted only when the
+    // owner ticks it (the page may start a reconnect from what the current
+    // connection holds, but it always sends that choice explicitly).
     const chosen = Array.isArray(decision.scopes)
       ? decision.scopes.filter((s): s is string => typeof s === "string")
       : requested.filter((s) => scopeInfo(s)?.defaultOn === true);

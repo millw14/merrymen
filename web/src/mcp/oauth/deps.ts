@@ -5,6 +5,7 @@ import { mcpConfig } from "../config";
 import { mcpDb } from "../db";
 import { agentDirectory } from "../agents";
 import { rateHit, writeAudit } from "../observe";
+import { settingsReader } from "@/lib/services/settings-view";
 import type { OAuthDeps } from "./server";
 import { jsonResponse } from "./metadata";
 
@@ -16,6 +17,10 @@ export async function oauthDeps(): Promise<OAuthDeps> {
     now: () => Math.floor(Date.now() / 1000),
     agents: agentDirectory(),
     audit: (e) => writeAudit(d, { action: e.action, outcome: e.outcome, tenant: e.tenant, connectionId: e.connectionId, clientId: e.clientId, detail: e.detail }),
+    // The owner's saved name, as list_agents falls back to it (one agent per
+    // owner today). Read through the settings allowlist projection, so nothing
+    // else in the sealed settings blob is touched.
+    agentName: async (tenant) => (await settingsReader().settingsFor(tenant))?.agentName ?? null,
   };
 }
 

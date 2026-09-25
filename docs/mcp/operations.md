@@ -111,6 +111,38 @@ How it is set up (repeat these steps for another hostname):
    spec-following clients check against the address they were given: connect
    them to `https://mcp.merrymen.dev/mcp`, not the app host.
 
+### What the MCP host does for a browser, and for the bare domain
+
+The MCP host serves the whole web app, so without a rule a browser there got
+the terminal, signed out (the sign-in cookie is on the app host), and a client
+given `https://mcp.merrymen.dev` got HTML. `web/src/middleware.ts` (logic in
+`web/src/mcp/landing.ts`) now answers, on the MCP host only:
+
+- **A page load in a browser** (GET or HEAD with `Sec-Fetch-Dest: document`,
+  or no Sec-Fetch headers and `Accept: text/html`; no `Authorization`, no
+  `MCP-Protocol-Version`): `307` to the app host. `/` goes to
+  `https://app.merrymen.dev/connect/mcp`, any other page to the same path and
+  query there.
+- **Anything else at `/`** (an MCP client given the bare domain): `308` to
+  `https://mcp.merrymen.dev/mcp`, keeping the method and body. Lenient clients
+  then connect. Spec-strict ones still refuse, because the protected-resource
+  metadata names `…/mcp`, not the address they were given: give them the full
+  URL.
+- **Never redirected:** `/mcp`, `/.well-known/*`, `/oauth/*`, `/api/*`,
+  `/_next/*` and any path with a file extension (icons, `sw.js`, the manifest).
+
+`/mcp` opened in a browser, on either host, answers `307` to the connect page
+instead of the JSON `401`; clients still get `401` + `WWW-Authenticate`. The
+app host, an install whose MCP URL is on the app host, and self-hosted
+installs are untouched. Targets come only from `MERRYMEN_PUBLIC_ORIGIN` (or
+`MERRYMEN_OAUTH_ISSUER`) and `MERRYMEN_MCP_RESOURCE_URL`, which the middleware
+reads when it loads. To check after a deploy:
+
+```bash
+curl -si https://mcp.merrymen.dev/ -H 'sec-fetch-dest: document' | grep -i '^location'   # https://app.merrymen.dev/connect/mcp (307)
+curl -si -X POST https://mcp.merrymen.dev/ -d '{}' | grep -i '^location'                 # https://mcp.merrymen.dev/mcp (308)
+```
+
 ## Observability
 
 - **Logs**: one JSON line per event on stdout, prefixed `{"mcp":…}`: `tool`,
