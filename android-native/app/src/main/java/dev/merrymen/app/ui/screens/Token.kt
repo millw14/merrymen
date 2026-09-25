@@ -1627,7 +1627,7 @@ private fun MarketActivity(coin: DiscoveryCoin?, read: ActivityRead, onOpen: (St
         }
         is TradesView.Rows -> {
           Meta(snapshotLine(v.observedAtMs, v.older))
-          ActivityTableRow(listOf("Side", "Value", "Token price", "Time"), head = true)
+          ActivityTableRow(listOf("Side", "Value", "Token price", "Time"), head = true, weights = TRADE_COLUMNS)
           v.rows.forEach { r -> TradeLine(r, onOpen) }
         }
       }
@@ -1680,9 +1680,26 @@ private fun ActivityFact(label: String, value: String) {
   }
 }
 
+/**
+ * THE TRADES TABLE'S COLUMN WIDTHS — Side, Value, Token price, Time — shared by
+ * its heading and every row so they line up.
+ *
+ * The time cell was an equal quarter, and a MEDIUM time with the ↗ after it
+ * ("9:10:49 AM ↗") does not fit a quarter of a phone: the arrow wrapped onto a
+ * second line for some times and not others, so the rows came out at two
+ * heights. "Buy" and "Sell" need the least room, so the side gives up what
+ * the time takes.
+ */
+private val TRADE_COLUMNS = listOf(0.8f, 1f, 1f, 1.5f)
+
 /** A table row: the first cell left, the rest right, tabular figures, a hairline above. */
 @Composable
-private fun ActivityTableRow(cells: List<String>, head: Boolean = false, modifier: Modifier = Modifier) {
+private fun ActivityTableRow(
+  cells: List<String>,
+  head: Boolean = false,
+  modifier: Modifier = Modifier,
+  weights: List<Float>? = null,
+) {
   Row(
     modifier
       .fillMaxWidth()
@@ -1704,7 +1721,7 @@ private fun ActivityTableRow(cells: List<String>, head: Boolean = false, modifie
           else -> MerryColors.tx
         },
         textAlign = if (i == 0) TextAlign.Start else TextAlign.End,
-        modifier = Modifier.weight(if (i == 0) 1.3f else 1f),
+        modifier = Modifier.weight(weights?.getOrNull(i) ?: if (i == 0) 1.3f else 1f),
       )
     }
   }
@@ -1734,11 +1751,23 @@ private fun TradeLine(r: PoolTradeRow, onOpen: (String) -> Unit) {
       text = if (r.buy) "Buy" else "Sell",
       style = cell,
       color = if (r.buy) MerryColors.up else MerryColors.down,
-      modifier = Modifier.weight(1.3f),
+      modifier = Modifier.weight(TRADE_COLUMNS[0]),
     )
-    Text(fmtMoney(r.usd), style = cell, color = if (r.usd == null) MerryColors.faint else MerryColors.tx, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
-    Text(fmtPrice(r.priceUsd), style = cell, color = if (r.priceUsd == null) MerryColors.faint else MerryColors.tx, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
-    Text(if (url != null) "$time ↗" else time, style = cell, color = MerryColors.tx2, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+    Text(fmtMoney(r.usd), style = cell, color = if (r.usd == null) MerryColors.faint else MerryColors.tx, textAlign = TextAlign.End, modifier = Modifier.weight(TRADE_COLUMNS[1]))
+    Text(fmtPrice(r.priceUsd), style = cell, color = if (r.priceUsd == null) MerryColors.faint else MerryColors.tx, textAlign = TextAlign.End, modifier = Modifier.weight(TRADE_COLUMNS[2]))
+    // ONE LINE, ALWAYS: the no-break space keeps the ↗ with the time it marks,
+    // and a size too big for the cell (a large font setting) is cut with an
+    // ellipsis rather than growing the row to a second line.
+    Text(
+      text = if (url != null) "$time\u00A0↗" else time,
+      style = cell,
+      color = MerryColors.tx2,
+      textAlign = TextAlign.End,
+      maxLines = 1,
+      softWrap = false,
+      overflow = TextOverflow.Ellipsis,
+      modifier = Modifier.weight(TRADE_COLUMNS[3]),
+    )
   }
 }
 
