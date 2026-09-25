@@ -146,6 +146,14 @@ fun firstPriceAgeSec(first: Bar, size: Long, nowSec: Long, poolAgeSec: Long?): L
  * is the venue's own (Yahoo's `range` for 1D/5D/1M/ALL, the VENUE_CUT tail for
  * 1H/4H), which is what the button names.
  *
+ * A GRADUATED coin traded on its bonding curve before its DEX pool existed,
+ * and its bars are the pool's, so "first trade" would date the coin by its
+ * pool: a coin a week old whose pool opened 8h ago read "since first trade 8h
+ * ago". There the words are "since this pool opened", which is what the
+ * series and the pool's age both measure. ALL already says only "since <age>
+ * ago", which is true of either, and a pool older than the bars returned
+ * would make "since this pool opened" false there.
+ *
  * A stale read keeps its figure but says it is as of the last read. Null when
  * there is no change to state: no bars, or a base price that is not positive.
  */
@@ -158,8 +166,10 @@ fun heroChange(
   stale: Boolean,
   nowSec: Long,
   poolAgeSec: Long? = null,
+  graduated: Boolean = false,
 ): HeroChange? {
   val first = drawn.firstOrNull() ?: return null
+  val since = if (graduated) "since this pool opened" else "since first trade"
   val last = drawn.last()
   var base = first.open
   val size = if (interval > 0) interval else barInterval(all)
@@ -180,9 +190,12 @@ fun heroChange(
       }
       when {
         !covered ->
-          firstPriceAgeSec(first, size, nowSec, poolAgeSec)?.let { "since first trade ${ageWords(it)} ago" }
-            ?: "since first trade"
+          firstPriceAgeSec(first, size, nowSec, poolAgeSec)?.let { "$since ${ageWords(it)} ago" } ?: since
         reachesNow(last, size, nowSec) -> window
+        // A STALE series is our last good read, kept while the index refuses:
+        // its newest bar can be old because the READ stopped, not the trading,
+        // so it is not called the last trade (newestForming draws the same line).
+        stale -> "over the ${SPAN_WORDS[window]} to the newest bar read, ${ageWords(nowSec - last.time - size)} ago"
         else -> "over the ${SPAN_WORDS[window]} before the last trade, ${ageWords(nowSec - last.time - size)} ago"
       }
     }

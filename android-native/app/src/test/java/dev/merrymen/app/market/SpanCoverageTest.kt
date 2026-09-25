@@ -57,6 +57,26 @@ class SpanCoverageTest {
   }
 
   /**
+   * THE CAPTURED COIN IS GRADUATED: it traded on its curve before this pool
+   * existed, so its 27 hours are the pool's, and "first trade" would be false
+   * of the coin. It says what the series measures.
+   */
+  @Test fun aGraduatedCoinDatesItsPoolNotItsFirstTrade() {
+    val doc = relaxed.decodeFromString(TokenDetail.serializer(), Fixtures.text("probe-token-coin.json"))
+    assertTrue("the capture is a graduated coin", doc.market.coin!!.graduated)
+    val all = completeBars(doc.candles)
+    val now = all.last().time + (doc.candles!!.lastBarAgeSec ?: 0)
+    val poolAge = (doc.market.coin!!.ageDays!! * 86_400).toLong()
+    val week = heroChange(trimToSpan(all, SPAN_SECONDS["5D"]), all, "5D", true, doc.candles!!.interval, false, now, poolAge, graduated = true)
+    assertEquals("since this pool opened 27h ago", week!!.label)
+    // ALL claims no start, so it stays "since 27h ago", true of the coin and the pool.
+    val ever = heroChange(all, all, "ALL", true, doc.candles!!.interval, false, now, poolAge, graduated = true)
+    assertEquals("since 27h ago", ever!!.label)
+    // Covered spans are unchanged: 1D is a day of this pool, and says 1D.
+    assertEquals("1D", heroChange(trimToSpan(all, SPAN_SECONDS["1D"]), all, "1D", true, doc.candles!!.interval, false, now, poolAge, graduated = true)!!.label)
+  }
+
+  /**
    * A POOL THAT WENT QUIET. The span is trimmed back from the newest bar, as
    * the web trims it, so the chart of a pool last traded 17.8 hours ago is
    * that pool's last hour of trading — the VPLT probe of 2026-09-25, whose
@@ -88,9 +108,10 @@ class SpanCoverageTest {
     val hours = hourly(start, 30)
     val day = heroChange(trimToSpan(hours, SPAN_SECONDS["1D"]), hours, "1D", true, hour, false, hours.last().time + 5 * hour)!!
     assertEquals("over the day before the last trade, 4h ago", day.label)
-    // Stale and quiet: both are said.
+    // Stale and old: both are said, and the old bar is not called the last
+    // trade — the read stopped, and the pool may have traded since.
     val staleQuiet = heroChange(trimToSpan(hours, SPAN_SECONDS["1D"]), hours, "1D", true, hour, true, hours.last().time + 5 * hour)!!
-    assertEquals("over the day before the last trade, 4h ago · as of the last read", staleQuiet.label)
+    assertEquals("over the day to the newest bar read, 4h ago · as of the last read", staleQuiet.label)
   }
 
   @Test fun theCaptionSaysWhenAQuietChartsNewestBarOpened() {

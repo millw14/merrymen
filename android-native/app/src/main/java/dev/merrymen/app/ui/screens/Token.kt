@@ -375,6 +375,8 @@ fun TokenDetailScreen(nav: NavHostController, address: String) {
               poolAgeSec = t.market.coin?.ageDays
                 ?.takeIf { it.isFinite() && it >= 0.0 }
                 ?.let { (it * 86_400).toLong() },
+              // A graduated coin's bars and age are its DEX pool's, not the coin's.
+              graduated = t.market.coin?.graduated == true,
             ),
           )
 
