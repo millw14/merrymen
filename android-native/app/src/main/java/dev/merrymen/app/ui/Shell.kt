@@ -107,9 +107,19 @@ object Routes {
 
   /** A delegated signature ceremony, by web path. */
   const val WEB = "web?path={path}&title={title}"
-  fun web(path: String, title: String) =
-    "web?path=" + java.net.URLEncoder.encode(path, "UTF-8") +
-      "&title=" + java.net.URLEncoder.encode(title, "UTF-8")
+  fun web(path: String, title: String) = "web?path=" + arg(path) + "&title=" + arg(title)
+
+  /**
+   * ONE ROUTE ARGUMENT, ENCODED THE WAY NAVIGATION DECODES IT.
+   *
+   * URLEncoder is a FORM encoder: it writes a space as '+'. Navigation reads a
+   * query argument back with Uri.decode, which only undoes %XX and leaves '+'
+   * alone — so every web screen's title came out as "Trading+limits" and
+   * "Wallet+&+permissions". A '+' the caller actually wrote is already "%2B"
+   * by this point, so every '+' left is a space and "%20" says so in the form
+   * both ends read.
+   */
+  internal fun arg(value: String): String = java.net.URLEncoder.encode(value, "UTF-8").replace("+", "%20")
 }
 
 private data class Tab(val route: String, val label: String)
