@@ -20,7 +20,7 @@ export const runtime = "nodejs";
 export function GET(): Response {
   const cfg = mcpConfig();
   const body = cfg.enabled
-    ? llmsTxt({ server: cfg.resource, app: cfg.issuer })
+    ? llmsTxt({ server: cfg.resource, app: cfg.issuer, directory: cfg.directoryResource })
     : [
       "# Merrymen",
       "",

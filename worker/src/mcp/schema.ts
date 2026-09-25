@@ -60,11 +60,12 @@ CREATE TABLE IF NOT EXISTS mcp_connections (
   updated_at INTEGER NOT NULL,
   last_used_at INTEGER,
   revoked_at INTEGER,
-  revoked_why TEXT
+  revoked_why TEXT,
+  resource TEXT
 );
 CREATE INDEX IF NOT EXISTS mcp_connections_tenant ON mcp_connections (tenant, status);
 CREATE UNIQUE INDEX IF NOT EXISTS mcp_connections_one_active
-  ON mcp_connections (tenant, client_id) WHERE status = 'active' AND kind = 'oauth';
+  ON mcp_connections (tenant, client_id, COALESCE(resource, '')) WHERE status = 'active' AND kind = 'oauth';
 CREATE TABLE IF NOT EXISTS mcp_codes (
   code_hash TEXT PRIMARY KEY,
   connection_id TEXT NOT NULL,
@@ -274,18 +275,67 @@ export const MCP_SCHEMA_OBJECTS: readonly string[] = [...MCP_SCHEMA.matchAll(/CR
 export const SCHEMA_LOCK_TIMEOUT_MS = 5_000;
 
 /**
- * How many of MCP_SCHEMA_OBJECTS are missing. A catalog lookup: to_regclass
- * resolves a name through the search_path (as the unqualified CREATE did)
- * without locking the relation, so this costs no lock on any MCP table.
+ * THE CONNECTION'S RESOURCE (2026-09, the directory profile). An owner may
+ * connect the same app (claude.ai uses one client_id for a custom connector
+ * and a directory connector) once per MCP resource, so the one-active rule is
+ * per (tenant, client_id, resource). NULL means the canonical resource: every
+ * row written before this column existed keeps meaning exactly what it did,
+ * and the index folds NULL to '' so two canonical rows still collide (a plain
+ * unique index treats NULLs as distinct).
+ *
+ * `CREATE TABLE IF NOT EXISTS` adds no column to a table that already exists,
+ * and `CREATE INDEX IF NOT EXISTS` keeps an index whose definition changed,
+ * so an existing database needs both steps below, run BEFORE MCP_SCHEMA in the
+ * same transaction: the column (the index expression names it), then the old
+ * index dropped so MCP_SCHEMA creates the new one. The index keeps its name on
+ * purpose: code from before this change checks for that name at boot, and a
+ * new name would make it recreate the old, stricter index, which fails once
+ * an owner holds one connection per resource.
  */
-async function missingObjects(db: Db, dialect: "postgres" | "sqlite"): Promise<number> {
-  const names = MCP_SCHEMA_OBJECTS;
-  const row = dialect === "postgres"
-    ? await db.prepare(`SELECT COUNT(*) AS n FROM (VALUES ${names.map(() => "(?::text)").join(", ")}) AS v(name) WHERE to_regclass(v.name) IS NULL`).get(...names)
-    : await db.prepare(`SELECT ? - COUNT(*) AS n FROM sqlite_master WHERE type IN ('table', 'index') AND name IN (${names.map(() => "?").join(", ")})`).get(names.length, ...names);
-  const n = Number((row as { n?: unknown } | undefined)?.n);
-  return Number.isFinite(n) ? n : names.length;
+export const CONNECTION_RESOURCE_DDL = "ALTER TABLE mcp_connections ADD COLUMN resource TEXT";
+export const ONE_ACTIVE_INDEX = "mcp_connections_one_active";
+
+interface SchemaState {
+  /** How many of MCP_SCHEMA_OBJECTS are missing. */
+  missing: number;
+  /** mcp_connections exists without the resource column. */
+  addColumn: boolean;
+  /** The one-active index exists with its old (tenant, client_id) definition. */
+  rebuildIndex: boolean;
 }
+
+const yes = (v: unknown) => v === true || Number(v) === 1;
+
+/**
+ * One catalog lookup for everything a boot might have to do: which objects
+ * are missing, and whether the connection-resource migration is pending (an
+ * ALTER is invisible to the object list). to_regclass resolves a name through
+ * the search_path (as the unqualified CREATE did) without locking the
+ * relation, and pg_attribute / pg_get_indexdef read the catalog, so this costs
+ * no lock on any MCP table.
+ */
+async function inspectSchema(db: Db, dialect: "postgres" | "sqlite"): Promise<SchemaState> {
+  const names = MCP_SCHEMA_OBJECTS;
+  const row = (dialect === "postgres"
+    ? await db.prepare(`SELECT (SELECT COUNT(*) FROM (VALUES ${names.map(() => "(?::text)").join(", ")}) AS v(name) WHERE to_regclass(v.name) IS NULL) AS n,
+        to_regclass('mcp_connections') IS NOT NULL AS has_table,
+        EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('mcp_connections') AND attname = 'resource' AND NOT attisdropped) AS has_column,
+        pg_get_indexdef(to_regclass('${ONE_ACTIVE_INDEX}')) AS index_def`).get(...names)
+    : await db.prepare(`SELECT ? - (SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table', 'index') AND name IN (${names.map(() => "?").join(", ")})) AS n,
+        EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mcp_connections') AS has_table,
+        EXISTS (SELECT 1 FROM pragma_table_info('mcp_connections') WHERE name = 'resource') AS has_column,
+        (SELECT sql FROM sqlite_master WHERE type = 'index' AND name = '${ONE_ACTIVE_INDEX}') AS index_def`).get(names.length, ...names)) as
+    { n?: unknown; has_table?: unknown; has_column?: unknown; index_def?: unknown } | undefined;
+  const n = Number(row?.n);
+  const def = typeof row?.index_def === "string" ? row.index_def : null;
+  return {
+    missing: Number.isFinite(n) ? n : names.length,
+    addColumn: yes(row?.has_table) && !yes(row?.has_column),
+    rebuildIndex: def !== null && !/\bresource\b/i.test(def),
+  };
+}
+
+const work = (s: SchemaState) => s.missing + (s.addColumn ? 1 : 0) + (s.rebuildIndex ? 1 : 0);
 
 /**
  * Create the MCP tables if missing. Idempotent; safe on every boot.
@@ -304,13 +354,19 @@ async function missingObjects(db: Db, dialect: "postgres" | "sqlite"): Promise<n
  * checks again and finds nothing left to do.
  */
 export async function ensureMcpSchema(db: Db, dialect: "postgres" | "sqlite"): Promise<void> {
-  if ((await missingObjects(db, dialect)) === 0) return;
+  if (work(await inspectSchema(db, dialect)) === 0) return;
   await db.tx(async (tx) => {
     if (dialect === "postgres") {
       await tx.prepare(`SET LOCAL lock_timeout = ${SCHEMA_LOCK_TIMEOUT_MS}`).run();
       await tx.prepare("SELECT pg_advisory_xact_lock(?)").get(MCP_SCHEMA_LOCK);
-      if ((await missingObjects(tx, dialect)) === 0) return;
     }
+    // Looked at again inside the transaction (under the advisory lock on
+    // Postgres): another replica may have done some or all of it meanwhile.
+    const state = await inspectSchema(tx, dialect);
+    if (work(state) === 0) return;
+    // The connection-resource migration, before MCP_SCHEMA (see CONNECTION_RESOURCE_DDL).
+    if (state.addColumn) await tx.exec(CONNECTION_RESOURCE_DDL);
+    if (state.rebuildIndex) await tx.exec(`DROP INDEX IF EXISTS ${ONE_ACTIVE_INDEX}`);
     await tx.exec(MCP_SCHEMA);
   });
 }

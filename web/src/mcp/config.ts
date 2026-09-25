@@ -10,6 +10,9 @@
  * login and "whoever reaches localhost" is not a principal we can delegate.
  */
 import { isHostedMode } from "@merrymen/core";
+import type { McpProfile } from "./scopes";
+
+export type { McpProfile } from "./scopes";
 
 export interface McpConfig {
   /** Hosted, backed by shared Postgres, not switched off, and an issuer is configured. */
@@ -20,6 +23,14 @@ export interface McpConfig {
   issuer: string;
   /** Canonical MCP resource URL, e.g. https://mcp.merrymen.dev/mcp (production, MERRYMEN_MCP_RESOURCE_URL). Tokens are bound to exactly this. */
   resource: string;
+  /**
+   * The directory profile's resource URL, e.g. https://mcp.merrymen.dev/mcp/directory:
+   * the same server with the sensitive scopes impossible to grant (scopes.ts,
+   * DIRECTORY_SCOPES), for Anthropic's connector directory. Tokens are bound
+   * to exactly this and refused at `resource`, and the other way round. ""
+   * when switched off (MERRYMEN_MCP_DIRECTORY=0) or not a usable URL.
+   */
+  directoryResource: string;
   /** Origins a browser-originated request to /mcp may carry. Requests with no Origin are server-to-server clients. */
   allowedOrigins: ReadonlySet<string>;
   /** Hosts /mcp and the OAuth endpoints answer on (DNS-rebinding guard). */
@@ -66,11 +77,21 @@ export function mcpConfig(env: NodeJS.ProcessEnv = process.env): McpConfig {
   // The resource keeps its path; normalise away a trailing slash so the
   // metadata's `resource` matches the URL clients were given exactly.
   const resource = resourceUrl ? `${resourceUrl.origin}${resourceUrl.pathname.replace(/\/+$/, "") || ""}` : "";
+  // The directory profile: <resource>/directory unless overridden. Off when
+  // switched off, and when it would share the canonical path: the path picks
+  // the protected-resource document, and one path cannot name two resources.
+  const directoryUrl = env.MERRYMEN_MCP_DIRECTORY === "0" || !resource
+    ? null
+    : originOf(env.MERRYMEN_MCP_DIRECTORY_RESOURCE_URL ?? `${resource}/directory`);
+  const directoryPath = directoryUrl ? directoryUrl.pathname.replace(/\/+$/, "") : "";
+  const canonicalPath = resourceUrl ? resourceUrl.pathname.replace(/\/+$/, "") : "";
+  const directoryResource = directoryUrl && directoryPath && directoryPath !== canonicalPath ? `${directoryUrl.origin}${directoryPath}` : "";
+  const directoryHost = directoryResource ? directoryUrl?.host : undefined;
 
   const extraOrigins = (env.MERRYMEN_MCP_ALLOWED_ORIGINS ?? "")
     .split(",").map((s) => originOf(s)?.origin).filter((s): s is string => !!s);
-  const allowedOrigins = new Set<string>([issuer, resourceUrl?.origin ?? ""].filter(Boolean).concat(extraOrigins));
-  const allowedHosts = new Set<string>([issuerUrl?.host, resourceUrl?.host].filter((h): h is string => !!h));
+  const allowedOrigins = new Set<string>([issuer, resourceUrl?.origin ?? "", directoryResource ? directoryUrl?.origin ?? "" : ""].filter(Boolean).concat(extraOrigins));
+  const allowedHosts = new Set<string>([issuerUrl?.host, resourceUrl?.host, directoryHost].filter((h): h is string => !!h));
   const staffTenants = new Set(
     (env.MERRYMEN_MCP_STAFF_TENANTS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter((s) => ADDRESS.test(s)),
   );
@@ -88,6 +109,7 @@ export function mcpConfig(env: NodeJS.ProcessEnv = process.env): McpConfig {
     disabledWhy,
     issuer,
     resource,
+    directoryResource,
     allowedOrigins,
     allowedHosts,
     staffTenants,
@@ -100,18 +122,38 @@ export function mcpConfig(env: NodeJS.ProcessEnv = process.env): McpConfig {
   };
 }
 
-/** The path part of the resource URL, e.g. "/mcp". */
-export function resourcePath(cfg: McpConfig): string {
+/**
+ * The resource URL a profile is served under: the canonical one for the full
+ * server, the directory one for the directory profile ("" when that is off).
+ */
+export function resourceFor(cfg: McpConfig, profile: McpProfile): string {
+  return profile === "directory" ? cfg.directoryResource : cfg.resource;
+}
+
+/**
+ * Which profile a (normalised) resource URL names, or null when it is neither
+ * address this server serves now: the endpoint moved, or the directory
+ * profile was switched off.
+ */
+export function profileOfResource(cfg: McpConfig, resource: string | null | undefined): McpProfile | null {
+  if (!resource) return null;
+  if (resource === cfg.resource) return "full";
+  if (resource === cfg.directoryResource) return "directory";
+  return null;
+}
+
+/** The path part of the resource URL, e.g. "/mcp" (or "/mcp/directory"); "" for a profile that is off. */
+export function resourcePath(cfg: McpConfig, profile: McpProfile = "full"): string {
   try {
-    return new URL(cfg.resource).pathname || "/";
+    return new URL(resourceFor(cfg, profile)).pathname || "/";
   } catch {
-    return "/mcp";
+    return profile === "directory" ? "" : "/mcp";
   }
 }
 
 /** RFC 9728 well-known URL for the resource: /.well-known/oauth-protected-resource/<path>. */
-export function protectedResourceMetadataUrl(cfg: McpConfig): string {
-  const url = new URL(cfg.resource);
+export function protectedResourceMetadataUrl(cfg: McpConfig, profile: McpProfile = "full"): string {
+  const url = new URL(resourceFor(cfg, profile));
   const path = url.pathname === "/" ? "" : url.pathname;
   return `${url.origin}/.well-known/oauth-protected-resource${path}`;
 }

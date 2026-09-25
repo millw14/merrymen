@@ -3,7 +3,9 @@
 ## Where it runs
 
 The MCP server is part of the **web** service (the Next.js app), not a separate
-service. It adds these routes: `/mcp`, `/.well-known/oauth-protected-resource[/mcp]`,
+service. It adds these routes: `/mcp`, `/mcp/directory` (the limited directory
+profile, see [oauth.md](oauth.md#the-directory-profile-mcpdirectory)),
+`/.well-known/oauth-protected-resource[/mcp[/directory]]`,
 `/.well-known/oauth-authorization-server`, `/oauth/{authorize,token,register,revoke}`,
 `/connect/{app,apps,approve/:id,export/:id,mcp}` pages and `/api/mcp/*`.
 
@@ -43,9 +45,28 @@ What is bounded, and what is not (`boundedDb` in `background.ts`):
 State lives in shared Postgres, in tables prefixed `mcp_` and `notify_`
 (`worker/src/mcp/schema.ts`). Each process checks the catalog once at start
 (`to_regclass`, no table locks) and runs the DDL only if a table or index is
-missing: then under an advisory lock, with a 5 s `lock_timeout`, so a boot
-never queues behind a long writer while holding other tables' locks (it fails
-and retries on the next request or tick instead). MCP never writes ledger
+missing or a migration is pending: then under an advisory lock, with a 5 s
+`lock_timeout`, so a boot never queues behind a long writer while holding
+other tables' locks (it fails and retries on the next request or tick
+instead).
+
+**The connection-resource migration (2026-09, the directory profile).**
+`mcp_connections` gained a nullable `resource` column (NULL = the canonical
+`/mcp`; the directory URL for a directory connection), and the unique index
+`mcp_connections_one_active` moved from `(tenant, client_id)` to
+`(tenant, client_id, COALESCE(resource, ''))`, so one owner can connect the
+same app to both addresses. It runs by itself on the first boot of the new
+code, in one transaction under the same lock and timeout: `ALTER TABLE …
+ADD COLUMN IF NOT EXISTS resource TEXT`, `DROP INDEX IF EXISTS
+mcp_connections_one_active`, then the schema recreates the index with the new
+definition. The same catalog query that checks for missing objects also sees
+a missing column or an old index definition (`pg_attribute`,
+`pg_get_indexdef`), so an already-migrated boot still runs no DDL. Existing
+rows keep NULL and mean exactly what they did; no data is rewritten. The new
+index is less strict than the old one, so existing data always satisfies it.
+The index keeps its name on purpose: code from before the change looks for
+that name at boot and finds it (a new name would make it recreate the old
+index). MCP never writes ledger
 tables, with one deliberate exception: an owner-approved trade is written to
 the existing owner-order queue (`agent_commands`) through the same helper the
 dashboard's chat orders use.
@@ -61,29 +82,38 @@ dashboard's chat orders use.
 | `MERRYMEN_MCP_ENABLED` | web, orchestrator (one shared Railway variable) | on | `0` switches MCP off. On **web**: every MCP route answers 404 (tokens unused). On the **orchestrator**: no backtest runs and no Telegram alert is evaluated or sent. Each service reads only its own environment, so set it on both — see [Emergency](#emergency-revoke-everything). |
 | `MERRYMEN_OAUTH_ISSUER` | web | public origin | Only if the issuer must differ from the public origin. |
 | `MERRYMEN_MCP_RESOURCE_URL` | web | `<origin>/mcp` | The canonical resource URL tokens are bound to, e.g. `https://mcp.merrymen.dev/mcp`. Changing it invalidates every existing token (audience changes); clients simply reconnect. |
+| `MERRYMEN_MCP_DIRECTORY` | web | on | `0` switches the directory profile off: `/mcp/directory` and its metadata answer 404, authorize refuses its address, and directory tokens stop working (`invalid_grant` at refresh). `/mcp` is untouched. |
+| `MERRYMEN_MCP_DIRECTORY_RESOURCE_URL` | web | `<resource>/directory` | The directory profile's resource URL, e.g. `https://mcp.merrymen.dev/mcp/directory`. Must be https and not share the canonical path. Changing it disconnects every directory connection once, like the canonical one. The route is always `/mcp/directory`. |
 | `MERRYMEN_MCP_ALLOWED_ORIGINS` | web | — | Extra browser origins allowed to call `/mcp` (comma separated). Server-side clients send no Origin and are unaffected. |
 | `MERRYMEN_MCP_STAFF_TENANTS` | web | — | Comma-separated owner addresses that may grant themselves `staff:diagnostics`. Re-checked on every call. |
 | `MERRYMEN_MCP_ACCESS_TTL_SEC`, `_REFRESH_TTL_SEC`, `_REFRESH_FAMILY_MAX_SEC` | web | 3600, 30 d, 90 d | Token lifetimes (bounded). |
 | `MERRYMEN_RPC_MAINNET` | web | chain default | RPC for quotes (already used elsewhere). |
 
 `GET /api/mcp/health` reports `enabled`, the reason when disabled, database
-latency and the deployed commit. It returns `503` with `Retry-After` when not
-ready.
+latency, the deployed commit, the canonical `endpoint` and `directory`: the
+directory profile's `endpoint`, or `null` with a `why` naming the variable that
+turned it off (`MERRYMEN_MCP_DIRECTORY=0`, or an unusable
+`MERRYMEN_MCP_DIRECTORY_RESOURCE_URL`). It returns `503` with `Retry-After`
+when not ready.
 
 ## Deploying
 
 MCP ships with the normal pipeline: PR → CI (`app`, `contracts`, `gateway`,
 `kaka-policy`) → merge to `main` → Railway rebuilds **web** and
-**orchestrator** from the same image. No new service, secret or migration step
-is needed; tables are created on first request.
+**orchestrator** from the same image. No new service, secret or manual
+migration step is needed; tables are created, and migrations applied, on first
+request.
 
 After a deploy, verify:
 
 ```bash
-curl -s https://mcp.merrymen.dev/api/mcp/health          # endpoint: https://mcp.merrymen.dev/mcp
+curl -s https://mcp.merrymen.dev/api/mcp/health          # endpoint: https://mcp.merrymen.dev/mcp, directory.endpoint: https://mcp.merrymen.dev/mcp/directory
 curl -s https://mcp.merrymen.dev/.well-known/oauth-protected-resource/mcp
 curl -s https://app.merrymen.dev/.well-known/oauth-authorization-server
 curl -si -X POST https://mcp.merrymen.dev/mcp -H 'content-type: application/json' -d '{}' | head -5   # expect 401 + WWW-Authenticate
+# the directory profile: its own metadata (no trade:propose, drafts:write, social:write) and challenge
+curl -s https://mcp.merrymen.dev/.well-known/oauth-protected-resource/mcp/directory
+curl -si -X POST https://mcp.merrymen.dev/mcp/directory -H 'content-type: application/json' -d '{}' | grep -i '^www-authenticate'   # resource_metadata=…/mcp/directory
 ```
 
 ### The dedicated hostname
@@ -128,7 +158,7 @@ given `https://mcp.merrymen.dev` got HTML. `web/src/middleware.ts` (logic in
   then connect. Spec-strict ones still refuse, because the protected-resource
   metadata names `…/mcp`, not the address they were given: give them the full
   URL.
-- **Never redirected:** `/mcp`, `/.well-known/*`, `/oauth/*`, `/api/*`,
+- **Never redirected:** `/mcp` and everything under it (`/mcp/directory`), `/.well-known/*`, `/oauth/*`, `/api/*`,
   `/_next/*` and any path with a file extension (icons, `sw.js`, the manifest).
 
 `/mcp` opened in a browser, on either host, answers `307` to the connect page
@@ -181,6 +211,18 @@ curl -si -X POST https://mcp.merrymen.dev/ -d '{}' | grep -i '^location'        
 Limits are enforced in shared Postgres, so they hold across web replicas.
 
 ## Emergency: revoke everything
+
+To take down only the directory listing's address (`/mcp/directory`) and
+leave custom connectors on `/mcp` working, set `MERRYMEN_MCP_DIRECTORY=0` on
+web: the endpoint and its metadata answer 404 and directory tokens stop
+working; they work again when it is unset. To end those connections for good:
+
+```sql
+UPDATE mcp_tokens SET revoked_at = EXTRACT(EPOCH FROM now())::bigint
+ WHERE revoked_at IS NULL AND connection_id IN (SELECT id FROM mcp_connections WHERE resource IS NOT NULL);
+UPDATE mcp_connections SET status = 'revoked', revoked_at = EXTRACT(EPOCH FROM now())::bigint, revoked_why = 'operator'
+ WHERE status = 'active' AND resource IS NOT NULL;
+```
 
 To cut every MCP connection at once without a deploy, either:
 
@@ -247,6 +289,14 @@ merge commit on `main`). The `mcp_*`/`notify_*` tables can stay; older code
 ignores them. Nothing in the rollback touches trading state. If a rollback
 happens while approvals are pending, their orders (if any were queued) remain
 normal owner orders as above.
+
+**Rolling back past the directory profile.** Code from before it runs on the
+migrated schema (it finds the index by name, and its inserts leave `resource`
+NULL), but it does not know a connection's address: for an owner holding both
+a full and a directory connection with the same app, its reconnect lookup
+could pick the directory row. Before such a rollback, end the directory
+connections with the SQL under [Emergency](#emergency-revoke-everything) (the
+`resource IS NOT NULL` statements). The column and index can stay.
 
 ## Retention
 

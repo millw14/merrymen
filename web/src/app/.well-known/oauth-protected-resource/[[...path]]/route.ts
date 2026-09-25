@@ -1,7 +1,8 @@
 /**
  * RFC 9728 protected-resource metadata, at both the root well-known URL and
  * the path-inserted one (/.well-known/oauth-protected-resource/mcp), which is
- * what MCP clients try first.
+ * what MCP clients try first; and the directory profile's own document at
+ * /.well-known/oauth-protected-resource/mcp/directory.
  */
 import { mcpConfig, resourcePath } from "@/mcp/config";
 import { discoveryResponse, protectedResourceMetadata } from "@/mcp/oauth/metadata";
@@ -14,9 +15,12 @@ export async function GET(_req: Request, context: { params: Promise<{ path?: str
   if (!cfg.enabled) return new Response("Not found", { status: 404 });
   const { path } = await context.params;
   const suffix = path?.length ? `/${path.join("/")}` : "";
-  // Root, or exactly the resource's own path. Anything else is not a resource here.
-  if (suffix && suffix !== resourcePath(cfg)) return new Response("Not found", { status: 404 });
-  return discoveryResponse(protectedResourceMetadata(cfg));
+  // Root (the canonical resource, unchanged), exactly the resource's own
+  // path, or the directory profile's (/mcp/directory, its own resource with
+  // its own scopes). Anything else is not a resource here.
+  if (!suffix || suffix === resourcePath(cfg)) return discoveryResponse(protectedResourceMetadata(cfg));
+  if (cfg.directoryResource && suffix === resourcePath(cfg, "directory")) return discoveryResponse(protectedResourceMetadata(cfg, "directory"));
+  return new Response("Not found", { status: 404 });
 }
 
 export function OPTIONS(): Response {
