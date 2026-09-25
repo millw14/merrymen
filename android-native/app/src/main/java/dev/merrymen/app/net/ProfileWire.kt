@@ -242,3 +242,16 @@ suspend fun MerrymenApi.agentImage(slug: String, kind: String, etag: String?, ve
     })
   }
 }
+
+/**
+ * WHICH AGENT IS THE READER'S OWN, from their /api/feed. Null unless the feed
+ * named one it actually read: `nameSource: "fallback"` is the house default
+ * identity ("Robin") a signed-out or unreadable feed sends, and it is nobody's
+ * agent — presenting it as the reader's own is the bug the fallback flag was
+ * added to stop.
+ */
+fun ownSlugOf(feed: Feed?): String? {
+  val agent = feed?.agent ?: return null
+  if (agent.nameSource == "fallback") return null
+  return agent.slug?.takeIf { it.isNotBlank() }
+}
