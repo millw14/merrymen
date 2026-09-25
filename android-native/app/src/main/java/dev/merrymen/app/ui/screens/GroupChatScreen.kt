@@ -69,6 +69,7 @@ import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.ChatItem
 import dev.merrymen.app.data.GC_COMPOSER_MAX
+import dev.merrymen.app.data.GC_COUNTED_WAIT_MS
 import dev.merrymen.app.data.GroupChatRoom
 import dev.merrymen.app.data.GroupChatRooms
 import dev.merrymen.app.data.GroupChatState
@@ -77,15 +78,16 @@ import dev.merrymen.app.data.ReplyTarget
 import dev.merrymen.app.data.RoomStatus
 import dev.merrymen.app.data.SendResult
 import dev.merrymen.app.data.chatItems
+import dev.merrymen.app.data.composerAfter
 import dev.merrymen.app.data.excerpt
 import dev.merrymen.app.data.isMine
 import dev.merrymen.app.data.mentionParts
 import dev.merrymen.app.data.ownerSummary
 import dev.merrymen.app.data.presenceLine
 import dev.merrymen.app.data.replyTarget
-import dev.merrymen.app.data.slowDown
 import dev.merrymen.app.data.sortPresence
 import dev.merrymen.app.data.timeZones
+import dev.merrymen.app.data.waitLine
 import dev.merrymen.app.market.WhileResumed
 import dev.merrymen.app.net.GcCall
 import dev.merrymen.app.net.GcLine
@@ -446,6 +448,19 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
     }
   }
 
+  // ONE RULE FOR WHAT AN ANSWER DOES TO THE COMPOSER, for Send and Send
+  // again alike (composerAfter): refused words come back to the box, and a
+  // counted rate limit is said by the countdown alone.
+  fun settle(r: SendResult) {
+    val next = composerAfter(r, draft, error, replyTo?.id)
+    draft = next.draft
+    error = next.error
+    if (replyTo == null && next.replyTo != null) {
+      val st = room.state.value
+      replyTo = st.messages.firstOrNull { it.id == next.replyTo }?.takeIf { it.id !in st.gone }
+    }
+  }
+
   fun jumpTo(id: Long) {
     val key = s.keys[id] ?: "m$id"
     val index = rows.indexOfFirst { it.key == key }
@@ -525,13 +540,7 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
               onToken = { token -> nav.navigate(Routes.token(token)) },
               onResend = { id ->
                 error = null
-                room.resend(id) { r ->
-                  when (r) {
-                    is SendResult.Refused -> if (r.error.isNotBlank()) error = r.error
-                    is SendResult.Unconfirmed -> error = r.error
-                    SendResult.Sent -> Unit
-                  }
-                }
+                room.resend(id) { r -> settle(r) }
               },
               onDiscard = { id -> room.discard(id) },
             )
@@ -578,19 +587,10 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
             room.setFollowing(true)
             draft = ""
             replyTo = null
-            room.send(text, target?.id) { r ->
-              when (r) {
-                SendResult.Sent -> Unit
-                is SendResult.Refused -> if (r.error.isNotBlank()) {
-                  // The words come back, so a refusal never costs the owner what they typed.
-                  error = r.error
-                  if (draft.isEmpty()) draft = text
-                  if (replyTo == null && target != null && target.id !in room.state.value.gone) replyTo = target
-                }
-                // NOT a failure: the line is on screen, marked, with Send again.
-                is SendResult.Unconfirmed -> error = r.error
-              }
-            }
+            // The words come back on a refusal, so it never costs the owner
+            // what they typed; an unconfirmed line is NOT a failure — it is on
+            // screen, marked, with Send again (settle).
+            room.send(text, target?.id) { r -> settle(r) }
           },
         )
       } else {
@@ -658,7 +658,8 @@ private fun GcComposer(
     while (true) {
       nowMs = System.currentTimeMillis()
       if (nowMs >= s.sendableAtMs) break
-      delay(500)
+      // A long wait is said in the server's words, which do not tick.
+      delay(if (s.sendableAtMs - nowMs > GC_COUNTED_WAIT_MS) 15_000 else 500)
     }
   }
   val waitMs = s.sendableAtMs - nowMs
@@ -685,7 +686,8 @@ private fun GcComposer(
     error?.let {
       Text(it, style = MetaText, color = MerryColors.down, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
     }
-    if (waitMs > 0) Text(slowDown(waitMs), style = MetaText, color = MerryColors.tx2)
+    // The one line about a rate limit, gone when the wait is (waitLine).
+    waitLine(s.sendableAtMs, s.waitWords, nowMs)?.let { Text(it, style = MetaText, color = MerryColors.tx2) }
     Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
       Column(Modifier.weight(1f)) {
         // Capped at the server's 500 on the way in, so nobody types past a

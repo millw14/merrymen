@@ -12,6 +12,7 @@ import dev.merrymen.app.net.gcMeOf
 import dev.merrymen.app.net.gcPageOf
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -230,6 +231,45 @@ class GroupChatTest {
     assertTrue(t is ReplyTarget.Here)
     // A line taken back is gone for good, not "earlier".
     assertEquals(ReplyTarget.Gone, replyTarget(2000, emptyMap(), 2100, false, setOf(2000L)))
+  }
+
+  /**
+   * LEAVING WHILE AN EARLIER PAGE LOADS. The page is read on the screen's
+   * scope and the room outlives the screen, so leaving mid-page cancels the
+   * read. That used to leave `loadingEarlier` up for the life of the process:
+   * "Loading…" on a button that stayed off, and the bounded log (which waits
+   * while a page is on its way) never trimmed again.
+   */
+  @Test fun leavingWhileAnEarlierPageLoadsLeavesNothingStuck() = runBlocking {
+    val asked = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    room.answer = { req ->
+      val p = req.path ?: ""
+      when {
+        p == "/api/groupchat?limit=60" -> json(roomFixture("room-limit60.json"))
+        p.startsWith("/api/groupchat?before=2765") -> {
+          asked.countDown()
+          release.await(5, TimeUnit.SECONDS)
+          json(roomFixture("room-before2765.json"))
+        }
+        else -> MockResponse().setResponseCode(599)
+      }
+    }
+    val r = store(this)
+    r.pollNow()
+    assertEquals(2765L, r.state.value.messages.first().id)
+    val leaving = launch { r.loadEarlier() }
+    withTimeout(5_000) { while (asked.count > 0) delay(10) }
+    assertTrue(r.state.value.loadingEarlier)
+    leaving.cancelAndJoin() // the screen went away mid-page
+    assertFalse("the flag comes down with the read", r.state.value.loadingEarlier)
+    assertFalse("leaving is not a failure", r.state.value.earlierFailed)
+    release.countDown()
+
+    // And the next "Load earlier" is not turned away by a lock nobody holds.
+    r.loadEarlier()
+    assertEquals(120, r.state.value.messages.size)
+    assertFalse(r.state.value.loadingEarlier)
   }
 
   @Test fun theLoopPollsOnItsCadenceBacksOffAndStopsWhenCancelled() = runBlocking {

@@ -8,6 +8,7 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.put
+import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
@@ -232,25 +233,33 @@ suspend fun MerrymenApi.groupChatMe(): ApiResult<GcMe?> =
  * no expiry), so sending the same line twice can never post it twice.
  *
  * Ok(null) is a 2xx with no line in it — for a write, an unknown outcome.
+ * [client] is the store's: the shared client with OkHttp's own resend off, so
+ * one call is one attempt (GroupChatRoom.writeHttp says why).
  */
-suspend fun MerrymenApi.groupChatPost(body: String, replyTo: Long?, clientId: String): ApiResult<GcLine?> {
+suspend fun MerrymenApi.groupChatPost(
+  body: String,
+  replyTo: Long?,
+  clientId: String,
+  client: OkHttpClient = http,
+): ApiResult<GcLine?> {
   val payload = buildJsonObject {
     put("body", body)
     if (replyTo != null) put("replyTo", replyTo)
     put("clientId", clientId)
   }
-  return callAt("/api/groupchat") { post(payload.toString().toRequestBody(jsonType)) }
+  return callAt("/api/groupchat", client) { post(payload.toString().toRequestBody(jsonType)) }
     .readAs(this) { gcLineOf((it as? JsonObject)?.get("message")) }
 }
 
 /**
  * DELETE /api/groupchat?id= — take back one of the caller's own lines. Ok(true)
  * only when the server says it hid it; the store checks author and tenant in
- * the same statement, so anybody else's line answers Ok(false).
+ * the same statement, so anybody else's line answers Ok(false). Ok(null) is an
+ * answer with no `hidden` in it — not "not hidden": nobody said.
  */
-suspend fun MerrymenApi.groupChatHide(id: Long): ApiResult<Boolean> =
+suspend fun MerrymenApi.groupChatHide(id: Long): ApiResult<Boolean?> =
   callAt("/api/groupchat?id=$id") { delete() }
-    .readAs(this) { ((it as? JsonObject)?.get("hidden") as? JsonPrimitive)?.booleanOrNull == true }
+    .readAs(this) { ((it as? JsonObject)?.get("hidden") as? JsonPrimitive)?.takeIf { p -> !p.isString }?.booleanOrNull }
 
 /** POST /api/groupchat/me {muted}. */
 suspend fun MerrymenApi.groupChatSetMuted(muted: Boolean): ApiResult<GcMe?> =

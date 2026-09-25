@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import okhttp3.OkHttpClient
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -77,6 +78,13 @@ const val GC_COMPOSER_MAX = 500
 
 /** How many lines a following reader keeps before the oldest are let go. */
 const val GC_KEEP_LINES = 400
+
+/**
+ * A rate limit up to this long is counted down in seconds. Longer (the day's
+ * limit runs to midnight UTC) a seconds counter is noise, and the server's own
+ * sentence says it instead (waitLine).
+ */
+const val GC_COUNTED_WAIT_MS = 120_000L
 
 /** Reopened after this long, the screen starts again from the newest page. */
 const val GC_RESUME_AFTER_MS = 5 * 60_000L
@@ -140,6 +148,8 @@ data class GroupChatState(
   val posting: Boolean = false,
   /** Epoch ms before which the server asked us not to post again (429 Retry-After). */
   val sendableAtMs: Long = 0,
+  /** The server's sentence for that wait, when it wrote one. Said instead of a counter for a long wait. */
+  val waitWords: String? = null,
   /** Bumped when the log was REPLACED rather than added to. */
   val epoch: Int = 0,
 )
@@ -148,8 +158,14 @@ data class GroupChatState(
 sealed interface SendResult {
   data object Sent : SendResult
 
-  /** Refused, here or by the server. The line was not posted: the words go back in the box. */
-  data class Refused(val error: String) : SendResult
+  /**
+   * Refused, here or by the server. The line was not posted, and [words] — the
+   * line as typed, whenever the refusal took it off the screen — go back in
+   * the box with [replyTo] (composerAfter). [error] is the sentence to show,
+   * BLANK when there is nothing to add: a counted rate limit, whose countdown
+   * (waitLine) already says it, or a turn that ended under the send.
+   */
+  data class Refused(val error: String, val words: String? = null, val replyTo: Long? = null) : SendResult
 
   /**
    * The answer was lost. The line stays on screen, marked; "Send again" reuses
@@ -190,6 +206,19 @@ class GroupChatRoom(
    * replaced it.
    */
   private val generation = AtomicLong(0)
+
+  /**
+   * THE SHARED CLIENT WITH OKHTTP'S OWN RESEND SWITCHED OFF, for the owner's
+   * line. Http.client retries a request whose connection dropped after it was
+   * written — on a pooled connection it does so every time — and a second copy
+   * of a line racing its original can be answered 429 ("One message at a time")
+   * while the original commits. That 429 then reads as a refusal of a line
+   * that is in the room: its words go back in the box, and sending them again
+   * mints a new key and posts twice. Without the resend, a lost answer is one
+   * attempt with an unknown outcome, and "Send again" is the owner's to press.
+   * newBuilder() shares the pool, the cookies and the logging.
+   */
+  private val writeHttp: OkHttpClient by lazy { api.http.newBuilder().retryOnConnectionFailure(false).build() }
 
   private val pollLock = Mutex()
   private val meLock = Mutex()
@@ -390,13 +419,22 @@ class GroupChatRoom(
     }
   }
 
-  /** The page before the oldest loaded line. A second call while one is on its way is dropped. */
+  /**
+   * The page before the oldest loaded line. A second call while one is on its
+   * way is dropped.
+   *
+   * IT RUNS ON THE CALLER'S SCOPE — the screen's — and the room outlives the
+   * screen, so leaving mid-page cancels this with the flag still up. The flag
+   * comes down in `finally` for that reason: left up, "Load earlier" read
+   * "Loading…" and stayed disabled until sign-out, and the 400-line trim
+   * (which waits while a page is on its way) never ran again.
+   */
   suspend fun loadEarlier() {
     val first = _state.value.messages.firstOrNull() ?: return
     if (_state.value.start) return
     if (!earlierLock.tryLock()) return
+    val gen = generation.get()
     try {
-      val gen = generation.get()
       _state.update { it.copy(loadingEarlier = true, earlierFailed = false) }
       val r = api.groupChatPage("?before=${first.id}&limit=$GC_PAGE")
       if (gen != generation.get()) return
@@ -413,6 +451,9 @@ class GroupChatRoom(
         )
       }
     } finally {
+      // After a turn end the room was replaced whole (forget), and this is not
+      // its page to settle.
+      if (gen == generation.get()) _state.update { if (it.loadingEarlier) it.copy(loadingEarlier = false) else it }
       earlierLock.unlock()
     }
   }
@@ -443,13 +484,14 @@ class GroupChatRoom(
    * One send at a time: a second tap, or a recomposition that calls this
    * again, while one is on its way is refused here and sends nothing. A 429's
    * Retry-After is kept, and until it passes no request is made at all.
-   * [onDone] is called once, on the scope the send ran on.
+   * [onDone] is called once, on the scope the send ran on. Every refusal hands
+   * [body] back, since the screen emptied the box when it sent.
    */
   fun send(body: String, replyTo: Long?, onDone: (SendResult) -> Unit = {}) {
     val text = body.trim()
     val local = localRefusal(text)
     if (local != null) {
-      onDone(SendResult.Refused(local))
+      onDone(SendResult.Refused(local, body, replyTo))
       return
     }
     var line: PendingLine? = null
@@ -469,16 +511,19 @@ class GroupChatRoom(
     }
     val l = line
     if (l == null) {
-      onDone(SendResult.Refused(if (busy) ONE_AT_A_TIME else slowDown(_state.value.sendableAtMs - t)))
+      // Waiting out a rate limit: the countdown under the box already says
+      // so, and a second sentence saying it again is how two disagreed.
+      onDone(SendResult.Refused(if (busy) ONE_AT_A_TIME else "", body, replyTo))
       return
     }
-    scope.launch { onDone(deliver(l)) }
+    scope.launch { onDone(deliver(l, resend = false)) }
   }
 
   /**
    * SEND AN UNCONFIRMED LINE AGAIN — with the SAME key. If the first attempt
    * landed, the server answers with that line and stores nothing new; if it
-   * did not, this posts it. Either way it is in the room once.
+   * did not, this posts it. Either way it is in the room once. A refusal here
+   * leaves the line on screen, still unconfirmed, so nothing is handed back.
    */
   fun resend(clientId: String, onDone: (SendResult) -> Unit = {}) {
     var line: PendingLine? = null
@@ -489,7 +534,8 @@ class GroupChatRoom(
       when {
         p == null -> { why = "That message is already settled."; line = null; s }
         s.posting -> { why = ONE_AT_A_TIME; line = null; s }
-        t < s.sendableAtMs -> { why = slowDown(s.sendableAtMs - t); line = null; s }
+        // The countdown under the box says this one.
+        t < s.sendableAtMs -> { why = ""; line = null; s }
         else -> {
           why = null
           val again = p.copy(unconfirmed = false)
@@ -503,7 +549,7 @@ class GroupChatRoom(
       onDone(SendResult.Refused(why ?: ONE_AT_A_TIME))
       return
     }
-    scope.launch { onDone(deliver(l)) }
+    scope.launch { onDone(deliver(l, resend = true)) }
   }
 
   /** Take an unconfirmed line off this screen. It changes nothing on the server. */
@@ -511,9 +557,14 @@ class GroupChatRoom(
     _state.update { s -> s.copy(pending = s.pending.filterNot { it.clientId == clientId && it.unconfirmed }) }
   }
 
-  private suspend fun deliver(line: PendingLine): SendResult {
+  /**
+   * One attempt at [line], and what became of it. [resend] is whether an
+   * earlier attempt with the same key went out and was never answered — which
+   * changes what a refusal proves (below).
+   */
+  private suspend fun deliver(line: PendingLine, resend: Boolean): SendResult {
     val gen = generation.get()
-    val r = api.groupChatPost(line.body, line.replyTo, line.clientId)
+    val r = api.groupChatPost(line.body, line.replyTo, line.clientId, client = writeHttp)
     if (gen != generation.get()) return SendResult.Refused("")
     val posted = (r as? ApiResult.Ok)?.value
     if (posted != null) {
@@ -527,31 +578,44 @@ class GroupChatRoom(
       }
       return SendResult.Sent
     }
-    if (r is ApiResult.Refused && r.status < 500) {
+    val t = now()
+    val refused = r as? ApiResult.Refused
+    // A RATE LIMIT IS KEPT HOWEVER THE LINE FARES: until it passes no request
+    // is made, and the countdown under the box (waitLine) is the one place
+    // that says how long. A Retry-After of 0 counts nothing and is not kept.
+    val waitSec = refused?.takeIf { it.status == 429 }?.retryAfterSec?.takeIf { it >= 1 }
+    val waitWords = refused?.let { wordsOf(it.message) }
+    // Signed out, or no longer a member, since the screen opened: ask again,
+    // so the composer stops offering what the server just refused.
+    if (refused != null && (refused.status == 401 || refused.status == 403)) scope.launch { pullMe(force = true) }
+    // WHAT A REFUSAL PROVES DEPENDS ON THE ATTEMPT. A first attempt carries a
+    // key the room has never seen, so a 4xx is a refusal of this line. A
+    // RESEND follows an attempt that may still be committing, and the route
+    // checks the session, the agent and its limits before it looks the key up
+    // (groupchat/route.ts) — so a 401, 403 or 429 there says nothing about the
+    // first attempt, and the line stays unconfirmed. Only the gate's 400 and
+    // 413 judge the words themselves, which the first attempt carried too.
+    if (refused != null && refused.status < 500 && (!resend || refused.status == 400 || refused.status == 413)) {
       // A REAL REFUSAL: the line was not stored. It comes off the screen — a
       // bubble for a message nobody else can see is a lie to the one person
       // looking — and the words go back in the box.
-      val t = now()
       _state.update { s ->
         s.copy(
           pending = s.pending.filterNot { it.clientId == line.clientId },
           posting = false,
-          sendableAtMs = if (r.status == 429 && r.retryAfterSec != null) {
-            maxOf(s.sendableAtMs, t + r.retryAfterSec * 1000)
-          } else {
-            s.sendableAtMs
-          },
-        )
+        ).waiting(waitSec, waitWords, t)
       }
-      // Signed out, or no longer a member, since the screen opened: ask again,
-      // so the composer stops offering what the server just refused.
-      if (r.status == 401 || r.status == 403) scope.launch { pullMe(force = true) }
-      return SendResult.Refused(postError(r.status, r.message, r.retryAfterSec))
+      return SendResult.Refused(
+        if (waitSec != null) "" else postError(refused.status, refused.message, refused.retryAfterSec),
+        words = line.body,
+        replyTo = line.replyTo,
+      )
     }
     // THE ANSWER WAS LOST — no answer, a 5xx (a proxy's 502 or 504 may stand
-    // in front of a commit), or a 2xx with no line in it. The line may be in
-    // the room. If a poll already brought its echo, it is; otherwise it stays
-    // on screen, marked, and is never reported as failed.
+    // in front of a commit), a 2xx with no line in it, or a resend refused
+    // before its key was looked up. The line may be in the room. If a poll
+    // already brought its echo, it is; otherwise it stays on screen, marked,
+    // and is never reported as failed.
     val settled = _state.value.let { s ->
       if (s.pending.none { it.clientId == line.clientId }) {
         s.keys.entries.firstOrNull { it.value == line.clientId }?.key
@@ -560,22 +624,23 @@ class GroupChatRoom(
       }
     }
     if (settled != null) {
-      _state.update { it.copy(posting = false) }
+      _state.update { it.copy(posting = false).waiting(waitSec, waitWords, t) }
       return SendResult.Sent
     }
     _state.update { s ->
       s.copy(
         pending = s.pending.map { if (it.clientId == line.clientId) it.copy(unconfirmed = true) else it },
         posting = false,
-      )
+      ).waiting(waitSec, waitWords, t)
     }
-    return SendResult.Unconfirmed(
-      if (r is ApiResult.Refused) {
-        "The room couldn't confirm that just now, so we can't say whether it was sent. It's kept below — sending it again won't post it twice."
-      } else {
-        "Can't reach merrymen right now, so we couldn't confirm your message was sent. It's kept below — sending it again won't post it twice."
-      },
-    )
+    return SendResult.Unconfirmed(unconfirmedWords(r, counted = waitSec != null))
+  }
+
+  /** The state with a 429's wait kept — the later deadline wins, with its words. */
+  private fun GroupChatState.waiting(waitSec: Long?, words: String?, t: Long): GroupChatState {
+    if (waitSec == null) return this
+    val until = t + waitSec * 1000
+    return if (until >= sendableAtMs) copy(sendableAtMs = until, waitWords = words) else this
   }
 
   /**
@@ -596,19 +661,22 @@ class GroupChatRoom(
       val r = api.groupChatHide(id)
       if (gen != generation.get()) return@launch
       when {
-        r is ApiResult.Ok && r.value -> {
+        r is ApiResult.Ok && r.value == true -> {
           _state.update { st ->
             val gone = st.gone + id
             st.copy(gone = gone, messages = st.messages.filter { it.id !in gone }, keys = st.keys - id)
           }
           onDone(null)
         }
-        r is ApiResult.Ok -> onDone("That message couldn't be removed — only your own lines can be.")
+        r is ApiResult.Ok && r.value == false -> onDone("That message couldn't be removed — only your own lines can be.")
         r is ApiResult.Refused && r.status < 500 -> onDone(wordsOf(r.message) ?: "Couldn't remove that message. Try again.")
         r is ApiResult.Refused -> onDone("That didn't go through. Try again in a moment.")
-        // No answer: the line may or may not be hidden. It stays on screen,
-        // and the next poll's `gone` settles it.
-        else -> onDone("Can't reach merrymen right now, so we couldn't confirm it was removed. Check the room before trying again.")
+        // No answer, or one this app could not read: the line may or may not
+        // be hidden. It stays on screen, and the next poll's `gone` settles it.
+        // An answer that came is not "couldn't reach".
+        r is ApiResult.Unreachable && !r.unreadable ->
+          onDone("Can't reach merrymen right now, so we couldn't confirm it was removed. Check the room before trying again.")
+        else -> onDone("$ANSWERED_UNREADABLE whether it was removed. Check the room before trying again.")
       }
     }
   }
@@ -638,9 +706,12 @@ class GroupChatRoom(
       }
       onDone(
         when {
-          r is ApiResult.Unreachable -> "Can't reach merrymen right now, so we couldn't confirm that saved."
+          r is ApiResult.Unreachable && !r.unreadable -> "Can't reach merrymen right now, so we couldn't confirm that saved."
           r is ApiResult.Refused && r.status < 500 -> wordsOf(r.message) ?: "That didn't save. Try again."
-          else -> "That didn't save. Try again."
+          r is ApiResult.Refused -> "That didn't save. Try again."
+          // A 2xx with no settings in it, or one this app could not read: it
+          // may well have saved, and "didn't save" would be a guess.
+          else -> "$ANSWERED_UNREADABLE whether that saved."
         },
       )
     }
@@ -674,6 +745,89 @@ class GroupChatRoom(
 fun slowDown(waitMs: Long): String {
   val s = ((waitMs + 999) / 1000).coerceAtLeast(1)
   return "Slow down — try again in ${s}s."
+}
+
+/**
+ * THE ONE LINE ABOUT A RATE LIMIT, for as long as it lasts — and null once it
+ * has passed, so nothing is left on screen saying "wait" after the wait.
+ *
+ * Up to [GC_COUNTED_WAIT_MS] it counts down in seconds. Longer — the day's
+ * limit runs to midnight UTC, a Retry-After near 86,400 — "try again in
+ * 80000s" is a number nobody can use, so the server's own sentence ([words]:
+ * "That's the most you can post today. The count resets at midnight UTC.")
+ * stands instead, true for the whole wait; without one, the wait in minutes
+ * or hours, rounded UP so it never says sooner than the room allows.
+ */
+fun waitLine(sendableAtMs: Long, words: String?, nowMs: Long): String? {
+  val wait = sendableAtMs - nowMs
+  return when {
+    wait <= 0 -> null
+    wait <= GC_COUNTED_WAIT_MS -> slowDown(wait)
+    else -> words ?: "Slow down — you can post again in ${longWait(wait)}."
+  }
+}
+
+private fun longWait(ms: Long): String {
+  val minutes = (ms + 59_999) / 60_000
+  return if (minutes < 120) "$minutes min" else "${(ms + 3_599_999) / 3_600_000} h"
+}
+
+/** "merrymen answered … so we can't say" — the first half of every sentence about an answer that came and could not be read. */
+private const val ANSWERED_UNREADABLE = "merrymen answered, but not in a form this app can read, so we can't say"
+
+/**
+ * WHAT TO TELL AN OWNER WHOSE LINE'S FATE IS UNKNOWN. The line is kept,
+ * marked, with Send again; the sentence says what actually happened, because
+ * "can't reach merrymen" is false about an answer that came.
+ */
+private fun unconfirmedWords(r: ApiResult<GcLine?>, counted: Boolean): String {
+  val kept = "It's kept below — sending it again won't post it twice."
+  return when {
+    r is ApiResult.Unreachable && !r.unreadable ->
+      "Can't reach merrymen right now, so we couldn't confirm your message was sent. $kept"
+    r is ApiResult.Refused && r.status >= 500 ->
+      "The room couldn't confirm that just now, so we can't say whether it was sent. $kept"
+    // A resend refused before its key was looked up: the first try may be in.
+    r is ApiResult.Refused -> {
+      val why = if (counted) "The room asked us to wait before trying again." else postError(r.status, r.message, null)
+      "$why We still can't say whether your first try was posted. $kept"
+    }
+    // A 2xx with no line in it, or an answer this app could not read.
+    else -> "$ANSWERED_UNREADABLE whether your message was sent. $kept"
+  }
+}
+
+/** What the composer holds after a send or a resend has answered. [replyTo] is a line id. */
+data class ComposerAfter(val draft: String, val error: String?, val replyTo: Long?)
+
+/**
+ * THE COMPOSER AFTER AN ANSWER, for the first send and for Send again alike.
+ *
+ * A refusal hands the words back ([SendResult.Refused.words]) and they go in
+ * the box — a refused Send again used to drop them, although the store took
+ * the line off the screen. A blank [SendResult.Refused.error] clears the
+ * sentence rather than setting one: the countdown under the box is the one
+ * place a rate limit is said, so two sentences can never disagree about it.
+ */
+fun composerAfter(r: SendResult, draft: String, error: String?, replyTo: Long?): ComposerAfter = when (r) {
+  SendResult.Sent -> ComposerAfter(draft, error, replyTo)
+  is SendResult.Refused -> ComposerAfter(
+    draft = r.words?.let { draftAfterRefusal(draft, it) } ?: draft,
+    error = r.error.ifBlank { null },
+    replyTo = replyTo ?: r.replyTo,
+  )
+  is SendResult.Unconfirmed -> ComposerAfter(draft, r.error, replyTo)
+}
+
+/**
+ * The box after [refused] comes back: the words alone into an empty box, or,
+ * when the owner has started another line meanwhile, above it — so neither
+ * what was refused nor what is being typed is lost.
+ */
+fun draftAfterRefusal(draft: String, refused: String): String = when {
+  refused.isBlank() -> draft
+  draft.isBlank() -> refused
+  else -> refused + "\n" + draft
 }
 
 /** The server's own sentence, or null when it wrote none (the client's "HTTP <code>"). */
