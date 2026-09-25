@@ -791,6 +791,77 @@ export async function approveProposal(mcp: Db, tenant: string, id: string, hash:
   return (await proposalRow(mcp, tenant, id))!;
 }
 
+/**
+ * How long an approval may take to act before an `approved` row counts as
+ * stranded. Acting is one queue insert, one settings write or one group-chat
+ * post, each seconds at most; a row still `approved` this long after its
+ * decision belongs to an approval whose process died between acting and
+ * recording the outcome.
+ */
+export const APPROVED_STALE_SEC = 300;
+
+/** Durable evidence of whether a stranded approval acted. null = cannot tell right now. */
+export interface StrandedProbe {
+  /** Is the trade's order (its deterministic id) in the owner-order queue? */
+  orderQueued(orderId: string, agentId: string): Promise<boolean | null>;
+  /** The owner's current value of each key (currentValues), or null when unreadable. */
+  settingsNow(tenant: `0x${string}`, keys: readonly string[]): Promise<Record<string, unknown> | null>;
+  /** Is the owner's group-chat line with this client id (the proposal's) stored? */
+  postStored(tenant: string, clientId: string): Promise<boolean | null>;
+}
+
+/**
+ * Resume a stranded `approved` proposal from what the action left behind, so
+ * a crash between acting and recording the outcome never detaches an executed
+ * order (or an applied setting, or a posted line) from its proposal:
+ *  - a trade whose order is in the queue (by its deterministic id) becomes
+ *    `submitted`, and followTrade tracks it from there; no order means nothing
+ *    was sent, so the owner gets the approval back (approving again cannot
+ *    trade twice: the order id collides);
+ *  - settings or a draft that now hold every proposed value are `applied`;
+ *    none of them means nothing was saved (back to awaiting approval); some
+ *    of them is an outcome that cannot be confirmed (`failed`, outcome_unknown);
+ *  - a post whose line is stored (the group chat's own idempotency key) is
+ *    `applied`; no line means nothing was posted.
+ * An expired proposal is not offered again. Evidence that cannot be read now
+ * leaves the row as it is, to be resumed on a later read.
+ */
+export async function resumeStranded(mcp: Db, row: ProposalRow, now: number, probe: StrandedProbe): Promise<ProposalRow> {
+  if (row.status !== "approved" || (row.decided_at ?? row.updated_at) > now - APPROVED_STALE_SEC) return row;
+  const binding = JSON.parse(row.binding_json) as Binding;
+  const note = "The approval was interrupted before its outcome was recorded; this was recovered from what it left behind.";
+  let done: { status: ProposalStatus; order_id?: string; result: Record<string, unknown> } | "not_done" | null = null;
+  try {
+    if (binding.kind === "trade") {
+      const orderId = orderIdFor(row.id);
+      const queued = await probe.orderQueued(orderId, binding.order_agent_id);
+      done = queued === null ? null : queued ? { status: "submitted", order_id: orderId, result: { recovered: true, note } } : "not_done";
+    } else if (binding.kind === "settings" || binding.kind === "agent_draft") {
+      const changes = binding.kind === "settings" ? binding.changes : binding.settings;
+      const keys = Object.keys(changes);
+      const current = await probe.settingsNow(binding.tenant as `0x${string}`, keys);
+      if (current) {
+        const same = keys.filter((k) => canonical(current[k] ?? null) === canonical(changes[k] ?? null));
+        done = same.length === keys.length ? { status: "applied", result: { recovered: true, applied: keys, note } }
+          : same.length === 0 ? "not_done"
+            : { status: "failed", result: { recovered: true, outcome_unknown: true, matching: same, why: "the approval was interrupted: some of these settings now hold their proposed values and some do not. Check your settings in Merrymen." } };
+      }
+    } else if (binding.kind === "post") {
+      const stored = await probe.postStored(binding.tenant, row.id.slice(4, 36));
+      done = stored === null ? null : stored ? { status: "applied", result: { recovered: true, note } } : "not_done";
+    }
+  } catch {
+    done = null;
+  }
+  if (done === null) return row;
+  const moved = done === "not_done"
+    ? row.expires_at <= now
+      ? await setStatus(mcp, row.id, ["approved"], "expired", now, { result: { why: "the approval was interrupted before anything was sent, and the proposal has since expired; nothing was sent", recovered: true } })
+      : await setStatus(mcp, row.id, ["approved"], "awaiting_approval", now)
+    : await setStatus(mcp, row.id, ["approved"], done.status, now, { order_id: done.order_id, result: done.result });
+  return moved ? (await proposalRow(mcp, row.tenant, row.id)) ?? row : row;
+}
+
 /** Queue an approved trade on the existing owner-order path (the same one the dashboard chat uses). */
 export async function queueApprovedTrade(ledger: Db | null, binding: TradeBinding, proposalId: string, tickSeconds: number, nowMs: number): Promise<{ status: ProposalStatus; order_id?: string; result: Record<string, unknown> } | { retry: string }> {
   const id = orderIdFor(proposalId);

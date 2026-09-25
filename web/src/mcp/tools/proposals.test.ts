@@ -19,7 +19,7 @@ import { projectSettings } from "@/lib/services/settings-view";
 import { revokeConnection } from "../oauth/server";
 import {
   DISCONNECTED_WHY, EVIDENCE_GRACE_SEC, ROW_SKEW_SEC, SETTLE_AFTER_SEC, approveProposal, cancelAwaitingForConnection, cancelProposal, followTrade, orderIdFor, proposalRow,
-  queueApprovedTrade, rejectProposal, settingsOutcome, workerSentence,
+  APPROVED_STALE_SEC, queueApprovedTrade, rejectProposal, resumeStranded, settingsOutcome, workerSentence, type StrandedProbe,
   type DraftBinding, type TradeBinding,
 } from "@/lib/services/proposals";
 import { BUILTIN_STRATEGIES } from "../../../../worker/src/strategies/registry";
@@ -821,4 +821,98 @@ test("proposal text inputs refuse NUL and other control characters (a post, a dr
   // Tabs and newlines are text.
   const ok = await run("draft_post", { text: "line one\nline two", idempotency_key: "ctl-post-02" });
   assert.equal(ok.isError, undefined, JSON.stringify(ok));
+});
+
+// ── an approval interrupted between acting and recording its outcome ────────
+
+/** Put a proposal where a crashed approval leaves it: 'approved', decided at `at`. */
+function strand(d: TestDb, id: string, at: number) {
+  d.raw.prepare("UPDATE mcp_proposals SET status = 'approved', decided_at = ?, updated_at = ? WHERE id = ?").run(at, at, id);
+}
+const probe = (o: Partial<StrandedProbe>): StrandedProbe => ({
+  orderQueued: async () => null, settingsNow: async () => null, postStored: async () => null, ...o,
+});
+
+test("a stranded trade approval whose order reached the queue becomes submitted, and is then tracked and cancellable", async () => {
+  const { d, run } = await setup();
+  const p = data(await run("propose_trade", { side: "buy", token: NVDA, amount_usdg: 5, idempotency_key: "strand-trade-1" }));
+  const id = String(p.proposal_id);
+  // The crash happened after the order was queued (deterministic id) and before the status write.
+  const row0 = (await proposalRow(d.db, OWNER_A, id))!;
+  const binding = JSON.parse(row0.binding_json) as TradeBinding;
+  await queueApprovedTrade(d.db, binding, id, 60, NOW * 1000);
+  strand(d, id, NOW);
+  // Still inside the window an approval may take: untouched.
+  const early = await resumeStranded(d.db, (await proposalRow(d.db, OWNER_A, id))!, NOW + APPROVED_STALE_SEC - 1, probe({ orderQueued: async () => true }));
+  assert.equal(early.status, "approved");
+  // Through the tool, with the real queue as evidence: recovered, then followed.
+  const later = NOW + APPROVED_STALE_SEC + 1;
+  const view = data(await runTool(tool("get_proposal"), { proposal_id: id }, (await connectAs(makeDeps(d), OWNER_A, { scopes: SCOPES })).principal, "t", { now: () => later }));
+  assert.equal(view.status, "submitted");
+  const row = (await proposalRow(d.db, OWNER_A, id))!;
+  assert.equal(row.order_id, orderIdFor(id));
+  assert.equal(JSON.parse(row.result_json!).recovered, true);
+});
+
+test("a stranded trade approval whose order never reached the queue goes back to the owner (or expires), and approving again cannot trade twice", async () => {
+  const { d, run } = await setup();
+  const p = data(await run("propose_trade", { side: "buy", token: NVDA, amount_usdg: 5, idempotency_key: "strand-trade-2" }));
+  const id = String(p.proposal_id);
+  strand(d, id, NOW);
+  const back = await resumeStranded(d.db, (await proposalRow(d.db, OWNER_A, id))!, NOW + APPROVED_STALE_SEC + 1, probe({ orderQueued: async () => false }));
+  assert.equal(back.status, "awaiting_approval");
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM agent_commands").get() as { n: number }).n, 0);
+  // Past the proposal's own expiry it is not offered again.
+  strand(d, id, NOW);
+  const gone = await resumeStranded(d.db, (await proposalRow(d.db, OWNER_A, id))!, NOW + 3600 * 24, probe({ orderQueued: async () => false }));
+  assert.equal(gone.status, "expired");
+  // Evidence that cannot be read leaves it for a later read.
+  const other = data(await run("propose_trade", { side: "buy", token: NVDA, amount_usdg: 6, idempotency_key: "strand-trade-3" }));
+  strand(d, String(other.proposal_id), NOW);
+  const unknown = await resumeStranded(d.db, (await proposalRow(d.db, OWNER_A, String(other.proposal_id)))!, NOW + APPROVED_STALE_SEC + 1, probe({}));
+  assert.equal(unknown.status, "approved");
+});
+
+test("a stranded settings approval is applied, back with the owner, or unconfirmed, by what the settings now hold", async () => {
+  const { d, run } = await setup({ settings: { strategy: "steady-basket", buyPerTickUsdg: 5 } });
+  const make = async (key: string, changes: Record<string, unknown>) => {
+    const p = data(await run("propose_settings_change", { changes, idempotency_key: key }));
+    const id = String(p.proposal_id);
+    strand(d, id, NOW);
+    return (await proposalRow(d.db, OWNER_A, id))!;
+  };
+  const at = NOW + APPROVED_STALE_SEC + 1;
+  const all = await make("strand-set-1", { buyPerTickUsdg: 2, strategy: "weekend-gap" });
+  assert.equal((await resumeStranded(d.db, all, at, probe({ settingsNow: async () => ({ buyPerTickUsdg: 2, strategy: "weekend-gap" }) }))).status, "applied");
+  const none = await make("strand-set-2", { buyPerTickUsdg: 3 });
+  assert.equal((await resumeStranded(d.db, none, at, probe({ settingsNow: async () => ({ buyPerTickUsdg: 5 }) }))).status, "awaiting_approval");
+  const some = await make("strand-set-3", { buyPerTickUsdg: 4, strategy: "dip-hunter" });
+  const partial = await resumeStranded(d.db, some, at, probe({ settingsNow: async () => ({ buyPerTickUsdg: 4, strategy: "steady-basket" }) }));
+  assert.equal(partial.status, "failed");
+  assert.equal(JSON.parse(partial.result_json!).outcome_unknown, true);
+});
+
+test("a stranded post approval is applied when its line is in the room, and goes back to the owner when it is not", async () => {
+  const { d, run } = await setup();
+  const make = async (key: string) => {
+    const p = data(await run("draft_post", { text: "Testing the connection.", idempotency_key: key }));
+    const id = String(p.proposal_id);
+    strand(d, id, NOW);
+    return (await proposalRow(d.db, OWNER_A, id))!;
+  };
+  const at = NOW + APPROVED_STALE_SEC + 1;
+  const seen: string[] = [];
+  const posted = await make("strand-post-1");
+  assert.equal((await resumeStranded(d.db, posted, at, probe({ postStored: async (_t, clientId) => { seen.push(clientId); return true; } }))).status, "applied");
+  assert.deepEqual(seen, [posted.id.slice(4, 36)], "looked up by the post's own idempotency key");
+  const lost = await make("strand-post-2");
+  assert.equal((await resumeStranded(d.db, lost, at, probe({ postStored: async () => false }))).status, "awaiting_approval");
+});
+
+test("the post probe names the group-chat route's own idempotency key (a drift would make every stranded post look unsent)", async () => {
+  const { ownerPostKey } = await import("@/lib/services/proposal-probes");
+  const { readFileSync } = await import("node:fs");
+  const route = readFileSync(join(process.cwd(), "web", "src", "app", "api", "groupchat", "route.ts"), "utf8");
+  assert.ok(route.includes("`owner:${tenant.toLowerCase()}:${clientId}`"), "the route's retryKey format");
+  assert.equal(ownerPostKey("0xABC", "client-1"), "owner:0xabc:client-1");
 });

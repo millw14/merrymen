@@ -15,7 +15,7 @@ import { settingsReader, type SettingsView } from "@/lib/services/settings-view"
 import { quoteTrade, type TradeQuote } from "@/lib/services/trade-quote";
 import { randomBytes } from "node:crypto";
 import {
-  KIND_CAPABILITY, PROPOSAL_TTL_SEC, TERMINAL, cancelIfUnbacked, cancelProposal, changeRow, createProposal, currentValues, expireIfDue, followTrade, listProposalRows, ownerOrderCeiling, proposalRow,
+  KIND_CAPABILITY, PROPOSAL_TTL_SEC, TERMINAL, cancelIfUnbacked, cancelProposal, resumeStranded, changeRow, createProposal, currentValues, expireIfDue, followTrade, listProposalRows, ownerOrderCeiling, proposalRow,
   resultView, ProposalError, type Binding, type ChangeRow, type ProposalRow, type TradeBinding,
 } from "@/lib/services/proposals";
 import { watchSetFor } from "@/lib/services/eligibility";
@@ -29,6 +29,7 @@ import type { Capability } from "../scopes";
 import { defineTool, type ToolContext } from "../tool";
 import type { OwnedAgent } from "../agents";
 import { ADDRESS_ARG, AGENT_ARG, LIMIT_ARG, isoOrNull, untrusted } from "./shared";
+import { strandedProbe } from "@/lib/services/proposal-probes";
 
 /** Mirrors worker/src/strategies/registry.ts BUILTIN_STRATEGIES (a test holds them equal). */
 export const KNOWN_STRATEGIES = ["steady-basket", "weekend-gap", "llm-strategist", "trencher", "even-keel", "dip-hunter"] as const;
@@ -550,6 +551,8 @@ async function viewOf(ctx: ToolContext, row: ProposalRow) {
   let r = await expireIfDue(d.db, row, ctx.now());
   // Waiting on an app that has since been disconnected, or lost this scope or agent: cancelled, not "waiting".
   r = await cancelIfUnbacked(d.db, r, ctx.now());
+  // An approval interrupted between acting and recording its outcome is finished from what it left behind.
+  r = await resumeStranded(d.db, r, ctx.now(), strandedProbe((fn) => ctx.ledger((db) => fn(db))));
   if (r.kind === "trade") r = await ctx.ledger((ledger) => followTrade(d.db, ledger, r, ctx.now()));
   const summary = JSON.parse(r.summary_json) as Record<string, unknown>;
   const result = resultView(r.result_json);
@@ -645,8 +648,10 @@ const cancel = defineTool({
   output: VIEW,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   async handler(args, ctx) {
-    const row = await ownedProposal(ctx, args.proposal_id);
+    const owned = await ownedProposal(ctx, args.proposal_id);
     const d = await ctx.mcp();
+    // A stranded approval is finished first, so its trade can be withdrawn like any queued one.
+    const row = await resumeStranded(d.db, owned, ctx.now(), strandedProbe((fn) => ctx.ledger((db) => fn(db))));
     const cancelled = await ctx.ledger((ledger) => cancelProposal(d.db, ledger, ctx.principal.tenant, row.id, ctx.now())).catch(translate);
     return { data: await viewOf(ctx, cancelled) };
   },

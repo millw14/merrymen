@@ -19,12 +19,13 @@ import { mcpDb } from "@/mcp/db";
 import { agentDirectory } from "@/mcp/agents";
 import { jsonResponse } from "@/mcp/oauth/metadata";
 import { readBoundedText } from "@/mcp/oauth/deps";
+import { strandedProbe } from "@/lib/services/proposal-probes";
 import { writeAudit } from "@/mcp/observe";
 import { readLedger as withReadDb } from "@/mcp/tool";
 import { settingsReader } from "@/lib/services/settings-view";
 import { quoteTrade } from "@/lib/services/trade-quote";
 import {
-  ProposalError, TERMINAL, approveProposal, cancelIfUnbacked, changeRow, changedSince, currentValues, expireIfDue, followTrade, ownerOrderCeiling, proposalRow,
+  ProposalError, TERMINAL, approveProposal, cancelIfUnbacked, resumeStranded, changeRow, changedSince, currentValues, expireIfDue, followTrade, ownerOrderCeiling, proposalRow,
   queueApprovedTrade, rejectProposal, resultView, settingsOutcome,
   type Binding, type DraftBinding, type ProposalRow, type Revalidation, type SettingsBinding, type TradeBinding,
 } from "@/lib/services/proposals";
@@ -194,6 +195,9 @@ async function view(row: ProposalRow, tenant: `0x${string}`, now: number) {
   // longer stands behind what it asked for: cancelled here, with the reason,
   // rather than offered for approval.
   r = await cancelIfUnbacked(d.db, r, now);
+  // An approval interrupted between acting and recording its outcome is
+  // finished from what it left behind (the queue, the settings, the room).
+  r = await resumeStranded(d.db, r, now, strandedProbe(withReadDb));
   if (r.kind === "trade") r = await withReadDb(async (ledger) => (ledger ? followTrade(d.db, ledger, r, now) : r));
   const binding = JSON.parse(r.binding_json) as Binding;
   let quote = null;

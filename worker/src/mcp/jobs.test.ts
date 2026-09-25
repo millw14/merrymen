@@ -713,6 +713,15 @@ test("runBacktest counts filled notional as turnover: buy spend plus sell gross"
   assert.equal(r.swapFills, 2);
   assert.equal(r.turnoverUsdg, 100_000_000n + 199_400_000n);
   assert.equal(r.executed, 2);
+  // The sell happened on the FINAL bar: the result must include it and its
+  // cost. Cash 900 + 199.40 less 30 bps = 1098.8018 USDG — not the pre-fill
+  // mark of 900 + 9.97 x $20 = 1099.40.
+  assert.equal(r.finalEquityUsdg, 1_098_801_800n);
+  assert.equal(r.pnlUsdg, 98_801_800n);
+  assert.equal(r.equitySeries[r.equitySeries.length - 1]!.equityUsdg, 1_098_801_800n, "the terminal point is the closing value");
+  assert.equal(r.equitySeries.length, bars.length, "one point per bar; the last is revalued, not duplicated");
+  // The drawdown sees the close: peak 1099.40 (the last pre-fill mark), close 1098.8018.
+  assert.ok(r.maxDrawdownBps >= 5, `drawdown ${r.maxDrawdownBps} includes the final bar's cost`);
 });
 
 test("a result over the byte bound is thinned, and refused if thinning is not enough", () => {
