@@ -21,6 +21,9 @@ test("phrases are joined as a, b and c", () => {
   assert.equal(joinPhrases(["a"]), "a");
   assert.equal(joinPhrases(["a", "b"]), "a and b");
   assert.equal(joinPhrases(["a", "b", "c"]), "a, b and c");
+  // An item with its own "and" would blur the list: semicolons instead.
+  assert.equal(joinPhrases(["your portfolio and trades", "reports and exports"]), "your portfolio and trades; reports and exports");
+  assert.equal(joinPhrases(["backtests", "your portfolio and trades", "your alerts"]), "backtests; your portfolio and trades; your alerts");
 });
 
 test("the summary groups what is ticked under See, Do, Suggest and Staff, in that order, leaving empty groups out", () => {
@@ -28,7 +31,7 @@ test("the summary groups what is ticked under See, Do, Suggest and Staff, in tha
   assert.deepEqual(all.map((g) => g.label), ["See", "Do", "Suggest, only with your approval", "Staff tools"]);
   assert.deepEqual(all.map((g) => g.level), ["read", "write", "sensitive", "staff"]);
   const see = all.find((g) => g.level === "read")!;
-  assert.equal(see.text, "your agent’s status and settings, your agent’s decisions, market and public-agent research, your portfolio and trades and reports and exports");
+  assert.equal(see.text, "your agent’s status and settings; your agent’s decisions; market and public-agent research; your portfolio and trades; reports and exports");
   const only = accessSummary(nonStaff, ids("market:read", "jobs:run"), true);
   assert.deepEqual(only, [
     { level: "read", label: "See", text: "market and public-agent research" },

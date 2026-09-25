@@ -3,9 +3,9 @@
    list folded away behind "Change what … can do". Builds on connect.css and
    mcp-connect.css (the checklist and badges are theirs). */
 
-.mcp-connect .mcp-agent-card { display: flex; align-items: center; gap: 13px; margin: 20px 0 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); }
+.mcp-connect .mcp-agent-card { display: flex; flex-wrap: wrap; align-items: center; gap: 13px; margin: 20px 0 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); }
 .mcp-connect .mcp-agent-card-icon { display: grid; place-items: center; width: 40px; height: 40px; flex-shrink: 0; border: 1px solid #c8ff0030; border-radius: 12px; background: #c8ff0008; color: #c8ff00; }
-.mcp-connect .mcp-agent-card > div { min-width: 0; }
+.mcp-connect .mcp-agent-card > div { flex: 1; min-width: 0; }
 .mcp-connect .mcp-agent-card strong { display: block; font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }
 .mcp-connect .mcp-agent-card div > span { display: block; margin-top: 3px; color: var(--tx-2); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 
@@ -37,6 +37,6 @@
 }
 @media (prefers-reduced-motion: reduce) { .mcp-connect .mcp-customize-toggle svg { transition: none; } }
 
-/* The single agent's Share box, at the card's right edge. */
-.mcp-connect .mcp-agent-card-share { display: flex; align-items: center; gap: 7px; margin-left: auto; flex-shrink: 0; min-height: 44px; padding-left: 8px; color: var(--tx-2); font-size: 12px; cursor: pointer; }
-.mcp-connect .mcp-agent-card-share input { width: 17px; height: 17px; margin: 0; accent-color: #c8ff00; cursor: pointer; }
+/* The single agent's Share box: its own row under the agent, so a phone never squeezes the name. */
+.mcp-connect .mcp-agent-card-share { display: flex; align-items: center; gap: 10px; flex-basis: 100%; min-height: 44px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--tx-2); font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; cursor: pointer; }
+.mcp-connect .mcp-agent-card-share input { flex-shrink: 0; width: 17px; height: 17px; margin: 0; accent-color: #c8ff00; cursor: pointer; }

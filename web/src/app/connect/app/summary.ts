@@ -44,9 +44,14 @@ const SPLIT: Readonly<Record<string, { atOnce: string; approved: string }>> = {
   "social:write": { atOnce: "following public agents", approved: "draft posts" },
 };
 
-/** "a", "a and b", "a, b and c". */
+/**
+ * "a", "a and b", "a, b and c". When a phrase has its own "and" ("your
+ * portfolio and trades"), "and" cannot also join the list without blurring
+ * where one item ends, so the items are separated by semicolons instead.
+ */
 export function joinPhrases(list: readonly string[]): string {
   if (list.length <= 1) return list[0] ?? "";
+  if (list.some((p) => / and /.test(p))) return list.join("; ");
   return `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
 }
 

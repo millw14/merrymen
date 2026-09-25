@@ -222,7 +222,7 @@ export function ConsentClient() {
                   {/* Still the owner's choice: unticked, only permissions that need no agent are shared. */}
                   <label className="mcp-agent-card-share">
                     <input type="checkbox" checked={agents.has(onlyAgent.slug)} onChange={() => toggle(agents, onlyAgent.slug, setAgents)} />
-                    Share<span className="sr-only"> {onlyAgent.name || "your agent"} with {appName}</span>
+                    Share this agent with {appName}
                   </label>
                 </div>
                 : <>
