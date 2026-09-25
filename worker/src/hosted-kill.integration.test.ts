@@ -226,6 +226,37 @@ describe("the child does not re-arm", () => {
     assert.equal(asChild(() => loadArmableGrant()), null, "but syncGrant arms nothing");
   });
 
+  it("AN UNREADABLE KILL STATE FAILS CLOSED: nothing arms, and nothing is revoked on it", async () => {
+    // A home that cannot be listed (here its path is a file, so readdir fails
+    // with ENOTDIR, not ENOENT) used to read as "no kill".
+    await store.put(TENANT, grantAt(nowSec() - 3600));
+    const unlistable = path.join(FLEET, "home-that-is-a-file");
+    writeFileSync(unlistable, "not a directory");
+    const copy = path.join(FLEET, "grant-copy.json");
+    writeFileSync(copy, JSON.stringify(await store.get(TENANT), null, 2));
+    process.env.MERRYMEN_GRANT_FILE = copy;
+    process.env.MERRYMEN_HOME = unlistable;
+    try {
+      assert.equal(killRequested(unlistable), true, "unknown counts as pending");
+      assert.equal(loadArmableGrant(), null, "so nothing arms");
+    } finally {
+      process.env.MERRYMEN_HOME = FLEET;
+      delete process.env.MERRYMEN_GRANT_FILE;
+    }
+    const k = await honourKillRequest(store, TENANT, unlistable, nowSec());
+    assert.equal(k.outcome, "failed", "an unreadable home is not evidence of a kill");
+    assert.ok(await store.get(TENANT), "so the stored grant is untouched");
+  });
+
+  it("AN UNREADABLE SUPERSEDED RECORD FAILS CLOSED: the grant it killed is unknown, so nothing arms", async () => {
+    await armedTenant(grantAt(nowSec() - 3600));
+    writeFileSync(path.join(home(), `${KILL_REQUEST_PREFIX}corrupt.superseded.json`), "{ not json");
+    assert.equal(killRequested(home()), true);
+    assert.equal(asChild(() => loadArmableGrant()), null, "the grant on disk might be the one it killed");
+    assert.equal((await honourKillRequest(store, TENANT, home(), nowSec())).outcome, "failed");
+    assert.ok(await store.get(TENANT), "and nothing is revoked on a superseded record");
+  });
+
   it("syncGrant arms through loadArmableGrant, and the hosted kill goes through killHosted", () => {
     // The two call sites the behaviour above depends on. They live inside
     // main()'s closure, where a test cannot reach them, so they are pinned

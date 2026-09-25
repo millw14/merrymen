@@ -115,13 +115,33 @@ function parse(raw: string): KillRequestBody | "unreadable" {
  * superseded name between the listing and the read. Then it is read under
  * that name, so no request goes missing from a single look.
  */
-function listRequests(home: string): RequestFile[] {
+/**
+ * What this home says about kills.
+ *
+ * `unknown` means it cannot be fully read. Either the home could not be
+ * listed, for any reason but its not existing, or a superseded request could
+ * not be read, so the grant it killed is not known. The latch fails closed on
+ * it: nothing is handed over and nothing arms until the state reads again. It
+ * is not a kill, though, and never a reason to revoke a stored grant
+ * (readKillRequest).
+ */
+interface KillState {
+  requests: RequestFile[];
+  unknown: boolean;
+}
+
+function killState(home: string): KillState {
   let names: string[];
   try {
     names = readdirSync(home);
-  } catch {
-    return [];
+  } catch (e) {
+    return { requests: [], unknown: (e as NodeJS.ErrnoException).code !== "ENOENT" };
   }
+  const requests = listRequests(home, names);
+  return { requests, unknown: requests.some((r) => r.superseded && r.body === "unreadable") };
+}
+
+function listRequests(home: string, names: string[]): RequestFile[] {
   const out: RequestFile[] = [];
   for (const listed of names) {
     if (!listed.startsWith(KILL_REQUEST_PREFIX) || !listed.endsWith(PENDING_SUFFIX)) continue;
@@ -148,10 +168,12 @@ function listRequests(home: string): RequestFile[] {
  * Is a kill PENDING in this home: asked for, and not superseded by a grant
  * signed after it? A request that exists but cannot be read counts as
  * pending. The file is the request, and a latch that can be lost by
- * corrupting it is no latch.
+ * corrupting it is no latch. So does a home whose kill state cannot be read
+ * (KillState.unknown): the latch fails closed.
  */
 export function killRequested(home: string): boolean {
-  return listRequests(home).some((r) => !r.superseded);
+  const s = killState(home);
+  return s.unknown || s.requests.some((r) => !r.superseded);
 }
 
 /**
@@ -160,7 +182,7 @@ export function killRequested(home: string): boolean {
  */
 export function killedGrants(home: string): Set<string> {
   const out = new Set<string>();
-  for (const r of listRequests(home)) {
+  for (const r of killState(home).requests) {
     if (r.body !== "unreadable" && typeof r.body.grant === "string") out.add(r.body.grant);
   }
   return out;
@@ -185,9 +207,12 @@ export interface KillRequest {
  * grant signed a moment after the kill, and the owner signs again. The other
  * way round would let a killed grant trade.
  */
-export function readKillRequest(home: string, nowSec: number): KillRequest | null {
-  const pending = listRequests(home).filter((r) => !r.superseded);
-  if (pending.length === 0) return null;
+export function readKillRequest(home: string, nowSec: number): KillRequest | "unreadable" | null {
+  const state = killState(home);
+  const pending = state.requests.filter((r) => !r.superseded);
+  // Unknown and no pending request in sight: that is no evidence of a kill,
+  // so nothing may be revoked on it. The latch still holds (killRequested).
+  if (pending.length === 0) return state.unknown ? "unreadable" : null;
   let killedAt = 0;
   let smartAccount: string | null = null;
   for (const r of pending) {
@@ -320,6 +345,13 @@ export async function honourKillRequest(
 ): Promise<KillOutcome> {
   const request = readKillRequest(home, nowSec);
   if (!request) return { outcome: "none" };
+  if (request === "unreadable") {
+    return {
+      outcome: "failed",
+      request: { smartAccount: null, killedAt: nowSec, files: [] },
+      error: "the kill state in this home cannot be read; nothing arms until it can",
+    };
+  }
   let result: "removed" | "absent" | "newer";
   try {
     result = await store.removeUnlessNewer(tenant, request.killedAt + KILL_CLOCK_SLACK_SEC);
