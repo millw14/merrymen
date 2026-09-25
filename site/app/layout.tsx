@@ -24,13 +24,13 @@ export const metadata: Metadata = {
     template: "%s — merrymen",
   },
   description:
-    "Trading agents you never have to trust — self-hosted or hosted. On-chain trading is non-custodial: your owner key never leaves you, every cap enforced by the account contract itself. Name your agent, chat with it and steer it from Telegram.",
+    "Trading agents you never have to trust — self-hosted or hosted. On-chain trading is non-custodial: your owner key never leaves you, every cap enforced by the account contract itself. Name your agent, chat with it and steer it from Telegram, or connect it to Claude and other AI assistants through the Merrymen MCP server.",
   // "non-custodial" is scoped to on-chain trading everywhere it appears —
   // deliberately, per the venue split in spikes/robinhood-mcp/DESIGN.md §9: a
   // future brokerage rail is custodial by construction (the broker holds the
   // account; merrymen holds a revocable trading token), and a product-wide
   // absolute here would become false the day it ships.
-  keywords: ["merrymen", "Robinhood Chain", "trading agent", "self-hosted", "non-custodial on-chain trading", "session keys", "Telegram bot", "crypto", "autonomous agent"],
+  keywords: ["merrymen", "Robinhood Chain", "trading agent", "self-hosted", "non-custodial on-chain trading", "session keys", "Telegram bot", "crypto", "autonomous agent", "MCP", "MCP server", "Claude", "Claude connector"],
   openGraph: {
     title: "merrymen — trading agents you never have to trust",
     description:
