@@ -207,7 +207,9 @@ fun LikeButton(postId: String?) {
           when {
             !likes.signedIn -> note = "Sign in from the You tab to like posts."
             !likes.mineRead ->
-              note = "We could not reach your likes just now, so this would not be saved."
+              // Unread, not "unreachable": the read may have come back in a
+              // form this app could not read, and either way nothing is known.
+              note = "Your likes couldn't be read just now, so this would not be saved."
             else -> scope.launch { note = c.social.toggleLike(postId, !mine) }
           }
         }

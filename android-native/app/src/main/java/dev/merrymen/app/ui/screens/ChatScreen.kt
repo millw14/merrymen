@@ -61,7 +61,7 @@ import dev.merrymen.app.data.PendingCard
 import dev.merrymen.app.data.chatKeyFor
 import dev.merrymen.app.data.receiptParts
 import dev.merrymen.app.net.perTradeUsdg
-import dev.merrymen.app.ui.Avatar
+import dev.merrymen.app.ui.AgentFace
 import dev.merrymen.app.ui.BottomInsetSpacer
 import dev.merrymen.app.ui.COMMANDS
 import dev.merrymen.app.ui.CommandSpec
@@ -241,7 +241,7 @@ fun ChatScreen(nav: NavHostController) {
         // `terminal.css:4573` — 30px above each turn; 22px between a question
         // and the reply to it (terminal.css:3473).
         val top = if (i == 0) 0.dp else if (m.role == "owner") 30.dp else 22.dp
-        Line(m, name, sending, Modifier.padding(top = top), onRetry = { chat.retry(m.id) }) {
+        Line(m, name, agent?.slug, sending, Modifier.padding(top = top), onRetry = { chat.retry(m.id) }) {
           nav.navigate(Routes.SETTINGS)
         }
       }
@@ -252,6 +252,7 @@ fun ChatScreen(nav: NavHostController) {
           // `streaming`: nothing of a marker, ever.
           AgentReply(
             name = name,
+            slug = agent?.slug,
             text = streaming?.takeIf { it.isNotBlank() } ?: "…",
             modifier = Modifier.padding(top = 22.dp).semantics { contentDescription = "$name is typing" },
           )
@@ -304,6 +305,7 @@ fun ChatScreen(nav: NavHostController) {
 private fun Line(
   m: ChatLine,
   name: String,
+  slug: String?,
   sending: Boolean,
   modifier: Modifier,
   onRetry: () -> Unit,
@@ -314,6 +316,7 @@ private fun Line(
     "event" -> ReceiptRow(m.side?.replaceFirstChar { it.uppercase() }, m.text, modifier)
     else -> AgentReply(
       name = name,
+      slug = slug,
       text = m.text,
       modifier = modifier,
       // THE RECEIPT IS TEMPLATED FROM LEDGER FIELDS, never from a model: the
@@ -369,6 +372,7 @@ private fun UserBubble(text: String, modifier: Modifier = Modifier) {
 @Composable
 private fun AgentReply(
   name: String,
+  slug: String?,
   text: String,
   modifier: Modifier = Modifier,
   receipt: Pair<String?, String>? = null,
@@ -380,7 +384,10 @@ private fun AgentReply(
     horizontalArrangement = Arrangement.spacedBy(12.dp),
     verticalAlignment = Alignment.Top,
   ) {
-    Avatar(name = name, size = 36.dp)
+    // The agent's own picture where the owner gave it one (the slug is read
+    // only from the thread's own feed, so a signed-out or unread chat draws
+    // the initials), else its seeded initials.
+    AgentFace(slug = slug, name = name, size = 36.dp)
     Column(Modifier.weight(1f)) {
       Text(
         text = name,

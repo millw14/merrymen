@@ -781,7 +781,9 @@ private fun unconfirmedWords(r: ApiResult<GcLine?>, counted: Boolean): String {
       "Can't reach merrymen right now, so we couldn't confirm your message was sent. $kept"
     r is ApiResult.Refused && r.status >= 500 ->
       "The room couldn't confirm that just now, so we can't say whether it was sent. $kept"
-    // A resend refused before its key was looked up: the first try may be in.
+    // A resend's 401 or 403 (answered before the key is looked up) or 429
+    // (after a look-up that found nothing, while the first try may still be
+    // committing): the first try may be in.
     r is ApiResult.Refused -> {
       val why = if (counted) "The room asked us to wait before trying again." else postError(r.status, r.message, null)
       "$why We still can't say whether your first try was posted. $kept"

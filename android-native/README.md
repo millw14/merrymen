@@ -43,7 +43,7 @@ says `merrymen-android/0.2.0`).
 **Tests are JVM unit tests** under `app/src/test/`, run by
 `testDebugUnitTest`. They drive the real `MerrymenApi` against a
 `MockWebServer` (`apiFor(server)` in `net/TestKit.kt`) and decode production
-answers captured on 2026-09-24 (`src/test/resources/fixtures/probe-*.json`,
+answers captured on 2026-09-24 and 25 (`src/test/resources/fixtures/probe-*.json`,
 read with `Fixtures.text(name)`). `DecodeFixturesTest` refuses a fixture that
 has no route, so a new capture has to be decoded somewhere. The wiring that
 decides whose state is held — sign-out, a wallet switch, a Server change, the
@@ -129,26 +129,27 @@ ceremonies. They belong where the key is.
 
 | Screen | Endpoints |
 |---|---|
-| Home — portfolio, positions, agent warning, Circle lock banner | `/api/feed`, `/api/tier` |
-| Feed — filters, most-liked sort, hearts | `/api/theses`, `/api/likes`, `/api/like-counts` |
-| Chat — full conversation, plus the propose/confirm card | `/api/chat`, and whatever the confirmed command writes |
-| Alpha — three-state lock | `/api/alpha` |
-| You — identity, controls, handoffs, sign out | `/api/feed`, `/api/auth/session` |
-| Markets | `/api/market` |
-| Token — chart over six spans, holders, star, share, copy | `/api/tokens/{address}`, `/api/venue?desk=chart` |
-| Search | `/api/search` |
-| Leaderboard | `/api/leaderboard` |
-| Agent desk — owner line, **wire in** with its budget, likes | `/api/theses`, `/api/follow` |
-| Coins to consider — approve into basket and watchlist | `/api/proposals`, `/api/settings` |
-| Trade — buy, sell, snipe, with the order followed after it is placed | `/api/orders`, `/api/snipe` |
-| How much risk — one word into six settings | `/api/settings` |
+| Home — the owner's book (mode chip, liveBlocker and its fix, positions, honest P&L, own tape), the Telegram/Trencher strip, Circle banner, group chat door | `/api/feed`, `/api/grants`, `/api/telegram`, `/api/settings`, `/api/tier`; `/api/auth/session` when a read answers for nobody |
+| Feed — trades vs views, the agent's own take, per-call figures, ×N since, Real money toggle, hearts, the wire ring | `/api/theses`, `/api/market`, `/api/discoveries`, `/api/likes`, `/api/like-counts`, `/api/follow` |
+| Chat — streamed replies, the persisted thread with receipts and the unread dot, confirm cards bound to the owner, fills landing in the thread | `/api/chat` (streamed), `/api/feed`, `/api/grants`, `/api/settings`, `/api/orders/ceiling`, `GET /api/orders?id=` |
+| Trade, Coins to consider, How much risk — confirm card inside the ceiling and the sealed cap, orders followed to their own window | `POST /api/orders`, `POST /api/snipe`, `GET /api/orders`, `/api/orders/ceiling`, `/api/proposals`, `/api/settings`, `/api/grants`, `/api/feed` |
+| Alpha — locked gate with its perks, "could not look" vs "nothing vetted", tier badge | `/api/alpha` |
+| You — the owner's book, account controls, pictures and name, stop, sign out | `/api/feed`, `/api/grants`, `DELETE /api/grants`, `PUT/DELETE /api/agent-image/me/{kind}`, `PUT /api/settings` (name), `/api/auth/session`, `/api/auth/logout` |
+| Markets — stocks, then launchpad coins; no 24h figure on a new pool | `/api/market`, `/api/discoveries` |
+| Token — chart over six spans with stale bars captioned, market activity, holders, star, share | `/api/tokens/{address}` (`&activity=1` once per visit), `/api/venue?desk=chart` |
+| Search — debounced, cancelled, retried | `/api/search` |
+| Leaderboard — every agent, paper returns stamped Paper, the retired count | `/api/leaderboard`, `/api/feed` (which row is yours), `/api/follow` |
+| Agent profile — stats, top trades, fills, growth, the public book, the owner's own dollars, wire in | `/api/agents/{slug}`, `/api/agents/{slug}/own`, `/api/feed`, `/api/follow` |
+| Group chat — read, post, reply, take back, mute, time zone | `/api/groupchat` (GET, POST, DELETE), `/api/groupchat/me` (GET, POST) |
 | The Merry Circle | `/api/circle` |
-| Telegram — connection, **link code**, owner chat | `/api/telegram` |
-| Settings — a real editor, plus server origin, practice reset | `/api/settings`, `/api/paper-reset` |
+| Telegram — connection, link code, test the bot | `/api/telegram` (GET, POST) |
+| Settings — Live trading switch with its consent, the web's form bound to its owner, server origin, practice reset | `/api/settings` (GET, PUT), `/api/paper-reset`, `/api/telegram`, `/api/auth/session` |
+| Every agent face and banner | `/api/agent-image/{slug}/avatar` and `/banner` (ETag, `?v=` after an upload) |
 
-`MerrymenApi` covers the wider surface too — selftest, models, holder
-link/unlink, grant revoke (the kill switch), wall, wall-tape, discoveries,
-agents, scoreboard.
+Nothing calls `/api/auth/challenge`, `/api/auth/verify`, `/api/holder`,
+`/api/selftest`, `/api/models`, `/api/scoreboard`, `/api/wall` or
+`/api/wall-tape`: sign-in and holder proof are the WebView's, and the rest
+have no screen here, so `MerrymenApi` no longer declares them.
 
 ## Three rules carried across from the server
 
@@ -160,9 +161,9 @@ agents, scoreboard.
    said no* (with its status, so 401 and 503 stay apart) and *we never reached
    it* distinct all the way to the pixel. `LoadedBlock` renders each with its
    own next action.
-3. **A refused trade is not a purchase.** `verbOf()` gives past tense only to
-   `landed`; a refused buy reads "tried to buy", and `toneOf()` refuses it the
-   green that means money moved.
+3. **A refused trade is not a purchase.** The feed's `verbOf()`
+   (`ui/feed/Beat.kt`) gives past tense only to a landed trade; a refused buy
+   never reads "bought", and a view is never a trade.
 
 ## Headers: what a non-browser must not send
 
@@ -175,8 +176,6 @@ active, so the `Host` must be loopback or private-LAN.
 ## Known gaps
 
 - No offline cache, no push, no widgets.
-- `AgentDetailScreen` filters the public thesis window client-side rather than
-  reading a per-agent endpoint.
 - The **watchlist is device-local**, in DataStore, the way the web's is
   device-local in `localStorage`. Starring here does not star on the web. There
   is no server route for it and inventing one would put a per-caller read in
@@ -241,8 +240,6 @@ the watchlist, sharing and the holders table are all here now. What is not:
 - **No X-handle proof flow.** The app renders a proven handle as a link and an
   unproven one as plain text, but the proof itself (post a nonce, verify it) is
   web-only.
-- No per-agent endpoint, so a desk's history is the public window filtered
-  client-side.
 
 ## Running it on an emulator
 

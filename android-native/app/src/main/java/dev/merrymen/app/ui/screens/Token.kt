@@ -102,7 +102,7 @@ import dev.merrymen.app.net.TokenDetail
 import dev.merrymen.app.net.TokenHolder
 import dev.merrymen.app.net.poolEvidenceOf
 import dev.merrymen.app.net.tapeWindows
-import dev.merrymen.app.ui.Avatar
+import dev.merrymen.app.ui.AgentFace
 import dev.merrymen.app.ui.BOTTOM_INSET
 import dev.merrymen.app.ui.Bar
 import dev.merrymen.app.ui.ChartKind
@@ -1014,7 +1014,7 @@ private fun HolderRow(h: TokenHolder, nav: NavHostController) {
     horizontalArrangement = Arrangement.spacedBy(12.dp),
     verticalAlignment = Alignment.Top,
   ) {
-    Avatar(name = name, size = 40.dp)
+    AgentFace(slug = slug, name = name, size = 40.dp)
     Column(Modifier.weight(1f)) {
       // `.held-top` — the name and the position value on one line.
       Row(

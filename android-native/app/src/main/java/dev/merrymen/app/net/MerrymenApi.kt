@@ -361,16 +361,10 @@ class MerrymenApi(
   /** Sign-out must invalidate the SERVER session, not just the local jar. */
   suspend fun logout(): ApiResult<JsonElement> = sendJson("/api/auth/logout", "POST", null)
 
-  suspend fun challenge(): ApiResult<Challenge> = getJson("/api/auth/challenge")
-
-  suspend fun verify(address: String, signature: String, nonce: String): ApiResult<VerifyResult> =
-    sendJson("/api/auth/verify", "POST", json.encodeToString(VerifyBody.serializer(), VerifyBody(address, signature, nonce)))
-
   // ── read: who am I, what do I hold ───────────────────────────────────────
 
   suspend fun version(): ApiResult<Version> = getJson("/api/version")
   suspend fun feed(): ApiResult<Feed> = getJson("/api/feed")
-  suspend fun scoreboard(): ApiResult<JsonElement> = getJson("/api/scoreboard")
   suspend fun grants(): ApiResult<GrantView> = getJson("/api/grants")
   suspend fun proposals(): ApiResult<ProposalsView> = getJson("/api/proposals")
 
@@ -413,9 +407,6 @@ class MerrymenApi(
   suspend fun leaderboard(): ApiResult<Leaderboard> = getJson("/api/leaderboard")
   suspend fun agent(slug: String): ApiResult<JsonElement> = getJson("/api/agents/" + slug)
   suspend fun discoveries(): ApiResult<Discoveries> = getJson("/api/discoveries")
-  suspend fun venue(): ApiResult<JsonElement> = getJson("/api/venue")
-  suspend fun wall(): ApiResult<JsonElement> = getJson("/api/wall")
-  suspend fun wallTape(): ApiResult<JsonElement> = getJson("/api/wall-tape")
   /** Session-free by design, so it is cacheable and carries nobody's identity. */
   suspend fun likeCounts(): ApiResult<LikeCounts> = getJson("/api/like-counts")
 
@@ -427,14 +418,6 @@ class MerrymenApi(
   suspend fun tier(): ApiResult<TierView> = getJson("/api/tier")
   suspend fun circle(): ApiResult<CircleView> = getJson("/api/circle")
   suspend fun alpha(): ApiResult<AlphaView> = getJson("/api/alpha")
-
-  /** GET returns a challenge to sign; PATCH reads back what is linked. */
-  suspend fun holderChallenge(holder: String): ApiResult<HolderChallenge> =
-    getJson("/api/holder?holder=" + java.net.URLEncoder.encode(holder, "UTF-8"))
-
-  suspend fun holderLinked(): ApiResult<HolderLinked> = sendJson("/api/holder", "PATCH", "{}")
-
-  suspend fun holderUnlink(): ApiResult<JsonElement> = sendJson("/api/holder", "DELETE", null)
 
   // ── settings ──────────────────────────────────────────────────────────────
 
@@ -509,6 +492,13 @@ class MerrymenApi(
   /**
    * Queue one order. [owner] is the wallet that confirmed it (see [OrderBody]);
    * null leaves it to the session, as before.
+   *
+   * NO SCREEN PLACES AN ORDER THROUGH THIS. Chat and Trade use
+   * OrdersWire.postOrder, which keeps the route's own refusal apart from a
+   * gateway's page (a 502 may stand in front of a placed order); here every
+   * unmarked 5xx is the generic sentence, so a caller would have to read any
+   * Refused 5xx as unknown and look it up. The transport tests use it as their
+   * example write.
    */
   suspend fun order(side: String, symbol: String, usdg: Double, owner: String? = null): ApiResult<OrderResult> =
     sendJson(
@@ -529,13 +519,8 @@ class MerrymenApi(
       json.encodeToString(SnipeBody.serializer(), SnipeBody(query, usdg, owner)),
     )
 
-  suspend fun selftest(): ApiResult<OrderResult> = sendJson("/api/selftest", "POST", null)
-  suspend fun selftestStatus(): ApiResult<JsonElement> = getJson("/api/selftest")
-
   /** Practice book only. The worker refuses this outright on the live rail. */
   suspend fun paperReset(): ApiResult<OrderResult> = sendJson("/api/paper-reset", "POST", null)
-
-  suspend fun models(): ApiResult<JsonElement> = sendJson("/api/models", "POST", "{}")
 
   // ── likes and follows ─────────────────────────────────────────────────────
 

@@ -36,15 +36,6 @@ data class Version(val version: String? = null, val commit: String? = null)
 @Serializable
 data class SessionView(val hosted: Boolean? = null, val address: String? = null)
 
-@Serializable
-data class Challenge(val origin: String, val nonce: String, val message: String)
-
-@Serializable
-data class VerifyBody(val address: String, val signature: String, val nonce: String)
-
-@Serializable
-data class VerifyResult(val ok: Boolean? = null, val address: String? = null, val error: String? = null)
-
 // ── the reader's standing in the Circle ─────────────────────────────────────
 
 /** Mirrors TierView in web/src/app/api/tier/route.ts. */
@@ -513,22 +504,6 @@ data class LeaderRow(
   val filledPaper: Int? = null,
 )
 
-/**
- * The web's own wording for an unranked row, from `unrankedShort` in
- * `web/src/lib/rank-pnl.ts:117`. Mirrored verbatim so the two clients do not
- * describe the same row differently.
- *
- * An id this build does not know falls back to "unranked" rather than printing
- * a raw enum at somebody.
- */
-fun unrankedShort(why: String?): String = when (why) {
-  "no-deposit" -> "no deposit"
-  "never-filled" -> "never filled"
-  "contributions-unevidenced" -> "unverified deposits"
-  "quality-unknown" -> "unranked"
-  else -> "unranked"
-}
-
 @Serializable
 data class Leaderboard(
   val agents: List<LeaderRow> = emptyList(),
@@ -912,18 +887,6 @@ private fun GrantView.capNumber(key: String): Double? {
   if (p.isString) return null
   return p.content.toDoubleOrNull()?.takeIf { it.isFinite() }
 }
-
-// ── holder proof ────────────────────────────────────────────────────────────
-
-@Serializable
-data class HolderChallenge(val message: String? = null, val nonce: String? = null, val error: String? = null)
-
-@Serializable
-data class HolderLinked(val linked: HolderProof? = null)
-
-/** The nested shape /api/holder actually returns: `{"linked":{address,at}}` or `{"linked":null}`. */
-@Serializable
-data class HolderProof(val address: String? = null, val at: Long? = null)
 
 /** A single-field error body, which several routes use verbatim. */
 @Serializable

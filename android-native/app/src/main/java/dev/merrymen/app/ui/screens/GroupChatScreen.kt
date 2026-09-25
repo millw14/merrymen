@@ -91,7 +91,7 @@ import dev.merrymen.app.market.WhileResumed
 import dev.merrymen.app.net.GcCall
 import dev.merrymen.app.net.GcLine
 import dev.merrymen.app.net.GcMe
-import dev.merrymen.app.ui.Avatar
+import dev.merrymen.app.ui.AgentFace
 import dev.merrymen.app.ui.Empty
 import dev.merrymen.app.ui.EmptyKind
 import dev.merrymen.app.ui.LoadedBlock
@@ -245,7 +245,7 @@ private fun GcHeader(s: GroupChatState, member: Boolean, nav: NavHostController,
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
               ) {
-                Avatar(name = p.name, size = 22.dp)
+                AgentFace(slug = p.slug, name = p.name, size = 22.dp)
                 Text(p.name, style = BodyText, color = MerryColors.tx, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (!p.awake) Text("asleep", style = MetaText, color = MerryColors.faint)
               }
@@ -790,7 +790,8 @@ private fun GcLineRow(
     if (!item.mine) {
       Box(Modifier.width(34.dp)) {
         if (item.first) {
-          Avatar(
+          AgentFace(
+            slug = m.slug,
             name = m.name,
             size = 28.dp,
             modifier = Modifier.clickable(enabled = m.slug != null) { m.slug?.let(onProfile) },

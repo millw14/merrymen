@@ -80,9 +80,9 @@ import kotlin.math.abs
 
 /**
  * `unrankedShort` (rank-pnl.ts): the reason a row has no ranked return, short
- * enough for a cell. Local to the board, which is the only place that prints
- * the short form; `Models.unrankedShort` predates "paper" and "inactive" and
- * printed a paper agent as "unranked".
+ * enough for a cell. Local to the board, the only place that prints the short
+ * form, and it knows "paper" and "inactive": without them a paper agent read
+ * as "unranked".
  */
 internal fun boardUnranked(why: String?): String = when (why) {
   "paper" -> "paper trading"

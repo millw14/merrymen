@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -617,180 +616,6 @@ fun Pill(text: String, selected: Boolean, modifier: Modifier = Modifier, onClick
 }
 
 // ---------------------------------------------------------------------------
-// AVATARS
-// ---------------------------------------------------------------------------
-
-/**
- * THE HUE HASH, mirrored character for character from `ui.tsx:6-9`.
- *
- * ```
- * let h = 0;
- * for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 360;
- * ```
- *
- * This is identity, not decoration: the same agent must come out the same colour
- * on the phone and in the browser, so the multiplier, the modulus and the
- * per-step reduction all have to stay exactly as they are. `charCodeAt` returns
- * a UTF-16 code unit, which is what Kotlin's `Char.code` gives, so a surrogate
- * pair folds identically in both.
- */
-private fun hueOf(seed: String): Int {
-  var h = 0
-  for (c in seed) h = (h * 31 + c.code) % 360
-  return h
-}
-
-/**
- * `gradient()` at `ui.tsx:20-23`:
- * `linear-gradient(145deg, hsl(h 62% 62%), hsl((h + 42) % 360 58% 44%))`.
- *
- * Note the second stop is 58%/44%, NOT a second copy of 62%/62% — the ramp
- * darkens as well as rotating, and a flat pair reads as a different avatar set.
- *
- * CSS measures the angle clockwise from "to top", so 145deg points down and
- * slightly right. For a box of w x h the gradient line has length
- * `|w sin θ| + |h cos θ|` and is centred on the box, which for a square puts the
- * ends at about (0.10, -0.07) and (0.90, 1.07) of the side.
- */
-private fun faceBrush(seed: String, size: Size): Brush {
-  val h = hueOf(seed).toFloat()
-  return Brush.linearGradient(
-    colors = listOf(
-      Color.hsl(h, 0.62f, 0.62f),
-      Color.hsl((h + 42f) % 360f, 0.58f, 0.44f),
-    ),
-    start = Offset(size.width * 0.1005f, size.height * -0.0705f),
-    end = Offset(size.width * 0.8995f, size.height * 1.0705f),
-  )
-}
-
-/**
- * `initialsOf` at `ui.tsx:11-17`, ported straight.
- *
- * Zero words returns the literal "??" — a VISIBLE "we do not have a name",
- * not a blank circle. Do not turn it into an empty string.
- */
-private fun initialsOf(name: String): String {
-  val words = name.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
-  return when {
-    words.isEmpty() -> "??"
-    words.size == 1 -> words[0].take(2).uppercase(Locale.ROOT)
-    else -> "${words[0][0]}${words[1][0]}".uppercase(Locale.ROOT)
-  }
-}
-
-/** `Coin`'s initials, `ui.tsx:261-262`: alphanumerics only, 2 chars, else "?". */
-private fun coinInitials(symbol: String): String =
-  symbol.replace(Regex("[^A-Za-z0-9]"), "").take(2).uppercase(Locale.ROOT).ifEmpty { "?" }
-
-/**
- * The initials size the sheet gives each avatar box. terminal.css:1031 sets the
- * shared 11px; the variants override it at :1058 (`.face.sm` 16px box / 7px),
- * :1064 (`.face.pin` 22 / 8), :1071 (`.face.lg` 48 / 16) and :1079 (`.coin`
- * 40 / 12). The ratios are not constant, so the four named boxes are matched
- * exactly and anything else falls back to the pin ratio.
- */
-private fun initialsSizeFor(box: Dp): TextUnit = when (box) {
-  16.dp -> 7.sp
-  22.dp -> 8.sp
-  30.dp -> 11.sp
-  40.dp -> 12.sp
-  48.dp -> 16.sp
-  else -> (box.value * 8f / 22f).sp
-}
-
-/**
- * AN AGENT'S FACE — `.face.pin` / `.stack .face`, 22x22 (terminal.css:1064, :2978).
- *
- * A circle carrying [name]'s own gradient with its initials on top in
- * `#0e0e10` at weight 700. That near-black is NOT `--ink` and not `--bg`
- * (terminal.css:1040 states it separately); it is the one colour in the app that
- * exists to sit on a light avatar ground.
- *
- * The web layers a lazily-loaded robohash `<img>` over the initials and REMOVES
- * it on error so the gradient shows through (`ui.tsx:38-45`). No image is
- * fetched here — this composable is the fallback layer only, and a caller that
- * wants the portrait should draw it into the same box on top. Doing so leaves
- * the identity colour correct either way, which is the point of the fallback
- * being a hash rather than a placeholder grey.
- *
- * [badgeSymbol] draws `.stack-badge .coin` (terminal.css:2999): a 13x13 coin
- * pinned to the bottom-right with `box-shadow: 0 0 0 2px var(--bg)`. That shadow
- * is a SPREAD RING outside the box, not a border — `Modifier.border` would eat
- * 2dp of the coin — so the ring is a larger `--bg` circle behind it, and the
- * badge is offset by (ring + the CSS's own -3px) to land where the sheet puts it.
- */
-@Composable
-fun Avatar(
-  name: String,
-  modifier: Modifier = Modifier,
-  size: Dp = 22.dp,
-  badgeSymbol: String? = null,
-) {
-  Box(modifier.size(size)) {
-    Box(
-      Modifier
-        .fillMaxSize()
-        .clip(CircleShape)
-        .drawBehind { drawRect(brush = faceBrush(name, this.size)) },
-      contentAlignment = Alignment.Center,
-    ) {
-      val glyph = initialsSizeFor(size)
-      Text(
-        text = initialsOf(name),
-        style = TextStyle(
-          fontFamily = sans(glyph, FontWeight.W700),
-          fontSize = glyph,
-          fontWeight = FontWeight.W700,
-          lineHeight = glyph,
-        ),
-        color = AvatarGlyph,
-      )
-    }
-    if (badgeSymbol != null) CoinBadge(badgeSymbol, Modifier.align(Alignment.BottomEnd))
-  }
-}
-
-/** terminal.css:1040 — shared by `.face` and `.coin`, and not a theme token. */
-private val AvatarGlyph = Color(0xFF0E0E10)
-
-/** terminal.css:1084 — `.coin`'s default ground while a logo is still loading. */
-private val CoinGround = Color(0xFFECECE4)
-
-@Composable
-private fun BoxScope.CoinBadge(symbol: String, modifier: Modifier = Modifier) {
-  Box(
-    modifier
-      // right:-3px / bottom:-3px on the coin, plus the 2dp ring that sits
-      // outside it, is 5dp of travel from the parent's corner.
-      .offset(x = 5.dp, y = 5.dp)
-      .size(17.dp)
-      .background(MerryColors.bg, CircleShape)
-      .padding(2.dp),
-  ) {
-    Box(
-      Modifier
-        .fillMaxSize()
-        .clip(CircleShape)
-        .background(CoinGround)
-        .drawBehind { drawRect(brush = faceBrush(symbol, this.size)) },
-      contentAlignment = Alignment.Center,
-    ) {
-      Text(
-        text = coinInitials(symbol),
-        style = TextStyle(
-          fontFamily = sans(6.sp, FontWeight.W700),
-          fontSize = 6.sp,
-          fontWeight = FontWeight.W700,
-          lineHeight = 6.sp,
-        ),
-        color = AvatarGlyph,
-      )
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
 // THE EMPTY STATE
 // ---------------------------------------------------------------------------
 
@@ -1179,48 +1004,8 @@ private fun Modifier.dashedRoundedBorder(color: Color, width: Dp, radius: Dp): M
   }
 
 // ---------------------------------------------------------------------------
-// CORRECTNESS VOCABULARY — unchanged, and deliberately so
+// SPACING AND TOKEN MARKS
 // ---------------------------------------------------------------------------
-
-/**
- * THE VERB FOR WHAT HAPPENED TO A DECISION — the client half of the rule the
- * web feed learned: a refused trade is not a purchase.
- *
- * Past tense is reserved for `landed`. Everything else is named for what it
- * actually was, because "bought" beside a trade the wall turned back is the
- * complaint that started all of this: "in the feed it says I've bought things
- * but nothing shows in my portfolio".
- */
-fun verbOf(action: String?, outcome: String?, shadow: Boolean): String {
-  val verb = action ?: "act"
-  if (shadow || outcome == "shadow") return "would $verb"
-  return when (outcome) {
-    "refused", "reverted", "dropped" -> if (verb == "hold") "meant to hold" else "tried to $verb"
-    "pending" -> if (verb == "hold") "is holding" else "is ${verb}ing"
-    "landed" -> when (verb) {
-      "buy" -> "bought"
-      "sell" -> "sold"
-      else -> "held"
-    }
-    else -> if (verb == "hold") "is holding" else "is ${verb}ing"
-  }
-}
-
-/**
- * A trade that came to nothing must not wear the colour of one that didn't.
- *
- * `--up` and `--down` are only ever set as a text colour in terminal.css, never
- * as a ground, and `.wire-beat.turned` resets a turned-back row to plain `--card`
- * with a neutral rail specifically so it cannot read as a fill. Anything that
- * colours by ACTION rather than by OUTCOME reintroduces exactly that bug.
- */
-fun toneOf(action: String?, outcome: String?): Color = when {
-  outcome == "refused" || outcome == "reverted" || outcome == "dropped" -> Neutral
-  outcome != "landed" -> Neutral
-  action == "buy" -> Up
-  action == "sell" -> Down
-  else -> Neutral
-}
 
 /**
  * Kept so a screen can put the tab bar's clearance at the end of a scrolling
@@ -1241,10 +1026,11 @@ fun BottomInsetSpacer() {
  * one colour for every token, because a token's identity is its logo and its
  * ticker, not a hue this app invented for it.
  *
- * Using [Avatar] for a token row therefore did two wrong things at once: it gave
- * every coin a fake identity colour, and it ran the ticker through `initialsOf`,
- * which splits on WHITESPACE — so "AAPL" became "AA" and a blank one became the
- * literal "??". A ticker is already short; it is truncated, not initialised.
+ * Drawing a token row with an agent's face would do two wrong things at once:
+ * give every coin a fake identity colour, and run the ticker through the
+ * face's initials, which split on WHITESPACE — so "AAPL" would become "AA"
+ * and a blank one the literal "??". A ticker is already short; it is
+ * truncated, not initialised.
  */
 @Composable
 fun Coin(symbol: String, modifier: Modifier = Modifier, size: Dp = 40.dp) {
