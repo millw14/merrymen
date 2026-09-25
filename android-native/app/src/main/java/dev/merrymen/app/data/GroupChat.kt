@@ -22,7 +22,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import okhttp3.OkHttpClient
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -205,19 +204,6 @@ class GroupChatRoom(
    * replaced it.
    */
   private val generation = AtomicLong(0)
-
-  /**
-   * THE SHARED CLIENT WITH OKHTTP'S OWN RESEND SWITCHED OFF, for the owner's
-   * line. Http.client retries a request whose connection dropped after it was
-   * written — on a pooled connection it does so every time — and a second copy
-   * of a line racing its original can be answered 429 ("One message at a time")
-   * while the original commits. That 429 then reads as a refusal of a line
-   * that is in the room: its words go back in the box, and sending them again
-   * mints a new key and posts twice. Without the resend, a lost answer is one
-   * attempt with an unknown outcome, and "Send again" is the owner's to press.
-   * newBuilder() shares the pool, the cookies and the logging.
-   */
-  private val writeHttp: OkHttpClient by lazy { api.http.newBuilder().retryOnConnectionFailure(false).build() }
 
   private val pollLock = Mutex()
   private val meLock = Mutex()
@@ -563,7 +549,14 @@ class GroupChatRoom(
    */
   private suspend fun deliver(line: PendingLine, resend: Boolean): SendResult {
     val gen = generation.get()
-    val r = api.groupChatPost(line.body, line.replyTo, line.clientId, client = writeHttp)
+    // ONE CALL IS ONE ATTEMPT. The post goes on the API's write client, which
+    // never resends a request whose connection dropped after it was written. A
+    // second copy racing its original can be answered 429 ("One message at a
+    // time") while the original commits, and that 429 would read as a refusal
+    // of a line that is in the room: its words back in the box, and a new key
+    // minted to post it twice. So a lost answer is one attempt with an unknown
+    // outcome, and "Send again" is the owner's to press.
+    val r = api.groupChatPost(line.body, line.replyTo, line.clientId)
     if (gen != generation.get()) return SendResult.Refused("")
     val posted = (r as? ApiResult.Ok)?.value
     if (posted != null) {
@@ -589,11 +582,13 @@ class GroupChatRoom(
     if (refused != null && (refused.status == 401 || refused.status == 403)) scope.launch { pullMe(force = true) }
     // WHAT A REFUSAL PROVES DEPENDS ON THE ATTEMPT. A first attempt carries a
     // key the room has never seen, so a 4xx is a refusal of this line. A
-    // RESEND follows an attempt that may still be committing, and the route
-    // checks the session, the agent and its limits before it looks the key up
-    // (groupchat/route.ts) — so a 401, 403 or 429 there says nothing about the
-    // first attempt, and the line stays unconfirmed. Only the gate's 400 and
-    // 413 judge the words themselves, which the first attempt carried too.
+    // RESEND follows an attempt that may still be committing, and on it the
+    // route (groupchat/route.ts) answers 401 and 403 BEFORE it looks the key
+    // up, so they say nothing about the first attempt; and it answers 429 only
+    // AFTER a look-up that found nothing, which a first attempt still
+    // committing also gives. So a 401, 403 or 429 on a resend leaves the line
+    // unconfirmed. Only the 400 and 413 judge the words themselves, which the
+    // first attempt carried too.
     if (refused != null && refused.status < 500 && (!resend || refused.status == 400 || refused.status == 413)) {
       // A REAL REFUSAL: the line was not stored. It comes off the screen — a
       // bubble for a message nobody else can see is a lie to the one person

@@ -61,7 +61,6 @@ import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.OriginCheck
 import dev.merrymen.app.net.SettingsRead
 import dev.merrymen.app.net.TelegramStatus
-import dev.merrymen.app.net.paperResetOnce
 import dev.merrymen.app.net.said
 import dev.merrymen.app.net.settingsRead
 import dev.merrymen.app.ui.LoadedBlock
@@ -619,7 +618,7 @@ fun SettingsScreen(nav: NavHostController) {
         )
         KillButton("Restart the practice book") {
           scope.launch {
-            when (val r = c.api.paperResetOnce()) {
+            when (val r = c.api.paperReset()) {
               is ApiResult.Ok -> {
                 note = "Queued. Your agent restarts the practice book on its next tick."
                 noteBad = false

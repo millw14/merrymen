@@ -6,12 +6,10 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import okhttp3.MediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import okio.BufferedSink
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -56,49 +54,36 @@ fun JsonObject?.text(key: String): String? =
 /**
  * ONE WRITE, and what came back — see [RouteAnswer].
  *
- * Built on [MerrymenApi.urlFor] and the shared client (so the cookie jar and
- * headers are the app's), but read by hand, because the route's JSON body on
- * an error status is the whole difference between "refused" and "unknown".
+ * Built on [MerrymenApi.urlFor] and the app's write client (so the cookie jar
+ * and headers are the app's), but read by hand, because the route's JSON body
+ * on an error status is the whole difference between "refused" and "unknown".
  *
- * SENT ONCE, WHATEVER CLIENT CARRIES IT. The body is one-shot, the one thing
- * OkHttp promises never to transmit twice: not when a reused connection dies
- * after the request went out (with retryOnConnectionFailure on, which the
- * shared client of this branch's base still has), and not on a 503 that says
- * Retry-After: 0, which OkHttp re-sends even with that retry off. Either would
- * be a second copy of the owner's order sent behind their back, after the
- * route may already have placed the first. The failure or the answer comes
- * back instead, and is read as above. A connection that failed BEFORE anything
- * was sent may still try the host's other address, which is safe and is what
- * keeps a write working on a network where one address family is broken.
+ * SENT ONCE, WHATEVER CLIENT CARRIES IT. It rides [MerrymenApi.writeHttp], or
+ * [client] made fit for writes the same way (forWrites), and either one never
+ * retries and gives the body a one-shot wrapper, the one thing OkHttp promises
+ * never to transmit twice: not when a reused connection dies after the request
+ * went out, and not on a 503 that says Retry-After: 0, which OkHttp re-sends
+ * even with its retry off. Either would be a second copy of the owner's order
+ * sent behind their back, after the route may already have placed the first.
+ * The failure or the answer comes back instead, and is read as above.
  */
 suspend fun MerrymenApi.routeAnswer(
   path: String,
   method: String,
   body: JsonObject,
-  client: OkHttpClient = http,
+  client: OkHttpClient = writeHttp,
 ): RouteAnswer {
   val u = urlFor(path) ?: return RouteAnswer.NotSent(NOT_A_WEB_ADDRESS)
-  val bytes = json.encodeToString(JsonElement.serializer(), body).toByteArray(Charsets.UTF_8)
   val req = Request.Builder()
     .url(u)
-    .method(method, OneShotJson(bytes, jsonType))
+    .method(method, json.encodeToString(JsonElement.serializer(), body).toRequestBody(jsonType))
     .build()
-  return exchange(client, req) { r ->
+  return exchange(client.forWrites(), req) { r ->
     val obj = jsonObjectOf(r)
     // THE WEB'S RULE, exactly: an error status with nothing the route wrote is
     // nobody's answer. A 2xx with no JSON is still a 2xx — the row exists.
     if (!r.isSuccessful && obj == null) RouteAnswer.Lost else RouteAnswer.Said(r.code, obj)
   } ?: RouteAnswer.Lost
-}
-
-/** A write's body that OkHttp may transmit at most once; see [routeAnswer]. */
-private class OneShotJson(private val bytes: ByteArray, private val type: MediaType) : RequestBody() {
-  override fun contentType(): MediaType = type
-  override fun contentLength(): Long = bytes.size.toLong()
-  override fun isOneShot(): Boolean = true
-  override fun writeTo(sink: BufferedSink) {
-    sink.write(bytes)
-  }
 }
 
 /**
@@ -237,7 +222,7 @@ suspend fun MerrymenApi.lookupSnipe(query: String, usdg: Double, owner: String?)
       put("usdgAmount", JsonPrimitive(usdg))
       if (owner != null) put("owner", JsonPrimitive(owner))
     },
-    client = http.newBuilder().callTimeout(SNIPE_LOOKUP_MS, TimeUnit.MILLISECONDS).build(),
+    client = writeHttp.newBuilder().callTimeout(SNIPE_LOOKUP_MS, TimeUnit.MILLISECONDS).build(),
   )
 
 /**

@@ -10,7 +10,6 @@ import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.Position
 import dev.merrymen.app.net.TelegramStatus
 import dev.merrymen.app.net.TradeRecord
-import dev.merrymen.app.net.putSettingsOnce
 import java.math.RoundingMode
 import java.time.Instant
 import java.time.ZoneId
@@ -919,7 +918,7 @@ suspend fun MerrymenApi.saveOwnAgentName(typed: String, readFor: String?, hosted
     return NameSave.Said("Couldn't tell whose agent this is, so nothing was sent. Reload and try again.")
   }
   val owner = if (hosted == false) null else readFor
-  return when (val o = settingsSaveOutcome(putSettingsOnce(JsonObject(mapOf("agentName" to JsonPrimitive(name))), owner))) {
+  return when (val o = settingsSaveOutcome(patchSettings(JsonObject(mapOf("agentName" to JsonPrimitive(name))), owner))) {
     is SettingsSaveOutcome.Saved ->
       if ("agentName" in o.notSaved) NameSave.Said("This server didn't take the name, so nothing changed.")
       else NameSave.Named(name)

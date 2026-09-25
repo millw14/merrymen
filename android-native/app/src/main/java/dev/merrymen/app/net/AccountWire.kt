@@ -55,28 +55,23 @@ fun agentImageProblem(kind: AgentImageKind, mime: String?, size: Long): String? 
 data class AgentImageSaved(val ok: Boolean? = null, val version: String? = null)
 
 /**
- * A WRITE IS SENT ONCE. The shared client retries on a connection failure,
- * and OkHttp treats a request whose answer was cut off as one it may send
- * again — measured here: with the shared client's setting, a PUT whose
- * connection dropped after the request reached the server arrived TWICE.
- * The writes on these screens are idempotent, so a repeat would do no harm;
- * the rule is kept anyway, because "a lost answer is looked up, never
- * resent" is only true if nothing underneath resends it. Derived with
- * newBuilder, so it shares the jar, the headers and the connection pool.
- */
-internal fun MerrymenApi.sendOnce(): okhttp3.OkHttpClient = http.newBuilder().retryOnConnectionFailure(false).build()
-
-/**
  * The raw file as the body. A ByteArray body, so OkHttp sends a Content-Length:
  * the route refuses an upload whose length it is not told (411) rather than
  * reading an unknown amount to find out.
+ *
+ * SENT ONCE: callAt puts every write on the API's write client, which never
+ * resends one whose answer was cut off. Measured on this route before that
+ * client existed: a PUT whose connection dropped after the request reached
+ * the server arrived TWICE. The write is idempotent, so a repeat would do no
+ * harm; the rule holds anyway, because "a lost answer is looked up, never
+ * resent" is only true if nothing underneath resends it.
  */
 suspend fun MerrymenApi.putAgentImage(kind: AgentImageKind, bytes: ByteArray, mime: String): ApiResult<AgentImageSaved> =
-  decoded(callAt("/api/agent-image/me/" + kind.wire, sendOnce()) { put(bytes.toRequestBody(mime.toMediaTypeOrNull())) })
+  decoded(callAt("/api/agent-image/me/" + kind.wire) { put(bytes.toRequestBody(mime.toMediaTypeOrNull())) })
 
 /** Remove one. Removing a picture that is not there is not an error — the owner's intent holds either way. */
 suspend fun MerrymenApi.deleteAgentImage(kind: AgentImageKind): ApiResult<AgentImageSaved> =
-  sendJson("/api/agent-image/me/" + kind.wire, "DELETE", null, sendOnce())
+  sendJson("/api/agent-image/me/" + kind.wire, "DELETE", null)
 
 /** What became of an upload or a removal. */
 sealed interface ImageWrite {

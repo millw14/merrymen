@@ -1,9 +1,6 @@
 package dev.merrymen.app.net
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * GET /api/settings, READ ONCE FOR TWO PURPOSES: the form's envelope, and the
@@ -72,21 +69,3 @@ fun SettingsKeys.providerKey(env: SettingsEnvelope): Pair<String, SecretView> {
 
 /** The web's placeholder for a masked key (Settings.tsx secretPlaceholder), less the invitation to type. */
 fun secretStatus(s: SecretView): String = if (s.set) "saved ····" + (s.hint ?: "") else "not set"
-
-/**
- * PUT /api/settings, SENT ONCE, with [owner] in the body — MerrymenApi.patchSettings's
- * body exactly, on the client that does not resend ([sendOnce]).
- *
- * The owner is the wallet the values were read for; "" when read signed out;
- * null (self-hosted) sends no key and the save is judged by session alone.
- * patchSettings rides the shared client, which resends a write whose answer
- * was cut off, and the screens here promise that a lost answer is looked up,
- * never sent again.
- */
-suspend fun MerrymenApi.putSettingsOnce(patch: JsonObject, owner: String?): ApiResult<SettingsSaved> {
-  val body = if (owner != null) JsonObject(patch + ("owner" to JsonPrimitive(owner))) else patch
-  return sendJson("/api/settings", "PUT", json.encodeToString(JsonElement.serializer(), body), sendOnce())
-}
-
-/** Restart the practice book, sent once: a lost answer is said as unknown, and not repeated underneath. */
-suspend fun MerrymenApi.paperResetOnce(): ApiResult<OrderResult> = sendJson("/api/paper-reset", "POST", null, sendOnce())

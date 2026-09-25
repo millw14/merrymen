@@ -99,8 +99,9 @@ class OrdersWireTest {
   }
 
   @Test fun anOrderIsSentOnceEvenOnAClientThatRetries() = runBlocking {
-    // A plain OkHttpClient, as this branch's shared client still is: it re-sends
-    // a request whose answer is cut off on a reused connection.
+    // A plain OkHttpClient retries by default: it re-sends a request whose
+    // answer is cut off on a reused connection. The order still rides the
+    // API's write client, which never does.
     val retrying = apiFor(server)
     server.answer("""{"ceilingUsdg":25}""")
     assertEquals(25.0, retrying.orderCeiling()!!, 0.0)
@@ -111,6 +112,22 @@ class OrdersWireTest {
     server.takeRequest()
     assertEquals("it rode the warm connection", 1, server.takeRequest().sequenceNumber)
     assertEquals("the read, and ONE copy of the order", 2, server.requestCount)
+  }
+
+  /**
+   * The snipe's look-up has its own time limit, so it is carried by a client
+   * of its own — derived from the write client, never from one that retries.
+   */
+  @Test fun aSnipeLookupIsSentOnceEvenOnAClientThatRetries() = runBlocking {
+    val retrying = apiFor(server)
+    server.answer("""{"ceilingUsdg":25}""")
+    retrying.orderCeiling()
+    server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+    server.answer("""{"outcome":"not-found","say":"nothing"}""")
+    assertEquals(RouteAnswer.Lost, retrying.lookupSnipe("pepe", 20.0, "0xabc"))
+    server.takeRequest()
+    assertEquals("it rode the warm connection", 1, server.takeRequest().sequenceNumber)
+    assertEquals("the read, and ONE copy of the look-up", 2, server.requestCount)
   }
 
   @Test fun aGatewaySayingRetryNowGetsNoSecondCopy() = runBlocking {

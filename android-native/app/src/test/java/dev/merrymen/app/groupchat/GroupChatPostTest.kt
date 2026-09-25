@@ -5,12 +5,7 @@ import dev.merrymen.app.data.GroupChatRoom
 import dev.merrymen.app.data.SendResult
 import dev.merrymen.app.data.composerAfter
 import dev.merrymen.app.data.waitLine
-import dev.merrymen.app.net.Http
-import dev.merrymen.app.net.MemoryStore
-import dev.merrymen.app.net.MerrymenApi
-import dev.merrymen.app.net.PersistentCookieJar
 import dev.merrymen.app.net.apiFor
-import dev.merrymen.app.net.origin
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -62,8 +57,8 @@ class GroupChatPostTest {
   /**
    * The client, WITHOUT OkHttp's own silent retry of a request whose connection
    * dropped: these tests are about what the STORE does with a lost answer. The
-   * app's client does retry (Http.client); the room's post is kept off that
-   * retry, which theRoomsPostIsOneAttemptEvenOnTheAppsOwnClient shows.
+   * room's post is one attempt whatever client the API is built over, which
+   * theRoomsPostIsOneAttemptEvenOnAClientThatRetries shows.
    */
   private fun api() = apiFor(server, OkHttpClient.Builder().retryOnConnectionFailure(false).build())
 
@@ -421,22 +416,21 @@ class GroupChatPostTest {
   }
 
   /**
-   * ONE CALL IS ONE ATTEMPT, EVEN ON THE APP'S OWN CLIENT. Http.client lets
-   * OkHttp send a POST again on its own when a pooled connection drops after
-   * the request went out, and a second copy racing the first can be answered
-   * 429 while the first commits — which read as a refusal of a line that is in
-   * the room. The room's post goes out with that resend off: the lost answer
-   * is an unknown outcome, and Send again is the owner's to press.
+   * ONE CALL IS ONE ATTEMPT, EVEN ON A CLIENT THAT RETRIES. A plain
+   * OkHttpClient sends a POST again on its own when a pooled connection drops
+   * after the request went out, and a second copy racing the first can be
+   * answered 429 while the first commits — which read as a refusal of a line
+   * that is in the room. The room's post rides the API's write client, which
+   * never does: the lost answer is an unknown outcome, and Send again is the
+   * owner's to press. (The app's own Http.client retries nothing either.)
    */
-  @Test fun theRoomsPostIsOneAttemptEvenOnTheAppsOwnClient() = runBlocking {
+  @Test fun theRoomsPostIsOneAttemptEvenOnAClientThatRetries() = runBlocking {
     val attempt = AtomicInteger(0)
     roomWith { req ->
       val res = storeLine(req)
       if (attempt.getAndIncrement() == 0) MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) else res
     }
-    val store = MemoryStore(server.origin())
-    val http = Http.client(PersistentCookieJar(store), debug = false)
-    val r = GroupChatRoom(MerrymenApi(http, store), this, now = { clock })
+    val r = GroupChatRoom(apiFor(server), this, now = { clock })
     // Read first, so the post goes out on a pooled connection: the case the transport resends.
     r.pollNow()
     r.pullMe(force = true)
@@ -453,13 +447,14 @@ class GroupChatPostTest {
   }
 
   /**
-   * A RESEND IS REFUSED BEFORE ITS KEY IS LOOKED UP. The route checks the
-   * session, the agent and the limits first, so a resend answered 429 or 401
-   * says nothing about the first attempt, which may be in the room or still
-   * committing. The line stays unconfirmed under its one key — never handed
-   * back to be typed again, which mints a new key and posts it twice.
+   * A RESEND'S 429 OR 401 SAYS NOTHING ABOUT THE FIRST ATTEMPT. The route
+   * answers 401 (and 403) before it looks the key up, and 429 only after a
+   * look-up that found nothing — which a first attempt still committing gives
+   * too. So the line may be in the room or on its way, and it stays
+   * unconfirmed under its one key — never handed back to be typed again, which
+   * mints a new key and posts it twice.
    */
-  @Test fun aResendRefusedBeforeItsKeyIsLookedUpStaysUnconfirmed() = runBlocking {
+  @Test fun aResendsRateLimitOrSignInSaysNothingAndStaysUnconfirmed() = runBlocking {
     var answer: (RecordedRequest) -> MockResponse = { MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) }
     roomWith { req -> answer(req) }
     val r = ready(this)

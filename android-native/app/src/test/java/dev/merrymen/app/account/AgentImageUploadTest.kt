@@ -129,7 +129,8 @@ class AgentImageUploadTest {
   }
 
   @Test fun aLostAnswerIsUnknownAndIsNotSentAgain() = runBlocking {
-    // The shared client's setting, which resends a write whose answer was cut off.
+    // A client that retries (a plain OkHttpClient's default), which resends a
+    // write whose answer was cut off; the API's write client sends it once.
     val api = apiFor(server, OkHttpClient.Builder().retryOnConnectionFailure(true).build())
     session(owner)
     server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))

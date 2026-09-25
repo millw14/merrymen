@@ -7,7 +7,6 @@ import dev.merrymen.app.net.SettingsEnvelope
 import dev.merrymen.app.net.answer
 import dev.merrymen.app.net.apiFor
 import dev.merrymen.app.net.providerKey
-import dev.merrymen.app.net.putSettingsOnce
 import dev.merrymen.app.net.secretStatus
 import dev.merrymen.app.net.settingsRead
 import dev.merrymen.app.net.valueOrNull
@@ -292,23 +291,23 @@ class SettingsPatchTest {
 
   @Test fun ignoredKeysAreSurfacedAsNotSaved() = runBlocking {
     server.answer("""{"ok":true,"appliesWithin":"one worker tick","ignored":["publicBook"]}""")
-    val o = settingsSaveOutcome(api.putSettingsOnce(JsonObject(mapOf("publicBook" to JsonPrimitive(true))), OWNER))
+    val o = settingsSaveOutcome(api.patchSettings(JsonObject(mapOf("publicBook" to JsonPrimitive(true))), OWNER))
     assertEquals(SettingsSaveOutcome.Saved("one worker tick", listOf("publicBook")), o)
   }
 
   @Test fun aCleanSaveSaysWhenItApplies() = runBlocking {
     server.answer("""{"ok":true,"appliesWithin":"one worker tick"}""")
-    assertEquals(SettingsSaveOutcome.Saved("one worker tick", emptyList()), settingsSaveOutcome(api.putSettingsOnce(JsonObject(mapOf("assetMode" to JsonPrimitive("all"))), OWNER)))
+    assertEquals(SettingsSaveOutcome.Saved("one worker tick", emptyList()), settingsSaveOutcome(api.patchSettings(JsonObject(mapOf("assetMode" to JsonPrimitive("all"))), OWNER)))
   }
 
   @Test fun aChangedOwnerIsRefusedAndSaidSo() = runBlocking {
     server.answer("""{"errors":["this browser is signed in with a different wallet now than the one that confirmed this, so nothing was changed. Sign back in with that wallet and ask again."]}""", code = 409)
-    assertEquals(SettingsSaveOutcome.OwnerChanged, settingsSaveOutcome(api.putSettingsOnce(JsonObject(mapOf("assetMode" to JsonPrimitive("all"))), OWNER)))
+    assertEquals(SettingsSaveOutcome.OwnerChanged, settingsSaveOutcome(api.patchSettings(JsonObject(mapOf("assetMode" to JsonPrimitive("all"))), OWNER)))
   }
 
   @Test fun theServersRefusalsAreOneLineEach() = runBlocking {
     server.answer("""{"errors":["classMaxHoldSec: must be a number between 60 and 2592000","name: 1-24 characters"]}""", code = 400)
-    val o = settingsSaveOutcome(api.putSettingsOnce(JsonObject(mapOf("classMaxHoldSec" to JsonPrimitive(5))), OWNER))
+    val o = settingsSaveOutcome(api.patchSettings(JsonObject(mapOf("classMaxHoldSec" to JsonPrimitive(5))), OWNER))
     assertEquals(SettingsSaveOutcome.Rejected(listOf("classMaxHoldSec: must be a number between 60 and 2592000", "name: 1-24 characters")), o)
   }
 
@@ -318,15 +317,16 @@ class SettingsPatchTest {
 
   @Test fun aLostAnswerIsUnknownAndIsLookedUpNotResent() = runBlocking {
     val patch = JsonObject(mapOf("assetMode" to JsonPrimitive("crypto"), "classMaxPositions" to JsonPrimitive(12L)))
-    // THE SHARED CLIENT'S OWN SETTING — it retries on a connection failure,
-    // and resends a write whose answer was cut off on a reused connection. The
-    // form has always read the settings first, so the save rides that
-    // connection, as it does on the phone.
+    // A CLIENT THAT RETRIES — a plain OkHttpClient's default, and what the
+    // app's shared client was before its writes went on writeHttp — resends a
+    // write whose answer was cut off on a reused connection. The form has
+    // always read the settings first, so the save rides that connection, as it
+    // does on the phone, and patchSettings still sends it once.
     val retrying = apiFor(server, OkHttpClient.Builder().retryOnConnectionFailure(true).build())
     server.answer(Fixtures.text("probe-settings-signedout.json"))
     retrying.settingsRead()
     server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
-    val o = settingsSaveOutcome(retrying.putSettingsOnce(patch, OWNER))
+    val o = settingsSaveOutcome(retrying.patchSettings(patch, OWNER))
     if (o !is SettingsSaveOutcome.Unknown) fail("a lost answer read as $o")
     assertEquals("the read and one save — never a second save underneath", 2, server.requestCount)
 

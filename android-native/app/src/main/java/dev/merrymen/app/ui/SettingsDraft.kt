@@ -4,7 +4,6 @@ import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.SettingsEnvelope
 import dev.merrymen.app.net.SettingsSaved
-import dev.merrymen.app.net.putSettingsOnce
 import java.util.Locale
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -495,5 +494,5 @@ suspend fun MerrymenApi.saveSettingsDraft(draft: SettingsDraft, env: SettingsEnv
   if (!formOwner.isNullOrEmpty() && signedInNow != null && !formOwner.equals(signedInNow, ignoreCase = true)) {
     return SettingsSave(null, SettingsSaveOutcome.OwnerChanged, emptyList())
   }
-  return SettingsSave(patch, settingsSaveOutcome(putSettingsOnce(patch, formOwner)), emptyList())
+  return SettingsSave(patch, settingsSaveOutcome(patchSettings(patch, formOwner)), emptyList())
 }
