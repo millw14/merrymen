@@ -15,14 +15,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -45,23 +50,36 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
+import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.Feed
+import dev.merrymen.app.net.GrantView
+import dev.merrymen.app.net.MerrymenApi
+import dev.merrymen.app.net.SettingsEnvelope
+import dev.merrymen.app.net.TelegramStatus
 import dev.merrymen.app.net.TierView
-import dev.merrymen.app.ui.Avatar
+import dev.merrymen.app.ui.BlockerFix
 import dev.merrymen.app.ui.BottomInsetSpacer
 import dev.merrymen.app.ui.LoadedBlock
 import dev.merrymen.app.ui.MerryColors
-import dev.merrymen.app.ui.Money
 import dev.merrymen.app.ui.Notice
+import dev.merrymen.app.ui.OwnBook
 import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.PageTitle
 import dev.merrymen.app.ui.Routes
+import dev.merrymen.app.ui.ownAgentName
+import dev.merrymen.app.ui.ownBookOf
+import dev.merrymen.app.ui.pnlLineOf
+import dev.merrymen.app.ui.positionLinesOf
 import dev.merrymen.app.ui.sans
-import dev.merrymen.app.ui.shortAddress
+import dev.merrymen.app.ui.sessionNeedsAsking
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** lucide `Search`, size 22 on Home's heading row (`terminal.css:742-748`). */
@@ -76,6 +94,16 @@ private fun SearchGlyph(tint: Color, size: Dp = 22.dp) {
     }
   }
 }
+
+/** lucide `MessagesSquare`, 22 at stroke 1.8 — Home.tsx's way into the group chat. */
+@Composable
+private fun GroupChatGlyph(tint: Color) = StrokeGlyph(
+  "M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z",
+  "M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1",
+  tint = tint,
+  size = 22.dp,
+  stroke = 1.8f,
+)
 
 /**
  * `.tag` — `terminal.css:1703`: 12px, weight 500, `letter-spacing: .03em`,
@@ -105,139 +133,293 @@ private fun Tag(text: String, modifier: Modifier = Modifier) {
 }
 
 /**
+ * THE OWNER'S READS, HELD FOR ONE WALLET — the feed, the account status, and
+ * the two reads behind the Telegram/Trencher strip.
+ *
+ * [readFor] is who was signed in when the feed was read, which is who every
+ * write from these screens is made for (a name, a picture). A refresh that
+ * fails after a good read keeps the figures on screen but says so, with their
+ * age ([feedFailure]); a refusal (a session that ended) replaces them, because
+ * a book the server would no longer send is not the reader's to keep looking at.
+ *
+ * A FEED ANSWERED FOR NOBODY WHILE THIS APP HOLDS AN ADDRESS IS A QUESTION,
+ * asked before the answer is published: [askWhoIsSignedIn] (the repository's
+ * refreshIdentity) runs first — see [sessionNeedsAsking] — so an ended session
+ * turns into the sign-in, not into "Couldn't read your book" over an account
+ * whose ledger is fine.
+ */
+internal class OwnReads {
+  var feed by mutableStateOf<Loaded<Feed>>(Loaded.Loading)
+  var feedAtMs by mutableStateOf<Long?>(null)
+  var feedFailure by mutableStateOf<ApiResult<*>?>(null)
+  var grants by mutableStateOf<Loaded<GrantView>>(Loaded.Loading)
+  var telegram by mutableStateOf<TelegramStatus?>(null)
+  var settings by mutableStateOf<SettingsEnvelope?>(null)
+  var readFor by mutableStateOf<String?>(null)
+
+  suspend fun load(
+    api: MerrymenApi,
+    signedIn: String?,
+    hosted: Boolean?,
+    withStrip: Boolean,
+    nowMs: () -> Long,
+    askWhoIsSignedIn: suspend () -> Unit = {},
+  ) {
+    val f = api.feed()
+    if (sessionNeedsAsking(f, (f as? ApiResult.Ok)?.value?.source == "none", signedIn, hosted)) askWhoIsSignedIn()
+    val keep = feed is Loaded.Value && (f is ApiResult.Unreachable || (f is ApiResult.Refused && f.status >= 500))
+    if (keep) {
+      feedFailure = f
+    } else {
+      feed = f.toLoaded()
+      feedFailure = null
+      if (f is ApiResult.Ok) {
+        feedAtMs = nowMs()
+        readFor = signedIn
+      }
+    }
+    val g = api.grants()
+    if (!(grants is Loaded.Value && g is ApiResult.Unreachable)) grants = g.toLoaded()
+    // THE STRIP ONLY FOR AN AGENT THAT EXISTS: no bot to connect and no
+    // strategy to run otherwise. Best effort — a failed read stays "checking…".
+    val exists = (grants as? Loaded.Value)?.value?.exists == true
+    if (withStrip && exists) {
+      (api.telegram() as? ApiResult.Ok)?.value?.let { telegram = it }
+      (api.settings() as? ApiResult.Ok)?.value?.let { settings = it }
+    }
+  }
+}
+
+/** How often the account refreshes while its screen is in front: the web shell's own pass. */
+private const val ACCOUNT_REFRESH_MS = 60_000L
+
+/**
  * HOME — one scrolling column, no cards, no dividers, no surface fills.
  *
  * `polish.css:65`: `.home-page { display:flex; flex-direction:column; gap:28px }`,
  * inside the body's own `padding: 16px 20px …` (`polish.css:87`) with the top
  * raised to 20px by `polish.css:177-180`. Every block here sits directly on
- * `--bg`; the only filled things on the whole web screen are the Deposit button,
- * the two market pills and the tiny strategy tags.
+ * `--bg`.
  *
- * THE 28px IS SPELT AS EXPLICIT TOP PADDING rather than as an
- * `Arrangement.spacedBy`, because the header block's own internal rhythm is 18px
- * (`polish.css:68`) and 20/8px (`.home-balance-label`), and one arrangement
- * value would flatten all three into one.
+ * WHOSE BOOK THIS IS COMES FIRST. /api/feed answers a signed-out reader, and a
+ * ledger it could not open, with the house fallback — "Robin", a steady
+ * basket — and this screen used to draw that as the reader's own agent over
+ * "Nothing held right now.". [ownBookOf] decides: signed out gets the empty
+ * hero and a sign-in (only where there is one), an unreadable book says so and
+ * offers a retry, and only a book the server read gets figures.
  *
- * WHAT THIS SCREEN FETCHES IS WHAT IT FETCHED BEFORE: `/api/feed` and
- * `/api/tier`, once, on first composition.
+ * THE READS: /api/feed and /api/grants on open, every 60 seconds while this
+ * screen is RESUMED, and on a pull; /api/tier once; /api/telegram and
+ * /api/settings for the strip when there is an agent. All of it is keyed on
+ * repo.signedIn, so a wallet switch starts from nothing rather than showing
+ * one wallet's book under another's session.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(nav: NavHostController) {
   val c = LocalContainer.current
-  var feed by remember { mutableStateOf<Loaded<Feed>>(Loaded.Loading) }
-  var tier by remember { mutableStateOf<Loaded<TierView>>(Loaded.Loading) }
+  val signedIn by c.repo.signedIn.collectAsState()
+  val hosted by c.repo.hosted.collectAsState()
+  val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
+  val reads = remember(signedIn) { OwnReads() }
+  var tier by remember(signedIn) { mutableStateOf<Loaded<TierView>>(Loaded.Loading) }
+  var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+  var refreshing by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
+  val lifecycle = LocalLifecycleOwner.current.lifecycle
 
   suspend fun load() {
-    feed = c.api.feed().toLoaded()
-    tier = c.api.tier().toLoaded()
+    reads.load(c.api, signedIn, c.repo.hosted.value, withStrip = true, nowMs = { System.currentTimeMillis() }) {
+      c.repo.refreshIdentity()
+    }
+    nowMs = System.currentTimeMillis()
   }
-  LaunchedEffect(Unit) { load() }
 
-  Column(
-    Modifier
-      .fillMaxSize()
-      .verticalScroll(rememberScrollState())
-      .padding(horizontal = PagePadH)
-      // `.body:has(> .home-page) { padding-top: 20px }` — polish.css:180 wins
-      // over the shorthand's 16px on source order at equal specificity.
-      .padding(top = 20.dp),
+  LaunchedEffect(signedIn) { tier = c.api.tier().toLoaded() }
+  // EVERY 60s WHILE IN FRONT, and never in the background: repeatOnLifecycle
+  // stops the loop when the screen is paused and starts it (with a read) when
+  // it is back.
+  LaunchedEffect(signedIn, lifecycle) {
+    lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+      while (true) {
+        load()
+        delay(ACCOUNT_REFRESH_MS)
+      }
+    }
+  }
+
+  val book = ownBookOf(reads.feed, signedIn, hosted, canOfferSignIn)
+  val pull = rememberPullToRefreshState()
+  PullToRefreshBox(
+    isRefreshing = refreshing,
+    onRefresh = {
+      scope.launch {
+        refreshing = true
+        load()
+        refreshing = false
+      }
+    },
+    state = pull,
+    modifier = Modifier.fillMaxSize(),
+    indicator = {
+      PullToRefreshDefaults.Indicator(
+        state = pull,
+        isRefreshing = refreshing,
+        modifier = Modifier.align(Alignment.TopCenter),
+        containerColor = MerryColors.card,
+        color = MerryColors.tx,
+      )
+    },
   ) {
-    // `.home-heading` — flex, space-between, margin-bottom 18px.
-    Row(
-      Modifier.fillMaxWidth().padding(bottom = 18.dp),
-      horizontalArrangement = Arrangement.SpaceBetween,
-      verticalAlignment = Alignment.CenterVertically,
+    Column(
+      Modifier
+        .fillMaxSize()
+        .verticalScroll(rememberScrollState())
+        .padding(horizontal = PagePadH)
+        // `.body:has(> .home-page) { padding-top: 20px }` — polish.css:180 wins
+        // over the shorthand's 16px on source order at equal specificity.
+        .padding(top = 20.dp),
     ) {
-      PageTitle("Home")
-      // `.icon-btn` — terminal.css:742-748: a 40x40 box holding a 22px glyph.
-      // 40dp is under Android's 48dp guidance; the box is left at the web's size
-      // so the heading's rhythm is not changed by a touch-target decision.
-      Box(
-        Modifier
-          .size(40.dp)
-          .clickable(role = Role.Button) { nav.navigate(Routes.SEARCH) }
-          .semantics { contentDescription = "Search tokens or agents" },
-        contentAlignment = Alignment.Center,
-      ) { SearchGlyph(MerryColors.tx) }
-    }
-
-    CircleLockBanner(tier, nav)
-
-    LoadedBlock(
-      feed,
-      onSignIn = { nav.navigate(Routes.SIGN_IN) },
-      onRetry = { scope.launch { load() } },
-    ) { f ->
-      HomeHero(f)
-
-      // THE WORKER'S OWN WARNING, which for a long time rendered nowhere at all.
-      f.events.firstOrNull { it.level == "warn" || it.level == "err" || it.level == "error" }
-        ?.message?.let {
-          Notice(title = "From your agent", body = it, modifier = Modifier.padding(top = 28.dp))
+      // `.home-heading` — flex, space-between, margin-bottom 18px.
+      Row(
+        Modifier.fillMaxWidth().padding(bottom = 18.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        PageTitle("Home")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          // THE WAY INTO THE GROUP CHAT, only where there is one: the room is
+          // hosted-only (self-hosted answers 404), and it is never shown while
+          // the server has not said which it is.
+          if (hosted == true) {
+            // `.icon-btn` — terminal.css:742-748: a 40x40 box holding a 22px glyph.
+            Box(
+              Modifier
+                .size(40.dp)
+                .clickable(role = Role.Button) { nav.navigate(Routes.GROUPCHAT) }
+                .semantics { contentDescription = "Group chat" },
+              contentAlignment = Alignment.Center,
+            ) { GroupChatGlyph(MerryColors.tx) }
+          }
+          Box(
+            Modifier
+              .size(40.dp)
+              .clickable(role = Role.Button) { nav.navigate(Routes.SEARCH) }
+              .semantics { contentDescription = "Search tokens or agents" },
+            contentAlignment = Alignment.Center,
+          ) { SearchGlyph(MerryColors.tx) }
         }
+      }
 
-      HomePositions(f)
+      SignedInNotice(Modifier.padding(bottom = 20.dp))
+      CircleLockBanner(tier, nav)
+
+      when (book) {
+        OwnBook.Loading -> LoadedBlock(Loaded.Loading) { _: Unit -> }
+        is OwnBook.Failed -> LoadedBlock(
+          book.state,
+          onSignIn = if (canOfferSignIn) ({ nav.navigate(Routes.SIGN_IN) }) else null,
+          onRetry = { scope.launch { load() } },
+        ) { _: Unit -> }
+        is OwnBook.SignedOut -> NoBookHero(
+          title = "Your agent starts here",
+          body = "Sign in to see your agent's balance, positions and trades here.",
+          action = if (book.canSignIn) "Sign in" else null,
+          onAction = { nav.navigate(Routes.SIGN_IN) },
+        )
+        OwnBook.Unreadable -> Notice(
+          title = "Couldn't read your book just now",
+          body = "merrymen answered, but your agent's ledger could not be read — that's our read failing, " +
+            "not a fact about your account. Nothing here is a balance of zero.",
+          actionLabel = "Try again",
+          onAction = { scope.launch { load() } },
+        )
+        is OwnBook.Mine -> {
+          val g = (reads.grants as? Loaded.Value)?.value
+          if (g != null && !g.exists) {
+            // SIGNED IN, NO AGENT YET. The feed still answers (with the name
+            // and strategy they configured), but there is no book behind it,
+            // and a "$—" hero would describe an account that does not exist.
+            NoBookHero(
+              title = "Your agent starts here",
+              body = "Create an agent to manage your portfolio and follow its trades here.",
+              action = "Create an agent",
+              onAction = { nav.navigate(Routes.web("/create", "Create an agent")) },
+            )
+          } else {
+            OwnHome(book.feed, reads, nowMs, hosted, nav) { scope.launch { load() } }
+          }
+        }
+      }
       HomeGo(nav)
+      BottomInsetSpacer()
     }
-    BottomInsetSpacer()
   }
 }
 
 /**
- * The header block's lower half: who the agent is, then the portfolio figure.
- *
- * `polish.css:90-94`, in order: `.hero-who { margin:0; gap:12px }`, the face at
- * 40x40, the name at 18px, the owner line at 13px, and the balance at 56px with
- * `line-height: 1.1` and no margin of its own.
+ * `.hero.empty` — Home.tsx:126-128, "This one trades.", and what to do next.
+ * Claims nothing about an account: it is the screen for one nobody has read.
  */
 @Composable
-private fun HomeHero(f: Feed) {
-  val agent = f.agent
+private fun NoBookHero(title: String, body: String, action: String?, onAction: () -> Unit) {
+  Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+    Prose(text = "This one trades.", size = 22.sp, lineHeight = 26.4.sp, color = MerryColors.tx, weight = FontWeight.W700)
+    Notice(title = title, body = body, actionLabel = action, onAction = if (action != null) onAction else null)
+  }
+}
+
+/** Where a blocker's fix goes: the web ceremony for money and signatures, Settings for the Live switch. */
+internal fun fixRoute(fix: BlockerFix): String = when (fix) {
+  BlockerFix.Deposit -> Routes.web("/deposit", "Add funds")
+  BlockerFix.Resign -> Routes.web("/grant#resign", "Wallet & permissions")
+  BlockerFix.StartLive -> Routes.SETTINGS
+}
+
+/**
+ * A BOOK THE SERVER READ, top to bottom: what is stopping it, who it is and
+ * what it is worth, what it made where that can be said, what the worker is
+ * warning about, Telegram and Trencher, what it holds, what is in the account
+ * on chain, and everything it did.
+ */
+@Composable
+private fun OwnHome(feed: Feed, reads: OwnReads, nowMs: Long, hosted: Boolean?, nav: NavHostController, onChanged: () -> Unit) {
+  val c = LocalContainer.current
+  val agent = feed.agent
+  val g = (reads.grants as? Loaded.Value)?.value
   Column(Modifier.fillMaxWidth()) {
-    if (agent != null) {
-      Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        Avatar(name = agent.name ?: "an agent", size = 40.dp)
-        Column(Modifier.weight(1f)) {
-          Text(
-            text = agent.name ?: "an agent",
-            style = TextStyle(
-              fontFamily = sans(18.sp, FontWeight.W600),
-              fontSize = 18.sp,
-              fontWeight = FontWeight.W600,
-              letterSpacing = (-0.02).em,
-            ),
-            color = MerryColors.tx,
-          )
-          // AN ABSENT OWNER GETS NO LINE AT ALL — `ui.tsx:102`. Not "owned by
-          // anonymous", not an em dash: there is nothing to say, so nothing is
-          // said. The handle is plain text and never a link, because nothing on
-          // this payload proves the association.
-          agent.owner?.takeIf { it.isNotBlank() }?.let { owner ->
-            Prose(
-              text = "owned by " + (shortAddress(owner) ?: owner),
-              size = 13.sp,
-              lineHeight = 17.55.sp,
-              color = MerryColors.faint,
-              modifier = Modifier.padding(top = 2.dp),
-            )
-          }
-        }
-      }
-    } else {
-      // `.hero.empty` — Home.tsx:126-128, exact copy including the full stop.
-      Prose(
-        text = "This one trades.",
-        size = 22.sp,
-        lineHeight = 26.4.sp,
-        color = MerryColors.tx,
-        weight = FontWeight.W700,
-      )
+    staleLine(reads.feedFailure, reads.feedAtMs, nowMs)?.let {
+      Prose(it, 13.sp, 18.85.sp, MerryColors.tx2, modifier = Modifier.padding(bottom = 16.dp))
     }
+    // THE BLOCKER IS PINNED ABOVE EVERYTHING (Agent.tsx): it is short, and it is
+    // the one thing on this screen that must not be scrolled past.
+    AccountBlockerPanel(reads.grants, onFix = { nav.navigate(fixRoute(it)) }, modifier = Modifier.padding(bottom = 28.dp))
+
+    // `polish.css:90-94` — `.hero-who { gap:12px }`, the face at 40x40, the
+    // name at 18px, and the balance at 56px.
+    val name = ownAgentName(agent) ?: "Your agent"
+    Row(
+      Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.spacedBy(12.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      // The owner's own picture where there is one (AccountFace), else the initials.
+      AccountFace(c.api, agent?.slug, name, 40.dp)
+      Column(Modifier.weight(1f)) {
+        Text(
+          text = name,
+          style = TextStyle(
+            fontFamily = sans(18.sp, FontWeight.W600),
+            fontSize = 18.sp,
+            fontWeight = FontWeight.W600,
+            letterSpacing = (-0.02).em,
+          ),
+          color = MerryColors.tx,
+        )
+        AccountModeLine(reads.grants, nowMs, Modifier.padding(top = 6.dp))
+      }
+    }
+    AccountNameChip(c.api, agent, reads.readFor, hosted, onNamed = onChanged, modifier = Modifier.padding(top = 12.dp))
 
     // `.home-balance-label` — polish.css:68: 14px `--tx-2`, 20px above, 8px below.
     Prose(
@@ -247,11 +429,15 @@ private fun HomeHero(f: Feed) {
       color = MerryColors.tx2,
       modifier = Modifier.padding(top = 20.dp, bottom = 8.dp),
     )
-    PixelBalance(f.equityNow)
+    PixelBalance(feed.equityNow)
+    // THE RETURN, ONLY WHERE EVERY TERM OF IT IS EVIDENCE — see pnlLineOf.
+    // Nothing at all otherwise: "Daily change unavailable" stays the honest
+    // line for the day, and no line is the honest line for all time.
+    pnlLineOf(feed, g?.mode)?.let { p ->
+      Prose(p.text, 14.sp, 21.sp, if (p.usd < 0) MerryColors.down else MerryColors.up, weight = FontWeight.W500, modifier = Modifier.padding(top = 8.dp))
+    }
 
-    // The mode chip is a fact about the RAIL, not a performance claim — so it is
-    // a `.tag`, the same squared-off label the leaderboard puts a strategy in,
-    // and never a tinted pill.
+    // The strategy is a fact about the RAIL — a `.tag`, never a tinted pill.
     agent?.strategy?.takeIf { it.isNotBlank() }?.let {
       Row(Modifier.padding(top = 12.dp)) { Tag(it) }
     }
@@ -264,61 +450,26 @@ private fun HomeHero(f: Feed) {
         modifier = Modifier.padding(top = 8.dp),
       )
     }
-  }
-}
 
-/**
- * Positions, drawn the way the web draws a token list on Home: a 20px heading
- * and then borderless rows separated by whitespace only.
- *
- * `polish.css:102`: `.home-mobile-market .tok { padding: 16px 0 }` with
- * `min-height: 64px` from `terminal.css:979`, and NO divider, NO background and
- * NO border between rows. Reaching for a `SectionCard` here would draw a box the
- * web does not draw.
- */
-@Composable
-private fun HomePositions(f: Feed) {
-  Column(Modifier.fillMaxWidth().padding(top = 28.dp)) {
-    TabSectionHeading("Positions", Modifier.padding(bottom = 12.dp))
-    if (f.positions.isEmpty()) {
-      Prose("Nothing held right now.", 13.sp, 18.85.sp, MerryColors.tx2)
-      return@Column
-    }
-    f.positions.forEach { p ->
-      Row(
-        Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(vertical = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        // The coin mark, seeded on the symbol exactly as `ui.tsx:258-272` does.
-        Avatar(name = p.symbol, size = 40.dp)
-        Column(Modifier.weight(1f)) {
-          Text(
-            text = p.symbol,
-            maxLines = 1,
-            style = TextStyle(
-              fontFamily = sans(16.sp, FontWeight.W700),
-              fontSize = 16.sp,
-              fontWeight = FontWeight.W700,
-            ),
-            color = MerryColors.tx,
-          )
-          // A STALE MARK IS NOT A WRONG ONE and it is not an error either — it
-          // is the last good reading, said as such. `.meta`, 13px `--tx-2`.
-          if (p.priceStale) {
-            Prose(
-              text = "price stale — last good mark",
-              size = 13.sp,
-              lineHeight = 18.85.sp,
-              color = MerryColors.tx2,
-              modifier = Modifier.padding(top = 2.dp),
-            )
-          }
-        }
-        // `Money` renders "—" for an unread value and never "$0.00".
-        Money(p.valueUsdg, bold = true)
+    // THE WORKER'S OWN WARNING, which for a long time rendered nowhere at all.
+    feed.events.firstOrNull { it.level == "warn" || it.level == "err" || it.level == "error" }
+      ?.message?.let {
+        Notice(title = "From your agent", body = it, modifier = Modifier.padding(top = 28.dp))
       }
+
+    if (g?.exists == true) {
+      AccountStrip(
+        telegram = reads.telegram,
+        settings = reads.settings,
+        onSettings = { nav.navigate(Routes.SETTINGS) },
+        onTelegram = { nav.navigate(Routes.TELEGRAM) },
+        modifier = Modifier.padding(top = 28.dp),
+      )
     }
+
+    AccountPositions(positionLinesOf(feed.positions), Modifier.padding(top = 28.dp))
+    AccountBalances(reads.grants, feed, Modifier.padding(top = 28.dp))
+    AccountTape(feed, nowMs, Modifier.padding(top = 28.dp))
   }
 }
 

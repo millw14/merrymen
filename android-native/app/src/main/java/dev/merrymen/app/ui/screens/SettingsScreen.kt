@@ -24,8 +24,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -56,17 +56,32 @@ import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
+import dev.merrymen.app.net.ApiResult
+import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.OriginCheck
-import dev.merrymen.app.net.SettingsEnvelope
+import dev.merrymen.app.net.SettingsRead
+import dev.merrymen.app.net.TelegramStatus
+import dev.merrymen.app.net.paperResetOnce
+import dev.merrymen.app.net.said
+import dev.merrymen.app.net.settingsRead
 import dev.merrymen.app.ui.LoadedBlock
 import dev.merrymen.app.ui.LocalBottomInset
 import dev.merrymen.app.ui.MerryColors
+import dev.merrymen.app.ui.Notice
+import dev.merrymen.app.ui.PUBLIC_BOOK_IGNORED
+import dev.merrymen.app.ui.SETTINGS_OWNER_CHANGED
+import dev.merrymen.app.ui.SaveLookup
+import dev.merrymen.app.ui.SettingsDraft
+import dev.merrymen.app.ui.SettingsSaveOutcome
+import dev.merrymen.app.ui.settingLabel
+import dev.merrymen.app.ui.saveSettingsDraft
+import dev.merrymen.app.ui.settleUnknownSave
 import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.PagePadTop
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.sans
+import dev.merrymen.app.ui.sessionNeedsAsking
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.JsonElement
 
 /**
  * THE FORM PAGE'S ACCENT IS NOT LIME, and this is the single easiest thing to
@@ -366,29 +381,54 @@ private fun KillButton(label: String, modifier: Modifier = Modifier, onClick: ()
   }
 }
 
+/**
+ * SETTINGS — the form, bound to the wallet it was read for.
+ *
+ * THE OWNER TRAVELS WITH THE FORM. GET /api/settings says whose values these
+ * are (`owner`), and every save sends that back: hosted, a save made after
+ * another wallet signed in — through the WebView, in another tab of the same
+ * session — is refused 409 and writes nothing, instead of turning Live trading
+ * on for an agent its owner never looked at. The form is also keyed on
+ * repo.signedIn, so a wallet switch throws away the old wallet's draft rather
+ * than offering to save it onto the new one.
+ *
+ * A SAVE IS REPORTED AS WHAT IT WAS. "Saved" only when the server said ok;
+ * keys it ignored listed as NOT saved; its own refusals one line each; and an
+ * answer that never came back is looked up — the settings read again and
+ * compared key by key — never sent a second time on its own.
+ */
 @Composable
 fun SettingsScreen(nav: NavHostController) {
   val c = LocalContainer.current
-  var state by remember { mutableStateOf<Loaded<SettingsEnvelope>>(Loaded.Loading) }
+  val signedIn by c.repo.signedIn.collectAsState()
+  val hosted by c.repo.hosted.collectAsState()
+  val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
+  // Keyed on the wallet: another wallet's read, draft and notes never survive a switch.
+  var state by remember(signedIn) { mutableStateOf<Loaded<SettingsRead>>(Loaded.Loading) }
+  var telegram by remember(signedIn) { mutableStateOf<TelegramStatus?>(null) }
+  var draft by remember(signedIn) { mutableStateOf(SettingsDraft()) }
   var origin by remember { mutableStateOf("") }
-  var note by remember { mutableStateOf<String?>(null) }
-  // WHETHER THE LAST THING THAT HAPPENED WENT WRONG. Purely a rendering fact:
-  // it changes nothing about what is sent or decided, and exists because one
-  // `note` string was carrying both "Saved." and "Couldn't reach merrymen" in
-  // the same grey. forms.css keeps those two apart — `.mm-note` is `--tx-2`,
-  // `.mm-danger` is `--down` — and a failure that reads like a confirmation is
-  // the specific mistake this product keeps writing rules against.
-  var noteBad by remember { mutableStateOf(false) }
-  // Only what the owner actually touched. Starts empty and stays that way for
-  // every control they do not move.
-  val edits = remember { mutableStateMapOf<String, JsonElement>() }
-  var dirty by remember { mutableStateOf(false) }
+  var note by remember(signedIn) { mutableStateOf<String?>(null) }
+  // WHETHER THE LAST THING THAT HAPPENED WENT WRONG. forms.css keeps "Saved"
+  // and a failure apart — `.mm-note` is `--tx-2`, `.mm-danger` is `--down` —
+  // and a failure that reads like a confirmation is the specific mistake this
+  // product keeps writing rules against.
+  var noteBad by remember(signedIn) { mutableStateOf(false) }
+  // The save's own report, under the button: the server's lines, or the keys
+  // that did not save.
+  var saveLines by remember(signedIn) { mutableStateOf<List<String>>(emptyList()) }
+  var ownerChanged by remember(signedIn) { mutableStateOf(false) }
   var saving by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
 
-  LaunchedEffect(Unit) {
+  suspend fun load() {
+    state = readSettingsFor(c.api, signedIn, c.repo.hosted.value) { c.repo.refreshIdentity() }
+    telegram = (c.api.telegram() as? ApiResult.Ok)?.value
+  }
+
+  LaunchedEffect(signedIn) {
     origin = c.repo.originNow()
-    state = c.api.settings().toLoaded()
+    load()
   }
 
   Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
@@ -409,6 +449,7 @@ fun SettingsScreen(nav: NavHostController) {
     }
 
     Column(Modifier.fillMaxWidth().padding(horizontal = PagePadH)) {
+      SignedInNotice(Modifier.padding(bottom = 16.dp))
       note?.let { if (noteBad) DangerLine(it) else NoteLine(it) }
 
       PanelSectionHeading("This device")
@@ -419,92 +460,152 @@ fun SettingsScreen(nav: NavHostController) {
           onValueChange = { origin = it },
         )
         // NO SITE PASSWORD FIELD. It opened the beta door, and the server
-        // removed that door on 2026-09-16 (46c852d1); anything typed there went
-        // to a route that now 404s and came back as "That password didn't open
-        // the door". The origin is the only thing about this device to set.
+        // removed that door on 2026-09-16 (46c852d1).
         PrimaryButton("Save and reconnect") {
           scope.launch {
             when (val saved = c.repo.setOrigin(origin)) {
               // NOTHING WAS SAVED, and the owner is told why in the red line
-              // above the field. A silent refusal would leave them looking at
-              // the address they typed and believing it took.
+              // above the field.
               is OriginCheck.Refused -> {
                 note = saved.why
                 noteBad = true
               }
               is OriginCheck.Ok -> {
-                // The address as stored, so the field shows what is in use.
                 origin = saved.origin
                 // A NEW ORIGIN IS A NEW SERVER, so who we are there has to be
-                // asked again before its settings are read — a session from the
-                // old origin says nothing about this one.
+                // asked again before its settings are read.
                 c.repo.refreshIdentity()
                 note = "Saved. Reloading."
                 noteBad = false
-                state = c.api.settings().toLoaded()
+                load()
               }
             }
           }
         }
       }
 
-      LoadedBlock(state, onSignIn = { nav.navigate(Routes.SIGN_IN) }) { env ->
+      LoadedBlock(
+        state,
+        // SIGN-IN ONLY WHERE THERE IS ONE: hosted, and nobody signed in.
+        onSignIn = if (canOfferSignIn) ({ nav.navigate(Routes.SIGN_IN) }) else null,
+        onRetry = { scope.launch { load() } },
+      ) { read ->
+        val env = read.env
+        // READ SIGNED OUT, HOSTED: `owner` is "" and the values are the house
+        // defaults — nobody's settings. Drawing them as a form would present
+        // defaults as the reader's own agent, and its save could only 401.
+        if (env.owner == "") {
+          Spacer(Modifier.height(24.dp))
+          Notice(
+            title = "Sign in to change your agent's settings",
+            body = "These are the defaults a new agent starts with, not an account of yours.",
+            actionLabel = if (canOfferSignIn) "Sign in" else null,
+            onAction = if (canOfferSignIn) ({ nav.navigate(Routes.SIGN_IN) }) else null,
+          )
+          return@LoadedBlock
+        }
         SettingsForm(
           env = env,
-          edits = edits,
+          keys = read.keys,
+          telegram = telegram,
+          hosted = hosted,
+          draft = draft,
+          onDraft = { draft = it; ownerChanged = false },
           // Which strategies need the token, so the lock is stated where the
           // choice is made rather than discovered later.
           circleLocked = setOf("even-keel", "dip-hunter"),
-          onChanged = { dirty = true },
+          onWeb = { path, title -> nav.navigate(Routes.web(path, title)) },
+          onTelegram = { nav.navigate(Routes.TELEGRAM) },
         )
         if (env.errors.isNotEmpty()) {
           Spacer(Modifier.height(16.dp))
-          Text(
-            text = "The server rejected some values",
-            style = FieldLabelText,
-            color = MerryColors.tx,
-          )
+          Text(text = "The server rejected some values", style = FieldLabelText, color = MerryColors.tx)
           Spacer(Modifier.height(9.dp))
-          // ONE RED LINE PER ERROR, which is how the web renders them
-          // (Settings.tsx:1388 — a `.mm-danger` div each, directly under Save).
-          // Joining them into one paragraph loses which value was refused.
-          Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            env.errors.forEach { DangerLine(it) }
-          }
+          Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { env.errors.forEach { DangerLine(it) } }
         }
 
         PanelSectionHeading("Save")
         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-          HintLine(if (dirty) "Unsaved changes." else "Nothing changed yet.")
+          HintLine(if (draft.dirty) "Unsaved changes." else "Nothing changed yet.")
           PrimaryButton(
             label = if (saving) "Saving…" else "Save changes",
-            enabled = dirty && !saving,
+            enabled = draft.dirty && !saving,
           ) {
+            saveLines = emptyList()
             saving = true
             scope.launch {
-              // ONLY WHAT WAS TOUCHED. Omitted fields are left alone by the
-              // server; echoing a masked secret back would overwrite a key.
-              when (val r = c.api.patchSettings(patchOf(edits)).toLoaded()) {
-                is Loaded.Value -> {
-                  if (r.value.errors.isEmpty()) {
-                    edits.clear(); dirty = false; note = "Saved."; noteBad = false
-                    state = c.api.settings().toLoaded()
-                  } else {
-                    // A rejection with nothing sayable in it is still a
-                    // rejection. A blank note renders as no note at all, which
-                    // looks identical to the save having never happened.
-                    note = r.value.errors.filter { it.isNotBlank() }.joinToString("\n")
-                      .ifBlank { "The server rejected that but did not say why." }
-                    noteBad = true
+              // THE FORM'S OWNER GOES WITH IT, and a session the app already
+              // knows to be another wallet's sends nothing (saveSettingsDraft).
+              val save = c.api.saveSettingsDraft(draft, env, c.repo.signedIn.value)
+              val outcome = save.outcome
+              if (outcome == null) {
+                // A BOX THIS FORM CANNOT READ IS NOT SENT AS TYPED, and it is
+                // not dropped either: the save stops and says which.
+                note = "Nothing was saved."
+                noteBad = true
+                saveLines = save.blocked
+              } else {
+                val report = reportOf(outcome)
+                note = report.note
+                noteBad = report.bad
+                saveLines = report.lines
+                ownerChanged = outcome is SettingsSaveOutcome.OwnerChanged
+                val sent = save.sent
+                when {
+                  outcome is SettingsSaveOutcome.Saved -> {
+                    // THE SERVER'S VALUES ARE WHAT THE SCREEN SHOWS NOW — the
+                    // ignored keys included, so a toggle the server dropped does
+                    // not keep showing the owner's own choice over it.
+                    draft = SettingsDraft()
+                    load()
                   }
+                  outcome is SettingsSaveOutcome.Unknown && sent != null -> {
+                    // LOOK IT UP. Read the settings back and compare each key
+                    // sent; what holds its new value saved, what does not stays
+                    // in the draft for the owner to decide about.
+                    when (val fresh = c.api.settingsRead()) {
+                      is ApiResult.Ok -> {
+                        val found = settleUnknownSave(sent, fresh.value.env, env.owner)
+                        val looked = lookupReport(outcome.why, found)
+                        note = looked.note
+                        noteBad = looked.bad
+                        saveLines = looked.lines
+                        ownerChanged = found.ownerChanged
+                        if (!found.ownerChanged) {
+                          draft = draft.without(found.saved)
+                          state = fresh.toLoaded()
+                        }
+                      }
+                      // THE READ-BACK FAILED TOO, and says how in its own words
+                      // (unknownSaveUnread): an unreadable answer is not "can't
+                      // reach", and the save itself stays unknown, never failed.
+                      is ApiResult.Refused, is ApiResult.Unreachable -> {
+                        note = unknownSaveUnread(outcome.why, fresh)
+                        noteBad = true
+                      }
+                    }
+                  }
+                  else -> Unit
                 }
-                is Loaded.Refused -> { note = r.message.ifBlank { "The server refused that (HTTP " + r.status + ")." }; noteBad = true }
-                is Loaded.Unreachable -> {
-                  note = ("Couldn't reach merrymen: " + r.cause).trim().ifBlank { "Couldn't reach merrymen." }; noteBad = true
-                }
-                else -> Unit
               }
               saving = false
+            }
+          }
+          if (saveLines.isNotEmpty()) {
+            // ONE RED LINE PER ERROR (Settings.tsx:1890 — a `.mm-danger` div
+            // each, directly under Save).
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { saveLines.forEach { DangerLine(it) } }
+          }
+          if (ownerChanged) {
+            KillButton("Reload for the wallet signed in now") {
+              scope.launch {
+                draft = SettingsDraft()
+                note = null
+                saveLines = emptyList()
+                ownerChanged = false
+                c.repo.refreshIdentity()
+                load()
+              }
             }
           }
         }
@@ -518,16 +619,22 @@ fun SettingsScreen(nav: NavHostController) {
         )
         KillButton("Restart the practice book") {
           scope.launch {
-            when (val r = c.api.paperReset().toLoaded()) {
-              is Loaded.Value -> {
+            when (val r = c.api.paperResetOnce()) {
+              is ApiResult.Ok -> {
                 note = "Queued. Your agent restarts the practice book on its next tick."
                 noteBad = false
               }
-              is Loaded.Refused -> { note = r.message.ifBlank { "The server refused that (HTTP " + r.status + ")." }; noteBad = true }
-              is Loaded.Unreachable -> {
-                note = ("Couldn't reach merrymen: " + r.cause).trim().ifBlank { "Couldn't reach merrymen." }; noteBad = true
+              is ApiResult.Refused -> {
+                note = if (r.status == 401) "Sign in to restart the practice book." else r.message
+                noteBad = true
               }
-              else -> Unit
+              // A LOST ANSWER TO A WRITE IS NOT A FAILURE: the restart may be
+              // queued. Said as unknown, and not sent again on its own.
+              is ApiResult.Unreachable -> {
+                note = "Couldn't tell whether the restart was queued. ${r.said.trimEnd('.')}. Check the " +
+                  "practice book after your agent's next tick before asking again."
+                noteBad = true
+              }
             }
           }
         }
@@ -535,4 +642,83 @@ fun SettingsScreen(nav: NavHostController) {
     }
     Spacer(Modifier.height(LocalBottomInset.current))
   }
+}
+
+/**
+ * READ THE FORM, AND ASK WHO IS SIGNED IN WHEN IT CAME BACK FOR NOBODY.
+ *
+ * Hosted, an ended session is answered with a 200 and `owner: ""` — the house
+ * defaults, nobody's settings — never a 401. While this app still held the old
+ * address, the page said "Sign in to change your agent's settings" with no
+ * button (the offer needs signedIn null) and nothing ever cleared the address.
+ * So a read for nobody under a held address asks the session route first
+ * ([sessionNeedsAsking]); when it says nobody, repo.signedIn goes to null, this
+ * screen starts again, and the notice carries its Sign in.
+ */
+internal suspend fun readSettingsFor(
+  api: MerrymenApi,
+  signedIn: String?,
+  hosted: Boolean?,
+  askWhoIsSignedIn: suspend () -> Unit,
+): Loaded<SettingsRead> {
+  val r = api.settingsRead()
+  if (sessionNeedsAsking(r, (r as? ApiResult.Ok)?.value?.env?.owner == "", signedIn, hosted)) askWhoIsSignedIn()
+  return r.toLoaded()
+}
+
+/**
+ * A SAVE WHOSE ANSWER WAS LOST, AND WHOSE READ-BACK FAILED TOO. The save is
+ * still UNKNOWN — it may have landed — so it is never said as a failure; the
+ * read-back's own failure is said in the contract's words (`said` for no
+ * answer or an unreadable one, the route's sentence for a refusal), never a
+ * hand-built "couldn't reach", which is false of an answer that arrived
+ * unreadable.
+ */
+internal fun unknownSaveUnread(why: String, readBack: ApiResult<*>): String {
+  val how = when (readBack) {
+    is ApiResult.Unreachable -> readBack.said.trimEnd('.')
+    is ApiResult.Refused -> readBack.message.trimEnd('.')
+    is ApiResult.Ok -> null
+  }
+  return "Couldn't tell whether that saved — $why, and the settings could not be read back to check" +
+    (how?.let { " ($it)" } ?: "") + ". Your changes are still here; reload before saving again."
+}
+
+/** What the Save area says about one save: a line at the top, and lines under the button. */
+private data class SaveReport(val note: String?, val bad: Boolean, val lines: List<String>)
+
+private fun reportOf(o: SettingsSaveOutcome): SaveReport = when (o) {
+  is SettingsSaveOutcome.Saved -> {
+    val applies = o.appliesWithin?.let { "Saved — applies within $it." } ?: "Saved."
+    if (o.notSaved.isEmpty()) {
+      SaveReport(applies, bad = false, lines = emptyList())
+    } else {
+      // NOT "Saved." A key the server dropped is a change the owner believes
+      // they made. Named, each one, as not saved — and the public book in the
+      // web's own words, because an older server drops it silently.
+      SaveReport(
+        "Saved, except what is listed below.",
+        bad = true,
+        lines = o.notSaved.map { key ->
+          if (key == "publicBook") PUBLIC_BOOK_IGNORED
+          else "Not saved: ${settingLabel(key)} — this server did not take it, so it is unchanged."
+        },
+      )
+    }
+  }
+  is SettingsSaveOutcome.Rejected -> SaveReport("The server rejected some values. Nothing was saved.", bad = true, lines = o.lines)
+  SettingsSaveOutcome.OwnerChanged -> SaveReport(SETTINGS_OWNER_CHANGED, bad = true, lines = emptyList())
+  SettingsSaveOutcome.SignIn -> SaveReport("Sign in to save your settings. Nothing was saved.", bad = true, lines = emptyList())
+  is SettingsSaveOutcome.Failed -> SaveReport(o.message, bad = true, lines = emptyList())
+  is SettingsSaveOutcome.Unknown -> SaveReport("Checking whether that saved…", bad = false, lines = emptyList())
+}
+
+private fun lookupReport(why: String, found: SaveLookup): SaveReport = when {
+  found.ownerChanged -> SaveReport(SETTINGS_OWNER_CHANGED, bad = true, lines = emptyList())
+  found.notSaved.isEmpty() -> SaveReport("Saved — $why, so the settings were read back, and every change is there.", bad = false, lines = emptyList())
+  else -> SaveReport(
+    "Couldn't confirm every change — $why, so the settings were read back.",
+    bad = true,
+    lines = found.notSaved.map { "Not saved yet: ${settingLabel(it)}. It is still in your changes; save again if you still want it." },
+  )
 }
