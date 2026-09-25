@@ -76,19 +76,43 @@ export function telegramRow(tg: TelegramStatus | null | undefined): TelegramRow 
 }
 
 /**
- * WHAT THE TRENCHER RAIL IS SET TO DO.
+ * The rail the worker last published — paper, live or idle — as /api/grants
+ * carries it from the agent's heartbeat, and null when nobody has read it.
+ *
+ * NOT `LiveMine.mode`, which is the STRATEGY. Typed as the rail's own words so
+ * passing that one here does not compile.
+ */
+export type AgentMode = "paper" | "live" | "idle" | null;
+
+/**
+ * WHAT TRENCHER IS DOING, AND WITH WHOSE MONEY.
+ *
+ * ── THE PERMISSION IS NOT THE RAIL ───────────────────────────────────────
+ *
+ * "Let trencher trade for real" (`trencherLiveEnabled`) says what trencher MAY
+ * do once the agent is live. It does not say the agent is live. This row used
+ * to read the permission alone, so a paper agent with the box ticked showed
+ * "Trencher: on, trading real money" in green under its PAPER chip. The worker
+ * decides on the rail first (worker/src/index.ts, trencher's candidate feed):
+ *
+ *   if (!paperActive() && !cfg.trencherLiveEnabled) → empty feed
+ *
+ * so on paper it trenches with practice money whatever the permission says,
+ * and on the live rail WITHOUT the permission it sees no candidates and buys
+ * nothing — which the old row called "practice money only". So "real money" is
+ * said only for a live agent that is allowed it, and a rail nobody read (or an
+ * idle one) gets what the permission allows, never a claim that it is trading.
  *
  * ── A CAVEAT WORTH WRITING DOWN ──────────────────────────────────────────
  *
- * This reads the owner's SETTINGS, which is the truth for every hosted tenant
- * and can be incomplete for a self-hosted install configured by environment
- * variable: `GET /api/settings` returns stored values only, and its `defaults`
- * field is the static core table rather than anything env-aware. So an install
- * running on `MERRYMEN_TRENCHER_LIVE=1` with nothing stored reads here as off.
- *
- * That is why the copy this feeds says what the SETTINGS say and links to them,
- * rather than claiming what the agent is doing. A row that promised "live" or
- * "off" as fact would be wrong for that cohort, and silently.
+ * The permission is read from the owner's SETTINGS, which is the truth for
+ * every hosted tenant and can be incomplete for a self-hosted install
+ * configured by environment variable: `GET /api/settings` returns stored values
+ * only, and its `defaults` field is the static core table rather than anything
+ * env-aware. A stored value wins over the environment (worker/src/settings.ts
+ * `bool`), so only an install running on `MERRYMEN_TRENCHER_LIVE=1` with
+ * nothing stored reads here as not allowed — and, live, as buying nothing.
+ * The row links to the settings it read for that reason.
  */
 export type TrencherRow =
   | { kind: "unread" }
@@ -104,9 +128,15 @@ export type TrencherRow =
    * dropdown is structurally invisible everywhere else in the product.
    */
   | { kind: "no-crypto" }
-  /** Running, but not permitted to spend real money on it. */
+  /** The agent is on paper: practice money, whatever the permission says. */
   | { kind: "paper" }
-  | { kind: "live" };
+  /** Live, and allowed to trench for real. The only state that says real money. */
+  | { kind: "live" }
+  /** Live, but not allowed to trench for real: its candidate feed is empty, so it buys nothing. */
+  | { kind: "live-not-allowed" }
+  /** The rail is unread or idle: what the permission allows, and nothing about what it is doing. */
+  | { kind: "allowed" }
+  | { kind: "not-allowed" };
 
 export function trencherRow(
   settings:
@@ -117,11 +147,16 @@ export function trencherRow(
       }
     | null
     | undefined,
+  mode: AgentMode,
 ): TrencherRow {
   if (!settings) return { kind: "unread" };
   if (settings.strategy !== "trencher") return { kind: "off" };
   if (settings.assetMode === "stocks") return { kind: "no-crypto" };
-  return settings.trencherLiveEnabled ? { kind: "live" } : { kind: "paper" };
+  // Fail closed: only a stored `true` is permission to spend.
+  const allowed = settings.trencherLiveEnabled === true;
+  if (mode === "paper") return { kind: "paper" };
+  if (mode === "live") return allowed ? { kind: "live" } : { kind: "live-not-allowed" };
+  return allowed ? { kind: "allowed" } : { kind: "not-allowed" };
 }
 
 /**

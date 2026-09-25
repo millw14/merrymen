@@ -330,6 +330,9 @@ export const EN = {
   "strip.trencher.changeIt": "Change it →",
   "strip.trencher.paper": "on, practice money only",
   "strip.trencher.live": "on, trading real money",
+  "strip.trencher.liveNotAllowed": "on, but not allowed to trade for real — it buys nothing until you allow it",
+  "strip.trencher.allowed": "on, allowed to trade for real when your agent is live",
+  "strip.trencher.notAllowed": "on, not allowed to trade for real",
   "strip.trencher.settings": "Settings →",
 
   // ── Settings, second pass ──────────────────────────────────────────

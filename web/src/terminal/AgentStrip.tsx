@@ -56,14 +56,25 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useT } from "@/lib/i18n";
-import { telegramRow, trencherRow, type TelegramRow, type TrencherRow } from "./agent-status";
+import { telegramRow, trencherRow, type AgentMode, type TelegramRow, type TrencherRow } from "./agent-status";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 
 interface SettingsShape {
   values?: { strategy?: string | null; trencherLiveEnabled?: boolean | null; assetMode?: string | null };
 }
 
-export function AgentStrip({ hasAgent }: { hasAgent: boolean }) {
+export function AgentStrip({
+  hasAgent,
+  mode,
+}: {
+  hasAgent: boolean;
+  /**
+   * The rail the agent is on, from /api/grants — what decides whether Trencher
+   * spends real money, which its permission alone does not (see trencherRow).
+   * Not optional: a strip that forgot it would be back to reading the box.
+   */
+  mode: AgentMode;
+}) {
   const t = useT();
   const [tg, setTg] = useState<TelegramStatus | null>(null);
   const [settings, setSettings] = useState<SettingsShape["values"] | null>(null);
@@ -90,7 +101,7 @@ export function AgentStrip({ hasAgent }: { hasAgent: boolean }) {
   return (
     <section className="agent-strip" aria-label={t("strip.aria")}>
       <TelegramLine row={telegramRow(tg)} />
-      <TrencherLine row={trencherRow(settings)} />
+      <TrencherLine row={trencherRow(settings, mode)} />
     </section>
   );
 }
@@ -197,6 +208,27 @@ function TrencherLine({ row }: { row: TrencherRow }) {
     case "live":
       return (
         <Row tone="ok" label="Trencher" value={t("strip.trencher.live")}
+          action={<Link href="/settings#trencher-mode">{t("strip.trencher.settings")}</Link>}
+        />
+      );
+    case "live-not-allowed":
+      // The other half of the rail rule: live with the box unticked, the
+      // worker empties trencher's feed. A warning with the way to the switch,
+      // because "practice money only" here described nothing that happens.
+      return (
+        <Row tone="warn" label="Trencher" value={t("strip.trencher.liveNotAllowed")}
+          action={<Link href="/settings#trencher-mode">{t("strip.trencher.changeIt")}</Link>}
+        />
+      );
+    case "allowed":
+      return (
+        <Row tone="quiet" label="Trencher" value={t("strip.trencher.allowed")}
+          action={<Link href="/settings#trencher-mode">{t("strip.trencher.settings")}</Link>}
+        />
+      );
+    case "not-allowed":
+      return (
+        <Row tone="quiet" label="Trencher" value={t("strip.trencher.notAllowed")}
           action={<Link href="/settings#trencher-mode">{t("strip.trencher.settings")}</Link>}
         />
       );

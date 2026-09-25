@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { AgentStrip } from "./AgentStrip";
+import type { AgentMode } from "./agent-status";
 import Link from "next/link";
 import { useWatchlist } from "./watchlist";
 import { useGroupChatSupported } from "./groupchat";
@@ -378,6 +379,7 @@ export function DesktopPortfolio({
   stopped,
   perTrade,
   perDay,
+  mode,
   onScreen,
   onTab,
 }: Actions & {
@@ -388,6 +390,8 @@ export function DesktopPortfolio({
   /** Null until the signed caps are read — drawn as a dash, never as $0.00. */
   perTrade: number | null;
   perDay: number | null;
+  /** The agent's rail from /api/grants, for the strip — not `mine.mode`, which is the strategy. */
+  mode: AgentMode;
 }) {
   return (
     <aside className="desktop-portfolio" aria-label="Your portfolio">
@@ -477,7 +481,7 @@ export function DesktopPortfolio({
             `hasAgent` is true by construction here: this component takes a
             non-nullable `LiveMine`, and App renders it only on `desktop &&
             mine`. The type is the gate. */}
-        <AgentStrip hasAgent />
+        <AgentStrip hasAgent mode={mode} />
       </section>
       {selectedToken && (
         <section className="desktop-token-context">

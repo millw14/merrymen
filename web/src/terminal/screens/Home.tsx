@@ -17,6 +17,7 @@ import {
 } from "../live";
 import { Coin, Face, MovingFigure, NameBlock, Pill } from "../ui";
 import { AgentStrip } from "../AgentStrip";
+import type { AgentMode } from "../agent-status";
 import { usd, usdParts } from "@/lib/format";
 
 export function Home({
@@ -33,6 +34,7 @@ export function Home({
   onDesk,
   onGroupChat,
   hasAgent,
+  mode,
   read,
   retired = null,
 }: {
@@ -62,6 +64,8 @@ export function Home({
    * it appears late, on top of whatever the reader had already started.
    */
   hasAgent: boolean;
+  /** The agent's rail from /api/grants, for the strip — not `mine.mode`, which is the strategy. */
+  mode: AgentMode;
   /** Whether the leaderboard READ landed — quiet and unreadable are different. */
   read: import("../live").ReadState;
   /** Accounts the board folded into a count. See Board. */
@@ -183,7 +187,7 @@ export function Home({
           A reading, not a second set of controls: it says what the settings
           say and links to them. It renders nothing for a visitor with no
           agent, who has no bot to connect and no strategy to run. */}
-      <AgentStrip hasAgent={hasAgent} />
+      <AgentStrip hasAgent={hasAgent} mode={mode} />
 
       {/*
         THE LEADERBOARD, NOT A SECOND COPY OF IT.

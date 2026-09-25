@@ -96,23 +96,24 @@ describe("the four states a tester can get stuck in", () => {
 
 describe("what the trencher row says", () => {
   it("is unread when settings have not arrived", () => {
-    assert.deepEqual(trencherRow(null), { kind: "unread" });
-    assert.deepEqual(trencherRow(undefined), { kind: "unread" });
+    assert.deepEqual(trencherRow(null, "live"), { kind: "unread" });
+    assert.deepEqual(trencherRow(undefined, "paper"), { kind: "unread" });
   });
 
   it("is off for any other strategy", () => {
-    assert.deepEqual(trencherRow({ strategy: "steady-basket" }), { kind: "off" });
-    assert.deepEqual(trencherRow({ strategy: null }), { kind: "off" });
+    assert.deepEqual(trencherRow({ strategy: "steady-basket" }, "live"), { kind: "off" });
+    assert.deepEqual(trencherRow({ strategy: null }, "live"), { kind: "off" });
   });
 
   it("separates paper from live", () => {
-    assert.deepEqual(trencherRow({ strategy: "trencher", trencherLiveEnabled: false }), { kind: "paper" });
-    assert.deepEqual(trencherRow({ strategy: "trencher", trencherLiveEnabled: true }), { kind: "live" });
+    assert.deepEqual(trencherRow({ strategy: "trencher", trencherLiveEnabled: false }, "paper"), { kind: "paper" });
+    assert.deepEqual(trencherRow({ strategy: "trencher", trencherLiveEnabled: true }, "live"), { kind: "live" });
   });
 
-  it("treats a missing live flag as paper, not as live", () => {
+  it("treats a missing live flag as not allowed, never as live", () => {
     // Fail closed. An unset flag must never read as permission to spend.
-    assert.deepEqual(trencherRow({ strategy: "trencher" }), { kind: "paper" });
+    assert.deepEqual(trencherRow({ strategy: "trencher" }, "live"), { kind: "live-not-allowed" });
+    assert.deepEqual(trencherRow({ strategy: "trencher", trencherLiveEnabled: null }, null), { kind: "not-allowed" });
   });
 
   it("SURFACES THE REFUSAL NOTHING ELSE SURFACES", () => {
@@ -120,21 +121,60 @@ describe("what the trencher row says", () => {
     // worker announces it at event level "ok" while the agent screen's notice
     // slot only renders warn/err. So this is the one Trencher refusal an owner
     // can cause from a dropdown and then never see explained anywhere.
-    assert.deepEqual(trencherRow({ strategy: "trencher", assetMode: "stocks" }), { kind: "no-crypto" });
+    assert.deepEqual(trencherRow({ strategy: "trencher", assetMode: "stocks" }, "paper"), { kind: "no-crypto" });
   });
 
   it("reports no-crypto ahead of live, because live cannot happen either way", () => {
     // Order matters: with no candidates there is nothing to trade, so "live"
     // would be a true flag describing an agent that cannot act on it.
     assert.deepEqual(
-      trencherRow({ strategy: "trencher", assetMode: "stocks", trencherLiveEnabled: true }),
+      trencherRow({ strategy: "trencher", assetMode: "stocks", trencherLiveEnabled: true }, "live"),
       { kind: "no-crypto" },
     );
   });
 
   it("is unaffected by asset modes that do permit coins", () => {
     for (const assetMode of ["all", "crypto", null, undefined]) {
-      assert.equal(trencherRow({ strategy: "trencher", assetMode }).kind, "paper", String(assetMode));
+      assert.equal(trencherRow({ strategy: "trencher", assetMode, trencherLiveEnabled: true }, "live").kind, "live", String(assetMode));
+    }
+  });
+});
+
+/**
+ * THE PERMISSION IS NOT THE RAIL (TW-2).
+ *
+ * "Let trencher trade for real" is what trencher MAY do once the agent is
+ * live. The worker checks the rail first — `!paperActive() &&
+ * !cfg.trencherLiveEnabled` empties trencher's feed — so a paper agent trenches
+ * on practice money whatever the box says, and a live agent without it buys
+ * nothing. The row read the box alone and said "on, trading real money" under
+ * a PAPER chip. Every rail against both answers, as the worker decides them.
+ */
+describe("the trencher row reads the rail, not only the permission", () => {
+  const trencher = (trencherLiveEnabled: boolean) => ({ strategy: "trencher", trencherLiveEnabled, assetMode: "crypto" });
+
+  it("NEVER CALLS PAPER TRADING REAL MONEY — a paper agent with the box ticked is practice money", () => {
+    assert.deepEqual(trencherRow(trencher(true), "paper"), { kind: "paper" });
+    assert.deepEqual(trencherRow(trencher(false), "paper"), { kind: "paper" });
+  });
+
+  it("says a live agent without the permission buys nothing, not that it practises", () => {
+    // On the live rail with the box off the worker returns an empty feed:
+    // no practice trades happen either, so "practice money only" was false.
+    assert.deepEqual(trencherRow(trencher(false), "live"), { kind: "live-not-allowed" });
+  });
+
+  it("says real money only for a live agent that is allowed it", () => {
+    const real = (["paper", "live", "idle", null] as const).flatMap((mode) =>
+      [true, false].filter((allowed) => trencherRow(trencher(allowed), mode).kind === "live").map((allowed) => `${mode}/${allowed}`),
+    );
+    assert.deepEqual(real, ["live/true"]);
+  });
+
+  it("says only what the permission allows while the rail is unread or idle — never that it is trading", () => {
+    for (const mode of ["idle", null] as const) {
+      assert.deepEqual(trencherRow(trencher(true), mode), { kind: "allowed" }, String(mode));
+      assert.deepEqual(trencherRow(trencher(false), mode), { kind: "not-allowed" }, String(mode));
     }
   });
 });
