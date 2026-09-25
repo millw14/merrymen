@@ -8,7 +8,7 @@ import { Icon } from "./Icon";
 
 const links = [
   ["/#features", "Features"], ["/memescope", "Markets"], ["/dashboard", "Agents"],
-  ["/watch", "Activity"], ["/api", "Developers"], ["/docs", "Docs"],
+  ["/watch", "Activity"], ["/claude", "Claude & MCP"], ["/api", "Developers"], ["/docs", "Docs"],
 ];
 export function Nav() {
   const [open, setOpen] = useState(false);
