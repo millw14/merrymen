@@ -4,8 +4,16 @@ import dev.merrymen.app.chat.ChatRig.Companion.A
 import dev.merrymen.app.chat.ChatRig.Companion.B
 import dev.merrymen.app.chat.ChatRig.Companion.json
 import dev.merrymen.app.chat.ChatRig.Companion.sse
+import dev.merrymen.app.data.ChatThread
+import dev.merrymen.app.data.FileThreadStore
 import dev.merrymen.app.data.MAX_LINES
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -159,6 +167,28 @@ class ChatThreadTest {
     assertNull(chat.thread.value.key)
     assertFalse(runBlocking { chat.sendNow("hello?", null) })
     assertTrue(rig.writes().isEmpty())
+  }
+
+  @OptIn(ExperimentalCoroutinesApi::class)
+  @Test fun aMessageTypedAsTheSessionLapsesIsNotSentForTheWalletThatLeft() {
+    rig.route("POST /api/chat") { json("""{"reply":"ok"}""") }
+    // The thread's collector runs only when this test says so, so the thread
+    // can still hold A after the session has stopped answering for A.
+    val held = StandardTestDispatcher()
+    val app = CoroutineScope(SupervisorJob() + held)
+    val chat = ChatThread(rig.api, rig.repo, app, FileThreadStore(rig.dir), clock = { rig.now }, pause = { rig.now += it }, io = Dispatchers.Unconfined)
+    try {
+      rig.signIn(A)
+      held.scheduler.advanceUntilIdle()
+      assertEquals(A, chat.thread.value.key)
+      rig.signIn(null)
+      assertEquals("the thread has not heard yet", A, chat.thread.value.key)
+      assertFalse(runBlocking { chat.sendNow("hi", null) })
+      assertTrue("the model is not asked for a session that is gone", rig.seen.none { it.path.startsWith("/api/chat") })
+      assertTrue("and nothing written into A's thread", chat.thread.value.messages.isEmpty())
+    } finally {
+      app.cancel()
+    }
   }
 
   @Test fun theAgentsOwnFillLandsOnceAfterTheFirstLookAndIsKept() {

@@ -5,7 +5,9 @@ import dev.merrymen.app.chat.ChatRig.Companion.A
 import dev.merrymen.app.chat.ChatRig.Companion.B
 import dev.merrymen.app.chat.ChatRig.Companion.json
 import dev.merrymen.app.chat.waitFor
+import dev.merrymen.app.data.ChatThread
 import dev.merrymen.app.data.ConfirmScope
+import dev.merrymen.app.data.FileThreadStore
 import dev.merrymen.app.data.LineOrder
 import dev.merrymen.app.data.PendingCard
 import dev.merrymen.app.net.ChatCommand
@@ -19,7 +21,13 @@ import dev.merrymen.app.ui.approveProposals
 import dev.merrymen.app.ui.placeConfirmedOrder
 import dev.merrymen.app.ui.runConfirmedCard
 import dev.merrymen.app.ui.runSettingsCard
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
@@ -27,6 +35,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -130,6 +139,48 @@ class OwnerScopeTest {
     assertTrue(r is Placed.Unknown)
     assertTrue(r.line.startsWith("I couldn't confirm that order reached my key"))
     assertTrue(scope.said.none { it.second.contains("didn't go through") })
+  }
+
+  @Test fun a200WhoseIdCannotBeReadIsARowThatExistsAndIsLookedUp() = runBlocking {
+    rig.route("GET /api/orders") { json("""{"state":"none"}""") }
+    for (answer in listOf(json("""{"queued":true}"""), json("<html>ok</html>").setHeader("content-type", "text/html"))) {
+      rig.seen.clear()
+      rig.route("POST /api/orders") { answer }
+      val scope = FakeScope(A)
+      val r = placeConfirmedOrder(rig.api, scope, "buy", "NVDA", 5.0) { "placed" }
+      // A 200 is a row the route wrote. Unfollowable, but never a refusal, and never sent again.
+      assertTrue("unknown, not refused: $r", r is Placed.Unknown)
+      assertEquals("sent once", 1, rig.writes().size)
+      assertEquals("looked up once, for the owner", listOf("/api/orders?owner=$A"), rig.seen.filter { it.method == "GET" }.map { it.path })
+      assertEquals("the card goes: tapping again may be a second order", 1, scope.cleared)
+    }
+  }
+
+  @OptIn(ExperimentalCoroutinesApi::class)
+  @Test fun aCardScopeIsDeadTheMomentTheSessionLapsesBeforeTheThreadHearsOfIt() {
+    rig.route("POST /api/orders") { json("""{"id":"$id","queued":true,"expiresInMs":495000}""") }
+    // An app scope that runs only when this test says so: the window between the
+    // session answering and the thread's collector hearing it.
+    val held = StandardTestDispatcher()
+    val app = CoroutineScope(SupervisorJob() + held)
+    val chat = ChatThread(rig.api, rig.repo, app, FileThreadStore(rig.dir), clock = { rig.now }, pause = { rig.now += it }, io = Dispatchers.Unconfined)
+    try {
+      rig.signIn(A)
+      held.scheduler.advanceUntilIdle()
+      assertEquals(A, chat.thread.value.key)
+      val scope = chat.cardScope()!!
+      assertTrue(scope.alive())
+
+      // The session lapses. No forget hook runs for that, and the thread still holds A.
+      rig.signIn(null)
+      assertEquals(A, chat.thread.value.key)
+      assertFalse("dead as soon as the session says so", scope.alive())
+      val r = runBlocking { placeConfirmedOrder(rig.api, scope, "buy", "NVDA", 5.0) { "placed" } }
+      assertEquals(Placed.Refused(OWNER_CHANGED_LOCAL), r)
+      assertTrue("nothing sent for a session that is gone", rig.writes().isEmpty())
+    } finally {
+      app.cancel()
+    }
   }
 
   @Test fun theRoutesOwn503IsARefusalNotALookup() = runBlocking {

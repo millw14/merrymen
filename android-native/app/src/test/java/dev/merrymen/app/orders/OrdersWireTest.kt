@@ -15,6 +15,7 @@ import dev.merrymen.app.net.postOrder
 import dev.merrymen.app.net.putSettingsFor
 import dev.merrymen.app.net.text
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -212,6 +213,18 @@ class OrdersWireTest {
   @Test fun anUnreadableLedgerIsNoAnswerYet() = runBlocking {
     server.answer("""{"error":"the ledger could not be read"}""", code = 503)
     assertNull(api.pollOrder("a".repeat(32)))
+  }
+
+  @Test fun aPollThatNeverAnswersIsGivenUpOnAtItsOwnLimit() = runTest {
+    // A client that would wait 20s for an answer. The poll gives up at its own
+    // 8s (virtual time here), so a hung connection is "no answer yet" and the
+    // follow moves on, rather than one poll holding it for the client's timeout.
+    val patient = apiFor(server, OkHttpClient.Builder().readTimeout(20, TimeUnit.SECONDS).build())
+    server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+    val started = System.nanoTime()
+    assertNull(patient.pollOrder("a".repeat(32)))
+    val tookMs = (System.nanoTime() - started) / 1_000_000
+    assertTrue("given up on by the poll's own limit, not the client's: took ${tookMs}ms", tookMs < 5_000)
   }
 
   @Test fun anIdThatIsNotAHashIsNeverPutInAUrl() = runBlocking {
