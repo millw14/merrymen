@@ -6,10 +6,12 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import okhttp3.MediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.RequestBody
 import okhttp3.Response
+import okio.BufferedSink
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -57,6 +59,17 @@ fun JsonObject?.text(key: String): String? =
  * Built on [MerrymenApi.urlFor] and the shared client (so the cookie jar and
  * headers are the app's), but read by hand, because the route's JSON body on
  * an error status is the whole difference between "refused" and "unknown".
+ *
+ * SENT ONCE, WHATEVER CLIENT CARRIES IT. The body is one-shot, the one thing
+ * OkHttp promises never to transmit twice: not when a reused connection dies
+ * after the request went out (with retryOnConnectionFailure on, which the
+ * shared client of this branch's base still has), and not on a 503 that says
+ * Retry-After: 0, which OkHttp re-sends even with that retry off. Either would
+ * be a second copy of the owner's order sent behind their back, after the
+ * route may already have placed the first. The failure or the answer comes
+ * back instead, and is read as above. A connection that failed BEFORE anything
+ * was sent may still try the host's other address, which is safe and is what
+ * keeps a write working on a network where one address family is broken.
  */
 suspend fun MerrymenApi.routeAnswer(
   path: String,
@@ -65,9 +78,10 @@ suspend fun MerrymenApi.routeAnswer(
   client: OkHttpClient = http,
 ): RouteAnswer {
   val u = urlFor(path) ?: return RouteAnswer.NotSent(NOT_A_WEB_ADDRESS)
+  val bytes = json.encodeToString(JsonElement.serializer(), body).toByteArray(Charsets.UTF_8)
   val req = Request.Builder()
     .url(u)
-    .method(method, json.encodeToString(JsonElement.serializer(), body).toRequestBody(jsonType))
+    .method(method, OneShotJson(bytes, jsonType))
     .build()
   return exchange(client, req) { r ->
     val obj = jsonObjectOf(r)
@@ -75,6 +89,16 @@ suspend fun MerrymenApi.routeAnswer(
     // nobody's answer. A 2xx with no JSON is still a 2xx — the row exists.
     if (!r.isSuccessful && obj == null) RouteAnswer.Lost else RouteAnswer.Said(r.code, obj)
   } ?: RouteAnswer.Lost
+}
+
+/** A write's body that OkHttp may transmit at most once; see [routeAnswer]. */
+private class OneShotJson(private val bytes: ByteArray, private val type: MediaType) : RequestBody() {
+  override fun contentType(): MediaType = type
+  override fun contentLength(): Long = bytes.size.toLong()
+  override fun isOneShot(): Boolean = true
+  override fun writeTo(sink: BufferedSink) {
+    sink.write(bytes)
+  }
 }
 
 /**

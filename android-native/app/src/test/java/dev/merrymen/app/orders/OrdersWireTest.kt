@@ -97,6 +97,34 @@ class OrdersWireTest {
     assertEquals("sent once, and not again", 1, server.requestCount)
   }
 
+  @Test fun anOrderIsSentOnceEvenOnAClientThatRetries() = runBlocking {
+    // A plain OkHttpClient, as this branch's shared client still is: it re-sends
+    // a request whose answer is cut off on a reused connection.
+    val retrying = apiFor(server)
+    server.answer("""{"ceilingUsdg":25}""")
+    assertEquals(25.0, retrying.orderCeiling()!!, 0.0)
+    server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+    // What a second copy of the order would be answered with.
+    server.answer("""{"id":"${"a".repeat(32)}","queued":true}""")
+    assertEquals(RouteAnswer.Lost, retrying.postOrder("buy", "TSLA", 5.0, "0xabc"))
+    server.takeRequest()
+    assertEquals("it rode the warm connection", 1, server.takeRequest().sequenceNumber)
+    assertEquals("the read, and ONE copy of the order", 2, server.requestCount)
+  }
+
+  @Test fun aGatewaySayingRetryNowGetsNoSecondCopy() = runBlocking {
+    // OkHttp re-sends on a 503 with Retry-After: 0 even with its retry off, and
+    // a gateway can say that after the route has already placed the order.
+    server.enqueue(
+      MockResponse().setResponseCode(503).setHeader("Retry-After", "0")
+        .setHeader("content-type", "application/json").setBody("""{"error":"couldn't queue it"}"""),
+    )
+    server.answer("""{"id":"${"a".repeat(32)}","queued":true}""")
+    val r = api.postOrder("buy", "TSLA", 5.0, "0xabc") as RouteAnswer.Said
+    assertEquals(503, r.status)
+    assertEquals("sent once", 1, server.requestCount)
+  }
+
   @Test fun aTimeoutIsNobodysAnswer() = runBlocking {
     server.enqueue(
       MockResponse().setHeader("content-type", "application/json").setBody("{}").setHeadersDelay(4, TimeUnit.SECONDS),
