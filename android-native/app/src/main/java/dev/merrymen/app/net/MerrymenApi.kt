@@ -72,6 +72,32 @@ const val UNREADABLE_ANSWER = "merrymen sent back something this app couldn't re
 const val NOT_A_WEB_ADDRESS = "the Server address in Settings isn't a web address — fix it there"
 
 /**
+ * NO ANSWER, SAID AS WHAT HAPPENED — never OkHttp's own words.
+ *
+ * [ApiResult.Unreachable.cause] reaches the owner verbatim ([said], the
+ * LoadedBlock notice, the stale line under Home's figures), and it used to be
+ * the exception's message, or its class name when it had none. An HTTP/2
+ * GOAWAY, common behind Cloudflare on a phone, has no message, so the notice
+ * ended in "ConnectionShutdownException"; others read "stream was reset:
+ * CANCEL" or "Unable to resolve host … No address associated with hostname".
+ * So the cause is picked by what kind of failure it was, in words the owner
+ * can act on, and the raw message goes to logcat. A timeout is checked before
+ * the rest because OkHttp's call timeout is an InterruptedIOException too.
+ */
+internal fun noAnswerCause(e: IOException): String {
+  android.util.Log.i("MerrymenApi", "no answer: ${e.javaClass.name}: ${e.message}")
+  return when (e) {
+    is java.net.SocketTimeoutException -> "the connection timed out"
+    is java.net.UnknownHostException -> "this phone couldn't look up the server's address — it may be offline"
+    is java.net.ConnectException -> "this phone couldn't open a connection to the server"
+    is javax.net.ssl.SSLException -> "a secure connection to the server couldn't be set up"
+    is java.net.UnknownServiceException -> "this phone won't talk to that server without https"
+    is java.io.InterruptedIOException -> "the connection timed out"
+    else -> if (e.message == "Canceled") "the request was cancelled" else "the connection dropped before an answer came back"
+  }
+}
+
+/**
  * THE ONE LINE TO SHOW for an answer we did not get, so no screen has to
  * prefix "Couldn't reach merrymen" by hand — which is false for an answer
  * that arrived and could not be read.
@@ -235,7 +261,7 @@ class MerrymenApi(
       cont.invokeOnCancellation { theCall.cancel() }
       theCall.enqueue(object : okhttp3.Callback {
         override fun onFailure(call: okhttp3.Call, e: IOException) {
-          cont.resume(ApiResult.Unreachable(e.message ?: e.javaClass.simpleName))
+          cont.resume(ApiResult.Unreachable(noAnswerCause(e)))
         }
 
         override fun onResponse(call: okhttp3.Call, response: Response) {
@@ -243,7 +269,7 @@ class MerrymenApi(
             val body = try {
               r.body?.string().orEmpty()
             } catch (e: IOException) {
-              cont.resume(ApiResult.Unreachable(e.message ?: "read failed"))
+              cont.resume(ApiResult.Unreachable(noAnswerCause(e)))
               return
             }
             if (r.isSuccessful) {

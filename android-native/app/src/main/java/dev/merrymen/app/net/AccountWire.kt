@@ -192,7 +192,7 @@ suspend fun MerrymenApi.agentImageBytes(slug: String, kind: AgentImageKind, vers
     cont.invokeOnCancellation { call.cancel() }
     call.enqueue(object : okhttp3.Callback {
       override fun onFailure(call: okhttp3.Call, e: IOException) {
-        cont.resume(ApiResult.Unreachable(e.message ?: "no answer"))
+        cont.resume(ApiResult.Unreachable(noAnswerCause(e)))
       }
 
       override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
@@ -209,7 +209,7 @@ suspend fun MerrymenApi.agentImageBytes(slug: String, kind: AgentImageKind, vers
                 ApiResult.Ok(bytes)
               }
             } catch (e: IOException) {
-              ApiResult.Unreachable(e.message ?: "read failed")
+              ApiResult.Unreachable(noAnswerCause(e))
             }
           }
           cont.resume(result)
