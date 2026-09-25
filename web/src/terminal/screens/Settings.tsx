@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CircleHelp } from "lucide-react";
 import { HolderLink } from "../HolderLink";
 import { AgentImageField } from "../AgentImageField";
@@ -58,6 +58,10 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const [draft, setDraft] = useState<Draft>({});
   const [symbols, setSymbols] = useState<string[] | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  // The "saved" note clears itself after a few seconds; the timer is dropped
+  // when the screen goes away, so it never fires into an unmounted form.
+  const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (statusTimer.current) clearTimeout(statusTimer.current); }, []);
   const [errors, setErrors] = useState<string[]>([]);
   // Telegram: booleans/allowlist can't ride the string `draft`, so track separately.
   /**
@@ -433,7 +437,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       const fresh = await fetch("/api/settings");
       if (fresh.ok) setView((await fresh.json()) as SettingsView);
       void loadTelegram();
-      setTimeout(() => setStatus(null), 4000);
+      if (statusTimer.current) clearTimeout(statusTimer.current);
+      statusTimer.current = setTimeout(() => setStatus(null), 4000);
     } catch {
       setErrors(["could not reach the settings API"]);
       setStatus(null);
