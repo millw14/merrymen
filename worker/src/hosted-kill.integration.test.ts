@@ -51,7 +51,8 @@ const grantAt = (grantedAt: number): StoredGrant =>
     smartAccount: ACCOUNT,
     owner: "0x00000000000000000000000000000000000000b2",
     sessionKeyAddress: "0x00000000000000000000000000000000000000d4",
-    serialized: "eyJ-a-zerodev-blob",
+    // Unique per signature, as the real signed permission is.
+    serialized: `eyJ-a-zerodev-blob-${grantedAt}`,
     chainId: 4663,
     grantedAt,
     expiresAt: grantedAt + 7 * 86_400,
@@ -250,11 +251,39 @@ describe("a grant signed after the kill is a redeploy, and arms", () => {
     await reconcile();
 
     assert.ok(await store.get(TENANT), "the new grant is kept");
-    assert.equal(killRequested(home()), false, "the request is cleared");
+    assert.equal(killRequested(home()), false, "the request is no longer pending");
     assert.deepEqual(proc.signals, [], "the child is not stood down");
     const handed = JSON.parse(readFileSync(grantFile(), "utf8")) as StoredGrant;
     assert.equal(handed.grantedAt, fresh.grantedAt, "the refresh handed the child the NEW grant");
     assert.equal(asChild(() => loadArmableGrant())?.grantedAt, fresh.grantedAt, "and it arms");
+  });
+
+  it("THE KILLED GRANT STAYS DEAD after a newer one supersedes the kill, even raced back into the home", async () => {
+    // A refresh that read the store before the kill writes the killed grant
+    // back; then the owner signs again. Clearing the only latch at that point
+    // would let the stale copy arm until the next refresh, or forever if the
+    // orchestrator died first.
+    await armedTenant(grantAt(nowSec() - 3600));
+    const killed = asChild(() => loadGrantFile())!;
+    childKill(nowSec() - 60);
+    writeFileSync(grantFile(), JSON.stringify(killed, null, 2)); // the raced-back copy
+    const fresh = grantAt(nowSec() - 5);
+    await store.put(TENANT, fresh);
+
+    await honourPendingKills(); // the fast clock: supersedes, installs nothing
+
+    assert.equal(killRequested(home()), false, "no longer pending: the new grant may be handed over");
+    assert.equal(asChild(() => loadGrantFile())?.grantedAt, killed.grantedAt, "the raced copy is still on disk");
+    assert.equal(asChild(() => loadArmableGrant()), null, "but the killed grant does not arm");
+
+    await reconcile(); // the refresh hands over the new grant
+    assert.equal(asChild(() => loadArmableGrant())?.grantedAt, fresh.grantedAt, "the new one arms");
+
+    // A stale write of the killed grant landing even AFTER that is refused too.
+    writeFileSync(grantFile(), JSON.stringify(killed, null, 2));
+    assert.equal(asChild(() => loadArmableGrant()), null, "a late copy of the killed grant is refused");
+    await reconcile();
+    assert.equal(asChild(() => loadArmableGrant())?.grantedAt, fresh.grantedAt, "and the refresh puts the new one back");
   });
 
   it("a grant stored in the SAME second as the kill counts as killed", async () => {
@@ -272,7 +301,7 @@ describe("a grant signed after the kill is a redeploy, and arms", () => {
     await store.put(TENANT, grantAt(nowSec() - 3600));
     const record = JSON.parse(readFileSync(path.join(FLEET, "tenants", `${TENANT}.json`), "utf8")) as { updatedAt: number };
     mkdirSync(home(), { recursive: true });
-    writeKillRequest(home(), { smartAccount: ACCOUNT }, record.updatedAt - (KILL_CLOCK_SLACK_SEC - 1));
+    writeKillRequest(home(), { smartAccount: ACCOUNT, serialized: "killed" }, record.updatedAt - (KILL_CLOCK_SLACK_SEC - 1));
     assert.equal((await honourKillRequest(store, TENANT, home(), nowSec())).outcome, "revoked");
     assert.equal(await store.get(TENANT), null);
   });
@@ -330,9 +359,11 @@ describe("the Telegram reply stays truthful", () => {
 
   it("when the request cannot be written, the reply says the key may come back", async () => {
     await armedTenant(grantAt(nowSec() - 3600));
-    // A home the request cannot be written into: its path is taken by a directory.
-    mkdirSync(killRequestPath(home()) + ".tmp", { recursive: true });
-    const d = killDeps(() => childKill());
+    // A request that cannot be written: its folder does not exist. (Anything
+    // occupying the request path itself would read as a pending kill, which is
+    // the latch failing safe, not a failed write.)
+    const nowhere = path.join(home(), "not-a-folder");
+    const d = killDeps(() => asChild(() => killHosted(nowhere, homePaths.grant(), loadGrantFile()!, nowSec())));
 
     await executeCommand({ kind: "kill" }, d);
     const done = await executeCommand({ kind: "confirm" }, d);

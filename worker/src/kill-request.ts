@@ -12,17 +12,26 @@
  * DATABASE_URL and the DEK, on purpose. So the child leaves a request in its
  * own home and the orchestrator, which holds both, carries it out:
  *
- *  - child: write `kill-request.json`, then delete grant.json (killHosted);
+ *  - child: write `kill-request.json`, naming the killed grant, then delete
+ *    grant.json (killHosted);
  *  - orchestrator: remove the tenant's grant from the store, but only one
  *    stored at or before the kill, give or take KILL_CLOCK_SLACK_SEC
- *    (honourKillRequest). The existing
- *    kill-switch branch of reconcile stands the child down and wipes its home;
- *  - both sides, while the request exists: the orchestrator writes no
+ *    (honourKillRequest). The existing kill-switch branch of reconcile then
+ *    stands the child down and wipes its home;
+ *  - both sides, while the request is PENDING: the orchestrator writes no
  *    grant.json into that home, and the child arms nothing it finds there.
  *
  * The last rule closes the race between them. The orchestrator can check for
  * the request, the child can then write it, and the orchestrator can then
  * restore grant.json from its earlier read. The child still refuses to arm.
+ *
+ * A GRANT SIGNED AFTER THE KILL (the store answers `newer`) arms. The request
+ * is not deleted: it is marked superseded. It stops being pending, so the
+ * writers hand the child the new grant. It still names the killed grant, and
+ * the child refuses that exact grant for as long as this home exists
+ * (loadArmableGrant). Deleting it would bring back the race above: a copy of
+ * the killed grant written back just before, or even after, the new one would
+ * arm again.
  *
  * THE REQUEST IS NOT DURABLE, SO THE CHILD DOES NOT CLAIM THE KILL IS DONE.
  * It lives in the child's home, and a redeploy discards the container along
@@ -41,7 +50,8 @@
  * Hosted only. A self-hosted kill never writes the request, so nothing here
  * changes what a self-hosted kill does.
  */
-import { readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { StoredGrant } from "../../packages/core/src/index";
 import type { GrantStore } from "./grant-store";
@@ -61,16 +71,58 @@ export function killRequestPath(home: string): string {
 }
 
 /**
- * Is a kill pending in this home? The FILE is the request. Its contents only
- * date it, so a file that exists but cannot be read still counts.
+ * Which signed permission a grant is. It hashes `serialized`, the signed
+ * permission itself, and not `smartAccount:grantedAt`. A re-sign keeps the
+ * account, and `grantedAt` is whole seconds.
+ */
+export function grantIdentity(grant: Pick<StoredGrant, "serialized">): string {
+  return createHash("sha256").update(String(grant.serialized)).digest("hex");
+}
+
+/** The request file as written. Every field is optional because it is read back from disk. */
+interface KillRequestFile {
+  smartAccount?: unknown;
+  grant?: unknown;
+  killedAt?: unknown;
+  supersededAt?: unknown;
+}
+
+/** The file, or "unreadable" when it exists but cannot be parsed, or null when absent. */
+function readFile(home: string): KillRequestFile | "unreadable" | null {
+  let raw: string;
+  try {
+    raw = readFileSync(killRequestPath(home), "utf8");
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ENOENT" ? null : "unreadable";
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as KillRequestFile) : "unreadable";
+  } catch {
+    return "unreadable";
+  }
+}
+
+/**
+ * Is a kill PENDING in this home: asked for, and not superseded by a grant
+ * signed after it? A request that exists but cannot be read counts as
+ * pending. The file is the request, and a latch that can be lost by
+ * corrupting it is no latch.
  */
 export function killRequested(home: string): boolean {
-  try {
-    statSync(killRequestPath(home));
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code !== "ENOENT";
-  }
+  const f = readFile(home);
+  if (f === null) return false;
+  if (f === "unreadable") return true;
+  return !(Number(f.supersededAt) > 0);
+}
+
+/**
+ * The identity of the grant killed in this home, pending or superseded, or
+ * null. The child refuses to arm that exact grant again (loadArmableGrant).
+ */
+export function killedGrant(home: string): string | null {
+  const f = readFile(home);
+  return f && f !== "unreadable" && typeof f.grant === "string" ? f.grant : null;
 }
 
 export interface KillRequest {
@@ -84,41 +136,45 @@ export interface KillRequest {
 }
 
 /**
- * The pending kill in this home, or null. A request that cannot be read is
+ * The PENDING kill in this home, or null. A request that cannot be read is
  * dated `nowSec`, so it covers every grant stored so far. That can remove a
  * grant signed a moment after the kill, and the owner signs again. The other
  * way round would let a killed grant trade.
  */
 export function readKillRequest(home: string, nowSec: number): KillRequest | null {
   if (!killRequested(home)) return null;
-  try {
-    const parsed = JSON.parse(readFileSync(killRequestPath(home), "utf8")) as Partial<KillRequest>;
-    const killedAt = Number(parsed.killedAt);
-    return {
-      smartAccount: typeof parsed.smartAccount === "string" ? parsed.smartAccount : null,
-      killedAt: Number.isSafeInteger(killedAt) && killedAt > 0 ? killedAt : nowSec,
-    };
-  } catch {
-    return { smartAccount: null, killedAt: nowSec };
-  }
+  const f = readFile(home);
+  if (!f || f === "unreadable") return { smartAccount: null, killedAt: nowSec };
+  const killedAt = Number(f.killedAt);
+  return {
+    smartAccount: typeof f.smartAccount === "string" ? f.smartAccount : null,
+    killedAt: Number.isSafeInteger(killedAt) && killedAt > 0 ? killedAt : nowSec,
+  };
 }
 
 /**
- * Leave the request. Written to a temporary name and renamed into place, so a
- * write that fails partway leaves no request rather than a half-written one.
- * If the write fails, the child's reply says the kill may not hold, and that
- * has to be true. Throws on failure.
+ * Write the request file atomically: a temporary name renamed into place, so
+ * a write that fails partway leaves the previous file, not half a new one.
+ * The temporary name is unique, because both processes write this file.
+ */
+function writeAtomically(home: string, body: KillRequestFile): void {
+  const file = killRequestPath(home);
+  const tmp = `${file}.${randomUUID()}.tmp`;
+  writeFileSync(tmp, JSON.stringify(body, null, 2), { encoding: "utf8", mode: 0o600 });
+  renameSync(tmp, file);
+}
+
+/**
+ * Leave the request, naming the grant being killed. If the write fails, the
+ * child's reply says the kill may not hold, and that has to be true. Throws
+ * on failure.
  */
 export function writeKillRequest(
   home: string,
-  grant: Pick<StoredGrant, "smartAccount">,
+  grant: Pick<StoredGrant, "smartAccount" | "serialized">,
   nowSec: number,
 ): void {
-  const file = killRequestPath(home);
-  const tmp = `${file}.tmp`;
-  const body: KillRequest = { smartAccount: grant.smartAccount, killedAt: nowSec };
-  writeFileSync(tmp, JSON.stringify(body, null, 2), { encoding: "utf8", mode: 0o600 });
-  renameSync(tmp, file);
+  writeAtomically(home, { smartAccount: grant.smartAccount, grant: grantIdentity(grant), killedAt: nowSec });
 }
 
 export interface HostedKillResult {
@@ -146,12 +202,12 @@ export interface HostedKillResult {
  *
  * Throws only when NOTHING happened: the request failed AND the copy is still
  * there. If the request was written, a failed delete is covered: the child
- * does not arm while the request exists.
+ * does not arm while the request is pending.
  */
 export function killHosted(
   home: string,
   grantFile: string,
-  grant: Pick<StoredGrant, "smartAccount">,
+  grant: Pick<StoredGrant, "smartAccount" | "serialized">,
   nowSec: number,
 ): HostedKillResult {
   let revocation: HostedKillResult["revocation"] = "queued";
@@ -184,7 +240,7 @@ export function killHosted(
 export const KILL_CLOCK_SLACK_SEC = 5;
 
 export type KillOutcome =
-  /** No request in this home. */
+  /** No pending request in this home. */
   | { outcome: "none" }
   /**
    * The stored grant is gone. Stand the child down. `removed` is true only for
@@ -192,9 +248,13 @@ export type KillOutcome =
    * later pass finds it already absent.
    */
   | { outcome: "revoked"; request: KillRequest; removed: boolean }
-  /** The stored grant was signed AFTER the kill. The request is cleared and that grant arms. */
+  /**
+   * The stored grant was signed AFTER the kill. The request is marked
+   * superseded: that grant is handed over and arms. The killed one is still
+   * refused.
+   */
   | { outcome: "superseded"; request: KillRequest }
-  /** Could not be carried out this pass. The request stays, so nothing arms, and the next pass retries. */
+  /** Could not be carried out this pass. The request stays pending, so nothing arms, and the next pass retries. */
   | { outcome: "failed"; request: KillRequest; error: string };
 
 /**
@@ -207,7 +267,7 @@ export type KillOutcome =
  * The request is NOT deleted on `revoked`. The reconcile that follows wipes
  * the whole home, and until then it keeps the child latched. If the wipe
  * fails, the leftover request is harmless: the next grant the owner signs is
- * stored after it, comes back `newer`, and clears it.
+ * stored after it, comes back `newer`, and supersedes it.
  */
 export async function honourKillRequest(
   store: Pick<GrantStore, "removeUnlessNewer">,
@@ -224,10 +284,13 @@ export async function honourKillRequest(
     return { outcome: "failed", request, error: e instanceof Error ? e.message : String(e) };
   }
   if (result !== "newer") return { outcome: "revoked", request, removed: result === "removed" };
+  // SUPERSEDED, NOT DELETED: the killed grant's identity stays in this home.
+  const f = readFile(home);
+  const kept: KillRequestFile = f && f !== "unreadable" ? f : { smartAccount: request.smartAccount, killedAt: request.killedAt };
   try {
-    rmSync(killRequestPath(home), { force: true });
+    writeAtomically(home, { ...kept, supersededAt: nowSec });
   } catch (e) {
-    // The new grant stays in the store, but with the request still here
+    // The new grant stays in the store, but with the request still pending
     // nothing writes or arms it. Retried next pass.
     return { outcome: "failed", request, error: e instanceof Error ? e.message : String(e) };
   }

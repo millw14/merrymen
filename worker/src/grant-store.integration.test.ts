@@ -13,6 +13,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { after, describe, it } from "node:test";
 import { existsSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { hostname } from "node:os";
 import os from "node:os";
 import path from "node:path";
 
@@ -188,13 +190,34 @@ describe("FileGrantStore writers are serialized (a kill racing a new signature)"
     await store.remove(DAVE);
   });
 
-  it("a lock left by a process that died holding it is broken, not waited on forever", async () => {
-    writeFileSync(lock, "a dead process");
-    const longAgo = new Date(Date.now() - 60_000);
-    utimesSync(lock, longAgo, longAgo);
+  it("a lock left by a process that DIED holding it is broken, not waited on forever", async () => {
+    // A pid that has certainly exited: a child run to completion.
+    const dead = spawnSync(process.execPath, ["-e", ""]).pid;
+    writeFileSync(lock, `${hostname()}:${dead}:crashed-mid-write`);
     await store.put(DAVE, grantFor(DAVE));
     assert.ok(await store.get(DAVE));
     assert.equal(existsSync(lock), false, "released after use");
+    await store.remove(DAVE);
+  });
+
+  it("A LIVE HOLDER IS NEVER BROKEN, however old its lock: age is not death", async () => {
+    // Breaking on age let a paused owner resume and delete its successor's
+    // lock, and two writers then overlapped. This holder is this very process.
+    await store.put(DAVE, grantFor(DAVE));
+    const old = backdate(100);
+    const live = `${hostname()}:${process.pid}:a-slow-writer`;
+    writeFileSync(lock, live);
+    const anHourAgo = new Date(Date.now() - 3_600_000);
+    utimesSync(lock, anHourAgo, anHourAgo);
+
+    const resign = store.put(DAVE, grantFor(DAVE));
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(readFileSync(lock, "utf8"), live, "the live holder's lock is untouched");
+    assert.equal(stampOf(), old, "and nobody wrote past it");
+
+    rmSync(lock); // the slow writer finishes
+    await resign;
+    assert.ok(stampOf() > old);
     await store.remove(DAVE);
   });
 });

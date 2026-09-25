@@ -28,7 +28,8 @@
  * browser bundle, which is why it lives here and not in core's browser barrel.
  */
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import path from "node:path";
 import { merrymenHome } from "./home";
 import { carriesOwnerKey } from "../../packages/core/src/index";
@@ -121,8 +122,65 @@ function fromRecord(rec: StoredRecord): StoredGrant {
 
 /** How long a writer waits for another writer's lock on the same tenant. */
 const LOCK_WAIT_MS = 5_000;
-/** A lock this old belongs to a process that died holding it. */
-const LOCK_STALE_MS = 30_000;
+
+/** A lock names its holder: host, pid, and a nonce for this one acquisition. */
+function lockToken(): string {
+  return `${hostname()}:${process.pid}:${randomUUID()}`;
+}
+
+/**
+ * Is the process that wrote this lock still running?
+ *
+ * Only a lock whose holder is known to be GONE may be broken. Age is not
+ * evidence: a slow or paused holder still owns its lock, and breaking it on
+ * age let a paused owner resume and delete its successor's. Anything that
+ * can't be judged counts as alive: another host's lock, an unreadable or
+ * half-written token, a pid we may not signal. Waiting fails closed (the
+ * write is refused as busy). Breaking wrongly fails open.
+ */
+function holderAlive(token: string): boolean {
+  const [host, pidText] = token.split(":");
+  const pid = Number(pidText);
+  if (host !== hostname() || !Number.isSafeInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/**
+ * Remove the lock at `lock` only if it is still exactly the orphan `seen`.
+ * The rename claims whatever is at the path, atomically, so at most one
+ * contender gets it. If the claimed file is not the orphan, a successor
+ * replaced it in between, and its lock is put back with link(), which never
+ * overwrites. (What remains is a microsecond window needing a dead holder and
+ * three contenders at once: a third writer can take the path while the
+ * successor's lock is aside.)
+ */
+async function breakOrphan(lock: string, seen: string): Promise<void> {
+  const claimed = `${lock}.${randomUUID()}.orphan`;
+  try {
+    await rename(lock, claimed);
+  } catch {
+    return; // another contender claimed it first
+  }
+  let got = "";
+  try {
+    got = await readFile(claimed, "utf8");
+  } catch {
+    /* unreadable: not provably the orphan, so it goes back */
+  }
+  if (got !== seen) {
+    try {
+      await link(claimed, lock);
+    } catch {
+      /* a newer lock already holds the path */
+    }
+  }
+  await rm(claimed, { force: true });
+}
 
 /**
  * One JSON record per tenant under <home>/tenants/. Used self-hosted, in tests,
@@ -146,32 +204,44 @@ export class FileGrantStore implements GrantStore {
    * take no lock: a put renames a finished record into place, so a reader
    * sees the old record or the new one, never half of one.
    *
-   * A lock older than LOCK_STALE_MS belongs to a process that died holding
-   * it, and is broken. No writer here holds it for more than milliseconds.
+   * The lock file holds its owner's token. It is released only by the call
+   * that holds it, and broken only when its holder process is gone
+   * (holderAlive, breakOrphan). No writer here holds it for more than
+   * milliseconds.
    */
   private async locked<T>(tenant: string, fn: () => Promise<T>): Promise<T> {
     await mkdir(this.dir, { recursive: true });
     const lock = `${this.file(tenant)}.lock`;
+    const token = lockToken();
     const giveUpAt = Date.now() + LOCK_WAIT_MS;
     for (;;) {
       try {
-        await writeFile(lock, String(process.pid), { flag: "wx", mode: 0o600 });
+        await writeFile(lock, token, { flag: "wx", mode: 0o600 });
         break;
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+        let seen: string | null = null;
         try {
-          if (Date.now() - (await stat(lock)).mtimeMs > LOCK_STALE_MS) await rm(lock, { force: true });
+          seen = await readFile(lock, "utf8");
         } catch {
           /* released while we looked */
         }
-        if (Date.now() > giveUpAt) throw new Error(`grant store busy for ${tenant}`);
+        if (seen !== null && !holderAlive(seen)) await breakOrphan(lock, seen);
+        if (Date.now() > giveUpAt) throw new Error(`grant store busy for ${tenant}: ${lock} is held by ${seen ?? "?"}`);
         await new Promise((r) => setTimeout(r, 20));
       }
     }
     try {
       return await fn();
     } finally {
-      await rm(lock, { force: true });
+      // ONLY THE LOCK THIS CALL HOLDS. Nobody breaks a live holder's lock, so
+      // it should still be ours. Checking means a surprise here can never
+      // delete someone else's.
+      try {
+        if ((await readFile(lock, "utf8")) === token) await rm(lock, { force: true });
+      } catch {
+        /* already gone */
+      }
     }
   }
   async put(tenant: `0x${string}`, grant: StoredGrant): Promise<void> {
