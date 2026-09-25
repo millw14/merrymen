@@ -34,6 +34,7 @@ import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
 import dev.merrymen.app.net.ApiResult
+import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.TelegramStatus
 import dev.merrymen.app.net.TelegramTest
 import dev.merrymen.app.net.said
@@ -71,6 +72,27 @@ internal fun telegramTestLine(r: ApiResult<TelegramTest>): String = when (r) {
 }
 
 /**
+ * READ THE OWNER'S BOT, AFTER ASKING WHO THE OWNER IS.
+ *
+ * GET /api/telegram answers an ended session from the house defaults — "no
+ * token", with a 200 — and, unlike the feed's `source` or the settings'
+ * `owner`, nothing in that answer says it is nobody's. So while this app holds
+ * an address on a server that has sessions, the session route is asked first
+ * ([askWhoIsSignedIn]); a session that ended turns repo.signedIn to null, and
+ * the screen draws its sign-in notice instead of "not set up" over a bot that
+ * may well exist.
+ */
+internal suspend fun readTelegramFor(
+  api: MerrymenApi,
+  signedIn: String?,
+  hosted: Boolean?,
+  askWhoIsSignedIn: suspend () -> Unit,
+): Loaded<TelegramStatus> {
+  if (signedIn != null && hosted != false) askWhoIsSignedIn()
+  return api.telegram().toLoaded()
+}
+
+/**
  * AN ANDROID-ONLY SCREEN, styled from the form vocabulary rather than invented.
  *
  * The web keeps the bot inside the settings form, and its link code used to
@@ -97,7 +119,7 @@ fun TelegramScreen(nav: NavHostController) {
   val scope = rememberCoroutineScope()
   val uri = LocalUriHandler.current
   val mayRead = signedIn != null || hosted == false
-  suspend fun load() { state = c.api.telegram().toLoaded() }
+  suspend fun load() { state = readTelegramFor(c.api, signedIn, c.repo.hosted.value) { c.repo.refreshIdentity() } }
   LaunchedEffect(signedIn, mayRead) { if (mayRead) load() }
 
   Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {

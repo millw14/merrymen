@@ -57,6 +57,7 @@ import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
 import dev.merrymen.app.net.ApiResult
+import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.OriginCheck
 import dev.merrymen.app.net.SettingsRead
 import dev.merrymen.app.net.TelegramStatus
@@ -79,6 +80,7 @@ import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.PagePadTop
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.sans
+import dev.merrymen.app.ui.sessionNeedsAsking
 import kotlinx.coroutines.launch
 
 /**
@@ -420,9 +422,7 @@ fun SettingsScreen(nav: NavHostController) {
   val scope = rememberCoroutineScope()
 
   suspend fun load() {
-    val r = c.api.settingsRead().toLoaded()
-    state = r
-    if (r is Loaded.Refused && r.status == 401) c.repo.refreshIdentity()
+    state = readSettingsFor(c.api, signedIn, c.repo.hosted.value) { c.repo.refreshIdentity() }
     telegram = (c.api.telegram() as? ApiResult.Ok)?.value
   }
 
@@ -640,6 +640,28 @@ fun SettingsScreen(nav: NavHostController) {
     }
     Spacer(Modifier.height(LocalBottomInset.current))
   }
+}
+
+/**
+ * READ THE FORM, AND ASK WHO IS SIGNED IN WHEN IT CAME BACK FOR NOBODY.
+ *
+ * Hosted, an ended session is answered with a 200 and `owner: ""` — the house
+ * defaults, nobody's settings — never a 401. While this app still held the old
+ * address, the page said "Sign in to change your agent's settings" with no
+ * button (the offer needs signedIn null) and nothing ever cleared the address.
+ * So a read for nobody under a held address asks the session route first
+ * ([sessionNeedsAsking]); when it says nobody, repo.signedIn goes to null, this
+ * screen starts again, and the notice carries its Sign in.
+ */
+internal suspend fun readSettingsFor(
+  api: MerrymenApi,
+  signedIn: String?,
+  hosted: Boolean?,
+  askWhoIsSignedIn: suspend () -> Unit,
+): Loaded<SettingsRead> {
+  val r = api.settingsRead()
+  if (sessionNeedsAsking(r, (r as? ApiResult.Ok)?.value?.env?.owner == "", signedIn, hosted)) askWhoIsSignedIn()
+  return r.toLoaded()
 }
 
 /** What the Save area says about one save: a line at the top, and lines under the button. */

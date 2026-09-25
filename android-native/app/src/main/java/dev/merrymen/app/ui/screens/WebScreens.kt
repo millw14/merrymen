@@ -30,8 +30,10 @@ import dev.merrymen.app.ui.Notice
 import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.PagePadTop
 import dev.merrymen.app.ui.Routes
+import dev.merrymen.app.ui.SignInPage
 import dev.merrymen.app.ui.sans
 import dev.merrymen.app.ui.shortAddress
+import dev.merrymen.app.ui.signInPageOf
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -173,29 +175,32 @@ fun SignInScreen(nav: NavHostController) {
     WebHeader("Sign in", nav)
     val o = origin
     val pad = Modifier.padding(horizontal = PagePadH, vertical = 12.dp)
-    when {
+    // ONLY [SignInPage.Open] LOADS THE WEB SIGN-IN; see signInPageOf.
+    when (signInPageOf(originRead = o != null, hosted = hosted, asked = asked)) {
       // A LINE, NOT THE 264dp BLANK CARD: a momentary read of a local setting.
-      o == null -> NoteLine("Reading your server setting.", pad)
-      hosted == false -> Notice(
+      SignInPage.ReadingOrigin -> NoteLine("Reading your server setting.", pad)
+      SignInPage.NoSignIn -> Notice(
         title = "This server has no sign-in",
         body = "It runs one owner's agent, so every screen here already acts for it. There is no wallet to sign in with.",
         modifier = pad,
       )
-      hosted == null && !asked -> NoteLine("Checking whether this server has sign-in.", pad)
-      hosted == null -> Notice(
+      SignInPage.Asking -> NoteLine("Checking whether this server has sign-in.", pad)
+      SignInPage.CannotTell -> Notice(
         title = "Can't tell whether this server has sign-in",
         body = "The session check did not answer, so nothing was opened. That's this app failing to get an answer, not a fact about your account.",
         actionLabel = "Try again",
         onAction = { scope.launch { c.repo.refreshIdentity() } },
         modifier = pad,
       )
-      else -> WebFlow(
-        url = WebAuth.signInUrl(o),
-        origin = o,
-        jar = c.cookieJar,
-        onCookies = { scope.launch { c.repo.adoptWebSession() } },
-        modifier = Modifier.fillMaxSize(),
-      )
+      SignInPage.Open -> if (o != null) {
+        WebFlow(
+          url = WebAuth.signInUrl(o),
+          origin = o,
+          jar = c.cookieJar,
+          onCookies = { scope.launch { c.repo.adoptWebSession() } },
+          modifier = Modifier.fillMaxSize(),
+        )
+      }
     }
   }
 }

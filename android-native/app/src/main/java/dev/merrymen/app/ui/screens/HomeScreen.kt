@@ -79,6 +79,7 @@ import dev.merrymen.app.ui.ownBookOf
 import dev.merrymen.app.ui.pnlLineOf
 import dev.merrymen.app.ui.positionLinesOf
 import dev.merrymen.app.ui.sans
+import dev.merrymen.app.ui.sessionNeedsAsking
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -141,6 +142,12 @@ private fun Tag(text: String, modifier: Modifier = Modifier) {
  * fails after a good read keeps the figures on screen but says so, with their
  * age ([feedFailure]); a refusal (a session that ended) replaces them, because
  * a book the server would no longer send is not the reader's to keep looking at.
+ *
+ * A FEED ANSWERED FOR NOBODY WHILE THIS APP HOLDS AN ADDRESS IS A QUESTION,
+ * asked before the answer is published: [askWhoIsSignedIn] (the repository's
+ * refreshIdentity) runs first — see [sessionNeedsAsking] — so an ended session
+ * turns into the sign-in, not into "Couldn't read your book" over an account
+ * whose ledger is fine.
  */
 internal class OwnReads {
   var feed by mutableStateOf<Loaded<Feed>>(Loaded.Loading)
@@ -151,8 +158,16 @@ internal class OwnReads {
   var settings by mutableStateOf<SettingsEnvelope?>(null)
   var readFor by mutableStateOf<String?>(null)
 
-  suspend fun load(api: MerrymenApi, signedIn: String?, withStrip: Boolean, nowMs: () -> Long) {
+  suspend fun load(
+    api: MerrymenApi,
+    signedIn: String?,
+    hosted: Boolean?,
+    withStrip: Boolean,
+    nowMs: () -> Long,
+    askWhoIsSignedIn: suspend () -> Unit = {},
+  ) {
     val f = api.feed()
+    if (sessionNeedsAsking(f, (f as? ApiResult.Ok)?.value?.source == "none", signedIn, hosted)) askWhoIsSignedIn()
     val keep = feed is Loaded.Value && (f is ApiResult.Unreachable || (f is ApiResult.Refused && f.status >= 500))
     if (keep) {
       feedFailure = f
@@ -215,9 +230,10 @@ fun HomeScreen(nav: NavHostController) {
   val lifecycle = LocalLifecycleOwner.current.lifecycle
 
   suspend fun load() {
-    reads.load(c.api, signedIn, withStrip = true) { System.currentTimeMillis() }
+    reads.load(c.api, signedIn, c.repo.hosted.value, withStrip = true, nowMs = { System.currentTimeMillis() }) {
+      c.repo.refreshIdentity()
+    }
     nowMs = System.currentTimeMillis()
-    if (reads.feed.let { it is Loaded.Refused && it.status == 401 }) c.repo.refreshIdentity()
   }
 
   LaunchedEffect(signedIn) { tier = c.api.tier().toLoaded() }

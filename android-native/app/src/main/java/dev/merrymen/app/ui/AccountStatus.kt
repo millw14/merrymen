@@ -87,6 +87,87 @@ fun ownBookOf(feed: Loaded<Feed>, signedIn: String?, hosted: Boolean?, canOfferS
   }
 
 /**
+ * WHETHER TO ASK THE SESSION ROUTE WHO IS SIGNED IN, after one of the owner's
+ * own reads came back — BEFORE its answer is drawn.
+ *
+ * A 401 is the obvious case. The one that hid is a read answered AS IF NOBODY
+ * WERE SIGNED IN while this app still holds an address: hosted, the feed, the
+ * grants and the settings routes all answer an ended session with a 200 —
+ * source "none", {exists:false}, owner "" — and never with a 401. Nothing else
+ * corrects a stale address (forget hooks do not run on an expiry, by design),
+ * so Home said "Couldn't read your book" with a Try again that got the same
+ * answer every time, You kept Sign out and Stop, and no screen offered the
+ * sign-in the owner actually needed. /api/auth/session is safe to ask; if it
+ * says nobody, repo.signedIn goes to null, every screen keyed on it starts
+ * again, and the sign-in appears where there is one. If it still names the
+ * wallet, the "nobody" answer really was the ledger failing, and says so.
+ *
+ * [answeredForNobody] is the read's own shape of "nobody"; self-hosted has no
+ * session to have ended, so there it is never a reason to ask.
+ */
+fun sessionNeedsAsking(read: ApiResult<*>, answeredForNobody: Boolean, signedIn: String?, hosted: Boolean?): Boolean =
+  when (read) {
+    is ApiResult.Refused -> read.status == 401
+    is ApiResult.Ok -> answeredForNobody && signedIn != null && hosted != false
+    is ApiResult.Unreachable -> false
+  }
+
+// ── who may be offered what ────────────────────────────────────────────────
+
+/**
+ * THE THREE ACCOUNT CONTROLS ON YOU, and when each one is TRUE here.
+ *
+ * [signInBanner] only where a sign-in exists and nobody is in it
+ * (canOfferSignIn): a self-hosted install has no sign-in, and a "Not signed
+ * in — Sign in" banner there sent its operator to a page that does not apply.
+ * [stop] for whoever the server acts for — a signed-in owner hosted, or the one
+ * operator of a self-hosted box, whose DELETE /api/grants needs no session.
+ * [signOut] only where there is a session to end.
+ */
+data class AccountControls(val signInBanner: Boolean, val stop: Boolean, val signOut: Boolean)
+
+fun accountControlsOf(signedIn: String?, hosted: Boolean?, canOfferSignIn: Boolean): AccountControls =
+  AccountControls(
+    signInBanner = canOfferSignIn,
+    stop = signedIn != null || hosted == false,
+    signOut = signedIn != null,
+  )
+
+/** What the sign-in page may show, in the order it finds out. Only [Open] loads the web sign-in. */
+enum class SignInPage {
+  /** The stored server address has not been read yet. */
+  ReadingOrigin,
+
+  /** Self-hosted: there is no sign-in, and the page says so instead of opening a door to nowhere. */
+  NoSignIn,
+
+  /** The session route has not said whether this server is hosted, and is being asked. */
+  Asking,
+
+  /** It was asked and did not answer: nothing is opened, and Try again asks again. */
+  CannotTell,
+
+  /** Hosted: the web sign-in, in the WebView. */
+  Open,
+}
+
+fun signInPageOf(originRead: Boolean, hosted: Boolean?, asked: Boolean): SignInPage = when {
+  !originRead -> SignInPage.ReadingOrigin
+  hosted == false -> SignInPage.NoSignIn
+  hosted == null && !asked -> SignInPage.Asking
+  hosted == null -> SignInPage.CannotTell
+  else -> SignInPage.Open
+}
+
+/**
+ * THE WELCOME PAGE'S TWO SIGN-IN DOORS, hidden only once the server has SAID it
+ * is self-hosted. While it has not answered they stay, so the page can draw
+ * before the network does; the sign-in page itself never opens the web flow
+ * until the server says hosted ([signInPageOf]).
+ */
+fun welcomeOffersSignIn(hosted: Boolean?): Boolean = hosted != false
+
+/**
  * THE AGENT'S NAME, ONLY WHEN SOMEBODY SET IT.
  *
  * `nameSource` is settings | ledger | fallback, and "fallback" is the house

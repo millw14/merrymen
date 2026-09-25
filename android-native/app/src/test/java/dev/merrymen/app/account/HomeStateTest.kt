@@ -21,10 +21,16 @@ import dev.merrymen.app.ui.ownAgentName
 import dev.merrymen.app.ui.ownBookOf
 import dev.merrymen.app.ui.screens.OwnReads
 import dev.merrymen.app.ui.screens.fixRoute
+import dev.merrymen.app.ui.screens.readSettingsFor
+import dev.merrymen.app.ui.screens.readTelegramFor
+import dev.merrymen.app.ui.sessionNeedsAsking
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -145,16 +151,18 @@ class HomeStateTest {
     val reads = OwnReads()
     server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
     server.answer("""{"exists":true,"mode":"live"}""")
-    reads.load(api, "0xabc", withStrip = false) { 1_000L }
+    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 1_000L })
     assertEquals(120.5, (reads.feed as Loaded.Value).value.equityNow!!, 1e-9)
     assertEquals("0xabc", reads.readFor)
 
-    server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
-    server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
-    reads.load(api, "0xabc", withStrip = false) { 2_000L }
+    server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+    server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 2_000L })
     // The figures stay — with their age said — rather than flapping to an error.
     assertEquals(120.5, (reads.feed as Loaded.Value).value.equityNow!!, 1e-9)
     assertTrue(reads.feedFailure is ApiResult.Unreachable)
+    // No answer — not an answer this app could not read.
+    assertFalse((reads.feedFailure as ApiResult.Unreachable).unreadable)
     assertEquals(1_000L, reads.feedAtMs)
   }
 
@@ -162,14 +170,127 @@ class HomeStateTest {
     val reads = OwnReads()
     server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
     server.answer("""{"exists":true}""")
-    reads.load(api, "0xabc", withStrip = false) { 1_000L }
+    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 1_000L })
     server.answer("""{"error":"not signed in"}""", code = 401)
     server.answer("""{"exists":false}""")
-    reads.load(api, "0xabc", withStrip = false) { 2_000L }
+    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 2_000L })
     // A session that ended does not keep a book on screen the server would no
     // longer send.
     val f = reads.feed
     if (f !is Loaded.Refused) fail("expected the 401 to replace the book, got $f")
     assertNull(reads.feedFailure)
+  }
+
+  // ── a session that ended while this app still held its address ───────────
+
+  /**
+   * THE HOSTED SERVER AS IT ANSWERS AN ENDED SESSION: never a 401. The feed is
+   * the captured signed-out answer (source "none"), the grants {exists:false},
+   * the settings the captured house defaults with owner "" — all 200s. Only the
+   * session route says who is signed in, and [address] is what it says now.
+   */
+  private class EndedSessionServer(@Volatile var address: String?) : Dispatcher() {
+    val sessionAsks = AtomicInteger()
+
+    override fun dispatch(request: RecordedRequest): MockResponse = when (request.path?.substringBefore('?')) {
+      "/api/auth/session" -> {
+        sessionAsks.incrementAndGet()
+        json("""{"hosted":true,"address":${address?.let { "\"$it\"" } ?: "null"}}""")
+      }
+      "/api/feed" -> json(Fixtures.text("probe-feed-signedout.json"))
+      "/api/grants" -> json("""{"exists":false}""")
+      "/api/settings" -> json(Fixtures.text("probe-settings-signedout.json"))
+      // The house defaults' bridge: "no token" — nothing in it says nobody's.
+      "/api/telegram" -> json("""{"enabled":false,"hasToken":false,"connected":false,"botUsername":null,"ownerId":null,"allowlist":[],"linkCode":null,"control":true}""")
+      else -> MockResponse().setResponseCode(404)
+    }
+
+    private fun json(body: String) = MockResponse().setHeader("content-type", "application/json").setBody(body)
+  }
+
+  /** The real repository on [server], holding [OWNER] as the app's signed-in wallet. */
+  private fun repoHoldingTheOwner(wire: EndedSessionServer): Repository = runBlocking {
+    server.dispatcher = wire
+    val store = MemoryStore(server.origin())
+    val jar = PersistentCookieJar(store)
+    val repo = Repository(MerrymenApi(Http.client(jar, debug = false), store), store, MemoryCookies(jar))
+    repo.refreshIdentity()
+    assertEquals(OWNER, repo.signedIn.value)
+    repo
+  }
+
+  @Test fun anEndedSessionIsAskedAboutAndBecomesTheSignIn() = runBlocking {
+    val wire = EndedSessionServer(OWNER)
+    val repo = repoHoldingTheOwner(wire)
+    // The session ends on the server; the app still holds the address.
+    wire.address = null
+    val reads = OwnReads()
+    reads.load(repo.api, repo.signedIn.value, repo.hosted.value, withStrip = false, nowMs = { 1L }) { repo.refreshIdentity() }
+
+    // The "nobody" feed was a question, asked once, before it was drawn...
+    assertEquals(2, wire.sessionAsks.get())
+    assertNull(repo.signedIn.value)
+    assertTrue(repo.canOfferSignIn.value)
+    // ...so what the screen draws is the sign-in, not "Couldn't read your book".
+    assertEquals(
+      OwnBook.SignedOut(canSignIn = true),
+      ownBookOf(reads.feed, repo.signedIn.value, repo.hosted.value, repo.canOfferSignIn.value),
+    )
+  }
+
+  @Test fun aSessionThatStillNamesTheWalletLeavesItAsTheLedgerFailing() = runBlocking {
+    val wire = EndedSessionServer(OWNER)
+    val repo = repoHoldingTheOwner(wire)
+    val reads = OwnReads()
+    reads.load(repo.api, repo.signedIn.value, repo.hosted.value, withStrip = false, nowMs = { 1L }) { repo.refreshIdentity() }
+    // Asked, and the session is still the owner's: the ledger really failed.
+    assertEquals(2, wire.sessionAsks.get())
+    assertEquals(OWNER, repo.signedIn.value)
+    assertEquals(OwnBook.Unreadable, ownBookOf(reads.feed, repo.signedIn.value, repo.hosted.value, repo.canOfferSignIn.value))
+  }
+
+  @Test fun aSettingsReadForNobodyAsksTheSameQuestion() = runBlocking {
+    val wire = EndedSessionServer(OWNER)
+    val repo = repoHoldingTheOwner(wire)
+    wire.address = null
+    val read = readSettingsFor(repo.api, repo.signedIn.value, repo.hosted.value) { repo.refreshIdentity() }
+    assertEquals("", (read as Loaded.Value).value.env.owner)
+    // Settings re-keys on signedIn, and its notice now carries the Sign in.
+    assertNull(repo.signedIn.value)
+    assertTrue(repo.canOfferSignIn.value)
+  }
+
+  @Test fun theBotIsReadOnlyAfterTheSessionIsConfirmed() = runBlocking {
+    val wire = EndedSessionServer(OWNER)
+    val repo = repoHoldingTheOwner(wire)
+    wire.address = null
+    readTelegramFor(repo.api, repo.signedIn.value, repo.hosted.value) { repo.refreshIdentity() }
+    // The bridge's answer cannot say "nobody", so the question comes first:
+    // the screen now draws its sign-in notice, not "not set up".
+    assertEquals(2, wire.sessionAsks.get())
+    assertNull(repo.signedIn.value)
+    assertTrue(repo.canOfferSignIn.value)
+    // Signed out already, nothing is asked on the bot's account.
+    readTelegramFor(repo.api, repo.signedIn.value, repo.hosted.value) { repo.refreshIdentity() }
+    assertEquals(2, wire.sessionAsks.get())
+  }
+
+  @Test fun onlyAnAddressHeldOnAServerWithSessionsIsAReasonToAsk() {
+    val none = ApiResult.Ok(Feed(source = "none"))
+    assertTrue(sessionNeedsAsking(none, answeredForNobody = true, signedIn = OWNER, hosted = true))
+    // An older server that does not say whether it is hosted still has sessions to end.
+    assertTrue(sessionNeedsAsking(none, answeredForNobody = true, signedIn = OWNER, hosted = null))
+    // Nobody held: already the sign-in. Self-hosted: no session to have ended.
+    assertFalse(sessionNeedsAsking(none, answeredForNobody = true, signedIn = null, hosted = true))
+    assertFalse(sessionNeedsAsking(none, answeredForNobody = true, signedIn = OWNER, hosted = false))
+    // A book, a failure to reach, or a server error are not about who is signed in.
+    assertFalse(sessionNeedsAsking(ApiResult.Ok(Feed(source = "sqlite")), answeredForNobody = false, signedIn = OWNER, hosted = true))
+    assertFalse(sessionNeedsAsking(ApiResult.Unreachable("timeout"), answeredForNobody = false, signedIn = OWNER, hosted = true))
+    assertFalse(sessionNeedsAsking(ApiResult.Refused(503, "down"), answeredForNobody = false, signedIn = OWNER, hosted = true))
+    assertTrue(sessionNeedsAsking(ApiResult.Refused(401, "sign in"), answeredForNobody = false, signedIn = OWNER, hosted = true))
+  }
+
+  private companion object {
+    const val OWNER = "0xabc0000000000000000000000000000000000001"
   }
 }

@@ -65,6 +65,7 @@ import dev.merrymen.app.ui.OwnBook
 import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.PageTitle
 import dev.merrymen.app.ui.Routes
+import dev.merrymen.app.ui.accountControlsOf
 import dev.merrymen.app.ui.modeChipOf
 import dev.merrymen.app.ui.numerals
 import dev.merrymen.app.ui.ownAgentName
@@ -147,9 +148,10 @@ fun ProfileScreen(nav: NavHostController) {
   val lifecycle = LocalLifecycleOwner.current.lifecycle
 
   suspend fun load() {
-    reads.load(c.api, signedIn, withStrip = false) { System.currentTimeMillis() }
+    reads.load(c.api, signedIn, c.repo.hosted.value, withStrip = false, nowMs = { System.currentTimeMillis() }) {
+      c.repo.refreshIdentity()
+    }
     nowMs = System.currentTimeMillis()
-    if (reads.feed.let { it is Loaded.Refused && it.status == 401 }) c.repo.refreshIdentity()
   }
   LaunchedEffect(signedIn, lifecycle) {
     lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -160,6 +162,7 @@ fun ProfileScreen(nav: NavHostController) {
     }
   }
   val book = ownBookOf(reads.feed, signedIn, hosted, canOfferSignIn)
+  val controls = accountControlsOf(signedIn, hosted, canOfferSignIn)
   val pull = rememberPullToRefreshState()
 
   PullToRefreshBox(
@@ -195,7 +198,7 @@ fun ProfileScreen(nav: NavHostController) {
       PageTitle("You")
       SignedInNotice()
 
-      if (canOfferSignIn) {
+      if (controls.signInBanner) {
         Notice(
           title = "Not signed in",
           body = "Signing in proves you control your owner key. It moves no funds and grants no permissions.",
@@ -288,12 +291,12 @@ fun ProfileScreen(nav: NavHostController) {
 
       // THE KILL SWITCH, for whoever this server acts for: a signed-in owner
       // hosted, or the one operator of a self-hosted box (which has no session
-      // at all, and whose DELETE /api/grants needs none).
-      if (signedIn != null || hosted == false) StopControl()
+      // at all, and whose DELETE /api/grants needs none). See accountControlsOf.
+      if (controls.stop) StopControl()
 
       // SIGN OUT ONLY WHERE THERE IS A SESSION TO END. `.profile-session-actions
       // button` — polish.css:75-76: #f47777, min-height 44px, 15px.
-      if (signedIn != null) {
+      if (controls.signOut) {
         Box(
           Modifier
             .heightIn(min = 44.dp)
