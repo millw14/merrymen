@@ -848,8 +848,8 @@ fun trencherRowOf(strategy: String?, trencherLiveEnabled: Boolean?, assetMode: S
  * cache-buster, so every image of that agent on screen re-reads the stored
  * picture instead of an HTTP cache's copy. A null version means removed. Keyed
  * by the agent's public slug, which is no wallet's secret, so it is not a
- * forget hook's business. The face renderer reads this too once it is the
- * one drawing faces on these screens.
+ * forget hook's business. Home's and You's faces read it through [ownFaceOf];
+ * the app-wide face renderer should read it the same way.
  */
 object AgentImageRevisions {
   private val state = MutableStateFlow<Map<String, String?>>(emptyMap())
@@ -860,6 +860,31 @@ object AgentImageRevisions {
   fun publish(slug: String, kind: AgentImageKind, version: String?) {
     state.value = state.value + (key(slug, kind) to version)
   }
+}
+
+/** What the face on Home's hero and You's agent card draws. */
+sealed interface OwnFace {
+  /** The seeded initials, and nothing to fetch. */
+  data object Initials : OwnFace
+
+  /** The served picture, at [version] when this app wrote one (the cache-buster), else as served. */
+  data class Picture(val slug: String, val version: String?) : OwnFace
+}
+
+/**
+ * THE OWNER'S OWN FACE, the web's useAgentImageSrc rule exactly: no slug is the
+ * initials; a picture this app just REMOVED is the initials too (null in
+ * [AgentImageRevisions], so no cache is asked for the old one); one it just
+ * UPLOADED is read at its new version, so the owner sees it on Home and You at
+ * once instead of only in the Pictures preview; anything else is read as the
+ * server has it, and an agent with no picture answers 404 and keeps its
+ * initials.
+ */
+fun ownFaceOf(slug: String?, revisions: Map<String, String?>): OwnFace {
+  val s = slug?.takeIf { it.isNotBlank() } ?: return OwnFace.Initials
+  val key = AgentImageRevisions.key(s, AgentImageKind.Avatar)
+  if (revisions.containsKey(key) && revisions[key] == null) return OwnFace.Initials
+  return OwnFace.Picture(s, revisions[key])
 }
 
 // ── naming the agent ───────────────────────────────────────────────────────

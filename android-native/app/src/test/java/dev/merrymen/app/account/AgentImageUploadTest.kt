@@ -1,13 +1,19 @@
 package dev.merrymen.app.account
 
 import dev.merrymen.app.net.AgentImageKind
+import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.ImageWrite
 import dev.merrymen.app.net.MerrymenApi
+import dev.merrymen.app.net.agentImageBytes
 import dev.merrymen.app.net.agentImageProblem
 import dev.merrymen.app.net.answer
 import dev.merrymen.app.net.apiFor
 import dev.merrymen.app.net.removeOwnAgentImage
 import dev.merrymen.app.net.uploadOwnAgentImage
+import dev.merrymen.app.ui.AgentImageRevisions
+import dev.merrymen.app.ui.OwnFace
+import dev.merrymen.app.ui.ownFaceOf
+import dev.merrymen.app.ui.screens.reportImageWrite
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
@@ -132,6 +138,45 @@ class AgentImageUploadTest {
     assertTrue((w as ImageWrite.Unknown).why.contains("Couldn't tell whether the banner was saved"))
     // The session ask and the one PUT — no retry behind the owner's back.
     assertEquals(2, server.requestCount)
+  }
+
+  @Test fun homeAndYouShowANewPictureAtItsVersionAndTheInitialsOnceRemoved() = runBlocking {
+    // AgentImageRevisions is process-wide; a slug of this test's own.
+    val slug = "face-" + System.nanoTime()
+    fun face() = ownFaceOf(slug, AgentImageRevisions.versions.value)
+    assertEquals("no slug, no picture to read", OwnFace.Initials, ownFaceOf(null, AgentImageRevisions.versions.value))
+    // Before this app wrote anything, the picture as the server has it.
+    assertEquals(OwnFace.Picture(slug, null), face())
+
+    // An upload through the real path, reported the way the You tab reports it...
+    session(owner)
+    server.answer("""{"ok":true,"version":"v2"}""")
+    reportImageWrite(AgentImageKind.Avatar, slug, api.uploadOwnAgentImage(AgentImageKind.Avatar, png, "image/png", owner)) { _, _ -> }
+    // ...is what the face on Home's hero and You's card now reads, at its version.
+    val now = face()
+    assertEquals(OwnFace.Picture(slug, "v2"), now)
+    server.answer("webp bytes", type = "image/webp")
+    val got = api.agentImageBytes(slug, AgentImageKind.Avatar, (now as OwnFace.Picture).version)
+    server.takeRequest()
+    server.takeRequest()
+    assertEquals("/api/agent-image/$slug/avatar?v=v2", server.takeRequest().path)
+    assertArrayEquals("webp bytes".toByteArray(), (got as ApiResult.Ok).value)
+
+    // A removal goes back to the initials, without asking any cache for the old one.
+    session(owner)
+    server.answer("""{"ok":true}""")
+    reportImageWrite(AgentImageKind.Avatar, slug, api.removeOwnAgentImage(AgentImageKind.Avatar, owner)) { _, _ -> }
+    assertEquals(OwnFace.Initials, face())
+    // A new banner is not a new face.
+    val other = "$slug-b"
+    AgentImageRevisions.publish(other, AgentImageKind.Banner, "b9")
+    assertEquals(OwnFace.Picture(other, null), ownFaceOf(other, AgentImageRevisions.versions.value))
+  }
+
+  @Test fun anAgentWithNoPictureKeepsItsInitials() = runBlocking {
+    server.answer("""{"error":"not found"}""", code = 404)
+    assertEquals(ApiResult.Ok(null), api.agentImageBytes("nobody-drew-me", AgentImageKind.Avatar, null))
+    assertEquals("/api/agent-image/nobody-drew-me/avatar", server.takeRequest().path)
   }
 
   @Test fun removalIsBehindTheSameSessionCheck() = runBlocking {

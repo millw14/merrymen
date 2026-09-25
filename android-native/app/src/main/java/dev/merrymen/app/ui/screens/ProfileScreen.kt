@@ -55,7 +55,6 @@ import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.Feed
 import dev.merrymen.app.net.GrantView
 import dev.merrymen.app.net.said
-import dev.merrymen.app.ui.Avatar
 import dev.merrymen.app.ui.BottomInsetSpacer
 import dev.merrymen.app.ui.LoadedBlock
 import dev.merrymen.app.ui.MerryColors
@@ -549,7 +548,8 @@ private fun YourAgent(f: Feed, g: GrantView?, nav: NavHostController) {
       horizontalArrangement = Arrangement.spacedBy(12.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
-      Avatar(name = name, size = 44.dp)
+      // The owner's own picture where there is one (AccountFace), else the initials.
+      AccountFace(LocalContainer.current.api, agent?.slug, name, 44.dp)
       Column(Modifier.weight(1f)) {
         Text(
           text = name,

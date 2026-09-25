@@ -64,7 +64,6 @@ import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.SettingsEnvelope
 import dev.merrymen.app.net.TelegramStatus
 import dev.merrymen.app.net.TierView
-import dev.merrymen.app.ui.Avatar
 import dev.merrymen.app.ui.BlockerFix
 import dev.merrymen.app.ui.BottomInsetSpacer
 import dev.merrymen.app.ui.LoadedBlock
@@ -404,7 +403,8 @@ private fun OwnHome(feed: Feed, reads: OwnReads, nowMs: Long, hosted: Boolean?, 
       horizontalArrangement = Arrangement.spacedBy(12.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
-      Avatar(name = name, size = 40.dp)
+      // The owner's own picture where there is one (AccountFace), else the initials.
+      AccountFace(c.api, agent?.slug, name, 40.dp)
       Column(Modifier.weight(1f)) {
         Text(
           text = name,

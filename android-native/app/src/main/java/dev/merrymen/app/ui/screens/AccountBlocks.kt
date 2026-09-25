@@ -64,12 +64,14 @@ import dev.merrymen.app.net.removeOwnAgentImage
 import dev.merrymen.app.net.said
 import dev.merrymen.app.net.uploadOwnAgentImage
 import dev.merrymen.app.ui.AgentImageRevisions
+import dev.merrymen.app.ui.Avatar
 import dev.merrymen.app.ui.BALANCE_UNREAD
 import dev.merrymen.app.ui.BlockerFix
 import dev.merrymen.app.ui.HOUSE_AGENT_NAME
 import dev.merrymen.app.ui.MerryColors
 import dev.merrymen.app.ui.Notice
 import dev.merrymen.app.ui.OWN_TAPE_LIMIT
+import dev.merrymen.app.ui.OwnFace
 import dev.merrymen.app.ui.PositionLine
 import dev.merrymen.app.ui.NameSave
 import dev.merrymen.app.ui.TapeItem
@@ -89,6 +91,7 @@ import dev.merrymen.app.ui.lastHeardText
 import dev.merrymen.app.ui.modeChipOf
 import dev.merrymen.app.ui.numerals
 import dev.merrymen.app.ui.offersNameChip
+import dev.merrymen.app.ui.ownFaceOf
 import dev.merrymen.app.ui.sans
 import dev.merrymen.app.ui.tapeItemsOf
 import dev.merrymen.app.ui.tapeOpWords
@@ -666,7 +669,7 @@ private fun PictureField(api: MerrymenApi, slug: String, readFor: String?, kind:
       } else {
         api.uploadOwnAgentImage(kind, bytes, mime, readFor)
       }
-      report(kind, slug, outcome) { text, isBad -> said = text; bad = isBad }
+      reportImageWrite(kind, slug, outcome) { text, isBad -> said = text; bad = isBad }
       busy = false
     }
   }
@@ -686,7 +689,7 @@ private fun PictureField(api: MerrymenApi, slug: String, readFor: String?, kind:
         PictureButtons(kind, preview != null, busy, onPick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) {
           busy = true
           scope.launch {
-            report(kind, slug, api.removeOwnAgentImage(kind, readFor)) { text, isBad -> said = text; bad = isBad }
+            reportImageWrite(kind, slug, api.removeOwnAgentImage(kind, readFor)) { text, isBad -> said = text; bad = isBad }
             busy = false
           }
         }
@@ -696,7 +699,7 @@ private fun PictureField(api: MerrymenApi, slug: String, readFor: String?, kind:
       PictureButtons(kind, preview != null, busy, onPick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) {
         busy = true
         scope.launch {
-          report(kind, slug, api.removeOwnAgentImage(kind, readFor)) { text, isBad -> said = text; bad = isBad }
+          reportImageWrite(kind, slug, api.removeOwnAgentImage(kind, readFor)) { text, isBad -> said = text; bad = isBad }
           busy = false
         }
       }
@@ -719,8 +722,71 @@ private fun PictureButtons(kind: AgentImageKind, hasOne: Boolean, busy: Boolean,
   }
 }
 
+/**
+ * THE PICTURES THIS PROCESS HAS ALREADY DECODED, by slug and version, so Home
+ * and You do not fetch and decode the same 512px face every time a tab is
+ * opened. A new upload or a removal changes the version, which is a new key;
+ * nothing here is ever shown for a version it was not read at. Main thread
+ * only (it is touched from composition and its effects).
+ */
+private object AccountFaceBitmaps {
+  private const val KEEP = 6
+  private val held = object : LinkedHashMap<String, ImageBitmap>(KEEP, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ImageBitmap>?): Boolean = size > KEEP
+  }
+
+  fun key(face: OwnFace.Picture): String = face.slug.lowercase() + "@" + (face.version ?: "")
+
+  operator fun get(face: OwnFace.Picture): ImageBitmap? = held[key(face)]
+
+  operator fun set(face: OwnFace.Picture, bitmap: ImageBitmap) {
+    held[key(face)] = bitmap
+  }
+}
+
+/**
+ * THE OWNER'S AGENT'S FACE, on Home's hero and You's agent card.
+ *
+ * The picture the owner gave it when there is one, and the seeded initials
+ * otherwise — while it loads, when it has none (the read route answers 404),
+ * and when the read fails, because a face is not a figure and initials claim
+ * nothing. [ownFaceOf] decides what to read, from [AgentImageRevisions], so an
+ * upload on the You tab shows here at once at its new version and a removal
+ * goes back to the initials without asking a cache for the old picture. This
+ * is the account screens' own path until the app-wide face renderer draws
+ * these two; the rule it follows is the web's (useAgentImageSrc).
+ */
+@Composable
+internal fun AccountFace(api: MerrymenApi, slug: String?, name: String, size: androidx.compose.ui.unit.Dp) {
+  val revisions by AgentImageRevisions.versions.collectAsState()
+  val face = ownFaceOf(slug, revisions)
+  var bitmap by remember(face) { mutableStateOf((face as? OwnFace.Picture)?.let { AccountFaceBitmaps[it] }) }
+  LaunchedEffect(face) {
+    val want = face as? OwnFace.Picture ?: return@LaunchedEffect
+    if (bitmap != null) return@LaunchedEffect
+    val bytes = (api.agentImageBytes(want.slug, AgentImageKind.Avatar, want.version) as? ApiResult.Ok)?.value
+      ?: return@LaunchedEffect
+    val decoded = withContext(Dispatchers.Default) {
+      BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+    } ?: return@LaunchedEffect
+    AccountFaceBitmaps[want] = decoded
+    bitmap = decoded
+  }
+  val shown = bitmap
+  if (shown == null) {
+    Avatar(name = name, size = size)
+  } else {
+    Image(
+      shown,
+      contentDescription = null,
+      modifier = Modifier.size(size).clip(CircleShape),
+      contentScale = ContentScale.Crop,
+    )
+  }
+}
+
 /** One write's result, said; and on success, the new version published so every face on screen re-reads it. */
-private fun report(kind: AgentImageKind, slug: String, w: ImageWrite, say: (String, Boolean) -> Unit) {
+internal fun reportImageWrite(kind: AgentImageKind, slug: String, w: ImageWrite, say: (String, Boolean) -> Unit) {
   when (w) {
     is ImageWrite.Done -> {
       AgentImageRevisions.publish(slug, kind, w.version)
