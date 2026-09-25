@@ -43,7 +43,7 @@ import {
   type TgMessage,
 } from "./api";
 import { runAgentTask } from "./agent";
-import { SETTING_CONFIRM_TTL_SEC, executeCommand, type CommandDeps, type PendingAction } from "./executor";
+import { SETTING_CONFIRM_TTL_SEC, executeCommand, type CommandDeps, type KillResult, type PendingAction } from "./executor";
 import { appliedText, proposeSettingChange, settingsListText } from "./settings-chat";
 import { specFor, stockSymbols, validStoredSetting } from "./setting-spec";
 import { signKeyboard, signUrl } from "./sign-prompt";
@@ -129,7 +129,7 @@ export interface TelegramServiceDeps {
   /** Build a bounded transfer intent and route it through processIntent. */
   submitTransfer: (to: `0x${string}`, usdg: number) => Promise<string>;
   /** Delete the grant (kill switch). */
-  kill: () => { ok: boolean; reason?: string };
+  kill: () => KillResult;
   /** Mirror a /name change into the agents table (dashboard display). */
   onNameChange?: (name: string) => void;
   /** Injectable for tests. */
@@ -378,6 +378,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     const statusCtx = () => deps.buildStatusContext();
     const cmdDeps: CommandDeps = {
       controlEnabled: cfg.telegramControlEnabled,
+      hosted: isHostedMode(),
       maxActionUsdg: cfg.telegramMaxActionUsdg,
       grantPerTradeUsdg: deps.grantPerTradeUsdg(),
       transferEnabled: cfg.telegramTransferEnabled,

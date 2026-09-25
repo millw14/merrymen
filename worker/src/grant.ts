@@ -1,7 +1,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { StoredGrant } from "../../packages/core/src/index";
-import { homePaths } from "./home";
+import { homePaths, merrymenHome } from "./home";
+import { mayArm } from "./kill-request";
 
 /** Reads the grant handoff written by web's /api/grants (~/.merrymen/grant.json). */
 export function loadGrantFile(): StoredGrant | null {
@@ -13,6 +14,22 @@ export function loadGrantFile(): StoredGrant | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The grant the worker may ARM: the file's, unless a hosted kill forbids it.
+ *
+ * Only a hosted /kill leaves the request (kill-request.ts). While it is
+ * pending, nothing arms: the orchestrator can race a copy of the key back
+ * into this home, and the copy is still on disk, but it is not a grant. Once
+ * a newer grant has superseded the kill, that one arms. The KILLED grant
+ * never does, however it gets back into the file. Self-hosted there is never
+ * a request, so this is loadGrantFile.
+ */
+export function loadArmableGrant(): StoredGrant | null {
+  const grant = loadGrantFile();
+  if (!grant) return null;
+  return mayArm(merrymenHome(), grant) ? grant : null;
 }
 
 /**

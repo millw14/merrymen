@@ -27,7 +27,9 @@
  * runtime) and the worker via the @merrymen/grant-store alias — never by the
  * browser bundle, which is why it lives here and not in core's browser barrel.
  */
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { merrymenHome } from "./home";
 import { carriesOwnerKey } from "../../packages/core/src/index";
@@ -63,6 +65,21 @@ export interface GrantStore {
   tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null>;
   /** Forget a tenant's grant (the kill switch). */
   remove(tenant: `0x${string}`): Promise<void>;
+  /**
+   * Forget a tenant's grant IF it was stored at or before `atSec` (unix
+   * seconds, compared with the record's server-stamped `updatedAt`).
+   *
+   * The kill switch for a kill that was asked for somewhere else — Telegram,
+   * inside the tenant's child — and carried out later by the orchestrator. In
+   * between, the owner may have signed a new grant on purpose, and that one
+   * must survive. `grantedAt` cannot decide it: the browser stamps it, so a
+   * skewed clock would pass an old grant off as new. `updatedAt` is stamped
+   * here, on the server, at the moment of the put.
+   *
+   * One conditional DELETE, so a put racing the kill cannot be lost to a
+   * read-then-delete. A tie counts as covered: the grant is removed.
+   */
+  removeUnlessNewer(tenant: `0x${string}`, atSec: number): Promise<"removed" | "absent" | "newer">;
 }
 
 /** Split a full grant into a persistable record, refusing anything with an owner key. */
@@ -103,6 +120,18 @@ function fromRecord(rec: StoredRecord): StoredGrant {
 
 // ── file backend ─────────────────────────────────────────────────────────────
 
+/** How long a writer waits for another writer, in any process, before giving up. */
+const LOCK_WAIT_MS = 5_000;
+
+/** The file whose SQLite write lock serializes this store's writers. */
+export const GRANT_STORE_LOCK_FILE = ".writers.lock.db";
+
+/** SQLITE_BUSY / SQLITE_LOCKED: another connection holds the write lock. */
+function lockBusy(e: unknown): boolean {
+  const code = (e as { errcode?: number }).errcode;
+  return code === 5 || code === 6 || /database is (locked|busy)/i.test(String((e as Error)?.message ?? e));
+}
+
 /**
  * One JSON record per tenant under <home>/tenants/. Used self-hosted, in tests,
  * and for a single-service hosted deploy on a persistent volume. The session
@@ -114,10 +143,68 @@ export class FileGrantStore implements GrantStore {
   private file(tenant: string) {
     return path.join(this.dir, `${tenant.toLowerCase()}.json`);
   }
-  async put(tenant: `0x${string}`, grant: StoredGrant): Promise<void> {
-    const rec = toRecord(tenant, grant);
+  /**
+   * ONE WRITER AT A TIME, ACROSS PROCESSES.
+   *
+   * removeUnlessNewer reads a record's stamp and then deletes it. Without
+   * this, a put from another process (the web's grant intake beside the
+   * orchestrator) could land between the two, and a grant signed after the
+   * kill would be the one deleted. Readers take no lock: a put renames a
+   * finished record into place, so a reader sees the old record or the new
+   * one, never half of one.
+   *
+   * THE LOCK IS THE OPERATING SYSTEM'S. It is SQLite's write lock on
+   * GRANT_STORE_LOCK_FILE, taken by BEGIN IMMEDIATE (fcntl on POSIX,
+   * LockFileEx on Windows). The kernel holds it and releases it when the
+   * holding process exits, however it exits. So a lock is never stale, and
+   * nothing ever has to break one. That is what the lock-file versions of
+   * this kept getting wrong: every protocol for breaking a dead holder's lock
+   * left a window where a live holder's lock went missing.
+   *
+   * A connection per call, closed after it: no handle stays open between
+   * writes. Callers in the same process contend through SQLite exactly as
+   * other processes do. The wait is a retry loop, not SQLite's busy timeout,
+   * so a contended lock never blocks the event loop.
+   */
+  private async locked<T>(tenant: string, fn: () => Promise<T>): Promise<T> {
     await mkdir(this.dir, { recursive: true });
-    await writeFile(this.file(tenant), JSON.stringify(rec, null, 2), { encoding: "utf8", mode: 0o600 });
+    const db = new DatabaseSync(path.join(this.dir, GRANT_STORE_LOCK_FILE));
+    try {
+      const giveUpAt = Date.now() + LOCK_WAIT_MS;
+      for (;;) {
+        try {
+          db.exec("BEGIN IMMEDIATE");
+          break;
+        } catch (e) {
+          if (!lockBusy(e)) throw e;
+          if (Date.now() > giveUpAt) throw new Error(`grant store busy for ${tenant}: another writer holds the lock`);
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      }
+      try {
+        const out = await fn();
+        db.exec("COMMIT");
+        return out;
+      } catch (e) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {
+          /* nothing to roll back */
+        }
+        throw e;
+      }
+    } finally {
+      db.close();
+    }
+  }
+  async put(tenant: `0x${string}`, grant: StoredGrant): Promise<void> {
+    await this.locked(tenant, async () => {
+      // Stamped inside the lock, so `updatedAt` is when the record landed.
+      const rec = toRecord(tenant, grant);
+      const tmp = `${this.file(tenant)}.${randomUUID()}.tmp`;
+      await writeFile(tmp, JSON.stringify(rec, null, 2), { encoding: "utf8", mode: 0o600 });
+      await rename(tmp, this.file(tenant));
+    });
   }
   async get(tenant: `0x${string}`): Promise<StoredGrant | null> {
     try {
@@ -136,7 +223,31 @@ export class FileGrantStore implements GrantStore {
     }
   }
   async remove(tenant: `0x${string}`): Promise<void> {
-    await rm(this.file(tenant), { force: true });
+    await this.locked(tenant, () => rm(this.file(tenant), { force: true }));
+  }
+  async removeUnlessNewer(tenant: `0x${string}`, atSec: number): Promise<"removed" | "absent" | "newer"> {
+    // The read and the delete under one lock (see `locked`), so no put lands
+    // between them.
+    return this.locked(tenant, async () => {
+      let raw: string;
+      try {
+        raw = await readFile(this.file(tenant), "utf8");
+      } catch (e) {
+        // Only a missing file is "absent". Any other read failure is not an
+        // answer, and the caller must not treat it as a completed kill.
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+        throw e;
+      }
+      let updatedAt = Number.NaN;
+      try {
+        updatedAt = Number((JSON.parse(raw) as StoredRecord).updatedAt);
+      } catch {
+        /* an unreadable record cannot prove it is newer — it is removed below */
+      }
+      if (updatedAt > atSec) return "newer";
+      await rm(this.file(tenant), { force: true });
+      return "removed";
+    });
   }
   async tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null> {
     const want = smartAccount.toLowerCase();
@@ -244,6 +355,16 @@ export class PgGrantStore implements GrantStore {
   async remove(tenant: `0x${string}`): Promise<void> {
     const c = await this.client();
     await c.query(`DELETE FROM grants WHERE tenant = $1`, [tenant.toLowerCase()]);
+  }
+  async removeUnlessNewer(tenant: `0x${string}`, atSec: number): Promise<"removed" | "absent" | "newer"> {
+    const c = await this.client();
+    const t = tenant.toLowerCase();
+    const { rows } = await c.query(`DELETE FROM grants WHERE tenant = $1 AND updated_at <= $2 RETURNING tenant`, [t, atSec]);
+    if (rows.length > 0) return "removed";
+    // Nothing deleted: either there is no row, or it was put after the kill.
+    // This read only names which — the decision was the DELETE above.
+    const left = await c.query(`SELECT 1 FROM grants WHERE tenant = $1`, [t]);
+    return left.rows.length > 0 ? "newer" : "absent";
   }
   async tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null> {
     const c = await this.client();
