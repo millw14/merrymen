@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -52,6 +53,7 @@ import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -67,15 +69,32 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import dev.merrymen.app.net.SettingsEnvelope
+import dev.merrymen.app.net.SettingsKeys
+import dev.merrymen.app.net.TelegramStatus
+import dev.merrymen.app.net.providerKey
+import dev.merrymen.app.net.secretStatus
+import dev.merrymen.app.ui.HOUSE_AGENT_NAME
+import dev.merrymen.app.ui.LIVE_OFF_HINT
+import dev.merrymen.app.ui.LIVE_OFF_UNIT
+import dev.merrymen.app.ui.LIVE_ON_HINT
+import dev.merrymen.app.ui.LIVE_ON_UNIT
+import dev.merrymen.app.ui.PUBLIC_BOOK_OFF
+import dev.merrymen.app.ui.PUBLIC_BOOK_ON
+import dev.merrymen.app.ui.SETTINGS_INTEGERS
+import dev.merrymen.app.ui.SETTINGS_RANGES
+import dev.merrymen.app.ui.SettingsDraft
+import dev.merrymen.app.ui.SettingsShown
+import dev.merrymen.app.ui.liveTradingNote
+import dev.merrymen.app.ui.outOfRange
+import dev.merrymen.app.ui.plainBound
+import dev.merrymen.app.ui.plainNumber
+import dev.merrymen.app.ui.telegramStartUrl
 import dev.merrymen.app.ui.MerryColors
 import dev.merrymen.app.ui.numerals
 import dev.merrymen.app.ui.sans
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
-import java.util.Locale
 
 /**
  * A REAL SETTINGS EDITOR, and the correction that made it possible.
@@ -131,44 +150,38 @@ import java.util.Locale
  * here sets a horizontal padding — the screen that hosts this form owns it.
  */
 
-/** The numeric bounds the server enforces, mirrored so the UI can say them. */
-private val RANGES: Map<String, Pair<Double, Double>> = mapOf(
-  "buyPerTickUsdg" to (1.0 to 100_000.0),
-  // SLIPPAGE_BPS_MAX = 1_000 in packages/core/src/settings.ts:616. This was
-  // 5_000, so the field's own "1–5,000" hint and pre-flight guard both invited a
-  // value the server then refused — the client vouching for a bound the server
-  // does not honour.
-  "slippageBps" to (1.0 to 1_000.0),
-  "maxImpactBps" to (0.0 to 10_000.0),
-  "takeProfitBps" to (0.0 to 1_000_000.0),
-  "strategistStopLossBps" to (0.0 to 10_000.0),
-  "llmMaxActionUsdg" to (1.0 to 100_000.0),
-  "tickSeconds" to (15.0 to 3_600.0),
-  "paperStartUsdg" to (1.0 to 10_000_000.0),
-)
-
 /**
  * [unit] is the `.mm-unit` slot (forms.css:45) — a 12px `--tx-2` word sitting
  * on the SAME LINE as the field, to its right, exactly as Settings.tsx:1341
- * puts "bps" beside max slippage. It used to be a parenthetical inside the
- * label; the words are unchanged, they have simply moved to where the web
- * keeps them.
+ * puts "bps" beside max slippage. The bounds are not here: they are the
+ * server's (NUM_FIELDS), mirrored once in [SETTINGS_RANGES].
  */
 private data class NumField(
   val key: String,
   val label: String,
   val unit: String,
   val help: String,
-  val decimal: Boolean = false,
 )
 
 private val NUMBERS = listOf(
-  NumField("buyPerTickUsdg", "Size per trade", "USDG", "What it puts to work each time it trades.", decimal = true),
+  NumField("buyPerTickUsdg", "Size per trade", "USDG", "What it puts to work each time it trades."),
   NumField("slippageBps", "Max slippage", "bps", "Refuse a fill worse than this far off the quote."),
   NumField("maxImpactBps", "Max price impact", "bps", "Refuse a trade that would move the price more than this. 0 turns the guard off."),
   NumField("takeProfitBps", "Take profit", "bps", "Sell a leg once it is this far ahead of what it cost. 0 disables it — and it is the default strategy's only exit."),
   NumField("strategistStopLossBps", "Stop loss", "bps", "0 is off. A tight floor on a small ticket pays the chain to churn."),
-  NumField("llmMaxActionUsdg", "Strategist ceiling", "USDG", "The most one model-proposed action may spend.", decimal = true),
+  NumField("llmMaxActionUsdg", "Strategist ceiling", "USDG", "The most one model-proposed action may spend."),
+)
+
+/**
+ * THE CLASS ROUTE'S FOUR NUMBERS — Settings.tsx:1270-1310, labels and hints
+ * from en.ts. They had a type, a PUT-allowlist entry and a worker read, and no
+ * control on the phone, so the route could not be configured from here at all.
+ */
+private val CLASS_NUMBERS = listOf(
+  NumField("classPerEntryUsdg", "per entry (USDG)", "USDG", "Spent on a single class entry. 0 means nothing is bought, whatever the switch says."),
+  NumField("classMaxPositions", "max open positions", "", "How many class positions may be held at once. 0 = no limit beyond the scout budget."),
+  NumField("classMaxHoldSec", "maximum holding time (seconds)", "sec", "For bonding-curve positions: attempt an exit after this duration, even when a market price is unavailable. Quotes, liquidity and signed limits still apply."),
+  NumField("classMinDepthUsdg", "minimum curve depth (USDG)", "USDG", "Real money raised into the curve, excluding the virtual seed it opens with. Below this, an entry is refused."),
 )
 
 /**
@@ -177,9 +190,7 @@ private val NUMBERS = listOf(
  * [on] and [off] are the `.mm-unit` state copy, taken WORD FOR WORD from
  * Settings.tsx. They are not decoration: "off — unpriceable tokens are never
  * bought" and "off" are different promises, and a bare toggle with no sentence
- * leaves the reader to guess which one a given switch is making. The spec is
- * explicit that a Switch may replace the checkbox but the sentence may not be
- * dropped.
+ * leaves the reader to guess which one a given switch is making.
  */
 private data class BoolField(
   val key: String,
@@ -190,22 +201,56 @@ private data class BoolField(
 )
 
 /**
- * PRACTICE IS THE ONE SWITCH THE WEB SETTINGS PAGE DOES NOT HAVE — it is set in
- * the create flow (CreateAgent.tsx:157) and read here only to decide whether the
- * setup checklist asks for funds. So its two sentences are authored rather than
- * copied, and they are written to keep the distinction this product is built on:
- * a simulated fill is not a fill. The copy borrows CreateAgent's own framing —
- * "a setting, not a different network".
+ * THE SWITCH THAT DECIDES WHETHER MONEY IS REAL — Settings.tsx:585-629.
+ *
+ * `liveTradingEnabled` is the only consent to trade real money: the worker's
+ * canTradeForReal requires it, and funding the account or re-signing the
+ * permission does not turn it on. This form had no control for it, only the
+ * paper switch below, so an owner could not see or change whether real money
+ * traded except through a chat card. Its hint changes with its state, so it is
+ * drawn by [LiveTradingField], not by [CheckField].
+ */
+private val LIVE = BoolField(key = "liveTradingEnabled", label = "live trading", on = LIVE_ON_UNIT, off = LIVE_OFF_UNIT)
+
+/**
+ * "PRACTICE FILLS" WAS READ AS THE MODE, AND IT IS NOT ONE.
+ *
+ * `paperTradingEnabled` answers a different question from Live trading: not
+ * "may real orders reach the chain" but "when they may not, should the agent
+ * simulate instead" (core settings.ts). Labelled "Practice fills" and alone on
+ * the page, an owner who unticked it expecting to go live got an agent that
+ * neither traded nor practised. So it sits UNDER the Live switch and says the
+ * two things it can mean, in the web's own words for them (live-blocker.ts:
+ * "an agent with paper trading on is simulating, one with it off is doing
+ * nothing at all").
  */
 private val PAPER = BoolField(
   key = "paperTradingEnabled",
-  label = "Practice fills",
-  on = "simulated fills when it cannot trade for real — marked as practice, never as money moved",
-  off = "off — nothing is recorded as filled unless it filled for real",
-  help = "Practice runs on live market prices. It is a setting, not a different network — your agent stays on the same chain either way.",
+  label = "practise while not live",
+  on = "on — while Live trading is off, your agent is simulating, at live prices",
+  off = "off — while Live trading is off, your agent is doing nothing at all",
+  help = "This never makes money real — only Live trading above does. It decides what your agent does " +
+    "while it is not trading for real: practise with simulated money, or sit still.",
 )
 
-/** Settings.tsx:715-733 — the `discovery · new pairs as they launch` block. */
+/** Settings.tsx:660-700 — the Trencher card's two switches. */
+private val TRENCHER_FAST = BoolField(
+  key = "trencherFastEnabled",
+  label = "fast Trencher exits",
+  on = "on — exits are attempted at −10%, +20%, or after 30 minutes",
+  off = "off — its standard exit profile",
+  help = "Applies when the strategy is Trencher. Off restores its standard exit profile.",
+)
+
+private val TRENCHER_LIVE = BoolField(
+  key = "trencherLiveEnabled",
+  label = "let trencher trade for real",
+  on = "trencher can open real positions",
+  off = "paper only",
+  help = "Allows live Trencher trades in tokens covered by your trading permissions.",
+)
+
+/** Settings.tsx:1103-1117 — the `discovery · new pairs as they launch` block. */
 private val DISCOVERY = BoolField(
   key = "discoveryEnabled",
   label = "watch for new pairs",
@@ -214,7 +259,7 @@ private val DISCOVERY = BoolField(
   help = "Requires a Bitquery key or a Merry Circle token — both are set on the web, under Connections.",
 )
 
-/** Settings.tsx:776-817 — the `scout mode` block, both of its switches. */
+/** Settings.tsx:1176-1206 — the `scout mode` block, both of its switches. */
 private val SCOUT_SWITCHES = listOf(
   BoolField(
     key = "deskEnabled",
@@ -234,7 +279,16 @@ private val SCOUT_SWITCHES = listOf(
   ),
 )
 
-/** Settings.tsx:885-891 — inside the collapsed `Telegram` group. */
+/** Settings.tsx:1255-1268 — the class route's switch. */
+private val CLASS_ROUTE = BoolField(
+  key = "classSnipeEnabled",
+  label = "class route",
+  on = "may buy newly launched coins",
+  off = "off — no coin is bought unless you listed it",
+  help = "Separate from sealing a vault at /grant. That says this key COULD reach one; this says go and do it.",
+)
+
+/** Settings.tsx:1386-1392 — inside the collapsed `Telegram` group. */
 private val TELEGRAM = BoolField(
   key = "telegramEnabled",
   label = "enable telegram",
@@ -242,7 +296,7 @@ private val TELEGRAM = BoolField(
   off = "off",
 )
 
-/** Settings.tsx:900-947 — the `Telegram controls` section inside Advanced. */
+/** Settings.tsx:1408-1433 — the `Telegram controls` section inside Advanced. */
 private val TELEGRAM_CONTROLS = listOf(
   BoolField(
     key = "telegramControlEnabled",
@@ -260,54 +314,111 @@ private val TELEGRAM_CONTROLS = listOf(
   ),
 )
 
+/** Settings.tsx:716-734 — the three asset modes, and what each one means for buying. */
+private val ASSET_MODES = listOf(
+  SelectOption("all", "All assets"),
+  SelectOption("stocks", "Stocks only"),
+  SelectOption("crypto", "Crypto only"),
+)
+
+private fun assetModeHint(mode: String): String = when (mode) {
+  "stocks" -> "Only tokenised equities and ETFs. Your agent will be idle while US markets are shut, and it will not buy coins even if they are in your basket."
+  "crypto" -> "Only coins. Stocks in your basket stay priced and sellable — they just stop being bought."
+  else -> "Everything your basket and your signed permission allow."
+}
+
+/**
+ * THE FORM, top to bottom in the web's order: whether money is real first,
+ * because a strategy, a cap or a venue only matters once you know that; then
+ * what it trades; then the agent; then the book; then the basket and the
+ * drawers.
+ *
+ * Every control reads [SettingsShown] (the edit, else the stored value, else
+ * the default) and writes through [onDraft], so the only thing a save can send
+ * is what a control put there. [keys] is the masked-key status from the same
+ * read, [telegram] the bridge status for the link code (null when unread —
+ * which says "checking", never "no code"), and [hosted] the session route's
+ * word on whether this is the hosted service.
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsForm(
   env: SettingsEnvelope,
-  edits: MutableMap<String, JsonElement>,
+  keys: SettingsKeys?,
+  telegram: TelegramStatus?,
+  hosted: Boolean?,
+  draft: SettingsDraft,
+  onDraft: (SettingsDraft) -> kotlin.Unit,
   circleLocked: Set<String>,
-  onChanged: () -> Unit,
+  onWeb: (path: String, title: String) -> kotlin.Unit,
+  onTelegram: () -> kotlin.Unit,
 ) {
-  // The value to SHOW: an edit if one was made, else the stored value, else the
-  // default. Never a blank that reads as "unset".
-  fun showStr(key: String): String =
-    (edits[key] as? JsonPrimitive)?.content ?: env.str(key) ?: ""
-
-  fun showNum(key: String): String =
-    (edits[key] as? JsonPrimitive)?.content
-      ?: env.num(key)?.let { if (it % 1.0 == 0.0) it.toLong().toString() else it.toString() }
-      ?: ""
-
-  fun showBool(key: String): Boolean =
-    (edits[key] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() ?: env.bool(key) ?: false
-
-  fun showList(key: String): List<String> =
-    (edits[key] as? JsonArray)
-      ?.mapNotNull { (it as? JsonPrimitive)?.content } ?: env.list(key)
-
-  fun setBool(key: String): (Boolean) -> Unit = { edits[key] = JsonPrimitive(it); onChanged() }
+  val shown = SettingsShown(env, draft)
+  fun setBool(key: String): (Boolean) -> kotlin.Unit = { onDraft(draft.setBool(key, it)) }
 
   Column(Modifier.fillMaxWidth()) {
 
+    // ── TRADING MODE ────────────────────────────────────────────────────────
+    // Settings.tsx:568 — FIRST ON THE PAGE, because it outranks everything
+    // below it.
+    SectionHeading("Trading mode")
+    FieldGrid {
+      LiveTradingField(shown) { onDraft(draft.setBool(LIVE.key, it)) }
+      CheckField(PAPER, shown.bool(PAPER.key), setBool(PAPER.key))
+    }
+
+    // ── WHAT IT TRADES ──────────────────────────────────────────────────────
+    SectionHeading("What it trades")
+    TrencherCard(env, shown, draft, onDraft, onWeb)
+    Spacer(Modifier.height(24.dp))
+    val mode = shown.str("assetMode").ifBlank { "all" }
+    FieldGrid {
+      Field("asset mode") {
+        SelectBox(
+          display = ASSET_MODES.firstOrNull { it.value == mode }?.label ?: mode,
+          options = ASSET_MODES,
+          selected = mode,
+          onPick = { onDraft(draft.setText("assetMode", it)) },
+        )
+        Hint(assetModeHint(mode))
+      }
+    }
+    // SAID BEFORE IT BITES (Settings.tsx:737-748). Narrowing the pool
+    // re-splits every surviving leg's weight, so this is a dropdown that
+    // moves real money for some owners.
+    if (mode != "all") {
+      Spacer(Modifier.height(8.dp))
+      Hint(
+        "Anything you already hold stays priced, valued and sellable — including its stop-loss and " +
+          "take-profit. This only changes what your agent may buy." +
+          if (shown.list("basketSymbols").isNotEmpty()) " If it leaves you with nothing to buy, your agent will say so rather than going quiet." else "",
+      )
+    }
+
     // ── AGENT SETTINGS ──────────────────────────────────────────────────────
-    // Settings.tsx:410. The heading strings on this screen are exact: the web
+    // Settings.tsx:750. The heading strings on this screen are exact: the web
     // says "Agent settings", not "Your agent".
     SectionHeading("Agent settings")
     FieldGrid {
       Field("Agent name", help = "Up to 24 letters, numbers, or spaces.") {
         InputBox(
-          value = showStr("agentName"),
-          onValueChange = { edits["agentName"] = JsonPrimitive(it); onChanged() },
+          value = shown.str("agentName"),
+          // A BLANK NAME IS UNTOUCHED, not "clear to Robin". The route reads
+          // "" as a reset to the house name, and deleting the last letter on
+          // the way to typing a new one is not a request for that.
+          onValueChange = { typed ->
+            onDraft(if (typed.isBlank()) draft.without(listOf("agentName")) else draft.setText("agentName", typed))
+          },
+          placeholder = env.str("agentName") ?: HOUSE_AGENT_NAME,
         )
       }
 
-      val current = showStr("strategy")
+      val current = shown.str("strategy")
       Field("Strategy") {
-        // THE HOLDER GATE LIVES IN THE OPTION STRING. Settings.tsx:542 appends
+        // THE HOLDER GATE LIVES IN THE OPTION STRING. Settings.tsx:866 appends
         // the literal " · holders only" to the option label because a <select>
         // has nowhere to hang a badge — and app/settings/honesty.test.ts counts
-        // that exact string. A styled chip instead of the suffix would pass for
-        // the same information and would not be.
+        // that exact string.
         val options = buildList {
           env.strategies.builtin.forEach {
             add(SelectOption(it, it + if (it in circleLocked) " · holders only" else ""))
@@ -321,25 +432,13 @@ fun SettingsForm(
           display = options.firstOrNull { it.value == current }?.label ?: current,
           options = options,
           selected = current,
-          onPick = { edits["strategy"] = JsonPrimitive(it); onChanged() },
+          onPick = { onDraft(draft.setText("strategy", it)) },
         )
       }
 
-      // THE LOCK IS STATED AT THE POINT OF CHOICE, which is the whole complaint
-      // that started this: an owner could pick a holder-only strategy and find
-      // out it never ran only by reading a JSON endpoint.
-      //
-      // IT IS AMBER, NOT MONEY-RED. It used to render in `colorScheme.error`,
-      // which after the palette fix is `--down` #ff5c71 — the colour of a loss.
-      // Nothing here is broken and no money moved; the web has a register for
-      // exactly this and it is `.create-locked` (terminal.css:7788): an amber
-      // slab, "louder than a hint and quieter than an error".
-      //
-      // The web's copy names the reader's standing — "You hold N and it needs
-      // M" — because that page has loaded /api/tier. This one has not, so it
-      // says only what it can back up. Claiming "that one won't run yet" while
-      // holding no balance reading would be the same shape of lie this whole
-      // file exists to avoid.
+      // THE LOCK IS STATED AT THE POINT OF CHOICE, in the amber `.create-locked`
+      // register — "louder than a hint and quieter than an error". This page has
+      // not read /api/tier, so it says only what it can back up.
       if (current in circleLocked) {
         LockedPanel(
           strong = "This is a Merry Circle strategy.",
@@ -347,48 +446,59 @@ fun SettingsForm(
             "agent stays idle until you do.",
         )
       }
-
-      CheckField(PAPER, showBool(PAPER.key), setBool(PAPER.key))
     }
 
+    // ── PUBLIC BOOK ─────────────────────────────────────────────────────────
+    SectionHeading("Public book")
+    PublicBookField(shown, draft, onDraft)
+
     // ── TRADING BASKET ──────────────────────────────────────────────────────
-    // Settings.tsx:599-621.
+    // Settings.tsx:925-970. GROUPED, because one undifferentiated run of chips
+    // is what an owner meant by "trading basket in settings is full of all
+    // stocks": twenty-five registry symbols with his own coin unselected at
+    // the end, and nothing said the two kinds were different.
     SectionHeading("Trading basket")
-    val basket = showList("basketSymbols")
-    // `.mm-chips` (forms.css:49): flex, WRAP, gap 8px, margin 12px 0. The chips
-    // used to be chunked four to a row by hand, which is a grid — symbols are
-    // three to five characters wide and a grid leaves ragged holes. FlowRow is
-    // stable in this Compose version; the opt-in above is harmless if the
-    // marker has already been dropped from the overload we use.
-    FlowRow(
-      modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
-      verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-      env.knownSymbols.forEach { sym ->
-        Chip(sym, sym in basket) {
-          val next = basket.toMutableList()
-          if (sym in next) next.remove(sym) else next.add(sym)
-          edits["basketSymbols"] = buildJsonArray { next.forEach { add(JsonPrimitive(it)) } }
-          onChanged()
+    val basket = shown.list("basketSymbols")
+    val coins = customTokenSymbols(env, draft)
+    listOf("stocks & etfs" to env.knownSymbols, "coins" to coins).forEach { (heading, syms) ->
+      SubtleHead(heading)
+      if (syms.isEmpty()) {
+        // An empty group rendered as nothing is how an owner concludes the
+        // feature does not exist. On the phone a coin arrives through "Coins
+        // to consider", where the agent's own suggestions are.
+        Hint("None yet — take a suggestion from your agent under Coins to consider.")
+      } else {
+        // `.mm-chips` (forms.css:49): flex, WRAP, gap 8px.
+        FlowRow(
+          modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          syms.forEach { sym ->
+            Chip(sym, sym in basket) {
+              val next = basket.toMutableList()
+              if (sym in next) next.remove(sym) else next.add(sym)
+              onDraft(draft.setList("basketSymbols", next))
+            }
+          }
         }
       }
     }
-    // EMPTY IS NOT NOTHING, and this line is the only place that says so.
-    // Settings.tsx:617-620, verbatim: an empty basket falls back to the default
-    // one rather than standing the agent down, which is the opposite of what a
-    // reader assumes from an empty row of chips.
+    Spacer(Modifier.height(12.dp))
+    // EMPTY IS NOT NOTHING. Settings.tsx:971-975, verbatim: an empty basket
+    // falls back to the default one rather than standing the agent down.
     Hint(
       if (basket.isEmpty()) "select at least one symbol (empty falls back to the default basket)"
       else "trading " + basket.joinToString(" · "),
     )
 
     // ── CUSTOM TOKENS & DISCOVERY (collapsed) ───────────────────────────────
-    // Settings.tsx:637. `details.settings-group`, closed on arrival.
+    // Settings.tsx:989. `details.settings-group`, closed on arrival.
     Disclosure("Custom tokens & discovery") {
       SubtleHead("discovery · new pairs as they launch")
       FieldGrid {
-        CheckField(DISCOVERY, showBool(DISCOVERY.key), setBool(DISCOVERY.key))
+        CheckField(DISCOVERY, shown.bool(DISCOVERY.key), setBool(DISCOVERY.key))
+        OfficialCoinsField(env, shown) { onDraft(draft.setBool("officialCoinsEnabled", it)) }
       }
 
       SubtleHead("scout mode · buying what can't be priced yet")
@@ -397,93 +507,391 @@ fun SettingsForm(
           "These positions are valued at purchase cost.",
       )
       FieldGrid {
-        SCOUT_SWITCHES.forEach { CheckField(it, showBool(it.key), setBool(it.key)) }
+        SCOUT_SWITCHES.forEach { CheckField(it, shown.bool(it.key), setBool(it.key)) }
       }
-      // A CLAIM ABOUT WHAT THE BREAKER CANNOT DO — Settings.tsx:840-853, kept
-      // word for word. The first half always renders; the second half renders
-      // only when scout is on AND the budget is exactly 0, because showing it
-      // otherwise is a false alarm and hiding it then leaves a feature that is
-      // silently inert. The budget is read, never written — this form has no
-      // field for it.
-      Danger(
-        scoutWarning(
-          zeroBudget = showBool("scoutEnabled") && env.num("scoutBudgetUsdg") == 0.0,
-        ),
+      // A CLAIM ABOUT WHAT THE BREAKER CANNOT DO — Settings.tsx:1231-1244,
+      // word for word. The second half renders only when scout is on AND the
+      // budget is exactly 0. The budget is read, never written — this form has
+      // no field for it.
+      Danger(scoutWarning(zeroBudget = shown.bool("scoutEnabled") && env.num("scoutBudgetUsdg") == 0.0))
+
+      SubtleHead("class route · buying a coin nobody listed")
+      Hint(
+        "Buy a token straight off a Pons bonding curve, held in your own vault so it can be sold " +
+          "again. Needs a class vault factory in Connections and a re-signed key — and the scout " +
+          "budget above still bounds it.",
       )
+      FieldGrid {
+        CheckField(CLASS_ROUTE, shown.bool(CLASS_ROUTE.key), setBool(CLASS_ROUTE.key))
+        CLASS_NUMBERS.forEach { f -> NumberField(f, shown, draft, onDraft) }
+      }
+      // TWO SWITCHES RATHER THAN ONE, because they fail differently
+      // (Settings.tsx:1312-1318): a route on with a size of 0 buys nothing.
+      if (shown.bool(CLASS_ROUTE.key) && shown.number("classPerEntryUsdg") == 0.0) {
+        Spacer(Modifier.height(12.dp))
+        Danger(
+          buildAnnotatedString {
+            append("The class route is on but the size is ")
+            withStyle(SpanStyle(fontFamily = sans(13.sp, FontWeight.W600), fontWeight = FontWeight.W600)) { append("0") }
+            append(", so nothing will be bought. Two switches rather than one, because they fail differently — set a size or turn the route back off.")
+          },
+        )
+      }
     }
 
     // ── TELEGRAM (collapsed) ────────────────────────────────────────────────
-    // Settings.tsx:856.
+    // Settings.tsx:1322. THE CODE, BESIDE THE INSTRUCTION THAT NEEDS IT: two
+    // beta testers stopped where the two were in different drawers.
     Disclosure("Telegram") {
-      FieldGrid { CheckField(TELEGRAM, showBool(TELEGRAM.key), setBool(TELEGRAM.key)) }
+      TelegramLinkLines(telegram, keys?.telegramBotToken?.set ?: env.telegramBotToken.set)
+      Spacer(Modifier.height(16.dp))
+      FieldGrid {
+        CheckField(TELEGRAM, shown.bool(TELEGRAM.key), setBool(TELEGRAM.key))
+        TextLink("Bot status and test →", onTelegram)
+      }
+    }
+
+    // ── KEYS (collapsed) ────────────────────────────────────────────────────
+    // THE PHONE SHOWS WHETHER A KEY IS SET, AND NEVER TAKES ONE. The server
+    // sends only `{set, hint}` for a secret; typing keys stays on the web,
+    // where the provider picker and its model list live.
+    Disclosure("Keys") {
+      KeysStatus(env, keys, hosted)
+      Spacer(Modifier.height(16.dp))
+      TextLink("Change on the web →") { onWeb("/settings", "Settings") }
     }
 
     // ── ADVANCED (collapsed) ────────────────────────────────────────────────
-    // Settings.tsx:897. `details.mm-advanced` wraps everything from "Telegram
-    // controls" to "Trading preferences", and it is closed by default on the
-    // web too. See the report: that is faithful, and it does put the slippage
-    // and stop-loss guards one tap further away than they were.
+    // Settings.tsx:1405. `details.mm-advanced`, closed by default on the web
+    // too — faithful, and it does put the slippage and stop-loss guards one
+    // tap further away than they were.
     Disclosure("Advanced settings", advanced = true) {
       SectionHeading("Telegram controls")
       FieldGrid {
-        TELEGRAM_CONTROLS.forEach { CheckField(it, showBool(it.key), setBool(it.key)) }
+        TELEGRAM_CONTROLS.forEach { CheckField(it, shown.bool(it.key), setBool(it.key)) }
       }
 
       SectionHeading("Trading preferences")
       FieldGrid {
-        NUMBERS.forEach { f ->
-          val bounds = RANGES[f.key]
-          val shown = showNum(f.key)
-          val typed = shown.toDoubleOrNull()
-          val outOfRange = bounds != null && typed != null &&
-            (typed < bounds.first || typed > bounds.second)
-          Field(
-            label = f.label,
-            help = f.help + (bounds?.let { " Between ${plain(it.first)} and ${plain(it.second)}." } ?: ""),
-          ) {
-            // `.mm-input` (forms.css:38) is a flex row: the field takes the
-            // slack and the unit keeps its intrinsic width beside it.
-            Row(
-              modifier = Modifier.fillMaxWidth(),
-              horizontalArrangement = Arrangement.spacedBy(8.dp),
-              verticalAlignment = Alignment.CenterVertically,
-            ) {
-              InputBox(
-                value = shown,
-                onValueChange = { raw ->
-                  // Stored as a NUMBER, not a string: the server's validator
-                  // checks the type, and a quoted number is rejected as the
-                  // wrong shape.
-                  val n = raw.trim().toDoubleOrNull()
-                  if (raw.isBlank()) edits.remove(f.key) else if (n != null) edits[f.key] = JsonPrimitive(n)
-                  onChanged()
-                },
-                modifier = Modifier.weight(1f),
-                numeric = true,
-                keyboardType = if (f.decimal) KeyboardType.Decimal else KeyboardType.Number,
-              )
-              Unit(f.unit)
-            }
-            // A VALUE THE SERVER WILL REFUSE, SAID BEFORE THE ROUND TRIP.
-            // The web has no error style for an input — only the red
-            // `.mm-danger` list under the Save button once the server has
-            // spoken (Settings.tsx:1388). This borrows that same treatment
-            // rather than inventing a red border, and it states the bound in
-            // words because the range otherwise lives only in the help
-            // popover, which is closed.
-            if (outOfRange && bounds != null) {
-              Danger(AnnotatedString("Must be between ${plain(bounds.first)} and ${plain(bounds.second)}."))
-            }
-          }
-        }
+        NUMBERS.forEach { f -> NumberField(f, shown, draft, onDraft) }
       }
     }
   }
 }
 
-/** The patch: exactly what was touched, and nothing else. */
-fun patchOf(edits: Map<String, JsonElement>): JsonElement =
-  buildJsonObject { edits.forEach { (k, v) -> put(k, v) } }
+/** The symbols of the owner's own tokens: the draft's list if they changed it, else the stored one. */
+private fun customTokenSymbols(env: SettingsEnvelope, draft: SettingsDraft): List<String> {
+  val raw = draft.edits["customTokens"] ?: env.raw("customTokens")
+  return (raw as? JsonArray)?.mapNotNull { t ->
+    ((t as? JsonObject)?.get("symbol") as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotBlank() }
+  } ?: emptyList()
+}
+
+/**
+ * THE LIVE TRADING SWITCH AND EVERY SENTENCE THAT COMES WITH IT.
+ *
+ * The state read-out and the hint are the web's (Settings.tsx:585-608), and
+ * the two warnings are drawn from [liveTradingNote] the moment the box stops
+ * matching what is saved — so there is no way to tick it on without "This
+ * spends real money." on screen beneath it, and no way to tick it off without
+ * the one about real positions left unmanaged. Both are said BEFORE the save,
+ * the last moment either can still help.
+ */
+@Composable
+private fun LiveTradingField(shown: SettingsShown, onChange: (Boolean) -> kotlin.Unit) {
+  val on = shown.bool(LIVE.key)
+  Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+    CheckField(LIVE.copy(help = if (on) LIVE_ON_HINT else LIVE_OFF_HINT), on, onChange)
+    liveTradingNote(shown)?.let { note ->
+      Text(
+        text = buildAnnotatedString {
+          withStyle(SpanStyle(fontFamily = sans(12.sp, FontWeight.W600), fontWeight = FontWeight.W600, color = MerryColors.tx)) {
+            append(note.lead)
+          }
+          append(note.body)
+        },
+        style = HintStyle,
+        color = MerryColors.tx2,
+      )
+    }
+  }
+}
+
+/**
+ * THE PUBLIC BOOK, AS A CONSENT (Profile.tsx BookSwitch, with a second step).
+ *
+ * The read-out names everything the flag publishes — trade sizes and dollar
+ * P&L, holdings, and its name as a holder on token pages — because the switch
+ * decides all of it. Ticking it on does not change the draft: it opens the
+ * disclosure with "Publish my book" and "Not now", and only the first puts
+ * `publicBook: true` in the save. Unticking needs no confirmation.
+ */
+@Composable
+private fun PublicBookField(shown: SettingsShown, draft: SettingsDraft, onDraft: (SettingsDraft) -> kotlin.Unit) {
+  val on = shown.bool("publicBook")
+  Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    CheckField(
+      BoolField(
+        key = "publicBook",
+        label = "publish this agent's book",
+        on = "on — sizes, dollar P&L and holdings are public",
+        off = "off — only its return and each trade's percentage are public",
+        help = if (on) PUBLIC_BOOK_ON else PUBLIC_BOOK_OFF,
+      ),
+      checked = on || draft.publicBookAsked,
+      onChange = { want ->
+        onDraft(
+          when {
+            want -> draft.askPublicBook()
+            // Saved private: unticking only takes back the request (or the
+            // confirmed edit) — there is nothing to turn off.
+            !shown.savedBool("publicBook") -> draft.cancelPublicBook().without(listOf("publicBook"))
+            else -> draft.publicBookOff()
+          },
+        )
+      },
+    )
+    if (draft.publicBookAsked && !on) {
+      LockedPanel(
+        strong = "Publish your book?",
+        body = "Anyone will be able to see this agent's trade sizes and dollar P&L, what it holds and how " +
+          "much, and its name as a holder on the token pages of what it holds. Nothing is published until " +
+          "you confirm here and then save.",
+      )
+      Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        SmallButton("Publish my book", strong = true) { onDraft(draft.confirmPublicBook()) }
+        SmallButton("Not now") { onDraft(draft.cancelPublicBook()) }
+      }
+    }
+  }
+}
+
+/**
+ * THE TRENCHER CARD — Settings.tsx:640-705: what the mode is, the switch that
+ * lets it spend real money right beside that explanation (it used to live 445
+ * lines further down, in a closed drawer), and the fast-exit profile.
+ *
+ * "Prepare Trencher mode" fills the draft exactly as the web's button does —
+ * crypto, the platform coins, discovery, the owner's coins in the basket, fast
+ * exits, the trencher strategy and a 15-second tick — and saves nothing: the
+ * owner still reads the form and presses Save.
+ */
+@Composable
+private fun TrencherCard(
+  env: SettingsEnvelope,
+  shown: SettingsShown,
+  draft: SettingsDraft,
+  onDraft: (SettingsDraft) -> kotlin.Unit,
+  onWeb: (String, String) -> kotlin.Unit,
+) {
+  Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Text("Trencher mode · fast memecoin setup", style = LabelStyle, color = MerryColors.tx)
+    Hint(
+      "Your Merryman tracks active memecoin pools with at least \$100,000 in daily volume, 20 distinct buyers, " +
+        "recent activity and both buys and sells. Brain reviews eligible coins in the background about once a " +
+        "minute; execution and exit checks run every 15 seconds. New buys need a fresh Brain approval. Brain can " +
+        "also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is " +
+        "unavailable. Liquidity loss can trigger an earlier exit.",
+    )
+    Hint(
+      "Entries remain \$5, subject to your budget and signed limits. Only discovered, priced pools that pass the " +
+        "liquidity, age and valuation checks qualify. With Autonomous Trencher permission, it finds verified pool " +
+        "tokens itself; no custom-token list is required. Existing positions remain monitored for exits.",
+    )
+    SmallButton("Prepare Trencher mode") {
+      val basket = (shown.list("basketSymbols") + customTokenSymbols(env, draft)).distinct()
+      onDraft(
+        draft.setText("assetMode", "crypto")
+          .setBool("officialCoinsEnabled", true)
+          .setBool("discoveryEnabled", true)
+          .setList("basketSymbols", basket)
+          .setBool(TRENCHER_FAST.key, true)
+          .setText("strategy", "trencher")
+          .setNumber("tickSeconds", "15", integer = true),
+      )
+    }
+    CheckField(TRENCHER_FAST, shown.bool(TRENCHER_FAST.key)) { onDraft(draft.setBool(TRENCHER_FAST.key, it)) }
+    CheckField(TRENCHER_LIVE, shown.bool(TRENCHER_LIVE.key)) { onDraft(draft.setBool(TRENCHER_LIVE.key, it)) }
+    Hint(
+      "Save changes below, then update your trading permission and select Autonomous Trencher. It is available " +
+        "only after the verified vault deployment is configured. Without that permission, the existing route can " +
+        "trade only individually authorized tokens. Brain must be connected and the recorded portfolio must pass " +
+        "its accounting checks. For real trades, enable live trading and “let trencher trade for real” " +
+        "explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not " +
+        "guaranteed.",
+    )
+    TextLink("Update trading permission →") { onWeb("/grant", "Wallet & permissions") }
+  }
+}
+
+/**
+ * THE PLATFORM COIN LIST — Settings.tsx:1124-1154. THE ONE TOGGLE HERE THAT
+ * STARTS ON, and THREE STATES, NOT TWO: off; on with coins listed; and on with
+ * none listed on this chain, which is a different fact from "off" and used to
+ * be printed as "coins are in your basket". `officialCoins` null means the
+ * server did not send the list — then the count is not claimed either way.
+ */
+@Composable
+private fun OfficialCoinsField(env: SettingsEnvelope, shown: SettingsShown, onChange: (Boolean) -> kotlin.Unit) {
+  val listed = env.officialCoins
+  val on = shown.bool("officialCoinsEnabled")
+  val unit = when {
+    !on -> "stocks only"
+    listed == null -> "on"
+    listed.isNotEmpty() -> "${listed.size} in your basket: ${listed.joinToString(", ")}"
+    else -> "on — but none are listed on this chain yet"
+  }
+  val lead = if (listed != null && listed.isNotEmpty()) {
+    "Verified coins we publish, watched and traded without you adding them. Coins trade"
+  } else {
+    "When we publish verified coins on this chain they appear here automatically. There are none yet, so this setting changes nothing today. Coins trade"
+  }
+  CheckField(
+    BoolField(
+      key = "officialCoinsEnabled",
+      label = "trade the platform coin list",
+      on = unit,
+      off = unit,
+      help = "$lead around the clock, so your agent keeps working when the stock market is shut. Your caps, " +
+        "budgets and trading permissions still apply — and a coin listed after you signed needs a free re-sign " +
+        "at /grant before your key can touch it.",
+    ),
+    on,
+    onChange,
+  )
+}
+
+/**
+ * A NUMBER BOX: the typed text is shown as typed, a value this form cannot read
+ * is said in red and blocks the save, and a value the server will refuse is
+ * said before the round trip. The stored value is the placeholder, so a box
+ * emptied on the way to a new figure still says what is in force.
+ */
+@Composable
+private fun NumberField(f: NumField, shown: SettingsShown, draft: SettingsDraft, onDraft: (SettingsDraft) -> kotlin.Unit) {
+  val range = SETTINGS_RANGES[f.key]
+  val integer = f.key in SETTINGS_INTEGERS
+  Field(
+    label = f.label,
+    help = f.help + (range?.let { " Between ${plainBound(it.start)} and ${plainBound(it.endInclusive)}." } ?: ""),
+  ) {
+    // `.mm-input` (forms.css:38) is a flex row: the field takes the slack
+    // and the unit keeps its intrinsic width beside it.
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      InputBox(
+        value = shown.numberText(f.key),
+        onValueChange = { raw -> onDraft(draft.setNumber(f.key, raw, integer)) },
+        modifier = Modifier.weight(1f),
+        placeholder = shown.number(f.key)?.let { "saved: " + plainNumber(it) },
+        numeric = true,
+        keyboardType = if (integer) KeyboardType.Number else KeyboardType.Decimal,
+      )
+      if (f.unit.isNotBlank()) Unit(f.unit)
+    }
+    val problem = draft.unreadable[f.key]?.let { "Can't send this: $it." } ?: outOfRange(f.key, shown.number(f.key))
+    if (problem != null) Danger(AnnotatedString(problem))
+  }
+}
+
+/**
+ * The link code and what to do with it, in one place (Settings.tsx:1337-1356).
+ * A missing code is a WAIT, not an absence: the agent mints one on its next
+ * pass after a token is saved. An unread bridge says so, never "no code".
+ */
+@Composable
+private fun TelegramLinkLines(tg: TelegramStatus?, tokenSet: Boolean) {
+  val uri = LocalUriHandler.current
+  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Hint("Create a bot with @BotFather and add its token on the web.")
+    val code = tg?.linkCode
+    when {
+      tg == null -> Hint("Checking the bridge for a link code…")
+      code != null -> {
+        Hint("Then send this to your bot to connect it:")
+        Text("/link $code", style = InputStyle, color = MerryColors.tx)
+        telegramStartUrl(tg.botUsername, code)?.let { url ->
+          TextLink("Open Telegram →") { runCatching { uri.openUri(url) } }
+        }
+        // A BEARER CREDENTIAL. `/link <code>` is accepted from any chat, first
+        // come, and grants control of this agent.
+        Hint("Anyone who has this code can control your agent — do not share or screenshot it.")
+      }
+      tokenSet -> Hint("No link code yet. Your agent mints one on its next pass with this token set — check back shortly.")
+      else -> Hint("Your link code appears here once a token is saved.")
+    }
+  }
+}
+
+/**
+ * THE MASKED KEYS, as status lines. Hosted, the bundler is the house's and is
+ * not shown (Settings.tsx renders the Pimlico field only when `hosted ===
+ * false`); the AI key is optional there, because the shared key is the default.
+ */
+@Composable
+private fun KeysStatus(env: SettingsEnvelope, keys: SettingsKeys?, hosted: Boolean?) {
+  Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Hint("Keys are typed on the web, never on the phone. This shows only whether each is saved.")
+    if (keys != null) {
+      val (provider, view) = keys.providerKey(env)
+      KeyLine("$provider API key", secretStatus(view))
+      if (hosted == true) Hint("Optional. Add your own provider for chat and the Strategist.")
+      KeyLine("Telegram bot token", secretStatus(keys.telegramBotToken))
+      if (hosted == false) KeyLine("Pimlico API key", secretStatus(keys.bundlerApiKey))
+    } else {
+      KeyLine("AI provider key", secretStatus(env.llmApiKey))
+      KeyLine("Telegram bot token", secretStatus(env.telegramBotToken))
+      if (hosted == false) KeyLine("Pimlico API key", secretStatus(env.bundlerApiKey))
+    }
+  }
+}
+
+@Composable
+private fun KeyLine(label: String, status: String) {
+  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+    Text(label, style = LabelStyle, color = MerryColors.tx, modifier = Modifier.weight(1f))
+    Text(status, style = UnitStyle, color = MerryColors.tx2)
+  }
+}
+
+/** A plain text control in the form's own register: `--tx`, 13px, 44dp tall. */
+@Composable
+private fun TextLink(label: String, onClick: () -> kotlin.Unit) {
+  Box(
+    Modifier.heightIn(min = 44.dp).clickable(role = Role.Button, onClick = onClick),
+    contentAlignment = Alignment.CenterStart,
+  ) {
+    Text(label, style = ChipTextStyle.copy(fontWeight = FontWeight.W600, fontFamily = sans(13.sp, FontWeight.W600)), color = MerryColors.tx)
+  }
+}
+
+/**
+ * `.mm-btn` (forms.css:51-53), small: the chip box when quiet, the `--tx`
+ * ground when [strong] — which is only ever the confirming step of a consent.
+ */
+@Composable
+private fun SmallButton(label: String, strong: Boolean = false, onClick: () -> kotlin.Unit) {
+  Box(
+    Modifier
+      .heightIn(min = 40.dp)
+      .clip(ChipShape)
+      .background(if (strong) MerryColors.tx else MerryColors.card)
+      .then(if (strong) Modifier else Modifier.border(1.dp, MerryColors.line, ChipShape))
+      .clickable(role = Role.Button, onClick = onClick)
+      .padding(horizontal = 14.dp, vertical = 10.dp),
+    contentAlignment = Alignment.Center,
+  ) {
+    Text(
+      label,
+      style = ChipTextStyle.copy(fontWeight = FontWeight.W600, fontFamily = sans(13.sp, FontWeight.W600)),
+      color = if (strong) MerryColors.ink else MerryColors.tx,
+    )
+  }
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // THE FORM VOCABULARY — forms.css, one composable per rule.
@@ -1195,8 +1603,3 @@ private fun CircleHelp() {
     drawCircle(color = MerryColors.tx2, radius = 1f * s, center = Offset(12f * s, 17f * s))
   }
 }
-
-/** A bound, said the way the terminal says a figure: en-US grouping, no decimals. */
-private fun plain(value: Double): String =
-  if (value % 1.0 == 0.0) String.format(Locale.US, "%,d", value.toLong())
-  else String.format(Locale.US, "%,.2f", value)
