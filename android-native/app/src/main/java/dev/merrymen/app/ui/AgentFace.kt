@@ -14,11 +14,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.produceState
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -383,8 +383,11 @@ fun AgentFace(
   val ringed = ring ?: (slug != null && wired.rings(slug))
   val density = LocalDensity.current
   val widthPx = with(density) { LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
-  // Decoded for the largest face this app draws (48dp), once per density.
-  remember(density, widthPx) { AgentFaces.setTargets(with(density) { 48.dp.roundToPx() }, widthPx) }
+  // Decoded for the largest face this app draws (48dp), at this density. A
+  // SideEffect, not a remember: it is done for its effect, and it runs after
+  // composition and before the load below starts, so the first decode is at
+  // the size it is drawn.
+  SideEffect { AgentFaces.setTargets(with(density) { 48.dp.roundToPx() }, widthPx) }
   val versions by AgentImageRevisions.versions.collectAsState()
   // KEYED ON THE SLUG: a LazyColumn reuses a row's slot for another agent, and
   // the first frame for the new one is whatever is held for IT, never the

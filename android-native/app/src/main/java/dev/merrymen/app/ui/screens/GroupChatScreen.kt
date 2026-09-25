@@ -911,9 +911,11 @@ private fun lineText(body: String, names: List<String>, myName: String?): Annota
 /**
  * A NAME OR EXCERPT ISOLATED from the text around it (U+2068 … U+2069), the
  * web's `<bdi>`: an Arabic or Hebrew name beside an excerpt that starts with
- * digits would otherwise pull the digits onto it.
+ * digits would otherwise pull the digits onto it. Written as escapes, not the
+ * characters themselves: invisible bidi controls in source are how code is
+ * made to read differently from how it compiles (lint's BidiSpoofing).
  */
-private fun isolate(s: String): String = "⁨$s⁩"
+private fun isolate(s: String): String = "\u2068$s\u2069"
 
 private val clockFormat: DateTimeFormatter =
   DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT).withZone(ZoneId.systemDefault())
