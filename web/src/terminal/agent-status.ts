@@ -103,16 +103,18 @@ export type AgentMode = "paper" | "live" | "idle" | null;
  * said only for a live agent that is allowed it, and a rail nobody read (or an
  * idle one) gets what the permission allows, never a claim that it is trading.
  *
- * ── A CAVEAT WORTH WRITING DOWN ──────────────────────────────────────────
+ * ── ONLY A STORED ANSWER IS KNOWN HERE ───────────────────────────────────
  *
  * The permission is read from the owner's SETTINGS, which is the truth for
  * every hosted tenant and can be incomplete for a self-hosted install
  * configured by environment variable: `GET /api/settings` returns stored values
  * only, and its `defaults` field is the static core table rather than anything
  * env-aware. A stored value wins over the environment (worker/src/settings.ts
- * `bool`), so only an install running on `MERRYMEN_TRENCHER_LIVE=1` with
- * nothing stored reads here as not allowed — and, live, as buying nothing.
- * The row links to the settings it read for that reason.
+ * `bool`), so a stored true or false is the answer on any install. A box never
+ * saved on a SELF-HOSTED install is not: `MERRYMEN_TRENCHER_LIVE` decides it,
+ * in a process this read cannot see. Read as "not allowed", a live agent on
+ * that variable — buying with real money — was told it buys nothing. So there
+ * the row says the install's environment decides, and claims neither.
  */
 export type TrencherRow =
   | { kind: "unread" }
@@ -136,7 +138,9 @@ export type TrencherRow =
   | { kind: "live-not-allowed" }
   /** The rail is unread or idle: what the permission allows, and nothing about what it is doing. */
   | { kind: "allowed" }
-  | { kind: "not-allowed" };
+  | { kind: "not-allowed" }
+  /** Self-hosted, never saved: the install's environment decides, which this read cannot see. */
+  | { kind: "env-decides" };
 
 export function trencherRow(
   settings:
@@ -144,6 +148,8 @@ export function trencherRow(
         strategy?: string | null;
         trencherLiveEnabled?: boolean | null;
         assetMode?: string | null;
+        /** `/api/settings` named no tenant (`owner: null`): a self-hosted install. */
+        selfHosted?: boolean;
       }
     | null
     | undefined,
@@ -152,9 +158,11 @@ export function trencherRow(
   if (!settings) return { kind: "unread" };
   if (settings.strategy !== "trencher") return { kind: "off" };
   if (settings.assetMode === "stocks") return { kind: "no-crypto" };
+  // Paper is practice money whatever the permission, stored or not.
+  if (mode === "paper") return { kind: "paper" };
+  if (settings.selfHosted === true && typeof settings.trencherLiveEnabled !== "boolean") return { kind: "env-decides" };
   // Fail closed: only a stored `true` is permission to spend.
   const allowed = settings.trencherLiveEnabled === true;
-  if (mode === "paper") return { kind: "paper" };
   if (mode === "live") return allowed ? { kind: "live" } : { kind: "live-not-allowed" };
   return allowed ? { kind: "allowed" } : { kind: "not-allowed" };
 }

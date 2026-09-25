@@ -18,16 +18,20 @@ import { json, testDom } from "./test-dom";
 
 let ui: ReturnType<typeof testDom>;
 const originalFetch = globalThis.fetch;
-let allowed: boolean;
+/** The stored box, or undefined when it was never saved. */
+let allowed: boolean | undefined;
+/** What /api/settings says of the tenant: an address hosted, null self-hosted. */
+let owner: string | null;
 
 beforeEach(() => {
   ui = testDom();
+  owner = "0x" + "a".repeat(40);
   // A Next <Link> on the strip schedules its prefetch through `self`.
   (globalThis as { self?: unknown }).self = ui.dom.window;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url === "/api/settings") {
-      return json({ values: { strategy: "trencher", assetMode: "crypto", trencherLiveEnabled: allowed } });
+      return json({ values: { strategy: "trencher", assetMode: "crypto", trencherLiveEnabled: allowed }, owner });
     }
     return json({ error: "not scripted" }, 404);
   }) as typeof fetch;
@@ -39,7 +43,7 @@ afterEach(async () => {
 });
 
 /** The Trencher row once its settings have landed: what it says, and in which tone. */
-async function trencherLine(mode: AgentMode, permission: boolean) {
+async function trencherLine(mode: AgentMode, permission: boolean | undefined) {
   allowed = permission;
   await ui.render(createElement(AgentStrip, { hasAgent: true, mode }));
   for (let i = 0; i < 20; i++) {
@@ -79,5 +83,19 @@ describe("the strip's Trencher line says whose money", () => {
     const line = await trencherLine(null, true);
     assert.equal(line.value, "on, allowed to trade for real when your agent is live");
     assert.doesNotMatch(line.value, /trading real money|practice/);
+  });
+
+  it("A SELF-HOSTED BOX NEVER SAVED IS NOT TOLD IT BUYS NOTHING — MERRYMEN_TRENCHER_LIVE may be trading for real", async () => {
+    owner = null;
+    const line = await trencherLine("live", undefined);
+    assert.match(line.value, /environment decides/);
+    assert.doesNotMatch(line.value, /buys nothing|trading real money/);
+    assert.equal(line.tone, "is-quiet");
+  });
+
+  it("a hosted tenant's box never saved is the default, off — and a live agent is warned", async () => {
+    const line = await trencherLine("live", undefined);
+    assert.equal(line.tone, "is-warn");
+    assert.match(line.value, /buys nothing/);
   });
 });

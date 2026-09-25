@@ -61,6 +61,8 @@ import type { TelegramStatus } from "@/app/api/telegram/route";
 
 interface SettingsShape {
   values?: { strategy?: string | null; trencherLiveEnabled?: boolean | null; assetMode?: string | null };
+  /** The tenant a hosted install read for; null self-hosted (api/settings GET). */
+  owner?: string | null;
 }
 
 export function AgentStrip({
@@ -77,7 +79,7 @@ export function AgentStrip({
 }) {
   const t = useT();
   const [tg, setTg] = useState<TelegramStatus | null>(null);
-  const [settings, setSettings] = useState<SettingsShape["values"] | null>(null);
+  const [settings, setSettings] = useState<(SettingsShape["values"] & { selfHosted: boolean }) | null>(null);
 
   useEffect(() => {
     if (!hasAgent) return;
@@ -91,7 +93,9 @@ export function AgentStrip({
       .catch(() => {});
     void fetch("/api/settings")
       .then((r) => (r.ok ? (r.json() as Promise<SettingsShape>) : null))
-      .then((s) => { if (live && s?.values) setSettings(s.values); })
+      // Self-hosted is carried with the values: there, a box never saved is
+      // decided by the install's environment, not by the default (trencherRow).
+      .then((s) => { if (live && s?.values) setSettings({ ...s.values, selfHosted: s.owner === null }); })
       .catch(() => {});
     return () => { live = false; };
   }, [hasAgent]);
@@ -229,6 +233,12 @@ function TrencherLine({ row }: { row: TrencherRow }) {
     case "not-allowed":
       return (
         <Row tone="quiet" label="Trencher" value={t("strip.trencher.notAllowed")}
+          action={<Link href="/settings#trencher-mode">{t("strip.trencher.settings")}</Link>}
+        />
+      );
+    case "env-decides":
+      return (
+        <Row tone="quiet" label="Trencher" value={t("strip.trencher.envDecides")}
           action={<Link href="/settings#trencher-mode">{t("strip.trencher.settings")}</Link>}
         />
       );

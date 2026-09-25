@@ -333,6 +333,7 @@ export const EN = {
   "strip.trencher.liveNotAllowed": "on, but not allowed to trade for real — it buys nothing until you allow it",
   "strip.trencher.allowed": "on, allowed to trade for real when your agent is live",
   "strip.trencher.notAllowed": "on, not allowed to trade for real",
+  "strip.trencher.envDecides": "on — trading for real isn't set in your settings, so this install's environment decides",
   "strip.trencher.settings": "Settings →",
 
   // ── Settings, second pass ──────────────────────────────────────────

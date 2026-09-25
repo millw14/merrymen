@@ -179,6 +179,37 @@ describe("the trencher row reads the rail, not only the permission", () => {
   });
 });
 
+/**
+ * ONLY A STORED ANSWER IS KNOWN. A stored value beats MERRYMEN_TRENCHER_LIVE
+ * on any install (worker/src/settings.ts `bool`), but a box never saved on a
+ * self-hosted install is decided by that variable, in a process /api/settings
+ * cannot see. Read as "not allowed", a live agent buying with real money on
+ * it was told it buys nothing.
+ */
+describe("a self-hosted box never saved is the environment's to decide", () => {
+  const unsaved = { strategy: "trencher", assetMode: "crypto", selfHosted: true };
+
+  it("SAYS THE ENVIRONMENT DECIDES — never that a live agent buys nothing", () => {
+    for (const mode of ["live", "idle", null] as const) {
+      assert.deepEqual(trencherRow(unsaved, mode), { kind: "env-decides" }, String(mode));
+      assert.deepEqual(trencherRow({ ...unsaved, trencherLiveEnabled: null }, mode), { kind: "env-decides" }, String(mode));
+    }
+  });
+
+  it("still says practice money on paper, which no environment changes", () => {
+    assert.deepEqual(trencherRow(unsaved, "paper"), { kind: "paper" });
+  });
+
+  it("takes a SAVED answer as the answer, self-hosted or not", () => {
+    assert.deepEqual(trencherRow({ ...unsaved, trencherLiveEnabled: false }, "live"), { kind: "live-not-allowed" });
+    assert.deepEqual(trencherRow({ ...unsaved, trencherLiveEnabled: true }, "live"), { kind: "live" });
+  });
+
+  it("leaves a hosted tenant's unsaved box at the default, off", () => {
+    assert.deepEqual(trencherRow({ ...unsaved, selfHosted: false }, "live"), { kind: "live-not-allowed" });
+  });
+});
+
 describe("the short label the settings field shows", () => {
   it("never says 'no token' for an unread bridge", () => {
     // THE REGRESSION THIS GUARDS. The settings screen printed exactly this for
