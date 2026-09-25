@@ -507,13 +507,17 @@ export async function refreshTokens(deps: OAuthDeps, form: URLSearchParams, clie
     if (resource && normalizeResource(resource) !== row.resource) throw new OAuthError("invalid_target", "resource does not match");
     if (!conn || conn.status !== "active") throw new OAuthError("invalid_grant", "the connection was revoked");
     // A refresh can narrow scope, never widen it, and never beyond what the
-    // owner's current consent allows.
+    // owner's current consent allows. A requested scope the token does not
+    // hold is dropped, not refused (RFC 6749 §6 lets the server issue fewer):
+    // many clients re-send their ORIGINAL request on refresh, which since the
+    // 401 challenge asks for every advertised scope usually includes ones the
+    // owner left unticked. Only a request that keeps nothing is refused.
     const held = new Set(row.scopes.split(" ").filter(Boolean));
     const allowed = new Set(conn.scopes.split(" ").filter(Boolean));
     const asked = form.get("scope");
     const wanted = asked ? asked.split(/\s+/).filter(Boolean) : [...held];
-    if (wanted.some((s) => !held.has(s))) throw new OAuthError("invalid_scope", "a refresh cannot add scopes");
-    const scopes = wanted.filter((s) => allowed.has(s));
+    const scopes = wanted.filter((s) => held.has(s) && allowed.has(s));
+    if (!scopes.length) throw new OAuthError("invalid_scope", "none of the requested scopes are held by this connection; a refresh cannot add scopes");
     const marked = await db.prepare("UPDATE mcp_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND revoked_at IS NULL").run(now, row.token_hash);
     if (marked.changes !== 1) {
       await revokeFamily(tx, row.connection_id, row.family, now);

@@ -247,10 +247,12 @@ test("refresh rotates; reusing a spent refresh token revokes the whole family", 
   const second = await refreshTokens(deps, r(tokens.refresh_token), client);
   assert.notEqual(second.refresh_token, tokens.refresh_token);
   assert.ok(await verifyAccessToken(d, deps.cfg, second.access_token, deps.now()));
-  // Narrowing is allowed; widening is not.
-  await assert.rejects(refreshTokens(deps, r(second.refresh_token, { scope: "market:read chat:write" }), client), /cannot add scopes/);
-  const narrowed = await refreshTokens(deps, r(second.refresh_token, { scope: "market:read" }), client);
-  assert.equal(narrowed.scope, "market:read");
+  // Narrowing is allowed; widening is not: an unheld scope in the request is
+  // dropped (clients re-send their original request), and a request that keeps
+  // nothing is refused without spending the token.
+  await assert.rejects(refreshTokens(deps, r(second.refresh_token, { scope: "chat:write" }), client), /cannot add scopes/);
+  const narrowed = await refreshTokens(deps, r(second.refresh_token, { scope: "market:read chat:write trade:propose" }), client);
+  assert.equal(narrowed.scope, "market:read", "chat:write and trade:propose were never held: not added");
   // The rotated-away token is spent: presenting it again is theft evidence.
   await assert.rejects(refreshTokens(deps, r(tokens.refresh_token), client), /already used/);
   assert.equal(await verifyAccessToken(d, deps.cfg, narrowed.access_token, deps.now()), null, "family revoked");

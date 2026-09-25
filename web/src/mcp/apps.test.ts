@@ -640,9 +640,11 @@ test("decision view: realized P&L evidence has three states: measured (no chip),
     const cells = tr.querySelectorAll("td");
     return Array.from(cells[cells.length - 1]!.querySelectorAll(".chip")).map((c) => `${c.className}:${c.textContent}`);
   });
-  assert.deepEqual(pnlChips, [[], ["chip warn:estimate"], ["chip unk:not confirmed"]], "null is not called an estimate");
+  assert.deepEqual(pnlChips, [[], ["chip warn:not verified"], ["chip unk:not confirmed"]], "null is not called an estimate");
   const said = card.textContent ?? "";
-  assert.match(said, /estimate: part of the cost or proceeds behind this figure was estimated from a quote/);
+  // false covers a quote, a cut replay and a legacy row: it is not called a quote estimate.
+  assert.match(said, /not verified: part of the cost or proceeds behind this figure was not read from receipts in full/);
+  assert.doesNotMatch(said, /estimated from a quote/);
   assert.match(said, /not confirmed: it could not be confirmed that both the cost and the proceeds behind this figure were read from receipts/);
   assertNoInjectedMarkup(m);
 

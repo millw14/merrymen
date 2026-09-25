@@ -82,13 +82,15 @@ limited to the agents and scopes that owner chose.
      client including its URL.
 
      When the client's host cannot answer (a network failure, a `5xx`, `408`
-     or `429`, or any non-`200` answer that is not JSON, such as a CDN
-     challenge page), a copy verified within the last 24 h is used; without
+     or `429`, or any other non-`200` answer that is not JSON, such as a CDN
+     challenge page — `404` and `410` excepted), a copy verified within the
+     last 24 h is used; without
      one the answer is the retryable `temporarily_unavailable` (HTTP 503 at
      `/oauth/token` and `/oauth/revoke`, a 503 page at `/oauth/authorize`),
-     never `invalid_client`, which clients treat as fatal. A JSON `4xx` such as
-     `404` or `410`, or a `200` that is not a valid JSON document, is the
-     host's definite answer and stays `invalid_client`.
+     never `invalid_client`, which clients treat as fatal. A `404` or `410`
+     (whatever its content type), any other JSON `4xx`, or a `200` that is
+     not a valid JSON document is the host's definite answer and stays
+     `invalid_client`.
    - **Dynamic Client Registration** (`POST /oauth/register`), for clients that
      do not use CIMD. Open but rate limited per IP. Public (`none`) or
      confidential (`client_secret_basic` / `client_secret_post`) clients.

@@ -774,17 +774,18 @@ var OUTCOME_TONE = {
 };
 // realized_pnl_measured is three-state, as the Telegram alert's PNL_NOT_STATED
 // is: true = cost and proceeds both read from receipts (no chip); false = part
-// of it was estimated from a quote; null = whether it was measured could not be
+// of it was not read from receipts in full (a quote, a cut replay, or a legacy
+// row without its source); null = whether it was measured could not be
 // established (no realized figure, or the evidence could not be replayed or
 // paired), which is not the same as an estimate.
 var PNL_EVIDENCE_NOTE = {
-  estimate: "estimate: part of the cost or proceeds behind this figure was estimated from a quote, not read from a receipt.",
+  estimate: "not verified: part of the cost or proceeds behind this figure was not read from receipts in full (a pre-trade quote, a history too long to replay, or an older record without its source).",
   unconfirmed: "not confirmed: it could not be confirmed that both the cost and the proceeds behind this figure were read from receipts."
 };
 function pnlEvidence(v) { return v === true ? null : v === false ? "estimate" : "unconfirmed"; }
 function pnlEvidenceChip(v) {
   var k = pnlEvidence(v);
-  return k === "estimate" ? chip("estimate", "warn") : k === "unconfirmed" ? chip("not confirmed", "unk") : null;
+  return k === "estimate" ? chip("not verified", "warn") : k === "unconfirmed" ? chip("not confirmed", "unk") : null;
 }
 
 function render(d) {

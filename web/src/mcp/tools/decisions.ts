@@ -253,7 +253,7 @@ const LIFECYCLE_TRADE = z.object({
   fill_price_usd: z.number().nullable(),
   realized_pnl_usdg: z.number().nullable().describe("The figure the worker booked; see realized_pnl_measured before reading it as a result"),
   realized_pnl_measured: z.boolean().nullable()
-    .describe("The rule get_trade uses: true only when the sell's proceeds AND the cost it sold against were both evidenced (read from receipts on the live book, or the paper book's own fills); false when either half is an estimate; null when there is no realized figure or the cost could not be replayed"),
+    .describe("The rule get_trade uses: true only when the sell's proceeds AND the cost it sold against were both evidenced (read from receipts on the live book, or the paper book's own fills); false when either half was not read from receipts in full (a pre-trade quote, a history too long to replay, or an older record without its source); null when there is no realized figure or the cost could not be replayed"),
   basis_source: z.string().nullable(),
   at: z.string().nullable(),
 });

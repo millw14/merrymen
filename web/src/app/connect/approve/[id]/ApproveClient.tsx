@@ -140,6 +140,18 @@ export function bookBox(v: Pick<View, "status" | "binding" | "result" | "current
     const moved = now !== proposed ? ` When this was proposed it was ${wasIn(proposed)}, so approving is refused; ask your assistant for a fresh proposal.` : "";
     return { warn: now !== "paper" || moved !== "", text: base + moved };
   }
+  // Once the agent has sent or finished the order, its CURRENT mode says
+  // nothing about what this order did: a live order already on chain stays
+  // real money even if live trading was switched off since.
+  // A 'submitted' ledger row is only ever written for a live send (paper fills are 'paper'), so
+  // "sent to the chain" is live even before the row carries its transaction hash.
+  const sentLive = (typeof v.result?.tx_hash === "string" && v.result.tx_hash !== "") || (typeof v.result?.note === "string" && v.result.note.startsWith("sent to the chain"));
+  if (v.status === "executing" && sentLive) {
+    return { warn: true, text: `Real money. Your agent sent this order on chain with its real funds; the ledger has not recorded whether it landed yet.${proposed !== "live" ? ` It was proposed while your agent was ${wasIn(proposed)}.` : ""}` };
+  }
+  if (v.status === "executing" && v.result && typeof v.result.note === "string") {
+    return { warn: true, text: "Your agent has finished this order. Until its trade record reaches the ledger, Merrymen cannot say whether it traded live (real money) or in practice." };
+  }
   const base = now === "live"
     ? "Real money. Your agent trades live right now; it executes this order in whatever mode it is in when it picks it up."
     : now === "paper"

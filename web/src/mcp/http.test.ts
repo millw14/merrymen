@@ -221,21 +221,27 @@ test("a tool that settles after a timeout (send_message) can still store what it
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }, timeoutMs: 20, settlesAfterTimeout: true,
     async handler(_args, ctx) {
       const m = await ctx.mcp();
+      const settle = await ctx.settleMcp!();
       await paused; // the model answers after the client was told "timeout"
-      try {
-        await m.db.prepare("INSERT INTO mcp_rate (bucket, window_start, hits) VALUES ('settle-probe', 1, 1)").run();
-        finished("stored");
-      } catch (e) {
-        finished(e instanceof McpError ? e.code : String(e));
+      const outcome: string[] = [];
+      for (const [name, db] of [["guarded", m.db], ["settle", settle.db]] as const) {
+        try {
+          await db.prepare(`INSERT INTO mcp_rate (bucket, window_start, hits) VALUES ('settle-probe-${name}', 1, 1)`).run();
+          outcome.push(`${name}: stored`);
+        } catch (e) {
+          outcome.push(`${name}: ${e instanceof McpError ? e.code : String(e)}`);
+        }
       }
+      finished(outcome.join(", "));
       return { data: { ok: true } };
     },
   });
   const res = await runTool(probe, {}, a.principal, "trace-s", { now: () => NOW, mcp: async () => d, ledger: (fn) => fn(d.db) });
   assert.equal(errorOf(res).code, "timeout");
   resume();
-  assert.equal(await done, "stored");
-  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM mcp_rate WHERE bucket = 'settle-probe'").get() as { n: number }).n, 1);
+  // Only the settle handle outlives the timeout; ctx.mcp() still stops.
+  assert.equal(await done, "guarded: timeout, settle: stored");
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM mcp_rate WHERE bucket LIKE 'settle-probe-%'").get() as { n: number }).n, 1);
 });
 
 test("wrong Host and foreign browser Origins are refused", async () => {

@@ -287,6 +287,14 @@ export interface SendInput {
    * under READ COMMITTED and both reach the model.
    */
   dialect: "postgres" | "sqlite";
+  /**
+   * The handle the FINAL settle write uses (defaults to `db`). The MCP tool
+   * passes one that still accepts writes after the call timed out, so a reply
+   * that arrives late is stored and the replay path holds.
+   */
+  settleDb?: Db;
+  /** The caller's abort signal: once it fires, no state read or model call starts. */
+  signal?: AbortSignal;
 }
 
 export interface SendResult {
@@ -391,6 +399,7 @@ export async function sendMessage(db: Db, input: SendInput, d: ConversationDeps)
   const history = existing ? await loadHistory(db, tenant, input.agentSlug, conversationId) : [];
   const notes = await researchForPrompt(db, tenant, input.agentSlug, now);
 
+  if (input.signal?.aborted) throw new ConversationError("unavailable", "The call was abandoned before the agent's state was read; nothing was sent.", 15);
   let snapshot: AgentStateSnapshot;
   try {
     snapshot = await withTimeout(d.readState(tenant), d.stateTimeoutMs, "state_timeout");
@@ -439,10 +448,16 @@ export async function sendMessage(db: Db, input: SendInput, d: ConversationDeps)
 
   let answer: ModelAnswer | null = null;
   let thrown: unknown = null;
-  try {
-    answer = await withTimeout(d.reply({ message, state, history }), d.replyTimeoutMs, "model_timeout");
-  } catch (e) {
-    thrown = e;
+  // An abandoned call does not start the paid model call: the claimed exchange
+  // is settled as a timeout instead, so it never sits pending.
+  if (input.signal?.aborted) {
+    thrown = new Error("model_timeout");
+  } else {
+    try {
+      answer = await withTimeout(d.reply({ message, state, history }), d.replyTimeoutMs, "model_timeout");
+    } catch (e) {
+      thrown = e;
+    }
   }
   // The model's text is stored as-is otherwise, and Postgres TEXT cannot hold
   // NUL: a provider reply carrying one would fail the settle write and be
@@ -455,7 +470,8 @@ export async function sendMessage(db: Db, input: SendInput, d: ConversationDeps)
   const final: StoredMessage = text
     ? { ...agentRow, content: text.slice(0, REPLY_CONTENT_MAX), status: "complete", completed_at: done }
     : { ...agentRow, status: "failed", error_code: failureOf(answer, thrown), completed_at: done };
-  await db.tx(async (tx) => {
+  // The one write that may run after the caller's timeout (see SendInput.settleDb).
+  await (input.settleDb ?? db).tx(async (tx) => {
     await tx.prepare("UPDATE mcp_messages SET content = ?, status = ?, error_code = ?, completed_at = ? WHERE id = ? AND tenant = ? AND status = 'pending'")
       .run(final.content, final.status, final.error_code, done, agentRow.id, tenant);
     if (proposalStripped) {

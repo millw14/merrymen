@@ -111,7 +111,11 @@ const sendMessageTool = defineTool({
   async handler(args, ctx) {
     const a = await ctx.agent(args.agent);
     const { db, dialect } = await ctx.mcp();
+    // Only the final write that stores the model's reply may outlive a timeout.
+    const settleDb = ctx.settleMcp ? (await ctx.settleMcp()).db : db;
     const r = await guarded(() => sendMessage(db, {
+      settleDb,
+      signal: ctx.signal,
       tenant: ctx.principal.tenant,
       agentSlug: a.slug,
       connectionId: ctx.principal.connectionId,

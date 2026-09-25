@@ -386,6 +386,16 @@ test("after a decision the box follows the outcome and says when it differs from
   assert.equal(reverted.warn, true, "a revert with a transaction was live");
   assert.match(reverted.text, /sent live and reverted on chain: nothing was traded, and only gas was spent/);
   assert.doesNotMatch(reverted.text, /went on chain with/, "a revert is not a trade that went through");
+  // Sent live, then live trading switched off: the current mode says nothing about this order.
+  const sentLive = trade("live", "executing", { tx_hash: `0x${"aa".repeat(32)}`, note: "sent to the chain; waiting for the ledger" }, "paper");
+  assert.equal(sentLive.warn, true);
+  assert.match(sentLive.text, /^Real money\. Your agent sent this order on chain/);
+  assert.doesNotMatch(sentLive.text, /no money moves/);
+  assert.match(trade("live", "executing", { tx_hash: null, note: "sent to the chain; waiting for the ledger to record whether it landed" }, "paper").text, /^Real money/, "a submitted row is live before it has a hash");
+  const finishedUnknown = trade("live", "executing", { note: "The agent finished the order; waiting for its trade record" }, "paper");
+  assert.equal(finishedUnknown.warn, true);
+  assert.match(finishedUnknown.text, /cannot say whether it traded live/);
+  assert.doesNotMatch(finishedUnknown.text, /no money moves/);
   const reported = trade("live", "filled_awaiting_ledger", { tx_hash: `0x${"ef".repeat(32)}` });
   assert.match(reported.text, /Your agent reports this trade went on chain.*the ledger has not confirmed it yet/);
   assert.doesNotMatch(trade("live", "confirmed", { tx_hash: `0x${"ab".repeat(32)}` }).text, /proposed while/);

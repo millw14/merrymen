@@ -50,7 +50,9 @@ test("get_agent_controls returns the controls list, and the kill switch is where
 
   const kill = where("kill switch");
   assert.ok(kill.includes("You → Wallet & permissions (/grant) → 'discard & start over'"), kill);
-  assert.ok(kill.includes("Telegram /kill, then /confirm"), kill);
+  // Hosted /kill does not stop the agent (the orchestrator restores the key), so it is named only as what NOT to use.
+  assert.ok(!kill.includes("Telegram /kill, then /confirm"), kill);
+  assert.ok(kill.includes("rather than the Telegram kill command"), kill);
   for (const c of AGENT_CONTROLS) {
     assert.ok(!/dashboard|→ Stop/.test(c.where), `${c.control}: no invented dashboard or Stop button (${c.where})`);
   }

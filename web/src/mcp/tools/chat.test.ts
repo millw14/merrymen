@@ -15,7 +15,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { afterEach, test } from "node:test";
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import {
-  PROPOSAL_NOTICE, RESEARCH_WARNING, fenceNote, partnerDeps, setConversationDepsForTest, withResearch,
+  PROPOSAL_NOTICE, RESEARCH_WARNING, fenceNote, partnerDeps, sendMessage, setConversationDepsForTest, withResearch,
   type ModelAnswer, type ModelInput, type ResearchNote,
 } from "@/lib/services/agent-conversation";
 import { STATE_BUDGET } from "@/lib/chat-state";
@@ -913,4 +913,27 @@ test("a model reply carrying NUL or other control characters is stored without t
   assert.equal(r.reply.content, "Fine today.\nAll good.");
   const stored = (d.raw.prepare("SELECT content FROM mcp_messages WHERE role = 'agent'").get() as { content: string }).content;
   assert.equal(stored.includes(nul), false);
+});
+
+test("a call abandoned before the model step starts no paid model call: the claimed exchange settles as a timeout", async () => {
+  const d = await makeTestDb();
+  let modelCalls = 0;
+  const controller = new AbortController();
+  const deps = {
+    readState: async () => ({ slug: SLUG_A, state: BASE_STATE }),
+    reply: async () => { modelCalls += 1; return { reply: "should not run" }; },
+    now: () => NOW, stateTimeoutMs: 2000, replyTimeoutMs: 2000,
+  };
+  // The signal fires after the state read and the claim, just before the model.
+  const readState = deps.readState;
+  deps.readState = async () => { const s = await readState(); controller.abort(); return s; };
+  const r = await sendMessage(d.db, {
+    tenant: OWNER_A, agentSlug: SLUG_A, connectionId: null, message: "hi", requestId: "req-abandon-1", dialect: "sqlite",
+    signal: controller.signal, settleDb: d.db,
+  }, deps);
+  assert.equal(modelCalls, 0, "no model call after the call was abandoned");
+  assert.equal(r.agent.status, "failed");
+  assert.equal(r.agent.error_code, "model_timeout");
+  const rows = d.raw.prepare("SELECT role, status FROM mcp_messages ORDER BY id").all() as Array<{ role: string; status: string }>;
+  assert.deepEqual(rows.map((x) => [x.role, x.status]), [["user", "complete"], ["agent", "failed"]], "nothing left pending");
 });

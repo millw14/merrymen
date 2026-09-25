@@ -58,6 +58,11 @@ export interface ToolContext {
   agent(ref?: string): Promise<OwnedAgent>;
   /** Every agent this connection may see. */
   agents(): Promise<OwnedAgent[]>;
+  /**
+   * Only for tools with settlesAfterTimeout: an unguarded handle for the ONE
+   * write that stores a paid call's result after the call may have timed out.
+   */
+  settleMcp?: () => Promise<McpDb>;
   directory: AgentDirectory;
 }
 
@@ -88,10 +93,11 @@ export interface ToolDef<I extends z.ZodType = z.ZodType, O extends z.ZodType = 
   timeoutMs?: number;
   /**
    * The handler stores what a paid external call produced (send_message: the
-   * model's reply), so ctx.mcp() hands out a database that still accepts its
-   * writes after the call timed out: the client is told to read the reply
-   * later, and that promise only holds if the reply is stored. Reads of the
-   * shared ledger and agent lookups still stop at the timeout.
+   * model's reply). ctx.settleMcp() then hands out a database that still
+   * accepts THAT write after the call timed out: the client is told to read the
+   * reply later, and that promise only holds if the reply is stored. Everything
+   * else (ctx.mcp(), the ledger, agent lookups) still stops at the timeout, so
+   * nothing new — no state read, no claim, no paid call — starts after it.
    */
   settlesAfterTimeout?: boolean;
   handler(args: z.infer<I>, ctx: ToolContext): Promise<ToolResult<z.infer<O>>>;
@@ -182,7 +188,7 @@ export function makeContext(principal: Principal, traceId: string, signal: Abort
     mcp: async () => {
       if (signal.aborted) throw abortError(signal);
       const d = await openMcp();
-      return o.settlesAfterTimeout ? d : { ...d, db: abortableDb(d.db, signal) };
+      return { ...d, db: abortableDb(d.db, signal) };
     },
     directory,
     ledger: (fn) => {
@@ -193,6 +199,7 @@ export function makeContext(principal: Principal, traceId: string, signal: Abort
         return fn(abortableDb(db, signal));
       });
     },
+    ...(o.settlesAfterTimeout ? { settleMcp: openMcp } : {}),
     // The directory reads the identity store and the grants: no new lookups after the call is abandoned either.
     agent: (ref) => (signal.aborted ? Promise.reject(abortError(signal)) : resolveOwnedAgent(principal, ref, directory)),
     agents: () => (signal.aborted ? Promise.reject(abortError(signal)) : reachableAgents(principal, directory)),
