@@ -19,11 +19,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -40,6 +40,9 @@ import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
+import dev.merrymen.app.market.SearchInput
+import dev.merrymen.app.market.SearchView
+import dev.merrymen.app.market.searchViews
 import dev.merrymen.app.net.SearchResults
 import dev.merrymen.app.ui.Empty
 import dev.merrymen.app.ui.EmptyKind
@@ -50,9 +53,6 @@ import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.PagePadTop
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.sans
-import dev.merrymen.app.market.SearchInput
-import dev.merrymen.app.market.SearchView
-import dev.merrymen.app.market.searchViews
 
 /** `.search` — terminal.css:2206: the one input in the terminal set to 16px. */
 private val SearchText = TextStyle(

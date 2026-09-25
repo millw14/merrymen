@@ -4,8 +4,11 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -28,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -58,6 +62,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
@@ -68,11 +73,33 @@ import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
+import dev.merrymen.app.market.HeroChange
+import dev.merrymen.app.market.PoolTradeRow
+import dev.merrymen.app.market.SPAN_SECONDS
+import dev.merrymen.app.market.TradesView
+import dev.merrymen.app.market.chartCaption
+import dev.merrymen.app.market.chartEmptySentence
+import dev.merrymen.app.market.completeBars
+import dev.merrymen.app.market.fmtCompactUsd
+import dev.merrymen.app.market.fmtCount
+import dev.merrymen.app.market.fmtMoney
+import dev.merrymen.app.market.fmtPrice
+import dev.merrymen.app.market.heroChange
+import dev.merrymen.app.market.newestForming
+import dev.merrymen.app.market.poolAgeNote
+import dev.merrymen.app.market.staleNote
+import dev.merrymen.app.market.tapeLabel
+import dev.merrymen.app.market.tradesView
+import dev.merrymen.app.market.trimToSpan
 import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.CandleRead
+import dev.merrymen.app.net.DiscoveryCoin
 import dev.merrymen.app.net.MerrymenApi
+import dev.merrymen.app.net.PoolEvidence
 import dev.merrymen.app.net.TokenDetail
 import dev.merrymen.app.net.TokenHolder
+import dev.merrymen.app.net.poolEvidenceOf
+import dev.merrymen.app.net.tapeWindows
 import dev.merrymen.app.ui.Avatar
 import dev.merrymen.app.ui.BOTTOM_INSET
 import dev.merrymen.app.ui.Bar
@@ -93,6 +120,10 @@ import kotlinx.coroutines.launch
 import java.math.BigDecimal
 import java.math.MathContext
 import java.math.RoundingMode
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 import java.util.Locale
 import kotlin.math.abs
 
@@ -153,15 +184,6 @@ private fun barSizeFor(window: String): String = when (window) {
   else -> "1h"
 }
 
-/** How much history each span claims. ALL trims nothing. */
-private val WINDOW_SECONDS: Map<String, Long> = mapOf(
-  "1H" to 3_600L,
-  "4H" to 14_400L,
-  "1D" to 86_400L,
-  "5D" to 432_000L,
-  "1M" to 2_592_000L,
-)
-
 /**
  * The cut the stock venue applies to its own answer.
  *
@@ -170,34 +192,17 @@ private val WINDOW_SECONDS: Map<String, Long> = mapOf(
  */
 private val VENUE_CUT: Map<String, Long> = mapOf("1H" to 3_600L, "4H" to 14_400L)
 
-private fun trim(bars: List<Bar>, seconds: Long?): List<Bar> {
-  if (seconds == null || bars.isEmpty()) return bars
-  val end = bars.last().time
-  return bars.filter { it.time >= end - seconds }
-}
-
 /**
- * A coin's bars, off the token document.
+ * A coin's bars, off the token document, trimmed to the span (SPAN_SECONDS;
+ * ALL trims nothing). Incomplete bars are dropped by completeBars.
  *
  * `uiMultiplier` is deliberately NOT applied here: it is a stock-contract
  * concept (a corporate action rebasing the on-chain unit), and a curve coin has
  * no such field. Multiplying a coin's bars by a number that does not exist for
  * it is how a chart quietly moves by 1e18.
  */
-private fun coinBars(candles: CandleRead?, window: String): List<Bar> {
-  val list = candles?.candles ?: return emptyList()
-  // An INCOMPLETE BAR IS DROPPED, the same rule [stockBars] applies to the
-  // venue's nulls: a gap is drawn as a gap, never as a bar to zero.
-  val bars = list.mapNotNull { k ->
-    val t = k.t ?: return@mapNotNull null
-    val o = k.o ?: return@mapNotNull null
-    val h = k.h ?: return@mapNotNull null
-    val l = k.l ?: return@mapNotNull null
-    val c = k.c ?: return@mapNotNull null
-    Bar(t, o, h, l, c)
-  }
-  return trim(bars, WINDOW_SECONDS[window])
-}
+private fun coinBars(candles: CandleRead?, window: String): List<Bar> =
+  trimToSpan(completeBars(candles), SPAN_SECONDS[window])
 
 /**
  * A stock's bars, through the venue proxy.
@@ -234,10 +239,12 @@ private suspend fun stockBars(
     // over-clipped 5D/1M so the chart showed fewer sessions than its label — and
     // the change line under the price, computed off the first drawn bar, then
     // read the wrong span. bars.ts trims stocks by cut alone.
-    Loaded.Value(trim(out, VENUE_CUT[window]))
+    Loaded.Value(trimToSpan(out, VENUE_CUT[window]))
   }
   is ApiResult.Refused -> Loaded.Refused(r.status, r.message)
-  is ApiResult.Unreachable -> Loaded.Unreachable(r.cause)
+  // `unreadable` travels: an answer the venue sent and we could not read is
+  // not "could not reach", and ChartPane says the two differently.
+  is ApiResult.Unreachable -> Loaded.Unreachable(r.cause, r.unreadable)
 }
 
 @Composable
@@ -252,6 +259,14 @@ fun TokenDetailScreen(nav: NavHostController, address: String) {
   var kind by remember { mutableStateOf(ChartKind.CANDLE) }
   var said by remember { mutableStateOf<String?>(null) }
   var copied by remember { mutableStateOf(false) }
+  // Bumped by Try again: part of the read's key, so a failed first read is
+  // read again whole — bars included — rather than the document alone, which
+  // left the chart saying "Loading the chart…" for ever.
+  var attempt by remember { mutableIntStateOf(0) }
+  // THE POOL EVIDENCE IS ASKED FOR ONCE PER TOKEN, on the first read, the way
+  // the web's token-page read does (?activity=1, keyed on the token alone).
+  // A span change re-reads bars, not the pool's trades.
+  var activity by remember(address) { mutableStateOf<ActivityRead>(ActivityRead.Unasked) }
 
   val watched by c.session.watchlist.collectAsState(initial = emptySet())
   // The Android watchlist keys on the LOWERCASED address; the web's
@@ -275,11 +290,16 @@ fun TokenDetailScreen(nav: NavHostController, address: String) {
   // Refetched on the SPAN because a coin's bars travel inside the token
   // document and their size depends on it. A stock refetch is a second call, and
   // both are cached upstream for minutes.
-  LaunchedEffect(address, window) {
+  LaunchedEffect(address, window, attempt) {
     bars = Loaded.Loading
-    val d = c.api.token(address, barSizeFor(window)).toLoaded()
+    val ask = activity is ActivityRead.Unasked
+    val d = c.api.token(address, barSizeFor(window), activity = ask).toLoaded()
     detail = d
     val t = (d as? Loaded.Value)?.value
+    // Only an answered read settles the evidence: a failed one asks again next
+    // time. The route attaches evidence to a coin only, so asking costs a stock
+    // nothing.
+    if (ask && t != null) activity = ActivityRead.Read(poolEvidenceOf(t.evidence))
     bars = when {
       t == null -> Loaded.Loading
       t.market.kind == "memecoin" -> Loaded.Value(coinBars(t.candles, window))
@@ -354,9 +374,7 @@ fun TokenDetailScreen(nav: NavHostController, address: String) {
 
         LoadedBlock(
           detail,
-          onRetry = {
-            scope.launch { detail = c.api.token(address, barSizeFor(window)).toLoaded() }
-          },
+          onRetry = { attempt++ },
         ) { t ->
           // BOTH TICKERS ARE ATTACKER-CHOSEN, and theses are matched to a page
           // by symbol. Without this an agent's real reasoning about NVDA prints
@@ -386,11 +404,22 @@ fun TokenDetailScreen(nav: NavHostController, address: String) {
           }
 
           val list = (bars as? Loaded.Value)?.value.orEmpty()
+          val isCoin = t.market.kind == "memecoin"
+          val nowSec = System.currentTimeMillis() / 1000
           Hero(
             price = t.market.stock?.priceUsd ?: t.market.coin?.priceUsd,
             fdvUsd = t.market.coin?.fdvUsd,
-            bars = list,
-            window = window,
+            // Worked out against the WHOLE answer, not only the drawn span, so
+            // the label can say whether the data reaches back that far.
+            change = heroChange(
+              drawn = list,
+              all = if (isCoin) completeBars(t.candles) else list,
+              window = window,
+              coin = isCoin,
+              interval = t.candles?.interval ?: 0,
+              stale = t.candles?.stale == true,
+              nowSec = nowSec,
+            ),
           )
 
           PriceNotes(t)
@@ -400,12 +429,21 @@ fun TokenDetailScreen(nav: NavHostController, address: String) {
           // given the axis strip's own 18px inset so it lands level with the
           // body text rather than 2px from the screen edge.
           Column(Modifier.bleed(18.dp).padding(bottom = 8.dp)) {
-            ChartPane(bars, kind, t)
+            ChartPane(bars, kind, t, window, nowSec)
             ChartTools(
               window = window,
               onWindow = { window = it },
               kind = kind,
               onKind = { kind = it },
+            )
+          }
+
+          // `{token.kind === "memecoin" && <TokenActivity …/>}` — Token.tsx:363.
+          if (isCoin) {
+            MarketActivity(
+              coin = t.market.coin,
+              read = activity,
+              onOpen = { url -> openInBrowser(ctx, url)?.let { said = it } },
             )
           }
 
@@ -601,18 +639,14 @@ private fun TokenTop(
  * CHART's colour (`const down = (winPct ?? 0) < 0`) and live.ts:283-296 names
  * that pattern as the bug `deltaClass` exists to fix. The text escapes it by
  * being gated on `winPct != null`, and that gate is kept here.
+ *
+ * THE LABEL SAYS WHAT THE CHANGE IS OVER, which is not always the span that
+ * was tapped: a nine-hour-old pool on 1D reads "since first trade 9h ago",
+ * and a stale series adds "as of the last read" (heroChange). The web still
+ * prints the tapped span either way.
  */
 @Composable
-private fun Hero(price: Double?, fdvUsd: Double?, bars: List<Bar>, window: String) {
-  val first = bars.firstOrNull()
-  val last = bars.lastOrNull()
-  val winPct = if (first != null && last != null && first.open > 0.0) {
-    ((last.close - first.open) / first.open) * 100.0
-  } else {
-    null
-  }
-  val winDol = if (first != null && last != null) last.close - first.open else null
-
+private fun Hero(price: Double?, fdvUsd: Double?, change: HeroChange?) {
   Row(
     Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 14.dp),
     horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -633,10 +667,10 @@ private fun Hero(price: Double?, fdvUsd: Double?, bars: List<Bar>, window: Strin
         color = MerryColors.tx,
         maxLines = 1,
       )
-      if (winPct != null && winDol != null) {
-        val down = winPct < 0.0
+      if (change != null) {
+        val down = change.pct < 0.0
         Text(
-          text = "${if (down) "▼" else "▲"} ${money(abs(winDol))} ${pctPts(winPct)} $window",
+          text = "${if (down) "▼" else "▲"} ${money(abs(change.dollars))} ${pctPts(change.pct)} ${change.label}",
           style = TextStyle(
             fontFamily = numerals(FontWeight.W600),
             fontSize = 13.sp,
@@ -740,50 +774,37 @@ private fun PriceNotes(t: TokenDetail) {
  * conflation.
  */
 @Composable
-private fun ChartPane(bars: Loaded<List<Bar>>, kind: ChartKind, t: TokenDetail) {
+private fun ChartPane(bars: Loaded<List<Bar>>, kind: ChartKind, t: TokenDetail, window: String, nowSec: Long) {
   val candles = t.candles
+  val coin = t.market.kind == "memecoin"
   when (bars) {
     is Loaded.Value ->
       if (bars.value.isEmpty()) {
-        ChartStatus(
-          when {
-            candles?.state == "mismatch" ->
-              "The index has bars for this pool, but they are about the other side of the pair — " +
-                "so they are not this token's prices and are not drawn."
-            candles?.state == "none" -> "This pool has published no bars in that span."
-            candles?.state == "refused" -> "We could not read the price series just now."
-            else -> "No bars for that span."
-          },
-        )
+        // One sentence per state, and `refused` worded by its reason: a 429
+        // on our side is not this token having no history (chartEmptySentence).
+        ChartStatus(chartEmptySentence(candles, coin, window, t.market.symbol ?: t.ledger.symbol))
       } else {
-        // THE NEWEST BAR IS ALWAYS PARTIAL — measured at one minute into an
-        // hour, one sixtieth complete — so it is drawn faint and said out loud.
-        val partial = candles?.lastBarAgeSec?.let { candles.interval > 0 && it < candles.interval } ?: true
-        PriceChart(bars.value, kind, partialLast = partial)
-        val gaps = candles?.gaps ?: 0
-        ChartCaption(
-          // Each clause closes itself. Built the other way round, a series with
-          // no label and no gaps read "79 bars The newest bar is still forming"
-          // — two sentences run together, which is what a caption assembled from
-          // optional parts does unless every part ends itself.
-          buildString {
-            append(bars.value.size)
-            append(if (bars.value.size == 1) " bar" else " bars")
-            candles?.label?.takeIf { it.isNotBlank() }?.let { append(", ").append(it) }
-            append(".")
-            if (gaps > 0) {
-              append(" ")
-              append(gaps)
-              append(" periods published nothing and are left out rather than drawn across.")
-            }
-            if (partial) append(" The newest bar is still forming, so it is drawn faint.")
-          },
-        )
+        // SERVING AN OLD SERIES MUST NEVER BE SILENT. read-candles keeps the
+        // last good bars through a refusal, which beats a blank chart over one
+        // 429 — provided the chart says so, above itself, before anything else.
+        staleNote(candles)?.let { ChartStatus(it) }
+        // THE NEWEST BAR OF A LIVE READ IS PARTIAL — measured at one minute into
+        // an hour, one sixtieth complete — so it is drawn faint and said out
+        // loud. Of a stale read it is not "still forming": the read stopped.
+        val forming = newestForming(bars.value, candles, nowSec)
+        PriceChart(bars.value, kind, partialLast = forming)
+        ChartCaption(chartCaption(bars.value.size, candles, forming))
       }
     is Loaded.Refused -> ChartStatus(
       "The chart venue said no (${bars.status}). That is our read failing, not a price.",
     )
-    is Loaded.Unreachable -> ChartStatus("We could not reach the chart venue: " + bars.cause)
+    is Loaded.Unreachable -> ChartStatus(
+      if (bars.unreadable) {
+        "The chart venue answered with something we couldn't read. That's ours to fix, not a price."
+      } else {
+        "We couldn't reach the chart venue just now: " + bars.cause
+      },
+    )
     // U+2026, as the web writes it — not three periods.
     else -> ChartStatus("Loading the chart…")
   }
@@ -1588,6 +1609,215 @@ private fun Modifier.tap(label: String? = null, onClick: () -> Unit): Modifier {
 /** For a control whose whole content is a Canvas or a bare glyph. */
 private fun Modifier.describedAs(text: String): Modifier =
   this.semantics { contentDescription = text }
+
+// ---------------------------------------------------------------------------
+// MARKET ACTIVITY — the pool's public trades and the index's tape
+// ---------------------------------------------------------------------------
+
+/** Where the pool evidence stands for this token. */
+private sealed interface ActivityRead {
+  /** The first read of the token has not answered yet. */
+  data object Unasked : ActivityRead
+
+  /** It answered; the evidence it carried, or null when there was none to read. */
+  data class Read(val evidence: PoolEvidence?) : ActivityRead
+}
+
+/**
+ * `.token-activity` — TokenActivity.tsx and terminal.css:8256-8276: a 16px-radius
+ * hairline box, 16px padding on a phone, the facts stacked in one column.
+ *
+ * TWO DIFFERENT SOURCES, SAID APART. The facts and the window tape are the
+ * index's own figures off the coin row; the trades are a SAMPLE of public pool
+ * swaps — "not your agent's fills", and never added up into a total here.
+ * A failed or missing trade read is "temporarily unavailable", never "no
+ * trades", which is the one distinction token-activity.test.ts pins on the web.
+ */
+@Composable
+private fun MarketActivity(coin: DiscoveryCoin?, read: ActivityRead, onOpen: (String) -> Unit) {
+  val shape = RoundedCornerShape(16.dp)
+  Column(
+    Modifier
+      .fillMaxWidth()
+      .padding(vertical = 24.dp)
+      .clip(shape)
+      .border(1.dp, MerryColors.line, shape)
+      .padding(16.dp),
+    verticalArrangement = Arrangement.spacedBy(6.dp),
+  ) {
+    ActivityHeading("Market activity")
+    if (coin == null) {
+      StatusLine("Pool activity is unavailable for this token.")
+      return@Column
+    }
+    Meta(listOfNotNull(coin.venue, "Indexed pool data").joinToString(" · "))
+
+    // `.activity-facts`, one column on a phone.
+    val dayNote = poolAgeNote(coin.ageDays, 86_400)?.let { " · $it" } ?: ""
+    ActivityFact("24h volume$dayNote", fmtCompactUsd(coin.volume24hUsd))
+    ActivityFact(if (coin.onCurve) "Virtual / indexed reserve" else "Indexed liquidity", fmtCompactUsd(coin.reserveUsd))
+    ActivityFact("24h buyers$dayNote", fmtCount(coin.buyers24h?.toLong()))
+    Meta(
+      if (coin.onCurve) {
+        "Curve reserves can include virtual liquidity and are not an available exit quote."
+      } else {
+        "Indexed liquidity is not a guaranteed execution price."
+      },
+    )
+
+    // "Reported trading windows" — a window the index omitted reads "—".
+    ActivitySubheading("Reported trading windows")
+    ActivityTableRow(listOf("Window", "Volume", "Buys", "Sells"), head = true)
+    tapeWindows(coin.buckets).forEach { w ->
+      ActivityTableRow(
+        listOf(
+          tapeLabel(w, coin.ageDays),
+          fmtCompactUsd(w.volumeUsd),
+          fmtCount(w.buys),
+          fmtCount(w.sells),
+        ),
+      )
+    }
+
+    ActivitySubheading("Recent pool buys & sells")
+    Meta("Public market trades, not your agent's fills. Latest indexed sample; may omit trades.")
+    when (read) {
+      ActivityRead.Unasked -> Meta("Loading pool activity…")
+      is ActivityRead.Read -> when (val v = tradesView(read.evidence, System.currentTimeMillis())) {
+        TradesView.Unavailable -> StatusLine("Recent trades are temporarily unavailable.")
+        is TradesView.NoneInSample -> {
+          Meta(snapshotLine(v.observedAtMs, v.older))
+          StatusLine("No matching trades were returned in this sample.")
+        }
+        is TradesView.Rows -> {
+          Meta(snapshotLine(v.observedAtMs, v.older))
+          ActivityTableRow(listOf("Side", "Value", "Token price", "Time"), head = true)
+          v.rows.forEach { r -> TradeLine(r, onOpen) }
+        }
+      }
+    }
+  }
+}
+
+/** "Snapshot · 24 Sept 2026, 14:05" — or "Older snapshot" past two minutes. */
+private fun snapshotLine(observedAtMs: Long?, older: Boolean): String {
+  val word = if (older) "Older snapshot" else "Snapshot"
+  val at = observedAtMs?.let {
+    DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT)
+      .withZone(ZoneId.systemDefault())
+      .format(Instant.ofEpochMilli(it))
+  } ?: "Time unavailable"
+  return "$word · $at"
+}
+
+@Composable
+private fun ActivityHeading(text: String) {
+  Text(
+    text = text,
+    style = TextStyle(fontFamily = sans(15.sp, FontWeight.W600), fontSize = 15.sp, fontWeight = FontWeight.W600),
+    color = MerryColors.tx,
+    modifier = Modifier.padding(bottom = 4.dp),
+  )
+}
+
+@Composable
+private fun ActivitySubheading(text: String) {
+  Text(
+    text = text,
+    style = TextStyle(fontFamily = sans(13.sp, FontWeight.W600), fontSize = 13.sp, fontWeight = FontWeight.W600),
+    color = MerryColors.tx,
+    modifier = Modifier.padding(top = 18.dp),
+  )
+}
+
+/** One `.activity-facts` cell: the label at 12px `--tx-2`, the figure at 20px. */
+@Composable
+private fun ActivityFact(label: String, value: String) {
+  Column(Modifier.padding(top = 8.dp)) {
+    Text(label, style = TextStyle(fontFamily = sans(12.sp), fontSize = 12.sp), color = MerryColors.tx2)
+    Text(
+      text = value,
+      style = TextStyle(fontFamily = numerals(FontWeight.W600), fontSize = 20.sp, fontWeight = FontWeight.W600),
+      color = if (value == "—") MerryColors.faint else MerryColors.tx,
+      modifier = Modifier.padding(top = 4.dp),
+    )
+  }
+}
+
+/** A table row: the first cell left, the rest right, tabular figures, a hairline above. */
+@Composable
+private fun ActivityTableRow(cells: List<String>, head: Boolean = false, modifier: Modifier = Modifier) {
+  Row(
+    modifier
+      .fillMaxWidth()
+      .drawBehind { if (!head) drawRect(MerryColors.line, size = Size(size.width, 1.dp.toPx())) }
+      .padding(vertical = if (head) 6.dp else 10.dp),
+    horizontalArrangement = Arrangement.spacedBy(6.dp),
+  ) {
+    cells.forEachIndexed { i, cell ->
+      Text(
+        text = cell,
+        maxLines = 2,
+        style = TextStyle(
+          fontFamily = if (head) sans(12.sp) else numerals(FontWeight.W400),
+          fontSize = if (head) 12.sp else 13.sp,
+        ),
+        color = when {
+          head -> MerryColors.tx2
+          cell == "—" -> MerryColors.faint
+          else -> MerryColors.tx
+        },
+        textAlign = if (i == 0) TextAlign.Start else TextAlign.End,
+        modifier = Modifier.weight(if (i == 0) 1.3f else 1f),
+      )
+    }
+  }
+}
+
+/**
+ * One public trade. The side takes `--up`/`--down` as TEXT (`.activity-buy`,
+ * `.activity-sell`); the row opens the transaction on the explorer in the
+ * user's own browser — only when the hash is a hash (explorerTxUrl).
+ */
+@Composable
+private fun TradeLine(r: PoolTradeRow, onOpen: (String) -> Unit) {
+  val time = DateTimeFormatter.ofLocalizedTime(FormatStyle.MEDIUM)
+    .withZone(ZoneId.systemDefault())
+    .format(Instant.ofEpochSecond(r.timeSec))
+  val url = r.txUrl
+  Row(
+    Modifier
+      .fillMaxWidth()
+      .then(if (url != null) Modifier.tap("View this transaction") { onOpen(url) } else Modifier)
+      .drawBehind { drawRect(MerryColors.line, size = Size(size.width, 1.dp.toPx())) }
+      .padding(vertical = 10.dp),
+    horizontalArrangement = Arrangement.spacedBy(6.dp),
+  ) {
+    val cell = TextStyle(fontFamily = numerals(FontWeight.W400), fontSize = 13.sp)
+    Text(
+      text = if (r.buy) "Buy" else "Sell",
+      style = cell,
+      color = if (r.buy) MerryColors.up else MerryColors.down,
+      modifier = Modifier.weight(1.3f),
+    )
+    Text(fmtMoney(r.usd), style = cell, color = if (r.usd == null) MerryColors.faint else MerryColors.tx, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+    Text(fmtPrice(r.priceUsd), style = cell, color = if (r.priceUsd == null) MerryColors.faint else MerryColors.tx, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+    Text(if (url != null) "$time ↗" else time, style = cell, color = MerryColors.tx2, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+  }
+}
+
+/**
+ * OPEN A PAGE IN THE USER'S OWN BROWSER — a Custom Tab, never the WebView,
+ * which exists for our own signature ceremonies (see Owner.openX). Returns
+ * the sentence to show when nothing on the device can open it.
+ */
+private fun openInBrowser(ctx: Context, url: String): String? =
+  try {
+    CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(ctx, Uri.parse(url))
+    null
+  } catch (e: android.content.ActivityNotFoundException) {
+    "Nothing on this device can open the explorer link."
+  }
 
 // ---------------------------------------------------------------------------
 // CLIPBOARD AND SHARE
