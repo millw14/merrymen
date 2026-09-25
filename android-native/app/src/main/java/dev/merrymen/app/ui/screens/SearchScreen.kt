@@ -41,11 +41,13 @@ import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
 import dev.merrymen.app.market.SearchInput
+import dev.merrymen.app.market.SearchList
 import dev.merrymen.app.market.SearchShown
 import dev.merrymen.app.market.SearchView
+import dev.merrymen.app.market.searchList
 import dev.merrymen.app.market.searchShown
 import dev.merrymen.app.market.searchViews
-import dev.merrymen.app.net.SearchResults
+import dev.merrymen.app.net.Discoveries
 import dev.merrymen.app.ui.Empty
 import dev.merrymen.app.ui.EmptyKind
 import dev.merrymen.app.ui.LoadedBlock
@@ -117,6 +119,9 @@ fun SearchScreen(nav: NavHostController) {
   // again rather than dropped as a repeat.
   var attempt by remember { mutableIntStateOf(0) }
   var view by remember { mutableStateOf<SearchView>(SearchView.Idle) }
+  // THE LAUNCHPAD COINS, read once for the screen and asked again by Try
+  // again after a failure: /api/search never matches them (searchList).
+  var coins by remember { mutableStateOf<Loaded<Discoveries>>(Loaded.Loading) }
   val focus = remember { FocusRequester() }
 
   // `autoFocus` on the input — Search.tsx:43. Somebody who opened search wants
@@ -127,6 +132,10 @@ fun SearchScreen(nav: NavHostController) {
   // screen should bet on. Losing the keyboard is a small miss; crashing on the
   // way into search is not.
   LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+
+  LaunchedEffect(attempt) {
+    if (coins !is Loaded.Value) coins = c.api.discoveries().toLoaded()
+  }
 
   // ONE COLLECTOR FOR THE LIFE OF THE SCREEN, fed by the text. searchViews
   // debounces it and cancels the request in flight when the text moves on, so
@@ -164,7 +173,9 @@ fun SearchScreen(nav: NavHostController) {
         SearchShown.Blank -> Unit
         SearchShown.Hint -> HintLine("Type at least two characters.")
         SearchShown.Loading -> LoadedBlock(Loaded.Loading) { _: Unit -> }
-        is SearchShown.Result -> LoadedBlock(shown.result, onRetry = { attempt++ }) { r -> SearchHits(r, nav) }
+        is SearchShown.Result -> LoadedBlock(shown.result, onRetry = { attempt++ }) { r ->
+          SearchHits(searchList(r, coins, q), nav)
+        }
       }
     }
     Spacer(Modifier.height(LocalBottomInset.current))
@@ -172,12 +183,22 @@ fun SearchScreen(nav: NavHostController) {
 }
 
 @Composable
-private fun SearchHits(r: SearchResults, nav: NavHostController) {
-  if (r.hits.isEmpty()) {
-    Empty("Nothing matched", "No token or agent by that name.", kind = EmptyKind.Search)
-    return
+private fun SearchHits(list: SearchList, nav: NavHostController) {
+  val hits = when (list) {
+    SearchList.StillReading -> {
+      LoadedBlock(Loaded.Loading) { _: Unit -> }
+      return
+    }
+    is SearchList.NoMatch -> {
+      Empty(list.title, list.body, kind = EmptyKind.Search)
+      return
+    }
+    is SearchList.Hits -> {
+      list.note?.let { NoteLine(it, Modifier.padding(bottom = 8.dp)) }
+      list.hits
+    }
   }
-  r.hits.forEach { h ->
+  hits.forEach { h ->
     TokRow(
       seed = h.title.orEmpty(),
       title = h.title.orEmpty(),
