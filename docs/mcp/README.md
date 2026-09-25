@@ -7,7 +7,7 @@ speaks MCP over Streamable HTTP with OAuth.
 
 **Connect in one click:** <https://app.merrymen.dev/connect/mcp>
 
-**In Claude Code:** `/plugin marketplace add millw14/merrymen`, then
+**In Claude Code:** `/plugin marketplace add https://github.com/millw14/merrymen.git`, then
 `/plugin install merrymen@merrymen` (run one at a time), for the server plus
 `/merrymen:status`, `/merrymen:why`, `/merrymen:portfolio` and more. See
 [Claude Code](clients.md#claude-code).

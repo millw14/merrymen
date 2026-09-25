@@ -8,14 +8,14 @@ or hasn't traded, your portfolio, a weekly review and token research.
 Inside Claude Code, run these one at a time:
 
 ```text
-/plugin marketplace add millw14/merrymen
+/plugin marketplace add https://github.com/millw14/merrymen.git
 /plugin install merrymen@merrymen
 ```
 
 Or from a terminal:
 
 ```bash
-claude plugin marketplace add millw14/merrymen
+claude plugin marketplace add https://github.com/millw14/merrymen.git
 claude plugin install merrymen@merrymen
 ```
 

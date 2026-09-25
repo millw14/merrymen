@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { ALL_TOOLS } from "./tools";
-import { PLUGIN_ID, PLUGIN_MARKETPLACE_REPO, PLUGIN_SERVER_URL, claudeCodePluginCommands } from "./install-links";
+import { PLUGIN_ID, PLUGIN_MARKETPLACE_URL, PLUGIN_SERVER_URL, claudeCodePluginCommands } from "./install-links";
 
 const root = new URL("../../../", import.meta.url);
 const read = (rel: string) => readFileSync(new URL(rel, root), "utf8");
@@ -27,8 +27,8 @@ test("the marketplace lists the plugin from its own directory, under the id the 
   assert.equal(`${entries[0].name}@${market.name}`, PLUGIN_ID);
   assert.equal(entries[0].source, "./plugins/merrymen");
   assert.ok(existsSync(new URL(`${PLUGIN}.claude-plugin/plugin.json`, root)));
-  assert.equal(PLUGIN_MARKETPLACE_REPO, "millw14/merrymen");
-  assert.deepEqual(claudeCodePluginCommands(PLUGIN_SERVER_URL), ["/plugin marketplace add millw14/merrymen", "/plugin install merrymen@merrymen"]);
+  assert.equal(PLUGIN_MARKETPLACE_URL, "https://github.com/millw14/merrymen.git");
+  assert.deepEqual(claudeCodePluginCommands(PLUGIN_SERVER_URL), ["/plugin marketplace add https://github.com/millw14/merrymen.git", "/plugin install merrymen@merrymen"]);
 });
 
 test("the plugin's server is the production endpoint, the same address the connect page falls back to", () => {
@@ -113,5 +113,5 @@ test("changing what the plugin runs needs a version bump, or installed copies ne
 test("the plugin's README lists every command", () => {
   const readme = read(`${PLUGIN}README.md`);
   for (const skill of skills) assert.ok(readme.includes(`/merrymen:${skill}`), skill);
-  assert.ok(readme.includes("/plugin marketplace add millw14/merrymen") && readme.includes("/plugin install merrymen@merrymen"));
+  assert.ok(readme.includes("/plugin marketplace add https://github.com/millw14/merrymen.git") && readme.includes("/plugin install merrymen@merrymen"));
 });
