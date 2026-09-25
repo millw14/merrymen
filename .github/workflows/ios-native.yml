@@ -28,11 +28,13 @@ jobs:
       - run: node ios-native/Branding/generate.mjs --check
       - run: node ios-native/Signing/verify-engine.mjs
       - run: node ios-native/Signing/verify-engine.mjs --trencher
+      - run: node ios-native/Signing/verify-engine.mjs --legacy
       - run: node ios-native/Signing/verify-feed.mjs
       - run: node ios-native/Signing/verify-crypto.mjs
+      - run: node ios-native/Signing/export-copy.mjs --check
   simulator:
     runs-on: macos-15
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Select Xcode
@@ -54,6 +56,26 @@ jobs:
             -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.5' \
             -derivedDataPath DerivedData -resultBundlePath TestResults.xcresult \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= | tee build.log
+      - name: Test iPad navigation and large text
+        working-directory: ios-native
+        run: |
+          set -o pipefail
+          IPAD_ID=$(xcrun simctl list devices available --json | python3 -c 'import sys,json; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for runtime,devices in d.items() if "iOS-18-5" in runtime for x in devices if x["name"].startswith("iPad")))')
+          xcodebuild test -project Merrymen.xcodeproj -scheme Merrymen \
+            -destination "platform=iOS Simulator,id=$IPAD_ID" \
+            -only-testing:MerrymenUITests/MerrymenUITests/testLargeTextNavigationAndRecovery \
+            -only-testing:MerrymenUITests/MerrymenUITests/testSpanishNavigationUsesSelectedLanguage \
+            -derivedDataPath DerivedData -resultBundlePath iPadResults.xcresult \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= | tee ipad-build.log
+      - name: Build unsigned Release device archive
+        working-directory: ios-native
+        run: |
+          set -o pipefail
+          xcodebuild archive -project Merrymen.xcodeproj -scheme Merrymen -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath Merrymen.xcarchive \
+            -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO DEVELOPMENT_TEAM= | tee archive.log
+          ditto -c -k --sequesterRsrc --keepParent Merrymen.xcarchive Merrymen-unsigned.xcarchive.zip
+          ditto -c -k --sequesterRsrc --keepParent DerivedData/Build/Products/Debug-iphonesimulator/Merrymen.app Merrymen-simulator.zip
       - name: Export simulator screenshots
         if: ${{ !cancelled() }}
         timeout-minutes: 2
@@ -62,6 +84,9 @@ jobs:
           if [ -d TestResults.xcresult ]; then
             xcrun xcresulttool export attachments --path TestResults.xcresult --output-path Screenshots
           fi
+          if [ -d iPadResults.xcresult ]; then
+            xcrun xcresulttool export attachments --path iPadResults.xcresult --output-path iPadScreenshots
+          fi
       - name: Archive test evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -69,13 +94,28 @@ jobs:
           name: native-ios-test-evidence
           path: |
             ios-native/build.log
+            ios-native/ipad-build.log
+            ios-native/archive.log
             ios-native/TestResults.xcresult
+            ios-native/iPadResults.xcresult
             ios-native/Screenshots
+            ios-native/iPadScreenshots
           retention-days: 7
       - name: Archive screenshots separately
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: native-ios-screenshots
-          path: ios-native/Screenshots/*.png
+          path: |
+            ios-native/Screenshots/*.png
+            ios-native/iPadScreenshots/*.png
           retention-days: 7
+      - name: Upload unsigned device archive and simulator app
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-ios-builds
+          path: |
+            ios-native/Merrymen-unsigned.xcarchive.zip
+            ios-native/Merrymen-simulator.zip
+          if-no-files-found: error
+          retention-days: 14

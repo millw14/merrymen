@@ -7,6 +7,12 @@ DerivedData/
 ExportOptions.plist
 Config/Signing.xcconfig
 TestResults.xcresult/
+iPadResults.xcresult/
+*.xcarchive.zip
+Merrymen-simulator.zip
+ipad-build.log
+archive.log
+iPadScreenshots/
 build.log
 Screenshots/
 ReviewEvidence/

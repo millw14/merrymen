@@ -1,6 +1,29 @@
 import XCTest
 
 final class MerrymenUITests: XCTestCase {
+    func testLargeTextNavigationAndRecovery() {
+        let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-reset-tour", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]; app.launch()
+        if app.buttons["Skip tour"].waitForExistence(timeout: 8) { app.buttons["Skip tour"].tap() }
+        app.buttons["Profile"].firstMatch.tap()
+        let recover = app.buttons["Recover an existing account"]
+        for _ in 0..<6 { if recover.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(recover.isHittable); recover.tap()
+        let old = app.buttons["Recover an older owner-key account"]
+        for _ in 0..<5 { if old.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(old.isHittable); old.tap()
+        XCTAssertTrue(app.secureTextFields["recovery-key"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.buttons["Read recovery account"].isEnabled)
+        capture(app, "Recovery available while signed out, with large text")
+    }
+    func testSpanishNavigationUsesSelectedLanguage() {
+        let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-reset-tour", "-test-language", "es"]; app.launch()
+        let skip = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "omitir")).firstMatch
+        if skip.waitForExistence(timeout: 8) { skip.tap() }
+        let profile = app.buttons["Perfil"].firstMatch
+        XCTAssertTrue(profile.waitForExistence(timeout: 8)); profile.tap()
+        XCTAssertTrue(app.buttons["Iniciar sesión"].waitForExistence(timeout: 8))
+        capture(app, "Spanish native navigation")
+    }
     func testGuestCanNavigateNativeTabsAndReadThesis() {
         let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-reset-tour"]; app.launch()
         XCTAssertTrue(app.buttons["Skip tour"].waitForExistence(timeout: 8)); app.buttons["Skip tour"].tap()

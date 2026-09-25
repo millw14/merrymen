@@ -16,6 +16,7 @@ struct WithdrawScreen: View {
     @State private var trencherVault: String?
     @State private var legacyKey: String?
     @State private var importing = false
+    @State private var restoring = false
     var body: some View {
         Page {
             Group {
@@ -26,6 +27,7 @@ struct WithdrawScreen: View {
                     NavigationLink("Wallet & permissions", value: Route.permissions)
                     Button("Recover an older owner-key account") { importing = true }.disabled(wallet.busy || reviewed != nil)
                     if legacyKey != nil { Text("Using an imported owner key for this recovery session.").font(.caption) }
+                    if legacyKey != nil, store.owner != nil { Button("Restore trading permissions") { restoring = true }.disabled(wallet.busy || unresolved) }
                     if let trencherVault {
                         Text("This account also has a Trencher vault. Its balances and positions are not included in this recovery plan. Withdrawing the smart account does not empty that vault.").foregroundStyle(.orange)
                         Text(trencherVault).font(.caption.monospaced()).textSelection(.enabled)
@@ -44,6 +46,13 @@ struct WithdrawScreen: View {
                         Metric(label: "ETH reserved for gas", value: rawUnits(plan["nativeReserveWei"].string, decimals: 18))
                         if plan["needsGas"].bool == true { Text("Add ETH on Robinhood Chain before withdrawing.").foregroundStyle(.orange) }
                         if !plan["unreadable"].array.isEmpty { Text("Some balances could not be read: " + plan["unreadable"].array.map(\.text).joined(separator: ", ")).foregroundStyle(.orange) }
+                        if plan["trencher"]["state"].text == "unread" { Text("The Trencher vault could not be read. Its balance is unknown and is not included in this withdrawal.").foregroundStyle(.orange) }
+                        if plan["trencher"]["funded"].bool == true {
+                            Divider(); Text("Separate Trencher vault").font(.headline)
+                            Text(plan["trencher"]["vault"].text).font(.caption.monospaced()).textSelection(.enabled)
+                            Rows(values: plan["trencher"]["balances"].array) { row in Metric(label: row["symbol"].text, value: row["amount"].text) }
+                            Text("These assets remain in the Trencher vault. The current recovery service handles the account and Class vaults; it does not relay Trencher recovery.").foregroundStyle(.orange)
+                        }
                         ForEach(Array(plan["classVaults"].array.enumerated()), id: \.offset) { _, vault in
                             Divider()
                             Text("Class vault \(vault["version"].text)").font(.headline)
@@ -94,15 +103,22 @@ struct WithdrawScreen: View {
             }
         }.navigationTitle("Withdraw").navigationBarBackButtonHidden(wallet.busy)
         .task { await load() }
-        .onDisappear { if !wallet.busy { legacyKey = nil } }
+        .onDisappear {
+            if !wallet.busy, !importing, !restoring, reviewed == nil, legacyKey != nil {
+                legacyKey = nil; input = nil; plan = nil; result = nil; records = []; acknowledged = false
+            }
+        }
         .sheet(isPresented: $importing) {
             NavigationStack { RecoveryImportScreen { recovered, key in
                 legacyKey = key
-                input = .object(["smartAccount": recovered["smartAccount"], "grantTokens": recovered["grantTokens"], "recoveryOwner": recovered["recoveryOwner"]])
+                input = .object(["smartAccount": recovered["smartAccount"], "grantTokens": recovered["grantTokens"], "recoveryOwner": recovered["recoveryOwner"], "trencher": recovered["trencher"]])
                 plan = recovered; result = nil; acknowledged = false; recipient = ""; trencherVault = nil
                 selectedVault = recovered["classVaults"].array.first(where: { !$0["holdings"].array.isEmpty })?["vault"].text ?? ""
                 do { try readRecords(recovered["recoveryOwner"].text); error = nil } catch { self.error = error.localizedDescription; unresolved = true }
             } }
+        }
+        .sheet(isPresented: $restoring) {
+            if let input, let legacyKey { NavigationStack { GrantScreen(creating: false, recovery: input, recoveryKey: legacyKey) } }
         }
         .sheet(item: $reviewed) { selected in
             NavigationStack { Page {

@@ -3,6 +3,15 @@ import UIKit
 @testable import Merrymen
 
 final class PackagingTests: XCTestCase {
+    func testAllWebLanguagesShipNativeNavigationAndFinancialCopy() {
+        for (locale, _) in Language.options {
+            XCTAssertNotEqual(Language.ui("Home", locale: locale), locale == "en" ? "__invalid__" : "Home", locale)
+            XCTAssertFalse(Language.text("mode.liveNote", locale: locale).isEmpty)
+            XCTAssertFalse(Language.text("mode.ack", locale: locale).isEmpty)
+        }
+        XCTAssertEqual(Language.ui("Withdraw", locale: "es"), "Retirar")
+        XCTAssertEqual(Language.text("settings.label.agentName", locale: "es"), Language.text("settings.label.agentName", locale: "en"), "Match the web's incomplete-namespace fallback")
+    }
     func testAppActuallyShipsArtworkFontsAndWalletLibrary() throws {
         let bundle = Bundle(for: AppStore.self)
         for name in ["WalletRuntime", "WalletEngine", "FeedEngine", "WalletCryptography"] {

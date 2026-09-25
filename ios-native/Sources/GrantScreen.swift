@@ -6,6 +6,8 @@ struct GrantScreen: View {
     @EnvironmentObject var store: AppStore
     @AppStorage("language") private var language = "en"
     let creating: Bool
+    var recovery: J? = nil
+    var recoveryKey: String? = nil
     @StateObject private var wallet = WalletHost()
     @StateObject private var presentation = FeedPresentation()
     @State private var settings: J?
@@ -85,7 +87,7 @@ struct GrantScreen: View {
                     Card {
                         Text(result["handoff"]["ok"].bool == true ? "Permission accepted" : "Permission saved on this device").font(.title2.bold())
                         Text(result["smartAccount"].text).font(.caption.monospaced()).textSelection(.enabled)
-                        Text("Your owner key stays in your embedded wallet. The trading permission is stored in this device's Keychain.")
+                        Text(recoveryKey == nil ? "Your owner key stays in your embedded wallet. The trading permission is stored in this device's Keychain." : "Your original recovery key remains in this recovery session. Keep your original backup. The new trading permission is stored in this device's Keychain.")
                         if result["handoff"]["ok"].bool != true {
                             Text(result["handoff"]["error"].string ?? "The service did not confirm activation.").foregroundStyle(.orange)
                             Button("Check activation / retry saved grant") { Task { await retrySaved() } }.disabled(wallet.busy || submitting)
@@ -112,8 +114,11 @@ struct GrantScreen: View {
                         Metric(label: "Mode", value: review["settingsToSave"]["liveTradingEnabled"].bool == true ? "Live" : "Paper")
                     }
                     Text("You authorize automated trading within these limits. Signing does not deposit or withdraw funds.")
-                    if store.privy == nil { Text("This build needs the public Privy iOS Client ID before it can sign.").foregroundStyle(.orange) }
-                    Button("Sign and activate") { Task { await activate(review) } }.buttonStyle(PrimaryButtonStyle()).disabled(submitting || wallet.busy || store.privy == nil)
+                    if recoveryKey != nil {
+                        Text("This restores the reviewed account using its original owner key. Your signed-in wallet must also authorize linking it to this login.")
+                        if ExternalWalletConnection.shared.configured { Button("Connect login wallet") { ExternalWalletConnection.shared.present() } }
+                    } else if store.privy == nil { Text("This build needs the public Privy iOS Client ID before it can sign.").foregroundStyle(.orange) }
+                    Button("Sign and activate") { Task { await activate(review) } }.buttonStyle(PrimaryButtonStyle()).disabled(submitting || wallet.busy || (recoveryKey == nil && store.privy == nil))
                     if wallet.busy { ProgressView(wallet.status) }
                 Button("Cancel", role: .cancel) { self.review = nil }.disabled(submitting || wallet.busy)
             } }.interactiveDismissDisabled(submitting || wallet.busy)
@@ -127,12 +132,17 @@ struct GrantScreen: View {
             let saved = try await store.api.request("/api/settings")
             guard saved["owner"].text.lowercased() == owner?.lowercased() else { throw APIError(status: 0, message: "The settings belong to another session.") }
             if creating && status["exists"].bool == true { throw APIError(status: 0, message: "Your agent already exists. Open Wallet & permissions to manage it.") }
-            if !creating && status["grant"] == .null { throw APIError(status: 0, message: "No active grant was found. Open Create agent to restore management.") }
+            if !creating && status["grant"] == .null && recovery == nil { throw APIError(status: 0, message: "No active grant was found. Open Create agent to restore management.") }
             grant = status["grant"] == .null ? nil : status["grant"]
+            if recovery?["trencher"]["funded"].bool == true { trencher = true }
             if let grant {
-                guard grant["owner"].text.lowercased() == owner?.lowercased(), grant["chainId"].number == 4663, grant["binding"]["version"].text == "privy-did-owner-v1" else { throw APIError(status: 0, message: "This account uses a legacy owner or another network. It cannot be replaced by your embedded wallet.") }
+                if let recovery {
+                    guard grant["smartAccount"].text.lowercased() == recovery["smartAccount"].text.lowercased(), grant["owner"].text.lowercased() == recovery["recoveryOwner"].text.lowercased(), grant["chainId"].number == 4663 else { throw APIError(status: 0, message: "Another account is active. Stand it down before restoring this older account; its funds remain in the original wallet.") }
+                } else {
+                    guard grant["owner"].text.lowercased() == owner?.lowercased(), grant["chainId"].number == 4663, grant["binding"]["version"].text == "privy-did-owner-v1" else { throw APIError(status: 0, message: "This account needs its original owner key. Open Withdraw, recover that account, then choose Restore trading permissions.") }
+                }
                 for field in fields { caps[field.0] = grant["caps"][field.0].text }
-                trencher = grant["trencherVaultAddress"].string != nil
+                trencher = grant["trencherVaultAddress"].string != nil || recovery?["trencher"]["funded"].bool == true
             }
             settings = saved; name = saved.setting("agentName").text; strategy = saved.setting("strategy").text.isEmpty ? "steady-basket" : saved.setting("strategy").text
             mode = saved.setting("assetMode").text.isEmpty ? "all" : saved.setting("assetMode").text
@@ -155,6 +165,10 @@ struct GrantScreen: View {
             var input: [String: J] = ["caps": .object(parsed), "extraTokens": .array(fresh.setting("customTokens").array), "autonomousTrencher": .bool(trencher)]
             for key in ["v4AdapterAddress", "ponsAdapterAddress", "ponsClassVaultFactory"] { if let value = fresh.setting(key).string, !value.isEmpty { input[key] = .string(value) } }
             if let grant { input["expectAccount"] = grant["smartAccount"]; if let factory = grant["trencherFactoryAddress"].string { input["priorTrencherFactory"] = .string(factory) } }
+            if let recovery {
+                input["expectAccount"] = recovery["smartAccount"]; input["recoveryOwner"] = recovery["recoveryOwner"]
+                if recovery["trencher"]["funded"].bool == true { input["priorTrencherFactory"] = recovery["trencher"]["factory"] }
+            }
             if creating {
                 basket.formIntersection(presentation.assets(fresh, mode: mode))
                 guard paper || liveAcknowledged else { throw APIError(status: 0, message: words("create.errAck")) }
@@ -173,12 +187,12 @@ struct GrantScreen: View {
             let owner = review["reviewOwner"].string
             try await store.verifyOwner(owner)
             let latest = try await store.api.request("/api/grants")
-            guard creating ? latest["exists"].bool == false : latest["grant"]["sessionKeyAddress"] == review["reviewSessionKey"] else { throw APIError(status: 409, message: "Your grant changed on another device. Reload and review it again.") }
+            guard creating ? latest["exists"].bool == false : latest["grant"]["sessionKeyAddress"] == review["reviewSessionKey"] && (latest["exists"].bool == false || latest["grant"]["smartAccount"] == review["expectAccount"]) else { throw APIError(status: 409, message: "Your grant changed on another device. Reload and review it again.") }
             if review["settingsToSave"] != .null { _ = try await store.perform("/api/settings", method: "PUT", body: review["settingsToSave"], expectedOwner: owner) }
             try await store.verifyOwner(owner)
             var input = review.object
             for key in ["settingsToSave", "reviewOwner", "reviewSessionKey"] { input.removeValue(forKey: key) }
-            result = try await wallet.call("create", input: .object(input), store: store)
+            result = try await wallet.call(recoveryKey == nil ? "create" : "restore", input: .object(input), store: store, legacyKey: recoveryKey)
         } catch { self.error = "Permission was not confirmed: \(error.localizedDescription) Any settings already saved remain in effect." }
         self.review = nil
     }
@@ -190,8 +204,11 @@ struct GrantScreen: View {
             try await store.verifyOwner(owner)
             let latest = try await store.api.request("/api/grants")
             if latest["grant"]["sessionKeyAddress"] != saved["sessionKeyAddress"] {
-                guard let user = await store.privy?.getUser() else { throw APIError(status: 401, message: "Sign in to your embedded wallet again.") }
-                let token = try await user.getAccessToken()
+                let token: String?
+                if saved["binding"]["version"].text == "privy-did-owner-v1" {
+                    guard let user = await store.privy?.getUser() else { throw APIError(status: 401, message: "Sign in to your embedded wallet again.") }
+                    token = try await user.getAccessToken()
+                } else { token = nil }
                 _ = try await store.api.request("/api/grants", method: "POST", body: saved, token: token, expectedSession: session)
             }
             result = .object(["smartAccount": saved["smartAccount"], "handoff": .object(["ok": .bool(true)])])

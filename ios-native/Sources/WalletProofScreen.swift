@@ -57,6 +57,7 @@ struct WalletProofScreen: View {
                 }
                 if busy { ProgressView("Checking ownership…") }
                 if let error { Text(error).foregroundStyle(.orange) }
+                if let error = connection.error { Text(error).foregroundStyle(.orange) }
                 if let note { Text(note) }
             }
         }.navigationTitle(linking ? "Holder wallet" : "Wallet sign-in")

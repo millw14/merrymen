@@ -81,7 +81,7 @@
   globalThis.window = { location: { origin: 'https://app.merrymen.dev' } };
   globalThis.__runWallet = async (id, operation, input) => {
     try {
-      if (!['capabilities', 'recoverIdentity', 'create', 'plan', 'withdraw', 'reconcile'].includes(operation)) throw new Error('Unsupported wallet operation');
+      if (!['capabilities', 'recoverIdentity', 'create', 'restore', 'preview', 'plan', 'withdraw', 'reconcile'].includes(operation)) throw new Error('Unsupported wallet operation');
       const result = await WalletEngine[operation](JSON.parse(input));
       __nativeResult(id, true, JSON.stringify(result, (_, value) => typeof value === 'bigint' ? value.toString() : value));
     } catch (error) { __nativeResult(id, false, error?.message || 'Wallet operation failed'); }

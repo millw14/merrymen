@@ -11,7 +11,7 @@ public enum WalletNetworkPolicy {
         if url.host == "rpc.mainnet.chain.robinhood.com", ["", "/"].contains(url.path), url.query == nil,
            method == "POST", let rpcMethod, reads.contains(rpcMethod) { return url }
         guard url.host == "app.merrymen.dev", url.query == nil else { return nil }
-        if operation == "create" {
+        if ["create", "restore"].contains(operation) {
             if method == "GET", url.path == "/api/auth/challenge" { return url }
             if method == "POST", url.path == "/api/grants" { return url }
         }

@@ -46,7 +46,7 @@ struct NativeShell: View {
             .id(store.generation)
             .toolbarBackground(Brand.background, for: .tabBar, .navigationBar)
             .toolbarBackground(.visible, for: .tabBar, .navigationBar)
-            .navigationTitle(store.tab.rawValue)
+            .navigationTitle(LocalizedStringKey(store.tab.rawValue))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -156,7 +156,10 @@ struct Rows<Content: View>: View {
 struct Metric: View {
     let label: String
     let value: String
-    var body: some View { HStack { Text(label).foregroundStyle(.secondary); Spacer(); Text(value).monospacedDigit() } }
+    var body: some View { ViewThatFits(in: .horizontal) {
+        HStack { Text(LocalizedStringKey(label)).foregroundStyle(.secondary); Spacer(); Text(value).monospacedDigit() }
+        VStack(alignment: .leading, spacing: 4) { Text(LocalizedStringKey(label)).foregroundStyle(.secondary); Text(value).monospacedDigit().textSelection(.enabled) }
+    } }
 }
 struct TrendChart: View {
     let values: [Double]

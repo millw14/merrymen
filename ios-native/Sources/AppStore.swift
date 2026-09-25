@@ -51,6 +51,12 @@ final class AppStore: ObservableObject {
             try? SecureStore.remove("dev.merrymen.orders", "pendingOrder.0x1111111111111111111111111111111111111111")
         }
         #endif
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing"), let index = ProcessInfo.processInfo.arguments.firstIndex(of: "-test-language"), ProcessInfo.processInfo.arguments.indices.contains(index + 1) {
+            let locale = ProcessInfo.processInfo.arguments[index + 1]
+            if Language.options.contains(where: { $0.0 == locale }) { UserDefaults.standard.set(locale, forKey: "language") }
+        }
+        #endif
         let app = Bundle.main.object(forInfoDictionaryKey: "PrivyAppID") as? String ?? ""
         let client = Bundle.main.object(forInfoDictionaryKey: "PrivyClientID") as? String ?? ""
         if !app.isEmpty, !client.isEmpty, !app.contains("$("), !client.contains("$(") {

@@ -16,6 +16,10 @@ enum Language {
         for (name, replacement) in vars { value = value.replacingOccurrences(of: "{\(name)}", with: replacement) }
         return value
     }
+    static func ui(_ value: String, locale: String) -> String {
+        guard let path = Bundle.main.path(forResource: locale, ofType: "lproj"), let bundle = Bundle(path: path) else { return value }
+        return bundle.localizedString(forKey: value, value: value, table: "Localizable")
+    }
 }
 
 struct LanguagePicker: View {
@@ -23,7 +27,7 @@ struct LanguagePicker: View {
     var body: some View {
         Card {
             Picker("Language", selection: $language) { ForEach(Language.options, id: \.0) { code, name in Text(name).tag(code) } }
-            Text("The walkthrough uses the same language catalogue as the website. Native screens that are still being translated use English.").font(.caption).foregroundStyle(.secondary)
+            Text("Some text is available in English.").font(.caption).foregroundStyle(.secondary)
         }
     }
 }

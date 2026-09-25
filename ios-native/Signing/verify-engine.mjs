@@ -16,12 +16,15 @@ const fixturePath = path.join(root, 'ios-native/Signing/chain-fixtures.json');
 const fixtures = fs.existsSync(fixturePath) ? JSON.parse(fs.readFileSync(fixturePath, 'utf8')) : {};
 const recording = process.argv.includes('--record');
 const trencher = process.argv.includes('--trencher');
+const legacy = process.argv.includes('--legacy');
+const tenant = privateKeyToAccount('0x' + '22'.repeat(32));
+let restoring = false;
 const cache = new Map();
 const storage = new Map();
 const timers = new Map();
 let randomIndex = 0, signatures = 0, posted;
 let finish, fail;
-const complete = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+let complete = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
 const sync = (op, args) => {
   switch (op) {
     case 'random': return Array.from({ length: args.count }, () => (++randomIndex % 251) + 1);
@@ -41,6 +44,12 @@ const sync = (op, args) => {
 const handle = async (op, args) => {
   if (op === 'status') return null;
   if (op === 'accessToken') return 'TEST_ONLY_NOT_A_REAL_TOKEN';
+  if (op === 'signTenant') {
+    assert.equal(restoring, true); assert.equal(args.address.toLowerCase(), tenant.address.toLowerCase());
+    assert.ok(args.message.includes('You are linking the agent wallet below to this login. It moves no funds.'));
+    assert.ok(args.message.endsWith('URI: https://app.merrymen.dev\nNonce: fixture_nonce'));
+    return tenant.signMessage({ message: args.message });
+  }
   if (op === 'signMessage') {
     assert.equal(args.address.toLowerCase(), owner.address.toLowerCase());
     const signature = await owner.signMessage({ message: { raw: args.hex } });
@@ -59,13 +68,19 @@ const handle = async (op, args) => {
     posted = JSON.parse(args.body);
     assert.equal(posted.demoOwnerPrivateKey, undefined);
     assert.equal(posted.owner.toLowerCase(), owner.address.toLowerCase());
-    assert.equal(posted.binding.did, 'did:privy:ios-test');
+    if (restoring) {
+      assert.equal(posted.binding.did, undefined);
+      assert.equal(posted.binding.version, 'legacy-wallet-owner-v1');
+      const message = ['https://app.merrymen.dev wants you to authorize a merrymen agent account.', '', 'You are linking the agent wallet below to this login. It moves no funds.', '', `Agent account: ${posted.smartAccount.toLowerCase()}`, `Owner key: ${owner.address.toLowerCase()}`, 'Chain ID: 4663', 'URI: https://app.merrymen.dev', 'Nonce: fixture_nonce'].join('\n');
+      assert.equal((await recoverMessageAddress({ message, signature: posted.binding.walletSignature })).toLowerCase(), tenant.address.toLowerCase());
+      assert.equal((await recoverMessageAddress({ message, signature: posted.binding.ownerSignature })).toLowerCase(), owner.address.toLowerCase());
+    } else assert.equal(posted.binding.did, 'did:privy:ios-test');
     assert.ok(storage.has('merrymen.grant.v1'), 'Grant must be stored before handoff');
     return { status: 200, body: '{"ok":true}' }; // No real app request.
   }
   assert.equal(url.href, 'https://rpc.mainnet.chain.robinhood.com/');
   const rpc = JSON.parse(args.body);
-  assert.ok(['eth_chainId', 'eth_getCode', 'eth_call', 'eth_getBalance', 'eth_blockNumber', 'eth_gasPrice', 'eth_estimateGas', 'eth_getTransactionCount', 'eth_getBlockByNumber', 'eth_feeHistory', 'eth_maxPriorityFeePerGas'].includes(rpc.method), `Forbidden RPC ${rpc.method}`);
+  assert.ok(['eth_chainId', 'eth_getCode', 'eth_call', 'eth_getBalance', 'eth_blockNumber', 'eth_gasPrice', 'eth_estimateGas', 'eth_getTransactionCount', 'eth_getBlockByNumber', 'eth_feeHistory', 'eth_maxPriorityFeePerGas', 'eth_getLogs'].includes(rpc.method), `Forbidden RPC ${rpc.method}`);
   const key = JSON.stringify([rpc.method, rpc.params]);
   if (!(key in fixtures)) {
     assert.ok(recording, `Missing read fixture: ${key}`);
@@ -100,9 +115,24 @@ try {
   vm.runInContext('Date.now = () => 1790287200000', context);
   const caps = { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5, maxOpsPerDay: 24 };
   context.__runWallet(1, 'create', JSON.stringify({ owner: owner.address, tenant: owner.address, did: 'did:privy:ios-test', caps, extraTokens: [], autonomousTrencher: trencher }));
-  const result = await complete;
+  let result = await complete;
+  if (legacy) {
+    restoring = true;
+    const expected = result.smartAccount;
+    complete = new Promise((resolve,reject) => { finish = resolve; fail = reject; });
+    context.__runWallet(2, 'restore', JSON.stringify({ owner: owner.address, tenant: tenant.address, did: '', expectAccount: expected, caps, extraTokens: [], autonomousTrencher: trencher }));
+    result = await complete;
+    assert.equal(result.smartAccount.toLowerCase(), expected.toLowerCase());
+    const before = signatures;
+    complete = new Promise((resolve,reject) => { finish = resolve; fail = reject; });
+    context.__runWallet(3, 'preview', JSON.stringify({ owner: owner.address, grantTokens: [] }));
+    const preview = await complete;
+    assert.equal(preview.smartAccount.toLowerCase(), expected.toLowerCase());
+    assert.equal(preview.ownerAddress.toLowerCase(), owner.address.toLowerCase());
+    assert.equal(signatures, before, 'Reading recovery must never ask for a signature');
+  }
   assert.equal(result.handoff.ok, true); assert.deepEqual(result.caps, caps);
   assert.equal(posted.chainId, 4663); assert.ok(posted.serialized); assert.ok(signatures >= 2);
   if (trencher) assert.equal(posted.trencherFactoryAddress, '0x32a2a19a9a0ff54ffcaeb40955fd710e77cbbbf7');
-  console.log(`Native runtime prepared and verified a ${trencher ? 'Trencher' : 'standard'} test grant: ${signatures} owner signatures, ${Object.keys(fixtures).length} read-only RPC fixtures, zero real writes.`);
+  console.log(`Native runtime prepared and verified a ${legacy ? 'legacy restoration' : trencher ? 'Trencher' : 'standard'} test grant: ${signatures} owner signatures, ${Object.keys(fixtures).length} read-only RPC fixtures, zero real writes.`);
 } finally { for (const timer of timers.values()) clearTimeout(timer); }

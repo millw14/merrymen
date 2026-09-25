@@ -41,7 +41,8 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
         if !owner.isEmpty { try await store.verifyOwner(owner) }
         signingOwner = owner
         if let legacyKey {
-            guard ["preview", "plan", "withdraw", "reconcile"].contains(name) else { throw fail("An imported key is only available for recovery.") }
+            guard ["preview", "plan", "withdraw", "reconcile", "restore"].contains(name) else { throw fail("An imported key is only available for recovery.") }
+            if name == "restore", owner.isEmpty { throw fail("Sign in before restoring trading permissions.") }
             signingOwner = try WalletCryptography.call("address", .object(["key": .string(legacyKey)]))
             guard input["recoveryOwner"].string?.lowercased() == signingOwner.lowercased() else { throw fail("The recovery key does not match the selected owner.") }
             self.legacyKey = legacyKey; did = ""
@@ -80,7 +81,7 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
         let values = try JSONDecoder().decode([String: String].self, from: data)
         guard let text = values["merrymen.grant.v1"] else { return nil }
         let grant = try JSONDecoder().decode(J.self, from: Data(text.utf8))
-        guard grant["owner"].text.lowercased() == owner.lowercased(), grant["demoOwnerPrivateKey"] == .null else { throw APIError(status: 0, message: "This saved grant belongs to a different owner.") }
+        guard (grant["owner"].text.lowercased() == owner.lowercased() || grant["binding"]["version"].text == "legacy-wallet-owner-v1"), grant["demoOwnerPrivateKey"] == .null else { throw APIError(status: 0, message: "This saved grant belongs to a different owner.") }
         return grant
     }
     static func withdrawals(owner: String) throws -> [J] {
@@ -102,8 +103,9 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
         case "storageSet":
             guard let text = args["value"].string, text.utf8.count <= 2_000_000 else { throw fail("Invalid grant data.") }
             let grant = try JSONDecoder().decode(J.self, from: Data(text.utf8))
-            guard grant["owner"].text.lowercased() == identity.lowercased(), grant["demoOwnerPrivateKey"] == .null,
-                  grant["binding"]["version"].text == "privy-did-owner-v1", grant["binding"]["did"].text == did else { throw fail("Refusing to store a grant for a different wallet.") }
+            let embedded = legacyKey == nil && grant["binding"]["version"].text == "privy-did-owner-v1" && grant["binding"]["did"].text == did
+            let restored = legacyKey != nil && operation == "restore" && grant["binding"]["version"].text == "legacy-wallet-owner-v1" && grant["binding"]["walletSignature"].string != nil && grant["smartAccount"].text.lowercased() == account.lowercased()
+            guard grant["owner"].text.lowercased() == signingOwner.lowercased(), grant["demoOwnerPrivateKey"] == .null, embedded || restored else { throw fail("Refusing to store a grant for a different wallet.") }
             if key == "merrymen.grant.v1", let old = values[key] {
                 let previous = try JSONDecoder().decode(J.self, from: Data(old.utf8))
                 // One atomic write preserves the preceding account even if the
@@ -132,6 +134,19 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
         switch op {
         case "status": status = args["message"].text; return .null
         case "accessToken": return .string(try await currentUser().getAccessToken())
+        case "signTenant":
+            let message = args["message"].text
+            let hex = "0x" + message.utf8.map { String(format: "%02x", $0) }.joined()
+            guard operation == "restore", legacyKey != nil, !identity.isEmpty, args["address"].text.lowercased() == identity.lowercased(), hex.count > 66,
+                  WalletSignaturePolicy.permitsPersonalSign(hex: hex, operation: "restore", owner: signingOwner, did: "", expectedAccount: account, nonce: challengeNonce) else { throw fail("The account-link request differs from your reviewed recovery.") }
+            try await store.verifyOwner(identity)
+            let signature: String
+            if let user = await store.privy?.getUser(), let wallet = user.embeddedEthereumWallets.first(where: { $0.address.lowercased() == identity.lowercased() }) {
+                signature = try await wallet.provider.request(.personalSign(message: message, address: wallet.address))
+            } else { signature = try await ExternalWalletConnection.shared.sign(message: message, address: identity) }
+            guard callID == runID, store.generation == generation, store.owner == identity,
+                  try WalletCryptography.call("recoverAddress", .object(["hex": .string(hex), "signature": .string(signature)])).lowercased() == identity.lowercased() else { throw fail("The login wallet changed during authorization.") }
+            return .string(signature)
         case "signMessage", "signTypedData":
             guard !["plan", "preview"].contains(operation), args["address"].text.lowercased() == signingOwner.lowercased() else { throw fail("This operation cannot request that signature.") }
             if !identity.isEmpty { try await store.verifyOwner(identity) }
@@ -178,7 +193,8 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
         }
         let data: Data; let response: HTTPURLResponse
         if url.host == API.origin.host {
-            let token = url.path == "/api/grants" ? try await currentUser().getAccessToken() : nil
+            if url.path == "/api/grants", requestJSON["demoOwnerPrivateKey"] != .null { throw fail("Owner keys cannot be sent to the service.") }
+            let token = url.path == "/api/grants" && legacyKey == nil ? try await currentUser().getAccessToken() : nil
             guard callID != nil, callID == runID else { throw fail("Wallet operation closed.") }
             if url.path == "/api/grants" { try await store.verifyOwner(identity) }
             guard callID == runID, let sessionBinding else { throw fail("Wallet operation closed.") }
