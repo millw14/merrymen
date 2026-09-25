@@ -24,6 +24,20 @@
  * the request, the child can then write it, and the orchestrator can then
  * restore grant.json from its earlier read. The child still refuses to arm.
  *
+ * THE REQUEST IS NOT DURABLE, SO THE CHILD DOES NOT CLAIM THE KILL IS DONE.
+ * It lives in the child's home, and a redeploy discards the container along
+ * with it. A request lost before the store is changed is a grant that arms
+ * again. So:
+ *
+ *  - the orchestrator carries requests out on its three-second order-ferry
+ *    clock and again on shutdown, not only in the fifteen-second reconcile.
+ *    The window in which one can be lost is seconds, not a pass;
+ *  - the child's reply says only what the child did. The ✅ that the grant is
+ *    gone (KILL_DONE_TEXT) is sent by the orchestrator after the conditional
+ *    DELETE succeeds. That is the one party that knows it happened.
+ *  - a lost request means no ✅. The child's reply tells the owner what to do
+ *    if none arrives.
+ *
  * Hosted only. A self-hosted kill never writes the request, so nothing here
  * changes what a self-hosted kill does.
  */
@@ -33,6 +47,14 @@ import type { StoredGrant } from "../../packages/core/src/index";
 import type { GrantStore } from "./grant-store";
 
 export const KILL_REQUEST_FILE = "kill-request.json";
+
+/**
+ * What the orchestrator tells the owner once the stored grant is deleted.
+ * Plain text: the sender escapes it for Telegram's HTML mode.
+ */
+export const KILL_DONE_TEXT =
+  "✅ Kill switch done: your stored trading grant is deleted, so this agent can no longer sign anything. " +
+  "Your funds stay in your smart account. Sign a new grant on the dashboard to ride again.";
 
 export function killRequestPath(home: string): string {
   return path.join(home, KILL_REQUEST_FILE);
@@ -164,8 +186,12 @@ export const KILL_CLOCK_SLACK_SEC = 5;
 export type KillOutcome =
   /** No request in this home. */
   | { outcome: "none" }
-  /** The stored grant is gone (or was already). Stand the child down. */
-  | { outcome: "revoked"; request: KillRequest }
+  /**
+   * The stored grant is gone. Stand the child down. `removed` is true only for
+   * the one call whose DELETE removed it. That call confirms to the owner. A
+   * later pass finds it already absent.
+   */
+  | { outcome: "revoked"; request: KillRequest; removed: boolean }
   /** The stored grant was signed AFTER the kill. The request is cleared and that grant arms. */
   | { outcome: "superseded"; request: KillRequest }
   /** Could not be carried out this pass. The request stays, so nothing arms, and the next pass retries. */
@@ -197,7 +223,7 @@ export async function honourKillRequest(
   } catch (e) {
     return { outcome: "failed", request, error: e instanceof Error ? e.message : String(e) };
   }
-  if (result !== "newer") return { outcome: "revoked", request };
+  if (result !== "newer") return { outcome: "revoked", request, removed: result === "removed" };
   try {
     rmSync(killRequestPath(home), { force: true });
   } catch (e) {

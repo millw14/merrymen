@@ -321,14 +321,17 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
         case "kill": {
           const r = deps.kill();
           if (!r.ok) return `nothing to kill: ${r.reason ?? "no grant"}`;
-          // HOSTED: say what happened. Nothing was archived, and the stored
-          // grant is removed by the server on its next pass. It is not gone
-          // yet at the moment this is sent.
+          // HOSTED: say only what THIS agent did. Nothing was archived. The
+          // stored grant is deleted by the server a few seconds later, and the
+          // server confirms that itself, because only it knows (KILL_DONE_TEXT,
+          // kill-request.ts). The request waits in a home a redeploy would
+          // discard, so a missing ✅ has to mean something the owner can act on.
           if (r.revocation === "queued") {
             return (
-              `🛑 KILL SWITCH — trading permission revoked. The band stands down on the next tick, and the server ` +
-              `removes the stored grant on its next pass, so it is not handed back.\n` +
-              `Your funds stay in your smart account. Sign a new grant in the dashboard to ride again.`
+              `🛑 KILL SWITCH — this agent's copy of the key is gone, and the band stands down on the next tick. ` +
+              `The server is deleting your stored grant now; you'll get a ✅ in the owner chat when it's done.\n` +
+              `No ✅ within a few minutes? Revoke it in the dashboard: You → Wallet &amp; permissions → discard &amp; start over. ` +
+              `Your funds stay in your smart account.`
             );
           }
           if (r.revocation === "failed") {

@@ -11726,7 +11726,7 @@ async function main() {
             active?.agentId ?? grant.smartAccount,
             "warn",
             r.revocation === "queued"
-              ? "kill switch (Telegram) — trading permission revoked; the server removes the stored grant on its next pass. Funds stay in the smart account."
+              ? "kill switch (Telegram) — this agent's copy of the key is gone; the server is deleting the stored grant. Funds stay in the smart account."
               : `kill switch (Telegram) — this copy of the key is gone, but the kill could not be recorded (${r.reason}), so the server may restore it. ` +
                   "Revoke it for good on the web: Wallet & permissions → discard & start over.",
           );

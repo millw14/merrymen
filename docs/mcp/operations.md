@@ -228,11 +228,15 @@ own expiry, one-order-at-a-time slot, caps, policy and the on-chain permission
 still apply, and the owner can stop the agent from Merrymen (You → Wallet &
 permissions → 'discard & start over') or with Telegram `/kill`, then `/confirm`
 (needs "allow control commands" on). On hosted Merrymen the Telegram kill
-stops the agent on its next tick and leaves a kill request. The orchestrator
-carries it out on its next pass: it removes the stored grant, the same as the
-web page's DELETE, and never restores the key while the request is pending.
-A grant the owner signs more than a few seconds after the kill is kept and
-arms. See
+stops the agent on its next tick and leaves a kill request in the agent's
+home. The orchestrator carries it out within seconds, on its three-second
+order-ferry clock as well as in reconcile. It removes the stored grant, the
+same as the web page's DELETE, never restores the key while the request is
+pending, and then sends a ✅ to the owner's Telegram chat. The request is not
+durable until then: if the orchestrator is replaced in those seconds, no ✅
+arrives, and the kill reply tells the owner to use the web control in that
+case. A grant the owner signs more than a few seconds after the kill is kept
+and arms. See
 `worker/src/kill-request.ts`.
 
 ## Rollback

@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { after, describe, it } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -142,5 +142,59 @@ describe("FileGrantStore", () => {
 
   it("get on an unknown tenant is null, never a throw", async () => {
     assert.equal(await store.get("0x00000000000000000000000000000000000000ff"), null);
+  });
+});
+
+describe("FileGrantStore writers are serialized (a kill racing a new signature)", () => {
+  const store = new FileGrantStore();
+  const DAVE = "0x00000000000000000000000000000000000000d4" as const;
+  const dir = path.join(HOME, "tenants");
+  const file = path.join(dir, `${DAVE}.json`);
+  const lock = `${file}.lock`;
+  const stampOf = () => Number((JSON.parse(readFileSync(file, "utf8")) as { updatedAt: number }).updatedAt);
+  /** Rewrite the stored record's server stamp, as if it had been put `ago` seconds earlier. */
+  const backdate = (ago: number) => {
+    const rec = JSON.parse(readFileSync(file, "utf8")) as { updatedAt: number };
+    rec.updatedAt = Math.floor(Date.now() / 1000) - ago;
+    writeFileSync(file, JSON.stringify(rec));
+    return rec.updatedAt;
+  };
+
+  it("A GRANT SIGNED AFTER THE KILL SURVIVES whichever of the two writers goes first", async () => {
+    // The read-then-delete in removeUnlessNewer used to leave a gap a put
+    // could land in, and the NEW grant was then the one deleted. Hold the
+    // lock, queue both writers behind it, and let them go together.
+    await store.put(DAVE, grantFor(DAVE));
+    const old = backdate(100);
+    writeFileSync(lock, "held by the test");
+
+    const removal = store.removeUnlessNewer(DAVE, old + 50); // the kill covers the old grant only
+    const resign = store.put(DAVE, grantFor(DAVE)); // a new signature, stamped now
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(stampOf(), old, "neither writer moved while another held the lock");
+
+    rmSync(lock);
+    const outcome = await removal;
+    await resign;
+    assert.ok(outcome === "removed" || outcome === "newer", outcome);
+    assert.ok(await store.get(DAVE), "the new grant is stored, in either order");
+    assert.ok(stampOf() > old + 50, "and it is the new one");
+    await store.remove(DAVE);
+  });
+
+  it("a put never leaves half a record or a temp file behind", async () => {
+    await store.put(DAVE, grantFor(DAVE));
+    assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith(DAVE)), [`${DAVE}.json`], "only the record: no .tmp, no .lock");
+    await store.remove(DAVE);
+  });
+
+  it("a lock left by a process that died holding it is broken, not waited on forever", async () => {
+    writeFileSync(lock, "a dead process");
+    const longAgo = new Date(Date.now() - 60_000);
+    utimesSync(lock, longAgo, longAgo);
+    await store.put(DAVE, grantFor(DAVE));
+    assert.ok(await store.get(DAVE));
+    assert.equal(existsSync(lock), false, "released after use");
+    await store.remove(DAVE);
   });
 });

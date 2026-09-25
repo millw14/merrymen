@@ -30,7 +30,7 @@ process.env.MERRYMEN_HOSTED = "1";
 delete process.env.DATABASE_URL;
 process.env.MERRYMEN_STORE_DEK = Buffer.alloc(32, 5).toString("base64");
 
-const { reconcile, childHome, adoptChildForTest } = await import("./orchestrator");
+const { reconcile, childHome, adoptChildForTest, honourPendingKills, setKillConfirmForTest } = await import("./orchestrator");
 const { getGrantStore } = await import("./grant-store");
 const { KILL_CLOCK_SLACK_SEC, killHosted, killRequested, killRequestPath, honourKillRequest, writeKillRequest } = await import("./kill-request");
 const { loadArmableGrant, loadGrantFile } = await import("./grant");
@@ -62,6 +62,11 @@ const grantAt = (grantedAt: number): StoredGrant =>
   }) as unknown as StoredGrant;
 
 const store = getGrantStore();
+/** Every ✅ the orchestrator would have sent the owner, by tenant. */
+const confirmed: string[] = [];
+setKillConfirmForTest(async (t) => {
+  confirmed.push(t);
+});
 const home = () => childHome(TENANT);
 const grantFile = () => path.join(home(), "grant.json");
 
@@ -101,6 +106,7 @@ beforeEach(async () => {
   await store.remove(TENANT);
   await reconcile();
   rmSync(home(), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  confirmed.length = 0;
 });
 
 describe("a hosted Telegram kill, then a reconcile", () => {
@@ -119,11 +125,35 @@ describe("a hosted Telegram kill, then a reconcile", () => {
     assert.ok(!(await store.listTenants()).includes(TENANT), "so the tenant is no longer wanted");
     assert.equal(existsSync(grantFile()), false, "grant.json was NOT restored");
     assert.deepEqual(proc.signals.slice(0, 1), ["SIGTERM"], "the kill-switch branch stood the child down");
+    assert.deepEqual(confirmed, [TENANT], "the ✅ is sent by the process that deleted the grant");
 
     // And it stays that way: nothing on the next pass brings it back.
     await reconcile();
     assert.equal(existsSync(grantFile()), false);
     assert.equal(await store.get(TENANT), null);
+    assert.deepEqual(confirmed, [TENANT], "and only once");
+  });
+
+  it("THE KILL REACHES THE STORE ON THE THREE-SECOND FERRY CLOCK, without waiting for a reconcile", async () => {
+    // The request sits in a home a redeploy discards. A whole reconcile pass
+    // is too long to leave it there.
+    const proc = await armedTenant(grantAt(nowSec() - 3600));
+    childKill();
+
+    await honourPendingKills();
+
+    assert.equal(await store.get(TENANT), null, "the stored grant is deleted before any reconcile");
+    assert.deepEqual(confirmed, [TENANT], "and the owner is told");
+
+    // The request stays in the home until reconcile wipes it, so the next
+    // tick of the fast clock sees it again, and finds the grant already gone.
+    await honourPendingKills();
+    assert.deepEqual(confirmed, [TENANT], "one ✅, not one per tick");
+    assert.deepEqual(proc.signals, [], "standing the child down is still reconcile's job");
+
+    await reconcile();
+    assert.deepEqual(proc.signals.slice(0, 1), ["SIGTERM"]);
+    assert.deepEqual(confirmed, [TENANT], "the reconcile finds it already gone and does not confirm again");
   });
 
   it("NOTHING IS WRITTEN WHILE THE STORE CANNOT BE CHANGED: a failed removal leaves the child unarmed and retries", async () => {
@@ -146,10 +176,12 @@ describe("a hosted Telegram kill, then a reconcile", () => {
     assert.deepEqual(proc.signals, [], "the child was not stood down this pass");
     assert.equal(existsSync(grantFile()), false, "and the refresh did NOT write grant.json back");
     assert.equal(killRequested(home()), true, "the request survives for the next pass");
+    assert.deepEqual(confirmed, [], "no ✅ while the grant is still stored");
 
     await reconcile();
     assert.equal(await store.get(TENANT), null, "the next pass carries it out");
     assert.deepEqual(proc.signals.slice(0, 1), ["SIGTERM"]);
+    assert.deepEqual(confirmed, [TENANT]);
   });
 
   it("A CRASHED CHILD IS NOT RESPAWNED with its key while a kill is pending", async () => {
@@ -170,6 +202,12 @@ describe("a hosted Telegram kill, then a reconcile", () => {
       store.removeUnlessNewer = real;
     }
     assert.equal(existsSync(grantFile()), false, "spawn did not hand the home a key");
+
+    // The fast clock finds the request on disk, not through the running set,
+    // so a crashed child's kill is carried out too.
+    await honourPendingKills();
+    assert.equal(await store.get(TENANT), null, "a crashed child's request still reaches the store");
+    assert.deepEqual(confirmed, [TENANT]);
   });
 });
 
@@ -277,11 +315,16 @@ describe("the Telegram reply stays truthful", () => {
     const done = await executeCommand({ kind: "confirm" }, d);
 
     assert.match(done, /KILL SWITCH/);
-    assert.match(done, /server removes the stored grant on its next pass/);
-    assert.doesNotMatch(done, /archived|merrymen recover/, "hosted archives nothing");
+    // The reply claims only what the child did; the grant is still stored now.
+    assert.ok(await store.get(TENANT), "the stored grant is not gone yet when the reply is sent");
+    assert.match(done, /deleting your stored grant now; you'll get a ✅/);
+    assert.doesNotMatch(done, /archived|merrymen recover|revoked/, "hosted archives nothing, and claims nothing it has not done");
+    assert.deepEqual(confirmed, [], "no ✅ before the server has deleted it");
 
+    await honourPendingKills();
+    assert.equal(await store.get(TENANT), null, "the server deleted the stored grant, as the reply said it would");
+    assert.deepEqual(confirmed, [TENANT], "and sent the ✅ the reply promised");
     await reconcile();
-    assert.equal(await store.get(TENANT), null, "the server removed the stored grant, as the reply said");
     assert.equal(existsSync(grantFile()), false, "and did not hand it back");
   });
 

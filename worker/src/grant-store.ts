@@ -27,7 +27,8 @@
  * runtime) and the worker via the @merrymen/grant-store alias — never by the
  * browser bundle, which is why it lives here and not in core's browser barrel.
  */
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { merrymenHome } from "./home";
 import { carriesOwnerKey } from "../../packages/core/src/index";
@@ -118,6 +119,11 @@ function fromRecord(rec: StoredRecord): StoredGrant {
 
 // ── file backend ─────────────────────────────────────────────────────────────
 
+/** How long a writer waits for another writer's lock on the same tenant. */
+const LOCK_WAIT_MS = 5_000;
+/** A lock this old belongs to a process that died holding it. */
+const LOCK_STALE_MS = 30_000;
+
 /**
  * One JSON record per tenant under <home>/tenants/. Used self-hosted, in tests,
  * and for a single-service hosted deploy on a persistent volume. The session
@@ -129,10 +135,53 @@ export class FileGrantStore implements GrantStore {
   private file(tenant: string) {
     return path.join(this.dir, `${tenant.toLowerCase()}.json`);
   }
-  async put(tenant: `0x${string}`, grant: StoredGrant): Promise<void> {
-    const rec = toRecord(tenant, grant);
+  /**
+   * ONE WRITER PER TENANT AT A TIME, ACROSS PROCESSES.
+   *
+   * removeUnlessNewer reads a record's stamp and then deletes it. Without
+   * this, a put from another process (the web's grant intake beside the
+   * orchestrator) could land between the two, and a grant signed after the
+   * kill would be the one deleted. The lock is a file created with O_EXCL,
+   * which works across processes where an in-memory lock would not. Readers
+   * take no lock: a put renames a finished record into place, so a reader
+   * sees the old record or the new one, never half of one.
+   *
+   * A lock older than LOCK_STALE_MS belongs to a process that died holding
+   * it, and is broken. No writer here holds it for more than milliseconds.
+   */
+  private async locked<T>(tenant: string, fn: () => Promise<T>): Promise<T> {
     await mkdir(this.dir, { recursive: true });
-    await writeFile(this.file(tenant), JSON.stringify(rec, null, 2), { encoding: "utf8", mode: 0o600 });
+    const lock = `${this.file(tenant)}.lock`;
+    const giveUpAt = Date.now() + LOCK_WAIT_MS;
+    for (;;) {
+      try {
+        await writeFile(lock, String(process.pid), { flag: "wx", mode: 0o600 });
+        break;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+        try {
+          if (Date.now() - (await stat(lock)).mtimeMs > LOCK_STALE_MS) await rm(lock, { force: true });
+        } catch {
+          /* released while we looked */
+        }
+        if (Date.now() > giveUpAt) throw new Error(`grant store busy for ${tenant}`);
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    try {
+      return await fn();
+    } finally {
+      await rm(lock, { force: true });
+    }
+  }
+  async put(tenant: `0x${string}`, grant: StoredGrant): Promise<void> {
+    await this.locked(tenant, async () => {
+      // Stamped inside the lock, so `updatedAt` is when the record landed.
+      const rec = toRecord(tenant, grant);
+      const tmp = `${this.file(tenant)}.${randomUUID()}.tmp`;
+      await writeFile(tmp, JSON.stringify(rec, null, 2), { encoding: "utf8", mode: 0o600 });
+      await rename(tmp, this.file(tenant));
+    });
   }
   async get(tenant: `0x${string}`): Promise<StoredGrant | null> {
     try {
@@ -151,27 +200,31 @@ export class FileGrantStore implements GrantStore {
     }
   }
   async remove(tenant: `0x${string}`): Promise<void> {
-    await rm(this.file(tenant), { force: true });
+    await this.locked(tenant, () => rm(this.file(tenant), { force: true }));
   }
   async removeUnlessNewer(tenant: `0x${string}`, atSec: number): Promise<"removed" | "absent" | "newer"> {
-    let raw: string;
-    try {
-      raw = await readFile(this.file(tenant), "utf8");
-    } catch (e) {
-      // Only a missing file is "absent". Any other read failure is not an
-      // answer, and the caller must not treat it as a completed kill.
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return "absent";
-      throw e;
-    }
-    let updatedAt = Number.NaN;
-    try {
-      updatedAt = Number((JSON.parse(raw) as StoredRecord).updatedAt);
-    } catch {
-      /* an unreadable record cannot prove it is newer — it is removed below */
-    }
-    if (updatedAt > atSec) return "newer";
-    await rm(this.file(tenant), { force: true });
-    return "removed";
+    // The read and the delete under one lock (see `locked`), so no put lands
+    // between them.
+    return this.locked(tenant, async () => {
+      let raw: string;
+      try {
+        raw = await readFile(this.file(tenant), "utf8");
+      } catch (e) {
+        // Only a missing file is "absent". Any other read failure is not an
+        // answer, and the caller must not treat it as a completed kill.
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+        throw e;
+      }
+      let updatedAt = Number.NaN;
+      try {
+        updatedAt = Number((JSON.parse(raw) as StoredRecord).updatedAt);
+      } catch {
+        /* an unreadable record cannot prove it is newer — it is removed below */
+      }
+      if (updatedAt > atSec) return "newer";
+      await rm(this.file(tenant), { force: true });
+      return "removed";
+    });
   }
   async tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null> {
     const want = smartAccount.toLowerCase();

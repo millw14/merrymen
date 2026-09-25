@@ -319,9 +319,11 @@ describe("executeCommand — code disposes", () => {
     assert.match(asked, /server never held your owner key/);
     const done = await executeCommand({ kind: "confirm" }, d);
     assert.match(done, /KILL SWITCH/);
-    // It is NOT yet gone from the store when this is sent, so it must not say so.
-    assert.doesNotMatch(done, /destroyed|archived/);
-    assert.match(done, /removes the stored grant on its next pass/);
+    // It is NOT yet gone from the store when this is sent, so it must not say
+    // so. The server says it with a ✅ once it is.
+    assert.doesNotMatch(done, /destroyed|archived|revoked/);
+    assert.match(done, /deleting your stored grant now; you'll get a ✅/);
+    assert.match(done, /No ✅ within a few minutes\? Revoke it in the dashboard/);
   });
 
   it("a hosted kill that could not be recorded says the key may come back, and where to stop it for good", async () => {
