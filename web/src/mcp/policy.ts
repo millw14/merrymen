@@ -27,7 +27,11 @@ export function hasCapability(p: Principal, capability: Capability): boolean {
 
 export function requireCapability(p: Principal, capability: Capability): void {
   if (!hasCapability(p, capability)) {
-    throw new McpError("insufficient_scope", `This connection was not granted "${scopeFor(capability)}". Reconnect the app and allow it to use this.`, {
+    // The recovery named here must actually work: a client holding a live token
+    // never re-asks by itself, so the owner disconnects it on Connected apps,
+    // and its next sign-in asks for every scope (the 401 challenge's scope, see
+    // bearerChallenge), where the owner ticks this one.
+    throw new McpError("insufficient_scope", `This connection was not granted "${scopeFor(capability)}". To allow it, the owner can disconnect this app on Merrymen's Connected apps page, connect it again and tick that permission on the Merrymen consent page, or use a personal access token that includes it.`, {
       details: { required_scope: scopeFor(capability) },
     });
   }

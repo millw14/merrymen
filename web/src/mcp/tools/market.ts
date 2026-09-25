@@ -50,7 +50,7 @@ import { McpError } from "../errors";
 import { hasCapability } from "../policy";
 import type { ResourceDef } from "../resources";
 import { defineTool, type ToolContext } from "../tool";
-import { ADDRESS_ARG, AGENT_ARG, CHAIN_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, untrusted } from "./shared";
+import { ADDRESS_ARG, AGENT_ARG, CHAIN_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, refuseControls, untrusted } from "./shared";
 
 // ── shared pieces ───────────────────────────────────────────────────────────
 
@@ -133,7 +133,7 @@ const searchTokensTool = defineTool({
   description: "Find tokens by address, ticker or name across Merrymen's curated registry (stock tokens, cash), the market index's pools, and — when this connection may see them — your own added tokens (agents:read) and watchlist (watchlist:manage). The address is the identity: tickers are not unique on this chain, so results are grouped by ticker and flag duplicates and impostors of trusted tickers. Each result says whether it is discoverable and priceable. " + DEFINITIONS,
   capability: "market.read",
   input: z.object({
-    query: z.string().trim().min(1).max(64).describe("A 0x address, a ticker (with or without $) or part of a name"),
+    query: refuseControls(z.string().trim().min(1).max(64)).describe("A 0x address, a ticker (with or without $) or part of a name"),
     chain_id: CHAIN_ARG,
     limit: LIMIT_ARG(25, 10),
     cursor: CURSOR_ARG,
@@ -678,8 +678,8 @@ const addToWatchlistTool = defineTool({
   input: z.object({
     address: ADDRESS_ARG,
     chain_id: CHAIN_ARG,
-    label: z.string().trim().max(64).optional().describe("Your short name for it; an empty string clears it"),
-    note: z.string().trim().max(500).optional().describe("Why you are watching it; an empty string clears it"),
+    label: refuseControls(z.string().trim().max(64)).optional().describe("Your short name for it; an empty string clears it"),
+    note: refuseControls(z.string().trim().max(500)).optional().describe("Why you are watching it; an empty string clears it"),
   }).strict(),
   output: z.object({
     added: z.boolean().describe("False when it was already watched and only its label or note changed"),
@@ -692,7 +692,7 @@ const addToWatchlistTool = defineTool({
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   async handler({ address, chain_id, label, note }, ctx) {
     const { db } = await ctx.mcp();
-    // Control and bidi characters are stripped before storage; an empty string clears.
+    // Control characters were refused at the boundary; bidi and other format characters are stripped before storage; an empty string clears.
     const clean = (v: string | undefined, max: number) => (v === undefined ? undefined : untrusted(v, max));
     const r = await addToWatchlist(db, {
       tenant: ctx.principal.tenant, chainId: chain_id, address,

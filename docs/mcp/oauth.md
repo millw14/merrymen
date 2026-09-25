@@ -39,6 +39,15 @@ limited to the agents and scopes that owner chose.
 
 1. The client calls `/mcp` with no token and receives `401` with
    `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/mcp", scope="…"`.
+   The challenge's `scope` lists every scope a client can be granted (the
+   same list as `scopes_supported`; never the staff scope). MCP clients
+   request exactly that scope, and the consent page can only offer what was
+   requested, so a narrower challenge would put the write and sensitive
+   scopes out of reach of every OAuth client. Asking grants nothing by itself:
+   the owner ticks what the app gets, and the sensitive scopes start unticked
+   (a decision that names no scopes gets only the scopes that start ticked).
+   An `/oauth/authorize` request with no `scope` at all is treated as asking
+   for read access plus chat.
 2. It reads the protected-resource metadata (which names the authorization
    server) and the authorization-server metadata.
 3. **Client identification**, in the order the MCP spec prefers:
@@ -59,14 +68,27 @@ limited to the agents and scopes that owner chose.
      (`URL.href`: ASCII, percent-encoded, IDNA host), and at most 2 KB
      together, counted in UTF-8 bytes as stored. The document's own spelling
      of a redirect still matches at `/oauth/authorize`, because the canonical
-     form is exactly where the code is sent. Only the steps that start or
-     complete a consent (`/oauth/authorize` and the consent page) cache a
-     document, for up to 24 h. `/oauth/token` and `/oauth/revoke` use a
-     fetched document for that one request and at most refresh a copy that is
-     already cached, so a caller with no code or token cannot make Merrymen
-     store anything. The cache keeps only the name (up to 100 characters) and
-     the redirect URIs, each once, never the fetched body: at most about 3 KB
-     per client including its URL.
+     form is exactly where the code is sent. The steps that start or complete
+     a consent (`/oauth/authorize` and the consent page) cache a document, for
+     up to 24 h. `/oauth/token` and `/oauth/revoke` use a fetched document for
+     that one request, refresh a copy that is already cached, and **restore
+     the cached copy of a client that some owner has an active connection
+     with** (retention may have dropped it, and without it one failed fetch at
+     the next refresh would disconnect the app). They never store a row for a
+     client no owner is connected to, so a caller with no code or token can
+     make Merrymen store at most one bounded row per client an owner already
+     connected. The cache keeps only the name (up to 100 characters) and the
+     redirect URIs, each once, never the fetched body: at most about 3 KB per
+     client including its URL.
+
+     When the client's host cannot answer (a network failure, a `5xx`, `408`
+     or `429`, or any non-`200` answer that is not JSON, such as a CDN
+     challenge page), a copy verified within the last 24 h is used; without
+     one the answer is the retryable `temporarily_unavailable` (HTTP 503 at
+     `/oauth/token` and `/oauth/revoke`, a 503 page at `/oauth/authorize`),
+     never `invalid_client`, which clients treat as fatal. A JSON `4xx` such as
+     `404` or `410`, or a `200` that is not a valid JSON document, is the
+     host's definite answer and stays `invalid_client`.
    - **Dynamic Client Registration** (`POST /oauth/register`), for clients that
      do not use CIMD. Open but rate limited per IP. Public (`none`) or
      confidential (`client_secret_basic` / `client_secret_post`) clients.
@@ -84,7 +106,8 @@ limited to the agents and scopes that owner chose.
    `redirect_uri` is loopback (a program on the owner's own computer, such as
    Claude Code or Codex CLI, waiting on that port) receives the error
    (`error`, `error_description`, `state`, `iss`) at its redirect. An unknown
-   client or an unregistered `redirect_uri` is always a page.
+   client, an unregistered `redirect_uri`, or a `state` containing a control
+   character (which is never stored or echoed) is always a page.
 5. Merrymen parks the request and sends the browser to the consent page. The
    request handle travels in the URL **fragment**, so it never reaches a
    server log or a `Referer`.
@@ -165,6 +188,12 @@ See [tools.md](tools.md) for the full list and which tool needs which scope.
 No scope can move funds, sign transactions or change trading permissions.
 `trade:propose`, `drafts:write` and `social:write` only create **proposals**
 that the owner approves on a Merrymen page with their own sign-in.
+
+A tool whose scope a connection does not hold is not listed, and calling it by
+name gets JSON-RPC error `-32602` ("Tool … not found"). To add a permission
+later, the owner disconnects the app on **Connected apps** and connects it
+again (its next sign-in asks for every scope), ticking that permission on the
+consent page; or uses a personal access token that includes it.
 
 ## The partner API
 

@@ -22,7 +22,7 @@ import type { OwnedAgent } from "../agents";
 import { McpError } from "../errors";
 import type { ResourceDef } from "../resources";
 import { defineTool, type ToolContext } from "../tool";
-import { ADDRESS_ARG, AGENT_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, isoOrNull, untrusted } from "./shared";
+import { ADDRESS_ARG, AGENT_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, isCursorInt, isoOrNull, untrusted } from "./shared";
 
 const BOOK = z.enum(["paper", "live"]);
 const MONEY_OF = z.enum(["simulated", "real"]);
@@ -299,9 +299,10 @@ const getTrades = defineTool({
     let cursor: { at: number; id: number } | null = null;
     if (args.cursor !== undefined) {
       const v = decodeCursor(ctx.principal.tenant, scopeKey, args.cursor);
-      const at = Number(v?.at);
-      const id = Number(v?.id);
-      if (!v || !Number.isSafeInteger(at) || !Number.isSafeInteger(id) || id < 0) {
+      // Checked as they are, never coerced: a forged true or "1e20" is not a position.
+      const at = v?.at;
+      const id = v?.id;
+      if (!v || !isCursorInt(at) || !isCursorInt(id)) {
         throw new McpError("invalid_input", "cursor is not valid for this query; start again without it");
       }
       cursor = { at, id };

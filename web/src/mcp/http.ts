@@ -6,6 +6,8 @@
  *   challenge) → per-connection and per-owner request rate (429) → process
  *   concurrency (503) → the SDK handler, which serves both the 2026-07-28
  *   stateless protocol and 2025-era clients through its stateless fallback.
+ * Every answer after the Origin check carries CORS headers for a configured
+ * browser origin (withCors).
  *
  * The bearer token is looked up (opaque, hashed at rest), audience-checked
  * against the configured resource URL, and never passed anywhere else.
@@ -48,6 +50,31 @@ function originAllowed(cfg: McpConfig, request: Request): boolean {
   const origin = request.headers.get("origin");
   if (origin === null) return true;
   return cfg.allowedOrigins.has(origin);
+}
+
+/**
+ * Response headers a browser client may read. The preflight (app/mcp/route.ts)
+ * lists them too, but only the actual response's list takes effect: without it
+ * a browser client could not read the 401's WWW-Authenticate (discovery) or a
+ * 429's Retry-After.
+ */
+export const MCP_EXPOSED_HEADERS = "WWW-Authenticate, Mcp-Session-Id, X-Trace-Id, Retry-After";
+
+/**
+ * CORS for a configured browser origin (MERRYMEN_MCP_ALLOWED_ORIGINS), on every
+ * answer after the Origin check: a browser discards any response without
+ * Access-Control-Allow-Origin, the 401 challenge and the 429 included. No
+ * credentials are allowed (the bearer token is an explicit header, never a
+ * cookie), and a request with no Origin or another origin gets none of this.
+ */
+function withCors(cfg: McpConfig, request: Request, res: Response): Response {
+  const origin = request.headers.get("origin");
+  if (!origin || !cfg.allowedOrigins.has(origin)) return res;
+  res.headers.set("Access-Control-Allow-Origin", origin);
+  res.headers.set("Access-Control-Expose-Headers", MCP_EXPOSED_HEADERS);
+  const vary = res.headers.get("vary");
+  if (!vary || !/(^|,)\s*(origin|\*)\s*(,|$)/i.test(vary)) res.headers.set("Vary", vary ? `${vary}, Origin` : "Origin");
+  return res;
 }
 
 function bearerOf(request: Request): string | null {
@@ -99,6 +126,11 @@ export async function handleMcpRequest(request: Request, deps: EndpointDeps = {}
     count("origin_refused");
     return jsonResponse({ error: "forbidden", error_description: "Origin not allowed" }, 403, { "X-Trace-Id": trace });
   }
+  return withCors(cfg, request, await answer(request, deps, cfg, trace));
+}
+
+/** Everything after the Host and Origin checks; the caller adds CORS to whatever this returns. */
+async function answer(request: Request, deps: EndpointDeps, cfg: McpConfig, trace: string): Promise<Response> {
   const token = bearerOf(request);
   if (token === null) return unauthorized(cfg, false, trace);
 

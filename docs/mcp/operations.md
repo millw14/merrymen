@@ -169,7 +169,10 @@ To cut every MCP connection at once without a deploy, either:
   UPDATE mcp_tokens SET revoked_at = EXTRACT(EPOCH FROM now())::bigint WHERE revoked_at IS NULL;
   ```
 
-To stop pending **approvals** from being acted on, expire them:
+Disconnecting an app on Connected apps already cancels that connection's
+proposals still waiting for approval, and the approval page re-checks the
+connection before acting. To stop every pending **approval** at once (for
+example after revoking all connections by SQL above), expire them:
 
 ```sql
 UPDATE mcp_proposals SET status = 'expired', updated_at = EXTRACT(EPOCH FROM now())::bigint
@@ -178,7 +181,9 @@ UPDATE mcp_proposals SET status = 'expired', updated_at = EXTRACT(EPOCH FROM now
 
 Orders already queued by an approval are ordinary owner orders: the worker's
 own expiry, one-order-at-a-time slot, caps, policy and the on-chain permission
-still apply, and the owner can use the dashboard's kill switch.
+still apply, and the owner can stop the agent from Merrymen (You → Wallet &
+permissions → 'discard & start over') or with Telegram `/kill` then `/confirm`
+(when Telegram control commands are allowed).
 
 ## Rollback
 

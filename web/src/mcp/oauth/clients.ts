@@ -11,9 +11,12 @@
  *    fetch it through the repo's SSRF-guarded transport (DNS pinned to public
  *    addresses, https only, no redirects, byte cap, timeout), accept only a 200
  *    JSON answer, require the document's client_id to equal the URL exactly,
- *    and cache only the fields we use (bounded, canonical), briefly, and only
- *    from the consent steps (see ResolveOptions.cacheNew). Claude and Codex
- *    both use this when advertised.
+ *    and cache only the fields we use (bounded, canonical), briefly. A new
+ *    row comes only from the consent steps, or restores the row of a client an
+ *    owner has an active connection with (see ResolveOptions.cacheNew). When
+ *    the host cannot answer (network failure, 5xx, 408, 429, a non-JSON error
+ *    page) a recently verified copy is served, else the error is the retryable
+ *    temporarily_unavailable. Claude and Codex both use this when advertised.
  * 2. Dynamic Client Registration (RFC 7591), kept for clients that have not
  *    moved to CIMD. Registration is open (as the MCP spec expects) but rate
  *    limited, and a registered client proves nothing about who it is: the
@@ -280,10 +283,31 @@ export function acceptableCimdResponse(status: number, contentType: string | und
   return status === 200 && JSON_MEDIA_TYPE.test((contentType ?? "").trim());
 }
 
+/**
+ * A refused answer that says nothing about the document, only about the host
+ * right now: a 5xx, 408 or 429, or any non-200 that is not JSON (a CDN or WAF
+ * challenge page, a proxy's HTML error). It is handled like a network failure
+ * (the stale copy, else temporarily_unavailable), never as "no such client":
+ * clients treat 401 invalid_client as fatal and would drop a working
+ * connection over a brief outage. A JSON-typed 4xx (404, 410, …) is the host's
+ * definite answer, and a 200 that is not a valid JSON document is the
+ * document's own defect; both stay invalid_client.
+ */
+export function transientCimdAnswer(status: number, contentType: string | undefined): boolean {
+  if (status >= 500 || status === 408 || status === 429) return true;
+  // Not found / gone is a definite answer whatever the page is dressed in:
+  // nearly every real 404 is HTML, and calling it an outage would promise a
+  // retry for a client_id that was mistyped or deleted.
+  if (status === 404 || status === 410) return false;
+  return status !== 200 && !JSON_MEDIA_TYPE.test((contentType ?? "").trim());
+}
+
 const defaultFetcher: CimdFetcher = async (url) => {
   // One retry on a network-level failure: a single dropped connection should
   // not turn "Connect" into an error page. A refused answer (non-200, or not
-  // JSON) is a definite "no" and is neither read nor retried.
+  // JSON) is neither read nor retried here; it is returned with an empty body,
+  // and resolveClient decides whether it is definite or an outage
+  // (transientCimdAnswer).
   let lastError: unknown = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     const seen: { refused?: { status: number; contentType: string | undefined } } = {};
@@ -376,18 +400,25 @@ export async function resolveClient(d: McpDb, clientId: unknown, now: number, op
   if (row && (row.kind !== "cimd" || (row.expires_at ?? 0) > now)) return rowToClient(row);
   if (!urlShaped) throw new ClientError("invalid_client", "unknown client_id");
   const fetcher = opts.fetcher ?? defaultFetcher;
+  // Serve stale when the host cannot answer, for a bounded time: the copy we
+  // hold was verified when fetched, and a flaky network between us and the
+  // client's host (or its CDN having a bad minute) should not lock owners out
+  // of connecting or disconnect a working app. A document that was never
+  // fetched successfully, or is over a day old, is not used.
+  const staleOrUnavailable = (): McpClient => {
+    if (row && row.kind === "cimd" && (row.fetched_at ?? 0) > now - CIMD_STALE_OK_SEC) return rowToClient(row);
+    throw new ClientError("temporarily_unavailable", "could not fetch the client metadata document");
+  };
 
   let fetched: Awaited<ReturnType<CimdFetcher>>;
   try {
     fetched = await fetcher(clientId);
   } catch {
-    // Serve stale on a network failure, for a bounded time: the copy we hold
-    // was verified when fetched, and a flaky network between us and the
-    // client's host should not lock owners out of connecting. A document that
-    // was never fetched successfully, or is over a day old, is not used.
-    if (row && row.kind === "cimd" && (row.fetched_at ?? 0) > now - CIMD_STALE_OK_SEC) return rowToClient(row);
-    throw new ClientError("temporarily_unavailable", "could not fetch the client metadata document");
+    return staleOrUnavailable();
   }
+  // defaultFetcher RETURNS a refused answer (it does not throw), so an HTTP-level
+  // outage must be recognised here, not only in the catch above.
+  if (transientCimdAnswer(fetched.status, fetched.contentType)) return staleOrUnavailable();
   if (fetched.status !== 200) throw new ClientError("invalid_client", "client metadata document is unavailable");
   if (!acceptableCimdResponse(fetched.status, fetched.contentType)) {
     throw new ClientError("invalid_client", "client metadata document must be served as application/json");

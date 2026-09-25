@@ -6,11 +6,18 @@
  */
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import * as z from "zod";
+import { createMcpHandler } from "@modelcontextprotocol/server";
 import { handleMcpRequest } from "./http";
 import {
-  ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, connectAs, installFixtures, makeDeps, makeTestDb, mcpRequest, rpcResult, testConfig, type Era,
+  ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, connectAs, errorOf, installFixtures, makeDeps, makeTestDb, mcpRequest, rpcResult, testConfig, type Era,
 } from "./testing";
 import { resetMetricsForTest } from "./observe";
+import { McpError } from "./errors";
+import { ADVERTISED_SCOPES } from "./scopes";
+import { buildServer, principalOf } from "./server";
+import type { ResourceDef } from "./resources";
+import { defineTool, runTool } from "./tool";
 
 let restore: (() => void) | null = null;
 afterEach(() => { restore?.(); restore = null; resetMetricsForTest(); });
@@ -45,9 +52,190 @@ test("no token → 401 with a discovery challenge; a bad token → invalid_token
   assert.match(challenge, /^Bearer /);
   assert.match(challenge, /resource_metadata="https:\/\/app\.test\/\.well-known\/oauth-protected-resource\/mcp"/);
   assert.doesNotMatch(challenge, /invalid_token/);
+  // Clients request exactly this scope, and consent can offer only what was
+  // requested: it names every grantable scope (write and sensitive ones
+  // included, which the consent page leaves to the owner), never staff.
+  const asked = (/scope="([^"]*)"/.exec(challenge)?.[1] ?? "").split(" ");
+  assert.deepEqual(asked, [...ADVERTISED_SCOPES]);
+  for (const s of ["trade:propose", "drafts:write", "social:write", "jobs:run", "notifications:manage", "watchlist:manage"]) assert.ok(asked.includes(s), s);
+  assert.ok(!asked.includes("staff:diagnostics"));
   const bad = await call(mcpRequest(`mcp_at_${"x".repeat(43)}`, "tools/list"));
   assert.equal(bad.status, 401);
   assert.match(bad.headers.get("www-authenticate") ?? "", /error="invalid_token"/);
+  assert.match(bad.headers.get("www-authenticate") ?? "", /trade:propose/, "a reconnect after a revoked token asks for everything too");
+});
+
+test("CORS: a configured browser origin can read every real answer, not only the preflight", async () => {
+  const { a } = await setup();
+  const cfg = testConfig({ allowedOrigins: new Set(["https://app.test", "https://inspector.example"]) });
+  const at = (req: Request) => handleMcpRequest(req, { cfg, now: () => NOW });
+  const origin = { origin: "https://inspector.example" };
+  const expectCors = (res: Response, what: string) => {
+    assert.equal(res.headers.get("access-control-allow-origin"), "https://inspector.example", what);
+    assert.match(res.headers.get("vary") ?? "", /\bOrigin\b/, what);
+    const exposed = (res.headers.get("access-control-expose-headers") ?? "").toLowerCase();
+    for (const h of ["www-authenticate", "mcp-session-id", "x-trace-id", "retry-after"]) assert.ok(exposed.includes(h), `${what}: ${h}`);
+    assert.equal(res.headers.get("access-control-allow-credentials"), null, what);
+  };
+  const ok = await at(mcpRequest(a.tokens.access_token, "tools/list", {}, { headers: origin }));
+  assert.equal(ok.status, 200);
+  expectCors(ok, "200");
+  await ok.text();
+  const challenge = await at(mcpRequest(null, "tools/list", {}, { headers: origin }));
+  assert.equal(challenge.status, 401);
+  expectCors(challenge, "401 (discovery)");
+  const invalid = await at(mcpRequest(`mcp_at_${"x".repeat(43)}`, "tools/list", {}, { headers: origin }));
+  expectCors(invalid, "401 invalid_token");
+  let limited: Response | null = null;
+  for (let i = 0; i < 245 && limited?.status !== 429; i++) {
+    const r = await at(mcpRequest(a.tokens.access_token, "tools/list", {}, { headers: origin }));
+    if (r.status === 429) limited = r;
+    else await r.text();
+  }
+  assert.equal(limited?.status, 429);
+  expectCors(limited!, "429");
+  // A server-side client (no Origin) and a foreign origin get no CORS headers.
+  const plain = await at(mcpRequest(null, "tools/list"));
+  assert.equal(plain.headers.get("access-control-allow-origin"), null);
+  const foreign = await at(mcpRequest(null, "tools/list", {}, { headers: { origin: "https://evil.test" } }));
+  assert.equal(foreign.status, 403);
+  assert.equal(foreign.headers.get("access-control-allow-origin"), null);
+});
+
+for (const era of ["legacy", "modern"] as Era[]) {
+  test(`${era}: tools, resources and prompts do not promise list_changed notifications the stateless server cannot send`, async () => {
+    const { a } = await setup();
+    const res = era === "legacy"
+      ? await rpcResult(await call(mcpRequest(a.tokens.access_token, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "1" } })))
+      : await rpcResult(await call(mcpRequest(a.tokens.access_token, "server/discover", {}, { era })));
+    const caps = res.result?.capabilities as Record<string, { listChanged?: boolean }> | undefined;
+    assert.ok(caps, JSON.stringify(res));
+    for (const k of ["tools", "resources", "prompts"]) assert.equal(caps[k]?.listChanged, false, `${k}: ${JSON.stringify(caps)}`);
+  });
+
+  test(`${era}: resources/read of another owner's object is resource-not-found (-32602 {uri}), exactly like an absent one`, async () => {
+    const { a } = await setup();
+    const foreign = `merrymen://agents/${SLUG_B}/portfolio`;
+    const res = await rpcResult(await call(mcpRequest(a.tokens.access_token, "resources/read", { uri: foreign }, { era })));
+    const err = res.error as { code: number; message: string; data?: unknown } | undefined;
+    assert.equal(err?.code, -32602, JSON.stringify(res));
+    assert.deepEqual(err?.data, { uri: foreign });
+    assert.ok(!JSON.stringify(res).includes(ACCOUNT_B));
+    const absent = await rpcResult(await call(mcpRequest(a.tokens.access_token, "resources/read", { uri: "merrymen://nothing/here" }, { era })));
+    assert.equal(absent.error?.code, err?.code);
+    assert.deepEqual(Object.keys((absent.error as { data?: object }).data ?? {}), ["uri"]);
+  });
+
+  test(`${era}: a failed resources/read keeps its stable code: bad input is -32602, a retryable failure keeps retry_after_s`, async () => {
+    const { deps } = await setup();
+    const b = await connectAs(deps, OWNER_B, { scopes: ["market:read"], agents: [SLUG_B] });
+    const probe: ResourceDef = {
+      name: "probe", title: "Probe", description: "test", mimeType: "text/plain", capability: "market.read", uri: "merrymen://probe/{kind}",
+      async read(_uri, vars) {
+        if (vars.kind === "bad") throw new McpError("invalid_input", "kind is malformed");
+        if (vars.kind === "busy") throw new McpError("rate_limited", "slow down", { retryAfterSec: 7 });
+        if (vars.kind === "gone") throw new McpError("not_found", "No such probe.");
+        return { text: "ok", mimeType: "text/plain" };
+      },
+    };
+    const handler = createMcpHandler(({ authInfo }) => buildServer(principalOf(authInfo), { tools: [], resources: [probe], deps: { now: () => NOW } }), { legacy: "stateless", responseMode: "auto" });
+    const read = async (kind: string) => (await rpcResult(await handleMcpRequest(mcpRequest(b.tokens.access_token, "resources/read", { uri: `merrymen://probe/${kind}` }, { era }), {
+      cfg: testConfig(), now: () => NOW, fetch: (r, auth) => handler.fetch(r, { authInfo: auth }),
+    }))).error as { code: number; message: string; data?: Record<string, unknown> } | undefined;
+    const bad = await read("bad");
+    assert.equal(bad?.code, -32602);
+    assert.equal(bad?.data?.code, "invalid_input");
+    assert.equal(bad?.data?.retryable, false);
+    assert.ok(!("uri" in (bad?.data ?? {})), "not mistaken for resource-not-found");
+    const busy = await read("busy");
+    assert.equal(busy?.code, -32603);
+    assert.equal(busy?.data?.code, "rate_limited");
+    assert.equal(busy?.data?.retryable, true);
+    assert.equal(busy?.data?.retry_after_s, 7);
+    const gone = await read("gone");
+    assert.equal(gone?.code, -32602);
+    assert.deepEqual(gone?.data, { uri: "merrymen://probe/gone" });
+    assert.match(gone?.message ?? "", /not_found/);
+  });
+}
+
+test("a timed-out tool call cannot start new database work: the abandoned handler stops at its next statement", async () => {
+  const { d, a } = await setup();
+  let resume!: () => void;
+  const paused = new Promise<void>((r) => { resume = r; });
+  let finished!: () => void;
+  const done = new Promise<void>((r) => { finished = r; });
+  const after: string[] = [];
+  let beforeTimeout = "";
+  const probe = defineTool({
+    name: "slow_probe", title: "Slow probe", description: "test", capability: "market.read",
+    input: z.object({}).strict(), output: z.object({ ok: z.boolean() }),
+    annotations: { readOnlyHint: true, openWorldHint: false }, timeoutMs: 20,
+    async handler(_args, ctx) {
+      try {
+        const m = await ctx.mcp();
+        beforeTimeout = JSON.stringify(await m.db.prepare("SELECT 1 AS one").get());
+        await paused; // the call times out while the handler is busy elsewhere
+        const steps: Array<[string, () => Promise<unknown>]> = [
+          ["statement", () => m.db.prepare("SELECT 1").get()],
+          ["transaction", () => m.db.tx(async (db) => db.prepare("SELECT 1").get())],
+          ["mcp()", () => ctx.mcp()],
+          ["ledger", () => ctx.ledger((db) => db.prepare("SELECT 1").get())],
+          ["agent()", () => ctx.agent()],
+          ["agents()", () => ctx.agents()],
+        ];
+        for (const [name, step] of steps) {
+          try {
+            await step();
+            after.push(`${name}: ran`);
+          } catch (e) {
+            after.push(`${name}: ${e instanceof McpError ? e.code : String(e)}`);
+          }
+        }
+        return { data: { ok: true } };
+      } finally {
+        finished();
+      }
+    },
+  });
+  const res = await runTool(probe, {}, a.principal, "trace-t", { now: () => NOW, mcp: async () => d, ledger: (fn) => fn(d.db) });
+  assert.equal(errorOf(res).code, "timeout");
+  assert.equal(beforeTimeout, JSON.stringify({ one: 1 }), "work before the timeout ran normally");
+  resume();
+  await done;
+  assert.deepEqual(after, ["statement: timeout", "transaction: timeout", "mcp(): timeout", "ledger: timeout", "agent(): timeout", "agents(): timeout"]);
+  // The call itself is still audited (runTool's own handle, not the handler's).
+  const audited = d.raw.prepare("SELECT outcome FROM mcp_audit WHERE action = 'tool:slow_probe'").all() as Array<{ outcome: string }>;
+  assert.deepEqual(audited.map((r) => r.outcome), ["timeout"]);
+});
+
+test("a tool that settles after a timeout (send_message) can still store what its paid call produced", async () => {
+  const { d, a } = await setup();
+  let resume!: () => void;
+  const paused = new Promise<void>((r) => { resume = r; });
+  let finished!: (v: string) => void;
+  const done = new Promise<string>((r) => { finished = r; });
+  const probe = defineTool({
+    name: "settling_probe", title: "Settling probe", description: "test", capability: "market.read",
+    input: z.object({}).strict(), output: z.object({ ok: z.boolean() }),
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }, timeoutMs: 20, settlesAfterTimeout: true,
+    async handler(_args, ctx) {
+      const m = await ctx.mcp();
+      await paused; // the model answers after the client was told "timeout"
+      try {
+        await m.db.prepare("INSERT INTO mcp_rate (bucket, window_start, hits) VALUES ('settle-probe', 1, 1)").run();
+        finished("stored");
+      } catch (e) {
+        finished(e instanceof McpError ? e.code : String(e));
+      }
+      return { data: { ok: true } };
+    },
+  });
+  const res = await runTool(probe, {}, a.principal, "trace-s", { now: () => NOW, mcp: async () => d, ledger: (fn) => fn(d.db) });
+  assert.equal(errorOf(res).code, "timeout");
+  resume();
+  assert.equal(await done, "stored");
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM mcp_rate WHERE bucket = 'settle-probe'").get() as { n: number }).n, 1);
 });
 
 test("wrong Host and foreign browser Origins are refused", async () => {

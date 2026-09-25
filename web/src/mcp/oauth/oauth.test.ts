@@ -10,7 +10,7 @@ import { test } from "node:test";
 import type { Db, Stmt } from "../../../../worker/src/db";
 import type { McpDb } from "../db";
 import {
-  CIMD_REDIRECTS_MAX_BYTES, acceptableCimdResponse, isCimdClientId, ownHostsOf, registerClient, parseCimd, redirectMatches, resolveClient, validRedirectUri, type CimdFetcher,
+  CIMD_REDIRECTS_MAX_BYTES, acceptableCimdResponse, isCimdClientId, ownHostsOf, registerClient, parseCimd, redirectMatches, resolveClient, transientCimdAnswer, validRedirectUri, type CimdFetcher,
 } from "./clients";
 import { pkceS256 } from "./crypto";
 import { FORM_MAX, readBoundedText, readForm } from "./deps";
@@ -833,4 +833,124 @@ test("token-family writes are serialised on the connection row, so a revocation 
   const replayLock = at(LOCK);
   assert.ok(replayLock >= 0 && at(/^tx UPDATE mcp_tokens SET revoked_at = \? WHERE family = \?/) > replayLock, log.join("\n"));
   assert.equal(await verifyAccessToken(base, deps.cfg, minted.access_token, deps.now()), null);
+});
+
+// ── round 3 ─────────────────────────────────────────────────────────────────
+
+test("a client that requests exactly the 401 challenge's scope can be granted any non-staff scope, and only what the owner ticks", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  // What a spec-following client (Claude Code, the SDK clients) sends to /oauth/authorize.
+  const asked = /scope="([^"]*)"/.exec(bearerChallenge(deps.cfg))![1]!;
+  const clientId = await publicClient(deps);
+  const newRequest = async () => {
+    const start = await startAuthorization(deps, authorizeParams(clientId, { scope: asked }));
+    assert.equal(start.kind, "consent");
+    return requestOf((start as { location: string }).location);
+  };
+  const req = await newRequest();
+  const view = await describeRequest(deps, req, OWNER_A);
+  const offered = view.scopes.map((s) => s.id);
+  for (const s of ["watchlist:manage", "notifications:manage", "jobs:run", "drafts:write", "trade:propose", "social:write"]) assert.ok(offered.includes(s), `${s} is offered`);
+  assert.ok(!offered.includes("staff:diagnostics"));
+  for (const s of view.scopes) if (s.level === "sensitive") assert.equal(s.defaultOn, false, `${s.id} starts unticked`);
+  // The owner ticks trade:propose: it is granted, and nothing else they left unticked.
+  const decided = await decideRequest(deps, req, OWNER_A, { approve: true, scopes: ["market:read", "agents:read", "trade:propose"], agentSlugs: [SLUG_A] });
+  const code = new URL(decided.location).searchParams.get("code")!;
+  const client = await resolveClient(d, clientId, deps.now(), { ownHosts: ownHostsOf(deps.cfg) });
+  const tokens = await exchangeCode(deps, new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: REDIRECT, code_verifier: VERIFIER, client_id: clientId }), client);
+  const p = await verifyAccessToken(d, deps.cfg, tokens.access_token, deps.now());
+  assert.ok(p?.scopes.has("trade:propose"));
+  assert.ok(!p?.scopes.has("drafts:write") && !p?.scopes.has("social:write"));
+  // A decision that names no scopes gets what the page starts with ticked, never a sensitive scope.
+  const req2 = await newRequest();
+  await decideRequest(deps, req2, OWNER_A, { approve: true, agentSlugs: [SLUG_A] });
+  const [conn] = await listConnections(d, OWNER_A);
+  for (const s of ["trade:propose", "drafts:write", "social:write", "staff:diagnostics"]) assert.ok(!conn!.scopes.includes(s), s);
+  assert.ok(conn!.scopes.includes("market:read"));
+});
+
+test("CIMD: a host outage answered over HTTP (5xx, 408, 429, a non-JSON error page) is like a network failure, never a fatal invalid_client", async () => {
+  // What defaultFetcher returns for a refused answer: the status and type, an empty body.
+  for (const [status, type] of [[503, "text/html"], [502, undefined], [500, "application/json"], [429, "application/json"], [408, "text/plain"], [403, "text/html; charset=utf-8"]] as const) {
+    assert.ok(transientCimdAnswer(status, type), `${status} ${type}`);
+  }
+  for (const [status, type] of [[404, "application/json"], [404, "text/html"], [410, "text/html; charset=utf-8"], [410, "application/problem+json"], [403, "application/json"], [200, "text/plain"], [200, "application/json"]] as const) {
+    assert.equal(transientCimdAnswer(status, type), false, `${status} ${type}`);
+  }
+
+  const d = await makeTestDb();
+  let answer: Awaited<ReturnType<CimdFetcher>> | null = null;
+  const serve = cimdFetcher(["http://127.0.0.1/callback"], { cacheControl: "max-age=3600" });
+  const deps = makeDeps(d, { fetcher: async (url) => answer ?? serve(url) });
+  const id = "https://client.example/oauth/metadata.json";
+  const start = await startAuthorization(deps, authorizeParams(id, { redirect_uri: "http://127.0.0.1:61234/callback" }));
+  assert.equal(start.kind, "consent");
+  // 70 minutes later the cached copy has expired, and the host is having a bad minute.
+  deps.advance(70 * 60);
+  const refused = (status: number, contentType: string | undefined) => ({ status, contentType, body: Buffer.alloc(0) });
+  for (const [status, type] of [[503, "text/html"], [502, undefined], [429, "application/json"], [403, "text/html"]] as const) {
+    answer = refused(status, type);
+    const c = await authenticateClient(deps, new URLSearchParams({ client_id: id }), null);
+    assert.equal(c.clientId, id, `${status}: the recently verified copy serves`);
+    assert.deepEqual(c.redirectUris, ["http://127.0.0.1/callback"]);
+  }
+  // A definite answer is still a definite no.
+  answer = refused(404, "application/json");
+  await assert.rejects(authenticateClient(deps, new URLSearchParams({ client_id: id }), null),
+    (e: unknown) => e instanceof OAuthError && e.status === 401 && e.error === "invalid_client");
+  // No copy at all: a retryable 503 at the token endpoint, a 503 page at authorize.
+  d.raw.prepare("DELETE FROM mcp_clients WHERE client_id = ?").run(id);
+  answer = refused(503, "text/html");
+  await assert.rejects(authenticateClient(deps, new URLSearchParams({ client_id: id }), null),
+    (e: unknown) => e instanceof OAuthError && e.status === 503 && e.error === "temporarily_unavailable");
+  const page = await startAuthorization(deps, authorizeParams(id, { redirect_uri: "http://127.0.0.1:61234/callback" }));
+  assert.deepEqual([page.kind, (page as { status: number }).status, (page as { error: string }).error], ["page_error", 503, "temporarily_unavailable"]);
+  // A copy older than the stale window is not used.
+  answer = null;
+  await startAuthorization(deps, authorizeParams(id, { redirect_uri: "http://127.0.0.1:61234/callback" }));
+  deps.advance(86_400 + 1);
+  answer = refused(503, "text/html");
+  await assert.rejects(authenticateClient(deps, new URLSearchParams({ client_id: id }), null),
+    (e: unknown) => e instanceof OAuthError && e.status === 503);
+});
+
+test("malformed percent-encoding in HTTP Basic client credentials is 401 invalid_client, not a server error", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const basic = (s: string) => `Basic ${Buffer.from(s).toString("base64")}`;
+  for (const creds of ["mcpc_abc%zz:secret", "mcpc_abc:sec%E0%A4%A", "%:x", "mcpc_abc:%"]) {
+    await assert.rejects(authenticateClient(deps, new URLSearchParams(), basic(creds)),
+      (e: unknown) => e instanceof OAuthError && e.status === 401 && e.error === "invalid_client", creds);
+  }
+  // Well-formed encoding still decodes.
+  const reg = await registerClient(d, { redirect_uris: ["https://claude.ai/api/mcp/auth_callback"] }, deps.now());
+  const header = basic(`${encodeURIComponent(String(reg.body.client_id))}:${encodeURIComponent(String(reg.body.client_secret))}`);
+  assert.equal((await authenticateClient(deps, new URLSearchParams(), header)).clientId, reg.body.client_id);
+});
+
+test("authorize refuses a state with a control character on its own page, never storing or echoing it", async () => {
+  const d = await makeTestDb();
+  // A metadata-document client on loopback would normally get authorize errors at its listener.
+  const deps = makeDeps(d, { fetcher: cimdFetcher(["http://127.0.0.1/callback"]) });
+  const id = "https://client.example/oauth/metadata.json";
+  const dcr = await publicClient(deps);
+  const parked = () => (d.raw.prepare("SELECT COUNT(*) AS n FROM mcp_auth_requests").get() as { n: number }).n;
+  for (const cp of [0x00, 0x01, 0x0a, 0x1f, 0x7f, 0x85, 0x9b]) {
+    const state = `abc${String.fromCharCode(cp)}def`;
+    for (const [clientId, redirect] of [[id, "http://127.0.0.1:61234/callback"], [dcr, REDIRECT]]) {
+      const out = await startAuthorization(deps, authorizeParams(clientId, { state, redirect_uri: redirect }));
+      assert.equal(out.kind, "page_error", `U+${cp.toString(16)} ${clientId}`);
+      assert.equal((out as { error: string }).error, "invalid_request");
+      assert.equal((out as { status: number }).status, 400);
+    }
+  }
+  // Even an over-long state with a control character is not bounced back.
+  const long = await startAuthorization(deps, authorizeParams(id, { state: `${"s".repeat(1100)}${String.fromCharCode(0)}`, redirect_uri: "http://127.0.0.1:61234/callback" }));
+  assert.equal(long.kind, "page_error");
+  assert.equal(parked(), 0, "nothing was stored");
+  // Visible ASCII and non-ASCII letters are still fine.
+  for (const state of ["xyz-._~+/=", `${String.fromCharCode(0xe9)}tat`]) {
+    assert.equal((await startAuthorization(deps, authorizeParams(dcr, { state }))).kind, "consent", state);
+  }
 });

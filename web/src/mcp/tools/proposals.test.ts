@@ -11,12 +11,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import type { PublicClient } from "viem";
-import { STOCK_TOKENS } from "@merrymen/core";
+import { STOCK_TOKENS, TRADEABLE_V2 } from "@merrymen/core";
 import { runTool, type ToolDef } from "../tool";
-import { PROPOSAL_TOOLS, KNOWN_STRATEGIES } from "./proposals";
+import { PROPOSAL_TOOLS, KNOWN_STRATEGIES, addressableSymbol } from "./proposals";
 import { setQuoteClientForTest } from "@/lib/services/trade-quote";
+import { projectSettings } from "@/lib/services/settings-view";
+import { revokeConnection } from "../oauth/server";
 import {
-  EVIDENCE_GRACE_SEC, ROW_SKEW_SEC, SETTLE_AFTER_SEC, approveProposal, cancelProposal, followTrade, orderIdFor, proposalRow, queueApprovedTrade, rejectProposal, workerSentence,
+  DISCONNECTED_WHY, EVIDENCE_GRACE_SEC, ROW_SKEW_SEC, SETTLE_AFTER_SEC, approveProposal, cancelAwaitingForConnection, cancelProposal, followTrade, orderIdFor, proposalRow,
+  queueApprovedTrade, rejectProposal, settingsOutcome, workerSentence,
   type DraftBinding, type TradeBinding,
 } from "@/lib/services/proposals";
 import { BUILTIN_STRATEGIES } from "../../../../worker/src/strategies/registry";
@@ -634,6 +637,166 @@ test("a failed placement hands the approval back instead of losing it", async ()
   assert.equal((await proposalRow(d.db, OWNER_A, id))?.status, "awaiting_approval");
 });
 
+// ── only tokens the worker watches (C1) ─────────────────────────────────────
+
+const AAPL = STOCK_TOKENS.find((t) => t.symbol === "AAPL")!.address.toLowerCase();
+
+test("propose_trade refuses a registry stock outside the agent's basket: the worker does not watch it and would always refuse the order (C1)", async () => {
+  // A wide grant CAN sell AAPL, so only the watch set stands in the way. With the
+  // default basket (QQQ, NVDA, TSLA), AAPL is a registry stock the worker does not watch.
+  const wideGrant = () => fixtureDirectory({ [OWNER_A]: [agentFixture(SLUG_A, ACCOUNT_A, { features: [TRADEABLE_V2] })] });
+  const { d, run } = await setup({ directory: wideGrant() });
+  const r = await run("propose_trade", { side: "buy", token: AAPL, amount_usdg: 10, idempotency_key: "c1-aapl-01" });
+  assert.equal(code(r), "unsupported");
+  assert.match(errorOf(r).message, /registry stock token, but not in the agent's basket, so the worker does not watch it and cannot trade it\. The owner can add it to the basket in Settings/);
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM mcp_proposals").get() as { n: number }).n, 0);
+  // A sell of it is refused the same way (it has left the basket, or never was in it).
+  assert.equal(code(await run("propose_trade", { side: "sell", token: AAPL, amount_usdg: 5, idempotency_key: "c1-aapl-02" })), "unsupported");
+  // With AAPL in the basket, it is the agent's token again.
+  restore?.();
+  const inBasket = await setup({ settings: { basketSymbols: ["AAPL"] }, directory: wideGrant() });
+  const ok = await inBasket.run("propose_trade", { side: "sell", token: AAPL, amount_usdg: 5, idempotency_key: "c1-aapl-03" });
+  assert.equal(ok.isError, undefined, JSON.stringify(ok));
+  assert.equal((JSON.parse((await proposalRow(inBasket.d.db, OWNER_A, String(data(ok).proposal_id)))!.binding_json) as TradeBinding).symbol, "AAPL");
+});
+
+test("addressableSymbol resolves through the worker's watch set: basket stocks, owner tokens that survive the collision rule, and the official-coins switch", () => {
+  const settings = (raw: Record<string, unknown>) => projectSettings(raw);
+  // The default basket: NVDA is watched, AAPL is not.
+  assert.deepEqual(addressableSymbol(NVDA, settings({}), 4663), { symbol: "NVDA" });
+  assert.match((addressableSymbol(AAPL, settings({}), 4663) as { why: string }).why, /not in the agent's basket/);
+  assert.deepEqual(addressableSymbol(AAPL, settings({ basketSymbols: ["AAPL"] }), 4663), { symbol: "AAPL" });
+  // NVDA left the basket: an order for it is one the worker would refuse.
+  assert.match((addressableSymbol(NVDA, settings({ basketSymbols: ["AAPL"] }), 4663) as { why: string }).why, /not in the agent's basket/);
+  // An owner token is watched unless the worker drops it (a symbol a registry stock already uses, in any case).
+  const CAT = { symbol: "CAT", address: "0x00000000000000000000000000000000000ca7ca", decimals: 18 };
+  assert.deepEqual(addressableSymbol(CAT.address, settings({ customTokens: [CAT] }), 4663), { symbol: "CAT" });
+  const FAKE = { symbol: "aapl", address: "0x00000000000000000000000000000000000faa01", decimals: 18 };
+  assert.match((addressableSymbol(FAKE.address, settings({ customTokens: [FAKE] }), 4663) as { why: string }).why, /The owner added it, but the worker does not watch it/);
+  // Of two owner tokens under one symbol the worker keeps the first; the second is never addressable.
+  const CAT2 = { symbol: "CAT", address: "0x00000000000000000000000000000000000ca7cb", decimals: 18 };
+  assert.deepEqual(addressableSymbol(CAT.address, settings({ customTokens: [CAT, CAT2] }), 4663), { symbol: "CAT" });
+  assert.equal("why" in addressableSymbol(CAT2.address, settings({ customTokens: [CAT, CAT2] }), 4663), true);
+  // Nothing the agent knows.
+  assert.match((addressableSymbol("0x000000000000000000000000000000000000dead", settings({}), 4663) as { why: string }).why, /not one of the agent's tokens/);
+});
+
+// ── notes refuse control characters (L9) ────────────────────────────────────
+
+test("a proposal note with NUL or another control character is invalid input, never stored; tabs and line breaks are fine", async () => {
+  const { d, run } = await setup();
+  const NUL = String.fromCharCode(0);
+  const BEL = String.fromCharCode(7);
+  for (const [i, bad] of [`from a pdf${NUL}page`, `ring${BEL}`].entries()) {
+    assert.equal(code(await run("propose_trade", { side: "buy", token: NVDA, amount_usdg: 10, idempotency_key: `l9-note-t${i}`, note: bad })), "invalid_input");
+    assert.equal(code(await run("propose_settings_change", { changes: { slippageBps: 80 }, idempotency_key: `l9-note-s${i}`, note: bad })), "invalid_input");
+  }
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM mcp_proposals").get() as { n: number }).n, 0);
+  const fine = await run("propose_trade", { side: "buy", token: NVDA, amount_usdg: 10, idempotency_key: "l9-note-ok", note: "line one\n\tline two" });
+  assert.equal(fine.isError, undefined, JSON.stringify(fine));
+});
+
+// ── what the settings route answered (C2) ──────────────────────────────────
+
+test("an approved settings change whose every key the settings route ignored is failed, never 'applied'; some ignored is applied and partial", () => {
+  const changes = { classExitAtGraduationPct: 50, slippageBps: 80 };
+  const none = settingsOutcome({ classExitAtGraduationPct: 50 }, { ok: true, body: { ok: true, ignored: ["classExitAtGraduationPct"] } as never });
+  assert.equal(none.status, "failed");
+  assert.match(String(none.result.why), /did not accept any of these changes; nothing was changed/);
+  assert.deepEqual(none.result.not_applied, ["classExitAtGraduationPct"]);
+  const some = settingsOutcome(changes, { ok: true, body: { ignored: ["classExitAtGraduationPct", "somethingElse"] } });
+  assert.equal(some.status, "applied");
+  assert.deepEqual(some.result.applied, ["slippageBps"]);
+  assert.equal(some.result.partial, true);
+  assert.deepEqual(some.result.not_applied, ["classExitAtGraduationPct"]);
+  const all = settingsOutcome(changes, { ok: true, body: {} });
+  assert.deepEqual(all, { status: "applied", result: { applied: ["classExitAtGraduationPct", "slippageBps"] } });
+  const refused = settingsOutcome(changes, { ok: false, body: { errors: ["slippageBps: must be a number between 1 and 1000"] } });
+  assert.equal(refused.status, "failed");
+  assert.deepEqual(refused.result.errors, ["slippageBps: must be a number between 1 and 1000"]);
+});
+
+// ── the app that asked must still stand behind it (S0) ──────────────────────
+
+test("disconnecting an app cancels what it left waiting; an order the owner already approved stays theirs", async () => {
+  const { d, a, run } = await setup();
+  const waiting = await propose(run, "s0-wait-01");
+  const post = data(await run("draft_post", { text: "gm merrymen", idempotency_key: "s0-post-01" }));
+  const approved = await propose(run, "s0-appr-01");
+  await approveProposal(d.db, OWNER_A, String(approved.proposal_id), String(approved.binding_hash), NOW, { revalidate: async () => ({ ok: true, notes: [] }), act: (b) => queueApprovedTrade(d.db, b as TradeBinding, String(approved.proposal_id), 60, NOW * 1000) });
+  assert.equal(await revokeConnection(d, OWNER_A, a.principal.connectionId, NOW + 1), true);
+  // Another owner's disconnect of this id touches nothing.
+  assert.equal(await cancelAwaitingForConnection(d.db, OWNER_B, a.principal.connectionId, NOW + 1), 0);
+  assert.equal(await cancelAwaitingForConnection(d.db, OWNER_A, a.principal.connectionId, NOW + 1), 2);
+  for (const p of [waiting, post]) {
+    const row = (await proposalRow(d.db, OWNER_A, String(p.proposal_id)))!;
+    assert.equal(row.status, "cancelled");
+    assert.equal(JSON.parse(row.result_json!).why, DISCONNECTED_WHY);
+  }
+  assert.equal((await proposalRow(d.db, OWNER_A, String(approved.proposal_id)))!.status, "submitted", "not withdrawn by a disconnect");
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM agent_commands WHERE claimed_at IS NULL").get() as { n: number }).n, 1);
+});
+
+test("approval refuses and cancels a proposal whose app was disconnected, lost the scope, or no longer shares the agent", async () => {
+  const { d, deps, run } = await setup();
+  const ok = { revalidate: async () => ({ ok: true as const, notes: [] }), act: async () => ({ status: "applied" as const, result: {} }) };
+  const approve = (p: Record<string, unknown>) => approveProposal(d.db, OWNER_A, String(p.proposal_id), String(p.binding_hash), NOW, ok);
+  const statusOf = async (p: Record<string, unknown>) => (await proposalRow(d.db, OWNER_A, String(p.proposal_id)))!;
+
+  // Revoked, with nothing cancelled yet (a proposal created by a call already in flight when the owner disconnected).
+  const gone = await connectAs(deps, OWNER_A, { scopes: SCOPES });
+  const p1 = data(await run("propose_trade", { side: "buy", token: NVDA, amount_usdg: 10, idempotency_key: "s0-gone-01" }, gone.principal));
+  await revokeConnection(d, OWNER_A, gone.principal.connectionId, NOW);
+  await assert.rejects(approve(p1), /cancelled, not approved: the app that prepared it was disconnected/);
+  assert.equal((await statusOf(p1)).status, "cancelled");
+
+  // Re-consented without trade:propose.
+  const narrowed = await connectAs(deps, OWNER_A, { scopes: SCOPES });
+  const p2 = data(await run("propose_trade", { side: "buy", token: NVDA, amount_usdg: 10, idempotency_key: "s0-narr-01" }, narrowed.principal));
+  d.raw.prepare("UPDATE mcp_connections SET scopes = ? WHERE id = ?").run("agents:read drafts:write", narrowed.principal.connectionId);
+  await assert.rejects(approve(p2), /no longer allowed to ask for this/);
+  assert.equal((await statusOf(p2)).status, "cancelled");
+
+  // The agent is no longer shared with it.
+  const unshared = await connectAs(deps, OWNER_A, { scopes: SCOPES });
+  const p3 = data(await run("propose_settings_change", { changes: { slippageBps: 80 }, idempotency_key: "s0-unsh-01" }, unshared.principal));
+  d.raw.prepare("UPDATE mcp_connections SET agent_slugs = '[]' WHERE id = ?").run(unshared.principal.connectionId);
+  await assert.rejects(approve(p3), /no longer has access to this agent/);
+  const r3 = await statusOf(p3);
+  assert.equal(r3.status, "cancelled");
+  assert.equal(JSON.parse(r3.result_json!).requester_withdrawn, true);
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM agent_commands").get() as { n: number }).n, 0);
+
+  // Seen by another of the owner's connections, it reads as cancelled, with the reason.
+  const view = data(await run("get_proposal", { proposal_id: p3.proposal_id }));
+  assert.equal(view.status, "cancelled");
+  assert.match(String(view.status_explained), /Cancelled because the app that prepared it no longer has access to this agent/);
+  assert.equal(view.approval_url, null);
+});
+
+test("get_proposal and list_proposals show a proposal whose app lost its standing as cancelled, not waiting", async () => {
+  const { d, deps, run } = await setup();
+  const other = await connectAs(deps, OWNER_A, { scopes: SCOPES });
+  const p = data(await run("draft_post", { text: "gm merrymen", idempotency_key: "s0-list-01" }, other.principal));
+  await revokeConnection(d, OWNER_A, other.principal.connectionId, NOW);
+  const listed = data(await run("list_proposals", { status: "all" })).proposals as Array<{ proposal_id: string; status: string; approval_url: string | null }>;
+  const mine = listed.find((x) => x.proposal_id === p.proposal_id)!;
+  assert.equal(mine.status, "cancelled");
+  assert.equal(mine.approval_url, null);
+});
+
+test("status_explained says when an approved settings change was only partly applied", async () => {
+  const { d, run } = await setup();
+  const p = data(await run("propose_settings_change", { changes: { slippageBps: 80, strategistStopLossBps: 900 }, idempotency_key: "c2-part-01" }));
+  await approveProposal(d.db, OWNER_A, String(p.proposal_id), String(p.binding_hash), NOW, {
+    revalidate: async () => ({ ok: true, notes: [] }),
+    act: async (b) => settingsOutcome((b as { changes: Record<string, unknown> }).changes, { ok: true, body: { ignored: ["strategistStopLossBps"] } }),
+  });
+  const view = data(await run("get_proposal", { proposal_id: p.proposal_id }));
+  assert.equal(view.status, "applied");
+  assert.match(String(view.status_explained), /only some of the changes were applied/);
+});
+
 test("an approved order is queued under the account exactly as the grant spells it (the ferry matches with =)", async () => {
   const checksummed = "0x000000000000000000000000000000000000A001";
   const { d, run } = await setup({ directory: fixtureDirectory({ [OWNER_A]: [agentFixture(SLUG_A, ACCOUNT_A, { orderAgentId: checksummed })] }) });
@@ -647,4 +810,15 @@ test("an approved order is queued under the account exactly as the grant spells 
   assert.equal(row.agent_account, checksummed);
   assert.equal((await followTrade(d.db, d.db, row, NOW + 1)).status, "submitted");
   assert.equal((await cancelProposal(d.db, d.db, OWNER_A, id, NOW + 2)).status, "cancelled");
+});
+
+test("proposal text inputs refuse NUL and other control characters (a post, a draft name, a settings value)", async () => {
+  const { run } = await setup();
+  const nul = String.fromCharCode(0);
+  assert.equal(code(await run("draft_post", { text: `hello${nul}`, idempotency_key: "ctl-post-01" })), "invalid_input");
+  assert.equal(code(await run("create_agent_draft", { name: `Bot${nul}`, idempotency_key: "ctl-draft-01" })), "invalid_input");
+  assert.equal(code(await run("propose_settings_change", { changes: { strategy: `steady-basket${nul}` }, idempotency_key: "ctl-set-001" })), "invalid_input");
+  // Tabs and newlines are text.
+  const ok = await run("draft_post", { text: "line one\nline two", idempotency_key: "ctl-post-02" });
+  assert.equal(ok.isError, undefined, JSON.stringify(ok));
 });

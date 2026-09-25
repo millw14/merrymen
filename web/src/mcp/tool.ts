@@ -46,8 +46,13 @@ export interface ToolContext {
   traceId: string;
   signal: AbortSignal;
   now(): number;
+  /** Merrymen's own database. Refuses new statements once `signal` is aborted (see abortableDb). */
   mcp(): Promise<McpDb>;
-  /** Run against the shared ledger (read side). A missing ledger is an outage, not an empty answer. */
+  /**
+   * Run against the shared ledger (read side). A missing ledger is an outage,
+   * not an empty answer. Refuses new statements once `signal` is aborted; a
+   * statement already in flight is not cancelled.
+   */
   ledger<T>(fn: (db: Db) => Promise<T>): Promise<T>;
   /** The agent this call is about, after the ownership check. */
   agent(ref?: string): Promise<OwnedAgent>;
@@ -81,6 +86,14 @@ export interface ToolDef<I extends z.ZodType = z.ZodType, O extends z.ZodType = 
   meta?: Record<string, unknown>;
   /** Default 15 s. Long work returns a job id instead of holding the connection. */
   timeoutMs?: number;
+  /**
+   * The handler stores what a paid external call produced (send_message: the
+   * model's reply), so ctx.mcp() hands out a database that still accepts its
+   * writes after the call timed out: the client is told to read the reply
+   * later, and that promise only holds if the reply is stored. Reads of the
+   * shared ledger and agent lookups still stop at the timeout.
+   */
+  settlesAfterTimeout?: boolean;
   handler(args: z.infer<I>, ctx: ToolContext): Promise<ToolResult<z.infer<O>>>;
 }
 
@@ -118,24 +131,71 @@ export function readLedger<T>(fn: (db: Db | null) => Promise<T>): Promise<T> {
   return override ? fn(override) : withReadDb(fn);
 }
 
-export function makeContext(principal: Principal, traceId: string, signal: AbortSignal, deps: RunDeps = {}): ToolContext {
+/** Why an aborted call stops: the abort reason when it is ours (the timeout), else a timeout. */
+function abortError(signal: AbortSignal): McpError {
+  return signal.reason instanceof McpError ? signal.reason : new McpError("timeout");
+}
+
+/**
+ * The database as a tool handler sees it: every statement, and every new
+ * transaction, first checks the call's signal and refuses to START once the
+ * call was abandoned (runTool answered `timeout`, and the client may already
+ * be retrying). Without this a timed-out handler keeps issuing its remaining
+ * queries one by one, and each retry starts another such orphan, until they
+ * hold every connection of the shared pool.
+ *
+ * A statement that is already running is NOT cancelled: it runs to its end
+ * (bounded only by the database's own limits), and the handler stops at its
+ * next statement. A transaction interrupted this way throws, so it rolls back
+ * rather than committing half of its work after the client was told the call
+ * timed out. Each call wraps anew, so nothing may key a cache on this Db's
+ * identity (none does: services use only prepare/exec/tx).
+ */
+function abortableDb(db: Db, signal: AbortSignal): Db {
+  const guard = <T>(start: () => Promise<T>): Promise<T> => (signal.aborted ? Promise.reject(abortError(signal)) : start());
+  return {
+    prepare(sql) {
+      const stmt = db.prepare(sql);
+      return {
+        run: (...params) => guard(() => stmt.run(...params)),
+        get: (...params) => guard(() => stmt.get(...params)),
+        all: (...params) => guard(() => stmt.all(...params)),
+      };
+    },
+    exec: (sql) => guard(() => db.exec(sql)),
+    tx: (fn) => guard(() => db.tx((scoped) => fn(abortableDb(scoped, signal)))),
+  };
+}
+
+export function makeContext(principal: Principal, traceId: string, signal: AbortSignal, deps: RunDeps = {}, o: { settlesAfterTimeout?: boolean } = {}): ToolContext {
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   const directory = deps.directory ?? agentDirectory();
   const override = ledgerOverride;
   const readLedger = deps.ledger ?? (override ? <T>(fn: (db: Db | null) => Promise<T>) => fn(override) : withReadDb);
+  const openMcp = deps.mcp ?? mcpDb;
   return {
     principal,
     traceId,
     signal,
     now,
-    mcp: deps.mcp ?? mcpDb,
+    // Both database seams refuse new work once the call is abandoned (abortableDb).
+    mcp: async () => {
+      if (signal.aborted) throw abortError(signal);
+      const d = await openMcp();
+      return o.settlesAfterTimeout ? d : { ...d, db: abortableDb(d.db, signal) };
+    },
     directory,
-    ledger: (fn) => readLedger(async (db) => {
-      if (!db) throw new McpError("upstream_unavailable", "The shared ledger is not reachable right now.", { retryAfterSec: 30 });
-      return fn(db);
-    }),
-    agent: (ref) => resolveOwnedAgent(principal, ref, directory),
-    agents: () => reachableAgents(principal, directory),
+    ledger: (fn) => {
+      if (signal.aborted) return Promise.reject(abortError(signal));
+      return readLedger(async (db) => {
+        if (!db) throw new McpError("upstream_unavailable", "The shared ledger is not reachable right now.", { retryAfterSec: 30 });
+        if (signal.aborted) throw abortError(signal);
+        return fn(abortableDb(db, signal));
+      });
+    },
+    // The directory reads the identity store and the grants: no new lookups after the call is abandoned either.
+    agent: (ref) => (signal.aborted ? Promise.reject(abortError(signal)) : resolveOwnedAgent(principal, ref, directory)),
+    agents: () => (signal.aborted ? Promise.reject(abortError(signal)) : reachableAgents(principal, directory)),
   };
 }
 
@@ -209,7 +269,7 @@ export async function runTool(def: ToolDef, rawArgs: unknown, principal: Princip
     if (!parsed.success) {
       throw new McpError("invalid_input", parsed.error.issues.slice(0, 3).map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "));
     }
-    const ctx = makeContext(principal, traceId, controller.signal, deps);
+    const ctx = makeContext(principal, traceId, controller.signal, deps, { settlesAfterTimeout: def.settlesAfterTimeout === true });
     const work = def.handler(parsed.data, ctx);
     const aborted = new Promise<never>((_, reject) => {
       controller.signal.addEventListener("abort", () => reject(controller.signal.reason ?? new McpError("timeout")), { once: true });

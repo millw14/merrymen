@@ -28,7 +28,7 @@ import {
 import { McpError } from "../errors";
 import { defineTool, type ToolContext } from "../tool";
 import type { OwnedAgent } from "../agents";
-import { ADDRESS_ARG, AGENT_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, isoOrNull, untrusted } from "./shared";
+import { ADDRESS_ARG, AGENT_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, isCursorInt, isoOrNull, untrusted } from "./shared";
 
 const SUBSCRIPTION_ID = z.string().regex(/^nsub_[0-9a-f]{32}$/, "a subscription id from list_subscriptions");
 const iso = (sec: number) => new Date(sec * 1000).toISOString();
@@ -463,7 +463,7 @@ const listDeliveries = defineTool({
     let after: { c: number; i: string } | null = null;
     if (cursor !== undefined) {
       const v = decodeCursor(tenant, scope, cursor);
-      if (!v || typeof v.c !== "number" || typeof v.i !== "string") throw new McpError("invalid_input", "cursor is not a cursor from this list");
+      if (!v || !isCursorInt(v.c) || typeof v.i !== "string" || v.i.length > 128) throw new McpError("invalid_input", "cursor is not a cursor from this list");
       after = { c: v.c, i: v.i };
     }
     const reachable = [...(await reachableSlugs(ctx))];

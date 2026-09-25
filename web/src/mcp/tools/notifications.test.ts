@@ -11,6 +11,7 @@ import { after, afterEach, before, test } from "node:test";
 import { STOCK_TOKENS } from "@merrymen/core";
 import { runTool, type ToolDef } from "../tool";
 import { NOTIFICATIONS_TOOLS } from "./notifications";
+import { encodeCursor } from "./shared";
 import { TELEGRAM_STATE_DDL } from "../../../../worker/src/telegram-store";
 import { canonicalParams, runNotifyPass, type NotifyDeps } from "../../../../worker/src/mcp/notify";
 import { errorOf, ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, agentFixture, connectAs, fixtureDirectory, installFixtures, makeDeps, makeTestDb, type TestDb } from "../testing";
@@ -289,6 +290,21 @@ test("list_deliveries pages newest first with an owner-bound cursor", async () =
   assert.equal(code(await run("list_deliveries", { limit: 2, cursor: p1.next_cursor }, b.principal)), "invalid_input");
   assert.equal(code(await run("list_deliveries", { limit: 2, cursor: p1.next_cursor, subscription_id: id })), "invalid_input", "a cursor is bound to its query");
   assert.equal(code(await run("list_deliveries", { limit: 101 })), "invalid_input");
+});
+
+test("a list_deliveries cursor whose time is not a safe integer is invalid_input (Postgres would refuse it against BIGINT as internal)", async () => {
+  const { d, run } = await setup();
+  const id = data(await run("subscribe", { kind: "inactivity", params: { hours: 6 } })).subscription.subscription_id as string;
+  insertDelivery(d, "ndl_0", id, { at: NOW - 100 });
+  // Cursors are unsigned: the owner tag is computable, so any client can forge one.
+  for (const c of [1_799_999_999.5, 1e20, -1, Number.MAX_SAFE_INTEGER + 2]) {
+    const r = await run("list_deliveries", { cursor: encodeCursor(OWNER_A.toLowerCase(), "deliveries:*", { c, i: "ndl_9" }) });
+    assert.equal(code(r), "invalid_input", String(c));
+    assert.equal(errorOf(r).retryable, false);
+  }
+  assert.equal(code(await run("list_deliveries", { cursor: encodeCursor(OWNER_A.toLowerCase(), "deliveries:*", { c: NOW, i: "x".repeat(129) }) })), "invalid_input", "an overlong id is refused");
+  const ok = data(await run("list_deliveries", { cursor: encodeCursor(OWNER_A.toLowerCase(), "deliveries:*", { c: NOW, i: "ndl_9" }) }));
+  assert.equal(ok.deliveries.length, 1, "a well-formed cursor still reads");
 });
 
 test("end to end: a subscription made here is evaluated and delivered by the worker pass, and its outcome reads back", async () => {

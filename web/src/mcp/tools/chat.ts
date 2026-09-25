@@ -15,7 +15,7 @@ import {
 } from "@/lib/services/agent-conversation";
 import { McpError } from "../errors";
 import { defineTool, type ToolContext } from "../tool";
-import { ADDRESS_ARG, AGENT_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, untrusted } from "./shared";
+import { ADDRESS_ARG, AGENT_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, isCursorInt, refuseControls, untrusted } from "./shared";
 
 const CONVERSATION_ARG = z.string().regex(/^conv_[0-9a-f]{16,64}$/, "a conversation id from send_message or list_conversations");
 const CURSOR_ARG = z.string().max(512).optional().describe("next_cursor from the previous page");
@@ -43,7 +43,7 @@ async function guarded<T>(work: () => Promise<T>): Promise<T> {
 function cursorOf(ctx: ToolContext, scope: string, cursor: string | undefined): { at: number; id: string } | null {
   if (cursor === undefined) return null;
   const v = decodeCursor(ctx.principal.tenant, scope, cursor);
-  if (!v || typeof v.at !== "number" || typeof v.id !== "string" || v.id.length > 128) {
+  if (!v || !isCursorInt(v.at) || typeof v.id !== "string" || v.id.length > 128) {
     throw new McpError("invalid_input", "cursor is not valid for this query. Start again without a cursor.");
   }
   return { at: v.at, id: v.id };
@@ -80,7 +80,7 @@ const sendMessageTool = defineTool({
   capability: "chat.send",
   input: z.object({
     agent: AGENT_ARG,
-    message: z.string().min(1).max(2000).refine((s) => s.trim().length > 0, "message must not be blank"),
+    message: refuseControls(z.string().min(1).max(2000).refine((s) => s.trim().length > 0, "message must not be blank")),
     request_id: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/, "8–128 letters, digits, _ or -").describe("A fresh random id per new message; reuse it only to retry the same message"),
     conversation_id: CONVERSATION_ARG.optional().describe("Continue this conversation; omit to start a new one"),
   }).strict(),
@@ -105,6 +105,9 @@ const sendMessageTool = defineTool({
   // Every new message is a model call billed to Merrymen.
   budget: { bucket: "llm_chat", perMinute: 6, perHour: 30, perDay: 150 },
   timeoutMs: 35_000,
+  // A reply that arrives after the timeout is still stored, so the replay path
+  // ("read the reply later with get_conversation") holds.
+  settlesAfterTimeout: true,
   async handler(args, ctx) {
     const a = await ctx.agent(args.agent);
     const { db, dialect } = await ctx.mcp();
@@ -264,7 +267,7 @@ function noteView(n: ResearchNote, now: number) {
   };
 }
 
-const SOURCE_ARG = z.string().max(500).refine((s) => httpsSource(s) !== null, "an https:// link with a host and no credentials");
+const SOURCE_ARG = refuseControls(z.string().max(500)).refine((s) => httpsSource(s) !== null, "an https:// link with a host and no credentials");
 
 const submitResearchTool = defineTool({
   name: "submit_research",
@@ -273,8 +276,8 @@ const submitResearchTool = defineTool({
   capability: "research.submit",
   input: z.object({
     agent: AGENT_ARG,
-    title: z.string().min(1).max(120).refine((s) => s.trim().length > 0, "title must not be blank"),
-    body: z.string().min(1).max(4000).refine((s) => s.trim().length > 0, "body must not be blank"),
+    title: refuseControls(z.string().min(1).max(120).refine((s) => s.trim().length > 0, "title must not be blank")),
+    body: refuseControls(z.string().min(1).max(4000).refine((s) => s.trim().length > 0, "body must not be blank")),
     sources: z.array(SOURCE_ARG).min(1).max(10),
     tokens: z.array(ADDRESS_ARG).max(10).optional().describe("Token contract addresses the note is about"),
   }).strict(),

@@ -27,7 +27,7 @@ answer: missing data sources return `upstream_unavailable`.
 | Code | Retry? | Meaning |
 |---|---|---|
 | `unauthenticated` | no | No valid access token. Reconnect the app. |
-| `insufficient_scope` | no | The connection was not granted the scope this needs (`details.required_scope`). Reconnect and allow it. |
+| `insufficient_scope` | no | The connection was not granted the scope this needs (`details.required_scope`). Disconnect the app on Connected apps and connect it again, ticking that permission on the consent screen, or use a personal access token. (A tool the connection holds no scope for is not listed at all; calling it anyway returns the protocol error `-32602 Tool … not found`.) |
 | `forbidden` | no | This connection may not act on that object (for example no agent is shared with it). |
 | `not_found` | no | No such object, **or it is not yours**. Other owners' objects are always reported as not found, and so are objects about an agent not shared with this connection (a proposal, an export) or of a kind it may not handle. |
 | `invalid_input` | no | An argument is missing, malformed or out of range. |
@@ -42,6 +42,19 @@ answer: missing data sources return `upstream_unavailable`.
 
 Input that fails the tool's JSON schema is rejected by the protocol layer
 before the tool runs, with a text message starting `Input validation error`.
+
+## Resource read errors
+
+`resources/read` has no `isError` channel, so failures are JSON-RPC errors:
+
+- an object that does not exist, **or is not yours** (or not shared with this
+  connection): `-32602` with `data: {"uri": "…"}` — the same answer as an
+  unknown URI;
+- other non-retryable codes (`invalid_input`, `insufficient_scope`, …):
+  `-32602` with the error envelope as `data`;
+- retryable codes (`rate_limited`, `upstream_unavailable`, `timeout`,
+  `internal`): `-32603` with the envelope as `data`, including
+  `retry_after_s`.
 
 ## Outcomes that are not errors
 

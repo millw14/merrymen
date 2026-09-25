@@ -7,9 +7,15 @@ client-specific business logic: Claude, Codex and everything else see exactly
 the tools their granted scopes allow.
 
 The first connection opens Merrymen in your browser. Sign in as usual, choose
-which of your agents the assistant may see and what it may do (the sensitive
-permissions start unticked), and approve. You can disconnect it any time on
+which of your agents the assistant may see and what it may do (every
+permission is listed; the sensitive ones, proposing trades, drafts and posts,
+start unticked), and approve. You can disconnect it any time on
 [Connected apps](https://app.merrymen.dev/connect/apps).
+
+To give a connected assistant a permission you left unticked, disconnect it on
+Connected apps and connect it again (in Claude Code, `/mcp` then
+re-authenticate), ticking that permission. A tool the connection has no
+permission for is not listed at all.
 
 ## Claude (claude.ai, Claude Desktop, Claude mobile)
 

@@ -30,6 +30,8 @@ import { errorOf,
 } from "../testing";
 import { runTool, type CallToolResult, type ToolDef } from "../tool";
 import { CHAT_TOOLS } from "./chat";
+import { asMcpError } from "../errors";
+import { encodeCursor } from "./shared";
 
 const NOW = 1_800_000_000;
 const CHAT_SCOPES = ["chat:write", "agents:read", "offline_access"];
@@ -389,7 +391,9 @@ test("submit_research validates links and tokens, stores who sent it, expires in
 
 test("list_research shows active notes by default, expired ones on request, as untrusted text", async () => {
   const { d, a } = await setup();
-  ok(await call(a, "submit_research", { title: "Fresh \u202eevil", body: "Body\u0007 text", sources: ["https://example.com/f"] }));
+  ok(await call(a, "submit_research", { title: "Fresh \u202eevil", body: "Body text", sources: ["https://example.com/f"] }));
+  // A control character is refused at submit_research; one already in a stored row is still stripped on the way out.
+  d.raw.prepare("UPDATE mcp_research SET body = ?").run(`Body${String.fromCharCode(7)} text`);
   d.raw.prepare(`INSERT INTO mcp_research (id, tenant, agent_slug, title, body, sources_json, tokens_json, created_at, expires_at)
     VALUES ('rsn_old', ?, ?, 'Old note', 'old', '[]', '[]', ?, ?)`).run(OWNER_A, SLUG_A, NOW - 900_000, NOW - 1);
   const active = ok(await call(a, "list_research", {}));
@@ -796,4 +800,117 @@ test("a research note reaches the model with no invisible characters: TAG smuggl
   // The only closing fence is the real one at the end.
   assert.equal(fenced.match(/<\s*\/\s*untrusted/gi)?.length, 1, fenced);
   assert.ok(fenced.endsWith("</untrusted>"));
+});
+
+// ── text a database cannot store, and cursors a BIGINT cannot hold ─────────
+
+const C = (n: number) => String.fromCharCode(n);
+const hex = (s: string) => `U+${s.charCodeAt(0).toString(16).padStart(4, "0")}`;
+
+/** A Db that refuses NUL in any bound text exactly as Postgres TEXT does (SQLSTATE 22021), where SQLite would store it. */
+function refusesNulLikePostgres(inner: Db): Db {
+  const check = (params: unknown[]) => {
+    if (params.some((p) => typeof p === "string" && p.includes(C(0)))) {
+      throw Object.assign(new Error('invalid byte sequence for encoding "UTF8": 0x00'), { code: "22021" });
+    }
+  };
+  return {
+    prepare(sql) {
+      const s = inner.prepare(sql);
+      return {
+        run: async (...p: unknown[]) => { check(p); return s.run(...p); },
+        get: async (...p: unknown[]) => { check(p); return s.get(...p); },
+        all: async (...p: unknown[]) => { check(p); return s.all(...p); },
+      };
+    },
+    exec: (sql) => inner.exec(sql),
+    tx: (fn) => inner.tx((t) => fn(refusesNulLikePostgres(t))),
+  };
+}
+
+test("a message, title, body or link holding NUL or another C0/C1 control is invalid_input before anything is stored; tabs and line breaks are kept", async () => {
+  const { d, a, calls } = await setup();
+  // NUL, BEL, ESC, DEL, NEL, CSI and a lone carriage return.
+  const controls = [C(0), C(7), C(0x1b), C(0x7f), C(0x85), C(0x9b), C(13)];
+  for (const [i, ch] of controls.entries()) {
+    const at = NOW + i * 3600; // a fresh minute each round, so no budget answers first
+    const sent = await call(a, "send_message", { message: `hello${ch}world`, request_id: `req-ctrl${i}000` }, at);
+    assert.equal(code(sent), "invalid_input", `send_message ${hex(ch)}`);
+    assert.equal(errorOf(sent).retryable, false);
+    assert.match(errorOf(sent).message, /message: must not contain control characters/);
+    for (const args of [
+      { title: "Note", body: `earnings beat${ch} guidance raised` },
+      { title: `No${ch}te`, body: "earnings beat" },
+      { title: "Note", body: "earnings beat", sources: [`https://example.com/a${ch}`] },
+    ]) {
+      const r = await call(a, "submit_research", { sources: ["https://example.com/a"], ...args }, at);
+      assert.equal(code(r), "invalid_input", `submit_research ${hex(ch)} ${JSON.stringify(Object.keys(args))}`);
+    }
+  }
+  assert.equal(calls.length, 0, "the model never ran");
+  assert.equal(count(d, "SELECT COUNT(*) AS n FROM mcp_messages"), 0);
+  assert.equal(count(d, "SELECT COUNT(*) AS n FROM mcp_research"), 0);
+
+  // Tab, line feed and CRLF are text, and are stored as given.
+  const body = `line one${C(13)}${C(10)}line two${C(9)}tabbed${C(10)}end`;
+  ok(await call(a, "submit_research", { title: "Note", body, sources: ["https://example.com/a"] }, NOW + 90_000));
+  assert.equal((d.raw.prepare("SELECT body FROM mcp_research").get() as { body: string }).body, body);
+  ok(await call(a, "send_message", { message: `a${C(10)}b${C(13)}${C(10)}c${C(9)}d`, request_id: "req-ctrl-ok01" }, NOW + 90_000));
+  assert.equal(calls.length, 1);
+});
+
+test("a conversation or research cursor whose time is not a safe integer is invalid_input (Postgres would refuse it against BIGINT as internal)", async () => {
+  const { a } = await setup();
+  const conv = ok(await call(a, "send_message", { message: "one", request_id: "req-curs0001" })).conversation_id as string;
+  const id = `conv_${"a".repeat(24)}`;
+  // Cursors are unsigned: the owner tag is computable, so any client can forge one.
+  for (const at of [NOW + 0.5, 1e20, -1, Number.MAX_SAFE_INTEGER + 2]) {
+    for (const [name, scope, args] of [
+      ["list_conversations", `conversations:${SLUG_A}`, {}],
+      ["list_research", `research:${SLUG_A}:active`, {}],
+      ["get_conversation", `conversation:${SLUG_A}:${conv}`, { conversation_id: conv }],
+    ] as const) {
+      const r = await call(a, name, { ...args, cursor: encodeCursor(OWNER_A, scope, { at, id }) });
+      assert.equal(code(r), "invalid_input", `${name} at=${at}`);
+      assert.equal(errorOf(r).retryable, false);
+    }
+  }
+  ok(await call(a, "list_conversations", { cursor: encodeCursor(OWNER_A, `conversations:${SLUG_A}`, { at: NOW + 60, id }) }));
+});
+
+test("on a database that refuses NUL as Postgres does, text that reaches it is invalid_input, never a retryable internal", async () => {
+  const { d, a } = await setup();
+  restore?.();
+  restore = installFixtures({ ...d, db: refusesNulLikePostgres(d.db) });
+  // A cursor's id is free text up to 128 characters; one holding NUL reaches the query.
+  const cursor = encodeCursor(OWNER_A, `conversations:${SLUG_A}`, { at: NOW, id: `conv_${C(0)}` });
+  const r = await call(a, "list_conversations", { cursor });
+  const e = errorOf(r);
+  assert.equal(e.code, "invalid_input");
+  assert.equal(e.retryable, false);
+  assert.doesNotMatch(JSON.stringify(r), /UTF8|0x00|22021/, "no raw database error text");
+});
+
+test("asMcpError maps only Postgres's unstorable-text states to invalid_input", () => {
+  const pg = (code: string) => Object.assign(new Error(`[pg ${code}] boom`), { code });
+  for (const state of ["22021", "22P05"]) {
+    const e = asMcpError(pg(state));
+    assert.equal(e.code, "invalid_input", state);
+    assert.equal(e.retryable, false);
+    assert.doesNotMatch(e.message, /boom|pg/);
+  }
+  for (const other of [pg("23505"), pg("22P02"), Object.assign(new Error("x"), { code: "ERR_SQLITE_ERROR" }), { code: 22021 }, null, "22021"]) {
+    assert.equal(asMcpError(other).code, "internal", JSON.stringify(other));
+  }
+});
+
+test("a model reply carrying NUL or other control characters is stored without them (Postgres TEXT cannot hold NUL)", async () => {
+  const nul = String.fromCharCode(0);
+  const bell = String.fromCharCode(7);
+  const { d, a } = await setup({ answer: async () => ({ reply: `Fine${nul} today.${bell}\nAll good.` }) });
+  const r = ok(await call(a, "send_message", { message: "How are you?", request_id: "req-nul-001" }));
+  assert.equal(r.reply.status, "complete");
+  assert.equal(r.reply.content, "Fine today.\nAll good.");
+  const stored = (d.raw.prepare("SELECT content FROM mcp_messages WHERE role = 'agent'").get() as { content: string }).content;
+  assert.equal(stored.includes(nul), false);
 });

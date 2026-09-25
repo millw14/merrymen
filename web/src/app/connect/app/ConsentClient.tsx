@@ -48,6 +48,19 @@ async function consent<T>(body: Record<string, unknown>): Promise<T> {
 
 const LEVEL_LABEL: Record<ScopeView["level"], string> = { read: "Read", write: "Change", sensitive: "Needs your approval each time", staff: "Staff" };
 
+/**
+ * A scope whose actions are NOT all proposals gets a badge that says which
+ * part needs approval. social:write follows and unfollows agents at once (no
+ * approval page), and only its posts wait for the owner; the level's
+ * "Needs your approval each time" would promise an approval that never comes.
+ */
+const SCOPE_BADGE: Readonly<Record<string, string>> = { "social:write": "Change — posts need your approval" };
+
+/** The badge a scope carries on the consent screen. */
+export function scopeBadge(s: Pick<ScopeView, "id" | "level">): string {
+  return SCOPE_BADGE[s.id] ?? LEVEL_LABEL[s.level];
+}
+
 export function ConsentClient() {
   const [request, setRequest] = useState<string | null>(null);
   const [view, setView] = useState<ConsentView | null>(null);
@@ -179,14 +192,14 @@ export function ConsentClient() {
                 <li key={s.id} className={s.level === "sensitive" ? "mcp-sensitive" : ""}>
                   <label>
                     <input type="checkbox" disabled={disabled} checked={scopes.has(s.id) && !disabled} onChange={() => toggle(scopes, s.id, setScopes)} />
-                    <span><strong>{s.title} <em className={`mcp-level mcp-level-${s.level}`}>{LEVEL_LABEL[s.level]}</em></strong><span>{s.detail}</span></span>
+                    <span><strong>{s.title} <em className={`mcp-level mcp-level-${s.level}`}>{scopeBadge(s)}</em></strong><span>{s.detail}</span></span>
                   </label>
                 </li>
               );
             })}</ul>
 
             <div className="connect-boundary"><ShieldCheck size={19} aria-hidden /><p>
-              {appName} can never move your funds, see your keys, turn on live trading or loosen your limits. Trades and setting changes it suggests only happen if you approve them in Merrymen, and your agent keeps running on its own whether or not the assistant is connected. It stays connected until you disconnect it{view.maxDays ? `, for at most ${view.maxDays} days before you are asked again` : ""}. Disconnect it any time at <a href="/connect/apps">Connected apps</a>; that ends its access at once.
+              {appName} can never move your funds, see your keys, turn on live trading or loosen your limits. Trades and setting changes it suggests only happen if you approve them in Merrymen, and your agent keeps running on its own whether or not the assistant is connected. It stays connected until you disconnect it{view.maxDays ? `, for at most ${view.maxDays} days before you are asked again` : ""}. Disconnect it any time at <a href="/connect/apps">Connected apps</a>; that ends its access at once and cancels anything it left waiting for your approval.
             </p></div>
 
             <button className="flow-primary" disabled={busy || !chosenUseful} onClick={() => void decide(true)}>{busy ? "Connecting…" : `Allow ${appName}`} {!busy && <ArrowRight size={16} aria-hidden />}</button>

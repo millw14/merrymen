@@ -8,8 +8,9 @@
  * this connection) reads as not found. A resource URI is a name, not a
  * capability: holding `merrymen://exports/exp_…` grants nothing by itself.
  */
-import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/server";
-import { McpError, asMcpError } from "./errors";
+import { ProtocolError, ProtocolErrorCode, ResourceNotFoundError, ResourceTemplate, type McpServer } from "@modelcontextprotocol/server";
+import { mcpDb } from "./db";
+import { McpError, asMcpError, errorBody } from "./errors";
 import { logEvent, pseudonym, rateHit, recordToolCall, writeAudit } from "./observe";
 import { hasCapability, requireCapability } from "./policy";
 import type { Capability } from "./scopes";
@@ -49,6 +50,32 @@ export interface ResourceDef {
 
 const isTemplate = (uri: string) => /\{[a-z_]+\}/i.test(uri);
 
+/**
+ * How a failed read crosses the wire. Resource reads have no isError channel,
+ * so the JSON-RPC error itself must carry the meaning (a plain Error would be
+ * -32603 "Internal error" for everything, telling a client the server broke):
+ *
+ * - not_found → the SDK's ResourceNotFoundError: -32602 with data {uri} on every
+ *   protocol era, the very shape of a URI that matches no resource, so another
+ *   owner's (or an unshared) object is indistinguishable from an absent one.
+ * - any other code that is not retryable (invalid_input, expired, forbidden,
+ *   …) → -32602 Invalid params: this request will not succeed as sent.
+ * - a retryable code (rate_limited, quota_exceeded, timeout,
+ *   upstream_unavailable, internal) → -32603.
+ *
+ * Except for not_found (whose data must stay exactly {uri} to be recognised),
+ * data is the tool error envelope {code, message, retryable, retry_after_s,
+ * trace_id}, so the stable code and any retry delay survive. The message keeps
+ * the "<code>: " prefix for people and logs; it never carries more than an
+ * McpError's own message.
+ */
+export function readFailure(e: McpError, uri: string, trace: string): ProtocolError {
+  const message = `${e.code}: ${e.message}`;
+  if (e.code === "not_found") return new ResourceNotFoundError(uri, message);
+  const data = errorBody(e, trace).error;
+  return new ProtocolError(e.retryable ? ProtocolErrorCode.InternalError : ProtocolErrorCode.InvalidParams, message, data);
+}
+
 async function runRead(def: ResourceDef, uri: URL, vars: Record<string, string>, p: Principal, trace: string, deps: RunDeps = {}) {
   const started = Date.now();
   let outcome = "ok";
@@ -66,15 +93,16 @@ async function runRead(def: ResourceDef, uri: URL, vars: Record<string, string>,
   } catch (error) {
     const e = asMcpError(error);
     outcome = e.code;
-    // Resource reads have no isError channel; the SDK turns a throw into a JSON-RPC error.
-    throw new Error(`${e.code}: ${e.message}`);
+    throw readFailure(e, uri.href, trace);
   } finally {
     clearTimeout(timer);
     const ms = Date.now() - started;
     recordToolCall(`resource:${def.name}`, outcome, ms);
     logEvent("resource", { resource: def.name, outcome, ms, trace, tenant: pseudonym(p.tenant) });
     try {
-      await writeAudit(await ctx.mcp(), { action: `resource:${def.name}`, outcome, tenant: p.tenant, connectionId: p.connectionId, clientId: p.clientId, capability: def.capability, latencyMs: ms, traceId: trace, detail: vars });
+      // Not ctx.mcp(): once the read timed out, the context refuses new
+      // database work, and the audit row of a timed-out read must still land.
+      await writeAudit(await (deps.mcp ?? mcpDb)(), { action: `resource:${def.name}`, outcome, tenant: p.tenant, connectionId: p.connectionId, clientId: p.clientId, capability: def.capability, latencyMs: ms, traceId: trace, detail: vars });
     } catch {
       /* audit is best effort for reads */
     }

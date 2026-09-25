@@ -81,12 +81,17 @@ function normalizeResource(raw: string): string {
  * served from one of our own hosts. `cacheNew` (may a fetched metadata document
  * create a cache row) is for the consent steps only: authorize, and the consent
  * page resolving the client its parked request names. The token and revocation
- * endpoints never pass it, so a caller with no code or token cannot make this
- * server store anything (see ResolveOptions.cacheNew).
+ * endpoints never pass it: there a fetched document only refreshes a cached
+ * row, or restores the row of a client some owner has an ACTIVE connection
+ * with, so a caller with no code or token cannot make this server store a row
+ * for a client no owner connected (see ResolveOptions.cacheNew).
  */
 export function clientFor(deps: Pick<OAuthDeps, "d" | "cfg" | "fetcher">, clientId: unknown, now: number, o: { cacheNew?: boolean } = {}): Promise<McpClient> {
   return resolveClient(deps.d, clientId, now, { ownHosts: ownHostsOf(deps.cfg), fetcher: deps.fetcher, cacheNew: o.cacheNew === true });
 }
+
+/** Any control character (C0 incl. NUL, DEL, C1), by Unicode category so no literal list can drift. */
+const STATE_CONTROL = /\p{Cc}/u;
 
 export async function startAuthorization(deps: OAuthDeps, p: URLSearchParams): Promise<AuthorizeOutcome> {
   const { d, cfg } = deps;
@@ -118,6 +123,13 @@ export async function startAuthorization(deps: OAuthDeps, p: URLSearchParams): P
   const fail = (error: string, description: string): AuthorizeOutcome => redirectErrors
     ? { kind: "redirect", location: withParams(redirectUri, { error, error_description: description, state, iss: cfg.issuer }) }
     : { kind: "page_error", status: 400, error, description };
+  // RFC 6749 allows only visible characters in state. A control character is
+  // refused on our own page, never echoed back to any redirect (so this comes
+  // before every fail()), and never stored (Postgres TEXT cannot hold NUL: the
+  // INSERT below would fail as a 500).
+  if (state !== undefined && STATE_CONTROL.test(state)) {
+    return { kind: "page_error", status: 400, error: "invalid_request", description: "state must not contain control characters" };
+  }
   if (state !== undefined && state.length > 1024) return fail("invalid_request", "state is too long");
   if (p.get("response_type") !== "code") return fail("unsupported_response_type", "only response_type=code is supported");
   if (p.get("code_challenge_method") !== "S256") return fail("invalid_request", "PKCE with code_challenge_method=S256 is required");
@@ -257,7 +269,12 @@ export async function decideRequest(deps: OAuthDeps, requestId: unknown, tenant:
       return { location: back({ error: "access_denied", error_description: "the owner declined the connection" }), connectionId: null };
     }
     const requested = offeredScopes(row.scopes.split(" ").filter(Boolean), staff);
-    const chosen = Array.isArray(decision.scopes) ? decision.scopes.filter((s): s is string => typeof s === "string") : requested;
+    // No explicit choice means what the consent page starts with ticked, never
+    // every requested scope: clients ask for all of them (see bearerChallenge),
+    // and a sensitive scope is granted only when the owner ticks it.
+    const chosen = Array.isArray(decision.scopes)
+      ? decision.scopes.filter((s): s is string => typeof s === "string")
+      : requested.filter((s) => scopeInfo(s)?.defaultOn === true);
     if (chosen.some((s) => !requested.includes(s))) throw new OAuthError("invalid_scope", "consent includes a scope the app did not request");
     const ownedSlugs = new Set(owned.map((a) => a.slug));
     const slugs = Array.isArray(decision.agentSlugs) ? [...new Set(decision.agentSlugs.filter((s): s is string => typeof s === "string"))] : [];
@@ -321,16 +338,27 @@ export async function authenticateClient(deps: OAuthDeps, form: URLSearchParams,
     }
     const i = decoded.indexOf(":");
     if (i < 0) throw new OAuthError("invalid_client", "malformed Basic authorization", 401);
-    const basicId = decodeURIComponent(decoded.slice(0, i));
+    // RFC 6749 §2.3.1 percent-encodes both parts. A stray "%" makes
+    // decodeURIComponent throw URIError; that is failed client authentication
+    // (401 invalid_client, §5.2), not a server error.
+    const formDecode = (s: string): string => {
+      try {
+        return decodeURIComponent(s);
+      } catch {
+        throw new OAuthError("invalid_client", "malformed Basic authorization", 401);
+      }
+    };
+    const basicId = formDecode(decoded.slice(0, i));
     if (clientId && clientId !== basicId) throw new OAuthError("invalid_client", "client_id does not match the Authorization header", 401);
     clientId = basicId;
-    secret = decodeURIComponent(decoded.slice(i + 1));
+    secret = formDecode(decoded.slice(i + 1));
     viaBasic = true;
   }
   let client: McpClient;
   try {
-    // Never caches a new metadata document: a client with no code or token
-    // cannot succeed here, so this endpoint must not let it store a row.
+    // Never caches a new metadata document (a client with no code or token
+    // cannot succeed here, so this endpoint must not let it store a row); it
+    // only refreshes a cached row or restores that of an actively connected client.
     client = await clientFor(deps, clientId, deps.now());
   } catch (e) {
     // A metadata document we could not fetch just now is an outage, not an

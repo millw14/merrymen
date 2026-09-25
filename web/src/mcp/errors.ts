@@ -65,11 +65,33 @@ export function errorBody(e: McpError, traceId?: string): ErrorBody {
   };
 }
 
-/** Anything thrown that is not an McpError becomes `internal`, with no text from the original error. */
+/**
+ * Postgres refusing a character in text it was handed: 22021
+ * (character_not_in_repertoire, e.g. NUL in a TEXT value: 'invalid byte
+ * sequence for encoding "UTF8": 0x00') and 22P05 (untranslatable_character,
+ * e.g. an escaped NUL in jsonb). The same request fails the same way every
+ * time, so it is the caller's input, never a retryable server fault.
+ */
+const PG_UNSTORABLE_TEXT = new Set(["22021", "22P05"]);
+
+function sqlState(error: unknown): string | null {
+  const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" ? code : null;
+}
+
+/**
+ * Anything thrown that is not an McpError becomes `internal`, with no text
+ * from the original error — except a timeout, and Postgres refusing a
+ * character it cannot store, which is `invalid_input` with Merrymen's own words.
+ */
 export function asMcpError(error: unknown): McpError {
   if (error instanceof McpError) return error;
   if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
     return new McpError("timeout");
+  }
+  const state = sqlState(error);
+  if (state !== null && PG_UNSTORABLE_TEXT.has(state)) {
+    return new McpError("invalid_input", "An argument holds a character Merrymen cannot store (such as NUL). Remove it and try again.");
   }
   return new McpError("internal");
 }

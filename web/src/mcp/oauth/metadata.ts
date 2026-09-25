@@ -10,7 +10,7 @@
  * registration. Both are advertised.
  */
 import { protectedResourceMetadataUrl, type McpConfig } from "../config";
-import { ADVERTISED_SCOPES, DEFAULT_REQUEST_SCOPES } from "../scopes";
+import { ADVERTISED_SCOPES } from "../scopes";
 
 export function authorizationServerMetadata(cfg: McpConfig): Record<string, unknown> {
   const i = cfg.issuer;
@@ -44,10 +44,23 @@ export function protectedResourceMetadata(cfg: McpConfig): Record<string, unknow
   };
 }
 
-/** The 401 challenge that sends a client to discovery (RFC 9728 §5.1, RFC 6750 §3). */
+/**
+ * The 401 challenge that sends a client to discovery (RFC 9728 §5.1, RFC 6750 §3).
+ *
+ * Its `scope` is every scope a client may be granted (`scopes_supported`, never
+ * the staff scope), not a narrow default. MCP clients request exactly the
+ * challenge's scope (Claude Code and the SDK clients use it before
+ * `scopes_supported`), and the consent page can offer only what was requested:
+ * a read-only challenge would mean no OAuth client could EVER be granted a
+ * write scope, however the owner answered. Asking for everything grants
+ * nothing by itself: the owner ticks what the app gets, and the sensitive
+ * scopes (trade:propose, drafts:write, social:write) start unticked.
+ * DEFAULT_REQUEST_SCOPES remains only what an /oauth/authorize request with
+ * no `scope` at all is treated as asking for (parseScopeParam).
+ */
 export function bearerChallenge(cfg: McpConfig, opts: { error?: "invalid_token" | "insufficient_scope"; description?: string; scope?: readonly string[] } = {}): string {
   const parts = [`resource_metadata="${protectedResourceMetadataUrl(cfg)}"`];
-  parts.push(`scope="${(opts.scope ?? DEFAULT_REQUEST_SCOPES).join(" ")}"`);
+  parts.push(`scope="${(opts.scope ?? ADVERTISED_SCOPES).join(" ")}"`);
   if (opts.error) parts.push(`error="${opts.error}"`);
   if (opts.description) parts.push(`error_description="${opts.description.replace(/["\\]/g, "")}"`);
   return `Bearer ${parts.join(", ")}`;

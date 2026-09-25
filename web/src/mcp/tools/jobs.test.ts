@@ -14,6 +14,7 @@ import { runTool, type CallToolResult, type ToolDef } from "../tool";
 import { OWNER_A, OWNER_B, connectAs, installFixtures, makeDeps, makeTestDb, type TestDb } from "../testing";
 import { JOB_LIMITS, claimNextJob, resetMcpJobsForTest, runMcpJobsPass } from "../../../../worker/src/mcp/jobs";
 import { JOBS_TOOLS, ORACLE_SYMBOLS } from "./jobs";
+import { encodeCursor } from "./shared";
 
 const NOW = 1_800_000_000;
 const SCOPES = ["jobs:run", "offline_access"];
@@ -253,6 +254,19 @@ test("list_jobs pages newest first with an owner-bound cursor and carries no res
   assert.equal(p2.next_cursor, null);
   assert.equal(errorOf(await run("list_jobs", { limit: 2, cursor: p1.next_cursor }, b)).code, "invalid_input");
   assert.equal(errorOf(await run("list_jobs", { cursor: "not-a-cursor" }, a)).code, "invalid_input");
+});
+
+test("a list_jobs cursor whose time is not a safe integer is invalid_input (Postgres would refuse it against BIGINT as internal)", async () => {
+  const { a } = await setup();
+  // Cursors are unsigned: the owner tag is computable, so any client can forge one.
+  const id = `job_${"a".repeat(32)}`;
+  for (const c of [1_799_999_999.5, 1e20, -1, Number.MAX_SAFE_INTEGER + 2, "1799999999"]) {
+    const cursor = encodeCursor(OWNER_A, "list_jobs", { c, i: id });
+    const e = errorOf(await run("list_jobs", { cursor }, a));
+    assert.equal(e.code, "invalid_input", String(c));
+    assert.equal(e.retryable, false);
+  }
+  assert.deepEqual(data(await run("list_jobs", { cursor: encodeCursor(OWNER_A, "list_jobs", { c: NOW, i: id }) }, a)).jobs, [], "a well-formed cursor still reads");
 });
 
 test("malformed ids are invalid input; a result in an unreadable format is withheld with a note", async () => {

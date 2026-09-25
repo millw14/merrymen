@@ -24,6 +24,7 @@ import { errorOf,
   mcpRequest, rpcResult, testConfig, type TestDb,
 } from "../testing";
 import { INLINE_CONTENT_MAX, REPORTS_RESOURCES, REPORTS_TOOLS } from "./reports";
+import { encodeCursor } from "./shared";
 
 delete process.env.MERRYMEN_OAUTH_ISSUER;
 process.env.MERRYMEN_PUBLIC_ORIGIN = "https://app.test";
@@ -666,6 +667,18 @@ test("list_exports: own and unexpired only, paged by an owner-bound cursor", asy
   const tampered = Buffer.from(JSON.stringify({ t: "x", s: "list_exports", v: { c: 0, i: ids[0] } })).toString("base64url");
   assert.equal(errorCode(await run("list_exports", { cursor: tampered }, a)), "invalid_input");
   assert.equal(data(await run("list_exports", {}, a, NOW + DAY + 5)).exports.length, 0, "expired exports are not listed");
+});
+
+test("a list_exports cursor whose time is not a safe integer is invalid_input (Postgres would refuse it against BIGINT as internal)", async () => {
+  const { a } = await setup();
+  // Cursors are unsigned: the owner tag is computable, so any client can forge one.
+  const id = `exp_${"a".repeat(32)}`;
+  for (const c of [1_799_999_999.5, 1e20, -1, Number.MAX_SAFE_INTEGER + 2]) {
+    const r = await run("list_exports", { cursor: encodeCursor(OWNER_A, "list_exports", { c, i: id }) }, a);
+    assert.equal(errorCode(r), "invalid_input", String(c));
+    assert.equal(errorOf(r).retryable, false);
+  }
+  assert.ok(Array.isArray(data(await run("list_exports", { cursor: encodeCursor(OWNER_A, "list_exports", { c: NOW, i: id }) }, a)).exports), "a well-formed cursor still reads");
 });
 
 test("create_export is budgeted at 20 per hour per owner", async () => {

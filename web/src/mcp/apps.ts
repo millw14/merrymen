@@ -772,6 +772,20 @@ var OUTCOME_TONE = {
   confirmed: "ok", paper_fill: "paper", landed_without_tx_hash: "warn", submitted_unconfirmed: "warn", reverted: "bad",
   rejected: "bad", dropped: "warn", hold: "unk", view: "unk", no_trade_recorded: "unk"
 };
+// realized_pnl_measured is three-state, as the Telegram alert's PNL_NOT_STATED
+// is: true = cost and proceeds both read from receipts (no chip); false = part
+// of it was estimated from a quote; null = whether it was measured could not be
+// established (no realized figure, or the evidence could not be replayed or
+// paired), which is not the same as an estimate.
+var PNL_EVIDENCE_NOTE = {
+  estimate: "estimate: part of the cost or proceeds behind this figure was estimated from a quote, not read from a receipt.",
+  unconfirmed: "not confirmed: it could not be confirmed that both the cost and the proceeds behind this figure were read from receipts."
+};
+function pnlEvidence(v) { return v === true ? null : v === false ? "estimate" : "unconfirmed"; }
+function pnlEvidenceChip(v) {
+  var k = pnlEvidence(v);
+  return k === "estimate" ? chip("estimate", "warn") : k === "unconfirmed" ? chip("not confirmed", "unk") : null;
+}
 
 function render(d) {
   if (obj(d.primary_cause) && Array.isArray(d.checks)) { renderInactivity(d); return true; }
@@ -952,8 +966,11 @@ function renderDecision(d) {
       var book = t.book === "live" || t.book === "paper" ? chip(t.book, t.book) : h("span", "missing", "no book");
       var status = nodes(human(t.status) || UNKNOWN, t.confirmed === true ? chip("confirmed", "ok") : null);
       var pnl = signedMoney(t.realized_pnl_usdg);
-      return [when(t.at), status, book, money(t.amount_usdg), money(t.fill_cash_usdg), pnl === null ? null : nodes(pnl, t.realized_pnl_measured === true ? null : chip("estimate", "warn"))];
+      return [when(t.at), status, book, money(t.amount_usdg), money(t.fill_cash_usdg), pnl === null ? null : nodes(pnl, pnlEvidenceChip(t.realized_pnl_measured))];
     }), 0);
+    var shown = {};
+    trades.forEach(function (t) { if (signedMoney(t.realized_pnl_usdg) !== null) { var k = pnlEvidence(t.realized_pnl_measured); if (k) shown[k] = true; } });
+    ["estimate", "unconfirmed"].forEach(function (k) { if (shown[k]) put(ls, "p", "small muted", PNL_EVIDENCE_NOTE[k]); });
   }
   var post = lc ? obj(lc.post) : null;
   if (post) { var ps = section(root, "What the agent posted"); untrustedBox(ps, when(post.at) || "", post.body_untrusted, 400); }

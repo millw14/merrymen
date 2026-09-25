@@ -4,7 +4,10 @@
  * GET shows it (with a fresh quote for a trade). POST approves or declines it,
  * and only with the owner's own Merrymen session, a same-origin request (the
  * /api middleware refuses cross-site; this route also checks Origin), and the
- * hash of the exact binding the page displayed. Approving re-validates the
+ * hash of the exact binding the page displayed. Showing it and approving it
+ * both re-check that the app which prepared it is still connected with this
+ * scope and agent (a proposal whose app lost that is cancelled, never
+ * approved). Approving re-validates the
  * binding against the current state and then acts through the existing,
  * validated paths — the owner-order queue for trades, the settings route for
  * settings, the group-chat route for posts — invoked in-process with the
@@ -21,11 +24,11 @@ import { readLedger as withReadDb } from "@/mcp/tool";
 import { settingsReader } from "@/lib/services/settings-view";
 import { quoteTrade } from "@/lib/services/trade-quote";
 import {
-  ProposalError, approveProposal, changeRow, changedSince, currentValues, expireIfDue, followTrade, ownerOrderCeiling, proposalRow,
-  queueApprovedTrade, rejectProposal, resultView,
+  ProposalError, TERMINAL, approveProposal, cancelIfUnbacked, changeRow, changedSince, currentValues, expireIfDue, followTrade, ownerOrderCeiling, proposalRow,
+  queueApprovedTrade, rejectProposal, resultView, settingsOutcome,
   type Binding, type DraftBinding, type ProposalRow, type Revalidation, type SettingsBinding, type TradeBinding,
 } from "@/lib/services/proposals";
-import { KNOWN_STRATEGIES, addressableSymbol } from "@/mcp/tools/proposals";
+import { KNOWN_STRATEGIES, orderSymbol } from "@/mcp/tools/proposals";
 import { readAgentRow } from "@/lib/services/agent-status";
 import { AGENT_NAME_RE, STOCK_TOKENS, normalizeAgentName, sellableAssets } from "@merrymen/core";
 import { specFor, validStoredSetting } from "../../../../../../../worker/src/telegram/setting-spec";
@@ -57,6 +60,16 @@ async function freshQuote(tenant: `0x${string}`, b: TradeBinding, features: stri
   });
 }
 
+/**
+ * The agent's book as it last reported it (its heartbeat row): the value an
+ * approval compares with the proposal's, and the one the page shows before a
+ * decision. 'unknown' when it has not reported one.
+ */
+async function currentBook(account: string): Promise<"live" | "paper" | "unknown"> {
+  const mode = await withReadDb(async (db) => (db ? (await readAgentRow(db, account))?.mode ?? null : null));
+  return mode === "live" ? "live" : mode === "paper" ? "paper" : "unknown";
+}
+
 async function revalidateTrade(tenant: `0x${string}`, b: TradeBinding, now: number): Promise<Revalidation> {
   const agent = (await agentDirectory().agentsFor(tenant)).find((a) => a.slug === b.agent_slug);
   if (!agent) return { ok: false, why: "This agent is no longer yours." };
@@ -68,8 +81,10 @@ async function revalidateTrade(tenant: `0x${string}`, b: TradeBinding, now: numb
   // The orders route's resolution: with nothing stored, the house's ceiling applies, not none.
   const ceiling = await ownerOrderCeiling(tenant, settings);
   if (ceiling > 0 && b.amount_usdg > ceiling) return { ok: false, why: `It is over your ${ceiling} USDG limit for an owner order.` };
-  const addressable = addressableSymbol(b.token, settings);
-  if ("why" in addressable) return { ok: false, why: addressable.why };
+  // Resolved through the worker's watch set, as propose_trade resolved it: an
+  // order for a token the worker does not watch is one it always refuses.
+  const addressable = await orderSymbol(tenant, b.token, settings, b.chain_id);
+  if ("why" in addressable) return { ok: false, why: `${addressable.why} Nothing was sent.` };
   if (addressable.symbol !== b.symbol) return { ok: false, why: "The token's symbol changed in your settings since this was proposed. Ask for a fresh proposal." };
   if (!sellableAssets({ grantFeatures: agent.features, grantTokens: agent.grantTokens }).has(b.token)) {
     return { ok: false, why: "Your signed permission no longer covers this token." };
@@ -77,8 +92,7 @@ async function revalidateTrade(tenant: `0x${string}`, b: TradeBinding, now: numb
   // The page told the owner "practice" or "real money" from the book the
   // agent was in when this was proposed. If that changed since, the approval
   // would be for something other than what they read: refuse it.
-  const mode = await withReadDb(async (db) => (db ? (await readAgentRow(db, b.account))?.mode ?? null : null));
-  const book = mode === "live" ? "live" : mode === "paper" ? "paper" : "unknown";
+  const book = await currentBook(b.account);
   if (book !== b.book) {
     return { ok: false, why: `Your agent is now in ${book === "live" ? "live (real money)" : book === "paper" ? "practice (paper)" : "an unknown"} mode, not the mode this proposal was made in. Nothing was sent; ask for a fresh proposal.` };
   }
@@ -167,26 +181,28 @@ async function applySettings(req: Request, tenant: string, changes: Record<strin
     headers: { "content-type": "application/json", cookie: req.headers.get("cookie") ?? "" },
     body: JSON.stringify({ ...changes, owner: tenant }),
   }));
-  const body = await res.json().catch(() => ({})) as { errors?: string[]; ignored?: string[] };
-  // The settings route saves nothing when any field fails validation (400).
-  if (!res.ok) {
-    return { status: "failed" as const, result: { why: "Merrymen's settings check refused it; nothing was changed.", errors: (body.errors ?? []).slice(0, 5) } };
-  }
-  // It does save the rest when it merely ignores an unknown key; say exactly which.
-  const ignored = (body.ignored ?? []).filter((k) => k in changes);
-  return {
-    status: "applied" as const,
-    result: { applied: Object.keys(changes).filter((k) => !ignored.includes(k)), ...(ignored.length ? { not_applied: ignored, note: "Merrymen's settings route did not accept these keys." } : {}) },
-  };
+  const body = await res.json().catch(() => ({})) as { errors?: unknown; ignored?: unknown };
+  // Refused outright (nothing saved), every key ignored (nothing saved: failed,
+  // never "applied"), or some ignored (applied, partial, and named).
+  return settingsOutcome(changes, { ok: res.ok, body: body && typeof body === "object" ? body : {} });
 }
 
 async function view(row: ProposalRow, tenant: `0x${string}`, now: number) {
   const d = await mcpDb();
   let r = await expireIfDue(d.db, row, now);
+  // An app that was disconnected, or no longer holds this scope or agent, no
+  // longer stands behind what it asked for: cancelled here, with the reason,
+  // rather than offered for approval.
+  r = await cancelIfUnbacked(d.db, r, now);
   if (r.kind === "trade") r = await withReadDb(async (ledger) => (ledger ? followTrade(d.db, ledger, r, now) : r));
   const binding = JSON.parse(r.binding_json) as Binding;
   let quote = null;
   let check = null;
+  // The book the agent is in NOW, while it has not finished: before a decision
+  // it is what approving is checked against; after one, the mode it will
+  // execute in. A finished trade's page reads its book from the outcome instead.
+  let book: "live" | "paper" | "unknown" | null = null;
+  if (binding.kind === "trade" && !TERMINAL.has(r.status)) book = await currentBook(binding.account).catch(() => "unknown" as const);
   if (r.status === "awaiting_approval" && binding.kind === "trade") {
     const agent = (await agentDirectory().agentsFor(tenant)).find((a) => a.slug === binding.agent_slug);
     quote = agent ? await freshQuote(tenant, binding, agent.features).catch(() => null) : null;
@@ -200,7 +216,7 @@ async function view(row: ProposalRow, tenant: `0x${string}`, now: number) {
     id: r.id, kind: r.kind, status: r.status, binding: shown, binding_hash: r.binding_hash,
     summary: JSON.parse(r.summary_json), requested_by: r.client_name,
     created_at: r.created_at, expires_at: r.expires_at, decided_at: r.decided_at,
-    result: resultView(r.result_json), fresh_quote: quote, settings_check: check,
+    result: resultView(r.result_json), fresh_quote: quote, settings_check: check, current_book: book,
   };
 }
 

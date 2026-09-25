@@ -3,9 +3,15 @@
  *
  * One McpServer instance per request (the SDK's stateless model), built from
  * the authenticated principal: only tools the connection holds a scope for are
- * listed, staff tools only for staff. Listing is a convenience — every call is
- * re-checked by the policy inside runTool, so a client that calls an unlisted
- * tool by name gets `insufficient_scope`, not the tool.
+ * registered, staff tools only for staff. A client that calls an unregistered
+ * tool by name gets the SDK's JSON-RPC error -32602 "Tool … not found" (not
+ * `insufficient_scope`, and never the tool). runTool still re-checks the
+ * policy on every call, so a registration mistake cannot widen access.
+ *
+ * The lists are fixed for the life of a request and nothing here can push a
+ * notification (stateless, no GET stream), so tools, resources and prompts
+ * declare `listChanged: false`: a client must not wait for a list_changed that
+ * never comes. A client sees a changed grant on its next tools/list.
  */
 import { McpServer, type AuthInfo } from "@modelcontextprotocol/server";
 import { hasCapability } from "./policy";
@@ -32,7 +38,11 @@ export function buildServer(principal: Principal | null, opts: { tools?: readonl
       // The current mark (the redesigned terminal's LogoMark), served by the web app.
       ...(issuer ? { icons: [{ src: `${issuer}/mcp-icon.svg`, mimeType: "image/svg+xml", sizes: ["any"] }] } : {}),
     },
-    { instructions: SERVER_INSTRUCTIONS, capabilities: { tools: {}, resources: {}, prompts: {} } },
+    {
+      instructions: SERVER_INSTRUCTIONS,
+      // Explicit: the SDK fills a missing listChanged with true.
+      capabilities: { tools: { listChanged: false }, resources: { listChanged: false }, prompts: { listChanged: false } },
+    },
   );
   if (!principal) return server;
   const trace = opts.trace ?? newTraceId();

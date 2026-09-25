@@ -611,6 +611,20 @@ test("watchlist: add, update, list and remove are the owner's own", async () => 
   assert.equal(await errCode(a, "remove_from_watchlist", { address: MEME }), "not_found");
 });
 
+test("a watchlist label or note, or a search, holding NUL or another C0/C1 control is invalid_input and nothing is stored (Postgres TEXT cannot hold NUL)", async () => {
+  const { d, a } = await setup();
+  const C = (n: number) => String.fromCharCode(n);
+  // NUL, backspace, ESC, DEL and NEL.
+  for (const ch of [C(0), C(8), C(0x1b), C(0x7f), C(0x85)]) {
+    assert.equal(await errCode(a, "add_to_watchlist", { address: MEME, label: `chu${ch}mp` }), "invalid_input");
+    assert.equal(await errCode(a, "add_to_watchlist", { address: MEME, note: `why${ch}not` }), "invalid_input");
+    assert.equal(await errCode(a, "search_tokens", { query: `CHU${ch}MP` }), "invalid_input");
+  }
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM mcp_watchlist").get() as { n: number }).n, 0, "nothing was stored");
+  const note = `line one${C(10)}line two${C(9)}end`;
+  assert.equal((await ok(a, "add_to_watchlist", { address: MEME, note })).item.note, note, "tab and line feed are text");
+});
+
 test("watchlist is capped per owner", async () => {
   const { d, a, b } = await setup();
   const insert = d.raw.prepare("INSERT INTO mcp_watchlist (tenant, chain_id, token, symbol, label, note, created_at) VALUES (?, 4663, ?, NULL, NULL, NULL, ?)");

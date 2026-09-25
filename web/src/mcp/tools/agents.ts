@@ -225,17 +225,29 @@ const getAgentControls = defineTool({
             max_positions: settings?.launchBuying.maxPositions ?? null,
           },
         },
-        controls: [
-          { control: "pause / resume", where: "Telegram /pause and /resume", effect: "Pausing stops the whole trading cycle: new entries AND exits, including stop-loss and take-profit. Owner orders are refused while paused. It is kept on the agent's own machine, so it is not offered here: a remote pause that silently disabled protective exits would be unsafe.", available_here: false },
-          { control: "kill switch", where: "Merrymen dashboard → your agent → Stop", effect: "Removes the stored trading key so the agent can no longer sign anything. Funds stay in the owner's smart account.", available_here: false },
-          { control: "live trading on/off", where: "Merrymen Settings", effect: "Off means no real orders; the agent practises on paper if paper trading is on. Only the owner can turn it on.", available_here: false },
-          { control: "limits (per trade, per day, drawdown, expiry)", where: "Re-sign the trading permission in Merrymen", effect: "Changing a signed limit requires a new owner signature.", available_here: false },
-          { control: "setting changes", where: "propose_settings_change (owner approves in Merrymen)", effect: "Strategy, basket and risk settings can be proposed here and take effect only after the owner approves them.", available_here: true },
-        ],
+        controls: AGENT_CONTROLS,
         observed_at: new Date(now * 1000).toISOString(),
       },
     };
   },
 });
+
+/**
+ * Where each control lives. Every `where` names a control that exists: the
+ * web app's You → Wallet & permissions (/grant) screen, whose red "discard &
+ * start over" button deletes the stored grant (DELETE /api/grants), the Trading
+ * limits panel's "Edit signed limits" link, Settings, and the Telegram
+ * commands in the bot's /help, which answer only while Settings → Advanced
+ * settings → Telegram controls → "allow control commands" is on.
+ * agents.test.ts checks each quoted label against the web app's source and
+ * the bot's command list.
+ */
+export const AGENT_CONTROLS = [
+  { control: "pause / resume", where: "Telegram /pause and /resume (only while Settings → Advanced settings → Telegram controls → 'allow control commands' is on)", effect: "Pausing stops the whole trading cycle: new entries AND exits, including stop-loss and take-profit. Owner orders are refused while paused. It is kept on the agent's own machine, so it is not offered here: a remote pause that silently disabled protective exits would be unsafe.", available_here: false },
+  { control: "kill switch", where: "Merrymen → You → Wallet & permissions (/grant) → 'discard & start over'; or Telegram /kill, then /confirm (only while Settings → Advanced settings → Telegram controls → 'allow control commands' is on)", effect: "Removes the stored trading key so the agent can no longer sign anything. Funds stay in the owner's smart account. Starting over on the web page also restarts a paper book; live positions and trades are never deleted.", available_here: false },
+  { control: "live trading on/off", where: "Merrymen → You → Settings (/settings) → 'live trading'", effect: "Off means no real orders; the agent practises on paper if paper trading is on. Only the owner can turn it on.", available_here: false },
+  { control: "limits (per trade, per day, drawdown, expiry)", where: "Merrymen → You → Trading limits → 'Edit signed limits' (re-sign on Wallet & permissions, /grant)", effect: "Changing a signed limit requires a new owner signature.", available_here: false },
+  { control: "setting changes", where: "propose_settings_change (owner approves in Merrymen)", effect: "Strategy, basket and risk settings can be proposed here and take effect only after the owner approves them.", available_here: true },
+];
 
 export const AGENT_TOOLS = [listAgents, getAgentStatus, getAgentControls];

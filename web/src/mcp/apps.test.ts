@@ -620,6 +620,40 @@ test("decision view (get_decision): outcome, rule, stored explanation and eviden
   assertNoInjectedMarkup(m);
 });
 
+test("decision view: realized P&L evidence has three states: measured (no chip), estimate, and a neutral 'not confirmed' for null", async () => {
+  const base = DECISION();
+  const sold = {
+    ...base.lifecycle.trades[0]!, status: "landed", book: "live" as const, confirmed: true, tx_hash: `0x${"ab".repeat(32)}`,
+    fill_side: "sell", fill_cash_usdg: 12,
+  };
+  const fixture = sample("get_decision", { ...base, lifecycle: { ...base.lifecycle, trades: [
+    { ...sold, realized_pnl_usdg: 1.25, realized_pnl_measured: true },
+    { ...sold, realized_pnl_usdg: -0.5, realized_pnl_measured: false },
+    { ...sold, realized_pnl_usdg: 2, realized_pnl_measured: null },
+  ] } });
+  const m = mount("decision");
+  await handshake(m);
+  await showResult(m, fixture);
+  const card = Array.from(m.doc.querySelectorAll("section.card")).find((sec) => sec.querySelector("h2")?.textContent === "Trades attached to this decision");
+  assert.ok(card, "the trades table is shown");
+  const pnlChips = Array.from(card.querySelectorAll("tbody tr")).map((tr) => {
+    const cells = tr.querySelectorAll("td");
+    return Array.from(cells[cells.length - 1]!.querySelectorAll(".chip")).map((c) => `${c.className}:${c.textContent}`);
+  });
+  assert.deepEqual(pnlChips, [[], ["chip warn:estimate"], ["chip unk:not confirmed"]], "null is not called an estimate");
+  const said = card.textContent ?? "";
+  assert.match(said, /estimate: part of the cost or proceeds behind this figure was estimated from a quote/);
+  assert.match(said, /not confirmed: it could not be confirmed that both the cost and the proceeds behind this figure were read from receipts/);
+  assertNoInjectedMarkup(m);
+
+  // Only the states on screen are explained.
+  const measuredOnly = sample("get_decision", { ...base, lifecycle: { ...base.lifecycle, trades: [{ ...sold, realized_pnl_usdg: 1.25, realized_pnl_measured: true }] } });
+  const m2 = mount("decision");
+  await handshake(m2);
+  await showResult(m2, measuredOnly);
+  assert.doesNotMatch(m2.text(), /estimate:|not confirmed:/);
+});
+
 test("token view: discoverable/priceable/executable, impostor warnings, missing facts with reasons, untrusted names", async () => {
   const m = mount("token");
   await handshake(m);

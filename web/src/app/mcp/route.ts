@@ -4,7 +4,7 @@
  * not browsers. This route does its own Host, Origin and bearer checks
  * (web/src/mcp/http.ts) and answers 404 unless hosted MCP is enabled.
  */
-import { handleMcpRequest } from "@/mcp/http";
+import { MCP_EXPOSED_HEADERS, handleMcpRequest } from "@/mcp/http";
 import { mcpConfig } from "@/mcp/config";
 
 export const dynamic = "force-dynamic";
@@ -18,7 +18,9 @@ export function OPTIONS(req: Request): Response {
   const cfg = mcpConfig();
   if (!cfg.enabled) return new Response(null, { status: 404 });
   const origin = req.headers.get("origin");
-  // CORS only for configured origins; everyone else gets no CORS headers.
+  // CORS only for configured origins; everyone else gets no CORS headers. The
+  // actual POST/GET/DELETE answers carry Allow-Origin and Expose-Headers too
+  // (handleMcpRequest): a preflight alone lets no response through.
   if (!origin || !cfg.allowedOrigins.has(origin)) return new Response(null, { status: 204 });
   return new Response(null, {
     status: 204,
@@ -26,7 +28,7 @@ export function OPTIONS(req: Request): Response {
       "Access-Control-Allow-Origin": origin,
       "Access-Control-Allow-Methods": "POST, GET, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept, MCP-Protocol-Version, Mcp-Method, Mcp-Name, Mcp-Session-Id, Last-Event-ID",
-      "Access-Control-Expose-Headers": "WWW-Authenticate, Mcp-Session-Id, X-Trace-Id",
+      "Access-Control-Expose-Headers": MCP_EXPOSED_HEADERS,
       "Access-Control-Max-Age": "600",
       Vary: "Origin",
     },

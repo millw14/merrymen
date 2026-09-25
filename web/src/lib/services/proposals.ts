@@ -18,8 +18,8 @@
  * that hash, the owner's own session is the proposal's tenant, the proposal is
  * unexpired and still awaiting, and a fresh re-validation passes (the agent is
  * still theirs on the same account, the permission unexpired, the amount
- * inside the signed per-trade cap and the owner's ceiling, the token still
- * unambiguous and covered, and — for a buy — the price has not moved past the
+ * inside the signed per-trade cap and the owner's ceiling, the token still in
+ * the worker's watch set, unambiguous and covered, and — for a buy — the price has not moved past the
  * slippage the quote was bound with). A client-supplied "approved" flag means
  * nothing anywhere in this file.
  *
@@ -30,6 +30,15 @@
  * with its own slippage limit at that moment, and trades in whatever mode it
  * is in when it picks the order up. Every surface that shows a trade proposal
  * says exactly that, and no more.
+ *
+ * THE APP THAT ASKED MUST STILL BE ALLOWED TO ASK. A proposal is only as good
+ * as the connection that prepared it. Disconnecting an app cancels what it
+ * left waiting (cancelAwaitingForConnection), and the approval page and the
+ * approval itself re-check that the connection is still active, still holds
+ * the scope for this kind and, for a proposal about an agent, still has that
+ * agent shared (connectionStanding). One that no longer does is cancelled,
+ * never approved. An order the owner already approved is not withdrawn by a
+ * disconnect: that decision was the owner's own.
  *
  * WHY EXECUTION CAN'T HAPPEN TWICE. The approval is an atomic
  * awaiting_approval → approved transition; the order id is derived from the
@@ -43,11 +52,21 @@ import type { Db } from "../../../../worker/src/db";
 import { resolveConfig } from "../../../../worker/src/settings";
 import { formatSettingValue, specFor } from "../../../../worker/src/telegram/setting-spec";
 import { untrusted } from "../../mcp/tools/shared";
+import { scopeFor, type Capability } from "../../mcp/scopes";
 import { chatOrderCeiling, placeHostedOrder, readHostedOrder, orderTtlMs } from "../order-state";
 import { describeRule } from "./decisions";
 import { settingsReader, type SettingsView } from "./settings-view";
 
 export type ProposalKind = "trade" | "settings" | "agent_draft" | "post";
+
+/** The capability a connection needs to prepare, see or keep standing behind each kind of proposal. */
+export const KIND_CAPABILITY: Readonly<Record<ProposalKind, Capability>> = {
+  trade: "trade.propose",
+  settings: "drafts.write",
+  agent_draft: "drafts.write",
+  post: "social.write",
+};
+
 export type ProposalStatus =
   | "awaiting_approval" | "approved" | "submitted" | "executing" | "confirmed" | "paper_filled" | "filled_awaiting_ledger"
   | "refused" | "failed" | "expired" | "cancelled" | "rejected" | "applied";
@@ -609,6 +628,93 @@ export function resultView(json: string | null): Record<string, unknown> | null 
   return rest;
 }
 
+// ── the app that asked ──────────────────────────────────────────────────────
+
+/** Why a proposal is cancelled when its app is disconnected (stored as result.why). */
+export const DISCONNECTED_WHY = "the app that prepared it was disconnected";
+
+/**
+ * Whether the connection that prepared a proposal still stands behind it: it
+ * is still active, still holds the scope for this kind, and — for a proposal
+ * about an agent — still has that agent shared. A proposal made under a grant
+ * the owner has since withdrawn (a disconnect, a narrower re-consent, an agent
+ * no longer shared) must not be approvable: the owner withdrew the app's
+ * standing to ask for it. A proposal with no recorded connection cannot be
+ * traced to an app at all, and fails closed.
+ */
+export async function connectionStanding(mcp: Db, row: Pick<ProposalRow, "tenant" | "connection_id" | "kind" | "agent_slug">): Promise<{ ok: true } | { ok: false; why: string }> {
+  if (!row.connection_id) return { ok: false, why: "Merrymen cannot tell which app prepared it" };
+  const c = await mcp.prepare("SELECT status, scopes, agent_slugs FROM mcp_connections WHERE id = ? AND tenant = ?")
+    .get(row.connection_id, row.tenant.toLowerCase()) as { status: string; scopes: string; agent_slugs: string } | undefined;
+  if (!c || c.status !== "active") return { ok: false, why: DISCONNECTED_WHY };
+  if (!c.scopes.split(" ").includes(scopeFor(KIND_CAPABILITY[row.kind]))) {
+    return { ok: false, why: "the app that prepared it is no longer allowed to ask for this (you changed what it may do)" };
+  }
+  if (row.agent_slug !== null) {
+    let slugs: unknown = [];
+    try { slugs = JSON.parse(c.agent_slugs); } catch { slugs = []; }
+    if (!Array.isArray(slugs) || !slugs.includes(row.agent_slug)) {
+      return { ok: false, why: "the app that prepared it no longer has access to this agent (you stopped sharing it)" };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * A proposal still waiting for the owner whose app no longer stands behind it
+ * (connectionStanding) is cancelled, with the reason. Anything past waiting is
+ * returned as it is: a decision the owner already made is theirs.
+ */
+export async function cancelIfUnbacked(mcp: Db, row: ProposalRow, now: number): Promise<ProposalRow> {
+  if (row.status !== "awaiting_approval") return row;
+  const standing = await connectionStanding(mcp, row);
+  if (standing.ok) return row;
+  const result = { why: standing.why, requester_withdrawn: true };
+  if (await setStatus(mcp, row.id, ["awaiting_approval"], "cancelled", now, { result })) {
+    return { ...row, status: "cancelled", updated_at: now, result_json: JSON.stringify(result) };
+  }
+  return (await proposalRow(mcp, row.tenant, row.id)) ?? row;
+}
+
+/**
+ * The owner disconnected an app: everything it left waiting for approval is
+ * cancelled, so a link to it in the owner's chat history approves nothing.
+ * Only 'awaiting_approval' rows — an order the owner already approved is not
+ * withdrawn by a disconnect. Returns how many were cancelled.
+ */
+export async function cancelAwaitingForConnection(mcp: Db, tenant: string, connectionId: string, now: number): Promise<number> {
+  const res = await mcp.prepare("UPDATE mcp_proposals SET status = 'cancelled', updated_at = ?, result_json = ? WHERE tenant = ? AND connection_id = ? AND status = 'awaiting_approval'")
+    .run(now, JSON.stringify({ why: DISCONNECTED_WHY, requester_withdrawn: true }), tenant.toLowerCase(), connectionId);
+  return Number(res.changes ?? 0);
+}
+
+// ── what the settings route said ────────────────────────────────────────────
+
+/**
+ * An approved settings change or draft, as the settings route answered it.
+ * The route saves nothing when any field fails validation (not ok). When it
+ * merely IGNORES a key it does not know, it still answers 200 and saves the
+ * rest — so a change whose every key was ignored changed nothing and is
+ * 'failed', and one with some keys ignored is 'applied' only with `partial`
+ * and the keys that were not applied named.
+ */
+export function settingsOutcome(changes: Record<string, unknown>, res: { ok: boolean; body: { errors?: unknown; ignored?: unknown } }): { status: "applied" | "failed"; result: Record<string, unknown> } {
+  const keys = Object.keys(changes);
+  const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  if (!res.ok) {
+    return { status: "failed", result: { why: "Merrymen's settings check refused it; nothing was changed.", errors: strings(res.body.errors).slice(0, 5) } };
+  }
+  const ignored = strings(res.body.ignored).filter((k) => keys.includes(k));
+  const applied = keys.filter((k) => !ignored.includes(k));
+  if (!applied.length) {
+    return { status: "failed", result: { why: "Merrymen's settings route did not accept any of these changes; nothing was changed.", not_applied: ignored } };
+  }
+  return {
+    status: "applied",
+    result: { applied, ...(ignored.length ? { partial: true, not_applied: ignored, note: "Merrymen's settings route did not accept these keys; they were not changed." } : {}) },
+  };
+}
+
 export async function cancelProposal(mcp: Db, ledger: Db | null, tenant: string, id: string, now: number): Promise<ProposalRow> {
   const row = await proposalRow(mcp, tenant, id);
   if (!row) throw new ProposalError("not_found", "No such proposal.");
@@ -664,6 +770,12 @@ export async function approveProposal(mcp: Db, tenant: string, id: string, hash:
   }
   const binding = JSON.parse(row.binding_json) as Binding;
   if (binding.tenant.toLowerCase() !== tenant.toLowerCase()) throw new ProposalError("not_found", "No such proposal.");
+  // Before anything else is weighed: the app that asked must still be allowed to ask.
+  const standing = await connectionStanding(mcp, row);
+  if (!standing.ok) {
+    await setStatus(mcp, id, ["awaiting_approval"], "cancelled", now, { result: { why: standing.why, requester_withdrawn: true } });
+    throw new ProposalError("refused", `This was cancelled, not approved: ${standing.why}. Nothing was sent.`);
+  }
   const check = await steps.revalidate(binding, row);
   if (!check.ok) throw new ProposalError("refused", check.why);
   if (!(await setStatus(mcp, id, ["awaiting_approval"], "approved", now, { decided: true }))) {

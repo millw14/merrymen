@@ -444,7 +444,11 @@ export async function sendMessage(db: Db, input: SendInput, d: ConversationDeps)
   } catch (e) {
     thrown = e;
   }
-  const raw = typeof answer?.reply === "string" ? answer.reply : "";
+  // The model's text is stored as-is otherwise, and Postgres TEXT cannot hold
+  // NUL: a provider reply carrying one would fail the settle write and be
+  // reported as the caller's bad input. Control characters other than tab and
+  // newline carry nothing a reader needs.
+  const raw = (typeof answer?.reply === "string" ? answer.reply : "").replace(/\p{Cc}/gu, (c) => (c === "\n" || c === "\t" ? c : ""));
   const { text, stripped } = stripProposals(raw);
   const proposalStripped = !thrown && (stripped || answer?.command != null || answer?.sawProposal === true);
   const done = d.now();

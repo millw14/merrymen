@@ -15,9 +15,10 @@ import { settingsReader, type SettingsView } from "@/lib/services/settings-view"
 import { quoteTrade, type TradeQuote } from "@/lib/services/trade-quote";
 import { randomBytes } from "node:crypto";
 import {
-  PROPOSAL_TTL_SEC, TERMINAL, cancelProposal, changeRow, createProposal, currentValues, expireIfDue, followTrade, listProposalRows, ownerOrderCeiling, proposalRow,
-  resultView, ProposalError, type Binding, type ChangeRow, type ProposalKind, type ProposalRow, type TradeBinding,
+  KIND_CAPABILITY, PROPOSAL_TTL_SEC, TERMINAL, cancelIfUnbacked, cancelProposal, changeRow, createProposal, currentValues, expireIfDue, followTrade, listProposalRows, ownerOrderCeiling, proposalRow,
+  resultView, ProposalError, type Binding, type ChangeRow, type ProposalRow, type TradeBinding,
 } from "@/lib/services/proposals";
+import { watchSetFor } from "@/lib/services/eligibility";
 import { SETTING_SPECS, specFor, validStoredSetting } from "../../../../worker/src/telegram/setting-spec";
 import { admitOwnerLine } from "../../../../worker/src/groupchat/policy";
 import { readAgentRow } from "@/lib/services/agent-status";
@@ -32,12 +33,15 @@ import { ADDRESS_ARG, AGENT_ARG, LIMIT_ARG, isoOrNull, untrusted } from "./share
 /** Mirrors worker/src/strategies/registry.ts BUILTIN_STRATEGIES (a test holds them equal). */
 export const KNOWN_STRATEGIES = ["steady-basket", "weekend-gap", "llm-strategist", "trencher", "even-keel", "dip-hunter"] as const;
 
-const KIND_CAPABILITY: Record<ProposalKind, Capability> = {
-  trade: "trade.propose",
-  settings: "drafts.write",
-  agent_draft: "drafts.write",
-  post: "social.write",
-};
+/**
+ * Tab and line breaks are text; every other C0/C1 control character (NUL
+ * included, which a Postgres TEXT column refuses) is not something a note to
+ * the owner needs. Refused as invalid input rather than stored or stripped.
+ */
+const NOTE_CONTROL = /(?![\t\n\r])\p{Cc}/u;
+const NO_CONTROLS = "control characters are not allowed (tabs and line breaks are fine)";
+const noControls = (s: string) => !NOTE_CONTROL.test(s);
+const NOTE = z.string().max(280).refine(noControls, NO_CONTROLS);
 
 const IDEMPOTENCY = z.string().regex(/^[A-Za-z0-9_-]{8,128}$/, "8-128 letters, digits, _ or -")
   .describe("A key you choose for this request. Resending the same key returns the same proposal instead of creating another.");
@@ -57,31 +61,56 @@ function translate(e: unknown): never {
 // ── tokens the owner-order path can address ─────────────────────────────────
 
 /**
- * The owner-order path names a token by SYMBOL (the worker resolves it
- * against the stock list and the owner's own added tokens, exactly and
- * case-sensitively, first match wins). So a proposal is only accepted for a
- * token whose symbol maps to exactly one address among those — otherwise the
- * order could fill a different token than the one the owner approved.
+ * The owner-order path names a token by SYMBOL, and the worker resolves that
+ * symbol against its WATCH SET only (worker index.ts submitChatTrade:
+ * `watchTokens.find((t) => t.symbol === symbol)`, exact, first match wins).
+ * The watch set is the basket's stock tokens, the official coins while the
+ * owner leaves them on, and the owner's added tokens that survive the
+ * collision rule (watchSetFor restates it) — NOT every registry stock token.
+ * So a proposal is only accepted for a token in that set whose symbol the
+ * worker's first match maps back to this address: anything else is an order
+ * the owner could approve and the worker would always refuse ("I don't know
+ * …"), or one that could fill a different token than the one approved.
+ *
+ * `officialCoinsEnabled` is the owner's stored switch (worker settings.ts
+ * officialCoinsEnabled, on unless stored false; the worker's officialCoinsIn).
  */
-export function addressableSymbol(token: string, settings: SettingsView | null): { symbol: string } | { why: string } {
+export function addressableSymbol(token: string, settings: SettingsView | null, chainId: number, o: { officialCoinsEnabled?: boolean } = {}): { symbol: string } | { why: string } {
   const t = token.toLowerCase();
-  const configured = [
-    ...STOCK_TOKENS.map((s) => ({ symbol: s.symbol, address: s.address.toLowerCase() })),
-    ...(settings?.customTokens ?? []).map((c) => ({ symbol: c.symbol, address: c.address.toLowerCase() })),
-  ];
-  const mine = configured.filter((c) => c.address === t);
-  if (!mine.length) {
-    return { why: "This token is not one of the agent's tokens (the stock tokens plus tokens the owner added in Settings). The owner can add it by address in Merrymen Settings first; the agent may still trade launchpad coins on its own." };
+  const watch = watchSetFor(settings, chainId);
+  const officialOff = o.officialCoinsEnabled === false;
+  const watched = officialOff ? watch.tokens.filter((w) => w.origin !== "official") : watch.tokens;
+  const mine = watched.find((w) => w.address === t);
+  if (!mine) {
+    if (officialOff && watch.tokens.some((w) => w.address === t && w.origin === "official")) {
+      return { why: "It is one of the chain's official coins, and official coins are switched off in the owner's settings, so the worker does not watch it and cannot trade it. The owner can switch them on in Settings." };
+    }
+    const dropped = watch.dropped.find((w) => w.address === t);
+    if (dropped) return { why: `The owner added it, but the worker does not watch it, so it cannot trade it. ${dropped.why}` };
+    if (STOCK_TOKENS.some((s) => s.address.toLowerCase() === t)) {
+      // check_token_eligibility's wording (services/eligibility.ts, watched_by_agent).
+      return { why: "It is a registry stock token, but not in the agent's basket, so the worker does not watch it and cannot trade it. The owner can add it to the basket in Settings." };
+    }
+    return { why: "This token is not one of the agent's tokens: the worker only trades the tokens it watches (basket stock tokens, official coins and tokens the owner added in Settings). The owner can add it by address in Merrymen Settings first; the agent may still trade launchpad coins on its own." };
   }
-  const symbol = mine[0]!.symbol;
+  const symbol = mine.symbol;
   if (!/^[A-Z0-9]{1,12}$/.test(symbol)) {
     return { why: `Its symbol "${symbol.slice(0, 16)}" cannot be addressed by an owner order (orders take upper-case tickers). The agent can still trade it on its own.` };
   }
-  const clash = configured.filter((c) => c.symbol === symbol && c.address !== t);
-  if (clash.length) {
+  // The worker takes the FIRST exact match: that must be this token.
+  if (watched.find((w) => w.symbol === symbol)?.address !== mine.address) {
     return { why: `Another of the agent's tokens also uses the symbol ${symbol}, so an order could not tell them apart. Remove the duplicate in Settings first.` };
   }
   return { symbol };
+}
+
+/**
+ * addressableSymbol with the owner's stored official-coins switch read in: the
+ * one check propose_trade and the approval's revalidation both make.
+ */
+export async function orderSymbol(tenant: `0x${string}`, token: string, settings: SettingsView | null, chainId: number): Promise<{ symbol: string } | { why: string }> {
+  const spec = (await settingsReader().specValuesFor?.(tenant)) ?? {};
+  return addressableSymbol(token, settings, chainId, { officialCoinsEnabled: spec.officialCoinsEnabled !== false });
 }
 
 /**
@@ -205,7 +234,7 @@ const proposeTrade = defineTool({
   capability: "trade.propose",
   input: TRADE_IN.extend({
     idempotency_key: IDEMPOTENCY,
-    note: z.string().max(280).optional().describe("Why you are proposing it; shown to the owner as your note"),
+    note: NOTE.optional().describe("Why you are proposing it; shown to the owner as your note"),
   }).strict(),
   output: PROPOSAL_OUT.extend({ quote: QUOTE_OUT.nullable() }),
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -217,7 +246,7 @@ const proposeTrade = defineTool({
     if (!agent.account || !agent.orderAgentId) throw new McpError("conflict", "This agent has no signed trading permission yet, so it cannot trade.");
     if (agent.expiresAt !== null && now >= agent.expiresAt) throw new McpError("conflict", "The agent's trading permission has expired. The owner must re-sign it in Merrymen before any trade.");
     const settings = await settingsReader().settingsFor(ctx.principal.tenant);
-    const addressable = addressableSymbol(args.token, settings);
+    const addressable = await orderSymbol(ctx.principal.tenant, args.token, settings, agent.chainId ?? 4663);
     if ("why" in addressable) throw new McpError("unsupported", addressable.why);
     const sellable = sellableAssets({ grantFeatures: agent.features, grantTokens: agent.grantTokens });
     if (!sellable.has(args.token.toLowerCase())) {
@@ -293,10 +322,10 @@ const proposeSettings = defineTool({
   capability: "drafts.write",
   input: z.object({
     agent: AGENT_ARG,
-    changes: z.record(z.string().max(40), z.union([z.number(), z.boolean(), z.string().max(64), z.array(z.string().max(16)).max(10)]))
+    changes: z.record(z.string().max(40), z.union([z.number(), z.boolean(), z.string().max(64).refine(noControls, NO_CONTROLS), z.array(z.string().max(16).refine(noControls, NO_CONTROLS)).max(10)]))
       .refine((c) => Object.keys(c).length >= 1 && Object.keys(c).length <= 10, "1-10 changes"),
     idempotency_key: IDEMPOTENCY,
-    note: z.string().max(280).optional(),
+    note: NOTE.optional().describe("Why you are proposing it; shown to the owner as your note"),
   }).strict(),
   output: PROPOSAL_OUT.extend({
     diff: z.array(z.object({ key: z.string(), label: z.string(), current: z.string(), proposed: z.string(), help: z.string() })),
@@ -368,7 +397,7 @@ const createDraft = defineTool({
   description: "Draft a name, strategy, basket, asset mode and risk level for the owner's agent. The owner reviews it in Merrymen and approving saves it to their settings. If they already run an agent, the approval page shows a before/after comparison and the changes apply to that running agent immediately; if not, they still choose limits and sign the trading permission themselves, and a draft never creates trading authority. A risk level carries only settings that can be changed by conversation (stop loss, take profit, amount per buy, max per AI trade, slippage); the price-impact safety floor is left out and stays a dashboard setting. Basket symbols beyond the stock tokens are checked against the owner's added tokens here only when an agent is shared with this connection; otherwise they are checked when the owner approves.",
   capability: "drafts.write",
   input: z.object({
-    name: z.string().max(24).optional(),
+    name: z.string().max(24).refine(noControls, NO_CONTROLS).optional(),
     strategy: z.enum(KNOWN_STRATEGIES).optional(),
     basket: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._$-]{0,15}$/)).min(1).max(10).optional(),
     asset_mode: z.enum(["all", "stocks", "crypto"]).optional(),
@@ -462,7 +491,7 @@ const draftPost = defineTool({
   title: "Draft a post for approval",
   description: "Draft a line for the Merrymen group chat, posted under the owner's agent only after the owner approves it in Merrymen. Lines with addresses, links or secrets are refused.",
   capability: "social.write",
-  input: z.object({ agent: AGENT_ARG, text: z.string().min(1).max(500), idempotency_key: IDEMPOTENCY }).strict(),
+  input: z.object({ agent: AGENT_ARG, text: z.string().min(1).max(500).refine(noControls, NO_CONTROLS), idempotency_key: IDEMPOTENCY }).strict(),
   output: PROPOSAL_OUT,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   budget: { bucket: "propose", perMinute: 5, perHour: 40 },
@@ -519,13 +548,18 @@ const EXPLAIN: Record<string, string> = {
 async function viewOf(ctx: ToolContext, row: ProposalRow) {
   const d = await ctx.mcp();
   let r = await expireIfDue(d.db, row, ctx.now());
+  // Waiting on an app that has since been disconnected, or lost this scope or agent: cancelled, not "waiting".
+  r = await cancelIfUnbacked(d.db, r, ctx.now());
   if (r.kind === "trade") r = await ctx.ledger((ledger) => followTrade(d.db, ledger, r, ctx.now()));
   const summary = JSON.parse(r.summary_json) as Record<string, unknown>;
+  const result = resultView(r.result_json);
   return {
     proposal_id: r.id,
     kind: r.kind,
     status: r.status,
-    status_explained: EXPLAIN[r.status] ?? r.status,
+    status_explained: r.status === "applied" && result?.partial === true
+      ? "Approved, but only some of the changes were applied: see result.not_applied for the ones Merrymen did not accept."
+      : r.status === "cancelled" && result?.requester_withdrawn === true && typeof result.why === "string" ? `Cancelled because ${result.why}. Nothing was sent.` : EXPLAIN[r.status] ?? r.status,
     terminal: TERMINAL.has(r.status),
     approval_url: r.status === "awaiting_approval" ? approvalUrl(r.id) : null,
     created_at: new Date(r.created_at * 1000).toISOString(),
@@ -534,7 +568,7 @@ async function viewOf(ctx: ToolContext, row: ProposalRow) {
     requested_by: r.client_name,
     summary,
     order_id: r.order_id,
-    result: resultView(r.result_json),
+    result,
   };
 }
 

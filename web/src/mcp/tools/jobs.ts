@@ -19,7 +19,7 @@ import {
 } from "../../../../worker/src/mcp/jobs";
 import { McpError } from "../errors";
 import { defineTool, type ToolContext } from "../tool";
-import { LIMIT_ARG, decodeCursor, encodeCursor, isoOrNull, untrusted } from "./shared";
+import { LIMIT_ARG, decodeCursor, encodeCursor, isCursorInt, isoOrNull, untrusted } from "./shared";
 
 /** Stock and ETF tokens with a Chainlink feed: the only ones oracle data can replay. */
 export const ORACLE_SYMBOLS: readonly string[] = STOCK_TOKENS.filter((t) => t.chainlinkFeed && t.kind !== "memecoin").map((t) => t.symbol);
@@ -327,7 +327,7 @@ const listJobs = defineTool({
     let before: { created_at: number; id: string } | null = null;
     if (args.cursor !== undefined) {
       const c = decodeCursor(tenant, "list_jobs", args.cursor);
-      if (!c || typeof c.c !== "number" || typeof c.i !== "string" || !/^job_[0-9a-f]{32}$/.test(c.i)) {
+      if (!c || !isCursorInt(c.c) || typeof c.i !== "string" || !/^job_[0-9a-f]{32}$/.test(c.i)) {
         throw new McpError("invalid_input", "cursor is not a list_jobs cursor from this connection's owner.");
       }
       before = { created_at: c.c, id: c.i };

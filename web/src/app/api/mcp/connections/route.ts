@@ -1,7 +1,8 @@
 /**
  * Connected apps, for the owner: list the MCP connections that can reach
  * their Merrymen, see what each may do and what it did recently, revoke any of
- * them, and create or revoke personal access tokens. Session-only; every
+ * them (which also cancels what it left waiting for approval), and create or
+ * revoke personal access tokens. Session-only; every
  * statement is scoped to the signed-in tenant.
  */
 import { tenantOf } from "@/lib/auth";
@@ -13,6 +14,7 @@ import { readBoundedText } from "@/mcp/oauth/deps";
 import { OAuthError, createPersonalToken, listConnections, revokeConnection } from "@/mcp/oauth/server";
 import { scopeInfo, SCOPES } from "@/mcp/scopes";
 import { writeAudit } from "@/mcp/observe";
+import { cancelAwaitingForConnection } from "@/lib/services/proposals";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -68,8 +70,15 @@ export async function POST(req: Request): Promise<Response> {
     if (body.action === "revoke") {
       if (typeof body.id !== "string" || !/^mcpcon_[0-9a-f]{32}$/.test(body.id)) return jsonResponse({ error: "invalid_request" }, 400);
       const ok = await revokeConnection(d, tenant, body.id, now, "owner");
-      await writeAudit(d, { action: "owner.revoke_connection", outcome: ok ? "ok" : "not_found", tenant, connectionId: body.id });
-      return ok ? jsonResponse({ revoked: true }) : jsonResponse({ error: "not_found" }, 404);
+      // Its access ends at once, and so does what it left waiting for approval:
+      // a link to one of those in the owner's chat must not approve anything
+      // now. An order the owner already approved stays theirs. (The approval
+      // page and the approval also refuse a proposal whose app is gone, so a
+      // proposal created by a call that was already in flight is caught there,
+      // and so is one this sweep failed to reach: the revoke still stands.)
+      const cancelled = ok ? await cancelAwaitingForConnection(d.db, tenant, body.id, now).catch(() => null) : 0;
+      await writeAudit(d, { action: "owner.revoke_connection", outcome: ok ? "ok" : "not_found", tenant, connectionId: body.id, ...(cancelled ? { detail: { proposals_cancelled: cancelled } } : {}) });
+      return ok ? jsonResponse({ revoked: true, proposals_cancelled: cancelled }) : jsonResponse({ error: "not_found" }, 404);
     }
     if (body.action === "create_token") {
       const owned = (await agentDirectory().agentsFor(tenant)).map((a) => a.slug);

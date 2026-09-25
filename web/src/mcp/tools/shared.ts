@@ -17,6 +17,39 @@ export const CHAIN_ARG = z.union([z.literal(4663), z.literal(46630)]).default(46
 
 export const LIMIT_ARG = (max: number, def: number) => z.number().int().min(1).max(max).default(def);
 
+/**
+ * A C0 or C1 control character (DEL included) other than a tab, a line feed or
+ * the carriage return of a CRLF line break. Written as a property class so the
+ * source never holds a literal control character. Not global: `test` keeps no
+ * state between calls.
+ */
+const STORED_CONTROL = /(?![\t\n]|\r\n)\p{Cc}/u;
+
+export const CONTROL_CHARACTER_RULE = "must not contain control characters (such as NUL); tabs and line breaks are fine";
+
+/**
+ * Caller text that Merrymen stores (messages, titles, bodies, labels, notes,
+ * research links) refuses NUL and every other C0/C1 control except tab and
+ * line breaks, as invalid_input at the boundary. Postgres TEXT cannot hold NUL
+ * at all (SQLSTATE 22021), so without this the insert fails as a retryable
+ * `internal` error on Postgres while SQLite stores the same text, and a client
+ * would retry an input that can never succeed. Format characters (bidi marks,
+ * zero-width) are storable and are stripped on the way out by untrusted().
+ */
+export function refuseControls(schema: z.ZodString): z.ZodString {
+  return schema.refine((s) => !STORED_CONTROL.test(s), CONTROL_CHARACTER_RULE);
+}
+
+/**
+ * A numeric cursor field (a created_at second): a non-negative safe integer.
+ * Cursors are unsigned (the owner tag is computable), so a client can put
+ * 1799999999.5 or 1e20 in one; Postgres refuses either against a BIGINT
+ * column (22P02 / 22003) where SQLite would compare the float silently.
+ */
+export function isCursorInt(v: unknown): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+}
+
 export function isoOrNull(sec: number | null | undefined): string | null {
   return typeof sec === "number" && Number.isFinite(sec) && sec > 0 ? new Date(sec * 1000).toISOString() : null;
 }

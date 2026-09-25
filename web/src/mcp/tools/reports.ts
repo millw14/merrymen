@@ -24,7 +24,7 @@ import { mcpConfig } from "../config";
 import { McpError } from "../errors";
 import type { ResourceDef } from "../resources";
 import { defineTool, type ToolContext } from "../tool";
-import { AGENT_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, untrusted, usd } from "./shared";
+import { AGENT_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, isCursorInt, untrusted, usd } from "./shared";
 
 /** Content above this is not inlined in a tool result; the resource and the download carry it. */
 export const INLINE_CONTENT_MAX = 200 * 1024;
@@ -393,7 +393,7 @@ const listExportsTool = defineTool({
     let before: { created_at: number; id: string } | null = null;
     if (cursor !== undefined) {
       const v = decodeCursor(ctx.principal.tenant, "list_exports", cursor);
-      if (!v || typeof v.c !== "number" || typeof v.i !== "string" || !EXPORT_ID.test(v.i)) throw new McpError("invalid_input", "cursor is not valid for this listing.");
+      if (!v || !isCursorInt(v.c) || typeof v.i !== "string" || !EXPORT_ID.test(v.i)) throw new McpError("invalid_input", "cursor is not valid for this listing.");
       before = { created_at: v.c, id: v.i };
     }
     const agents = await ctx.agents();
