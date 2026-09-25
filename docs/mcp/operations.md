@@ -105,8 +105,9 @@ How it is set up (repeat these steps for another hostname):
    (`railway domain status <id> --service web`: `Verified: yes`,
    `CERTIFICATE_STATUS_TYPE_VALID`).
 4. `MERRYMEN_MCP_RESOURCE_URL=https://mcp.merrymen.dev/mcp` on web. Tokens are
-   bound to this URL, so changing it again disconnects every app once (they
-   reconnect). The protected-resource metadata names this URL, which is what
+   bound to this URL, so changing it again disconnects every app once: their
+   access tokens get `401 invalid_token` and their refresh gets
+   `invalid_grant`, which makes a client start a new sign-in. The protected-resource metadata names this URL, which is what
    spec-following clients check against the address they were given: connect
    them to `https://mcp.merrymen.dev/mcp`, not the app host.
 
