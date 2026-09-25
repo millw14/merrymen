@@ -724,7 +724,7 @@ test("eligibility: with the fast Trencher off (its default) there is no vault ro
   // The default Trencher set-up: vault sealed, live trenching on, the fast Trencher never touched.
   const base = { ...SETTINGS_A, strategy: "trencher", liveTradingEnabled: true, trencherLiveEnabled: true };
   for (const [label, settingsA, wording] of [
-    ["unset", base, /is not turned on \(it is off by default\)/],
+    ["unset", base, /is not turned on in the owner's settings \(it is off by default; a self-hosted install can also turn it on for everyone with an environment variable, which this server cannot see\)/],
     ["off", { ...base, trencherFastEnabled: false }, /fast Trencher is off/],
   ] as const) {
     install(d, { directory: vault, settingsA });
