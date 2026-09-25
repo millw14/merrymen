@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, Check, ShieldCheck, X } from "lucide-react";
-import { fullDateTime, timeOnly } from "@/lib/format";
+import { fullDateTime } from "@/lib/format";
 import { SignIn } from "@/terminal/HostedControls";
 import { BrandLockup } from "../../BrandLockup";
 
@@ -87,7 +87,7 @@ function SettingsRows({ c }: { c: SettingsCheck }) {
   return <>
     {c.changed_since.length > 0 && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p><b>Your settings changed since this was proposed.</b> Approving is refused; ask your assistant for a fresh proposal.</p></div>}
     <ul className="mcp-checks">{c.rows.map((d) => <li key={d.key}><label><span>
-      <strong>{d.label}: {d.current} → {d.proposed}</strong>
+      <strong>{d.label}: {d.current === d.proposed ? <>{d.current} (no change)</> : <>{d.current} → {d.proposed}</>}</strong>
       <span>{d.changed ? `It was ${d.when_proposed} when this was proposed. ` : ""}{d.help}</span>
     </span></label></li>)}</ul>
   </>;
@@ -197,7 +197,7 @@ export function ApproveClient({ id }: { id: string }) {
           <span className="connect-eyebrow">PREPARED BY YOUR ASSISTANT</span>
           <h1>{v && v.status !== "awaiting_approval" ? STATUS_TEXT[v.status] ?? v.status : <>You decide.</>}</h1>
           <p>Your AI assistant prepared this. Nothing happens unless you approve it here{v?.kind === "trade" ? ", and your agent’s own limits still apply after that" : ""}.</p>
-          {v && <div className="connect-app"><div><strong>Requested by {v.requested_by ?? "an AI assistant"}</strong><span>{fullDateTime(v.created_at * 1000)} · {v.status === "awaiting_approval" ? `expires ${timeOnly(v.expires_at * 1000)}` : STATUS_TEXT[v.status]}</span></div></div>}
+          {v && <div className="connect-app"><div><strong>Requested by {v.requested_by ?? "an AI assistant"}</strong><span>{fullDateTime(v.created_at * 1000)} · {v.status === "awaiting_approval" ? `expires ${fullDateTime(v.expires_at * 1000)}` : STATUS_TEXT[v.status]}</span></div></div>}
         </div>
         <section className="connect-panel" aria-busy={loading || busy}>
           {loading && <div className="connect-wait" role="status"><span className="connect-spinner" aria-hidden />Loading…</div>}
