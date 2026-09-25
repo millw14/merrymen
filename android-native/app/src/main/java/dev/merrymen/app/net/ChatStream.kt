@@ -1,7 +1,8 @@
 package dev.merrymen.app.net
 
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -235,70 +236,83 @@ private suspend fun MerrymenApi.askAgentOnce(body: ChatBody, onText: (String) ->
     .header("accept", "text/event-stream, application/json")
     .post(json.encodeToString(ChatBody.serializer(), body).toRequestBody(jsonType))
     .build()
-  return withContext(Dispatchers.IO) {
-    val call = chatHttp.newCall(req)
-    // A thread that goes away takes its request with it; the server's own
-    // abort then stops the model, since nobody is reading.
-    val stop = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
+  val call = chatHttp.newCall(req)
+  // AN ASK THAT IS CANCELLED CANCELS ITS CALL, AT ONCE. The read below blocks
+  // a thread, and cancelling a coroutine does not unblock a socket: the hook
+  // this used to be (invokeOnCompletion on the reading job) ran only once the
+  // blocked read had returned, so a cancelled ask kept its request open for
+  // the model's whole answer — up to the client's 120s — and the model kept
+  // generating for nobody. So the reading runs as a child, and the ask waits
+  // for it where a cancellation lands straight away; cancelling the call then
+  // fails the blocked read, and the server's own abort stops the model.
+  return coroutineScope {
+    val reading = async(Dispatchers.IO) { readReply(call, onText) }
     try {
-      val response = try {
-        call.execute()
-      } catch (e: InterruptedIOException) {
-        coroutineContext.ensureActive()
-        return@withContext Asked.Failed("timeout")
-      } catch (e: IOException) {
-        coroutineContext.ensureActive()
-        return@withContext Asked.Failed("network")
-      }
-      response.use { r ->
-        if (r.code == 401) return@withContext Asked.Failed("signed-out")
-        if (!r.isSuccessful) return@withContext Asked.Failed("server", status = r.code)
-        val type = r.header("content-type").orEmpty()
-        val out: StreamedReply = when {
-          type.contains("text/event-stream", ignoreCase = true) -> {
-            val reader = SseReplyReader(onText)
-            val stream = r.body?.byteStream() ?: return@withContext Asked.Failed("unreadable")
-            val buf = ByteArray(8 * 1024)
-            try {
-              var done: StreamedReply? = null
-              while (done == null) {
-                val n = stream.read(buf)
-                if (n < 0) break
-                if (n > 0) done = reader.feed(buf, n)
-              }
-              done ?: reader.finish()
-            } catch (e: InterruptedIOException) {
-              coroutineContext.ensureActive()
-              return@withContext Asked.Failed("timeout")
-            } catch (e: IOException) {
-              coroutineContext.ensureActive()
-              return@withContext Asked.Failed("cut-off")
+      reading.await()
+    } catch (e: kotlinx.coroutines.CancellationException) {
+      call.cancel()
+      throw e
+    }
+  }
+}
+
+private suspend fun MerrymenApi.readReply(call: okhttp3.Call, onText: (String) -> Unit): Asked {
+  return withContext(Dispatchers.IO) {
+    val response = try {
+      call.execute()
+    } catch (e: InterruptedIOException) {
+      coroutineContext.ensureActive()
+      return@withContext Asked.Failed("timeout")
+    } catch (e: IOException) {
+      coroutineContext.ensureActive()
+      return@withContext Asked.Failed("network")
+    }
+    response.use { r ->
+      if (r.code == 401) return@withContext Asked.Failed("signed-out")
+      if (!r.isSuccessful) return@withContext Asked.Failed("server", status = r.code)
+      val type = r.header("content-type").orEmpty()
+      val out: StreamedReply = when {
+        type.contains("text/event-stream", ignoreCase = true) -> {
+          val reader = SseReplyReader(onText)
+          val stream = r.body?.byteStream() ?: return@withContext Asked.Failed("unreadable")
+          val buf = ByteArray(8 * 1024)
+          try {
+            var done: StreamedReply? = null
+            while (done == null) {
+              val n = stream.read(buf)
+              if (n < 0) break
+              if (n > 0) done = reader.feed(buf, n)
             }
+            done ?: reader.finish()
+          } catch (e: InterruptedIOException) {
+            coroutineContext.ensureActive()
+            return@withContext Asked.Failed("timeout")
+          } catch (e: IOException) {
+            coroutineContext.ensureActive()
+            return@withContext Asked.Failed("cut-off")
           }
-          type.contains("application/json", ignoreCase = true) -> {
-            val o = try {
-              json.parseToJsonElement(r.body?.string().orEmpty()) as? JsonObject
-            } catch (e: IllegalArgumentException) {
-              null
-            } catch (e: IOException) {
-              coroutineContext.ensureActive()
-              return@withContext Asked.Failed("unreadable")
-            } ?: return@withContext Asked.Failed("unreadable")
-            replyOf(o)
-          }
-          else -> return@withContext Asked.Failed("unreadable")
         }
-        val reply = out.reply
-        when {
-          !reply.isNullOrBlank() -> Asked.Replied(reply, out.command)
-          out.why == "no-llm" -> Asked.Failed("no-llm")
-          out.why == "cut-off" -> Asked.Failed("cut-off")
-          out.why == "llm-error" -> Asked.Failed("llm-error", kind = out.kind, provider = out.provider)
-          else -> Asked.Failed("unreadable")
+        type.contains("application/json", ignoreCase = true) -> {
+          val o = try {
+            json.parseToJsonElement(r.body?.string().orEmpty()) as? JsonObject
+          } catch (e: IllegalArgumentException) {
+            null
+          } catch (e: IOException) {
+            coroutineContext.ensureActive()
+            return@withContext Asked.Failed("unreadable")
+          } ?: return@withContext Asked.Failed("unreadable")
+          replyOf(o)
         }
+        else -> return@withContext Asked.Failed("unreadable")
       }
-    } finally {
-      stop?.dispose()
+      val reply = out.reply
+      when {
+        !reply.isNullOrBlank() -> Asked.Replied(reply, out.command)
+        out.why == "no-llm" -> Asked.Failed("no-llm")
+        out.why == "cut-off" -> Asked.Failed("cut-off")
+        out.why == "llm-error" -> Asked.Failed("llm-error", kind = out.kind, provider = out.provider)
+        else -> Asked.Failed("unreadable")
+      }
     }
   }
 }

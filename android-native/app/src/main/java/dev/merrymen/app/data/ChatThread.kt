@@ -32,8 +32,10 @@ import dev.merrymen.app.ui.runConfirmedCard
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -413,7 +415,17 @@ class ChatThread internal constructor(
   /** The key saves may write under. Null after forget, so a save still queued cannot bring a file back. */
   @Volatile private var diskKey: String? = null
   private val following: MutableSet<String> = ConcurrentHashMap.newKeySet()
-  private val sendingNow = java.util.concurrent.atomic.AtomicBoolean(false)
+  /**
+   * THE ONE SEND IN FLIGHT, and whose: a token holding the coroutine that
+   * sends it. Cleared by [switchTo] and [forget], which also cancel that
+   * coroutine: a reply still coming for the last wallet held the next one's
+   * composer — the typing bubble under the new agent's name for up to the chat
+   * client's two minutes, and a Send dropped without a word. A send finishing
+   * after that frees the guard only if it is still its own, so it cannot free
+   * or clear the send of the owner who came after it.
+   */
+  private val sendingNow = AtomicReference<SendHold?>(null)
+  private class SendHold(val job: Job?)
   private val confirmHold = AtomicReference<Any?>(null)
   private val ceilingRead = AtomicLong(0)
   private val seq = AtomicLong(0)
@@ -442,6 +454,7 @@ class ChatThread internal constructor(
     lastKey = key
     ownerTurn.incrementAndGet()
     confirmHold.set(null)
+    dropSend()
     _card.value = null
     _confirming.value = false
     _streaming.value = null
@@ -477,6 +490,7 @@ class ChatThread internal constructor(
     val key = state.value.key ?: lastKey
     ownerTurn.incrementAndGet()
     confirmHold.set(null)
+    dropSend()
     state.value = ThreadState(null, emptyList(), emptyList())
     _card.value = null
     _confirming.value = false
@@ -489,6 +503,17 @@ class ChatThread internal constructor(
       diskKey = null
       if (key != null) store.delete(key)
     }
+  }
+
+  /**
+   * THE SEND IN FLIGHT BELONGS TO THE OWNER WHO IS LEAVING: cancelled, which
+   * now cancels its HTTP call too (askAgent), and the guard and the typing
+   * bubble freed for whoever comes next. Its reply would have been dropped
+   * anyway ([sendNow] keeps only a reply for the key it asked under).
+   */
+  private fun dropSend() {
+    sendingNow.getAndSet(null)?.job?.cancel()
+    _sending.value = false
   }
 
   /** The Chat screen is showing (or not). What lands while it is not counts toward the dot. */
@@ -688,7 +713,8 @@ class ChatThread internal constructor(
     if (q.isEmpty()) return false
     val key = state.value.key ?: return false
     if (keyNow() != key) return false
-    if (!sendingNow.compareAndSet(false, true)) return false
+    val hold = SendHold(currentCoroutineContext()[Job])
+    if (!sendingNow.compareAndSet(null, hold)) return false
     _sending.value = true
     _streaming.value = null
     _card.value = null
@@ -726,9 +752,10 @@ class ChatThread internal constructor(
       arrived()
       return out is Asked.Replied
     } finally {
-      sendingNow.set(false)
-      _sending.value = false
-      _streaming.value = null
+      if (sendingNow.compareAndSet(hold, null)) {
+        _sending.value = false
+        _streaming.value = null
+      }
     }
   }
 
