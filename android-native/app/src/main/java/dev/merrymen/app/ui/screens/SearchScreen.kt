@@ -21,7 +21,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,7 +50,9 @@ import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.PagePadTop
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.sans
-import kotlinx.coroutines.launch
+import dev.merrymen.app.market.SearchInput
+import dev.merrymen.app.market.SearchView
+import dev.merrymen.app.market.searchViews
 
 /** `.search` — terminal.css:2206: the one input in the terminal set to 16px. */
 private val SearchText = TextStyle(
@@ -108,8 +111,10 @@ private fun SearchField(
 fun SearchScreen(nav: NavHostController) {
   val c = LocalContainer.current
   var q by remember { mutableStateOf("") }
-  var state by remember { mutableStateOf<Loaded<SearchResults>>(Loaded.Idle) }
-  val scope = rememberCoroutineScope()
+  // Bumped by Try again: part of the flow's key, so the same words are asked
+  // again rather than dropped as a repeat.
+  var attempt by remember { mutableIntStateOf(0) }
+  var view by remember { mutableStateOf<SearchView>(SearchView.Idle) }
   val focus = remember { FocusRequester() }
 
   // `autoFocus` on the input — Search.tsx:43. Somebody who opened search wants
@@ -120,6 +125,15 @@ fun SearchScreen(nav: NavHostController) {
   // screen should bet on. Losing the keyboard is a small miss; crashing on the
   // way into search is not.
   LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+
+  // ONE COLLECTOR FOR THE LIFE OF THE SCREEN, fed by the text. searchViews
+  // debounces it and cancels the request in flight when the text moves on, so
+  // an older answer can never land on top of a newer query. This used to be a
+  // scope.launch per keystroke with nothing cancelling the last.
+  LaunchedEffect(Unit) {
+    searchViews(snapshotFlow { SearchInput(q, attempt) }) { c.api.search(it).toLoaded() }
+      .collect { view = it }
+  }
 
   Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
     // `.find-bar` — terminal.css:2364: `display: flex; align-items: center; gap: 10px; margin-bottom: 8px`,
@@ -135,44 +149,52 @@ fun SearchScreen(nav: NavHostController) {
       BackControl({ nav.popBackStack() })
       SearchField(
         value = q,
-        onValueChange = {
-          q = it
-          scope.launch {
-            if (it.isBlank()) state = Loaded.Idle
-            else {
-              state = Loaded.Loading
-              state = c.api.search(it).toLoaded()
-            }
-          }
-        },
+        onValueChange = { q = it },
         modifier = Modifier.weight(1f),
         focusRequester = focus,
       )
     }
     Column(Modifier.fillMaxWidth().padding(horizontal = PagePadH)) {
-      LoadedBlock(state) { r ->
-        if (r.hits.isEmpty()) {
-          Empty("Nothing matched", "No token or agent by that name.", kind = EmptyKind.Search)
-        } else {
-          r.hits.forEach { h ->
-            TokRow(
-              seed = h.title.orEmpty(),
-              title = h.title.orEmpty(),
-              sub = h.sub,
-              modifier = Modifier.clickable {
-                // The server hands back its own web path; turn it into our route
-                // rather than re-deriving the destination from the kind field.
-                val href = h.href.orEmpty()
-                when {
-                  href.startsWith("/t/") -> nav.navigate(Routes.token(href.removePrefix("/t/")))
-                  href.startsWith("/a/") -> nav.navigate(Routes.agent(href.removePrefix("/a/")))
-                }
-              },
-            )
+      val typed = q.trim()
+      when (val v = view) {
+        SearchView.Idle -> Unit
+        is SearchView.TooShort -> HintLine("Type at least two characters.")
+        is SearchView.Searching -> LoadedBlock(Loaded.Loading) { _: Unit -> }
+        is SearchView.Answer ->
+          // THE BOX AND THE LIST MUST AGREE. Between a keystroke and the
+          // debounce firing, the answer on hand is for the previous text; it
+          // reads as loading rather than as hits for words no longer typed.
+          if (v.query != typed) {
+            LoadedBlock(Loaded.Loading) { _: Unit -> }
+          } else {
+            LoadedBlock(v.result, onRetry = { attempt++ }) { r -> SearchHits(r, nav) }
           }
-        }
       }
     }
     Spacer(Modifier.height(LocalBottomInset.current))
+  }
+}
+
+@Composable
+private fun SearchHits(r: SearchResults, nav: NavHostController) {
+  if (r.hits.isEmpty()) {
+    Empty("Nothing matched", "No token or agent by that name.", kind = EmptyKind.Search)
+    return
+  }
+  r.hits.forEach { h ->
+    TokRow(
+      seed = h.title.orEmpty(),
+      title = h.title.orEmpty(),
+      sub = h.sub,
+      modifier = Modifier.clickable {
+        // The server hands back its own web path; turn it into our route
+        // rather than re-deriving the destination from the kind field.
+        val href = h.href.orEmpty()
+        when {
+          href.startsWith("/t/") -> nav.navigate(Routes.token(href.removePrefix("/t/")))
+          href.startsWith("/a/") -> nav.navigate(Routes.agent(href.removePrefix("/a/")))
+        }
+      },
+    )
   }
 }
