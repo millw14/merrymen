@@ -26,11 +26,6 @@ class RoomServer : Dispatcher() {
   fun posts(): List<RecordedRequest> = requests.filter { it.method == "POST" && it.path == "/api/groupchat" }
 }
 
-/** A captured production answer from src/test/resources/groupchat/. */
-fun roomFixture(name: String): String =
-  RoomServer::class.java.getResource("/groupchat/$name")?.readText()
-    ?: error("no group chat fixture named $name")
-
 fun json(body: String, code: Int = 200): MockResponse =
   MockResponse().setResponseCode(code).setHeader("content-type", "application/json").setBody(body)
 

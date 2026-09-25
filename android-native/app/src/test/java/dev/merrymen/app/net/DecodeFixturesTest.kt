@@ -46,6 +46,13 @@ class DecodeFixturesTest {
     // A live agent with fills and TOP TRADES, private book (cluster C, profile page).
     "/api/agents/bm74qsj64fygkhjh" to ("probe-agent-live.json" to 200),
     "/api/groupchat?limit=2" to ("probe-groupchat_limit_2.json" to 200),
+    // The room as its screen reads it, signed out, 2026-09-25 (cluster E): the
+    // first page, a poll sixteen ids behind its cursor, the page before the
+    // first, and who the reader is.
+    "/api/groupchat?limit=60" to ("probe-groupchat_limit_60.json" to 200),
+    "/api/groupchat?since=2808&limit=100" to ("probe-groupchat_since_2808.json" to 200),
+    "/api/groupchat?before=2765&limit=60" to ("probe-groupchat_before_2765.json" to 200),
+    "/api/groupchat/me" to ("probe-groupchat_me-signedout.json" to 200),
     "/api/orders/ceiling" to ("probe-orders_ceiling.json" to 401),
     // The four the adversarial review captured signed out, live, on the same
     // day: the routes whose models F1 changed and nothing pinned.
@@ -166,6 +173,26 @@ class DecodeFixturesTest {
     assertEquals("\"db\"", room.getValue("source").toString())
     val ceiling = api.getJson<JsonElement>("/api/orders/ceiling")
     assertEquals(ApiResult.Refused(401, "not signed in"), ceiling)
+  }
+
+  @Test fun theRoomReadsThroughItsOwnRoutes() = runBlocking {
+    val first = ok(api.groupChatPage("?limit=60"))!!
+    assertEquals(60, first.messages.size)
+    assertEquals(2824L, first.cursor)
+    assertEquals(3, first.messages.count { it.call != null })
+    assertEquals(52, first.room?.awake)
+    // A poll asks behind its cursor, so it overlaps the page it follows; the
+    // store merges by id.
+    val poll = ok(api.groupChatPage("?since=2808&limit=100"))!!
+    assertEquals(17, poll.messages.size)
+    assertEquals((2809L..2825L).toList(), poll.messages.map { it.id })
+    assertEquals(2825L, poll.cursor)
+    val earlier = ok(api.groupChatPage("?before=2765&limit=60"))!!
+    assertEquals(60, earlier.messages.size)
+    assertTrue("the page before the first ends where it began", earlier.messages.all { it.id < 2765 })
+    val me = ok(api.groupChatMe())!!
+    assertFalse(me.signedIn)
+    assertFalse(me.member)
   }
 
   // ── read times are epoch SECONDS ─────────────────────────────────────────

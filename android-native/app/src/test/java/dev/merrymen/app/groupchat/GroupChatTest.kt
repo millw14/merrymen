@@ -7,6 +7,7 @@ import dev.merrymen.app.data.ReplyTarget
 import dev.merrymen.app.data.RoomStatus
 import dev.merrymen.app.data.presenceLine
 import dev.merrymen.app.data.replyTarget
+import dev.merrymen.app.net.Fixtures
 import dev.merrymen.app.net.apiFor
 import dev.merrymen.app.net.gcMeOf
 import dev.merrymen.app.net.gcPageOf
@@ -56,17 +57,17 @@ class GroupChatTest {
     room.answer = { r ->
       val p = r.path ?: ""
       when {
-        p == "/api/groupchat?limit=60" -> json(roomFixture("room-limit60.json"))
-        p.startsWith("/api/groupchat?since=") -> json(roomFixture("room-since2808.json"))
-        p.startsWith("/api/groupchat?before=2765") -> json(roomFixture("room-before2765.json"))
-        p == "/api/groupchat/me" -> json(roomFixture("me-signedout.json"))
+        p == "/api/groupchat?limit=60" -> json(Fixtures.text("probe-groupchat_limit_60.json"))
+        p.startsWith("/api/groupchat?since=") -> json(Fixtures.text("probe-groupchat_since_2808.json"))
+        p.startsWith("/api/groupchat?before=2765") -> json(Fixtures.text("probe-groupchat_before_2765.json"))
+        p == "/api/groupchat/me" -> json(Fixtures.text("probe-groupchat_me-signedout.json"))
         else -> MockResponse().setResponseCode(599)
       }
     }
   }
 
   @Test fun theCapturedPagesDecode() {
-    val page = gcPageOf(Json.parseToJsonElement(roomFixture("room-limit60.json")))!!
+    val page = gcPageOf(Json.parseToJsonElement(Fixtures.text("probe-groupchat_limit_60.json")))!!
     assertEquals(60, page.messages.size)
     assertEquals(2824L, page.cursor)
     assertEquals(3, page.messages.count { it.call != null })
@@ -75,7 +76,7 @@ class GroupChatTest {
     assertEquals(52, page.room!!.awake)
     assertEquals(8, page.room!!.asleep)
     assertEquals(60, page.room!!.presence.size)
-    val me = gcMeOf(Json.parseToJsonElement(roomFixture("me-signedout.json")))!!
+    val me = gcMeOf(Json.parseToJsonElement(Fixtures.text("probe-groupchat_me-signedout.json")))!!
     assertFalse(me.signedIn)
     assertFalse(me.member)
   }
@@ -127,13 +128,13 @@ class GroupChatTest {
     // The poll says 2810 was taken back — and its own messages still carry it,
     // as a read from just before the hide committed would.
     // The captured poll carries its own (empty) gone list, as every poll does.
-    val since = roomFixture("room-since2808.json").replace("\"gone\":[]", "\"gone\":[2810]")
+    val since = Fixtures.text("probe-groupchat_since_2808.json").replace("\"gone\":[]", "\"gone\":[2810]")
     assertTrue(since.contains("\"gone\":[2810]"))
     room.answer = { json(since) }
     r.pollNow()
     assertFalse(r.state.value.messages.any { it.id == 2810L })
     // A later page that re-delivers it does not put it back.
-    room.answer = { json(roomFixture("room-since2808.json")) }
+    room.answer = { json(Fixtures.text("probe-groupchat_since_2808.json")) }
     r.pollNow()
     assertFalse(r.state.value.messages.any { it.id == 2810L })
     assertTrue(2810L in r.state.value.gone)
@@ -246,11 +247,11 @@ class GroupChatTest {
     room.answer = { req ->
       val p = req.path ?: ""
       when {
-        p == "/api/groupchat?limit=60" -> json(roomFixture("room-limit60.json"))
+        p == "/api/groupchat?limit=60" -> json(Fixtures.text("probe-groupchat_limit_60.json"))
         p.startsWith("/api/groupchat?before=2765") -> {
           asked.countDown()
           release.await(5, TimeUnit.SECONDS)
-          json(roomFixture("room-before2765.json"))
+          json(Fixtures.text("probe-groupchat_before_2765.json"))
         }
         else -> MockResponse().setResponseCode(599)
       }
@@ -314,7 +315,7 @@ class GroupChatTest {
     room.answer = { req ->
       asked.complete(Unit)
       hold.await(5, TimeUnit.SECONDS)
-      json(roomFixture("room-limit60.json")).also { req.path }
+      json(Fixtures.text("probe-groupchat_limit_60.json")).also { req.path }
     }
     val inFlight = async { r.pollNow() }
     asked.await()
