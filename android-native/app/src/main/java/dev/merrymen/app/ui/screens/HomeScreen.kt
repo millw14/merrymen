@@ -466,6 +466,7 @@ private fun OwnHome(feed: Feed, reads: OwnReads, nowMs: Long, hosted: Boolean?, 
       AccountStrip(
         telegram = reads.telegram,
         settings = reads.settings,
+        mode = g.mode,
         onSettings = { nav.navigate(Routes.SETTINGS) },
         onTelegram = { nav.navigate(Routes.TELEGRAM) },
         modifier = Modifier.padding(top = 28.dp),

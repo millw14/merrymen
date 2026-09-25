@@ -251,12 +251,32 @@ class AccountStatusTest {
   }
 
   @Test fun trencherIsReadFromTheSettings() {
-    assertEquals(TrencherRow.Unread, trencherRowOf(null, null, null, read = false))
-    assertEquals(TrencherRow.Off, trencherRowOf("steady-basket", true, "all", read = true))
-    assertEquals(TrencherRow.NoCrypto, trencherRowOf("trencher", true, "stocks", read = true))
-    assertEquals(TrencherRow.Live, trencherRowOf("trencher", true, "crypto", read = true))
-    assertEquals(TrencherRow.Paper, trencherRowOf("trencher", false, "all", read = true))
-    assertEquals(TrencherRow.Paper, trencherRowOf("trencher", null, "all", read = true))
+    assertEquals(TrencherRow.Unread, trencherRowOf(null, null, null, read = false, mode = "live"))
+    assertEquals(TrencherRow.Off, trencherRowOf("steady-basket", true, "all", read = true, mode = "live"))
+    assertEquals(TrencherRow.NoCrypto, trencherRowOf("trencher", true, "stocks", read = true, mode = "live"))
+    assertEquals(TrencherRow.Live, trencherRowOf("trencher", true, "crypto", read = true, mode = "live"))
+  }
+
+  /**
+   * PAPER IS NEVER CALLED REAL MONEY. "Let trencher trade for real" is a
+   * permission; the rail is the heartbeat's. A paper agent trenches on paper
+   * whatever the permission says, and a live one without it buys nothing
+   * (worker/src/index.ts empties the feed on the live rail only).
+   */
+  @Test fun theRailDecidesWhoseMoneyTrencherTrades() {
+    assertEquals(TrencherRow.Paper, trencherRowOf("trencher", true, "all", read = true, mode = "paper"))
+    assertEquals("on, practice money only", TrencherRow.Paper.value)
+    assertEquals(TrencherRow.Paper, trencherRowOf("trencher", false, "all", read = true, mode = "paper"))
+    assertEquals(TrencherRow.LiveNotAllowed, trencherRowOf("trencher", false, "all", read = true, mode = "live"))
+    assertEquals(TrencherRow.LiveNotAllowed, trencherRowOf("trencher", null, "all", read = true, mode = "live"))
+    assertTrue(TrencherRow.LiveNotAllowed.value.contains("buys nothing"))
+    // Nobody read the rail: only what the permission allows, never "trading".
+    for (mode in listOf(null, "idle")) {
+      val allowed = trencherRowOf("trencher", true, "all", read = true, mode = mode)
+      assertEquals(TrencherRow.AllowedReal, allowed)
+      assertFalse(allowed.value, allowed.value.contains("trading real money"))
+      assertEquals(TrencherRow.NotAllowedReal, trencherRowOf("trencher", false, "all", read = true, mode = mode))
+    }
   }
 
   // ── the owner's tape ─────────────────────────────────────────────────────

@@ -366,6 +366,8 @@ private fun TapeLine(pill: String, pillColor: Color, title: String, sub: String?
 internal fun AccountStrip(
   telegram: TelegramStatus?,
   settings: SettingsEnvelope?,
+  /** The heartbeat's LIVE / PAPER / IDLE, or null unread: the rail trencher trades on. */
+  mode: String?,
   onSettings: () -> Unit,
   onTelegram: () -> Unit,
   modifier: Modifier = Modifier,
@@ -377,6 +379,7 @@ internal fun AccountStrip(
     trencherLiveEnabled = settings?.bool("trencherLiveEnabled"),
     assetMode = settings?.str("assetMode"),
     read = settings != null,
+    mode = mode,
   )
   Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
     StripRow(
@@ -415,14 +418,14 @@ internal fun AccountStrip(
       value = tr.value,
       tone = when (tr) {
         TrencherRow.Live -> MerryColors.up
-        TrencherRow.NoCrypto -> StripWarn
+        TrencherRow.NoCrypto, TrencherRow.LiveNotAllowed -> StripWarn
         else -> MerryColors.tx2
       },
       action = when (tr) {
         TrencherRow.Unread -> null
         TrencherRow.Off -> "What is this? →"
-        TrencherRow.NoCrypto -> "Change it →"
-        TrencherRow.Paper, TrencherRow.Live -> "Settings →"
+        TrencherRow.NoCrypto, TrencherRow.LiveNotAllowed -> "Change it →"
+        TrencherRow.Paper, TrencherRow.Live, TrencherRow.AllowedReal, TrencherRow.NotAllowedReal -> "Settings →"
       },
       onAction = onSettings,
     )

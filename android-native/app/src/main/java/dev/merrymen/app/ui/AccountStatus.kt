@@ -819,24 +819,43 @@ fun telegramStartUrl(botUsername: String?, linkCode: String?): String? {
 }
 
 /**
- * WHAT THE TRENCHER RAIL IS SET TO DO — agent-status.ts trencherRow. A reading
- * of the SETTINGS, not of what the agent is doing, and the copy says so.
+ * WHAT THE TRENCHER RAIL IS DOING WITH WHOSE MONEY — agent-status.ts
+ * trencherRow, with the rail put back in.
+ *
+ * "Let trencher trade for real" is a permission, not the rail. The worker
+ * trenches on paper whatever it says while the agent is on paper (the
+ * heartbeat's mode), and on the live rail with it off it empties trencher's
+ * candidate feed, so it buys nothing (worker/src/index.ts: `!paperActive() &&
+ * !cfg.trencherLiveEnabled`). Read from the settings alone — as the web
+ * still does — the strip said "on, trading real money" in green under a PAPER
+ * chip, and "practice money only" about a live agent that could trade nothing.
+ * So real money is said only for a live agent that may trench for real, and a
+ * mode nobody read says only what the settings allow.
  */
 enum class TrencherRow(val value: String) {
   Unread("checking…"),
   Off("not your strategy"),
   /** Chosen, but asset mode is stocks, so no coin can ever be considered — the refusal nothing else shows. */
   NoCrypto("on, but your asset mode is stocks only — no coins can be considered"),
+  /** The agent is on paper: trencher trades practice money, whatever the permission says. */
   Paper("on, practice money only"),
+  /** Live, and allowed to trench for real. */
   Live("on, trading real money"),
+  /** Live, but not allowed to trench for real: its candidate feed is empty, so it buys nothing. */
+  LiveNotAllowed("on, but not allowed to trade for real — it buys nothing until you allow it"),
+  /** The mode was not read: what the permission allows, and no claim about what it is doing. */
+  AllowedReal("on, allowed to trade for real when your agent is live"),
+  NotAllowedReal("on, not allowed to trade for real"),
 }
 
-fun trencherRowOf(strategy: String?, trencherLiveEnabled: Boolean?, assetMode: String?, read: Boolean): TrencherRow = when {
+fun trencherRowOf(strategy: String?, trencherLiveEnabled: Boolean?, assetMode: String?, read: Boolean, mode: String?): TrencherRow = when {
   !read -> TrencherRow.Unread
   strategy != "trencher" -> TrencherRow.Off
   assetMode == "stocks" -> TrencherRow.NoCrypto
-  trencherLiveEnabled == true -> TrencherRow.Live
-  else -> TrencherRow.Paper
+  mode == "paper" -> TrencherRow.Paper
+  mode == "live" -> if (trencherLiveEnabled == true) TrencherRow.Live else TrencherRow.LiveNotAllowed
+  trencherLiveEnabled == true -> TrencherRow.AllowedReal
+  else -> TrencherRow.NotAllowedReal
 }
 
 
