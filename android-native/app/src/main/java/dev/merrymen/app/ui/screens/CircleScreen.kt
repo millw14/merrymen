@@ -208,10 +208,7 @@ fun CircleScreen(nav: NavHostController) {
             "Your \$MERRYMEN balance is read from your login wallet. To point the Circle at a " +
               "different wallet, use the merrymen web app.",
           )
-          "unreadable" -> Notice(
-            "Couldn't read your balance",
-            "That's our chain read failing, not your wallet. " + (v.error ?: ""),
-          )
+          "unreadable" -> circleNoticeFor(v).let { Notice(it.first, it.second) }
           // AN UNKNOWN REASON IS NOT A SUCCESSFUL READ. `why` is a plain String
           // defaulting to "ok", so anything this build does not recognise —
           // including a reason the server adds later — used to fall through to
@@ -254,11 +251,7 @@ fun CircleScreen(nav: NavHostController) {
               )
             }
           }
-          else -> Notice(
-            "Couldn't read where you stand",
-            v.error?.ifBlank { null }
-              ?: "The server gave a reason this version of the app doesn't know yet (\"${v.why}\").",
-          )
+          else -> circleNoticeFor(v).let { Notice(it.first, it.second) }
         }
 
         // The tier TABLE is public and renders in every arm — it is what makes
@@ -268,6 +261,24 @@ fun CircleScreen(nav: NavHostController) {
     }
     Spacer(Modifier.height(LocalBottomInset.current))
   }
+}
+
+/**
+ * THE NOTICE FOR A STANDING THAT WAS NOT READ: a title and a body, in this
+ * app's words only.
+ *
+ * The route's `error` is never shown. It is the chain client's exception
+ * message — a multi-line dump with the HTTP status, the RPC URL, the request
+ * body with the holder's address in it and the library's version — and this
+ * screen pasted it after "That's our chain read failing" (the web never
+ * renders the field). A reason this build does not know is said as that,
+ * without echoing the code.
+ */
+internal fun circleNoticeFor(v: CircleView): Pair<String, String> = when (v.why) {
+  "unreadable" -> "Couldn't read your balance" to
+    "That's our chain read failing, not your wallet. It should clear on its own."
+  else -> "Couldn't read where you stand" to
+    "The server gave a reason this app doesn't know yet, so nothing here is a reading of your wallet."
 }
 
 @Composable
