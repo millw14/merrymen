@@ -7,8 +7,10 @@ import dev.merrymen.app.net.OriginCheck
 import dev.merrymen.app.net.SessionStore
 import dev.merrymen.app.net.checkOrigin
 import dev.merrymen.app.net.isOtherServer
+import dev.merrymen.app.net.serverOf
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
 
 /**
  * WHAT THE APP KNOWS, AND HOW SURE IT IS.
@@ -109,9 +111,15 @@ class Repository(
    */
   fun addForgetHook(hook: ForgetHook) = identity.addForgetHook(hook)
 
-  val origin: Flow<String> get() = session.origin
+  /**
+   * THE SERVER IN USE, which sign-in, every web screen, Share and the Settings
+   * field build from. The server the stored address names ([serverOf]): an
+   * older build stored a pasted "…/home" as it was, and sign-in would open
+   * /home/home.
+   */
+  val origin: Flow<String> get() = session.origin.map(::serverOf)
 
-  suspend fun originNow() = session.originNow()
+  suspend fun originNow() = serverOf(session.originNow())
 
   /**
    * SAVE A NEW SERVER ADDRESS — or refuse it, with a sentence the owner reads.

@@ -2,6 +2,11 @@ package dev.merrymen.app.net
 
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.mockwebserver.Dispatcher
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -88,6 +93,45 @@ class ServerOriginTest {
   }
 
   // ── an address an older build already stored ─────────────────────────────
+
+  @Test fun aStoredPageIsReadAsTheServerItNames() {
+    // An older build saved the field as typed; none of these came through
+    // checkOrigin.
+    assertEquals("https://app.merrymen.dev", serverOf("https://app.merrymen.dev/home"))
+    assertEquals("http://10.0.2.2:3100", serverOf("http://10.0.2.2:3100/sub/"))
+    assertEquals("https://app.merrymen.dev", serverOf("https://owner:pw@App.merrymen.dev:443/home?x=1#top"))
+    // Not a web address at all: left as it is, so a call still says so.
+    assertEquals("app.merrymen.dev", serverOf("app.merrymen.dev"))
+    // Whatever the Server field saves is already its own server.
+    for (typed in listOf("https://app.merrymen.dev/", "http://localhost:3000", "http://10.0.2.2:3100", "https://h.example:8443")) {
+      val stored = ok(typed)
+      assertEquals(stored, serverOf(stored))
+    }
+  }
+
+  @Test fun aStoredPageIsNotPutInFrontOfEveryRoute() = runBlocking {
+    // Like the real server: every route at the root, and a Next 404 page for
+    // anything else, which is what /home/api/… got.
+    val server = MockWebServer()
+    server.dispatcher = object : Dispatcher() {
+      override fun dispatch(request: RecordedRequest): MockResponse =
+        if (request.path.orEmpty().startsWith("/api/")) {
+          MockResponse().setHeader("content-type", "application/json").setBody("""{"version":"0.21.0"}""")
+        } else {
+          MockResponse().setResponseCode(404).setHeader("content-type", "text/html").setBody(HTML_PAGE)
+        }
+    }
+    server.start()
+    try {
+      val api = MerrymenApi(OkHttpClient(), OriginSource { server.origin() + "/home" })
+      assertTrue("a read", api.version() is ApiResult.Ok)
+      assertTrue("a write, as a route outside MerrymenApi.kt sends one", api.callAt("/api/settings") { put("{}".toRequestBody()) } is ApiResult.Ok)
+      assertEquals("what a web URL beside them is built from", server.origin(), api.originNow())
+      assertEquals(listOf("/api/version", "/api/settings"), List(2) { server.takeRequest().path })
+    } finally {
+      server.shutdown()
+    }
+  }
 
   @Test fun aStoredAddressThatIsNotOneIsUnreachableNeverAThrow() = runBlocking {
     for (bad in listOf("app.merrymen.dev", "https://app.merrymen.dev x", "")) {

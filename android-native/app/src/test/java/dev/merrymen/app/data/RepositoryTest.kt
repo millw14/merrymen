@@ -1,5 +1,6 @@
 package dev.merrymen.app.data
 
+import dev.merrymen.app.net.HTML_PAGE
 import dev.merrymen.app.net.Http
 import dev.merrymen.app.net.MemoryCookies
 import dev.merrymen.app.net.MemoryStore
@@ -9,13 +10,16 @@ import dev.merrymen.app.net.PersistentCookieJar
 import dev.merrymen.app.net.answer
 import dev.merrymen.app.net.origin
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import okhttp3.Cookie
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -283,6 +287,26 @@ class RepositoryTest {
     server.session(null)
     repo.refreshIdentity()
     assertNull("no credential goes to a host that never set it", sentCookies(server))
+  }
+
+  @Test fun aPageAnOlderBuildStoredIsReadAsItsServer() = runBlocking {
+    // 0.1.0 saved the field as typed, so the web's sign-in page is on upgraded
+    // phones. Like the real server, this one answers /home/api/… with a 404
+    // page: every screen said "The server said no: HTTP 404".
+    store.originState.value = server.origin() + "/home"
+    server.dispatcher = object : Dispatcher() {
+      override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+        "/api/version" -> MockResponse().setHeader("content-type", "application/json").setBody("""{"version":"0.21.0"}""")
+        "/api/auth/session" -> MockResponse().setHeader("content-type", "application/json").setBody("""{"hosted":true,"address":"0xAAA"}""")
+        else -> MockResponse().setResponseCode(404).setHeader("content-type", "text/html").setBody(HTML_PAGE)
+      }
+    }
+    assertEquals(Loaded.Value(Unit), repo.bootstrap())
+    assertEquals("0xAAA", repo.signedIn.value)
+    // What sign-in (origin + "/home"), every web screen, Share and the
+    // Settings field build from: the server, not the page.
+    assertEquals(server.origin(), repo.originNow())
+    assertEquals(server.origin(), repo.origin.first())
   }
 
   @Test fun aStartAgainstAnAddressThatIsNotOneIsAnAnswerNotACrash() = runBlocking {

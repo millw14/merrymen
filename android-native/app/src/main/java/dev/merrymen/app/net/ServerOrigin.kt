@@ -15,7 +15,8 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
  *
  * So it is checked HERE, once, and a refusal is a sentence the Settings screen
  * shows instead of saving. [MerrymenApi] still guards every call, because an
- * address stored by an older build never came through this door.
+ * address stored by an older build never came through this door; an address
+ * that parses but carries a page is read as its server ([serverOf]).
  */
 sealed interface OriginCheck {
   /** Fit to store: an http(s) origin with no trailing slash, so a path can be appended as-is. */
@@ -80,6 +81,29 @@ fun checkOrigin(raw: String, fallback: String): OriginCheck {
   // Stored the way the parser reads it — scheme and host lowercased, a default
   // port dropped — so the same server typed two ways is one stored address.
   return OriginCheck.Ok(url.toString().trimEnd('/'))
+}
+
+/**
+ * THE SERVER A STORED ADDRESS NAMES: its scheme, host and port, and nothing
+ * after them. [stored] comes back as it is when it will not parse, so a caller
+ * still finds out that it is not a web address.
+ *
+ * [checkOrigin] refuses a page, a query and a user name, but an older build
+ * stored the field exactly as typed, so "https://app.merrymen.dev/home" (the
+ * web's sign-in page, and the likeliest paste) is on upgraded phones. Routes
+ * were appended to it, every read asked /home/api/…, and every screen said
+ * "The server said no: HTTP 404" with nothing pointing at Settings.
+ *
+ * Nothing after the host can mean anything to this app. A merrymen server
+ * keeps every route at the root of its origin (web/next.config.mjs sets no
+ * basePath), and that is how the web's own "/api/…" fetches resolve from
+ * whatever page they run on. So the address is read as the server it names:
+ * the same host, so the same cookies and the same turn, and the app works
+ * where it used to show a 404.
+ */
+fun serverOf(stored: String): String {
+  val url = stored.trim().toHttpUrlOrNull() ?: return stored
+  return HttpUrl.Builder().scheme(url.scheme).host(url.host).port(url.port).build().toString().trimEnd('/')
 }
 
 /**

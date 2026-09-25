@@ -76,12 +76,16 @@ built over any other client reads exactly as that client does.
 `localhost` and `10.0.2.2` — the hosts `network_security_config.xml` allows in
 the clear — and only the server's address: a page such as `/home`, a query, a
 fragment or a user name is refused. Anything else is refused with a sentence
-and not saved. Moving to another host ends the wallet's turn: per-wallet state
-is forgotten, and the session cookie stays with the host that set it. One
-exception, because nothing recorded that host: a session 0.1.0 kept beside a
-Server saved with no scheme is kept for the build's default origin (the hosted
-service) and sent to no other host, so fixing the field to that server keeps
-the owner signed in, and typing any other server sends it nothing.
+and not saved. An address 0.1.0 already stored with a page after it (a pasted
+`https://app.merrymen.dev/home`) is read as the server it names, because every
+merrymen route lives at the root of its origin; one it stored with no scheme
+says so on every screen ("fix it there") and sends nothing. Moving to another
+host ends the wallet's turn: per-wallet state is forgotten, and the session
+cookie stays with the host that set it. One exception, because nothing
+recorded that host: a session 0.1.0 kept beside a Server saved with no scheme
+is kept for the build's default origin (the hosted service) and sent to no
+other host, so fixing the field to that server keeps the owner signed in, and
+typing any other server sends it nothing.
 
 ---
 

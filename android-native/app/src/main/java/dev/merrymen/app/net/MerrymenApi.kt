@@ -141,8 +141,12 @@ class MerrymenApi(
 
   @PublishedApi internal val jsonType: MediaType = "application/json; charset=utf-8".toMediaType()
 
-  /** The origin every call is made against right now — for building a web URL beside an API one. */
-  suspend fun originNow(): String = origins.originNow()
+  /**
+   * The origin every call is made against right now — for building a web URL
+   * beside an API one. The server the stored address names ([serverOf]), so a
+   * page an older build stored after it is not in front of every path.
+   */
+  suspend fun originNow(): String = serverOf(origins.originNow())
 
   /**
    * THE CLIENT EVERY WRITE GOES OUT ON: [http] with no transport retry and
@@ -183,8 +187,13 @@ class MerrymenApi(
    * on that call and on every launch after. Settings now refuses such an
    * address, but one stored by an older build is still on the device, so every
    * request is built from this and a null is [NOT_A_WEB_ADDRESS], not a throw.
+   *
+   * [path] is appended to the SERVER the stored address names, not to the
+   * address as typed: an older build also stored "https://app.merrymen.dev/home"
+   * as it was pasted, and every route became /home/api/… and a 404. See
+   * [serverOf].
    */
-  @PublishedApi internal suspend fun urlFor(path: String): HttpUrl? = (origins.originNow() + path).toHttpUrlOrNull()
+  @PublishedApi internal suspend fun urlFor(path: String): HttpUrl? = (serverOf(origins.originNow()) + path).toHttpUrlOrNull()
 
   /**
    * ONE REQUEST TO [path] that getJson/sendJson do not cover — raw bytes,
