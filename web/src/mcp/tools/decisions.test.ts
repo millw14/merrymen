@@ -14,7 +14,7 @@ import { projectSettings } from "@/lib/services/settings-view";
 import type { AgentDirectory } from "../agents";
 import type { Principal } from "../oauth/server";
 import { resetMetricsForTest } from "../observe";
-import {
+import { errorOf,
   ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, agentFixture, connectAs, installFixtures, makeDeps, makeTestDb, type TestDb,
 } from "../testing";
 import { makeContext, runTool, type ToolDef } from "../tool";
@@ -36,7 +36,7 @@ const tool = (name: string) => DECISIONS_TOOLS.find((t) => t.name === name) as u
 
 async function call(name: string, args: Record<string, unknown>, p: Principal) {
   const res = await runTool(tool(name), args, p, "trace-test", { now: () => NOW });
-  return { res, sc: res.structuredContent as Record<string, any>, text: JSON.stringify(res) };
+  return { res, sc: (res.isError ? { error: errorOf(res) } : res.structuredContent) as Record<string, any>, text: JSON.stringify(res) };
 }
 const errCode = (r: { sc: Record<string, any> }): string | undefined => r.sc?.error?.code;
 

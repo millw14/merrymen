@@ -22,7 +22,7 @@ import { resetMetricsForTest } from "../observe";
 import type { Principal } from "../oauth/server";
 import { buildServer, principalOf } from "../server";
 import { makeContext, runTool, type ToolDef } from "../tool";
-import {
+import { errorOf,
   ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, agentFixture, connectAs, fixtureDirectory, installFixtures, makeDeps, makeTestDb,
   mcpRequest, rpcResult, testConfig, type TestDb,
 } from "../testing";
@@ -166,7 +166,7 @@ const ok = async (p: Principal, name: string, args: unknown): Promise<any> => {
 const errCode = async (p: Principal, name: string, args: unknown): Promise<string> => {
   const r = await call(p, name, args);
   assert.equal(r.isError, true, `expected an error from ${name}`);
-  return (r.structuredContent as { error: { code: string } }).error.code;
+  return errorOf(r).code;
 };
 
 // ── search ──────────────────────────────────────────────────────────────────
@@ -577,7 +577,7 @@ test("eligibility: another owner's agent is not found whatever id is passed, and
   const { a, b } = await setup();
   assert.equal(await errCode(b, "check_token_eligibility", { agent: SLUG_A, address: NVDA }), "not_found");
   const res = await call(a, "check_token_eligibility", { agent: SLUG_B, address: NVDA });
-  assert.equal((res.structuredContent as { error: { code: string } }).error.code, "not_found");
+  assert.equal(errorOf(res).code, "not_found");
   assert.ok(!JSON.stringify(res).includes(ACCOUNT_B));
   const d2 = await makeTestDb();
   install(d2);

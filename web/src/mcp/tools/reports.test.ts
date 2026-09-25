@@ -19,7 +19,7 @@ import { resetMetricsForTest } from "../observe";
 import type { Principal } from "../oauth/server";
 import { buildServer, principalOf } from "../server";
 import { runTool, type CallToolResult, type ToolDef } from "../tool";
-import {
+import { errorOf,
   ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, agentFixture, connectAs, fixtureDirectory, installFixtures, makeDeps, makeTestDb,
   mcpRequest, rpcResult, testConfig, type TestDb,
 } from "../testing";
@@ -49,7 +49,7 @@ const data = (r: CallToolResult) => {
 };
 const errorCode = (r: CallToolResult) => {
   assert.equal(r.isError, true, "expected an error result");
-  return (r.structuredContent as { error: { code: string } }).error.code;
+  return errorOf(r).code;
 };
 
 // ── ledger seeding ──────────────────────────────────────────────────────────
@@ -537,7 +537,7 @@ test("create_export: an owner holds a bounded number of unexpired exports at onc
   for (let i = 0; i < EXPORT_LIVE_MAX_COUNT; i++) put.run(`exp_${i.toString(16).padStart(32, "0")}`, OWNER_A, `merrymen-${SLUG_A}-trades-x.csv`, 1, NOW - 100, NOW + 3600 + i);
   const full = await run("create_export", { kind: "portfolio" }, a);
   assert.equal(errorCode(full), "quota_exceeded");
-  assert.equal((full.structuredContent as { error: { retry_after_s: number } }).error.retry_after_s, 3600);
+  assert.equal(errorOf(full).retry_after_s, 3600);
   // Another owner's holdings do not count against B.
   data(await run("create_export", { kind: "portfolio" }, b));
   // Expired ones do not count either: once they lapse, A can export again.

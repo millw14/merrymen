@@ -20,7 +20,7 @@ import {
   type DraftBinding, type TradeBinding,
 } from "@/lib/services/proposals";
 import { BUILTIN_STRATEGIES } from "../../../../worker/src/strategies/registry";
-import { ACCOUNT_A, OWNER_A, OWNER_B, SLUG_A, agentFixture, connectAs, fixtureDirectory, installFixtures, makeDeps, makeTestDb, type TestDb } from "../testing";
+import { errorOf, ACCOUNT_A, OWNER_A, OWNER_B, SLUG_A, agentFixture, connectAs, fixtureDirectory, installFixtures, makeDeps, makeTestDb, type TestDb } from "../testing";
 
 // Approval links are built from the configured public origin.
 process.env.MERRYMEN_PUBLIC_ORIGIN = "https://app.test";
@@ -83,7 +83,7 @@ async function setup(o: { settings?: Record<string, unknown>; directory?: Return
 }
 
 const data = (r: Awaited<ReturnType<typeof runTool>>) => r.structuredContent as Record<string, unknown>;
-const code = (r: Awaited<ReturnType<typeof runTool>>) => (r.structuredContent as { error?: { code: string } }).error?.code;
+const code = (r: Awaited<ReturnType<typeof runTool>>) => errorOf(r).code;
 
 test("the strategy list matches the worker's registry", () => {
   assert.deepEqual([...KNOWN_STRATEGIES].sort(), [...BUILTIN_STRATEGIES].sort());
@@ -585,7 +585,7 @@ test("with no ceiling stored, the house's owner-order ceiling applies, as on the
   const ctx = await setup({ directory: wide, settings: { telegramMaxActionUsdg: undefined } });
   const over = await ctx.run("propose_trade", { side: "buy", token: NVDA, amount_usdg: 60, idempotency_key: "l5-ceil-01" });
   assert.equal(code(over), "invalid_input");
-  assert.match(JSON.stringify(over.structuredContent), /25 USDG limit/);
+  assert.match(errorOf(over).message, /25 USDG limit/);
   const ok = data(await ctx.run("propose_trade", { side: "buy", token: NVDA, amount_usdg: 20, idempotency_key: "l5-ceil-02" }));
   const b = JSON.parse((await proposalRow(ctx.d.db, OWNER_A, String(ok.proposal_id)))!.binding_json) as TradeBinding;
   assert.equal(b.limits.chat_ceiling_usdg, 25);

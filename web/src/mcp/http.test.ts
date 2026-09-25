@@ -86,7 +86,7 @@ test("another owner's agent is not found, whatever id is passed", async () => {
   const { a } = await setup();
   const res = await rpcResult(await call(mcpRequest(a.tokens.access_token, "tools/call", { name: "get_agent_status", arguments: { agent: SLUG_B } })));
   assert.equal(res.result?.isError, true);
-  assert.equal((res.result?.structuredContent as { error: { code: string } }).error.code, "not_found");
+  assert.equal((res.result?._meta as Record<string, { code: string }> | undefined)?.["dev.merrymen/error"]?.code, "not_found");
   assert.ok(!JSON.stringify(res).includes(ACCOUNT_B));
 });
 
@@ -103,7 +103,7 @@ test("an agent unshared on the owner's side becomes unreachable at once", async 
   restore?.();
   restore = installFixtures(d, { directory: { async agentsFor() { return []; } } });
   const res = await rpcResult(await call(mcpRequest(a.tokens.access_token, "tools/call", { name: "get_agent_status", arguments: {} })));
-  assert.equal((res.result?.structuredContent as { error: { code: string } }).error.code, "not_found");
+  assert.equal((res.result?._meta as Record<string, { code: string }> | undefined)?.["dev.merrymen/error"]?.code, "not_found");
 });
 
 test("per-connection request rate is limited with Retry-After", async () => {

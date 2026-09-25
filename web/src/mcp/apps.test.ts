@@ -913,7 +913,9 @@ test("errors, cancellations, text-only results, unknown shapes and missing field
   await handshake(m);
   m.deliver({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: { address: ADDR2 } } });
   assert.match(m.text(), /Waiting for the result/);
-  m.deliver({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { isError: true, content: [{ type: "text", text: "Error not_found: No such token." }], structuredContent: { error: { code: "not_found", message: `No such token. ${EVIL}` } } } });
+  m.deliver({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { isError: true, content: [{ type: "text", text: `Error not_found: No such token.
+
+${JSON.stringify({ error: { code: "not_found", message: `No such token. ${EVIL}` } })}` }], _meta: { "dev.merrymen/error": { code: "not_found", message: `No such token. ${EVIL}` } } } });
   assert.match(m.text(), /The tool returned an error\./);
   assert.match(m.text(), /No such token\./);
   assertNoInjectedMarkup(m);

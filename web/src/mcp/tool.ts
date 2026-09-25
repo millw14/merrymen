@@ -144,12 +144,23 @@ function textOf(summary: string | undefined, data: unknown): string {
   return summary ? `${summary}\n\n${json}` : json;
 }
 
+/** Where an error result carries its machine-readable envelope ({code, message, retryable, retry_after_s, trace_id}). */
+export const ERROR_META_KEY = "dev.merrymen/error";
+
+/**
+ * An error result carries NO structuredContent: every tool declares an
+ * outputSchema for its success shape, and clients (the v1 TypeScript SDK's
+ * callTool among them) validate structuredContent against it even when
+ * isError is set — an error envelope there fails validation and the model
+ * would see a schema mismatch instead of the code. The envelope rides in the
+ * text (after a blank line, as JSON) and in _meta.
+ */
 function errorResult(e: McpError, traceId: string): CallToolResult {
   const body: ErrorBody = errorBody(e, traceId);
   const retry = e.retryAfterSec ? ` Retry after ${e.retryAfterSec}s.` : "";
   return {
-    content: [{ type: "text", text: `Error ${e.code}: ${e.message}${retry}` }],
-    structuredContent: body as unknown as Record<string, unknown>,
+    content: [{ type: "text", text: `Error ${e.code}: ${e.message}${retry}\n\n${JSON.stringify(body)}` }],
+    _meta: { [ERROR_META_KEY]: body.error },
     isError: true,
   };
 }

@@ -21,7 +21,7 @@ import { handleMcpRequest } from "../http";
 import { resetMetricsForTest } from "../observe";
 import type { Principal } from "../oauth/server";
 import { buildServer, principalOf } from "../server";
-import {
+import { errorOf,
   ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, connectAs, installFixtures, makeDeps, makeTestDb, mcpRequest, rpcResult, testConfig, type TestDb,
 } from "../testing";
 import { runTool, type ToolDef } from "../tool";
@@ -119,7 +119,7 @@ async function setup() {
 async function call(p: Principal, name: string, args: unknown) {
   const def = PUBLIC_TOOLS.find((t) => t.name === name) as unknown as ToolDef;
   const res = await runTool(def, args, p, "trace-public", { now: () => T });
-  return { res, sc: res.structuredContent as Record<string, any>, json: JSON.stringify(res) };
+  return { res, sc: (res.isError ? { error: errorOf(res) } : res.structuredContent) as Record<string, any>, json: JSON.stringify(res) };
 }
 
 function assertAbsent(json: string, needles: string[], what: string) {

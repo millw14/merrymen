@@ -395,9 +395,13 @@ function showError(r) {
   clear(root);
   var box = put(root, "div", "errbox");
   put(box, "strong", null, "The tool returned an error.");
-  var sc = obj(r.structuredContent);
-  var err = sc ? obj(sc.error) : null;
-  var msg = (err && clean(err.message, 400)) || clean(textOf(r.content), 400);
+  // Errors carry no structuredContent: the envelope is in _meta and, as JSON, after the text's first paragraph.
+  var meta = obj(r._meta);
+  var sc = obj(r.structuredContent) || parseText(r.content);
+  var err = (meta ? obj(meta["dev.merrymen/error"]) : null) || (sc ? obj(sc.error) : null);
+  var firstPara = textOf(r.content);
+  if (firstPara !== null && firstPara.indexOf("\n\n") >= 0) firstPara = firstPara.slice(0, firstPara.indexOf("\n\n"));
+  var msg = (err && clean(err.message, 400)) || clean(firstPara, 400);
   if (msg) put(box, "p", null, msg);
   var code = err ? clean(err.code, 40) : null;
   if (code) put(box, "p", "small muted", "Code: " + code);

@@ -2,8 +2,11 @@
 
 ## Tool errors
 
-A failed tool call returns an MCP result with `isError: true`, a one-line text
-explanation, and this structured content:
+A failed tool call returns an MCP result with `isError: true` and **no**
+`structuredContent` (every tool's `outputSchema` describes its success shape,
+and clients validate `structuredContent` against it even on errors). The
+machine-readable envelope is in `_meta["dev.merrymen/error"]`, and also in the
+text: a one-line explanation, a blank line, then this JSON:
 
 ```json
 {

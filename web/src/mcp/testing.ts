@@ -174,3 +174,19 @@ export async function rpcResult(res: Response): Promise<{ result?: Record<string
   }
   return text ? JSON.parse(text) : {};
 }
+
+/** The error envelope of an isError tool result ({code, message, retryable, retry_after_s, trace_id, details?}), from _meta. */
+export interface ToolErrorEnvelope {
+  code: string;
+  message: string;
+  retryable: boolean;
+  retry_after_s: number | null;
+  trace_id: string;
+  details?: Record<string, unknown>;
+}
+export function errorOf(r: unknown): ToolErrorEnvelope {
+  const meta = (r as { _meta?: Record<string, unknown> | null } | null | undefined)?._meta;
+  const e = meta?.["dev.merrymen/error"] as ToolErrorEnvelope | undefined;
+  if (!e) throw new Error(`not an error result: ${JSON.stringify(r)?.slice(0, 300)}`);
+  return e;
+}

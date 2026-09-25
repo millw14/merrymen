@@ -24,7 +24,7 @@ import { handleMcpRequest } from "../http";
 import { resetMetricsForTest } from "../observe";
 import type { Principal } from "../oauth/server";
 import { buildServer, principalOf } from "../server";
-import {
+import { errorOf,
   ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, agentFixture, connectAs, fixtureDirectory, installFixtures, makeDeps, makeTestDb,
   mcpRequest, rpcResult, testConfig,
 } from "../testing";
@@ -74,7 +74,7 @@ function ok(r: CallToolResult): any {
 }
 function code(r: CallToolResult): string {
   assert.equal(r.isError, true, JSON.stringify(r.structuredContent));
-  return (r.structuredContent as { error: { code: string } }).error.code;
+  return errorOf(r).code;
 }
 const count = (d: Awaited<ReturnType<typeof makeTestDb>>, sql: string) => Number((d.raw.prepare(sql).get() as { n: number }).n);
 
@@ -384,7 +384,7 @@ test("submit_research validates links and tokens, stores who sent it, expires in
   ok(await call(a, "submit_research", { ...good, body: "one more" }));
   const capped = await call(a, "submit_research", { ...good, body: "over the cap" });
   assert.equal(code(capped), "quota_exceeded");
-  assert.equal((capped.structuredContent as { error: { retry_after_s: number } }).error.retry_after_s, 3600);
+  assert.equal(errorOf(capped).retry_after_s, 3600);
 });
 
 test("list_research shows active notes by default, expired ones on request, as untrusted text", async () => {

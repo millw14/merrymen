@@ -23,7 +23,7 @@ import { setFollowStoreForTest, type FollowStoreLike } from "@/lib/services/soci
 import type { OwnedAgent } from "../agents";
 import type { Principal } from "../oauth/server";
 import { resetMetricsForTest } from "../observe";
-import {
+import { errorOf,
   ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, agentFixture, connectAs, fixtureDirectory, installFixtures, makeDeps, makeTestDb, type TestDb,
 } from "../testing";
 import { runTool, type ToolDef } from "../tool";
@@ -66,7 +66,7 @@ const tool = (name: string) => SOCIAL_TOOLS.find((t) => t.name === name) as unkn
 
 async function call(name: string, args: Record<string, unknown>, p: Principal, now = NOW) {
   const res = await runTool(tool(name), args, p, "trace-test", { now: () => now });
-  return { res, sc: res.structuredContent as Record<string, any>, text: JSON.stringify(res) };
+  return { res, sc: (res.isError ? { error: errorOf(res) } : res.structuredContent) as Record<string, any>, text: JSON.stringify(res) };
 }
 
 const errCode = (r: { sc: Record<string, any> }): string | undefined => r.sc?.error?.code;

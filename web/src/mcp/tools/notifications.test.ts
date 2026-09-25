@@ -13,7 +13,7 @@ import { runTool, type ToolDef } from "../tool";
 import { NOTIFICATIONS_TOOLS } from "./notifications";
 import { TELEGRAM_STATE_DDL } from "../../../../worker/src/telegram-store";
 import { canonicalParams, runNotifyPass, type NotifyDeps } from "../../../../worker/src/mcp/notify";
-import { ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, agentFixture, connectAs, fixtureDirectory, installFixtures, makeDeps, makeTestDb, type TestDb } from "../testing";
+import { errorOf, ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, agentFixture, connectAs, fixtureDirectory, installFixtures, makeDeps, makeTestDb, type TestDb } from "../testing";
 
 const NOW = 1_800_000_000;
 const CHAT_A = 424_242_777;
@@ -57,7 +57,7 @@ async function setup(o: { settingsA?: Record<string, unknown>; linkB?: boolean; 
 
 type Result = Awaited<ReturnType<typeof runTool>>;
 const data = (r: Result) => r.structuredContent as Record<string, any>;
-const code = (r: Result) => (r.structuredContent as { error?: { code: string } }).error?.code;
+const code = (r: Result) => errorOf(r).code;
 const subCount = (d: TestDb, status = "active") => (d.raw.prepare("SELECT COUNT(*) AS n FROM notify_subscriptions WHERE status = ?").get(status) as { n: number }).n;
 
 function insertSub(d: TestDb, id: string, o: { tenant?: string; slug?: string | null; kind?: string; params?: Record<string, string | number> } = {}) {
@@ -150,7 +150,7 @@ test("subscribe needs a linked Telegram; nothing is stored without one", async (
   const { d, run, b } = await setup();
   const r = await run("subscribe", { kind: "trade_confirmed" }, b.principal);
   assert.equal(code(r), "conflict");
-  assert.match(String((r.structuredContent as { error: { message: string } }).error.message), /Link Telegram first/);
+  assert.match(String(errorOf(r).message), /Link Telegram first/);
   assert.equal(subCount(d), 0);
 });
 

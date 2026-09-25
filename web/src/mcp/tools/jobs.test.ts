@@ -29,7 +29,8 @@ const data = (r: CallToolResult) => {
 };
 const errorOf = (r: CallToolResult) => {
   assert.equal(r.isError, true, `expected an error result, got ${r.content[0]?.text}`);
-  return (r.structuredContent as { error: { code: string; message: string; retry_after_s: number | null } }).error;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (r as { _meta?: Record<string, any> })._meta?.["dev.merrymen/error"];
 };
 
 async function setup(): Promise<{ d: TestDb; a: Principal; b: Principal; deps: ReturnType<typeof makeDeps> }> {

@@ -23,7 +23,7 @@ import { pseudonym, resetMetricsForTest } from "../observe";
 import type { Principal } from "../oauth/server";
 import { buildServer, principalOf } from "../server";
 import { runTool, type RunDeps, type ToolDef } from "../tool";
-import {
+import { errorOf,
   ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, connectAs, installFixtures, makeDeps, makeTestDb, mcpRequest, rpcResult, testConfig, type TestDb,
 } from "../testing";
 import { STAFF_TOOLS } from "./staff";
@@ -74,7 +74,7 @@ afterEach(() => { restore?.(); restore = null; resetMetricsForTest(); });
 
 async function call(name: string, args: unknown = {}, p: Principal = staffPrincipal(), deps: RunDeps = {}) {
   const res = await runTool(tool(name), args, p, "trace-staff", { now: () => NOW, ...deps });
-  return { res, sc: res.structuredContent as Record<string, any> };
+  return { res, sc: (res.isError ? { error: errorOf(res) } : res.structuredContent) as Record<string, any> };
 }
 
 const insAgent = (d: TestDb, account: string, owner: string, name: string, status: string, mode: string | null, beat: number | null, blocker: string | null, expires = 4102444800) =>
@@ -179,7 +179,7 @@ test("every staff tool refuses a principal without the scope, or with the scope 
     for (const [label, p] of cases) {
       const res = await runTool(def, {}, p, "trace", { now: () => NOW });
       assert.equal(res.isError, true, `${def.name} / ${label}`);
-      const body = res.structuredContent as { error: { code: string; details?: { required_scope?: string } } };
+      const body = { error: errorOf(res) as { code: string; details?: { required_scope?: string } } };
       assert.equal(body.error.code, "insufficient_scope", `${def.name} / ${label}`);
       assert.equal(body.error.details?.required_scope, "staff:diagnostics");
       assert.ok(!JSON.stringify(res).includes("Shogun"));
