@@ -32,6 +32,12 @@ data class SettingsDraft(
   val edits: Map<String, JsonElement> = emptyMap(),
   /** What was typed into each number box, kept even while it is not a number yet. */
   val numberText: Map<String, String> = emptyMap(),
+  /**
+   * What was typed into each text box whose blank means "leave it alone" (the
+   * agent name) — kept so the box can be EMPTIED on the way to a new value.
+   * Only the edit is ever sent; see [setTypedText].
+   */
+  val typedText: Map<String, String> = emptyMap(),
   /** Number boxes whose text this form cannot send, and why. A save is refused while any remain. */
   val unreadable: Map<String, String> = emptyMap(),
   /**
@@ -51,28 +57,54 @@ data class SettingsDraft(
   fun setList(key: String, values: List<String>): SettingsDraft = set(key, JsonArray(values.map { JsonPrimitive(it) }))
 
   /**
-   * A NUMBER, SENT AS A JSON NUMBER — never the owner's keystrokes.
+   * A TEXT BOX WHOSE BLANK IS "UNTOUCHED" — the agent name, where the route
+   * reads "" as a reset to the house name, and deleting the last letter on the
+   * way to typing a new one is not a request for that.
+   *
+   * The box shows what was typed, blank included, so it can be cleared; the
+   * edit is only a non-blank value. It used to show the saved name again the
+   * moment the box emptied, with the cursor thrown to its end, and the only
+   * way to a new name was typing over the old one.
+   */
+  fun setTypedText(key: String, raw: String): SettingsDraft = copy(
+    edits = if (raw.isBlank()) edits - key else edits + (key to JsonPrimitive(raw)),
+    typedText = typedText + (key to raw),
+  )
+
+  /**
+   * A NUMBER, SENT AS A JSON NUMBER — never the owner's keystrokes, and never
+   * a number they did not type.
    *
    * The route stores a JSON number as-is and parses a STRING with its own
    * locale rules, and a string is where "25.000" once became twenty-five. So
    * this reads the text itself, with a point as the only decimal mark, and a
    * box it cannot read blocks the save and says why, rather than being sent as
    * typed or silently dropped. A blank box is untouched, not "clear to default".
-   * [integer] fields refuse a fraction: a count of positions is whole.
+   *
+   * THE PLACES ARE THE WEB'S (parse-amount.ts settingDecimals): a key ending in
+   * Usdg is money, quoted to cents; every other setting is a whole number
+   * ([integer]). Counted as TYPED, not after trailing zeros are dropped:
+   * "25.000" in a whole-number box is twenty-five thousand to the web's reader
+   * and twenty-five to this one, so neither reading is sent. And no bigger
+   * than the web's reader takes (Number.MAX_SAFE_INTEGER): past it a Long
+   * wraps silently — "18446744073709551617" became 1, in range, sent without a
+   * word — and a double stops holding every digit.
    */
   fun setNumber(key: String, raw: String, integer: Boolean = false): SettingsDraft {
     val text = raw.trim()
     val keptText = numberText + (key to raw)
+    fun refuse(why: String) = copy(edits = edits - key, numberText = keptText, unreadable = unreadable + (key to why))
     if (text.isEmpty()) return copy(edits = edits - key, numberText = keptText, unreadable = unreadable - key)
     val readable = Regex("^-?\\d+(\\.\\d+)?$").matches(text)
-    val value = if (readable) text.toBigDecimalOrNull() else null
-    if (value == null) {
-      return copy(edits = edits - key, numberText = keptText, unreadable = unreadable + (key to "not a number this form can read — use digits, and a point for decimals"))
+    val value = (if (readable) text.toBigDecimalOrNull() else null)
+      ?: return refuse("not a number this form can read — use digits, and a point for decimals")
+    if (value.abs() > MAX_SETTING_NUMBER) return refuse("too large a number for this form to send exactly")
+    val places = if (integer) 0 else settingDecimals(key)
+    val typedPlaces = text.substringAfter('.', "").length
+    if (typedPlaces > places) {
+      return refuse(if (places == 0) "a whole number" else "at most $places decimal places — this is dollars and cents")
     }
-    if (integer && value.stripTrailingZeros().scale() > 0) {
-      return copy(edits = edits - key, numberText = keptText, unreadable = unreadable + (key to "a whole number"))
-    }
-    val json = if (integer) JsonPrimitive(value.toLong()) else JsonPrimitive(value.toDouble())
+    val json = if (integer) JsonPrimitive(value.longValueExact()) else JsonPrimitive(value.toDouble())
     return copy(edits = edits + (key to json), numberText = keptText, unreadable = unreadable - key)
   }
 
@@ -85,7 +117,7 @@ data class SettingsDraft(
    * patch until [confirmPublicBook]. Turning it OFF needs no confirmation:
    * taking something out of public view is never the step to guard.
    */
-  fun askPublicBook(): SettingsDraft = copy(publicBookAsked = true)
+  fun askPublicBook(): SettingsDraft = copy(publicBookAsked = true, edits = edits - "publicBook")
 
   fun confirmPublicBook(): SettingsDraft = copy(publicBookAsked = false, edits = edits + ("publicBook" to JsonPrimitive(true)))
 
@@ -93,9 +125,30 @@ data class SettingsDraft(
 
   fun publicBookOff(): SettingsDraft = copy(publicBookAsked = false, edits = edits + ("publicBook" to JsonPrimitive(false)))
 
+  /**
+   * THE PUBLIC-BOOK BOX, TICKED ([want]) OR UNTICKED, over what is saved ([savedOn]).
+   *
+   * The box and the save must never disagree on a consent control. Unticking a
+   * book saved public puts `publicBook: false` in the draft; ticking it again
+   * used to only ask for the consent step and leave that false behind, so the
+   * box read "on — sizes, dollar P&L and holdings are public" with the
+   * disclosure open while Save would have unpublished the book. Ticked again
+   * over a book that is ALREADY public, the draft goes back to what is saved:
+   * no edit, and no second consent for something the owner already gave.
+   * Asking always drops a pending edit, so no path can leave one under it.
+   */
+  fun togglePublicBook(want: Boolean, savedOn: Boolean): SettingsDraft = when {
+    want && savedOn -> cancelPublicBook().without(listOf("publicBook"))
+    want -> askPublicBook()
+    // Saved private: unticking only takes back the request (or the confirmed
+    // edit) — there is nothing to turn off.
+    !savedOn -> cancelPublicBook().without(listOf("publicBook"))
+    else -> publicBookOff()
+  }
+
   /** Drop what was saved (or looked up and found saved), keeping only what still differs. */
   fun without(keys: Collection<String>): SettingsDraft =
-    copy(edits = edits - keys.toSet(), numberText = numberText - keys.toSet())
+    copy(edits = edits - keys.toSet(), numberText = numberText - keys.toSet(), typedText = typedText - keys.toSet())
 
   /** The body a save would send, or why it may not go. */
   fun submission(): SettingsSubmission {
@@ -127,6 +180,12 @@ class SettingsShown(private val env: SettingsEnvelope, private val draft: Settin
 
   fun str(key: String): String =
     (draft.edits[key] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: env.str(key) ?: ""
+
+  /** What a blank-means-untouched box shows: what was typed (an empty box too), else the stored value. */
+  fun typed(key: String): String = draft.typedText[key] ?: env.str(key) ?: ""
+
+  /** Whether the public-book box is drawn ticked: saved or edited on, or on its way through the consent step. */
+  val publicBookChecked: Boolean get() = bool("publicBook") || draft.publicBookAsked
 
   fun numberText(key: String): String =
     draft.numberText[key] ?: env.num(key)?.let { plainNumber(it) } ?: ""
@@ -178,6 +237,17 @@ val SETTINGS_RANGES: Map<String, ClosedFloatingPointRange<Double>> = mapOf(
 /** The keys the server keeps whole. A fraction there is refused here rather than stored as 2.5 positions. */
 val SETTINGS_INTEGERS = setOf("slippageBps", "maxImpactBps", "takeProfitBps", "strategistStopLossBps", "tickSeconds", "classMaxPositions", "classMaxHoldSec")
 
+/**
+ * How many decimal places a setting takes — web/src/lib/parse-amount.ts
+ * settingDecimals, derived from the NAME as the web derives it: money (a key
+ * ending in Usdg) is quoted to cents, and everything else — basis points,
+ * seconds, counts — is whole.
+ */
+fun settingDecimals(key: String): Int = if (Regex("Usdg?$").containsMatchIn(key)) 2 else 0
+
+/** The largest magnitude the web's reader accepts (Number.MAX_SAFE_INTEGER), and so the largest this form sends. */
+internal val MAX_SETTING_NUMBER = java.math.BigDecimal("9007199254740991")
+
 /** A value the server will refuse, said before the round trip; null when in range or unread. */
 fun outOfRange(key: String, value: Double?): String? {
   val r = SETTINGS_RANGES[key] ?: return null
@@ -202,6 +272,17 @@ const val LIVE_ON_HINT = "Your agent places real orders on Robinhood Chain with 
 
 const val LIVE_OFF_HINT = "Nothing your agent does costs real money while this is off. Funding the account does " +
   "NOT turn it on, and neither does re-signing your permission: this switch is the only thing that does."
+
+/** The Live trading box's read-out beside it and the hint under it, for the position it is in. */
+data class LiveTradingReadout(val unit: String, val hint: String)
+
+/**
+ * WHAT THE LIVE BOX SAYS IN EACH POSITION — Settings.tsx's two ternaries, and
+ * the one place the form reads them, so WebMirrorTest can hold what the owner
+ * is shown against the web's own sentences.
+ */
+fun liveTradingReadout(on: Boolean): LiveTradingReadout =
+  if (on) LiveTradingReadout(LIVE_ON_UNIT, LIVE_ON_HINT) else LiveTradingReadout(LIVE_OFF_UNIT, LIVE_OFF_HINT)
 
 /**
  * WHICH WARNING THE LIVE SWITCH OWES THE OWNER, before they press Save.

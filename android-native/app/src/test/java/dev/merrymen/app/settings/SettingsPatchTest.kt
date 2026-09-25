@@ -23,6 +23,8 @@ import dev.merrymen.app.ui.SettingsSubmission
 import dev.merrymen.app.ui.liveTradingNote
 import dev.merrymen.app.ui.outOfRange
 import dev.merrymen.app.ui.saveSettingsDraft
+import dev.merrymen.app.ui.screens.unknownSaveUnread
+import dev.merrymen.app.ui.settingDecimals
 import dev.merrymen.app.ui.settingsSaveOutcome
 import dev.merrymen.app.ui.settleUnknownSave
 import kotlinx.coroutines.runBlocking
@@ -181,6 +183,85 @@ class SettingsPatchTest {
     // Taking the book out of public view needs no confirmation.
     assertEquals(false, sent(SettingsDraft().publicBookOff(), env())["publicBook"]!!.jsonPrimitive.booleanOrNull)
     assertTrue(PUBLIC_BOOK_ON.contains("trade sizes and dollar P&L"))
+  }
+
+  @Test fun reTickingABookThatIsAlreadyPublicPutsNothingInTheSave() {
+    // Saved public; the owner unticks it, then ticks it again.
+    val savedPublic = env(values = """{"publicBook":true}""")
+    val unticked = SettingsDraft().togglePublicBook(want = false, savedOn = true)
+    assertEquals(false, unticked.edits["publicBook"]?.jsonPrimitive?.booleanOrNull)
+    val again = unticked.togglePublicBook(want = true, savedOn = true)
+    // The box reads on AND the save agrees: no publicBook:false left under a
+    // ticked box, and no second consent for a book already public.
+    val shown = SettingsShown(savedPublic, again)
+    assertTrue(shown.publicBookChecked)
+    assertFalse(again.edits.containsKey("publicBook"))
+    assertFalse(again.publicBookAsked)
+    assertFalse("nothing is left to save", again.dirty)
+    // With another change beside it, the PUT that reaches the server says nothing about the book.
+    assertEquals(setOf("assetMode", "owner"), sent(again.setText("assetMode", "stocks"), savedPublic).keys)
+    // And asking, from any draft, leaves no pending edit under the consent step.
+    assertFalse(SettingsDraft().publicBookOff().askPublicBook().edits.containsKey("publicBook"))
+  }
+
+  @Test fun aNumberTooLargeToSendExactlyIsRefusedNotWrapped() {
+    // Past Long.MAX_VALUE this used to wrap to 1 — in range, no warning, sent.
+    val wrapped = SettingsDraft().setNumber("classMaxPositions", "18446744073709551617", integer = true)
+    assertFalse(wrapped.edits.containsKey("classMaxPositions"))
+    assertEquals("too large a number for this form to send exactly", wrapped.unreadable["classMaxPositions"])
+    assertTrue(wrapped.submission() is SettingsSubmission.Blocked)
+    // The web's reader stops at Number.MAX_SAFE_INTEGER, and so does this one.
+    assertNotNull(SettingsDraft().setNumber("classMinDepthUsdg", "9007199254740992").unreadable["classMinDepthUsdg"])
+    assertEquals(
+      "9007199254740991",
+      SettingsDraft().setNumber("classMaxPositions", "9007199254740991", integer = true).edits["classMaxPositions"]!!.jsonPrimitive.content,
+    )
+  }
+
+  @Test fun moneyTakesCentsAndEverythingElseIsWhole() {
+    // parse-amount.ts settingDecimals: a key ending in Usdg is money, to cents.
+    assertEquals(2, settingDecimals("classPerEntryUsdg"))
+    assertEquals(2, settingDecimals("buyPerTickUsdg"))
+    assertEquals(0, settingDecimals("slippageBps"))
+    assertEquals(0, settingDecimals("classMaxHoldSec"))
+    val subCent = SettingsDraft().setNumber("classPerEntryUsdg", "2.555")
+    assertFalse(subCent.edits.containsKey("classPerEntryUsdg"))
+    assertTrue(subCent.unreadable["classPerEntryUsdg"]!!.startsWith("at most 2 decimal places"))
+    assertEquals(2.55, SettingsDraft().setNumber("classPerEntryUsdg", "2.55").edits["classPerEntryUsdg"]!!.jsonPrimitive.content.toDouble(), 0.0)
+    // "25.000" in a whole-number box is twenty-five thousand to the web's reader
+    // and twenty-five to this one: neither is sent.
+    val ambiguous = SettingsDraft().setNumber("classMaxPositions", "25.000", integer = true)
+    assertFalse(ambiguous.edits.containsKey("classMaxPositions"))
+    assertEquals("a whole number", ambiguous.unreadable["classMaxPositions"])
+  }
+
+  @Test fun theNameBoxCanBeEmptiedWithoutSendingABlank() {
+    val named = env(values = """{"agentName":"Shogun"}""")
+    assertEquals("Shogun", SettingsShown(named, SettingsDraft()).typed("agentName"))
+    // Deleting the last letter on the way to a new name empties the box...
+    val emptied = SettingsDraft().setTypedText("agentName", "S").setTypedText("agentName", "")
+    assertEquals("", SettingsShown(named, emptied).typed("agentName"))
+    // ...and sends nothing: a blank name is untouched, not "reset to Robin".
+    assertFalse(emptied.edits.containsKey("agentName"))
+    assertFalse(emptied.dirty)
+    val renamed = emptied.setTypedText("agentName", "Kai")
+    assertEquals("Kai", sent(renamed, named)["agentName"]!!.jsonPrimitive.content)
+  }
+
+  @Test fun aLostSaveWhoseReadBackFailsIsStillUnknownAndSaysWhy() = runBlocking {
+    // The read-back answered, but not in a shape this app can read: that is
+    // said as the contract says it — never "can't reach" for an answer that came.
+    server.answer(dev.merrymen.app.net.HTML_PAGE, type = "text/html")
+    val unreadable = api.settingsRead()
+    val line = unknownSaveUnread("the answer was lost", unreadable)
+    assertTrue(line, line.startsWith("Couldn't tell whether that saved — the answer was lost"))
+    assertTrue(line, line.contains(dev.merrymen.app.net.UNREADABLE_ANSWER.trimEnd('.')))
+    assertFalse(line, line.contains("Can't reach"))
+    // No answer at all is said as one, in the contract's words.
+    server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+    val gone = unknownSaveUnread("the answer was lost", api.settingsRead())
+    assertTrue(gone, gone.contains("Can't reach merrymen right now: "))
+    assertTrue(gone, gone.endsWith("Your changes are still here; reload before saving again."))
   }
 
   @Test fun theLiveSwitchCarriesTheWebsSentencesTheMomentItDiffersFromWhatIsSaved() {

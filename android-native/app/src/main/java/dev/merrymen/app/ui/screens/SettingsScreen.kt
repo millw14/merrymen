@@ -573,12 +573,14 @@ fun SettingsScreen(nav: NavHostController) {
                         ownerChanged = found.ownerChanged
                         if (!found.ownerChanged) {
                           draft = draft.without(found.saved)
-                          state = Loaded.Value(fresh.value)
+                          state = fresh.toLoaded()
                         }
                       }
-                      else -> {
-                        note = "Couldn't tell whether that saved — ${outcome.why}, and the settings could not " +
-                          "be read back to check. Your changes are still here; reload before saving again."
+                      // THE READ-BACK FAILED TOO, and says how in its own words
+                      // (unknownSaveUnread): an unreadable answer is not "can't
+                      // reach", and the save itself stays unknown, never failed.
+                      is ApiResult.Refused, is ApiResult.Unreachable -> {
+                        note = unknownSaveUnread(outcome.why, fresh)
                         noteBad = true
                       }
                     }
@@ -662,6 +664,24 @@ internal suspend fun readSettingsFor(
   val r = api.settingsRead()
   if (sessionNeedsAsking(r, (r as? ApiResult.Ok)?.value?.env?.owner == "", signedIn, hosted)) askWhoIsSignedIn()
   return r.toLoaded()
+}
+
+/**
+ * A SAVE WHOSE ANSWER WAS LOST, AND WHOSE READ-BACK FAILED TOO. The save is
+ * still UNKNOWN — it may have landed — so it is never said as a failure; the
+ * read-back's own failure is said in the contract's words (`said` for no
+ * answer or an unreadable one, the route's sentence for a refusal), never a
+ * hand-built "couldn't reach", which is false of an answer that arrived
+ * unreadable.
+ */
+internal fun unknownSaveUnread(why: String, readBack: ApiResult<*>): String {
+  val how = when (readBack) {
+    is ApiResult.Unreachable -> readBack.said.trimEnd('.')
+    is ApiResult.Refused -> readBack.message.trimEnd('.')
+    is ApiResult.Ok -> null
+  }
+  return "Couldn't tell whether that saved — $why, and the settings could not be read back to check" +
+    (how?.let { " ($it)" } ?: "") + ". Your changes are still here; reload before saving again."
 }
 
 /** What the Save area says about one save: a line at the top, and lines under the button. */

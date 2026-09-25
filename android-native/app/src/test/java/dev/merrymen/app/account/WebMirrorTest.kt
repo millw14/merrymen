@@ -1,10 +1,17 @@
 package dev.merrymen.app.account
 
+import dev.merrymen.app.net.Fixtures
+import dev.merrymen.app.net.SettingsEnvelope
 import dev.merrymen.app.ui.BLOCKER_ADVICE
 import dev.merrymen.app.ui.REJECT_LABELS
+import dev.merrymen.app.ui.SettingsDraft
+import dev.merrymen.app.ui.SettingsShown
 import dev.merrymen.app.ui.blockerAdviceOf
+import dev.merrymen.app.ui.liveTradingNote
+import dev.merrymen.app.ui.liveTradingReadout
 import dev.merrymen.app.ui.rejectRuleLabel
 import java.io.File
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -56,6 +63,47 @@ class WebMirrorTest {
     assertEquals("every rule the web advises on, and no other", seen, BLOCKER_ADVICE.keys)
   }
 
+  /**
+   * THE LIVE TRADING SWITCH SAYS WHAT THE WEB'S SAYS — Settings.tsx's read-out
+   * and hint in each position, and the warning owed when the box differs from
+   * what is saved, taken from the TSX (whitespace folded, as the page renders
+   * it) and held against what this app's own functions hand the form.
+   */
+  @Test fun liveTradingSentencesMatchSettingsTsx() {
+    val src = sibling("web/src/terminal/screens/Settings.tsx")
+    assumeTrue("web/ is not beside this checkout", src != null)
+    val flat = src!!.replace(Regex("\\s+"), " ")
+    val section = flat.substringAfter("settings.section.tradingMode").substringBefore("WHAT IT TRADES")
+    val str = "\"((?:[^\"\\\\]|\\\\.)*)\""
+    val ternaries = Regex("""\{liveTradingVal \? $str : $str\}""").findAll(section).map { it.groupValues }.toList()
+    assertEquals("the read-out and the hint", 2, ternaries.size)
+    val (unit, hint) = ternaries
+    assertEquals(unit[1], liveTradingReadout(true).unit)
+    assertEquals(unit[2], liveTradingReadout(false).unit)
+    assertEquals(hint[1], liveTradingReadout(true).hint)
+    assertEquals(hint[2], liveTradingReadout(false).hint)
+
+    // Each warning is the first <b>…</b>…</p> after the condition that shows it.
+    fun noteAfter(condition: String): Pair<String, String> {
+      val m = Regex("""<b>(.*?)</b>(.*?)</p>""").find(section.substringAfter(condition))
+        ?: error("no warning after $condition in Settings.tsx")
+      return m.groupValues[1].trim() to m.groupValues[2].trim()
+    }
+    val env = LENIENT.decodeFromString(SettingsEnvelope.serializer(), Fixtures.text("probe-settings-signedout.json"))
+    fun noteFor(saved: Boolean, ticked: Boolean): Pair<String, String> {
+      val shown = SettingsShown(
+        env.copy(values = Json.parseToJsonElement("""{"liveTradingEnabled":$saved}""")),
+        SettingsDraft().setBool("liveTradingEnabled", ticked),
+      )
+      val note = liveTradingNote(shown) ?: error("no warning for saved=$saved ticked=$ticked")
+      return note.lead.trim() to note.body.trim()
+    }
+    // Unticked over a saved ON: the real-positions warning.
+    assertEquals(noteAfter("{!liveTradingVal &&"), noteFor(saved = true, ticked = false))
+    // Ticked over a saved OFF: "This spends real money."
+    assertEquals(noteAfter("{liveTradingVal && !("), noteFor(saved = false, ticked = true))
+  }
+
   @Test fun rejectLabelsMatchThesisPolicyTs() {
     val src = sibling("worker/src/thesis-policy.ts")
     assumeTrue("worker/ is not beside this checkout", src != null)
@@ -70,5 +118,9 @@ class WebMirrorTest {
     }
     assertEquals(seen, REJECT_LABELS)
     for ((rule, label) in seen) assertEquals(label, rejectRuleLabel(rule))
+  }
+
+  private companion object {
+    val LENIENT = Json { ignoreUnknownKeys = true }
   }
 }

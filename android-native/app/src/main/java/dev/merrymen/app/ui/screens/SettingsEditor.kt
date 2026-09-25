@@ -74,9 +74,7 @@ import dev.merrymen.app.net.TelegramStatus
 import dev.merrymen.app.net.providerKey
 import dev.merrymen.app.net.secretStatus
 import dev.merrymen.app.ui.HOUSE_AGENT_NAME
-import dev.merrymen.app.ui.LIVE_OFF_HINT
 import dev.merrymen.app.ui.LIVE_OFF_UNIT
-import dev.merrymen.app.ui.LIVE_ON_HINT
 import dev.merrymen.app.ui.LIVE_ON_UNIT
 import dev.merrymen.app.ui.PUBLIC_BOOK_OFF
 import dev.merrymen.app.ui.PUBLIC_BOOK_ON
@@ -85,6 +83,7 @@ import dev.merrymen.app.ui.SETTINGS_RANGES
 import dev.merrymen.app.ui.SettingsDraft
 import dev.merrymen.app.ui.SettingsShown
 import dev.merrymen.app.ui.liveTradingNote
+import dev.merrymen.app.ui.liveTradingReadout
 import dev.merrymen.app.ui.outOfRange
 import dev.merrymen.app.ui.plainBound
 import dev.merrymen.app.ui.plainNumber
@@ -402,13 +401,10 @@ fun SettingsForm(
     FieldGrid {
       Field("Agent name", help = "Up to 24 letters, numbers, or spaces.") {
         InputBox(
-          value = shown.str("agentName"),
-          // A BLANK NAME IS UNTOUCHED, not "clear to Robin". The route reads
-          // "" as a reset to the house name, and deleting the last letter on
-          // the way to typing a new one is not a request for that.
-          onValueChange = { typed ->
-            onDraft(if (typed.isBlank()) draft.without(listOf("agentName")) else draft.setText("agentName", typed))
-          },
+          // WHAT WAS TYPED, EMPTY INCLUDED — a blank name is untouched, not
+          // "clear to Robin", but the box must still be clearable (setTypedText).
+          value = shown.typed("agentName"),
+          onValueChange = { typed -> onDraft(draft.setTypedText("agentName", typed)) },
           placeholder = env.str("agentName") ?: HOUSE_AGENT_NAME,
         )
       }
@@ -600,8 +596,9 @@ private fun customTokenSymbols(env: SettingsEnvelope, draft: SettingsDraft): Lis
 @Composable
 private fun LiveTradingField(shown: SettingsShown, onChange: (Boolean) -> kotlin.Unit) {
   val on = shown.bool(LIVE.key)
+  val readout = liveTradingReadout(on)
   Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
-    CheckField(LIVE.copy(help = if (on) LIVE_ON_HINT else LIVE_OFF_HINT), on, onChange)
+    CheckField(LIVE.copy(on = readout.unit, off = readout.unit, help = readout.hint), on, onChange)
     liveTradingNote(shown)?.let { note ->
       Text(
         text = buildAnnotatedString {
@@ -638,18 +635,9 @@ private fun PublicBookField(shown: SettingsShown, draft: SettingsDraft, onDraft:
         off = "off — only its return and each trade's percentage are public",
         help = if (on) PUBLIC_BOOK_ON else PUBLIC_BOOK_OFF,
       ),
-      checked = on || draft.publicBookAsked,
-      onChange = { want ->
-        onDraft(
-          when {
-            want -> draft.askPublicBook()
-            // Saved private: unticking only takes back the request (or the
-            // confirmed edit) — there is nothing to turn off.
-            !shown.savedBool("publicBook") -> draft.cancelPublicBook().without(listOf("publicBook"))
-            else -> draft.publicBookOff()
-          },
-        )
-      },
+      checked = shown.publicBookChecked,
+      // THE BOX AND THE SAVE NEVER DISAGREE — see SettingsDraft.togglePublicBook.
+      onChange = { want -> onDraft(draft.togglePublicBook(want, shown.savedBool("publicBook"))) },
     )
     if (draft.publicBookAsked && !on) {
       LockedPanel(
