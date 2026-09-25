@@ -262,6 +262,64 @@ class SocialToggleTest {
     assertFalse(l.signedIn)
   }
 
+  /**
+   * THE NEXT WALLET SIGNED IN WHILE THE LAST ONE'S LIKE WAS ON ITS WAY. Its
+   * own likes, read in between, are what stay: the late answer used to wipe
+   * them and mark the reader signed out, so every heart said "Sign in".
+   */
+  @Test fun aLateLikeAnswerLeavesTheNextWalletsLikesAlone() = runBlocking {
+    server.answer("""{"liked":[],"signedIn":true,"read":true}""")
+    social.refreshMine(force = true)
+    server.takeRequest(2, TimeUnit.SECONDS)
+    server.enqueue(
+      MockResponse().setHeader("content-type", "application/json")
+        .setBody("""{"liked":["post-1","post-9"],"signedIn":true,"read":true}""")
+        .setHeadersDelay(800, TimeUnit.MILLISECONDS),
+    )
+    val row = async(Dispatchers.Default) { social.toggleLike("post-1", true) }
+    assertEquals("POST", server.takeRequest(2, TimeUnit.SECONDS)?.method)
+    social.forget()
+    // Wallet B signs in and reads its own likes before A's answer lands.
+    server.answer("""{"liked":["post-7","post-8"],"signedIn":true,"read":true}""")
+    social.refreshMine(force = true)
+    assertEquals(setOf("post-7", "post-8"), social.likes.value.mine)
+
+    assertNull("A's answer is A's, and says nothing to B", row.await())
+    val l = social.likes.value
+    assertEquals("B's likes stand", setOf("post-7", "post-8"), l.mine)
+    assertTrue("and B is still signed in", l.signedIn)
+    assertTrue(l.canLike)
+  }
+
+  /**
+   * THE LAST WALLET'S WIRE WRITE DOES NOT HOLD THE NEXT WALLET'S CONTROL. Its
+   * first read of its list is applied, its own tap is sent, and the late
+   * answer changes nothing of B's.
+   */
+  @Test fun aWireWriteOnItsWayDoesNotHoldTheNextWalletsControl() = runBlocking {
+    server.enqueue(
+      MockResponse().setHeader("content-type", "application/json")
+        .setBody("""{"wired":["adesk00000000000","other0000000000a"],"max":8}""")
+        .setHeadersDelay(1_000, TimeUnit.MILLISECONDS),
+    )
+    val a = async(Dispatchers.Default) { social.toggleWire("adesk00000000000", true) }
+    assertEquals("POST", server.takeRequest(2, TimeUnit.SECONDS)?.method)
+    social.forget()
+
+    server.answer("""{"wired":["bdesk00000000000"],"max":8}""")
+    social.refreshWired(force = true)
+    assertEquals("GET", server.takeRequest(2, TimeUnit.SECONDS)?.method)
+    assertEquals("B's first read is applied", WiredState(listOf("bdesk00000000000"), 8, known = true), social.wired.value)
+
+    server.answer("""{"wired":["bdesk00000000000","cdesk00000000000"],"max":8}""")
+    assertNull(social.toggleWire("cdesk00000000000", true))
+    assertEquals("B's tap was sent", "POST", server.takeRequest(2, TimeUnit.SECONDS)?.method)
+
+    assertNull(a.await())
+    assertEquals(listOf("bdesk00000000000", "cdesk00000000000"), social.wired.value.wired)
+    assertFalse(social.wired.value.busy)
+  }
+
   @Test fun aSecondTapWhileOneIsOnItsWayIsIgnored() = runBlocking {
     server.enqueue(
       MockResponse().setHeader("content-type", "application/json")

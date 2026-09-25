@@ -8,8 +8,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * LIKES AND FOLLOWS, ONCE PER APP — not once per screen.
@@ -140,7 +140,7 @@ class Social(private val api: MerrymenApi) {
    * it, a screen entry that refreshed mid-write released it and let a second
    * POST go out with the first still on its way.
    */
-  private val writing = AtomicBoolean(false)
+  private val writer = AtomicReference<Any?>(null)
 
   /** Bumped as each wire write starts, so a list read can tell it overlapped one. */
   private val writes = AtomicLong(0)
@@ -150,6 +150,29 @@ class Social(private val api: MerrymenApi) {
    * is never applied to the one after it.
    */
   private val wallet = AtomicLong(0)
+
+  /**
+   * WHOSE STATE THIS IS, CHECKED AND WRITTEN AS ONE. forget() runs on IO (a
+   * forget hook) and the toggles on Main, so "is this still the wallet the
+   * write was made for?" and the write that follows must not have a sign-out
+   * between them. Every write of a per-wallet fact after a network answer, and
+   * forget() itself, take this lock.
+   */
+  private val walletLock = Any()
+
+  /** Apply [change] to the likes only while [at] is still the wallet. */
+  private fun likesFor(at: Long, change: (LikesState) -> LikesState): Boolean = synchronized(walletLock) {
+    if (wallet.get() != at) return false
+    _likes.value = change(_likes.value)
+    true
+  }
+
+  /** Apply [change] to the wired state only while [at] is still the wallet. */
+  private fun wiredFor(at: Long, change: (WiredState) -> WiredState): Boolean = synchronized(walletLock) {
+    if (wallet.get() != at) return false
+    _wired.value = change(_wired.value)
+    true
+  }
 
   /**
    * When the per-caller reads last ran.
@@ -193,27 +216,31 @@ class Social(private val api: MerrymenApi) {
     val now = System.currentTimeMillis()
     if (!force && now - lastMineAt < MIN_GAP_MS) return
     lastMineAt = now
+    // An answer read for the wallet before a sign-out is that wallet's likes.
+    val at = wallet.get()
     when (val r = api.likes()) {
       is ApiResult.Ok ->
         if (!r.value.read) {
           // The SESSION was read; the STORE was not. `signedIn` is deliberately
           // untouched — reporting this as signed-out is a false claim about the
           // reader, with a remedy that cannot work.
-          _likes.value = _likes.value.copy(mineRead = false)
+          likesFor(at) { it.copy(mineRead = false) }
         } else {
-          _likes.value = _likes.value.copy(
-            mine = r.value.liked.toSet(),
-            signedIn = r.value.signedIn,
-            mineRead = true,
-          )
+          likesFor(at) {
+            it.copy(
+              mine = r.value.liked.toSet(),
+              signedIn = r.value.signedIn,
+              mineRead = true,
+            )
+          }
         }
       is ApiResult.Refused ->
         // 404 is the hosted-only surface saying this install has no likes at
         // all. Not an error, and not a signed-out reader.
-        if (r.status == 404) _likes.value = _likes.value.copy(supported = false)
-        else if (r.status == 401) _likes.value = _likes.value.copy(signedIn = false, mineRead = true)
-        else _likes.value = _likes.value.copy(mineRead = false)
-      is ApiResult.Unreachable -> _likes.value = _likes.value.copy(mineRead = false)
+        if (r.status == 404) likesFor(at) { it.copy(supported = false) }
+        else if (r.status == 401) likesFor(at) { it.copy(signedIn = false, mineRead = true) }
+        else likesFor(at) { it.copy(mineRead = false) }
+      is ApiResult.Unreachable -> likesFor(at) { it.copy(mineRead = false) }
     }
   }
 
@@ -232,34 +259,42 @@ class Social(private val api: MerrymenApi) {
    * the end, bounded by the client's own timeouts.
    */
   suspend fun toggleLike(postId: String, on: Boolean): String? = withContext(NonCancellable) {
-    val walletAtStart = wallet.get()
-    val said = likeWrite(postId, on)
-    if (wallet.get() == walletAtStart) {
-      said
-    } else {
-      // Signed out while it was on its way: whatever it wrote about the last
-      // wallet's likes is wiped again, and the new reader's are read afresh.
-      forgetLikes()
-      null
-    }
+    val at = wallet.get()
+    val said = likeWrite(postId, on, at)
+    // Signed out, or into another wallet, while it was on its way: what it has
+    // to say is about the last wallet's likes. The new reader's state was
+    // never written (likeWrite checks [at] before each write), so it is left
+    // exactly as it is — wiping it here threw away likes the new wallet had
+    // just read, and told a signed-in reader to sign in.
+    if (wallet.get() == at) said else null
   }
 
-  private suspend fun likeWrite(postId: String, on: Boolean): String? {
-    val before = _likes.value
-    _likes.value = before.copy(
-      mine = if (on) before.mine + postId else before.mine - postId,
-      counts = before.counts + (postId to maxOf(0, (before.counts[postId] ?: 0) + if (on) 1 else -1)),
-    )
-    fun rollBack(): Unit {
-      // Roll back BOTH halves from the state as it stands now, not by assigning
-      // `before` wholesale: a counts poll may have landed in between and its
-      // answer is newer than ours.
-      val s = _likes.value
-      _likes.value = s.copy(
-        mine = if (on) s.mine - postId else s.mine + postId,
-        counts = s.counts + (postId to maxOf(0, (s.counts[postId] ?: 0) + if (on) -1 else 1)),
-      )
+  /**
+   * One like write for the wallet [at]. THE HEART IS THAT WALLET'S, THE COUNT
+   * IS EVERYBODY'S: every change to `mine`, `signedIn` or `mineRead` is made
+   * only while [at] is still the wallet ([likesFor]), and the count's own
+   * optimistic step comes back whoever is signed in by the time the answer
+   * lands, since forget() keeps the counts.
+   */
+  private suspend fun likeWrite(postId: String, on: Boolean, at: Long): String? {
+    val step = if (on) 1 else -1
+    fun counted(s: LikesState, delta: Int) = s.counts + (postId to maxOf(0, (s.counts[postId] ?: 0) + delta))
+    val stepped = likesFor(at) { s ->
+      s.copy(mine = if (on) s.mine + postId else s.mine - postId, counts = counted(s, step))
     }
+    /** The server kept nothing: the count's step comes off, and [mine] is this wallet's new set when it is still theirs. */
+    fun undo(mine: (LikesState) -> Set<String>, alsoMineRead: Boolean = false) = synchronized(walletLock) {
+      // From the state as it stands now, not `before` wholesale: a counts poll
+      // may have landed in between and its answer is newer than ours.
+      val s = _likes.value
+      val counts = if (stepped) counted(s, -step) else s.counts
+      _likes.value = if (wallet.get() == at) {
+        s.copy(mine = mine(s), counts = counts, mineRead = if (alsoMineRead) true else s.mineRead)
+      } else {
+        s.copy(counts = counts)
+      }
+    }
+    fun rollBack() = undo({ s -> if (on) s.mine - postId else s.mine + postId })
     return when (val r = api.like(postId, on)) {
       is ApiResult.Ok -> {
         // A 200 THAT SAYS IT DID NOT WRITE IS A FAILURE. `read: false` comes
@@ -276,26 +311,21 @@ class Social(private val api: MerrymenApi) {
           // on screen until the next counts poll. At-capacity is only reachable
           // on an `on = true` like, so this always undoes a +1; the delta-from-
           // current form keeps a poll that landed in between correct.
-          val s = _likes.value
-          _likes.value = s.copy(
-            mine = r.value.liked.toSet(),
-            mineRead = true,
-            counts = s.counts + (postId to maxOf(0, (s.counts[postId] ?: 0) + if (on) -1 else 1)),
-          )
+          undo({ r.value.liked.toSet() }, alsoMineRead = true)
           if (r.value.refused == "at-capacity") {
             "You have liked as many posts as we keep (${r.value.max}). Unlike one to make room."
           } else {
             "That was not saved: " + r.value.refused
           }
         } else {
-          _likes.value = _likes.value.copy(mine = r.value.liked.toSet(), mineRead = true)
+          likesFor(at) { it.copy(mine = r.value.liked.toSet(), mineRead = true) }
           null
         }
       }
       is ApiResult.Refused -> {
         rollBack()
         if (r.status == 401) {
-          _likes.value = _likes.value.copy(signedIn = false)
+          likesFor(at) { it.copy(signedIn = false) }
           "Sign in to like posts."
         } else {
           r.message
@@ -303,19 +333,21 @@ class Social(private val api: MerrymenApi) {
       }
       // A LOST ANSWER TO A WRITE IS UNKNOWN. The like may have been stored
       // and the answer lost on the way back, so it is looked up rather than
-      // rolled back on a guess — and never simply sent again.
-      is ApiResult.Unreachable -> when (val look = api.likes()) {
+      // rolled back on a guess — and never simply sent again. Not for a
+      // wallet that has gone: the look-up would read the NEXT session's
+      // likes, and the count's step stays until the next counts poll.
+      is ApiResult.Unreachable -> if (wallet.get() != at) null else when (val look = api.likes()) {
         is ApiResult.Ok -> if (look.value.read) {
           val stored = postId in look.value.liked
-          val s = _likes.value
-          _likes.value = s.copy(
-            mine = look.value.liked.toSet(),
-            mineRead = true,
+          if (stored == on) {
+            likesFor(at) { it.copy(mine = look.value.liked.toSet(), mineRead = true) }
+            null
+          } else {
             // The optimistic step comes off the count only when the store
             // says it did not happen.
-            counts = if (stored == on) s.counts else s.counts + (postId to maxOf(0, (s.counts[postId] ?: 0) + if (on) -1 else 1)),
-          )
-          if (stored == on) null else "merrymen didn't answer, and that wasn't saved. Try again."
+            undo({ look.value.liked.toSet() }, alsoMineRead = true)
+            "merrymen didn't answer, and that wasn't saved. Try again."
+          }
         } else {
           lookupFailed(r)
         }
@@ -348,30 +380,32 @@ class Social(private val api: MerrymenApi) {
     val now = System.currentTimeMillis()
     if (!force && now - lastWiredAt < MIN_GAP_MS) return
     lastWiredAt = now
-    val quietAtStart = !writing.get()
+    // A write is "overlapping" only while it is THIS wallet's: forget() frees
+    // the guard, so a write the last wallet left on its way cannot throw away
+    // the new wallet's first read of its list.
+    val quietAtStart = writer.get() == null
     val writesAtStart = writes.get()
     val walletAtStart = wallet.get()
     val r = api.following()
-    if (!quietAtStart || writing.get() || writes.get() != writesAtStart || wallet.get() != walletAtStart) return
+    if (!quietAtStart || writer.get() != null || writes.get() != writesAtStart) return
     when (r) {
-      is ApiResult.Ok -> _wired.value = WiredState(r.value.wired, r.value.max, known = true)
+      is ApiResult.Ok -> wiredFor(walletAtStart) { WiredState(r.value.wired, r.value.max, known = true) }
       // `known` STAYS FALSE for every one of these, so nothing claims the
       // viewer follows nobody. It claims not to know, which is the truth.
-      is ApiResult.Refused -> _wired.value = _wired.value.copy(
-        known = false,
-        signedOut = r.status == 401,
-        why = when (r.status) {
-          401 -> "Sign in to wire other desks into your agent."
-          404 -> "Wiring is part of the hosted service."
-          else -> r.message
-        },
-      )
+      is ApiResult.Refused -> wiredFor(walletAtStart) {
+        it.copy(
+          known = false,
+          signedOut = r.status == 401,
+          why = when (r.status) {
+            401 -> "Sign in to wire other desks into your agent."
+            404 -> "Wiring is part of the hosted service."
+            else -> r.message
+          },
+        )
+      }
       // `said`, not "Couldn't reach" by hand: an answer this app could not
       // read is not an unreachable server.
-      is ApiResult.Unreachable -> _wired.value = _wired.value.copy(
-        known = false,
-        why = r.said,
-      )
+      is ApiResult.Unreachable -> wiredFor(walletAtStart) { it.copy(known = false, why = r.said) }
     }
   }
 
@@ -406,16 +440,21 @@ class Social(private val api: MerrymenApi) {
    * say is kept in [wireNote] for that desk's page.
    */
   suspend fun toggleWire(slug: String, on: Boolean): String? = withContext(NonCancellable) {
-    if (!writing.compareAndSet(false, true)) return@withContext null
+    val me = Any()
+    if (!writer.compareAndSet(null, me)) return@withContext null
     writes.incrementAndGet()
     val walletAtStart = wallet.get()
     try {
       val before = _wired.value
-      _wireNote.value = null
-      _wired.value = before.copy(
-        busy = true,
-        wired = if (on) (listOf(slug) + before.wired).distinct() else before.wired.filter { it != slug },
-      )
+      val started = wiredFor(walletAtStart) { s ->
+        _wireNote.value = null
+        s.copy(
+          busy = true,
+          wired = if (on) (listOf(slug) + s.wired).distinct() else s.wired.filter { it != slug },
+        )
+      }
+      // Signed out between the tap and here: nothing is sent for a wallet that has gone.
+      if (!started) return@withContext null
       val (after, said) = when (val r = api.follow(slug, on)) {
         is ApiResult.Ok -> WiredState(r.value.wired, r.value.max, known = true) to when (r.value.refused) {
           null -> null
@@ -429,17 +468,20 @@ class Social(private val api: MerrymenApi) {
         }
         is ApiResult.Refused ->
           before to if (r.status == 401) "Sign in to wire other desks into your agent." else r.message
-        is ApiResult.Unreachable -> lookUpWire(slug, on, r)
+        // Not looked up for a wallet that has gone: the read would be the
+        // next session's list.
+        is ApiResult.Unreachable -> if (wallet.get() != walletAtStart) before to null else lookUpWire(slug, on, r)
       }
       // Signed out (or into another wallet) while this was on its way: the
       // answer describes the last wallet's agent, and is nobody's business now.
-      if (wallet.get() != walletAtStart) return@withContext null
-      _wired.value = after
-      _wireNote.value = said?.let { WireNote(slug, it) }
-      said
+      val landed = wiredFor(walletAtStart) {
+        _wireNote.value = said?.let { WireNote(slug, it) }
+        after
+      }
+      if (landed) said else null
     } finally {
-      writing.set(false)
-      if (wallet.get() == walletAtStart) _wired.value = _wired.value.copy(busy = false)
+      writer.compareAndSet(me, null)
+      wiredFor(walletAtStart) { it.copy(busy = false) }
     }
   }
 
@@ -458,12 +500,15 @@ class Social(private val api: MerrymenApi) {
     }
 
   /** Sign-out clears both, because both are per-wallet facts. */
-  fun forget() {
+  fun forget() = synchronized(walletLock) {
     wallet.incrementAndGet()
     forgetLikes()
     _wired.value = WiredState()
     _wireNote.value = null
     lastWiredAt = 0L
+    // The one-write guard is per wallet too: a write the last wallet left on
+    // its way no longer holds the new wallet's control, or its first read.
+    writer.set(null)
   }
 
   /** The per-wallet half of the likes; the counts are everybody's and stay. */
