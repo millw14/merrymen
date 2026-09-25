@@ -16,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -44,6 +45,10 @@ import dev.merrymen.app.net.agentImage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -229,6 +234,15 @@ object AgentFaces {
 
   private data class Rev(val version: String?)
 
+  private val _revision = MutableStateFlow(0L)
+
+  /**
+   * Bumped by every [publish], so a face ALREADY ON SCREEN asks again — the
+   * new picture shows on the page the owner uploaded it from, and a removed
+   * one stops drawing — instead of waiting until that face is composed afresh.
+   */
+  val revision: StateFlow<Long> = _revision.asStateFlow()
+
   @Volatile
   private var lastOrigin: String? = null
 
@@ -243,6 +257,7 @@ object AgentFaces {
     val k = slug.lowercase(Locale.ROOT) + "|" + kind.path
     revisions[k] = Rev(version)
     lastOrigin?.let { cache.forget("$it|${slug.lowercase(Locale.ROOT)}|${kind.path}|") }
+    _revision.update { it + 1 }
   }
 
   private fun keyFor(origin: String, slug: String, kind: FaceKind): FaceKey? {
@@ -368,11 +383,17 @@ fun AgentFace(
   val widthPx = with(density) { LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
   // Decoded for the largest face this app draws (48dp), once per density.
   remember(density, widthPx) { AgentFaces.setTargets(with(density) { 48.dp.roundToPx() }, widthPx) }
+  val revision by AgentFaces.revision.collectAsState()
   // KEYED ON THE SLUG: a LazyColumn reuses a row's slot for another agent, and
   // the first frame for the new one is whatever is held for IT, never the
-  // previous occupant's picture.
-  val picture by produceState(AgentFaces.peek(slug, FaceKind.AVATAR), slug, c.api) {
-    value = AgentFaces.load(c.api, slug, FaceKind.AVATAR)
+  // previous occupant's picture. produceState's own keys do not do that — its
+  // state outlives a key change and holds the last agent's picture until the
+  // new load lands — so the state itself is made fresh per slug, and per
+  // upload, with key().
+  val picture by key(slug, revision) {
+    produceState(AgentFaces.peek(slug, FaceKind.AVATAR), c.api) {
+      value = AgentFaces.load(c.api, slug, FaceKind.AVATAR)
+    }
   }
   Box(
     modifier
@@ -444,8 +465,12 @@ private fun BoxScope.FaceCoinBadge(symbol: String) {
 @Composable
 fun AgentBanner(slug: String?, modifier: Modifier = Modifier) {
   val c = LocalContainer.current
-  val picture by produceState(AgentFaces.peek(slug, FaceKind.BANNER), slug, c.api) {
-    value = AgentFaces.load(c.api, slug, FaceKind.BANNER)
+  val revision by AgentFaces.revision.collectAsState()
+  // Fresh state per agent and per upload, for the reason AgentFace's is.
+  val picture by key(slug, revision) {
+    produceState(AgentFaces.peek(slug, FaceKind.BANNER), c.api) {
+      value = AgentFaces.load(c.api, slug, FaceKind.BANNER)
+    }
   }
   picture?.let {
     Image(

@@ -171,6 +171,25 @@ class AgentFaceCacheTest {
     assertEquals(1, seen.size)
   }
 
+  @Test fun anUploadIsAskedForByItsVersionAndARemovalIsNeverAskedAbout() = runBlocking {
+    val slug = "p1b2c3d4e5f6g7h8"
+    val before = AgentFaces.revision.value
+    AgentFaces.publish(slug, FaceKind.AVATAR, "v7")
+    // Every face on screen is told, so the one just uploaded shows now.
+    assertTrue(AgentFaces.revision.value > before)
+    assertNull(AgentFaces.load(api, slug, FaceKind.AVATAR))
+    assertEquals("/api/agent-image/$slug/avatar?v=v7", seen.single().path)
+    val removed = AgentFaces.revision.value
+    AgentFaces.publish(slug, FaceKind.AVATAR, null)
+    assertTrue(AgentFaces.revision.value > removed)
+    assertNull(AgentFaces.load(api, slug, FaceKind.AVATAR))
+    assertNull(AgentFaces.peek(slug, FaceKind.AVATAR))
+    assertEquals("a removed picture is not asked for", 1, seen.size)
+    // The banner is its own picture: removing the face does not remove it.
+    assertNull(AgentFaces.load(api, slug, FaceKind.BANNER))
+    assertEquals("/api/agent-image/$slug/banner", seen.last().path)
+  }
+
   @Test fun aSlugOfAnyOtherShapeIsNeverAskedAbout() = runBlocking {
     assertNull(AgentFaces.load(api, "../../api/feed", FaceKind.AVATAR))
     assertNull(AgentFaces.load(api, null, FaceKind.AVATAR))
