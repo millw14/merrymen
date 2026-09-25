@@ -6,6 +6,9 @@ import dev.merrymen.app.chat.ChatRig.Companion.json
 import dev.merrymen.app.ui.COMMANDS
 import dev.merrymen.app.ui.LIMIT_UNREAD
 import dev.merrymen.app.ui.LimitCheck
+import dev.merrymen.app.ui.MONEY_LIVE
+import dev.merrymen.app.ui.MONEY_LIVE_ON
+import dev.merrymen.app.ui.MONEY_PAPER
 import dev.merrymen.app.ui.Placed
 import dev.merrymen.app.ui.TradeDesk
 import dev.merrymen.app.ui.TradeOpen
@@ -47,10 +50,10 @@ class TradeConfirmTest {
     grants(20)
     val card = open("buy", "nvda", 5.0)
     assertTrue("nothing but reads before the confirm", rig.writes().isEmpty())
-    assertEquals(setOf("/api/orders/ceiling", "/api/grants"), rig.seen.map { it.path }.toSet())
+    assertEquals(setOf("/api/orders/ceiling", "/api/grants", "/api/settings"), rig.seen.map { it.path }.toSet())
     assertEquals(COMMANDS.getValue("buy").say(mapOf("symbol" to "NVDA", "usdgAmount" to "5.0")), card.sentence)
     assertEquals("Spend \$5.00 buying NVDA. I'll place it — my key's limits still decide whether it goes through.", card.sentence)
-    assertTrue("it says real money", card.money.startsWith("Real money"))
+    assertEquals("it says real money", MONEY_LIVE, card.money)
     assertEquals(LimitCheck.Within, card.limit)
   }
 
@@ -128,5 +131,15 @@ class TradeConfirmTest {
     val nobody = TradeDesk(rig.api) { null }
     assertTrue(runBlocking { nobody.open("buy", "NVDA", 5.0) } is TradeOpen.No)
     assertTrue(rig.seen.isEmpty())
+  }
+
+  @Test fun aPaperCardIsSaidOnlyWhileLiveTradingIsOff() {
+    // The rig's heartbeat: paper, because Live trading is off; the settings agree.
+    assertEquals(MONEY_PAPER, open("buy", "NVDA", 5.0).money)
+    // The owner switched Live trading on; the heartbeat has not caught up.
+    rig.route("GET /api/settings") {
+      json("""{"values":{"liveTradingEnabled":true},"defaults":{"liveTradingEnabled":false},"owner":"$A"}""")
+    }
+    assertEquals(MONEY_LIVE_ON, open("buy", "NVDA", 5.0).money)
   }
 }

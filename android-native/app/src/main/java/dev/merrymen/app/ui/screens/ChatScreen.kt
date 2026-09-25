@@ -74,7 +74,7 @@ import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.Via
 import dev.merrymen.app.ui.chipsFor
-import dev.merrymen.app.ui.moneyLine
+import dev.merrymen.app.ui.moneyLineFor
 import dev.merrymen.app.ui.orderLimit
 import dev.merrymen.app.ui.sans
 
@@ -264,7 +264,7 @@ fun ChatScreen(nav: NavHostController) {
       ConfirmCard(
         card = pending,
         acting = confirming,
-        mode = snap?.grants?.mode,
+        moneySaid = moneyLineFor(snap),
         perTrade = snap?.grants?.perTradeUsdg,
         ceiling = ceiling,
         onDismiss = { chat.dismissCard() },
@@ -533,7 +533,9 @@ private fun Composer(
  *
  * A CARD THAT PLACES AN ORDER SAYS FOUR THINGS BEFORE THE TAP: the side, the
  * coin and the amount (the registry's sentence), and whether it is real money
- * or paper (from the worker's own mode, unread said as "treat it as real").
+ * or paper (moneyLineFor: paper only when Live trading is off by the worker's
+ * verdict AND the owner's setting as last read; unread said as "treat it as
+ * real").
  * An amount past a limit the phone has read is refused ON the card, in red,
  * with the limit named, and YES is disabled; a limit that was not read is
  * said, and the server checks it. A coin a snipe found carries its address.
@@ -550,7 +552,7 @@ private fun Composer(
 private fun ConfirmCard(
   card: PendingCard,
   acting: Boolean,
-  mode: String?,
+  moneySaid: String,
   perTrade: Double?,
   ceiling: Double?,
   onDismiss: () -> Unit,
@@ -587,7 +589,7 @@ private fun ConfirmCard(
       style = TextStyle(fontFamily = sans(13.5.sp), fontSize = 13.5.sp, fontWeight = FontWeight.W400, lineHeight = 21.6.sp),
       color = MerryColors.tx,
     )
-    if (money) CardNote(moneyLine(mode))
+    if (money) CardNote(moneySaid)
     when (limit) {
       is LimitCheck.Over -> FlowError(limit.line, Modifier.padding(top = 6.dp))
       is LimitCheck.Unread -> CardNote(limit.note)

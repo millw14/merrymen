@@ -29,11 +29,14 @@ import dev.merrymen.app.net.postOrder
 import dev.merrymen.app.net.putSettingsFor
 import dev.merrymen.app.net.said
 import dev.merrymen.app.net.text
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -439,18 +442,69 @@ fun failureLine(failure: String, status: Int? = null, kind: String? = null, prov
 
 // ── the card: real money or paper, and the limits ──────────────────────────
 
+const val MONEY_LIVE = "Real money: I'm trading live, so this is a real order on Robinhood Chain."
+const val MONEY_PAPER = "Paper: Live trading is off, so I'm practising — simulated money at live prices, and no real order goes out."
+const val MONEY_LIVE_ON = "Treat this as real money: I'm practising right now, but Live trading is on — if my worker can trade " +
+  "for real when it picks this up, it's a real order on Robinhood Chain."
+const val MONEY_UNKNOWN = "I can't tell right now whether this would be real money or paper, so treat it as real money."
+
 /**
- * REAL MONEY OR PAPER, said on every card that places an order.
+ * HAS THE OWNER TURNED LIVE TRADING ON? Their saved answer, else the default —
+ * the order the worker resolves it in — or null when it was not read.
  *
- * From the worker's own heartbeat (grants.mode), the same verdict that decides
- * how the order runs. Unread or anything else is said as unknown and to be
- * treated as real — never assumed to be practice.
+ * A saved value that is there but is not a boolean is unread, not "off": the
+ * default is only the answer for an owner who never chose. And a read made
+ * signed out (owner "") answers for nobody, so it says nothing about this
+ * owner's consent.
  */
-fun moneyLine(mode: String?): String = when (mode) {
-  "live" -> "Real money: I'm trading live, so this is a real order on Robinhood Chain."
-  "paper" -> "Paper: I'm practising right now, so this is simulated money at live prices — no real order goes out."
-  else -> "I can't tell right now whether this would be real money or paper, so treat it as real money."
+fun liveConsentOf(settings: SettingsEnvelope?): Boolean? {
+  if (settings == null || settings.owner == "") return null
+  val saved = (settings.values as? JsonObject)?.get("liveTradingEnabled")
+  if (saved != null && saved !is JsonNull) return (saved as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull
+  val default = (settings.defaults as? JsonObject)?.get("liveTradingEnabled")
+  return (default as? JsonPrimitive)?.takeIf { it !is JsonNull && !it.isString }?.booleanOrNull
 }
+
+/**
+ * REAL MONEY OR PAPER, said on every card that places an order — and PAPER
+ * ONLY WHEN IT CANNOT BECOME REAL MONEY WITHOUT THE OWNER ACTING AGAIN.
+ *
+ * The worker decides paper or live when it PICKS THE ORDER UP, from its inputs
+ * at that tick (worker/src/exec-mode.ts execModeOf). The heartbeat's mode is
+ * what it decided at its last tick, up to a tick old, so "paper" from the
+ * heartbeat alone was a promise this card could not keep. An owner who had
+ * just confirmed "go live", or whose agent was on paper only because it was
+ * unfunded until a deposit a minute ago, was told "no real order goes out"
+ * about an order the next tick placed with real USDG.
+ *
+ * Consent is the one term of that rail no machine supplies: funding, gas and a
+ * chain switch all come without the owner deciding anything, but
+ * liveTradingEnabled does not. So paper is said only when BOTH halves agree it
+ * is missing: the worker's own verdict (liveBlocker "live-not-enabled"), and
+ * the owner's setting as read for this card ([liveConsentOf] false). Paper with
+ * Live trading on is said as real money that may not be spent. Anything unread
+ * or anything else is said as unknown and to be treated as real. A card never
+ * assumes practice.
+ */
+fun moneyLine(grants: GrantView?, settings: SettingsEnvelope?): String {
+  val mode = grants?.mode
+  val consent = liveConsentOf(settings)
+  return when {
+    mode == "live" -> MONEY_LIVE
+    mode == "paper" && grants?.liveBlocker == "live-not-enabled" && consent == false -> MONEY_PAPER
+    mode == "paper" && consent == true -> MONEY_LIVE_ON
+    else -> MONEY_UNKNOWN
+  }
+}
+
+/**
+ * The chat card's line, from what the thread last read. Settings an earlier
+ * read left behind, because the latest one failed, may predate the owner
+ * turning Live trading on, so they vouch for nothing here (see
+ * [ChatSnapshot.settingsKept]).
+ */
+fun moneyLineFor(snapshot: ChatSnapshot?): String =
+  moneyLine(snapshot?.grants, snapshot?.settings?.takeUnless { snapshot.settingsKept })
 
 /** Whether an order's size fits the limits the phone has read. */
 sealed interface LimitCheck {
@@ -982,12 +1036,24 @@ private val TRADE_SYMBOL = Regex("^[A-Z0-9]{1,12}$")
 
 /**
  * THE TRADE SCREEN'S FLOW, WITHOUT THE SCREEN, so a test can hold it to the
- * rules: opening a card READS (the ceiling and the grant — never a write),
- * confirming it is the only thing that places, and it places through the same
- * placeConfirmedOrder the chat uses, so the order is said and followed in the
- * thread whichever screen the owner is on.
+ * rules: opening a card READS (the ceiling, the grant and the settings — never
+ * a write), confirming it is the only thing that places, and it places through
+ * the same placeConfirmedOrder the chat uses, so the order is said and followed
+ * in the thread whichever screen the owner is on.
  */
 class TradeDesk(private val api: MerrymenApi, private val scopeNow: () -> ConfirmScope?) {
+  /** What a card is checked and labelled against: the limits and the rail, read fresh for each card. */
+  private class Read(val ceiling: Double?, val grants: GrantView?, val settings: SettingsEnvelope?)
+
+  private suspend fun read(): Read = coroutineScope {
+    val ceiling = async { api.orderCeiling() }
+    val grants = async { (api.grants() as? ApiResult.Ok)?.value }
+    // Whether Live trading is on, read for THIS card: the heartbeat's "paper"
+    // alone is no promise about the tick that picks the order up (moneyLine).
+    val settings = async { (api.settings() as? ApiResult.Ok)?.value }
+    Read(ceiling.await(), grants.await(), settings.await())
+  }
+
   suspend fun open(kind: String, subject: String, usdg: Double?): TradeOpen {
     val scope = scopeNow() ?: return TradeOpen.No("Sign in to trade — an order is placed for the wallet that confirms it.")
     if (usdg == null || !usdg.isFinite() || usdg <= 0) return TradeOpen.No("That isn't an amount I can trade.")
@@ -995,9 +1061,7 @@ class TradeDesk(private val api: MerrymenApi, private val scopeNow: () -> Confir
     if (what.isEmpty() || (kind != "snipe" && !TRADE_SYMBOL.matches(what))) {
       return TradeOpen.No("That isn't a symbol I can look up — letters and digits, up to 12.")
     }
-    val ceiling = api.orderCeiling()
-    val grants = api.grants().let { (it as? ApiResult.Ok)?.value }
-    return TradeOpen.Card(cardFor(kind, what, usdg, grants?.perTradeUsdg, ceiling, grants?.mode, scope, null))
+    return TradeOpen.Card(cardFor(kind, what, usdg, read(), scope, null))
   }
 
   /** Carry out [card] for its own owner. A snipe's lookup returns the found coin's card, never an order. */
@@ -1006,11 +1070,7 @@ class TradeDesk(private val api: MerrymenApi, private val scopeNow: () -> Confir
     val scope = card.scope
     if (card.kind == "snipe") {
       return when (val looked = lookupConfirmedSnipe(api, scope, card.subject, card.usdg)) {
-        is Looked.Found -> {
-          val ceiling = api.orderCeiling()
-          val grants = api.grants().let { (it as? ApiResult.Ok)?.value }
-          TradeStep.Next(cardFor("buy", looked.target.symbol, card.usdg, grants?.perTradeUsdg, ceiling, grants?.mode, scope, looked.target))
-        }
+        is Looked.Found -> TradeStep.Next(cardFor("buy", looked.target.symbol, card.usdg, read(), scope, looked.target))
         is Looked.Said -> TradeStep.Said(looked.line)
       }
     }
@@ -1030,9 +1090,7 @@ class TradeDesk(private val api: MerrymenApi, private val scopeNow: () -> Confir
     kind: String,
     subject: String,
     usdg: Double,
-    perTrade: Double?,
-    ceiling: Double?,
-    mode: String?,
+    read: Read,
     scope: ConfirmScope,
     found: SnipeTarget?,
   ): TradeCard {
@@ -1047,8 +1105,8 @@ class TradeDesk(private val api: MerrymenApi, private val scopeNow: () -> Confir
       subject = subject,
       usdg = usdg,
       sentence = spec.say(args),
-      money = moneyLine(mode),
-      limit = orderLimit(if (kind == "sell") "sell" else "buy", usdg, perTrade, ceiling),
+      money = moneyLine(read.grants, read.settings),
+      limit = orderLimit(if (kind == "sell") "sell" else "buy", usdg, read.grants?.perTradeUsdg, read.ceiling),
       scope = scope,
       found = found,
     )

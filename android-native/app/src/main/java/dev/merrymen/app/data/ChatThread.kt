@@ -307,8 +307,21 @@ interface ConfirmScope {
  */
 data class PendingCard(val command: ChatCommand, val scope: ConfirmScope, val found: SnipeTarget? = null)
 
-/** What the chat knows about the book when it asks: each read's last good answer, or null. */
-data class ChatSnapshot(val feed: Feed?, val grants: GrantView?, val settings: SettingsEnvelope?)
+/**
+ * What the chat knows about the book when it asks: each read's last good
+ * answer, or null.
+ *
+ * [settingsKept] says the latest settings read failed and [settings] is an
+ * earlier read's. That is still the best picture of the book for the model,
+ * but it is no promise about the owner's switches NOW: Live trading may have
+ * been turned on since, and a card must not say "paper" on it (moneyLineFor).
+ */
+data class ChatSnapshot(
+  val feed: Feed?,
+  val grants: GrantView?,
+  val settings: SettingsEnvelope?,
+  val settingsKept: Boolean = false,
+)
 
 /**
  * THE ONE CHAT THREAD, FOR THE WHOLE APP.
@@ -562,6 +575,7 @@ class ChatThread internal constructor(
       feed = fresh.feed ?: last?.feed,
       grants = fresh.grants ?: last?.grants,
       settings = fresh.settings ?: last?.settings,
+      settingsKept = fresh.settings == null && last?.settings != null,
     )
     if (keyNow() == key && state.value.key == key) {
       good = key to merged
