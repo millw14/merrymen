@@ -838,15 +838,23 @@ private fun settingsWriteFailed(r: ApiResult<*>): Acted.Failed = when {
  * adding to `basketSymbols` means "trade it". They are deliberately different
  * permissions, and approving a proposal is the owner saying both at once.
  *
- * FOR THE WALLET THE VALUES WERE READ FOR. The GET's `owner` goes back with the
- * PUT, so a wallet that signs in between the two gets a 409 and nothing
- * written, rather than the first wallet's basket saved onto its agent. The web
- * does not send it here yet; the server takes it.
+ * FOR THE WALLET THE LIST WAS SHOWN TO. [shownFor] is who was signed in when
+ * the proposals were read; if the settings now answer for anybody else, the
+ * coins one wallet was shown are not written onto another's agent, and nothing
+ * is saved. And the GET's `owner` goes back with the PUT, so a wallet that
+ * signs in between the two gets a 409 and nothing written. The web sends
+ * neither yet; the server takes the second.
  */
-suspend fun approveProposals(repo: Repository, list: List<Proposal>): Acted {
+suspend fun approveProposals(repo: Repository, list: List<Proposal>, shownFor: String? = null): Acted {
   val cur = repo.api.settings()
   if (cur !is ApiResult.Ok) return Acted.Failed("could not read your settings — " + why(cur))
   val env = cur.value
+  val readFor = env.owner
+  if (shownFor != null && readFor != null && !readFor.equals(shownFor, ignoreCase = true)) {
+    return Acted.Failed(
+      "Your session changed since these were shown — nothing was saved. Look at the list again for the wallet signed in now.",
+    )
+  }
 
   val tokens = ((env.values as? JsonObject)?.get("customTokens") as? JsonArray)
     ?.mapNotNull { row ->

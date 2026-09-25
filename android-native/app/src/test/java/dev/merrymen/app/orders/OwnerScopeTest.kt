@@ -190,6 +190,22 @@ class OwnerScopeTest {
     assertTrue((r as Acted.Failed).line.startsWith("Your session changed since this was set up — nothing was saved."))
   }
 
+  @Test fun proposalsShownToOneWalletAreNeverApprovedOntoAnother() = runBlocking {
+    rig.route("PUT /api/settings") { json("""{"ok":true}""") }
+    val coin = listOf(dev.merrymen.app.net.Proposal(token = "0x1da81ca017949efbe07972776580d04592ba9b63", symbol = "CASHCAT"))
+    // The settings now answer for A; the list was read while B was signed in.
+    val r = approveProposals(rig.repo, coin, shownFor = B)
+    assertTrue(r is Acted.Failed)
+    assertTrue("nothing written", rig.writes().isEmpty())
+    approveProposals(rig.repo, coin, shownFor = A.uppercase().replace("0X", "0x"))
+    assertEquals("the same wallet in another case is the same wallet", 1, rig.writes().size)
+
+    // Hosted and signed out since, the settings answer for nobody (owner "").
+    rig.route("GET /api/settings") { json("""{"values":{},"defaults":{"basketSymbols":["QQQ"]},"owner":""}""") }
+    assertTrue(approveProposals(rig.repo, coin, shownFor = A) is Acted.Failed)
+    assertEquals("a lapsed session writes nothing", 1, rig.writes().size)
+  }
+
   @Test fun aRiskTapWritesForTheWalletTheScreenRead() = runBlocking {
     rig.route("PUT /api/settings") { json("""{"ok":true}""") }
     val r = applyRisk(rig.repo, "careful", owner = B)

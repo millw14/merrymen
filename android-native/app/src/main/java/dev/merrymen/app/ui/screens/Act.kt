@@ -510,14 +510,32 @@ fun ProposalsScreen(nav: NavHostController) {
   var state by remember { mutableStateOf<Loaded<ProposalsView>>(Loaded.Loading) }
   var busy by remember { mutableStateOf(false) }
   var note by remember { mutableStateOf<String?>(null) }
+  // WHO THE LIST WAS READ FOR. An approval writes for that wallet or not at all.
+  var shownFor by remember { mutableStateOf<String?>(null) }
+  val signedIn by c.repo.signedIn.collectAsState()
   val scope = rememberCoroutineScope()
 
-  suspend fun load() { state = c.api.proposals().toLoaded() }
-  LaunchedEffect(Unit) { load() }
+  // The wallet is taken BEFORE the read and published WITH its answer, never
+  // ahead of it: set first, it would stand beside the previous wallet's list
+  // for as long as the read took, and an approval in that moment would pass
+  // the check below and write that list onto the new wallet's agent.
+  suspend fun load() {
+    val who = c.repo.signedIn.value
+    val read = c.api.proposals().toLoaded()
+    shownFor = who
+    state = read
+  }
+  // Read again whenever the session changes hands: the forget hooks do not run
+  // when a session lapses, so what is on screen follows signedIn itself.
+  LaunchedEffect(signedIn) {
+    note = null
+    load()
+  }
+  val current = if (shownFor.equals(signedIn, ignoreCase = true)) state else Loaded.Loading
 
   Page("Coins to consider", nav) {
     note?.let { Notice("Watchlist", it) }
-    LoadedBlock(state, onSignIn = { nav.navigate(Routes.SIGN_IN) }, onRetry = { scope.launch { load() } }) { v ->
+    LoadedBlock(current, onSignIn = { nav.navigate(Routes.SIGN_IN) }, onRetry = { scope.launch { load() } }) { v ->
       if (v.proposals.isEmpty()) {
         // FIVE REASONS FOR AN EMPTY LIST, and they are not the same sentence.
         Notice(
@@ -557,7 +575,7 @@ fun ProposalsScreen(nav: NavHostController) {
             onClick = {
               busy = true
               scope.launch {
-                val r = approveProposals(c.repo, v.proposals)
+                val r = approveProposals(c.repo, v.proposals, shownFor)
                 note = when (r) { is Acted.Ok -> r.line; is Acted.Failed -> r.line }
                 busy = false
                 load()
@@ -656,7 +674,7 @@ fun ProposalsScreen(nav: NavHostController) {
               onClick = {
                 busy = true
                 scope.launch {
-                  val r = approveProposals(c.repo, listOf(p))
+                  val r = approveProposals(c.repo, listOf(p), shownFor)
                   note = when (r) { is Acted.Ok -> r.line; is Acted.Failed -> r.line }
                   busy = false
                   load()
@@ -765,7 +783,14 @@ fun TradeScreen(nav: NavHostController) {
 
   // THE SYMBOLS WORTH OFFERING: the basket as it stands (the owner's, else the
   // default) and what is held. Still free text — a chip only fills the field.
-  LaunchedEffect(Unit) {
+  // Read per session, like everything this screen shows: a wallet that signs
+  // in here is offered its own coins, and a card, a note or an outcome made
+  // for the last wallet goes with it (its scope would refuse to act anyway).
+  LaunchedEffect(signedIn) {
+    card = null
+    note = null
+    watching = null
+    suggestions = emptyList()
     val env = c.api.settings().valueOrNull()
     val feed = c.api.feed().valueOrNull()?.takeIf { it.source != "none" }
     suggestions = (env?.list("basketSymbols").orEmpty() + feed?.positions?.map { it.symbol }.orEmpty())
@@ -812,19 +837,26 @@ fun TradeScreen(nav: NavHostController) {
           // the owner tapped back would be a POST whose answer nobody reads — an
           // order that may exist, never followed and never said.
           c.appScope.launch {
-            when (val step = desk.confirm(pending)) {
-              is TradeStep.Next -> card = step.card
-              is TradeStep.Said -> {
-                card = null
-                note = step.line
-              }
-              is TradeStep.Done -> {
-                card = null
-                note = step.placed.line
-                watching = when (val p = step.placed) {
-                  is Placed.Queued -> p.id
-                  is Placed.Unknown -> p.following
-                  is Placed.Refused -> null
+            val step = desk.confirm(pending)
+            if (!pending.scope.alive()) {
+              // The owner changed while it ran. What happened was said in THEIR
+              // thread; this screen now belongs to somebody else.
+              card = null
+            } else {
+              when (step) {
+                is TradeStep.Next -> card = step.card
+                is TradeStep.Said -> {
+                  card = null
+                  note = step.line
+                }
+                is TradeStep.Done -> {
+                  card = null
+                  note = step.placed.line
+                  watching = when (val p = step.placed) {
+                    is Placed.Queued -> p.id
+                    is Placed.Unknown -> p.following
+                    is Placed.Refused -> null
+                  }
                 }
               }
             }
@@ -973,26 +1005,36 @@ private fun TradeConfirm(card: TradeCard, busy: Boolean, onDismiss: () -> Unit, 
 @Composable
 fun RiskScreen(nav: NavHostController) {
   val c = LocalContainer.current
-  var read by remember { mutableStateOf<Loaded<SettingsEnvelope>>(Loaded.Loading) }
+  // The read as it came back — kept as the ApiResult so a failure is said in
+  // the words the foundation gives it (`said`), not rebuilt here.
+  var read by remember { mutableStateOf<ApiResult<SettingsEnvelope>?>(null) }
   var current by remember { mutableStateOf<String?>(null) }
   var saved by remember { mutableStateOf<String?>(null) }
   var busy by remember { mutableStateOf(false) }
   var note by remember { mutableStateOf<String?>(null) }
+  val signedIn by c.repo.signedIn.collectAsState()
   val scope = rememberCoroutineScope()
 
-  LaunchedEffect(Unit) {
-    read = c.api.settings().toLoaded()
-    current = riskLevelOf((read as? Loaded.Value)?.value?.values)
+  // WHOSE DIALS these are follows the session: a wallet that signs in while the
+  // screen is open is shown its own rung, never the last wallet's. A tap while
+  // the new read is out has no owner in hand, so applyRisk reads one first; a
+  // tap already in flight carries the old owner, which the route refuses (409).
+  LaunchedEffect(signedIn) {
+    read = null
+    current = null
+    saved = null
+    note = null
+    val r = c.api.settings()
+    read = r
+    current = riskLevelOf(r.valueOrNull()?.values)
   }
+  val settings = read?.valueOrNull()
 
   Page("How much risk?", nav) {
     note?.let { Notice("Risk", it) }
     when (val r = read) {
-      is Loaded.Refused -> Notice("Risk", "I couldn't read your current dials — ${r.message}")
-      is Loaded.Unreachable -> Notice(
-        "Risk",
-        "I couldn't read your current dials, so none is marked. " + ApiResult.Unreachable(r.cause, r.unreadable).said,
-      )
+      is ApiResult.Refused -> Notice("Risk", "I couldn't read your current dials — ${r.message}")
+      is ApiResult.Unreachable -> Notice("Risk", "I couldn't read your current dials, so none is marked. " + r.said)
       else -> Unit
     }
 
@@ -1013,7 +1055,7 @@ fun RiskScreen(nav: NavHostController) {
             busy = true
             note = null
             scope.launch {
-              val owner = (read as? Loaded.Value)?.value?.owner
+              val owner = settings?.owner
               when (val r = applyRisk(c.repo, p.level, owner)) {
                 is Acted.Ok -> {
                   current = p.level
@@ -1028,7 +1070,7 @@ fun RiskScreen(nav: NavHostController) {
         )
       }
     }
-    if (read is Loaded.Value && current == null && saved == null) {
+    if (settings != null && current == null && saved == null) {
       Note("Your dials are set by hand right now — picking a level replaces them.")
     }
 
