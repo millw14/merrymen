@@ -43,6 +43,7 @@ export function Footer() {
             <h5>Docs</h5>
             <Link href="/docs">Getting started</Link>
             <Link href="/api">API & SDK</Link>
+            <Link href="/claude">Use it in Claude</Link>
             <Link href="/docs#wallet">Create a wallet</Link>
             <Link href="/docs#telegram">Set up Telegram</Link>
             <Link href="/docs#pc-control">PC control</Link>

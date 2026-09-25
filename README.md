@@ -17,6 +17,9 @@ merrymen in the [hosted app](https://app.merrymen.dev) or on your own machine.
 Create an agent, choose its markets and limits, and follow its decisions,
 positions and trade outcomes from the dashboard or Telegram.
 
+**Use it from Claude:** tell Claude “set up merrymen mcp”, or add it in one
+click: <https://merrymen.dev/claude> (hosted Merrymen).
+
 The account contract enforces the permissions sealed into its session key:
 allowed calls and assets, per-call limits and expiry. The worker adds daily
 budgets, drawdown checks and operation limits. These are different enforcement
@@ -406,23 +409,43 @@ recipient into a prompt.
 
 ---
 
-## 5 · Ask Claude about your merryman
+## 5 · Use your merryman from Claude
 
 Hosted Merrymen has an MCP server, so Claude (and Codex, Cursor, VS Code, …)
-can read your agent's status, trades and portfolio and explain why it has or
-hasn't traded. One click for Claude: <https://app.merrymen.dev/connect/mcp>.
+can work with your agent: check its status, trades and portfolio, explain why
+it has or hasn't traded, research tokens, and prepare trades or setting changes
+for you to approve.
 
-In **Claude Code**, run these one at a time:
+**Set it up:** tell Claude “set up merrymen mcp”, or add it in one click:
+<https://merrymen.dev/claude>. Other assistants:
+<https://app.merrymen.dev/connect/mcp>. Setup instructions written for AI
+assistants: <https://merrymen.dev/llms.txt>.
 
-```text
-/plugin marketplace add https://github.com/millw14/merrymen.git
-/plugin install merrymen@merrymen
+In **Claude Code**, from a terminal, either add the server:
+
+```bash
+claude mcp add --transport http --scope user merrymen https://mcp.merrymen.dev/mcp
 ```
 
-then sign in once from `/mcp`, and use `/merrymen:status`, `/merrymen:why`,
-`/merrymen:portfolio`, `/merrymen:week` and `/merrymen:token`. The assistant
-only gets what you allow when you connect, and it can never move your funds,
-see your keys or loosen your limits. Details: [docs/mcp](docs/mcp/README.md).
+or install the plugin **instead** (it includes the server and adds
+`/merrymen:status`, `/merrymen:why`, `/merrymen:portfolio`, `/merrymen:week`
+and `/merrymen:token`; choose one route, not both):
+
+```bash
+claude plugin marketplace add https://github.com/millw14/merrymen.git
+claude plugin install merrymen@merrymen
+```
+
+Then, in Claude Code, type `/mcp`, choose the Merrymen entry, choose
+Authenticate and click Allow.
+
+**What it can and cannot do:** it sees only the agent and the permissions you
+allow when you sign in, and you can disconnect it at any time at
+[Connected apps](https://app.merrymen.dev/connect/apps). It can suggest trades
+or setting changes only if you allowed that, and nothing happens until you
+approve each one in Merrymen. It can never move your funds, see your keys, turn
+on live trading or loosen your limits. Paper (practice) and live money are
+always reported separately. Details: [docs/mcp](docs/mcp/README.md).
 
 ---
 

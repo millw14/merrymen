@@ -22,5 +22,5 @@ export const dynamic = "force-dynamic";
 export default function ConnectMcpPage() {
   const cfg = mcpConfig();
   const url = cfg.resource || "https://mcp.merrymen.dev/mcp";
-  return <McpConnectClient url={url} enabled={cfg.enabled} disabledWhy={cfg.disabledWhy} />;
+  return <McpConnectClient url={url} app={cfg.issuer} enabled={cfg.enabled} disabledWhy={cfg.disabledWhy} />;
 }

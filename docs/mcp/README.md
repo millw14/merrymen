@@ -7,6 +7,11 @@ speaks MCP over Streamable HTTP with OAuth.
 
 **Connect in one click:** <https://app.merrymen.dev/connect/mcp>
 
+**Or just tell Claude** “set up merrymen mcp”. The setup instructions written
+for AI assistants are at <https://merrymen.dev/llms.txt> (give Claude that
+address if it does not find them); the same steps for people are at
+<https://merrymen.dev/claude>.
+
 **In Claude Code:** `/plugin marketplace add https://github.com/millw14/merrymen.git`, then
 `/plugin install merrymen@merrymen` (run one at a time), for the server plus
 `/merrymen:status`, `/merrymen:why`, `/merrymen:portfolio` and more. See
