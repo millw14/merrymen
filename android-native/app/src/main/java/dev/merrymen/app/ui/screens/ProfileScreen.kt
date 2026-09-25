@@ -14,16 +14,20 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -41,25 +45,35 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
-import dev.merrymen.app.data.toLoaded
+import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.Feed
+import dev.merrymen.app.net.GrantView
+import dev.merrymen.app.net.said
 import dev.merrymen.app.ui.Avatar
 import dev.merrymen.app.ui.BottomInsetSpacer
 import dev.merrymen.app.ui.LoadedBlock
 import dev.merrymen.app.ui.MerryColors
 import dev.merrymen.app.ui.Money
 import dev.merrymen.app.ui.Notice
+import dev.merrymen.app.ui.OwnBook
 import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.PageTitle
 import dev.merrymen.app.ui.Routes
+import dev.merrymen.app.ui.modeChipOf
 import dev.merrymen.app.ui.numerals
+import dev.merrymen.app.ui.ownAgentName
+import dev.merrymen.app.ui.ownBookOf
+import dev.merrymen.app.ui.pnlLineOf
 import dev.merrymen.app.ui.sans
 import dev.merrymen.app.ui.shortAddress
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.Locale
 
 /** lucide `ChevronRight`, 18px, at the end of every account row. */
 @Composable
@@ -106,197 +120,280 @@ private fun AccountHeading(text: String, count: String? = null) {
  * gap: 24px; padding: 0 }`, and `polish.css:133` strips the border, padding and
  * margin off every `.account-section`. Whitespace is the ONLY divider.
  *
- * ONE ELEMENT ON THIS SCREEN IS A CARD — the agent row (`polish.css:136`) — plus
- * the grouped account rows, which are one card built out of several. The balance
- * block, the sections and the header are backgroundless and borderless; the base
- * sheet's rules that boxed them are flattened to `border-radius: 0` by later
- * unconditional rules. Material's Card and Button will silently box all of it,
- * which changes what reads as "a thing the system knows" versus "a page of
- * prose", so nothing here uses them.
- *
  * THE TITLE STAYS "You". `You.tsx:50` says "Profile", but the tab this screen
- * sits on is labelled "You" in Shell.kt and Shell is out of scope for this pass;
- * a page heading that disagreed with the tab that opened it would be worse than
- * the mismatch with the web. Noted in the hand-off.
+ * sits on is labelled "You" in Shell.kt; a page heading that disagreed with the
+ * tab that opened it would be worse than the mismatch with the web.
+ *
+ * WHOSE ACCOUNT THIS IS decides everything below the title ([ownBookOf]): a
+ * signed-out reader's feed is the house fallback, and an unreadable one is our
+ * failure — neither is drawn as a balance, an agent card or a picture to change.
+ *
+ * SIGN-IN IS OFFERED ONLY WHERE IT EXISTS (repo.canOfferSignIn: hosted, and
+ * nobody signed in). A self-hosted install answers the session route with
+ * {hosted:false, address:null}; it has no sign-in, and a "Not signed in — Sign
+ * in" banner there sent owners to a web page that does not apply.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(nav: NavHostController) {
   val c = LocalContainer.current
   val signedIn by c.repo.signedIn.collectAsState()
-  val identityKnown by c.repo.identityKnown.collectAsState()
-  var feed by remember { mutableStateOf<Loaded<Feed>>(Loaded.Loading) }
+  val hosted by c.repo.hosted.collectAsState()
+  val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
+  val reads = remember(signedIn) { OwnReads() }
+  var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+  var refreshing by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
-  LaunchedEffect(Unit) { feed = c.api.feed().toLoaded() }
+  val lifecycle = LocalLifecycleOwner.current.lifecycle
 
-  Column(
-    Modifier
-      .fillMaxSize()
-      .verticalScroll(rememberScrollState())
-      .padding(horizontal = PagePadH)
-      // `.body:has(> .account-page) { padding-top: 20px }` — polish.css:180.
-      .padding(top = 20.dp),
-    verticalArrangement = Arrangement.spacedBy(24.dp),
+  suspend fun load() {
+    reads.load(c.api, signedIn, withStrip = false) { System.currentTimeMillis() }
+    nowMs = System.currentTimeMillis()
+    if (reads.feed.let { it is Loaded.Refused && it.status == 401 }) c.repo.refreshIdentity()
+  }
+  LaunchedEffect(signedIn, lifecycle) {
+    lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+      while (true) {
+        load()
+        delay(60_000)
+      }
+    }
+  }
+  val book = ownBookOf(reads.feed, signedIn, hosted, canOfferSignIn)
+  val pull = rememberPullToRefreshState()
+
+  PullToRefreshBox(
+    isRefreshing = refreshing,
+    onRefresh = {
+      scope.launch {
+        refreshing = true
+        load()
+        refreshing = false
+      }
+    },
+    state = pull,
+    modifier = Modifier.fillMaxSize(),
+    indicator = {
+      PullToRefreshDefaults.Indicator(
+        state = pull,
+        isRefreshing = refreshing,
+        modifier = Modifier.align(Alignment.TopCenter),
+        containerColor = MerryColors.card,
+        color = MerryColors.tx,
+      )
+    },
   ) {
-    PageTitle("You")
+    Column(
+      Modifier
+        .fillMaxSize()
+        .verticalScroll(rememberScrollState())
+        .padding(horizontal = PagePadH)
+        // `.body:has(> .account-page) { padding-top: 20px }` — polish.css:180.
+        .padding(top = 20.dp),
+      verticalArrangement = Arrangement.spacedBy(24.dp),
+    ) {
+      PageTitle("You")
+      SignedInNotice()
 
-    // ONLY WHEN WE KNOW YOU ARE SIGNED OUT. While identity is unknown (the
-    // session route has not answered, or the server was unreachable), a "Not
-    // signed in" banner would be a claim about the reader that nobody checked;
-    // the feed's own LoadedBlock below says what actually went wrong instead.
-    if (identityKnown && signedIn == null) {
-      Notice(
-        title = "Not signed in",
-        body = "Signing in proves you control your owner key. It moves no funds and grants no permissions.",
-        actionLabel = "Sign in",
-        onAction = { nav.navigate(Routes.SIGN_IN) },
-      )
-    }
-
-    LoadedBlock(feed) { f ->
-      AccountPerson(f)
-      AccountBalance(f, nav)
-      YourAgent(f, nav)
-    }
-
-    // The three controls that belong to the agent rather than to the account.
-    Column(Modifier.fillMaxWidth()) {
-      AccountHeading("Controls")
-      AccountGroup {
-        AccountRow("Trade", first = true) { nav.navigate(Routes.TRADE) }
-        AccountRow("Coins to consider") { nav.navigate(Routes.PROPOSALS) }
-        AccountRow("How much risk?") { nav.navigate(Routes.RISK) }
+      if (canOfferSignIn) {
+        Notice(
+          title = "Not signed in",
+          body = "Signing in proves you control your owner key. It moves no funds and grants no permissions.",
+          actionLabel = "Sign in",
+          onAction = { nav.navigate(Routes.SIGN_IN) },
+        )
       }
-    }
 
-    Column(Modifier.fillMaxWidth()) {
-      AccountHeading("Account")
-      AccountGroup {
-        AccountRow("Trading limits", first = true) {
-          nav.navigate(Routes.web("/limits", "Trading limits"))
-        }
-        AccountRow("Wallet & permissions") {
-          nav.navigate(Routes.web("/grant", "Wallet & permissions"))
-        }
-        AccountRow("Settings") { nav.navigate(Routes.SETTINGS) }
-        AccountRow("Telegram") { nav.navigate(Routes.TELEGRAM) }
-        AccountRow("The Merry Circle") { nav.navigate(Routes.CIRCLE) }
-        AccountRow("Create an agent") {
-          nav.navigate(Routes.web("/create", "Create an agent"))
+      when (book) {
+        OwnBook.Loading -> LoadedBlock(Loaded.Loading) { _: Unit -> }
+        is OwnBook.Failed -> LoadedBlock(
+          book.state,
+          onSignIn = if (canOfferSignIn) ({ nav.navigate(Routes.SIGN_IN) }) else null,
+          onRetry = { scope.launch { load() } },
+        ) { _: Unit -> }
+        // The banner above is the whole answer for a signed-out reader; this
+        // only says what the page is for, and claims nothing about an account.
+        is OwnBook.SignedOut -> Prose("Your agents belong here.", 15.sp, 20.25.sp, MerryColors.tx2)
+        OwnBook.Unreadable -> Notice(
+          title = "Couldn't read your book just now",
+          body = "merrymen answered, but your agent's ledger could not be read — that's our read failing, " +
+            "not a fact about your account.",
+          actionLabel = "Try again",
+          onAction = { scope.launch { load() } },
+        )
+        is OwnBook.Mine -> {
+          val g = (reads.grants as? Loaded.Value)?.value
+          if (g != null && !g.exists) {
+            Notice(
+              title = "Your agents belong here",
+              body = "Create an agent to manage your portfolio and follow its trades here.",
+              actionLabel = "Create an agent",
+              onAction = { nav.navigate(Routes.web("/create", "Create an agent")) },
+            )
+          } else {
+            staleLine(reads.feedFailure, reads.feedAtMs, nowMs)?.let { Prose(it, 13.sp, 18.85.sp, MerryColors.tx2) }
+            AccountPerson(signedIn, g)
+            AccountBalance(book.feed, g, nav)
+            YourAgent(book.feed, g, nav)
+            AccountNameChip(c.api, book.feed.agent, reads.readFor, hosted, onNamed = { scope.launch { load() } })
+            // PICTURES ARE HOSTED-ONLY and belong to an agent that exists: the
+            // route answers 404 self-hosted, and a picture needs a slug to
+            // belong to. The owner they are for is the one this page was read for.
+            val slug = book.feed.agent?.slug
+            if (hosted == true && reads.readFor != null && slug != null) {
+              AccountPictures(c.api, slug, reads.readFor)
+            }
+          }
         }
       }
-      // EVERY ONE OF THE SIGNATURE-BEARING ROWS ENDS IN A CEREMONY, so every one
-      // of them is a handoff to the web app rather than a native
-      // reimplementation of key custody. The web gives these rows no warning
-      // styling at all and neither do these; the sentence carries it instead.
-      Prose(
-        text = "Trading limits, wallet permissions and creating an agent need your owner key, " +
-          "so they open the merrymen web app inside this one. This app never holds a key.",
-        size = 13.sp,
-        lineHeight = 19.5.sp,
-        color = MerryColors.tx2,
-        modifier = Modifier.padding(top = 12.dp),
-      )
-    }
 
-    if (signedIn != null) {
-      // THE KILL SWITCH, WHICH WAS DECLARED AND NEVER WIRED. revokeGrant()
-      // (DELETE /api/grants) stands the worker down, and nothing in the app
-      // reached it — a stop control you cannot find is not a stop control. It
-      // arms then confirms, the way KillSwitch.tsx does, because a single tap on
-      // "stop everything" is too easy to hit by accident. It is DESTRUCTIVE in
-      // the true sense (`--down`, not the softer sign-out red): re-arming the
-      // agent afterwards needs a fresh signature, which is a web handoff.
-      var armed by remember { mutableStateOf(false) }
-      var stopNote by remember { mutableStateOf<String?>(null) }
-      Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+      // The three controls that belong to the agent rather than to the account.
+      Column(Modifier.fillMaxWidth()) {
+        AccountHeading("Controls")
+        AccountGroup {
+          AccountRow("Trade", first = true) { nav.navigate(Routes.TRADE) }
+          AccountRow("Coins to consider") { nav.navigate(Routes.PROPOSALS) }
+          AccountRow("How much risk?") { nav.navigate(Routes.RISK) }
+        }
+      }
+
+      Column(Modifier.fillMaxWidth()) {
+        AccountHeading("Account")
+        AccountGroup {
+          AccountRow("Trading limits", first = true) {
+            nav.navigate(Routes.web("/limits", "Trading limits"))
+          }
+          AccountRow("Wallet & permissions") {
+            nav.navigate(Routes.web("/grant", "Wallet & permissions"))
+          }
+          AccountRow("Settings") { nav.navigate(Routes.SETTINGS) }
+          AccountRow("Telegram") { nav.navigate(Routes.TELEGRAM) }
+          AccountRow("The Merry Circle") { nav.navigate(Routes.CIRCLE) }
+          AccountRow("Create an agent") {
+            nav.navigate(Routes.web("/create", "Create an agent"))
+          }
+        }
+        // EVERY ONE OF THE SIGNATURE-BEARING ROWS ENDS IN A CEREMONY, so every one
+        // of them is a handoff to the web app rather than a native
+        // reimplementation of key custody.
+        Prose(
+          text = "Trading limits, wallet permissions and creating an agent need your owner key, " +
+            "so they open the merrymen web app inside this one. This app never holds a key.",
+          size = 13.sp,
+          lineHeight = 19.5.sp,
+          color = MerryColors.tx2,
+          modifier = Modifier.padding(top = 12.dp),
+        )
+      }
+
+      // THE KILL SWITCH, for whoever this server acts for: a signed-in owner
+      // hosted, or the one operator of a self-hosted box (which has no session
+      // at all, and whose DELETE /api/grants needs none).
+      if (signedIn != null || hosted == false) StopControl()
+
+      // SIGN OUT ONLY WHERE THERE IS A SESSION TO END. `.profile-session-actions
+      // button` — polish.css:75-76: #f47777, min-height 44px, 15px.
+      if (signedIn != null) {
         Box(
           Modifier
             .heightIn(min = 44.dp)
-            .clickable(role = Role.Button) {
-              if (!armed) {
-                armed = true
-                stopNote = "Tap again to stop it. This revokes its trading permission until you re-sign."
-              } else {
-                armed = false
-                scope.launch {
-                  stopNote = when (val r = c.api.revokeGrant()) {
-                    is dev.merrymen.app.net.ApiResult.Ok ->
-                      "Stopped. Your agent will not trade again until you re-sign its permission."
-                    is dev.merrymen.app.net.ApiResult.Refused ->
-                      if (r.status == 401) "Sign in first." else r.message
-                    is dev.merrymen.app.net.ApiResult.Unreachable ->
-                      "Couldn't reach merrymen to stop it. " + r.cause
-                  }
-                }
-              }
-            },
+            .clickable(role = Role.Button) { scope.launch { c.repo.signOut() } },
           contentAlignment = Alignment.CenterStart,
         ) {
           Text(
-            text = if (armed) "Tap again to stop your agent" else "Stop my agent",
-            style = TextStyle(fontFamily = sans(15.sp, FontWeight.SemiBold), fontSize = 15.sp),
-            color = MerryColors.down,
-          )
-        }
-        stopNote?.let {
-          Text(
-            it,
-            style = TextStyle(fontFamily = sans(13.sp), fontSize = 13.sp, lineHeight = 19.sp),
-            color = MerryColors.tx2,
+            text = "Sign out",
+            style = TextStyle(fontFamily = sans(15.sp), fontSize = 15.sp),
+            color = SignOutRed,
           )
         }
       }
-
-      // `.profile-session-actions button` — polish.css:75-76: colour #f47777,
-      // min-height 44px, 15px, transparent, no border. That red is NOT `--down`;
-      // it is a softer one used only here, and keeping them apart keeps "a loss"
-      // and "a destructive control" from wearing the same colour.
-      Box(
-        Modifier
-          .heightIn(min = 44.dp)
-          .clickable(role = Role.Button) { scope.launch { c.repo.signOut() } },
-        contentAlignment = Alignment.CenterStart,
-      ) {
-        Text(
-          text = "Sign out",
-          style = TextStyle(fontFamily = sans(15.sp), fontSize = 15.sp),
-          color = SignOutRed,
-        )
-      }
+      BottomInsetSpacer()
     }
-    BottomInsetSpacer()
+  }
+}
+
+/**
+ * THE KILL SWITCH. revokeGrant() (DELETE /api/grants) stands the worker down.
+ * It arms then confirms, the way KillSwitch.tsx does, because a single tap on
+ * "stop everything" is too easy to hit by accident. DESTRUCTIVE in the true
+ * sense (`--down`): re-arming needs a fresh signature, which is a web handoff.
+ *
+ * A LOST ANSWER IS NOT "it didn't stop". The grant may be gone. So the status
+ * route is asked, and the owner is told what it says — stopped, or still
+ * armed and theirs to stop again — rather than a failure that may be false.
+ */
+@Composable
+private fun StopControl() {
+  val c = LocalContainer.current
+  val scope = rememberCoroutineScope()
+  var armed by remember { mutableStateOf(false) }
+  var stopNote by remember { mutableStateOf<String?>(null) }
+  Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+    Box(
+      Modifier
+        .heightIn(min = 44.dp)
+        .clickable(role = Role.Button) {
+          if (!armed) {
+            armed = true
+            stopNote = "Tap again to stop it. This revokes its trading permission until you re-sign."
+          } else {
+            armed = false
+            scope.launch {
+              stopNote = when (val r = c.api.revokeGrant()) {
+                is ApiResult.Ok ->
+                  "Stopped. Your agent will not trade again until you re-sign its permission."
+                is ApiResult.Refused ->
+                  if (r.status == 401) "Sign in first. Nothing was stopped." else r.message
+                is ApiResult.Unreachable -> when (val after = c.api.grants()) {
+                  is ApiResult.Ok -> if (!after.value.exists) {
+                    "Stopped. Your agent will not trade again until you re-sign its permission."
+                  } else {
+                    "Couldn't tell whether that went through (${r.said.trimEnd('.')}), and your agent's " +
+                      "permission is still in place. Tap again to stop it."
+                  }
+                  else -> "Couldn't tell whether your agent stopped — ${r.said.trimEnd('.')}, and its " +
+                    "status could not be read back. Look again before trying again."
+                }
+              }
+            }
+          }
+        },
+      contentAlignment = Alignment.CenterStart,
+    ) {
+      Text(
+        text = if (armed) "Tap again to stop your agent" else "Stop my agent",
+        style = TextStyle(fontFamily = sans(15.sp, FontWeight.SemiBold), fontSize = 15.sp),
+        color = MerryColors.down,
+      )
+    }
+    stopNote?.let {
+      Text(
+        it,
+        style = TextStyle(fontFamily = sans(13.sp), fontSize = 13.sp, lineHeight = 19.sp),
+        color = MerryColors.tx2,
+      )
+    }
   }
 }
 
 /**
  * `.account-person` — polish.css:124-127: a flex row at `gap: 14px` holding a
- * 48px circle, then the name at 19px/600 with `letter-spacing: -.02em`, then the
- * agent-count line at 14px `--faint`.
+ * 48px circle, then the name at 19px/600, then the agent-count line at 14px
+ * `--faint`, and the `.profile-mode` chip.
  *
- * THE AVATAR IS NOT A GRADIENT FACE. `terminal.css:3902-3911` (as re-sized by
- * polish.css:125) makes this one a plain `--raised` circle carrying a single
- * 24px glyph in `--tx`: the "◎" mark when the owner string is an address, and
- * otherwise the owner's first character uppercased. The earlier 52px
- * lime-on-#252c19 rounded square at terminal.css:3486 is fully overridden.
+ * THE LABEL IS THE SIGNED-IN WALLET, the one fact about the reader this app
+ * actually holds — /api/feed sends no owner field, so the old reading of one
+ * always fell to "You". The glyph is "◎" for an address, as the web draws it.
  *
- * "1 agent" IS A LITERAL in the web (`You.tsx:59`), not a count. It is not
- * pluralised here either — computing it would make the two clients disagree
- * about a number.
+ * THE MODE CHIP is the heartbeat's own LIVE / PAPER / IDLE, and nothing when it
+ * reported none: a chip defaulted to "Offline" would state a fact nobody read.
  *
- * THE STATUS CHIP IS NOT DRAWN. `.profile-mode` reads `mine.statusLabel`
- * ("Paper trading" / "Running" / "Idle" / "Offline") and this screen has no such
- * field; an empty chip, or one defaulted to "Offline", would state a fact about
- * the agent that nothing here read.
+ * "1 agent" IS A LITERAL in the web (`You.tsx:59`), not a count.
  */
 @Composable
-private fun AccountPerson(f: Feed) {
-  val owner = f.agent?.owner
-  val label = shortAddress(owner) ?: owner?.takeIf { it.isNotBlank() } ?: "You"
-  val glyph = when {
-    owner?.startsWith("0x") == true -> "◎"
-    !label.isEmpty() -> label.take(1).uppercase(Locale.ROOT)
-    else -> "?"
-  }
+private fun AccountPerson(signedIn: String?, g: GrantView?) {
+  val label = shortAddress(signedIn) ?: "You"
+  val glyph = if (signedIn?.startsWith("0x") == true) "◎" else "Y"
   Row(
     Modifier.fillMaxWidth(),
     horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -336,30 +433,23 @@ private fun AccountPerson(f: Feed) {
         modifier = Modifier.padding(top = 3.dp),
       )
     }
+    modeChipOf(g?.takeIf { it.exists }?.mode)?.let { AccountModeTag(it) }
   }
 }
 
 /**
- * `.account-balance` — a plain block. `polish.css:128` sets `padding: 0;
- * margin: 0` and `terminal.css:3921` flattens its radius to 0, so the card the
- * base sheet drew here is gone.
+ * `.account-balance` — a plain block (polish.css:128-130): the label at 15px,
+ * the figure at 54px of Geist Pixel. `money(null)` is the em dash, NEVER "$0.00".
  *
- * The label is 15px `--tx-2` with 8px under it (polish.css:129); the figure is
- * 54px of Geist Pixel at `line-height: 1.15` (polish.css:130) with the cents at
- * `0.43em` in `--tx-2` — 23px inside a 54px figure. `money(null)` is the em dash
- * and `BalanceFigure` then emits no decimals span at all, so an unread balance
- * is one dash and nothing else. NEVER "$0.00".
- *
- * THE DAILY CHANGE HAS THREE RENDERINGS AND ONLY ONE OF THEM IS COLOURED
- * (`You.tsx:68-72`): null gets the class `meta` — grey `--tx-2` — and the words
- * "Daily change unavailable"; a negative gets `--down`; anything else gets
- * `--up`. This client has no daily-change figure on this payload, so the null
- * arm is the true one and it says so in words rather than showing a dash with no
- * label. What it must never do is take the `>= 0` branch by default, which is
- * the screen saying "we don't know" in text and "it went up" in colour.
+ * THE DAILY CHANGE STAYS "Daily change unavailable". The web's "+$X today" is
+ * raw equity, which counts a same-day deposit as a gain, and /api/feed carries
+ * no dated flows to take one out. The all-time line under it is net of
+ * contributions and gas, and appears only where every term is evidence
+ * (pnlLineOf) — on a live book, with fills, and a deposit history the worker
+ * vouches for.
  */
 @Composable
-private fun AccountBalance(f: Feed, nav: NavHostController) {
+private fun AccountBalance(f: Feed, g: GrantView?, nav: NavHostController) {
   Column(Modifier.fillMaxWidth()) {
     Prose(
       text = "Portfolio balance",
@@ -375,15 +465,14 @@ private fun AccountBalance(f: Feed, nav: NavHostController) {
       lineHeight = 21.sp,
       color = MerryColors.tx2,
       weight = FontWeight.W500,
-      modifier = Modifier.padding(top = 8.dp, bottom = 16.dp),
+      modifier = Modifier.padding(top = 8.dp),
     )
+    pnlLineOf(f, g?.mode)?.let { p ->
+      Prose(p.text, 14.sp, 21.sp, if (p.usd < 0) MerryColors.down else MerryColors.up, weight = FontWeight.W500, modifier = Modifier.padding(top = 4.dp))
+    }
 
     // `.profile-funding` — polish.css:57-58 and :132: two equal columns,
-    // `gap: 10px`, `margin-top: 18px`, each button 50px tall at radius 10 and
-    // 16px/600. The primary is `--tx` on `--ink`; the secondary is `--card` with
-    // a 1px `--line` border. WITHDRAW IS NOT STYLED AS DESTRUCTIVE — it is a
-    // quiet secondary, which is the product's stated posture and not an
-    // oversight to correct in a restyle.
+    // `gap: 10px`, `margin-top: 18px`. WITHDRAW IS NOT STYLED AS DESTRUCTIVE.
     Row(
       Modifier.fillMaxWidth().padding(top = 18.dp),
       horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -397,6 +486,7 @@ private fun AccountBalance(f: Feed, nav: NavHostController) {
     }
   }
 }
+
 
 @Composable
 private fun FundButton(
@@ -434,13 +524,17 @@ private fun FundButton(
  * `border: 1px solid var(--line); border-radius: 14px; background: var(--card);
  * padding: 16px 12px; gap: 12px`, with a 44px face, the name at 16px/600, the
  * strategy at 13px `--tx-2` and the value right-aligned. Tapping it goes to Chat.
+ *
+ * The name is the one the owner SET (settings or ledger); the house fallback is
+ * "Your agent", never "Robin" presented as theirs.
  */
 @Composable
-private fun YourAgent(f: Feed, nav: NavHostController) {
+private fun YourAgent(f: Feed, g: GrantView?, nav: NavHostController) {
   val agent = f.agent
+  val name = ownAgentName(agent) ?: "Your agent"
   val shape = RoundedCornerShape(14.dp)
   Column(Modifier.fillMaxWidth()) {
-    AccountHeading("Your agent", count = if (agent != null) "1" else null)
+    AccountHeading("Your agent", count = "1")
     Row(
       Modifier
         .fillMaxWidth()
@@ -452,10 +546,10 @@ private fun YourAgent(f: Feed, nav: NavHostController) {
       horizontalArrangement = Arrangement.spacedBy(12.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
-      Avatar(name = agent?.name ?: "No agent yet", size = 44.dp)
+      Avatar(name = name, size = 44.dp)
       Column(Modifier.weight(1f)) {
         Text(
-          text = agent?.name ?: "No agent yet",
+          text = name,
           maxLines = 1,
           style = TextStyle(
             fontFamily = sans(16.sp, FontWeight.W600),
@@ -468,8 +562,13 @@ private fun YourAgent(f: Feed, nav: NavHostController) {
           Prose(it, 13.sp, 18.85.sp, MerryColors.tx2, modifier = Modifier.padding(top = 5.dp))
         }
       }
-      // `money(null)` is "—". An unread portfolio is not an empty one.
-      Money(f.equityNow, bold = true)
+      Column(horizontalAlignment = Alignment.End) {
+        // `money(null)` is "—". An unread portfolio is not an empty one.
+        Money(f.equityNow, bold = true)
+        modeChipOf(g?.takeIf { it.exists }?.mode)?.let {
+          Prose(it, 12.sp, 16.sp, MerryColors.tx2, modifier = Modifier.padding(top = 3.dp))
+        }
+      }
     }
   }
 }
