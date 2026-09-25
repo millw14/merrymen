@@ -10,6 +10,7 @@ import dev.merrymen.app.ui.LimitCheck
 import dev.merrymen.app.ui.MONEY_LIVE
 import dev.merrymen.app.ui.MONEY_LIVE_ON
 import dev.merrymen.app.ui.MONEY_PAPER
+import dev.merrymen.app.ui.PAPER_MOVED
 import dev.merrymen.app.ui.Placed
 import dev.merrymen.app.ui.TradeDesk
 import dev.merrymen.app.ui.TradeOpen
@@ -146,6 +147,28 @@ class TradeConfirmTest {
       json("""{"values":{"liveTradingEnabled":true},"defaults":{"liveTradingEnabled":false},"owner":"$A"}""")
     }
     assertEquals(MONEY_LIVE_ON, open("buy", "NVDA", 5.0).money)
+  }
+
+  /**
+   * THE TRADE SCREEN'S PAPER CARD IS CHECKED AGAIN AT THE TAP, as the chat's is:
+   * its line was read when it opened, and Live trading can go on elsewhere
+   * while it sits there. Nothing is sent; the card comes back redrawn, with
+   * the reason, and the tap on THAT card places.
+   */
+  @Test fun aPaperCardTappedAfterLiveTradingWentOnComesBackRedrawnAndPlacesNothing() {
+    rig.route("POST /api/orders") { json("""{"id":"$id","queued":true,"expiresInMs":495000}""") }
+    val card = open("buy", "NVDA", 5.0)
+    assertEquals(MONEY_PAPER, card.money)
+    rig.route("GET /api/settings") {
+      json("""{"values":{"liveTradingEnabled":true},"defaults":{"liveTradingEnabled":false},"owner":"$A"}""")
+    }
+    val step = runBlocking { desk.confirm(card) } as TradeStep.Redrawn
+    assertEquals(PAPER_MOVED, step.line)
+    assertEquals(MONEY_LIVE_ON, step.card.money)
+    assertTrue("no order went out", rig.writes().none { it.path == "/api/orders" })
+
+    assertTrue(runBlocking { desk.confirm(step.card) } is TradeStep.Done)
+    assertEquals(1, rig.writes().count { it.path == "/api/orders" })
   }
 
   @Test fun twoTapsBeforeTheButtonGreysOutPlaceOneOrder() {

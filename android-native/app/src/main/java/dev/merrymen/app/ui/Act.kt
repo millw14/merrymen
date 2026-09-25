@@ -450,6 +450,13 @@ const val MONEY_LIVE_ON = "Treat this as real money: I'm practising right now, b
 const val MONEY_UNKNOWN = "I can't tell right now whether this would be real money or paper, so treat it as real money."
 
 /**
+ * Said when a Paper order card is tapped and the book, read again at the tap,
+ * no longer says Paper: nothing was placed, and the card now says what is true.
+ */
+const val PAPER_MOVED = "I checked again before placing it, and this may not be paper any more, so I haven't placed it. " +
+  "The card now says what it would be — confirm again if you still want it."
+
+/**
  * HAS THE OWNER TURNED LIVE TRADING ON? Their saved answer, else the default —
  * the order the worker resolves it in — or null when it was not read.
  *
@@ -1036,6 +1043,12 @@ sealed interface TradeOpen {
 sealed interface TradeStep {
   data class Done(val placed: Placed) : TradeStep
   data class Next(val card: TradeCard) : TradeStep
+  /**
+   * Nothing was sent: the card said Paper, and the book read at the tap says
+   * otherwise. [card] is the same order redrawn with what is true now, and
+   * [line] says why the tap placed nothing.
+   */
+  data class Redrawn(val card: TradeCard, val line: String) : TradeStep
   data class Said(val line: String) : TradeStep
   /** A confirm was already being carried out here: this tap did nothing, and the first one's answer is the one to show. */
   data object Held : TradeStep
@@ -1106,6 +1119,14 @@ class TradeDesk(private val api: MerrymenApi, private val scopeNow: () -> Confir
         is Looked.Found -> TradeStep.Next(cardFor("buy", looked.target.symbol, card.usdg, read(), scope, looked.target))
         is Looked.Said -> TradeStep.Said(looked.line)
       }
+    }
+    // PAPER IS CHECKED AGAIN AT THE TAP (ChatThread.paperStillHolds says why):
+    // the card's line was read when it opened, and it can sit on screen while
+    // Live trading is switched on elsewhere. Anything but Paper now is a new
+    // card for the owner to confirm, and nothing is sent for this tap.
+    if (card.money == MONEY_PAPER) {
+      val now = cardFor(card.kind, card.subject, card.usdg, read(), scope, card.found)
+      if (now.money != MONEY_PAPER) return TradeStep.Redrawn(now, PAPER_MOVED)
     }
     val found = card.found
     val placed = placeConfirmedOrder(api, scope, card.kind, card.subject, card.usdg) { duplicate ->

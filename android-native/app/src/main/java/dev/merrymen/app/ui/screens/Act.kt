@@ -851,6 +851,10 @@ fun TradeScreen(nav: NavHostController) {
             } else {
               when (step) {
                 is TradeStep.Next -> card = step.card
+                is TradeStep.Redrawn -> {
+                  card = step.card
+                  note = step.line
+                }
                 is TradeStep.Said -> {
                   card = null
                   note = step.line

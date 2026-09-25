@@ -11,6 +11,7 @@ import dev.merrymen.app.ui.MONEY_LIVE
 import dev.merrymen.app.ui.MONEY_LIVE_ON
 import dev.merrymen.app.ui.MONEY_PAPER
 import dev.merrymen.app.ui.MONEY_UNKNOWN
+import dev.merrymen.app.ui.PAPER_MOVED
 import dev.merrymen.app.ui.liveConsentOf
 import dev.merrymen.app.ui.moneyLine
 import dev.merrymen.app.ui.moneyLineFor
@@ -166,6 +167,76 @@ class MoneyLineTest {
     assertTrue(snap.settingsKept)
     assertNotNull("the model still gets the book as last read", snap.settings)
     assertEquals(MONEY_UNKNOWN, moneyLineFor(snap))
+  }
+
+  // ── the tap ──────────────────────────────────────────────────────────────
+
+  private val switchedOn = AtomicBoolean(false)
+
+  /** A buy card drawn while Live trading is off, as the rig's heartbeat has it: paper. */
+  private fun paperCard(): dev.merrymen.app.data.ChatThread {
+    rig.route("GET /api/settings") {
+      json("""{"values":{"liveTradingEnabled":${switchedOn.get()}},"defaults":{"liveTradingEnabled":false},"owner":"$A"}""")
+    }
+    rig.route("POST /api/chat") {
+      json("""{"reply":"Shall I?","command":{"id":"buy","args":{"symbol":"NVDA","usdgAmount":5}}}""")
+    }
+    val id = "f".repeat(32)
+    rig.route("POST /api/orders") { json("""{"id":"$id","queued":true,"expiresInMs":495000}""") }
+    rig.route("GET /api/orders") { json("""{"id":"$id","state":"done","result":"Bought NVDA."}""") }
+    val chat = rig.thread()
+    rig.signIn(A)
+    waitFor("A") { chat.thread.value.key == A }
+    chat.setOpen(true)
+    runBlocking { chat.sendNow("buy $5 of nvda", null) }
+    assertNotNull(chat.card.value)
+    assertEquals("drawn while Live trading was off", MONEY_PAPER, moneyLineFor(chat.snapshot.value))
+    return chat
+  }
+
+  /**
+   * A PAPER CARD IS CHECKED AGAIN AT THE TAP. Live trading goes on elsewhere
+   * (the web, Telegram) while the card sits on an open Chat, which reads
+   * nothing. The tap reads the book again, places nothing, says why, and the
+   * card now says real money; the owner's second tap confirms THAT, and places.
+   */
+  @Test fun aPaperCardTappedAfterLiveTradingWentOnPlacesNothingUntilConfirmedAgain() {
+    val chat = paperCard()
+    switchedOn.set(true)
+    chat.confirm { _, _ -> }
+    waitFor("the tap settled") { !chat.confirming.value }
+    assertTrue("no order went out", rig.writes().none { it.path == "/api/orders" })
+    assertNotNull("the card is still up", chat.card.value)
+    assertEquals("and says what is true now", MONEY_LIVE_ON, moneyLineFor(chat.snapshot.value))
+    assertEquals("and the thread says why", PAPER_MOVED, chat.thread.value.messages.last().text)
+
+    chat.confirm { _, _ -> }
+    waitFor("the second tap placed it") { rig.writes().any { it.path == "/api/orders" } }
+    waitFor("and it settled") { !chat.confirming.value }
+    assertEquals(1, rig.writes().count { it.path == "/api/orders" })
+  }
+
+  /** A settings read that fails at the tap vouches for nothing: nothing is sent, and the card says so. */
+  @Test fun aPaperCardWhoseSettingsCannotBeReadAtTheTapPlacesNothing() {
+    val chat = paperCard()
+    rig.route("GET /api/settings") { json("""{"error":"merrymen had a problem"}""", 500) }
+    chat.confirm { _, _ -> }
+    waitFor("the tap settled") { !chat.confirming.value }
+    assertTrue(rig.writes().none { it.path == "/api/orders" })
+    assertEquals(MONEY_UNKNOWN, moneyLineFor(chat.snapshot.value))
+    assertEquals(PAPER_MOVED, chat.thread.value.messages.last().text)
+  }
+
+  /** Still off at the tap: the check costs one read, and the order goes on the first tap. */
+  @Test fun aPaperCardThatIsStillPaperAtTheTapPlaces() {
+    val chat = paperCard()
+    val before = rig.seen.size
+    chat.confirm { _, _ -> }
+    waitFor("placed") { rig.writes().any { it.path == "/api/orders" } }
+    waitFor("and it settled") { !chat.confirming.value }
+    val untilPlaced = rig.seen.drop(before).takeWhile { !(it.method == "POST" && it.path == "/api/orders") }
+    assertEquals("read again at the tap, once, before the order", 1, untilPlaced.count { it.path == "/api/settings" })
+    assertTrue(chat.thread.value.messages.none { it.text == PAPER_MOVED })
   }
 
   // ── reads that land out of order ─────────────────────────────────────────

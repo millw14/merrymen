@@ -18,10 +18,15 @@ import dev.merrymen.app.net.perTradeUsdg
 import dev.merrymen.app.net.pollOrder
 import dev.merrymen.app.net.receiptOf
 import dev.merrymen.app.net.valueOrNull
+import dev.merrymen.app.ui.COMMANDS
 import dev.merrymen.app.ui.ChatMove
+import dev.merrymen.app.ui.MONEY_PAPER
+import dev.merrymen.app.ui.PAPER_MOVED
+import dev.merrymen.app.ui.Via
 import dev.merrymen.app.ui.asksAmount
 import dev.merrymen.app.ui.chatStateOf
 import dev.merrymen.app.ui.failureLine
+import dev.merrymen.app.ui.moneyLineFor
 import dev.merrymen.app.ui.retryHelps
 import dev.merrymen.app.ui.runConfirmedCard
 import kotlinx.coroutines.CoroutineDispatcher
@@ -754,12 +759,40 @@ class ChatThread internal constructor(
     _confirming.value = true
     appScope.launch {
       try {
+        if (!paperStillHolds(card)) return@launch
         // The limits as last read: an order past one is refused before it is sent.
         runConfirmedCard(api, card, _snapshot.value?.grants?.perTradeUsdg, _ceiling.value, onNavigate)
       } finally {
         if (confirmHold.compareAndSet(hold, null)) _confirming.value = false
       }
     }
+  }
+
+  /**
+   * PAPER IS CHECKED AGAIN AT THE TAP, NOT ONLY WHEN THE CARD WAS DRAWN.
+   *
+   * An order card saying "Paper … no real order goes out" was drawn from the
+   * last read, and an open Chat reads again only when it is asked something,
+   * comes back on screen, or a card acts. Live trading switched on from the web
+   * or Telegram while the card sits there changes nothing on it, and the worker
+   * decides paper or live at the tick that picks the order up — so the owner
+   * would confirm a card that called real USDG simulated. So a Paper order card
+   * reads the book again first, and the order goes only if that read, and what
+   * the screen now shows, still say Paper. Anything else — Live trading on, the
+   * rail live, the settings unread — sends nothing: the card stays up, redrawn
+   * from that read, the thread says why, and a second tap confirms what the
+   * card now says. Any other line already said "treat this as real money",
+   * which is what the owner confirmed, so it asks for no read.
+   */
+  private suspend fun paperStillHolds(card: PendingCard): Boolean {
+    if (COMMANDS[card.command.id]?.via != Via.ORDER) return true
+    if (moneyLineFor(_snapshot.value) != MONEY_PAPER) return true
+    // No thread in hand: runConfirmedCard finds the scope dead and sends nothing.
+    val key = state.value.key ?: return true
+    val now = readSnapshot(key)
+    if (moneyLineFor(now) == MONEY_PAPER && moneyLineFor(_snapshot.value) == MONEY_PAPER) return true
+    card.scope.say("agent", PAPER_MOVED)
+    return false
   }
 
   /**
