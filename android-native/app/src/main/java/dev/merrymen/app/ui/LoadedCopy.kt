@@ -84,9 +84,27 @@ fun noticeFor(state: Loaded<*>, canSignIn: Boolean, canRetry: Boolean): NoticeCo
       // Deliberately OUR failure, in our words. Not "you are offline" — we do
       // not know that, and telling somebody their connection is broken when the
       // server is down sends them to reset a router.
-      body = "That's this app failing to get an answer, not a fact about your account. " + state.cause,
+      body = "That's this app failing to get an answer, not a fact about your account. " + causeSentence(state.cause),
       action = if (canRetry) NoticeAction.TryAgain else null,
       refusal = false,
     )
   }
+}
+
+/**
+ * A CAUSE, MADE A SENTENCE OF ITS OWN.
+ *
+ * Every cause is written to follow "Can't reach merrymen right now: " (see
+ * ApiResult.Unreachable.said): lower-case, with no full stop. Joined after a
+ * sentence it read "…not a fact about your account. this phone couldn't look
+ * up the server's address — it may be offline", on Home, You and Search each
+ * time the phone was offline. So it is capitalised and closed here, where the
+ * join is, and left as it is for [said]. "merrymen" keeps its lower case: it
+ * is the product's name, and the web never capitalises it.
+ */
+internal fun causeSentence(cause: String): String {
+  val t = cause.trim()
+  if (t.isEmpty()) return t
+  val opened = if (t.startsWith("merrymen")) t else t.replaceFirstChar { it.uppercaseChar() }
+  return if (opened.last() in ".!?") opened else "$opened."
 }

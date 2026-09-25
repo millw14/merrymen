@@ -7,6 +7,7 @@ import dev.merrymen.app.net.CANT_REACH
 import dev.merrymen.app.net.HTML_PAGE
 import dev.merrymen.app.net.answer
 import dev.merrymen.app.net.apiFor
+import dev.merrymen.app.net.noAnswerCause
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
@@ -48,10 +49,34 @@ class LoadedCopyTest {
   }
 
   @Test fun noAnswerIsCantReach() {
-    val c = copy(Loaded.Unreachable("timeout"))
+    val c = copy(Loaded.Unreachable("the connection timed out"))
     assertEquals(CANT_REACH, c.title)
-    assertTrue(c.body.endsWith("timeout"))
+    assertTrue(c.body.endsWith("The connection timed out."))
     assertEquals(NoticeAction.TryAgain, c.action)
+  }
+
+  /**
+   * THE CAUSE IS ITS OWN SENTENCE in the body. Causes are written to follow
+   * "Can't reach merrymen right now: ", so the emulator read "…not a fact about
+   * your account. this phone couldn't look up …" with no full stop, offline, on
+   * Home, You and Search — and the same after a Server address that isn't one.
+   */
+  @Test fun theCauseStartsAndEndsLikeASentence() {
+    // The cause the client gives a host it cannot look up: the phone offline.
+    val offline = Loaded.Unreachable(noAnswerCause(java.net.UnknownHostException("Unable to resolve host")))
+    assertEquals(
+      "That's this app failing to get an answer, not a fact about your account. " +
+        "This phone couldn't look up the server's address — it may be offline.",
+      copy(offline).body,
+    )
+    assertEquals(
+      "That's this app failing to get an answer, not a fact about your account. " +
+        "The Server address in Settings isn't a web address — fix it there.",
+      copy(Loaded.Unreachable(dev.merrymen.app.net.NOT_A_WEB_ADDRESS)).body,
+    )
+    // Already a sentence: not closed twice. Our own name keeps its lower case.
+    assertEquals("It stopped.", causeSentence("it stopped."))
+    assertEquals("merrymen went quiet.", causeSentence("merrymen went quiet"))
   }
 
   @Test fun anAnswerWeCouldNotReadIsNotCantReach() = runBlocking {
