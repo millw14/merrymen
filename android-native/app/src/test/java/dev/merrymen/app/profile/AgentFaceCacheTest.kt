@@ -8,9 +8,14 @@ import dev.merrymen.app.ui.FaceCache
 import dev.merrymen.app.ui.FaceKey
 import dev.merrymen.app.ui.FaceKind
 import dev.merrymen.app.ui.FaceLoader
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -25,6 +30,7 @@ import org.junit.Before
 import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * THE PICTURE CACHE, over the real client and a MockWebServer standing in for
@@ -169,6 +175,31 @@ class AgentFaceCacheTest {
     val all = (0 until 10).map { async { loader.load(k) { etag -> api.agentImage("a1b2c3d4e5f6g7h8", "avatar", etag, null) } } }.awaitAll()
     assertTrue(all.all { it == "FACE-A" })
     assertEquals(1, seen.size)
+  }
+
+  /**
+   * A fast scroll takes the row that asked first out of the list mid-request.
+   * The row still waiting on the same picture must not be handed that row's
+   * nothing — it asks for itself, and gets the agent's face.
+   */
+  @Test fun aRowThatScrolledAwayMidAskLeavesTheOthersToAsk() = runBlocking {
+    val k = key("a1b2c3d4e5f6g7h8")
+    val asks = AtomicInteger(0)
+    val firstAsk = CompletableDeferred<Unit>()
+    val leader = launch {
+      loader.load(k) {
+        asks.incrementAndGet()
+        firstAsk.complete(Unit)
+        awaitCancellation() // the network, until the row is gone
+      }
+    }
+    firstAsk.await()
+    val waiter = async { loader.load(k) { etag -> asks.incrementAndGet(); api.agentImage("a1b2c3d4e5f6g7h8", "avatar", etag, null) } }
+    yield() // the waiter is now waiting on the first row's turn
+    leader.cancelAndJoin()
+    assertEquals("the row still on screen shows the agent's own face", "FACE-A", waiter.await())
+    assertEquals("the first ask died with its row, so the waiter asked", 2, asks.get())
+    assertEquals("FACE-A", cache.peek(k.id))
   }
 
   @Test fun anUploadIsAskedForByItsVersionAndARemovalIsNeverAskedAbout() = runBlocking {

@@ -167,47 +167,76 @@ class FaceCache<T : Any>(
 /**
  * ONE REQUEST PER PICTURE, however many rows want it. A feed of ten rows by one
  * agent asks once; the others wait for that answer.
+ *
+ * THE ROW THAT ASKED FIRST CAN LEAVE BEFORE ITS ANSWER COMES — a fast scroll
+ * takes it out of the LazyColumn and cancels its load. That is not an answer:
+ * handing the rows still waiting its null drew initials on every one of them
+ * for an agent that has a picture, until each was composed afresh. So a
+ * cancelled first asker hands its waiters NOTHING ([Turn.abandoned]), and they
+ * go round again — one of them becomes the asker.
  */
 class FaceLoader<T : Any>(private val cache: FaceCache<T>, private val decode: suspend (FaceKey, ByteArray) -> T?) {
-  private val inFlight = HashMap<String, CompletableDeferred<T?>>()
+  /** An asker's outcome. [abandoned] means it was cancelled and answered nobody. */
+  private class Turn<T>(val value: T?, val abandoned: Boolean)
+
+  private val inFlight = HashMap<String, CompletableDeferred<Turn<T>>>()
 
   suspend fun load(key: FaceKey, fetch: suspend (etag: String?) -> ImageAnswer): T? {
     val id = key.id
-    val held = when (val l = cache.lookup(id)) {
-      is FaceCache.Lookup.Fresh -> return l.value
-      FaceCache.Lookup.KnownMissing -> return null
-      is FaceCache.Lookup.Stale -> l
-      FaceCache.Lookup.Unknown -> null
-    }
-    val (mine, waiting) = synchronized(inFlight) {
-      inFlight[id]?.let { false to it } ?: (true to CompletableDeferred<T?>().also { inFlight[id] = it })
-    }
-    if (!mine) return waiting.await()
-    var result: T? = held?.value
-    try {
-      result = when (val a = fetch(held?.etag)) {
-        is ImageAnswer.Fresh -> decode(key, a.bytes)?.also { cache.putImage(id, a.etag, it) }
-        // Only ever the bytes held under THIS key — the ETag sent was theirs.
-        ImageAnswer.NotModified -> held?.value?.also { cache.confirm(id) }
-        ImageAnswer.Missing -> {
-          cache.putMissing(id)
-          null
-        }
-        // No answer says nothing about the agent: keep showing its own last
-        // picture if there is one, and ask again next time.
-        is ImageAnswer.Failed -> held?.value
+    while (true) {
+      val held = when (val l = cache.lookup(id)) {
+        is FaceCache.Lookup.Fresh -> return l.value
+        FaceCache.Lookup.KnownMissing -> return null
+        is FaceCache.Lookup.Stale -> l
+        FaceCache.Lookup.Unknown -> null
       }
-    } catch (e: CancellationException) {
-      throw e
-    } catch (e: Exception) {
-      // A picture that would not decode is no picture; the face keeps its
-      // initials rather than taking the screen down with it.
-      result = held?.value
+      val (mine, turn) = synchronized(inFlight) {
+        inFlight[id]?.let { false to it } ?: (true to CompletableDeferred<Turn<T>>().also { inFlight[id] = it })
+      }
+      if (!mine) {
+        val answered = turn.await()
+        if (answered.abandoned) continue
+        return answered.value
+      }
+      return ask(key, id, held, fetch, turn)
+    }
+  }
+
+  private suspend fun ask(
+    key: FaceKey,
+    id: String,
+    held: FaceCache.Lookup.Stale<T>?,
+    fetch: suspend (etag: String?) -> ImageAnswer,
+    turn: CompletableDeferred<Turn<T>>,
+  ): T? {
+    var outcome = Turn<T>(null, abandoned = true)
+    try {
+      val result = try {
+        when (val a = fetch(held?.etag)) {
+          is ImageAnswer.Fresh -> decode(key, a.bytes)?.also { cache.putImage(id, a.etag, it) }
+          // Only ever the bytes held under THIS key — the ETag sent was theirs.
+          ImageAnswer.NotModified -> held?.value?.also { cache.confirm(id) }
+          ImageAnswer.Missing -> {
+            cache.putMissing(id)
+            null
+          }
+          // No answer says nothing about the agent: keep showing its own last
+          // picture if there is one, and ask again next time.
+          is ImageAnswer.Failed -> held?.value
+        }
+      } catch (e: CancellationException) {
+        throw e
+      } catch (e: Exception) {
+        // A picture that would not decode is no picture; the face keeps its
+        // initials rather than taking the screen down with it.
+        held?.value
+      }
+      outcome = Turn(result, abandoned = false)
+      return result
     } finally {
       synchronized(inFlight) { inFlight.remove(id) }
-      waiting.complete(result)
+      turn.complete(outcome)
     }
-    return result
   }
 }
 
