@@ -12,7 +12,7 @@ struct MerrymenApp: App {
                 .font(.custom("DMSans-9ptRegular", size: 16, relativeTo: .body))
                 .preferredColorScheme(.dark)
                 .tint(Color(red: 0.65, green: 0.81, blue: 0.12))
-                .onOpenURL { store.open($0) }
+                .onOpenURL { if !ExternalWalletConnection.shared.handleURL($0) { store.open($0) } }
                 .overlay {
                     if scenePhase != .active {
                         ZStack {

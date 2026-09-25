@@ -39,6 +39,7 @@ struct AccountScreen: View {
                 Button("Sign out", role: .destructive) { signOut = true }
             } else { SignInCard() }
             NavigationLink("Site access", value: Route.siteAccess)
+            if store.owner == nil { NavigationLink("Recover an existing account", value: Route.withdraw) }
             NavigationLink("Replay tour", value: Route.tour)
             Text("merrymen · native iOS preview").font(.caption).foregroundStyle(.secondary)
         }.confirmationDialog("Sign out of Merrymen?", isPresented: $signOut, titleVisibility: .visible) {

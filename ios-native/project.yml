@@ -9,6 +9,9 @@ packages:
     exactVersion: 2.16.2
   MerrymenPolicy:
     path: Policy
+  Reown:
+    url: https://github.com/reown-com/reown-swift
+    exactVersion: 2.4.0
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -18,6 +21,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     PRIVY_APP_ID: cmtnun9wn00rg0dl5txyoxpju
     PRIVY_CLIENT_ID: ""
+    WALLETCONNECT_PROJECT_ID: ""
 targets:
   Merrymen:
     type: application
@@ -48,6 +52,9 @@ targets:
         NSSpeechRecognitionUsageDescription: Transcribe your voice on this device into a draft you review before sending.
         PrivyAppID: $(PRIVY_APP_ID)
         PrivyClientID: $(PRIVY_CLIENT_ID)
+        WalletConnectProjectID: $(WALLETCONNECT_PROJECT_ID)
+        WalletConnectKeychainGroup: $(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)
+        LSApplicationQueriesSchemes: [metamask, rainbow, trust, zerion, argent, safe, phantom, wc]
         UIAppFonts: [DMSans.ttf, GeistPixel.ttf]
     settings:
       base:
@@ -59,6 +66,8 @@ targets:
       - package: MerrymenPolicy
       - package: Privy
         product: Privy
+      - package: Reown
+        product: ReownAppKit
   MerrymenUITests:
     type: bundle.ui-testing
     platform: iOS

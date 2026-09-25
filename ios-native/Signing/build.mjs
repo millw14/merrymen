@@ -35,8 +35,15 @@ const feed = await build({
   tsconfig: path.join(root, 'web/tsconfig.json'), nodePaths: [path.join(dependencyRoot, 'node_modules')],
   metafile: true, legalComments: 'eof', minify: true,
 });
-const sources = [...new Set([...Object.keys(result.metafile.inputs), ...Object.keys(feed.metafile.inputs)])].filter(p => !p.includes('node_modules') && fs.existsSync(path.resolve(root, p))).sort();
-sources.push('package-lock.json', 'ios-native/Signing/build.mjs', 'ios-native/Signing/public-config.json', 'ios-native/Resources/WalletEngine.js', 'ios-native/Resources/WalletRuntime.js', 'ios-native/Resources/FeedEngine.js');
+const cryptography = await build({
+  absWorkingDir: root, entryPoints: ['ios-native/Signing/crypto.ts'], bundle: true,
+  platform: 'browser', target: 'es2020', format: 'iife', globalName: 'WalletCryptography',
+  outfile: path.join(root, 'ios-native/Resources/WalletCryptography.js'),
+  nodePaths: [path.join(dependencyRoot, 'node_modules')], metafile: true, legalComments: 'eof', minify: true,
+  banner: { js: fs.readFileSync(path.join(root, 'ios-native/Signing/crypto-platform.js'), 'utf8') },
+});
+const sources = [...new Set([...Object.keys(result.metafile.inputs), ...Object.keys(feed.metafile.inputs), ...Object.keys(cryptography.metafile.inputs)])].filter(p => !p.includes('node_modules') && fs.existsSync(path.resolve(root, p))).sort();
+sources.push('package-lock.json', 'ios-native/Signing/build.mjs', 'ios-native/Signing/crypto-platform.js', 'ios-native/Signing/public-config.json', 'ios-native/Resources/WalletEngine.js', 'ios-native/Resources/WalletRuntime.js', 'ios-native/Resources/FeedEngine.js', 'ios-native/Resources/WalletCryptography.js');
 const manifest = Object.fromEntries(sources.sort().map(p => [p.replaceAll('\\', '/'), hash(p)]));
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
 console.log(`Bundled ${sources.length} shared source files; native signing integration still requires acceptance testing.`);

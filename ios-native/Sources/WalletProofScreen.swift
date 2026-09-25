@@ -8,6 +8,7 @@ struct WalletProofScreen: View {
     @EnvironmentObject var store: AppStore
     @Environment(\.dismiss) var dismiss
     let linking: Bool
+    @ObservedObject private var connection = ExternalWalletConnection.shared
     @State private var address = ""
     @State private var signature = ""
     @State private var challenge: J?
@@ -26,6 +27,13 @@ struct WalletProofScreen: View {
                     Text(linking ? "Prove ownership with a message signature. This wallet is read only; it does not become your agent's spending key." : "Use the wallet that already owns your Merrymen account. This message signs you in without moving funds.")
                     if let linked { Text("Linked: \(linked)").font(.caption.monospaced()); Button("Unlink holder wallet", role: .destructive) { unlink = true }.disabled(busy) }
                     if challenge == nil {
+                        if connection.configured {
+                            Button(connection.address == nil ? "Connect wallet app" : "Change wallet app") { connection.present() }.disabled(busy)
+                            if let connected = connection.address {
+                                Button("Use connected wallet") { address = connected }.disabled(busy)
+                                Button("Disconnect wallet") { Task { await connection.disconnect() } }.disabled(busy)
+                            }
+                        }
                         TextField("Wallet address (0x…)", text: $address).textInputAutocapitalization(.never).autocorrectionDisabled()
                         Button(linking ? "Prepare linking message" : "Prepare sign-in message") { Task { await start() } }.disabled(busy)
                     }
@@ -36,6 +44,9 @@ struct WalletProofScreen: View {
                         Text(challengeAddress).font(.caption.monospaced()).textSelection(.enabled)
                         Text(challenge["message"].text).font(.caption.monospaced()).textSelection(.enabled)
                         Button("Copy message") { UIPasteboard.general.string = challenge["message"].text }
+                        if connection.configured {
+                            Button("Sign in wallet app") { Task { await signExternal() } }.disabled(busy || connection.address?.lowercased() != challengeAddress.lowercased())
+                        }
                         if linking, challengeAddress.lowercased() == store.owner?.lowercased(), store.privy != nil {
                             Button("Sign with my embedded wallet") { Task { await signEmbedded() } }.disabled(busy)
                         }
@@ -50,6 +61,7 @@ struct WalletProofScreen: View {
             }
         }.navigationTitle(linking ? "Holder wallet" : "Wallet sign-in")
         .task(id: store.generation) { challenge = nil; signature = ""; if linking { await readLinked() } }
+        .onChange(of: connection.address) { _, value in if !busy { challenge = nil; signature = ""; if let value { address = value } } }
         .confirmationDialog("Stop using this wallet for your Circle tier?", isPresented: $unlink, titleVisibility: .visible) {
             Button("Unlink wallet", role: .destructive) { Task { await remove() } }
         }
@@ -74,6 +86,16 @@ struct WalletProofScreen: View {
             guard let user = await store.privy?.getUser(), let wallet = user.embeddedEthereumWallets.first(where: { $0.address.lowercased() == challengeAddress.lowercased() }) else { throw APIError(status: 0, message: "This is not the embedded wallet currently signed in.") }
             signature = try await wallet.provider.request(.personalSign(message: challenge["message"].text, address: wallet.address))
         } catch { self.error = error.localizedDescription }
+    }
+    private func signExternal() async {
+        guard !busy, let challenge else { return }; busy = true; defer { busy = false }
+        do {
+            let generation = store.generation
+            if linking { try await store.verifyOwner(challengeOwner) }
+            let result = try await connection.sign(message: challenge["message"].text, address: challengeAddress)
+            guard generation == store.generation, store.owner == challengeOwner else { throw APIError(status: 409, message: "Your account changed. Prepare a fresh message.") }
+            signature = result
+        } catch { self.challenge = nil; signature = ""; self.error = error.localizedDescription }
     }
     private func submit() async {
         guard !busy, let challenge else { return }; busy = true; defer { busy = false }; error = nil

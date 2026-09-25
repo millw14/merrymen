@@ -5,7 +5,7 @@ import UIKit
 final class PackagingTests: XCTestCase {
     func testAppActuallyShipsArtworkFontsAndWalletLibrary() throws {
         let bundle = Bundle(for: AppStore.self)
-        for name in ["WalletRuntime", "WalletEngine", "FeedEngine"] {
+        for name in ["WalletRuntime", "WalletEngine", "FeedEngine", "WalletCryptography"] {
             let url = try XCTUnwrap(bundle.url(forResource: name, withExtension: "js"))
             XCTAssertGreaterThan(try Data(contentsOf: url).count, 100)
         }
@@ -22,6 +22,31 @@ final class PackagingTests: XCTestCase {
         XCTAssertEqual(try SecureStore.read(service, "test"), Data("replacement".utf8))
         try SecureStore.remove(service, "test")
         XCTAssertNil(try SecureStore.read(service, "test"))
+    }
+    func testRecoveryKeySignsOnlyInsideTheLocalCryptoContext() throws {
+        let key = "0x" + String(repeating: "01", count: 32)
+        let owner = try WalletCryptography.call("address", .object(["key": .string(key)]))
+        XCTAssertEqual(owner, "0x1a642f0e3c3af545e7acbd38b07251b3990914f1")
+        let signed = try WalletCryptography.call("signMessage", .object(["key": .string(key), "hex": .string("0x68656c6c6f")]))
+        XCTAssertEqual(try WalletCryptography.call("recoverAddress", .object(["hex": .string("0x68656c6c6f"), "signature": .string(signed)])), owner)
+        XCTAssertNotEqual(try WalletCryptography.call("recoverAddress", .object(["hex": .string("0x68656c6c6f21"), "signature": .string(signed)])), owner)
+        XCTAssertThrowsError(try WalletCryptography.call("address", .object(["key": .string("0x" + String(repeating: "0", count: 64))])))
+    }
+    func testRecoveryBackupCannotSupplyRemoteCapabilitiesOrAnotherNetwork() throws {
+        let owner = "0x" + String(repeating: "1", count: 40)
+        let account = "0x" + String(repeating: "2", count: 40)
+        let data = Data("{\"owner\":\"\(owner)\",\"smartAccount\":\"\(account)\",\"chainId\":4663,\"rpcUrl\":\"https://untrusted.invalid\",\"serialized\":\"untrusted\",\"grantTokens\":[]}".utf8)
+        let imported = try RecoveryBackup.read(data)
+        XCTAssertNil(imported["rpcUrl"].string); XCTAssertNil(imported["serialized"].string)
+        XCTAssertEqual(imported["smartAccount"].text, account)
+        XCTAssertThrowsError(try RecoveryBackup.read(Data(String(decoding: data, as: UTF8.self).replacingOccurrences(of: "4663", with: "1").utf8)))
+    }
+    @MainActor
+    func testImportedKeyCannotBeUsedToCreateAPermission() async {
+        do {
+            _ = try await WalletHost().call("create", input: .object([:]), store: AppStore(), legacyKey: "0x" + String(repeating: "01", count: 32))
+            XCTFail("A recovery-only key was accepted for a grant")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("only available for recovery")) }
     }
     @MainActor
     func testMalformedPresentationDoesNotPoisonLaterResponses() {

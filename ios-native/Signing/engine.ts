@@ -9,6 +9,8 @@ import { TRENCHER_FACTORY } from "../../web/src/lib/trencher-permission";
 import type { Address, Hex, TypedDataDomain } from "viem";
 import { stringToHex, bytesToHex, getTypesForEIP712Domain, recoverMessageAddress } from "viem";
 import { getUserOperationHash } from "viem/account-abstraction";
+import { ownerFromSigner, planRecovery } from "../../worker/src/recover";
+import { robinhoodChain } from "../../packages/core/src/chain";
 import { planFromBrowser, sweepFromBrowser, getRecoveryTicket, relayUrl, type BrowserWallet } from "../../web/src/lib/recover-client";
 
 declare const nativeCall: (operation: string, args: unknown) => Promise<any>;
@@ -66,6 +68,11 @@ function recoveryWallet(input: { owner: Address; smartAccount: Address; grantTok
   return { ownerAccount: signer(input.owner), smartAccount: input.smartAccount, chainId: 4663, grantTokens: input.grantTokens ?? [] };
 }
 export async function plan(input: Parameters<typeof recoveryWallet>[0]) { return planFromBrowser(recoveryWallet(input)); }
+export async function preview(input: { owner: Address; grantTokens?: string[] }) {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(input.owner) || /^0x0{40}$/.test(input.owner)) throw new Error("Invalid owner.");
+  const plan = await planRecovery({ chain: robinhoodChain, owner: ownerFromSigner(signer(input.owner)), extraTokens: (input.grantTokens ?? []).map(address => ({ address, symbol: '', decimals: 18 })) });
+  return { ...plan, needsGas: plan.gasWei === 0n };
+}
 export async function withdraw(input: Parameters<typeof recoveryWallet>[0] & { to: Address; approvedClass?: { vault: Address; tokens: Address[] } }) {
   if (!/^0x[0-9a-fA-F]{40}$/.test(input.to) || /^0x0{40}$/.test(input.to) || input.to.toLowerCase() === input.smartAccount.toLowerCase()) throw new Error("Choose a valid recipient other than this smart account.");
   return sweepFromBrowser(recoveryWallet(input), input.to, input.approvedClass);

@@ -14,22 +14,26 @@ struct WithdrawScreen: View {
     @State private var acknowledged = false
     @State private var unresolved = false
     @State private var trencherVault: String?
+    @State private var legacyKey: String?
+    @State private var importing = false
     var body: some View {
         Page {
-            if store.owner == nil { SignInCard() } else {
+            Group {
                 Card {
                     Text("Withdraw to your wallet").font(.largeTitle.bold())
                     Text("The owner wallet signs this transfer. Withdrawal gas is paid in ETH by the smart account, even when trading gas is sponsored.")
                     Text("Stand down the agent first if you want it to stop trading while you withdraw.").font(.caption).foregroundStyle(.secondary)
                     NavigationLink("Wallet & permissions", value: Route.permissions)
+                    Button("Recover an older owner-key account") { importing = true }.disabled(wallet.busy || reviewed != nil)
+                    if legacyKey != nil { Text("Using an imported owner key for this recovery session.").font(.caption) }
                     if let trencherVault {
                         Text("This account also has a Trencher vault. Its balances and positions are not included in this recovery plan. Withdrawing the smart account does not empty that vault.").foregroundStyle(.orange)
                         Text(trencherVault).font(.caption.monospaced()).textSelection(.enabled)
                     }
                 }
                 if input != nil {
-                    Button("Read balances and recovery plan") { Task { await readPlan() } }.disabled(wallet.busy || store.privy == nil)
-                    if store.privy == nil { Text("This build needs its Privy iOS Client ID to open the owning wallet.").foregroundStyle(.orange) }
+                    Button("Read balances and recovery plan") { Task { await readPlan() } }.disabled(wallet.busy || (legacyKey == nil && store.privy == nil))
+                    if legacyKey == nil && store.privy == nil { Text("This build needs its Privy iOS Client ID to open the owning wallet.").foregroundStyle(.orange) }
                 }
                 if let plan {
                     Card {
@@ -90,6 +94,16 @@ struct WithdrawScreen: View {
             }
         }.navigationTitle("Withdraw").navigationBarBackButtonHidden(wallet.busy)
         .task { await load() }
+        .onDisappear { if !wallet.busy { legacyKey = nil } }
+        .sheet(isPresented: $importing) {
+            NavigationStack { RecoveryImportScreen { recovered, key in
+                legacyKey = key
+                input = .object(["smartAccount": recovered["smartAccount"], "grantTokens": recovered["grantTokens"], "recoveryOwner": recovered["recoveryOwner"]])
+                plan = recovered; result = nil; acknowledged = false; recipient = ""; trencherVault = nil
+                selectedVault = recovered["classVaults"].array.first(where: { !$0["holdings"].array.isEmpty })?["vault"].text ?? ""
+                do { try readRecords(recovered["recoveryOwner"].text); error = nil } catch { self.error = error.localizedDescription; unresolved = true }
+            } }
+        }
         .sheet(item: $reviewed) { selected in
             NavigationStack { Page {
                 Text("Confirm withdrawal").font(.title.bold())
@@ -111,7 +125,7 @@ struct WithdrawScreen: View {
             let status = try await store.api.request("/api/grants")
             let local = try WalletHost.savedGrant(owner: owner)
             let grant = status["grant"] != .null ? status["grant"] : local ?? .null
-            guard grant["owner"].text.lowercased() == owner.lowercased(), grant["chainId"].number == 4663, grant["binding"]["version"].text == "privy-did-owner-v1" else { throw APIError(status: 0, message: "No recoverable embedded-wallet grant was found. Legacy wallets need their original owner recovery flow.") }
+            guard grant["owner"].text.lowercased() == owner.lowercased(), grant["chainId"].number == 4663, grant["binding"]["version"].text == "privy-did-owner-v1" else { return }
             input = .object(["smartAccount": grant["smartAccount"], "grantTokens": .array(grant["grantTokens"].array)])
             trencherVault = grant["trencherVaultAddress"].string
             try readRecords(owner)
@@ -121,7 +135,7 @@ struct WithdrawScreen: View {
     private func readPlan() async {
         guard let input else { return }; error = nil
         do {
-            plan = try await wallet.call("plan", input: input, store: store)
+            plan = try await wallet.call("plan", input: input, store: store, legacyKey: legacyKey)
             selectedVault = plan?["classVaults"].array.first(where: { !$0["holdings"].array.isEmpty })?["vault"].text ?? ""
         } catch { self.error = error.localizedDescription }
     }
@@ -129,6 +143,7 @@ struct WithdrawScreen: View {
         let to = recipient.trimmingCharacters(in: .whitespacesAndNewlines)
         guard to.range(of: "^0x[0-9a-fA-F]{40}$", options: .regularExpression) != nil, !to.lowercased().hasSuffix(String(repeating: "0", count: 40)), to.lowercased() != input?["smartAccount"].text.lowercased(), let input, let plan else { error = "Enter a valid recipient other than this smart account."; return }
         var fields = input.object; fields["to"] = .string(to)
+        fields["reviewTenant"] = store.owner.map(J.string) ?? .null; fields["reviewGeneration"] = .number(Double(store.generation))
         if let vault = plan["classVaults"].array.first(where: { $0["vault"].text == selectedVault }), !vault["holdings"].array.isEmpty {
             fields["approvedClass"] = .object(["vault": vault["vault"], "tokens": .array(vault["holdings"].array.map { $0["token"] })])
         }
@@ -136,14 +151,17 @@ struct WithdrawScreen: View {
     }
     private func withdraw(_ input: J) async {
         guard !wallet.busy else { return }
-        do { result = try await wallet.call("withdraw", input: input, store: store); plan = nil }
+        do {
+            guard input["reviewTenant"].string == store.owner, input["reviewGeneration"].number == Double(store.generation) else { throw APIError(status: 409, message: "Your account changed. Review the withdrawal again.") }
+            result = try await wallet.call("withdraw", input: input, store: store, legacyKey: legacyKey); plan = nil
+        }
         catch { self.error = "Withdrawal was not confirmed: \(error.localizedDescription) Check the recorded receipt before retrying." }
-        if let owner = store.owner { do { try readRecords(owner) } catch { self.error = error.localizedDescription; unresolved = true } }
+        if let owner = input["recoveryOwner"].string ?? store.owner { do { try readRecords(owner) } catch { self.error = error.localizedDescription; unresolved = true } }
         reviewed = nil
     }
     private func reconcile() async {
         guard let input else { return }; error = nil
-        do { _ = try await wallet.call("reconcile", input: input, store: store); if let owner = store.owner { try readRecords(owner) } }
+        do { _ = try await wallet.call("reconcile", input: input, store: store, legacyKey: legacyKey); if let owner = input["recoveryOwner"].string ?? store.owner { try readRecords(owner) } }
         catch { self.error = error.localizedDescription }
     }
 }

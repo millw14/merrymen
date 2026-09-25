@@ -12,6 +12,8 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
     private var runtime: WalletRuntime?
     private weak var store: AppStore?
     private var identity = ""
+    private var signingOwner = ""
+    private var legacyKey: String?
     private var did = ""
     private var generation = 0
     private var operation = ""
@@ -28,20 +30,30 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
     }()
     private var service: String { "dev.merrymen.wallet.\(identity.lowercased())" }
 
-    func call(_ name: String, input: J, store: AppStore) async throws -> J {
+    func call(_ name: String, input: J, store: AppStore, legacyKey: String? = nil) async throws -> J {
         guard !busy else { throw fail("A wallet operation is already running.") }
         let callID = UUID(); runID = callID
-        busy = true; defer { busy = false; operation = ""; runtime = nil; runID = nil }
-        guard let owner = store.owner else { throw fail("Sign in before opening your wallet.") }
+        busy = true; defer { busy = false; operation = ""; runtime = nil; runID = nil; self.legacyKey = nil }
+        guard store.owner != nil || legacyKey != nil else { throw fail("Sign in before opening your wallet.") }
+        let owner = store.owner ?? ""
         self.store = store; identity = owner; generation = store.generation
         sessionBinding = store.api.binding()
-        try await store.verifyOwner(owner)
-        guard let user = await store.privy?.getUser(), user.embeddedEthereumWallets.contains(where: { $0.address.lowercased() == owner.lowercased() }) else {
-            throw fail("Sign in to the embedded wallet that owns this account.")
+        if !owner.isEmpty { try await store.verifyOwner(owner) }
+        signingOwner = owner
+        if let legacyKey {
+            guard ["preview", "plan", "withdraw", "reconcile"].contains(name) else { throw fail("An imported key is only available for recovery.") }
+            signingOwner = try WalletCryptography.call("address", .object(["key": .string(legacyKey)]))
+            guard input["recoveryOwner"].string?.lowercased() == signingOwner.lowercased() else { throw fail("The recovery key does not match the selected owner.") }
+            self.legacyKey = legacyKey; did = ""
+        } else {
+            guard let user = await store.privy?.getUser(), user.embeddedEthereumWallets.contains(where: { $0.address.lowercased() == owner.lowercased() }) else {
+                throw fail("Sign in to the embedded wallet that owns this account.")
+            }
+            did = user.id
         }
-        did = user.id; operation = name; challengeNonce = nil
+        operation = name; challengeNonce = nil
         var fields = input.object
-        fields["owner"] = .string(owner); fields["tenant"] = .string(owner); fields["did"] = .string(did)
+        fields["owner"] = .string(signingOwner); fields["tenant"] = .string(owner); fields["did"] = .string(did)
         account = fields["smartAccount"]?.text ?? fields["expectAccount"]?.text ?? ""
         recipient = fields["to"]?.text ?? ""
         if name == "withdraw", try journal().contains(where: { $0["settled"].bool != true }) { throw fail("A previous withdrawal is unresolved. Check its receipt before signing another.") }
@@ -75,8 +87,8 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
         guard let data = try SecureStore.read("dev.merrymen.wallet.\(owner.lowercased())", "withdrawals") else { return [] }
         return try JSONDecoder().decode([J].self, from: data)
     }
-    private func journal() throws -> [J] { try Self.withdrawals(owner: identity) }
-    private func saveJournal(_ items: [J]) throws { try SecureStore.write(service, "withdrawals", JSONEncoder().encode(items)) }
+    private func journal() throws -> [J] { try Self.withdrawals(owner: signingOwner) }
+    private func saveJournal(_ items: [J]) throws { try SecureStore.write("dev.merrymen.wallet.\(signingOwner.lowercased())", "withdrawals", JSONEncoder().encode(items)) }
 
     private func storage(_ op: String, _ args: J) throws -> J {
         guard store?.generation == generation, store?.owner == identity else { throw fail("Your account changed. Open your wallet again.") }
@@ -114,30 +126,31 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
     }
     private func handle(_ op: String, _ args: J) async throws -> J {
         let callID = runID
-        _ = try await currentUser()
+        guard let store, (store.owner ?? "") == identity, store.generation == generation else { throw fail("The wallet session changed. Review the action again.") }
+        if legacyKey == nil { _ = try await currentUser() }
         guard callID != nil, callID == runID else { throw fail("Wallet operation closed.") }
         switch op {
         case "status": status = args["message"].text; return .null
         case "accessToken": return .string(try await currentUser().getAccessToken())
         case "signMessage", "signTypedData":
-            guard operation != "plan", args["address"].text.lowercased() == identity.lowercased(), let store else { throw fail("This operation cannot request that signature.") }
-            try await store.verifyOwner(identity)
+            guard !["plan", "preview"].contains(operation), args["address"].text.lowercased() == signingOwner.lowercased() else { throw fail("This operation cannot request that signature.") }
+            if !identity.isEmpty { try await store.verifyOwner(identity) }
             guard callID == runID else { throw fail("Wallet operation closed.") }
-            let user = try await currentUser()
-            guard callID == runID else { throw fail("Wallet operation closed.") }
-            guard let wallet = user.embeddedEthereumWallets.first(where: { $0.address.lowercased() == identity.lowercased() }) else { throw fail("The owning wallet is unavailable.") }
-            let request: EthereumRpcRequest
             if op == "signMessage" {
                 let hex = args["hex"].text
-                guard WalletSignaturePolicy.permitsPersonalSign(hex: hex, operation: operation, owner: identity, did: did, expectedAccount: account, nonce: challengeNonce) else { throw fail("The wallet challenge does not match the action you reviewed.") }
-                request = EthereumRpcRequest(method: "personal_sign", params: [hex, wallet.address])
+                guard WalletSignaturePolicy.permitsPersonalSign(hex: hex, operation: operation, owner: signingOwner, did: did, expectedAccount: account, nonce: challengeNonce) else { throw fail("The wallet challenge does not match the action you reviewed.") }
             } else {
                 guard operation != "reconcile" else { throw fail("Receipt checks cannot sign spending permissions.") }
                 let chain = args["typedData"]["domain"]["chainId"]
                 guard chain.number == 4663 || chain.string == "4663" else { throw fail("The signature names the wrong network.") }
-                let json = String(decoding: try JSONEncoder().encode(args["typedData"]), as: UTF8.self)
-                request = EthereumRpcRequest(method: "eth_signTypedData_v4", params: [wallet.address, json])
             }
+            if let legacyKey {
+                var fields = args.object; fields["key"] = .string(legacyKey)
+                return .string(try WalletCryptography.call(op, .object(fields)))
+            }
+            let user = try await currentUser()
+            guard callID == runID, let wallet = user.embeddedEthereumWallets.first(where: { $0.address.lowercased() == signingOwner.lowercased() }) else { throw fail("The owning wallet is unavailable.") }
+            let request = op == "signMessage" ? EthereumRpcRequest(method: "personal_sign", params: [args["hex"].text, wallet.address]) : EthereumRpcRequest(method: "eth_signTypedData_v4", params: [wallet.address, String(decoding: try JSONEncoder().encode(args["typedData"]), as: UTF8.self)])
             return .string(try await wallet.provider.request(request))
         case "fetch": return try await fetch(args)
         default: throw fail("Unsupported wallet capability.")
@@ -153,7 +166,7 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
               (body?.count ?? 0) <= 2_000_000, let store else { throw fail("The wallet requested an unsupported network destination or method.") }
         let rpcMethod = requestJSON["method"].text
         if rpcMethod == "eth_sendUserOperation" {
-            try await store.verifyOwner(identity)
+            if !identity.isEmpty { try await store.verifyOwner(identity) }
             guard callID != nil, callID == runID else { throw fail("Wallet operation closed before submission.") }
             let hash = args["metadata"]["hash"].text
             guard hash.range(of: "^0x[0-9a-fA-F]{64}$", options: .regularExpression) != nil,
