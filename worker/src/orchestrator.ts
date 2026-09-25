@@ -1263,6 +1263,105 @@ function killChild(tenant: string): void {
   }, 3_000);
 }
 
+/** Bring the running set in line with the store: spawn new tenants, stop killed ones. */
+export async function reconcile(): Promise<void> {
+  if (stopping) return;
+  const store = getGrantStore();
+  let tenants: `0x${string}`[];
+  try {
+    tenants = await store.listTenants();
+  } catch (e) {
+    log(`store unreadable, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+  const wanted = new Set(tenants.map((t) => t.toLowerCase()));
+
+  // A lease whose connection dropped no longer protects its tenant — Postgres
+  // has released the lock and another replica may hold it. Stand the child down
+  // and drop the lease; the acquire below will try to re-take it (or find the
+  // other replica now owns it). This is what makes the lock a live guarantee and
+  // not just a start-time check.
+  for (const [tenant, lease] of [...leases]) {
+    if (!lease.healthy()) {
+      log(`${tenant}: lease lost (connection dropped) — standing the child down until it can be re-leased`);
+      if (children.has(tenant)) killChild(tenant);
+      await releaseLease(tenant);
+    }
+  }
+
+  // Spawn any wanted tenant that isn't running — but only behind a lease. Acquire
+  // one first (unless we already hold it from a previous reconcile / across a
+  // crash restart); if another replica holds it, skip this tenant and try again
+  // next reconcile.
+  for (const tenant of tenants) {
+    const lc = tenant.toLowerCase() as `0x${string}`;
+    if (children.has(lc)) continue;
+    /**
+     * A TENANT THE RESTART POLICY GAVE UP ON IS NOT A TENANT THAT ISN'T RUNNING.
+     *
+     * This loop's job is "spawn anything wanted that is not running", and a
+     * crash-looping child is not running — so every fifteen seconds it was
+     * respawned here with `restarts` defaulting to 0, wiping the ladder and the
+     * MAX_RESTARTS ceiling the exit handler had just reached. The measured
+     * result is roughly nine restarts every two minutes, indefinitely, each one
+     * a fresh 28-call cold arm including a 200,000-block getLogs walk.
+     *
+     * The cool-off expires, and when it does the tenant is retried with the
+     * restart count it had — not with a clean slate, which is what made the
+     * ceiling unreachable in the first place.
+     */
+    const cool = gaveUpUntil.get(lc);
+    if (cool && Date.now() < cool.until) continue;
+    if (cool) {
+      gaveUpUntil.delete(lc);
+      log(`${lc}: stand-down over — trying once more`);
+    }
+    if (!leases.has(lc)) {
+      let lease: TenantLease | null;
+      try {
+        lease = await acquireTenantLease(lc);
+      } catch (e) {
+        log(`${lc}: lease attempt failed, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
+      if (!lease) {
+        log(`${lc}: leased by another replica — not arming here`);
+        continue;
+      }
+      leases.set(lc, lease);
+    }
+    await spawnChild(lc, cool?.restarts ?? 0);
+  }
+  // Refresh every running child's settings.json so a tenant's config change
+  // reaches it (the worker re-reads settings.json each tick). Cheap: one small
+  // file per tenant, and unchanged content is a harmless rewrite. The shared
+  // seenBotTokens set de-duplicates Telegram bots across the fleet (see the guard
+  // in writeSettingsForChild).
+  const seenBotTokens = new Set<string>();
+  for (const tenant of children.keys()) {
+    await writeSettingsForChild(tenant as `0x${string}`, seenBotTokens);
+    // AND THEIR GRANT, for the same reason and on the same clock. Settings
+    // reached a live agent in fifteen seconds while a new SIGNATURE reached it
+    // only on a restart — so an owner who re-signed to cover a token watched
+    // their agent keep refusing it. See refreshGrantForChild.
+    await refreshGrantForChild(tenant as `0x${string}`);
+  }
+  // Stop (and forget) any running child whose grant is gone — the kill switch.
+  for (const tenant of [...children.keys()]) {
+    if (!wanted.has(tenant)) {
+      log(`${tenant} grant removed — standing it down`);
+      await standDownKilled(tenant);
+    }
+  }
+  // Release any lease we still hold for a tenant that is no longer wanted — both
+  // the kill-switch case above and a lease left over from a child that has since
+  // exited. Holding a lease for a tenant we won't arm would block another replica
+  // (or a later re-arm) for no reason.
+  for (const tenant of [...leases.keys()]) {
+    if (!wanted.has(tenant)) await releaseLease(tenant);
+  }
+}
+
 /**
  * Tenants between the kill switch's SIGTERM and their released lease.
  * spawnChild refuses them.
@@ -1414,105 +1513,6 @@ async function recordKill(tenant: string, child: Child): Promise<void> {
       `${tenant}: kill recorded — agents row set to killed (${r.marked} row${r.marked === 1 ? "" : "s"}), ` +
         (r.event === "written" ? "KILL SWITCH event written" : "the child's own KILL SWITCH event was already there"),
     );
-  }
-}
-
-/** Bring the running set in line with the store: spawn new tenants, stop killed ones. */
-export async function reconcile(): Promise<void> {
-  if (stopping) return;
-  const store = getGrantStore();
-  let tenants: `0x${string}`[];
-  try {
-    tenants = await store.listTenants();
-  } catch (e) {
-    log(`store unreadable, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
-    return;
-  }
-  const wanted = new Set(tenants.map((t) => t.toLowerCase()));
-
-  // A lease whose connection dropped no longer protects its tenant — Postgres
-  // has released the lock and another replica may hold it. Stand the child down
-  // and drop the lease; the acquire below will try to re-take it (or find the
-  // other replica now owns it). This is what makes the lock a live guarantee and
-  // not just a start-time check.
-  for (const [tenant, lease] of [...leases]) {
-    if (!lease.healthy()) {
-      log(`${tenant}: lease lost (connection dropped) — standing the child down until it can be re-leased`);
-      if (children.has(tenant)) killChild(tenant);
-      await releaseLease(tenant);
-    }
-  }
-
-  // Spawn any wanted tenant that isn't running — but only behind a lease. Acquire
-  // one first (unless we already hold it from a previous reconcile / across a
-  // crash restart); if another replica holds it, skip this tenant and try again
-  // next reconcile.
-  for (const tenant of tenants) {
-    const lc = tenant.toLowerCase() as `0x${string}`;
-    if (children.has(lc)) continue;
-    /**
-     * A TENANT THE RESTART POLICY GAVE UP ON IS NOT A TENANT THAT ISN'T RUNNING.
-     *
-     * This loop's job is "spawn anything wanted that is not running", and a
-     * crash-looping child is not running — so every fifteen seconds it was
-     * respawned here with `restarts` defaulting to 0, wiping the ladder and the
-     * MAX_RESTARTS ceiling the exit handler had just reached. The measured
-     * result is roughly nine restarts every two minutes, indefinitely, each one
-     * a fresh 28-call cold arm including a 200,000-block getLogs walk.
-     *
-     * The cool-off expires, and when it does the tenant is retried with the
-     * restart count it had — not with a clean slate, which is what made the
-     * ceiling unreachable in the first place.
-     */
-    const cool = gaveUpUntil.get(lc);
-    if (cool && Date.now() < cool.until) continue;
-    if (cool) {
-      gaveUpUntil.delete(lc);
-      log(`${lc}: stand-down over — trying once more`);
-    }
-    if (!leases.has(lc)) {
-      let lease: TenantLease | null;
-      try {
-        lease = await acquireTenantLease(lc);
-      } catch (e) {
-        log(`${lc}: lease attempt failed, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
-        continue;
-      }
-      if (!lease) {
-        log(`${lc}: leased by another replica — not arming here`);
-        continue;
-      }
-      leases.set(lc, lease);
-    }
-    await spawnChild(lc, cool?.restarts ?? 0);
-  }
-  // Refresh every running child's settings.json so a tenant's config change
-  // reaches it (the worker re-reads settings.json each tick). Cheap: one small
-  // file per tenant, and unchanged content is a harmless rewrite. The shared
-  // seenBotTokens set de-duplicates Telegram bots across the fleet (see the guard
-  // in writeSettingsForChild).
-  const seenBotTokens = new Set<string>();
-  for (const tenant of children.keys()) {
-    await writeSettingsForChild(tenant as `0x${string}`, seenBotTokens);
-    // AND THEIR GRANT, for the same reason and on the same clock. Settings
-    // reached a live agent in fifteen seconds while a new SIGNATURE reached it
-    // only on a restart — so an owner who re-signed to cover a token watched
-    // their agent keep refusing it. See refreshGrantForChild.
-    await refreshGrantForChild(tenant as `0x${string}`);
-  }
-  // Stop (and forget) any running child whose grant is gone — the kill switch.
-  for (const tenant of [...children.keys()]) {
-    if (!wanted.has(tenant)) {
-      log(`${tenant} grant removed — standing it down`);
-      await standDownKilled(tenant);
-    }
-  }
-  // Release any lease we still hold for a tenant that is no longer wanted — both
-  // the kill-switch case above and a lease left over from a child that has since
-  // exited. Holding a lease for a tenant we won't arm would block another replica
-  // (or a later re-arm) for no reason.
-  for (const tenant of [...leases.keys()]) {
-    if (!wanted.has(tenant)) await releaseLease(tenant);
   }
 }
 
