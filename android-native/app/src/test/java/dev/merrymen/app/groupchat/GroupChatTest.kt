@@ -5,6 +5,7 @@ import dev.merrymen.app.data.GroupChatRoom
 import dev.merrymen.app.data.GroupChatState
 import dev.merrymen.app.data.ReplyTarget
 import dev.merrymen.app.data.RoomStatus
+import dev.merrymen.app.data.composerEdit
 import dev.merrymen.app.data.presenceLine
 import dev.merrymen.app.data.replyTarget
 import dev.merrymen.app.net.Fixtures
@@ -303,6 +304,22 @@ class GroupChatTest {
     withTimeout(5_000) { while (pauses.size < 6) delay(5) }
     failing.cancel()
     assertEquals(listOf(3_000L, 6_000L, 12_000L, 24_000L, 30_000L, 30_000L), pauses.take(6))
+  }
+
+  /**
+   * A BOX ALREADY OVER THE CAP IS NEVER CUT BY AN EDIT. Refused words come
+   * back above a newer draft, and together they can pass 500; cutting to the
+   * cap on the next keystroke dropped the newer draft's tail without a word.
+   */
+  @Test fun anEditNeverCutsABoxAlreadyOverTheCap() {
+    val refusedAndNewer = "r".repeat(300) + "\n" + "n".repeat(300)
+    assertEquals(601, refusedAndNewer.length)
+    assertEquals("a keystroke that would make it longer does nothing", refusedAndNewer, composerEdit(refusedAndNewer, refusedAndNewer + "x"))
+    val trimmed = refusedAndNewer.drop(10)
+    assertEquals("a trim is kept whole, even while still over", trimmed, composerEdit(refusedAndNewer, trimmed))
+    // Under the cap, typing stops at 500 as it always did.
+    assertEquals("a".repeat(500), composerEdit("a".repeat(499), "a".repeat(501)))
+    assertEquals("ok", composerEdit("o", "ok"))
   }
 
   @Test fun aTurnEndEmptiesTheRoomAndDropsAnAnswerStillInFlight() = runBlocking {

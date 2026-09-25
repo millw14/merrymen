@@ -78,6 +78,7 @@ import dev.merrymen.app.data.RoomStatus
 import dev.merrymen.app.data.SendResult
 import dev.merrymen.app.data.chatItems
 import dev.merrymen.app.data.composerAfter
+import dev.merrymen.app.data.composerEdit
 import dev.merrymen.app.data.excerpt
 import dev.merrymen.app.data.isMine
 import dev.merrymen.app.data.mentionParts
@@ -460,6 +461,19 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
     }
   }
 
+  // REFUSED WORDS COME BACK THROUGH THE ROOM, not the callback: the answer
+  // can land after this composer is gone (Back, a profile, a rotation), and
+  // the words then wait in the room's state for the next one to take, once.
+  LaunchedEffect(s.returned) {
+    s.returned.forEach { r -> if (room.takeReturned(r)) settle(r) }
+  }
+
+  /** A send's answer. Refused words are left to the room (above); everything else is settled here. */
+  fun answered(r: SendResult) {
+    if (r is SendResult.Refused && r.words != null) return
+    settle(r)
+  }
+
   fun jumpTo(id: Long) {
     val key = s.keys[id] ?: "m$id"
     val index = rows.indexOfFirst { it.key == key }
@@ -539,7 +553,7 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
               onToken = { token -> nav.navigate(Routes.token(token)) },
               onResend = { id ->
                 error = null
-                room.resend(id) { r -> settle(r) }
+                room.resend(id) { r -> answered(r) }
               },
               onDiscard = { id -> room.discard(id) },
             )
@@ -589,7 +603,7 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
             // The words come back on a refusal, so it never costs the owner
             // what they typed; an unconfirmed line is NOT a failure — it is on
             // screen, marked, with Send again (settle).
-            room.send(text, target?.id) { r -> settle(r) }
+            room.send(text, target?.id) { r -> answered(r) }
           },
         )
       } else {
@@ -690,8 +704,9 @@ private fun GcComposer(
     Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
       Column(Modifier.weight(1f)) {
         // Capped at the server's 500 on the way in, so nobody types past a
-        // limit the gate would only refuse after the fact.
-        GcField(draft, { onDraft(it.take(GC_COMPOSER_MAX)) }, "Say something to the room…", singleLine = false)
+        // limit the gate would only refuse after the fact — but never cut
+        // below what is already there (composerEdit).
+        GcField(draft, { onDraft(composerEdit(draft, it)) }, "Say something to the room…", singleLine = false)
         if (draft.length >= GC_COMPOSER_MAX - 100) {
           Text(
             "${draft.length}/$GC_COMPOSER_MAX",

@@ -150,6 +150,16 @@ data class GroupChatState(
   val waitWords: String? = null,
   /** Bumped when the log was REPLACED rather than added to. */
   val epoch: Int = 0,
+  /**
+   * REFUSED WORDS NOT YET BACK IN A BOX. Every refusal that hands words back
+   * ([SendResult.Refused.words]) is kept here, the same object the send's
+   * callback gets, until a composer takes it ([GroupChatRoom.takeReturned]).
+   * The answer can land after the screen that pressed Send is gone — Back, a
+   * tap on a name, a rotation — and a callback into that screen's state wrote
+   * the words into a box nobody would see again: the line was off the screen,
+   * the box empty, and nothing said why. The next composer takes them from here.
+   */
+  val returned: List<SendResult.Refused> = emptyList(),
 )
 
 /** What became of a send. */
@@ -476,7 +486,7 @@ class GroupChatRoom(
     val text = body.trim()
     val local = localRefusal(text)
     if (local != null) {
-      onDone(SendResult.Refused(local, body, replyTo))
+      onDone(kept(SendResult.Refused(local, body, replyTo)))
       return
     }
     var line: PendingLine? = null
@@ -498,7 +508,7 @@ class GroupChatRoom(
     if (l == null) {
       // Waiting out a rate limit: the countdown under the box already says
       // so, and a second sentence saying it again is how two disagreed.
-      onDone(SendResult.Refused(if (busy) ONE_AT_A_TIME else "", body, replyTo))
+      onDone(kept(SendResult.Refused(if (busy) ONE_AT_A_TIME else "", body, replyTo)))
       return
     }
     scope.launch { onDone(deliver(l, resend = false)) }
@@ -535,6 +545,27 @@ class GroupChatRoom(
       return
     }
     scope.launch { onDone(deliver(l, resend = true)) }
+  }
+
+  /**
+   * TAKE REFUSED WORDS BACK INTO A BOX, once. True when [r] was still waiting
+   * ([GroupChatState.returned]) and is now the caller's to put in the box;
+   * false when another composer already took it. By identity, not equality:
+   * the same words refused twice are two refusals.
+   */
+  fun takeReturned(r: SendResult.Refused): Boolean {
+    var took = false
+    _state.update { s ->
+      val left = s.returned.filterNot { it === r }
+      took = left.size != s.returned.size
+      if (took) s.copy(returned = left) else s
+    }
+    return took
+  }
+
+  private fun kept(r: SendResult.Refused): SendResult.Refused {
+    if (r.words != null) _state.update { it.copy(returned = it.returned + r) }
+    return r
   }
 
   /** Take an unconfirmed line off this screen. It changes nothing on the server. */
@@ -592,18 +623,21 @@ class GroupChatRoom(
     if (refused != null && refused.status < 500 && (!resend || refused.status == 400 || refused.status == 413)) {
       // A REAL REFUSAL: the line was not stored. It comes off the screen — a
       // bubble for a message nobody else can see is a lie to the one person
-      // looking — and the words go back in the box.
-      _state.update { s ->
-        s.copy(
-          pending = s.pending.filterNot { it.clientId == line.clientId },
-          posting = false,
-        ).waiting(waitSec, waitWords, t)
-      }
-      return SendResult.Refused(
+      // looking — and the words go back in the box: kept in `returned` in the
+      // same update, so they outlive the screen that pressed Send.
+      val refusal = SendResult.Refused(
         if (waitSec != null) "" else postError(refused.status, refused.message, refused.retryAfterSec),
         words = line.body,
         replyTo = line.replyTo,
       )
+      _state.update { s ->
+        s.copy(
+          pending = s.pending.filterNot { it.clientId == line.clientId },
+          posting = false,
+          returned = s.returned + refusal,
+        ).waiting(waitSec, waitWords, t)
+      }
+      return refusal
     }
     // THE ANSWER WAS LOST — no answer, a 5xx (a proxy's 502 or 504 may stand
     // in front of a commit), a 2xx with no line in it, or a resend refused
@@ -824,6 +858,22 @@ fun draftAfterRefusal(draft: String, refused: String): String = when {
   refused.isBlank() -> draft
   draft.isBlank() -> refused
   else -> refused + "\n" + draft
+}
+
+/**
+ * WHAT AN EDIT LEAVES IN THE BOX. Typing stops at [GC_COMPOSER_MAX], as the
+ * gate would only refuse the rest after the fact. But a box ALREADY over it —
+ * refused words put back above a newer draft ([draftAfterRefusal]) — is never
+ * cut by an edit: cutting to the cap on the first keystroke silently dropped
+ * the tail, which was the owner's newer line. There, a keystroke that would
+ * make it longer does nothing, a trim is kept whole, and Send says "Keep it
+ * under 500 characters." until the owner has made it fit.
+ */
+fun composerEdit(before: String, typed: String): String = when {
+  typed.length <= GC_COMPOSER_MAX -> typed
+  typed.length <= before.length -> typed
+  before.length >= GC_COMPOSER_MAX -> before
+  else -> typed.take(GC_COMPOSER_MAX)
 }
 
 /** The server's own sentence, or null when it wrote none (the client's "HTTP <code>"). */

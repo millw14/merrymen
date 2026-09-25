@@ -267,6 +267,31 @@ class GroupChatPostTest {
     assertEquals(posts, room.posts().size)
   }
 
+  /**
+   * REFUSED WORDS OUTLIVE THE SCREEN THAT SENT THEM. They wait in the room's
+   * state — the same object the callback got — until one composer takes them,
+   * once, so an answer that lands after Back or a rotation still puts them in
+   * the next box instead of into a screen nobody will see again.
+   */
+  @Test fun refusedWordsWaitInTheRoomUntilAComposerTakesThemOnce() = runBlocking {
+    roomWith { json("""{"error":"Links can't be posted in the room."}""", 400) }
+    val r = ready(this)
+    val refused = r.sendAndWait("see example.com", replyTo = 100) as SendResult.Refused
+    assertEquals("see example.com", refused.words)
+    assertTrue(r.state.value.returned.single() === refused)
+    assertTrue(r.takeReturned(refused))
+    assertFalse("taken once, by one composer", r.takeReturned(refused))
+    assertTrue(r.state.value.returned.isEmpty())
+
+    // Refused here, before anything is sent, the same way.
+    val local = r.sendAndWait("   ") as SendResult.Refused
+    assertTrue(r.state.value.returned.single() === local)
+
+    // A turn end takes them with everything else: they are not the next reader's.
+    r.forget()
+    assertTrue(r.state.value.returned.isEmpty())
+  }
+
   @Test fun anEchoThatArrivesBeforeALostAnswerSettlesTheLine() = runBlocking {
     val posted = CountDownLatch(1)
     val release = CountDownLatch(1)
