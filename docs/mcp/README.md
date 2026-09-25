@@ -7,6 +7,11 @@ speaks MCP over Streamable HTTP with OAuth.
 
 **Connect in one click:** <https://app.merrymen.dev/connect/mcp>
 
+**In Claude Code:** `/plugin marketplace add millw14/merrymen`, then
+`/plugin install merrymen@merrymen` (run one at a time), for the server plus
+`/merrymen:status`, `/merrymen:why`, `/merrymen:portfolio` and more. See
+[Claude Code](clients.md#claude-code).
+
 **Server address:** `https://mcp.merrymen.dev/mcp`
 
 Merrymen stays the source of truth for your identity, your agent, your limits,

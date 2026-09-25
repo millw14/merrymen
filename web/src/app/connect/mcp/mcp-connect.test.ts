@@ -61,6 +61,21 @@ test("every control has an accessible name, and every copy announces itself", ()
   }
 });
 
+test("Claude Code comes first among the others, with the plugin's two commands copied one at a time", () => {
+  const html = unescape(render(true));
+  const others = html.slice(html.indexOf("Other assistants"));
+  assert.ok(others.indexOf("Claude Code") < others.indexOf("ChatGPT"), "Claude Code is the first row");
+  for (const line of ["/plugin marketplace add millw14/merrymen", "/plugin install merrymen@merrymen"]) {
+    assert.ok(html.includes(`<code>${line}</code>`), `${line} in a block of its own`);
+  }
+  assert.match(html, /aria-label="Copy the first Claude Code command"/);
+  assert.match(html, /aria-label="Copy the second Claude Code command"/);
+  // Any other server (staging, self-hosted) gets no plugin, which points at production.
+  const other = renderToStaticMarkup(createElement(McpConnectClient, { url: "https://mcp.staging.example/mcp", enabled: true, disabledWhy: null }));
+  assert.ok(!other.includes("/plugin install"));
+  assert.ok(other.includes("claude mcp add --transport http --scope user merrymen https://mcp.staging.example/mcp"));
+});
+
 test("when connections are off, the page says so and offers nothing to install", () => {
   const html = render(false, "MCP is available on hosted Merrymen only");
   assert.match(html, /Assistant connections are switched off on this server/);

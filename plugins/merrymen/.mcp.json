@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "merrymen": {
+      "type": "http",
+      "url": "https://mcp.merrymen.dev/mcp"
+    }
+  }
+}

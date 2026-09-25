@@ -18,7 +18,7 @@
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ArrowUpRight, Check, ChevronDown, Copy, Plug } from "lucide-react";
-import { installCommands, installLinks } from "@/mcp/install-links";
+import { claudeCodePluginCommands, installCommands, installLinks } from "@/mcp/install-links";
 import { BrandLockup } from "../BrandLockup";
 
 /** The fields of a GET /api/mcp/connections row that the status line reads. */
@@ -156,6 +156,8 @@ function Row({ name, children }: { name: string; children: ReactNode }) {
 export function McpConnectClient({ url, enabled, disabledWhy }: { url: string; enabled: boolean; disabledWhy: string | null }) {
   const links = installLinks(url);
   const commands = installCommands(url);
+  // The Claude Code plugin, offered only where this page serves the address it points at.
+  const plugin = claudeCodePluginCommands(url);
   const addressId = useId();
   const [connected, setConnected] = useState<ReturnType<typeof connectedSummary>>(null);
 
@@ -222,6 +224,16 @@ export function McpConnectClient({ url, enabled, disabledWhy }: { url: string; e
             <section className="mcp-hub-section" aria-labelledby="mcp-hub-others">
               <h2 id="mcp-hub-others" className="mcp-hub-h2">Other assistants</h2>
               <ul className="mcp-hub-rows">
+                <Row name="Claude Code">
+                  {plugin ? <>
+                    <p>In Claude Code, run these one at a time:</p>
+                    <Command lines={[plugin[0]]} label="Copy the first Claude Code command" />
+                    <Command lines={[plugin[1]]} label="Copy the second Claude Code command" />
+                    <p>Then type <code>/mcp</code>, choose Merrymen and Authenticate. You get <code>/merrymen:status</code>, <code>/merrymen:why</code>, <code>/merrymen:portfolio</code> and more, or just ask.</p>
+                    <p className="mcp-hub-fine">Added Merrymen to Claude already? Claude Code signed in to the same account has it too. Without the plugin, from a terminal:</p>
+                  </> : <p>Added it to Claude already? It’s in Claude Code too. Otherwise:</p>}
+                  <Command lines={commands.claudeCode} label="Copy both Claude Code terminal commands" />
+                </Row>
                 <Row name="ChatGPT">
                   <p>Turn on Developer mode (Settings → Security and login), then create an app with the address below.</p>
                   <div className="mcp-hub-actions">
@@ -232,10 +244,6 @@ export function McpConnectClient({ url, enabled, disabledWhy }: { url: string; e
                 <Row name="Codex">
                   <Command lines={commands.codex} label="Copy the Codex command" />
                   <p>It opens Merrymen to sign in by itself. The Codex app and IDE extension pick it up too.</p>
-                </Row>
-                <Row name="Claude Code">
-                  <p>Added it to Claude already? It’s in Claude Code too. Otherwise:</p>
-                  <Command lines={commands.claudeCode} label="Copy both Claude Code commands" />
                 </Row>
                 <Row name="Cursor">
                   <div className="mcp-hub-actions">

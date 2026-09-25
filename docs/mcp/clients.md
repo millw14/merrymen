@@ -68,8 +68,46 @@ screen shows "Verified at claude.ai". Callback: `https://claude.ai/api/mcp/auth_
 
 ## Claude Code
 
-If you already added Merrymen on claude.ai and Claude Code is signed in to the
-same account, it is there already (`/mcp` lists it). Otherwise:
+**Fastest: the Merrymen plugin.** Inside Claude Code, run these one at a time
+(pasted together they would be sent as one message):
+
+```text
+/plugin marketplace add millw14/merrymen
+/plugin install merrymen@merrymen
+```
+
+From a terminal, the same is `claude plugin marketplace add millw14/merrymen`
+then `claude plugin install merrymen@merrymen`. Then sign in once: type `/mcp`,
+choose `plugin:merrymen:merrymen`, choose **Authenticate**, and click
+**Allow** on the Merrymen page that opens (from a terminal:
+`claude mcp login plugin:merrymen:merrymen`). `/merrymen:connect` walks
+through it.
+
+The plugin adds the server and these commands, which Claude also picks by
+itself when you just ask:
+
+| Command | What it does |
+|---|---|
+| `/merrymen:status` | Running or not, paper or live, blockers, permission expiry |
+| `/merrymen:why` | Why the agent has or hasn't traded |
+| `/merrymen:portfolio` | Cash, positions, P&L; paper and live kept apart |
+| `/merrymen:week` | A week-in-review and anything you need to do |
+| `/merrymen:token <address or symbol>` | Research a token and whether the agent could trade it |
+| `/merrymen:connect` | Sign in, or fix a connection |
+
+The plugin lives in [`plugins/merrymen`](../../plugins/merrymen); the
+marketplace that lists it is [`.claude-plugin/marketplace.json`](../../.claude-plugin/marketplace.json).
+Its server is always the production address, so the connect page offers it
+only when it serves that address.
+
+**Already added Merrymen on claude.ai?** If Claude Code is signed in to the same
+Claude account, the connector is there already (`/mcp` lists it as
+`claude.ai Merrymen`; in the Claude desktop app it is under **+** →
+**Connectors**). Installing the plugin still adds the commands. Its server
+then takes precedence over the connector (Claude Code treats two servers at the
+same address as one), so you sign in once more.
+
+**Without the plugin:**
 
 ```bash
 claude mcp add --transport http --scope user merrymen https://mcp.merrymen.dev/mcp
@@ -247,6 +285,7 @@ by `web/src/mcp/install-links.test.ts` but were not clicked through.
 | Claude Desktop / Claude mobile | Not verified separately. A connector added on claude.ai appears in them for the same account. |
 | Official MCP TypeScript SDK client v2.1.0 | Full OAuth flow against a local deployment backed by real Postgres, then tool, resource and prompt calls on both **2026-07-28** (pinned) and **2025-11-25**; refresh rotation, refresh-reuse revocation, owner disconnect. |
 | Claude Code 2.1.281 | Discovery, Client ID Metadata Document (`https://claude.ai/oauth/claude-code-client-metadata`), PKCE S256, loopback redirect, `resource` parameter and scope request observed from the real CLI against the local deployment; the consent page verified Claude Code's real published metadata document; the code exchange and tool calls were completed with the same client id and a test verifier. The last interactive step (`claude mcp login` pasting back in a TTY) was not automated. |
+| Claude Code plugin (2.1.281) | 2026-09-25, in a throwaway `CLAUDE_CONFIG_DIR`: `claude plugin validate` passed for the plugin and the marketplace; `claude plugin marketplace add` (local checkout) and `claude plugin install merrymen@merrymen` installed 6 skills and the server; `claude mcp list` showed `plugin:merrymen:merrymen` pointing at production as "Needs authentication"; `claude mcp login plugin:merrymen:merrymen --no-browser` produced an authorization URL with Claude Code's metadata-document client and the production `resource`, and that URL reached Merrymen's consent page. Adding the marketplace from GitHub (`millw14/merrymen`) was not tested before merge, because the plugin is not on `main` until then. |
 | Codex | Not verified (the Codex CLI is not installed on the build machine). Commands and configuration follow OpenAI's Codex MCP documentation. |
 | ChatGPT developer mode | Not verified. |
 | Cursor, VS Code, Gemini CLI, Kiro, LM Studio, Goose, Windsurf / Devin, Zed | Not verified. Links, commands and configuration follow each vendor's documentation as of 2026-09-25. |
