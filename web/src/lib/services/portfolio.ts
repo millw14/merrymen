@@ -153,8 +153,11 @@ const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
  * and a partial replay can vouch for what it never saw, so that case vouches
  * for nothing (null).
  */
-async function readTradeSpelling(db: Db, account: string): Promise<string | null | "none"> {
-  const rows = (await db.prepare("SELECT DISTINCT agent_id FROM trades WHERE lower(agent_id) = ? LIMIT 3").all(account)) as { agent_id: string }[];
+export async function readTradeSpelling(db: Db, account: string): Promise<string | null | "none"> {
+  // Only the rows a replay reads count (fills: landed or paper). A refusal or
+  // an in-flight row under another spelling adds nothing to the tape; when an
+  // in-flight row lands it keeps its spelling and is counted from then on.
+  const rows = (await db.prepare("SELECT DISTINCT agent_id FROM trades WHERE lower(agent_id) = ? AND status IN ('landed', 'paper') LIMIT 3").all(account)) as { agent_id: string }[];
   if (rows.length === 0) return "none";
   return rows.length === 1 ? String(rows[0]!.agent_id) : null;
 }

@@ -1228,13 +1228,28 @@ async function bookLine(shared: Db, scope: AgentScope, book: "live" | "paper", s
     // An epoch-carry is the opening balance of a new run, not a deposit, and a
     // flow before the opening reading is already in the opening figure.
     const acct = spellings(String(last.agent_id));
+    // Rows, not a SUM: the flows key includes the spelled agent_id, so one
+    // on-chain log can be recorded once per spelling. De-duplicated by chain
+    // identity (tx, log index), as the web's reports flowRows does.
     const flows = (await shared
-      .prepare(`SELECT direction, SUM(amount_usdg) AS total FROM flows
-        WHERE agent_id IN (${placeholders(acct.length)}) AND epoch = ? AND source <> 'epoch-carry' AND at > ? AND at <= ?
-        GROUP BY direction`)
-      .all(...acct, last.epoch, openAt, lastAt)) as Array<{ direction: string; total: unknown }>;
-    const inflow = num(flows.find((f) => f.direction === "in")?.total) ?? 0;
-    const outflow = num(flows.find((f) => f.direction === "out")?.total) ?? 0;
+      .prepare(`SELECT direction, amount_usdg, tx_hash, log_index FROM flows
+        WHERE agent_id IN (${placeholders(acct.length)}) AND epoch = ? AND source <> 'epoch-carry' AND at > ? AND at <= ?`)
+      .all(...acct, last.epoch, openAt, lastAt)) as Array<{ direction: string; amount_usdg: unknown; tx_hash: unknown; log_index: unknown }>;
+    let inflow = 0;
+    let outflow = 0;
+    const seenLogs = new Set<string>();
+    for (const f of flows) {
+      const amount = num(f.amount_usdg);
+      if (amount === null || (f.direction !== "in" && f.direction !== "out")) continue;
+      const li = num(f.log_index);
+      if (typeof f.tx_hash === "string" && f.tx_hash !== "" && li !== null) {
+        const k = `${f.tx_hash.toLowerCase()}:${li}`;
+        if (seenLogs.has(k)) continue;
+        seenLogs.add(k);
+      }
+      if (f.direction === "in") inflow += amount;
+      else outflow += amount;
+    }
     if (inflow > 0 || outflow > 0) flowsText = ` Deposits ${usd(inflow)} USDG and withdrawals ${usd(outflow)} USDG are inside that change.`;
   }
   return `${label}: ${valued}${change}.${flowsText} ${fillsText}`;

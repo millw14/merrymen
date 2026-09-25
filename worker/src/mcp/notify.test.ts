@@ -716,6 +716,20 @@ test("summary: only money moved between the two readings is said to be inside th
   assert.ok(text!.split("\n").some((l) => l.startsWith(`LIVE: equity 1300.00 USDG as of ${utcOf(end - 100)} (1000.00 at the start, +300.00). Deposits 200.00 USDG and withdrawals 50.00 USDG are inside that change.`)), text);
 });
 
+test("summary: one on-chain deposit recorded under both spellings of the account is counted once", async () => {
+  const f = await setup();
+  const { start, end } = summaryPeriod("day", 0, NOW);
+  f.sub("summary", { period: "day", hour_utc: 0 }, { createdAt: start - 3600 });
+  equity(f, "live", 1000, start - 100);
+  equity(f, "live", 1100, end - 100);
+  const flow = f.raw.prepare("INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, log_index, chain_id, source, at, epoch) VALUES (?, 'in', 100, ?, 3, 4663, 'chain-log', ?, 1)");
+  flow.run(ACCOUNT_A, "0xDEP", start + 100);
+  flow.run(getAddress(ACCOUNT_A), "0xdep", start + 100); // the same log, the other spelling
+  await f.pass();
+  const [text] = texts(f);
+  assert.ok(text!.includes("Deposits 100.00 USDG and withdrawals 0.00 USDG are inside that change."), text);
+});
+
 // ── honest numbers ─────────────────────────────────────────────────────────
 
 const CHUMP = "0x00000000000000000000000000000000000c0001";

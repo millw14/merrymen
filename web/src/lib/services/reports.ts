@@ -40,6 +40,7 @@ import { distinctTrades, OP_COPY_REACH_SEC } from "../distinct-trades";
 import { OP_KEY, readEvidencedSells } from "../profile-trades";
 import { readDeskPositions } from "../desk-positions";
 import { readAgentStatus, type AgentStatusView } from "./agent-status";
+import { readTradeSpelling } from "./portfolio";
 import { explanationOf, FILL_KINDS } from "./decisions";
 import type { SettingsView } from "./settings-view";
 
@@ -433,17 +434,25 @@ async function readRealized(db: Db, scope: Scope, since: number, until: number):
     const token = str(r.sell_token);
     const op = str(r.op_key);
     if (!account || !token || !op) continue;
-    const key = `${account}|${book}`;
-    const g = groups.get(key) ?? { account, book, sells: [] };
+    // Grouped per ACCOUNT, not per spelling: the replay must see the whole tape.
+    const key = `${account.toLowerCase()}|${book}`;
+    const g = groups.get(key) ?? { account: account.toLowerCase(), book, sells: [] };
     groups.set(key, g);
     g.sells.push({ op, token, pnl: num(r.realized_pnl_usdg) });
   }
   let replayFailed = false;
+  let splitSpelling = false;
   for (const g of groups.values()) {
     const candidates = g.sells.filter((s) => s.pnl !== null);
     let vouched = new Set<string>();
     try {
-      vouched = await readEvidencedSells(db, g.account, g.book === "paper" ? "paper" : "landed", candidates);
+      // The replay matches agent_id exactly. An account written under two
+      // spellings would replay as two partial tapes, and a partial replay can
+      // vouch for a sell whose estimated buy sits under the other spelling —
+      // so that case vouches for nothing (the rule portfolio.ts applies).
+      const spelling = await readTradeSpelling(db, g.account);
+      if (spelling === null) splitSpelling = true;
+      else vouched = await readEvidencedSells(db, spelling === "none" ? g.account : spelling, g.book === "paper" ? "paper" : "landed", candidates);
     } catch {
       replayFailed = true;
     }
@@ -460,6 +469,7 @@ async function readRealized(db: Db, scope: Scope, since: number, until: number):
     if (v.sells > 0 && v.evidenced_sells === 0) v.notes.push("No sell in this window has an evidenced result, so realized P&L is unknown (null), not zero.");
     if (cut) v.notes.push(`Only the newest ${SUMMARY_SELLS_MAX} sells were replayed.`);
     if (replayFailed) v.notes.push("The cost replay could not be read for some sells; they are left out.");
+    if (splitSpelling) v.notes.push("An account's trades are recorded under two spellings of its address, so its sells cannot be replayed whole and are left out.");
   }
   return out;
 }
@@ -836,19 +846,25 @@ async function tradesTable(db: Db, scope: Scope, since: number, until: number, i
     const op = str(r.op_key);
     if (!account || !token || !op) continue;
     const book = r.status === "paper" ? "paper" : "landed";
-    const g = groups.get(`${account}|${book}`) ?? { account, book, sells: [] };
-    groups.set(`${account}|${book}`, g);
+    const key = `${account.toLowerCase()}|${book}`;
+    const g = groups.get(key) ?? { account: account.toLowerCase(), book, sells: [] };
+    groups.set(key, g);
     g.sells.push({ op, token });
   }
   let replayFailed = false;
+  let splitSpelling = false;
   for (const g of groups.values()) {
     try {
-      for (const op of await readEvidencedSells(db, g.account, g.book, g.sells)) vouched.add(op);
+      // Same rule as readRealized: two spellings vouch for nothing.
+      const spelling = await readTradeSpelling(db, g.account);
+      if (spelling === null) { splitSpelling = true; continue; }
+      for (const op of await readEvidencedSells(db, spelling === "none" ? g.account : spelling, g.book, g.sells)) vouched.add(op);
     } catch {
       replayFailed = true;
     }
   }
   if (replayFailed) notes.push("The cost replay could not be read for some sells; their realized P&L is left blank.");
+  if (splitSpelling) notes.push("An account's trades are recorded under two spellings of its address; its sells cannot be replayed whole, so their realized P&L is left blank (unverified).");
   const out: Cell[][] = kept.map((r) => {
     const status = str(r.status) ?? "unknown";
     const rule = str(r.reject_rule);
@@ -976,23 +992,29 @@ async function portfolioTable(db: Db, scope: Scope, clean: TextCleaner): Promise
       "equity can exceed cash + vault + positions by USDG held in launch or Trencher vaults and by holdings carried at cost; gas ETH is excluded"]);
     if (book === current) {
       const spellings = (await db.prepare("SELECT DISTINCT p.agent_id FROM positions p WHERE lower(p.agent_id) = ? LIMIT 4").all(account)) as Record<string, unknown>[];
+      // readDeskPositions replays each holding's cost under the POSITIONS
+      // spelling; that replay is only whole when the trades carry that same
+      // single spelling. Otherwise no holding's provenance is vouched for.
+      const tradeSpelled = await readTradeSpelling(db, account).catch(() => null);
       for (const s of spellings) {
         const spelled = str(s.agent_id);
         if (!spelled) continue;
+        const wholeTape = tradeSpelled === "none" || tradeSpelled === spelled;
         const updated = await db.prepare("SELECT MAX(p.updated_at) AS at FROM positions p WHERE p.agent_id = ?").get(spelled) as Record<string, unknown> | undefined;
         const valuedAt = num(updated?.at);
         for (const p of await readDeskPositions(db, spelled, book)) {
           const cost = p.cost_usdg ?? null;
           const stale = Number(p.price_stale) === 1;
           const value = num(p.value_usdg);
-          const unrealized = cost !== null && value !== null && !stale && p.cost_from_quote === false ? value - cost : null;
+          const fromQuote = wholeTape ? p.cost_from_quote ?? null : null;
+          const unrealized = cost !== null && value !== null && !stale && fromQuote === false ? value - cost : null;
           const why = cost === null ? "no cost basis on record"
             : stale ? "price is stale"
-              : p.cost_from_quote === true ? "cost includes a fill booked from a pre-trade quote"
-                : p.cost_from_quote !== false ? "cost provenance could not be checked" : null;
+              : fromQuote === true ? "cost includes a fill booked from a pre-trade quote"
+                : fromQuote !== false ? "cost provenance could not be checked" : null;
           rows.push([book, "position", valuedAt === null ? null : iso(valuedAt), spelled.toLowerCase(), null, clean(p.symbol, 32),
             clean(p.raw_balance, 80), num(p.price_usd), stale, clean(p.price_source, 16), value, cost, unrealized,
-            p.cost_from_quote ?? null, null, null, null, null, why]);
+            fromQuote, null, null, null, null, why]);
         }
       }
     } else {

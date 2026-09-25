@@ -680,7 +680,13 @@ const hostOf = (u: string) => {
  * their hosts: provenance, not destinations, in a model's context.
  */
 export function fenceNote(n: ResearchNote): string {
-  const clean = (s: string | null, max: number) => deCmd(sanitizeText((s ?? "").normalize("NFKC"), max));
+  // Every control, format and surrogate character goes (tabs and newlines
+  // stay), after NFKC and before the fence checks: TAG characters (invisible
+  // "ASCII smuggling"), soft hyphens and bidi marks would otherwise reach the
+  // model while list_research shows the owner a clean note, and a soft hyphen
+  // could split a lookalike closing fence past the fence check.
+  const strip = (s: string) => s.replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, (c) => (c === "\n" || c === "\t" ? c : ""));
+  const clean = (s: string | null, max: number) => deCmd(sanitizeText(strip((s ?? "").normalize("NFKC")), max));
   const hosts = [...new Set(n.sources.map(hostOf).filter((h): h is string => !!h))].slice(0, 5);
   const parts = [
     `Title: ${clean(n.title, 120)}`,
