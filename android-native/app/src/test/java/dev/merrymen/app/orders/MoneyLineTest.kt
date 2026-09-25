@@ -2,6 +2,7 @@ package dev.merrymen.app.orders
 
 import dev.merrymen.app.chat.ChatRig
 import dev.merrymen.app.chat.ChatRig.Companion.A
+import dev.merrymen.app.chat.ChatRig.Companion.FEED
 import dev.merrymen.app.chat.ChatRig.Companion.json
 import dev.merrymen.app.chat.waitFor
 import dev.merrymen.app.net.GrantView
@@ -13,6 +14,7 @@ import dev.merrymen.app.ui.MONEY_UNKNOWN
 import dev.merrymen.app.ui.liveConsentOf
 import dev.merrymen.app.ui.moneyLine
 import dev.merrymen.app.ui.moneyLineFor
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -24,7 +26,12 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -145,5 +152,114 @@ class MoneyLineTest {
     assertTrue(snap.settingsKept)
     assertNotNull("the model still gets the book as last read", snap.settings)
     assertEquals(MONEY_UNKNOWN, moneyLineFor(snap))
+  }
+
+  // ── reads that land out of order ─────────────────────────────────────────
+
+  /** Each feed read takes the next gate, in the order it reaches the server, and waits on it. */
+  private val feedGates = ConcurrentLinkedQueue<CountDownLatch>()
+  /** How many feed reads have taken a gate — are out and held. */
+  private val heldFeeds = AtomicInteger(0)
+  private val liveOn = AtomicBoolean(false)
+  /** What each settings read answered for liveTradingEnabled, in order. */
+  private val answered = CopyOnWriteArrayList<Boolean>()
+
+  private fun slowFeedsAndASwitch() {
+    rig.route("GET /api/feed") {
+      val gate = feedGates.poll()
+      if (gate != null) {
+        heldFeeds.incrementAndGet()
+        gate.await(20, TimeUnit.SECONDS)
+      }
+      json(FEED)
+    }
+    rig.route("GET /api/settings") {
+      val on = liveOn.get()
+      answered += on
+      json("""{"values":{"liveTradingEnabled":$on},"defaults":{"liveTradingEnabled":false},"owner":"$A"}""")
+    }
+    rig.route("PUT /api/settings") {
+      liveOn.set(true)
+      json("""{"ok":true}""")
+    }
+  }
+
+  /**
+   * A READ THAT STARTED BEFORE "GO LIVE" DOES NOT TAKE THE CARD BACK TO PAPER.
+   * Its settings answered "off" at once; its feed sat behind a backoff until
+   * after the owner switched Live trading on and a buy card was drawn. It
+   * finished last, and it used to be what the thread showed: the card on
+   * screen turned from "treat this as real money" to "no real order goes out".
+   */
+  @Test fun aReadStartedBeforeGoLiveThatLandsLastLeavesTheCardRealMoney() {
+    slowFeedsAndASwitch()
+    val reply = AtomicReference("""{"reply":"Going live?","command":{"id":"go-live","args":{}}}""")
+    rig.route("POST /api/chat") { json(reply.get()) }
+    val chat = rig.thread()
+    rig.signIn(A)
+    waitFor("A") { chat.thread.value.key == A }
+    runBlocking { chat.sendNow("go live", null) }
+    assertNotNull(chat.card.value)
+
+    // A read goes out — Chat coming back on screen, say — and is slow.
+    val gate = CountDownLatch(1)
+    feedGates += gate
+    val before = answered.size
+    val stale = rig.scope.async { chat.readSnapshot(A) }
+    waitFor("its settings said off and its feed is held") { heldFeeds.get() == 1 && answered.size > before }
+    assertEquals(false, answered.last())
+
+    // The owner confirms "go live" while it is out, then asks for a buy.
+    chat.confirm { _, _ -> }
+    waitFor("the switch said done") { chat.thread.value.messages.last().text.startsWith("Done") }
+    waitFor("the settings read again") { liveConsentOf(chat.snapshot.value?.settings) == true }
+    reply.set("""{"reply":"Shall I?","command":{"id":"buy","args":{"symbol":"NVDA","usdgAmount":5}}}""")
+    runBlocking { chat.sendNow("buy $5 of nvda", null) }
+    assertNotNull(chat.card.value)
+    assertEquals("the card as drawn", MONEY_LIVE_ON, moneyLineFor(chat.snapshot.value))
+
+    gate.countDown()
+    val old = runBlocking { stale.await() }
+    assertEquals("the slow read did say off", false, liveConsentOf(old.settings))
+    assertTrue("Live trading is on", liveOn.get())
+    assertEquals("the card on screen still says real money", MONEY_LIVE_ON, moneyLineFor(chat.snapshot.value))
+  }
+
+  /**
+   * AND THE QUESTION'S OWN READ IS NEVER THROWN AWAY FOR A LATER ONE STILL OUT.
+   * Keeping only the newest read STARTED (the ceiling's rule) would drop it
+   * while a follow's read was pending, and the card would be drawn from the
+   * read before the question — one that said Live trading was off.
+   */
+  @Test fun theCardIsDrawnFromAReadNoOlderThanTheQuestion() {
+    slowFeedsAndASwitch()
+    rig.route("POST /api/chat") {
+      json("""{"reply":"Shall I?","command":{"id":"buy","args":{"symbol":"NVDA","usdgAmount":5}}}""")
+    }
+    val chat = rig.thread()
+    rig.signIn(A)
+    waitFor("A") { chat.thread.value.key == A }
+    runBlocking { chat.readSnapshot(A) }
+    assertEquals("the last read said off", MONEY_PAPER, moneyLineFor(chat.snapshot.value))
+
+    // Live trading goes on, on the web. The question's read goes out, then a
+    // later one; both are slow, and the question's answers first.
+    liveOn.set(true)
+    val first = CountDownLatch(1)
+    val second = CountDownLatch(1)
+    feedGates += first
+    val asked = rig.scope.async { chat.sendNow("buy $5 of nvda", null) }
+    waitFor("the question's read is out") { heldFeeds.get() == 1 }
+    feedGates += second
+    val later = rig.scope.async { chat.readSnapshot(A) }
+    waitFor("a later read is out") { heldFeeds.get() == 2 }
+
+    first.countDown()
+    assertTrue(runBlocking { asked.await() })
+    assertNotNull(chat.card.value)
+    assertEquals("drawn from the question's read", MONEY_LIVE_ON, moneyLineFor(chat.snapshot.value))
+    second.countDown()
+    runBlocking { later.await() }
+    assertEquals(MONEY_LIVE_ON, moneyLineFor(chat.snapshot.value))
   }
 }

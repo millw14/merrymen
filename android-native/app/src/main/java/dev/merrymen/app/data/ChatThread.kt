@@ -412,6 +412,12 @@ class ChatThread internal constructor(
   private val confirmHold = AtomicReference<Any?>(null)
   private val ceilingRead = AtomicLong(0)
   private val seq = AtomicLong(0)
+  /** Numbers every snapshot read as it STARTS; see [readSnapshot]. */
+  private val snapshotRead = AtomicLong(0)
+  /** Guards [snapshotShown], [good] and [_snapshot] together, so a read lands whole or not at all. */
+  private val snapshotLock = Any()
+  /** The number of the read [_snapshot] holds. Only a read started after it may replace it. */
+  private var snapshotShown = 0L
   @Volatile private var good: Pair<String, ChatSnapshot>? = null
 
   init {
@@ -435,7 +441,7 @@ class ChatThread internal constructor(
     _confirming.value = false
     _streaming.value = null
     _unread.value = 0
-    _snapshot.value = null
+    dropSnapshot()
     _ceiling.value = null
     _draft.value = ""
     val kept = withContext(io) {
@@ -471,10 +477,9 @@ class ChatThread internal constructor(
     _confirming.value = false
     _streaming.value = null
     _unread.value = 0
-    _snapshot.value = null
+    dropSnapshot()
     _ceiling.value = null
     _draft.value = ""
-    good = null
     diskLock.withLock {
       diskKey = null
       if (key != null) store.delete(key)
@@ -562,28 +567,64 @@ class ChatThread internal constructor(
    * state then says it could not be read rather than handing the model a
    * default dressed as the owner's choice. A feed that answers source "none"
    * was not read.
+   *
+   * THE NEWEST READ THAT HAS LANDED IS THE ONE SHOWN — by when it STARTED, not
+   * when it finished. The three answers are awaited together, and any one can
+   * wait behind a rate-limit backoff for up to the 30s read timeout, so a read
+   * whose settings answered "Live trading off" before the owner switched it on
+   * could land after a read that saw it on, and take it back: a buy card
+   * already on screen, correctly "treat this as real money", turned into
+   * "Paper … no real order goes out" while the next tick could spend real USDG.
+   * So a read replaces [_snapshot] only when it started after the read in it.
+   *
+   * Not the ceiling's rule ([readCeiling]: only the newest STARTED may land).
+   * Under that, the read the question itself made could be thrown away because
+   * a later one — a follow's, a resume's — was still out, and the card would
+   * be drawn from whatever landed before the question, older still. Here the
+   * card is always drawn from a read at least as new as the question's.
+   *
+   * The caller gets what it read either way: the model's picture of the book
+   * for this question is this read's.
    */
   internal suspend fun readSnapshot(key: String): ChatSnapshot {
+    val n = snapshotRead.incrementAndGet()
     val fresh = coroutineScope {
       val feed = async { api.feed().valueOrNull()?.takeIf { it.source != "none" } }
       val grants = async { api.grants().valueOrNull() }
       val settings = async { api.settings().valueOrNull() }
       ChatSnapshot(feed.await(), grants.await(), settings.await())
     }
-    val last = good?.takeIf { it.first == key }?.second
-    val merged = ChatSnapshot(
-      feed = fresh.feed ?: last?.feed,
-      grants = fresh.grants ?: last?.grants,
-      settings = fresh.settings ?: last?.settings,
-      settingsKept = fresh.settings == null && last?.settings != null,
-    )
-    if (keyNow() == key && state.value.key == key) {
-      good = key to merged
-      _snapshot.value = merged
-      // Only a feed that ANSWERED is a tape; a failed read is not an empty one.
-      chatTape(merged.grants?.exists, fresh.feed)?.let { mergeTape(key, it) }
+    return synchronized(snapshotLock) {
+      val last = good?.takeIf { it.first == key }?.second
+      val merged = ChatSnapshot(
+        feed = fresh.feed ?: last?.feed,
+        grants = fresh.grants ?: last?.grants,
+        settings = fresh.settings ?: last?.settings,
+        settingsKept = fresh.settings == null && last?.settings != null,
+      )
+      if (n > snapshotShown && keyNow() == key && state.value.key == key) {
+        snapshotShown = n
+        good = key to merged
+        _snapshot.value = merged
+        // Only a feed that ANSWERED is a tape; a failed read is not an empty one.
+        // Taken under the same lock, so tapes come in the order their reads
+        // started and only from a read that landed: the first look is never an
+        // older tape than one the thread has already taken.
+        chatTape(merged.grants?.exists, fresh.feed)?.let { mergeTape(key, it) }
+      }
+      merged
     }
-    return merged
+  }
+
+  /**
+   * The owner changed: what was read for the last one is gone, and no read
+   * started before this moment may land after it — not for somebody else, and
+   * not for the same wallet coming back, whose switches may have moved since.
+   */
+  private fun dropSnapshot() = synchronized(snapshotLock) {
+    snapshotShown = snapshotRead.get()
+    good = null
+    _snapshot.value = null
   }
 
   /**

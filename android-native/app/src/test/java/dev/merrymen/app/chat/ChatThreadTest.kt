@@ -11,6 +11,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -21,6 +22,9 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * THE THREAD OUTLIVES THE SCREEN AND NEVER OUTLIVES ITS WALLET.
@@ -262,6 +266,36 @@ class ChatThreadTest {
     waitFor("A") { chat.thread.value.key == A }
     runBlocking { chat.readSnapshot(A) }
     assertNull("a failed read sets no watermark", chat.thread.value.since)
+  }
+
+  /**
+   * WHAT WAS READ FOR AN EARLIER TURN NEVER LANDS IN A LATER ONE — the card
+   * scope's rule (ConfirmScope.alive), for the book the card is drawn from. A
+   * read still out when the wallet left does not become the picture of the
+   * book when the same wallet comes back: its switches may have moved since.
+   */
+  @Test fun aReadStartedBeforeTheWalletLeftDoesNotLandWhenItComesBack() {
+    val gate = CountDownLatch(1)
+    val held = AtomicBoolean(false)
+    rig.route("GET /api/feed") {
+      if (held.compareAndSet(false, true)) gate.await(20, TimeUnit.SECONDS)
+      json(ChatRig.FEED)
+    }
+    val chat = rig.thread()
+    rig.signIn(A)
+    waitFor("A") { chat.thread.value.key == A }
+    val stale = rig.scope.async { chat.readSnapshot(A) }
+    waitFor("the read is out") { held.get() }
+
+    rig.signIn(B)
+    waitFor("B") { chat.thread.value.key == B }
+    rig.signIn(A)
+    waitFor("A again") { chat.thread.value.key == A }
+
+    gate.countDown()
+    runBlocking { stale.await() }
+    assertNull("nothing read in A's first turn is the book in the second", chat.snapshot.value)
+    assertNull("nor its tape the thread's first look", chat.thread.value.since)
   }
 
   @Test fun aKeptFileThatIsNotAThreadIsAnEmptyThreadNotACrash() {
