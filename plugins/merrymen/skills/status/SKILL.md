@@ -11,4 +11,4 @@ Check on the owner's Merrymen agent with the Merrymen tools (their names end in 
 3. Answer in at most six short lines per agent: its name, whether it is running, paper (practice) or live, anything blocking it, and when its trading permission expires. Say "paper" or "live" every time you give a figure; never mix the two.
 4. If it is blocked or has been quiet, offer `/merrymen:why` to find out why it hasn't traded.
 
-If no Merrymen tools are available in this session, Merrymen is not connected yet: follow `/merrymen:connect` instead of guessing.
+If Merrymen tools are available but `get_agent_status` is not, this connection was made without the permission "See your agent's status and settings": tell the owner to type `/mcp`, choose `plugin:merrymen:merrymen`, authenticate again and tick it under "Change what … can do". If no Merrymen tools are available at all, follow `/merrymen:connect` instead of guessing.

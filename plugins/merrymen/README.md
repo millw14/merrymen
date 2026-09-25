@@ -52,3 +52,13 @@ on live trading or loosen your limits.
 
 Server: `https://mcp.merrymen.dev/mcp`. More ways to connect:
 <https://app.merrymen.dev/connect/mcp>.
+
+## Maintaining this plugin
+
+Claude Code caches an installed plugin by the `version` in
+`.claude-plugin/plugin.json` and delivers a change only when that version
+moves. Any change to `.mcp.json` or a skill therefore needs a version bump, or
+people who installed it earlier keep the old copy. `web/src/mcp/claude-plugin.test.ts`
+fingerprints those files and fails until the version and the fingerprint are
+updated together. Check a change with
+`claude plugin validate --strict plugins/merrymen` and `claude plugin validate --strict .`.
