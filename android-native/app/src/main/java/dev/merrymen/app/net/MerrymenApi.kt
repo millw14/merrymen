@@ -113,6 +113,10 @@ fun interface OriginSource {
  * handling as every route here, without this file becoming everybody's merge
  * conflict. A raw body goes through callAt, never
  * `Request.Builder().url(String)` — see [urlFor] for why.
+ *
+ * EVERY WRITE GOES THROUGH [writeHttp] OR sendJson/callAt/call, which put it
+ * there. Never `http.newCall` for a non-GET: see [writeHttp] for what a
+ * transport retry of a lost answer does to an order.
  */
 class MerrymenApi(
   /** The shared client: one cookie jar, one connection pool, the app's headers. */
@@ -131,6 +135,31 @@ class MerrymenApi(
 
   /** The origin every call is made against right now — for building a web URL beside an API one. */
   suspend fun originNow(): String = origins.originNow()
+
+  /**
+   * THE CLIENT EVERY WRITE GOES OUT ON: [http] with no transport retry and
+   * [SendWritesOnce] last, whatever client this API was built with.
+   *
+   * A write whose answer is lost — an order, a snipe, a confirm, a settings
+   * save, an upload — is UNKNOWN, and the caller looks it up. It is never sent
+   * a second time by OkHttp: that would be a second order nobody decided on.
+   * sendJson, callAt and call put every non-GET here by themselves; a raw
+   * write says so with `writeHttp.newCall(...)`, never `http.newCall(...)`.
+   *
+   * In the app [http] (Http.client) already is this, so it is the same
+   * object; built from anything else — a test's plain OkHttpClient, which
+   * retries — it is a derivative sharing the pool, jar and headers.
+   */
+  val writeHttp: OkHttpClient by lazy { http.forWrites() }
+
+  /**
+   * THE TRANSPORT'S OWN RECOVERY, FOR READS ONLY. A GET that meets a stale
+   * pooled connection is sent again on a fresh one, which asks the same
+   * question twice and changes nothing. Private, and [call] hands it nothing
+   * but a GET or HEAD — that is the whole proof that no write rides on it
+   * (and [SendWritesOnce], which it inherits in the app, would still hold one).
+   */
+  private val readHttp: OkHttpClient by lazy { http.newBuilder().retryOnConnectionFailure(true).build() }
 
   // ── plumbing ──────────────────────────────────────────────────────────────
 
@@ -160,8 +189,25 @@ class MerrymenApi(
     return call(Request.Builder().url(u).apply(build).build(), client)
   }
 
-  /** One request, as the three-state result. [client] is [http] unless a route needs its own timeouts. */
-  @PublishedApi internal suspend fun call(req: Request, client: OkHttpClient = http): ApiResult<String> =
+  /**
+   * One request, as the three-state result. [client] is [http] unless a route
+   * needs its own timeouts.
+   *
+   * THE CLIENT IS CHOSEN BY THE METHOD, HERE, for every route: a write goes
+   * on [writeHttp] (or on [client] made fit for writes), so no caller can
+   * send one on a client that retries; a read on the default client gets
+   * [readHttp]'s recovery.
+   */
+  @PublishedApi internal suspend fun call(req: Request, client: OkHttpClient = http): ApiResult<String> {
+    val via = when {
+      !isWrite(req.method) -> if (client === http) readHttp else client
+      client === http -> writeHttp
+      else -> client.forWrites()
+    }
+    return send(req, via)
+  }
+
+  private suspend fun send(req: Request, client: OkHttpClient): ApiResult<String> =
     suspendCancellableCoroutine { cont ->
       // CANCELLABLE, so a screen that goes away takes its request with it.
       // suspendCoroutine leaked one in-flight call per abandoned LaunchedEffect.
@@ -271,12 +317,17 @@ class MerrymenApi(
   @PublishedApi internal suspend inline fun <reified T> getJson(path: String): ApiResult<T> =
     decoded(callAt(path) { get() })
 
-  /** A JSON body (`{}` when null) with any method. [client] as on [call]. */
+  /**
+   * A JSON body (`{}` when null) with a write's method. On [writeHttp]: a
+   * lost answer comes back as Unreachable — unknown, to be looked up — and is
+   * never sent again. A [client] of a route's own is made fit for writes the
+   * same way by [call].
+   */
   @PublishedApi internal suspend inline fun <reified T> sendJson(
     path: String,
     method: String,
     bodyJson: String?,
-    client: OkHttpClient = http,
+    client: OkHttpClient = writeHttp,
   ): ApiResult<T> {
     val body: RequestBody = (bodyJson ?: "{}").toRequestBody(jsonType)
     return decoded(callAt(path, client) { this.method(method, body) })
@@ -418,9 +469,15 @@ class MerrymenApi(
    *
    * Derived with newBuilder, so it shares the cookie jar, the headers and the
    * connection pool. A streamed reader (SSE) should use this client as well.
+   *
+   * FROM [writeHttp], because every chat call is a POST that spends a model
+   * call and can come back proposing a trade: a second copy sent behind the
+   * owner's back is a second answer they never asked for. So it never retries
+   * and its body is one-shot, even when a streamed reader calls
+   * `chatHttp.newCall` directly.
    */
   val chatHttp: OkHttpClient by lazy {
-    http.newBuilder()
+    writeHttp.newBuilder()
       .readTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
       .callTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
       .build()

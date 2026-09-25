@@ -9,9 +9,13 @@ import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
+import okhttp3.MediaType
 import okhttp3.OkHttpClient
+import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.logging.HttpLoggingInterceptor
+import okio.BufferedSink
 import java.util.concurrent.TimeUnit
 
 /**
@@ -234,6 +238,63 @@ internal fun debugCallLog(
     redactHeader("Set-Cookie")
   }
 
+/** Anything but GET and HEAD: a request that may DO something, so it must happen at most once. */
+internal fun isWrite(method: String): Boolean = method != "GET" && method != "HEAD"
+
+/**
+ * A WRITE IS SENT ONCE. OkHttp does not get to send it again on its own.
+ *
+ * OkHttp re-sends a request by itself in more cases than a stale connection:
+ * a 408, a 421, an auth challenge, and a 503 that says `Retry-After: 0` — that
+ * last one even with retryOnConnectionFailure off. For an order, a snipe, a
+ * confirm or a settings save, every one of those is a second copy of the
+ * owner's decision sent behind their back, and a gateway's 503 can arrive
+ * AFTER the route already placed the order.
+ *
+ * A body marked one-shot is the one thing OkHttp promises never to transmit
+ * twice ([RequestBody.isOneShot]): the failure or the answer comes back
+ * instead, and the caller reads it as UNKNOWN and looks it up. So every write
+ * through the app's client gets one here — including one a screen built by
+ * hand on `http.newCall`, and one on a client derived with
+ * retryOnConnectionFailure turned back on. A write with no body gets an empty
+ * one, which is what OkHttp's own `delete()` sends. Reads are left alone; a
+ * GET the transport repeats does nothing twice.
+ *
+ * Installed LAST among the application interceptors, so nothing after it can
+ * swap the body back for a repeatable one.
+ */
+class SendWritesOnce : Interceptor {
+  override fun intercept(chain: Interceptor.Chain): Response {
+    val asked = chain.request()
+    val body = asked.body
+    if (!isWrite(asked.method) || body?.isOneShot() == true) return chain.proceed(asked)
+    val once = OnceBody(body ?: ByteArray(0).toRequestBody(null))
+    return chain.proceed(asked.newBuilder().method(asked.method, once).build())
+  }
+
+  private class OnceBody(private val inner: RequestBody) : RequestBody() {
+    override fun contentType(): MediaType? = inner.contentType()
+    override fun contentLength(): Long = inner.contentLength()
+    override fun isDuplex(): Boolean = inner.isDuplex()
+    override fun isOneShot(): Boolean = true
+    override fun writeTo(sink: BufferedSink) = inner.writeTo(sink)
+  }
+}
+
+/**
+ * THIS CLIENT, FIT TO CARRY A WRITE: no transport retry, and [SendWritesOnce]
+ * last. Itself when it already is — the app's client is — so the common case
+ * builds nothing; otherwise a derivative sharing its pool, jar and headers.
+ */
+internal fun OkHttpClient.forWrites(): OkHttpClient =
+  if (!retryOnConnectionFailure && interceptors.lastOrNull() is SendWritesOnce) {
+    this
+  } else {
+    newBuilder().retryOnConnectionFailure(false)
+      .apply { if (interceptors().lastOrNull() !is SendWritesOnce) addInterceptor(SendWritesOnce()) }
+      .build()
+  }
+
 object Http {
   /**
    * The app's one client. [debug] is BuildConfig.DEBUG in the app; a test
@@ -244,6 +305,7 @@ object Http {
       .cookieJar(jar)
       .addInterceptor(MerrymenHeaders())
       .apply { if (debug) addInterceptor(debugCallLog()) }
+      .addInterceptor(SendWritesOnce())
       // A TRADING CLIENT WAITS, IT DOES NOT HANG. The chain reads behind these
       // routes are metered and can queue behind a rate-limit backoff, so a
       // three-second timeout would report "offline" for a server that is merely
@@ -252,6 +314,15 @@ object Http {
       .connectTimeout(15, TimeUnit.SECONDS)
       .readTimeout(30, TimeUnit.SECONDS)
       .writeTimeout(30, TimeUnit.SECONDS)
-      .retryOnConnectionFailure(true)
+      // NO TRANSPORT RETRY ON THE SHARED CLIENT. With it on, OkHttp silently
+      // re-sent a request whose answer was cut off on a reused connection: an
+      // agent-picture PUT reached the server twice in a test, and an order is
+      // a POST that would go the same way. A lost answer to a write is UNKNOWN and is looked up; it is
+      // never sent again by the transport. Everything built from this client
+      // (chatHttp, writeHttp, a route's own timeouts) inherits the off, and
+      // [SendWritesOnce] holds even where somebody turns it back on. Reads get
+      // the recovery back where it is provably a read: MerrymenApi hands only a
+      // GET or HEAD to its private read client.
+      .retryOnConnectionFailure(false)
       .build()
 }

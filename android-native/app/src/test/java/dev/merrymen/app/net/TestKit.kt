@@ -38,7 +38,10 @@ object Fixtures {
  * Built the way AppContainer builds it, minus the two Android-only pieces: the
  * DataStore cookie jar and the header interceptor (which reads BuildConfig).
  * Everything this module decides — the three-state result, the refusal
- * wording, decoding — is the production code path.
+ * wording, decoding — is the production code path. A plain OkHttpClient
+ * retries on its own, but a write still goes out once: MerrymenApi puts every
+ * non-GET on writeHttp whatever client it was given (WriteOnceTest). To test
+ * the app's client itself, build Http.client(jar, debug = false).
  */
 fun apiFor(server: MockWebServer, http: OkHttpClient = OkHttpClient()): MerrymenApi =
   MerrymenApi(http, OriginSource { server.url("/").toString().removeSuffix("/") })

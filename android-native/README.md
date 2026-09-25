@@ -60,6 +60,17 @@ handling as everything else. A raw body or an extra header goes through
 `callAt(path) { … }`, never `Request.Builder().url(String)`, which throws on
 an address it cannot parse.
 
+**A write is sent once.** Every non-GET goes through `sendJson`, `callAt` or
+`call` (which put it on `api.writeHttp`) or, built by hand, on
+`api.writeHttp.newCall(…)` — never `http.newCall` for a non-GET. A lost answer
+to a write comes back `Unreachable`: the outcome is UNKNOWN and is looked up,
+never sent again. The shared client (`Http.client`) has OkHttp's
+`retryOnConnectionFailure` off, and its `SendWritesOnce` interceptor makes
+every write's body one-shot, so even a stray `http.newCall(POST)` or a 503
+saying `Retry-After: 0` is not re-sent behind the owner's back
+(`WriteOnceTest`). Reads made through the API still recover from a stale
+pooled connection.
+
 **The Server field** (Settings) takes `https://…`, or plain `http://` only for
 `localhost` and `10.0.2.2` — the hosts `network_security_config.xml` allows in
 the clear. Anything else is refused with a sentence and not saved. Moving to
