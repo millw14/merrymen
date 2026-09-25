@@ -8,7 +8,7 @@
  */
 import { tenantOf } from "@/lib/auth";
 import { mcpConfig } from "@/mcp/config";
-import { oauthDeps } from "@/mcp/oauth/deps";
+import { oauthDeps, readBoundedText } from "@/mcp/oauth/deps";
 import { jsonResponse } from "@/mcp/oauth/metadata";
 import { OAuthError, decideRequest, describeRequest } from "@/mcp/oauth/server";
 import { ClientError } from "@/mcp/oauth/clients";
@@ -24,8 +24,9 @@ export async function POST(req: Request): Promise<Response> {
   if (!cfg.enabled) return jsonResponse({ error: "not_found" }, 404);
   const origin = req.headers.get("origin");
   if (origin !== null && origin !== cfg.issuer) return jsonResponse({ error: "forbidden", error_description: "cross-site request" }, 403);
-  const text = await req.text();
-  if (text.length > MAX) return jsonResponse({ error: "invalid_request" }, 400);
+  // `describe` works signed out, so the body read is bounded before anything is buffered.
+  const text = await readBoundedText(req, MAX);
+  if (text === null) return jsonResponse({ error: "invalid_request", error_description: "request too large" }, 413);
   let body: Record<string, unknown>;
   try {
     body = JSON.parse(text) as Record<string, unknown>;

@@ -52,6 +52,11 @@ in as usual, choose which agent the assistant may see and what it may do, and
 approve. Manage or disconnect assistants any time at
 [Connected apps](https://app.merrymen.dev/connect/apps).
 
+Links an assistant gives you open Merrymen pages, where you act signed in as
+yourself: `/connect/approve/<id>` to approve or decline a proposal, and
+`/connect/export/<id>` to download an export. Nobody else can open them for
+your account.
+
 ## Read the numbers right
 
 - **Paper vs live.** Paper (practice) figures are simulated and always labelled

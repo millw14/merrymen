@@ -411,6 +411,11 @@ const OPS = z.object({
   paper_refused: z.number(),
 });
 
+const GAS_USDG_DESCRIPTION =
+  "Gas the book's landed operations paid, in USDG: the priced part. Null when none of their gas was priced and some of it was unpriced or never recorded (unknown, not zero); 0 only when nothing landed or every landed operation was sponsored. Read gas_complete before treating it as the whole cost.";
+const GAS_COMPLETE_DESCRIPTION =
+  "False when gas_usdg leaves out landed operations whose gas was unpriced or unrecorded, so it is a floor (or null); true when every landed operation's gas is in it";
+
 const BOOK_PERF = z.object({
   book: BOOK,
   money: MONEY_OF,
@@ -433,8 +438,10 @@ const BOOK_PERF = z.object({
   realized_sells_excluded: z.number().nullable(),
   fees_accrued_usdg: z.number().nullable(),
   fee_accruals: z.number().nullable(),
-  gas_usdg: z.number().nullable(),
-  gas_unpriced_ops: z.number().nullable(),
+  gas_usdg: z.number().nullable().describe(GAS_USDG_DESCRIPTION),
+  gas_unpriced_ops: z.number().nullable().describe("Landed operations that paid gas the worker could not price in USDG"),
+  gas_unrecorded_ops: z.number().nullable().describe("Landed operations with no gas record at all (neither paid nor sponsored)"),
+  gas_complete: z.boolean().nullable().describe(GAS_COMPLETE_DESCRIPTION),
   gas_sponsored_ops: z.number().nullable(),
   ops: OPS,
   series: z.array(z.object({ at: z.string(), equity_usdg: z.number() })).max(200),
@@ -514,7 +521,8 @@ const COMPARE_ROW = z.object({
   max_drawdown_pct: z.number().nullable(),
   realized_pnl_usdg: z.number().nullable(),
   fees_accrued_usdg: z.number().nullable(),
-  gas_usdg: z.number().nullable(),
+  gas_usdg: z.number().nullable().describe(GAS_USDG_DESCRIPTION),
+  gas_complete: z.boolean().nullable().describe(GAS_COMPLETE_DESCRIPTION),
   fills: z.number().describe("confirmed on-chain operations (live) or paper fills (paper)"),
   failed_or_refused: z.number().describe("live: operations that reverted on chain; paper: refused paper fills. Refusals before anything was sent belong to neither book (get_performance refused_ops)"),
   caveats: z.array(z.string()),
@@ -534,6 +542,7 @@ function compareRow(p: BookPerformance): z.infer<typeof COMPARE_ROW> {
     realized_pnl_usdg: p.realized_pnl_usdg,
     fees_accrued_usdg: p.fees_accrued_usdg,
     gas_usdg: p.gas_usdg,
+    gas_complete: p.gas_complete,
     fills: p.book === "live" ? p.ops.confirmed : p.ops.paper_fills,
     failed_or_refused: p.book === "live" ? p.ops.failed : p.ops.paper_refused,
     caveats: p.caveats,

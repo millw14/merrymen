@@ -220,7 +220,13 @@ var lastH = -1;
 var observer = null;
 var locale = undefined;
 var timeZone = undefined;
-var CTRL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+// Every Unicode control (Cc, C1 included) and format character (Cf: bidi
+// marks and isolates, zero-width characters, tags) and lone surrogates (Cs)
+// but tab and line feed, the
+// same classes the server's untrusted() strips. Any spelling of a line break
+// becomes a line feed first.
+var LINE_BREAKS = /\r\n?|[\p{Zl}\p{Zp}]/gu;
+var CTRL = /(?![\t\n])[\p{Cc}\p{Cf}\p{Cs}]/gu;
 
 function has(map, key) { return typeof key === "string" && Object.prototype.hasOwnProperty.call(map, key); }
 function pick(map, key, fallback) { return has(map, key) ? map[key] : fallback; }
@@ -229,10 +235,10 @@ function arr(v, max) { return Array.isArray(v) ? v.slice(0, max || 100) : []; }
 function num(v) { return typeof v === "number" && isFinite(v) ? v : null; }
 function clean(v, max) {
   if (typeof v !== "string") return null;
-  var s = v.replace(CTRL, "").trim();
+  var s = v.replace(LINE_BREAKS, "\n").replace(CTRL, "").trim();
   if (!s) return null;
   var cap = max || 400;
-  return s.length > cap ? s.slice(0, cap) + "…" : s;
+  return s.length > cap ? s.slice(0, cap).replace(/\p{Cs}$/u, "") + "…" : s;
 }
 function str(v, max) { return clean(v, max); }
 function human(v) { var s = clean(v, 80); return s ? s.replace(/_/g, " ") : null; }
@@ -713,7 +719,12 @@ function renderPerformance(d, books) {
     var rs = num(b.realized_sells_counted);
     row(g, "Realized P&L", signedMoney(b.realized_pnl_usdg), rs !== null ? count(rs) + " sell(s) counted, " + count(b.realized_sells_excluded) + " excluded (unevidenced)" : null);
     row(g, "Fees accrued", money(b.fees_accrued_usdg));
-    row(g, "Gas", money(b.gas_usdg), num(b.gas_unpriced_ops) ? count(b.gas_unpriced_ops) + " operation(s) with unpriced gas" : null);
+    // A total that leaves operations out is a floor, and says so; null is "not known", never 0.
+    var gasVal = money(b.gas_usdg);
+    var gasNotes = [];
+    if (num(b.gas_unpriced_ops)) gasNotes.push(count(b.gas_unpriced_ops) + " operation(s) with unpriced gas");
+    if (num(b.gas_unrecorded_ops)) gasNotes.push(count(b.gas_unrecorded_ops) + " operation(s) with no gas record");
+    row(g, "Gas", gasVal !== null && b.gas_complete === false ? "at least " + gasVal : gasVal, gasNotes.length ? gasNotes.join("; ") : null);
     var at = obj(b.attribution);
     if (at) {
       put(card, "h3", null, "What explains the change");

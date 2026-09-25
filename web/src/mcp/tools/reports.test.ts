@@ -404,7 +404,7 @@ test("create_export trades (CSV): one row per operation, labelled books, evidenc
   const r = data(await run("create_export", { kind: "trades", format: "csv", since: new Date((NOW - DAY) * 1000).toISOString() }, a));
   assert.match(r.export_id, /^exp_[0-9a-f]{32}$/);
   assert.equal(r.resource_uri, `merrymen://exports/${r.export_id}`);
-  assert.equal(r.download_url, `https://app.test/api/mcp/exports/${r.export_id}`);
+  assert.equal(r.download_url, `https://app.test/connect/export/${r.export_id}`, "a page link: the file route refuses the cross-site click");
   assert.equal(r.expires_at, new Date((NOW + DAY) * 1000).toISOString());
   assert.equal(r.agent, SLUG_A);
   assert.match(r.filename, new RegExp(`^merrymen-${SLUG_A}-trades-\\d{8}T\\d{6}Z\\.csv$`));
@@ -747,6 +747,31 @@ test("download route: only the owner's session gets the file, as a no-store atta
   });
   const audit = d.raw.prepare("SELECT outcome FROM mcp_audit WHERE action = 'owner.download_export' ORDER BY at").all() as Array<{ outcome: string }>;
   assert.ok(audit.some((r) => r.outcome === "ok") && audit.some((r) => r.outcome === "not_found") && audit.some((r) => r.outcome === "expired"));
+});
+
+test("download route ?info=1: the file's details for the owner only, never its content", async () => {
+  const d = await makeTestDb();
+  restore = installFixtures(d);
+  const live = `exp_${"a".repeat(32)}`;
+  const old = `exp_${"b".repeat(32)}`;
+  seedExport(d.raw, live, OWNER_A, Math.floor(Date.now() / 1000) + 3600);
+  seedExport(d.raw, old, OWNER_A, Math.floor(Date.now() / 1000) - 1);
+  const info = (id: string, cookie?: string) => downloadExport(
+    new Request(`https://app.test/api/mcp/exports/${id}?info=1`, { headers: cookie ? { cookie } : {} }),
+    { params: Promise.resolve({ id }) },
+  );
+  await withHostedEnv(async () => {
+    const cookieA = `mm_session=${encodeURIComponent(mintSession(OWNER_A))}`;
+    const ok = await info(live, cookieA);
+    assert.equal(ok.status, 200);
+    assert.match(ok.headers.get("content-type") ?? "", /json/);
+    const body = await ok.json() as Record<string, unknown>;
+    assert.deepEqual(Object.keys(body).sort(), ["bytes", "created_at", "expires_at", "filename", "format", "id", "kind"]);
+    assert.equal(body.bytes, 42);
+    assert.equal((await info(live, `mm_session=${encodeURIComponent(mintSession(OWNER_B))}`)).status, 404, "another owner learns nothing");
+    assert.equal((await info(live)).status, 401);
+    assert.equal((await info(old, cookieA)).status, 410);
+  });
 });
 
 test("download route: absent when MCP is off", async () => {

@@ -5,9 +5,12 @@
  * permission can sell (core grant.ts sellableAssets), what the worker watches
  * (worker strategies/registry.ts watchTokensFor), the owner's asset mode
  * (core tokens.ts assetModeAllows), the price guards (worker pool-price.ts and
- * quarantine.ts scoutAllows), and the class route's prerequisites (worker
- * class-entry-gate.ts). This asks each of them from the same inputs the worker
- * uses and says plainly which ones cannot be checked from here.
+ * quarantine.ts scoutAllows), the class route's prerequisites (worker
+ * class-entry-gate.ts), and the Trencher route's (worker index.ts
+ * trenchCandidates and policy.ts custody "trencher", which skips the asset
+ * allowlist and the no-exit rule for a vault-custodied buy). This asks each of
+ * them from the same inputs the worker uses and says plainly which ones cannot
+ * be checked from here.
  *
  * It never places, quotes or simulates a trade.
  *
@@ -24,6 +27,7 @@ import {
   CASH,
   DEFAULT_BASKET_SYMBOLS,
   GRANT_PONS_CLASS,
+  GRANT_TRENCHER,
   LEGACY_TRADEABLE_SYMBOLS,
   SETTINGS_DEFAULTS,
   STOCK_TOKENS,
@@ -80,6 +84,7 @@ export type CheckName =
   | "trading_not_paused"
   | "symbol_collision"
   | "class_route"
+  | "trencher_route"
   | "discovery_lists_it";
 
 export interface EligibilityCheck {
@@ -217,6 +222,7 @@ export function judgeEligibility(o: {
 
   const checks: EligibilityCheck[] = [];
   const add = (check: CheckName, result: CheckResult, detail: string) => checks.push({ check, result, detail });
+  const checkNamed = (name: CheckName) => checks.find((c) => c.check === name)!;
 
   // ── the permission ──
   if (!o.agent.account) add("permission_signed", "fail", "No trading permission has been signed for this agent, so it cannot trade anything.");
@@ -314,12 +320,42 @@ export function judgeEligibility(o: {
     }
   }
 
+  // ── the Trencher route (worker index.ts trenchCandidates; policy.ts custody "trencher") ──
+  // A buy the Trencher makes into its sealed vault is not judged against the
+  // asset allowlist or the no-exit rule: the wall instead requires the vault
+  // and a coin the worker verified on chain for it (knownTrencherAssets). Which
+  // coins those are comes from the worker's own discovery tape and pool checks.
+  {
+    const vaultSealed = o.agent.features.includes(GRANT_TRENCHER);
+    const priceOk = checkNamed("price_guard").result !== "fail" || checkNamed("scout_budget").result === "pass";
+    if (stock || a === USDG) {
+      add("trencher_route", "not_applicable", "The Trencher route buys discovered coins only.");
+    } else if (!vaultSealed) {
+      add("trencher_route", "not_applicable", "The signed permission carries no Trencher vault (trencher-vault-v1), so there is no Trencher route.");
+    } else if (o.settings?.strategy !== "trencher") {
+      add("trencher_route", "not_applicable", "The permission carries a Trencher vault, but the agent's strategy is not Trencher, so nothing uses it.");
+    } else {
+      const fails: string[] = [];
+      if (assetMode === "stocks") fails.push("the asset mode is stocks only, which empties the Trencher's candidate feed");
+      // The worker gates live trenching only while it trades live; on paper the feed runs.
+      if (o.mode !== "paper" && o.settings?.trencherLiveEnabled !== true) {
+        fails.push("live trenching (“let trencher trade for real”) is off, so while the agent trades live the worker gives the Trencher no candidates");
+      }
+      if (!priceOk) fails.push("the Trencher opens a position only on a pool price the worker trusts (or inside the scout budget), and this token's price fails the guards");
+      if (fails.length) {
+        add("trencher_route", "fail", `The Trencher route cannot buy it: ${fails.join("; ")}.`);
+      } else {
+        add("trencher_route", "unknown", `Its prerequisites are met: the permission seals a Trencher vault, the strategy is Trencher, ${o.mode === "paper" ? "and the asset mode allows it (on paper live trenching is not needed)" : "and live trenching and the asset mode allow it"}. Whether this coin qualifies depends on the worker's own discovery and vault-verified assets: a high-volume pool on its discovery tape, verified on chain for the sealed vault, with the fast Trencher on and a connected Brain approving the entry (settings this server cannot see). The worker caps each entry at 5 USDG and the vault at 25 USDG of buys a day. The asset allowlist and the no-exit rule do not apply to this route.`);
+      }
+    }
+  }
+
   // ── discovery ──
   const discoverable: Verdict = mainnet ? discoverability(facts) : { state: "unknown", reasons: ["Market data covers Robinhood Chain mainnet only; this agent runs on testnet."] };
   add("discovery_lists_it", discoverable.state === "yes" ? "pass" : discoverable.state === "no" ? "fail" : "unknown", discoverable.reasons.join(" "));
 
   // ── verdict ──
-  const by = (name: CheckName) => checks.find((c) => c.check === name)!;
+  const by = checkNamed;
   const hard = (["permission_signed", "permission_current", "asset_mode", "trading_not_paused"] as const).map(by).filter((c) => c.result === "fail");
   const hardUnknown = (["permission_current", "trading_not_paused"] as const).map(by).filter((c) => c.result === "unknown");
   const routeFails = (["watched_by_agent", "grant_can_sell"] as const).map(by).filter((c) => c.result === "fail");
@@ -331,6 +367,9 @@ export function judgeEligibility(o: {
   const routeA: "yes" | "no" | "unknown" = routeFails.length ? "no" : priced ? "yes" : price.result === "fail" ? "no" : "unknown";
   const classCheck = by("class_route");
   const routeB: "no" | "unknown" = classCheck.result === "unknown" ? "unknown" : "no";
+  // The Trencher route: null when the agent has none.
+  const trencherCheck = by("trencher_route");
+  const routeC: "no" | "unknown" | null = trencherCheck.result === "unknown" ? "unknown" : trencherCheck.result === "fail" ? "no" : null;
 
   let executable: Verdict;
   const caveat = "Caps (per trade, per day, operation count), the drawdown breaker, price impact and the on-chain wall are still judged by the worker at trade time.";
@@ -338,9 +377,9 @@ export function judgeEligibility(o: {
     executable = { state: "no", reasons: ["USDG is the agents' cash: it is what they buy with, not something they buy."] };
   } else if (hard.length) {
     executable = { state: "no", reasons: hard.map((c) => c.detail) };
-  } else if (routeA === "no" && routeB === "no") {
+  } else if (routeA === "no" && routeB === "no" && routeC !== "unknown") {
     // No route could reach it, so an unread halt flag or expiry changes nothing.
-    const blockers = [...routeFails, ...(priced ? [] : [price, scout]), ...(classCheck.result === "fail" ? [classCheck] : [])];
+    const blockers = [...routeFails, ...(priced ? [] : [price, scout]), ...(classCheck.result === "fail" ? [classCheck] : []), ...(routeC === "no" ? [trencherCheck] : [])];
     executable = { state: "no", reasons: blockers.map((c) => c.detail) };
   } else if (routeA === "yes" && !hardUnknown.length) {
     executable = {
@@ -351,8 +390,31 @@ export function judgeEligibility(o: {
       ],
     };
   } else {
-    const open = [...hardUnknown, ...(routeA === "no" ? routeFails : []), ...(routeA === "unknown" ? [price, scout] : []), ...(routeB === "unknown" ? [classCheck] : [])];
+    // An open Trencher route answers for the ordinary route's allowlist and
+    // no-exit refusals: they are not why this agent could not buy it.
+    const open = [
+      ...hardUnknown, ...(routeC === "unknown" ? [trencherCheck] : []), ...(routeA === "no" && routeC !== "unknown" ? routeFails : []),
+      ...(routeA === "unknown" ? [price, scout] : []), ...(routeB === "unknown" ? [classCheck] : []),
+    ];
     executable = { state: "unknown", reasons: [...open.map((c) => c.detail), caveat] };
+  }
+
+  // Shown after the verdict, which was judged on the ordinary route's own
+  // results: on an open Trencher route the allowlist and the no-exit rule do
+  // not apply (policy.ts skips both for a vault-custodied buy), so failing
+  // them there would tell the owner to re-sign or add a token for nothing.
+  if (routeC === "unknown") {
+    const onTrencher: Partial<Record<CheckName, string>> = {
+      grant_can_sell: "Not required on the Trencher route: a vault-custodied buy is not held to the no-exit rule, since the sealed Trencher vault, not a per-token approval, sells it.",
+      watched_by_agent: "Not required on the Trencher route: a vault-custodied buy skips the asset allowlist; the wall checks it against the coins the worker verified on chain for the vault instead.",
+    };
+    for (const c of checks) {
+      const why = onTrencher[c.check];
+      if (why && c.result === "fail") {
+        c.result = "not_applicable";
+        c.detail = `${why} On the ordinary route: ${c.detail}`;
+      }
+    }
   }
 
   const notes: string[] = [];

@@ -6,7 +6,7 @@
  *   awaiting_approval ─┬─ owner approves ──► approved ─► submitted ─► executing ─┬─► confirmed      (trade: on-chain receipt + reconciled fill)
  *                      │                              (trade only)               ├─► paper_filled   (practice book; no money moved)
  *                      │                                                          ├─► refused        (the worker's gates or the wall said no)
- *                      │                                                          ├─► failed         (reverted, or never recorded)
+ *                      │                                                          ├─► failed         (reverted, or its outcome could not be confirmed in time)
  *                      │                                                          └─► expired        (the agent never picked it up in time)
  *                      │                              (settings/draft/post) ─► applied | failed
  *                      ├─ owner declines ─► rejected
@@ -23,6 +23,14 @@
  * slippage the quote was bound with). A client-supplied "approved" flag means
  * nothing anywhere in this file.
  *
+ * WHAT APPROVAL DOES NOT BIND. The order the agent receives is side, symbol
+ * and USDG size — nothing more (the worker's owner-order path takes no
+ * minimum and no book). So the bound minimum and the practice/live mode are
+ * checked AT APPROVAL only: the agent takes a fresh price when it executes,
+ * with its own slippage limit at that moment, and trades in whatever mode it
+ * is in when it picks the order up. Every surface that shows a trade proposal
+ * says exactly that, and no more.
+ *
  * WHY EXECUTION CAN'T HAPPEN TWICE. The approval is an atomic
  * awaiting_approval → approved transition; the order id is derived from the
  * proposal id, so even a replayed placement collides on the order queue's
@@ -32,7 +40,12 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import type { Db } from "../../../../worker/src/db";
-import { placeHostedOrder, readHostedOrder, orderTtlMs } from "../order-state";
+import { resolveConfig } from "../../../../worker/src/settings";
+import { formatSettingValue, specFor } from "../../../../worker/src/telegram/setting-spec";
+import { untrusted } from "../../mcp/tools/shared";
+import { chatOrderCeiling, placeHostedOrder, readHostedOrder, orderTtlMs } from "../order-state";
+import { describeRule } from "./decisions";
+import { settingsReader, type SettingsView } from "./settings-view";
 
 export type ProposalKind = "trade" | "settings" | "agent_draft" | "post";
 export type ProposalStatus =
@@ -81,8 +94,20 @@ export interface DraftBinding {
   v: 1;
   kind: "agent_draft";
   tenant: string;
+  /** Only chat-settable keys (SETTING_SPECS) plus a validated agentName. */
   settings: Record<string, unknown>;
+  /** Each drafted key's value when it was drafted (null = not set). Approval refuses when any has changed since. */
+  before: Record<string, unknown>;
   risk_level: string | null;
+  /** Risk-profile keys a draft may not carry (not chat-settable), named so the owner sees what was left out. */
+  left_out: string[];
+  /**
+   * Random. `before` holds the owner's current settings and the binding's hash
+   * is shown to any drafts connection, including one with no agent shared: a
+   * one-key draft ("strategy") would otherwise let it brute-force the current
+   * value from the hash over a handful of candidates.
+   */
+  salt: string;
   expires_at: number;
 }
 export interface PostBinding {
@@ -166,7 +191,82 @@ function stable(b: Binding): unknown {
     const { quote: _q, ...t } = rest as Omit<TradeBinding, "expires_at">;
     return t;
   }
+  if (rest.kind === "agent_draft") {
+    // The salt differs every time by design, and `before` is the owner's state
+    // rather than the request: a retry of the same draft returns the same
+    // proposal (whose own `before` the approval re-checks), and a reply that
+    // differed with the owner's settings would tell a caller they had changed.
+    const { salt: _s, before: _b, ...d } = rest as Omit<DraftBinding, "expires_at">;
+    return d;
+  }
   return rest;
+}
+
+// ── settings: what is proposed, against what is there now ──────────────────
+
+/** One changed setting as the owner reads it. */
+export interface ChangeRow { key: string; label: string; current: string; proposed: string; help: string }
+
+/** A setting (a chat-settable key, or a draft's agentName) in the owner's words. */
+export function changeRow(key: string, current: unknown, proposed: unknown): ChangeRow {
+  if (key === "agentName") {
+    return { key, label: "agent name", current: typeof current === "string" && current ? current : "not set", proposed: String(proposed), help: "what your agent is called" };
+  }
+  const spec = specFor(key);
+  if (!spec) return { key, label: key, current: current === null || current === undefined ? "not set" : String(current), proposed: String(proposed), help: "" };
+  return { key, label: spec.label, current: formatSettingValue(spec, current), proposed: formatSettingValue(spec, proposed), help: spec.help };
+}
+
+/**
+ * The owner's CURRENT value of each key (null = not set), read the way a
+ * proposal's `before` was read: the chat-settable projection, plus the name.
+ */
+export async function currentValues(tenant: `0x${string}`, keys: readonly string[], view?: SettingsView | null): Promise<Record<string, unknown>> {
+  const reader = settingsReader();
+  const spec = (await reader.specValuesFor?.(tenant)) ?? {};
+  let named = view;
+  const out: Record<string, unknown> = {};
+  for (const k of keys) {
+    if (k === "agentName") {
+      if (named === undefined) named = await reader.settingsFor(tenant);
+      out[k] = named?.agentName ?? null;
+    } else {
+      out[k] = spec[k] ?? null;
+    }
+  }
+  return out;
+}
+
+/**
+ * Keys whose current value is no longer the one the proposal was made
+ * against. A proposal says "10% → 8%"; if the owner has since set 5% on the
+ * dashboard, approving it would LOOSEN the stop loss while the page read as a
+ * tightening. So a difference refuses the approval and asks for a fresh one.
+ */
+export function changedSince(before: Record<string, unknown>, current: Record<string, unknown>): string[] {
+  return Object.keys(before).filter((k) => canonical(before[k] ?? null) !== canonical(current[k] ?? null));
+}
+
+// ── the owner-order ceiling ─────────────────────────────────────────────────
+
+/**
+ * The most one owner order may spend, resolved exactly as POST /api/orders
+ * resolves it (lib/order-ceiling.ts → chatOrderCeiling): the owner's stored
+ * value when there is a usable one, else the house's. It used to be read as
+ * "no ceiling" when the owner never stored one, so a proposal the worker then
+ * refused at its default (25 USDG) was accepted and shown with no ceiling.
+ *
+ * `hosted: true` because MCP exists only on hosted Merrymen (mcp/config.ts
+ * refuses to enable it otherwise), which is the branch the route takes there.
+ * Zero is an owner's explicit "no chat ceiling".
+ */
+export function ownerOrderCeiling(tenant: string, settings: SettingsView | null): Promise<number> {
+  return chatOrderCeiling({
+    hosted: true,
+    tenant,
+    fallback: resolveConfig().telegramMaxActionUsdg,
+    stored: async () => ({ telegramMaxActionUsdg: settings?.telegram.maxActionUsdg ?? undefined }),
+  });
 }
 
 export async function createProposal(db: Db, input: {
@@ -235,57 +335,236 @@ export async function expireIfDue(db: Db, row: ProposalRow, now: number): Promis
   return row;
 }
 
-interface TradeRowLite { status: string; tx_hash: string | null; created_at: number; fill_cash_usdg: number | null; fill_qty_raw: string | null; basis_source: string | null; reject_rule: string | null }
+interface TradeRowLite {
+  status: string;
+  tx_hash: string | null;
+  created_at: number;
+  amount_usdg: number | null;
+  fill_cash_usdg: number | null;
+  fill_qty_raw: string | null;
+  basis_source: string | null;
+  reject_rule: string | null;
+}
+const TRADE_COLS = "t.status, t.tx_hash, t.created_at, t.amount_usdg, t.fill_cash_usdg, t.fill_qty_raw, t.basis_source, t.reject_rule";
+
+/**
+ * How far a trade row's clock may sit outside its order's claim-to-answer
+ * window. The orchestrator stamps the claim and the answer, the agent's
+ * process stamps the row, on the same machine; this is skew, not slack.
+ */
+const ROW_SKEW_SEC = 10;
+
+/**
+ * How long past the order's own deadline (or its answer, if later) the ledger
+ * gets to show the trade row of a finished order with no receipt. The row
+ * reaches the shared ledger through the orchestrator's mirror, which runs
+ * every 15 s or more; ten minutes is dozens of passes. Past it the outcome
+ * is called unknown, never "did not happen".
+ */
+export const EVIDENCE_GRACE_SEC = 10 * 60;
+
+const num = (v: unknown): number | null => {
+  const n = typeof v === "string" && v.trim() !== "" ? Number(v) : typeof v === "number" ? v : NaN;
+  return Number.isFinite(n) ? n : null;
+};
+
+/**
+ * A reject rule in Merrymen's own vocabulary (services/decisions.ts): the slug,
+ * its family, our sentence and the owner's remedy. The raw text a rule can
+ * carry (a provider error after "couldn't submit", a revert string) is never
+ * relayed — describeRule withholds it and so does this.
+ */
+function ruleFields(raw: string | null | undefined, tradeStatus: string): Record<string, unknown> {
+  const v = describeRule(raw, tradeStatus);
+  if (!v) return { rule: null };
+  return { rule: v.key, rule_family: v.family, rule_label: v.label, rule_remedy: v.remedy, ...(v.detail_withheld ? { rule_detail_withheld: true } : {}) };
+}
+
+/**
+ * The worker's own sentence, for the one case with no rule to describe
+ * instead: a refusal decided inside the agent before anything was built
+ * (paused, over its chat ceiling, a symbol it does not watch). Everything
+ * from a pre-submission failure on is provider text — the bundler's or the
+ * RPC's error, which can carry the endpoint and its key — and is cut; a
+ * parenthesised tail survives only as a bare rule slug; no link survives at
+ * all. What is left is still the agent's text, not Merrymen's, so it is
+ * marked untrusted and bounded.
+ */
+export function workerSentence(line: string | null | undefined): string | null {
+  if (typeof line !== "string") return null;
+  let s = line;
+  const cut = s.search(/\(?\s*couldn.?t submit/i);
+  if (cut >= 0) s = s.slice(0, cut);
+  s = s.replace(/\s*\(([^()]*)\)?/g, (_m, inner: string) => (/^[a-z0-9][a-z0-9-]{0,63}$/i.test(inner.trim()) ? ` (${inner.trim()})` : ""));
+  s = s.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S*/gi, "").replace(/\s+/g, " ");
+  return untrusted(s, 200);
+}
+
+/**
+ * THIS order's trade row, or that it cannot be named (yet).
+ *
+ * An owner order leaves no id of its own on the trade row, so it is named by
+ * everything the worker does leave, together:
+ *  - the account, and a decision minted for an OWNER order (source 'chat',
+ *    submitChatTrade) with the same side — a strategy's own trade of the same
+ *    token is not this order;
+ *  - the leg the order was about: what a buy bought, what a sell sold;
+ *  - a row written between the claim and the answer. The worker writes its
+ *    row (paper, submitted, or the outcome) before it answers, and settles a
+ *    submitted row IN PLACE, so the row keeps that created_at when it lands.
+ *    An earlier trade of the same token is outside the window.
+ * Two rows that fit are two owner orders for one token in one window (a
+ * Telegram order beside this one): ambiguous, so neither is taken.
+ */
+async function orderTrade(ledger: Db, o: { account: string; side: "buy" | "sell"; token: string; fromSec: number; toSec: number }): Promise<{ kind: "none" | "ambiguous" } | { kind: "one"; row: TradeRowLite }> {
+  const leg = o.side === "buy" ? "t.buy_token" : "t.sell_token";
+  const rows = await ledger.prepare(`SELECT ${TRADE_COLS} FROM trades t JOIN decisions d ON d.id = t.decision_id
+    WHERE lower(t.agent_id) = ? AND lower(d.agent_id) = ? AND d.source = 'chat' AND lower(d.action) = ? AND lower(${leg}) = ?
+      AND t.created_at >= ? AND t.created_at <= ?
+    ORDER BY t.id ASC LIMIT 2`)
+    .all(o.account.toLowerCase(), o.account.toLowerCase(), o.side, o.token.toLowerCase(), o.fromSec, o.toSec) as TradeRowLite[];
+  if (rows.length === 1) return { kind: "one", row: rows[0]! };
+  return { kind: rows.length ? "ambiguous" : "none" };
+}
+
+/** The claim-to-answer window of a finished order, and how long its evidence may take. */
+async function orderWindow(ledger: Db, row: ProposalRow, expiresAtMs: number | null, now: number): Promise<{ fromSec: number; toSec: number; deadlineSec: number }> {
+  const cmd = await ledger.prepare("SELECT claimed_at, done_at FROM agent_commands WHERE id = ? AND agent_id = ?")
+    .get(row.order_id, row.agent_account) as { claimed_at: unknown; done_at: unknown } | undefined;
+  const claimedMs = num(cmd?.claimed_at) ?? (row.decided_at ?? row.created_at) * 1000;
+  const doneMs = num(cmd?.done_at) ?? now * 1000;
+  return {
+    fromSec: Math.floor(claimedMs / 1000) - ROW_SKEW_SEC,
+    toSec: Math.ceil(doneMs / 1000) + ROW_SKEW_SEC,
+    deadlineSec: Math.ceil(Math.max(expiresAtMs ?? doneMs, doneMs) / 1000) + EVIDENCE_GRACE_SEC,
+  };
+}
+
+/** The USDG a landed row moved, only when known exactly (the rule order-receipt.ts applies to a receipt). */
+function usdgMoved(side: "buy" | "sell", t: TradeRowLite): number | null {
+  if (t.basis_source === "receipt" && typeof t.fill_cash_usdg === "number" && t.fill_cash_usdg >= 0) return t.fill_cash_usdg;
+  if (side === "buy" && typeof t.amount_usdg === "number" && t.amount_usdg > 0) return t.amount_usdg;
+  return null;
+}
+
+const WAITING_NOTE = "The agent finished the order; waiting for its trade record to reach the ledger before saying what happened. This usually takes under a minute.";
 
 /**
  * Follow a submitted trade through the order queue and the ledger and settle
- * its status. "confirmed" requires BOTH the worker's filled receipt AND the
- * mirrored trade row that says landed with the same transaction hash.
+ * its status. "confirmed" requires an on-chain receipt AND the ledger's landed
+ * row for the same transaction: the worker's filled receipt plus the mirrored
+ * row with its hash, or — when the worker answered before the chain did —
+ * this order's own row (see orderTrade), settled to landed from the chain's
+ * receipt, with its hash.
+ *
+ * A MISSING ROW IS NOT A FAILED TRADE. The row reaches the shared ledger on
+ * the mirror's schedule, later than the answer, and a live row the worker left
+ * 'submitted' is settled in place long after. So a finished order with no
+ * receipt stays 'executing' until its row says what happened, and only past
+ * EVIDENCE_GRACE_SEC is it closed — as an outcome that could not be confirmed.
+ *
+ * Results are built from the receipt's status and the reject-rule vocabulary;
+ * the worker's own line is never relayed raw (see workerSentence).
  */
 export async function followTrade(mcp: Db, ledger: Db, row: ProposalRow, now: number): Promise<ProposalRow> {
   if (row.kind !== "trade" || !row.order_id || !row.agent_account || !["submitted", "executing", "filled_awaiting_ledger"].includes(row.status)) return row;
   const binding = JSON.parse(row.binding_json) as TradeBinding;
   const order = await readHostedOrder(ledger, row.agent_account, row.order_id, now * 1000);
   if (order.status !== 200) return row; // unreadable: keep the last known state, never guess
-  const body = order.body as { state: string; result?: string | null; receipt?: { status: string; txHash: string | null; rejectRule: string | null; usdgActual: number | null } };
+  const body = order.body as { state: string; result?: string | null; expiresAt?: number | null; receipt?: { status: string; txHash: string | null; rejectRule: string | null; usdgActual: number | null } };
   let next: ProposalStatus = row.status;
   let result: Record<string, unknown> | undefined;
+  const mine = async () => {
+    const w = await orderWindow(ledger, row, typeof body.expiresAt === "number" ? body.expiresAt : null, now);
+    return { w, m: await orderTrade(ledger, { account: row.agent_account!, side: binding.side, token: binding.token, ...w }) };
+  };
   if (body.state === "none") return row;
   if (body.state === "queued") next = "submitted";
   else if (body.state === "running") next = "executing";
   else if (body.state === "expired") { next = "expired"; result = { why: "the agent did not pick the order up before its window closed; nothing was sent" }; }
   else if (body.state === "done") {
     const receipt = body.receipt;
-    const line = typeof body.result === "string" ? body.result.slice(0, 300) : null;
+    const line = typeof body.result === "string" ? body.result : null;
+    // A refusal or a failure with no rule slug on its receipt: the rule may
+    // still be on this order's own row (free text the slug check dropped), and
+    // is described from there; failing that, the agent's own sentence, cut.
+    const explain = async (slug: string | null, status: string): Promise<Record<string, unknown>> => {
+      if (slug) return ruleFields(slug, status);
+      const { m } = await mine();
+      if (m.kind === "one" && m.row.reject_rule) return ruleFields(m.row.reject_rule, m.row.status);
+      return { rule: null, agent_said_untrusted: workerSentence(line) };
+    };
     if (receipt?.status === "filled" && receipt.txHash) {
-      const landed = await ledger.prepare(`SELECT status, tx_hash, created_at, fill_cash_usdg, fill_qty_raw, basis_source, reject_rule FROM trades
-        WHERE lower(agent_id) = ? AND lower(tx_hash) = ? ORDER BY id DESC LIMIT 1`).get(row.agent_account.toLowerCase(), receipt.txHash.toLowerCase()) as TradeRowLite | undefined;
+      const landed = await ledger.prepare(`SELECT ${TRADE_COLS} FROM trades t
+        WHERE lower(t.agent_id) = ? AND lower(t.tx_hash) = ? ORDER BY t.id DESC LIMIT 1`).get(row.agent_account.toLowerCase(), receipt.txHash.toLowerCase()) as TradeRowLite | undefined;
       if (landed?.status === "landed") {
         next = "confirmed";
-        result = { tx_hash: receipt.txHash, usdg_actual: receipt.usdgActual, fill_qty_raw: landed.fill_qty_raw, basis_source: landed.basis_source, worker_line: line };
+        result = { tx_hash: receipt.txHash, usdg_actual: receipt.usdgActual, fill_qty_raw: landed.fill_qty_raw, basis_source: landed.basis_source };
       } else {
         next = "filled_awaiting_ledger";
-        result = { tx_hash: receipt.txHash, note: "the agent reported a fill; waiting for the ledger to record the landed trade before calling it confirmed", worker_line: line };
+        result = { tx_hash: receipt.txHash, note: "the agent reported a fill; waiting for the ledger to record the landed trade before calling it confirmed" };
       }
-    } else if (receipt?.status === "refused") { next = "refused"; result = { rule: receipt.rejectRule, worker_line: line }; }
-    else if (receipt?.status === "failed") { next = "failed"; result = { rule: receipt.rejectRule, tx_hash: receipt.txHash, worker_line: line }; }
-    else if (receipt?.status === "expired") { next = "expired"; result = { why: "the order's window closed before it ran; nothing was sent", worker_line: line }; }
-    else {
-      // No receipt: the worker booked it on paper, or sent it and is still
-      // waiting for the chain. Tell the two apart from the ledger row.
-      const trade = await ledger.prepare(`SELECT status, tx_hash, created_at, fill_cash_usdg, fill_qty_raw, basis_source, reject_rule FROM trades
-        WHERE lower(agent_id) = ? AND created_at >= ? AND (lower(buy_token) = ? OR lower(sell_token) = ?) ORDER BY id DESC LIMIT 1`)
-        .get(row.agent_account.toLowerCase(), (row.decided_at ?? row.created_at) - 5, binding.token.toLowerCase(), binding.token.toLowerCase()) as TradeRowLite | undefined;
-      if (trade?.status === "paper") { next = "paper_filled"; result = { note: "a simulated fill in the practice book; no money moved", worker_line: line }; }
-      else if (trade?.status === "submitted") { next = "executing"; result = { tx_hash: trade.tx_hash, note: "sent to the chain; waiting for the receipt", worker_line: line }; }
-      else { next = "failed"; result = { why: "the agent finished the order without a recorded fill", worker_line: line }; }
+    } else if (receipt?.status === "refused") {
+      next = "refused";
+      result = { why: "the agent's limits, policy or on-chain permission refused it; nothing was sent", ...(await explain(receipt.rejectRule, "rejected")) };
+    } else if (receipt?.status === "failed") {
+      next = "failed";
+      result = receipt.txHash
+        ? { why: "it reached the chain and reverted; nothing moved but the gas", tx_hash: receipt.txHash, ...(await explain(receipt.rejectRule, "reverted")) }
+        : { why: "the agent handed the order to execution and no trade was recorded for it", tx_hash: null, ...(await explain(receipt.rejectRule, "rejected")) };
+    } else if (receipt?.status === "expired") {
+      next = "expired";
+      result = { why: "the order's window closed before it ran; nothing was sent" };
+    } else {
+      // No receipt: the worker booked it on paper, or sent it and answered
+      // before the chain did (or it is a worker that writes no receipts).
+      // Only this order's own row says which — and until it is in the shared
+      // ledger, nothing is concluded.
+      const { w, m } = await mine();
+      const t = m.kind === "one" ? m.row : null;
+      if (t?.status === "paper") {
+        next = "paper_filled";
+        result = { note: "a simulated fill in the practice book; no money moved", ...(t.reject_rule ? { simulated_because: ruleFields(t.reject_rule, "paper") } : {}) };
+      } else if (t?.status === "submitted") {
+        next = "executing";
+        result = { tx_hash: t.tx_hash, note: "sent to the chain; waiting for the ledger to record whether it landed" };
+      } else if (t?.status === "landed" && t.tx_hash) {
+        next = "confirmed";
+        result = { tx_hash: t.tx_hash, usdg_actual: usdgMoved(binding.side, t), fill_qty_raw: t.fill_qty_raw, basis_source: t.basis_source };
+      } else if (t?.status === "reverted") {
+        next = "failed";
+        result = { why: "it reached the chain and reverted; nothing moved but the gas", tx_hash: t.tx_hash, ...ruleFields(t.reject_rule, "reverted") };
+      } else if (t?.status === "rejected") {
+        next = "refused";
+        result = { why: "the agent's limits, policy or on-chain permission refused it; nothing was sent", ...ruleFields(t.reject_rule, "rejected") };
+      } else if (now > w.deadlineSec) {
+        next = "failed";
+        result = {
+          why: "the agent finished the order, but no trade record that is clearly this order's reached the ledger in time, so its outcome could not be confirmed. Check the agent's trades before proposing it again.",
+          outcome_unknown: true,
+        };
+      } else {
+        next = "executing";
+        result = { note: WAITING_NOTE };
+      }
     }
   }
-  if (next !== row.status || result) {
-    await setStatus(mcp, row.id, ["submitted", "executing", "filled_awaiting_ledger"], next, now, result ? { result } : {});
-    return { ...row, status: next, updated_at: now, result_json: result ? JSON.stringify(result) : row.result_json };
+  const json = result ? JSON.stringify(result) : null;
+  if (next !== row.status || (json !== null && json !== row.result_json)) {
+    if (!(await setStatus(mcp, row.id, ["submitted", "executing", "filled_awaiting_ledger"], next, now, result ? { result } : {}))) {
+      // Moved on under us (a cancel, or another reader settling it): report what is stored.
+      return (await proposalRow(mcp, row.tenant, row.id)) ?? row;
+    }
+    return { ...row, status: next, updated_at: now, result_json: json ?? row.result_json };
   }
   return row;
+}
+
+/** A stored result, minus anything a result must no longer carry (a raw worker line from before workerSentence). */
+export function resultView(json: string | null): Record<string, unknown> | null {
+  if (!json) return null;
+  const { worker_line: _w, ...rest } = JSON.parse(json) as Record<string, unknown>;
+  return rest;
 }
 
 export async function cancelProposal(mcp: Db, ledger: Db | null, tenant: string, id: string, now: number): Promise<ProposalRow> {

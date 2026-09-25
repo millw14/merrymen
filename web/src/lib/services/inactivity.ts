@@ -85,7 +85,7 @@ export const EMPTY_TALLY: DecisionTally = {
  * row is the one that says whether it was a live or a shadow run — so Brain
  * failures are counted from decisions, and the event is only reported.
  */
-export type EventKind = "market_unreadable" | "provider_failure" | "brain_failure" | "brain_refused" | "execution_failure" | "policy_notice" | "arm_failure" | "funding_notice" | "other";
+export type EventKind = "market_unreadable" | "provider_failure" | "brain_failure" | "brain_refused" | "execution_failure" | "policy_notice" | "arm_failure" | "funding_notice" | "consent_notice" | "other";
 
 /**
  * What a warn/err event is about, from the fixed openings the worker writes
@@ -100,6 +100,8 @@ export function classifyEvent(message: string): EventKind {
   if (/^brain refused:/i.test(m)) return "brain_refused";
   if (/^this agent CANNOT START/.test(m)) return "arm_failure";
   if (/^no ETH in the account/i.test(m)) return "funding_notice";
+  // index.ts trenchCandidates: the Trencher's feed is empty because a setting says so.
+  if (/^trencher is running but (live trenching is off|your asset mode is Stocks only)/i.test(m)) return "consent_notice";
   if (/^policy rejected /i.test(m)) return "policy_notice";
   if (/ (reverted on-chain|failed before submit)[: ]|not retried again until the next arm|the gas sponsor declined/i.test(m)) return "execution_failure";
   return "other";
@@ -112,7 +114,7 @@ const emptyCount = (): EventCount => ({ count: 0, first_at: null, last_at: null 
 export function emptyEvents(): EventTally {
   return {
     market_unreadable: emptyCount(), provider_failure: emptyCount(), brain_failure: emptyCount(), brain_refused: emptyCount(), execution_failure: emptyCount(),
-    policy_notice: emptyCount(), arm_failure: emptyCount(), funding_notice: emptyCount(), other: emptyCount(), scanned: 0, truncated: false,
+    policy_notice: emptyCount(), arm_failure: emptyCount(), funding_notice: emptyCount(), consent_notice: emptyCount(), other: emptyCount(), scanned: 0, truncated: false,
   };
 }
 
@@ -565,19 +567,42 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
     if (!s) {
       add({ category: "settings_consent", status: "unknown", kind: null, summary: "The agent's settings could not be read.", observed: {} });
     } else {
+      // THE TRENCHER'S OWN GATES (worker index.ts trenchCandidates, the same
+      // reading as the terminal's trencherRow): its candidate feed is empty —
+      // it never opens a position — when the asset mode is Stocks only (on
+      // either book), and while it trades live unless live trenching
+      // (trencherLiveEnabled, off by default) is on. The worker announces the
+      // second as a warn event once per arm.
+      const trencher = s.strategy === "trencher";
+      const trencherStocks = trencher && s.assetMode === "stocks";
+      const trencherLiveOff = trencher && s.trencherLiveEnabled !== true;
+      const trencherNotice = i.events.consent_notice;
       const observed = {
         live_trading_enabled: s.liveTradingEnabled, paper_trading_enabled: s.paperTradingEnabled, asset_mode: s.assetMode, strategy: s.strategy,
         launch_buying_enabled: s.launchBuying.enabled, scout_enabled: s.scoutEnabled, scout_budget_usdg: s.scoutBudgetUsdg,
+        trencher_live_enabled: s.trencherLiveEnabled,
       };
       const evidence: string[] = [];
       if (!s.launchBuying.enabled) evidence.push("Launch buying is off, so it does not buy new launches.");
       if (s.scoutEnabled && s.scoutBudgetUsdg !== null && s.scoutBudgetUsdg <= 0) evidence.push("The scout budget is 0, so coins it discovers are never bought.");
       else if (s.scoutEnabled && s.scoutBudgetUsdg === null) evidence.push("No scout budget is set; the default is 0, so coins it discovers are not bought unless the agent's own machine sets one.");
       if (s.assetMode) evidence.push(`Asset mode: ${s.assetMode}.`);
+      if (trencherNotice.count) evidence.push(`The worker reported at ${iso(trencherNotice.last_at)} that the Trencher's candidate feed is empty because of a setting.`);
       const turnOn = "Turn on Live trading in Settings when you want it to trade your real funds.";
+      const trencherLiveRemedy = "Turn on “let trencher trade for real” in Settings so it can open real positions.";
+      const liveTrenchingState = s.trencherLiveEnabled === false ? "is off" : "is not set, and it is off by default";
       if (!s.liveTradingEnabled && !s.paperTradingEnabled) {
         add({ category: "settings_consent", status: "blocking", kind: "consent_off", summary: "Live trading and paper trading are both off, so the agent does nothing at all: no real orders and no simulated ones.", observed, evidence, remedy: ["Turn on Live trading in Settings to trade real funds, or Paper trading to practise."] });
+      } else if (trencherStocks) {
+        add({ category: "settings_consent", status: "blocking", kind: "consent_off", summary: "The strategy is Trencher, but the asset mode is Stocks only. Every Trencher candidate is a coin, so its candidate feed is empty and it never opens a position, on paper or live.", observed, evidence, remedy: ["Switch Asset mode to All assets or Crypto only in Settings, or pick a strategy that trades stock tokens."] });
+      } else if (s.liveTradingEnabled && trencherLiveOff) {
+        add({ category: "settings_consent", status: "blocking", kind: "consent_off", summary: `Live trading is on and the strategy is Trencher, but live trenching (“let trencher trade for real”) ${liveTrenchingState}. While it trades live the worker gives the Trencher no candidates, so it never opens a position.`, observed, evidence, recorded_at: trencherNotice.last_at, since: trencherNotice.first_at, remedy: [trencherLiveRemedy] });
+      } else if (s.liveTradingEnabled && trencher && trencherNotice.count) {
+        // Settings say on, yet the worker said off inside the window: the change
+        // may postdate that notice, or the agent's own machine may override it.
+        add({ category: "settings_consent", status: "warning", kind: "consent_off", summary: `Your settings have live trenching on, but at ${iso(trencherNotice.last_at)} the worker reported the Trencher's candidate feed empty because of a setting (live trenching off, or a Stocks-only asset mode). It picks up a change on its next settings reload, unless a setting on the agent's own machine overrides it.`, observed, evidence, recorded_at: trencherNotice.last_at, remedy: [trencherLiveRemedy] });
       } else if (!s.liveTradingEnabled) {
+        if (trencherLiveOff) evidence.push(`Live trenching ${liveTrenchingState}: once Live trading is on, the Trencher opens no real position until “let trencher trade for real” is on too.`);
         add({ category: "settings_consent", status: "warning", kind: "paper_by_choice", summary: "Live trading is off, so it places no real orders; it practises on paper.", observed, evidence, remedy: [turnOn] });
       } else {
         add({ category: "settings_consent", status: "ok", kind: null, summary: "Live trading is on.", observed, evidence });

@@ -18,7 +18,9 @@ import type { McpConfig } from "../config";
 import { lockSuffix, type McpDb } from "../db";
 import { scopeInfo, normalizeScopes, parseScopeParam, scopeString, type ScopeInfo } from "../scopes";
 import type { AgentDirectory } from "../agents";
-import { ClientError, redirectMatches, resolveClient, type CimdFetcher, type McpClient } from "./clients";
+import {
+  ClientError, consentHost, isLoopbackRedirect, ownHostsOf, redirectMatches, resolveClient, type CimdFetcher, type McpClient,
+} from "./clients";
 import { PKCE_CHALLENGE, constantTimeEqual, randomCredential, randomId, sha256hex, verifyPkce } from "./crypto";
 
 export type Tenant = `0x${string}`;
@@ -74,12 +76,17 @@ function normalizeResource(raw: string): string {
   }
 }
 
+/** Resolve a client_id the way every endpoint must: never a metadata document served from one of our own hosts. */
+export function clientFor(deps: Pick<OAuthDeps, "d" | "cfg" | "fetcher">, clientId: unknown, now: number): Promise<McpClient> {
+  return resolveClient(deps.d, clientId, now, { ownHosts: ownHostsOf(deps.cfg), fetcher: deps.fetcher });
+}
+
 export async function startAuthorization(deps: OAuthDeps, p: URLSearchParams): Promise<AuthorizeOutcome> {
   const { d, cfg } = deps;
   const now = deps.now();
   let client: McpClient;
   try {
-    client = await resolveClient(d, p.get("client_id"), now, deps.fetcher);
+    client = await clientFor(deps, p.get("client_id"), now);
   } catch (e) {
     const ce = e instanceof ClientError ? e : new ClientError("invalid_client", "unknown client");
     return { kind: "page_error", status: ce.code === "temporarily_unavailable" ? 503 : 400, error: ce.code, description: ce.message };
@@ -91,10 +98,19 @@ export async function startAuthorization(deps: OAuthDeps, p: URLSearchParams): P
     return { kind: "page_error", status: 400, error: "invalid_request", description: "redirect_uri is missing or not registered for this client" };
   }
   const state = p.get("state") ?? undefined;
-  const fail = (error: string, description: string): AuthorizeOutcome => ({
-    kind: "redirect",
-    location: withParams(redirectUri, { error, error_description: description, state, iss: cfg.issuer }),
-  });
+  // Before the owner has seen the consent screen, an error is shown on our own
+  // page, not bounced to the client: registration is open (and a metadata
+  // document is whatever its author serves), so a "registered" https redirect
+  // proves nothing, and bouncing would make every Merrymen authorize link an
+  // open redirector to any site that registered itself (RFC 9700 §4.11.2).
+  // The one exception is a metadata-document client returning to loopback —
+  // a program on the owner's own computer (Claude Code, Codex CLI) that is
+  // waiting on that port and would otherwise hang. After consent, decline and
+  // approval go back to the client as usual.
+  const redirectErrors = client.kind === "cimd" && isLoopbackRedirect(redirectUri);
+  const fail = (error: string, description: string): AuthorizeOutcome => redirectErrors
+    ? { kind: "redirect", location: withParams(redirectUri, { error, error_description: description, state, iss: cfg.issuer }) }
+    : { kind: "page_error", status: 400, error, description };
   if (state !== undefined && state.length > 1024) return fail("invalid_request", "state is too long");
   if (p.get("response_type") !== "code") return fail("unsupported_response_type", "only response_type=code is supported");
   if (p.get("code_challenge_method") !== "S256") return fail("invalid_request", "PKCE with code_challenge_method=S256 is required");
@@ -135,17 +151,30 @@ interface RequestRow {
 export interface ConsentView {
   client: {
     name: string | null;
+    /** The verified CIMD host, or for a dynamically registered app the host the code will actually go to. */
     host: string;
     registration: "metadata-document" | "dynamic";
     redirectHost: string;
     /** Loopback redirects mean a program on the owner's own computer (Claude Code, Codex CLI). */
     local: boolean;
   };
+  /** The choices the owner makes. `offline_access` is never one of them: see OFFLINE_ACCESS. */
   scopes: Array<Pick<ScopeInfo, "id" | "title" | "detail" | "level" | "needsAgent" | "defaultOn">>;
   agents: Array<{ slug: string; account: string | null }>;
   signedIn: boolean;
   expiresAt: number;
+  /** A connection lasts at most this many days (the refresh-token family limit) before the owner approves again. */
+  maxDays: number;
 }
+
+/**
+ * Refresh tokens are ALWAYS issued (rotating; idle and absolute family limits
+ * from config), because MCP clients depend on them. `offline_access` is
+ * therefore accepted and echoed for compatibility and grants nothing extra; it
+ * is never offered as a choice, so no consent text can suggest it controls how
+ * long a connection lasts. Disconnecting on Connected apps ends everything.
+ */
+const OFFLINE_ACCESS = "offline_access";
 
 async function pendingRequest(d: McpDb, requestId: unknown, now: number, lock = false): Promise<RequestRow> {
   if (typeof requestId !== "string" || requestId.length < 20 || requestId.length > 200) {
@@ -169,10 +198,10 @@ function offeredScopes(requested: string[], staff: boolean): string[] {
 export async function describeRequest(deps: OAuthDeps, requestId: unknown, tenant: Tenant | null): Promise<ConsentView> {
   const now = deps.now();
   const row = await pendingRequest(deps.d, requestId, now);
-  const client = await resolveClient(deps.d, row.client_id, now, deps.fetcher);
+  const client = await clientFor(deps, row.client_id, now);
   const redirect = new URL(row.redirect_uri);
   const staff = !!tenant && deps.cfg.staffTenants.has(tenant.toLowerCase());
-  const scopes = offeredScopes(row.scopes.split(" ").filter(Boolean), staff).map((id) => {
+  const scopes = offeredScopes(row.scopes.split(" ").filter(Boolean), staff).filter((id) => id !== OFFLINE_ACCESS).map((id) => {
     const i = scopeInfo(id)!;
     return { id: i.id, title: i.title, detail: i.detail, level: i.level, needsAgent: i.needsAgent, defaultOn: i.defaultOn };
   });
@@ -180,7 +209,7 @@ export async function describeRequest(deps: OAuthDeps, requestId: unknown, tenan
   return {
     client: {
       name: client.clientName,
-      host: client.displayHost,
+      host: consentHost(client, row.redirect_uri),
       registration: client.kind === "cimd" ? "metadata-document" : "dynamic",
       redirectHost: redirect.host,
       local: redirect.protocol === "http:",
@@ -189,6 +218,7 @@ export async function describeRequest(deps: OAuthDeps, requestId: unknown, tenan
     agents,
     signedIn: !!tenant,
     expiresAt: row.expires_at,
+    maxDays: Math.max(1, Math.floor(deps.cfg.refreshFamilyMaxSec / 86_400)),
   };
 }
 
@@ -208,7 +238,7 @@ export async function decideRequest(deps: OAuthDeps, requestId: unknown, tenant:
   // connection) and the client (a metadata document may need re-fetching).
   const owned = decision.approve ? await deps.agents.agentsFor(owner) : [];
   const peek = await pendingRequest(d, requestId, now);
-  const client = await resolveClient(d, peek.client_id, now, deps.fetcher);
+  const client = await clientFor(deps, peek.client_id, now);
   const result = await d.db.tx(async (db) => {
     const tx: McpDb = { db, dialect: d.dialect };
     const row = await pendingRequest(tx, requestId, now, true);
@@ -226,8 +256,13 @@ export async function decideRequest(deps: OAuthDeps, requestId: unknown, tenant:
     if (slugs.some((s) => !ownedSlugs.has(s))) throw new OAuthError("access_denied", "you can only share your own agents", 403);
     // Agent scopes are meaningless without an agent to apply them to; do not
     // leave a dormant grant that would silently widen if an agent appeared.
-    const scopes = normalizeScopes(chosen.filter((s) => slugs.length > 0 || !scopeInfo(s)?.needsAgent));
-    if (!scopes.filter((s) => s !== "offline_access").length) throw new OAuthError("invalid_scope", "choose at least one kind of access, or cancel");
+    const granted = chosen.filter((s) => s !== OFFLINE_ACCESS && (slugs.length > 0 || !scopeInfo(s)?.needsAgent));
+    if (!granted.length) throw new OAuthError("invalid_scope", "choose at least one kind of access, or cancel");
+    // offline_access is not the owner's choice (it controls nothing): echoed when asked for.
+    const scopes = normalizeScopes(requested.includes(OFFLINE_ACCESS) ? [...granted, OFFLINE_ACCESS] : granted);
+    // What Connected apps will show: for a self-registered app, the host the
+    // code is actually going to, not whichever redirect it registered first.
+    const host = consentHost(client, row.redirect_uri);
 
     await db.prepare("UPDATE mcp_auth_requests SET status = 'approved' WHERE id_hash = ?").run(row.id_hash);
     const existing = await db.prepare(`SELECT id FROM mcp_connections WHERE tenant = ? AND client_id = ? AND kind = 'oauth' AND status = 'active'${lockSuffix(tx)}`)
@@ -235,11 +270,11 @@ export async function decideRequest(deps: OAuthDeps, requestId: unknown, tenant:
     const connectionId = existing?.id ?? randomId("mcpcon_");
     if (existing) {
       await db.prepare("UPDATE mcp_connections SET scopes = ?, agent_slugs = ?, client_name = ?, client_host = ?, updated_at = ? WHERE id = ?")
-        .run(scopeString(scopes), JSON.stringify(slugs), client.clientName, client.displayHost, now, connectionId);
+        .run(scopeString(scopes), JSON.stringify(slugs), client.clientName, host, now, connectionId);
     } else {
       await db.prepare(`INSERT INTO mcp_connections (id, tenant, client_id, client_name, client_host, kind, scopes, agent_slugs, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, 'oauth', ?, ?, 'active', ?, ?)`)
-        .run(connectionId, owner, client.clientId, client.clientName, client.displayHost, scopeString(scopes), JSON.stringify(slugs), now, now);
+        .run(connectionId, owner, client.clientId, client.clientName, host, scopeString(scopes), JSON.stringify(slugs), now, now);
     }
     const code = randomCredential("mcpcode_", 32);
     await db.prepare(`INSERT INTO mcp_codes (code_hash, connection_id, client_id, redirect_uri, code_challenge, resource, scopes, family, expires_at, used_at)
@@ -286,7 +321,7 @@ export async function authenticateClient(deps: OAuthDeps, form: URLSearchParams,
   }
   let client: McpClient;
   try {
-    client = await resolveClient(deps.d, clientId, deps.now(), deps.fetcher);
+    client = await clientFor(deps, clientId, deps.now());
   } catch {
     throw new OAuthError("invalid_client", "unknown client", 401);
   }
@@ -319,8 +354,39 @@ async function issuePair(db: McpDb["db"], cfg: McpConfig, now: number, o: {
   return { access_token: access, token_type: "Bearer", expires_in: Math.max(1, accessExp - now), refresh_token: refresh, scope };
 }
 
-async function revokeFamily(db: McpDb["db"], family: string, now: number): Promise<void> {
-  await db.prepare("UPDATE mcp_tokens SET revoked_at = ? WHERE family = ? AND revoked_at IS NULL").run(now, family);
+/**
+ * Every write to a token family is serialised on its connection row.
+ *
+ * Postgres runs these transactions at READ COMMITTED, where each statement
+ * sees only what was committed when THAT statement started. A family
+ * revocation written as one bare UPDATE can then miss a pair minted by a
+ * rotation running at the same time: the UPDATE blocks on the row the rotation
+ * is spending, re-checks only that row once the rotation commits, and the new
+ * pair (invisible to the UPDATE's snapshot) stays live after reuse was
+ * detected.
+ *
+ * So every transaction that mints into a family (code exchange, rotation) or
+ * revokes one (refresh reuse, code replay, client revocation) first takes
+ * `SELECT … FOR UPDATE` on the connection row, and only in LATER statements
+ * reads the token state it decides on or runs the revoking UPDATE:
+ * - a revoker queued behind a rotation starts its UPDATE after that rotation
+ *   committed, so the UPDATE's snapshot includes the new pair;
+ * - a rotation queued behind a revoker re-reads its token after the
+ *   revocation committed, sees it revoked, and refuses.
+ * Lock order is always code row → connection row → token rows (and
+ * revokeConnection updates the connection row before its tokens), so these
+ * paths cannot deadlock one another. SQLite serialises writers; there the
+ * lock clause is empty and the order of statements is what the tests pin.
+ */
+async function lockConnection(tx: McpDb, connectionId: string): Promise<ConnectionRow | undefined> {
+  return await tx.db.prepare(`SELECT id, tenant, status, scopes FROM mcp_connections WHERE id = ?${lockSuffix(tx)}`)
+    .get(connectionId) as ConnectionRow | undefined;
+}
+
+/** Revoke a whole family. Must run inside a transaction (the connection lock is held until it commits). */
+async function revokeFamily(tx: McpDb, connectionId: string, family: string, now: number): Promise<void> {
+  await lockConnection(tx, connectionId);
+  await tx.db.prepare("UPDATE mcp_tokens SET revoked_at = ? WHERE family = ? AND revoked_at IS NULL").run(now, family);
 }
 
 export async function exchangeCode(deps: OAuthDeps, form: URLSearchParams, client: McpClient): Promise<TokenResponse> {
@@ -338,7 +404,7 @@ export async function exchangeCode(deps: OAuthDeps, form: URLSearchParams, clien
     if (!row) throw new OAuthError("invalid_grant", "the authorization code is invalid");
     if (row.used_at !== null) {
       // A replayed code means it leaked: kill everything minted from it (RFC 6749 §4.1.2).
-      await revokeFamily(db, row.family, now);
+      await revokeFamily(tx, row.connection_id, row.family, now);
       return { replay: true as const, row };
     }
     if (row.client_id !== client.clientId) throw new OAuthError("invalid_grant", "the code was issued to another client");
@@ -349,7 +415,7 @@ export async function exchangeCode(deps: OAuthDeps, form: URLSearchParams, clien
     if (resource && normalizeResource(resource) !== row.resource) throw new OAuthError("invalid_target", "resource does not match the authorization request");
     const marked = await db.prepare("UPDATE mcp_codes SET used_at = ? WHERE code_hash = ? AND used_at IS NULL").run(now, row.code_hash);
     if (marked.changes !== 1) throw new OAuthError("invalid_grant", "the authorization code was already used");
-    const conn = await db.prepare("SELECT id, tenant, status, scopes FROM mcp_connections WHERE id = ?").get(row.connection_id) as ConnectionRow | undefined;
+    const conn = await lockConnection(tx, row.connection_id);
     if (!conn || conn.status !== "active") throw new OAuthError("invalid_grant", "the connection was revoked");
     const tokens = await issuePair(db, cfg, now, {
       connectionId: row.connection_id, clientId: client.clientId, family: row.family,
@@ -370,10 +436,16 @@ export async function refreshTokens(deps: OAuthDeps, form: URLSearchParams, clie
   const now = deps.now();
   const raw = form.get("refresh_token");
   if (!raw || raw.length > 200) throw new OAuthError("invalid_request", "refresh_token is required");
+  const hash = sha256hex(raw);
   const out = await d.db.tx(async (db) => {
     const tx: McpDb = { db, dialect: d.dialect };
+    // Which connection? A plain read (it locks and waits for nothing); every
+    // decision below is made on a re-read taken after the connection lock.
+    const owner = await db.prepare("SELECT connection_id FROM mcp_tokens WHERE token_hash = ?").get(hash) as { connection_id: string } | undefined;
+    if (!owner) throw new OAuthError("invalid_grant", "the refresh token is invalid");
+    const conn = await lockConnection(tx, owner.connection_id);
     const row = await db.prepare(`SELECT token_hash, connection_id, kind, family, scopes, resource, client_id, expires_at, family_expires_at, used_at, revoked_at
-      FROM mcp_tokens WHERE token_hash = ?${lockSuffix(tx)}`).get(sha256hex(raw)) as {
+      FROM mcp_tokens WHERE token_hash = ?${lockSuffix(tx)}`).get(hash) as {
       token_hash: string; connection_id: string; kind: string; family: string; scopes: string; resource: string; client_id: string;
       expires_at: number; family_expires_at: number; used_at: number | null; revoked_at: number | null;
     } | undefined;
@@ -383,13 +455,12 @@ export async function refreshTokens(deps: OAuthDeps, form: URLSearchParams, clie
     if (row.used_at !== null) {
       // Rotation reuse: either the client or an attacker holds a stale copy.
       // OAuth 2.1 §4.3.1: revoke the family so neither keeps access.
-      await revokeFamily(db, row.family, now);
+      await revokeFamily(tx, row.connection_id, row.family, now);
       return { reuse: true as const, row };
     }
     if (row.expires_at <= now || row.family_expires_at <= now) throw new OAuthError("invalid_grant", "the refresh token has expired; reconnect the app");
     const resource = form.get("resource");
     if (resource && normalizeResource(resource) !== row.resource) throw new OAuthError("invalid_target", "resource does not match");
-    const conn = await db.prepare("SELECT id, tenant, status, scopes FROM mcp_connections WHERE id = ?").get(row.connection_id) as ConnectionRow | undefined;
     if (!conn || conn.status !== "active") throw new OAuthError("invalid_grant", "the connection was revoked");
     // A refresh can narrow scope, never widen it, and never beyond what the
     // owner's current consent allows.
@@ -401,7 +472,7 @@ export async function refreshTokens(deps: OAuthDeps, form: URLSearchParams, clie
     const scopes = wanted.filter((s) => allowed.has(s));
     const marked = await db.prepare("UPDATE mcp_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND revoked_at IS NULL").run(now, row.token_hash);
     if (marked.changes !== 1) {
-      await revokeFamily(db, row.family, now);
+      await revokeFamily(tx, row.connection_id, row.family, now);
       return { reuse: true as const, row };
     }
     const tokens = await issuePair(db, cfg, now, {
@@ -423,11 +494,13 @@ export async function revokeToken(deps: OAuthDeps, form: URLSearchParams, client
   const raw = form.get("token");
   if (!raw || raw.length > 200) throw new OAuthError("invalid_request", "token is required");
   const now = deps.now();
-  const row = await deps.d.db.prepare("SELECT token_hash, kind, family, client_id, connection_id FROM mcp_tokens WHERE token_hash = ?")
+  const { d } = deps;
+  const row = await d.db.prepare("SELECT token_hash, kind, family, client_id, connection_id FROM mcp_tokens WHERE token_hash = ?")
     .get(sha256hex(raw)) as { token_hash: string; kind: string; family: string; client_id: string; connection_id: string } | undefined;
   if (!row || row.client_id !== client.clientId) return;
-  if (row.kind === "refresh") await revokeFamily(deps.d.db, row.family, now);
-  else await deps.d.db.prepare("UPDATE mcp_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL").run(now, row.token_hash);
+  // A family revocation holds the connection lock until it commits (see lockConnection).
+  if (row.kind === "refresh") await d.db.tx((db) => revokeFamily({ db, dialect: d.dialect }, row.connection_id, row.family, now));
+  else await d.db.prepare("UPDATE mcp_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL").run(now, row.token_hash);
   await deps.audit?.({ action: "oauth.token_revoked", outcome: "ok", connectionId: row.connection_id, clientId: client.clientId, detail: { kind: row.kind } });
 }
 

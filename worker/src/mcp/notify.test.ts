@@ -19,7 +19,7 @@ import { STOCK_TOKENS } from "../../../packages/core/src/tokens";
 import { ensureMcpSchema } from "./schema";
 import {
   ALERT_WINDOW_SEC, MAX_ATTEMPTS, QUEUE_MAX_AGE_SEC, RETRY_BACKOFF_SEC, canonicalParams, chainlinkPriceReader, hostedRecipient, normalizeNotifyParams,
-  runNotifyPass, sendErrorCode, staleAfterSec, summaryPeriod, telegramSend, type FeedClient, type NotifyDeps, type NotifyParams,
+  plain, runNotifyPass, sendErrorCode, staleAfterSec, summaryPeriod, telegramSend, vouchedSells, type FeedClient, type NotifyDeps, type NotifyParams,
   type NotifyRecipient, type PriceReading, type SendResult,
 } from "./notify";
 
@@ -140,10 +140,24 @@ async function setup(o: {
   };
 }
 
-function trade(f: Fixture, o: { account?: string; status?: string; tx?: string | null; at?: number; side?: string; symbol?: string; cash?: number; op?: string | null }): number {
-  const r = f.raw.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, tx_hash, status, fill_side, fill_symbol, fill_cash_usdg, created_at)
-    VALUES (?, 'swap', '0x1', ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(o.account ?? ACCOUNT_A, o.cash ?? 10, o.op ?? null, o.tx ?? null, o.status ?? "landed", o.side ?? "buy", o.symbol ?? "NVDA", o.cash ?? 10, o.at ?? NOW - 60);
+function trade(f: Fixture, o: {
+  account?: string; status?: string; tx?: string | null; at?: number; side?: string | null; symbol?: string; cash?: number;
+  op?: string | null; kind?: string;
+  /** The order size; defaults to `cash`. */
+  amount?: number;
+  /** fill_cash_usdg; null for a row with no filled amount. Defaults to `cash`. */
+  fill?: number | null;
+  /** basis_source; defaults to 'receipt' ('paper' for a paper fill). */
+  basis?: string | null;
+  qty?: string | null; buyToken?: string | null; sellToken?: string | null; pnl?: number | null; decision?: string | null;
+}): number {
+  const status = o.status ?? "landed";
+  const r = f.raw.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, tx_hash, status, fill_side, fill_symbol, fill_cash_usdg,
+      basis_source, fill_qty_raw, buy_token, sell_token, realized_pnl_usdg, decision_id, created_at)
+    VALUES (?, ?, '0x1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(o.account ?? ACCOUNT_A, o.kind ?? "swap", o.amount ?? o.cash ?? 10, o.op ?? null, o.tx ?? null, status, o.side === undefined ? "buy" : o.side,
+      o.symbol ?? "NVDA", o.fill === undefined ? o.cash ?? 10 : o.fill, o.basis === undefined ? (status === "paper" ? "paper" : "receipt") : o.basis,
+      o.qty ?? null, o.buyToken ?? null, o.sellToken ?? null, o.pnl ?? null, o.decision ?? null, o.at ?? NOW - 60);
   return Number(r.lastInsertRowid);
 }
 
@@ -156,6 +170,7 @@ function equity(f: Fixture, mode: string, value: number, at: number, account = A
 }
 
 const texts = (f: Fixture) => f.deliveries().map((d) => (JSON.parse(d.payload_json) as { text: string }).text);
+const utcOf = (sec: number) => `${new Date(sec * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 
 // ── dedupe ─────────────────────────────────────────────────────────────────
 
@@ -485,8 +500,9 @@ test("summary: live and paper books are separate lines, each labelled, never sum
   const [text] = texts(f);
   assert.ok(text, "one summary queued");
   assert.match(text!, /daily summary/);
-  assert.match(text!, /^LIVE: equity 1100\.00 USDG \(1000\.00 at the start, \+100\.00\)\. 2 trades landed\.$/m);
-  assert.match(text!, /^PAPER \(practice, no real money\): equity 4900\.00 USDG \(5000\.00 at the start, −100\.00\)\. 3 paper fills\.$/m);
+  const lines = text!.split("\n");
+  assert.ok(lines.includes(`LIVE: equity 1100.00 USDG as of ${utcOf(end - 100)} (1000.00 at the start, +100.00). 2 trades landed.`), text);
+  assert.ok(lines.includes(`PAPER (practice, no real money): equity 4900.00 USDG as of ${utcOf(end - 50)} (5000.00 at the start, −100.00). 3 paper fills.`), text);
   assert.ok(!/6000/.test(text!), "the two books are never added together");
   assert.equal((JSON.parse(f.deliveries()[0]!.payload_json) as { book: string }).book, "separate");
   f.advance(61);
@@ -697,7 +713,166 @@ test("summary: only money moved between the two readings is said to be inside th
   flow.run(ACCOUNT_A, "out", 50, "transfer-intent", start + 200);
   await f.pass();
   const [text] = texts(f);
-  assert.match(text!, /^LIVE: equity 1300\.00 USDG \(1000\.00 at the start, \+300\.00\)\. Deposits 200\.00 USDG and withdrawals 50\.00 USDG are inside that change\./m);
+  assert.ok(text!.split("\n").some((l) => l.startsWith(`LIVE: equity 1300.00 USDG as of ${utcOf(end - 100)} (1000.00 at the start, +300.00). Deposits 200.00 USDG and withdrawals 50.00 USDG are inside that change.`)), text);
+});
+
+// ── honest numbers ─────────────────────────────────────────────────────────
+
+const CHUMP = "0x00000000000000000000000000000000000c0001";
+const GOOD = "0x00000000000000000000000000000000000c0002";
+const QUOTED = "0x00000000000000000000000000000000000c0003";
+
+test("trade_confirmed: a realised P&L is stated only when its cost and proceeds were both read from receipts", async () => {
+  const f = await setup();
+  f.sub("trade_confirmed", {}, { createdAt: NOW - 3600 });
+  // Before the subscription, so not announced — but in the cost the sells below realised against.
+  trade(f, { side: "buy", symbol: "CHUMP", buyToken: CHUMP, qty: "10", cash: 10, basis: "quote", tx: tx(40), op: "0xb1", at: NOW - 7200 });
+  trade(f, { side: "buy", symbol: "GOOD", buyToken: GOOD, qty: "10", cash: 10, tx: tx(41), op: "0xb2", at: NOW - 7100 });
+  trade(f, { side: "buy", symbol: "QUOTED", buyToken: QUOTED, qty: "5", cash: 6, tx: tx(42), op: "0xb3", at: NOW - 7000 });
+  // Receipt-read proceeds against a cost the quote booked: the P&L is an estimate.
+  trade(f, { side: "sell", symbol: "CHUMP", sellToken: CHUMP, qty: "10", cash: 14, pnl: 4, tx: tx(43), op: "0xs1", at: NOW - 300 });
+  // Both sides read from receipts: a measurement.
+  trade(f, { side: "sell", symbol: "GOOD", sellToken: GOOD, qty: "10", cash: 13, pnl: 3, tx: tx(44), op: "0xs2", at: NOW - 290 });
+  // Proceeds booked from the quote: an estimated cash leg and no P&L.
+  trade(f, { side: "sell", symbol: "QUOTED", sellToken: QUOTED, qty: "5", cash: 7, pnl: 1, basis: "quote", tx: tx(45), op: "0xs3", at: NOW - 280 });
+  // No filled amount at all: the order size, said to be one.
+  trade(f, { side: "buy", symbol: "NVDA", fill: null, amount: 25, basis: null, tx: tx(46), op: "0xb4", at: NOW - 270 });
+  // CHUMP went flat above, so the quote-booked cost is gone: a new receipt round trip is measured.
+  trade(f, { side: "buy", symbol: "CHUMP", buyToken: CHUMP, qty: "10", cash: 10, tx: tx(47), op: "0xb5", at: NOW - 260 });
+  trade(f, { side: "sell", symbol: "CHUMP", sellToken: CHUMP, qty: "10", cash: 12, pnl: 2, tx: tx(48), op: "0xs4", at: NOW - 250 });
+  await f.pass();
+  const byTx = (n: number) => f.calls.map((c) => c.text).find((t) => t.includes(tx(n)))!;
+  assert.equal(f.calls.length, 6);
+
+  assert.match(byTx(43), /Sold CHUMP for 14\.00 USDG\./);
+  assert.doesNotMatch(byTx(43), /Realised P&L [+−]/, "a P&L against a quote-booked cost is not stated as a result");
+  assert.match(byTx(43), /Realised P&L is not stated/);
+
+  assert.match(byTx(44), /Sold GOOD for 13\.00 USDG\. Realised P&L \+3\.00 USDG\./);
+
+  assert.match(byTx(45), /Sold QUOTED for about 7\.00 USDG \(estimated from the quote: the receipt could not be read\)\./);
+  assert.doesNotMatch(byTx(45), /Realised P&L [+−]/);
+
+  assert.match(byTx(46), /Bought NVDA \(order size 25\.00 USDG; the filled amount is not recorded\)\./);
+  assert.doesNotMatch(byTx(46), /for 25\.00/, "an order size is never printed as what was paid");
+
+  assert.match(byTx(48), /Sold CHUMP for 12\.00 USDG\. Realised P&L \+2\.00 USDG\./);
+});
+
+test("trade_confirmed: an account the ledger spells two ways vouches for no P&L (the replay would see half the tape)", async () => {
+  const f = await setup();
+  // An account whose checksummed spelling differs from its lowercase one.
+  const MIXED = "0x000000000000000000000000000000000000abcd";
+  assert.notEqual(getAddress(MIXED), MIXED);
+  f.raw.prepare("UPDATE agent_identity SET accounts = ? WHERE tenant = ?").run(JSON.stringify([MIXED]), OWNER_A);
+  f.raw.prepare("UPDATE grants SET grant_json = ? WHERE tenant = ?").run(JSON.stringify({ smartAccount: getAddress(MIXED), sessionKey: "never-read" }), OWNER_A);
+  f.raw.prepare("UPDATE agents SET smart_account = ? WHERE smart_account = ?").run(MIXED, ACCOUNT_A);
+  f.sub("trade_confirmed", {}, { createdAt: NOW - 3600 });
+  trade(f, { account: MIXED, side: "buy", symbol: "GOOD", buyToken: GOOD, qty: "10", cash: 10, tx: tx(50), op: "0xb6", at: NOW - 7200 });
+  trade(f, { account: MIXED, side: "sell", symbol: "GOOD", sellToken: GOOD, qty: "10", cash: 13, pnl: 3, tx: tx(51), op: "0xs5", at: NOW - 300 });
+  await f.pass();
+  assert.match(f.calls[0]!.text, /Sold GOOD for 13\.00 USDG\. Realised P&L \+3\.00 USDG\./, "one spelling: the replay reads the whole tape");
+
+  // The same account's rows now also carry its checksummed spelling.
+  trade(f, { account: getAddress(MIXED), side: "buy", symbol: "CHUMP", buyToken: CHUMP, qty: "10", cash: 10, tx: tx(52), op: "0xb7", at: NOW - 200 });
+  trade(f, { account: MIXED, side: "sell", symbol: "CHUMP", sellToken: CHUMP, qty: "10", cash: 11, pnl: 1, tx: tx(53), op: "0xs6", at: NOW - 100 });
+  f.advance(61);
+  await f.pass();
+  const sell = f.calls.map((c) => c.text).find((t) => t.includes(tx(53)))!;
+  assert.match(sell, /Sold CHUMP for 11\.00 USDG\. Realised P&L is not stated/);
+});
+
+test("vouchedSells mirrors the web replay: it vouches for nothing it could not read whole", () => {
+  // The same cases as web/src/lib/profile-trades.test.ts, against this copy of the rule.
+  const fills = [
+    { op: "b", side: "buy" as const, token: "0xm", qty: "10", source: "receipt" },
+    { op: "s", side: "sell" as const, token: "0xm", qty: "10", source: "receipt" },
+  ];
+  assert.deepEqual([...vouchedSells(fills, true)], ["s"]);
+  assert.deepEqual([...vouchedSells(fills, false)], [], "a truncated read cannot know what came before its first row");
+  assert.deepEqual([...vouchedSells([{ ...fills[0]!, source: null }, fills[1]!], true)], [], "a cost of unknown provenance is not evidence");
+  assert.deepEqual([...vouchedSells([{ ...fills[0]!, source: "paper" }, { ...fills[1]!, source: "paper" }], true)], ["s"], "a paper fill is exact");
+  assert.deepEqual([...vouchedSells([{ op: "r", side: null, token: "0xm", qty: null, source: "quote" }, fills[1]!], true)], []);
+  assert.deepEqual(
+    [...vouchedSells([fills[0]!, { op: "s1", side: "sell", token: "0xm", qty: null, source: "quote" }, { ...fills[1]!, op: "s2", qty: "5" }], true)],
+    ["s1", "s2"],
+  );
+  // Flat resets the basis: an estimate bought and fully sold is not under the next round trip.
+  assert.deepEqual(
+    [...vouchedSells([{ ...fills[0]!, op: "q", source: "quote" }, { ...fills[1]!, op: "s1" }, { ...fills[0]!, op: "b2" }, { ...fills[1]!, op: "s2" }], true)],
+    ["s2"],
+  );
+});
+
+test("inactivity: a transfer or vault move is not a fill, and a redeploy's copy of an old fill is that old fill", async () => {
+  const f = await setup();
+  f.sub("inactivity", { hours: 6 }, { createdAt: NOW - 30 * 3600 });
+  const lastFill = NOW - 10 * 3600;
+  trade(f, { side: "buy", op: "0xf1", decision: "d1", tx: tx(60), at: lastFill });
+  // The owner moved money out an hour ago, and parked cash in the vault before that.
+  trade(f, { kind: "transfer", side: null, fill: null, basis: null, tx: tx(61), at: NOW - 3600 });
+  trade(f, { kind: "vault-deposit", side: null, fill: null, basis: null, op: "0xv1", decision: "d2", tx: tx(62), at: NOW - 2 * 3600 });
+  // A redeploy re-recorded both as bare swaps stamped at the restart (the hash spelled differently).
+  trade(f, { side: null, fill: null, basis: null, op: "0xV1", tx: tx(62), at: NOW - 1800 });
+  trade(f, { side: null, fill: null, basis: null, op: "0xF1", tx: tx(60), at: NOW - 1200 });
+  await f.pass();
+  assert.equal(f.deliveries().length, 1, "ten hours without a fill is past the six asked for");
+  assert.ok(texts(f)[0]!.includes(`No live or paper fill for 10 hours (you asked to hear after 6). The last fill was at ${utcOf(lastFill)}.`), texts(f)[0]);
+});
+
+test("summary: only fills are counted as trades, one per operation", async () => {
+  const f = await setup();
+  const { start, end } = summaryPeriod("day", 0, NOW);
+  f.sub("summary", { period: "day", hour_utc: 0 }, { createdAt: start - 3600 });
+  equity(f, "live", 1000, start - 100);
+  equity(f, "live", 1000, end - 100);
+  trade(f, { op: "0xa1", decision: "d1", tx: tx(70), at: start + 10 });
+  trade(f, { op: "0xb1", decision: "d2", tx: tx(71), at: start + 20 });
+  // A redeploy's copies: of a fill in the period, and of one from the day before.
+  trade(f, { side: null, fill: null, basis: null, op: "0xA1", tx: tx(70), at: start + 500 });
+  trade(f, { op: "0xc1", decision: "d3", tx: tx(72), at: start - 3600 });
+  trade(f, { side: null, fill: null, basis: null, op: "0xC1", tx: tx(72), at: start + 510 });
+  // Money moves, not trades.
+  trade(f, { kind: "transfer", side: null, fill: null, basis: null, tx: tx(73), at: start + 40 });
+  trade(f, { kind: "vault-deposit", side: null, fill: null, basis: null, op: "0xd1", tx: tx(74), at: start + 50 });
+  await f.pass();
+  assert.match(texts(f)[0]!, /^LIVE: .* 2 trades landed\.$/m);
+});
+
+test("summary: a valuation taken hours before the period ended is stated with its time, never as the close", async () => {
+  const f = await setup();
+  const { start, end } = summaryPeriod("day", 0, NOW);
+  f.sub("summary", { period: "day", hour_utc: 0 }, { createdAt: start - 3600 });
+  equity(f, "live", 100, start - 60);
+  equity(f, "live", 120, start + 3600); // then the worker stopped valuing
+  await f.pass();
+  const [text] = texts(f);
+  assert.ok(text!.split("\n").includes(
+    `LIVE: last valued at ${utcOf(start + 3600)}, 23 hours before the period ended, and not since: equity then 120.00 USDG (100.00 at the start, +20.00 by then). 0 trades landed.`,
+  ), text);
+  assert.doesNotMatch(text!, /LIVE: equity 120\.00/);
+  assert.equal(end - (start + 3600), 23 * 3600);
+});
+
+test("plain(): control, format and separator characters a stranger wrote never reach a message", async () => {
+  const C = (...cps: number[]) => String.fromCodePoint(...cps);
+  // C1 CSI and NEL, the Arabic letter mark, line and paragraph separators, a
+  // bidi override and isolate, zero-width space, BOM, soft hyphen, DEL, ESC, tab, newline.
+  const dirty = `abc${C(0x9b)}31mX${C(0x85)}Y${C(0x61c)}Z${C(0x2028)}W${C(0x2029)}V${C(0x202e)}U${C(0x2066)}T${C(0x200b)}S${C(0xfeff)}R${C(0xad)}Q${C(0x7f)}P${C(0x1b)}[0m${C(0x9)}O${C(0xa)}N`;
+  assert.equal(plain(dirty, 100), "abc31mXYZ W VUTSRQP[0m O N");
+  assert.equal(plain(C(0x200e, 0x2067), 10), null, "nothing printable is nothing");
+  const cut = plain(C(0x1f600).repeat(20), 16)!;
+  assert.equal(Array.from(cut).length, 17, "sixteen code points and the ellipsis");
+  assert.doesNotMatch(cut, /\p{Cs}/u, "no half of a surrogate pair at the cut");
+
+  const f = await setup();
+  f.raw.prepare("UPDATE agents SET name = ? WHERE smart_account = ?").run(`Sho${C(0x202e)}gun${C(0x9b)}`, ACCOUNT_A);
+  f.sub("trade_confirmed");
+  trade(f, { symbol: `NV${C(0x85)}DA${C(0x2028)}`, tx: tx(80) });
+  await f.pass();
+  const text = f.calls[0]!.text;
+  assert.match(text, /^Shogun · LIVE\nBought NVDA for 10\.00 USDG\./);
+  assert.doesNotMatch(text.replace(/\n/g, ""), /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
 });
 
 // ── adapters ───────────────────────────────────────────────────────────────

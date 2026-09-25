@@ -3,7 +3,14 @@
  *
  * Nothing here is needed for correctness — expired codes, tokens and exports
  * are already refused by the code that reads them — it only stops the tables
- * growing forever. Each statement is bounded by an index on its time column.
+ * growing forever. Each statement filters on a time column that leads an index
+ * of its own (schema.ts), so it is an index range scan, never a sequential scan
+ * of the whole audit or rate table; maintenance.test.ts checks every plan. The
+ * request path never deletes: mcp_rate is pruned here and only here.
+ *
+ * Each DELETE runs in its own short transaction, so the orchestrator's bounded
+ * database (background.ts boundedDb) can put a statement_timeout and a
+ * lock_timeout on it, and one slow table cannot hold another's locks.
  */
 import type { Db } from "../db";
 
@@ -20,18 +27,19 @@ export const MCP_RETENTION = {
   deliveriesSec: 90 * 86_400,
   /** Finished jobs: 30 days. */
   jobsSec: 30 * 86_400,
+  /** Dynamically registered clients no active connection uses: 30 days after registration. */
+  dcrUnusedSec: 30 * 86_400,
 } as const;
 
-let lastRun = 0;
-
-export async function runMcpMaintenancePass(shared: Db, now = Math.floor(Date.now() / 1000), force = false): Promise<{ ran: boolean; errors: number }> {
-  if (!force && now - lastRun < 3600) return { ran: false, errors: 0 };
-  lastRun = now;
+/** The retention statements for one run, in order. Exported so the test can check each one's plan. */
+export function retentionStatements(now: number): Array<[string, unknown[]]> {
   const r = MCP_RETENTION;
-  const statements: Array<[string, unknown[]]> = [
+  return [
     ["DELETE FROM mcp_auth_requests WHERE expires_at < ?", [now - r.requestsAndCodesSec]],
     ["DELETE FROM mcp_codes WHERE expires_at < ?", [now - r.requestsAndCodesSec]],
-    ["DELETE FROM mcp_tokens WHERE expires_at < ? OR (revoked_at IS NOT NULL AND revoked_at < ?)", [now - r.tokensSec, now - r.tokensSec]],
+    // Two statements, one index each, rather than an OR the planner may not split.
+    ["DELETE FROM mcp_tokens WHERE expires_at < ?", [now - r.tokensSec]],
+    ["DELETE FROM mcp_tokens WHERE revoked_at IS NOT NULL AND revoked_at < ?", [now - r.tokensSec]],
     ["DELETE FROM mcp_audit WHERE at < ?", [now - r.auditSec]],
     ["DELETE FROM mcp_rate WHERE window_start < ?", [now - r.rateSec]],
     ["DELETE FROM mcp_exports WHERE expires_at < ?", [now]],
@@ -42,16 +50,32 @@ export async function runMcpMaintenancePass(shared: Db, now = Math.floor(Date.no
     ["DELETE FROM mcp_jobs WHERE finished_at IS NOT NULL AND finished_at < ?", [now - r.jobsSec]],
     // Dynamically registered clients that never became (or no longer are) a
     // live connection: some clients register afresh on every connect.
-    ["DELETE FROM mcp_clients WHERE kind = 'dcr' AND created_at < ? AND client_id NOT IN (SELECT client_id FROM mcp_connections WHERE status = 'active')", [now - 30 * 86_400]],
-    // Cached metadata documents are re-fetched on use; stale copies can go.
-    ["DELETE FROM mcp_clients WHERE kind = 'cimd' AND expires_at < ?", [now - 7 * 86_400]],
+    ["DELETE FROM mcp_clients WHERE kind = 'dcr' AND created_at < ? AND client_id NOT IN (SELECT client_id FROM mcp_connections WHERE status = 'active')", [now - r.dcrUnusedSec]],
+    // A cached client metadata document (CIMD) is only a cache: an expired one
+    // is fetched again on its next use whether its row is here or not. Anyone
+    // can make the server cache one (any URL is a client_id until fetched), so
+    // a document no active connection uses goes AS SOON AS it expires — a week
+    // of grace let one caller park gigabytes in the shared database. A row a
+    // live connection uses is kept: those are bounded by real connections.
+    // (A row with no expiry at all is read as expired, as resolveClient reads it.)
+    ["DELETE FROM mcp_clients WHERE kind = 'cimd' AND expires_at < ? AND client_id NOT IN (SELECT client_id FROM mcp_connections WHERE status = 'active')", [now]],
+    ["DELETE FROM mcp_clients WHERE kind = 'cimd' AND expires_at IS NULL AND client_id NOT IN (SELECT client_id FROM mcp_connections WHERE status = 'active')", []],
   ];
+}
+
+let lastRun = 0;
+
+export async function runMcpMaintenancePass(shared: Db, now = Math.floor(Date.now() / 1000), force = false): Promise<{ ran: boolean; errors: number }> {
+  if (!force && now - lastRun < 3600) return { ran: false, errors: 0 };
+  lastRun = now;
   let errors = 0;
-  for (const [sql, params] of statements) {
+  for (const [sql, params] of retentionStatements(now)) {
     try {
-      await shared.prepare(sql).run(...params);
+      await shared.tx((tx) => tx.prepare(sql).run(...params));
     } catch {
-      // A missing table on a database that never served MCP is not an error worth more than a count.
+      // A missing table on a database that never served MCP, or a statement
+      // the database cut off, is not an error worth more than a count; the
+      // next hour tries again.
       errors += 1;
     }
   }

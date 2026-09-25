@@ -27,6 +27,17 @@ interface View {
   decided_at: number | null;
   result: Record<string, unknown> | null;
   fresh_quote: { quoted: boolean; why_not: string | null; expected_out: { human: number | null } | null; min_out: { human: number | null } | null; price_impact_bps: number | null; impact_verdict: { ok: boolean; detail: string | null } } | null;
+  /** Settings and drafts only, while awaiting: each key as proposed against, now, and proposed — read live. */
+  settings_check: SettingsCheck | null;
+}
+
+interface SettingsCheck {
+  rows: Array<{ key: string; label: string; when_proposed: string; current: string; proposed: string; help: string; changed: boolean }>;
+  /** Keys whose value moved since the proposal: approving is refused until a fresh one. */
+  changed_since: string[];
+  /** The owner runs an agent with a signed permission: saving applies to it at once. */
+  applies_to_running_agent: boolean;
+  left_out: string[];
 }
 
 const TERMINAL = new Set(["confirmed", "paper_filled", "refused", "failed", "expired", "cancelled", "rejected", "applied"]);
@@ -34,12 +45,12 @@ const STATUS_TEXT: Record<string, string> = {
   awaiting_approval: "Waiting for your decision",
   approved: "Approved — handing it to your agent",
   submitted: "Queued for your agent",
-  executing: "Your agent is executing it",
+  executing: "Your agent is executing it, or its result is on its way",
   filled_awaiting_ledger: "Filled — waiting for the ledger to confirm",
   confirmed: "Confirmed on chain",
   paper_filled: "Filled in your practice book (no real money moved)",
   refused: "Refused by your agent's limits or permission — nothing was traded",
-  failed: "Did not complete",
+  failed: "Did not complete, or could not be confirmed — see the result",
   expired: "Expired — nothing was sent",
   cancelled: "Cancelled — nothing was sent",
   rejected: "You declined it",
@@ -64,33 +75,66 @@ async function call<T>(id: string, body?: Record<string, unknown>): Promise<T> {
 const text = (v: unknown) => (v === null || v === undefined ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v));
 const short = (a: unknown) => (typeof a === "string" && a.length > 12 ? `${a.slice(0, 8)}…${a.slice(-6)}` : text(a));
 
+const usdg = (v: unknown) => (typeof v === "number" ? `${v} USDG` : "—");
+
+/**
+ * Settings changes and drafts, as the owner decides them: each setting as it
+ * is NOW (read live, not when the assistant asked) and as it would become.
+ * A setting that moved since the proposal is flagged, and the server refuses
+ * the approval until a fresh proposal.
+ */
+function SettingsRows({ c }: { c: SettingsCheck }) {
+  return <>
+    {c.changed_since.length > 0 && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p><b>Your settings changed since this was proposed.</b> Approving is refused; ask your assistant for a fresh proposal.</p></div>}
+    <ul className="mcp-checks">{c.rows.map((d) => <li key={d.key}><label><span>
+      <strong>{d.label}: {d.current} → {d.proposed}</strong>
+      <span>{d.changed ? `It was ${d.when_proposed} when this was proposed. ` : ""}{d.help}</span>
+    </span></label></li>)}</ul>
+  </>;
+}
+
 function Details({ v }: { v: View }) {
   const b = v.binding;
   const s = v.summary;
   if (v.kind === "trade") {
     const book = String(b.book);
+    const limits = (b.limits as Record<string, unknown>) ?? {};
+    const ceiling = limits.chat_ceiling_usdg;
     return <>
       {book === "live"
-        ? <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p><b>Real money.</b> Your agent trades live: approving queues a real order from your agent’s account.</p></div>
-        : <div className="connect-boundary"><ShieldCheck size={18} aria-hidden /><p>{book === "paper" ? "Practice mode: approving books a simulated trade. No money moves." : "Your agent’s current mode is unknown; it will apply whatever mode it is in."}</p></div>}
+        ? <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p><b>Real money.</b> Your agent trades live right now: approving queues a real order from your agent’s account.</p></div>
+        : <div className="connect-boundary"><ShieldCheck size={18} aria-hidden /><p>{book === "paper" ? "Your agent is in practice mode right now. If it still is when it executes, the trade is simulated and no money moves." : "Your agent’s current mode is unknown; it will trade in whatever mode it is in."}</p></div>}
       <ul className="mcp-checks">
         <li><label><span><strong>{text(s.action)}</strong><span>Token {short(b.token)} ({text(b.symbol)}) · chain {text(b.chain_id)}</span></span></label></li>
-        <li><label><span><strong>Expected / at least</strong><span>{text(s.expected_out)} / {text(s.min_out)} {b.side === "buy" ? String(b.symbol) : "USDG"} · max slippage {Number(b.slippage_bps) / 100}%</span></span></label></li>
+        <li><label><span><strong>Quoted: expect / at least</strong><span>{text(s.expected_out)} / {text(s.min_out)} {b.side === "buy" ? String(b.symbol) : "USDG"} · your agent’s slippage limit when proposed {Number(b.slippage_bps) / 100}%</span></span></label></li>
         {v.fresh_quote && <li><label><span><strong>Price right now</strong><span>{v.fresh_quote.quoted ? `expect ${text(v.fresh_quote.expected_out?.human)} · impact ${v.fresh_quote.price_impact_bps ?? "unknown"} bps${v.fresh_quote.impact_verdict.ok ? "" : ` · ${v.fresh_quote.impact_verdict.detail}`}` : `no quote: ${v.fresh_quote.why_not}`}</span></span></label></li>}
-        <li><label><span><strong>Your limits</strong><span>per trade {text((b.limits as Record<string, unknown>)?.per_trade_usdg)} USDG · owner-order ceiling {text((b.limits as Record<string, unknown>)?.chat_ceiling_usdg)} · per day {text((b.limits as Record<string, unknown>)?.daily_usdg)}</span></span></label></li>
+        <li><label><span><strong>Your limits</strong><span>per trade {usdg(limits.per_trade_usdg)} · owner-order ceiling {ceiling === 0 ? "none" : usdg(ceiling)} · per day {usdg(limits.daily_usdg)}</span></span></label></li>
       </ul>
-      <p className="mcp-note">After you approve, your agent re-checks its limits, the market and its permission before it executes, and may still refuse. You can cancel from your assistant until the agent picks the order up.</p>
+      <p className="mcp-note">
+        What approving checks, and what it does not: {b.side === "buy" ? "approving re-quotes this buy and refuses if the price has moved past the “at least” figure, or if your agent’s practice/live mode (as it last reported it) has changed. " : "approving refuses if your agent’s practice/live mode (as it last reported it) has changed. "}
+        After that, your agent takes a fresh price when it executes, with its own slippage limit at that moment, so the fill can differ from the figures above; and it trades in whatever mode it is in when it picks the order up. It also re-checks its limits and permission, and may still refuse. You can cancel from your assistant until the agent picks the order up.
+      </p>
     </>;
   }
   if (v.kind === "settings") {
+    if (v.settings_check) return <><SettingsRows c={v.settings_check} /><p className="mcp-note">These apply to your running agent as soon as you approve.</p></>;
     const diff = (s.diff as Array<{ label: string; current: string; proposed: string; help: string }>) ?? [];
     return <ul className="mcp-checks">{diff.map((d) => <li key={d.label}><label><span><strong>{d.label}: {d.current} → {d.proposed}</strong><span>{d.help}</span></span></label></li>)}</ul>;
   }
   if (v.kind === "agent_draft") {
-    const settings = (b.settings as Record<string, unknown>) ?? {};
+    const c = v.settings_check;
+    if (!c) {
+      const settings = (b.settings as Record<string, unknown>) ?? {};
+      return <>
+        <ul className="mcp-checks">{Object.entries(settings).map(([k, val]) => <li key={k}><label><span><strong>{k}</strong><span>{text(val)}</span></span></label></li>)}</ul>
+        {v.status === "awaiting_approval" && <p className="mcp-note">Your current settings could not be read just now. If you already run an agent, approving applies these to it immediately.</p>}
+      </>;
+    }
     return <>
-      <ul className="mcp-checks">{Object.entries(settings).map(([k, val]) => <li key={k}><label><span><strong>{k}</strong><span>{text(val)}</span></span></label></li>)}</ul>
-      <p className="mcp-note">This saves settings only. Your agent cannot trade until you choose its limits and sign its trading permission yourself.</p>
+      {c.applies_to_running_agent && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p><b>This changes your running agent.</b> Approving saves these settings and they apply to your agent immediately, including its trading limits below.</p></div>}
+      <SettingsRows c={c} />
+      {c.left_out.length > 0 && <p className="mcp-note">Left out of this draft: {c.left_out.join(", ")}. Safety floors such as the price-impact cap are only changed in Settings.</p>}
+      {!c.applies_to_running_agent && <p className="mcp-note">This saves settings only. Your agent cannot trade until you choose its limits and sign its trading permission yourself.</p>}
     </>;
   }
   return <div className="connect-boundary"><p>“{text(b.text)}”</p></div>;
@@ -165,7 +209,8 @@ export function ApproveClient({ id }: { id: string }) {
             <Details v={v} />
             {v.result && <details open={TERMINAL.has(v.status)}><summary>Result</summary><pre className="mcp-activity">{JSON.stringify(v.result, null, 2)}</pre></details>}
             {v.status === "awaiting_approval" && !expired && <>
-              <button className="flow-primary" disabled={busy} onClick={() => void decide("approve")}>{busy ? "Working…" : "Approve"} {!busy && <ArrowRight size={16} aria-hidden />}</button>
+              {/* A settings change whose "before" moved is refused by the server; no button offers it. */}
+              {!(v.settings_check && v.settings_check.changed_since.length > 0) && <button className="flow-primary" disabled={busy} onClick={() => void decide("approve")}>{busy ? "Working…" : "Approve"} {!busy && <ArrowRight size={16} aria-hidden />}</button>}
               <button className="connect-cancel" disabled={busy} onClick={() => void decide("reject")}><X size={15} aria-hidden /> Decline</button>
             </>}
             {v.status === "awaiting_approval" && expired && <p className="mcp-note">This request expired. Ask your assistant for a fresh one.</p>}

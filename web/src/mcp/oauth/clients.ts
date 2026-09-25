@@ -4,19 +4,26 @@
  * Two registration mechanisms, in the order the MCP authorization spec prefers:
  *
  * 1. Client ID Metadata Documents (CIMD). The client_id IS an https URL that
- *    serves the client's metadata. We fetch it through the repo's SSRF-guarded
- *    transport (DNS pinned to public addresses, https only, no redirects, byte
- *    cap, timeout), require the document's client_id to equal the URL exactly,
- *    and cache it briefly. Claude and Codex both use this when advertised.
+ *    serves the client's metadata. The URL must be canonical (no query, no
+ *    fragment, no dot segments) and must not be on one of our own hosts: the
+ *    consent page shows "Verified at <host>", and a document served through
+ *    one of our own routes (the image proxy, say) would borrow our name. We
+ *    fetch it through the repo's SSRF-guarded transport (DNS pinned to public
+ *    addresses, https only, no redirects, byte cap, timeout), accept only a 200
+ *    JSON answer, require the document's client_id to equal the URL exactly,
+ *    and cache only the fields we use, briefly. Claude and Codex both use this
+ *    when advertised.
  * 2. Dynamic Client Registration (RFC 7591), kept for clients that have not
  *    moved to CIMD. Registration is open (as the MCP spec expects) but rate
  *    limited, and a registered client proves nothing about who it is: the
- *    consent screen always shows the redirect host, not the self-chosen name.
+ *    consent screen shows the host of the redirect the code will actually go
+ *    to, and marks the app as not verified.
  *
  * A client identity is never authority over a user. It only says where the
  * authorization code may be sent; the owner's consent creates the connection.
  */
 import { fetchPublicHttps } from "../../../../packages/core/src/server/public-network";
+import type { McpConfig } from "../config";
 import type { McpDb } from "../db";
 import { randomCredential, sha256hex } from "./crypto";
 
@@ -30,7 +37,11 @@ export interface McpClient {
   redirectUris: string[];
   authMethod: AuthMethod;
   secretHash: string | null;
-  /** The host a user should recognise: the CIMD host, or the first redirect's host. */
+  /**
+   * The CIMD host (verified: it served the document). For a DCR client this is
+   * only the first registered redirect's host and proves nothing; what an owner
+   * is shown and what a connection records is `consentHost()` instead.
+   */
   displayHost: string;
 }
 
@@ -49,14 +60,24 @@ const CIMD_MAX_TTL = 86_400;
 /** How old a cached metadata document may be and still be used when a re-fetch fails. */
 const CIMD_STALE_OK_SEC = 86_400;
 const MAX_REDIRECTS = 10;
+/** A metadata document's redirect_uris, serialised, may not exceed this (real clients list a few short URLs). */
+const CIMD_REDIRECTS_MAX_CHARS = 4096;
 const NAME_MAX = 100;
 
-/** Printable, single-line, bounded. Control and bidi characters are refused (spoofing on the consent screen). */
+/**
+ * Printable, single-line, bounded. Refused (spoofing on the consent screen):
+ * every control character (C0, DEL and C1, e.g. U+009B CSI, U+0085 NEL), every
+ * format character (bidi marks and overrides including U+061C, zero-width
+ * characters, word joiners, BOM, soft hyphen) and the line/paragraph
+ * separators U+2028/U+2029. By Unicode category, so no literal list can drift.
+ */
+const UNSAFE_NAME_CHAR = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+
 function cleanName(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const name = raw.trim();
   if (!name || name.length > NAME_MAX) return null;
-  if (/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/.test(name)) return null;
+  if (UNSAFE_NAME_CHAR.test(name)) return null;
   return name;
 }
 
@@ -81,6 +102,15 @@ export function validRedirectUri(raw: unknown): string | null {
 
 function isLoopback(url: URL): boolean {
   return url.protocol === "http:" && LOOPBACK.has(url.hostname);
+}
+
+/** A loopback (http://localhost|127.0.0.1|[::1]) redirect: a program on the owner's own computer. */
+export function isLoopbackRedirect(raw: string): boolean {
+  try {
+    return isLoopback(new URL(raw));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -119,14 +149,69 @@ function hostOf(raw: string): string {
   }
 }
 
-/** A client_id that is a CIMD URL: https, a path, no fragment or credentials. */
-export function isCimdClientId(clientId: string): boolean {
+/**
+ * The hostnames that are ours: the issuer's, the resource's and every host the
+ * MCP endpoints answer on. A metadata document may never be served from one of
+ * them, because whatever route answered (the coin-image proxy echoes any
+ * https body labelled image/*) the consent page would read "Verified at" our
+ * own name.
+ */
+export function ownHostsOf(cfg: Pick<McpConfig, "issuer" | "resource" | "allowedHosts">): ReadonlySet<string> {
+  const hosts = new Set<string>();
+  const add = (raw: string, base = false) => {
+    try {
+      hosts.add(bareHostname(new URL(base ? `https://${raw}` : raw)));
+    } catch {
+      /* not a host */
+    }
+  };
+  add(cfg.issuer);
+  add(cfg.resource);
+  for (const h of cfg.allowedHosts) add(h, true);
+  hosts.delete("");
+  return hosts;
+}
+
+/**
+ * A client_id that is an acceptable CIMD URL: https, canonical as written (so
+ * no dot segments, percent-encoded or not, no default port, no upper-case
+ * host), a path, no query string, no fragment, no credentials, and not on one
+ * of our own hosts.
+ */
+export function isCimdClientId(clientId: string, ownHosts: ReadonlySet<string>): boolean {
+  if (clientId.includes("?") || clientId.includes("#")) return false;
+  let u: URL;
   try {
-    const u = new URL(clientId);
-    return u.protocol === "https:" && u.pathname.length > 1 && !u.hash && !u.username && !u.password;
+    u = new URL(clientId);
   } catch {
     return false;
   }
+  if (u.protocol !== "https:" || u.pathname.length <= 1 || u.username || u.password) return false;
+  // The WHATWG parser resolves "." / ".." / "%2e" segments; if it changed the
+  // string, the URL was not the one the document must name exactly.
+  if (u.href !== clientId) return false;
+  if (u.pathname.split("/").some((seg) => seg === "." || seg === ".." || /^(%2e|\.){1,2}$/i.test(seg))) return false;
+  return !ownHosts.has(bareHostname(u));
+}
+
+/** Lower-case hostname without a trailing root dot ("app.test." resolves to the same place as "app.test"). */
+function bareHostname(u: URL): string {
+  return u.hostname.toLowerCase().replace(/\.+$/, "");
+}
+
+/** A client_id shaped like a URL (DCR ids are `mcpc_…` and never contain a scheme). */
+function looksLikeUrl(clientId: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:/i.test(clientId);
+}
+
+/**
+ * The host an owner is shown for this client and that a connection records:
+ * the verified CIMD host, or, for a DCR client (which proves nothing about
+ * itself), the host of the redirect the code will actually be sent to — never
+ * a different registered redirect that might name a host the owner trusts.
+ */
+export function consentHost(client: Pick<McpClient, "kind" | "displayHost">, redirectUri: string): string {
+  return client.kind === "cimd" ? client.displayHost : hostOf(redirectUri);
 }
 
 interface ClientRow {
@@ -162,17 +247,37 @@ function maxAge(cacheControl: string | string[] | undefined): number {
   return Math.max(60, Math.min(CIMD_MAX_TTL, n));
 }
 
-export type CimdFetcher = (url: string) => Promise<{ status: number; body: Buffer; cacheControl?: string | string[] }>;
+export type CimdFetcher = (url: string) => Promise<{ status: number; body: Buffer; contentType: string | undefined; cacheControl?: string | string[] }>;
+
+/** application/json or a structured-syntax suffix (application/<x>+json), parameters allowed. */
+const JSON_MEDIA_TYPE = /^application\/([\w.+-]+\+)?json\s*(;|$)/i;
+
+/** A metadata document is only a 200 answer labelled JSON. Anything else is not read at all. */
+export function acceptableCimdResponse(status: number, contentType: string | undefined): boolean {
+  return status === 200 && JSON_MEDIA_TYPE.test((contentType ?? "").trim());
+}
 
 const defaultFetcher: CimdFetcher = async (url) => {
   // One retry on a network-level failure: a single dropped connection should
-  // not turn "Connect" into an error page. A non-200 answer is not retried.
+  // not turn "Connect" into an error page. A refused answer (non-200, or not
+  // JSON) is a definite "no" and is neither read nor retried.
   let lastError: unknown = null;
   for (let attempt = 0; attempt < 2; attempt++) {
+    const seen: { refused?: { status: number; contentType: string | undefined } } = {};
     try {
-      const res = await fetchPublicHttps(url, { maxBytes: CIMD_MAX_BYTES, timeoutMs: CIMD_TIMEOUT_MS, maxRedirects: 0 });
-      return { status: res.status, body: res.body, cacheControl: res.headers["cache-control"] };
+      const res = await fetchPublicHttps(url, {
+        maxBytes: CIMD_MAX_BYTES, timeoutMs: CIMD_TIMEOUT_MS, maxRedirects: 0,
+        accept: (r) => {
+          const status = r.statusCode ?? 0;
+          const contentType = r.headers["content-type"];
+          if (acceptableCimdResponse(status, contentType)) return true;
+          seen.refused = { status, contentType };
+          return false;
+        },
+      });
+      return { status: res.status, body: res.body, contentType: res.headers["content-type"], cacheControl: res.headers["cache-control"] };
     } catch (error) {
+      if (seen.refused) return { ...seen.refused, body: Buffer.alloc(0) };
       lastError = error;
     }
   }
@@ -197,6 +302,9 @@ export function parseCimd(clientId: string, body: Buffer): Omit<McpClient, "secr
   if (!redirectUris.length || redirectUris.length !== uris.length || redirectUris.length > MAX_REDIRECTS) {
     throw new ClientError("invalid_redirect_uri", "client metadata redirect_uris must be https or loopback URLs");
   }
+  if (JSON.stringify(redirectUris).length > CIMD_REDIRECTS_MAX_CHARS) {
+    throw new ClientError("invalid_redirect_uri", "client metadata redirect_uris are too long");
+  }
   if (doc.grant_types !== undefined && !(Array.isArray(doc.grant_types) && doc.grant_types.includes("authorization_code"))) {
     throw new ClientError("invalid_client_metadata", "client must use the authorization_code grant");
   }
@@ -213,11 +321,24 @@ export function parseCimd(clientId: string, body: Buffer): Omit<McpClient, "secr
   };
 }
 
-export async function resolveClient(d: McpDb, clientId: unknown, now: number, fetcher: CimdFetcher = defaultFetcher): Promise<McpClient> {
+export interface ResolveOptions {
+  /** Hostnames a metadata document may never be served from: `ownHostsOf(cfg)`. */
+  ownHosts: ReadonlySet<string>;
+  fetcher?: CimdFetcher;
+}
+
+export async function resolveClient(d: McpDb, clientId: unknown, now: number, opts: ResolveOptions): Promise<McpClient> {
   if (typeof clientId !== "string" || !clientId || clientId.length > 512) throw new ClientError("invalid_client", "missing or malformed client_id");
+  // A URL-shaped id is judged before the cache, so a copy cached under an
+  // earlier, looser rule (or a config change that made its host ours) is not used.
+  const urlShaped = looksLikeUrl(clientId);
+  if (urlShaped && !isCimdClientId(clientId, opts.ownHosts)) {
+    throw new ClientError("invalid_client", "client_id must be a plain https metadata document URL on the client's own host (no query, fragment or dot segments)");
+  }
   const row = await d.db.prepare("SELECT client_id, kind, client_name, redirect_uris, auth_method, secret_hash, expires_at, fetched_at FROM mcp_clients WHERE client_id = ?").get(clientId) as ClientRow | undefined;
   if (row && (row.kind !== "cimd" || (row.expires_at ?? 0) > now)) return rowToClient(row);
-  if (!isCimdClientId(clientId)) throw new ClientError("invalid_client", "unknown client_id");
+  if (!urlShaped) throw new ClientError("invalid_client", "unknown client_id");
+  const fetcher = opts.fetcher ?? defaultFetcher;
 
   let fetched: Awaited<ReturnType<CimdFetcher>>;
   try {
@@ -231,14 +352,25 @@ export async function resolveClient(d: McpDb, clientId: unknown, now: number, fe
     throw new ClientError("temporarily_unavailable", "could not fetch the client metadata document");
   }
   if (fetched.status !== 200) throw new ClientError("invalid_client", "client metadata document is unavailable");
+  if (!acceptableCimdResponse(fetched.status, fetched.contentType)) {
+    throw new ClientError("invalid_client", "client metadata document must be served as application/json");
+  }
   const client = parseCimd(clientId, fetched.body);
   const ttl = maxAge(fetched.cacheControl);
+  // Only the fields we use are kept, never the fetched body: anyone can make
+  // this server fetch a document, so the raw bytes (padding and all) must not
+  // land in the shared database.
   await d.db.prepare(`INSERT INTO mcp_clients (client_id, kind, client_name, redirect_uris, auth_method, secret_hash, metadata_json, created_at, fetched_at, expires_at)
     VALUES (?, 'cimd', ?, ?, 'none', NULL, ?, ?, ?, ?)
     ON CONFLICT (client_id) DO UPDATE SET client_name = excluded.client_name, redirect_uris = excluded.redirect_uris,
       metadata_json = excluded.metadata_json, fetched_at = excluded.fetched_at, expires_at = excluded.expires_at`)
-    .run(clientId, client.clientName, JSON.stringify(client.redirectUris), fetched.body.toString("utf8").slice(0, CIMD_MAX_BYTES), now, now, now + ttl);
+    .run(clientId, client.clientName, JSON.stringify(client.redirectUris), cimdStoredMetadata(client), now, now, now + ttl);
   return { ...client, secretHash: null };
+}
+
+/** The canonical, bounded record kept for a metadata-document client (≤ ~4.3 KB). */
+export function cimdStoredMetadata(client: Pick<McpClient, "clientName" | "redirectUris">): string {
+  return JSON.stringify({ client_name: client.clientName, redirect_uris: client.redirectUris, token_endpoint_auth_method: "none" });
 }
 
 export interface RegistrationResult {

@@ -540,7 +540,7 @@ const discoverTokensTool = defineTool({
 const checkTokenEligibilityTool = defineTool({
   name: "check_token_eligibility",
   title: "Could my agent trade this token?",
-  description: "Whether THIS agent could buy a token and, if not, exactly why: the signed permission's sell coverage, whether the agent watches it, the asset mode, the price guards and scout budget, a halted stock token, symbol collisions among its tokens, the launch (class) route's prerequisites, and whether discovery lists it. Returns discoverable, priceable and executable, each yes/no/unknown with reasons, plus every check. It never places or simulates a trade.",
+  description: "Whether THIS agent could buy a token and, if not, exactly why: the signed permission's sell coverage, whether the agent watches it, the asset mode, the price guards and scout budget, a halted stock token, symbol collisions among its tokens, the launch (class) route's prerequisites, the Trencher vault route's prerequisites (that route skips the allowlist and no-exit checks, and whether a coin qualifies for it depends on the worker's own discovery), and whether discovery lists it. Returns discoverable, priceable and executable, each yes/no/unknown with reasons, plus every check. It never places or simulates a trade.",
   capability: "agents.read",
   input: z.object({ agent: AGENT_ARG, address: ADDRESS_ARG }).strict(),
   output: z.object({

@@ -603,6 +603,9 @@ test("get_performance: flows divided out, unexplained change kept out of trading
   assert.equal(live.fee_accruals, 1);
   assert.ok(near(live.gas_usdg, 0.3));
   assert.equal(live.gas_unpriced_ops, 1);
+  assert.equal(live.gas_unrecorded_ops, 3, "two sells and the stand-alone copy carry no gas record");
+  assert.equal(live.gas_complete, false, "so 0.3 is a floor");
+  assert.ok(live.caveats.some((c: string) => /gas_usdg is a floor/.test(c)));
   assert.equal(live.ops.confirmed, 5);
   assert.equal(live.ops.landed_without_tx_hash, 1, "the stand-alone copy is still an operation on the tape, just not a trade in its step");
   assert.equal(live.ops.paper_fills, 0);
@@ -615,6 +618,7 @@ test("get_performance: flows divided out, unexplained change kept out of trading
   assert.equal(paper.net_flows_usdg, 0, "real deposits never enter the paper book");
   assert.equal(paper.fees_accrued_usdg, 0);
   assert.equal(paper.gas_usdg, 0);
+  assert.equal(paper.gas_complete, true, "the paper book pays no gas");
   assert.equal(paper.realized_pnl_usdg, 10);
   assert.equal(paper.ops.paper_fills, 2);
   assert.equal(paper.ops.paper_refused, 1);
@@ -622,6 +626,54 @@ test("get_performance: flows divided out, unexplained change kept out of trading
   assert.ok(paper.caveats.some((c: string) => /simulated money/.test(c)));
   assert.equal(sc.refused_ops, 1, "the daily-cap refusal belongs to neither book");
   assert.ok(!text.includes("9999"));
+});
+
+test("get_performance and compare_paper_live: gas never recorded or never priced is unknown or a floor, never 0 (reports.ts's rule)", async () => {
+  const live = async (seed: (d: TestDb) => void) => {
+    const { d, a } = await setup();
+    agentRow(d, ACCOUNT_A, OWNER_A, "live", 1);
+    mark(d, ACCOUNT_A, { mode: "live", at: NOW - 5000, cash: 100, equity: 100 });
+    mark(d, ACCOUNT_A, { mode: "live", at: NOW - 60, cash: 100, equity: 100 });
+    seed(d);
+    const perf = (await call("get_performance", { period: "day" }, a)).sc.books.live;
+    const cmp = (await call("compare_paper_live", { period: "day" }, a)).sc.live;
+    restore?.();
+    restore = null;
+    return { perf, cmp };
+  };
+  const landed = (d: TestDb, n: number, o: Partial<TradeSeed> = {}) =>
+    trade(d, ACCOUNT_A, { status: "landed", buy: T1, sell: USDG, side: "buy", qty: "1", source: "receipt", op: oph(n), tx: txh(n), at: NOW - 1000 + n, ...o });
+
+  // The only landed operation has no gas record at all (the in-flight reconciler wrote it).
+  const unrecorded = await live((d) => { landed(d, 1); });
+  assert.equal(unrecorded.perf.gas_usdg, null, "gas nobody recorded is unknown, not 0");
+  assert.equal(unrecorded.perf.gas_unrecorded_ops, 1);
+  assert.equal(unrecorded.perf.gas_complete, false);
+  assert.ok(unrecorded.perf.caveats.some((c: string) => /Gas is unknown, not zero/.test(c)));
+  assert.equal(unrecorded.cmp.gas_usdg, null, "compare_paper_live says the same");
+  assert.equal(unrecorded.cmp.gas_complete, false);
+
+  // Every landed operation paid gas, none of it priced.
+  const unpriced = await live((d) => { landed(d, 1, { gasWei: "100" }); landed(d, 2, { gasWei: "200" }); });
+  assert.equal(unpriced.perf.gas_usdg, null);
+  assert.equal(unpriced.perf.gas_unpriced_ops, 2);
+  assert.equal(unpriced.perf.gas_complete, false);
+
+  // Part priced: the priced part, flagged as a floor.
+  const partial = await live((d) => { landed(d, 1, { gasWei: "100", gasUsdg: 0.04 }); landed(d, 2); });
+  assert.equal(partial.perf.gas_usdg, 0.04);
+  assert.equal(partial.perf.gas_complete, false);
+  assert.ok(partial.perf.caveats.some((c: string) => /gas_usdg is a floor/.test(c)));
+  assert.equal(partial.cmp.gas_complete, false);
+
+  // Everything priced: complete. Nothing landed: a measured 0.
+  const whole = await live((d) => { landed(d, 1, { gasWei: "100", gasUsdg: 0.04 }); landed(d, 2, { gasWei: "200", gasUsdg: 0.06 }); });
+  assert.ok(near(whole.perf.gas_usdg, 0.1));
+  assert.equal(whole.perf.gas_complete, true);
+  assert.ok(!whole.perf.caveats.some((c: string) => /gas/i.test(c)), "no gas caveat when every operation is priced");
+  const idle = await live(() => {});
+  assert.equal(idle.perf.gas_usdg, 0);
+  assert.equal(idle.perf.gas_complete, true);
 });
 
 test("get_performance: the run period starts at the current run's first valuation; an unvalued book is null, not flat", async () => {

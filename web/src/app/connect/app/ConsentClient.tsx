@@ -22,6 +22,8 @@ interface ConsentView {
   agents: Array<{ slug: string; account: string | null }>;
   signedIn: boolean;
   expiresAt: number;
+  /** A connection lasts at most this many days before the owner approves it again. */
+  maxDays?: number;
 }
 
 async function consent<T>(body: Record<string, unknown>): Promise<T> {
@@ -119,6 +121,9 @@ export function ConsentClient() {
 
   const appName = view?.client.name ?? view?.client.host ?? "An AI assistant";
   const noAgent = !!view && view.signedIn && view.agents.length === 0;
+  // The server never offers offline_access (it controls nothing: every
+  // connection can refresh until it is disconnected or reaches its limit).
+  // Filtered here too, so an older server can never show it as a choice.
   const visibleScopes = view ? view.scopes.filter((s) => s.id !== "offline_access") : [];
   const chosenUseful = [...scopes].some((s) => s !== "offline_access" && (agents.size > 0 || !view?.scopes.find((x) => x.id === s)?.needsAgent));
 
@@ -181,7 +186,7 @@ export function ConsentClient() {
             })}</ul>
 
             <div className="connect-boundary"><ShieldCheck size={19} aria-hidden /><p>
-              {appName} can never move your funds, see your keys, turn on live trading or loosen your limits. Trades and setting changes it suggests only happen if you approve them in Merrymen, and your agent keeps running on its own whether or not the assistant is connected. Disconnect it any time at <a href="/connect/apps">Connected apps</a>.
+              {appName} can never move your funds, see your keys, turn on live trading or loosen your limits. Trades and setting changes it suggests only happen if you approve them in Merrymen, and your agent keeps running on its own whether or not the assistant is connected. It stays connected until you disconnect it{view.maxDays ? `, for at most ${view.maxDays} days before you are asked again` : ""}. Disconnect it any time at <a href="/connect/apps">Connected apps</a>; that ends its access at once.
             </p></div>
 
             <button className="flow-primary" disabled={busy || !chosenUseful} onClick={() => void decide(true)}>{busy ? "Connecting…" : `Allow ${appName}`} {!busy && <ArrowRight size={16} aria-hidden />}</button>

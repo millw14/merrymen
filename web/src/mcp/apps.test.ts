@@ -107,7 +107,7 @@ const PERF_BOOK = (book: "paper" | "live") => ({
   change_excluding_flows_usdg: book === "live" ? 12.34 : null, return_pct: book === "live" ? 12.34 : null, max_drawdown_pct: null,
   attribution: { available: false, why_unavailable: "Too few valuations.", flows_usdg: null, trading_usdg: null, unattributed_usdg: null, valuation_gaps: null },
   realized_pnl_usdg: null, realized_sells_counted: 0, realized_sells_excluded: 0, fees_accrued_usdg: null, fee_accruals: 0, gas_usdg: 0.12,
-  gas_unpriced_ops: 0, gas_sponsored_ops: 0, ops: OPS,
+  gas_unpriced_ops: 0, gas_unrecorded_ops: 0, gas_complete: true, gas_sponsored_ops: 0, ops: OPS,
   series: book === "live" ? [{ at: T0, equity_usdg: 100 }, { at: T0, equity_usdg: 104 }, { at: T0, equity_usdg: 112.34 }] : [],
   series_bucket_s: 3600, caveats: book === "paper" ? ["No paper valuation in this window."] : [],
 });
@@ -133,7 +133,7 @@ const INACTIVITY = () => sample("explain_agent_inactivity", {
   refusals_in_window: [{ rule: "min-cash", family: "funding", status: "rejected", label: "Not enough cash", remedy: "Deposit USDG.", count: 3, last_at: T0 }],
   events_in_window: {
     market_unreadable: 0, provider_failure: 2, brain_failure: 0, brain_refused: 0, execution_failure: 0, policy_notice: 0, arm_failure: 0, funding_notice: 1,
-    other_not_relayed: 0, note: "Counted by kind.",
+    consent_notice: 0, other_not_relayed: 0, note: "Counted by kind.",
   },
   fills_in_window: { live_landed: 0, live_confirmed: 0, paper: 0, submitted_unresolved: 0 },
   last_successful_cycle: { at: T0, book: "live", meaning: "The newest complete valuation." },
@@ -542,6 +542,21 @@ test("portfolio view: live and paper are separate cards, missing prices read 'no
   assertOnlyAllowedOutbound(m);
 });
 
+test("views strip every Unicode control and format character from third-party text: C1, the Arabic letter mark, isolates", async () => {
+  const m = mount("portfolio");
+  await handshake(m);
+  const data = PORTFOLIO();
+  // A creator-chosen symbol built to drive a terminal (CSI, NEL) and to reorder or hide text.
+  data.books.live.positions![0]!.symbol = "PE\u0085PE\u061c\u2066\u202eX\u009b[31m\u2069\u00ad\ufeffY\u2028Z";
+  await showResult(m, data);
+  const sym = m.doc.querySelector(".book.live .ut-inline")!;
+  assert.equal(sym.textContent, "PEPEX[31mY\nZ", "only printable text and a plain line feed survive");
+  for (const cp of [0x85, 0x61c, 0x2066, 0x202e, 0x9b, 0x2069, 0xad, 0xfeff, 0x2028]) {
+    assert.ok(![...m.text()].some((c) => c.codePointAt(0) === cp), `U+${cp.toString(16).padStart(4, "0")} reached the page`);
+  }
+  assertNoInjectedMarkup(m);
+});
+
 test("portfolio view renders get_performance per book with the window and a chart made of numbers only", async () => {
   const m = mount("portfolio");
   await handshake(m);
@@ -554,6 +569,24 @@ test("portfolio view renders get_performance per book with the window and a char
   assert.match(m.doc.querySelector(".book.paper")!.textContent!, /No valuation of this book in the window/);
   assert.match(m.text(), /4 refused operation/);
   assertNoInjectedMarkup(m);
+});
+
+test("portfolio view: gas that leaves operations out reads as a floor, and unknown gas reads 'not known', never 0", async () => {
+  const perf = (live: Record<string, unknown>) => sample("get_performance", { ...PERFORMANCE(), books: { paper: PERF_BOOK("paper"), live: { ...PERF_BOOK("live"), ...live } } });
+  const floor = mount("portfolio");
+  await handshake(floor);
+  await showResult(floor, perf({ gas_usdg: 0.12, gas_unrecorded_ops: 2, gas_complete: false }));
+  const fl = floor.doc.querySelector(".book.live")!.textContent!;
+  assert.match(fl, /Gasat least 0\.12 USDG/);
+  assert.match(fl, /2 operation\(s\) with no gas record/);
+
+  const unknown = mount("portfolio");
+  await handshake(unknown);
+  await showResult(unknown, perf({ gas_usdg: null, gas_unrecorded_ops: 1, gas_complete: false }));
+  const un = unknown.doc.querySelector(".book.live")!.textContent!;
+  assert.match(un, /Gasnot known/);
+  assert.doesNotMatch(un, /Gas(at least )?0(\.00)? USDG/);
+  assertNoInjectedMarkup(unknown);
 });
 
 test("decision view (inactivity): primary cause, ok/warning/blocking checks, evidence and what the owner can do", async () => {

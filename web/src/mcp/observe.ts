@@ -141,15 +141,17 @@ export interface RateVerdict {
  * replicas. One upsert per check. A database error propagates (fails closed):
  * an unreachable database also means the tool could not read its data, so
  * refusing costs nothing and never lets a flood through.
+ *
+ * Old windows are pruned by the orchestrator's hourly retention pass
+ * (worker/src/mcp/maintenance.ts), never here: a DELETE on the request path
+ * made that request wait on a scan of the table, and two replicas pruning at
+ * once waited on each other's row locks.
  */
 export async function rateHit(d: McpDb, bucket: string, windowSec: number, limit: number, now: number): Promise<RateVerdict> {
   const windowStart = Math.floor(now / windowSec) * windowSec;
   const row = await d.db.prepare(`INSERT INTO mcp_rate (bucket, window_start, hits) VALUES (?, ?, 1)
     ON CONFLICT (bucket, window_start) DO UPDATE SET hits = mcp_rate.hits + 1 RETURNING hits`).get(bucket, windowStart) as { hits: number | string };
   const hits = Number(row.hits);
-  if (hits === 1 && Math.random() < 0.02) {
-    await d.db.prepare("DELETE FROM mcp_rate WHERE window_start < ?").run(now - 3 * 86_400).catch(() => undefined);
-  }
   return { ok: hits <= limit, count: hits, retryAfterSec: Math.max(1, windowStart + windowSec - now) };
 }
 

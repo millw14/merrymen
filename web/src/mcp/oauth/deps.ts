@@ -51,14 +51,45 @@ export function preflight(): Response {
   return new Response(null, { status: 204, headers: PUBLIC_CORS });
 }
 
-const FORM_MAX = 16 * 1024;
+export const FORM_MAX = 16 * 1024;
+
+/**
+ * Read a request body of at most `limit` bytes, or null when it is larger.
+ *
+ * These endpoints are public and outside /api (so no middleware body cap), and
+ * `request.text()` would buffer a chunked body of any size before a length
+ * check could run. This refuses a declared Content-Length over the limit and
+ * otherwise reads the stream chunk by chunk, cancelling it as soon as the
+ * running total passes the limit: at most one chunk past `limit` is ever held.
+ */
+export async function readBoundedText(request: Request, limit: number): Promise<string | null> {
+  const declared = request.headers.get("content-length");
+  if (declared !== null && Number(declared) > limit) return null;
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, size).toString("utf8");
+}
 
 /** Read a token-endpoint body: form-encoded per RFC 6749; JSON tolerated. Bounded. */
 export async function readForm(request: Request): Promise<URLSearchParams | null> {
-  const declared = Number(request.headers.get("content-length") ?? "0");
-  if (declared > FORM_MAX) return null;
-  const text = await request.text();
-  if (text.length > FORM_MAX) return null;
+  const text = await readBoundedText(request, FORM_MAX);
+  if (text === null) return null;
   const type = (request.headers.get("content-type") ?? "").toLowerCase();
   if (type.includes("application/json")) {
     try {

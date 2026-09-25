@@ -859,6 +859,54 @@ export async function readTradeDetail(db: Db, scope: LedgerScope, id: number): P
   return { trade: view, decision, ledger_rows: rows.length, requested_id: String(id), receipt: receiptExplanation(view) };
 }
 
+/** The most trade rows one decision's evidence read replays; any beyond it are left unjudged (null). */
+export const DECISION_TRADES_MAX = 200;
+
+/** Whether one of a decision's trade rows carries a MEASURED realized figure, with the row's identity to pair it by. */
+export interface DecisionRealizedEvidence {
+  created_at: number;
+  status: string;
+  /** Lowercased; null when the row has none. */
+  user_op_hash: string | null;
+  /**
+   * True: the row's realized figure is a measurement (proceeds and the cost
+   * sold against both evidenced). False: it is an estimate (either half is).
+   * Null: the row carries no realized figure, or the cost could not be replayed.
+   */
+  measured: boolean | null;
+}
+
+/**
+ * THE SAME RULE get_trade APPLIES, for every trade one decision produced:
+ * tradeOf publishes a realized figure only on a sell whose proceeds the book
+ * itself evidenced, and markMeasured replays the cost it sold against
+ * (readEvidencedSells). A row whose raw figure tradeOf would not publish is an
+ * estimate (false), never a measurement.
+ *
+ * `account` is the decision's own agent_id (the caller has already settled that
+ * it is one of the owner's accounts). Rows come oldest first, in the order
+ * readDecisionLifecycle lists them, so the caller can pair them row by row.
+ */
+export async function readDecisionRealizedEvidence(db: Db, account: string, decisionId: string): Promise<DecisionRealizedEvidence[]> {
+  const rows = (await db
+    .prepare(`SELECT ${TRADE_COLS} FROM trades t ${DECISION_JOIN}
+        WHERE t.decision_id = ? AND lower(t.agent_id) = ? ORDER BY t.created_at ASC, t.id ASC LIMIT ${DECISION_TRADES_MAX}`)
+    .all(decisionId, account.toLowerCase())) as Record<string, unknown>[];
+  const views = rows.map((r) => tradeOf(r, 4663));
+  await markMeasured(db, views);
+  return rows.map((r, i) => {
+    const raw = num(r.realized_pnl_usdg);
+    const view = views[i]!;
+    const op = typeof r.user_op_hash === "string" && r.user_op_hash !== "" ? r.user_op_hash.toLowerCase() : null;
+    return {
+      created_at: Number(r.created_at),
+      status: String(r.status ?? ""),
+      user_op_hash: op,
+      measured: raw === null ? null : view.realized_pnl_usdg === null ? false : view.realized_pnl_measured,
+    };
+  });
+}
+
 // ── performance ─────────────────────────────────────────────────────────────
 
 export type Period = "day" | "week" | "month" | "run";
@@ -948,8 +996,17 @@ export interface BookPerformance {
   realized_sells_excluded: number | null;
   fees_accrued_usdg: number | null;
   fee_accruals: number | null;
+  /**
+   * Gas landed operations paid, in USDG (reports.ts's rule): the priced part;
+   * null when no landed operation has priced gas and some have unpriced or unrecorded gas;
+   * 0 only when nothing landed or every landed operation was sponsored.
+   */
   gas_usdg: number | null;
   gas_unpriced_ops: number | null;
+  /** Landed operations with no gas record at all (neither paid nor sponsored). */
+  gas_unrecorded_ops: number | null;
+  /** False when gas_usdg leaves out unpriced or unrecorded operations (a floor, or null). */
+  gas_complete: boolean | null;
   gas_sponsored_ops: number | null;
   ops: OpCounts;
   series: SeriesPoint[];
@@ -1021,7 +1078,15 @@ async function runMarkAt(db: Db, run: RunKey, book: Book, cond: string, order: "
   return markPoint(r);
 }
 
-async function opCounts(db: Db, scope: LedgerScope, w: Window): Promise<{ ops: OpCounts; refused: number; gas: number; unpriced: number; sponsored: number }> {
+/**
+ * Operation counts and gas, one row per operation. Gas is what LANDED
+ * operations paid (the worker's getGasPaidUsdg and reports.ts's rule), and
+ * every landed operation is one of: priced (gas_usdg), unpriced (gas_wei with
+ * no USDG price), sponsored (someone else paid), or unrecorded (no gas record
+ * at all — a row the in-flight reconciler wrote, say). Only the first is in the
+ * total, so the other two decide whether the total is a floor or unknown.
+ */
+async function opCounts(db: Db, scope: LedgerScope, w: Window): Promise<{ ops: OpCounts; refused: number; gas: number; priced: number; unpriced: number; unrecorded: number; sponsored: number }> {
   const r = (await db
     .prepare(`SELECT
         COUNT(CASE WHEN ${CONFIRMED_SQL} THEN 1 END) AS confirmed,
@@ -1032,7 +1097,10 @@ async function opCounts(db: Db, scope: LedgerScope, w: Window): Promise<{ ops: O
         COUNT(CASE WHEN t.status = 'rejected' AND t.reject_rule LIKE 'paper:%' THEN 1 END) AS paper_refused,
         COUNT(CASE WHEN t.status = 'rejected' AND (t.reject_rule IS NULL OR t.reject_rule NOT LIKE 'paper:%') THEN 1 END) AS refused,
         COALESCE(SUM(CASE WHEN t.status = 'landed' THEN t.gas_usdg END), 0) AS gas,
+        COUNT(CASE WHEN t.status = 'landed' AND t.gas_usdg IS NOT NULL THEN 1 END) AS priced,
         COUNT(CASE WHEN t.status = 'landed' AND t.gas_wei IS NOT NULL AND t.gas_wei <> '' AND t.gas_usdg IS NULL THEN 1 END) AS unpriced,
+        COUNT(CASE WHEN t.status = 'landed' AND t.gas_usdg IS NULL AND (t.gas_wei IS NULL OR t.gas_wei = '')
+          AND (t.sponsored_gas_wei IS NULL OR t.sponsored_gas_wei = '') THEN 1 END) AS unrecorded,
         COUNT(CASE WHEN t.status = 'landed' AND t.sponsored_gas_wei IS NOT NULL AND t.sponsored_gas_wei NOT IN ('', '0') THEN 1 END) AS sponsored
        FROM ${distinctTrades(`lower(t.agent_id) IN (${qs(scope.accounts.length)}) AND t.created_at > ?`)}
       WHERE t.created_at > ? AND t.created_at <= ?`)
@@ -1045,7 +1113,9 @@ async function opCounts(db: Db, scope: LedgerScope, w: Window): Promise<{ ops: O
     },
     refused: n("refused"),
     gas: num(r?.gas) ?? 0,
+    priced: n("priced"),
     unpriced: n("unpriced"),
+    unrecorded: n("unrecorded"),
     sponsored: n("sponsored"),
   };
 }
@@ -1111,11 +1181,22 @@ async function bookPerformance(db: Db, scope: LedgerScope, book: Book, w: Window
     return_pct: null, max_drawdown_pct: null, attribution: noAttr("this book has no valuation in the window"),
     realized_pnl_usdg: null, realized_sells_counted: null, realized_sells_excluded: null,
     fees_accrued_usdg: live ? null : 0, fee_accruals: live ? null : 0,
-    gas_usdg: live ? money(counts.gas) : 0, gas_unpriced_ops: live ? counts.unpriced : 0, gas_sponsored_ops: live ? counts.sponsored : 0,
+    // reports.ts's rule: zero only when it was measured (nothing landed, or
+    // everything that landed was sponsored); unknown when landed operations
+    // paid gas and none of it was priced; otherwise the priced part, flagged
+    // as a floor whenever any landed operation's gas is unpriced or unrecorded.
+    gas_usdg: live ? (counts.priced > 0 ? money(counts.gas) : counts.unpriced > 0 || counts.unrecorded > 0 ? null : 0) : 0,
+    gas_unpriced_ops: live ? counts.unpriced : 0,
+    gas_unrecorded_ops: live ? counts.unrecorded : 0,
+    gas_complete: live ? counts.unpriced === 0 && counts.unrecorded === 0 : true,
+    gas_sponsored_ops: live ? counts.sponsored : 0,
     ops, series: [], series_bucket_s: null, caveats,
   };
   if (!live) caveats.push("Paper book: simulated money. Real deposits and withdrawals never enter it, and it accrues no fees and pays no gas.");
-  if (live && counts.unpriced > 0) caveats.push(`${counts.unpriced} landed operation(s) paid gas that could not be priced in USDG; gas_usdg understates the cost by those.`);
+  if (live && counts.unpriced > 0) caveats.push(`${counts.unpriced} landed operation(s) paid gas that could not be priced in USDG, so gas_usdg leaves them out.`);
+  if (live && counts.unrecorded > 0) caveats.push(`${counts.unrecorded} landed operation(s) carry no gas record at all (neither paid nor sponsored), so gas_usdg leaves them out.`);
+  if (live && out.gas_usdg === null) caveats.push("Gas is unknown, not zero: no landed operation in the window has priced gas, and some have gas that was unpriced or never recorded.");
+  else if (live && out.gas_complete === false) caveats.push("gas_usdg is a floor: it covers only the landed operations whose gas was priced (gas_complete is false).");
 
   if (live) {
     const f = (await db
@@ -1314,7 +1395,7 @@ export async function readPerformance(db: Db, scope: LedgerScope, period: Period
       flows_count: null, flows_evidenced: null, change_excluding_flows_usdg: null, return_pct: null, max_drawdown_pct: null,
       attribution: { available: false, why_unavailable: "no smart account yet", flows_usdg: null, trading_usdg: null, unattributed_usdg: null, valuation_gaps: null },
       realized_pnl_usdg: null, realized_sells_counted: null, realized_sells_excluded: null, fees_accrued_usdg: null, fee_accruals: null,
-      gas_usdg: null, gas_unpriced_ops: null, gas_sponsored_ops: null,
+      gas_usdg: null, gas_unpriced_ops: null, gas_unrecorded_ops: null, gas_complete: null, gas_sponsored_ops: null,
       ops: { confirmed: 0, landed_without_tx_hash: 0, submitted: 0, failed: 0, paper_fills: 0, paper_refused: 0 },
       series: [], series_bucket_s: null, caveats: ["No smart account exists for this agent yet."],
     });

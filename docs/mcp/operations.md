@@ -7,17 +7,30 @@ service. It adds these routes: `/mcp`, `/.well-known/oauth-protected-resource[/m
 `/.well-known/oauth-authorization-server`, `/oauth/{authorize,token,register,revoke}`,
 `/connect/{app,apps,approve/:id,mcp}` pages and `/api/mcp/*`.
 
-Two background passes run in the **orchestrator** (the only durable scheduler):
+Three background passes run in the **orchestrator** (the only durable scheduler):
 backtest jobs (`worker/src/mcp/jobs.ts`), notification evaluation and delivery
 (`worker/src/mcp/notify.ts`) and table retention (`worker/src/mcp/maintenance.ts`).
 Trading, protective exits and the agent's own Telegram keep running in the
 worker children and never depend on an MCP connection.
 
+The passes are started from the reconcile loop and never awaited
+(`worker/src/mcp/background.ts`). Each holds its slot as a lease of 2 minutes:
+a pass still running after that is presumed hung and the next tick starts
+another beside it (every pass is safe to run twice, as two replicas would).
+Every database call of a pass gives up after 20 s, and inside a transaction
+Postgres cancels a statement after 15 s and a lock wait after 5 s
+(`SET LOCAL`, so nothing leaks onto the shared pool's connections). A log line
+`mcp: the <pass> pass started N s ago has not finished` means a pass hung.
+
 State lives in shared Postgres, in tables prefixed `mcp_` and `notify_`
-(`worker/src/mcp/schema.ts`), created idempotently on first use under an
-advisory lock. MCP never writes ledger tables, with one deliberate exception:
-an owner-approved trade is written to the existing owner-order queue
-(`agent_commands`) through the same helper the dashboard's chat orders use.
+(`worker/src/mcp/schema.ts`). Each process checks the catalog once at start
+(`to_regclass`, no table locks) and runs the DDL only if a table or index is
+missing: then under an advisory lock, with a 5 s `lock_timeout`, so a boot
+never queues behind a long writer while holding other tables' locks (it fails
+and retries on the next request or tick instead). MCP never writes ledger
+tables, with one deliberate exception: an owner-approved trade is written to
+the existing owner-order queue (`agent_commands`) through the same helper the
+dashboard's chat orders use.
 
 ## Configuration
 
@@ -27,7 +40,7 @@ an owner-approved trade is written to the existing owner-order queue
 | `DATABASE_URL` | web, orchestrator | — | Shared Postgres. Required. |
 | `MERRYMEN_PUBLIC_ORIGIN` | web | — | e.g. `https://app.merrymen.dev`. The OAuth issuer and (by default) the resource origin. Required. |
 | `MERRYMEN_SESSION_SECRET` | web | — | Owner sign-in (already required by the dashboard). |
-| `MERRYMEN_MCP_ENABLED` | web | on | `0` switches the whole MCP surface off (404s everywhere, tokens unused). |
+| `MERRYMEN_MCP_ENABLED` | web, orchestrator (one shared Railway variable) | on | `0` switches MCP off. On **web**: every MCP route answers 404 (tokens unused). On the **orchestrator**: no backtest runs and no Telegram alert is evaluated or sent. Each service reads only its own environment, so set it on both — see [Emergency](#emergency-revoke-everything). |
 | `MERRYMEN_OAUTH_ISSUER` | web | public origin | Only if the issuer must differ from the public origin. |
 | `MERRYMEN_MCP_RESOURCE_URL` | web | `<origin>/mcp` | The canonical resource URL tokens are bound to, e.g. `https://mcp.merrymen.dev/mcp`. Changing it invalidates every existing token (audience changes); clients simply reconnect. |
 | `MERRYMEN_MCP_ALLOWED_ORIGINS` | web | — | Extra browser origins allowed to call `/mcp` (comma separated). Server-side clients send no Origin and are unaffected. |
@@ -109,8 +122,27 @@ Limits are enforced in shared Postgres, so they hold across web replicas.
 
 To cut every MCP connection at once without a deploy, either:
 
-- set `MERRYMEN_MCP_ENABLED=0` on web (all MCP routes 404; tokens are unusable
-  but survive, and work again when re-enabled), or
+- set `MERRYMEN_MCP_ENABLED=0` on **both web and orchestrator** — best as one
+  shared Railway variable referenced by both services, so one change reaches
+  both (each service restarts to pick it up). What each one stops:
+  - **web**: `/mcp`, the OAuth routes, the MCP `/.well-known/*` metadata and
+    `/api/mcp/*` answer 404 (`/api/mcp/health` instead reports
+    `enabled: false`); the connect pages load but every action on them fails.
+    Tokens are unusable but survive, and work again when re-enabled. Owners
+    also cannot list or remove alert subscriptions or disconnect apps while it
+    is off.
+  - **orchestrator**: the background passes stop: no backtest job runs, no
+    alert subscription is evaluated and no Telegram alert is sent, and
+    retention pauses. Queued backtests do not run; one past its 1-hour
+    deadline when MCP is re-enabled is expired, not run. Queued alerts wait
+    and go out when re-enabled, except any more than a day old, which are
+    dropped as expired rather than delivered late.
+
+  Setting it on web alone is **not** an emergency stop: the orchestrator keeps
+  sending alerts to owners who hold a `notifications:manage` connection and
+  keeps running queued backtests, and with web off those owners cannot turn
+  the alerts off themselves. If the emergency is an alert (a misleading or
+  noisy message), the orchestrator switch is the one that stops it; or
 - revoke all tokens (permanent; every client must reconnect):
 
   ```sql
@@ -143,5 +175,15 @@ normal owner orders as above.
 
 Run hourly by the orchestrator (`runMcpMaintenancePass`): consent requests and
 codes are deleted a day after expiry, tokens 30 days after expiry or
-revocation, audit rows after 180 days, deliveries after 90 days, finished jobs
-after 30 days, exports at expiry (24 h).
+revocation, audit rows after 180 days, rate-limit windows after 3 days,
+deliveries after 90 days, finished jobs after 30 days, research notes 30 days
+after expiry, conversation messages after a year, exports at expiry (24 h).
+Dynamically registered clients that no active connection uses go 30 days after
+registration; cached client metadata documents that no active connection uses
+go as soon as their cache expires (one an active connection uses is kept).
+
+Every one of these DELETEs is an index range scan on its time column (the
+indexes are in `schema.ts`; `maintenance.test.ts` checks each plan), and each
+runs in its own short transaction under the pass's statement and lock
+timeouts. The request path never deletes: rate-limit windows are pruned only
+here.

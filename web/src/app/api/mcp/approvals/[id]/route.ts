@@ -20,12 +20,13 @@ import { readLedger as withReadDb } from "@/mcp/tool";
 import { settingsReader } from "@/lib/services/settings-view";
 import { quoteTrade } from "@/lib/services/trade-quote";
 import {
-  ProposalError, approveProposal, expireIfDue, followTrade, proposalRow, queueApprovedTrade, rejectProposal,
-  type Binding, type ProposalRow, type Revalidation, type TradeBinding,
+  ProposalError, approveProposal, changeRow, changedSince, currentValues, expireIfDue, followTrade, ownerOrderCeiling, proposalRow,
+  queueApprovedTrade, rejectProposal, resultView,
+  type Binding, type DraftBinding, type ProposalRow, type Revalidation, type SettingsBinding, type TradeBinding,
 } from "@/lib/services/proposals";
-import { addressableSymbol } from "@/mcp/tools/proposals";
+import { KNOWN_STRATEGIES, addressableSymbol } from "@/mcp/tools/proposals";
 import { readAgentRow } from "@/lib/services/agent-status";
-import { sellableAssets } from "@merrymen/core";
+import { AGENT_NAME_RE, STOCK_TOKENS, normalizeAgentName, sellableAssets } from "@merrymen/core";
 import { specFor, validStoredSetting } from "../../../../../../../worker/src/telegram/setting-spec";
 import { PUT as settingsPut } from "../../../settings/route";
 import { POST as groupchatPost } from "../../../groupchat/route";
@@ -61,8 +62,9 @@ async function revalidateTrade(tenant: `0x${string}`, b: TradeBinding, now: numb
   const perTrade = agent.caps?.perTradeUsdg ?? null;
   if (perTrade !== null && b.amount_usdg > perTrade) return { ok: false, why: `It is over the signed per-trade limit of ${perTrade} USDG.` };
   const settings = await settingsReader().settingsFor(tenant);
-  const ceiling = settings?.telegram.maxActionUsdg ?? null;
-  if (ceiling !== null && ceiling > 0 && b.amount_usdg > ceiling) return { ok: false, why: `It is over your ${ceiling} USDG limit for an owner order.` };
+  // The orders route's resolution: with nothing stored, the house's ceiling applies, not none.
+  const ceiling = await ownerOrderCeiling(tenant, settings);
+  if (ceiling > 0 && b.amount_usdg > ceiling) return { ok: false, why: `It is over your ${ceiling} USDG limit for an owner order.` };
   const addressable = addressableSymbol(b.token, settings);
   if ("why" in addressable) return { ok: false, why: addressable.why };
   if (addressable.symbol !== b.symbol) return { ok: false, why: "The token's symbol changed in your settings since this was proposed. Ask for a fresh proposal." };
@@ -90,14 +92,69 @@ async function revalidateTrade(tenant: `0x${string}`, b: TradeBinding, now: numb
   return { ok: true, notes };
 }
 
-function revalidateSettings(changes: Record<string, unknown>): Revalidation {
+/**
+ * A settings change or an agent draft, checked again as the owner approves it.
+ *
+ * THE SAME ALLOWLIST AS THE PROPOSAL. Only chat-settable keys (SETTING_SPECS),
+ * plus a draft's name; a safety floor such as maxImpactBps is not approvable
+ * from here whatever a stored binding carries. A basket is checked against the
+ * stock tokens and the owner's own added tokens, spelled exactly as the
+ * settings route will check them — a draft from a connection with no agent
+ * shared could not be checked when it was made.
+ *
+ * AND AGAINST WHAT IS THERE NOW. The page showed "before → after"; if any
+ * "before" is no longer the owner's value, approving would apply a different
+ * change than the one they read (a "tightening" that loosens), so it is
+ * refused and a fresh proposal asked for.
+ */
+async function revalidateSettings(tenant: `0x${string}`, b: SettingsBinding | DraftBinding): Promise<Revalidation> {
+  const changes = b.kind === "settings" ? b.changes : b.settings;
+  const view = await settingsReader().settingsFor(tenant);
   for (const [k, v] of Object.entries(changes)) {
-    // Agent drafts also carry agentName and the risk-profile keys; the settings
-    // route validates every one of them again when they are applied.
-    if (k === "agentName" || k === "maxImpactBps") continue;
-    if (!specFor(k) || !validStoredSetting(k, v)) return { ok: false, why: `The change to ${k} is no longer allowed.` };
+    if (k === "agentName") {
+      if (b.kind !== "agent_draft" || typeof v !== "string" || normalizeAgentName(v) !== v || !AGENT_NAME_RE.test(v)) return { ok: false, why: "The agent name in this proposal is not allowed." };
+      continue;
+    }
+    const spec = specFor(k);
+    if (!spec || !validStoredSetting(k, v)) return { ok: false, why: `The change to ${spec?.label ?? k} is not allowed from here. Nothing was changed.` };
+    if (spec.kind === "strategy" && !(KNOWN_STRATEGIES as readonly string[]).includes(v as string)) return { ok: false, why: `${String(v)} is not a strategy Merrymen knows.` };
+    if (spec.kind === "symbols") {
+      const selectable = new Set([...STOCK_TOKENS.map((t) => t.symbol), ...(view?.customTokens ?? []).map((c) => c.symbol)]);
+      const bad = (v as string[]).filter((s) => !selectable.has(s));
+      if (bad.length) return { ok: false, why: `The basket names ${bad.slice(0, 5).join(", ")}, which ${bad.length === 1 ? "is" : "are"} not a stock token or a token you added in Settings. Nothing was changed.` };
+    }
+  }
+  if (!b.before || typeof b.before !== "object") return { ok: false, why: "This proposal was made before Merrymen recorded your settings with it. Ask your assistant for a fresh one." };
+  const changed = changedSince(b.before, await currentValues(tenant, Object.keys(b.before), view));
+  if (changed.length) {
+    return { ok: false, why: `Your settings changed since this was proposed (${changed.map((k) => changeRow(k, null, null).label).join(", ")}). Nothing was changed; ask your assistant for a fresh proposal.` };
   }
   return { ok: true, notes: [] };
+}
+
+/** Does the owner run an agent that holds a signed permission? Then settings apply to it immediately. */
+async function runsAnAgent(tenant: `0x${string}`): Promise<boolean> {
+  return (await agentDirectory().agentsFor(tenant)).some((a) => a.account !== null);
+}
+
+/**
+ * The before / now / proposed rows the approval page shows for a settings
+ * change or a draft, read live, with the keys whose value moved since.
+ */
+async function settingsCheck(tenant: `0x${string}`, b: SettingsBinding | DraftBinding) {
+  const changes = b.kind === "settings" ? b.changes : b.settings;
+  const before = b.before ?? {};
+  const now = await currentValues(tenant, Object.keys(changes));
+  const changed = new Set(changedSince(before, now));
+  return {
+    rows: Object.keys(changes).map((k) => {
+      const live = changeRow(k, now[k], changes[k]);
+      return { key: k, label: live.label, when_proposed: changeRow(k, before[k] ?? null, null).current, current: live.current, proposed: live.proposed, help: live.help, changed: changed.has(k) };
+    }),
+    changed_since: [...changed],
+    applies_to_running_agent: b.kind === "settings" ? true : await runsAnAgent(tenant),
+    left_out: b.kind === "agent_draft" ? b.left_out ?? [] : [],
+  };
 }
 
 /** Apply settings through the settings route itself, as the approving owner. */
@@ -126,15 +183,21 @@ async function view(row: ProposalRow, tenant: `0x${string}`, now: number) {
   if (r.kind === "trade") r = await withReadDb(async (ledger) => (ledger ? followTrade(d.db, ledger, r, now) : r));
   const binding = JSON.parse(r.binding_json) as Binding;
   let quote = null;
+  let check = null;
   if (r.status === "awaiting_approval" && binding.kind === "trade") {
     const agent = (await agentDirectory().agentsFor(tenant)).find((a) => a.slug === binding.agent_slug);
     quote = agent ? await freshQuote(tenant, binding, agent.features).catch(() => null) : null;
   }
+  if (r.status === "awaiting_approval" && (binding.kind === "settings" || binding.kind === "agent_draft")) {
+    check = await settingsCheck(tenant, binding).catch(() => null);
+  }
+  // The salt only defeats guessing from the hash; the page has no use for it.
+  const shown = binding.kind === "agent_draft" ? (({ salt: _s, ...rest }) => rest)(binding) : binding;
   return {
-    id: r.id, kind: r.kind, status: r.status, binding, binding_hash: r.binding_hash,
+    id: r.id, kind: r.kind, status: r.status, binding: shown, binding_hash: r.binding_hash,
     summary: JSON.parse(r.summary_json), requested_by: r.client_name,
     created_at: r.created_at, expires_at: r.expires_at, decided_at: r.decided_at,
-    result: r.result_json ? JSON.parse(r.result_json) : null, fresh_quote: quote,
+    result: resultView(r.result_json), fresh_quote: quote, settings_check: check,
   };
 }
 
@@ -179,8 +242,7 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
     const row = await approveProposal(d.db, tenant, id, body.hash, now, {
       revalidate: async (binding) => {
         if (binding.kind === "trade") return revalidateTrade(tenant, binding, now);
-        if (binding.kind === "settings") return revalidateSettings(binding.changes);
-        if (binding.kind === "agent_draft") return revalidateSettings(binding.settings);
+        if (binding.kind === "settings" || binding.kind === "agent_draft") return revalidateSettings(tenant, binding);
         return { ok: true, notes: [] };
       },
       act: async (binding, proposal) => {

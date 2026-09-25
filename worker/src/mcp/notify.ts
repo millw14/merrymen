@@ -398,12 +398,29 @@ function parseJson(raw: unknown): Record<string, unknown> {
   }
 }
 
-/** Strip control and bidi characters and cap length: symbols and names can be written by strangers. */
-function plain(text: string | null | undefined, max: number): string | null {
+/**
+ * One line of text a stranger may have written (a coin's symbol, an agent's
+ * name), made safe to print: whitespace of any kind (tabs, newlines, the line
+ * and paragraph separators U+2028/U+2029, no-break spaces) becomes one space,
+ * and every other control or format character is dropped by Unicode category:
+ * Cc (C0, DEL and the C1 range, so a terminal-style CSI U+009B or NEL U+0085
+ * cannot pass), Cf (bidi marks, embeddings and isolates including U+061C, the
+ * zero-width characters, BOM, soft hyphen) and Cs (a lone surrogate, which is
+ * not text). Written with property classes: a literal invisible character in
+ * this source would be invisible in review too. The length cap counts code
+ * points, so an emoji at the cut is not split into half a surrogate pair.
+ */
+export function plain(text: string | null | undefined, max: number): string | null {
   if (typeof text !== "string") return null;
-  const clean = text.replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, "").replace(/\s+/g, " ").trim();
+  const clean = text
+    .replace(/[\p{Cf}\p{Cs}]/gu, "") // format characters first: a BOM counts as whitespace to \s, but it is not a space
+    .replace(/\s+/gu, " ")
+    .replace(/\p{Cc}/gu, "") // what is left of C0, DEL and C1 is not whitespace
+    .replace(/ {2,}/g, " ")
+    .trim();
   if (!clean) return null;
-  return clean.length > max ? `${clean.slice(0, max)}…` : clean;
+  const points = Array.from(clean);
+  return points.length > max ? `${points.slice(0, max).join("")}…` : clean;
 }
 
 const usd = (n: number) => n.toFixed(2);
@@ -483,9 +500,12 @@ function scopeFor(shared: Db, s: PassState, tenant: string, slug: string): Promi
 
 interface TradeRow {
   id: number;
+  agent_id: string;
   status: string;
   kind: string | null;
   tx_hash: string | null;
+  user_op_hash: string | null;
+  sell_token: string | null;
   fill_side: string | null;
   fill_symbol: string | null;
   fill_cash_usdg: number | null;
@@ -497,16 +517,203 @@ interface TradeRow {
 
 const TX = /^0x[0-9a-fA-F]{64}$/;
 
-function tradeText(scope: AgentScope, t: TradeRow): string {
+// ── one row per operation, and which sells are measured ───────────────────
+//
+// The worker may not import web code, so the few ledger-reading rules the web
+// already states are restated here, each naming the web function it mirrors.
+// notify.test.ts pins the same behaviour; a change to one side needs the other.
+
+/** A fill of a market position (web/src/lib/services/decisions.ts FILL_KINDS): a transfer or a vault move is not one. */
+export const FILL_KINDS = ["swap", "curve-trade"] as const;
+const FILL_KINDS_SQL = FILL_KINDS.map((k) => `'${k}'`).join(", ");
+
+/** How much younger than its operation a re-recorded copy can be (web/src/lib/distinct-trades.ts OP_COPY_REACH_SEC). */
+export const OP_COPY_REACH_SEC = 7 * 86_400;
+
+/**
+ * `trades`, one row per operation, as a derived table named `t` — the same SQL
+ * as web/src/lib/distinct-trades.ts distinctTrades. A redeploy re-records old
+ * operations as bare 'swap' rows (no decision, no fill side) stamped at the
+ * restart; without this a copy reads as a fresh fill, and a vault deposit's
+ * copy reads as a trade. The copy that speaks for the operation: one that knows
+ * the outcome, then one with fill evidence, then one linked to its decision,
+ * then the earliest. `where` scopes BEFORE the collapse and should hold only an
+ * account and time scope; status and kind filters go outside it, and a time
+ * scope must reach OP_COPY_REACH_SEC past the window the caller reports on.
+ */
+function distinctTrades(where: string): string {
+  return `(WITH scoped AS (SELECT * FROM trades t WHERE ${where})
+    SELECT * FROM (
+      SELECT s.*, ROW_NUMBER() OVER (
+        PARTITION BY lower(s.agent_id), lower(s.user_op_hash)
+        ORDER BY (s.status = 'submitted'), (s.fill_side IS NULL), (s.decision_id IS NULL), s.created_at, s.id
+      ) AS op_rank
+      FROM scoped s WHERE s.user_op_hash IS NOT NULL AND s.user_op_hash <> ''
+    ) ranked WHERE ranked.op_rank = 1
+    UNION ALL
+    SELECT s.*, 1 AS op_rank FROM scoped s WHERE s.user_op_hash IS NULL OR s.user_op_hash = '') t`;
+}
+
+/** An operation's key (web/src/lib/profile-trades.ts OP_KEY), as SQL over `t` and for one row in hand. */
+const OP_KEY_SQL = "COALESCE(LOWER(NULLIF(t.user_op_hash, '')), 'row:' || CAST(t.id AS TEXT))";
+const opKeyOf = (t: { id: number; user_op_hash: string | null }) =>
+  typeof t.user_op_hash === "string" && t.user_op_hash !== "" ? t.user_op_hash.toLowerCase() : `row:${Number(t.id)}`;
+
+/** One basis-moving fill as the replay reads it (web/src/lib/profile-trades.ts BasisReplayFill). */
+export interface BasisReplayFill {
+  op: string;
+  side: "buy" | "sell" | null;
+  token: string;
+  qty: string | null;
+  source: string | null;
+}
+
+const EVIDENCED_SOURCES: ReadonlySet<string> = new Set(["receipt", "paper"]);
+
+/**
+ * WHICH SELLS REALIZED AGAINST A COST NOTHING ESTIMATED — the same replay as
+ * web/src/lib/profile-trades.ts vouchedSells. A sell's realized_pnl_usdg is its
+ * proceeds minus the running cost of every buy since the coin was last flat,
+ * and a buy whose receipt could not be read booked that cost from the quote
+ * (basis_source 'quote'). So the sell's own basis_source says nothing about the
+ * cost side. A sell is vouched for when no buy still in the basis it sold
+ * against was anything but a receipt or a paper fill; a row that moved the coin
+ * without a side or quantity means flat can no longer be told, and a read cut
+ * short (`complete` false) vouches for nothing. `fills` oldest first.
+ */
+export function vouchedSells(fills: readonly BasisReplayFill[], complete: boolean): Set<string> {
+  const vouched = new Set<string>();
+  if (!complete) return vouched;
+  const state = new Map<string, { held: bigint; estimated: boolean; exact: boolean }>();
+  for (const f of fills) {
+    const s = state.get(f.token) ?? { held: 0n, estimated: false, exact: true };
+    state.set(f.token, s);
+    const qty = f.qty !== null && /^\d+$/.test(f.qty.trim()) ? BigInt(f.qty.trim()) : null;
+    if (f.side === "sell" && !s.estimated) vouched.add(f.op);
+    if (f.side === null || qty === null) {
+      s.exact = false;
+      if (f.side !== "sell" && !EVIDENCED_SOURCES.has(f.source ?? "")) s.estimated = true;
+      continue;
+    }
+    if (f.side === "buy") {
+      s.held += qty;
+      if (!EVIDENCED_SOURCES.has(f.source ?? "")) s.estimated = true;
+      continue;
+    }
+    s.held -= qty < s.held ? qty : s.held;
+    if (s.exact && s.held === 0n) s.estimated = false;
+  }
+  return vouched;
+}
+
+/** Rows one coin's replay reads before it vouches for nothing (web/src/lib/profile-trades.ts BASIS_REPLAY_ROWS). */
+const BASIS_REPLAY_ROWS = 5_000;
+
+/**
+ * The LIVE sells, of those asked about, whose realised P&L is a measurement:
+ * proceeds read from the sell's own receipt AND a cost vouchedSells can replay
+ * with no estimate in it — web/src/lib/profile-trades.ts readEvidencedSells, run
+ * per account the way web/src/lib/services/portfolio.ts markMeasured runs it.
+ * The replay matches `agent_id = ?` exactly, so it needs the one spelling the
+ * account's rows carry; an account written under two spellings would replay as
+ * two partial tapes, and vouches for nothing (portfolio.ts readTradeSpelling —
+ * here over the three spellings this pass reads every account under, which the
+ * trades index can serve). Returns op keys (opKeyOf). NEVER THROWS: a replay
+ * that cannot be read vouches for nothing, and nothing is printed as measured.
+ */
+async function evidencedLiveSells(shared: Db, sells: readonly TradeRow[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  const byAccount = new Map<string, TradeRow[]>();
+  for (const t of sells) {
+    const token = typeof t.sell_token === "string" ? t.sell_token.toLowerCase() : "";
+    if (!token || typeof t.agent_id !== "string") continue;
+    const key = t.agent_id.toLowerCase();
+    byAccount.set(key, [...(byAccount.get(key) ?? []), t]);
+  }
+  for (const [account, rows] of byAccount) {
+    try {
+      const names = spellings(account);
+      const held = (await shared.prepare(`SELECT DISTINCT agent_id FROM trades WHERE agent_id IN (${placeholders(names.length)}) LIMIT 3`)
+        .all(...names)) as Array<{ agent_id: string }>;
+      if (held.length !== 1) continue;
+      const tokens = [...new Set(rows.map((t) => String(t.sell_token).toLowerCase()))];
+      const replayed = (await shared
+        .prepare(`SELECT r.op, r.fill_side, r.fill_qty_raw, r.basis_source, r.coin
+           FROM (
+             SELECT l.*, ROW_NUMBER() OVER (PARTITION BY l.coin ORDER BY l.created_at DESC, l.id DESC) AS coin_rank
+               FROM (
+                 SELECT ${OP_KEY_SQL} AS op, t.fill_side, t.fill_qty_raw, t.basis_source, t.created_at, t.id,
+                        CASE WHEN leg.side = 'buy' THEN LOWER(t.buy_token) ELSE LOWER(t.sell_token) END AS coin
+                   FROM ${distinctTrades("t.agent_id = ? AND (t.user_op_hash IS NOT NULL OR t.fill_side IS NOT NULL OR t.basis_source IS NOT NULL)")}
+                  CROSS JOIN (SELECT 'buy' AS side UNION ALL SELECT 'sell' AS side) leg
+                  WHERE t.status = 'landed'
+                    AND (t.fill_side IN ('buy','sell') OR t.basis_source IS NOT NULL)
+                    AND (t.fill_side IS NULL OR t.fill_side NOT IN ('buy','sell') OR t.fill_side = leg.side)
+               ) l
+              WHERE l.coin IN (${placeholders(tokens.length)})
+           ) r
+          WHERE r.coin_rank <= ?
+          ORDER BY r.created_at ASC, r.id ASC`)
+        .all(String(held[0]!.agent_id), ...tokens, BASIS_REPLAY_ROWS + 1)) as Array<Record<string, unknown>>;
+      const byCoin = new Map<string, BasisReplayFill[]>();
+      const sellSource = new Map<string, string | null>();
+      for (const r of replayed) {
+        const coin = typeof r.coin === "string" ? r.coin : "";
+        if (!coin) continue;
+        const op = String(r.op);
+        const side = r.fill_side === "buy" || r.fill_side === "sell" ? r.fill_side : null;
+        const source = typeof r.basis_source === "string" ? r.basis_source : null;
+        const qty = side === null || r.fill_qty_raw === null || r.fill_qty_raw === undefined ? null : String(r.fill_qty_raw);
+        if (side === "sell") sellSource.set(op, source);
+        byCoin.set(coin, [...(byCoin.get(coin) ?? []), { op, side, token: coin, qty, source }]);
+      }
+      const vouched = new Set<string>();
+      for (const fills of byCoin.values()) {
+        for (const op of vouchedSells(fills, fills.length <= BASIS_REPLAY_ROWS)) vouched.add(op);
+      }
+      for (const t of rows) {
+        const op = opKeyOf(t);
+        if (vouched.has(op) && sellSource.get(op) === "receipt") out.add(op);
+      }
+    } catch {
+      /* unreplayable: nothing from this account is printed as measured */
+    }
+  }
+  return out;
+}
+
+/**
+ * What a confirmed trade's message may say about money, and no more than the
+ * ledger evidences. The cash leg is stated as a fact only when it was read from
+ * the receipt; a leg booked from the pre-trade quote is an estimate and says
+ * so, and a row with no filled amount at all states its ORDER size as that.
+ * A realised P&L is stated only for a sell `measured` vouches for; otherwise it
+ * is left out and the message says why.
+ */
+function tradeText(scope: AgentScope, t: TradeRow, measured: boolean): string {
   const symbol = plain(t.fill_symbol, 16) ?? "a token";
-  const cash = num(t.fill_cash_usdg) ?? num(t.amount_usdg);
+  const fill = num(t.fill_cash_usdg);
+  const order = num(t.amount_usdg);
+  const fromReceipt = fill !== null && t.basis_source === "receipt";
   const side = t.fill_side === "buy" ? "Bought" : t.fill_side === "sell" ? "Sold" : null;
-  const what = side
-    ? `${side} ${symbol}${cash !== null ? ` for ${usd(Math.abs(cash))} USDG` : ""}.`
-    : `A ${plain(t.kind, 24) ?? "trade"} landed${cash !== null ? ` (${usd(Math.abs(cash))} USDG)` : ""}.`;
+  let money = "";
+  if (side) {
+    if (fromReceipt) money = ` for ${usd(Math.abs(fill))} USDG`;
+    else if (fill !== null) money = ` for about ${usd(Math.abs(fill))} USDG (estimated from the quote: the receipt could not be read)`;
+    else if (order !== null) money = ` (order size ${usd(Math.abs(order))} USDG; the filled amount is not recorded)`;
+  } else {
+    if (fromReceipt) money = ` (${usd(Math.abs(fill))} USDG)`;
+    else if (fill !== null) money = ` (about ${usd(Math.abs(fill))} USDG, estimated)`;
+    else if (order !== null) money = ` (${usd(Math.abs(order))} USDG requested)`;
+  }
+  const what = side ? `${side} ${symbol}${money}.` : `A ${plain(t.kind, 24) ?? "trade"} landed${money}.`;
   const pnl = num(t.realized_pnl_usdg);
-  // Only a receipt-backed basis makes a realised figure a measurement rather than a guess.
-  const realized = t.fill_side === "sell" && pnl !== null && t.basis_source === "receipt" ? ` Realised P&L ${signed(pnl)} USDG.` : "";
+  let realized = "";
+  if (t.fill_side === "sell" && pnl !== null) {
+    realized = measured
+      ? ` Realised P&L ${signed(pnl)} USDG.`
+      : " Realised P&L is not stated: part of the cost it sold against, or its proceeds, was estimated rather than read from a receipt.";
+  }
   return `${scope.name} · LIVE\n${what}${realized}\nConfirmed on chain: ${t.tx_hash}`;
 }
 
@@ -522,7 +729,7 @@ async function evalTrades(shared: Db, sub: SubRow, scope: AgentScope, cursor: Re
   if (!scope.ids.length) return { candidates: [], cursor: null };
   const after = num(cursor.t) ?? 0;
   const pendingIn = Array.isArray(cursor.p) ? cursor.p.map(num).filter((n): n is number => n !== null).slice(-MAX_PENDING_TRADES) : [];
-  const cols = "id, status, kind, tx_hash, fill_side, fill_symbol, fill_cash_usdg, amount_usdg, realized_pnl_usdg, basis_source, created_at";
+  const cols = "id, agent_id, status, kind, tx_hash, user_op_hash, sell_token, fill_side, fill_symbol, fill_cash_usdg, amount_usdg, realized_pnl_usdg, basis_source, created_at";
   const idsIn = placeholders(scope.ids.length);
   const recheck = pendingIn.length
     ? ((await shared.prepare(`SELECT ${cols} FROM trades WHERE id IN (${placeholders(pendingIn.length)}) AND agent_id IN (${idsIn})`)
@@ -532,7 +739,7 @@ async function evalTrades(shared: Db, sub: SubRow, scope: AgentScope, cursor: Re
     .prepare(`SELECT ${cols} FROM trades WHERE agent_id IN (${idsIn}) AND id > ? AND created_at >= ? ORDER BY id ASC LIMIT ?`)
     .all(...scope.ids, after, sub.created_at, 100)) as TradeRow[];
 
-  const candidates: Candidate[] = [];
+  const emitted: Array<{ key: string; row: TradeRow }> = [];
   const pending = new Set<number>();
   const seen = new Set<string>();
   const consider = (t: TradeRow): "emit" | "pending" | "done" => {
@@ -545,7 +752,7 @@ async function evalTrades(shared: Db, sub: SubRow, scope: AgentScope, cursor: Re
     const tx = t.tx_hash!.toLowerCase();
     if (seen.has(tx)) return;
     seen.add(tx);
-    candidates.push({ key: `trade_confirmed:${sub.id}:${tx}`, text: tradeText(scope, t), book: "live" });
+    emitted.push({ key: `trade_confirmed:${sub.id}:${tx}`, row: t });
   };
   for (const t of recheck) {
     const v = consider(t);
@@ -554,12 +761,17 @@ async function evalTrades(shared: Db, sub: SubRow, scope: AgentScope, cursor: Re
   }
   let watermark = after;
   for (const t of scan) {
-    if (candidates.length >= TRADES_PER_EVAL) break; // the rest next pass: the watermark stops here
+    if (emitted.length >= TRADES_PER_EVAL) break; // the rest next pass: the watermark stops here
     const v = consider(t);
     if (v === "emit") emit(t);
     else if (v === "pending") pending.add(Number(t.id));
     watermark = Math.max(watermark, Number(t.id));
   }
+  // Only the sells whose realised P&L the message would state need the replay.
+  const measured = await evidencedLiveSells(shared, emitted
+    .map((e) => e.row)
+    .filter((t) => t.fill_side === "sell" && num(t.realized_pnl_usdg) !== null && t.basis_source === "receipt"));
+  const candidates: Candidate[] = emitted.map((e) => ({ key: e.key, text: tradeText(scope, e.row, measured.has(opKeyOf(e.row))), book: "live" }));
   const p = [...pending].sort((a, b) => a - b).slice(-MAX_PENDING_TRADES);
   const changed = watermark !== after || p.join(",") !== pendingIn.join(",");
   return { candidates, cursor: changed ? { ...cursor, t: watermark, p } : null };
@@ -693,6 +905,36 @@ async function evalStale(sub: SubRow, scope: AgentScope, s: PassState, cursor: R
   };
 }
 
+/**
+ * When the agent last FILLED, live or paper: the newest swap or curve trade,
+ * one row per operation. A landed transfer or vault move is not a fill (the
+ * rule web/src/lib/services/inactivity.ts applies), and a redeploy's re-recorded
+ * copy of an older operation is that operation, not a new fill (distinctTrades).
+ *
+ * Collapsing an account's whole history on every evaluation would sort every
+ * row it ever wrote, so the collapse is scoped the way the web scopes a report:
+ * the newest fill-kind row bounds the answer from above, and a survivor within
+ * OP_COPY_REACH_SEC of it is exact once the scope reaches OP_COPY_REACH_SEC
+ * further back (its original, if it has one, is inside). Only when every fill
+ * in that week was a copy is the whole history collapsed.
+ */
+async function lastFillAt(shared: Db, ids: readonly string[]): Promise<number | null> {
+  const idsIn = placeholders(ids.length);
+  const newest = num(((await shared
+    .prepare(`SELECT MAX(created_at) AS at FROM trades WHERE agent_id IN (${idsIn}) AND status IN ('landed', 'paper') AND kind IN (${FILL_KINDS_SQL})`)
+    .get(...ids)) as { at: unknown } | undefined)?.at);
+  if (newest === null) return null;
+  const collapsed = async (from: number | null): Promise<number | null> => {
+    const scoped = from === null ? `t.agent_id IN (${idsIn})` : `t.agent_id IN (${idsIn}) AND t.created_at >= ?`;
+    const row = (await shared
+      .prepare(`SELECT MAX(t.created_at) AS at FROM ${distinctTrades(scoped)}
+        WHERE t.status IN ('landed', 'paper') AND t.kind IN (${FILL_KINDS_SQL}) AND t.created_at >= ?`)
+      .all(...ids, ...(from === null ? [] : [from - OP_COPY_REACH_SEC]), from ?? 0)) as Array<{ at: unknown }>;
+    return num(row[0]?.at);
+  };
+  return (await collapsed(newest - OP_COPY_REACH_SEC)) ?? (await collapsed(null));
+}
+
 async function evalInactivity(shared: Db, sub: SubRow, params: NotifyParams, scope: AgentScope, now: number): Promise<Evaluation> {
   const none = { candidates: [], cursor: null };
   // A killed or expired agent is idle on purpose; saying so every few hours is noise.
@@ -701,10 +943,7 @@ async function evalInactivity(shared: Db, sub: SubRow, params: NotifyParams, sco
   if (scope.expiresAt !== null && scope.expiresAt <= now) return none;
   const hours = Number(params.hours);
   const window = hours * 3600;
-  const row = (await shared
-    .prepare(`SELECT MAX(created_at) AS at FROM trades WHERE agent_id IN (${placeholders(scope.ids.length)}) AND status IN ('landed', 'paper')`)
-    .get(...scope.ids)) as { at: unknown } | undefined;
-  const last = num(row?.at);
+  const last = await lastFillAt(shared, scope.ids);
   // Never filled: counted from the subscription, since "never" has no length.
   const ref = last !== null && last > 0 ? Math.max(last, 0) : sub.created_at;
   const n = Math.floor((now - ref) / window);
@@ -788,6 +1027,19 @@ export function summaryPeriod(period: "day" | "week", hourUtc: number, now: numb
   return { end, start: end - 7 * 86_400 };
 }
 
+/**
+ * A book's last valuation taken more than this before the period's end is not
+ * its close. A running agent values its book every tick (a minute by default),
+ * so an hour without one means valuing stopped, not that the book sat still.
+ */
+export const SUMMARY_VALUATION_STALE_SEC = 3600;
+
+/** Only ever called with more than SUMMARY_VALUATION_STALE_SEC, so always an hour or more. */
+const hoursBefore = (sec: number) => {
+  const h = Math.max(1, Math.round(sec / 3600));
+  return `${h} hour${h === 1 ? "" : "s"}`;
+};
+
 async function bookLine(shared: Db, scope: AgentScope, book: "live" | "paper", start: number, end: number): Promise<string | null> {
   const ids = scope.ids;
   const idsIn = placeholders(ids.length);
@@ -795,18 +1047,20 @@ async function bookLine(shared: Db, scope: AgentScope, book: "live" | "paper", s
     .prepare(`SELECT agent_id, equity_usdg, at, epoch FROM equity WHERE agent_id IN (${idsIn}) AND mode = ? AND at <= ? ORDER BY at DESC LIMIT 1`)
     .get(...ids, book, end)) as { agent_id: string; equity_usdg: unknown; at: unknown; epoch: unknown } | undefined;
   const status = book === "live" ? "landed" : "paper";
+  // Fills only (a transfer or a vault move is not a trade), one per operation:
+  // a redeploy's copy of an operation is not a second trade. The collapse
+  // reaches back past the period, as web/src/lib/services/reports.ts does, so a
+  // copy stamped in the period of an operation from before it collapses into it.
   const counted = (await shared
-    .prepare(`SELECT COUNT(DISTINCT CASE WHEN user_op_hash IS NOT NULL AND user_op_hash <> '' THEN lower(user_op_hash) END) AS ops,
-        SUM(CASE WHEN user_op_hash IS NULL OR user_op_hash = '' THEN 1 ELSE 0 END) AS loose
-      FROM trades WHERE agent_id IN (${idsIn}) AND status = ? AND created_at >= ? AND created_at < ?`)
-    .get(...ids, status, start, end)) as { ops: unknown; loose: unknown } | undefined;
-  const fills = (num(counted?.ops) ?? 0) + (num(counted?.loose) ?? 0);
+    .prepare(`SELECT COUNT(*) AS n FROM ${distinctTrades(`t.agent_id IN (${idsIn}) AND t.created_at >= ?`)}
+      WHERE t.status = ? AND t.kind IN (${FILL_KINDS_SQL}) AND t.created_at >= ? AND t.created_at < ?`)
+    .get(...ids, start - OP_COPY_REACH_SEC, status, start, end)) as { n: unknown } | undefined;
+  const fills = num(counted?.n) ?? 0;
   const label = book === "live" ? "LIVE" : "PAPER (practice, no real money)";
   const fillsText = book === "live" ? `${fills} trade${fills === 1 ? "" : "s"} landed.` : `${fills} paper fill${fills === 1 ? "" : "s"}.`;
   const lastAt = num(last?.at);
   const lastEq = num(last?.equity_usdg);
-  const inPeriod = last && lastAt !== null && lastAt >= start && lastEq !== null;
-  if (!inPeriod) {
+  if (!last || lastAt === null || lastAt < start || lastEq === null) {
     // A book with neither a valuation nor a fill in the period is not part of this summary.
     return fills > 0 ? `${label}: no valuation was recorded in the period. ${fillsText}` : null;
   }
@@ -820,9 +1074,16 @@ async function bookLine(shared: Db, scope: AgentScope, book: "live" | "paper", s
       .get(last.agent_id, book, last.epoch, start))) as { equity_usdg: unknown; at: unknown } | undefined;
   const open = num(opening?.equity_usdg);
   const openAt = num(opening?.at);
+  // The figure is the last valuation, stated with its time. One taken well
+  // before the period ended is not the period's close, and says so rather than
+  // passing for it: the worker may have stopped valuing hours ago.
+  const stale = end - lastAt > SUMMARY_VALUATION_STALE_SEC;
+  const valued = stale
+    ? `last valued at ${utc(lastAt)}, ${hoursBefore(end - lastAt)} before the period ended, and not since: equity then ${usd(lastEq)} USDG`
+    : `equity ${usd(lastEq)} USDG as of ${utc(lastAt)}`;
   let change = "";
   if (open !== null && openAt !== null && openAt !== lastAt) {
-    change = ` (${usd(open)} ${openAt <= start ? "at the start" : "at the first reading in the period"}, ${signed(lastEq - open)})`;
+    change = ` (${usd(open)} ${openAt <= start ? "at the start" : "at the first reading in the period"}, ${signed(lastEq - open)}${stale ? " by then" : ""})`;
   }
   let flowsText = "";
   if (book === "live" && change && openAt !== null && lastAt !== null) {
@@ -840,7 +1101,7 @@ async function bookLine(shared: Db, scope: AgentScope, book: "live" | "paper", s
     const outflow = num(flows.find((f) => f.direction === "out")?.total) ?? 0;
     if (inflow > 0 || outflow > 0) flowsText = ` Deposits ${usd(inflow)} USDG and withdrawals ${usd(outflow)} USDG are inside that change.`;
   }
-  return `${label}: equity ${usd(lastEq)} USDG${change}.${flowsText} ${fillsText}`;
+  return `${label}: ${valued}${change}.${flowsText} ${fillsText}`;
 }
 
 async function evalSummary(shared: Db, sub: SubRow, params: NotifyParams, scope: AgentScope, now: number): Promise<Evaluation> {

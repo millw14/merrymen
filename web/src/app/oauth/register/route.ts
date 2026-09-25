@@ -4,7 +4,7 @@
  * nothing until an owner consents.
  */
 import { mcpConfig } from "@/mcp/config";
-import { PUBLIC_CORS, ipLimited, oauthDeps, preflight } from "@/mcp/oauth/deps";
+import { PUBLIC_CORS, ipLimited, oauthDeps, preflight, readBoundedText } from "@/mcp/oauth/deps";
 import { jsonResponse } from "@/mcp/oauth/metadata";
 import { registerClient } from "@/mcp/oauth/clients";
 
@@ -18,8 +18,10 @@ export async function POST(req: Request): Promise<Response> {
   const deps = await oauthDeps();
   const limited = await ipLimited(deps, req, "register", 3600, 30);
   if (limited) return limited;
-  const text = await req.text();
-  if (text.length > MAX) return jsonResponse({ error: "invalid_client_metadata", error_description: "metadata too large" }, 400, PUBLIC_CORS);
+  // Bounded read: never buffer more than MAX (+ one chunk) of an unauthenticated
+  // body. RFC 7591 §3.2.2 shapes the refusal as a 400 invalid_client_metadata.
+  const text = await readBoundedText(req, MAX);
+  if (text === null) return jsonResponse({ error: "invalid_client_metadata", error_description: "metadata too large" }, 400, PUBLIC_CORS);
   let body: unknown;
   try {
     body = JSON.parse(text);

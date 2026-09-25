@@ -27,6 +27,7 @@ import {
   mcpRequest, rpcResult, testConfig, type TestDb,
 } from "../testing";
 import { MARKET_RESOURCES, MARKET_TOOLS } from "./market";
+import { untrusted } from "./shared";
 
 const NOW = 1_800_000_000;
 const MEME = "0x1111111111111111111111111111111111111111";
@@ -652,4 +653,63 @@ test("through the SDK: the family is listed with output schemas and a call retur
     assert.equal(r.result?.isError, undefined, `${name}: ${JSON.stringify(r)}`);
     assert.ok(r.result?.structuredContent);
   }
+});
+
+// ── untrusted text ──────────────────────────────────────────────────────────
+
+test("untrusted() strips every Unicode control and format character: C1 controls, the Arabic letter mark, isolates, separators, tags", () => {
+  // A creator-chosen coin name built to drive a terminal (CSI, NEL) and to reorder or hide text.
+  const hostile = "abc\u009b31mX\u0085Y\u061cZ\u2066W\u2069\u2028V\u2029U\u00adT\ufeffS\u200eR\u{e0041}Q\u0007P\r\nO";
+  const out = untrusted(hostile)!;
+  for (const cp of [0x9b, 0x85, 0x61c, 0x2066, 0x2069, 0x2028, 0x2029, 0xad, 0xfeff, 0x200e, 0xe0041, 0x07, 0x0d]) {
+    assert.ok(![...out].some((c) => c.codePointAt(0) === cp), `U+${cp.toString(16).padStart(4, "0")} survived`);
+  }
+  assert.equal(out, "abc31mXYZW\nV\nUTSRQP\nO", "line breaks of any spelling become a plain line feed");
+  assert.equal(untrusted("line one\n\tline two"), "line one\n\tline two", "tab and line feed are kept for multi-line text");
+  assert.equal(untrusted("\u0085\u061c\u2066"), null, "nothing left is null, not an empty string");
+  assert.equal(untrusted("ab\u{1f600}", 3), "ab\u2026", "a cut through a surrogate pair leaves no half character");
+  assert.equal(untrusted("a\ud800b"), "ab", "a lone surrogate is not text");
+});
+
+test("eligibility: a Trencher agent's vault route is not refused by the allowlist and no-exit rules it skips", async () => {
+  const { d, a } = await setup();
+  d.raw.prepare("UPDATE agents SET mode = 'live' WHERE smart_account = ?").run(ACCOUNT_A);
+  const trencher = { ...SETTINGS_A, strategy: "trencher", liveTradingEnabled: true, trencherLiveEnabled: true };
+  const vault = dirWith({ features: ["tradeable-v2", "trencher-vault-v1"] });
+  // A high-volume Uniswap-v3 coin from its discovery universe: not watched, not sealed for a sale.
+  install(d, { directory: vault, settingsA: trencher });
+  const r = await ok(a, "check_token_eligibility", { address: BIG });
+  assert.equal(check(r, "trencher_route").result, "unknown");
+  assert.match(check(r, "trencher_route").detail, /discovery and vault-verified assets/);
+  assert.equal(r.executable.state, "unknown", "it depends on the worker's discovery, not on rules that do not apply");
+  assert.match(r.executable.reasons[0], /Trencher vault/);
+  assert.ok(!r.executable.reasons.some((x: string) => /refuses to buy it|only trades USDG/.test(x)), "no refusal the Trencher route skips is given as a reason");
+  for (const name of ["grant_can_sell", "watched_by_agent"]) {
+    assert.equal(check(r, name).result, "not_applicable", name);
+    assert.match(check(r, name).detail, /^Not required on the Trencher route/, name);
+  }
+
+  // Live trenching off while it trades live: the route is shut, and the ordinary refusals stand.
+  install(d, { directory: vault, settingsA: { ...trencher, trencherLiveEnabled: false } });
+  const off = await ok(a, "check_token_eligibility", { address: BIG });
+  assert.equal(check(off, "trencher_route").result, "fail");
+  assert.match(check(off, "trencher_route").detail, /let trencher trade for real/);
+  assert.equal(check(off, "grant_can_sell").result, "fail");
+  assert.equal(off.executable.state, "no");
+  assert.ok(off.executable.reasons.some((x: string) => /Trencher route cannot buy it/.test(x)));
+
+  // A Stocks-only asset mode empties its feed.
+  install(d, { directory: vault, settingsA: { ...trencher, assetMode: "stocks" } });
+  const stocks = await ok(a, "check_token_eligibility", { address: BIG });
+  assert.equal(check(stocks, "trencher_route").result, "fail");
+  assert.equal(stocks.executable.state, "no");
+
+  // Another strategy, or no vault sealed: there is no Trencher route at all.
+  install(d, { directory: vault, settingsA: { ...trencher, strategy: "momentum" } });
+  assert.equal(check(await ok(a, "check_token_eligibility", { address: BIG }), "trencher_route").result, "not_applicable");
+  install(d, { directory: dirWith({ features: ["tradeable-v2"] }), settingsA: trencher });
+  const none = await ok(a, "check_token_eligibility", { address: BIG });
+  assert.equal(check(none, "trencher_route").result, "not_applicable");
+  assert.equal(none.executable.state, "no");
+  assert.equal(check(none, "grant_can_sell").result, "fail");
 });

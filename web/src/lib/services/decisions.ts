@@ -31,6 +31,7 @@ import { ACCOUNT_WIDE_RULES } from "../../../../worker/src/owner-refusal";
 import { isProvenance, type Provenance } from "../../../../worker/src/provenance";
 import type { RevertClass } from "../../../../worker/src/revert";
 import { classifyDrop, rejectRuleLabel, rejectRuleRemedy, SHADOW_SOURCES } from "../../../../worker/src/thesis-policy";
+import { readDecisionRealizedEvidence, type DecisionRealizedEvidence } from "./portfolio";
 
 /**
  * The quiet-market review (market-review.ts quietReviewRow): a `hold` row the
@@ -534,6 +535,32 @@ export async function readOwnerDecisions(db: Db, accounts: readonly string[], q:
 export interface OwnerDecision {
   row: OwnerDecisionRow;
   lifecycle: DecisionLifecycle;
+  /**
+   * One entry per lifecycle trade, in the same order: whether its realized
+   * figure is a MEASUREMENT by get_trade's rule (portfolio.ts
+   * readDecisionRealizedEvidence). Null when it has no realized figure, when
+   * the cost could not be replayed, or when the evidence read and the
+   * lifecycle read do not describe the same row.
+   */
+  realized_measured: Array<boolean | null>;
+}
+
+/**
+ * Pair the evidence rows with the lifecycle's, row by row, only where both
+ * reads describe the same row (time, status and operation). Anything that does
+ * not line up — a row written between the two reads — is left unjudged (null),
+ * never assumed measured.
+ */
+export function pairRealizedEvidence(
+  trades: DecisionLifecycle["trades"],
+  evidence: readonly DecisionRealizedEvidence[] | null,
+): Array<boolean | null> {
+  return trades.map((t, i) => {
+    if (t.realized_pnl_usdg === null) return null;
+    const e = evidence?.[i];
+    const op = t.user_op_hash ? t.user_op_hash.toLowerCase() : null;
+    return e && e.created_at === t.created_at && e.status === t.status && e.user_op_hash === op ? e.measured : null;
+  });
 }
 
 /**
@@ -552,7 +579,11 @@ export async function readOwnerDecision(db: Db, accounts: readonly string[], dec
   if (!r || !acc.includes(String(r.agent_id).toLowerCase())) return null;
   const lifecycle = await readDecisionLifecycle(db, decisionId);
   if (!lifecycle || !acc.includes(lifecycle.decision.agent_id.toLowerCase())) return null;
-  return { row: decisionRow(r), lifecycle };
+  // Only a decision with a realized figure needs its costs replayed.
+  const evidence = lifecycle.trades.some((t) => t.realized_pnl_usdg !== null)
+    ? await readDecisionRealizedEvidence(db, lifecycle.decision.agent_id, decisionId).catch(() => null)
+    : null;
+  return { row: decisionRow(r), lifecycle, realized_measured: pairRealizedEvidence(lifecycle.trades, evidence) };
 }
 
 // ── refusals over a window ───────────────────────────────────────────────────

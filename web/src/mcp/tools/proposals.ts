@@ -13,11 +13,12 @@ import * as z from "zod";
 import { STOCK_TOKENS, RISK_PROFILES, sellableAssets, normalizeAgentName, AGENT_NAME_RE } from "@merrymen/core";
 import { settingsReader, type SettingsView } from "@/lib/services/settings-view";
 import { quoteTrade, type TradeQuote } from "@/lib/services/trade-quote";
+import { randomBytes } from "node:crypto";
 import {
-  PROPOSAL_TTL_SEC, TERMINAL, cancelProposal, createProposal, expireIfDue, followTrade, listProposalRows, proposalRow,
-  ProposalError, type Binding, type ProposalKind, type ProposalRow, type TradeBinding,
+  PROPOSAL_TTL_SEC, TERMINAL, cancelProposal, changeRow, createProposal, currentValues, expireIfDue, followTrade, listProposalRows, ownerOrderCeiling, proposalRow,
+  resultView, ProposalError, type Binding, type ChangeRow, type ProposalKind, type ProposalRow, type TradeBinding,
 } from "@/lib/services/proposals";
-import { SETTING_SPECS, specFor, validStoredSetting, formatSettingValue, stockSymbols } from "../../../../worker/src/telegram/setting-spec";
+import { SETTING_SPECS, specFor, validStoredSetting, stockSymbols } from "../../../../worker/src/telegram/setting-spec";
 import { admitOwnerLine } from "../../../../worker/src/groupchat/policy";
 import { readAgentRow } from "@/lib/services/agent-status";
 import { mcpConfig } from "../config";
@@ -185,7 +186,7 @@ function proposalOut(row: ProposalRow, created: boolean, next: string) {
 const proposeTrade = defineTool({
   name: "propose_trade",
   title: "Propose a trade for approval",
-  description: "Prepare an exact buy or sell for the owner to approve in Merrymen. Nothing is traded until the owner opens approval_url, signs in and approves; the agent's own limits, policy and on-chain permission still apply after that. Proposals expire after 15 minutes.",
+  description: "Prepare an exact buy or sell for the owner to approve in Merrymen. Nothing is traded until the owner opens approval_url, signs in and approves; the agent's own limits, policy and on-chain permission still apply after that. Approval re-quotes a buy and refuses if the price moved past the quoted minimum or the agent's practice/live mode changed; after approval the agent re-prices at execution with its own slippage limit, so the fill can differ from the quote. Proposals expire after 15 minutes.",
   capability: "trade.propose",
   input: TRADE_IN.extend({
     idempotency_key: IDEMPOTENCY,
@@ -209,8 +210,10 @@ const proposeTrade = defineTool({
     }
     const perTrade = agent.caps?.perTradeUsdg ?? null;
     if (perTrade !== null && args.amount_usdg > perTrade) throw new McpError("invalid_input", `That is over the signed per-trade limit of ${perTrade} USDG.`);
-    const ceiling = settings?.telegram.maxActionUsdg ?? null;
-    if (ceiling !== null && ceiling > 0 && args.amount_usdg > ceiling) {
+    // Resolved as the orders route and the worker resolve it: an owner who never
+    // set one still has the house's ceiling, not none.
+    const ceiling = await ownerOrderCeiling(ctx.principal.tenant, settings);
+    if (ceiling > 0 && args.amount_usdg > ceiling) {
       throw new McpError("invalid_input", `That is over the owner's ${ceiling} USDG limit for an owner order (Settings → max per chat trade).`);
     }
     const row = await ctx.ledger((db) => readAgentRow(db, agent.account!));
@@ -243,9 +246,15 @@ const proposeTrade = defineTool({
       action: `${args.side === "buy" ? "Buy" : "Sell"} ${binding.amount_usdg} USDG of ${addressable.symbol}`,
       token: binding.token,
       book,
-      book_note: book === "paper" ? "The agent is in practice mode: approving books a simulated trade, no money moves." : book === "live" ? "The agent trades real funds: approving queues a real order." : "The agent's current book is unknown.",
+      book_note: book === "paper"
+        ? "The agent is in practice mode now. If it is still in practice mode when it executes, the trade is simulated and no money moves."
+        : book === "live"
+          ? "The agent trades real funds now: approving queues a real order."
+          : "The agent's current mode is unknown; it executes in whatever mode it is in when it picks the order up.",
       expected_out: quote.expected_out?.human ?? null,
       min_out: quote.min_out?.human ?? null,
+      // Exactly what is enforced, and where (services/proposals.ts, "WHAT APPROVAL DOES NOT BIND").
+      execution_note: `${args.side === "buy" ? "Approval re-quotes and refuses if the expected amount has fallen below min_out, or if the agent's practice/live mode has changed. " : "Approval refuses if the agent's practice/live mode has changed. "}After approval the agent takes a fresh price when it executes, with its own slippage limit at that moment, so the fill can differ from these figures; and it trades in whatever mode it is in when it picks the order up.`,
       price_impact_bps: quote.price_impact_bps,
       assistant_note: untrusted(args.note, 280),
       requested_by: ctx.principal.clientName ?? "an AI assistant",
@@ -287,7 +296,7 @@ const proposeSettings = defineTool({
     const current = (await reader.specValuesFor?.(ctx.principal.tenant)) ?? {};
     const basketAllowed = new Set([...stockSymbols(), ...(settings?.customTokens ?? []).map((c) => c.symbol.toUpperCase())]);
     const changes: Record<string, unknown> = {};
-    const diff: Array<{ key: string; label: string; current: string; proposed: string; help: string }> = [];
+    const diff: ChangeRow[] = [];
     for (const [key, value] of Object.entries(args.changes)) {
       const spec = specFor(key);
       if (!spec) throw new McpError("invalid_input", `"${key.slice(0, 40)}" cannot be changed from here. Allowed: ${SETTING_SPECS.map((s) => s.key).join(", ")}.`);
@@ -302,7 +311,7 @@ const proposeSettings = defineTool({
         throw new McpError("invalid_input", `strategy must be one of ${KNOWN_STRATEGIES.join(", ")}.`);
       }
       changes[key] = value;
-      diff.push({ key, label: spec.label, current: formatSettingValue(spec, current[key]), proposed: formatSettingValue(spec, value), help: spec.help });
+      diff.push(changeRow(key, current[key], value));
     }
     const before: Record<string, unknown> = {};
     for (const k of Object.keys(changes)) before[k] = current[k] ?? null;
@@ -320,10 +329,21 @@ const proposeSettings = defineTool({
   },
 });
 
+/** A risk profile's keys that a draft may carry: the chat-settable ones. Safety floors (maxImpactBps) are a dashboard act. */
+function profileSettings(level: keyof typeof RISK_PROFILES): { settings: Record<string, number>; leftOut: string[] } {
+  const settings: Record<string, number> = {};
+  const leftOut: string[] = [];
+  for (const [k, v] of Object.entries(RISK_PROFILES[level].settings)) {
+    if (specFor(k) && validStoredSetting(k, v)) settings[k] = v as number;
+    else leftOut.push(k);
+  }
+  return { settings, leftOut };
+}
+
 const createDraft = defineTool({
   name: "create_agent_draft",
-  title: "Draft a new agent setup",
-  description: "Draft a name, strategy, basket and risk level for a new (or re-configured) agent. The owner reviews it in Merrymen; approving applies the name, strategy and basket, then they choose limits and sign the trading permission themselves. A draft never creates trading authority.",
+  title: "Draft an agent setup",
+  description: "Draft a name, strategy, basket, asset mode and risk level for the owner's agent. The owner reviews it in Merrymen and approving saves it to their settings. If they already run an agent, the approval page shows a before/after comparison and the changes apply to that running agent immediately; if not, they still choose limits and sign the trading permission themselves, and a draft never creates trading authority. A risk level carries only settings that can be changed by conversation (stop loss, take profit, amount per buy, max per AI trade, slippage); the price-impact safety floor is left out and stays a dashboard setting. Basket symbols beyond the stock tokens are checked against the owner's added tokens here only when an agent is shared with this connection; otherwise they are checked when the owner approves.",
   capability: "drafts.write",
   input: z.object({
     name: z.string().max(24).optional(),
@@ -333,11 +353,20 @@ const createDraft = defineTool({
     risk_level: z.enum(["careful", "balanced", "bold"]).optional(),
     idempotency_key: IDEMPOTENCY,
   }).strict(),
-  output: PROPOSAL_OUT.extend({ risk_profile: z.object({ level: z.string(), name: z.string(), blurb: z.string(), settings: z.record(z.string(), z.number()) }).nullable() }),
+  output: PROPOSAL_OUT.extend({
+    risk_profile: z.object({ level: z.string(), name: z.string(), blurb: z.string(), settings: z.record(z.string(), z.number()) }).nullable(),
+    left_out: z.array(z.object({ key: z.string(), why: z.string() })),
+    diff: z.array(z.object({ key: z.string(), label: z.string(), current: z.string(), proposed: z.string(), help: z.string() })).nullable()
+      .describe("Current value → drafted value, only when an agent is shared with this connection; the approval page always shows it to the owner"),
+  }),
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   budget: { bucket: "propose", perMinute: 5, perHour: 40 },
   async handler(args, ctx) {
     const now = ctx.now();
+    const tenant = ctx.principal.tenant;
+    // A connection the owner shared no agent with may draft, but may not learn
+    // the owner's settings — not their added tokens, not their current values.
+    const shared = (await ctx.agents()).length > 0;
     const settings: Record<string, unknown> = {};
     if (args.name !== undefined) {
       const name = normalizeAgentName(args.name);
@@ -347,32 +376,61 @@ const createDraft = defineTool({
     if (args.strategy) settings.strategy = args.strategy;
     if (args.asset_mode) settings.assetMode = args.asset_mode;
     if (args.basket) {
-      const owner = await settingsReader().settingsFor(ctx.principal.tenant);
-      const allowed = new Set([...stockSymbols(), ...(owner?.customTokens ?? []).map((c) => c.symbol.toUpperCase())]);
-      if (args.basket.some((s) => !allowed.has(s.toUpperCase()))) throw new McpError("invalid_input", "basket may only contain stock tokens or tokens added in Settings.");
-      settings.basketSymbols = [...new Set(args.basket.map((s) => s.toUpperCase()))];
+      const stock = new Map(STOCK_TOKENS.map((t) => [t.symbol.toUpperCase(), t.symbol]));
+      const custom = shared ? new Map(((await settingsReader().settingsFor(tenant))?.customTokens ?? []).map((c) => [c.symbol.toUpperCase(), c.symbol])) : null;
+      const basket: string[] = [];
+      for (const s of args.basket) {
+        const known = stock.get(s.toUpperCase()) ?? custom?.get(s.toUpperCase());
+        // With an agent shared, the owner's added tokens are checked (and spelled) here, as
+        // propose_settings_change does. Without one, the answer must not depend on them: the
+        // symbol is kept as typed and the approval checks it against the owner's tokens.
+        if (!known && custom) throw new McpError("invalid_input", "basket may only contain stock tokens or tokens added in Settings.");
+        basket.push(known ?? s);
+      }
+      settings.basketSymbols = [...new Set(basket)];
     }
     const profile = args.risk_level ? RISK_PROFILES[args.risk_level] : null;
-    if (profile) Object.assign(settings, profile.settings);
+    const carried = args.risk_level ? profileSettings(args.risk_level) : { settings: {}, leftOut: [] };
+    Object.assign(settings, carried.settings);
     if (!Object.keys(settings).length) throw new McpError("invalid_input", "Say at least one thing to set up: name, strategy, basket, asset_mode or risk_level.");
-    const binding: Binding = { v: 1, kind: "agent_draft", tenant: ctx.principal.tenant, settings, risk_level: args.risk_level ?? null, expires_at: now + PROPOSAL_TTL_SEC.agent_draft };
+    for (const [k, v] of Object.entries(settings)) {
+      // The allowlist, stated once more over the whole bag: a draft carries chat-settable keys and a name, nothing else.
+      if (k !== "agentName" && !validStoredSetting(k, v)) throw new McpError("invalid_input", `${k}: not a setting a draft can carry.`);
+    }
+    const leftOut = carried.leftOut.map((key) => ({ key, why: key === "maxImpactBps" ? "the price-impact safety floor is changed only in Settings on the dashboard" : "not a setting that can be changed from here" }));
+    const binding: Binding = {
+      v: 1, kind: "agent_draft", tenant, settings,
+      before: await currentValues(tenant, Object.keys(settings)),
+      risk_level: args.risk_level ?? null,
+      left_out: carried.leftOut,
+      salt: randomBytes(16).toString("hex"),
+      expires_at: now + PROPOSAL_TTL_SEC.agent_draft,
+    };
+    // Stored, and shown to every drafts connection of this owner: the request
+    // only, never the owner's current values (those live in the binding, which
+    // only the owner's approval page reads).
     const summary = {
-      action: "Set up an agent",
+      action: "Set up the agent",
       settings,
       risk_level: args.risk_level ?? null,
-      after_approval: "Approving saves these settings. Then choose the agent's limits and sign its trading permission in Merrymen; until then it cannot trade.",
+      left_out: leftOut,
+      after_approval: "Approving saves these settings. If the owner already runs an agent, they apply to it immediately; the approval page shows each one before and after. If not, the owner then chooses the agent's limits and signs its trading permission in Merrymen, and until then it cannot trade.",
       requested_by: ctx.principal.clientName ?? "an AI assistant",
     };
     const d = await ctx.mcp();
     const { row, created } = await createProposal(d.db, {
-      tenant: ctx.principal.tenant, connectionId: ctx.principal.connectionId, clientName: ctx.principal.clientName,
+      tenant, connectionId: ctx.principal.connectionId, clientName: ctx.principal.clientName,
       binding, summary, idempotencyKey: args.idempotency_key, agentSlug: null, agentAccount: null, now,
     }).catch(translate);
+    const stored = JSON.parse(row.binding_json) as { settings: Record<string, unknown>; before?: Record<string, unknown> };
     return {
       data: {
-        ...proposalOut(row, created, "Send the owner approval_url. Approving applies these settings; signing the trading permission stays with the owner."),
-        risk_profile: profile ? { level: profile.level, name: profile.name, blurb: profile.blurb, settings: { ...profile.settings } as Record<string, number> } : null,
+        ...proposalOut(row, created, "Send the owner approval_url. Approving saves these settings (at once, to an agent the owner already runs); signing a trading permission stays with the owner."),
+        risk_profile: profile ? { level: profile.level, name: profile.name, blurb: profile.blurb, settings: carried.settings } : null,
+        left_out: leftOut,
+        diff: shared ? Object.keys(stored.settings).map((k) => changeRow(k, stored.before?.[k] ?? null, stored.settings[k])) : null,
       },
+      summary: leftOut.length ? `Draft ${row.id} is waiting for the owner's approval. Left out: ${leftOut.map((x) => x.key).join(", ")} (${leftOut[0]!.why}).` : `Draft ${row.id} is waiting for the owner's approval at ${approvalUrl(row.id)}.`,
     };
   },
 });
@@ -424,12 +482,12 @@ const EXPLAIN: Record<string, string> = {
   awaiting_approval: "Waiting for the owner to approve it in Merrymen.",
   approved: "Approved; being handed to the agent.",
   submitted: "Queued for the agent; it has not picked it up yet.",
-  executing: "The agent picked it up and is executing (or waiting for the chain's receipt).",
+  executing: "The agent picked it up and is executing, is waiting for the chain, or has finished and its trade record has not reached the ledger yet. Not an outcome: poll again.",
   filled_awaiting_ledger: "The agent reported a fill; waiting for the ledger to record it before calling it confirmed.",
   confirmed: "Confirmed on chain: the receipt and the recorded fill agree.",
   paper_filled: "Filled in the practice (paper) book. No real money moved.",
   refused: "The agent's limits, policy or the on-chain permission refused it. Nothing was traded.",
-  failed: "It did not complete (for example the transaction reverted). See result.",
+  failed: "It did not complete (for example the transaction reverted), or its outcome could not be confirmed (result.outcome_unknown). See result before proposing it again.",
   expired: "It expired without running. Nothing was sent.",
   cancelled: "Cancelled. Nothing was sent.",
   rejected: "The owner declined it.",
@@ -454,15 +512,32 @@ async function viewOf(ctx: ToolContext, row: ProposalRow) {
     requested_by: r.client_name,
     summary,
     order_id: r.order_id,
-    result: r.result_json ? JSON.parse(r.result_json) as Record<string, unknown> : null,
+    result: resultView(r.result_json),
   };
+}
+
+/** The agents this connection was given (shared by the owner, and still theirs). */
+async function reachableSlugs(ctx: ToolContext): Promise<Set<string>> {
+  return new Set((await ctx.agents()).map((a) => a.slug));
+}
+
+/**
+ * Whether this connection may see a proposal at all. Its kind must be one the
+ * connection handles, and a proposal about an agent is visible only where that
+ * agent is shared with this connection: a settings proposal carries the agent's
+ * current settings, a trade its limits. An agentless draft stays visible to any
+ * drafts connection of the owner.
+ */
+function visibleTo(ctx: ToolContext, row: ProposalRow, slugs: Set<string>): boolean {
+  if (!hasCapability(ctx.principal, KIND_CAPABILITY[row.kind])) return false;
+  return row.agent_slug === null || slugs.has(row.agent_slug);
 }
 
 async function ownedProposal(ctx: ToolContext, id: string): Promise<ProposalRow> {
   const d = await ctx.mcp();
   const row = await proposalRow(d.db, ctx.principal.tenant, id);
-  // Another owner's, or a kind this connection may not handle: not found.
-  if (!row || !hasCapability(ctx.principal, KIND_CAPABILITY[row.kind])) throw new McpError("not_found", "No such proposal.");
+  // Another owner's, a kind this connection may not handle, or about an agent not shared with it: not found.
+  if (!row || !visibleTo(ctx, row, await reachableSlugs(ctx))) throw new McpError("not_found", "No such proposal.");
   return row;
 }
 
@@ -487,7 +562,7 @@ const getProposal = defineTool({
 const listProposals = defineTool({
   name: "list_proposals",
   title: "List proposals",
-  description: "Proposals prepared through this and other connections for this owner, newest first.",
+  description: "Proposals prepared through this and other connections for this owner, newest first: those about agents shared with this connection, of kinds it may handle, plus agent drafts.",
   capability: "trade.propose",
   anyOf: ANY_PROPOSAL,
   input: z.object({ status: z.enum(["open", "all", "awaiting_approval", "confirmed", "paper_filled", "refused", "failed", "expired", "cancelled", "rejected", "applied"]).default("open"), limit: LIMIT_ARG(50, 20) }).strict(),
@@ -496,7 +571,8 @@ const listProposals = defineTool({
   async handler(args, ctx) {
     const d = await ctx.mcp();
     const rows = await listProposalRows(d.db, ctx.principal.tenant, { status: args.status === "all" ? undefined : args.status, limit: args.limit });
-    const visible = rows.filter((r) => hasCapability(ctx.principal, KIND_CAPABILITY[r.kind]));
+    const slugs = await reachableSlugs(ctx);
+    const visible = rows.filter((r) => visibleTo(ctx, r, slugs));
     const proposals = [];
     for (const r of visible) proposals.push(await viewOf(ctx, r));
     return { data: { proposals } };

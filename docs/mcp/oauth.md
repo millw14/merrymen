@@ -44,11 +44,20 @@ limited to the agents and scopes that owner chose.
 3. **Client identification**, in the order the MCP spec prefers:
    - **Client ID Metadata Documents** (advertised with
      `client_id_metadata_document_supported: true` and `none` in
-     `token_endpoint_auth_methods_supported`). The `client_id` is an https URL;
-     Merrymen fetches it through an SSRF-guarded transport (public addresses
-     only, pinned DNS, https, no redirects, 64 KB, 5 s), requires the
-     document's `client_id` to equal the URL exactly, accepts only public
-     clients, validates every redirect URI, and caches it (≤ 24 h).
+     `token_endpoint_auth_methods_supported`). The `client_id` is an https URL
+     that must be written in canonical form with a path and **no query
+     string, fragment, credentials or dot segments** (`.`, `..`, `%2e`), and
+     whose host is **not one of Merrymen's own hosts** (the issuer, the MCP
+     resource, or any host the MCP endpoints answer on): the consent page says
+     "Verified at *host*", and a document served through one of our own routes
+     would borrow our name. Merrymen fetches it through an SSRF-guarded
+     transport (public addresses only, pinned DNS, https, no redirects, 64 KB,
+     5 s), accepts only a `200` answer with an `application/json` (or
+     `application/*+json`) `Content-Type`, requires the document's
+     `client_id` to equal the URL exactly, accepts only public clients,
+     validates every redirect URI (at most 10, 4 KB together), and caches it
+     (≤ 24 h). Only the fields Merrymen uses (name and redirect URIs) are
+     stored, never the fetched body.
    - **Dynamic Client Registration** (`POST /oauth/register`), for clients that
      do not use CIMD. Open but rate limited per IP. Public (`none`) or
      confidential (`client_secret_basic` / `client_secret_post`) clients.
@@ -58,17 +67,29 @@ limited to the agents and scopes that owner chose.
    exactly; loopback redirects may use any port per RFC 8252), `state`,
    `scope`, and `resource=https://app.merrymen.dev/mcp` (RFC 8707; any other
    resource is refused with `invalid_target`).
+
+   **Errors before consent are shown on a Merrymen page, not redirected.**
+   Registration is open, so a registered https redirect proves nothing, and
+   bouncing errors to it would make every Merrymen authorize link an open
+   redirector (RFC 9700 §4.11.2). The one exception: a CIMD client whose
+   `redirect_uri` is loopback (a program on the owner's own computer, such as
+   Claude Code or Codex CLI, waiting on that port) receives the error
+   (`error`, `error_description`, `state`, `iss`) at its redirect. An unknown
+   client or an unregistered `redirect_uri` is always a page.
 5. Merrymen parks the request and sends the browser to the consent page. The
    request handle travels in the URL **fragment**, so it never reaches a
    server log or a `Referer`.
 6. The owner signs in to Merrymen (their normal sign-in), sees who is asking
-   (a verified CIMD host, or "not verified by Merrymen" plus the redirect host
-   for a dynamically registered client), chooses which of their agents the
-   client may see and which scopes to allow (sensitive scopes start unticked),
-   and approves or declines. The decision is a same-origin POST that requires
-   the owner's session; the page cannot be framed.
-7. The browser returns to the client's `redirect_uri` with `code`, `state` and
-   `iss` (RFC 9207).
+   (a verified CIMD host; or, for a dynamically registered client, "not
+   verified by Merrymen" and the host of the redirect the code will actually
+   go to, which is also what **Connected apps** records for the connection),
+   chooses which of their agents the client may see and which scopes to allow
+   (sensitive scopes start unticked), and approves or declines. The decision
+   is a same-origin POST that requires the owner's session; the page cannot be
+   framed.
+7. Only now does the browser go back to the client's `redirect_uri`: with
+   `code`, `state` and `iss` (RFC 9207) on approval, or with
+   `error=access_denied` on decline.
 8. The client exchanges the code at `/oauth/token` (form-encoded) with its
    `code_verifier`. Codes are single use, expire after 5 minutes, and are bound
    to the client, redirect URI, PKCE challenge and resource. **Replaying a code
@@ -80,14 +101,34 @@ limited to the agents and scopes that owner chose.
   audience-bound to the MCP resource URL. Stored only as SHA-256 hashes and
   looked up on every request, so revocation is immediate. There is no signing
   key that could be stolen or confused with the dashboard's session secret.
-- **Refresh tokens** (`mcp_rt_…`): 30 days, **rotated on every use**. A refresh
-  token that is presented again after rotation is treated as stolen: the whole
-  token family (and every access token in it) is revoked and the client must
-  reconnect. A family cannot outlive 90 days; after that the owner re-consents.
+- **Refresh tokens** (`mcp_rt_…`) are **always issued** with every code
+  exchange, whether or not the client asked for `offline_access`, because MCP
+  clients depend on them. They are **rotated on every use**, expire after 30
+  days without use, and a token family cannot outlive 90 days from consent;
+  after that the owner approves again. A refresh token that is presented again
+  after rotation is treated as stolen: the whole token family (and every
+  access token in it) is revoked and the client must reconnect.
+- **`offline_access`** is accepted for compatibility and echoed in the granted
+  `scope` when the client asked for it, but it **grants nothing extra** and is
+  never shown to the owner as a choice: leaving it out does not make a
+  connection shorter-lived. What ends a connection is the owner pressing
+  **Disconnect** on Connected apps (every access and refresh token under it
+  stops working on the next request), the client revoking its refresh token,
+  or the idle / family limits above.
+- Rotation and family revocation are safe under concurrency: every
+  transaction that mints into a family (code exchange, rotation) or revokes
+  one (refresh reuse, code replay, client revocation) first locks the
+  connection row (`SELECT … FOR UPDATE`) and only then reads the token state
+  it decides on, so on Postgres (READ COMMITTED) a revocation can never miss a
+  pair minted by a rotation running at the same moment.
 - A refresh can narrow scope, never widen it; the effective scopes of any token
   are always intersected with the owner's **current** consent.
 - Tokens are accepted **only** in the `Authorization: Bearer` header, never in a
   query string. The MCP server never forwards a token anywhere.
+- The public endpoints read request bodies with a hard bound (16 KB for
+  `/oauth/token`, `/oauth/revoke` and `/oauth/register`, 8 KB for the consent
+  API): a declared `Content-Length` over the bound is refused unread, and a
+  chunked body is cancelled as soon as it passes the bound.
 
 ## Revocation
 
@@ -95,7 +136,8 @@ limited to the agents and scopes that owner chose.
   token revokes its whole family. A client cannot revoke another client's
   tokens (the call succeeds silently, as the RFC requires, and does nothing).
 - **Owner-initiated**: **Connected apps** (`/connect/apps`) → Disconnect. The
-  connection and every token under it stop working on the next request.
+  connection and every token under it (access and refresh, every family) stop
+  working on the next request.
 - **Server-wide emergency**: see [operations.md](operations.md#emergency-revoke-everything).
 
 ## Personal access tokens

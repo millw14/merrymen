@@ -9,6 +9,12 @@
  * Secrets are never stored in the clear here: OAuth codes, access and refresh
  * tokens, client secrets and consent-request ids are stored as SHA-256 hashes
  * of 256-bit random values. Nothing in these tables can sign a transaction.
+ *
+ * Every time column retention deletes by (maintenance.ts) is range-searchable
+ * through an index — its own, or after the equality column the statement also
+ * filters on (kind, status) — so the hourly DELETEs are index range scans, not
+ * sequential scans of the audit or rate tables. maintenance.test.ts checks
+ * each statement's plan.
  */
 import type { Db } from "../db";
 
@@ -25,6 +31,8 @@ CREATE TABLE IF NOT EXISTS mcp_clients (
   fetched_at INTEGER NOT NULL,
   expires_at INTEGER
 );
+CREATE INDEX IF NOT EXISTS mcp_clients_kind_created ON mcp_clients (kind, created_at);
+CREATE INDEX IF NOT EXISTS mcp_clients_kind_expiry ON mcp_clients (kind, expires_at);
 CREATE TABLE IF NOT EXISTS mcp_auth_requests (
   id_hash TEXT PRIMARY KEY,
   client_id TEXT NOT NULL,
@@ -69,6 +77,7 @@ CREATE TABLE IF NOT EXISTS mcp_codes (
   expires_at INTEGER NOT NULL,
   used_at INTEGER
 );
+CREATE INDEX IF NOT EXISTS mcp_codes_expiry ON mcp_codes (expires_at);
 CREATE TABLE IF NOT EXISTS mcp_tokens (
   token_hash TEXT PRIMARY KEY,
   connection_id TEXT NOT NULL,
@@ -86,6 +95,8 @@ CREATE TABLE IF NOT EXISTS mcp_tokens (
 );
 CREATE INDEX IF NOT EXISTS mcp_tokens_connection ON mcp_tokens (connection_id);
 CREATE INDEX IF NOT EXISTS mcp_tokens_family ON mcp_tokens (family);
+CREATE INDEX IF NOT EXISTS mcp_tokens_expiry ON mcp_tokens (expires_at);
+CREATE INDEX IF NOT EXISTS mcp_tokens_revoked ON mcp_tokens (revoked_at);
 CREATE TABLE IF NOT EXISTS mcp_audit (
   id TEXT PRIMARY KEY,
   at INTEGER NOT NULL,
@@ -101,12 +112,14 @@ CREATE TABLE IF NOT EXISTS mcp_audit (
 );
 CREATE INDEX IF NOT EXISTS mcp_audit_tenant ON mcp_audit (tenant, at);
 CREATE INDEX IF NOT EXISTS mcp_audit_connection ON mcp_audit (connection_id, at);
+CREATE INDEX IF NOT EXISTS mcp_audit_at ON mcp_audit (at);
 CREATE TABLE IF NOT EXISTS mcp_rate (
   bucket TEXT NOT NULL,
   window_start INTEGER NOT NULL,
   hits INTEGER NOT NULL,
   PRIMARY KEY (bucket, window_start)
 );
+CREATE INDEX IF NOT EXISTS mcp_rate_window ON mcp_rate (window_start);
 CREATE TABLE IF NOT EXISTS mcp_messages (
   id TEXT PRIMARY KEY,
   tenant TEXT NOT NULL,
@@ -123,6 +136,7 @@ CREATE TABLE IF NOT EXISTS mcp_messages (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS mcp_messages_request ON mcp_messages (tenant, request_id, role);
 CREATE INDEX IF NOT EXISTS mcp_messages_conversation ON mcp_messages (tenant, conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS mcp_messages_created ON mcp_messages (created_at);
 CREATE TABLE IF NOT EXISTS mcp_research (
   id TEXT PRIMARY KEY,
   tenant TEXT NOT NULL,
@@ -137,6 +151,7 @@ CREATE TABLE IF NOT EXISTS mcp_research (
   expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS mcp_research_tenant ON mcp_research (tenant, created_at);
+CREATE INDEX IF NOT EXISTS mcp_research_expiry ON mcp_research (expires_at);
 CREATE TABLE IF NOT EXISTS mcp_watchlist (
   tenant TEXT NOT NULL,
   chain_id INTEGER NOT NULL,
@@ -193,6 +208,7 @@ CREATE TABLE IF NOT EXISTS mcp_jobs (
 CREATE INDEX IF NOT EXISTS mcp_jobs_queue ON mcp_jobs (status, created_at);
 CREATE INDEX IF NOT EXISTS mcp_jobs_tenant ON mcp_jobs (tenant, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS mcp_jobs_idempotency ON mcp_jobs (tenant, idempotency_key);
+CREATE INDEX IF NOT EXISTS mcp_jobs_finished ON mcp_jobs (finished_at);
 CREATE TABLE IF NOT EXISTS mcp_exports (
   id TEXT PRIMARY KEY,
   tenant TEXT NOT NULL,
@@ -206,6 +222,7 @@ CREATE TABLE IF NOT EXISTS mcp_exports (
   expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS mcp_exports_tenant ON mcp_exports (tenant, created_at);
+CREATE INDEX IF NOT EXISTS mcp_exports_expiry ON mcp_exports (expires_at);
 CREATE TABLE IF NOT EXISTS notify_subscriptions (
   id TEXT PRIMARY KEY,
   tenant TEXT NOT NULL,
@@ -240,15 +257,60 @@ CREATE TABLE IF NOT EXISTS notify_deliveries (
 CREATE UNIQUE INDEX IF NOT EXISTS notify_deliveries_dedupe ON notify_deliveries (dedupe_key);
 CREATE INDEX IF NOT EXISTS notify_deliveries_due ON notify_deliveries (status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS notify_deliveries_tenant ON notify_deliveries (tenant, created_at);
+CREATE INDEX IF NOT EXISTS notify_deliveries_retention ON notify_deliveries (status, created_at);
 `;
 
 /** Advisory-lock key serialising concurrent schema creation across replicas. */
 export const MCP_SCHEMA_LOCK = 1_297_692_101;
 
-/** Create the MCP tables if missing. Idempotent; safe on every boot. */
+/**
+ * Every table and index MCP_SCHEMA creates, read from the DDL itself so the
+ * boot check below cannot drift from it. A change that is not a new table or
+ * a new index (an ALTER) is not visible here and needs a check of its own.
+ */
+export const MCP_SCHEMA_OBJECTS: readonly string[] = [...MCP_SCHEMA.matchAll(/CREATE (?:UNIQUE )?(?:TABLE|INDEX) IF NOT EXISTS (\w+)/g)].map((m) => m[1]!);
+
+/** How long a boot that has to run the DDL waits for any one lock before giving up (and retrying later). */
+export const SCHEMA_LOCK_TIMEOUT_MS = 5_000;
+
+/**
+ * How many of MCP_SCHEMA_OBJECTS are missing. A catalog lookup: to_regclass
+ * resolves a name through the search_path (as the unqualified CREATE did)
+ * without locking the relation, so this costs no lock on any MCP table.
+ */
+async function missingObjects(db: Db, dialect: "postgres" | "sqlite"): Promise<number> {
+  const names = MCP_SCHEMA_OBJECTS;
+  const row = dialect === "postgres"
+    ? await db.prepare(`SELECT COUNT(*) AS n FROM (VALUES ${names.map(() => "(?::text)").join(", ")}) AS v(name) WHERE to_regclass(v.name) IS NULL`).get(...names)
+    : await db.prepare(`SELECT ? - COUNT(*) AS n FROM sqlite_master WHERE type IN ('table', 'index') AND name IN (${names.map(() => "?").join(", ")})`).get(names.length, ...names);
+  const n = Number((row as { n?: unknown } | undefined)?.n);
+  return Number.isFinite(n) ? n : names.length;
+}
+
+/**
+ * Create the MCP tables if missing. Idempotent; safe on every boot.
+ *
+ * NO LOCKS ONCE THE SCHEMA EXISTS. Postgres takes a ShareLock on a table
+ * before it checks whether `CREATE INDEX IF NOT EXISTS` has anything to do, and
+ * one transaction holds every lock it took until COMMIT. So running the DDL on
+ * every boot queued each new web replica and orchestrator behind any long
+ * writer of an MCP table, while holding the locks it already had — and every
+ * request that wrote an MCP table (token use, audit rows) queued behind that.
+ * Now a boot first asks the catalog whether every table and index exists and
+ * returns if so. Only a boot that has something to create runs the DDL, and it
+ * gives up on any lock wait after SCHEMA_LOCK_TIMEOUT_MS instead of queueing
+ * (the caller retries on its next request or tick). The advisory lock still
+ * serialises two replicas creating the schema at once; the one that waited
+ * checks again and finds nothing left to do.
+ */
 export async function ensureMcpSchema(db: Db, dialect: "postgres" | "sqlite"): Promise<void> {
+  if ((await missingObjects(db, dialect)) === 0) return;
   await db.tx(async (tx) => {
-    if (dialect === "postgres") await tx.prepare("SELECT pg_advisory_xact_lock(?)").get(MCP_SCHEMA_LOCK);
+    if (dialect === "postgres") {
+      await tx.prepare(`SET LOCAL lock_timeout = ${SCHEMA_LOCK_TIMEOUT_MS}`).run();
+      await tx.prepare("SELECT pg_advisory_xact_lock(?)").get(MCP_SCHEMA_LOCK);
+      if ((await missingObjects(tx, dialect)) === 0) return;
+    }
     await tx.exec(MCP_SCHEMA);
   });
 }

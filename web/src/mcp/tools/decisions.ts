@@ -251,8 +251,9 @@ const LIFECYCLE_TRADE = z.object({
   fill_qty_raw: z.string().nullable(),
   fill_cash_usdg: z.number().nullable(),
   fill_price_usd: z.number().nullable(),
-  realized_pnl_usdg: z.number().nullable(),
-  realized_pnl_measured: z.boolean().describe("True only when the basis came from a receipt (live) or the paper book"),
+  realized_pnl_usdg: z.number().nullable().describe("The figure the worker booked; see realized_pnl_measured before reading it as a result"),
+  realized_pnl_measured: z.boolean().nullable()
+    .describe("The rule get_trade uses: true only when the sell's proceeds AND the cost it sold against were both evidenced (read from receipts on the live book, or the paper book's own fills); false when either half is an estimate; null when there is no realized figure or the cost could not be replayed"),
   basis_source: z.string().nullable(),
   at: z.string().nullable(),
 });
@@ -276,7 +277,7 @@ async function decisionDetail(ctx: ToolContext, agentRef: string | undefined, de
   const found = await ctx.ledger((db) => readOwnerDecision(db, a.accounts, decisionId, withEvidence));
   // Missing and someone else's read the same, so ids cannot be probed.
   if (!found) throw new McpError("not_found", "No such decision for this agent.");
-  const trades = found.lifecycle.trades.map((t) => {
+  const trades = found.lifecycle.trades.map((t, i) => {
     const confirmed = t.status === "landed" && txHashOrNull(t.tx_hash) !== null;
     return {
       status: t.status,
@@ -291,7 +292,8 @@ async function decisionDetail(ctx: ToolContext, agentRef: string | undefined, de
       fill_cash_usdg: usd(t.fill_cash_usdg, 6),
       fill_price_usd: t.fill_price_usd,
       realized_pnl_usdg: usd(t.realized_pnl_usdg, 6),
-      realized_pnl_measured: t.realized_pnl_usdg !== null && (t.basis_source === "receipt" || t.basis_source === "paper"),
+      // Both halves replayed by get_trade's rule, never the proceeds' source alone.
+      realized_pnl_measured: found.realized_measured[i] ?? null,
       basis_source: t.basis_source !== null && /^[a-z-]{1,24}$/.test(t.basis_source) ? t.basis_source : null,
       at: isoOrNull(t.created_at),
     };
@@ -460,7 +462,9 @@ const explainInactivity = defineTool({
     })),
     events_in_window: z.object({
       market_unreadable: COUNT, provider_failure: COUNT, brain_failure: COUNT, brain_refused: COUNT, execution_failure: COUNT, policy_notice: COUNT,
-      arm_failure: COUNT, funding_notice: COUNT, other_not_relayed: COUNT, note: z.string(),
+      arm_failure: COUNT, funding_notice: COUNT,
+      consent_notice: COUNT.describe("The worker's notices that a setting leaves the strategy nothing to trade (the Trencher with live trenching off)"),
+      other_not_relayed: COUNT, note: z.string(),
     }),
     fills_in_window: z.object({ live_landed: COUNT, live_confirmed: COUNT, paper: COUNT, submitted_unresolved: COUNT })
       .describe("Market fills (swaps and launch-curve trades; not transfers or vault moves), one per operation. live_confirmed = landed with a transaction hash"),
@@ -514,7 +518,7 @@ const explainInactivity = defineTool({
       events_in_window: {
         market_unreadable: e.market_unreadable.count, provider_failure: e.provider_failure.count, brain_failure: e.brain_failure.count, brain_refused: e.brain_refused.count,
         execution_failure: e.execution_failure.count, policy_notice: e.policy_notice.count, arm_failure: e.arm_failure.count,
-        funding_notice: e.funding_notice.count, other_not_relayed: e.other.count,
+        funding_notice: e.funding_notice.count, consent_notice: e.consent_notice.count, other_not_relayed: e.other.count,
         note: "Warnings and errors from the agent's event log, counted by kind. Their text is not relayed here because it can carry raw provider errors, chat ids and addresses; Merrymen's activity log shows it. brain_failure events are the same failed Brain runs (live and shadow) as the brain_unreachable, brain_malformed and brain_shadow_failures decision counts, not further failures.",
       },
       fills_in_window: dx.fills_in_window,
