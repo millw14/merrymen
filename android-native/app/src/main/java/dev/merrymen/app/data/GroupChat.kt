@@ -160,6 +160,16 @@ data class GroupChatState(
    * the box empty, and nothing said why. The next composer takes them from here.
    */
   val returned: List<SendResult.Refused> = emptyList(),
+  /**
+   * WHAT THE OWNER IS TYPING, held by the room and not by the screen, so a
+   * turn end empties it with everything else ([GroupChatRoom.forget]). In the
+   * screen's saved state it outlived the wallet that typed it: a 401 on Send
+   * put A's words back in the box, A tapped Sign in, B signed in, and the
+   * screen came back from the back stack with A's words ready to post to the
+   * public room as B. A saved state is restored whatever key it is given, so
+   * keying it on the wallet would not have stopped that.
+   */
+  val draft: String = "",
 )
 
 /** What became of a send. */
@@ -558,9 +568,21 @@ class GroupChatRoom(
     _state.update { s ->
       val left = s.returned.filterNot { it === r }
       took = left.size != s.returned.size
-      if (took) s.copy(returned = left) else s
+      // Into the box in the same step, so a turn end cannot fall between
+      // taking the words and putting them back (draftAfterRefusal).
+      if (took) s.copy(returned = left, draft = r.words?.let { draftAfterRefusal(s.draft, it) } ?: s.draft) else s
     }
     return took
+  }
+
+  /** A keystroke in the box, kept as [composerEdit] keeps it. */
+  fun editDraft(typed: String) {
+    _state.update { it.copy(draft = composerEdit(it.draft, typed)) }
+  }
+
+  /** The box emptied, as a line leaves it for [send]. */
+  fun clearDraft() {
+    _state.update { it.copy(draft = "") }
   }
 
   private fun kept(r: SendResult.Refused): SendResult.Refused {

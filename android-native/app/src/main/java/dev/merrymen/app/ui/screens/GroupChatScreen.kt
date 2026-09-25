@@ -42,7 +42,6 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -78,7 +77,6 @@ import dev.merrymen.app.data.RoomStatus
 import dev.merrymen.app.data.SendResult
 import dev.merrymen.app.data.chatItems
 import dev.merrymen.app.data.composerAfter
-import dev.merrymen.app.data.composerEdit
 import dev.merrymen.app.data.excerpt
 import dev.merrymen.app.data.isMine
 import dev.merrymen.app.data.mentionParts
@@ -433,7 +431,10 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
   }
   val unseen = if (follow) 0 else s.messages.count { it.id > seenTop && !isMine(it, mySlug) }
 
-  var draft by rememberSaveable { mutableStateOf("") }
+  // THE BOX IS THE ROOM'S (GroupChatState.draft), so a turn end empties it:
+  // kept in this screen's saved state, one wallet's refused words came back
+  // from the back stack in the next wallet's box.
+  val draft = s.draft
   var replyTo by remember { mutableStateOf<GcLine?>(null) }
   var error by remember { mutableStateOf<String?>(null) }
   var confirmHide by remember { mutableStateOf<GcLine?>(null) }
@@ -452,8 +453,9 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
   // again alike (composerAfter): refused words come back to the box, and a
   // counted rate limit is said by the countdown alone.
   fun settle(r: SendResult) {
+    // The words themselves are already back in the box: the room put them
+    // there as it handed them over (takeReturned). This settles the rest.
     val next = composerAfter(r, draft, error, replyTo?.id)
-    draft = next.draft
     error = next.error
     if (replyTo == null && next.replyTo != null) {
       val st = room.state.value
@@ -588,7 +590,7 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
         GcComposer(
           s = s,
           draft = draft,
-          onDraft = { draft = it },
+          onDraft = { room.editDraft(it) },
           replyTo = replyTo,
           onCancelReply = { replyTo = null },
           error = error,
@@ -598,7 +600,7 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
             error = null
             follow = true
             room.setFollowing(true)
-            draft = ""
+            room.clearDraft()
             replyTo = null
             // The words come back on a refusal, so it never costs the owner
             // what they typed; an unconfirmed line is NOT a failure — it is on
@@ -705,8 +707,8 @@ private fun GcComposer(
       Column(Modifier.weight(1f)) {
         // Capped at the server's 500 on the way in, so nobody types past a
         // limit the gate would only refuse after the fact — but never cut
-        // below what is already there (composerEdit).
-        GcField(draft, { onDraft(composerEdit(draft, it)) }, "Say something to the room…", singleLine = false)
+        // below what is already there (the room keeps it by composerEdit).
+        GcField(draft, onDraft, "Say something to the room…", singleLine = false)
         if (draft.length >= GC_COMPOSER_MAX - 100) {
           Text(
             "${draft.length}/$GC_COMPOSER_MAX",

@@ -292,6 +292,35 @@ class GroupChatPostTest {
     assertTrue(r.state.value.returned.isEmpty())
   }
 
+  /**
+   * ONE WALLET'S WORDS NEVER REACH THE NEXT WALLET'S BOX. The box is the
+   * room's: a 401 on Send puts the words back in it, and the turn end that
+   * follows a different wallet signing in empties it. Held in the screen's
+   * saved state instead, A's refused words came back from the back stack in
+   * B's box, one tap from the public room under B's name.
+   */
+  @Test fun aTurnEndEmptiesTheBoxTheRefusedWordsWentBackInto() = runBlocking {
+    roomWith { json("""{"error":"Sign in to post."}""", 401) }
+    val r = ready(this)
+    r.editDraft("gm from A")
+    r.clearDraft()
+    val refused = r.sendAndWait("gm from A") as SendResult.Refused
+    r.editDraft("and a newer line")
+    assertTrue(r.takeReturned(refused))
+    assertEquals("the refused words above what was typed since", "gm from A\nand a newer line", r.state.value.draft)
+
+    r.forget()
+    assertEquals("", r.state.value.draft)
+    assertFalse("a composer still holding A's refusal cannot put it back", r.takeReturned(refused))
+    assertEquals("", r.state.value.draft)
+  }
+
+  @Test fun theBoxKeepsTheComposerRule() = runBlocking {
+    val r = GroupChatRoom(api(), this, now = { clock })
+    r.editDraft("x".repeat(600))
+    assertEquals("typing stops at the gate's limit", 500, r.state.value.draft.length)
+  }
+
   @Test fun anEchoThatArrivesBeforeALostAnswerSettlesTheLine() = runBlocking {
     val posted = CountDownLatch(1)
     val release = CountDownLatch(1)
