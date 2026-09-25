@@ -60,8 +60,6 @@ import dev.merrymen.app.net.AgentProfile
 import dev.merrymen.app.net.OwnBook
 import dev.merrymen.app.net.ProfileTrade
 import dev.merrymen.app.net.ownBook
-import dev.merrymen.app.net.ownSlugOf
-import dev.merrymen.app.net.valueOrNull
 import dev.merrymen.app.ui.AgentBanner
 import dev.merrymen.app.ui.AgentFace
 import dev.merrymen.app.ui.ChartWindow
@@ -74,6 +72,7 @@ import dev.merrymen.app.ui.LocalBottomInset
 import dev.merrymen.app.ui.MerryColors
 import dev.merrymen.app.ui.NameBlock
 import dev.merrymen.app.ui.Notice
+import dev.merrymen.app.ui.OwnAgent
 import dev.merrymen.app.ui.PageGap
 import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.PagePadTop
@@ -110,6 +109,7 @@ import dev.merrymen.app.ui.growthPointsOf
 import dev.merrymen.app.ui.growthWindow
 import dev.merrymen.app.ui.holdingDetail
 import dev.merrymen.app.ui.numerals
+import dev.merrymen.app.ui.ownAgentOf
 import dev.merrymen.app.ui.ownBookOf
 import dev.merrymen.app.ui.returnOf
 import dev.merrymen.app.ui.sans
@@ -140,14 +140,6 @@ private fun ArrowLeftIcon(tint: Color, size: Dp = 18.dp) {
       drawPath(head, tint, style = stroke)
     }
   }
-}
-
-/** Whose agent this is, once the reader's own feed has been asked. */
-private sealed interface OwnAgent {
-  data object Asking : OwnAgent
-
-  /** Settled: the reader's own slug, or null when they have none we read. */
-  data class Known(val slug: String?) : OwnAgent
 }
 
 /**
@@ -189,19 +181,16 @@ fun AgentDetailScreen(nav: NavHostController, slug: String) {
     c.social.refresh()
   }
 
-  // WHOSE AGENT IS THIS — asked once per wallet. Keyed on the wallet, so a
-  // sign-out or a wallet switch starts over rather than carrying the last
-  // wallet's answer; and not settled while the session itself is unanswered
-  // (a cold start, a server change), when "signed out" is only the default.
-  val ownAgent by produceState<OwnAgent>(OwnAgent.Asking, signedIn, identityKnown) {
-    // Back to asking first: the last wallet's answer must not stand while the
-    // new wallet's feed is on its way.
-    value = OwnAgent.Asking
-    value = when {
-      !identityKnown -> OwnAgent.Asking
-      signedIn == null -> OwnAgent.Known(null)
-      else -> OwnAgent.Known(ownSlugOf(c.api.feed().valueOrNull()))
-    }
+  // WHOSE AGENT IS THIS — asked once per wallet (ownAgentOf). Keyed on the
+  // wallet, so a sign-out or a wallet switch starts over rather than carrying
+  // the last wallet's answer. A feed read that failed settles nothing, and is
+  // asked again with the page's own read (every 30s while it is on screen)
+  // until one answers; once settled it is not asked again.
+  var ownAgent by remember(signedIn, identityKnown) { mutableStateOf<OwnAgent>(OwnAgent.Asking) }
+  val askAgain = if (ownAgent is OwnAgent.Known) null else slot.okAtMs
+  LaunchedEffect(signedIn, identityKnown, askAgain) {
+    if (ownAgent is OwnAgent.Known) return@LaunchedEffect
+    ownAgent = ownAgentOf(identityKnown, signedIn) { c.api.feed() }
   }
   val profile = slot.body.takeIf { slot.state == ReadState.OK }
 

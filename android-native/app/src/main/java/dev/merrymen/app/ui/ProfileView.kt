@@ -2,12 +2,14 @@ package dev.merrymen.app.ui
 
 import dev.merrymen.app.net.AgentProfile
 import dev.merrymen.app.net.ApiResult
+import dev.merrymen.app.net.Feed
 import dev.merrymen.app.net.GrowthPoint
 import dev.merrymen.app.net.HowItTrades
 import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.OwnBook
 import dev.merrymen.app.net.ProfileTrade
 import dev.merrymen.app.net.agentProfile
+import dev.merrymen.app.net.ownSlugOf
 import dev.merrymen.app.ui.feed.Beat
 import dev.merrymen.app.ui.feed.MINUS
 import dev.merrymen.app.ui.feed.PROFILE_EVERY_MS
@@ -334,11 +336,39 @@ fun decisionsList(p: AgentProfile): ProfileList<Beat> = listRead(beatsOf(p.these
  * already reads its own posts, and the server refuses the self-follow (M16).
  * Not while we are still finding out whose agent the reader has, so it never
  * flashes onto their own page and vanishes. Their own agent is the one their
- * feed named from something it read ([dev.merrymen.app.net.ownSlugOf]), or
- * the one whose /own the server answered for this session.
+ * feed names ([ownSlugOf], settled by [ownAgentOf]), or the one whose /own the
+ * server answered for this session.
  */
 fun wireOffered(slug: String, ownKnown: Boolean, ownSlug: String?, own: OwnBook?): Boolean =
   ownKnown && own == null && ownSlug?.equals(slug, ignoreCase = true) != true
+
+/** Whose agent the reader has, as far as this page can tell. */
+sealed interface OwnAgent {
+  /** Not settled, so the wire control is held back. */
+  data object Asking : OwnAgent
+
+  /** Settled: the reader's own slug, or null when they have none. */
+  data class Known(val slug: String?) : OwnAgent
+}
+
+/**
+ * THE READER'S OWN AGENT, from the session and — signed in — their /api/feed.
+ *
+ * A FEED THAT COULD NOT BE READ SETTLES NOTHING. It used to settle on "no
+ * agent" and so offered the wire everywhere, the owner's own page included,
+ * because a failed read looked like a reader with none. It stays [OwnAgent.Asking]
+ * until a read answers; the control waits rather than guesses. [feed] is only
+ * asked for when the session is known and signed in.
+ */
+suspend fun ownAgentOf(identityKnown: Boolean, signedIn: String?, feed: suspend () -> ApiResult<Feed>): OwnAgent = when {
+  // A cold start or a server change: "signed out" is only the default yet.
+  !identityKnown -> OwnAgent.Asking
+  signedIn == null -> OwnAgent.Known(null)
+  else -> when (val r = feed()) {
+    is ApiResult.Ok -> OwnAgent.Known(ownSlugOf(r.value))
+    else -> OwnAgent.Asking
+  }
+}
 
 // ── the reads ───────────────────────────────────────────────────────────────
 

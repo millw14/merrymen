@@ -4,6 +4,7 @@ import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.feed.served
 import dev.merrymen.app.net.AgentProfile
 import dev.merrymen.app.net.ApiResult
+import dev.merrymen.app.net.Fixtures
 import dev.merrymen.app.net.GrowthPoint
 import dev.merrymen.app.net.HowItTrades
 import dev.merrymen.app.net.OwnBook
@@ -14,6 +15,7 @@ import dev.merrymen.app.net.answer
 import dev.merrymen.app.net.apiFor
 import dev.merrymen.app.ui.ChartWindow
 import dev.merrymen.app.ui.FigureSign
+import dev.merrymen.app.ui.OwnAgent
 import dev.merrymen.app.ui.ProfileList
 import dev.merrymen.app.ui.ProfileReads
 import dev.merrymen.app.ui.SwapTab
@@ -32,6 +34,7 @@ import dev.merrymen.app.ui.fillsList
 import dev.merrymen.app.ui.gasLine
 import dev.merrymen.app.ui.growthPointsOf
 import dev.merrymen.app.ui.growthWindow
+import dev.merrymen.app.ui.ownAgentOf
 import dev.merrymen.app.ui.ownBookOf
 import dev.merrymen.app.ui.returnOf
 import dev.merrymen.app.ui.showMoneyOf
@@ -277,6 +280,39 @@ class ProfileViewTest {
     assertFalse("the reader's own agent", wireOffered(slug, ownKnown = true, ownSlug = slug.uppercase(), own = null))
     // The server answering /own for this session is it saying the slug is theirs.
     assertFalse(wireOffered(slug, ownKnown = true, ownSlug = null, own = OwnBook()))
+  }
+
+  /**
+   * THE READER'S OWN AGENT IS THEIR FEED'S SLUG, whatever the NAME came from.
+   * Signed in with settings that could not be read, /api/feed names the agent
+   * `"fallback"` — and still carries the tenant's real slug, because the slug
+   * comes from the identity store, not the settings. A feed that could not be
+   * read at all settles nothing, so the wire waits rather than guesses.
+   */
+  @Test fun theReadersOwnAgentIsTheirFeedsSlugAndAnUnreadFeedSettlesNothing() = runBlocking {
+    val server = MockWebServer()
+    server.start()
+    try {
+      val api = apiFor(server)
+      val slug = "bm74qsj64fygkhjh"
+      server.answer(
+        Fixtures.text("probe-feed-signedout.json")
+          .replace("\"nameSource\":\"fallback\",\"slug\":null", "\"nameSource\":\"fallback\",\"slug\":\"$slug\""),
+      )
+      val own = ownAgentOf(identityKnown = true, signedIn = "0x00000000000000000000000000000000000000aa") { api.feed() }
+      assertEquals(OwnAgent.Known(slug), own)
+      assertFalse("no wire on their own page", wireOffered(slug, ownKnown = true, ownSlug = (own as OwnAgent.Known).slug, own = null))
+
+      repeat(3) { server.answer("""{"error":"upstream"}""", code = 503) }
+      val unread = ownAgentOf(identityKnown = true, signedIn = "0x00000000000000000000000000000000000000aa") { api.feed() }
+      assertEquals("a failed read is not 'no agent'", OwnAgent.Asking, unread)
+
+      // Signed out is settled without asking; an unanswered session is not.
+      assertEquals(OwnAgent.Known(null), ownAgentOf(identityKnown = true, signedIn = null) { error("not asked") })
+      assertEquals(OwnAgent.Asking, ownAgentOf(identityKnown = false, signedIn = null) { error("not asked") })
+    } finally {
+      server.shutdown()
+    }
   }
 
   // ── the reads ─────────────────────────────────────────────────────────────

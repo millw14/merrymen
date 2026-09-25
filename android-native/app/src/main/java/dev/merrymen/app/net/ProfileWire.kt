@@ -244,14 +244,16 @@ suspend fun MerrymenApi.agentImage(slug: String, kind: String, etag: String?, ve
 }
 
 /**
- * WHICH AGENT IS THE READER'S OWN, from their /api/feed. Null unless the feed
- * named one it actually read: `nameSource: "fallback"` is the house default
- * identity ("Robin") a signed-out or unreadable feed sends, and it is nobody's
- * agent — presenting it as the reader's own is the bug the fallback flag was
- * added to stop.
+ * WHICH AGENT IS THE READER'S OWN, from their /api/feed: its `agent.slug`,
+ * as the web's `mineOf` (terminal/live.ts) takes it.
+ *
+ * `nameSource` IS NOT CONSULTED, because it is about the NAME alone. The slug
+ * comes from the identity store for the session's own tenant
+ * (feed-identity.ts `identityOf`: `slug = tenant ? slugOf(tenant) : null`),
+ * so a signed-out feed already sends null, and a signed-in one whose settings
+ * could not be read — `"fallback"`, a name that says nothing — still carries
+ * the reader's real slug. Gating on the name threw it away: the reader was
+ * offered the wire on their own page and their own row on the board was not
+ * marked "you". The house "Robin" is nobody's agent, and it never has a slug.
  */
-fun ownSlugOf(feed: Feed?): String? {
-  val agent = feed?.agent ?: return null
-  if (agent.nameSource == "fallback") return null
-  return agent.slug?.takeIf { it.isNotBlank() }
-}
+fun ownSlugOf(feed: Feed?): String? = feed?.agent?.slug?.takeIf { it.isNotBlank() }

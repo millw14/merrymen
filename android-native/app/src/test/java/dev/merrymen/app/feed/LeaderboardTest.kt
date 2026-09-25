@@ -1,13 +1,19 @@
 package dev.merrymen.app.feed
 
+import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.Feed
+import dev.merrymen.app.net.Fixtures
 import dev.merrymen.app.net.LeaderRow
 import dev.merrymen.app.net.Leaderboard
+import dev.merrymen.app.net.answer
+import dev.merrymen.app.net.apiFor
 import dev.merrymen.app.net.ownSlugOf
 import dev.merrymen.app.ui.screens.BoardTone
 import dev.merrymen.app.ui.screens.boardLines
 import dev.merrymen.app.ui.screens.boardTradeLine
 import dev.merrymen.app.ui.screens.retiredLine
+import kotlinx.coroutines.runBlocking
+import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -81,9 +87,32 @@ class LeaderboardTest {
     val mine = boardLines(board, mine = "8SS5EKT83WXRZH5W")
     assertEquals(1, mine.count { it.you })
     assertTrue(mine.single { it.you }.row.slug == "8ss5ekt83wxrzh5w")
-    // The signed-out feed names the house fallback, which is nobody's agent.
+    // The signed-out feed names the house fallback, which is nobody's agent —
+    // and carries no slug, so nobody is marked.
     val signedOut: Feed = served("probe-feed-signedout.json") { it.feed() }
     assertNull(ownSlugOf(signedOut))
     assertFalse(boardLines(board, ownSlugOf(signedOut)).any { it.you })
+  }
+
+  /**
+   * Signed in, with settings the server could not read: the NAME is the
+   * fallback, but the slug is the reader's own (it comes from the identity
+   * store), and their row is still theirs.
+   */
+  @Test fun aFallbackNameDoesNotUnmarkTheReadersOwnRow() {
+    val server = MockWebServer()
+    server.start()
+    try {
+      server.answer(
+        Fixtures.text("probe-feed-signedout.json")
+          .replace("\"nameSource\":\"fallback\",\"slug\":null", "\"nameSource\":\"fallback\",\"slug\":\"8ss5ekt83wxrzh5w\""),
+      )
+      val feed = (runBlocking { apiFor(server).feed() } as ApiResult.Ok).value
+      assertEquals("fallback", feed.agent?.nameSource)
+      assertEquals("8ss5ekt83wxrzh5w", ownSlugOf(feed))
+      assertEquals("8ss5ekt83wxrzh5w", boardLines(board, ownSlugOf(feed)).single { it.you }.row.slug)
+    } finally {
+      server.shutdown()
+    }
   }
 }

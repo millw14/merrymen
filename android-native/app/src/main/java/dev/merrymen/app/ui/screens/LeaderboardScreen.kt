@@ -204,8 +204,8 @@ fun LeaderboardScreen(nav: NavHostController) {
   LaunchedEffect(lifecycle, reads) { lifecycle.pollWhileResumed(listOf(reads.loop)) }
   // What the reader's agent reads, for the wire rings on the faces. Throttled.
   LaunchedEffect(Unit) { c.social.refreshWired() }
-  // THE READER'S OWN ROW, marked "you" — from their own feed, and only when it
-  // named an agent it actually read.
+  // THE READER'S OWN ROW, marked "you" — from their own feed's slug. A feed
+  // that could not be read marks nobody: "you" is never a guess.
   val mine by produceState<String?>(null, signedIn) {
     // Cleared first: the state outlives the key, and the last wallet's agent
     // must not stay marked "you" while the new wallet's feed is on its way.
