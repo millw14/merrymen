@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { homePaths, merrymenHome } from "./home";
-import { grantIdentity, killedGrants, killRequested } from "./kill-request";
+import { mayArm } from "./kill-request";
 
 /** Reads the grant handoff written by web's /api/grants (~/.merrymen/grant.json). */
 export function loadGrantFile(): StoredGrant | null {
@@ -29,9 +29,7 @@ export function loadGrantFile(): StoredGrant | null {
 export function loadArmableGrant(): StoredGrant | null {
   const grant = loadGrantFile();
   if (!grant) return null;
-  const home = merrymenHome();
-  if (killRequested(home)) return null;
-  return killedGrants(home).has(grantIdentity(grant)) ? null : grant;
+  return mayArm(merrymenHome(), grant) ? grant : null;
 }
 
 /**

@@ -257,6 +257,21 @@ describe("the child does not re-arm", () => {
     assert.ok(await store.get(TENANT), "and nothing is revoked on a superseded record");
   });
 
+  it("THE ARM CHECK IS ONE LOOK AT THE HOME, not two that can disagree", () => {
+    // "Is a kill pending?" and "which grants were killed?" used to be two
+    // scans. A record read fine by the first and failing the second dropped
+    // out of the killed set, and a killed grant armed for a tick. Pinned in
+    // the source because the disagreement needs a fault injected between two
+    // reads.
+    const kr = readFileSync(new URL("./kill-request.ts", import.meta.url), "utf8");
+    const body = kr.slice(kr.indexOf("export function mayArm("), kr.indexOf("\n}", kr.indexOf("export function mayArm(")));
+    assert.equal(body.match(/killState\(/g)?.length, 1, "mayArm scans the home exactly once");
+    const g = readFileSync(new URL("./grant.ts", import.meta.url), "utf8");
+    const arm = g.slice(g.indexOf("export function loadArmableGrant("), g.indexOf("\n}", g.indexOf("export function loadArmableGrant(")));
+    assert.match(arm, /mayArm\(merrymenHome\(\), grant\)/);
+    assert.doesNotMatch(arm, /killRequested\(|killState\(/, "and loadArmableGrant takes no second look of its own");
+  });
+
   it("syncGrant arms through loadArmableGrant, and the hosted kill goes through killHosted", () => {
     // The two call sites the behaviour above depends on. They live inside
     // main()'s closure, where a test cannot reach them, so they are pinned

@@ -177,15 +177,20 @@ export function killRequested(home: string): boolean {
 }
 
 /**
- * The identities of every grant killed in this home, pending or superseded.
- * The child refuses to arm any of them again (loadArmableGrant).
+ * May the child arm this grant? The whole latch is decided from ONE scan of
+ * the home. Two scans, one for "pending" and one for "which grants were
+ * killed", could disagree: a record read fine the first time and failed the
+ * second would drop out of the killed set, and a killed grant would arm for a
+ * tick.
+ *
+ * No, while a kill is pending or the state is unknown (killRequested). No,
+ * for any grant a request here killed, pending or superseded. Yes otherwise.
  */
-export function killedGrants(home: string): Set<string> {
-  const out = new Set<string>();
-  for (const r of killState(home).requests) {
-    if (r.body !== "unreadable" && typeof r.body.grant === "string") out.add(r.body.grant);
-  }
-  return out;
+export function mayArm(home: string, grant: Pick<StoredGrant, "serialized">): boolean {
+  const s = killState(home);
+  if (s.unknown || s.requests.some((r) => !r.superseded)) return false;
+  const id = grantIdentity(grant);
+  return !s.requests.some((r) => r.body !== "unreadable" && r.body.grant === id);
 }
 
 export interface KillRequest {
