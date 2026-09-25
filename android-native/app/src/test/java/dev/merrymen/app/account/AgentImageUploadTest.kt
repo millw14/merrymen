@@ -11,8 +11,8 @@ import dev.merrymen.app.net.apiFor
 import dev.merrymen.app.net.removeOwnAgentImage
 import dev.merrymen.app.net.uploadOwnAgentImage
 import dev.merrymen.app.ui.AgentImageRevisions
-import dev.merrymen.app.ui.OwnFace
-import dev.merrymen.app.ui.ownFaceOf
+import dev.merrymen.app.ui.FaceSource
+import dev.merrymen.app.ui.faceSourceOf
 import dev.merrymen.app.ui.screens.reportImageWrite
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
@@ -143,10 +143,10 @@ class AgentImageUploadTest {
   @Test fun homeAndYouShowANewPictureAtItsVersionAndTheInitialsOnceRemoved() = runBlocking {
     // AgentImageRevisions is process-wide; a slug of this test's own.
     val slug = "face-" + System.nanoTime()
-    fun face() = ownFaceOf(slug, AgentImageRevisions.versions.value)
-    assertEquals("no slug, no picture to read", OwnFace.Initials, ownFaceOf(null, AgentImageRevisions.versions.value))
+    fun face() = faceSourceOf(slug, AgentImageRevisions.versions.value)
+    assertEquals("no slug, no picture to read", FaceSource.Initials, faceSourceOf(null, AgentImageRevisions.versions.value))
     // Before this app wrote anything, the picture as the server has it.
-    assertEquals(OwnFace.Picture(slug, null), face())
+    assertEquals(FaceSource.Picture(slug, null), face())
 
     // An upload through the real path, reported the way the You tab reports it...
     session(owner)
@@ -154,9 +154,9 @@ class AgentImageUploadTest {
     reportImageWrite(AgentImageKind.Avatar, slug, api.uploadOwnAgentImage(AgentImageKind.Avatar, png, "image/png", owner)) { _, _ -> }
     // ...is what the face on Home's hero and You's card now reads, at its version.
     val now = face()
-    assertEquals(OwnFace.Picture(slug, "v2"), now)
+    assertEquals(FaceSource.Picture(slug, "v2"), now)
     server.answer("webp bytes", type = "image/webp")
-    val got = api.agentImageBytes(slug, AgentImageKind.Avatar, (now as OwnFace.Picture).version)
+    val got = api.agentImageBytes(slug, AgentImageKind.Avatar, (now as FaceSource.Picture).version)
     server.takeRequest()
     server.takeRequest()
     assertEquals("/api/agent-image/$slug/avatar?v=v2", server.takeRequest().path)
@@ -166,11 +166,12 @@ class AgentImageUploadTest {
     session(owner)
     server.answer("""{"ok":true}""")
     reportImageWrite(AgentImageKind.Avatar, slug, api.removeOwnAgentImage(AgentImageKind.Avatar, owner)) { _, _ -> }
-    assertEquals(OwnFace.Initials, face())
+    assertEquals(FaceSource.Initials, face())
     // A new banner is not a new face.
     val other = "$slug-b"
     AgentImageRevisions.publish(other, AgentImageKind.Banner, "b9")
-    assertEquals(OwnFace.Picture(other, null), ownFaceOf(other, AgentImageRevisions.versions.value))
+    assertEquals(FaceSource.Picture(other, null), faceSourceOf(other, AgentImageRevisions.versions.value))
+    assertEquals(FaceSource.Picture(other, "b9"), faceSourceOf(other, AgentImageRevisions.versions.value, AgentImageKind.Banner))
   }
 
   @Test fun anAgentWithNoPictureKeepsItsInitials() = runBlocking {

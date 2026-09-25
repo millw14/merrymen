@@ -1,5 +1,7 @@
 package dev.merrymen.app.profile
 
+import dev.merrymen.app.net.AgentImageKind
+import dev.merrymen.app.net.ImageWrite
 import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.agentImage
 import dev.merrymen.app.net.apiFor
@@ -8,6 +10,7 @@ import dev.merrymen.app.ui.FaceCache
 import dev.merrymen.app.ui.FaceKey
 import dev.merrymen.app.ui.FaceKind
 import dev.merrymen.app.ui.FaceLoader
+import dev.merrymen.app.ui.screens.reportImageWrite
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -202,17 +205,19 @@ class AgentFaceCacheTest {
     assertEquals("FACE-A", cache.peek(k.id))
   }
 
+  /**
+   * THE YOU TAB'S WRITE IS WHAT EVERY FACE READS. A picture uploaded there is
+   * reported through its own path (reportImageWrite publishes the version the
+   * server confirmed), and the app-wide face then asks for it AT that version,
+   * so no HTTP cache's copy of the old one can stand in for it; a removal
+   * reported the same way is never asked about again.
+   */
   @Test fun anUploadIsAskedForByItsVersionAndARemovalIsNeverAskedAbout() = runBlocking {
     val slug = "p1b2c3d4e5f6g7h8"
-    val before = AgentFaces.revision.value
-    AgentFaces.publish(slug, FaceKind.AVATAR, "v7")
-    // Every face on screen is told, so the one just uploaded shows now.
-    assertTrue(AgentFaces.revision.value > before)
+    reportImageWrite(AgentImageKind.Avatar, slug, ImageWrite.Done("v7")) { _, _ -> }
     assertNull(AgentFaces.load(api, slug, FaceKind.AVATAR))
     assertEquals("/api/agent-image/$slug/avatar?v=v7", seen.single().path)
-    val removed = AgentFaces.revision.value
-    AgentFaces.publish(slug, FaceKind.AVATAR, null)
-    assertTrue(AgentFaces.revision.value > removed)
+    reportImageWrite(AgentImageKind.Avatar, slug, ImageWrite.Done(null)) { _, _ -> }
     assertNull(AgentFaces.load(api, slug, FaceKind.AVATAR))
     assertNull(AgentFaces.peek(slug, FaceKind.AVATAR))
     assertEquals("a removed picture is not asked for", 1, seen.size)

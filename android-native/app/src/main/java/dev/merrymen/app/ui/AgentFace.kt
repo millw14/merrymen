@@ -39,19 +39,15 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.merrymen.app.LocalContainer
+import dev.merrymen.app.net.AgentImageKind
 import dev.merrymen.app.net.ImageAnswer
 import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.agentImage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import java.util.Locale
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * AN AGENT'S OWN PICTURE, where the owner uploaded one — and the seeded
@@ -69,7 +65,10 @@ import java.util.concurrent.ConcurrentHashMap
  *  - It must not grow without bound. It holds a fixed number of entries and a
  *    fixed number of bitmap bytes, and evicts the least recently used.
  */
-enum class FaceKind(val path: String) { AVATAR("avatar"), BANNER("banner") }
+enum class FaceKind(val path: String, val image: AgentImageKind) {
+  AVATAR("avatar", AgentImageKind.Avatar),
+  BANNER("banner", AgentImageKind.Banner),
+}
 
 /** Which picture, from which server, at which upload. [id] is the whole cache key. */
 data class FaceKey(val origin: String, val slug: String, val kind: FaceKind, val version: String?) {
@@ -133,12 +132,6 @@ class FaceCache<T : Any>(
 
   @Synchronized
   fun putMissing(key: String) = put(key, Held(null, null, now(), 0))
-
-  /** Drop every entry whose key starts with [prefix] — a new upload for that slug. */
-  @Synchronized
-  fun forget(prefix: String) {
-    map.keys.filter { it.startsWith(prefix) }.forEach { remove(it) }
-  }
 
   @get:Synchronized
   val size: Int get() = map.size
@@ -254,24 +247,6 @@ object AgentFaces {
   )
   private val loader = FaceLoader(cache) { key, bytes -> decodeScaled(key.kind, bytes) }
 
-  /**
-   * The upload version per slug and kind (the web's `publishAgentImage`). A
-   * present entry with a null version means the owner REMOVED the picture, so
-   * none is asked for.
-   */
-  private val revisions = ConcurrentHashMap<String, Rev>()
-
-  private data class Rev(val version: String?)
-
-  private val _revision = MutableStateFlow(0L)
-
-  /**
-   * Bumped by every [publish], so a face ALREADY ON SCREEN asks again — the
-   * new picture shows on the page the owner uploaded it from, and a removed
-   * one stops drawing — instead of waiting until that face is composed afresh.
-   */
-  val revision: StateFlow<Long> = _revision.asStateFlow()
-
   @Volatile
   private var lastOrigin: String? = null
 
@@ -279,21 +254,18 @@ object AgentFaces {
   private var targetPx = mapOf(FaceKind.AVATAR to 144, FaceKind.BANNER to 1080)
 
   /**
-   * After an upload or a removal the server confirmed (P11): a new [version]
-   * makes the new picture show at once; null removes it everywhere.
+   * WHICH PICTURE, BY THE ONE RULE THE WHOLE APP USES ([faceSourceOf] over
+   * [AgentImageRevisions]): a picture the You tab just uploaded is asked for at
+   * its new version, so an HTTP cache's copy of the old one is never it; one
+   * it just removed is not asked for at all; anything else is read as the
+   * server has it. The You tab publishes there on every write the server
+   * confirmed, so there is one list of versions, not one per screen.
    */
-  fun publish(slug: String, kind: FaceKind, version: String?) {
-    val k = slug.lowercase(Locale.ROOT) + "|" + kind.path
-    revisions[k] = Rev(version)
-    lastOrigin?.let { cache.forget("$it|${slug.lowercase(Locale.ROOT)}|${kind.path}|") }
-    _revision.update { it + 1 }
-  }
-
-  private fun keyFor(origin: String, slug: String, kind: FaceKind): FaceKey? {
-    val rev = revisions[slug.lowercase(Locale.ROOT) + "|" + kind.path]
-    if (rev != null && rev.version == null) return null
-    return FaceKey(origin, slug, kind, rev?.version)
-  }
+  private fun keyFor(origin: String, slug: String, kind: FaceKind): FaceKey? =
+    when (val face = faceSourceOf(slug, AgentImageRevisions.versions.value, kind.image)) {
+      FaceSource.Initials -> null
+      is FaceSource.Picture -> FaceKey(origin, face.slug, kind, face.version)
+    }
 
   /** What is already held for this face, with no request — the first frame. */
   fun peek(slug: String?, kind: FaceKind): ImageBitmap? {
@@ -413,14 +385,16 @@ fun AgentFace(
   val widthPx = with(density) { LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
   // Decoded for the largest face this app draws (48dp), once per density.
   remember(density, widthPx) { AgentFaces.setTargets(with(density) { 48.dp.roundToPx() }, widthPx) }
-  val revision by AgentFaces.revision.collectAsState()
+  val versions by AgentImageRevisions.versions.collectAsState()
   // KEYED ON THE SLUG: a LazyColumn reuses a row's slot for another agent, and
   // the first frame for the new one is whatever is held for IT, never the
   // previous occupant's picture. produceState's own keys do not do that — its
   // state outlives a key change and holds the last agent's picture until the
   // new load lands — so the state itself is made fresh per slug, and per
-  // upload, with key().
-  val picture by key(slug, revision) {
+  // upload, with key(). The upload is THIS agent's entry only, so a new
+  // picture shows on the page it was uploaded from while every other face on
+  // screen keeps what it drew.
+  val picture by key(slug, faceSourceOf(slug, versions)) {
     produceState(AgentFaces.peek(slug, FaceKind.AVATAR), c.api) {
       value = AgentFaces.load(c.api, slug, FaceKind.AVATAR)
     }
@@ -495,9 +469,9 @@ private fun BoxScope.FaceCoinBadge(symbol: String) {
 @Composable
 fun AgentBanner(slug: String?, modifier: Modifier = Modifier) {
   val c = LocalContainer.current
-  val revision by AgentFaces.revision.collectAsState()
+  val versions by AgentImageRevisions.versions.collectAsState()
   // Fresh state per agent and per upload, for the reason AgentFace's is.
-  val picture by key(slug, revision) {
+  val picture by key(slug, faceSourceOf(slug, versions, AgentImageKind.Banner)) {
     produceState(AgentFaces.peek(slug, FaceKind.BANNER), c.api) {
       value = AgentFaces.load(c.api, slug, FaceKind.BANNER)
     }

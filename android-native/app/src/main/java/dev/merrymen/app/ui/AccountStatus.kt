@@ -850,8 +850,9 @@ fun trencherRowOf(strategy: String?, trencherLiveEnabled: Boolean?, assetMode: S
  * cache-buster, so every image of that agent on screen re-reads the stored
  * picture instead of an HTTP cache's copy. A null version means removed. Keyed
  * by the agent's public slug, which is no wallet's secret, so it is not a
- * forget hook's business. Home's and You's faces read it through [ownFaceOf];
- * the app-wide face renderer should read it the same way.
+ * forget hook's business. Every face and banner the app draws (AgentFace,
+ * AgentBanner, the You tab's preview) reads it through [faceSourceOf], so an
+ * upload shows on Home, You, the Feed and a profile at once.
  */
 object AgentImageRevisions {
   private val state = MutableStateFlow<Map<String, String?>>(emptyMap())
@@ -864,29 +865,33 @@ object AgentImageRevisions {
   }
 }
 
-/** What the face on Home's hero and You's agent card draws. */
-sealed interface OwnFace {
-  /** The seeded initials, and nothing to fetch. */
-  data object Initials : OwnFace
+/** What an agent's face (or banner) is drawn from. */
+sealed interface FaceSource {
+  /** The seeded initials (or no banner), and nothing to fetch. */
+  data object Initials : FaceSource
 
   /** The served picture, at [version] when this app wrote one (the cache-buster), else as served. */
-  data class Picture(val slug: String, val version: String?) : OwnFace
+  data class Picture(val slug: String, val version: String?) : FaceSource
 }
 
 /**
- * THE OWNER'S OWN FACE, the web's useAgentImageSrc rule exactly: no slug is the
+ * AN AGENT'S PICTURE, the web's useAgentImageSrc rule exactly: no slug is the
  * initials; a picture this app just REMOVED is the initials too (null in
  * [AgentImageRevisions], so no cache is asked for the old one); one it just
- * UPLOADED is read at its new version, so the owner sees it on Home and You at
+ * UPLOADED is read at its new version, so the owner sees it on every screen at
  * once instead of only in the Pictures preview; anything else is read as the
  * server has it, and an agent with no picture answers 404 and keeps its
- * initials.
+ * initials. The avatar and the banner are separate pictures.
  */
-fun ownFaceOf(slug: String?, revisions: Map<String, String?>): OwnFace {
-  val s = slug?.takeIf { it.isNotBlank() } ?: return OwnFace.Initials
-  val key = AgentImageRevisions.key(s, AgentImageKind.Avatar)
-  if (revisions.containsKey(key) && revisions[key] == null) return OwnFace.Initials
-  return OwnFace.Picture(s, revisions[key])
+fun faceSourceOf(
+  slug: String?,
+  revisions: Map<String, String?>,
+  kind: AgentImageKind = AgentImageKind.Avatar,
+): FaceSource {
+  val s = slug?.takeIf { it.isNotBlank() } ?: return FaceSource.Initials
+  val key = AgentImageRevisions.key(s, kind)
+  if (revisions.containsKey(key) && revisions[key] == null) return FaceSource.Initials
+  return FaceSource.Picture(s, revisions[key])
 }
 
 // ── naming the agent ───────────────────────────────────────────────────────
