@@ -92,6 +92,11 @@ class PersistentCookieJar(private val store: CookieBlob) : CookieJar {
 
   private val memory = mutableMapOf<String, Cookie>()
 
+  /**
+   * True once the stored blob is in [memory]. Stays false while an older
+   * build's blob is WAITING for an address it can belong to (see [loadOnce]);
+   * until then [persist] writes nothing, so the blob is still on disk.
+   */
   @Volatile private var loaded = false
 
   private fun key(c: Cookie) = c.name + "\u0000" + c.domain + "\u0000" + c.path
@@ -102,35 +107,48 @@ class PersistentCookieJar(private val store: CookieBlob) : CookieJar {
       if (loaded) return
       val raw = runBlocking { store.cookiesRaw() }.orEmpty().trim()
       val now = System.currentTimeMillis()
-      val isLegacy = raw.isNotEmpty() && !raw.startsWith("[")
-      val cookies = if (isLegacy) {
-        legacy(raw)
+      if (raw.isNotEmpty() && !raw.startsWith("[")) {
+        // AN OLDER BUILD'S BLOB, WITH NOWHERE TO GO YET. The one install that
+        // has a Server address which will not parse is one an older build let
+        // save "app.merrymen.dev" with no scheme — and that owner was signed
+        // in. Placing the blob on no host and writing the empty result back
+        // signed them out without a word. So it is left on disk exactly as it
+        // is, and the next load tries again: once the owner fixes the address
+        // in Settings, the session is placed on that server, which in this
+        // one case is the same server typed properly.
+        val host = runBlocking { store.originNow() }.toHttpUrlOrNull()?.host ?: return
+        // A waiting cookie a fresher answer already replaced stays replaced.
+        legacy(raw, host).filter { it.expiresAt > now }.forEach { memory.putIfAbsent(key(it), it) }
+        loaded = true
+        // REWRITTEN AT ONCE, not on the next change. A legacy blob says nothing
+        // about its host, so left on disk it would be placed on whatever origin
+        // is stored at the NEXT launch — after a Server change, the new one.
+        persist()
       } else {
         runCatching { cookieJson.decodeFromString<List<StoredCookie>>(raw.ifEmpty { "[]" }) }.getOrDefault(emptyList())
           .mapNotNull { runCatching { it.toCookie() }.getOrNull() }
+          .filter { it.expiresAt > now }
+          .forEach { memory.putIfAbsent(key(it), it) }
+        loaded = true
       }
-      cookies.filter { it.expiresAt > now }.forEach { memory[key(it)] = it }
-      // REWRITTEN AT ONCE, not on the next change. A legacy blob says nothing
-      // about its host, so left on disk it would be placed on whatever origin
-      // is stored at the NEXT launch — after a Server change, the new one.
-      if (isLegacy) persist()
-      loaded = true
     }
   }
 
-  /** `name=value` lines from 0.1.0, placed on the host they were stored against. */
-  private fun legacy(raw: String): List<Cookie> {
-    if (raw.isEmpty()) return emptyList()
-    val host = runBlocking { store.originNow() }.toHttpUrlOrNull()?.host ?: return emptyList()
-    return raw.split('\n').mapNotNull { line ->
+  /**
+   * `name=value` lines from 0.1.0, placed on [host]. A retired name is not
+   * read at all: mm_gate's value is the old site password, and a blob that
+   * waited past the start that drops it would otherwise carry it back in.
+   */
+  private fun legacy(raw: String, host: String): List<Cookie> =
+    raw.split('\n').mapNotNull { line ->
       val eq = line.indexOf('=')
       if (eq <= 0) return@mapNotNull null
+      val name = line.substring(0, eq).trim()
+      if (name in WebAuth.RETIRED_COOKIES) return@mapNotNull null
       runCatching {
-        Cookie.Builder().name(line.substring(0, eq).trim()).value(line.substring(eq + 1).trim())
-          .hostOnlyDomain(host).path("/").build()
+        Cookie.Builder().name(name).value(line.substring(eq + 1).trim()).hostOnlyDomain(host).path("/").build()
       }.getOrNull()
     }
-  }
 
   override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
     loadOnce()
@@ -158,10 +176,12 @@ class PersistentCookieJar(private val store: CookieBlob) : CookieJar {
     }
   }
 
+  /** Everything, on every host — a waiting older blob too: a sign-out forgets that session as well. */
   fun clear() {
     loadOnce()
     synchronized(this) {
       memory.clear()
+      loaded = true
       persist()
     }
   }
@@ -180,6 +200,10 @@ class PersistentCookieJar(private val store: CookieBlob) : CookieJar {
   }
 
   private fun persist() {
+    // An older blob still waiting for its host is the only copy of that
+    // session; writing memory over it would be the silent sign-out loadOnce
+    // exists to avoid.
+    if (!loaded) return
     val blob = cookieJson.encodeToString(memory.values.map { StoredCookie.of(it) })
     runBlocking { store.setCookiesRaw(blob) }
   }

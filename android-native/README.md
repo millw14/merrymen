@@ -73,9 +73,10 @@ pooled connection.
 
 **The Server field** (Settings) takes `https://…`, or plain `http://` only for
 `localhost` and `10.0.2.2` — the hosts `network_security_config.xml` allows in
-the clear. Anything else is refused with a sentence and not saved. Moving to
-another host ends the wallet's turn: per-wallet state is forgotten, and the
-session cookie stays with the host that set it.
+the clear — and only the server's address: a page such as `/home`, a query, a
+fragment or a user name is refused. Anything else is refused with a sentence
+and not saved. Moving to another host ends the wallet's turn: per-wallet state
+is forgotten, and the session cookie stays with the host that set it.
 
 ---
 

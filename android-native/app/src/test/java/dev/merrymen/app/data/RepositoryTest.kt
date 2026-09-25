@@ -171,6 +171,21 @@ class RepositoryTest {
     assertFalse(store.cookieBlob!!.contains("mm_gate"))
   }
 
+  @Test fun anOwnerWhoFixesASchemelessServerIsStillSignedIn() = runBlocking {
+    // An older build saved "localhost:<port>" with no scheme while its owner
+    // was signed in; the session blob is from before, with no host in it.
+    store.originState.value = "localhost:${server.port}"
+    store.cookieBlob = "mm_session=abc"
+    assertTrue(repo.bootstrap() is Loaded.Unreachable)
+    assertEquals("the start left the session on disk", "mm_session=abc", store.cookieBlob)
+
+    assertEquals(OriginCheck.Ok(server.origin()), repo.setOrigin(server.origin()))
+    server.session("0xAAA")
+    repo.refreshIdentity()
+    assertEquals("mm_session=abc", sentCookies(server))
+    assertEquals("0xAAA", repo.signedIn.value)
+  }
+
   @Test fun aStartAgainstAnAddressThatIsNotOneIsAnAnswerNotACrash() = runBlocking {
     store.originState.value = "app.merrymen.dev" // stored by an older build
     val r = repo.bootstrap()

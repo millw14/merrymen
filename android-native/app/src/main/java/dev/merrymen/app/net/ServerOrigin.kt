@@ -66,6 +66,17 @@ fun checkOrigin(raw: String, fallback: String): OriginCheck {
   ) {
     return OriginCheck.Refused("Enter just the server's address, with nothing after ? or # and no user name in it.")
   }
+  // A PAGE IS NOT A SERVER. Every route is appended to the stored address, so
+  // "https://app.merrymen.dev/home" — the web's own sign-in page, and the
+  // likeliest thing to be pasted here — made every read ask /home/api/…, and
+  // every screen said "The server said no: HTTP 404" with nothing pointing at
+  // this field. The trailing slash was trimmed above, so a bare origin's path
+  // is "/".
+  if (url.encodedPath != "/") {
+    return OriginCheck.Refused(
+      "Enter just the server's address, like https://app.merrymen.dev — without /home or any other page after it.",
+    )
+  }
   // Stored the way the parser reads it — scheme and host lowercased, a default
   // port dropped — so the same server typed two ways is one stored address.
   return OriginCheck.Ok(url.toString().trimEnd('/'))

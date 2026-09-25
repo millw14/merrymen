@@ -56,6 +56,17 @@ class ServerOriginTest {
     refused("https://owner:secret@app.merrymen.dev")
   }
 
+  @Test fun aPageIsNotAServer() {
+    // The web's sign-in page is the likeliest paste. Stored, every read asked
+    // /home/api/… and every screen said "HTTP 404" with nothing pointing here.
+    assertTrue(refused("https://app.merrymen.dev/home").contains("/home"))
+    refused("https://app.merrymen.dev/sub/")
+    refused("http://10.0.2.2:3100/api")
+    refused("https://app.merrymen.dev/ path")
+    // A trailing slash is not a page.
+    assertEquals("https://app.merrymen.dev", ok("https://app.merrymen.dev//"))
+  }
+
   @Test fun storedTheWayTheParserReadsIt() {
     assertEquals("https://app.merrymen.dev", ok("  HTTPS://App.Merrymen.dev/  "))
     assertEquals("https://app.merrymen.dev", ok("https://app.merrymen.dev:443"))

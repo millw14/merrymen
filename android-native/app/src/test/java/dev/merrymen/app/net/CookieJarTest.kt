@@ -4,6 +4,7 @@ import okhttp3.Cookie
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -64,6 +65,55 @@ class CookieJarTest {
     assertTrue(store.cookieBlob!!.startsWith("["))
     store.originState.value = "https://evil.example"
     assertTrue(jar(store).names(other).isEmpty())
+  }
+
+  // ── an older build's blob with no address to put it on yet ───────────────
+
+  @Test fun anOlderBuildsBlobWaitsForAnAddressThatParses() {
+    // A 0.2.0 owner, signed in, who then saved the Server with no scheme: the
+    // blob came from a real server, and the stored address names none.
+    val store = MemoryStore("app.merrymen.dev").apply { cookieBlob = "mm_gate=pw\nmm_session=abc" }
+    val first = jar(store)
+    first.drop("mm_gate") // what every start does first
+    assertTrue(first.names(hosted).isEmpty())
+    assertEquals("left on disk exactly as it was", "mm_gate=pw\nmm_session=abc", store.cookieBlob)
+
+    // The owner fixes the address; the next start still has the session.
+    store.originState.value = "https://app.merrymen.dev"
+    val cold = jar(store)
+    assertEquals(listOf("mm_session=abc"), cold.names(hosted))
+    assertTrue(cold.names(other).isEmpty())
+    assertTrue("rewritten with its host at once", store.cookieBlob!!.startsWith("["))
+    assertFalse("the retired password is never read back in", store.cookieBlob!!.contains("mm_gate"))
+  }
+
+  @Test fun theSameRunPicksItUpOnceTheAddressIsFixed() {
+    val store = MemoryStore("app.merrymen.dev").apply { cookieBlob = "mm_session=abc" }
+    val j = jar(store)
+    assertTrue(j.names(hosted).isEmpty())
+    store.originState.value = "https://app.merrymen.dev"
+    assertEquals(listOf("mm_session=abc"), j.names(hosted))
+  }
+
+  @Test fun aCookieSetWhileTheBlobWaitsDoesNotWriteOverIt() {
+    // Nothing is written while it waits, so an answer from somewhere else
+    // cannot replace the only copy of that session with its own cookie.
+    val store = MemoryStore("app.merrymen.dev").apply { cookieBlob = "mm_session=abc" }
+    val j = jar(store)
+    j.set(other, "theirs=1; Path=/")
+    assertEquals("mm_session=abc", store.cookieBlob)
+    store.originState.value = "https://app.merrymen.dev"
+    assertEquals(listOf("mm_session=abc"), j.names(hosted))
+    assertEquals(listOf("theirs=1"), j.names(other))
+    assertEquals("both, once it has a host", setOf("mm_session=abc", "theirs=1"), jar(store).let { it.names(hosted) + it.names(other) }.toSet())
+  }
+
+  @Test fun aSignOutForgetsAWaitingBlobToo() {
+    val store = MemoryStore("app.merrymen.dev").apply { cookieBlob = "mm_session=abc" }
+    jar(store).clear()
+    assertEquals("[]", store.cookieBlob)
+    store.originState.value = "https://app.merrymen.dev"
+    assertTrue(jar(store).names(hosted).isEmpty())
   }
 
   @Test fun anExpiredCookieIsADelete() {
