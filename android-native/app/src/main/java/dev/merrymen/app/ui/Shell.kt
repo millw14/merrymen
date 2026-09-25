@@ -10,8 +10,11 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -19,8 +22,10 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -30,6 +35,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -37,11 +45,13 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import dev.merrymen.app.LocalContainer
+import kotlinx.coroutines.flow.collectLatest
 import dev.merrymen.app.ui.screens.AgentDetailScreen
 import dev.merrymen.app.ui.screens.AlphaScreen
 import dev.merrymen.app.ui.screens.ChatScreen
 import dev.merrymen.app.ui.screens.CircleScreen
 import dev.merrymen.app.ui.screens.FeedScreen
+import dev.merrymen.app.ui.screens.GroupChatScreen
 import dev.merrymen.app.ui.screens.HomeScreen
 import dev.merrymen.app.ui.screens.LeaderboardScreen
 import dev.merrymen.app.ui.screens.MarketsScreen
@@ -88,6 +98,8 @@ object Routes {
   const val PROPOSALS = "proposals"
   const val TRADE = "trade"
   const val RISK = "risk"
+  /** The fleet room — every hosted Merryman in one chat. Hosted only. */
+  const val GROUPCHAT = "groupchat"
 
   const val TOKEN = "token/{address}"
   fun token(address: String) = "token/$address"
@@ -96,9 +108,19 @@ object Routes {
 
   /** A delegated signature ceremony, by web path. */
   const val WEB = "web?path={path}&title={title}"
-  fun web(path: String, title: String) =
-    "web?path=" + java.net.URLEncoder.encode(path, "UTF-8") +
-      "&title=" + java.net.URLEncoder.encode(title, "UTF-8")
+  fun web(path: String, title: String) = "web?path=" + arg(path) + "&title=" + arg(title)
+
+  /**
+   * ONE ROUTE ARGUMENT, ENCODED THE WAY NAVIGATION DECODES IT.
+   *
+   * URLEncoder is a FORM encoder: it writes a space as '+'. Navigation reads a
+   * query argument back with Uri.decode, which only undoes %XX and leaves '+'
+   * alone — so every web screen's title came out as "Trading+limits" and
+   * "Wallet+&+permissions". A '+' the caller actually wrote is already "%2B"
+   * by this point, so every '+' left is a space and "%20" says so in the form
+   * both ends read.
+   */
+  internal fun arg(value: String): String = java.net.URLEncoder.encode(value, "UTF-8").replace("+", "%20")
 }
 
 private data class Tab(val route: String, val label: String)
@@ -119,11 +141,23 @@ fun Shell() {
   // WHICH SCREEN OPENS is decided before the NavHost composes, so the reader
   // never sees Home flash behind the welcome page. Null means "not decided yet"
   // and holds the graph back; the Box's own background covers that instant.
-  var start by remember { mutableStateOf<String?>(null) }
+  //
+  // DECIDED ONCE, NOT ONCE PER ACTIVITY. A rotation recreates the Activity and
+  // this composable with it; with `remember` the graph was held back again on
+  // every turn of the phone until the start had been asked for again. Saved,
+  // the graph composes at once with the back stack it had.
+  var start by rememberSaveable { mutableStateOf<String?>(null) }
   LaunchedEffect(Unit) {
+    // Already decided: a rotation, which the process outlived (the start is
+    // done, and this asks nothing), or a process the system ended and
+    // restored, which runs its one start now, behind the restored screens.
+    if (start != null) {
+      container.started()
+      return@LaunchedEffect
+    }
     // THE ROUTE IS DECIDED FROM A LOCAL READ, NOT A NETWORK ONE. welcomedNow()
-    // is a DataStore read (sub-millisecond); bootstrap() is three network
-    // round-trips (open the gate, read version, read identity). Waiting for
+    // is a DataStore read (sub-millisecond); bootstrap() is two network
+    // round-trips (read version, read identity). Waiting for
     // bootstrap before composing ANYTHING left the screen black for the whole
     // network wait — measured as the ~1s "jank" on the welcome page, which was
     // never the logos and never CPU: it was the app refusing to draw until the
@@ -131,31 +165,43 @@ fun Shell() {
     //
     // So: a fresh install that has not been welcomed goes straight to the
     // welcome page with zero network on the critical path, and bootstrap runs
-    // AFTER — the welcome's three doors don't need the gate open. Anyone who has
-    // been welcomed goes to Home, and THERE bootstrap must finish first, because
-    // Home's own reads 401 until the gate is open (Repository.bootstrap).
+    // AFTER — the welcome's three doors need no server. Anyone who has been
+    // welcomed goes to Home, and there bootstrap still finishes first. It no
+    // longer has to (it did while the site gate made Home's reads 401 until it
+    // was open), but it means identity is settled before the first screen that
+    // asks about it composes.
     val welcomed = container.session.welcomedNow()
     if (!welcomed) {
       start = Routes.WELCOME
-      container.repo.bootstrap()
+      container.started()
     } else {
-      container.repo.bootstrap()
+      container.started()
       start = Routes.HOME
+    }
+  }
+
+  // UNTIL SOMEBODY SAYS WHO IS SIGNED IN, KEEP ASKING — while the app is in
+  // front. bootstrap asks once; a start that reached nothing left identity
+  // unknown for the life of the process, and every screen that waits on it
+  // with it (Repository.askUntilKnown). A Server change makes it unknown
+  // again, and this starts over.
+  val lifecycle = LocalLifecycleOwner.current.lifecycle
+  LaunchedEffect(lifecycle) {
+    lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+      container.repo.identityKnown.collectLatest { known -> if (!known) container.repo.askUntilKnown() }
     }
   }
 
   val entry by nav.currentBackStackEntryAsState()
   val current = entry?.destination?.route
   val onTab = TABS.any { it.route == current }
+  val chatUnread by container.chat.unread.collectAsState()
 
   // NOT A Scaffold BOTTOM BAR. The web's `.tabbar` is `position: fixed` and the
   // page scrolls UNDER it, so the bar overlays the content rather than taking a
   // slice of the layout. A Scaffold bottomBar would shorten every screen by the
   // bar's height and change where everything sits.
   Box(Modifier.fillMaxSize().background(MerryColors.bg)) {
-    // Provided once: while the site gate is shut EVERY screen is refused, and
-    // every one of them needs the same way out — the password field in
-    // Settings, not a wallet signature. See LoadedBlock.
     // `LocalContentColor` MUST BE PROVIDED HERE, and dropping the Scaffold is
     // what stopped it being. Material's `Text` falls back to
     // `LocalContentColor.current` when no colour is passed, and that local is
@@ -164,7 +210,6 @@ fun Shell() {
     // did not name a colour vanished while every Text that did stayed lit. On
     // the device that read as a half-rendered screen, not as a missing default.
     CompositionLocalProvider(
-      LocalOpenSettings provides { nav.navigate(Routes.SETTINGS) },
       LocalContentColor provides MerryColors.tx,
       LocalBottomInset provides BOTTOM_INSET,
     ) {
@@ -187,7 +232,7 @@ fun Shell() {
       }
     }
     if (onTab) {
-      TabBar(current) { route ->
+      TabBar(current, chatUnread) { route ->
         nav.navigate(route) {
           popUpTo(Routes.HOME) { saveState = true }
           launchSingleTop = true
@@ -232,7 +277,7 @@ fun Shell() {
  * of the effect, and that is what is here — stated rather than silently dropped.
  */
 @Composable
-private fun TabBar(current: String?, onSelect: (String) -> Unit) {
+private fun TabBar(current: String?, chatUnread: Int, onSelect: (String) -> Unit) {
   Box(
     Modifier
       .fillMaxSize()
@@ -256,6 +301,7 @@ private fun TabBar(current: String?, onSelect: (String) -> Unit) {
       TABS.forEach { tab ->
         val on = current == tab.route
         val tint = if (on) MerryColors.tx else MerryColors.faint
+        val dot = tab.route == Routes.CHAT && chatUnread > 0
         Box(
           Modifier
             .weight(1f)
@@ -268,7 +314,9 @@ private fun TabBar(current: String?, onSelect: (String) -> Unit) {
               // 24dp pill draws a rectangle through the corners.
               indication = null,
             ) { onSelect(tab.route) }
-            .semantics { contentDescription = tab.label },
+            // The web puts "New in chat" on the dot itself; a dot has no node
+            // here, so the tab says it.
+            .semantics { contentDescription = if (dot) tab.label + ", new in chat" else tab.label },
           contentAlignment = Alignment.Center,
         ) {
           when (tab.route) {
@@ -279,10 +327,32 @@ private fun TabBar(current: String?, onSelect: (String) -> Unit) {
             Routes.ALPHA -> AlphaIcon(tint)
             else -> YouIcon(tint)
           }
+          if (dot) UnreadDot(Modifier.align(Alignment.TopCenter))
         }
       }
     }
   }
+}
+
+/**
+ * THE CHAT TAB'S UNREAD DOT — `chat.css:74-83`: an 8px `--lime` circle, 12px
+ * from the tab's top and 16px right of its centre, ringed 2px in the bar's own
+ * ground so it reads as sitting ON the bar rather than in the icon.
+ *
+ * It is drawn from ChatThread.unread and nothing else. Something arrived that
+ * the owner has not seen; it says no more than that, and never a count.
+ */
+@Composable
+private fun UnreadDot(modifier: Modifier) {
+  Box(
+    modifier
+      // Centre at +12 so the 8dp dot's right edge sits at centre + 16.
+      .offset(x = 12.dp, y = 10.dp)
+      .size(12.dp)
+      .background(MerryColors.card, CircleShape)
+      .padding(2.dp)
+      .background(MerryColors.lime, CircleShape),
+  )
 }
 
 private fun NavGraphBuilder.graph(nav: NavHostController) {
@@ -303,6 +373,7 @@ private fun NavGraphBuilder.graph(nav: NavHostController) {
   composable(Routes.PROPOSALS) { ProposalsScreen(nav) }
   composable(Routes.TRADE) { TradeScreen(nav) }
   composable(Routes.RISK) { RiskScreen(nav) }
+  composable(Routes.GROUPCHAT) { GroupChatScreen(nav) }
 
   composable(Routes.TOKEN) { back ->
     TokenDetailScreen(nav, back.arguments?.getString("address").orEmpty())

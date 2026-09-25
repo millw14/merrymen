@@ -78,6 +78,12 @@
 .mcp-connect .mcp-hub-address-row code { flex: 1 1 220px; min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: #0b0c08; color: var(--tx); font-family: var(--mono); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .mcp-connect .mcp-hub-know ul { margin: 8px 0 0; padding-left: 18px; }
 .mcp-connect .mcp-hub-know li { margin: 7px 0; color: var(--tx-2); font-size: 13px; line-height: 1.7; }
+/* For AI assistants: small print at the very end, for an assistant that fetched the page while setting Merrymen up. */
+.mcp-connect .mcp-hub-section.mcp-hub-ai { margin-top: 24px; padding-top: 16px; }
+.mcp-connect .connect-panel .mcp-hub-ai h2 { margin: 0 0 6px; color: var(--tx-2); font-size: 11px; font-weight: 500; letter-spacing: .11em; line-height: 1.4; text-transform: uppercase; }
+.mcp-connect .mcp-hub-ai ul { margin: 0; padding-left: 18px; }
+.mcp-connect .mcp-hub-ai li { margin: 3px 0; color: var(--tx-2); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.mcp-connect .mcp-hub-ai code { font-family: var(--mono); font-size: 11px; color: var(--tx); }
 .mcp-connect .connect-footer a { color: var(--tx-2); text-underline-offset: 3px; }
 /* The empty state on Connected apps offers the same one-click install. */
 .mcp-connect .mcp-hub-empty { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 20px; }

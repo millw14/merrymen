@@ -4,6 +4,11 @@
 every link and command below, with Copy buttons, and shows which assistants
 are already connected when you are signed in.
 
+**Or tell Claude** “set up merrymen mcp”. The setup instructions written for
+AI assistants are at <https://merrymen.dev/llms.txt> (give Claude that address
+if it does not find them); the Claude steps for people are at
+<https://merrymen.dev/claude>.
+
 **Server address:** `https://mcp.merrymen.dev/mcp` (Streamable HTTP, OAuth 2.1).
 
 Every client below uses the same server and the same tools. There is no
@@ -107,7 +112,7 @@ Claude account, the connector is there already (`/mcp` lists it as
 then takes precedence over the connector (Claude Code treats two servers at the
 same address as one), so you sign in once more.
 
-**Without the plugin:**
+**Without the plugin** (use one route, the plugin or this, not both):
 
 ```bash
 claude mcp add --transport http --scope user merrymen https://mcp.merrymen.dev/mcp

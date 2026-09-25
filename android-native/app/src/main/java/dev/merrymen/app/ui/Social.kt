@@ -207,7 +207,9 @@ fun LikeButton(postId: String?) {
           when {
             !likes.signedIn -> note = "Sign in from the You tab to like posts."
             !likes.mineRead ->
-              note = "We could not reach your likes just now, so this would not be saved."
+              // Unread, not "unreachable": the read may have come back in a
+              // form this app could not read, and either way nothing is known.
+              note = "Your likes couldn't be read just now, so this would not be saved."
             else -> scope.launch { note = c.social.toggleLike(postId, !mine) }
           }
         }
@@ -316,7 +318,12 @@ fun WireButton(slug: String, name: String, onSignIn: (() -> Unit)? = null) {
   val c = LocalContainer.current
   val wired by c.social.wired.collectAsState()
   val scope = rememberCoroutineScope()
-  var note by remember { mutableStateOf<String?>(null) }
+  // THE STORE'S NOTE, not the button's: the write runs on after this page is
+  // left, and a refusal that lands then is still said here when the reader
+  // comes back. Only this desk's: a note about wiring one agent must not
+  // follow the reader onto the next agent's page.
+  val wireNote by c.social.wireNote.collectAsState()
+  val note = wireNote?.takeIf { it.slug == slug }?.text
 
   val on = wired.has(slug)
   val full = !on && wired.full
@@ -367,10 +374,10 @@ fun WireButton(slug: String, name: String, onSignIn: (() -> Unit)? = null) {
       WireToggle(
         label = if (on) "wired" else "wire in",
         on = on,
-        enabled = !full,
+        // Not while a write is on its way: one at a time, as the web's is.
+        enabled = !full && !wired.busy,
       ) {
-        note = null
-        scope.launch { note = c.social.toggleWire(slug, !on) }
+        scope.launch { c.social.toggleWire(slug, !on) }
       }
       Budget(count = wired.wired.size, max = wired.max)
     }

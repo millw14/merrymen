@@ -143,7 +143,7 @@ export default function Home() {
               <Link href="/api" className="btn btn-ghost btn-lg">Build with Merrymen <Icon name="arrow" size={16}/></Link>
             </div>
             <p className="hero-meta">RUN IT HOSTED. SELF-HOST IT. MAKE IT YOURS.</p>
-            <div className="hero-bottom-links"><Link href="/docs">Read the docs ↗</Link><a href={GITHUB}>Explore the source ↗</a></div>
+            <div className="hero-bottom-links" style={{ flexWrap: "wrap", rowGap: 10 }}><Link href="/docs">Read the docs ↗</Link><Link href="/claude">Use it in Claude ↗</Link><a href={GITHUB}>Explore the source ↗</a></div>
           </div>
           <AgentPreview />
         </div>
