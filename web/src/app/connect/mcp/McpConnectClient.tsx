@@ -309,7 +309,7 @@ export function McpConnectClient({ url, app, enabled, disabledWhy }: { url: stri
                 <li>Claude asks before each action. To stop it asking for read-only look-ups, open Claude → Customize → Connectors → Merrymen and set Read-only tools to Always allow.</li>
                 <li>It only sees the agent and permissions you allow when you connect. Disconnect it any time on <a href="/connect/apps">Connected apps</a>.</li>
                 <li>It can suggest trades or setting changes only if you allow that, and nothing happens until you approve them in Merrymen.</li>
-                <li>It can never move your funds, see your keys, turn on live trading or loosen your limits.</li>
+                <li>It can never move your funds, see your keys, turn on live trading or loosen your signed limits.</li>
                 <li>Paper (practice) results are always kept apart from real money.</li>
               </ul>
             </section>

@@ -103,6 +103,10 @@ describe("the production text", () => {
     assert.ok(text.includes("and in Claude Code when Claude Code is signed in with the same claude.ai account"), "a claude.ai connector reaches Claude Code only on that login");
   });
 
+  it("says which limits it can never loosen: the signed ones (a settings proposal the owner approves can still change others)", () => {
+    assert.ok(text.includes("It can never move funds, see keys, turn on live trading or loosen the owner's signed limits."));
+  });
+
   it("is llms.txt-shaped: one H1 title, a blockquote summary, the setup, then links", () => {
     assert.equal(lines[0], "# Merrymen");
     assert.equal(lines.filter((l) => l.startsWith("# ")).length, 1);

@@ -646,7 +646,8 @@ const cancel = defineTool({
   anyOf: ANY_PROPOSAL,
   input: z.object({ proposal_id: PROPOSAL_ID }).strict(),
   output: VIEW,
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // Destructive: a cancelled proposal cannot be reopened, and a withdrawn trade is gone; the owner has to ask again.
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   async handler(args, ctx) {
     const owned = await ownedProposal(ctx, args.proposal_id);
     const d = await ctx.mcp();
