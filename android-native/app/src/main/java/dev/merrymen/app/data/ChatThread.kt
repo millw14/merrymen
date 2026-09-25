@@ -18,6 +18,7 @@ import dev.merrymen.app.net.perTradeUsdg
 import dev.merrymen.app.net.pollOrder
 import dev.merrymen.app.net.receiptOf
 import dev.merrymen.app.net.valueOrNull
+import dev.merrymen.app.ui.ChatMove
 import dev.merrymen.app.ui.asksAmount
 import dev.merrymen.app.ui.chatStateOf
 import dev.merrymen.app.ui.failureLine
@@ -87,14 +88,28 @@ data class ChatLine(
   val order: LineOrder? = null,
   val failed: String? = null,
   @Transient val retry: String? = null,
+  /** The trade this line is about, once the tape showed it — the join that keeps one trade to one line (ChatFills). */
+  val tradeKey: String? = null,
+  /** That trade as the tape last read it. Never written to disk: a thread read back gets it again from the tape. */
+  @Transient val trade: ChatMove? = null,
 )
 
 /** An order still being followed, and when to stop asking — on this phone's clock. */
 @Serializable
 data class KeptOrder(val id: String, val until: Long)
 
-/** Whose thread is in hand, and what is in it. [key] null is "nobody's": nothing is shown or kept. */
-data class ThreadState(val key: String?, val messages: List<ChatLine>, val orders: List<KeptOrder>) {
+/**
+ * Whose thread is in hand, and what is in it. [key] null is "nobody's": nothing
+ * is shown or kept. [since] is the watermark below which the agent's own fills
+ * are history rather than news (epoch seconds, the tape's clock), null until
+ * the tape has been read once for this thread.
+ */
+data class ThreadState(
+  val key: String?,
+  val messages: List<ChatLine>,
+  val orders: List<KeptOrder>,
+  val since: Long? = null,
+) {
   /**
    * THE LINES A SCREEN MAY DRAW for the session as it stands NOW — none unless
    * this thread is that session's. The forget hooks do not run when a session
@@ -184,7 +199,12 @@ class FileThreadStore(private val dir: File) : ThreadStore {
 }
 
 @Serializable
-internal data class KeptFile(val v: Int = 2, val messages: List<ChatLine> = emptyList(), val orders: List<KeptOrder> = emptyList())
+internal data class KeptFile(
+  val v: Int = 2,
+  val messages: List<ChatLine> = emptyList(),
+  val orders: List<KeptOrder> = emptyList(),
+  val since: Long? = null,
+)
 
 private val keptJson = Json {
   ignoreUnknownKeys = true
@@ -217,13 +237,17 @@ internal fun decodeThread(raw: String?): KeptFile {
     // A receipt goes through the route's own field checks again: it is printed
     // as a fact about money, and this file is only as trustworthy as the disk.
     val order = line.order?.takeIf { ORDER_ID.matches(it.id) }?.let { o ->
-      o.copy(receipt = o.receipt?.let { r -> receiptOf(keptJson.encodeToJsonElement(OrderReceipt.serializer(), r)) })
+      o.copy(
+        receipt = o.receipt?.let { r -> receiptOf(keptJson.encodeToJsonElement(OrderReceipt.serializer(), r)) },
+        serverPlacedAt = o.serverPlacedAt?.takeIf { it > 0 },
+      )
     }
     line.copy(
       text = line.text.take(8_000),
       side = line.side?.takeIf { it == "buy" || it == "sell" },
       order = order,
       failed = line.failed?.takeIf { it in FAILURES },
+      tradeKey = line.tradeKey?.takeIf { it.isNotEmpty() && it.length <= 200 },
     )
   }
   val orders = (root["orders"] as? JsonArray).orEmpty().mapNotNull { el ->
@@ -233,7 +257,9 @@ internal fun decodeThread(raw: String?): KeptFile {
       null
     }
   }
-  return KeptFile(messages = lines.takeLast(MAX_LINES), orders = orders)
+  val since = (root["since"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { !it.isString }
+    ?.content?.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0 }?.toLong()
+  return KeptFile(messages = lines.takeLast(MAX_LINES), orders = orders, since = since)
 }
 
 // ── confirming ──────────────────────────────────────────────────────────────
@@ -413,8 +439,13 @@ class ChatThread internal constructor(
       }
     }
     if (lastKey != key) return
-    state.value = ThreadState(key, kept.messages, kept.orders)
-    if (key != null) kept.orders.forEach { startFollow(key, it) }
+    state.value = ThreadState(key, kept.messages, kept.orders, kept.since)
+    if (key != null && kept.orders.isNotEmpty()) {
+      // Read the book before the first answer can land, so a receipt finds the
+      // fill the tape may already show (absorbFill needs the trade in hand).
+      appScope.launch { readSnapshot(key) }
+      kept.orders.forEach { startFollow(key, it) }
+    }
   }
 
   /** Drop the current wallet's thread. A forget hook: runs on sign-out, a wallet switch and a server change. */
@@ -459,7 +490,7 @@ class ChatThread internal constructor(
   /** Empty this owner's thread. */
   fun clearThread() {
     val key = state.value.key ?: return
-    update(key) { it.copy(messages = emptyList(), orders = emptyList()) }
+    update(key) { it.copy(messages = emptyList(), orders = emptyList(), since = null) }
     _card.value = null
     _streaming.value = null
   }
@@ -477,12 +508,15 @@ class ChatThread internal constructor(
   private fun update(key: String, fn: (ThreadState) -> ThreadState): Boolean {
     var changed = false
     state.update { t ->
-      if (t.key == key) {
-        changed = true
-        val next = fn(t)
-        next.copy(messages = next.messages.takeLast(MAX_LINES))
-      } else {
+      val next = if (t.key == key) fn(t) else t
+      changed = next !== t
+      if (!changed) {
         t
+      } else {
+        // Capped here, for every change — and the watermark moves past any
+        // trade the trim removes, so the tape cannot bring it back as news.
+        val (messages, since) = capThread(next.messages, next.since)
+        next.copy(messages = messages, since = since)
       }
     }
     if (changed) keep()
@@ -495,10 +529,10 @@ class ChatThread internal constructor(
         val t = state.value
         val key = t.key ?: return@withLock
         if (key != diskKey) return@withLock
-        if (t.messages.isEmpty() && t.orders.isEmpty()) {
+        if (t.messages.isEmpty() && t.orders.isEmpty() && t.since == null) {
           store.delete(key)
         } else {
-          val file = KeptFile(messages = t.messages, orders = t.orders)
+          val file = KeptFile(messages = t.messages, orders = t.orders, since = t.since)
           store.save(key, keptJson.encodeToString(KeptFile.serializer(), file))
         }
       }
@@ -532,8 +566,27 @@ class ChatThread internal constructor(
     if (keyNow() == key && state.value.key == key) {
       good = key to merged
       _snapshot.value = merged
+      // Only a feed that ANSWERED is a tape; a failed read is not an empty one.
+      chatTape(merged.grants?.exists, fresh.feed)?.let { mergeTape(key, it) }
     }
     return merged
+  }
+
+  /**
+   * THE AGENT'S OWN FILLS INTO THIS OWNER'S THREAD (ChatFills.mergeFills). The
+   * first tape the thread sees is history, so it sets the watermark and adds
+   * nothing; after that each new landed fill is one line, and one landing
+   * while Chat is not on screen lights the dot.
+   */
+  private fun mergeTape(key: String, moves: List<ChatMove>) {
+    var added = false
+    update(key) { t ->
+      val since = t.since ?: newestAt(moves)
+      val merged = mergeFills(t.messages, moves, since)
+      added = merged.any { m -> m.role == "event" && t.messages.none { it.id == m.id } }
+      if (merged === t.messages && since == t.since) t else t.copy(messages = merged, since = since)
+    }
+    if (added) arrived()
   }
 
   /**
@@ -709,13 +762,16 @@ class ChatThread internal constructor(
           say = { line, poll ->
             // THE WORKER'S WORDS, and its receipt when it wrote one — both read
             // off the ledger. Nothing here infers an outcome.
+            val answer = ChatLine(
+              lineId("order"), "agent", clock(), line,
+              order = LineOrder(order.id, receipt = poll?.receipt, outcome = true),
+            )
             val landed = update(key) { t ->
               t.copy(
                 orders = t.orders.filter { it.id != order.id },
-                messages = t.messages + ChatLine(
-                  lineId("order"), "agent", clock(), line,
-                  order = LineOrder(order.id, receipt = poll?.receipt, outcome = true),
-                ),
+                // The tape may have shown the fill first: the receipt takes it
+                // over, so one trade stays one line.
+                messages = absorbFill(t.messages + answer, answer.id),
               )
             }
             // Only an answer that landed in THIS owner's thread lights the dot.

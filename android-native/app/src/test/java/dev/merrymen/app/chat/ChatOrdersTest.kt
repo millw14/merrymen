@@ -6,6 +6,7 @@ import dev.merrymen.app.data.receiptText
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -99,6 +100,68 @@ class ChatOrdersTest {
     chat.confirm { _, _ -> }
     waitFor("the order") { rig.writes().any { it.path == "/api/orders" } }
     waitFor("placed") { chat.thread.value.messages.any { it.text.startsWith("CASHCAT at 0x1da8…9b63. Placed, not filled") } }
+  }
+
+  @Test fun aChatOrdersFillOnTheTapeIsItsReceiptNotASecondLine() {
+    proposeBuy(5)
+    // The server's own clock: placed at 2026-09-24 12:00:00Z. The phone's (the
+    // rig's) is decades off, which the order's life is read across.
+    rig.route("POST /api/orders") { json("""{"id":"$id","queued":true,"expiresAt":${1_790_251_200_000 + 495_000},"expiresInMs":495000}""") }
+    rig.route("GET /api/orders") {
+      json("""{"id":"$id","state":"done","result":"Bought NVDA.","receipt":{"status":"filled","side":"buy","symbol":"NVDA","usdgActual":5}}""")
+    }
+    val chat = rig.thread()
+    rig.signIn(A)
+    waitFor("A") { chat.thread.value.key == A }
+    runBlocking { chat.sendNow("buy $5 of nvda", null) }
+    assertEquals("first look taken before the order", 1_790_244_000L, chat.thread.value.since)
+    // The fill reaches the tape ten seconds after the placement.
+    rig.route("GET /api/feed") {
+      json(
+        ChatRig.FEED.replace(
+          "\"trades\":[",
+          """"trades":[{"status":"landed","fill_side":"buy","symbol":"NVDA","amount_usdg":5.0,"created_at":"2026-09-24 12:00:10"},""",
+        ),
+      )
+    }
+    chat.confirm { _, _ -> }
+    waitFor("the receipt, joined to its fill") { chat.thread.value.messages.any { it.order?.outcome == true && it.tradeKey != null } }
+    runBlocking { chat.readSnapshot(A) }
+    val lines = chat.thread.value.messages
+    assertTrue("one trade, one line: no fill line beside the receipt", lines.none { it.role == "event" })
+    assertEquals("Bought NVDA.", lines.last().text)
+  }
+
+  @Test fun whenTheTapeShowsTheFillFirstTheReceiptTakesItsPlace() {
+    proposeBuy(5)
+    rig.route("POST /api/orders") { json("""{"id":"$id","queued":true,"expiresAt":${1_790_251_200_000 + 495_000},"expiresInMs":495000}""") }
+    // The worker's answer is held back until the tape has shown the fill.
+    val answer = java.util.concurrent.CountDownLatch(1)
+    rig.route("GET /api/orders") {
+      answer.await(5, java.util.concurrent.TimeUnit.SECONDS)
+      json("""{"id":"$id","state":"done","result":"Bought NVDA.","receipt":{"status":"filled","side":"buy","symbol":"NVDA","usdgActual":5}}""")
+    }
+    val chat = rig.thread()
+    rig.signIn(A)
+    waitFor("A") { chat.thread.value.key == A }
+    runBlocking { chat.sendNow("buy $5 of nvda", null) }
+    chat.confirm { _, _ -> }
+    waitFor("placed") { chat.thread.value.messages.any { it.order?.id == id } }
+    rig.route("GET /api/feed") {
+      json(
+        ChatRig.FEED.replace(
+          "\"trades\":[",
+          """"trades":[{"status":"landed","fill_side":"buy","symbol":"NVDA","amount_usdg":5.0,"created_at":"2026-09-24 12:00:10"},""",
+        ),
+      )
+    }
+    runBlocking { chat.readSnapshot(A) }
+    assertEquals("the fill is a line of its own for now", 1, chat.thread.value.messages.count { it.role == "event" })
+    answer.countDown()
+    waitFor("the receipt") { chat.thread.value.messages.any { it.order?.outcome == true } }
+    val lines = chat.thread.value.messages
+    assertTrue("one trade, one line: the fill's line went", lines.none { it.role == "event" })
+    assertNotNull("and the receipt holds its trade", lines.last().tradeKey)
   }
 
   @Test fun aNavigateCardOpensItsPageByNameAndSendsNothing() {

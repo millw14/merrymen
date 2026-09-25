@@ -98,6 +98,10 @@ data class ChatMove(
   /** landed | refused | reverted | pending — an ALLOW-LIST, so a state nobody knows is "pending", never "landed". */
   val outcome: String,
   val outcomeText: String?,
+  /** Practice: the tape books a paper trade as landed, and only this says it was not real. Not sent to the model. */
+  val paper: Boolean = false,
+  /** The chain hash the ledger recorded, as the ledger wrote it — the thread's key for the trade. Not sent to the model. */
+  val txHash: String? = null,
 )
 
 /** A ledger time ("2026-09-24 12:00:00", UTC) as epoch seconds, or 0 — the web's ledgerSeconds. */
@@ -152,6 +156,8 @@ fun chatMoves(feed: Feed): List<ChatMove> =
       sizeUsdg = t.amountUsdg,
       outcome = tradeOutcome(t.status),
       outcomeText = rejectRuleLabel(t.rejectRule) ?: t.rejectRule,
+      paper = t.status == "paper",
+      txHash = t.txHash?.takeIf { it.isNotEmpty() },
     )
   }.sortedByDescending { it.at }
 

@@ -161,6 +161,79 @@ class ChatThreadTest {
     assertTrue(rig.writes().isEmpty())
   }
 
+  @Test fun theAgentsOwnFillLandsOnceAfterTheFirstLookAndIsKept() {
+    val chat = rig.thread()
+    rig.signIn(A)
+    waitFor("A") { chat.thread.value.key == A }
+    chat.setOpen(false)
+    runBlocking { chat.readSnapshot(A) }
+    assertTrue("the first tape is history, not news", chat.thread.value.messages.isEmpty())
+    assertEquals("the watermark is the newest trade on it", 1_790_244_000L, chat.thread.value.since)
+
+    // The agent traded on its own: a real buy, and a paper one that is not news.
+    rig.route("GET /api/feed") {
+      json(
+        ChatRig.FEED.replace(
+          "\"trades\":[",
+          """"trades":[{"status":"landed","fill_side":"buy","symbol":"TSLA","amount_usdg":7.0,"created_at":"2026-09-24 11:30:00"},
+            {"status":"paper","fill_side":"sell","symbol":"NVDA","amount_usdg":3.0,"created_at":"2026-09-24 11:40:00"},""",
+        ),
+      )
+    }
+    runBlocking { chat.readSnapshot(A) }
+    runBlocking { chat.readSnapshot(A) }
+    val lines = chat.thread.value.messages
+    assertEquals("once, however often the tape is read", listOf("\$7.00 TSLA · Filled"), lines.map { it.text })
+    assertEquals("event", lines.single().role)
+    assertEquals("buy", lines.single().side)
+    assertEquals("it landed while Chat was closed", 1, chat.unread.value)
+
+    // Kept with its watermark: the same tape after a cold start adds nothing.
+    waitFor("kept") { file(A).isFile && file(A).readText().contains("\"since\"") }
+    val cold = rig.coldStart()
+    rig.signIn(A)
+    waitFor("A again") { cold.thread.value.key == A && cold.thread.value.messages.size == 1 }
+    runBlocking { cold.readSnapshot(A) }
+    assertEquals(1, cold.thread.value.messages.size)
+    assertEquals("its trade is back from the tape, not from the disk", "TSLA", cold.thread.value.messages.single().trade?.symbol)
+  }
+
+  @Test fun fillsTrimmedOffTheTopOfAFullThreadDoNotComeBackAsNews() {
+    rig.route("POST /api/chat") { json("""{"reply":"ok"}""") }
+    val chat = rig.thread()
+    rig.signIn(A)
+    waitFor("A") { chat.thread.value.key == A }
+    runBlocking { chat.readSnapshot(A) }
+    rig.route("GET /api/feed") {
+      json(
+        ChatRig.FEED.replace(
+          "\"trades\":[",
+          """"trades":[{"status":"landed","fill_side":"buy","symbol":"TSLA","amount_usdg":7.0,"created_at":"2026-09-24 11:00:00"},
+            {"status":"landed","fill_side":"buy","symbol":"PEPE","amount_usdg":2.0,"created_at":"2026-09-24 11:05:00"},""",
+        ),
+      )
+    }
+    runBlocking { chat.readSnapshot(A) }
+    assertEquals(2, chat.thread.value.messages.count { it.role == "event" })
+    // Forty exchanges push both fills off the top, and every one reads the
+    // same tape again on its way.
+    runBlocking { repeat(40) { chat.sendNow("question $it", null) } }
+    runBlocking { chat.readSnapshot(A) }
+    val lines = chat.thread.value.messages
+    assertEquals(MAX_LINES, lines.size)
+    assertTrue("the trimmed fills are history now, not news at the bottom", lines.none { it.role == "event" })
+    assertEquals("the watermark moved past them", 1_790_247_900L, chat.thread.value.since)
+  }
+
+  @Test fun aTapeThatWasNotReadIsNotAFirstLook() {
+    rig.route("GET /api/feed") { json("""{"error":"the ledger could not be read"}""", 503) }
+    val chat = rig.thread()
+    rig.signIn(A)
+    waitFor("A") { chat.thread.value.key == A }
+    runBlocking { chat.readSnapshot(A) }
+    assertNull("a failed read sets no watermark", chat.thread.value.since)
+  }
+
   @Test fun aKeptFileThatIsNotAThreadIsAnEmptyThreadNotACrash() {
     rig.dir.mkdirs()
     file(A).writeText("""{"messages":[{"id":"x","role":"hacker","text":"hi"},{"id":"y","role":"agent","text":"real","at":1,"order":{"id":"../x"}}],"orders":[{"id":"nope","until":1}]}""")
