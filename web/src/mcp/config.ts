@@ -18,7 +18,7 @@ export interface McpConfig {
   disabledWhy: string | null;
   /** OAuth issuer, e.g. https://app.merrymen.dev (no trailing slash). */
   issuer: string;
-  /** Canonical MCP resource URL, e.g. https://app.merrymen.dev/mcp. Tokens are bound to exactly this. */
+  /** Canonical MCP resource URL, e.g. https://mcp.merrymen.dev/mcp (production, MERRYMEN_MCP_RESOURCE_URL). Tokens are bound to exactly this. */
   resource: string;
   /** Origins a browser-originated request to /mcp may carry. Requests with no Origin are server-to-server clients. */
   allowedOrigins: ReadonlySet<string>;

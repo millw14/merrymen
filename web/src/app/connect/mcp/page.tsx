@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
 
 export default function ConnectMcpPage() {
   const cfg = mcpConfig();
-  const url = cfg.resource || "https://app.merrymen.dev/mcp";
+  const url = cfg.resource || "https://mcp.merrymen.dev/mcp";
   return (
     <div className="terminal-host partner-connect mcp-connect">
       <header className="connect-header">
