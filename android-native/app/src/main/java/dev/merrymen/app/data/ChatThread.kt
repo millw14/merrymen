@@ -637,7 +637,7 @@ class ChatThread internal constructor(
    * CARRY OUT THE CARD ONCE. A second tap while one is in flight does nothing,
    * from whichever screen it came — the hold lives beside the card, not in a
    * screen, so a tab switch mid-POST cannot bring the same card back ready.
-   * [onNavigate] gets a web path and the command id for a navigate card.
+   * [onNavigate] gets a web path and its page's title for a navigate card.
    */
   fun confirm(onNavigate: (String, String) -> Unit) {
     val card = _card.value ?: return

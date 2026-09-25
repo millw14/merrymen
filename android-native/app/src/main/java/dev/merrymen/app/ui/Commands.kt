@@ -45,6 +45,11 @@ data class CommandSpec(
   val to: String? = null,
   /** Weighty commands move money or change what the agent may trade. */
   val weighty: Boolean = false,
+  /**
+   * What a navigate command's page is called in the app's header — the name
+   * the rest of the app gives the same web page, never the command's id.
+   */
+  val title: String? = null,
   val say: (Map<String, String>) -> String,
 )
 
@@ -205,21 +210,21 @@ val COMMANDS: Map<String, CommandSpec> = listOf(
       "I have to sell the whole position — I'll tell you which happened. I'll place it; my key's " +
       "limits still decide."
   },
-  CommandSpec("open-deposit", Via.NAVIGATE, to = "/deposit") { "Show you where to send funds." },
-  CommandSpec("open-withdraw", Via.NAVIGATE, to = "/withdraw", weighty = true) {
+  CommandSpec("open-deposit", Via.NAVIGATE, to = "/deposit", title = "Add funds") { "Show you where to send funds." },
+  CommandSpec("open-withdraw", Via.NAVIGATE, to = "/withdraw", weighty = true, title = "Withdraw") {
     "Take you to the withdraw screen. I cannot send it from chat — moving money out needs a " +
       "permission sealed into my key when you signed, and most keys carry none."
   },
-  CommandSpec("open-settings", Via.NAVIGATE, to = "/settings") {
+  CommandSpec("open-settings", Via.NAVIGATE, to = "/settings", title = "Settings") {
     "Open your settings, where every dial I have is listed."
   },
-  CommandSpec("open-limits", Via.NAVIGATE, to = "/limits") { "Show you the spending limits sealed into my key." },
-  CommandSpec("show-address", Via.NAVIGATE, to = "/grant") { "Show you my account address." },
-  CommandSpec("reveal-key", Via.NAVIGATE, to = "/grant", weighty = true) {
+  CommandSpec("open-limits", Via.NAVIGATE, to = "/limits", title = "Trading limits") { "Show you the spending limits sealed into my key." },
+  CommandSpec("show-address", Via.NAVIGATE, to = "/grant", title = "Wallet & permissions") { "Show you my account address." },
+  CommandSpec("reveal-key", Via.NAVIGATE, to = "/grant", weighty = true, title = "Wallet & permissions") {
     "Take you to your owner key on the wallet page. I will not print it in chat — it would go " +
       "through my brain and be saved in this conversation, and that key is the money."
   },
-  CommandSpec("resign", Via.NAVIGATE, to = "/grant#resign", weighty = true) {
+  CommandSpec("resign", Via.NAVIGATE, to = "/grant#resign", weighty = true, title = "Re-sign") {
     "Take you to re-sign my trading permission — free, one signature, nothing moves on-chain."
   },
 ).associateBy { it.id }

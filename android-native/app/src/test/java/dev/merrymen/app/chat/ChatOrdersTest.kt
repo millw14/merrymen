@@ -101,6 +101,20 @@ class ChatOrdersTest {
     waitFor("placed") { chat.thread.value.messages.any { it.text.startsWith("CASHCAT at 0x1da8…9b63. Placed, not filled") } }
   }
 
+  @Test fun aNavigateCardOpensItsPageByNameAndSendsNothing() {
+    rig.route("POST /api/chat") { json("""{"reply":"Here's where.","command":{"id":"open-deposit","args":{}}}""") }
+    val chat = rig.thread()
+    rig.signIn(A)
+    waitFor("A") { chat.thread.value.key == A }
+    runBlocking { chat.sendNow("how do I add money?", null) }
+    var went: Pair<String, String>? = null
+    chat.confirm { path, title -> went = path to title }
+    waitFor("the page") { went != null }
+    assertEquals("the page's name, not the command's id", "/deposit" to "Add funds", went)
+    assertNull(chat.card.value)
+    assertEquals("only the question was sent", listOf("/api/chat"), rig.writes().map { it.path })
+  }
+
   @Test fun aColdStartResumesTheFollowAndAsksEvenPastTheDeadline() {
     rig.dir.mkdirs()
     File(rig.dir, "thread-$A.json").writeText(

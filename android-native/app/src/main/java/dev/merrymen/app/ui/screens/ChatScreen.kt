@@ -268,7 +268,7 @@ fun ChatScreen(nav: NavHostController) {
         perTrade = snap?.grants?.perTradeUsdg,
         ceiling = ceiling,
         onDismiss = { chat.dismissCard() },
-        onConfirm = { chat.confirm { path, id -> nav.navigate(Routes.web(path, id)) } },
+        onConfirm = { chat.confirm { path, title -> nav.navigate(Routes.web(path, title)) } },
       )
     }
 

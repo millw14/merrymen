@@ -728,6 +728,7 @@ private fun amountOf(args: Map<String, String>): Double? =
  * The model proposed it; this runs only from a tap. An id this build does not
  * know is never run (the card shows it and disables the button). An order
  * past a limit the phone has read is refused here, before anything is sent.
+ * [onNavigate] gets a navigate command's web path and its page's title.
  */
 suspend fun runConfirmedCard(
   api: MerrymenApi,
@@ -746,7 +747,7 @@ suspend fun runConfirmedCard(
   when (spec.via) {
     Via.NAVIGATE -> {
       scope.clearCard()
-      spec.to?.let { onNavigate(it, spec.id) }
+      spec.to?.let { onNavigate(it, spec.title ?: spec.id) }
     }
     Via.SNIPE -> {
       val usdg = amountOf(args)
