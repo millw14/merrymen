@@ -47,6 +47,17 @@ interface SessionStore : OriginSource {
   /** Record that it has. Survives sign-out: sign-out empties the WebView's store anyway. */
   suspend fun markWebViewGateExpired()
 
+  /**
+   * Whether a handoff on this install has written the session into the
+   * WebView's store httpOnly even though the store already held that value.
+   * Repository.seedWebView does that once, to replace the copy an older build
+   * wrote there without HttpOnly; after it, the same value is left alone.
+   */
+  suspend fun webViewSessionReseeded(): Boolean
+
+  /** Record that it has. Survives sign-out, for the same reason as [markWebViewGateExpired]. */
+  suspend fun markWebViewSessionReseeded()
+
   /** Sign-out: forget the stored session, keep the origin. */
   suspend fun clearSession()
 }
@@ -79,6 +90,8 @@ class Session(private val context: Context) : SessionStore, CookieBlob {
     val WELCOMED = androidx.datastore.preferences.core.booleanPreferencesKey("welcomed")
     /** The retired mm_gate cookie is gone from the WebView's store; see [webViewGateExpired]. */
     val WEBVIEW_GATE_EXPIRED = androidx.datastore.preferences.core.booleanPreferencesKey("webview-gate-expired")
+    /** The session has been rewritten httpOnly in the WebView's store once; see [webViewSessionReseeded]. */
+    val WEBVIEW_SESSION_RESEEDED = androidx.datastore.preferences.core.booleanPreferencesKey("webview-session-reseeded")
   }
 
   /**
@@ -157,6 +170,12 @@ class Session(private val context: Context) : SessionStore, CookieBlob {
 
   override suspend fun markWebViewGateExpired() {
     context.sessionStore.edit { it[Keys.WEBVIEW_GATE_EXPIRED] = true }
+  }
+
+  override suspend fun webViewSessionReseeded(): Boolean = context.sessionStore.data.first()[Keys.WEBVIEW_SESSION_RESEEDED] == true
+
+  override suspend fun markWebViewSessionReseeded() {
+    context.sessionStore.edit { it[Keys.WEBVIEW_SESSION_RESEEDED] = true }
   }
 
   override suspend fun cookiesRaw(): String? = context.sessionStore.data.first()[Keys.COOKIES]

@@ -7,6 +7,7 @@ import dev.merrymen.app.net.MemoryStore
 import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.OriginCheck
 import dev.merrymen.app.net.PersistentCookieJar
+import dev.merrymen.app.net.WebAuth
 import dev.merrymen.app.net.answer
 import dev.merrymen.app.net.origin
 import kotlinx.coroutines.Dispatchers
@@ -256,6 +257,50 @@ class RepositoryTest {
     assertEquals(2, cookies.webExpiries)
     assertFalse(cookies.web.containsKey("mm_gate"))
     assertTrue(store.webViewGateExpired)
+  }
+
+  /** The session as the jar holds it after a hand-back: harvested from the WebView (WebAuth.webCookies). */
+  private fun jarHoldsSession(value: String) {
+    val here = server.origin().toHttpUrl()
+    jar.saveFromResponse(here, WebAuth.webCookies("mm_session=$value", here))
+  }
+
+  @Test fun anOlderBuildsScriptReadableSessionIsRewrittenHttpOnlyOnTheFirstHandoff() = runBlocking {
+    // An older build seeded "mm_session=abc; Path=/" into the WebView, with
+    // the value the jar still holds: the same value, so the skip would keep it.
+    jarHoldsSession("abc")
+    cookies.web["mm_session"] = "abc"
+
+    repo.seedWebView(server.origin())
+    val line = cookies.seeded.single()
+    assertTrue(line, line.startsWith("mm_session=abc; "))
+    assertTrue(line, "HttpOnly" in line.split("; ") && "SameSite=Strict" in line.split("; "))
+    assertTrue(store.webViewSessionReseeded)
+
+    // Every handoff after it: the WebView's copy is httpOnly now, and the
+    // server's own, set at the next sign-in, keeps its expiry.
+    repo.seedWebView(server.origin())
+    assertEquals("the same value is left alone from now on", 1, cookies.seeded.size)
+  }
+
+  @Test fun aHandoffThatWroteNoSessionIsNotRecorded() = runBlocking {
+    // Nobody signed in: nothing to give, so nothing is recorded.
+    cookies.web["mm_session"] = "abc"
+    repo.seedWebView(server.origin())
+    assertTrue(cookies.seeded.isEmpty())
+    assertFalse(store.webViewSessionReseeded)
+
+    // A WebView that refused (missing, mid-update) wrote nothing either.
+    jarHoldsSession("abc")
+    cookies.webRefuses = true
+    repo.seedWebView(server.origin())
+    assertFalse("nothing was written, so nothing is recorded", store.webViewSessionReseeded)
+
+    // So the next handoff still rewrites the copy an older build left.
+    cookies.webRefuses = false
+    repo.seedWebView(server.origin())
+    assertTrue(cookies.seeded.single().startsWith("mm_session=abc; "))
+    assertTrue(store.webViewSessionReseeded)
   }
 
   @Test fun anOwnerWhoFixesASchemelessServerToTheHostedOneIsStillSignedIn() = runBlocking {

@@ -52,6 +52,17 @@ class WebSeedTest {
     )
   }
 
+  @Test fun onceAfterAnUpgradeTheSameValueIsWrittenAgainHttpOnly() {
+    // An older build seeded "mm_session=same; Path=/" here, with the jar's
+    // own value: the skip above would keep that script-readable copy.
+    val held = listOf(harvested("mm_locale", "fr"), harvested("mm_session", "same"))
+    val lines = WebAuth.seedLines(held, webRaw = "mm_locale=fr; mm_session=same", url = hosted, nowMs = now, rewriteSame = true)
+    val line = lines.single()
+    assertTrue("still only the session: $lines", line.startsWith("mm_session=same; "))
+    val attrs = line.split("; ").drop(1).toSet()
+    assertEquals(line, setOf("Path=/", "HttpOnly", "SameSite=Strict", "Secure"), attrs)
+  }
+
   @Test fun anOlderSessionInTheWebViewIsReplacedWithTheAppsOwn() {
     // CookieManager lost the newer cookie to a lazy flush and kept the older one.
     val line = WebAuth.seedLines(listOf(harvested("mm_session", "new")), webRaw = "mm_session=old", url = hosted, nowMs = now).single()

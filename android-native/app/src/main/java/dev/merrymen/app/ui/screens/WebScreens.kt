@@ -197,6 +197,7 @@ fun SignInScreen(nav: NavHostController) {
           url = WebAuth.signInUrl(o),
           origin = o,
           jar = c.cookieJar,
+          seed = { c.repo.seedWebView(o) },
           onCookies = { scope.launch { c.repo.adoptWebSession() } },
           modifier = Modifier.fillMaxSize(),
         )
@@ -220,6 +221,7 @@ fun WebFlowScreen(nav: NavHostController, path: String, title: String) {
         url = o + path,
         origin = o,
         jar = c.cookieJar,
+        seed = { c.repo.seedWebView(o) },
         onCookies = { scope.launch { c.repo.adoptWebSession() } },
         modifier = Modifier.fillMaxSize(),
       )

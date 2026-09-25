@@ -243,6 +243,28 @@ class Repository(
     }
   }
 
+  /**
+   * HAND A WEB PAGE THE SESSION THE APP IS USING, before it loads
+   * (WebAuth.seedLines: httpOnly and SameSite=Strict, as the server sets it).
+   *
+   * ONCE PER INSTALL, WHATEVER THE WEBVIEW ALREADY HOLDS. An older build
+   * seeded the session as "mm_session=…; Path=/", without HttpOnly, and on an
+   * upgraded phone that copy is still in the WebView's store with the jar's
+   * value (the jar harvested it from there). The rule that leaves a
+   * same-valued session alone left it for any script on the page to read,
+   * until the owner next signed in. So the first handoff with a session to
+   * give writes it regardless, and that is recorded
+   * ([SessionStore.webViewSessionReseeded]); every handoff after it keeps the
+   * skip, which keeps the server's own expiry on the cookie. Recorded only
+   * when a session was written: a WebView that refused, or a jar holding no
+   * session for [origin] (nobody signed in there), leaves it for the next
+   * handoff, which costs nothing because the WebView is being opened anyway.
+   */
+  suspend fun seedWebView(origin: String) {
+    val first = !session.webViewSessionReseeded()
+    if (cookies.seedWebView(origin, rewriteSame = first) && first) session.markWebViewSessionReseeded()
+  }
+
   /** Called after the WebView flow settles, to pick up a fresh session cookie. */
   suspend fun adoptWebSession() {
     identity.refuseInsideHook("adoptWebSession")

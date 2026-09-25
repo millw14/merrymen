@@ -81,6 +81,8 @@ class MemoryStore(
   var gatePassword: String? = null
   /** Whether a start has already expired mm_gate in the WebView's store. */
   var webViewGateExpired = false
+  /** Whether a handoff has already rewritten the session httpOnly whatever the WebView held. */
+  var webViewSessionReseeded = false
   /** The jar's blob, exactly as the jar wrote it. */
   var cookieBlob: String? = null
   var sessionsCleared = 0
@@ -95,6 +97,10 @@ class MemoryStore(
   override suspend fun webViewGateExpired(): Boolean = webViewGateExpired
   override suspend fun markWebViewGateExpired() {
     webViewGateExpired = true
+  }
+  override suspend fun webViewSessionReseeded(): Boolean = webViewSessionReseeded
+  override suspend fun markWebViewSessionReseeded() {
+    webViewSessionReseeded = true
   }
   override suspend fun clearSession() {
     sessionsCleared++
@@ -137,6 +143,26 @@ class MemoryCookies(val jar: PersistentCookieJar) : CookieStores {
     if (webRefuses || origin.toHttpUrlOrNull() == null) return false
     web.remove(name)
     return true
+  }
+
+  /**
+   * Every line a seed handed the WebView's store, in order: what
+   * CookieManager.setCookie was given, attributes and all. [web] keeps only
+   * the value, as the WebView's own line does.
+   */
+  val seeded = mutableListOf<String>()
+
+  override suspend fun seedWebView(origin: String, rewriteSame: Boolean): Boolean {
+    val url = origin.toHttpUrlOrNull() ?: return false
+    if (webRefuses) return false
+    val raw = web.entries.joinToString("; ") { "${it.key}=${it.value}" }
+    val lines = WebAuth.seedLines(jar.loadForRequest(url), raw, url, System.currentTimeMillis(), rewriteSame)
+    for (line in lines) {
+      seeded += line
+      val pair = line.substringBefore(';')
+      web[pair.substringBefore('=')] = pair.substringAfter('=')
+    }
+    return lines.isNotEmpty()
   }
 
   override suspend fun forgetAll() {

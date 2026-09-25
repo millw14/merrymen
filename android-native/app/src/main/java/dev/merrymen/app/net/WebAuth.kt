@@ -7,6 +7,11 @@ import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
@@ -132,18 +137,18 @@ object WebAuth {
    * opened signed out would ask the owner to sign in a second time before it
    * could act for them. Copying the session into CookieManager before the first
    * load hands the page the session the app is already using. What is copied,
-   * and with which attributes, is [seedLines].
+   * and with which attributes, is [seedLines], given what the jar holds for
+   * [origin] ([held]) and [rewriteSame]. True when a session was handed over,
+   * which is what Repository.seedWebView records.
    */
-  fun seed(origin: String, jar: PersistentCookieJar) {
-    val url = origin.toHttpUrlOrNull() ?: return
+  fun seed(origin: String, held: List<Cookie>, rewriteSame: Boolean = false): Boolean {
+    val url = origin.toHttpUrlOrNull() ?: return false
     val cm = CookieManager.getInstance()
     cm.setAcceptCookie(true)
-    // Only what the jar would send to this origin: it is scoped by host now,
-    // so another server's session never lands in this server's page.
-    for (line in seedLines(jar.loadForRequest(url), cm.getCookie(origin), url, System.currentTimeMillis())) {
-      cm.setCookie(origin, line)
-    }
+    val lines = seedLines(held, cm.getCookie(origin), url, System.currentTimeMillis(), rewriteSame)
+    for (line in lines) cm.setCookie(origin, line)
     cm.flush()
+    return lines.isNotEmpty()
   }
 
   /**
@@ -169,14 +174,21 @@ object WebAuth {
    * value is left exactly as the server set it, expiry included. The age is
    * the jar's when it knows one; a copy harvested from the WebView carries
    * none, so it is a session cookie there, and the next handoff seeds it again.
+   *
+   * [rewriteSame] WRITES IT EVEN THEN, and is for one handoff per install
+   * (Repository.seedWebView). The old "name=value; Path=/" copy is still in
+   * the WebView's store on a phone upgraded from a build that wrote it, and
+   * its value is the jar's, because the jar harvested it from there. The
+   * same-value skip therefore kept the copy a script can read until the owner
+   * next signed in, since only a sign-in makes the server set the cookie again.
    */
-  fun seedLines(held: List<Cookie>, webRaw: String?, url: HttpUrl, nowMs: Long): List<String> {
+  fun seedLines(held: List<Cookie>, webRaw: String?, url: HttpUrl, nowMs: Long, rewriteSame: Boolean = false): List<String> {
     val inWeb = webRaw.orEmpty().split(';').mapNotNull { part ->
       val t = part.trim()
       val eq = t.indexOf('=')
       if (eq <= 0) null else t.substring(0, eq) to t.substring(eq + 1)
     }.toMap()
-    return held.filter { it.name in SESSION_COOKIES && inWeb[it.name] != it.value }.map { c ->
+    return held.filter { it.name in SESSION_COOKIES && (rewriteSame || inWeb[it.name] != it.value) }.map { c ->
       buildString {
         append(c.name).append('=').append(c.value)
         append("; Path=/; HttpOnly; SameSite=Strict")
@@ -219,6 +231,14 @@ interface CookieStores {
    */
   suspend fun expireInWebView(origin: String, name: String): Boolean
 
+  /**
+   * Hand the WebView the session the jar holds for [origin], before a web
+   * page loads ([WebAuth.seedLines]; [rewriteSame] as there). True only when
+   * a session was handed over: false when the jar held none for [origin], and
+   * false when the WebView's store refused.
+   */
+  suspend fun seedWebView(origin: String, rewriteSame: Boolean): Boolean
+
   /** Forget every cookie in both stores: a sign-out. */
   suspend fun forgetAll()
 }
@@ -247,6 +267,14 @@ class DeviceCookies(private val jar: PersistentCookieJar) : CookieStores {
   override suspend fun expireInWebView(origin: String, name: String): Boolean =
     web("expire $name") { WebAuth.expire(origin, name) } == true
 
+  override suspend fun seedWebView(origin: String, rewriteSame: Boolean): Boolean {
+    val url = origin.toHttpUrlOrNull() ?: return false
+    // Only what the jar would send to this origin: it is scoped by host now,
+    // so another server's session never lands in this server's page.
+    val held = withContext(Dispatchers.IO) { jar.loadForRequest(url) }
+    return web("seed") { WebAuth.seed(origin, held, rewriteSame) } == true
+  }
+
   override suspend fun forgetAll() {
     withContext(Dispatchers.IO) { jar.clear() }
     web("forget") {
@@ -273,6 +301,9 @@ class DeviceCookies(private val jar: PersistentCookieJar) : CookieStores {
  * signing flow; DOM storage because Privy's session needs it. No JavaScript
  * INTERFACE is registered — nothing in the page can call into the app, which
  * keeps the bridge one-directional: cookies out, no code in.
+ *
+ * [seed] hands the WebView the session the app already holds
+ * (Repository.seedWebView), and the page is not loaded until it has returned.
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -280,6 +311,7 @@ fun WebFlow(
   url: String,
   origin: String,
   jar: PersistentCookieJar,
+  seed: suspend () -> Unit,
   onCookies: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
@@ -297,12 +329,20 @@ fun WebFlow(
   }
   DisposableEffect(Unit) {
     CookieManager.getInstance().setAcceptCookie(true)
-    // Hand the WebView the session the app already holds, httpOnly as the
-    // server set it, so a handoff page opens signed in as the same wallet the
-    // app is (WebAuth.seedLines).
-    WebAuth.seed(origin, jar)
     onDispose { CookieManager.getInstance().flush() }
   }
+  // Hand the WebView the session the app already holds, httpOnly as the
+  // server set it, so a handoff page opens signed in as the same wallet the
+  // app is (WebAuth.seedLines). THE PAGE WAITS FOR IT. The seed reads a
+  // stored flag first (Repository.seedWebView), and a page loaded alongside
+  // it could run its scripts while an older build's copy, the one a script
+  // can read, was still in the store.
+  var seeded by remember(origin) { mutableStateOf(false) }
+  LaunchedEffect(origin) {
+    seed()
+    seeded = true
+  }
+  if (!seeded) return
   AndroidView(
     modifier = modifier.fillMaxSize(),
     factory = { ctx ->
