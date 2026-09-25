@@ -185,8 +185,15 @@ data class TelegramStatus(
 @Serializable
 data class TelegramTest(val ok: Boolean = false, val username: String? = null, val reason: String? = null)
 
+/**
+ * NO DEFAULT FOR [action], ON PURPOSE. The API's Json does not encode
+ * defaults, so `action = "test"` as a default was left out of the body: every
+ * "Test the bot" sent `{}`, the route answered 400 "unknown action" before it
+ * looked at any token, and the owner read "✗ unknown action" about a bot that
+ * may have been fine. A field the route requires is always written out.
+ */
 @Serializable
-data class TelegramTestBody(val action: String = "test", val token: String? = null)
+data class TelegramTestBody(val action: String, val token: String? = null)
 
 // ── the feed and the tape ───────────────────────────────────────────────────
 

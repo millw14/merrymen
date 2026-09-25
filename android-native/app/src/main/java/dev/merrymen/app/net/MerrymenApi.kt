@@ -455,7 +455,7 @@ class MerrymenApi(
     sendJson(
       "/api/telegram",
       "POST",
-      json.encodeToString(TelegramTestBody.serializer(), TelegramTestBody(token = token)),
+      json.encodeToString(TelegramTestBody.serializer(), TelegramTestBody(action = "test", token = token)),
     )
 
   // ── acting ────────────────────────────────────────────────────────────────
