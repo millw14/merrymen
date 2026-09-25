@@ -8,7 +8,13 @@ import dev.merrymen.app.net.SearchHit
 import dev.merrymen.app.net.SearchResults
 import dev.merrymen.app.net.answer
 import dev.merrymen.app.net.apiFor
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runTest
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -22,6 +28,7 @@ import org.junit.Test
  * answered {"hits":[]} while those coins were rows on Markets. The coins here
  * are the captured /api/discoveries sweep, read through the real client.
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SearchCoinsTest {
   private val disc: Discoveries = runBlocking {
     val server = MockWebServer()
@@ -89,5 +96,77 @@ class SearchCoinsTest {
     val nvda = SearchResults(listOf(SearchHit(kind = "token", href = "/t/0xnvda", title = "NVDA", sub = "NVIDIA")))
     val list = searchList(nvda, Loaded.Refused(503, "merrymen answered with an error (503). Try again in a moment."), "nv")
     assertTrue((list as SearchList.Hits).note!!.contains("weren't searched"))
+  }
+
+  // ── asking again (SearchCoins) ─────────────────────────────────────────────
+
+  private fun routeHits(q: String) = Loaded.Value(SearchResults(listOf(SearchHit(kind = "agent", href = "/a/$q", title = q))))
+
+  @Test fun coinsThatFailedAreAskedAgainByTheNextQueryWhenTheSearchItselfAnswered() = runTest {
+    val answers = ArrayDeque(listOf(Loaded.Unreachable("the connection timed out"), coins))
+    var reads = 0
+    val coinsFor = SearchCoins(this) { reads++; answers.removeFirst() }
+    coinsFor.ask() // the screen opening
+    advanceUntilIdle()
+    val first = searchList(none, coinsFor.coins.value, "fooms")
+    assertTrue("the list says the coins weren't searched", (first as SearchList.NoMatch).body.contains("weren't searched"))
+
+    // /api/search answers every query, so no failed block offers Try again;
+    // the next query sent asks for the coins by itself.
+    val inputs = MutableStateFlow(SearchInput(""))
+    val job = launch { searchViews(inputs, coinsFor) { routeHits(it) }.collect {} }
+    inputs.value = SearchInput("fooms")
+    advanceUntilIdle()
+    assertEquals(2, reads)
+    assertEquals(listOf("FOOMS", "FOOMS"), hitsOf(searchList(none, coinsFor.coins.value, "fooms")).map { it.title })
+
+    inputs.value = SearchInput("hydx")
+    advanceUntilIdle()
+    job.cancel()
+    assertEquals("never again once rows were read", 2, reads)
+  }
+
+  @Test fun aSlowSweepIsNotCancelledOrRestartedByTyping() = runTest {
+    var reads = 0
+    val coinsFor = SearchCoins(this) { reads++; delay(5_000); coins }
+    coinsFor.ask()
+    val inputs = MutableStateFlow(SearchInput(""))
+    val job = launch { searchViews(inputs, coinsFor) { routeHits(it) }.collect {} }
+    for (text in listOf("fo", "foo", "foom", "fooms")) {
+      inputs.value = SearchInput(text)
+      advanceTimeBy(400) // each one past the debounce, so each is sent
+    }
+    assertEquals("still reading", Loaded.Loading, coinsFor.coins.value)
+    advanceUntilIdle()
+    job.cancel()
+    assertEquals("one read, and it landed", 1, reads)
+    assertEquals(coins, coinsFor.coins.value)
+  }
+
+  @Test fun anIndexThatDidNotAnswerIsAskedAgainToo() = runTest {
+    val indexDown = Loaded.Value(disc.copy(indexUnreachable = true, rows = emptyList()))
+    val answers = ArrayDeque(listOf(indexDown, coins))
+    val coinsFor = SearchCoins(this) { answers.removeFirst() }
+    coinsFor.ask()
+    advanceUntilIdle()
+    coinsFor.ask() // the note's Try again
+    advanceUntilIdle()
+    assertEquals(coins, coinsFor.coins.value)
+  }
+
+  @Test fun tryAgainIsOfferedExactlyWhenTheListSaysTheCoinsWerentSearched() {
+    val nvda = SearchResults(listOf(SearchHit(kind = "token", href = "/t/0xnvda", title = "NVDA", sub = "NVIDIA")))
+    val states = listOf(
+      Loaded.Idle,
+      Loaded.Loading,
+      coins,
+      Loaded.Value(disc.copy(indexUnreachable = true, rows = emptyList())),
+      Loaded.Unreachable("the connection timed out"),
+      Loaded.Refused(503, "merrymen answered with an error (503). Try again in a moment."),
+    )
+    for (state in states) {
+      val saysSo = (searchList(nvda, state, "nv") as SearchList.Hits).note != null
+      assertEquals(state.toString(), saysSo, coinsUnsearched(state))
+    }
   }
 }

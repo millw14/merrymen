@@ -4,13 +4,18 @@ import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.net.Discoveries
 import dev.merrymen.app.net.SearchHit
 import dev.merrymen.app.net.SearchResults
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.transformLatest
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 /**
@@ -167,14 +172,13 @@ private const val COINS_UNSEARCHED =
  */
 fun searchList(server: SearchResults, coins: Loaded<Discoveries>, q: String): SearchList {
   val disc = (coins as? Loaded.Value)?.value
-  val coinsRead = disc != null && !disc.indexUnreachable
+  val unsearched = coinsUnsearched(coins)
   val listed = server.hits.mapNotNull { it.href?.lowercase(Locale.ROOT) }.toSet()
   val hits = server.hits + coinHits(disc, q).filter { it.href?.lowercase(Locale.ROOT) !in listed }
-  val waiting = coins is Loaded.Loading || coins is Loaded.Idle
   return when {
-    hits.isNotEmpty() -> SearchList.Hits(hits, note = if (coinsRead || waiting) null else COINS_UNSEARCHED)
-    waiting -> SearchList.StillReading
-    !coinsRead -> SearchList.NoMatch("Nothing matched", "No listed stock, ETF or agent by that name. $COINS_UNSEARCHED")
+    hits.isNotEmpty() -> SearchList.Hits(hits, note = if (unsearched) COINS_UNSEARCHED else null)
+    coins is Loaded.Loading || coins is Loaded.Idle -> SearchList.StillReading
+    unsearched -> SearchList.NoMatch("Nothing matched", "No listed stock, ETF or agent by that name. $COINS_UNSEARCHED")
     disc?.truncated == true -> SearchList.NoMatch(
       "Nothing matched",
       "No stock, ETF, agent or launchpad coin by that name in what was read — the index cut its sweep short, " +
@@ -182,4 +186,60 @@ fun searchList(server: SearchResults, coins: Loaded<Discoveries>, q: String): Se
     )
     else -> SearchList.NoMatch("Nothing matched", "No stock, ETF, launchpad coin or agent by that name.")
   }
+}
+
+/**
+ * THE COINS WENT UNSEARCHED, AND NOTHING IS STILL READING THEM: their read
+ * failed, or it answered that the index did not. This is exactly when the
+ * list says they weren't searched, and exactly when asking again can change
+ * that.
+ */
+fun coinsUnsearched(coins: Loaded<Discoveries>): Boolean = when (coins) {
+  is Loaded.Value -> coins.value.indexUnreachable
+  is Loaded.Refused, is Loaded.Unreachable -> true
+  Loaded.Idle, Loaded.Loading -> false
+}
+
+/**
+ * THE LAUNCHPAD COINS ONE SEARCH SCREEN MATCHES AGAINST ([coinHits]), and
+ * when they are asked for again.
+ *
+ * [ask] reads them when the screen opens, then again for every query sent and
+ * from the note's own Try again, but only while they went unsearched
+ * ([coinsUnsearched]). Only a failed search's Try again used to ask again. So
+ * when /api/search answered and this read had failed, nothing on the screen
+ * could ever ask: a new query did not, and the note saying the coins weren't
+ * searched had no action. It never asks while a read is out, so a slow sweep
+ * is not cancelled and started over by every query, and never once rows were
+ * read. [scope] is the screen's, so a read outlives the query that asked for
+ * it.
+ */
+class SearchCoins(
+  private val scope: CoroutineScope,
+  private val read: suspend () -> Loaded<Discoveries>,
+) {
+  private val state = MutableStateFlow<Loaded<Discoveries>>(Loaded.Idle)
+  val coins: StateFlow<Loaded<Discoveries>> = state.asStateFlow()
+
+  /** Read the coins: the first time, and after a read that left them unsearched. Otherwise nothing. */
+  fun ask() {
+    val now = state.value
+    if (now != Loaded.Idle && !coinsUnsearched(now)) return
+    if (!state.compareAndSet(now, Loaded.Loading)) return
+    scope.launch { state.value = read() }
+  }
+}
+
+/**
+ * THE SEARCH THE SCREEN RUNS: [searchViews], where every query sent also asks
+ * for coins that went unsearched ([SearchCoins.ask]), so its list can hold
+ * them.
+ */
+fun searchViews(
+  inputs: Flow<SearchInput>,
+  coins: SearchCoins,
+  search: suspend (String) -> Loaded<SearchResults>,
+): Flow<SearchView> = searchViews(inputs) { q ->
+  coins.ask()
+  search(q)
 }

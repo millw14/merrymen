@@ -16,12 +16,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -40,14 +43,15 @@ import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
+import dev.merrymen.app.market.SearchCoins
 import dev.merrymen.app.market.SearchInput
 import dev.merrymen.app.market.SearchList
 import dev.merrymen.app.market.SearchShown
 import dev.merrymen.app.market.SearchView
+import dev.merrymen.app.market.coinsUnsearched
 import dev.merrymen.app.market.searchList
 import dev.merrymen.app.market.searchShown
 import dev.merrymen.app.market.searchViews
-import dev.merrymen.app.net.Discoveries
 import dev.merrymen.app.ui.Empty
 import dev.merrymen.app.ui.EmptyKind
 import dev.merrymen.app.ui.LoadedBlock
@@ -119,9 +123,12 @@ fun SearchScreen(nav: NavHostController) {
   // again rather than dropped as a repeat.
   var attempt by remember { mutableIntStateOf(0) }
   var view by remember { mutableStateOf<SearchView>(SearchView.Idle) }
-  // THE LAUNCHPAD COINS, read once for the screen and asked again by Try
-  // again after a failure: /api/search never matches them (searchList).
-  var coins by remember { mutableStateOf<Loaded<Discoveries>>(Loaded.Loading) }
+  // THE LAUNCHPAD COINS: /api/search never matches them (searchList). Read
+  // when the screen opens, and asked again by each query sent and by Try
+  // again while they went unsearched (SearchCoins).
+  val scope = rememberCoroutineScope()
+  val coinsFor = remember { SearchCoins(scope) { c.api.discoveries().toLoaded() } }
+  val coins by coinsFor.coins.collectAsState()
   val focus = remember { FocusRequester() }
 
   // `autoFocus` on the input — Search.tsx:43. Somebody who opened search wants
@@ -133,16 +140,14 @@ fun SearchScreen(nav: NavHostController) {
   // way into search is not.
   LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
 
-  LaunchedEffect(attempt) {
-    if (coins !is Loaded.Value) coins = c.api.discoveries().toLoaded()
-  }
+  LaunchedEffect(Unit) { coinsFor.ask() }
 
   // ONE COLLECTOR FOR THE LIFE OF THE SCREEN, fed by the text. searchViews
   // debounces it and cancels the request in flight when the text moves on, so
   // an older answer can never land on top of a newer query. This used to be a
   // scope.launch per keystroke with nothing cancelling the last.
   LaunchedEffect(Unit) {
-    searchViews(snapshotFlow { SearchInput(q, attempt) }) { c.api.search(it).toLoaded() }
+    searchViews(snapshotFlow { SearchInput(q, attempt) }, coinsFor) { c.api.search(it).toLoaded() }
       .collect { view = it }
   }
 
@@ -174,7 +179,9 @@ fun SearchScreen(nav: NavHostController) {
         SearchShown.Hint -> HintLine("Type at least two characters.")
         SearchShown.Loading -> LoadedBlock(Loaded.Loading) { _: Unit -> }
         is SearchShown.Result -> LoadedBlock(shown.result, onRetry = { attempt++ }) { r ->
-          SearchHits(searchList(r, coins, q), nav)
+          // /api/search answered, so the block offers no Try again; the note
+          // that says the coins weren't searched has its own.
+          SearchHits(searchList(r, coins, q), nav, onRetryCoins = if (coinsUnsearched(coins)) coinsFor::ask else null)
         }
       }
     }
@@ -183,18 +190,29 @@ fun SearchScreen(nav: NavHostController) {
 }
 
 @Composable
-private fun SearchHits(list: SearchList, nav: NavHostController) {
+private fun SearchHits(list: SearchList, nav: NavHostController, onRetryCoins: (() -> Unit)?) {
   val hits = when (list) {
     SearchList.StillReading -> {
       LoadedBlock(Loaded.Loading) { _: Unit -> }
       return
     }
     is SearchList.NoMatch -> {
-      Empty(list.title, list.body, kind = EmptyKind.Search)
+      Empty(
+        list.title,
+        list.body,
+        actionLabel = if (onRetryCoins != null) "Try again" else null,
+        onAction = onRetryCoins,
+        kind = EmptyKind.Search,
+      )
       return
     }
     is SearchList.Hits -> {
-      list.note?.let { NoteLine(it, Modifier.padding(bottom = 8.dp)) }
+      list.note?.let { note ->
+        Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+          NoteLine(note, Modifier.weight(1f))
+          if (onRetryCoins != null) TextButton(onClick = onRetryCoins) { Text("Try again", color = MerryColors.tx) }
+        }
+      }
       list.hits
     }
   }
