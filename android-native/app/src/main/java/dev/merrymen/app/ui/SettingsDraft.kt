@@ -2,6 +2,7 @@ package dev.merrymen.app.ui
 
 import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.MerrymenApi
+import dev.merrymen.app.net.NOT_SENT
 import dev.merrymen.app.net.SettingsEnvelope
 import dev.merrymen.app.net.SettingsSaved
 import java.util.Locale
@@ -349,7 +350,11 @@ sealed interface SettingsSaveOutcome {
   data class Rejected(val lines: List<String>) : SettingsSaveOutcome
   data object OwnerChanged : SettingsSaveOutcome
   data object SignIn : SettingsSaveOutcome
-  /** The server failed; [message] is already a sentence (the generic 5xx line or an ownerFacing one). */
+  /**
+   * Nothing was written: the server failed, or this app never sent it (the
+   * Server changed under the save). [message] is already a sentence — the
+   * generic 5xx line, an ownerFacing one, or the phone's own.
+   */
   data class Failed(val message: String) : SettingsSaveOutcome
   /** We cannot say whether it was written. Read the settings back and compare. */
   data class Unknown(val why: String) : SettingsSaveOutcome
@@ -369,6 +374,8 @@ fun settingsSaveOutcome(r: ApiResult<SettingsSaved>): SettingsSaveOutcome = when
     else -> SettingsSaveOutcome.Saved(r.value.appliesWithin?.takeIf { it.isNotBlank() }, r.value.ignored.filter { it.isNotBlank() })
   }
   is ApiResult.Refused -> when {
+    // Refused on the phone: not sent, so nothing to look up.
+    r.status == NOT_SENT -> SettingsSaveOutcome.Failed("Nothing was saved. " + r.message)
     r.status == 409 -> SettingsSaveOutcome.OwnerChanged
     r.status == 401 -> SettingsSaveOutcome.SignIn
     r.status >= 500 -> SettingsSaveOutcome.Failed(r.message)

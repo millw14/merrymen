@@ -52,6 +52,7 @@ import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
 import dev.merrymen.app.net.Discoveries
 import dev.merrymen.app.net.ProposalsView
+import dev.merrymen.app.net.ServerBound
 import dev.merrymen.app.ui.Acted
 import dev.merrymen.app.ui.BottomInsetSpacer
 import dev.merrymen.app.ui.LoadedBlock
@@ -83,6 +84,7 @@ import dev.merrymen.app.net.valueOrNull
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.runtime.collectAsState
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 // ---------------------------------------------------------------------------
 // PAGE CHROME
@@ -573,6 +575,8 @@ fun ProposalsScreen(nav: NavHostController) {
   var note by remember { mutableStateOf<String?>(null) }
   // WHO THE LIST WAS READ FOR. An approval writes for that wallet or not at all.
   var shownFor by remember { mutableStateOf<String?>(null) }
+  // AND ON WHICH SERVER (a server turn): an approval goes there or nowhere.
+  var shownOn by remember { mutableStateOf(-1L) }
   // Whether the scout looked, read only when the list came back "nothing-vetted".
   var verdicts by remember { mutableStateOf<Loaded<Discoveries>?>(null) }
   val signedIn by c.repo.signedIn.collectAsState()
@@ -586,11 +590,16 @@ fun ProposalsScreen(nav: NavHostController) {
   // the check below and write that list onto the new wallet's agent.
   suspend fun load() {
     val who = c.repo.signedIn.value
-    val read = c.api.proposals().toLoaded()
-    // "nothing-vetted" is also what the route says when the scout could not
-    // look at all; the sweep it read from says which (proposalsEmptyCopy).
-    verdicts = if ((read as? Loaded.Value)?.value?.why == "nothing-vetted") c.api.discoveries().toLoaded() else null
+    val on = c.repo.serverTurn.value
+    val (read, looked) = withContext(ServerBound(on)) {
+      val r = c.api.proposals().toLoaded()
+      // "nothing-vetted" is also what the route says when the scout could not
+      // look at all; the sweep it read from says which (proposalsEmptyCopy).
+      r to if ((r as? Loaded.Value)?.value?.why == "nothing-vetted") c.api.discoveries().toLoaded() else null
+    }
+    verdicts = looked
     shownFor = who
+    shownOn = on
     state = read
   }
   // Read again whenever the session changes hands: the forget hooks do not run
@@ -635,7 +644,7 @@ fun ProposalsScreen(nav: NavHostController) {
             modifier = Modifier.fillMaxWidth(),
             onClick = {
               busy = true
-              scope.launch {
+              scope.launch(ServerBound(shownOn)) {
                 val r = approveProposals(c.repo, v.proposals, shownFor)
                 note = when (r) { is Acted.Ok -> r.line; is Acted.Failed -> r.line }
                 busy = false
@@ -734,7 +743,7 @@ fun ProposalsScreen(nav: NavHostController) {
               verticalPadding = 7.dp,
               onClick = {
                 busy = true
-                scope.launch {
+                scope.launch(ServerBound(shownOn)) {
                   val r = approveProposals(c.repo, listOf(p), shownFor)
                   note = when (r) { is Acted.Ok -> r.line; is Acted.Failed -> r.line }
                   busy = false
@@ -1183,7 +1192,7 @@ fun RiskScreen(nav: NavHostController) {
           onClick = {
             busy = true
             note = null
-            scope.launch {
+            scope.launch(c.api.boundHere()) {
               val owner = settings?.owner
               when (val r = applyRisk(c.repo, p.level, owner)) {
                 is Acted.Ok -> {

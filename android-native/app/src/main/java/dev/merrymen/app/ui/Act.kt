@@ -17,7 +17,9 @@ import dev.merrymen.app.net.GrantView
 import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.ORDER_ID
 import dev.merrymen.app.net.Proposal
+import dev.merrymen.app.net.NOT_SENT
 import dev.merrymen.app.net.RouteAnswer
+import dev.merrymen.app.net.ServerBound
 import dev.merrymen.app.net.SettingsEnvelope
 import dev.merrymen.app.net.SnipeTarget
 import dev.merrymen.app.net.dailyUsdg
@@ -31,6 +33,7 @@ import dev.merrymen.app.net.said
 import dev.merrymen.app.net.text
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -425,6 +428,7 @@ fun failureLine(failure: String, status: Int? = null, kind: String? = null, prov
     "network" -> return "I couldn't reach you just now — the connection dropped before my answer arrived. Try again."
     "server" -> return "I couldn't get an answer through just now${if (status != null) " (the server said $status)" else ""}. Try again."
     "no-address" -> return "I can't reach merrymen from here: the Server address in Settings isn't a web address — fix it there."
+    "server-changed" -> return "I didn't send that — the Server in Settings changed before it went out, so neither server heard it. Ask me again."
     "llm-error" -> Unit
     else -> return "I got an answer back that I can't read, so I haven't shown it. Try again."
   }
@@ -590,6 +594,25 @@ private fun JsonObject?.errorsOf(): String? =
 const val OWNER_CHANGED_LOCAL =
   "I didn't place that — the wallet signed in here changed after you confirmed, so nothing was sent. Ask again if you still want it."
 
+/** Said when the Server in Settings changed after the card was made: nothing is sent to either server. */
+const val SERVER_CHANGED_LOCAL =
+  "I didn't place that — the Server in Settings changed after you confirmed, so nothing was sent to either server. " +
+    "Ask again if you still want it."
+
+/** Whether the Server changed under [this] card since it was shown (see ConfirmScope.serverTurn). */
+private fun ConfirmScope.movedOff(api: MerrymenApi): Boolean = serverTurn?.let { !api.servers.holds(it) } ?: false
+
+/**
+ * CARRY OUT [block] ON THE SERVER THE CARD WAS SHOWN ON. Every read and write
+ * in it is bound to the card's server turn (ServerBound), so none of them goes
+ * to a server the owner switched to after confirming — each is sent there or
+ * nowhere, and a write that is not sent comes back as NotSent, never unknown.
+ */
+private suspend fun <T> ConfirmScope.onItsServer(block: suspend () -> T): T {
+  val on = serverTurn ?: return block()
+  return withContext(ServerBound(on)) { block() }
+}
+
 /**
  * AN ORDER WHOSE PLACING NEVER ANSWERED IS NOT A REFUSAL.
  *
@@ -625,6 +648,10 @@ private suspend fun orderLost(api: MerrymenApi, scope: ConfirmScope): Placed {
  * goes out names that owner, so the route refuses a session another wallet
  * took over (409). A refusal is said in the route's own words and the chat
  * card stays for another tap — never an automatic one.
+ *
+ * On the card's own server ([onItsServer]): an order confirmed on one server
+ * is placed there or not at all, whatever the Server in Settings says by the
+ * time it goes.
  */
 suspend fun placeConfirmedOrder(
   api: MerrymenApi,
@@ -633,10 +660,20 @@ suspend fun placeConfirmedOrder(
   symbol: String,
   usdg: Double,
   words: (duplicate: Boolean) -> String,
+): Placed = scope.onItsServer { placeOnItsServer(api, scope, side, symbol, usdg, words) }
+
+private suspend fun placeOnItsServer(
+  api: MerrymenApi,
+  scope: ConfirmScope,
+  side: String,
+  symbol: String,
+  usdg: Double,
+  words: (duplicate: Boolean) -> String,
 ): Placed {
   if (!scope.alive()) {
-    scope.say("agent", OWNER_CHANGED_LOCAL)
-    return Placed.Refused(OWNER_CHANGED_LOCAL)
+    val line = if (scope.movedOff(api)) SERVER_CHANGED_LOCAL else OWNER_CHANGED_LOCAL
+    scope.say("agent", line)
+    return Placed.Refused(line)
   }
   // Whatever goes wrong on the way is an answer we did not get: looked up, never retried.
   val answer = try {
@@ -705,10 +742,14 @@ private val SNIPE_ADDRESS = Regex("^0x[0-9a-fA-F]{40}$")
  * only that tap places it. A deliberate departure from the web, in the safe
  * direction: a lookup is free, a wrong coin is not.
  */
-suspend fun lookupConfirmedSnipe(api: MerrymenApi, scope: ConfirmScope, query: String, usdg: Double): Looked {
+suspend fun lookupConfirmedSnipe(api: MerrymenApi, scope: ConfirmScope, query: String, usdg: Double): Looked =
+  scope.onItsServer { lookupOnItsServer(api, scope, query, usdg) }
+
+private suspend fun lookupOnItsServer(api: MerrymenApi, scope: ConfirmScope, query: String, usdg: Double): Looked {
   if (!scope.alive()) {
-    scope.say("agent", OWNER_CHANGED_LOCAL)
-    return Looked.Said(OWNER_CHANGED_LOCAL)
+    val line = if (scope.movedOff(api)) SERVER_CHANGED_LOCAL else OWNER_CHANGED_LOCAL
+    scope.say("agent", line)
+    return Looked.Said(line)
   }
   return when (val found = api.lookupSnipe(query, usdg, scope.owner)) {
     is RouteAnswer.NotSent -> Looked.Said("That didn't go through: ${found.why}").also { scope.say("agent", it.line) }
@@ -764,9 +805,19 @@ suspend fun lookupConfirmedSnipe(api: MerrymenApi, scope: ConfirmScope, query: S
  * A lost answer may have landed: said as unknown, the settings re-read, and the
  * card left, because setting the same value twice is safe.
  */
-suspend fun runSettingsCard(api: MerrymenApi, scope: ConfirmScope, spec: CommandSpec, args: Map<String, String>) {
+suspend fun runSettingsCard(api: MerrymenApi, scope: ConfirmScope, spec: CommandSpec, args: Map<String, String>) =
+  scope.onItsServer { settingsOnItsServer(api, scope, spec, args) }
+
+private suspend fun settingsOnItsServer(api: MerrymenApi, scope: ConfirmScope, spec: CommandSpec, args: Map<String, String>) {
   if (!scope.alive()) {
-    scope.say("agent", "I didn't change that — the wallet signed in here changed after you confirmed, so nothing was saved.")
+    scope.say(
+      "agent",
+      if (scope.movedOff(api)) {
+        "I didn't change that — the Server in Settings changed after you confirmed, so nothing was saved on either server."
+      } else {
+        "I didn't change that — the wallet signed in here changed after you confirmed, so nothing was saved."
+      },
+    )
     return
   }
   when (val put = api.putSettingsFor(settingsPayload(spec, args), scope.owner)) {
@@ -894,6 +945,8 @@ private fun why(r: ApiResult<*>): String = when (r) {
  * were read, and nothing was saved.
  */
 private fun settingsWriteFailed(r: ApiResult<*>): Acted.Failed = when {
+  // Not sent at all — the Server changed under the tap. Known, not unknown.
+  r is ApiResult.Refused && r.status == NOT_SENT -> Acted.Failed("Nothing was saved. " + r.message)
   r is ApiResult.Refused && r.status == 409 ->
     Acted.Failed("Your session changed since this was set up — nothing was saved. " + r.message)
   r is ApiResult.Unreachable ->
@@ -925,6 +978,11 @@ private fun settingsWriteFailed(r: ApiResult<*>): Acted.Failed = when {
  * is saved. And the GET's `owner` goes back with the PUT, so a wallet that
  * signs in between the two gets a 409 and nothing written. The web sends
  * neither yet; the server takes the second.
+ *
+ * ONE SERVER FOR BOTH HALVES. The screen calls this bound to the server the
+ * list was read from (ServerBound): the read and the write go there, or the
+ * write is not sent — never the other server's basket with this one's coins
+ * added.
  */
 suspend fun approveProposals(repo: Repository, list: List<Proposal>, shownFor: String? = null): Acted {
   val cur = repo.api.settings()
@@ -999,6 +1057,7 @@ suspend fun approveProposals(repo: Repository, list: List<Proposal>, shownFor: S
  * that signed in since is refused (409) and nothing is written. When the
  * screen's read failed there is no such wallet yet, so the settings are read
  * first for it.
+ * Under the tap's binding, like [approveProposals]: one server, or no write.
  */
 suspend fun applyRisk(repo: Repository, level: String, owner: String?): Acted {
   val who = owner ?: when (val cur = repo.api.settings()) {
@@ -1101,7 +1160,8 @@ class TradeDesk(private val api: MerrymenApi, private val scopeNow: () -> Confir
     if (what.isEmpty() || (kind != "snipe" && !TRADE_SYMBOL.matches(what))) {
       return TradeOpen.No("That isn't a symbol I can look up — letters and digits, up to 12.")
     }
-    return TradeOpen.Card(cardFor(kind, what, usdg, read(), scope, null))
+    // The limits and the rail the card shows are read from the card's own server.
+    return TradeOpen.Card(cardFor(kind, what, usdg, scope.onItsServer { read() }, scope, null))
   }
 
   /**
@@ -1113,7 +1173,8 @@ class TradeDesk(private val api: MerrymenApi, private val scopeNow: () -> Confir
     if (!card.canConfirm) return TradeStep.Said((card.limit as LimitCheck.Over).line)
     if (!confirming.compareAndSet(false, true)) return TradeStep.Held
     try {
-      return carryOut(card)
+      // On the card's own server, the paper check's read included.
+      return card.scope.onItsServer { carryOut(card) }
     } finally {
       confirming.set(false)
     }

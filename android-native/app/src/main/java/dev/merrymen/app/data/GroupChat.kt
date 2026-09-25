@@ -521,7 +521,9 @@ class GroupChatRoom(
       onDone(kept(SendResult.Refused(if (busy) ONE_AT_A_TIME else "", body, replyTo)))
       return
     }
-    scope.launch { onDone(deliver(l, resend = false)) }
+    // To the room of the server it was typed on, or nowhere (ServerBound): a
+    // line written to one server's room is never posted in the next one's.
+    scope.launch(api.boundHere()) { onDone(deliver(l, resend = false)) }
   }
 
   /**
@@ -554,7 +556,7 @@ class GroupChatRoom(
       onDone(SendResult.Refused(why ?: ONE_AT_A_TIME))
       return
     }
-    scope.launch { onDone(deliver(l, resend = true)) }
+    scope.launch(api.boundHere()) { onDone(deliver(l, resend = true)) }
   }
 
   /**
@@ -706,7 +708,7 @@ class GroupChatRoom(
       onDone("Only your own messages can be removed.")
       return
     }
-    scope.launch {
+    scope.launch(api.boundHere()) {
       val gen = generation.get()
       val r = api.groupChatHide(id)
       if (gen != generation.get()) return@launch
@@ -743,7 +745,7 @@ class GroupChatRoom(
       onDone("Only owners with a Merryman can change this.")
       return
     }
-    scope.launch {
+    scope.launch(api.boundHere()) {
       val gen = generation.get()
       val r = call()
       if (gen != generation.get()) return@launch

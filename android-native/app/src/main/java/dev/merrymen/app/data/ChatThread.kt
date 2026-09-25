@@ -10,6 +10,7 @@ import dev.merrymen.app.net.GrantView
 import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.ORDER_ID
 import dev.merrymen.app.net.OrderReceipt
+import dev.merrymen.app.net.ServerBound
 import dev.merrymen.app.net.SettingsEnvelope
 import dev.merrymen.app.net.SnipeTarget
 import dev.merrymen.app.net.askAgent
@@ -219,7 +220,7 @@ private val keptJson = Json {
 }
 
 private val ROLES = setOf("owner", "agent", "event")
-private val FAILURES = setOf("signed-out", "no-llm", "llm-error", "unreadable", "network", "timeout", "cut-off", "server", "no-address")
+private val FAILURES = setOf("signed-out", "no-llm", "llm-error", "unreadable", "network", "timeout", "cut-off", "server", "no-address", "server-changed")
 
 /**
  * A kept thread, SHAPE-CHECKED line by line rather than trusted: it is shown
@@ -272,11 +273,13 @@ internal fun decodeThread(raw: String?): KeptFile {
 // ── confirming ──────────────────────────────────────────────────────────────
 
 /**
- * WHAT A CONFIRMED CARD MAY DO, BOUND TO THE OWNER WHO WAS SHOWN IT.
+ * WHAT A CONFIRMED CARD MAY DO, BOUND TO THE OWNER WHO WAS SHOWN IT, ON THE
+ * SERVER IT WAS SHOWN ON.
  *
- * Captured when the card is made. Once that owner has gone from this phone
- * each of these is a no-op, so a confirm still in flight when another wallet
- * signs in cannot write "placed it" into the next owner's thread, follow the
+ * Captured when the card is made. Once that owner has gone from this phone —
+ * or the Server in Settings has become another host — each of these is a
+ * no-op, so a confirm still in flight when another wallet signs in, or the
+ * Server changes, cannot write "placed it" into the next thread, follow the
  * previous owner's order there, or clear the next owner's card.
  */
 interface ConfirmScope {
@@ -288,10 +291,22 @@ interface ConfirmScope {
   val owner: String?
 
   /**
+   * THE SERVER THE CARD WAS SHOWN ON, as the API's server turn (ServerTurns).
+   * Carrying the card out is bound to it (ServerBound): each request goes to
+   * that server or nowhere. It is what stops a self-hosted order, which has
+   * no owner for a server to refuse, from being placed on the server the owner
+   * switched to after confirming. Null for a scope made without one (a test's
+   * stand-in): its requests are held only to the turn each one is built in.
+   */
+  val serverTurn: Long? get() = null
+
+  /**
    * May a request that ACTS still go out? Only while the owner who was shown
-   * the card has been the owner here the whole time: false from the moment it
-   * changes, and still false if they come back. A request carries the session
-   * the phone holds when it LEAVES, so this is asked before anything is sent.
+   * the card has been the owner here the whole time, on the same server:
+   * false from the moment either changes, and still false if they come back.
+   * A request carries the session the phone holds when it LEAVES, so this is
+   * asked before anything is sent — and the request is held to [serverTurn]
+   * again as it leaves, because asking is not sending.
    */
   fun alive(): Boolean
 
@@ -488,7 +503,8 @@ class ChatThread internal constructor(
       // Read the book before the first answer can land, so a receipt finds the
       // fill the tape may already show (absorbFill needs the trade in hand).
       appScope.launch { readSnapshot(key) }
-      kept.orders.forEach { startFollow(key, it) }
+      val on = api.servers.now.value
+      kept.orders.forEach { startFollow(key, it, on) }
     }
   }
 
@@ -720,6 +736,10 @@ class ChatThread internal constructor(
     if (q.isEmpty()) return false
     val key = state.value.key ?: return false
     if (keyNow() != key) return false
+    // THE SERVER THE QUESTION IS PUT TO, taken as it is sent: the book read for
+    // the model, the question and any card its answer raises are all that
+    // server's, and a card is carried out there or nowhere.
+    val on = currentCoroutineContext()[ServerBound]?.turn ?: api.servers.now.value
     val hold = SendHold(currentCoroutineContext()[Job])
     if (!sendingNow.compareAndSet(null, hold)) return false
     _sending.value = true
@@ -736,18 +756,21 @@ class ChatThread internal constructor(
         append(key, ChatLine(lineId("owner"), "owner", clock(), q))
       }
       _draft.update { d -> if (d.trim() == q) "" else d }
-      val snap = readSnapshot(key)
-      val stateJson = chatStateOf(snap.feed, snap.settings, snap.grants, clock())
-      val out = api.askAgent(ChatBody(message = q, state = stateJson.toString(), history = history)) { visible ->
-        if (state.value.key == key) _streaming.value = visible
+      val out = withContext(ServerBound(on)) {
+        val snap = readSnapshot(key)
+        val stateJson = chatStateOf(snap.feed, snap.settings, snap.grants, clock())
+        api.askAgent(ChatBody(message = q, state = stateJson.toString(), history = history)) { visible ->
+          if (state.value.key == key) _streaming.value = visible
+        }
       }
       if (state.value.key != key) return false
       when (out) {
         is Asked.Replied -> {
           append(key, ChatLine(lineId("agent"), "agent", clock(), out.reply))
           if (asksAmount(out.reply)) appScope.launch { readCeiling(key) }
-          // ONLY `done` MAY RAISE A CARD, and only for the owner who asked.
-          _card.value = out.command?.let { PendingCard(it, Scope(key, ownerTurn.get(), chatCard = true)) }
+          // ONLY `done` MAY RAISE A CARD, and only for the owner who asked, on
+          // the server that answered.
+          _card.value = out.command?.let { PendingCard(it, Scope(key, ownerTurn.get(), on, chatCard = true)) }
         }
         is Asked.Failed -> {
           val line = failureLine(out.failure, out.status, out.kind, out.provider)
@@ -777,7 +800,7 @@ class ChatThread internal constructor(
   fun cardScope(): ConfirmScope? {
     val key = state.value.key ?: return null
     if (keyNow() != key) return null
-    return Scope(key, ownerTurn.get(), chatCard = false)
+    return Scope(key, ownerTurn.get(), api.servers.now.value, chatCard = false)
   }
 
   /**
@@ -791,7 +814,10 @@ class ChatThread internal constructor(
     val hold = Any()
     if (!confirmHold.compareAndSet(null, hold)) return
     _confirming.value = true
-    appScope.launch {
+    // ON THE CARD'S OWN SERVER, from the paper check to the order: every read
+    // and write below is bound to it, and none goes anywhere once it changed.
+    val on = card.scope.serverTurn ?: api.servers.now.value
+    appScope.launch(ServerBound(on)) {
       try {
         if (!paperStillHolds(card)) return@launch
         // The limits as last read: an order past one is refused before it is sent.
@@ -840,17 +866,29 @@ class ChatThread internal constructor(
    * newer card, or swapped it for "Found it — buy $X of COIN" with Yes in the
    * same place, between the owner reading it and tapping. So a scope touches
    * the card only while the card up is the one it was made for.
+   *
+   * AND ONLY ON ITS OWN SERVER ([serverTurn]). Self-hosted, every server's
+   * thread has the one key "self", so after a Server change the key alone
+   * said "still theirs": an order in flight to the old server could say
+   * "placed it" in the new server's thread and then be followed there, by id,
+   * on a server that never saw it.
    */
-  private inner class Scope(val key: String, val turn: Long, val chatCard: Boolean) : ConfirmScope {
+  private inner class Scope(
+    val key: String,
+    val turn: Long,
+    override val serverTurn: Long,
+    val chatCard: Boolean,
+  ) : ConfirmScope {
     override val owner: String? = ownerOfKey(key)
-    override fun alive() = ownerTurn.get() == turn && keyNow() == key && state.value.key == key
-    private fun theirs() = state.value.key == key && keyNow() == key
+    override fun alive() =
+      ownerTurn.get() == turn && keyNow() == key && state.value.key == key && api.servers.holds(serverTurn)
+    private fun theirs() = state.value.key == key && keyNow() == key && api.servers.holds(serverTurn)
     override fun say(role: String, text: String, order: LineOrder?) {
       val said = if (!chatCard && role == "owner" && text == "✓ Confirmed") "✓ Confirmed on the Trade screen" else text
       if (theirs()) append(key, ChatLine(lineId(role), role, clock(), said, order = order))
     }
     override fun followOrder(id: String, expiresInMs: Long?) {
-      if (theirs()) follow(key, id, expiresInMs)
+      if (theirs()) follow(key, id, expiresInMs, serverTurn)
     }
     override fun clearCard() {
       if (chatCard && theirs()) _card.update { if (it?.scope === this) null else it }
@@ -874,18 +912,23 @@ class ChatThread internal constructor(
 
   // ── orders, followed here and not by a screen ────────────────────────────
 
-  private fun follow(key: String, id: String, expiresInMs: Long?) {
+  private fun follow(key: String, id: String, expiresInMs: Long?, on: Long) {
     if (!ORDER_ID.matches(id)) return
     val order = KeptOrder(id, OrderFollow.followDeadline(expiresInMs, clock()))
     update(key) { t -> if (t.orders.any { it.id == id }) t else t.copy(orders = t.orders + order) }
-    startFollow(key, state.value.orders.firstOrNull { it.id == id } ?: order)
+    startFollow(key, state.value.orders.firstOrNull { it.id == id } ?: order, on)
   }
 
-  /** Every kept order is followed exactly once per owner, the ones a cold start brought back included. */
-  private fun startFollow(key: String, order: KeptOrder) {
+  /**
+   * Every kept order is followed exactly once per owner, the ones a cold start
+   * brought back included — ON THE SERVER THAT PLACED IT ([on], a server turn):
+   * polled there only, and given up without a word once the Server changes,
+   * since an order id means nothing to another server.
+   */
+  private fun startFollow(key: String, order: KeptOrder, on: Long) {
     val tag = "$key|${order.id}"
     if (!following.add(tag)) return
-    appScope.launch {
+    appScope.launch(ServerBound(on)) {
       try {
         OrderFollow.followUntil(
           id = order.id,
@@ -893,8 +936,9 @@ class ChatThread internal constructor(
           poll = { api.pollOrder(it) },
           sleep = pause,
           now = clock,
-          // Not "is the screen open": "is this still this owner's thread".
-          alive = { state.value.key == key },
+          // Not "is the screen open": "is this still this owner's thread, on
+          // the server the order was placed on".
+          alive = { state.value.key == key && api.servers.holds(on) },
           say = { line, poll ->
             // THE WORKER'S WORDS, and its receipt when it wrote one — both read
             // off the ledger. Nothing here infers an outcome.

@@ -549,7 +549,7 @@ internal fun AccountNameChip(
           if (busy || typed.isBlank()) return@AskChip
           busy = true
           said = null
-          scope.launch {
+          scope.launch(api.boundHere()) {
             when (val r = api.saveOwnAgentName(typed, readFor, hosted)) {
               is NameSave.Named -> { named = r.name; onNamed() }
               is NameSave.Said -> said = r.text
@@ -662,7 +662,9 @@ private fun PictureField(api: MerrymenApi, slug: String, readFor: String?, kind:
     if (uri == null || busy) return@rememberLauncherForActivityResult
     busy = true
     said = null
-    scope.launch {
+    // Bound as the file is chosen: the picture goes to the server this page
+    // was read from, or nowhere — never to one the Server changed to meanwhile.
+    scope.launch(api.boundHere()) {
       val (mime, bytes) = withContext(Dispatchers.IO) { readPicked(context, uri, kind.maxBytes) }
       val outcome = if (bytes == null) {
         ImageWrite.NotSent("That file could not be opened.")
@@ -688,7 +690,7 @@ private fun PictureField(api: MerrymenApi, slug: String, readFor: String?, kind:
       if (kind == AgentImageKind.Avatar) {
         PictureButtons(kind, preview != null, busy, onPick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) {
           busy = true
-          scope.launch {
+          scope.launch(api.boundHere()) {
             reportImageWrite(kind, slug, api.removeOwnAgentImage(kind, readFor)) { text, isBad -> said = text; bad = isBad }
             busy = false
           }
@@ -698,7 +700,7 @@ private fun PictureField(api: MerrymenApi, slug: String, readFor: String?, kind:
     if (kind == AgentImageKind.Banner) {
       PictureButtons(kind, preview != null, busy, onPick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) {
         busy = true
-        scope.launch {
+        scope.launch(api.boundHere()) {
           reportImageWrite(kind, slug, api.removeOwnAgentImage(kind, readFor)) { text, isBad -> said = text; bad = isBad }
           busy = false
         }

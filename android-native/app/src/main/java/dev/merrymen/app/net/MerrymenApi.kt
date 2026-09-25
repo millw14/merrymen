@@ -14,6 +14,7 @@ import okhttp3.Response
 import java.io.IOException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 /**
@@ -42,6 +43,11 @@ sealed interface ApiResult<out T> {
    * [retryAfterSec] is the Retry-After header in seconds, when a rate limit
    * sent one (group chat's 429 does), so "slow down, try again in 7s" can say
    * the real number instead of a guess. Null when absent or not in seconds.
+   *
+   * ONE REFUSAL IS THIS APP'S OWN: status [NOT_SENT], a write that was not
+   * sent because the Server changed after it was asked for. No server said
+   * it, and nothing left the phone — a known outcome, so it is said as "not
+   * sent", never looked up like a lost answer.
    */
   data class Refused(val status: Int, val message: String, val retryAfterSec: Long? = null) : ApiResult<Nothing>
   /**
@@ -133,12 +139,14 @@ fun interface OriginSource {
  *
  *   suspend fun MerrymenApi.ceiling(): ApiResult<Ceiling> = getJson("/api/orders/ceiling")
  *
- * getJson, sendJson, callAt, call, urlFor, decoded and json are
+ * getJson, sendJson, callAt, call, aim, decoded and json are
  * `@PublishedApi internal` for exactly that, so a new route gets the same
  * three-state result, the same refusal wording and the same decode-failure
  * handling as every route here, without this file becoming everybody's merge
  * conflict. A raw body goes through callAt, never
- * `Request.Builder().url(String)` — see [urlFor] for why.
+ * `Request.Builder().url(String)` — see [aim] for why. A request built by
+ * hand from [aim] leaves through [ServerTurns.sendIf] with the turn [aim]
+ * gave, so it too goes nowhere once the Server has changed under it.
  *
  * EVERY WRITE GOES THROUGH [writeHttp] OR sendJson/callAt/call, which put it
  * there. Never `http.newCall` for a non-GET: see [writeHttp] for what a
@@ -205,7 +213,32 @@ class MerrymenApi(
   // ── plumbing ──────────────────────────────────────────────────────────────
 
   /**
-   * THE URL FOR [path], OR NULL WHEN THE STORED ORIGIN IS NOT A WEB ADDRESS.
+   * WHICH SERVER EVERY REQUEST IS FOR — see [ServerTurns]. Repository.setOrigin
+   * moves it, and nothing else does.
+   */
+  val servers = ServerTurns()
+
+  /**
+   * THE BINDING A DECISION TAKES: every request made in a coroutine started
+   * with it goes to the server on screen now, or is not sent. Take it at the
+   * tap (`scope.launch(api.boundHere()) { … }`), not later: a request that
+   * reads the stored address after the Server was changed would otherwise go
+   * to a server the owner never looked at.
+   */
+  fun boundHere(): ServerBound = ServerBound(servers.now.value)
+
+  /** A request's address, and the server turn it was read in (see [ServerTurns]). */
+  @PublishedApi internal class Aimed(val url: HttpUrl, val turn: Long)
+
+  /**
+   * THE URL FOR [path] AND THE TURN IT BELONGS TO, OR NULL WHEN THE STORED
+   * ORIGIN IS NOT A WEB ADDRESS.
+   *
+   * The turn is the coroutine's [ServerBound] when it carries one — the moment
+   * the owner decided — else the turn now, and it is taken BEFORE the address
+   * is read. Whoever sends the request checks it again right before it leaves
+   * ([ServerTurns.sendIf]); see [ServerTurns] for why that is the whole proof
+   * that the address is that turn's server.
    *
    * Never a String handed to Request.Builder.url(String): that overload THROWS
    * on an address it cannot parse, and it used to run outside anything that
@@ -219,7 +252,11 @@ class MerrymenApi(
    * as it was pasted, and every route became /home/api/… and a 404. See
    * [serverOf].
    */
-  @PublishedApi internal suspend fun urlFor(path: String): HttpUrl? = (serverOf(origins.originNow()) + path).toHttpUrlOrNull()
+  @PublishedApi internal suspend fun aim(path: String): Aimed? {
+    val turn = currentCoroutineContext()[ServerBound]?.turn ?: servers.now.value
+    val url = (serverOf(origins.originNow()) + path).toHttpUrlOrNull() ?: return null
+    return Aimed(url, turn)
+  }
 
   /**
    * ONE REQUEST TO [path] that getJson/sendJson do not cover — raw bytes,
@@ -231,41 +268,58 @@ class MerrymenApi(
     client: OkHttpClient = http,
     build: Request.Builder.() -> Unit,
   ): ApiResult<String> {
-    val u = urlFor(path) ?: return ApiResult.Unreachable(NOT_A_WEB_ADDRESS)
-    return call(Request.Builder().url(u).apply(build).build(), client)
+    val at = aim(path) ?: return ApiResult.Unreachable(NOT_A_WEB_ADDRESS)
+    return call(Request.Builder().url(at.url).apply(build).build(), client, at.turn)
   }
 
   /**
    * One request, as the three-state result. [client] is [http] unless a route
-   * needs its own timeouts.
+   * needs its own timeouts. [turn] is the server turn its address was read in
+   * ([aim]); it is not sent if the Server has moved since.
    *
    * THE CLIENT IS CHOSEN BY THE METHOD, HERE, for every route: a write goes
    * on [writeHttp] (or on [client] made fit for writes), so no caller can
    * send one on a client that retries; a read on the default client goes on
    * [readHttp], which in the app recovers from a stale connection.
    */
-  @PublishedApi internal suspend fun call(req: Request, client: OkHttpClient = http): ApiResult<String> {
+  @PublishedApi internal suspend fun call(req: Request, client: OkHttpClient = http, turn: Long = servers.now.value): ApiResult<String> {
     val via = when {
       !isWrite(req.method) -> if (client === http) readHttp else client
       client === http -> writeHttp
       else -> client.forWrites()
     }
-    return send(req, via)
+    return send(req, via, turn)
   }
 
-  private suspend fun send(req: Request, client: OkHttpClient): ApiResult<String> =
+  /**
+   * WHAT A REQUEST THE SERVER MOVED UNDER COMES BACK AS. A write: refused here,
+   * [NOT_SENT] — nothing left the phone, which is known, never "unknown", so it
+   * is not looked up. A read: no answer this app can use.
+   */
+  private fun serverMoved(req: Request): ApiResult<Nothing> =
+    if (isWrite(req.method)) ApiResult.Refused(NOT_SENT, SERVER_CHANGED_SENTENCE) else ApiResult.Unreachable(SERVER_CHANGED_READ)
+
+  private suspend fun send(req: Request, client: OkHttpClient, turn: Long): ApiResult<String> =
     suspendCancellableCoroutine { cont ->
       // CANCELLABLE, so a screen that goes away takes its request with it.
       // suspendCoroutine leaked one in-flight call per abandoned LaunchedEffect.
       val theCall = client.newCall(req)
       cont.invokeOnCancellation { theCall.cancel() }
-      theCall.enqueue(object : okhttp3.Callback {
+      val callback = object : okhttp3.Callback {
         override fun onFailure(call: okhttp3.Call, e: IOException) {
           cont.resume(ApiResult.Unreachable(noAnswerCause(e)))
         }
 
         override fun onResponse(call: okhttp3.Call, response: Response) {
           response.use { r ->
+            // A READ ANSWERED BY THE SERVER THE OWNER LEFT is that server's
+            // answer. Handed on, a screen — or the chat's picture of the book —
+            // would show it as the new server's. A write's answer is kept: it
+            // happened, and whoever sent it decides who may hear about it.
+            if (!isWrite(req.method) && !servers.holds(turn)) {
+              cont.resume(ApiResult.Unreachable(SERVER_CHANGED_READ))
+              return
+            }
             val body = try {
               r.body?.string().orEmpty()
             } catch (e: IOException) {
@@ -280,7 +334,12 @@ class MerrymenApi(
             }
           }
         }
-      })
+      }
+      // THE LAST MOMENT THE SERVER CAN BE CHECKED, and the one that counts: the
+      // turn is compared under the lock a Server change takes to begin, and
+      // the request is handed over inside it, so no change can start between
+      // the check and the send.
+      if (!servers.sendIf(turn) { theCall.enqueue(callback) }) cont.resume(serverMoved(req))
     }
 
   /**

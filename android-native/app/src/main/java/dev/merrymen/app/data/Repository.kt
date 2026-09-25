@@ -8,10 +8,15 @@ import dev.merrymen.app.net.SessionStore
 import dev.merrymen.app.net.checkOrigin
 import dev.merrymen.app.net.isOtherServer
 import dev.merrymen.app.net.serverOf
+import dev.merrymen.app.net.ServerTurns
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * WHAT THE APP KNOWS, AND HOW SURE IT IS.
@@ -140,19 +145,51 @@ class Repository(
    * that set it — the jar is scoped, so it is simply not sent to the new one —
    * and comes back into use if the owner points the app back.
    *
-   * The new address is stored BEFORE the turn ends, so an identity read that
-   * starts after it asks the new server, and one that left before it is
-   * dropped by the turn count rather than folded in.
+   * THE TURN ENDS BEFORE THE NEW ADDRESS CAN BE SEEN, and no request crosses
+   * it. It used to store the address first and end the turn after, so a
+   * confirmed order that had already passed its owner check could read the
+   * new address in that gap and be placed on a server its owner never looked
+   * at — self-hosted, with no owner in the body for that server to refuse. Now
+   * the move is one piece ([ServerTurns]): every request from before it stops
+   * going anywhere, the hooks run, the address is stored, and only then can a
+   * request read it. An identity read caught in the middle is refused, not
+   * sent, and one that left before is dropped by the turn count as before.
+   * The move cannot be cut in half by a cancelled screen, and two moves never
+   * overlap.
    */
   suspend fun setOrigin(value: String): OriginCheck {
     identity.refuseInsideHook("setOrigin")
     val checked = checkOrigin(value, session.fallbackOrigin)
     if (checked !is OriginCheck.Ok) return checked
-    val before = session.originNow()
-    session.setOrigin(checked)
-    if (isOtherServer(before, checked.origin)) identity.serverChanged()
+    withContext(NonCancellable) {
+      moving.withLock {
+        val before = session.originNow()
+        if (!isOtherServer(before, checked.origin)) {
+          // The same server, written as normalised: nobody's turn ends.
+          session.setOrigin(checked)
+          return@withLock
+        }
+        api.servers.leave()
+        try {
+          identity.serverChanged()
+          session.setOrigin(checked)
+        } finally {
+          api.servers.arrive()
+        }
+      }
+    }
     return checked
   }
+
+  /** One Server change at a time; see [setOrigin]. */
+  private val moving = Mutex()
+
+  /**
+   * WHICH SERVER THE APP IS ON, as a number that moves when the Server in
+   * Settings becomes another host ([ServerTurns]). A screen notes the turn it
+   * read in, and binds what the owner decides there to it (ServerBound).
+   */
+  val serverTurn: StateFlow<Long> get() = api.servers.now
 
   /**
    * Is the server there, and who does it say we are.

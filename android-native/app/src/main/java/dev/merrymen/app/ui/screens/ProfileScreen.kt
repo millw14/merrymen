@@ -342,7 +342,8 @@ private fun StopControl() {
             stopNote = "Tap again to stop it. This revokes its trading permission until you re-sign."
           } else {
             armed = false
-            scope.launch {
+            // The stop goes to the server this page shows, or nowhere (ServerBound).
+            scope.launch(c.api.boundHere()) {
               stopNote = when (val r = c.api.revokeGrant()) {
                 is ApiResult.Ok ->
                   "Stopped. Your agent will not trade again until you re-sign its permission."

@@ -155,7 +155,8 @@ suspend fun MerrymenApi.removeOwnAgentImage(kind: AgentImageKind, readFor: Strin
  */
 internal fun imageWriteOf(kind: AgentImageKind, r: ApiResult<AgentImageSaved>): ImageWrite = when (r) {
   is ApiResult.Ok -> ImageWrite.Done(r.value.version?.takeIf { it.isNotBlank() })
-  is ApiResult.Refused -> ImageWrite.Refused(
+  // Refused on the phone, not by the server: the Server changed under it.
+  is ApiResult.Refused -> if (r.status == NOT_SENT) ImageWrite.NotSent(r.message) else ImageWrite.Refused(
     when {
       r.status == 401 -> "Sign in to change your agent's ${kind.noun}."
       r.status == 404 -> "Pictures are not available on this server."
@@ -185,12 +186,12 @@ private const val PREVIEW_CAP = 10L * 1024 * 1024
 suspend fun MerrymenApi.agentImageBytes(slug: String, kind: AgentImageKind, version: String?): ApiResult<ByteArray?> {
   val path = "/api/agent-image/" + java.net.URLEncoder.encode(slug, "UTF-8") + "/" + kind.wire +
     (version?.let { "?v=" + java.net.URLEncoder.encode(it, "UTF-8") } ?: "")
-  val u = urlFor(path) ?: return ApiResult.Unreachable(NOT_A_WEB_ADDRESS)
-  val req = Request.Builder().url(u).header("accept", "image/*").get().build()
+  val at = aim(path) ?: return ApiResult.Unreachable(NOT_A_WEB_ADDRESS)
+  val req = Request.Builder().url(at.url).header("accept", "image/*").get().build()
   return suspendCancellableCoroutine { cont ->
     val call = http.newCall(req)
     cont.invokeOnCancellation { call.cancel() }
-    call.enqueue(object : okhttp3.Callback {
+    val callback = object : okhttp3.Callback {
       override fun onFailure(call: okhttp3.Call, e: IOException) {
         cont.resume(ApiResult.Unreachable(noAnswerCause(e)))
       }
@@ -215,6 +216,8 @@ suspend fun MerrymenApi.agentImageBytes(slug: String, kind: AgentImageKind, vers
           cont.resume(result)
         }
       }
-    })
+    }
+    // Only to the server this preview was asked of (MerrymenApi.aim).
+    if (!servers.sendIf(at.turn) { call.enqueue(callback) }) cont.resume(ApiResult.Unreachable(SERVER_CHANGED_READ))
   }
 }

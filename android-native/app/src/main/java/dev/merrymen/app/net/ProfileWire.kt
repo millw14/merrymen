@@ -199,16 +199,16 @@ private const val IMAGE_MAX_BYTES = 9L * 1024 * 1024
  */
 suspend fun MerrymenApi.agentImage(slug: String, kind: String, etag: String?, version: String?): ImageAnswer {
   val path = "/api/agent-image/$slug/$kind" + (version?.let { "?v=" + URLEncoder.encode(it, "UTF-8") } ?: "")
-  val url = urlFor(path) ?: return ImageAnswer.Failed(NOT_A_WEB_ADDRESS)
+  val at = aim(path) ?: return ImageAnswer.Failed(NOT_A_WEB_ADDRESS)
   val request = Request.Builder()
-    .url(url)
+    .url(at.url)
     .header("Accept", "image/webp,image/*")
     .apply { if (etag != null) header("If-None-Match", etag) }
     .build()
   return suspendCancellableCoroutine { cont ->
     val call = http.newCall(request)
     cont.invokeOnCancellation { call.cancel() }
-    call.enqueue(object : Callback {
+    val callback = object : Callback {
       override fun onFailure(call: Call, e: IOException) {
         if (cont.isActive) cont.resume(ImageAnswer.Failed(e.message ?: "no answer"))
       }
@@ -239,7 +239,9 @@ suspend fun MerrymenApi.agentImage(slug: String, kind: String, etag: String?, ve
         }
         if (cont.isActive) cont.resume(answer)
       }
-    })
+    }
+    // Only to the server this face was asked of (MerrymenApi.aim).
+    if (!servers.sendIf(at.turn) { call.enqueue(callback) }) cont.resume(ImageAnswer.Failed(SERVER_CHANGED_READ))
   }
 }
 

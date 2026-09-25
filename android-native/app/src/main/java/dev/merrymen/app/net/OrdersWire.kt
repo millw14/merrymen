@@ -54,9 +54,17 @@ fun JsonObject?.text(key: String): String? =
 /**
  * ONE WRITE, and what came back — see [RouteAnswer].
  *
- * Built on [MerrymenApi.urlFor] and the app's write client (so the cookie jar
+ * Built on [MerrymenApi.aim] and the app's write client (so the cookie jar
  * and headers are the app's), but read by hand, because the route's JSON body
  * on an error status is the whole difference between "refused" and "unknown".
+ *
+ * ONLY TO THE SERVER IT WAS ASKED FOR. The address is read in a server turn —
+ * the confirm card's, when the caller is bound to one — and the write leaves
+ * only if the Server has not changed since ([ServerTurns.sendIf]). When it has,
+ * it is [RouteAnswer.NotSent] with [SERVER_CHANGED]: nothing went, to either
+ * server, and that is said as such. An order confirmed on one self-hosted
+ * server used to be able to read the next server's address here and be placed
+ * there, with no owner in the body for it to refuse.
  *
  * SENT ONCE, WHATEVER CLIENT CARRIES IT. It rides [MerrymenApi.writeHttp], or
  * [client] made fit for writes the same way (forWrites), and either one never
@@ -73,17 +81,28 @@ suspend fun MerrymenApi.routeAnswer(
   body: JsonObject,
   client: OkHttpClient = writeHttp,
 ): RouteAnswer {
-  val u = urlFor(path) ?: return RouteAnswer.NotSent(NOT_A_WEB_ADDRESS)
+  val at = aim(path) ?: return RouteAnswer.NotSent(NOT_A_WEB_ADDRESS)
   val req = Request.Builder()
-    .url(u)
+    .url(at.url)
     .method(method, json.encodeToString(JsonElement.serializer(), body).toRequestBody(jsonType))
     .build()
-  return exchange(client.forWrites(), req) { r ->
-    val obj = jsonObjectOf(r)
-    // THE WEB'S RULE, exactly: an error status with nothing the route wrote is
-    // nobody's answer. A 2xx with no JSON is still a 2xx — the row exists.
-    if (!r.isSuccessful && obj == null) RouteAnswer.Lost else RouteAnswer.Said(r.code, obj)
-  } ?: RouteAnswer.Lost
+  return when (
+    val out = exchange(client.forWrites(), req, at.turn) { r ->
+      val obj = jsonObjectOf(r)
+      // THE WEB'S RULE, exactly: an error status with nothing the route wrote is
+      // nobody's answer. A 2xx with no JSON is still a 2xx — the row exists.
+      if (!r.isSuccessful && obj == null) RouteAnswer.Lost else RouteAnswer.Said(r.code, obj)
+    }
+  ) {
+    Exchanged.NotSent -> RouteAnswer.NotSent(SERVER_CHANGED)
+    is Exchanged.Came -> out.value ?: RouteAnswer.Lost
+  }
+}
+
+/** What [exchange] came to: the request never left, or it did and [Came.value] is what was read (null: no answer). */
+private sealed interface Exchanged<out T> {
+  data object NotSent : Exchanged<Nothing>
+  data class Came<T>(val value: T?) : Exchanged<T>
 }
 
 /**
@@ -110,17 +129,24 @@ private suspend fun MerrymenApi.readObject(path: String): JsonObject? {
 }
 
 /**
- * One call, cancellable, with [read] run on the response while it is open.
- * Null when no response came: a dropped connection, a timeout, a cancelled
- * call — the caller decides what that means for its route.
+ * One call, cancellable, with [read] run on the response while it is open —
+ * sent only while server [turn] holds ([ServerTurns.sendIf]), else
+ * [Exchanged.NotSent] and nothing left the phone. A null [Exchanged.Came]
+ * value is no response: a dropped connection, a timeout, a cancelled call —
+ * the caller decides what that means for its route.
  */
-private suspend fun <T> exchange(client: OkHttpClient, req: Request, read: (Response) -> T): T? =
+private suspend fun <T> MerrymenApi.exchange(
+  client: OkHttpClient,
+  req: Request,
+  turn: Long,
+  read: (Response) -> T,
+): Exchanged<T> =
   suspendCancellableCoroutine { cont ->
     val call = client.newCall(req)
     cont.invokeOnCancellation { call.cancel() }
-    call.enqueue(object : okhttp3.Callback {
+    val callback = object : okhttp3.Callback {
       override fun onFailure(call: okhttp3.Call, e: IOException) {
-        cont.resume(null)
+        cont.resume(Exchanged.Came(null))
       }
 
       override fun onResponse(call: okhttp3.Call, response: Response) {
@@ -132,9 +158,10 @@ private suspend fun <T> exchange(client: OkHttpClient, req: Request, read: (Resp
         } catch (e: Exception) {
           null
         }
-        cont.resume(out)
+        cont.resume(Exchanged.Came(out))
       }
-    })
+    }
+    if (!servers.sendIf(turn) { call.enqueue(callback) }) cont.resume(Exchanged.NotSent)
   }
 
 /**

@@ -192,7 +192,9 @@ private fun replyOf(o: JsonObject) = StreamedReply(
  *
  * [Failed.failure] is one of the web's ChatFailure kinds — signed-out, no-llm,
  * llm-error, unreadable, network, timeout, cut-off, server — plus "no-address"
- * for a stored Server that is not a web address, which only a phone can have.
+ * for a stored Server that is not a web address, and "server-changed" for a
+ * question the Server in Settings changed under before it went (nothing was
+ * sent), which only a phone can have.
  * The sentence for each is the thread's to choose (ui/Act.kt failureLine);
  * [Failed.kind] and [Failed.provider] are the route's classification of a
  * model failure, never the provider's own words.
@@ -230,9 +232,9 @@ suspend fun MerrymenApi.askAgent(body: ChatBody, onText: (String) -> Unit): Aske
 }
 
 private suspend fun MerrymenApi.askAgentOnce(body: ChatBody, onText: (String) -> Unit): Asked {
-  val u = urlFor("/api/chat") ?: return Asked.Failed("no-address")
+  val at = aim("/api/chat") ?: return Asked.Failed("no-address")
   val req = Request.Builder()
-    .url(u)
+    .url(at.url)
     .header("accept", "text/event-stream, application/json")
     .post(json.encodeToString(ChatBody.serializer(), body).toRequestBody(jsonType))
     .build()
@@ -246,7 +248,7 @@ private suspend fun MerrymenApi.askAgentOnce(body: ChatBody, onText: (String) ->
   // for it where a cancellation lands straight away; cancelling the call then
   // fails the blocked read, and the server's own abort stops the model.
   return coroutineScope {
-    val reading = async(Dispatchers.IO) { readReply(call, onText) }
+    val reading = async(Dispatchers.IO) { readReply(call, at.turn, onText) }
     try {
       reading.await()
     } catch (e: kotlinx.coroutines.CancellationException) {
@@ -256,8 +258,12 @@ private suspend fun MerrymenApi.askAgentOnce(body: ChatBody, onText: (String) ->
   }
 }
 
-private suspend fun MerrymenApi.readReply(call: okhttp3.Call, onText: (String) -> Unit): Asked {
+private suspend fun MerrymenApi.readReply(call: okhttp3.Call, turn: Long, onText: (String) -> Unit): Asked {
   return withContext(Dispatchers.IO) {
+    // NOT ASKED OF A SERVER THE OWNER HAS LEFT. The address was read in [turn]
+    // (MerrymenApi.aim), so while it holds this goes to the server the question
+    // was put to; once the Server has changed, nothing is sent to either.
+    if (!servers.holds(turn)) return@withContext Asked.Failed("server-changed")
     val response = try {
       call.execute()
     } catch (e: InterruptedIOException) {

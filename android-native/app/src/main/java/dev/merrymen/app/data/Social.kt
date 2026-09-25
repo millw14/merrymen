@@ -2,8 +2,10 @@ package dev.merrymen.app.data
 
 import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.MerrymenApi
+import dev.merrymen.app.net.ServerBound
 import dev.merrymen.app.net.said
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -245,6 +247,14 @@ class Social(private val api: MerrymenApi) {
   }
 
   /**
+   * THE SERVER THE TAP WAS ON: the caller's binding when it took one, else the
+   * turn now — the tap runs straight into this. The write, and the look-up
+   * after a lost answer, go to that server or nowhere; a like or a wire the
+   * owner gave one server is never cast on the one they switched to.
+   */
+  private suspend fun onServerNow(): ServerBound = currentCoroutineContext()[ServerBound] ?: api.boundHere()
+
+  /**
    * Cast or withdraw a like.
    *
    * Optimistic on BOTH halves and rolled back together — a heart that fills
@@ -258,7 +268,7 @@ class Social(private val api: MerrymenApi) {
    * as though stored. So the write and whatever it takes to settle it run to
    * the end, bounded by the client's own timeouts.
    */
-  suspend fun toggleLike(postId: String, on: Boolean): String? = withContext(NonCancellable) {
+  suspend fun toggleLike(postId: String, on: Boolean): String? = withContext(NonCancellable + onServerNow()) {
     val at = wallet.get()
     val said = likeWrite(postId, on, at)
     // Signed out, or into another wallet, while it was on its way: what it has
@@ -439,7 +449,7 @@ class Social(private val api: MerrymenApi) {
    * flag run to the end whatever happens to the caller, and what it had to
    * say is kept in [wireNote] for that desk's page.
    */
-  suspend fun toggleWire(slug: String, on: Boolean): String? = withContext(NonCancellable) {
+  suspend fun toggleWire(slug: String, on: Boolean): String? = withContext(NonCancellable + onServerNow()) {
     val me = Any()
     if (!writer.compareAndSet(null, me)) return@withContext null
     writes.incrementAndGet()
