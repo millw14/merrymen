@@ -406,6 +406,26 @@ recipient into a prompt.
 
 ---
 
+## 5 · Ask Claude about your merryman
+
+Hosted Merrymen has an MCP server, so Claude (and Codex, Cursor, VS Code, …)
+can read your agent's status, trades and portfolio and explain why it has or
+hasn't traded. One click for Claude: <https://app.merrymen.dev/connect/mcp>.
+
+In **Claude Code**, run these one at a time:
+
+```text
+/plugin marketplace add https://github.com/millw14/merrymen.git
+/plugin install merrymen@merrymen
+```
+
+then sign in once from `/mcp`, and use `/merrymen:status`, `/merrymen:why`,
+`/merrymen:portfolio`, `/merrymen:week` and `/merrymen:token`. The assistant
+only gets what you allow when you connect, and it can never move your funds,
+see your keys or loosen your limits. Details: [docs/mcp](docs/mcp/README.md).
+
+---
+
 ## Strategies
 
 Pick one in `/settings` (or `/strategy <name>` from Telegram; `MERRYMEN_STRATEGY`

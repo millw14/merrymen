@@ -35,6 +35,12 @@ export type ScopeLevel = "read" | "write" | "sensitive" | "staff";
 export interface ScopeInfo {
   id: string;
   title: string;
+  /**
+   * The title as a short lowercase noun phrase, for the consent screen's
+   * one-line summary, where it is listed under a verb ("See", "Do", "Suggest,
+   * only with your approval"): "your portfolio and trades", "backtests".
+   */
+  phrase: string;
   /** Plain-language consent text: what the connected app can do. */
   detail: string;
   level: ScopeLevel;
@@ -49,78 +55,91 @@ export const SCOPES: readonly ScopeInfo[] = [
   {
     id: "market:read", level: "read", needsAgent: false, defaultOn: true,
     title: "Research markets and public agents",
+    phrase: "market and public-agent research",
     detail: "Search tokens, read prices, candles, liquidity and public agent profiles, theses and leaderboards. Nothing private.",
     capabilities: ["market.read"],
   },
   {
     id: "agents:read", level: "read", needsAgent: true, defaultOn: true,
     title: "See your agent’s status and settings",
+    phrase: "your agent’s status and settings",
     detail: "Its mode (paper or live), strategy, limits, permission expiry and whether it is running.",
     capabilities: ["agents.read"],
   },
   {
     id: "portfolio:read", level: "read", needsAgent: true, defaultOn: true,
     title: "See your portfolio and trades",
+    phrase: "your portfolio and trades",
     detail: "Cash, savings, positions, profit and loss, fees and your trade history with receipts.",
     capabilities: ["portfolio.read"],
   },
   {
     id: "decisions:read", level: "read", needsAgent: true, defaultOn: true,
     title: "See your agent’s decisions",
+    phrase: "your agent’s decisions",
     detail: "What it decided and why, what it refused, and why it has not traded.",
     capabilities: ["decisions.read"],
   },
   {
     id: "reports:read", level: "read", needsAgent: true, defaultOn: true,
     title: "Create reports and exports",
+    phrase: "reports and exports",
     detail: "Daily and weekly summaries and downloadable portfolio or trade exports that expire after a day.",
     capabilities: ["reports.read"],
   },
   {
     id: "chat:write", level: "write", needsAgent: true, defaultOn: true,
     title: "Talk with your agent",
+    phrase: "chats with your agent",
     detail: "Send it messages and research notes and read the replies. Messages cannot change settings or place trades.",
     capabilities: ["chat.send", "research.submit"],
   },
   {
     id: "watchlist:manage", level: "write", needsAgent: false, defaultOn: true,
     title: "Manage your watchlist",
+    phrase: "your watchlist",
     detail: "Add and remove tokens you are watching. Watching a token never buys it.",
     capabilities: ["watchlist.manage"],
   },
   {
     id: "notifications:manage", level: "write", needsAgent: true, defaultOn: true,
     title: "Manage your alerts",
+    phrase: "your alerts",
     detail: "Choose which alerts your agent sends to your linked Telegram, and see whether they were delivered.",
     capabilities: ["notifications.manage"],
   },
   {
     id: "jobs:run", level: "write", needsAgent: false, defaultOn: true,
     title: "Run backtests",
+    phrase: "backtests",
     detail: "Run historical strategy tests. Results are simulations, never promises of live returns.",
     capabilities: ["jobs.run"],
   },
   {
     id: "drafts:write", level: "sensitive", needsAgent: false, defaultOn: false,
     title: "Suggest setting changes for you to approve",
+    phrase: "setting-change suggestions",
     detail: "Prepare agent drafts and setting changes. Nothing changes until you approve it in Merrymen.",
     capabilities: ["drafts.write"],
   },
   {
     id: "trade:propose", level: "sensitive", needsAgent: true, defaultOn: false,
     title: "Suggest trades for you to approve",
+    phrase: "trade suggestions",
     detail: "Get quotes and prepare exact trade proposals. Nothing is bought or sold until you approve it in Merrymen, and your agent’s limits still apply.",
     capabilities: ["trade.propose"],
   },
   {
     id: "social:write", level: "sensitive", needsAgent: true, defaultOn: false,
     title: "Follow agents and draft posts",
+    phrase: "follows and draft posts",
     detail: "Follow or unfollow public agents for research and draft posts. A post is published only after you approve it in Merrymen. Following never copies trades.",
     capabilities: ["social.write"],
   },
   {
     id: "staff:diagnostics", level: "staff", needsAgent: false, defaultOn: false,
     title: "Merrymen staff diagnostics",
+    phrase: "fleet health and error diagnostics",
     detail: "Fleet health, provider errors and execution failures, with owners’ private data redacted. Staff only.",
     capabilities: ["staff.diagnostics"],
   },
@@ -130,6 +149,7 @@ export const SCOPES: readonly ScopeInfo[] = [
     // refresh tokens are issued whether or not a client asks for this.
     id: "offline_access", level: "read", needsAgent: false, defaultOn: true,
     title: "Offline access (compatibility only)",
+    phrase: "offline access (compatibility only)",
     detail: "Accepted for compatibility with standard OAuth clients; it grants nothing extra. Every app connected through sign-in gets refresh tokens whether or not it asks for this scope (a personal access token has none), and access ends when you disconnect the app on Connected apps or the connection reaches its time limit.",
     capabilities: [],
   },

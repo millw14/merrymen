@@ -19,11 +19,11 @@ import {
   refreshTokens, revokeConnection, revokeToken, startAuthorization, verifyAccessToken,
 } from "./server";
 import { authorizationServerMetadata, protectedResourceMetadata, bearerChallenge } from "./metadata";
-import { scopeInfo } from "../scopes";
+import { SCOPES, scopeInfo } from "../scopes";
 import { DOC_RESOURCES } from "../resources-catalog";
 import { mintSession } from "../../lib/auth";
 import { POST as connectionsPost } from "../../app/api/mcp/connections/route";
-import { ACCOUNT_A, OWNER_A, OWNER_B, SLUG_A, SLUG_B, VERIFIER, connectAs, installFixtures, makeDeps, makeTestDb, testConfig } from "../testing";
+import { ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, VERIFIER, agentFixture, connectAs, fixtureDirectory, installFixtures, makeDeps, makeTestDb, testConfig } from "../testing";
 
 const REDIRECT = "http://127.0.0.1:33418/callback";
 
@@ -325,10 +325,45 @@ test("DCR rejects unsafe metadata", async () => {
     { redirect_uris: ["https://ok.test/cb"], grant_types: ["client_credentials"] },
     { redirect_uris: ["https://ok.test/cb"], response_types: ["token"] },
     { redirect_uris: ["https://ok.test/cb"], token_endpoint_auth_method: "private_key_jwt" },
+    // Only app-scheme callbacks: nothing a code could be sent to.
+    { redirect_uris: ["cursor://anysphere.cursor-mcp/oauth/callback"] },
+    // An app scheme is ignored, a bad http(s) redirect still fails the registration.
+    { redirect_uris: ["cursor://anysphere.cursor-mcp/oauth/callback", "http://evil.test/cb"] },
+    // Not app schemes, just malformed: a scheme-less loopback, and schemes with no "//".
+    { redirect_uris: ["localhost:8787/callback", "https://ok.test/cb"] },
+    { redirect_uris: ["javascript:alert(1)", "https://ok.test/cb"] },
+    { redirect_uris: Array.from({ length: 11 }, (_, i) => `https://ok.test/cb${i}`) },
   ]) {
     const r = await registerClient(d, bad, 1);
     assert.equal(r.status, 400, JSON.stringify(bad));
   }
+});
+
+test("DCR: Cursor's three callbacks register; its app-scheme one is ignored and never receives a code", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  // Cursor (IDE/CLI) registers all three together, per its staff on the Cursor forum (2026-07).
+  const cursorScheme = "cursor://anysphere.cursor-mcp/oauth/callback";
+  const loopback = "http://localhost:8787/callback";
+  const reg = await registerClient(d, {
+    client_name: "Cursor", token_endpoint_auth_method: "none",
+    redirect_uris: [cursorScheme, "https://www.cursor.com/agents/mcp/oauth/callback", loopback],
+  }, deps.now());
+  assert.equal(reg.status, 201);
+  assert.deepEqual(reg.body.redirect_uris, ["https://www.cursor.com/agents/mcp/oauth/callback", loopback], "the response lists only what was kept");
+  const clientId = String(reg.body.client_id);
+  assert.deepEqual(await startAuthorization(deps, authorizeParams(clientId, { redirect_uri: cursorScheme })),
+    { kind: "page_error", status: 400, error: "invalid_request", description: "redirect_uri is missing or not registered for this client" });
+  const start = await startAuthorization(deps, authorizeParams(clientId, { redirect_uri: loopback }));
+  const view = await describeRequest(deps, requestOf((start as { location: string }).location), OWNER_A);
+  assert.equal(view.client.redirectHost, "localhost:8787");
+});
+
+test("CIMD: app-scheme callbacks in a metadata document are ignored, not fatal", () => {
+  const id = "https://client.example/oauth/metadata.json";
+  const doc = { client_id: id, redirect_uris: ["myapp://callback", "http://127.0.0.1/callback"], token_endpoint_auth_method: "none" };
+  assert.deepEqual(parseCimd(id, Buffer.from(JSON.stringify(doc))).redirectUris, ["http://127.0.0.1/callback"]);
+  assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify({ ...doc, redirect_uris: ["myapp://callback"] }))), /redirect_uris/);
 });
 
 test("CIMD: the document must name itself, be public, and list safe redirects", async () => {
@@ -976,4 +1011,109 @@ test("after the endpoint moves, refreshing a connection made for the old address
   // Where the address did not move, the same token still refreshes.
   const same = await refreshTokens(deps, new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refresh_token!, client_id: clientId }), client);
   assert.ok(same.access_token);
+});
+
+// ── one-click consent ───────────────────────────────────────────────────────
+
+test("every scope has a short lowercase phrase for the consent screen's summary", () => {
+  for (const s of SCOPES) {
+    assert.ok(s.phrase.trim().length > 0, `${s.id} has a phrase`);
+    assert.equal(s.phrase, s.phrase.trim(), s.id);
+    assert.match(s.phrase, /^[a-z]/, `${s.id} starts lowercase, to read after a verb`);
+    assert.doesNotMatch(s.phrase, /[.!?;:]$/, `${s.id} is a phrase, not a sentence`);
+    assert.ok(s.phrase.split(/\s+/).length <= 6, `${s.id} is short`);
+  }
+});
+
+/** Connect OWNER_A to one client with trade:propose ticked, then park a new request from that same client. */
+async function reconnecting(deps: ReturnType<typeof makeDeps>, scope?: string) {
+  const first = await connectAs(deps, OWNER_A, { scopes: ["market:read", "portfolio:read", "trade:propose", "offline_access"] });
+  const asked = scope ?? /scope="([^"]*)"/.exec(bearerChallenge(deps.cfg))![1]!;
+  const start = await startAuthorization(deps, authorizeParams(first.clientId, { scope: asked }));
+  assert.equal(start.kind, "consent");
+  return { first, req: requestOf((start as { location: string }).location) };
+}
+
+test("a reconnect from the same app is described with what its active connection holds, so a sensitive permission is not dropped", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const since = deps.now();
+  const { first, req } = await reconnecting(deps);
+  deps.advance(60);
+  const view = await describeRequest(deps, req, OWNER_A);
+  assert.deepEqual(view.previous, { scopes: ["market:read", "portfolio:read", "trade:propose"], agentSlugs: [SLUG_A], since, partial: false });
+  // The tenant is matched however the session spells it.
+  const upper = `0x${OWNER_A.slice(2).toUpperCase()}` as const;
+  assert.deepEqual((await describeRequest(deps, req, upper)).previous?.scopes, view.previous!.scopes);
+  // The page sends that choice back explicitly: the reconnect keeps trade:propose on the same connection.
+  await decideRequest(deps, req, OWNER_A, { approve: true, scopes: view.previous!.scopes, agentSlugs: view.previous!.agentSlugs });
+  const conns = await listConnections(d, OWNER_A);
+  assert.equal(conns.length, 1);
+  assert.equal(conns[0]!.id, first.principal.connectionId);
+  assert.ok(conns[0]!.scopes.includes("trade:propose"));
+});
+
+test("previous is null signed out, for another app, for another owner, and after the owner disconnects", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const { first, req } = await reconnecting(deps);
+  assert.equal((await describeRequest(deps, req, null)).previous, null);
+  // Owner B has no connection with this app; owner A's is never shown to them.
+  assert.equal((await describeRequest(deps, req, OWNER_B)).previous, null);
+  // Another app owner A never connected starts from the defaults.
+  const other = await publicClient(deps, "http://127.0.0.1:44001/callback");
+  const otherStart = await startAuthorization(deps, authorizeParams(other, { redirect_uri: "http://127.0.0.1:44001/callback" }));
+  assert.equal((await describeRequest(deps, requestOf((otherStart as { location: string }).location), OWNER_A)).previous, null);
+  // Disconnected on Connected apps: the next consent starts fresh.
+  assert.ok(await revokeConnection(d, OWNER_A, first.principal.connectionId, deps.now()));
+  assert.equal((await describeRequest(deps, req, OWNER_A)).previous, null);
+});
+
+test("previous never holds a scope the request does not offer, nor offline_access, nor an agent the owner no longer has", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const { req } = await reconnecting(deps, "market:read agents:read offline_access");
+  const view = await describeRequest(deps, req, OWNER_A);
+  assert.deepEqual(view.previous?.scopes, ["market:read"]);
+  assert.equal(view.previous?.partial, true, "approving would remove portfolio:read and trade:propose");
+  const offered = new Set(view.scopes.map((s) => s.id));
+  for (const s of view.previous!.scopes) assert.ok(offered.has(s), s);
+  // The agent is gone from the owner's directory: it is not carried over.
+  const moved = { ...deps, agents: fixtureDirectory({ [OWNER_A]: [agentFixture(SLUG_B, ACCOUNT_A)] }) };
+  assert.deepEqual((await describeRequest(moved, req, OWNER_A)).previous?.agentSlugs, []);
+});
+
+test("the agent's name comes from the optional dependency, for the signed-in owner only, and never fails the page", async () => {
+  const d = await makeTestDb();
+  const clientDeps = makeDeps(d);
+  const clientId = await publicClient(clientDeps);
+  const park = async (deps: ReturnType<typeof makeDeps>) => requestOf(((await startAuthorization(deps, authorizeParams(clientId))) as { location: string }).location);
+  const asked: string[] = [];
+  const named = makeDeps(d, { agentName: async (tenant) => { asked.push(tenant); return tenant === OWNER_A ? "  Sherwood  " : null; } });
+  const req = await park(named);
+  assert.deepEqual((await describeRequest(named, req, null)).agents, []);
+  assert.deepEqual(asked, [], "signed out: nobody's name is read");
+  assert.deepEqual((await describeRequest(named, req, OWNER_A)).agents, [{ slug: SLUG_A, account: ACCOUNT_A, name: "Sherwood" }]);
+  assert.deepEqual(asked, [OWNER_A], "only the signed-in owner's name is read");
+  // A throwing or missing dependency, or an empty name, is no name, never an error.
+  const throwing = makeDeps(d, { agentName: async () => { throw new Error("settings store down"); } });
+  assert.equal((await describeRequest(throwing, await park(throwing), OWNER_A)).agents[0]!.name, null);
+  assert.equal((await describeRequest(clientDeps, await park(clientDeps), OWNER_A)).agents[0]!.name, null);
+  const blank = makeDeps(d, { agentName: async () => "   " });
+  assert.equal((await describeRequest(blank, await park(blank), OWNER_A)).agents[0]!.name, null);
+  // The name is per owner: with several agents it could label the wrong one, so none is given.
+  const several = makeDeps(d, {
+    agentName: async () => "Sherwood",
+    agents: fixtureDirectory({ [OWNER_A]: [agentFixture(SLUG_A, ACCOUNT_A), agentFixture(SLUG_B, ACCOUNT_B)] }),
+  });
+  const both = (await describeRequest(several, await park(several), OWNER_A)).agents;
+  assert.deepEqual(both.map((a) => [a.slug, a.name]), [[SLUG_A, null], [SLUG_B, null]]);
+});
+
+test("the consent view gives every offered scope its phrase", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const { req } = await reconnecting(deps);
+  const view = await describeRequest(deps, req, OWNER_A);
+  for (const s of view.scopes) assert.equal(s.phrase, scopeInfo(s.id)!.phrase, s.id);
 });

@@ -64,6 +64,7 @@ const nextConfig = {
     ] },
     { source: "/connect/app", headers: noFrame },
     { source: "/connect/apps", headers: noFrame },
+    { source: "/connect/mcp", headers: noFrame },
     { source: "/connect/approve/:id", headers: noFrame },
     { source: "/connect/export/:id", headers: noFrame }];
   },

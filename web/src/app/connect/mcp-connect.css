@@ -36,3 +36,54 @@
 .mcp-connect .mcp-brand { display: flex; align-items: center; gap: 10px; color: var(--tx); text-decoration: none; }
 .mcp-connect .mcp-brand .mcp-wordmark { color: var(--tx); text-decoration: none; }
 .mcp-connect .mcp-brand .logo-mark { color: #a5ce1f; flex-shrink: 0; }
+/* The connect hub (/connect/mcp): one big Add to Claude, then one row per other assistant. */
+.mcp-connect .mcp-hub a:where(:not(.flow-primary, .mcp-hub-action)) { color: var(--tx); text-decoration: underline; text-underline-offset: 3px; }
+.mcp-connect .mcp-hub-status { display: flex; align-items: flex-start; gap: 9px; margin: 0 0 24px; padding: 11px 14px; border: 1px solid #c8ff0030; border-radius: 12px; background: #c8ff0008; color: var(--tx-2); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.mcp-connect .mcp-hub-status svg { color: #c8ff00; flex-shrink: 0; margin-top: 3px; }
+.mcp-connect .mcp-hub-section { min-width: 0; }
+.mcp-connect .mcp-hub-section + .mcp-hub-section { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
+.mcp-connect .mcp-hub-section > h2:first-child { margin-top: 0; }
+.mcp-connect .connect-panel .mcp-hub-h2 { font-size: 19px; margin: 0 0 8px; }
+.mcp-connect .mcp-hub-steps { list-style: none; counter-reset: mcp-hub-step; padding: 0; margin: 20px 0 16px; }
+/* Text and <b> flow inline; the number sits in the gutter, not as a flex item beside each word. */
+.mcp-connect .mcp-hub-steps li { counter-increment: mcp-hub-step; position: relative; padding: 9px 0 9px 36px; color: var(--tx-2); font-size: 14px; line-height: 1.6; }
+.mcp-connect .mcp-hub-steps li::before { content: counter(mcp-hub-step); position: absolute; left: 0; top: 9px; display: grid; place-items: center; width: 23px; height: 23px; border: 1px solid #c8ff0050; border-radius: 50%; color: #c8ff00; font-size: 11px; line-height: 1; }
+.mcp-connect .mcp-hub-steps b { color: var(--tx); font-weight: 500; }
+.mcp-connect .mcp-hub-fine { color: var(--tx-2); font-size: 12px; line-height: 1.7; margin: 8px 0 0; overflow-wrap: anywhere; }
+.mcp-connect .mcp-hub-rows { list-style: none; padding: 0; margin: 4px 0 0; }
+.mcp-connect .mcp-hub-row { min-width: 0; padding: 16px 0; border-top: 1px solid var(--line); }
+.mcp-connect .mcp-hub-row:first-child { border-top: 0; }
+.mcp-connect .mcp-hub-row h3 { margin: 0; font-size: 15px; font-weight: 500; }
+.mcp-connect .mcp-hub-row p { margin: 8px 0 0; color: var(--tx-2); font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.mcp-connect .mcp-hub-row p.mcp-hub-fine { font-size: 12px; line-height: 1.7; }
+.mcp-connect .mcp-hub-row code { font-family: var(--mono); font-size: 12px; color: var(--tx); }
+.mcp-connect .mcp-hub-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 10px; }
+.mcp-connect .mcp-hub-action, .mcp-connect .mcp-hub-copy { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 42px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 10px; background: #ffffff06; color: var(--tx); font-size: 13px; font-weight: 500; line-height: 1.2; text-decoration: none; white-space: nowrap; }
+.mcp-connect .mcp-hub-action:hover, .mcp-connect .mcp-hub-copy:hover { border-color: #c8ff0050; }
+.mcp-connect .mcp-hub-action svg, .mcp-connect .mcp-hub-copy svg { flex-shrink: 0; color: var(--tx-2); }
+.mcp-connect .mcp-hub a.mcp-hub-minor { display: inline-flex; align-items: center; min-height: 42px; color: var(--tx-2); font-size: 12px; }
+.mcp-connect .mcp-hub-copy-note { flex-basis: 100%; color: #ffcf7a; font-size: 12px; line-height: 1.6; }
+.mcp-connect .mcp-hub-command { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; margin-top: 10px; min-width: 0; }
+/* Long commands wrap inside their own box, and on a phone the Copy button drops below it; the page never scrolls sideways. */
+.mcp-connect .mcp-hub-command pre { flex: 1 1 260px; min-width: 0; margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #0b0c08; font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mcp-connect .mcp-hub-command pre code { font: inherit; color: var(--tx); }
+.mcp-connect .mcp-hub-more { margin: 0; border-top: 1px solid var(--line); font-size: inherit; color: inherit; }
+.mcp-connect .mcp-hub-more > summary { display: flex; align-items: center; gap: 8px; min-height: 48px; color: var(--tx); font-size: 14px; font-weight: 500; list-style: none; }
+.mcp-connect .mcp-hub-more > summary::-webkit-details-marker { display: none; }
+.mcp-connect .mcp-hub-more > summary svg { color: var(--tx-2); transition: transform .15s; }
+.mcp-connect .mcp-hub-more[open] > summary svg { transform: rotate(180deg); }
+.mcp-connect .mcp-hub-more > summary:focus-visible { outline: 2px solid #c8ff00; outline-offset: 4px; }
+.mcp-connect .mcp-hub-more .mcp-hub-rows { margin: 0; }
+.mcp-connect .mcp-hub-address-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mcp-connect .mcp-hub-address-row code { flex: 1 1 220px; min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: #0b0c08; color: var(--tx); font-family: var(--mono); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.mcp-connect .mcp-hub-know ul { margin: 8px 0 0; padding-left: 18px; }
+.mcp-connect .mcp-hub-know li { margin: 7px 0; color: var(--tx-2); font-size: 13px; line-height: 1.7; }
+.mcp-connect .connect-footer a { color: var(--tx-2); text-underline-offset: 3px; }
+/* The empty state on Connected apps offers the same one-click install. */
+.mcp-connect .mcp-hub-empty { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 20px; }
+.mcp-connect .mcp-hub-empty .connect-cancel { margin-top: 4px; }
+@media (max-width: 450px) {
+  .mcp-connect .mcp-hub-steps li { font-size: 13px; }
+  .mcp-connect .mcp-hub-actions > .mcp-hub-action, .mcp-connect .mcp-hub-actions > .mcp-hub-copy { flex: 1 1 auto; }
+}
+@media (prefers-reduced-motion: reduce) { .mcp-connect .mcp-hub-more > summary svg { transition: none; } }
