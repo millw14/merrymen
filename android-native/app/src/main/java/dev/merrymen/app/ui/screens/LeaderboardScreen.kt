@@ -207,6 +207,9 @@ fun LeaderboardScreen(nav: NavHostController) {
   // THE READER'S OWN ROW, marked "you" — from their own feed, and only when it
   // named an agent it actually read.
   val mine by produceState<String?>(null, signedIn) {
+    // Cleared first: the state outlives the key, and the last wallet's agent
+    // must not stay marked "you" while the new wallet's feed is on its way.
+    value = null
     value = if (signedIn == null) null else ownSlugOf(c.api.feed().valueOrNull())
   }
   val retry: () -> Unit = { scope.launch { reads.loop.readNow(System.currentTimeMillis()) } }
