@@ -808,8 +808,8 @@ const TRADE_COLS_T = TRADE_COLS.split(", ").map((c) => `t.${c}`).join(", ");
  * about. Narrowing the scope to the asked-about op hashes keeps each of their
  * partitions whole, so it does not change which copy speaks.
  */
-async function operationsOf(shared: Db, scope: AgentScope, rows: readonly TradeRow[]): Promise<Map<number, TradeRow>> {
-  const out = new Map<number, TradeRow>();
+async function operationsOf(shared: Db, scope: AgentScope, rows: readonly TradeRow[]): Promise<Map<number, TradeRow | null>> {
+  const out = new Map<number, TradeRow | null>();
   const hashOf = (t: TradeRow) => (typeof t.user_op_hash === "string" && t.user_op_hash !== "" ? t.user_op_hash.toLowerCase() : null);
   const hashed = rows.filter((t) => hashOf(t) !== null);
   for (const t of rows) if (hashOf(t) === null) out.set(Number(t.id), t);
@@ -821,9 +821,17 @@ async function operationsOf(shared: Db, scope: AgentScope, rows: readonly TradeR
       `t.agent_id IN (${placeholders(scope.ids.length)}) AND t.created_at >= ? AND lower(t.user_op_hash) IN (${placeholders(ops.length)})`,
     )}`)
     .all(...scope.ids, from, ...ops)) as TradeRow[];
-  const key = (t: TradeRow) => `${String(t.agent_id).toLowerCase()}|${hashOf(t)}`;
+  const key = (t: Pick<TradeRow, "agent_id" | "user_op_hash">) => `${String(t.agent_id).toLowerCase()}|${hashOf(t as TradeRow)}`;
   const byOp = new Map(speakers.filter((s) => hashOf(s) !== null).map((s) => [key(s), s] as const));
-  for (const t of hashed) out.set(Number(t.id), byOp.get(key(t)) ?? t);
+  // An operation ANY of whose rows is a transfer or vault move is not a trade,
+  // whichever row speaks for it: a vault deposit still 'submitted' during a
+  // redeploy ranks below the reconciler's bare 'swap' copy of the same op.
+  const nonFill = new Set(((await shared
+    .prepare(`SELECT agent_id, user_op_hash FROM trades
+      WHERE agent_id IN (${placeholders(scope.ids.length)}) AND created_at >= ? AND lower(user_op_hash) IN (${placeholders(ops.length)})
+        AND kind NOT IN (${FILL_KINDS_SQL})`)
+    .all(...scope.ids, from, ...ops)) as Array<Pick<TradeRow, "agent_id" | "user_op_hash">>).map(key));
+  for (const t of hashed) out.set(Number(t.id), nonFill.has(key(t)) ? null : byOp.get(key(t)) ?? t);
   return out;
 }
 
@@ -875,11 +883,13 @@ async function evalTrades(shared: Db, sub: SubRow, scope: AgentScope, cursor: Re
     watermark = Math.max(watermark, Number(t.id));
   }
 
-  const ops = landed.length ? await operationsOf(shared, scope, landed) : new Map<number, TradeRow>();
+  const ops = landed.length ? await operationsOf(shared, scope, landed) : new Map<number, TradeRow | null>();
   const emitted: Array<{ key: string; row: TradeRow }> = [];
   const seen = new Set<string>();
   for (const t of landed) {
-    const op = ops.get(Number(t.id)) ?? t;
+    const found = ops.get(Number(t.id));
+    if (found === null) continue; // part of a transfer or vault move: not a trade
+    const op = found ?? t;
     const tx = txOf(op);
     if (op.status !== "landed" || !tx) continue; // the operation's own row does not say it landed
     if (!(FILL_KINDS as readonly string[]).includes(String(op.kind))) continue; // a transfer or vault move, or a copy of one: not a trade

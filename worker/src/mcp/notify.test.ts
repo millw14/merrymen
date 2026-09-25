@@ -810,6 +810,10 @@ test("trade_confirmed announces trades only: a transfer, a vault move, or a rede
   trade(f, { kind: "vault-deposit", side: null, fill: null, basis: null, op: "0xd9", decision: "dv", tx: tx(91), at: NOW - 400 });
   // A redeploy re-recorded the deposit as a bare swap (the hash spelled differently): it is still the deposit.
   trade(f, { side: null, fill: null, basis: null, op: "0xD9", tx: tx(91), at: NOW - 100 });
+  // A deposit still IN FLIGHT when a redeploy re-recorded it: its own row stays 'submitted',
+  // so the landed bare-swap copy is the row that speaks for it — and it is still not a trade.
+  trade(f, { kind: "vault-deposit", status: "submitted", side: null, fill: null, basis: null, amount: 50, op: "0xd7", decision: "dv2", tx: null, at: NOW - 300 });
+  trade(f, { side: null, fill: null, basis: null, amount: 50, op: "0xD7", tx: tx(96), at: NOW - 95 });
   // A swap from before the subscription, and the redeploy's fresh-looking copy of it.
   trade(f, { side: "buy", op: "0xe1", decision: "de", tx: tx(92), at: NOW - 5000 });
   trade(f, { side: null, fill: null, basis: null, op: "0xE1", tx: tx(92), at: NOW - 90 });

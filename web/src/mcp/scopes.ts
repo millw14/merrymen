@@ -130,7 +130,7 @@ export const SCOPES: readonly ScopeInfo[] = [
     // refresh tokens are issued whether or not a client asks for this.
     id: "offline_access", level: "read", needsAgent: false, defaultOn: true,
     title: "Offline access (compatibility only)",
-    detail: "Accepted for compatibility with standard OAuth clients; it grants nothing extra. Every connection gets refresh tokens whether or not it asks for this scope, and access ends when you disconnect the app on Connected apps or the connection reaches its time limit.",
+    detail: "Accepted for compatibility with standard OAuth clients; it grants nothing extra. Every app connected through sign-in gets refresh tokens whether or not it asks for this scope (a personal access token has none), and access ends when you disconnect the app on Connected apps or the connection reaches its time limit.",
     capabilities: [],
   },
 ];

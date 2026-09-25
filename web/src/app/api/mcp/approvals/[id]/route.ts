@@ -234,6 +234,8 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
   } catch {
     return jsonResponse({ error: "invalid_request" }, 400);
   }
+  // `null`, a number or an array parse fine and are not a decision.
+  if (!body || typeof body !== "object" || Array.isArray(body)) return jsonResponse({ error: "invalid_request" }, 400);
   if (typeof body.hash !== "string" || !/^[0-9a-f]{64}$/.test(body.hash)) return jsonResponse({ error: "invalid_request" }, 400);
   const d = await mcpDb();
   const now = Math.floor(Date.now() / 1000);

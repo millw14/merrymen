@@ -332,7 +332,13 @@ export async function authenticateClient(deps: OAuthDeps, form: URLSearchParams,
     // Never caches a new metadata document: a client with no code or token
     // cannot succeed here, so this endpoint must not let it store a row.
     client = await clientFor(deps, clientId, deps.now());
-  } catch {
+  } catch (e) {
+    // A metadata document we could not fetch just now is an outage, not an
+    // unknown client: clients treat 401 invalid_client as fatal and would drop
+    // a working connection over one network blip.
+    if (e instanceof ClientError && e.code === "temporarily_unavailable") {
+      throw new OAuthError("temporarily_unavailable", "the client's metadata document could not be fetched; try again shortly", 503);
+    }
     throw new OAuthError("invalid_client", "unknown client", 401);
   }
   if (client.authMethod === "none") return client;

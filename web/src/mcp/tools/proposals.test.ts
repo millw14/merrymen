@@ -434,6 +434,19 @@ test("a refusal read before the window settles is explained by the agent's own s
   assert.equal(res.agent_said_untrusted, "🧱 refused: I'm paused. Nothing was sent.");
 });
 
+test("a refusal decided before any intent was built (no token on its receipt) never borrows a row, even once the window has settled", async () => {
+  const ctx = await setup();
+  const refused = { status: "refused", side: "buy", symbol: "NVDA", token: null, usdgActual: null, txHash: null, rejectRule: null };
+  const a = await answered(ctx, "prebuild-1", { doneAfter: 5, line: "🧱 refused: I'm paused. Nothing was sent.", receipt: refused });
+  // A concurrent Telegram order's refused row is the only row in the window.
+  ownerOrderTrade(ctx.d, { status: "rejected", at: NOW + 3, rule: "daily-cap" });
+  const r = await a.follow(settledAt(NOW + 5) + 60);
+  assert.equal(r.status, "refused");
+  const res = JSON.parse(r.result_json!) as Record<string, unknown>;
+  assert.equal(res.rule, null, "a pre-build refusal wrote no row; the window's row is another order's");
+  assert.equal(res.agent_said_untrusted, "🧱 refused: I'm paused. Nothing was sent.");
+});
+
 test("a revert with no rule slug on its receipt is described from the row with its hash, whenever it is read", async () => {
   const ctx = await setup();
   const tx = `0x${"7a".repeat(32)}`;
@@ -478,7 +491,8 @@ test("a refusal's result is built from the rule vocabulary and the agent's sente
   assert.equal("worker_line" in r1, false);
 
   // The rule is on this order's own row, as free text the receipt's slug check dropped: classified, detail withheld.
-  const b = await answered(ctx, "raw-line-2", { doneAfter: 5, line: RAW, receipt: refused });
+  // A receipt built from a row names that row's token leg.
+  const b = await answered(ctx, "raw-line-2", { doneAfter: 5, line: RAW, receipt: { ...refused, token: NVDA } });
   ownerOrderTrade(ctx.d, { status: "rejected", at: NOW + 2, rule: "couldn't submit: RPC Request failed. URL: https://api.pimlico.io/v2/4663/rpc?apikey=pim_SECRETKEY" });
   const second = await b.follow(settledAt(NOW + 5));
   assert.equal(second.status, "refused");

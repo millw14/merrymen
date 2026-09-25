@@ -115,7 +115,11 @@ test("no invisible, bidirectional, control or separator characters hide in the M
       return [];
     }
   };
-  const files = roots.flatMap((r) => walk(path.join(process.cwd(), r))).filter((f) => /\.(ts|tsx|js|jsx|mjs|cjs|css|json)$/.test(f));
+  const source = (f: string) => /\.(ts|tsx|js|jsx|mjs|cjs|css|json)$/.test(f);
+  // Every root must exist and hold source: a moved or misspelled root would
+  // otherwise be skipped silently and the guard would stay green over nothing.
+  for (const r of roots) assert.ok(walk(path.join(process.cwd(), r)).some(source), `${r} holds no source files (run from the repository root)`);
+  const files = roots.flatMap((r) => walk(path.join(process.cwd(), r))).filter(source);
   assert.ok(files.some((f) => f.endsWith(path.join("worker", "src", "mcp", "notify.ts"))), "the roots resolve (run from the repository root)");
   const offenders = files.flatMap((f) => hiddenCharacters(readFileSync(f, "utf8")).map((at) => `${path.relative(process.cwd(), f)}:${at}`));
   assert.deepEqual(offenders, []);

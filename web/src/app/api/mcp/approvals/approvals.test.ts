@@ -101,6 +101,17 @@ test("only the proposal's owner can see or decide it, only same-origin, only wit
   assert.equal((await POST(req(id, { body: { decision: "approve", hash: "0".repeat(64) } }), params(id))).status, 409);
 });
 
+test("a body that parses but is not an object (null, a number, an array) is a 400, not a crash", async () => {
+  const { id } = await setup();
+  for (const raw of ["null", "3", "[]", "\"approve\""]) {
+    const r = new Request(`https://app.test/api/mcp/approvals/${id}`, {
+      method: "POST", body: raw,
+      headers: { "content-type": "application/json", origin: "https://app.test", cookie: `mm_session=${mintSession(OWNER_A)}` },
+    });
+    assert.equal((await POST(r, params(id))).status, 400, raw);
+  }
+});
+
 test("approve queues exactly one order under the agent's account, and a replay is refused", async () => {
   const { d, id, hash } = await setup();
   const res = await POST(req(id, { body: { decision: "approve", hash } }), params(id));

@@ -565,6 +565,56 @@ test("CIMD: the token and revocation endpoints never cache a new metadata docume
   assert.equal(fetchedAt(), cachedAt + 86_401);
 });
 
+test("CIMD: the stored redirect list is capped at exactly 2 KB of UTF-8 (the documented bound)", async () => {
+  assert.equal(CIMD_REDIRECTS_MAX_BYTES, 2048, "docs/mcp/oauth.md states this bound; change both together");
+  const d = await makeTestDb();
+  const own = ownHostsOf(testConfig());
+  // JSON of a one-element list is the URL plus 4 bytes (brackets and quotes).
+  const url = (bytes: number) => `https://client.example/${"p".repeat(bytes - 4 - "https://client.example/".length)}`;
+  assert.equal(Buffer.byteLength(JSON.stringify([url(2048)])), 2048);
+  await resolveClient(d, "https://client.example/at-cap", 1_000, { ownHosts: own, fetcher: cimdFetcher([url(2048)]), cacheNew: true });
+  await assert.rejects(resolveClient(d, "https://client.example/over-cap", 1_000, { ownHosts: own, fetcher: cimdFetcher([url(2049)]), cacheNew: true }), /too long/);
+});
+
+test("CIMD: an app the owner is connected to gets its cached copy back at the token endpoint, so one failed fetch cannot disconnect it", async () => {
+  const d = await makeTestDb();
+  let down = false;
+  const serve = cimdFetcher(["http://127.0.0.1/callback"], { cacheControl: "max-age=3600" });
+  const deps = makeDeps(d, { fetcher: async (url) => { if (down) throw new Error("ECONNRESET"); return serve(url); } });
+  const id = "https://client.example/oauth/metadata.json";
+  const count = () => (d.raw.prepare("SELECT COUNT(*) AS n FROM mcp_clients WHERE client_id = ?").get(id) as { n: number }).n;
+  const start = await startAuthorization(deps, authorizeParams(id, { redirect_uri: "http://127.0.0.1:61234/callback" }));
+  assert.equal(start.kind, "consent");
+  const decided = await decideRequest(deps, requestOf((start as { location: string }).location), OWNER_A, { approve: true, agentSlugs: [SLUG_A] });
+  const code = new URL(decided.location).searchParams.get("code")!;
+  const client = await authenticateClient(deps, new URLSearchParams({ client_id: id }), null);
+  const tokens = await exchangeCode(deps, new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: "http://127.0.0.1:61234/callback", code_verifier: VERIFIER, client_id: id, resource: "https://app.test/mcp" }), client);
+
+  // Days later retention has dropped the row (its stale window passed).
+  deps.advance(3 * 86_400);
+  d.raw.prepare("DELETE FROM mcp_clients WHERE client_id = ?").run(id);
+  assert.equal(count(), 0);
+  const refreshed = await refreshTokens(deps, new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refresh_token!, client_id: id }), await authenticateClient(deps, new URLSearchParams({ client_id: id }), null));
+  assert.equal(count(), 1, "the actively connected client's row is restored by the token endpoint");
+
+  // Ten minutes after the copy expires, the client's host is unreachable: the copy serves.
+  deps.advance(3_600 + 600);
+  down = true;
+  const again = await authenticateClient(deps, new URLSearchParams({ client_id: id }), null);
+  assert.equal(again.clientId, id);
+  assert.ok(refreshed.access_token);
+
+  // With no copy at all, an outage is a retryable 503, never a fatal 401 invalid_client.
+  d.raw.prepare("DELETE FROM mcp_clients WHERE client_id = ?").run(id);
+  await assert.rejects(authenticateClient(deps, new URLSearchParams({ client_id: id }), null),
+    (e: unknown) => e instanceof OAuthError && e.status === 503 && e.error === "temporarily_unavailable");
+
+  // A client nobody is connected to still stores nothing at the token endpoint.
+  down = false;
+  await authenticateClient(deps, new URLSearchParams({ client_id: "https://client.example/other.json" }), null);
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM mcp_clients WHERE client_id = ?").get("https://client.example/other.json") as { n: number }).n, 0);
+});
+
 test("OAuth bodies are read with a bound: a chunked body with no Content-Length is cut off, not buffered", async () => {
   let pulled = 0;
   const chunk = new Uint8Array(4096).fill(97);

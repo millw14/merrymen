@@ -197,6 +197,15 @@ test("boundedDb: work that finishes after the transaction's bound rolls back ins
   assert.ok(TX_TIMEOUT_MS > CALL_TIMEOUT_MS && TX_TIMEOUT_MS < PASS_LEASE_MS, "longer than any one call it holds, inside the pass's lease");
 });
 
+test("boundedDb: a transaction whose ONLY statement finishes after the bound rolls back, never commits (the retention DELETE shape)", async () => {
+  const slow = recordingDb(() => undefined, { delayMs: (sql) => (sql === "DELETE x" ? 60 : 0) });
+  const out = await within(boundedDb(slow.db, { ...BOUNDS, txMs: 20 }).tx((t) => t.prepare("DELETE x").run()), 500);
+  assert.ok(out !== "pending" && "error" in out && (out.error as Error).name === "DbCallTimeout");
+  await settle(80);
+  assert.ok(slow.seen.includes("ROLLBACK"), slow.seen.join(" | "));
+  assert.ok(!slow.seen.includes("COMMIT"), "the pass already reported a timeout: nothing it did may commit");
+});
+
 test("retention runs each DELETE in its own bounded transaction", async () => {
   const { db, seen } = recordingDb();
   resetMaintenanceForTest();

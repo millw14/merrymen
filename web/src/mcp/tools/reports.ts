@@ -148,7 +148,7 @@ const money = (v: number | null) => (v === null ? "unknown" : `${v >= 0 ? "+" : 
 const getSummary = defineTool({
   name: "get_summary",
   title: "Daily or weekly summary",
-  description: "A structured summary of one agent over the trailing day or week, with paper (simulated) and live (real funds) kept apart: equity at the start and end of the window and what moved it, deposits and withdrawals, confirmed trades, paper fills, realized P&L from evidenced sells only, fees and gas, refusals by rule, decisions by action, current blockers and what the owner can do next.",
+  description: "A structured summary of one agent over the trailing day or week, with paper (simulated) and live (real funds) kept apart: equity at the start and end of the window and what moved it, deposits and withdrawals, confirmed operations (fills, transfers and vault moves that landed with a transaction hash), paper fills, realized P&L from evidenced sells only, fees and gas, refusals by rule, decisions by action, current blockers and what the owner can do next.",
   capability: "reports.read",
   input: z.object({
     agent: AGENT_ARG,

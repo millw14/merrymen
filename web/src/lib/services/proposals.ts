@@ -366,14 +366,18 @@ export const EVIDENCE_GRACE_SEC = 10 * 60;
 /**
  * How long after an order's window closes before ONE row that fits it is taken
  * as this order's. Every row that could fit was written by the window's end,
- * and the mirror copies them in the order they were written, every 15 s or
- * more (the orchestrator's RECONCILE_MS). A Telegram owner order for the same
- * token and side, answered inside this order's window, can reach the ledger a
- * pass before this order's own row does; read then, it would be the only row
- * and would be taken as this one. Three passes later both are there, and two
- * rows are ambiguous rather than a wrong answer.
+ * and the mirror copies them in the order they were written. A Telegram owner
+ * order for the same token and side, answered inside this order's window, can
+ * reach the ledger a pass before this order's own row does; read then, it
+ * would be the only row and would be taken as this one. The orchestrator's
+ * loop runs the mirror, then the rest of its pass (builder, news, the command
+ * ferry, fleet health), and only then sleeps RECONCILE_MS (15 s), so passes
+ * are 15 s PLUS a whole loop apart, not 15 s. Three minutes covers several
+ * slow loops and is still well inside EVIDENCE_GRACE_SEC. An ASSUMPTION about
+ * loop time, not a guarantee: a loop slower than this can still let the first
+ * row through alone.
  */
-export const SETTLE_AFTER_SEC = 45;
+export const SETTLE_AFTER_SEC = 180;
 
 const num = (v: unknown): number | null => {
   const n = typeof v === "string" && v.trim() !== "" ? Number(v) : typeof v === "number" ? v : NaN;
@@ -475,7 +479,7 @@ function usdgMoved(side: "buy" | "sell", t: TradeRowLite): number | null {
   return null;
 }
 
-const WAITING_NOTE = "The agent finished the order; waiting for its trade record to reach the ledger, and for the ledger to settle, before saying what happened. This usually takes about a minute.";
+const WAITING_NOTE = "The agent finished the order; waiting for its trade record to reach the ledger, and for the ledger to settle, before saying what happened. This usually takes a few minutes.";
 
 /**
  * Follow a submitted trade through the order queue and the ledger and settle
@@ -503,7 +507,7 @@ export async function followTrade(mcp: Db, ledger: Db, row: ProposalRow, now: nu
   const binding = JSON.parse(row.binding_json) as TradeBinding;
   const order = await readHostedOrder(ledger, row.agent_account, row.order_id, now * 1000);
   if (order.status !== 200) return row; // unreadable: keep the last known state, never guess
-  const body = order.body as { state: string; result?: string | null; expiresAt?: number | null; receipt?: { status: string; txHash: string | null; rejectRule: string | null; usdgActual: number | null } };
+  const body = order.body as { state: string; result?: string | null; expiresAt?: number | null; receipt?: { status: string; txHash: string | null; rejectRule: string | null; usdgActual: number | null; token?: string | null } };
   let next: ProposalStatus = row.status;
   let result: Record<string, unknown> | undefined;
   const mine = async () => {
@@ -522,9 +526,14 @@ export async function followTrade(mcp: Db, ledger: Db, row: ProposalRow, now: nu
     // is described from there — the row with the receipt's hash, or the one
     // row in a settled window. Failing that, the agent's own sentence, cut:
     // it is this order's by construction, where an unsettled row may not be.
+    // A receipt with no token was decided before any intent was built (paused,
+    // over the chat ceiling, an unwatched symbol) and wrote NO row, so the
+    // window is not searched then: a row found there would be another order's.
     const explain = async (slug: string | null, status: string, txHash: string | null): Promise<Record<string, unknown>> => {
       if (slug) return ruleFields(slug, status);
-      const own = txHash ? await rowByTx(ledger, row.agent_account!, txHash) : await mine().then(({ m }) => (m.kind === "one" ? m.row : null));
+      const own = txHash ? await rowByTx(ledger, row.agent_account!, txHash)
+        : receipt?.token ? await mine().then(({ m }) => (m.kind === "one" ? m.row : null))
+          : null;
       if (own?.reject_rule) return ruleFields(own.reject_rule, own.status);
       return { rule: null, agent_said_untrusted: workerSentence(line) };
     };

@@ -352,7 +352,7 @@ export function judgeEligibility(o: {
     } else if (o.settings?.strategy !== "trencher") {
       add("trencher_route", "not_applicable", "The permission carries a Trencher vault, but the agent's strategy is not Trencher, so nothing uses it.");
     } else if (fastSetting !== true) {
-      add("trencher_route", "not_applicable", `The fast Trencher ${fastSetting === false ? "is off" : "is not turned on (it is off by default)"} in the owner's settings, and only the fast Trencher buys into the sealed vault. Without it the Trencher's buys carry no vault custody, so they are ordinary buys: the checks above, including the asset allowlist and the no-exit rule, decide them.`);
+      add("trencher_route", "not_applicable", `The fast Trencher ${fastSetting === false ? "is off" : "is not turned on in the owner's settings (it is off by default; a self-hosted install can also turn it on for everyone with an environment variable, which this server cannot see)"}${fastSetting === false ? " in the owner's settings" : ""}, and only the fast Trencher buys into the sealed vault. Without it the Trencher's buys carry no vault custody, so they are ordinary buys: the checks above, including the asset allowlist and the no-exit rule, decide them.`);
     } else {
       const fails: string[] = [];
       if (assetMode === "stocks") fails.push("the asset mode is stocks only, which empties the Trencher's candidate feed");

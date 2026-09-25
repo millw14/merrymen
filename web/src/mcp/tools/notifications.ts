@@ -235,7 +235,7 @@ const subscribe = defineTool({
   title: "Subscribe to an alert",
   description: [
     "Ask your agent to send you an alert on your linked Telegram. Kinds:",
-    "trade_confirmed (each live trade confirmed on chain),",
+    "trade_confirmed (each live trade confirmed on chain; transfers and savings-vault moves are not announced),",
     "risk_halt (kill switch, or the drawdown breaker tripping; a breaker at most once per 6 h),",
     "provider_failure (market data, decision service or AI model failing; at most once per 6 h),",
     "stale_data (a running agent stops reporting a heartbeat; at most once per 6 h),",

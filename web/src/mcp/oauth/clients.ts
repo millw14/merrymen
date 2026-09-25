@@ -358,7 +358,8 @@ export interface ResolveOptions {
    * the shared database. Everywhere else (the token and revocation endpoints,
    * where a client holding no code or token cannot succeed anyway) a fetched
    * document serves that one request and only refreshes a row that already
-   * exists. Default false.
+   * exists — or restores the row of a client an owner is actively connected
+   * to, so its stale fallback survives retention. Default false.
    */
   cacheNew?: boolean;
 }
@@ -409,6 +410,16 @@ export async function resolveClient(d: McpDb, clientId: unknown, now: number, op
     await d.db.prepare(`UPDATE mcp_clients SET client_name = ?, redirect_uris = ?, metadata_json = '{}', fetched_at = ?, expires_at = ?
       WHERE client_id = ? AND kind = 'cimd'`)
       .run(client.clientName, redirects, now, now + ttl, clientId);
+  } else {
+    // A client an owner has an ACTIVE connection with may have its row back:
+    // retention drops a used row once its stale window passes, and without a
+    // row a single failed fetch at the next refresh would have no copy to fall
+    // back on and disconnect the app. Growth stays bounded by owner consents.
+    await d.db.prepare(`INSERT INTO mcp_clients (client_id, kind, client_name, redirect_uris, auth_method, secret_hash, metadata_json, created_at, fetched_at, expires_at)
+      SELECT ?, 'cimd', ?, ?, 'none', NULL, '{}', ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM mcp_connections WHERE client_id = ? AND status = 'active')
+      ON CONFLICT (client_id) DO NOTHING`)
+      .run(clientId, client.clientName, redirects, now, now, now + ttl, clientId);
   }
   return { ...client, secretHash: null };
 }
