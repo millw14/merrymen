@@ -1,0 +1,6 @@
+{
+  "extends": "../../web/tsconfig.json",
+  "compilerOptions": { "incremental": false },
+  "include": ["*.ts"],
+  "exclude": []
+}

@@ -43,6 +43,15 @@ export interface BacktestResult {
   executed: number;
   rejected: { rule: string; count: number }[];
   rejectedEvents: { tSec: number; rule: string }[];
+  /**
+   * USDG notional of the swaps that actually FILLED: a buy's spend, a sell's
+   * gross proceeds, both before the execution cost. `executed` counts every
+   * intent the policy passed, including vault moves and intents that then found
+   * no price or no cash, so it cannot say how much was traded; this can.
+   */
+  turnoverUsdg: bigint;
+  /** How many swaps contributed to turnoverUsdg. */
+  swapFills: number;
 }
 
 const ONE = 10n ** 18n;
@@ -78,6 +87,8 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
   let peak = 0n;
   let maxDrawdownBps = 0;
   let executed = 0;
+  let turnover = 0n;
+  let swapFills = 0;
   const rejectCounts = new Map<string, number>();
   const rejectedEvents: { tSec: number; rule: string }[] = [];
   const equitySeries: { tSec: number; equityUsdg: bigint }[] = [];
@@ -213,6 +224,8 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
         const afterCost = (spend * (10_000n - costBps)) / 10_000n;
         cash -= spend;
         shares.set(buySymbol, (shares.get(buySymbol) ?? 0n) + sharesFor(afterCost, price));
+        turnover += spend;
+        swapFills += 1;
       } else if (sellSymbol) {
         // stock → USDG
         const price = bar.prices.get(sellSymbol);
@@ -222,10 +235,32 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
         const gross = valueUsdg(raw, price);
         cash += (gross * (10_000n - costBps)) / 10_000n;
         shares.set(sellSymbol, held - raw);
+        turnover += gross;
+        swapFills += 1;
       }
     }
   }
 
+  // Each bar's point is marked BEFORE that bar's fills (the fills show up in
+  // the next bar's mark). The last bar has no next bar, so without a closing
+  // revaluation a trade on it would be missing from the final equity, the P&L
+  // and the drawdown (its execution cost included). Revalue after the final
+  // bar's fills at that bar's prices, and let the terminal point carry it.
+  const lastBar = bars[bars.length - 1];
+  if (lastBar && equitySeries.length > 0) {
+    let closingPositions = 0n;
+    for (const [symbol, raw] of shares) {
+      if (raw === 0n) continue;
+      closingPositions += valueUsdg(raw, lastBar.prices.get(symbol) ?? 0n);
+    }
+    const closing = cash + vault + closingPositions;
+    peak = closing > peak ? closing : peak;
+    if (peak > 0n && closing < peak) {
+      const dd = Number(((peak - closing) * 10_000n) / peak);
+      if (dd > maxDrawdownBps) maxDrawdownBps = dd;
+    }
+    equitySeries[equitySeries.length - 1] = { tSec: lastBar.tSec, equityUsdg: closing };
+  }
   const last = equitySeries[equitySeries.length - 1];
   const finalEquity = last ? last.equityUsdg : cfg.initialCashUsdg;
   return {
@@ -236,6 +271,8 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
     executed,
     rejected: [...rejectCounts.entries()].map(([rule, count]) => ({ rule, count })),
     rejectedEvents,
+    turnoverUsdg: turnover,
+    swapFills,
   };
 }
 
