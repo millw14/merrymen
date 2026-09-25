@@ -76,3 +76,37 @@ fun searchViews(
         }
       }
     }
+
+/** What the list under the box draws. */
+sealed interface SearchShown {
+  /** The box is empty. */
+  data object Blank : SearchShown
+
+  /** "Type at least two characters." */
+  data object Hint : SearchShown
+
+  data object Loading : SearchShown
+
+  /** The answer to exactly the words in the box. */
+  data class Result(val result: Loaded<SearchResults>) : SearchShown
+}
+
+/**
+ * THE BOX AND THE LIST MUST AGREE — for every view, not only an answer.
+ *
+ * The flow is debounced, so for 250ms after a keystroke the view on hand is
+ * about the PREVIOUS text. Checking only answers against the box left the
+ * rest unchecked: typing the second character kept "Type at least two
+ * characters." under a box that had two. So the box decides what may be
+ * drawn: nothing when it is empty, the hint when it is short, the answer only
+ * when it answers these very words, and loading for anything else.
+ */
+fun searchShown(view: SearchView, typed: String): SearchShown {
+  val q = typed.trim()
+  return when {
+    q.isEmpty() -> SearchShown.Blank
+    q.length < SEARCH_MIN_CHARS -> SearchShown.Hint
+    view is SearchView.Answer && view.query == q -> SearchShown.Result(view.result)
+    else -> SearchShown.Loading
+  }
+}

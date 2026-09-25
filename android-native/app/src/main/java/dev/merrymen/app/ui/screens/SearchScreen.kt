@@ -41,7 +41,9 @@ import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
 import dev.merrymen.app.market.SearchInput
+import dev.merrymen.app.market.SearchShown
 import dev.merrymen.app.market.SearchView
+import dev.merrymen.app.market.searchShown
 import dev.merrymen.app.market.searchViews
 import dev.merrymen.app.net.SearchResults
 import dev.merrymen.app.ui.Empty
@@ -155,20 +157,14 @@ fun SearchScreen(nav: NavHostController) {
       )
     }
     Column(Modifier.fillMaxWidth().padding(horizontal = PagePadH)) {
-      val typed = q.trim()
-      when (val v = view) {
-        SearchView.Idle -> Unit
-        is SearchView.TooShort -> HintLine("Type at least two characters.")
-        is SearchView.Searching -> LoadedBlock(Loaded.Loading) { _: Unit -> }
-        is SearchView.Answer ->
-          // THE BOX AND THE LIST MUST AGREE. Between a keystroke and the
-          // debounce firing, the answer on hand is for the previous text; it
-          // reads as loading rather than as hits for words no longer typed.
-          if (v.query != typed) {
-            LoadedBlock(Loaded.Loading) { _: Unit -> }
-          } else {
-            LoadedBlock(v.result, onRetry = { attempt++ }) { r -> SearchHits(r, nav) }
-          }
+      // What may be drawn is decided by the box, not only by the view: the
+      // view lags the text by the debounce, and anything it says about older
+      // words reads as loading (searchShown).
+      when (val shown = searchShown(view, q)) {
+        SearchShown.Blank -> Unit
+        SearchShown.Hint -> HintLine("Type at least two characters.")
+        SearchShown.Loading -> LoadedBlock(Loaded.Loading) { _: Unit -> }
+        is SearchShown.Result -> LoadedBlock(shown.result, onRetry = { attempt++ }) { r -> SearchHits(r, nav) }
       }
     }
     Spacer(Modifier.height(LocalBottomInset.current))

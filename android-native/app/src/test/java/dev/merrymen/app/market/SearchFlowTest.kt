@@ -148,4 +148,23 @@ class SearchFlowTest {
       server.shutdown()
     }
   }
+
+  /**
+   * THE BOX DECIDES WHAT IS DRAWN. For the 250ms after a keystroke the view
+   * is about the previous text, whatever kind of view it is: typing the
+   * second character left "Type at least two characters." under a box that
+   * had two, because only an answer was checked against the box.
+   */
+  @Test fun onlyWhatIsAboutTheWordsInTheBoxIsDrawn() {
+    // With two characters typed, the hint, the idle view and any view of older words read as loading.
+    assertEquals(SearchShown.Loading, searchShown(SearchView.TooShort("n"), "nv"))
+    assertEquals(SearchShown.Loading, searchShown(SearchView.Idle, "nv"))
+    assertEquals(SearchShown.Loading, searchShown(SearchView.Searching("n v"), "nv"))
+    assertEquals(SearchShown.Loading, searchShown(SearchView.Answer("nvd", hits("nvd")), "nv"))
+    // The answer to exactly these words, spaces around them aside.
+    assertEquals(SearchShown.Result(hits("nv")), searchShown(SearchView.Answer("nv", hits("nv")), " nv "))
+    // Short or empty text is said by the box, whatever the view still holds.
+    assertEquals(SearchShown.Hint, searchShown(SearchView.Answer("nvda", hits("nvda")), "n"))
+    assertEquals(SearchShown.Blank, searchShown(SearchView.Searching("nvda"), "  "))
+  }
 }
