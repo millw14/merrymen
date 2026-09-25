@@ -122,6 +122,14 @@ class MerrymenApi(
   /** The shared client: one cookie jar, one connection pool, the app's headers. */
   val http: OkHttpClient,
   private val origins: OriginSource,
+  /**
+   * Whether a READ on [http] may be asked again when its connection turns out
+   * stale ([readHttp]). The app says yes (AppGraph). Anything else gets
+   * exactly the client it passed: a test that built a client with no retry
+   * means "a dropped connection is that call's answer", and a read that
+   * quietly took the next queued answer would make it lie.
+   */
+  private val recoverReads: Boolean = false,
 ) {
 
   @PublishedApi internal val json = Json {
@@ -153,13 +161,16 @@ class MerrymenApi(
   val writeHttp: OkHttpClient by lazy { http.forWrites() }
 
   /**
-   * THE TRANSPORT'S OWN RECOVERY, FOR READS ONLY. A GET that meets a stale
-   * pooled connection is sent again on a fresh one, which asks the same
-   * question twice and changes nothing. Private, and [call] hands it nothing
-   * but a GET or HEAD — that is the whole proof that no write rides on it
-   * (and [SendWritesOnce], which it inherits in the app, would still hold one).
+   * THE TRANSPORT'S OWN RECOVERY, FOR READS ONLY, when [recoverReads] asks for
+   * it. A GET that meets a stale pooled connection is sent again on a fresh
+   * one, which asks the same question twice and changes nothing. Private, and
+   * [call] hands it nothing but a GET or HEAD — that is the whole proof that
+   * no write rides on it (and [SendWritesOnce], which it inherits in the app,
+   * would still hold one).
    */
-  private val readHttp: OkHttpClient by lazy { http.newBuilder().retryOnConnectionFailure(true).build() }
+  private val readHttp: OkHttpClient by lazy {
+    if (recoverReads) http.newBuilder().retryOnConnectionFailure(true).build() else http
+  }
 
   // ── plumbing ──────────────────────────────────────────────────────────────
 
@@ -195,8 +206,8 @@ class MerrymenApi(
    *
    * THE CLIENT IS CHOSEN BY THE METHOD, HERE, for every route: a write goes
    * on [writeHttp] (or on [client] made fit for writes), so no caller can
-   * send one on a client that retries; a read on the default client gets
-   * [readHttp]'s recovery.
+   * send one on a client that retries; a read on the default client goes on
+   * [readHttp], which in the app recovers from a stale connection.
    */
   @PublishedApi internal suspend fun call(req: Request, client: OkHttpClient = http): ApiResult<String> {
     val via = when {

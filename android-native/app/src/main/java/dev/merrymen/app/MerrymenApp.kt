@@ -69,7 +69,11 @@ fun newAppScope(
  * this over a MockWebServer and fakes of the two stores and signs a wallet out.
  */
 class AppGraph(http: OkHttpClient, store: SessionStore, cookies: CookieStores) {
-  val api = MerrymenApi(http, store)
+  // READS RECOVER, WRITES NEVER REPEAT. The shared client retries nothing, so
+  // a write whose answer is lost is looked up rather than sent twice; a read
+  // that meets a stale pooled connection (common after the app sat in the
+  // background) is asked again instead of showing "Can't reach merrymen".
+  val api = MerrymenApi(http, store, recoverReads = true)
   val social = Social(api)
   val repo = Repository(api, store, cookies).also { repo ->
     // Likes and follows are per-wallet facts and must not outlive the wallet

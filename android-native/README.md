@@ -68,8 +68,9 @@ never sent again. The shared client (`Http.client`) has OkHttp's
 `retryOnConnectionFailure` off, and its `SendWritesOnce` interceptor makes
 every write's body one-shot, so even a stray `http.newCall(POST)` or a 503
 saying `Retry-After: 0` is not re-sent behind the owner's back
-(`WriteOnceTest`). Reads made through the API still recover from a stale
-pooled connection.
+(`WriteOnceTest`). The app's reads through the API still recover from a stale
+pooled connection (`AppGraph` builds it with `recoverReads = true`); an API
+built over any other client reads exactly as that client does.
 
 **The Server field** (Settings) takes `https://…`, or plain `http://` only for
 `localhost` and `10.0.2.2` — the hosts `network_security_config.xml` allows in

@@ -1,5 +1,6 @@
 package dev.merrymen.app.net
 
+import dev.merrymen.app.AppGraph
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -47,10 +48,11 @@ class WriteOnceTest {
 
   @After fun stop() = server.shutdown()
 
-  /** The client the app runs: Http.client over the real cookie jar. */
+  /** The API exactly as the app wires it: AppGraph over Http.client and the real cookie jar. */
   private fun appApi(s: MockWebServer = server): MerrymenApi {
     val store = MemoryStore(s.origin())
-    return MerrymenApi(Http.client(PersistentCookieJar(store), debug = false), store)
+    val jar = PersistentCookieJar(store)
+    return AppGraph(Http.client(jar, debug = false), store, MemoryCookies(jar)).api
   }
 
   /** One read first, so its connection is pooled and the next request reuses it. */
@@ -181,13 +183,26 @@ class WriteOnceTest {
   }
 
   @Test fun aReadStillRecoversFromAStaleConnection() = runBlocking {
-    // What the retry was good for, kept where it is safe: a read the API makes
-    // is asked again on a fresh connection, which changes nothing.
+    // What the retry was good for, kept where it is safe: a read the app's API
+    // makes is asked again on a fresh connection, which changes nothing.
     val api = appApi()
     warm(api)
     cutOffThenOffer("""{"version":"0.21.1"}""")
     assertEquals(ApiResult.Ok(Version(version = "0.21.1")), api.version())
     assertEquals(listOf("GET /api/version", "GET /api/version"), arrivedAfterWarmUp())
+  }
+
+  @Test fun aReadOnAClientThatRetriesNothingIsAskedOnce() = runBlocking {
+    // Only the app opts its reads into recovery. A caller that hands the API a
+    // client with no retry means a dropped connection is that read's answer —
+    // the feed's and the chart's tests are built on exactly that — and must
+    // not have the next queued answer taken behind its back.
+    val api = apiFor(server, OkHttpClient.Builder().retryOnConnectionFailure(false).build())
+    server.answer("""{"version":"0.21.0"}""")
+    assertTrue(api.version() is ApiResult.Ok)
+    cutOffThenOffer("""{"version":"0.21.1"}""")
+    assertUnknown("the read", api.version())
+    assertEquals(listOf("GET /api/version"), arrivedAfterWarmUp())
   }
 
   // ── whatever client the API was built with ─────────────────────────────
