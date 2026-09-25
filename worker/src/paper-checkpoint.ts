@@ -29,6 +29,84 @@ type Basis = {symbol:string; qty_raw:string; cost_usdg:string};
 const MARK_TOLERANCE_USDG = 0.00001;
 
 /**
+ * BASIS_UNITS — WHAT A PAPER BASIS QUANTITY IS COUNTED IN, AND WHY IT IS TWO THINGS.
+ *
+ * Since d2c652db (2026-09-19) a paper fill books its basis in the SAME
+ * split-invariant units as the book: index.ts passes `qtyRaw: rawShares * 1e18`,
+ * and rawShares is exactly what the book stores. Before it, the basis took the
+ * TRADEABLE quantity at the multiplier of the day. A position bought across the
+ * change holds some of each, so a sound checkpoint's basis lies between
+ * `shares` and `shares × multiplier`.
+ *
+ * The comment below (from 912502b5) read the old half as the whole rule and
+ * compared every basis with `shares × multiplier`. That passed the pre-change
+ * rows and refused every book today's engine writes, as soon as a multiplier
+ * left 1.0 — and a refused checkpoint is an agent the orchestrator never
+ * starts. Production, 2026-09-24: ten paper agents refused on every ferry
+ * pass since the deploy that shipped it, one of them the only agent there with
+ * a Telegram bot, which went silent while the dashboard said connected.
+ */
+
+/**
+ * THE MULTIPLIER DRIFT A LEGACY BASIS MAY CARRY — dividend-scale, never a split.
+ *
+ * A basis in the old tradeable units differs from its shares by at most the
+ * multiplier, which for every stock token today is within 0.08% of 1.0. A
+ * range that wide cannot hide a torn write of any real size. At a split the
+ * multiplier is ~2 and the same range would admit a sell that updated the book
+ * but crashed before its basis (Kaka's review of #164: book 0.6, stale basis
+ * 1.0, inside [0.6, 1.2]) — so past this bound the check is exact, and a
+ * legacy basis there is refused as it was before.
+ */
+export const LEGACY_DRIFT = 0.01;
+
+/**
+ * HOW A BASIS QUANTITY RELATES TO THE BOOK'S SHARES: "current" (today's units,
+ * equal within the engine's rounding), "legacy" (the old tradeable units at a
+ * drift-scale multiplier, or a mix of both), or null (neither — refuse it).
+ */
+export function basisUnits(qty: number, shares: number, mul: number): "current" | "legacy" | null {
+  if (Math.abs(qty - shares) <= 1e-6) return "current";
+  if (Math.abs(mul - 1) > LEGACY_DRIFT) return null;
+  const lo = shares * Math.min(1, mul), hi = shares * Math.max(1, mul);
+  return qty >= lo - 1e-6 && qty <= hi + 1e-6 ? "legacy" : null;
+}
+
+/**
+ * EVERY LEGACY BASIS REWRITTEN IN TODAY'S UNITS — qty := shares, cost kept.
+ *
+ * Admitting a mixed basis is not enough on its own (Kaka's review of #164): a
+ * sell takes split-invariant quantity off a basis whose older part is
+ * tradeable, so a legacy position that is later sold down drifts past
+ * shares × multiplier and would be refused on the NEXT restart. So a legacy
+ * basis is admitted only to be normalised: after this, basis == shares, and
+ * every later fill and sell keeps it so. The cost is untouched; the average
+ * cost per share moves by the multiplier's drift (≤ 0.08% today), which is the
+ * units correction and nothing else. A basis the check refuses is not touched.
+ */
+export function normalizedBasis(
+  sharesJson: string,
+  basisJson: string,
+  multiplierOf: MultiplierOf,
+): { basis: Basis[]; normalized: string[] } {
+  const shares = JSON.parse(sharesJson) as Record<string, { shares: number }>;
+  const basis = JSON.parse(basisJson) as Basis[];
+  const normalized: string[] = [];
+  const out = basis.map((b) => {
+    const held = shares[b.symbol];
+    if (!held) return b;
+    if (basisUnits(Number(b.qty_raw) / 1e18, held.shares, multiplierOf(b.symbol)) !== "legacy") return b;
+    normalized.push(b.symbol);
+    // The expression index.ts books a paper fill with: the stored shares, in 18dp.
+    return { ...b, qty_raw: String(BigInt(Math.round(held.shares * 1e18))) };
+  });
+  return { basis: out, normalized };
+}
+
+const saidNormalized = (symbols: string[]) =>
+  symbols.length ? ` (basis for ${symbols.join(", ")} moved to split-invariant units)` : "";
+
+/**
  * WHAT ONE SPLIT-INVARIANT SHARE IS WORTH IN TRADEABLE UNITS, PER SYMBOL.
  *
  * The two numbers a checkpoint carries are in DIFFERENT UNITS and nothing said
@@ -99,13 +177,15 @@ export function paperCheckpointRejection(row: Checkpoint, multiplierOf: Multipli
       // A snapshot between cash/book and basis writes must not become a restore point.
       if (!b) return `${symbol} is held with no paper cost basis`;
       if (BigInt(b.cost_usdg)<0n) return `${symbol} has a negative cost basis`;
-      // LIKE FOR LIKE. `qty_raw` is tradeable, `shares` is split-invariant, so
-      // one of them has to be converted before they can be compared at all —
-      // see MultiplierOf. The multiply adds one rounding step, which is ~1e-16
-      // relative and nowhere near the bound below.
-      const mul = multiplierOf(symbol);
-      const tradeable = p.shares * mul;
-      if (Math.abs(Number(b.qty_raw)/1e18-tradeable)>1e-6) return `${symbol} basis ${b.qty_raw} raw disagrees with ${p.shares} shares at multiplier ${mul}`;
+      // IN THE UNITS THE ENGINE WROTE — see BASIS_UNITS. Today's fills book the
+      // split-invariant quantity, so basis == shares; the 1e-6 is the engine's
+      // own rounding (a sell rounds the book's shares to 6dp, the basis stays
+      // exact). A basis from before 2026-09-19 may also sit anywhere up to
+      // shares × multiplier — see legacyBasis for when that is admitted and
+      // why it is admitted only to be normalised away.
+      if (basisUnits(Number(b.qty_raw)/1e18, p.shares, multiplierOf(symbol)) === null) {
+        return `${symbol} basis ${b.qty_raw} raw disagrees with ${p.shares} shares at multiplier ${multiplierOf(symbol)}`;
+      }
     }
     for (const b of basis) {
       if (BigInt(b.qty_raw)<0n || BigInt(b.cost_usdg)<0n) return `${b.symbol} basis is negative`;
@@ -145,7 +225,8 @@ export async function mirrorPaperCheckpoints(child:Db, shared:Db): Promise<numbe
   let count=0;
   for(const b of snapshots) {
     // FROM THE CHILD, which is the book these shares were written against.
-    const why = paperCheckpointRejection(b, await multipliersFor(child, b.agent_id));
+    const multiplierOf = await multipliersFor(child, b.agent_id);
+    const why = paperCheckpointRejection(b, multiplierOf);
     if (why) {
       // SAID OUT LOUD, because this skip is the start of the whole failure
       // chain. No checkpoint written here means every later restore falls to
@@ -154,6 +235,9 @@ export async function mirrorPaperCheckpoints(child:Db, shared:Db): Promise<numbe
       console.warn(`[paper] checkpoint not mirrored for ${b.agent_id}: ${why}`);
       continue;
     }
+    // The durable row is written in today's units, so a restore from it never
+    // carries a legacy basis back into a book (see normalizedBasis).
+    b.basis_json = JSON.stringify(normalizedBasis(b.shares, b.basis_json, multiplierOf).basis);
     await shared.prepare(`INSERT INTO paper_checkpoints(agent_id,epoch,cash_usdg,vault_usdg,hwm_usdg,shares,basis_json,updated_at)
       VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET epoch=excluded.epoch,cash_usdg=excluded.cash_usdg,
       vault_usdg=excluded.vault_usdg,hwm_usdg=excluded.hwm_usdg,shares=excluded.shares,basis_json=excluded.basis_json,updated_at=excluded.updated_at
@@ -166,7 +250,24 @@ export async function mirrorPaperCheckpoints(child:Db, shared:Db): Promise<numbe
 
 /** Restore only an empty local book, including its matching basis. */
 export async function restorePaperCheckpoint(child:Db, shared:Db, account:string):Promise<string> {
-  if (await child.prepare("SELECT agent_id FROM paper_book WHERE LOWER(agent_id)=LOWER(?)").get(account)) return 'local book retained';
+  const local = await child.prepare("SELECT agent_id, shares FROM paper_book WHERE LOWER(agent_id)=LOWER(?)").get(account) as {agent_id:string;shares:string} | undefined;
+  if (local) {
+    // A BOOK THAT SURVIVED THE RESTART IS KEPT — and its legacy basis, if any,
+    // moved to today's units now, so the next sell cannot drift it past the
+    // check (see normalizedBasis). Best-effort: a local book is never blocked.
+    try {
+      const rows = await child.prepare("SELECT symbol, qty_raw, cost_usdg FROM cost_basis WHERE agent_id=? AND mode='paper'").all(local.agent_id) as Basis[];
+      const { basis, normalized } = normalizedBasis(local.shares, JSON.stringify(rows), await multipliersFor(shared, account));
+      if (normalized.length) {
+        await child.tx(async (db) => {
+          for (const b of basis.filter((b) => normalized.includes(b.symbol))) {
+            await db.prepare("UPDATE cost_basis SET qty_raw=? WHERE agent_id=? AND mode='paper' AND symbol=?").run(b.qty_raw, local.agent_id, b.symbol);
+          }
+        });
+      }
+      return `local book retained${saidNormalized(normalized)}`;
+    } catch { return 'local book retained'; }
+  }
   await shared.exec(PAPER_CHECKPOINT_SCHEMA);
   let row = await shared.prepare(`SELECT p.* FROM paper_checkpoints p JOIN agents a ON LOWER(a.smart_account)=LOWER(p.agent_id)
     WHERE LOWER(p.agent_id)=LOWER(?) AND p.epoch=a.epoch`).get(account) as Checkpoint | undefined;
@@ -233,18 +334,20 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
     const markDelta = Number(mark.cash_usdg)+Number(mark.vault_usdg)+Number(mark.positions_usdg)-Number(mark.equity_usdg);
     if (Math.abs(markDelta)>MARK_TOLERANCE_USDG) throw new Error(`the recoverable valuation does not add up (cash+vault+positions-equity=${markDelta})`);
     /**
-     * SPLIT-INVARIANT, LIKE THE BOOK THIS IS RESTORING INTO.
+     * SPLIT-INVARIANT, LIKE THE BOOK THIS IS RESTORING INTO — AND A PAPER
+     * `raw_balance` ALREADY IS.
      *
-     * This used to write `raw_balance/1e18` — a TRADEABLE quantity — into a
-     * field the paper engine reads as shares at multiplier 1.0, so the two
-     * restore paths wrote the same field in different units and only agreed
-     * while nothing had split. Nobody had been bitten yet; a post-split
-     * upgrade-path restore would have mis-stated the book by the multiplier,
-     * silently, in the direction of over-reporting the holding.
+     * index.ts writes a paper position's raw balance as `shares * 1e18` ("shares
+     * is split-invariant, so it IS the raw balance in 18dp terms"), so it comes
+     * back as `raw_balance / 1e18` with nothing applied. 912502b5 divided it by
+     * the multiplier as well, reading it as a tradeable on-chain balance: every
+     * restore through here then understated the holding by that multiplier and,
+     * against the basis, disagreed by it twice over — which is how three
+     * agents on this path were refused on every pass.
      */
     const shares=Object.fromEntries(positions.filter(p=>BigInt(String(p.raw_balance))>0n).map(p=>{
       const symbol=String(p.symbol);
-      return [symbol,{token:String(p.token),shares:Number(p.raw_balance)/1e18/multiplierOf(symbol)}];
+      return [symbol,{token:String(p.token),shares:Number(p.raw_balance)/1e18}];
     }));
     const basis=await shared.prepare(`SELECT symbol,qty_raw,cost_usdg FROM cost_basis WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).all(account) as Basis[];
     const peak=await shared.prepare(`SELECT MAX(equity_usdg) AS peak FROM equity WHERE LOWER(agent_id)=LOWER(?) AND epoch=? AND mode='paper'`).get(account,Number(mark.epoch)) as {peak:number};
@@ -262,12 +365,15 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
   }
   const why = paperCheckpointRejection(row, multiplierOf);
   if (why) throw new Error(`invalid paper checkpoint: ${why}`);
+  // Restored in today's units, so the book comes back with basis == shares and
+  // stays so through every later fill (see normalizedBasis).
+  const { basis, normalized } = normalizedBasis(row.shares, row.basis_json, multiplierOf);
   await child.tx(async db=>{
     await db.prepare(`INSERT INTO paper_book(agent_id,cash_usdg,vault_usdg,hwm_usdg,shares,updated_at) VALUES(?,?,?,?,?,?)`)
       .run(account,row.cash_usdg,row.vault_usdg,row.hwm_usdg,row.shares,row.updated_at);
     await db.prepare("DELETE FROM cost_basis WHERE agent_id=? AND mode='paper'").run(account);
-    for(const b of JSON.parse(row.basis_json) as Basis[]) await db.prepare(`INSERT INTO cost_basis(agent_id,mode,symbol,qty_raw,cost_usdg,updated_at) VALUES(?,'paper',?,?,?,?)`)
+    for(const b of basis) await db.prepare(`INSERT INTO cost_basis(agent_id,mode,symbol,qty_raw,cost_usdg,updated_at) VALUES(?,'paper',?,?,?,?)`)
       .run(account,b.symbol,b.qty_raw,b.cost_usdg,row.updated_at);
   });
-  return 'paper cash, holdings and basis restored';
+  return `paper cash, holdings and basis restored${saidNormalized(normalized)}`;
 }
