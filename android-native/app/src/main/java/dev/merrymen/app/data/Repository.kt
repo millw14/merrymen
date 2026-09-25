@@ -8,6 +8,7 @@ import dev.merrymen.app.net.SessionStore
 import dev.merrymen.app.net.checkOrigin
 import dev.merrymen.app.net.isOtherServer
 import dev.merrymen.app.net.serverOf
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
@@ -51,6 +52,10 @@ fun <T> ApiResult<T>.toLoaded(): Loaded<T> = when (this) {
  * is about the session.
  */
 fun Loaded<*>.needsSignIn(): Boolean = this is Loaded.Refused && status == 401
+
+/** The first wait before [Repository.askUntilKnown] asks again, and the longest it waits. */
+const val IDENTITY_RETRY_FIRST_MS = 3_000L
+const val IDENTITY_RETRY_MAX_MS = 60_000L
 
 /**
  * THE APP'S ONE ACCOUNT OF WHO IT ACTS FOR, against which server.
@@ -210,6 +215,32 @@ class Repository(
     identity.refuseInsideHook("refreshIdentity")
     val asOf = identity.turn
     identity.answered(api.session(), asOf)
+  }
+
+  /**
+   * KEEP ASKING WHO IS SIGNED IN UNTIL SOMEBODY ANSWERS.
+   *
+   * [bootstrap] asks once, and only after the version read answered. A cold
+   * start whose first request failed (airplane mode, a DNS blip on wake, a
+   * server restart) never asked again for the life of the process: every
+   * read after the network came back worked, but identity stayed unknown, so
+   * Chat said "Checking who's signed in…" for good, Trade told a signed-in
+   * owner to sign in, no screen offered Sign in, and chat orders kept on disk
+   * were never followed again. So while identity is unknown this asks the
+   * session route again after a pause that doubles up to a minute, and
+   * returns once an answer has landed, from here or from anything else that
+   * asked. It pauses BEFORE the first ask, so a start whose bootstrap is
+   * still out does not ask twice. The shell runs it while the app is in
+   * front, and again whenever a Server change makes identity unknown.
+   */
+  suspend fun askUntilKnown(pause: suspend (Long) -> Unit = { delay(it) }) {
+    var wait = IDENTITY_RETRY_FIRST_MS
+    while (!identity.identityKnown.value) {
+      pause(wait)
+      if (identity.identityKnown.value) return
+      refreshIdentity()
+      wait = (wait * 2).coerceAtMost(IDENTITY_RETRY_MAX_MS)
+    }
   }
 
   /** Called after the WebView flow settles, to pick up a fresh session cookie. */

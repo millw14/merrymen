@@ -34,6 +34,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -41,6 +44,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import dev.merrymen.app.LocalContainer
+import kotlinx.coroutines.flow.collectLatest
 import dev.merrymen.app.ui.screens.AgentDetailScreen
 import dev.merrymen.app.ui.screens.AlphaScreen
 import dev.merrymen.app.ui.screens.ChatScreen
@@ -150,6 +154,18 @@ fun Shell() {
     } else {
       container.repo.bootstrap()
       start = Routes.HOME
+    }
+  }
+
+  // UNTIL SOMEBODY SAYS WHO IS SIGNED IN, KEEP ASKING — while the app is in
+  // front. bootstrap asks once; a start that reached nothing left identity
+  // unknown for the life of the process, and every screen that waits on it
+  // with it (Repository.askUntilKnown). A Server change makes it unknown
+  // again, and this starts over.
+  val lifecycle = LocalLifecycleOwner.current.lifecycle
+  LaunchedEffect(lifecycle) {
+    lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+      container.repo.identityKnown.collectLatest { known -> if (!known) container.repo.askUntilKnown() }
     }
   }
 

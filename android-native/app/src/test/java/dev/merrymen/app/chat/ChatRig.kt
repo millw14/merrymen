@@ -19,6 +19,7 @@ import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
 import java.io.File
 import java.net.InetAddress
 import java.nio.file.Files
@@ -42,6 +43,8 @@ class ChatRig : AutoCloseable {
   val seen = CopyOnWriteArrayList<Seen>()
   val routes = ConcurrentHashMap<String, (Seen) -> MockResponse>()
   @Volatile var address: String? = null
+  /** The session route's connection is cut before it answers: a phone with no network, for that route alone. */
+  @Volatile var sessionDown = false
   @Volatile var now = 1_000_000L
   val failures = CopyOnWriteArrayList<Throwable>()
   val dir: File = Files.createTempDirectory("chat-thread").toFile()
@@ -53,6 +56,7 @@ class ChatRig : AutoCloseable {
         seen += s
         val path = s.path.substringBefore("?")
         if (path == "/api/auth/session") {
+          if (sessionDown) return MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
           val who = address?.let { "\"$it\"" } ?: "null"
           return json("""{"hosted":true,"address":$who}""")
         }
