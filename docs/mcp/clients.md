@@ -72,11 +72,11 @@ screen shows "Verified at claude.ai". Callback: `https://claude.ai/api/mcp/auth_
 (pasted together they would be sent as one message):
 
 ```text
-/plugin marketplace add millw14/merrymen
+/plugin marketplace add https://github.com/millw14/merrymen.git
 /plugin install merrymen@merrymen
 ```
 
-From a terminal, the same is `claude plugin marketplace add millw14/merrymen`
+From a terminal, the same is `claude plugin marketplace add https://github.com/millw14/merrymen.git`
 then `claude plugin install merrymen@merrymen`. Then sign in once: type `/mcp`,
 choose `plugin:merrymen:merrymen`, choose **Authenticate**, and click
 **Allow** on the Merrymen page that opens (from a terminal:
@@ -285,7 +285,7 @@ by `web/src/mcp/install-links.test.ts` but were not clicked through.
 | Claude Desktop / Claude mobile | Not verified separately. A connector added on claude.ai appears in them for the same account. |
 | Official MCP TypeScript SDK client v2.1.0 | Full OAuth flow against a local deployment backed by real Postgres, then tool, resource and prompt calls on both **2026-07-28** (pinned) and **2025-11-25**; refresh rotation, refresh-reuse revocation, owner disconnect. |
 | Claude Code 2.1.281 | Discovery, Client ID Metadata Document (`https://claude.ai/oauth/claude-code-client-metadata`), PKCE S256, loopback redirect, `resource` parameter and scope request observed from the real CLI against the local deployment; the consent page verified Claude Code's real published metadata document; the code exchange and tool calls were completed with the same client id and a test verifier. The last interactive step (`claude mcp login` pasting back in a TTY) was not automated. |
-| Claude Code plugin (2.1.281) | 2026-09-25, in a throwaway `CLAUDE_CONFIG_DIR`: `claude plugin validate` passed for the plugin and the marketplace; `claude plugin marketplace add` (local checkout) and `claude plugin install merrymen@merrymen` installed 6 skills and the server; `claude mcp list` showed `plugin:merrymen:merrymen` pointing at production as "Needs authentication"; `claude mcp login plugin:merrymen:merrymen --no-browser` produced an authorization URL with Claude Code's metadata-document client and the production `resource`, and that URL reached Merrymen's consent page. Adding the marketplace from GitHub (`millw14/merrymen`) was not tested before merge, because the plugin is not on `main` until then. |
+| Claude Code plugin (2.1.281) | 2026-09-25, in a throwaway `CLAUDE_CONFIG_DIR`: `claude plugin validate` passed for the plugin and the marketplace; `claude plugin marketplace add` (local checkout) and `claude plugin install merrymen@merrymen` installed 6 skills and the server; `claude mcp list` showed `plugin:merrymen:merrymen` pointing at production as "Needs authentication"; `claude mcp login plugin:merrymen:merrymen --no-browser` produced an authorization URL with Claude Code's metadata-document client and the production `resource`, and that URL reached Merrymen's consent page. After merge, the same run from GitHub in a fresh config: `claude plugin marketplace add https://github.com/millw14/merrymen.git`, install, `claude mcp list` and the login URL all worked, the URL reaching the consent page. The `millw14/merrymen` shorthand failed on that machine because Claude Code clones it over SSH ("SSH host key is not in your known_hosts file"), which is why every command here uses the HTTPS URL. |
 | Codex | Not verified (the Codex CLI is not installed on the build machine). Commands and configuration follow OpenAI's Codex MCP documentation. |
 | ChatGPT developer mode | Not verified. |
 | Cursor, VS Code, Gemini CLI, Kiro, LM Studio, Goose, Windsurf / Devin, Zed | Not verified. Links, commands and configuration follow each vendor's documentation as of 2026-09-25. |

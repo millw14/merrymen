@@ -415,7 +415,7 @@ hasn't traded. One click for Claude: <https://app.merrymen.dev/connect/mcp>.
 In **Claude Code**, run these one at a time:
 
 ```text
-/plugin marketplace add millw14/merrymen
+/plugin marketplace add https://github.com/millw14/merrymen.git
 /plugin install merrymen@merrymen
 ```
 

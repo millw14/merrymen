@@ -53,7 +53,14 @@ export interface InstallLinks {
  * a staging or self-hosted server would be handed a plugin pointing elsewhere.
  */
 export const PLUGIN_SERVER_URL = "https://mcp.merrymen.dev/mcp";
-export const PLUGIN_MARKETPLACE_REPO = "millw14/merrymen";
+/**
+ * The HTTPS clone URL, never the `millw14/merrymen` shorthand: Claude Code
+ * clones the shorthand over SSH, which fails on any machine without a GitHub
+ * SSH setup ("SSH host key is not in your known_hosts file"). Seen with Claude
+ * Code 2.1.281 on 2026-09-25; the HTTPS URL installed cleanly from the same
+ * machine.
+ */
+export const PLUGIN_MARKETPLACE_URL = "https://github.com/millw14/merrymen.git";
 export const PLUGIN_ID = "merrymen@merrymen";
 
 /**
@@ -62,7 +69,7 @@ export const PLUGIN_ID = "merrymen@merrymen";
  * the plugin points at.
  */
 export function claudeCodePluginCommands(serverUrl: string): [string, string] | null {
-  return serverUrl === PLUGIN_SERVER_URL ? [`/plugin marketplace add ${PLUGIN_MARKETPLACE_REPO}`, `/plugin install ${PLUGIN_ID}`] : null;
+  return serverUrl === PLUGIN_SERVER_URL ? [`/plugin marketplace add ${PLUGIN_MARKETPLACE_URL}`, `/plugin install ${PLUGIN_ID}`] : null;
 }
 
 export interface InstallCommands {

@@ -65,7 +65,7 @@ test("Claude Code comes first among the others, with the plugin's two commands c
   const html = unescape(render(true));
   const others = html.slice(html.indexOf("Other assistants"));
   assert.ok(others.indexOf("Claude Code") < others.indexOf("ChatGPT"), "Claude Code is the first row");
-  for (const line of ["/plugin marketplace add millw14/merrymen", "/plugin install merrymen@merrymen"]) {
+  for (const line of ["/plugin marketplace add https://github.com/millw14/merrymen.git", "/plugin install merrymen@merrymen"]) {
     assert.ok(html.includes(`<code>${line}</code>`), `${line} in a block of its own`);
   }
   assert.match(html, /aria-label="Copy the first Claude Code command"/);
