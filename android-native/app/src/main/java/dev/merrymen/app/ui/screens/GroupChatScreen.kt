@@ -42,6 +42,9 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -69,11 +72,13 @@ import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.ChatItem
 import dev.merrymen.app.data.GC_COMPOSER_MAX
 import dev.merrymen.app.data.GC_COUNTED_WAIT_MS
+import dev.merrymen.app.data.GcReader
 import dev.merrymen.app.data.GroupChatRoom
 import dev.merrymen.app.data.GroupChatState
 import dev.merrymen.app.data.MeState
 import dev.merrymen.app.data.ReplyTarget
 import dev.merrymen.app.data.RoomStatus
+import dev.merrymen.app.data.ScrollEnds
 import dev.merrymen.app.data.SendResult
 import dev.merrymen.app.data.chatItems
 import dev.merrymen.app.data.composerAfter
@@ -385,6 +390,12 @@ private fun GcZonePicker(current: String?, onPick: (String) -> Unit, onDismiss: 
 // THE LOG AND THE COMPOSER
 // ---------------------------------------------------------------------------
 
+/** The reader's place in the room, kept across a rotation (see [GcReader]). */
+private val GcReaderSaver: Saver<GcReader, List<Any>> = Saver(
+  save = { listOf(it.following, it.seenTop, it.epoch) },
+  restore = { GcReader(following = it[0] as Boolean, seenTop = it[1] as Long, epoch = it[2] as Int) },
+)
+
 @Composable
 private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, nav: NavHostController, modifier: Modifier) {
   val scope = rememberCoroutineScope()
@@ -399,10 +410,12 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
     (s.messages.filter { it.author != "system" }.map { it.name } + s.room?.presence.orEmpty().map { it.name }).distinct()
   }
   val listState = rememberLazyListState()
-  // Is the reader following the newest line? Only the READER changes it, by
-  // scrolling: a line landing below the fold is not the reader leaving.
-  var follow by remember { mutableStateOf(true) }
-  var seenTop by remember { mutableLongStateOf(0L) }
+  // Is the reader following the newest line, and what have they seen? Only the
+  // READER stops the following, by a scroll that ends away from the bottom: a
+  // line landing below the fold is not the reader leaving, and neither is the
+  // list being drawn at its top before the first scroll down. Saved, so a
+  // rotation keeps a follower on the newest line and a reader where they were.
+  var reader by rememberSaveable(stateSaver = GcReaderSaver) { mutableStateOf(GcReader()) }
   val atBottom by remember {
     derivedStateOf {
       val info = listState.layoutInfo
@@ -410,26 +423,38 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
       last == null || last.index >= info.totalItemsCount - 1
     }
   }
-  LaunchedEffect(listState) {
-    snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
-      if (!scrolling) {
-        follow = atBottom
-        room.setFollowing(follow)
-      }
-    }
-  }
   val newestId = s.messages.lastOrNull()?.id ?: 0L
-  // FOLLOW THE NEWEST LINE unless the reader scrolled away; count what they
-  // are missing instead, so the pill can say so. A replaced log (the screen
-  // back after a long absence) goes to the bottom.
-  LaunchedEffect(rows.size, s.epoch) {
-    if (follow && rows.isNotEmpty()) {
-      // +1: the "top" item (load earlier / the start) sits before the rows.
-      listState.scrollToItem(rows.size)
-      seenTop = newestId
+  val latestNewest by rememberUpdatedState(newestId)
+  val latestRows by rememberUpdatedState(rows.size)
+  LaunchedEffect(listState) {
+    val ends = ScrollEnds()
+    snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+      if (ends.ended(scrolling)) reader = reader.scrollEnded(atBottom, latestNewest)
     }
   }
-  val unseen = if (follow) 0 else s.messages.count { it.id > seenTop && !isMine(it, mySlug) }
+  // The store trims only a following reader's log, so it hears every change.
+  LaunchedEffect(reader.following) { room.setFollowing(reader.following) }
+  // FOLLOW THE NEWEST LINE unless the reader scrolled away; count what they
+  // are missing instead, so the pill can say so. Keyed on the last row as well
+  // as the count: at GC_KEEP_LINES a new line and a trimmed one leave the count
+  // where it was. A replaced log (the screen back after a long absence) and the
+  // first one this screen shows go to the bottom.
+  LaunchedEffect(rows.size, rows.lastOrNull()?.key, s.epoch) {
+    val (next, scroll) = reader.logShown(s.epoch, newestId, rows.isNotEmpty())
+    reader = next
+    // +1: the "top" item (load earlier / the start) sits before the rows. Not
+    // under the reader's finger: a drag is theirs, and where it ends decides.
+    if (scroll && !listState.isScrollInProgress) listState.scrollToItem(rows.size)
+  }
+  // The list getting shorter — the keyboard opening, a notice above it, a
+  // rotation — keeps its first line and hides its last. A follower stays on
+  // the newest line (the web's ResizeObserver).
+  LaunchedEffect(listState) {
+    snapshotFlow { listState.layoutInfo.viewportSize }.collect {
+      if (reader.following && latestRows > 0 && !listState.isScrollInProgress) listState.scrollToItem(latestRows)
+    }
+  }
+  val unseen = reader.unseen(s.messages, mySlug)
 
   // THE BOX IS THE ROOM'S (GroupChatState.draft), so a turn end empties it:
   // kept in this screen's saved state, one wallet's refused words came back
@@ -562,7 +587,7 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
           }
         }
       }
-      if (!follow && unseen > 0) {
+      if (!reader.following && unseen > 0) {
         val shape = RoundedCornerShape(50)
         Text(
           text = if (unseen == 1) "1 new message ↓" else "$unseen new messages ↓",
@@ -574,9 +599,7 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
             .clip(shape)
             .background(MerryColors.tx)
             .clickable {
-              follow = true
-              room.setFollowing(true)
-              seenTop = newestId
+              reader = reader.toNewest(newestId)
               scope.launch { if (rows.isNotEmpty()) listState.scrollToItem(rows.size) }
             }
             .padding(horizontal = 14.dp, vertical = 8.dp),
@@ -598,8 +621,8 @@ private fun GcRoomBody(s: GroupChatState, member: Boolean, room: GroupChatRoom, 
             val text = draft
             val target = replyTo
             error = null
-            follow = true
-            room.setFollowing(true)
+            // The owner's own line is where they will look: back to the newest.
+            reader = reader.toNewest(newestId)
             room.clearDraft()
             replyTo = null
             // The words come back on a refusal, so it never costs the owner
