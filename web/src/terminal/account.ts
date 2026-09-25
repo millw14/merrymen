@@ -65,7 +65,7 @@ export function dailyChange(mine: LiveMine): number | null {
   return previous > 0 ? (mine.chg24 / previous) * 100 : null;
 }
 
-export function spentToday(mine: LiveMine, now: number): number {
+export function spentToday(mine: Pick<LiveMine, "moves">, now: number): number {
   const start = new Date(now);
   start.setHours(0, 0, 0, 0);
   return mine.moves.reduce((total, move) => {
@@ -83,7 +83,7 @@ export function spentToday(mine: LiveMine, now: number): number {
   }, 0);
 }
 
-export function positionsOf(mine: LiveMine) {
+export function positionsOf(mine: Pick<LiveMine, "positions" | "glance">) {
   // THE POSITION'S OWN %, which mineOf computed from the recorded cost and this
   // mapping threw away as `pnl: null` — so the desk never showed one. Null
   // stays null and says why: no cost on record is "cost unknown", never 0%.

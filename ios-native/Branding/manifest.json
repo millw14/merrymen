@@ -1,0 +1,13 @@
+{
+  "source": {
+    "geometry": "7970ecfbe078f674f8420f2788303c1dd4272a6ebd707343e3d6f9e0f2ce331e",
+    "accent": "#a5ce1f",
+    "background": "#070806",
+    "version": 1
+  },
+  "files": {
+    "ios-native/Resources/Assets.xcassets/Brand.imageset/Brand.png": "f5e2154f06750faef8697f12198bf64dae5b0c7749dd908e8f212ac157d9eec3",
+    "ios-native/Resources/Assets.xcassets/TabMark.imageset/TabMark.png": "efa1e0ef37e68c6dc33a56e4ea0914e9dcd5fe7fb70a2b3f2bba19049f795633",
+    "ios-native/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png": "a63edb1a5eb7eb8d8308f369c2666141a3017377829798b4ae79c7bf79c7658d"
+  }
+}
