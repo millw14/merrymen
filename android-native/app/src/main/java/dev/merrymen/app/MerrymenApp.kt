@@ -2,6 +2,7 @@ package dev.merrymen.app
 
 import android.app.Application
 import dev.merrymen.app.data.ChatThread
+import dev.merrymen.app.data.GroupChatRoom
 import dev.merrymen.app.data.Repository
 import dev.merrymen.app.data.Social
 import dev.merrymen.app.net.CookieStores
@@ -63,23 +64,46 @@ fun newAppScope(
 /**
  * THE PART OF THE GRAPH THAT DECIDES WHOSE STATE IS HELD, with no Android in it.
  *
- * The API, the per-wallet likes-and-follows store and the Repository, wired
- * the way the app runs them — including Social's forget hook, the one line
- * whose absence would hand one wallet's likes to the next. A JVM test builds
- * this over a MockWebServer and fakes of the two stores and signs a wallet out.
+ * The API, the per-wallet likes-and-follows store, the group chat room and the
+ * Repository, wired the way the app runs them — including each store's forget
+ * hook, the one line whose absence would hand one wallet's likes (or its seat
+ * in the room) to the next. A JVM test builds this over a MockWebServer and
+ * fakes of the two stores and signs a wallet out.
+ *
+ * [appScope] is where the room's writes run, so a line sent just before Back
+ * is still heard. The default is the app's own kind of scope; a test that
+ * sends passes one it controls.
  */
-class AppGraph(http: OkHttpClient, store: SessionStore, cookies: CookieStores) {
+class AppGraph(
+  http: OkHttpClient,
+  store: SessionStore,
+  cookies: CookieStores,
+  appScope: CoroutineScope = newAppScope(),
+) {
   // READS RECOVER, WRITES NEVER REPEAT. The shared client retries nothing, so
   // a write whose answer is lost is looked up rather than sent twice; a read
   // that meets a stale pooled connection (common after the app sat in the
   // background) is asked again instead of showing "Can't reach merrymen".
   val api = MerrymenApi(http, store, recoverReads = true)
   val social = Social(api)
+
+  /**
+   * THE GROUP CHAT, ONE ROOM FOR THE PROCESS. Held here rather than by the
+   * screen, so coming back draws what was already read while the next poll is
+   * in flight, and so its forget hook is registered with the others — at
+   * construction, not on the screen's first visit, which is the only way a
+   * test of this graph can show that a sign-out empties it.
+   */
+  val groupChat = GroupChatRoom(api, appScope)
+
   val repo = Repository(api, store, cookies).also { repo ->
     // Likes and follows are per-wallet facts and must not outlive the wallet
     // they belong to — on sign-out, when another wallet signs in, or when the
     // app moves to another server.
     repo.addForgetHook { social.forget() }
+    // The room of another server is not this one's, and the old wallet's
+    // membership and unconfirmed lines are not the new reader's.
+    repo.addForgetHook { groupChat.forget() }
   }
 }
 
@@ -90,10 +114,11 @@ class AppContainer(app: Application) {
   val session = Session(app)
   val cookieJar = PersistentCookieJar(session)
   val http = Http.client(cookieJar)
-  private val graph = AppGraph(http, session, DeviceCookies(cookieJar))
+  private val graph = AppGraph(http, session, DeviceCookies(cookieJar), appScope)
   val api = graph.api
   val social = graph.social
   val repo = graph.repo
+  val groupChat = graph.groupChat
 
   /** The app-wide chat thread. Registers its own forget hook. */
   val chat = ChatThread(app, api, repo, appScope)

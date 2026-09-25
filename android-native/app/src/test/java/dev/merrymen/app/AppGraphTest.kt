@@ -1,5 +1,8 @@
 package dev.merrymen.app
 
+import dev.merrymen.app.data.GroupChatState
+import dev.merrymen.app.groupchat.lineJson
+import dev.merrymen.app.groupchat.pageJson
 import dev.merrymen.app.net.Http
 import dev.merrymen.app.net.MemoryCookies
 import dev.merrymen.app.net.MemoryStore
@@ -18,8 +21,9 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * THE GRAPH THE APP RUNS, and the one line in it whose absence hands one
- * wallet's likes to the next: Social's forget hook.
+ * THE GRAPH THE APP RUNS, and the lines in it whose absence hands one
+ * wallet's state to the next: Social's forget hook and the group chat
+ * room's.
  */
 class AppGraphTest {
   private lateinit var server: MockWebServer
@@ -58,6 +62,34 @@ class AppGraphTest {
     graph.repo.setOrigin("https://staging.merrymen.dev")
 
     assertTrue(graph.social.likes.value.mine.isEmpty())
+  }
+
+  /**
+   * The room is held by the graph, not by its screen, so its hook is
+   * registered at construction: a wallet that signs out before ever opening
+   * the room again still leaves nothing of the old reader's behind.
+   */
+  @Test fun signingOutEmptiesTheGroupChatRoom() = runBlocking {
+    server.answer("""{"hosted":true,"address":"0xAAA"}""")
+    graph.repo.refreshIdentity()
+    server.answer(pageJson(listOf(lineJson(1, "gm")), cursor = 1))
+    graph.groupChat.pollNow()
+    assertEquals(listOf(1L), graph.groupChat.state.value.messages.map { it.id })
+
+    server.answer("{}")
+    graph.repo.signOut()
+
+    assertEquals(GroupChatState(), graph.groupChat.state.value)
+  }
+
+  @Test fun anotherServerEmptiesTheRoomToo() = runBlocking {
+    server.answer(pageJson(listOf(lineJson(1, "gm")), cursor = 1))
+    graph.groupChat.pollNow()
+    assertEquals(1, graph.groupChat.state.value.messages.size)
+
+    graph.repo.setOrigin("https://staging.merrymen.dev")
+
+    assertEquals(GroupChatState(), graph.groupChat.state.value)
   }
 
   @Test fun appScopedWorkThatThrowsIsALogLineAndItsSiblingsLive() = runBlocking {

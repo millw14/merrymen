@@ -71,7 +71,6 @@ import dev.merrymen.app.data.ChatItem
 import dev.merrymen.app.data.GC_COMPOSER_MAX
 import dev.merrymen.app.data.GC_COUNTED_WAIT_MS
 import dev.merrymen.app.data.GroupChatRoom
-import dev.merrymen.app.data.GroupChatRooms
 import dev.merrymen.app.data.GroupChatState
 import dev.merrymen.app.data.MeState
 import dev.merrymen.app.data.ReplyTarget
@@ -133,7 +132,7 @@ import java.time.format.FormatStyle
 @Composable
 fun GroupChatScreen(nav: NavHostController) {
   val c = LocalContainer.current
-  val room = remember(c.repo) { GroupChatRooms.of(c.repo, c.appScope) }
+  val room = c.groupChat
   val s by room.state.collectAsState()
   val signedIn by c.repo.signedIn.collectAsState()
 

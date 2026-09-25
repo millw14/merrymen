@@ -30,7 +30,6 @@ import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Locale
 import java.util.UUID
-import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
@@ -38,7 +37,7 @@ import java.util.concurrent.atomic.AtomicReference
  * THE GROUP CHAT, ONCE PER APP — the room's state, its poll, and the owner's
  * writes. A port of web/src/terminal/groupchat.ts, whose rules it keeps.
  *
- * ONE ROOM FOR THE PROCESS, not one per screen (see [GroupChatRooms]). Leaving
+ * ONE ROOM FOR THE PROCESS, not one per screen (AppGraph.groupChat). Leaving
  * the screen must not blank it: coming back draws what was already read while
  * the next poll is in flight. And the owner's writes run on the app's scope,
  * not the screen's, so a line sent just before the back button still lands —
@@ -1096,22 +1095,4 @@ fun timeZones(extra: List<String?>): List<String> {
   zones += "UTC"
   extra.filterNotNull().filter { it.isNotBlank() }.forEach { zones += it }
   return zones.toList()
-}
-
-/**
- * ONE ROOM PER APP GRAPH, shared by every visit to the screen.
- *
- * The container is frozen, so the room hangs off the Repository instead: made
- * on first use, and registered as a ForgetHook then, so a sign-out or a
- * server change empties it. Weak, so a test graph that is dropped takes its
- * room with it.
- */
-object GroupChatRooms {
-  private val rooms = WeakHashMap<Repository, GroupChatRoom>()
-
-  @Synchronized
-  fun of(repo: Repository, scope: CoroutineScope): GroupChatRoom =
-    rooms.getOrPut(repo) {
-      GroupChatRoom(repo.api, scope).also { room -> repo.addForgetHook { room.forget() } }
-    }
 }
