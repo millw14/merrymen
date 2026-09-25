@@ -9,13 +9,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -31,6 +29,14 @@ import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
+import dev.merrymen.app.market.MarketRow
+import dev.merrymen.app.market.WhileResumed
+import dev.merrymen.app.market.fmtCompactUsd
+import dev.merrymen.app.market.fmtPctPts
+import dev.merrymen.app.market.marketCaveats
+import dev.merrymen.app.market.marketRows
+import dev.merrymen.app.market.refreshLoop
+import dev.merrymen.app.net.Discoveries
 import dev.merrymen.app.net.TokensPage
 import dev.merrymen.app.ui.Empty
 import dev.merrymen.app.ui.EmptyKind
@@ -41,6 +47,7 @@ import dev.merrymen.app.ui.Money
 import dev.merrymen.app.ui.PageGap
 import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.Routes
+import dev.merrymen.app.ui.numerals
 import dev.merrymen.app.ui.sans
 import kotlinx.coroutines.launch
 
@@ -75,13 +82,60 @@ private fun HaltChip(text: String, modifier: Modifier = Modifier) {
   }
 }
 
+/** The registry and its prices: the venue's quote TTL (refresh-loop.ts MARKET_EVERY_MS). */
+private const val MARKET_EVERY_MS = 30_000L
+
+/** The launchpad sweep: the server's memo lives two minutes (DISCOVERIES_EVERY_MS). */
+private const val DISCOVERIES_EVERY_MS = 120_000L
+
+/**
+ * MARKETS — the listed stocks and ETFs, and the launchpad coins the index is
+ * carrying, as the web's Home "Market activity" joins them.
+ *
+ * It used to list /api/market alone, so no launchpad coin ever appeared here.
+ * Now the two reads are merged (marketRows), each on its own clock, and only
+ * while this screen is on top (WhileResumed): a screen nobody can see does not
+ * ask for prices every thirty seconds.
+ *
+ * A REFRESH THAT FAILS KEEPS THE LAST GOOD ROWS and says so, instead of
+ * blanking a list the reader was scanning; a first read that fails says what
+ * failed, and a list missing one of its two halves says which half.
+ */
 @Composable
 fun MarketsScreen(nav: NavHostController) {
   val c = LocalContainer.current
-  var state by remember { mutableStateOf<Loaded<TokensPage>>(Loaded.Loading) }
+  var market by remember { mutableStateOf<Loaded<TokensPage>>(Loaded.Loading) }
+  var disc by remember { mutableStateOf<Loaded<Discoveries>>(Loaded.Loading) }
+  var marketStale by remember { mutableStateOf(false) }
+  var discStale by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
-  suspend fun load() { state = c.api.market().toLoaded() }
-  LaunchedEffect(Unit) { load() }
+
+  suspend fun readMarket(): Boolean {
+    val r = c.api.market().toLoaded()
+    if (r is Loaded.Value || market !is Loaded.Value) {
+      market = r
+      marketStale = false
+    } else {
+      marketStale = true
+    }
+    return r is Loaded.Value
+  }
+
+  suspend fun readDiscoveries(): Boolean {
+    val r = c.api.discoveries().toLoaded()
+    if (r is Loaded.Value || disc !is Loaded.Value) {
+      disc = r
+      discStale = false
+    } else {
+      discStale = true
+    }
+    return r is Loaded.Value
+  }
+
+  WhileResumed(Unit) {
+    launch { refreshLoop(MARKET_EVERY_MS) { readMarket() } }
+    launch { refreshLoop(DISCOVERIES_EVERY_MS) { readDiscoveries() } }
+  }
 
   // ONE SCROLLER, and the header scrolls with it. `App.tsx` renders no app bar
   // on a phone at all — `.body` is the single scroll region (polish.css:87) and
@@ -95,43 +149,99 @@ fun MarketsScreen(nav: NavHostController) {
     Header("Markets", nav)
     Spacer(Modifier.height(PageGap))
     Column(Modifier.fillMaxWidth().padding(horizontal = PagePadH)) {
-      LoadedBlock(state, onRetry = { scope.launch { load() } }) { page ->
-        if (page.tokens.isEmpty()) {
-          Empty(
-            "No tokens listed",
-            "Nothing has been registered on this deployment yet.",
-            kind = EmptyKind.Positions,
-          )
-        } else {
-          page.tokens.forEach { t ->
-            TokRow(
-              seed = t.symbol,
-              title = t.symbol,
-              sub = t.name,
-              modifier = Modifier.clickable(enabled = t.address != null) {
-                t.address?.let { nav.navigate(Routes.token(it)) }
-              },
-              under = {
-                // HALT IS NULLABLE ON PURPOSE: the server may only assert it
-                // when the chain answered, so unknown stays quiet.
-                if (t.paused == true) HaltChip("trading halted", Modifier.padding(top = 4.dp))
-              },
-              right = {
-                Money(t.priceUsd, bold = true)
-                // 24h VOLUME, NOT A 24h CHANGE. /api/market sends no change
-                // figure, so the arrow that used to sit here was an em dash on
-                // every row for every token, for ever. The label stays: an
-                // unlabelled second figure under a price reads as a move.
-                t.volume24hUsd?.let {
-                  Text("24h vol", style = MetaText, color = MerryColors.faint)
-                  Money(it, size = 12.sp, bold = true)
-                }
-              },
-            )
-          }
-        }
+      val m = market
+      val d = disc
+      val mFailed = m is Loaded.Refused || m is Loaded.Unreachable
+      val dFailed = d is Loaded.Refused || d is Loaded.Unreachable
+      when {
+        // Neither read has answered yet.
+        m is Loaded.Loading && d is Loaded.Loading -> LoadedBlock(Loaded.Loading) { _: Unit -> }
+        // Neither half could be read: say what failed, with Try again.
+        mFailed && dFailed -> LoadedBlock(
+          m,
+          onRetry = {
+            scope.launch {
+              readMarket()
+              readDiscoveries()
+            }
+          },
+        ) { _ -> }
+        else -> MarketList(
+          market = m,
+          disc = d,
+          marketStale = marketStale,
+          discStale = discStale,
+          nav = nav,
+        )
       }
     }
     Spacer(Modifier.height(LocalBottomInset.current))
   }
+}
+
+@Composable
+private fun MarketList(
+  market: Loaded<TokensPage>,
+  disc: Loaded<Discoveries>,
+  marketStale: Boolean,
+  discStale: Boolean,
+  nav: NavHostController,
+) {
+  val rows = marketRows((market as? Loaded.Value)?.value, (disc as? Loaded.Value)?.value)
+  marketCaveats(market, disc, marketStale, discStale).forEach { NoteLine(it, Modifier.padding(bottom = 8.dp)) }
+
+  if (rows.isEmpty() && market is Loaded.Value && disc is Loaded.Value) {
+    Empty(
+      "No tokens listed",
+      "Nothing has been registered on this deployment yet, and the index returned no coins.",
+      kind = EmptyKind.Positions,
+    )
+    return
+  }
+  rows.forEach { r -> MarketListRow(r, nav) }
+  // The coins arrive on their own clock; until the first sweep lands, the
+  // list says it is still reading rather than implying there are none.
+  if (disc is Loaded.Loading) NoteLine("Reading the launchpad…", Modifier.padding(top = 8.dp))
+  if (market is Loaded.Loading) NoteLine("Reading the listed stocks…", Modifier.padding(top = 8.dp))
+}
+
+@Composable
+private fun MarketListRow(r: MarketRow, nav: NavHostController) {
+  TokRow(
+    seed = r.symbol,
+    title = r.symbol,
+    sub = r.name,
+    modifier = Modifier.clickable(enabled = r.address != null) {
+      r.address?.let { nav.navigate(Routes.token(it)) }
+    },
+    under = {
+      // HALT IS NULLABLE ON PURPOSE: the server may only assert it when the
+      // chain answered, so unknown stays quiet.
+      if (r.halted) HaltChip("trading halted", Modifier.padding(top = 4.dp))
+    },
+    right = {
+      Money(r.priceUsd, bold = true)
+      val chg = r.change24hPct
+      when {
+        // A POOL YOUNGER THAN A DAY HAS NO 24-HOUR CHANGE. The index reports
+        // one anyway — a change since launch — and printing it under "24h"
+        // is the figure the doNotDo list forbids by name.
+        r.newPool -> Text("new pool", style = MetaText, color = MerryColors.faint)
+        chg != null -> Text(
+          text = fmtPctPts(chg) + " 24h",
+          style = TextStyle(fontFamily = numerals(FontWeight.W600), fontSize = 12.sp, fontWeight = FontWeight.W600),
+          color = if (chg < 0) MerryColors.down else MerryColors.up,
+        )
+        // 24h VOLUME, NOT A 24h CHANGE. /api/market sends no change figure
+        // for a stock, so nothing claims one; the label stays, because an
+        // unlabelled second figure under a price reads as a move.
+        r.volume24hUsd != null -> Text(
+          "24h vol " + fmtCompactUsd(r.volume24hUsd),
+          style = MetaText,
+          color = MerryColors.faint,
+        )
+        else -> Unit
+      }
+    },
+  )
 }
