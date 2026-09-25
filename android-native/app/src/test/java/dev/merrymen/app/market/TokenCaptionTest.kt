@@ -1,14 +1,25 @@
 package dev.merrymen.app.market
 
+import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.net.ApiResult
+import dev.merrymen.app.net.CANT_REACH
 import dev.merrymen.app.net.CandleRead
 import dev.merrymen.app.net.Fixtures
 import dev.merrymen.app.net.TokenDetail
+import dev.merrymen.app.net.UNREADABLE_ANSWER
 import dev.merrymen.app.net.answer
 import dev.merrymen.app.net.apiFor
 import dev.merrymen.app.ui.Bar
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -106,6 +117,87 @@ class TokenCaptionTest {
       chartEmptySentence(CandleRead(state = "none"), true, "1D", null),
     )
     assertEquals("No bars for that span.", chartEmptySentence(null, false, "1D", "AAPL"))
+  }
+
+  /**
+   * A COIN WITH NO CANDLE READ is one of two things, and the document's
+   * `market.read` says which. The route asks for candles only for a coin the
+   * index described, so the captured coin is edited the way read-token-market
+   * answers the other two cases: `coin: null`, `candles: null`, and `read`
+   * set to "absent" (the index answered without it) or "unread" (it could
+   * not be asked).
+   */
+  @Test fun aCoinTheIndexAnsweredWithoutIsNotCalledAnOutage() {
+    fun without(read: String): String {
+      val doc = Json.parseToJsonElement(Fixtures.text("probe-token-coin.json")).jsonObject
+      val market = JsonObject(doc.getValue("market").jsonObject + mapOf("read" to JsonPrimitive(read), "coin" to JsonNull))
+      return JsonObject(doc + mapOf("market" to market, "candles" to JsonNull, "evidence" to JsonNull)).toString()
+    }
+    val absent = serve(without("absent"))
+    assertNull(absent.candles)
+    assertEquals("absent", absent.market.read)
+    val said = chartEmptySentence(absent.candles, true, "1D", null, absent.market.read)
+    assertFalse("the index answered: not our outage", said.contains("couldn't reach"))
+    assertFalse("and not a claim about the index or the token", said.contains("No price history"))
+    assertTrue(said, said.contains("isn't among the pools we read"))
+
+    val unread = serve(without("unread"))
+    assertTrue(chartEmptySentence(unread.candles, true, "1D", null, unread.market.read).contains("couldn't reach"))
+  }
+
+  /**
+   * A STOCK'S BARS through the real client: an answer merrymen sent and this
+   * app could not read stays `unreadable` to the sentence under the chart,
+   * which says so in the contract's words rather than "couldn't reach".
+   */
+  @Test fun aStockChartIsSaidTheWayItFailed() = runBlocking {
+    val server = MockWebServer()
+    server.start()
+    try {
+      // One attempt per call, so a dropped connection is that call's answer
+      // and not a silent second try that takes the next queued response.
+      val api = apiFor(server, OkHttpClient.Builder().retryOnConnectionFailure(false).build())
+
+      server.answer("<html>not json</html>", type = "text/html")
+      val unreadable = api.stockBarsRead("AAPL", "1D", 1.0)
+      assertTrue("$unreadable", unreadable is Loaded.Unreachable && unreadable.unreadable)
+      val u = chartReadFailure(unreadable)!!
+      assertTrue(u, u.startsWith(UNREADABLE_ANSWER))
+      assertFalse(u, u.contains("Can't reach"))
+      assertTrue(u.endsWith("That's our chart read failing, not a price."))
+      assertTrue(chartReadRetries(unreadable))
+
+      server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+      val lost = api.stockBarsRead("AAPL", "1D", 1.0)
+      assertTrue("$lost", lost is Loaded.Unreachable && !lost.unreadable)
+      val l = chartReadFailure(lost)!!
+      assertTrue(l, l.startsWith("$CANT_REACH: "))
+      assertTrue(l, l.contains(". That's our chart read failing, not a price."))
+
+      server.answer("""{"error":"boom"}""", code = 503)
+      val failed = api.stockBarsRead("AAPL", "1D", 1.0)
+      assertEquals(
+        "merrymen answered with an error (503). Try again in a moment. That's our chart read failing, not a price.",
+        chartReadFailure(failed),
+      )
+      assertTrue(chartReadRetries(failed))
+
+      server.answer("""{"error":"Unknown symbol"}""", code = 404)
+      val no = api.stockBarsRead("ZZZZ", "1D", 1.0)
+      assertEquals("The chart venue said no (404). That's our chart read failing, not a price.", chartReadFailure(no))
+      assertFalse("asking again gets the same answer", chartReadRetries(no))
+
+      // A good answer: a bar with a null in it is dropped, the rest scaled.
+      server.answer(
+        """{"chart":{"result":[{"timestamp":[1790290000,1790290060,1790290120],""" +
+          """"indicators":{"quote":[{"open":[1,null,3],"high":[1,2,3],"low":[1,2,3],"close":[1,2,3]}]}}]}}""",
+      )
+      val ok = api.stockBarsRead("AAPL", "1D", 2.0)
+      assertEquals(listOf(Bar(1790290000, 2.0, 2.0, 2.0, 2.0), Bar(1790290120, 6.0, 6.0, 6.0, 6.0)), (ok as Loaded.Value<List<Bar>>).value)
+      assertNull(chartReadFailure(ok))
+    } finally {
+      server.shutdown()
+    }
   }
 
   @Test fun theCaptionClosesEveryClause() {

@@ -78,6 +78,8 @@ import dev.merrymen.app.market.PoolTradeRow
 import dev.merrymen.app.market.SPAN_SECONDS
 import dev.merrymen.app.market.TradesView
 import dev.merrymen.app.market.chartCaption
+import dev.merrymen.app.market.chartReadFailure
+import dev.merrymen.app.market.chartReadRetries
 import dev.merrymen.app.market.chartEmptySentence
 import dev.merrymen.app.market.completeBars
 import dev.merrymen.app.market.fmtCompactUsd
@@ -87,14 +89,14 @@ import dev.merrymen.app.market.fmtPrice
 import dev.merrymen.app.market.heroChange
 import dev.merrymen.app.market.newestForming
 import dev.merrymen.app.market.poolAgeNote
+import dev.merrymen.app.market.quietForSec
 import dev.merrymen.app.market.staleNote
+import dev.merrymen.app.market.stockBarsRead
 import dev.merrymen.app.market.tapeLabel
 import dev.merrymen.app.market.tradesView
 import dev.merrymen.app.market.trimToSpan
-import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.CandleRead
 import dev.merrymen.app.net.DiscoveryCoin
-import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.PoolEvidence
 import dev.merrymen.app.net.TokenDetail
 import dev.merrymen.app.net.TokenHolder
@@ -185,14 +187,6 @@ private fun barSizeFor(window: String): String = when (window) {
 }
 
 /**
- * The cut the stock venue applies to its own answer.
- *
- * Yahoo has no one-hour range, so the proxy asks for a day of one-minute bars
- * and the last hour is taken from the tail. Mirrored from CHART_WINDOWS.
- */
-private val VENUE_CUT: Map<String, Long> = mapOf("1H" to 3_600L, "4H" to 14_400L)
-
-/**
  * A coin's bars, off the token document, trimmed to the span (SPAN_SECONDS;
  * ALL trims nothing). Incomplete bars are dropped by completeBars.
  *
@@ -203,49 +197,6 @@ private val VENUE_CUT: Map<String, Long> = mapOf("1H" to 3_600L, "4H" to 14_400L
  */
 private fun coinBars(candles: CandleRead?, window: String): List<Bar> =
   trimToSpan(completeBars(candles), SPAN_SECONDS[window])
-
-/**
- * A stock's bars, through the venue proxy.
- *
- * A BAR WITH ANY NULL IN IT IS DROPPED, not interpolated. Yahoo's arrays are
- * nullable at every index — a halted minute is four nulls — and filling them in
- * draws a line through a price that never existed. Then `uiMultiplier` is
- * applied, because the on-chain unit is what the rest of this screen quotes.
- */
-private suspend fun stockBars(
-  api: MerrymenApi,
-  symbol: String,
-  window: String,
-  multiplier: Double,
-): Loaded<List<Bar>> = when (val r = api.venueChart(symbol, window)) {
-  is ApiResult.Ok -> {
-    val row = r.value.chart?.result?.firstOrNull()
-    val q = row?.indicators?.quote?.firstOrNull()
-    val ts = row?.timestamp ?: emptyList()
-    val out = ArrayList<Bar>(ts.size)
-    if (q != null) {
-      for (i in ts.indices) {
-        val o = q.open.getOrNull(i)
-        val h = q.high.getOrNull(i)
-        val l = q.low.getOrNull(i)
-        val c = q.close.getOrNull(i)
-        if (o == null || h == null || l == null || c == null) continue
-        out.add(Bar(ts[i], o * multiplier, h * multiplier, l * multiplier, c * multiplier))
-      }
-    }
-    // ONE TRIM, NOT TWO. The web trims a STOCK series only by the venue's own
-    // `cut` (VENUE_CUT), because the range it asked the venue for already
-    // matches the span; WINDOW_SECONDS is the COIN path's trimmer. Applying both
-    // over-clipped 5D/1M so the chart showed fewer sessions than its label — and
-    // the change line under the price, computed off the first drawn bar, then
-    // read the wrong span. bars.ts trims stocks by cut alone.
-    Loaded.Value(trimToSpan(out, VENUE_CUT[window]))
-  }
-  is ApiResult.Refused -> Loaded.Refused(r.status, r.message)
-  // `unreadable` travels: an answer the venue sent and we could not read is
-  // not "could not reach", and ChartPane says the two differently.
-  is ApiResult.Unreachable -> Loaded.Unreachable(r.cause, r.unreadable)
-}
 
 @Composable
 fun TokenDetailScreen(nav: NavHostController, address: String) {
@@ -309,7 +260,7 @@ fun TokenDetailScreen(nav: NavHostController, address: String) {
         // bought had no symbol to ask the venue about.
         val sym = t.market.symbol ?: t.market.stock?.symbol ?: t.ledger.symbol
         if (sym == null) Loaded.Value(emptyList())
-        else stockBars(c.api, sym, window, t.market.stock?.uiMultiplier ?: 1.0)
+        else c.api.stockBarsRead(sym, window, t.market.stock?.uiMultiplier ?: 1.0)
       }
     }
   }
@@ -419,6 +370,11 @@ fun TokenDetailScreen(nav: NavHostController, address: String) {
               interval = t.candles?.interval ?: 0,
               stale = t.candles?.stale == true,
               nowSec = nowSec,
+              // The pool's own age bounds "since first trade": a daily bar is
+              // stamped at midnight, hours before a pool made that day existed.
+              poolAgeSec = t.market.coin?.ageDays
+                ?.takeIf { it.isFinite() && it >= 0.0 }
+                ?.let { (it * 86_400).toLong() },
             ),
           )
 
@@ -429,7 +385,7 @@ fun TokenDetailScreen(nav: NavHostController, address: String) {
           // given the axis strip's own 18px inset so it lands level with the
           // body text rather than 2px from the screen edge.
           Column(Modifier.bleed(18.dp).padding(bottom = 8.dp)) {
-            ChartPane(bars, kind, t, window, nowSec)
+            ChartPane(bars, kind, t, window, nowSec, onRetry = { attempt++ })
             ChartTools(
               window = window,
               onWindow = { window = it },
@@ -670,7 +626,11 @@ private fun Hero(price: Double?, fdvUsd: Double?, change: HeroChange?) {
       if (change != null) {
         val down = change.pct < 0.0
         Text(
-          text = "${if (down) "▼" else "▲"} ${money(abs(change.dollars))} ${pctPts(change.pct)} ${change.label}",
+          // The label may be empty (a change nobody can date says nothing
+          // after it), so the parts are joined rather than spaced by hand.
+          text = listOf(if (down) "▼" else "▲", money(abs(change.dollars)), pctPts(change.pct), change.label)
+            .filter { it.isNotEmpty() }
+            .joinToString(" "),
           style = TextStyle(
             fontFamily = numerals(FontWeight.W600),
             fontSize = 13.sp,
@@ -774,7 +734,14 @@ private fun PriceNotes(t: TokenDetail) {
  * conflation.
  */
 @Composable
-private fun ChartPane(bars: Loaded<List<Bar>>, kind: ChartKind, t: TokenDetail, window: String, nowSec: Long) {
+private fun ChartPane(
+  bars: Loaded<List<Bar>>,
+  kind: ChartKind,
+  t: TokenDetail,
+  window: String,
+  nowSec: Long,
+  onRetry: () -> Unit,
+) {
   val candles = t.candles
   val coin = t.market.kind == "memecoin"
   when (bars) {
@@ -782,7 +749,9 @@ private fun ChartPane(bars: Loaded<List<Bar>>, kind: ChartKind, t: TokenDetail, 
       if (bars.value.isEmpty()) {
         // One sentence per state, and `refused` worded by its reason: a 429
         // on our side is not this token having no history (chartEmptySentence).
-        ChartStatus(chartEmptySentence(candles, coin, window, t.market.symbol ?: t.ledger.symbol))
+        // `market.read` tells a coin the index answered without from one it
+        // could not be asked about.
+        ChartStatus(chartEmptySentence(candles, coin, window, t.market.symbol ?: t.ledger.symbol, t.market.read))
       } else {
         // SERVING AN OLD SERIES MUST NEVER BE SILENT. read-candles keeps the
         // last good bars through a refusal, which beats a blank chart over one
@@ -793,18 +762,28 @@ private fun ChartPane(bars: Loaded<List<Bar>>, kind: ChartKind, t: TokenDetail, 
         // loud. Of a stale read it is not "still forming": the read stopped.
         val forming = newestForming(bars.value, candles, nowSec)
         PriceChart(bars.value, kind, partialLast = forming)
-        ChartCaption(chartCaption(bars.value.size, candles, forming))
+        // A coin's span is trimmed back from its newest bar, so on a pool that
+        // went quiet the chart is of an earlier hour, and the caption says when.
+        val quiet = if (coin) quietForSec(bars.value, candles?.interval ?: 0, nowSec) else null
+        ChartCaption(chartCaption(bars.value.size, candles, forming, quiet))
       }
-    is Loaded.Refused -> ChartStatus(
-      "The chart venue said no (${bars.status}). That is our read failing, not a price.",
-    )
-    is Loaded.Unreachable -> ChartStatus(
-      if (bars.unreadable) {
-        "The chart venue answered with something we couldn't read. That's ours to fix, not a price."
-      } else {
-        "We couldn't reach the chart venue just now: " + bars.cause
-      },
-    )
+    // Our read of the venue failed. Said in the contract's words
+    // (chartReadFailure): an unreadable answer is not "couldn't reach", and
+    // neither is a price.
+    is Loaded.Refused, is Loaded.Unreachable -> {
+      chartReadFailure(bars)?.let { ChartStatus(it) }
+      if (chartReadRetries(bars)) {
+        Text(
+          text = "Try again",
+          style = TextStyle(fontFamily = sans(12.sp, FontWeight.W600), fontSize = 12.sp, fontWeight = FontWeight.W600),
+          color = MerryColors.tx,
+          modifier = Modifier
+            .padding(horizontal = 18.dp)
+            .padding(top = 6.dp)
+            .clickable(onClickLabel = "Read the chart again", onClick = onRetry),
+        )
+      }
+    }
     // U+2026, as the web writes it — not three periods.
     else -> ChartStatus("Loading the chart…")
   }
