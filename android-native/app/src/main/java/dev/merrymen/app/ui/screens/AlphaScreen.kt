@@ -20,7 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +60,14 @@ import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
+import dev.merrymen.app.market.WhileResumed
+import dev.merrymen.app.market.alphaEmptyCopy
+import dev.merrymen.app.market.alphaNotes
+import dev.merrymen.app.market.alphaPerks
+import dev.merrymen.app.market.alphaTierBadge
+import dev.merrymen.app.market.refreshLoop
+import dev.merrymen.app.net.AlphaRead
+import dev.merrymen.app.net.alphaRead
 import dev.merrymen.app.ui.BottomInsetSpacer
 import dev.merrymen.app.ui.Empty
 import dev.merrymen.app.ui.LoadedBlock
@@ -272,19 +280,39 @@ private fun passedCount(passed: JsonElement?): Int = when (passed) {
  * NOTHING IN THIS AREA HAS A `min-width: 1100px` RULE, so the phone rendering IS
  * the whole Alpha design.
  *
- * THE TIER BADGE IS NOT DRAWN. `.alpha-tier` renders `{emoji} {name}` beside the
- * title, but only for an OPEN Alpha in hosted mode — and this client's
- * `AlphaView` carries no tier at all. An absent badge on an open Alpha means
- * self-hosted, never "Traveller" and never "unknown tier", so the slot is left
- * empty rather than filled with a guess.
+ * THE TIER BADGE — `.alpha-tier`, `{emoji} {name}` beside the title — is drawn
+ * only for an OPEN desk whose payload names a tier. An open desk with no tier
+ * is self-hosted, never "Traveller" and never "unknown tier", so the slot is
+ * left empty rather than filled with a guess (alphaTierBadge).
+ *
+ * IT REFRESHES EVERY TWO MINUTES WHILE ON SCREEN, and not at all otherwise:
+ * the desk comes off the same server memo as /api/discoveries, which lives two
+ * minutes, so asking sooner is asking for the same bytes. A refresh that fails
+ * after a good read keeps the good read on screen and SAYS it is the last one,
+ * rather than blanking a desk the reader was in the middle of reading.
  */
 @Composable
 fun AlphaScreen(nav: NavHostController) {
   val c = LocalContainer.current
-  var state by remember { mutableStateOf<Loaded<dev.merrymen.app.net.AlphaView>>(Loaded.Loading) }
+  val signedIn by c.repo.signedIn.collectAsState()
+  // KEYED ON THE WALLET: a desk read for one session is not shown under
+  // another, and a sign-in reads the desk again at once.
+  // alphaRead, not alpha(): it keeps whether the server SAID why no row has
+  // a verdict, which the empty state needs (alphaEmptyCopy).
+  var state by remember(signedIn) { mutableStateOf<Loaded<AlphaRead>>(Loaded.Loading) }
+  var refreshFailed by remember(signedIn) { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
-  suspend fun load() { state = c.api.alpha().toLoaded() }
-  LaunchedEffect(Unit) { load() }
+  suspend fun load(): Boolean {
+    val r = c.api.alphaRead().toLoaded()
+    if (r is Loaded.Value || state !is Loaded.Value) {
+      state = r
+      refreshFailed = false
+    } else {
+      refreshFailed = true
+    }
+    return r is Loaded.Value
+  }
+  WhileResumed(signedIn) { refreshLoop(ALPHA_EVERY_MS) { load() } }
 
   Column(
     Modifier
@@ -294,12 +322,16 @@ fun AlphaScreen(nav: NavHostController) {
       // `.body:has(> .alpha-page) { padding-top: 20px }` — polish.css:180.
       .padding(top = 20.dp),
   ) {
-    // `.board-head` — a space-between row; with one child, a left-aligned title.
+    // `.board-head` — a space-between row: the title, and the tier badge when
+    // an open desk names one.
     Row(
       Modifier.fillMaxWidth(),
       horizontalArrangement = Arrangement.SpaceBetween,
       verticalAlignment = Alignment.CenterVertically,
-    ) { PageTitle("Alpha") }
+    ) {
+      PageTitle("Alpha")
+      (state as? Loaded.Value)?.value?.let { alphaTierBadge(it.view) }?.let { TierBadge(it) }
+    }
 
     // `.alpha-page > .alpha-intro` — polish.css:145: 17px/1.5 `--tx-2`,
     // `margin: 0 0 18px`. (polish.css:31's 21px is the non-mobile instance.)
@@ -311,34 +343,88 @@ fun AlphaScreen(nav: NavHostController) {
       modifier = Modifier.padding(top = 8.dp, bottom = 18.dp),
     )
 
-    LoadedBlock(state, onSignIn = { nav.navigate(Routes.SIGN_IN) }, onRetry = { scope.launch { load() } }) { a ->
+    if (refreshFailed) {
+      HostedNote(
+        "Couldn't refresh Alpha just now — this is the last read, and it will try again.",
+        Modifier.padding(bottom = 14.dp),
+      )
+    }
+
+    LoadedBlock(state, onSignIn = { nav.navigate(Routes.SIGN_IN) }, onRetry = { scope.launch { load() } }) { read ->
+      val a = read.view
       if (a.locked) {
         // THE BODY IS NOT HERE TO HIDE. The server omits `picks` entirely when
         // locked; there is nothing to blur, which is the point.
         AlphaGate(a, nav)
         InsideAlpha(picks = a.pickCount, passed = passedCount(a.passed))
-      } else if (a.pickRows.isEmpty()) {
-        // AN OUTAGE IS NOT A QUIET DAY. When the index could not be read the
-        // route sends an empty list WITH indexUnreachable — the same empty
-        // shape as "considered everything and passed", but a different fact.
-        // Saying "nothing cleared the screen" for our own failed read states
-        // something about the market we did not learn.
-        if (a.indexUnreachable) {
-          Notice(
-            title = "Couldn't read the desk just now",
-            body = "That's our data feed failing, not a quiet market. It should clear on its own.",
-          )
-        } else {
-          Empty(
-            "Nothing vetted yet",
-            "Nothing has cleared the screen recently. That is not the same as nothing looking good.",
-          )
-        }
       } else {
-        AlphaKept(a, nav)
+        AlphaDesk(a, read.verdictsWhySaid, nav, onRetry = { scope.launch { load() } })
       }
     }
     BottomInsetSpacer()
+  }
+}
+
+/** Two minutes: the server's discoveries memo lives that long (refresh-loop.ts DISCOVERIES_EVERY_MS). */
+private const val ALPHA_EVERY_MS = 120_000L
+
+/**
+ * `.alpha-tier` — the tier that opened the desk, beside the title. A quiet
+ * outlined chip in `--tx-2`: it identifies the reader's standing, it is not a
+ * reward, so it takes neither the accent nor the gate's green.
+ */
+@Composable
+private fun TierBadge(text: String) {
+  val shape = RoundedCornerShape(50)
+  Box(
+    Modifier.clip(shape).border(1.dp, MerryColors.line, shape).padding(horizontal = 10.dp, vertical = 4.dp),
+  ) {
+    Text(
+      text = text,
+      maxLines = 1,
+      style = TextStyle(fontFamily = sans(12.sp, FontWeight.W600), fontSize = 12.sp, fontWeight = FontWeight.W600),
+      color = MerryColors.tx2,
+    )
+  }
+}
+
+/**
+ * THE OPEN DESK, with what it says about itself first.
+ *
+ * The disclosures (alphaNotes) come before the rows, once for the page. Then
+ * "Kept": the rows, or — when there are none — WHY there are none, which is
+ * one of three different facts (alphaEmptyCopy). The scout could not look,
+ * the index did not answer, or it looked and kept nothing: only the last is a
+ * statement about the market, and only the last is drawn as an empty state.
+ * The other two are our failure and read as a notice.
+ */
+@Composable
+private fun AlphaDesk(
+  a: dev.merrymen.app.net.AlphaView,
+  verdictsWhySaid: Boolean,
+  nav: NavHostController,
+  onRetry: () -> Unit,
+) {
+  val notes = alphaNotes(a)
+  if (notes.isNotEmpty()) {
+    Column(Modifier.padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      notes.forEach { HostedNote(it) }
+    }
+  }
+  val empty = alphaEmptyCopy(a, verdictsWhySaid)
+  AlphaKept(a, nav) {
+    when {
+      empty == null -> Unit
+      empty.ours -> Notice(
+        title = empty.title,
+        body = empty.body,
+        // Try again only where trying again can help: the index blinking.
+        // A scout with no model will have no model on the next tap either.
+        actionLabel = if (a.indexUnreachable) "Try again" else null,
+        onAction = if (a.indexUnreachable) onRetry else null,
+      )
+      else -> Empty(empty.title, empty.body)
+    }
   }
 }
 
@@ -432,6 +518,22 @@ private fun AlphaGate(a: dev.merrymen.app.net.AlphaView, nav: NavHostController)
           color = MerryColors.tx,
         )
         Prose(symbol, 14.sp, 18.9.sp, MerryColors.tx2)
+      }
+    }
+
+    // WHAT THE ENTRY TIER UNLOCKS, verbatim from the payload, which renders it
+    // from CIRCLE_TIERS so the copy cannot drift from what the token does —
+    // and cannot promise a price, a return or a burn (token.ts forbids it).
+    // Typed here instead, it would be the one place such a promise could creep in.
+    val perks = alphaPerks(a)
+    if (perks.isNotEmpty()) {
+      Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        perks.forEach { perk ->
+          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Prose("·", 14.sp, 20.sp, MerryColors.tx2)
+            Prose(perk, 14.sp, 20.sp, MerryColors.tx2)
+          }
+        }
       }
     }
 
@@ -529,7 +631,11 @@ private fun InsideRow(paths: Array<String>, label: String) {
  * carry simply does not render, which is the same answer the web gives.
  */
 @Composable
-private fun AlphaKept(a: dev.merrymen.app.net.AlphaView, nav: NavHostController) {
+private fun AlphaKept(
+  a: dev.merrymen.app.net.AlphaView,
+  nav: NavHostController,
+  whenEmpty: @Composable () -> Unit,
+) {
   val passed = (a.passed as? JsonArray)?.toList() ?: emptyList()
   var open by remember { mutableStateOf(false) }
 
@@ -556,8 +662,12 @@ private fun AlphaKept(a: dev.merrymen.app.net.AlphaView, nav: NavHostController)
       )
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-      a.pickRows.forEach { AlphaRow(it, passed = false, nav = nav) }
+    if (a.pickRows.isEmpty()) {
+      whenEmpty()
+    } else {
+      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        a.pickRows.forEach { AlphaRow(it, passed = false, nav = nav) }
+      }
     }
 
     if (passed.isNotEmpty()) {
