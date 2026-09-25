@@ -12,9 +12,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { after, describe, it } from "node:test";
-import { existsSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
-import { hostname } from "node:os";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
 
@@ -23,7 +23,7 @@ process.env.MERRYMEN_HOME = HOME;
 // A 32-byte base64 DEK so the file backend seals the session key at rest.
 process.env.MERRYMEN_STORE_DEK = Buffer.alloc(32, 7).toString("base64");
 
-const { FileGrantStore } = await import("./grant-store");
+const { FileGrantStore, GRANT_STORE_LOCK_FILE } = await import("./grant-store");
 const { sealSecret, openSecret } = await import("./store-crypto");
 
 after(() => {
@@ -152,7 +152,7 @@ describe("FileGrantStore writers are serialized (a kill racing a new signature)"
   const DAVE = "0x00000000000000000000000000000000000000d4" as const;
   const dir = path.join(HOME, "tenants");
   const file = path.join(dir, `${DAVE}.json`);
-  const lock = `${file}.lock`;
+  const lockDb = path.join(dir, GRANT_STORE_LOCK_FILE);
   const stampOf = () => Number((JSON.parse(readFileSync(file, "utf8")) as { updatedAt: number }).updatedAt);
   /** Rewrite the stored record's server stamp, as if it had been put `ago` seconds earlier. */
   const backdate = (ago: number) => {
@@ -168,14 +168,16 @@ describe("FileGrantStore writers are serialized (a kill racing a new signature)"
     // lock, queue both writers behind it, and let them go together.
     await store.put(DAVE, grantFor(DAVE));
     const old = backdate(100);
-    writeFileSync(lock, "held by the test");
+    const holder = new DatabaseSync(lockDb);
+    holder.exec("BEGIN IMMEDIATE");
 
     const removal = store.removeUnlessNewer(DAVE, old + 50); // the kill covers the old grant only
     const resign = store.put(DAVE, grantFor(DAVE)); // a new signature, stamped now
-    await new Promise((r) => setTimeout(r, 120));
+    await new Promise((r) => setTimeout(r, 150));
     assert.equal(stampOf(), old, "neither writer moved while another held the lock");
 
-    rmSync(lock);
+    holder.exec("COMMIT");
+    holder.close();
     const outcome = await removal;
     await resign;
     assert.ok(outcome === "removed" || outcome === "newer", outcome);
@@ -186,38 +188,34 @@ describe("FileGrantStore writers are serialized (a kill racing a new signature)"
 
   it("a put never leaves half a record or a temp file behind", async () => {
     await store.put(DAVE, grantFor(DAVE));
-    assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith(DAVE)), [`${DAVE}.json`], "only the record: no .tmp, no .lock");
+    assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith(DAVE)), [`${DAVE}.json`], "only the record: no .tmp");
     await store.remove(DAVE);
   });
 
-  it("a lock left by a process that DIED holding it is broken, not waited on forever", async () => {
-    // A pid that has certainly exited: a child run to completion.
-    const dead = spawnSync(process.execPath, ["-e", ""]).pid;
-    writeFileSync(lock, `${hostname()}:${dead}:crashed-mid-write`);
-    await store.put(DAVE, grantFor(DAVE));
-    assert.ok(await store.get(DAVE));
-    assert.equal(existsSync(lock), false, "released after use");
-    await store.remove(DAVE);
-  });
-
-  it("A LIVE HOLDER IS NEVER BROKEN, however old its lock: age is not death", async () => {
-    // Breaking on age let a paused owner resume and delete its successor's
-    // lock, and two writers then overlapped. This holder is this very process.
+  it("THE LOCK IS THE KERNEL'S: a writer waits while another PROCESS holds it, and proceeds the moment that process dies", async () => {
+    // Nothing is ever judged stale or broken. A live holder is waited for,
+    // however long it takes. A dead one's lock is released by the operating
+    // system, not by a contender guessing, which is the guess every
+    // lock-file protocol for this got wrong.
     await store.put(DAVE, grantFor(DAVE));
     const old = backdate(100);
-    const live = `${hostname()}:${process.pid}:a-slow-writer`;
-    writeFileSync(lock, live);
-    const anHourAgo = new Date(Date.now() - 3_600_000);
-    utimesSync(lock, anHourAgo, anHourAgo);
+    const holder = spawn(
+      process.execPath,
+      ["-e", `const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(${JSON.stringify(lockDb)}); db.exec("BEGIN IMMEDIATE"); process.stdout.write("locked\\n"); setInterval(() => {}, 1 << 30);`],
+      { stdio: ["ignore", "pipe", "ignore"] },
+    );
+    await new Promise<void>((resolve, reject) => {
+      holder.stdout!.on("data", (d: Buffer) => String(d).includes("locked") && resolve());
+      holder.on("exit", (code) => reject(new Error(`lock holder exited early (${code})`)));
+    });
 
     const resign = store.put(DAVE, grantFor(DAVE));
-    await new Promise((r) => setTimeout(r, 150));
-    assert.equal(readFileSync(lock, "utf8"), live, "the live holder's lock is untouched");
-    assert.equal(stampOf(), old, "and nobody wrote past it");
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(stampOf(), old, "the live holder in another process is waited for");
 
-    rmSync(lock); // the slow writer finishes
+    holder.kill("SIGKILL"); // dies holding the lock, as a crashed writer would
     await resign;
-    assert.ok(stampOf() > old);
+    assert.ok(stampOf() > old, "its death released the lock and the write went through");
     await store.remove(DAVE);
   });
 });

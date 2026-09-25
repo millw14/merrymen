@@ -28,8 +28,8 @@
  * browser bundle, which is why it lives here and not in core's browser barrel.
  */
 import { randomUUID } from "node:crypto";
-import { link, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { hostname } from "node:os";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { merrymenHome } from "./home";
 import { carriesOwnerKey } from "../../packages/core/src/index";
@@ -120,66 +120,16 @@ function fromRecord(rec: StoredRecord): StoredGrant {
 
 // ── file backend ─────────────────────────────────────────────────────────────
 
-/** How long a writer waits for another writer's lock on the same tenant. */
+/** How long a writer waits for another writer, in any process, before giving up. */
 const LOCK_WAIT_MS = 5_000;
 
-/** A lock names its holder: host, pid, and a nonce for this one acquisition. */
-function lockToken(): string {
-  return `${hostname()}:${process.pid}:${randomUUID()}`;
-}
+/** The file whose SQLite write lock serializes this store's writers. */
+export const GRANT_STORE_LOCK_FILE = ".writers.lock.db";
 
-/**
- * Is the process that wrote this lock still running?
- *
- * Only a lock whose holder is known to be GONE may be broken. Age is not
- * evidence: a slow or paused holder still owns its lock, and breaking it on
- * age let a paused owner resume and delete its successor's. Anything that
- * can't be judged counts as alive: another host's lock, an unreadable or
- * half-written token, a pid we may not signal. Waiting fails closed (the
- * write is refused as busy). Breaking wrongly fails open.
- */
-function holderAlive(token: string): boolean {
-  const [host, pidText] = token.split(":");
-  const pid = Number(pidText);
-  if (host !== hostname() || !Number.isSafeInteger(pid) || pid <= 0) return true;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
-
-/**
- * Remove the lock at `lock` only if it is still exactly the orphan `seen`.
- * The rename claims whatever is at the path, atomically, so at most one
- * contender gets it. If the claimed file is not the orphan, a successor
- * replaced it in between, and its lock is put back with link(), which never
- * overwrites. (What remains is a microsecond window needing a dead holder and
- * three contenders at once: a third writer can take the path while the
- * successor's lock is aside.)
- */
-async function breakOrphan(lock: string, seen: string): Promise<void> {
-  const claimed = `${lock}.${randomUUID()}.orphan`;
-  try {
-    await rename(lock, claimed);
-  } catch {
-    return; // another contender claimed it first
-  }
-  let got = "";
-  try {
-    got = await readFile(claimed, "utf8");
-  } catch {
-    /* unreadable: not provably the orphan, so it goes back */
-  }
-  if (got !== seen) {
-    try {
-      await link(claimed, lock);
-    } catch {
-      /* a newer lock already holds the path */
-    }
-  }
-  await rm(claimed, { force: true });
+/** SQLITE_BUSY / SQLITE_LOCKED: another connection holds the write lock. */
+function lockBusy(e: unknown): boolean {
+  const code = (e as { errcode?: number }).errcode;
+  return code === 5 || code === 6 || /database is (locked|busy)/i.test(String((e as Error)?.message ?? e));
 }
 
 /**
@@ -194,54 +144,57 @@ export class FileGrantStore implements GrantStore {
     return path.join(this.dir, `${tenant.toLowerCase()}.json`);
   }
   /**
-   * ONE WRITER PER TENANT AT A TIME, ACROSS PROCESSES.
+   * ONE WRITER AT A TIME, ACROSS PROCESSES.
    *
    * removeUnlessNewer reads a record's stamp and then deletes it. Without
    * this, a put from another process (the web's grant intake beside the
    * orchestrator) could land between the two, and a grant signed after the
-   * kill would be the one deleted. The lock is a file created with O_EXCL,
-   * which works across processes where an in-memory lock would not. Readers
-   * take no lock: a put renames a finished record into place, so a reader
-   * sees the old record or the new one, never half of one.
+   * kill would be the one deleted. Readers take no lock: a put renames a
+   * finished record into place, so a reader sees the old record or the new
+   * one, never half of one.
    *
-   * The lock file holds its owner's token. It is released only by the call
-   * that holds it, and broken only when its holder process is gone
-   * (holderAlive, breakOrphan). No writer here holds it for more than
-   * milliseconds.
+   * THE LOCK IS THE OPERATING SYSTEM'S. It is SQLite's write lock on
+   * GRANT_STORE_LOCK_FILE, taken by BEGIN IMMEDIATE (fcntl on POSIX,
+   * LockFileEx on Windows). The kernel holds it and releases it when the
+   * holding process exits, however it exits. So a lock is never stale, and
+   * nothing ever has to break one. That is what the lock-file versions of
+   * this kept getting wrong: every protocol for breaking a dead holder's lock
+   * left a window where a live holder's lock went missing.
+   *
+   * A connection per call, closed after it: no handle stays open between
+   * writes. Callers in the same process contend through SQLite exactly as
+   * other processes do. The wait is a retry loop, not SQLite's busy timeout,
+   * so a contended lock never blocks the event loop.
    */
   private async locked<T>(tenant: string, fn: () => Promise<T>): Promise<T> {
     await mkdir(this.dir, { recursive: true });
-    const lock = `${this.file(tenant)}.lock`;
-    const token = lockToken();
-    const giveUpAt = Date.now() + LOCK_WAIT_MS;
-    for (;;) {
-      try {
-        await writeFile(lock, token, { flag: "wx", mode: 0o600 });
-        break;
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-        let seen: string | null = null;
-        try {
-          seen = await readFile(lock, "utf8");
-        } catch {
-          /* released while we looked */
-        }
-        if (seen !== null && !holderAlive(seen)) await breakOrphan(lock, seen);
-        if (Date.now() > giveUpAt) throw new Error(`grant store busy for ${tenant}: ${lock} is held by ${seen ?? "?"}`);
-        await new Promise((r) => setTimeout(r, 20));
-      }
-    }
+    const db = new DatabaseSync(path.join(this.dir, GRANT_STORE_LOCK_FILE));
     try {
-      return await fn();
-    } finally {
-      // ONLY THE LOCK THIS CALL HOLDS. Nobody breaks a live holder's lock, so
-      // it should still be ours. Checking means a surprise here can never
-      // delete someone else's.
-      try {
-        if ((await readFile(lock, "utf8")) === token) await rm(lock, { force: true });
-      } catch {
-        /* already gone */
+      const giveUpAt = Date.now() + LOCK_WAIT_MS;
+      for (;;) {
+        try {
+          db.exec("BEGIN IMMEDIATE");
+          break;
+        } catch (e) {
+          if (!lockBusy(e)) throw e;
+          if (Date.now() > giveUpAt) throw new Error(`grant store busy for ${tenant}: another writer holds the lock`);
+          await new Promise((r) => setTimeout(r, 20));
+        }
       }
+      try {
+        const out = await fn();
+        db.exec("COMMIT");
+        return out;
+      } catch (e) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {
+          /* nothing to roll back */
+        }
+        throw e;
+      }
+    } finally {
+      db.close();
     }
   }
   async put(tenant: `0x${string}`, grant: StoredGrant): Promise<void> {

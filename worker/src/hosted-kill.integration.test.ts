@@ -32,7 +32,7 @@ process.env.MERRYMEN_STORE_DEK = Buffer.alloc(32, 5).toString("base64");
 
 const { reconcile, childHome, adoptChildForTest, honourPendingKills, setKillConfirmForTest } = await import("./orchestrator");
 const { getGrantStore } = await import("./grant-store");
-const { KILL_CLOCK_SLACK_SEC, killHosted, killRequested, killRequestPath, honourKillRequest, writeKillRequest } = await import("./kill-request");
+const { KILL_CLOCK_SLACK_SEC, KILL_REQUEST_PREFIX, killHosted, killRequested, honourKillRequest, writeKillRequest } = await import("./kill-request");
 const { loadArmableGrant, loadGrantFile } = await import("./grant");
 const { homePaths, merrymenHome } = await import("./home");
 const { executeCommand } = await import("./telegram/executor");
@@ -294,6 +294,37 @@ describe("a grant signed after the kill is a redeploy, and arms", () => {
     assert.equal(await store.removeUnlessNewer(TENANT, record.updatedAt), "absent");
   });
 
+  it("A SECOND /kill WRITTEN WHILE THE FIRST IS BEING SUPERSEDED IS NOT LOST", async () => {
+    // The supersede used to rewrite the one shared request file after reading
+    // it, so a second kill landing in between was overwritten and never
+    // carried out. Now each request is its own file, and the supersede renames
+    // only the files it read.
+    await armedTenant(grantAt(nowSec() - 3600));
+    childKill(nowSec() - 60); // kill #1, of the old grant
+    const fresh = grantAt(nowSec() - 5);
+    await store.put(TENANT, fresh); // the owner signs again
+
+    // The owner kills AGAIN while the orchestrator is between reading kill #1
+    // and superseding it.
+    const real = store.removeUnlessNewer.bind(store);
+    store.removeUnlessNewer = async (t, at) => {
+      const r = await real(t, at);
+      writeKillRequest(home(), fresh, nowSec()); // kill #2, of the new grant
+      return r;
+    };
+    try {
+      assert.equal((await honourKillRequest(store, TENANT, home(), nowSec())).outcome, "superseded", "kill #1 is superseded by the new grant");
+    } finally {
+      store.removeUnlessNewer = real;
+    }
+
+    assert.equal(killRequested(home()), true, "kill #2 is still pending");
+    assert.ok(await store.get(TENANT), "the new grant is still stored, until kill #2 is carried out");
+    const k = await honourKillRequest(store, TENANT, home(), nowSec());
+    assert.equal(k.outcome, "revoked", "and the next pass carries kill #2 out");
+    assert.equal(await store.get(TENANT), null);
+  });
+
   it("CLOCK SLACK: a grant stamped a few seconds after the kill is still covered", async () => {
     // The stamp comes from the web service's clock and the kill time from
     // this one. A web clock running ahead must not turn the grant that was
@@ -309,7 +340,7 @@ describe("a grant signed after the kill is a redeploy, and arms", () => {
   it("an unreadable request covers everything stored so far", async () => {
     await store.put(TENANT, grantAt(nowSec() - 3600));
     mkdirSync(home(), { recursive: true });
-    writeFileSync(killRequestPath(home()), "{ not json");
+    writeFileSync(path.join(home(), `${KILL_REQUEST_PREFIX}garbled.json`), "{ not json");
     const k = await honourKillRequest(store, TENANT, home(), nowSec() + 1);
     assert.equal(k.outcome, "revoked");
     assert.equal(await store.get(TENANT), null);

@@ -33,6 +33,14 @@
  * the killed grant written back just before, or even after, the new one would
  * arm again.
  *
+ * ONE FILE PER REQUEST (`kill-request-<nonce>.json`), never rewritten. Two
+ * processes write here: the child adds requests, and the orchestrator
+ * supersedes them. The child never touches an existing file. The orchestrator
+ * supersedes by renaming exactly the files it read. So a second /kill written
+ * while the first is being superseded is a file that rename never names, and
+ * it stays pending. A single shared file would need a read-modify-write, and
+ * the second kill could be overwritten inside it.
+ *
  * THE REQUEST IS NOT DURABLE, SO THE CHILD DOES NOT CLAIM THE KILL IS DONE.
  * It lives in the child's home, and a redeploy discards the container along
  * with it. A request lost before the store is changed is a grant that arms
@@ -51,12 +59,15 @@
  * changes what a self-hosted kill does.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { StoredGrant } from "../../packages/core/src/index";
 import type { GrantStore } from "./grant-store";
 
-export const KILL_REQUEST_FILE = "kill-request.json";
+/** `kill-request-<nonce>.json` is pending; `kill-request-<nonce>.superseded.json` is not. */
+export const KILL_REQUEST_PREFIX = "kill-request-";
+const PENDING_SUFFIX = ".json";
+const SUPERSEDED_SUFFIX = ".superseded.json";
 
 /**
  * What the orchestrator tells the owner once the stored grant is deleted.
@@ -65,10 +76,6 @@ export const KILL_REQUEST_FILE = "kill-request.json";
 export const KILL_DONE_TEXT =
   "✅ Kill switch done: your stored trading grant is deleted, so this agent can no longer sign anything. " +
   "Your funds stay in your smart account. Sign a new grant on the dashboard to ride again.";
-
-export function killRequestPath(home: string): string {
-  return path.join(home, KILL_REQUEST_FILE);
-}
 
 /**
  * Which signed permission a grant is. It hashes `serialized`, the signed
@@ -79,28 +86,62 @@ export function grantIdentity(grant: Pick<StoredGrant, "serialized">): string {
   return createHash("sha256").update(String(grant.serialized)).digest("hex");
 }
 
-/** The request file as written. Every field is optional because it is read back from disk. */
-interface KillRequestFile {
+/** A request as written. Every field is optional because it is read back from disk. */
+interface KillRequestBody {
   smartAccount?: unknown;
   grant?: unknown;
   killedAt?: unknown;
-  supersededAt?: unknown;
 }
 
-/** The file, or "unreadable" when it exists but cannot be parsed, or null when absent. */
-function readFile(home: string): KillRequestFile | "unreadable" | null {
-  let raw: string;
-  try {
-    raw = readFileSync(killRequestPath(home), "utf8");
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "ENOENT" ? null : "unreadable";
-  }
+interface RequestFile {
+  /** The file name in its pending form (ending .json), even when read under its superseded name. */
+  name: string;
+  superseded: boolean;
+  /** "unreadable": the file exists but cannot be parsed. It still counts. */
+  body: KillRequestBody | "unreadable";
+}
+
+function parse(raw: string): KillRequestBody | "unreadable" {
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return parsed && typeof parsed === "object" ? (parsed as KillRequestFile) : "unreadable";
+    return parsed && typeof parsed === "object" ? (parsed as KillRequestBody) : "unreadable";
   } catch {
     return "unreadable";
   }
+}
+
+/**
+ * Every request in this home. A pending file can be renamed to its
+ * superseded name between the listing and the read. Then it is read under
+ * that name, so no request goes missing from a single look.
+ */
+function listRequests(home: string): RequestFile[] {
+  let names: string[];
+  try {
+    names = readdirSync(home);
+  } catch {
+    return [];
+  }
+  const out: RequestFile[] = [];
+  for (const listed of names) {
+    if (!listed.startsWith(KILL_REQUEST_PREFIX) || !listed.endsWith(PENDING_SUFFIX)) continue;
+    const superseded = listed.endsWith(SUPERSEDED_SUFFIX);
+    const name = superseded ? listed.slice(0, -SUPERSEDED_SUFFIX.length) + PENDING_SUFFIX : listed;
+    const tries: [string, boolean][] = superseded
+      ? [[listed, true]]
+      : [[listed, false], [name.slice(0, -PENDING_SUFFIX.length) + SUPERSEDED_SUFFIX, true]];
+    for (const [file, isSuperseded] of tries) {
+      try {
+        out.push({ name, superseded: isSuperseded, body: parse(readFileSync(path.join(home, file), "utf8")) });
+        break;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+        out.push({ name, superseded: isSuperseded, body: "unreadable" });
+        break;
+      }
+    }
+  }
+  return out;
 }
 
 /**
@@ -110,19 +151,19 @@ function readFile(home: string): KillRequestFile | "unreadable" | null {
  * corrupting it is no latch.
  */
 export function killRequested(home: string): boolean {
-  const f = readFile(home);
-  if (f === null) return false;
-  if (f === "unreadable") return true;
-  return !(Number(f.supersededAt) > 0);
+  return listRequests(home).some((r) => !r.superseded);
 }
 
 /**
- * The identity of the grant killed in this home, pending or superseded, or
- * null. The child refuses to arm that exact grant again (loadArmableGrant).
+ * The identities of every grant killed in this home, pending or superseded.
+ * The child refuses to arm any of them again (loadArmableGrant).
  */
-export function killedGrant(home: string): string | null {
-  const f = readFile(home);
-  return f && f !== "unreadable" && typeof f.grant === "string" ? f.grant : null;
+export function killedGrants(home: string): Set<string> {
+  const out = new Set<string>();
+  for (const r of listRequests(home)) {
+    if (r.body !== "unreadable" && typeof r.body.grant === "string") out.add(r.body.grant);
+  }
+  return out;
 }
 
 export interface KillRequest {
@@ -131,8 +172,11 @@ export interface KillRequest {
   /**
    * When the kill was asked for, in unix seconds on this container's clock.
    * Grants the store received at or before this second are covered by it.
+   * With several pending requests, the latest.
    */
   killedAt: number;
+  /** The pending files this was read from: exactly the ones a supersede may rename. */
+  files: string[];
 }
 
 /**
@@ -142,39 +186,38 @@ export interface KillRequest {
  * way round would let a killed grant trade.
  */
 export function readKillRequest(home: string, nowSec: number): KillRequest | null {
-  if (!killRequested(home)) return null;
-  const f = readFile(home);
-  if (!f || f === "unreadable") return { smartAccount: null, killedAt: nowSec };
-  const killedAt = Number(f.killedAt);
-  return {
-    smartAccount: typeof f.smartAccount === "string" ? f.smartAccount : null,
-    killedAt: Number.isSafeInteger(killedAt) && killedAt > 0 ? killedAt : nowSec,
-  };
+  const pending = listRequests(home).filter((r) => !r.superseded);
+  if (pending.length === 0) return null;
+  let killedAt = 0;
+  let smartAccount: string | null = null;
+  for (const r of pending) {
+    const at = r.body === "unreadable" ? NaN : Number(r.body.killedAt);
+    const dated = Number.isSafeInteger(at) && at > 0 ? at : nowSec;
+    if (dated >= killedAt) {
+      killedAt = dated;
+      smartAccount = r.body !== "unreadable" && typeof r.body.smartAccount === "string" ? r.body.smartAccount : smartAccount;
+    }
+  }
+  return { smartAccount, killedAt, files: pending.map((r) => r.name) };
 }
 
 /**
- * Write the request file atomically: a temporary name renamed into place, so
- * a write that fails partway leaves the previous file, not half a new one.
- * The temporary name is unique, because both processes write this file.
- */
-function writeAtomically(home: string, body: KillRequestFile): void {
-  const file = killRequestPath(home);
-  const tmp = `${file}.${randomUUID()}.tmp`;
-  writeFileSync(tmp, JSON.stringify(body, null, 2), { encoding: "utf8", mode: 0o600 });
-  renameSync(tmp, file);
-}
-
-/**
- * Leave the request, naming the grant being killed. If the write fails, the
- * child's reply says the kill may not hold, and that has to be true. Throws
- * on failure.
+ * Leave a NEW request, naming the grant being killed. Written under a
+ * temporary name and renamed into place, so a write that fails partway leaves
+ * no request rather than half of one. If the write fails, the child's reply
+ * says the kill may not hold, and that has to be true. Throws on failure.
  */
 export function writeKillRequest(
   home: string,
   grant: Pick<StoredGrant, "smartAccount" | "serialized">,
   nowSec: number,
 ): void {
-  writeAtomically(home, { smartAccount: grant.smartAccount, grant: grantIdentity(grant), killedAt: nowSec });
+  const nonce = randomUUID();
+  const file = path.join(home, `${KILL_REQUEST_PREFIX}${nonce}${PENDING_SUFFIX}`);
+  const tmp = path.join(home, `${KILL_REQUEST_PREFIX}${nonce}.tmp`);
+  const body: KillRequestBody = { smartAccount: grant.smartAccount, grant: grantIdentity(grant), killedAt: nowSec };
+  writeFileSync(tmp, JSON.stringify(body, null, 2), { encoding: "utf8", mode: 0o600 });
+  renameSync(tmp, file);
 }
 
 export interface HostedKillResult {
@@ -284,15 +327,20 @@ export async function honourKillRequest(
     return { outcome: "failed", request, error: e instanceof Error ? e.message : String(e) };
   }
   if (result !== "newer") return { outcome: "revoked", request, removed: result === "removed" };
-  // SUPERSEDED, NOT DELETED: the killed grant's identity stays in this home.
-  const f = readFile(home);
-  const kept: KillRequestFile = f && f !== "unreadable" ? f : { smartAccount: request.smartAccount, killedAt: request.killedAt };
-  try {
-    writeAtomically(home, { ...kept, supersededAt: nowSec });
-  } catch (e) {
-    // The new grant stays in the store, but with the request still pending
-    // nothing writes or arms it. Retried next pass.
-    return { outcome: "failed", request, error: e instanceof Error ? e.message : String(e) };
+  // SUPERSEDED, NOT DELETED: each killed grant's identity stays in this home.
+  // Only the files this call read are renamed. A request the child wrote since
+  // is one this rename never names, so it stays pending for the next pass.
+  for (const file of request.files) {
+    const from = path.join(home, file);
+    const to = path.join(home, file.slice(0, -PENDING_SUFFIX.length) + SUPERSEDED_SUFFIX);
+    try {
+      renameSync(from, to);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue; // the home was wiped
+      // The new grant stays in the store, but with a request still pending
+      // nothing writes or arms it. Retried next pass.
+      return { outcome: "failed", request, error: e instanceof Error ? e.message : String(e) };
+    }
   }
   return { outcome: "superseded", request };
 }
