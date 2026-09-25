@@ -424,6 +424,19 @@ data class PnlLine(val usd: Double, val pct: Double, val gasUnpriced: Int) {
  * ran last, and a simulated balance minus real deposits is a number about
  * nothing — so the heartbeat has to say "live". Gas the ledger could not price
  * makes the figure gross of that gas, and the line says so.
+ *
+ * THE GAP THIS CANNOT CLOSE FROM HERE. The heartbeat is the mode the worker is
+ * running NOW; the newest equity mark is the book it valued LAST. For the part
+ * of a tick after an owner turns Live trading on and before that tick writes
+ * its first live mark, the two disagree, and a practice balance can pass this
+ * gate as a live one. The feed route knows which book its newest mark is (its
+ * `bookMode`) and does not send it. Comparing the mark's time with the beat's
+ * does not settle it either: the worker beats at the TOP of every tick, before
+ * it values anything (worker/src/index.ts, "BEAT FIRST"), so every live tick
+ * has the same few seconds where the newest mark is older than the beat — that
+ * rule would blank a true figure on every tick to catch one false one. The fix
+ * is the feed saying `bookMode`, asked of the foundation; until then the web
+ * (which has no mode gate at all) shows the same figure in that window.
  */
 fun pnlLineOf(feed: Feed, mode: String?): PnlLine? {
   if (mode != "live") return null
@@ -463,6 +476,23 @@ fun ethFromWei(raw: String?): String? {
  * add funds (grant-balances.ts).
  */
 const val BALANCE_UNREAD = "couldn't read"
+
+/**
+ * THE VAULT FIGURE IN "IN THE ACCOUNT", ONLY FOR A LIVE BOOK.
+ *
+ * The chain read of the vault is a share count, not USDG, so the dollar figure
+ * comes from the feed's newest equity mark — and on the paper rail that mark is
+ * the PRACTICE ledger's (the worker values `balances` from the paper book there
+ * and writes its vault into the mark). Drawn under the chain balances, right
+ * after "Real funds, on chain", a paper owner with real Morpho shares read
+ * "In vaults $0.00" as a fact about their real account. So: only when the
+ * heartbeat says live, and nothing for paper, idle or an unread mode. The one
+ * tick after a flip to live has the gap [pnlLineOf] describes.
+ */
+fun accountVaultUsdOf(g: GrantView?, feed: Feed): Double? {
+  if (g == null || !g.exists || g.mode != "live") return null
+  return feed.equity.lastOrNull()?.vaultUsdg?.takeIf { it.isFinite() }
+}
 
 // ── the owner's own tape ───────────────────────────────────────────────────
 

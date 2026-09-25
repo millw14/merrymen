@@ -79,6 +79,7 @@ import dev.merrymen.app.ui.TapeStatus
 import dev.merrymen.app.ui.TelegramRow
 import dev.merrymen.app.ui.TrencherRow
 import dev.merrymen.app.ui.accountUsd
+import dev.merrymen.app.ui.accountVaultUsdOf
 import dev.merrymen.app.ui.ago
 import dev.merrymen.app.ui.blockerAdviceOf
 import dev.merrymen.app.ui.blockerFixOf
@@ -227,25 +228,23 @@ internal fun AccountPositions(lines: List<PositionLine>, modifier: Modifier = Mo
  * by field. A read that failed says "couldn't read" and never "$0.00": a zero
  * sends a funded owner to add funds they already sent. Vault SHARES are not
  * printed as dollars (the chain read is a share count, not USDG); the book's
- * own vault figure is, when the feed's newest mark carries one.
+ * own vault figure is, when the book is live — a paper mark's vault is the
+ * practice ledger's, and does not belong under "Real funds, on chain"
+ * ([accountVaultUsdOf]).
  */
 @Composable
 internal fun AccountBalances(grants: Loaded<GrantView>, feed: Feed, modifier: Modifier = Modifier) {
-  val g = (grants as? Loaded.Value)?.value?.takeIf { it.exists }
-  val b = g?.balances
-  val vault = feed.equity.lastOrNull()?.vaultUsdg?.takeIf { it.isFinite() }
-  if (g == null && vault == null) return
+  val g = (grants as? Loaded.Value)?.value?.takeIf { it.exists } ?: return
+  val b = g.balances
+  val vault = accountVaultUsdOf(g, feed)
   Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
     TabSectionHeading("In the account", Modifier.padding(bottom = 4.dp))
-    if (g != null) {
-      val paper = g.mode == "paper"
-      BalanceRow("USDG", b?.let { usdgFromUnits(it.cashUsdg)?.let { v -> accountUsd(v) } } ?: BALANCE_UNREAD)
-      BalanceRow("ETH for fees", b?.let { ethFromWei(it.ethWei) } ?: BALANCE_UNREAD)
-      if (paper) {
-        // Both facts are true and the owner needs both: the chain holds real
-        // money, and a paper agent is not trading it.
-        Prose("Real funds, on chain. In Paper mode none of it trades.", 12.sp, 18.sp, MerryColors.faint)
-      }
+    BalanceRow("USDG", b?.let { usdgFromUnits(it.cashUsdg)?.let { v -> accountUsd(v) } } ?: BALANCE_UNREAD)
+    BalanceRow("ETH for fees", b?.let { ethFromWei(it.ethWei) } ?: BALANCE_UNREAD)
+    if (g.mode == "paper") {
+      // Both facts are true and the owner needs both: the chain holds real
+      // money, and a paper agent is not trading it.
+      Prose("Real funds, on chain. In Paper mode none of it trades.", 12.sp, 18.sp, MerryColors.faint)
     }
     vault?.let { BalanceRow("In vaults", accountUsd(it)) }
   }

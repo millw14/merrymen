@@ -14,6 +14,7 @@ import dev.merrymen.app.ui.TelegramRow
 import dev.merrymen.app.ui.TrencherRow
 import dev.merrymen.app.ui.accountPct
 import dev.merrymen.app.ui.accountUsd
+import dev.merrymen.app.ui.accountVaultUsdOf
 import dev.merrymen.app.ui.blockerAdviceOf
 import dev.merrymen.app.ui.blockerFixOf
 import dev.merrymen.app.ui.blockerIsStale
@@ -312,6 +313,20 @@ class AccountStatusTest {
     assertNull(tapeRowsOf(listOf(sell.copy(realizedVouched = false))).single().realizedUsd)
     assertNull("a buy realizes nothing", tapeRowsOf(listOf(sell.copy(fillSide = "buy"))).single().realizedUsd)
     assertNull("a refused sell realized nothing", tapeRowsOf(listOf(sell.copy(status = "rejected"))).single().realizedUsd)
+  }
+
+  @Test fun theVaultFigureIsOnlyALiveBooksNeverThePracticeLedgers() {
+    // On the paper rail the newest mark is the PRACTICE ledger's; its vault is
+    // not a fact about the real account it would sit under.
+    val feed = Feed(source = "sqlite", equity = listOf(EquityPoint(equityUsdg = 1_000.0, vaultUsdg = 0.0)))
+    assertNull("paper", accountVaultUsdOf(GrantView(exists = true, mode = "paper"), feed))
+    assertNull("idle", accountVaultUsdOf(GrantView(exists = true, mode = "idle"), feed))
+    assertNull("mode unread", accountVaultUsdOf(GrantView(exists = true, mode = null), feed))
+    assertNull("grants unread", accountVaultUsdOf(null, feed))
+    assertNull("no agent", accountVaultUsdOf(GrantView(exists = false, mode = "live"), feed))
+    val live = Feed(source = "sqlite", equity = listOf(EquityPoint(vaultUsdg = 5.0), EquityPoint(vaultUsdg = 40.25)))
+    assertEquals(40.25, accountVaultUsdOf(GrantView(exists = true, mode = "live"), live)!!, 1e-9)
+    assertNull("a live book with no mark", accountVaultUsdOf(GrantView(exists = true, mode = "live"), Feed(source = "sqlite")))
   }
 
   @Test fun eachRowSaysWhatItIsFromTheLedgersOwnWords() {
