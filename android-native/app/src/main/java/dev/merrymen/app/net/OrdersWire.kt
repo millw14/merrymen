@@ -1,6 +1,7 @@
 package dev.merrymen.app.net
 
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -78,13 +79,24 @@ suspend fun MerrymenApi.routeAnswer(
 
 /**
  * A GET the order routes answer, as its JSON object — or null for anything
- * that is not a 200 with one. Used where a failed read is simply "no answer
- * yet": a poll, and the one look-up after a lost placement.
+ * that is not a 2xx with one, or that took longer than [POLL_MS]. Used where a
+ * failed read is simply "no answer yet": a poll, and the one look-up after a
+ * lost placement.
+ *
+ * THROUGH callAt ON THE DEFAULT CLIENT, not a GET built by hand, because that
+ * is the one read that keeps OkHttp's recovery once writes stop retrying. The
+ * look-up runs straight after a placement whose connection died, and OkHttp
+ * marks that route failed: the next call goes to the host's other address
+ * first, and on a client that never retries, a refusal there is the end of it
+ * — the look-up said "nothing open" about an order that was open. The time
+ * limit is the coroutine's, which cancels the call.
  */
-private suspend fun MerrymenApi.readObject(path: String, client: OkHttpClient): JsonObject? {
-  val u = urlFor(path) ?: return null
-  return exchange(client, Request.Builder().url(u).get().build()) { r ->
-    if (r.isSuccessful) jsonObjectOf(r) else null
+private suspend fun MerrymenApi.readObject(path: String): JsonObject? {
+  val body = (withTimeoutOrNull(POLL_MS) { callAt(path) { get() } } as? ApiResult.Ok)?.value ?: return null
+  return try {
+    json.parseToJsonElement(body) as? JsonObject
+  } catch (e: IllegalArgumentException) {
+    null
   }
 }
 
@@ -242,10 +254,7 @@ data class OrderPoll(val state: String?, val result: String?, val receipt: Order
 /** GET /api/orders?id= — null for anything but a readable 200: a failed poll is not an outcome. */
 suspend fun MerrymenApi.pollOrder(id: String): OrderPoll? {
   if (!ORDER_ID.matches(id)) return null
-  val obj = readObject(
-    "/api/orders?id=" + java.net.URLEncoder.encode(id, "UTF-8"),
-    http.newBuilder().callTimeout(POLL_MS, TimeUnit.MILLISECONDS).build(),
-  ) ?: return null
+  val obj = readObject("/api/orders?id=" + java.net.URLEncoder.encode(id, "UTF-8")) ?: return null
   return OrderPoll(state = obj.text("state"), result = obj.text("result"), receipt = receiptOf(obj["receipt"]))
 }
 
@@ -261,7 +270,7 @@ suspend fun MerrymenApi.pollOrder(id: String): OrderPoll? {
  */
 suspend fun MerrymenApi.openOrder(owner: String?): String? {
   val path = if (owner != null) "/api/orders?owner=" + java.net.URLEncoder.encode(owner, "UTF-8") else "/api/orders"
-  val obj = readObject(path, http.newBuilder().callTimeout(POLL_MS, TimeUnit.MILLISECONDS).build()) ?: return null
+  val obj = readObject(path) ?: return null
   val state = obj.text("state")
   val id = obj.text("id")
   return if ((state == "queued" || state == "running") && id != null && ORDER_ID.matches(id)) id else null

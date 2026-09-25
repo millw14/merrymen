@@ -47,7 +47,9 @@ class OrdersWireTest {
   @Before fun start() {
     server = MockWebServer()
     server.start()
-    api = apiFor(server, OkHttpClient.Builder().readTimeout(2, TimeUnit.SECONDS).build())
+    // No retry of its own, as the integrated app's write client: a cut-off
+    // POST must reach the code under test as lost, not be quietly re-sent.
+    api = apiFor(server, OkHttpClient.Builder().readTimeout(2, TimeUnit.SECONDS).retryOnConnectionFailure(false).build())
   }
 
   @After fun stop() = server.shutdown()
@@ -92,6 +94,7 @@ class OrdersWireTest {
   @Test fun aDroppedConnectionIsNobodysAnswer() = runBlocking {
     server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
     assertEquals(RouteAnswer.Lost, api.postOrder("buy", "TSLA", 5.0, "0xabc"))
+    assertEquals("sent once, and not again", 1, server.requestCount)
   }
 
   @Test fun aTimeoutIsNobodysAnswer() = runBlocking {

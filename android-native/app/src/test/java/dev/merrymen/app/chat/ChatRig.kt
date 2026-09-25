@@ -14,11 +14,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.runBlocking
+import okhttp3.Dns
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import java.io.File
+import java.net.InetAddress
 import java.nio.file.Files
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -59,13 +61,39 @@ class ChatRig : AutoCloseable {
         return route(s)
       }
     }
-    server.start()
+    // On the one address the client below resolves "localhost" to; see [api].
+    server.start(LOOPBACK, 0)
     defaults()
   }
 
   val store = MemoryStore(server.origin())
   val jar = PersistentCookieJar(store)
-  val api = MerrymenApi(Http.client(jar, debug = false), store)
+  /**
+   * The app's client, but one that never sends a request a second time on its
+   * own. The integrated app writes through a client with
+   * retryOnConnectionFailure(false) (the foundation's writeHttp): left on, OkHttp
+   * could quietly re-send a POST whose connection this rig cuts, and a test of
+   * "a lost placement is looked up, never sent again" would be measuring
+   * OkHttp's retry rather than the code under test.
+   *
+   * "localhost" is pinned to the one address the server listens on. The JVM
+   * resolves it to 127.0.0.1 AND ::1; a cut POST marks its route failed, the
+   * next call then tries ::1 first, where nobody listens, and without the retry
+   * it never falls back — the look-up after a lost placement failed for that
+   * reason alone. The app's reads keep OkHttp's retry, so they fall back there.
+   */
+  val api = MerrymenApi(
+    Http.client(jar, debug = false).newBuilder()
+      .retryOnConnectionFailure(false)
+      .dns(
+        object : Dns {
+          override fun lookup(hostname: String): List<InetAddress> =
+            if (hostname == "localhost") listOf(LOOPBACK) else Dns.SYSTEM.lookup(hostname)
+        },
+      )
+      .build(),
+    store,
+  )
   /** The Repository the app runs. A cold start replaces it: a new process has a fresh Identity. */
   var repo = Repository(api, store, MemoryCookies(jar))
     private set
@@ -110,6 +138,8 @@ class ChatRig : AutoCloseable {
   }
 
   companion object {
+    val LOOPBACK: InetAddress = InetAddress.getByName("127.0.0.1")
+
     const val A = "0x00000000000000000000000000000000000000aa"
     const val B = "0x00000000000000000000000000000000000000bb"
 
