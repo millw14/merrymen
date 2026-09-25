@@ -10,6 +10,7 @@ import dev.merrymen.app.net.PersistentCookieJar
 import dev.merrymen.app.net.answer
 import dev.merrymen.app.net.origin
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockWebServer
@@ -90,6 +91,44 @@ class AppGraphTest {
     graph.repo.setOrigin("https://staging.merrymen.dev")
 
     assertEquals(GroupChatState(), graph.groupChat.state.value)
+  }
+
+  /**
+   * A ROTATION DOES NOT START THE APP AGAIN. The emulator pass logged GET
+   * /api/version and GET /api/auth/session on every turn of the phone: Shell
+   * asked for the start from a LaunchedEffect, and a rotation recreates it.
+   * Played here as the recreated Shell asks: after the start answered, and
+   * while it is still out.
+   */
+  @Test fun theStartIsAskedForOnceHoweverOftenShellAsks() = runBlocking {
+    val gate = java.util.concurrent.CountDownLatch(1)
+    server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+      override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): okhttp3.mockwebserver.MockResponse =
+        when (request.path) {
+          "/api/version" -> {
+            gate.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            okhttp3.mockwebserver.MockResponse().setBody(dev.merrymen.app.net.Fixtures.text("probe-version.json"))
+          }
+          "/api/auth/session" -> okhttp3.mockwebserver.MockResponse().setBody("""{"hosted":true,"address":"0xAAA"}""")
+          else -> okhttp3.mockwebserver.MockResponse().setResponseCode(404)
+        }
+    }
+    val store = MemoryStore(server.origin())
+    val jar = PersistentCookieJar(store)
+    val app = AppGraph(Http.client(jar, debug = false), store, MemoryCookies(jar), newAppScope(Dispatchers.Unconfined))
+
+    // The first Shell asks, and is gone (a rotation) before the start answers.
+    val first = launch(Dispatchers.IO) { app.started() }
+    kotlinx.coroutines.withTimeout(5_000) { while (server.requestCount == 0) kotlinx.coroutines.delay(10) }
+    first.cancel()
+    // The recreated Shell asks while it is still out, and again later.
+    val second = async(Dispatchers.IO) { app.started() }
+    gate.countDown()
+    assertEquals(dev.merrymen.app.data.Loaded.Value(Unit), second.await())
+    assertEquals(dev.merrymen.app.data.Loaded.Value(Unit), app.started())
+
+    assertEquals("one version read, one session read", 2, server.requestCount)
+    assertEquals("0xAAA", app.repo.signedIn.value)
   }
 
   @Test fun appScopedWorkThatThrowsIsALogLineAndItsSiblingsLive() = runBlocking {

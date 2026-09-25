@@ -3,6 +3,7 @@ package dev.merrymen.app
 import android.app.Application
 import dev.merrymen.app.data.ChatThread
 import dev.merrymen.app.data.GroupChatRoom
+import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.Repository
 import dev.merrymen.app.data.Social
 import dev.merrymen.app.net.CookieStores
@@ -15,8 +16,10 @@ import dev.merrymen.app.net.SessionStore
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import okhttp3.OkHttpClient
 
 /**
@@ -105,6 +108,25 @@ class AppGraph(
     // membership and unconfirmed lines are not the new reader's.
     repo.addForgetHook { groupChat.forget() }
   }
+
+  /**
+   * THE START, ONCE PER PROCESS: the retired gate dropped, the version and the
+   * session asked (Repository.bootstrap).
+   *
+   * Shell asked for it from a LaunchedEffect, and a rotation recreates the
+   * Activity and Shell with it — so every turn of the phone asked /api/version
+   * and /api/auth/session again and held the screens back until they
+   * answered. The start belongs to the process, which a rotation does not end:
+   * it runs here once, in the app's scope, and every later caller is handed
+   * the same answer. A caller that goes away mid-start (a rotation during it)
+   * does not cancel it; the next one waits for the same start instead of
+   * sending it again. Identity asked again after a failed start is
+   * Repository.askUntilKnown's job, not this one's.
+   */
+  private val start = appScope.async(start = CoroutineStart.LAZY) { repo.bootstrap() }
+
+  /** The one start's answer, running it the first time it is asked for. */
+  suspend fun started(): Loaded<Unit> = start.await()
 }
 
 class AppContainer(app: Application) {
@@ -119,6 +141,9 @@ class AppContainer(app: Application) {
   val social = graph.social
   val repo = graph.repo
   val groupChat = graph.groupChat
+
+  /** The start, once per process. See [AppGraph.started]. */
+  suspend fun started(): Loaded<Unit> = graph.started()
 
   /** The app-wide chat thread. Registers its own forget hook. */
   val chat = ChatThread(app, api, repo, appScope)

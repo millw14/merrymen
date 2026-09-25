@@ -25,6 +25,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -140,8 +141,20 @@ fun Shell() {
   // WHICH SCREEN OPENS is decided before the NavHost composes, so the reader
   // never sees Home flash behind the welcome page. Null means "not decided yet"
   // and holds the graph back; the Box's own background covers that instant.
-  var start by remember { mutableStateOf<String?>(null) }
+  //
+  // DECIDED ONCE, NOT ONCE PER ACTIVITY. A rotation recreates the Activity and
+  // this composable with it; with `remember` the graph was held back again on
+  // every turn of the phone until the start had been asked for again. Saved,
+  // the graph composes at once with the back stack it had.
+  var start by rememberSaveable { mutableStateOf<String?>(null) }
   LaunchedEffect(Unit) {
+    // Already decided: a rotation, which the process outlived (the start is
+    // done, and this asks nothing), or a process the system ended and
+    // restored, which runs its one start now, behind the restored screens.
+    if (start != null) {
+      container.started()
+      return@LaunchedEffect
+    }
     // THE ROUTE IS DECIDED FROM A LOCAL READ, NOT A NETWORK ONE. welcomedNow()
     // is a DataStore read (sub-millisecond); bootstrap() is two network
     // round-trips (read version, read identity). Waiting for
@@ -160,9 +173,9 @@ fun Shell() {
     val welcomed = container.session.welcomedNow()
     if (!welcomed) {
       start = Routes.WELCOME
-      container.repo.bootstrap()
+      container.started()
     } else {
-      container.repo.bootstrap()
+      container.started()
       start = Routes.HOME
     }
   }

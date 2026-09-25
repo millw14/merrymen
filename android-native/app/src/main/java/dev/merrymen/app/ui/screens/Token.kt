@@ -31,10 +31,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,13 +69,16 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
-import dev.merrymen.app.data.toLoaded
+import dev.merrymen.app.market.ActivityRead
 import dev.merrymen.app.market.HeroChange
 import dev.merrymen.app.market.PoolTradeRow
-import dev.merrymen.app.market.SPAN_SECONDS
+import dev.merrymen.app.market.TokenVisit
 import dev.merrymen.app.market.TradesView
 import dev.merrymen.app.market.chartCaption
 import dev.merrymen.app.market.chartReadFailure
@@ -91,16 +94,12 @@ import dev.merrymen.app.market.newestForming
 import dev.merrymen.app.market.poolAgeNote
 import dev.merrymen.app.market.quietForSec
 import dev.merrymen.app.market.staleNote
-import dev.merrymen.app.market.stockBarsRead
 import dev.merrymen.app.market.tapeLabel
 import dev.merrymen.app.market.tradesView
-import dev.merrymen.app.market.trimToSpan
-import dev.merrymen.app.net.CandleRead
 import dev.merrymen.app.net.DiscoveryCoin
-import dev.merrymen.app.net.PoolEvidence
+import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.TokenDetail
 import dev.merrymen.app.net.TokenHolder
-import dev.merrymen.app.net.poolEvidenceOf
 import dev.merrymen.app.net.tapeWindows
 import dev.merrymen.app.ui.AgentFace
 import dev.merrymen.app.ui.BOTTOM_INSET
@@ -180,23 +179,10 @@ import kotlin.math.abs
  */
 private val WINDOWS = listOf("1H", "4H", "1D", "5D", "1M", "ALL")
 
-private fun barSizeFor(window: String): String = when (window) {
-  "1H", "4H" -> "15m"
-  "1M", "ALL" -> "1d"
-  else -> "1h"
+/** The page's reads, held by its back-stack entry so a rotation keeps them (see [TokenVisit]). */
+private class TokenVisitModel(api: MerrymenApi, address: String) : ViewModel() {
+  val visit = TokenVisit(api, address, viewModelScope)
 }
-
-/**
- * A coin's bars, off the token document, trimmed to the span (SPAN_SECONDS;
- * ALL trims nothing). Incomplete bars are dropped by completeBars.
- *
- * `uiMultiplier` is deliberately NOT applied here: it is a stock-contract
- * concept (a corporate action rebasing the on-chain unit), and a curve coin has
- * no such field. Multiplying a coin's bars by a number that does not exist for
- * it is how a chart quietly moves by 1e18.
- */
-private fun coinBars(candles: CandleRead?, window: String): List<Bar> =
-  trimToSpan(completeBars(candles), SPAN_SECONDS[window])
 
 @Composable
 fun TokenDetailScreen(nav: NavHostController, address: String) {
@@ -204,20 +190,19 @@ fun TokenDetailScreen(nav: NavHostController, address: String) {
   val ctx = LocalContext.current
   val scope = rememberCoroutineScope()
 
-  var detail by remember { mutableStateOf<Loaded<TokenDetail>>(Loaded.Loading) }
-  var bars by remember { mutableStateOf<Loaded<List<Bar>>>(Loaded.Loading) }
-  var window by remember { mutableStateOf("1D") }
-  var kind by remember { mutableStateOf(ChartKind.CANDLE) }
+  // THE READS BELONG TO THE VISIT, NOT TO THIS COMPOSITION: a rotation
+  // recreates the composition, and every turn of the phone read the token
+  // again — the pool's trades included (?activity=1, which a visit asks for
+  // once) — and put the span back to 1D. See TokenVisit.
+  val visit = viewModel(key = "token:$address") { TokenVisitModel(c.api, address) }.visit
+  val view by visit.view.collectAsState()
+  val detail = view.detail
+  val bars = view.bars
+  val window = view.window
+  val activity = view.activity
+  var kind by rememberSaveable { mutableStateOf(ChartKind.CANDLE) }
   var said by remember { mutableStateOf<String?>(null) }
   var copied by remember { mutableStateOf(false) }
-  // Bumped by Try again: part of the read's key, so a failed first read is
-  // read again whole — bars included — rather than the document alone, which
-  // left the chart saying "Loading the chart…" for ever.
-  var attempt by remember { mutableIntStateOf(0) }
-  // THE POOL EVIDENCE IS ASKED FOR ONCE PER TOKEN, on the first read, the way
-  // the web's token-page read does (?activity=1, keyed on the token alone).
-  // A span change re-reads bars, not the pool's trades.
-  var activity by remember(address) { mutableStateOf<ActivityRead>(ActivityRead.Unasked) }
 
   val watched by c.session.watchlist.collectAsState(initial = emptySet())
   // The Android watchlist keys on the LOWERCASED address; the web's
@@ -239,31 +224,10 @@ fun TokenDetailScreen(nav: NavHostController, address: String) {
   }
 
   // Refetched on the SPAN because a coin's bars travel inside the token
-  // document and their size depends on it. A stock refetch is a second call, and
-  // both are cached upstream for minutes.
-  LaunchedEffect(address, window, attempt) {
-    bars = Loaded.Loading
-    val ask = activity is ActivityRead.Unasked
-    val d = c.api.token(address, barSizeFor(window), activity = ask).toLoaded()
-    detail = d
-    val t = (d as? Loaded.Value)?.value
-    // Only an answered read settles the evidence: a failed one asks again next
-    // time. The route attaches evidence to a coin only, so asking costs a stock
-    // nothing.
-    if (ask && t != null) activity = ActivityRead.Read(poolEvidenceOf(t.evidence))
-    bars = when {
-      t == null -> Loaded.Loading
-      t.market.kind == "memecoin" -> Loaded.Value(coinBars(t.candles, window))
-      else -> {
-        // The registry's ticker, not the ledger's: the ledger only knows a
-        // symbol for a token some agent already holds, so a stock nobody has
-        // bought had no symbol to ask the venue about.
-        val sym = t.market.symbol ?: t.market.stock?.symbol ?: t.ledger.symbol
-        if (sym == null) Loaded.Value(emptyList())
-        else c.api.stockBarsRead(sym, window, t.market.stock?.uiMultiplier ?: 1.0)
-      }
-    }
-  }
+  // document and their size depends on it (TokenVisit.show). A stock refetch
+  // is a second call, and both are cached upstream for minutes. Opening asks
+  // nothing when this visit has already read.
+  LaunchedEffect(visit) { visit.open() }
 
   val loaded = (detail as? Loaded.Value)?.value
   // Unchanged from the previous version of this screen, and it is also what the
@@ -325,7 +289,7 @@ fun TokenDetailScreen(nav: NavHostController, address: String) {
 
         LoadedBlock(
           detail,
-          onRetry = { attempt++ },
+          onRetry = { visit.retry() },
         ) { t ->
           // BOTH TICKERS ARE ATTACKER-CHOSEN, and theses are matched to a page
           // by symbol. Without this an agent's real reasoning about NVDA prints
@@ -387,10 +351,10 @@ fun TokenDetailScreen(nav: NavHostController, address: String) {
           // given the axis strip's own 18px inset so it lands level with the
           // body text rather than 2px from the screen edge.
           Column(Modifier.bleed(18.dp).padding(bottom = 8.dp)) {
-            ChartPane(bars, kind, t, window, nowSec, onRetry = { attempt++ })
+            ChartPane(bars, kind, t, window, nowSec, onRetry = { visit.retry() })
             ChartTools(
               window = window,
-              onWindow = { window = it },
+              onWindow = { visit.show(it) },
               kind = kind,
               onKind = { kind = it },
             )
@@ -1594,15 +1558,6 @@ private fun Modifier.describedAs(text: String): Modifier =
 // ---------------------------------------------------------------------------
 // MARKET ACTIVITY — the pool's public trades and the index's tape
 // ---------------------------------------------------------------------------
-
-/** Where the pool evidence stands for this token. */
-private sealed interface ActivityRead {
-  /** The first read of the token has not answered yet. */
-  data object Unasked : ActivityRead
-
-  /** It answered; the evidence it carried, or null when there was none to read. */
-  data class Read(val evidence: PoolEvidence?) : ActivityRead
-}
 
 /**
  * `.token-activity` — TokenActivity.tsx and terminal.css:8256-8276: a 16px-radius
