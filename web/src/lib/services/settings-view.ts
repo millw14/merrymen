@@ -8,6 +8,7 @@
  * field is invisible here until someone decides it is safe.
  */
 import { getSettingsStore } from "@merrymen/settings-store";
+import { CHAT_SETTING_KEYS } from "../../../../worker/src/telegram/setting-spec";
 
 export interface SettingsView {
   agentName: string | null;
@@ -42,6 +43,8 @@ export interface SettingsView {
 
 export interface SettingsReader {
   settingsFor(tenant: `0x${string}`): Promise<SettingsView | null>;
+  /** Values for the conversation-settable keys only. Optional for fixtures that don't need it. */
+  specValuesFor?(tenant: `0x${string}`): Promise<Record<string, unknown>>;
 }
 
 const n = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
@@ -93,10 +96,31 @@ export function projectSettings(raw: Record<string, unknown> | null | undefined)
   };
 }
 
+/**
+ * The current values of the settings an owner may change by conversation
+ * (worker/src/telegram/setting-spec.ts): the same allowlist a setting proposal
+ * is validated against, so a proposal's "before" column can only ever show
+ * these keys. Absent keys are omitted (they resolve to the worker's default).
+ */
+export function projectSpecValues(raw: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const key of CHAT_SETTING_KEYS) {
+    const v = raw[key];
+    if (v === undefined || v === null) continue;
+    if (typeof v === "number" || typeof v === "boolean" || typeof v === "string" || (Array.isArray(v) && v.every((x) => typeof x === "string"))) out[key] = v;
+  }
+  return out;
+}
+
 export const storeSettingsReader: SettingsReader = {
   async settingsFor(tenant) {
     const raw = await getSettingsStore().get(tenant.toLowerCase() as `0x${string}`);
     return projectSettings(raw as unknown as Record<string, unknown> | null);
+  },
+  async specValuesFor(tenant) {
+    const raw = await getSettingsStore().get(tenant.toLowerCase() as `0x${string}`);
+    return projectSpecValues(raw as unknown as Record<string, unknown> | null);
   },
 };
 

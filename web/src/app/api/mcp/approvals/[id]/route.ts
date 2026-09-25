@@ -1,0 +1,206 @@
+/**
+ * The owner's approval of a proposal an AI assistant prepared.
+ *
+ * GET shows it (with a fresh quote for a trade). POST approves or declines it,
+ * and only with the owner's own Merrymen session, a same-origin request (the
+ * /api middleware refuses cross-site; this route also checks Origin), and the
+ * hash of the exact binding the page displayed. Approving re-validates the
+ * binding against the current state and then acts through the existing,
+ * validated paths — the owner-order queue for trades, the settings route for
+ * settings, the group-chat route for posts — invoked in-process with the
+ * approver's own cookie, so every check those paths make still applies.
+ */
+import { tenantOf } from "@/lib/auth";
+import { mcpConfig } from "@/mcp/config";
+import { mcpDb } from "@/mcp/db";
+import { agentDirectory } from "@/mcp/agents";
+import { jsonResponse } from "@/mcp/oauth/metadata";
+import { writeAudit } from "@/mcp/observe";
+import { readLedger as withReadDb } from "@/mcp/tool";
+import { settingsReader } from "@/lib/services/settings-view";
+import { quoteTrade } from "@/lib/services/trade-quote";
+import {
+  ProposalError, approveProposal, expireIfDue, followTrade, proposalRow, queueApprovedTrade, rejectProposal,
+  type Binding, type ProposalRow, type Revalidation, type TradeBinding,
+} from "@/lib/services/proposals";
+import { addressableSymbol } from "@/mcp/tools/proposals";
+import { sellableAssets } from "@merrymen/core";
+import { specFor, validStoredSetting } from "../../../../../../../worker/src/telegram/setting-spec";
+import { PUT as settingsPut } from "../../../settings/route";
+import { POST as groupchatPost } from "../../../groupchat/route";
+
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
+const ID = /^prp_[0-9a-f]{32}$/;
+
+async function holding(account: string, token: string) {
+  return withReadDb(async (db) => {
+    if (!db) return null;
+    const row = await db.prepare("SELECT raw_balance, value_usdg FROM positions WHERE lower(agent_id) = ? AND lower(token) = ? LIMIT 1").get(account.toLowerCase(), token.toLowerCase()) as { raw_balance: string | null; value_usdg: number | null } | undefined;
+    if (!row?.raw_balance || !/^\d+$/.test(row.raw_balance)) return null;
+    return { rawBalance: BigInt(row.raw_balance), valueUsdg: typeof row.value_usdg === "number" ? row.value_usdg : null };
+  });
+}
+
+async function freshQuote(tenant: `0x${string}`, b: TradeBinding, features: string[]) {
+  const settings = await settingsReader().settingsFor(tenant);
+  return quoteTrade({
+    side: b.side, token: b.token as `0x${string}`, amountUsdg: b.amount_usdg,
+    slippageBps: b.slippage_bps, maxImpactBps: settings?.maxImpactBps ?? null, grantFeatures: features,
+    holding: b.side === "sell" ? await holding(b.account, b.token) : null,
+  });
+}
+
+async function revalidateTrade(tenant: `0x${string}`, b: TradeBinding, now: number): Promise<Revalidation> {
+  const agent = (await agentDirectory().agentsFor(tenant)).find((a) => a.slug === b.agent_slug);
+  if (!agent) return { ok: false, why: "This agent is no longer yours." };
+  if (agent.account !== b.account || agent.orderAgentId !== b.order_agent_id) return { ok: false, why: "The agent's account changed since this was proposed (a new permission was signed). Ask for a fresh proposal." };
+  if (agent.expiresAt !== null && now >= agent.expiresAt) return { ok: false, why: "The agent's trading permission has expired. Re-sign it first." };
+  const perTrade = agent.caps?.perTradeUsdg ?? null;
+  if (perTrade !== null && b.amount_usdg > perTrade) return { ok: false, why: `It is over the signed per-trade limit of ${perTrade} USDG.` };
+  const settings = await settingsReader().settingsFor(tenant);
+  const ceiling = settings?.telegram.maxActionUsdg ?? null;
+  if (ceiling !== null && ceiling > 0 && b.amount_usdg > ceiling) return { ok: false, why: `It is over your ${ceiling} USDG limit for an owner order.` };
+  const addressable = addressableSymbol(b.token, settings);
+  if ("why" in addressable) return { ok: false, why: addressable.why };
+  if (addressable.symbol !== b.symbol) return { ok: false, why: "The token's symbol changed in your settings since this was proposed. Ask for a fresh proposal." };
+  if (!sellableAssets({ grantFeatures: agent.features, grantTokens: agent.grantTokens }).has(b.token)) {
+    return { ok: false, why: "Your signed permission no longer covers this token." };
+  }
+  const notes: string[] = [];
+  if (b.side === "buy") {
+    const q = await freshQuote(tenant, b, agent.features);
+    if (!q.quoted || !q.expected_out) return { ok: false, why: `There is no executable quote right now (${q.why_not ?? "no route"}). Nothing was sent.` };
+    if (b.quote && BigInt(q.expected_out.raw) < BigInt(b.quote.min_out_raw)) {
+      return { ok: false, why: "The price has moved past the slippage this proposal was made with. Nothing was sent; ask for a fresh proposal." };
+    }
+    if (!q.impact_verdict.ok) return { ok: false, why: `The agent would refuse this buy now: ${q.impact_verdict.detail ?? "price impact is over its cap"}.` };
+    notes.push(`re-quoted at approval: expect ${q.expected_out.human ?? q.expected_out.raw}`);
+  }
+  return { ok: true, notes };
+}
+
+function revalidateSettings(changes: Record<string, unknown>): Revalidation {
+  for (const [k, v] of Object.entries(changes)) {
+    // Agent drafts also carry agentName and the risk-profile keys; the settings
+    // route validates every one of them again when they are applied.
+    if (k === "agentName" || k === "maxImpactBps") continue;
+    if (!specFor(k) || !validStoredSetting(k, v)) return { ok: false, why: `The change to ${k} is no longer allowed.` };
+  }
+  return { ok: true, notes: [] };
+}
+
+/** Apply settings through the settings route itself, as the approving owner. */
+async function applySettings(req: Request, tenant: string, changes: Record<string, unknown>) {
+  const res = await settingsPut(new Request(`${mcpConfig().issuer}/api/settings`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", cookie: req.headers.get("cookie") ?? "" },
+    body: JSON.stringify({ ...changes, owner: tenant }),
+  }));
+  const body = await res.json().catch(() => ({})) as { errors?: string[]; ignored?: string[] };
+  // The settings route saves nothing when any field fails validation (400).
+  if (!res.ok) {
+    return { status: "failed" as const, result: { why: "Merrymen's settings check refused it; nothing was changed.", errors: (body.errors ?? []).slice(0, 5) } };
+  }
+  // It does save the rest when it merely ignores an unknown key; say exactly which.
+  const ignored = (body.ignored ?? []).filter((k) => k in changes);
+  return {
+    status: "applied" as const,
+    result: { applied: Object.keys(changes).filter((k) => !ignored.includes(k)), ...(ignored.length ? { not_applied: ignored, note: "Merrymen's settings route did not accept these keys." } : {}) },
+  };
+}
+
+async function view(row: ProposalRow, tenant: `0x${string}`, now: number) {
+  const d = await mcpDb();
+  let r = await expireIfDue(d.db, row, now);
+  if (r.kind === "trade") r = await withReadDb(async (ledger) => (ledger ? followTrade(d.db, ledger, r, now) : r));
+  const binding = JSON.parse(r.binding_json) as Binding;
+  let quote = null;
+  if (r.status === "awaiting_approval" && binding.kind === "trade") {
+    const agent = (await agentDirectory().agentsFor(tenant)).find((a) => a.slug === binding.agent_slug);
+    quote = agent ? await freshQuote(tenant, binding, agent.features).catch(() => null) : null;
+  }
+  return {
+    id: r.id, kind: r.kind, status: r.status, binding, binding_hash: r.binding_hash,
+    summary: JSON.parse(r.summary_json), requested_by: r.client_name,
+    created_at: r.created_at, expires_at: r.expires_at, decided_at: r.decided_at,
+    result: r.result_json ? JSON.parse(r.result_json) : null, fresh_quote: quote,
+  };
+}
+
+export async function GET(req: Request, context: { params: Promise<{ id: string }> }): Promise<Response> {
+  if (!mcpConfig().enabled) return jsonResponse({ error: "not_found" }, 404);
+  const tenant = tenantOf(req);
+  if (!tenant) return jsonResponse({ error: "login_required" }, 401);
+  const { id } = await context.params;
+  if (!ID.test(id)) return jsonResponse({ error: "not_found" }, 404);
+  const d = await mcpDb();
+  const row = await proposalRow(d.db, tenant, id);
+  if (!row) return jsonResponse({ error: "not_found" }, 404);
+  return jsonResponse(await view(row, tenant, Math.floor(Date.now() / 1000)));
+}
+
+export async function POST(req: Request, context: { params: Promise<{ id: string }> }): Promise<Response> {
+  const cfg = mcpConfig();
+  if (!cfg.enabled) return jsonResponse({ error: "not_found" }, 404);
+  if (req.headers.get("origin") !== cfg.issuer) return jsonResponse({ error: "forbidden", error_description: "cross-site request" }, 403);
+  const tenant = tenantOf(req);
+  if (!tenant) return jsonResponse({ error: "login_required" }, 401);
+  const { id } = await context.params;
+  if (!ID.test(id)) return jsonResponse({ error: "not_found" }, 404);
+  const text = await req.text();
+  if (text.length > 4096) return jsonResponse({ error: "invalid_request" }, 400);
+  let body: { decision?: unknown; hash?: unknown };
+  try {
+    body = JSON.parse(text) as typeof body;
+  } catch {
+    return jsonResponse({ error: "invalid_request" }, 400);
+  }
+  if (typeof body.hash !== "string" || !/^[0-9a-f]{64}$/.test(body.hash)) return jsonResponse({ error: "invalid_request" }, 400);
+  const d = await mcpDb();
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    if (body.decision === "reject") {
+      const row = await rejectProposal(d.db, tenant, id, body.hash, now);
+      await writeAudit(d, { action: "owner.proposal_rejected", outcome: "ok", tenant, detail: { proposal_id: id, kind: row.kind } });
+      return jsonResponse(await view(row, tenant, now));
+    }
+    if (body.decision !== "approve") return jsonResponse({ error: "invalid_request" }, 400);
+    const row = await approveProposal(d.db, tenant, id, body.hash, now, {
+      revalidate: async (binding) => {
+        if (binding.kind === "trade") return revalidateTrade(tenant, binding, now);
+        if (binding.kind === "settings") return revalidateSettings(binding.changes);
+        if (binding.kind === "agent_draft") return revalidateSettings(binding.settings);
+        return { ok: true, notes: [] };
+      },
+      act: async (binding, proposal) => {
+        if (binding.kind === "trade") {
+          const settings = await settingsReader().settingsFor(tenant);
+          return withReadDb((ledger) => queueApprovedTrade(ledger, binding, proposal.id, settings?.tickSeconds ?? 240, Date.now()));
+        }
+        if (binding.kind === "settings") return applySettings(req, tenant, binding.changes);
+        if (binding.kind === "agent_draft") return applySettings(req, tenant, binding.settings);
+        // A post: the group-chat route's own gate, rate limit and idempotency (clientId = the proposal id).
+        const res = await groupchatPost(new Request(`${cfg.issuer}/api/groupchat`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: req.headers.get("cookie") ?? "" },
+          body: JSON.stringify({ body: binding.text, clientId: proposal.id.slice(4, 36) }),
+        }));
+        const out = await res.json().catch(() => ({})) as { message?: { id?: string }; error?: string };
+        if (res.status === 429 || res.status === 503) return { retry: out.error ?? "The group chat is busy. Try again in a moment." };
+        if (!res.ok) return { status: "failed", result: { why: out.error ?? `the group chat refused it (${res.status})` } };
+        return { status: "applied", result: { message_id: out.message?.id ?? null } };
+      },
+    });
+    await writeAudit(d, { action: "owner.proposal_approved", outcome: row.status, tenant, detail: { proposal_id: id, kind: row.kind } });
+    return jsonResponse(await view(row, tenant, now));
+  } catch (error) {
+    if (error instanceof ProposalError) {
+      const status = error.code === "not_found" ? 404 : error.code === "expired" ? 410 : error.code === "upstream_unavailable" ? 503 : error.code === "quota_exceeded" ? 429 : 409;
+      await writeAudit(d, { action: "owner.proposal_decision", outcome: error.code, tenant, detail: { proposal_id: id } });
+      return jsonResponse({ error: error.code, error_description: error.message }, status);
+    }
+    return jsonResponse({ error: "server_error", error_description: "Something went wrong. Nothing was changed." }, 500);
+  }
+}

@@ -19,7 +19,7 @@ import { agentDirectory, type AgentDirectory, type OwnedAgent } from "./agents";
 import { mcpDb, type McpDb } from "./db";
 import { McpError, asMcpError, errorBody, type ErrorBody } from "./errors";
 import { auditDetail, logEvent, pseudonym, rateHit, recordToolCall, writeAudit } from "./observe";
-import { reachableAgents, requireCapability, resolveOwnedAgent } from "./policy";
+import { hasCapability, reachableAgents, requireCapability, resolveOwnedAgent } from "./policy";
 import type { Capability } from "./scopes";
 import type { Principal } from "./oauth/server";
 
@@ -67,10 +67,18 @@ export interface ToolDef<I extends z.ZodType = z.ZodType, O extends z.ZodType = 
   title: string;
   description: string;
   capability: Capability;
+  /**
+   * When set, holding ANY of these is enough (e.g. reading a proposal: the
+   * scope that created its kind). The handler must still check the object's
+   * own kind against the connection's capabilities.
+   */
+  anyOf?: readonly Capability[];
   input: I;
   output: O;
   annotations: ToolAnnotations;
   budget?: Budget;
+  /** Protocol `_meta` for the tool definition (e.g. an MCP Apps UI resource). Never authority. */
+  meta?: Record<string, unknown>;
   /** Default 15 s. Long work returns a job id instead of holding the connection. */
   timeoutMs?: number;
   handler(args: z.infer<I>, ctx: ToolContext): Promise<ToolResult<z.infer<O>>>;
@@ -102,6 +110,12 @@ let ledgerOverride: Db | null = null;
 /** Test seam: the ledger every tool reads when no per-call override is given. */
 export function setLedgerForTest(db: Db | null): void {
   ledgerOverride = db;
+}
+
+/** The shared ledger for MCP code outside a tool call (the approval route), honouring the test seam. */
+export function readLedger<T>(fn: (db: Db | null) => Promise<T>): Promise<T> {
+  const override = ledgerOverride;
+  return override ? fn(override) : withReadDb(fn);
 }
 
 export function makeContext(principal: Principal, traceId: string, signal: AbortSignal, deps: RunDeps = {}): ToolContext {
@@ -170,7 +184,11 @@ export async function runTool(def: ToolDef, rawArgs: unknown, principal: Princip
   let outcome = "ok";
   let d: McpDb | null = null;
   try {
-    requireCapability(principal, def.capability);
+    if (def.anyOf?.length) {
+      if (!def.anyOf.some((c) => hasCapability(principal, c))) requireCapability(principal, def.anyOf[0]!);
+    } else {
+      requireCapability(principal, def.capability);
+    }
     d = await (deps.mcp ?? mcpDb)();
     await enforceBudget(d, def, principal, now());
     const parsed = def.input.safeParse(rawArgs ?? {});

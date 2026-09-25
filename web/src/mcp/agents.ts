@@ -26,6 +26,12 @@ export interface OwnedAgent {
   slug: string;
   /** The ledger's agent_id: the current smart account, lowercased. Null before the first signed grant. */
   account: `0x${string}` | null;
+  /**
+   * The same account spelled EXACTLY as the grant stores it. The owner-order
+   * queue (agent_commands) and its ferry match agent_id with `=`, not lower(),
+   * so an order must be written under this spelling or it is never delivered.
+   */
+  orderAgentId: string | null;
   /** Every smart account this identity has held, newest first (older ledger rows live under these). */
   accounts: `0x${string}`[];
   chainId: number | null;
@@ -112,9 +118,11 @@ export function agentFromParts(
   const current = addr(grant?.smart_account);
   const history = identity.accounts.map(addr).filter((a): a is `0x${string}` => !!a);
   const accounts = current ? [current, ...history.filter((a) => a !== current)] : history;
+  const raw = typeof grant?.smart_account === "string" && ADDRESS.test(grant.smart_account.toLowerCase()) ? grant.smart_account : null;
   return {
     slug: identity.slug,
     account: current,
+    orderAgentId: raw,
     accounts,
     chainId: num(grant?.chain_id),
     grantedAt: num(grant?.granted_at),

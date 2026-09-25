@@ -31,13 +31,15 @@ export function buildServer(principal: Principal | null, opts: { tools?: readonl
   if (!principal) return server;
   const trace = opts.trace ?? newTraceId();
   for (const def of opts.tools ?? ALL_TOOLS) {
-    if (!hasCapability(principal, def.capability)) continue;
+    const usable = def.anyOf?.length ? def.anyOf.some((c) => hasCapability(principal, c)) : hasCapability(principal, def.capability);
+    if (!usable) continue;
     server.registerTool(def.name, {
       title: def.title,
       description: def.description,
       inputSchema: def.input,
       outputSchema: def.output,
       annotations: { title: def.title, ...def.annotations },
+      ...(def.meta ? { _meta: def.meta } : {}),
     }, async (args: unknown) => runTool(def, args, principal, trace, opts.deps) as never);
   }
   registerResources(server, principal, opts.resources ?? ALL_RESOURCES, trace, opts.deps);

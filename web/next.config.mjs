@@ -63,7 +63,8 @@ const nextConfig = {
       { key: "Cache-Control", value: "public, max-age=300" },
     ] },
     { source: "/connect/app", headers: noFrame },
-    { source: "/connect/apps", headers: noFrame }];
+    { source: "/connect/apps", headers: noFrame },
+    { source: "/connect/approve/:id", headers: noFrame }];
   },
   experimental: {
     externalDir: true,

@@ -16,7 +16,7 @@ import { registerClient } from "./oauth/clients";
 import { pkceS256 } from "./oauth/crypto";
 import { decideRequest, exchangeCode, startAuthorization, type OAuthDeps, type Principal, type TokenResponse, verifyAccessToken } from "./oauth/server";
 import { setLedgerForTest } from "./tool";
-import { projectSettings, setSettingsReaderForTest } from "@/lib/services/settings-view";
+import { projectSettings, projectSpecValues, setSettingsReaderForTest } from "@/lib/services/settings-view";
 
 export const OWNER_A = "0x00000000000000000000000000000000000000aa" as const;
 export const OWNER_B = "0x00000000000000000000000000000000000000bb" as const;
@@ -126,7 +126,10 @@ export function installFixtures(d: McpDb, o: { directory?: AgentDirectory; setti
   setLedgerForTest(d.db);
   setAgentDirectoryForTest(o.directory ?? fixtureDirectory());
   const settings = o.settings ?? {};
-  setSettingsReaderForTest({ async settingsFor(tenant) { return projectSettings(settings[tenant.toLowerCase()] ?? {}); } });
+  setSettingsReaderForTest({
+    async settingsFor(tenant) { return projectSettings(settings[tenant.toLowerCase()] ?? {}); },
+    async specValuesFor(tenant) { return projectSpecValues(settings[tenant.toLowerCase()] ?? {}); },
+  });
   return () => {
     setMcpDbForTest(null);
     setLedgerForTest(null);
