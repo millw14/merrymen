@@ -218,7 +218,17 @@ sealed interface Asked {
  * On [MerrymenApi.chatHttp], whose 90s read timeout outlasts a slow model's
  * first byte and whose 120s call timeout still ends a dead connection.
  */
-suspend fun MerrymenApi.askAgent(body: ChatBody, onText: (String) -> Unit): Asked {
+suspend fun MerrymenApi.askAgent(body: ChatBody, onText: (String) -> Unit): Asked = try {
+  askAgentOnce(body, onText)
+} catch (e: kotlinx.coroutines.CancellationException) {
+  throw e
+} catch (e: Exception) {
+  // NOTHING THE WIRE SENDS MAY CRASH THE APP. Whatever this was, it is an
+  // answer that could not be read, said as one.
+  Asked.Failed("unreadable")
+}
+
+private suspend fun MerrymenApi.askAgentOnce(body: ChatBody, onText: (String) -> Unit): Asked {
   val u = urlFor("/api/chat") ?: return Asked.Failed("no-address")
   val req = Request.Builder()
     .url(u)

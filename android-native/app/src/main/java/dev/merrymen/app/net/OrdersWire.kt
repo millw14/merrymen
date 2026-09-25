@@ -103,9 +103,12 @@ private suspend fun <T> exchange(client: OkHttpClient, req: Request, read: (Resp
       }
 
       override fun onResponse(call: okhttp3.Call, response: Response) {
+        // ANYTHING that goes wrong reading the answer is no answer — never a
+        // coroutine left waiting for ever on a callback that threw, which for
+        // an order would be a placement nobody hears about.
         val out = try {
           response.use { read(it) }
-        } catch (e: IOException) {
+        } catch (e: Exception) {
           null
         }
         cont.resume(out)

@@ -65,10 +65,22 @@ import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.SectionCard
 import dev.merrymen.app.ui.applyRisk
 import dev.merrymen.app.ui.approveProposals
-import dev.merrymen.app.ui.placeOrder
 import dev.merrymen.app.ui.sans
-import dev.merrymen.app.ui.snipe
-import kotlinx.coroutines.delay
+import dev.merrymen.app.ui.LimitCheck
+import dev.merrymen.app.ui.Placed
+import dev.merrymen.app.ui.TradeCard
+import dev.merrymen.app.ui.TradeDesk
+import dev.merrymen.app.ui.TradeOpen
+import dev.merrymen.app.ui.TradeStep
+import dev.merrymen.app.ui.riskLevelOf
+import dev.merrymen.app.data.chatKeyFor
+import dev.merrymen.app.data.receiptText
+import dev.merrymen.app.net.ApiResult
+import dev.merrymen.app.net.SettingsEnvelope
+import dev.merrymen.app.net.said
+import dev.merrymen.app.net.valueOrNull
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.runtime.collectAsState
 import kotlinx.coroutines.launch
 
 // ---------------------------------------------------------------------------
@@ -325,13 +337,14 @@ private fun OutlinePill(
  * identical `LimePill` as a private of its own. They want lifting into one.
  */
 @Composable
-private fun ResignPill(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun ResignPill(label: String, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
   val shape = RoundedCornerShape(50)
   Box(
     modifier
+      .alpha(if (enabled) 1f else DISABLED_CONFIRM)
       .clip(shape)
       .background(MerryColors.lime)
-      .clickable(onClick = onClick)
+      .clickable(enabled = enabled, onClick = onClick)
       .padding(horizontal = 16.dp, vertical = 9.dp),
     contentAlignment = Alignment.Center,
   ) {
@@ -545,7 +558,7 @@ fun ProposalsScreen(nav: NavHostController) {
               busy = true
               scope.launch {
                 val r = approveProposals(c.repo, v.proposals)
-                note = when (r) { is Acted.Ok -> r.line; is Acted.Failed -> r.line; else -> null }
+                note = when (r) { is Acted.Ok -> r.line; is Acted.Failed -> r.line }
                 busy = false
                 load()
               }
@@ -644,7 +657,7 @@ fun ProposalsScreen(nav: NavHostController) {
                 busy = true
                 scope.launch {
                   val r = approveProposals(c.repo, listOf(p))
-                  note = when (r) { is Acted.Ok -> r.line; is Acted.Failed -> r.line; else -> null }
+                  note = when (r) { is Acted.Ok -> r.line; is Acted.Failed -> r.line }
                   busy = false
                   load()
                 }
@@ -710,70 +723,116 @@ private fun Caveat(text: String) {
 
 // ── TRADE ───────────────────────────────────────────────────────────────────
 
+private val SUGGESTED_SYMBOL = Regex("^[A-Z0-9]{1,12}$")
+
 /**
- * Place a buy or a sell, or go after a coin by name.
+ * Place a buy or a sell, or go after a coin by name — ALWAYS THROUGH A CARD.
  *
- * "Queued" is not "filled" and this screen never says otherwise: the worker
- * claims the order on its next tick and the wall decides. So it polls and
- * reports what actually became of it.
+ * This screen used to POST /api/orders on the tap of Buy, which is the
+ * one-click order the product refuses everywhere else, and "Find it and buy"
+ * bought whatever coin the lookup matched without the owner ever seeing it.
+ * Now each tap opens a card (TradeDesk): the registry's sentence naming side,
+ * coin and amount, whether it is real money or paper, and the limits the phone
+ * has read — an amount past the per-trade cap or the chat ceiling is refused
+ * on the card with the limit named. Only "Yes, place it" places anything, and
+ * a snipe's lookup only ever leads to a second card naming the coin it found
+ * and its address.
  *
- * BUY AND SELL ARE TWO EQUAL `.btn`s AND NEITHER IS COLOURED. They are the same
- * size and the same reach for the reason `.desk-confirm-row` gives about its own
- * pair (terminal.css:7558): the safer choice must never be the harder thing to
- * hit. And `--up` / `--down` stay off them — a control is not an outcome, and
- * this product's whole rule is that those two colours mean money moved.
+ * "Queued" is not "filled" and this screen never says otherwise. The order is
+ * said and followed in the chat thread, in the app's scope, so it is followed
+ * to its answer whichever screen the owner is on; this screen shows that
+ * answer too while it is open.
  *
- * The snipe card gets a `.flow-primary` instead because the card IS that one
- * action; the buy/sell card has two, so neither of them is the card's primary.
+ * BUY AND SELL ARE TWO EQUAL `.btn`s AND NEITHER IS COLOURED: a control is not
+ * an outcome, and `--up` / `--down` mean money moved.
  */
 @Composable
 fun TradeScreen(nav: NavHostController) {
   val c = LocalContainer.current
+  val desk = remember(c) { TradeDesk(c.api) { c.chat.cardScope() } }
   var symbol by remember { mutableStateOf("") }
   var amount by remember { mutableStateOf("") }
   var query by remember { mutableStateOf("") }
   var busy by remember { mutableStateOf(false) }
   var note by remember { mutableStateOf<String?>(null) }
-  var followed by remember { mutableStateOf<String?>(null) }
+  var card by remember { mutableStateOf<TradeCard?>(null) }
+  var watching by remember { mutableStateOf<String?>(null) }
+  var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+  val thread by c.chat.thread.collectAsState()
+  val signedIn by c.repo.signedIn.collectAsState()
+  val hosted by c.repo.hosted.collectAsState()
   val scope = rememberCoroutineScope()
 
-  /**
-   * Poll until the worker has answered, then say what it said.
-   *
-   * TIME-BOUNDED TO OUTLIVE THE HOSTED TICK, not a fixed 20 tries. The hosted
-   * worker claims one command per ~240s tick, so an order can sit unclaimed for
-   * up to four minutes before anything happens to it; a 60s budget timed out
-   * before the order was even looked at. The web polls for seven minutes, which
-   * covers two ticks, and so does this.
-   */
-  suspend fun follow(id: String?) {
-    if (id == null) return
-    val deadline = 7 * 60 * 1000L
-    var elapsed = 0L
-    while (elapsed < deadline) {
-      delay(5_000); elapsed += 5_000
-      val st = c.api.orderStatus(id)
-      if (st is dev.merrymen.app.net.ApiResult.Ok) {
-        val s = st.value
-        // "done" IS TERMINAL ONLY WITH A RESULT. The worker returns done with a
-        // null result when it has nothing to say; printing "Done." there reads
-        // as a settled trade the worker never reported. Keep waiting instead.
-        val result = s.result
-        if (s.state == "done" && !result.isNullOrBlank()) { followed = result; return }
-        // "none" is also what the route answers when the ledger read fails, not
-        // only "nothing queued", so it is not a fact to interpolate at the
-        // reader — a neutral "checking" is the honest word.
-        followed = if (s.state == "none" || s.state == "done") "Checking with your agent…"
-        else "Still with your agent (${s.state})…"
+  // THE SYMBOLS WORTH OFFERING: the basket as it stands (the owner's, else the
+  // default) and what is held. Still free text — a chip only fills the field.
+  LaunchedEffect(Unit) {
+    val env = c.api.settings().valueOrNull()
+    val feed = c.api.feed().valueOrNull()?.takeIf { it.source != "none" }
+    suggestions = (env?.list("basketSymbols").orEmpty() + feed?.positions?.map { it.symbol }.orEmpty())
+      .map { it.trim().uppercase() }
+      .filter { SUGGESTED_SYMBOL.matches(it) }
+      .distinct()
+  }
+
+  // What became of the order this screen placed, as the thread heard it — for
+  // this owner's thread only.
+  val key = chatKeyFor(hosted, signedIn)
+  val outcome = watching?.let { id ->
+    if (thread.key != key) null else thread.messages.lastOrNull { it.order?.id == id && it.order.outcome }
+  }
+
+  fun open(kind: String, subject: String) {
+    busy = true
+    note = null
+    card = null
+    scope.launch {
+      when (val o = desk.open(kind, subject, amount.trim().toDoubleOrNull())) {
+        is TradeOpen.Card -> card = o.card
+        is TradeOpen.No -> note = o.line
       }
+      busy = false
     }
-    // A TIMEOUT IS NOT A FAILURE AND NOT A FILL. Say only what is true.
-    followed = "Still waiting on your agent. It will show on your feed when it lands."
   }
 
   Page("Trade", nav) {
     note?.let { Notice("Your order", it) }
-    followed?.let { Notice("Outcome", it) }
+    outcome?.let { line ->
+      val receipt = line.order?.receipt?.let(::receiptText)
+      Notice("Outcome", listOfNotNull(receipt, line.text).joinToString("\n"))
+    }
+
+    card?.let { pending ->
+      TradeConfirm(
+        card = pending,
+        busy = busy,
+        onDismiss = { card = null },
+        onConfirm = {
+          busy = true
+          // IN THE APP'S SCOPE, NOT THE SCREEN'S. A placement cancelled because
+          // the owner tapped back would be a POST whose answer nobody reads — an
+          // order that may exist, never followed and never said.
+          c.appScope.launch {
+            when (val step = desk.confirm(pending)) {
+              is TradeStep.Next -> card = step.card
+              is TradeStep.Said -> {
+                card = null
+                note = step.line
+              }
+              is TradeStep.Done -> {
+                card = null
+                note = step.placed.line
+                watching = when (val p = step.placed) {
+                  is Placed.Queued -> p.id
+                  is Placed.Unknown -> p.following
+                  is Placed.Refused -> null
+                }
+              }
+            }
+            busy = false
+          }
+        },
+      )
+    }
 
     SectionCard("Buy or sell a symbol", gap = 14.dp) {
       Field(
@@ -781,6 +840,23 @@ fun TradeScreen(nav: NavHostController) {
         value = symbol,
         onValueChange = { symbol = it.uppercase() },
       )
+      if (suggestions.isNotEmpty()) {
+        Row(
+          Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          suggestions.forEach { s ->
+            OutlinePill(
+              label = s,
+              enabled = true,
+              borderColor = if (s == symbol) MerryColors.lime else MerryColors.line,
+              disabledAlpha = DISABLED_ADD,
+              verticalPadding = 7.dp,
+              onClick = { symbol = s },
+            )
+          }
+        }
+      }
       Field(
         label = "Amount (USDG)",
         value = amount,
@@ -795,23 +871,15 @@ fun TradeScreen(nav: NavHostController) {
         listOf("buy", "sell").forEach { side ->
           Btn(
             label = side.replaceFirstChar { it.uppercase() },
-            enabled = !busy && symbol.isNotBlank() && (amount.toDoubleOrNull() ?: 0.0) > 0,
+            enabled = !busy && card == null && symbol.isNotBlank() && (amount.trim().toDoubleOrNull() ?: 0.0) > 0,
             modifier = Modifier.weight(1f),
-            onClick = {
-              busy = true; followed = null
-              scope.launch {
-                val (r, id) = placeOrder(c.repo, side, symbol, amount.toDouble())
-                note = when (r) { is Acted.Ok -> r.line; is Acted.Failed -> r.line; else -> null }
-                busy = false
-                follow(id)
-              }
-            },
+            onClick = { open(side, symbol) },
           )
         }
       }
       Note(
-        "Your key's per-trade and per-day caps still decide whether it goes through. " +
-          "A sell clamps down to the position; a bonding-curve coin must be sold whole.",
+        "Nothing is placed until you confirm. Your key's per-trade and per-day caps still decide whether it goes " +
+          "through. A sell clamps down to the position; a bonding-curve coin must be sold whole.",
       )
     }
 
@@ -822,27 +890,57 @@ fun TradeScreen(nav: NavHostController) {
         onValueChange = { query = it },
       )
       FlowPrimary(
-        label = "Find it and buy",
-        enabled = !busy && query.isNotBlank() && (amount.toDoubleOrNull() ?: 0.0) > 0,
-        onClick = {
-          busy = true; followed = null
-          scope.launch {
-            val (r, id) = snipe(c.repo, query, amount.toDouble())
-            note = when (r) {
-              is Acted.Ok -> r.line
-              is Acted.Failed -> r.line
-              // TWO COINS WITH ONE NAME IS A QUESTION, NOT A PICK.
-              is Acted.Ambiguous -> r.line + " — " + r.candidates.joinToString(", ")
-              is Acted.NeedsSignature -> r.line
-            }
-            busy = false
-            follow(id)
-          }
-        },
+        label = "Find it",
+        enabled = !busy && card == null && query.isNotBlank() && (amount.trim().toDoubleOrNull() ?: 0.0) > 0,
+        onClick = { open("snipe", query) },
       )
       Note(
-        "If more than one coin answers to that name it asks rather than guesses, and if your " +
-          "key doesn't cover it yet it says so instead of failing.",
+        "It looks the coin up first and shows you which one it found — its address too — before anything is " +
+          "bought. If more than one coin answers to that name it asks rather than guesses.",
+      )
+    }
+  }
+}
+
+/**
+ * THE TRADE SCREEN'S CARD — the same contract as the chat's: the sentence from
+ * the registry, real money or paper, the limit, and two equal buttons.
+ */
+@Composable
+private fun TradeConfirm(card: TradeCard, busy: Boolean, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+  SectionCard(gap = 8.dp) {
+    card.found?.let { Note("Found: ${it.symbol} at ${it.short ?: it.address}") }
+    Text(
+      text = card.sentence,
+      style = TextStyle(fontFamily = sans(13.5.sp), fontSize = 13.5.sp, lineHeight = 21.6.sp),
+      color = MerryColors.tx,
+    )
+    Note(card.money)
+    when (val limit = card.limit) {
+      is LimitCheck.Over -> Text(
+        text = limit.line,
+        style = TextStyle(fontFamily = sans(12.sp), fontSize = 12.sp, lineHeight = 18.sp),
+        color = MerryColors.down,
+      )
+      is LimitCheck.Unread -> Note(limit.note)
+      LimitCheck.Within -> Unit
+    }
+    Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      ResignPill(
+        label = when {
+          busy -> "Doing it…"
+          card.kind == "snipe" -> "Yes, look it up"
+          else -> "Yes, place it"
+        },
+        enabled = card.canConfirm && !busy,
+        onClick = onConfirm,
+      )
+      OutlinePill(
+        label = "Not now",
+        enabled = !busy,
+        borderColor = MerryColors.line,
+        disabledAlpha = DISABLED_ADD,
+        onClick = onDismiss,
       )
     }
   }
@@ -851,43 +949,52 @@ fun TradeScreen(nav: NavHostController) {
 // ── RISK ────────────────────────────────────────────────────────────────────
 
 /**
- * One tap for sizing and both exit rules.
+ * One tap for sizing and both exit rules — opening on the rung the owner is on.
  *
  * AND WHAT IT CANNOT REACH, said on the screen: the per-trade and per-day caps
  * live in the signature and are enforced on-chain. No settings write moves
- * them — only a new signature does — and a risk control that quietly implied
- * otherwise would be the most expensive kind of wrong.
+ * them — only a new signature does.
  *
- * THE CONTROL IS `.risk-option`, WHICH IS THE WEB'S OWN ELEMENT FOR THIS EXACT
- * QUESTION — `HostedControls.tsx:142-171` renders the same three profiles from
- * the same `RISK_PROFILES` table, and terminal.css:7576-7594 styles them:
- * `.risk-options { display: flex; flex-direction: column; gap: 8px }` over
- * `.risk-option { padding: 11px 14px; border: 1px solid var(--line);
- * border-radius: 14px; background: transparent; text-align: left; gap: 3px }`,
- * with `b` at 14px/600, `span` at 12.5px/1.5 in `--tx-2`, `.on` changing only
- * `border-color` to `--lime`, and `:disabled` at opacity .6.
+ * THE CURRENT RUNG IS READ, NOT REMEMBERED. The screen opened blank, so an
+ * owner on Careful saw three unselected options and could not tell which one
+ * they were on. It reads /api/settings and matches all six saved dials against
+ * the table (riskLevelOf); a hand-tuned book matches nothing and says so,
+ * rather than highlighting the nearest rung.
  *
- * SO THE WHOLE ROW IS THE TAP TARGET AND SELECTION IS A BORDER. There is no
- * "Choose" / "Selected" button beside each card any more — the web has never had
- * one, and a control whose label says "Selected" is a second place the selected
- * state can disagree with the first. Note the ground is TRANSPARENT: these sit
- * on the page, not on a card, which is what keeps three of them from reading as
- * three separate sections.
+ * A TAP WRITES FOR THE WALLET THE SCREEN WAS READ FOR: the envelope's `owner`
+ * goes with the PUT, so a wallet that signed in since gets a 409 and nothing
+ * written.
  *
- * The sheet's reason for three rungs rather than a slider is worth keeping in
- * view: "a slider implies a continuum between the rungs that does not exist, and
- * invites somebody to land between two coherent sets of numbers."
+ * THE CONTROL IS `.risk-option`, the web's own element for this question
+ * (`HostedControls.tsx`), styled by terminal.css:7576-7594: the whole row is the
+ * tap target and selection is a lime border. Three rungs rather than a slider:
+ * "a slider implies a continuum between the rungs that does not exist".
  */
 @Composable
 fun RiskScreen(nav: NavHostController) {
   val c = LocalContainer.current
+  var read by remember { mutableStateOf<Loaded<SettingsEnvelope>>(Loaded.Loading) }
   var current by remember { mutableStateOf<String?>(null) }
+  var saved by remember { mutableStateOf<String?>(null) }
   var busy by remember { mutableStateOf(false) }
   var note by remember { mutableStateOf<String?>(null) }
   val scope = rememberCoroutineScope()
 
+  LaunchedEffect(Unit) {
+    read = c.api.settings().toLoaded()
+    current = riskLevelOf((read as? Loaded.Value)?.value?.values)
+  }
+
   Page("How much risk?", nav) {
     note?.let { Notice("Risk", it) }
+    when (val r = read) {
+      is Loaded.Refused -> Notice("Risk", "I couldn't read your current dials — ${r.message}")
+      is Loaded.Unreachable -> Notice(
+        "Risk",
+        "I couldn't read your current dials, so none is marked. " + ApiResult.Unreachable(r.cause, r.unreadable).said,
+      )
+      else -> Unit
+    }
 
     // `.risk-options` — a column at gap 8, not a stack of cards at the page gap.
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -897,34 +1004,42 @@ fun RiskScreen(nav: NavHostController) {
           blurb = p.blurb,
           // The numbers this level actually writes. DM Sans rather than
           // [dev.merrymen.app.ui.Numerals]: it is a sentence containing figures,
-          // not a column of them, so nothing here has to line up with anything
-          // above it.
+          // not a column of them.
           figures = "Sells at ${p.stopLossBps / 100}% down or ${p.takeProfitBps / 100}% up · " +
             "$${p.buyPerTickUsdg} a trade · slippage ${p.slippageBps / 100.0}%",
           selected = current == p.level,
           enabled = !busy,
           onClick = {
             busy = true
+            note = null
             scope.launch {
-              val r = applyRisk(c.repo, p.level)
-              note = when (r) { is Acted.Ok -> r.line; is Acted.Failed -> r.line; else -> null }
-              if (r is Acted.Ok) current = p.level
+              val owner = (read as? Loaded.Value)?.value?.owner
+              when (val r = applyRisk(c.repo, p.level, owner)) {
+                is Acted.Ok -> {
+                  current = p.level
+                  saved = p.level
+                  note = r.line
+                }
+                is Acted.Failed -> note = r.line
+              }
               busy = false
             }
           },
         )
       }
     }
+    if (read is Loaded.Value && current == null && saved == null) {
+      Note("Your dials are set by hand right now — picking a level replaces them.")
+    }
 
     SectionCard("What this does not touch", gap = 12.dp) {
       Note(
-        "Your per-trade and per-day caps are sealed into your key and enforced on-chain. " +
-          "Nothing on this screen can move them — only a new signature can.",
+        "This sets how I size and when I sell. Your per-trade and per-day caps are sealed into your key and " +
+          "enforced on-chain — nothing on this screen can move them, only a new signature can.",
       )
-      // `LimitsPanel` (HostedControls.tsx:176) makes "Edit signed limits" its
-      // `.flow-primary` — the signature-requiring action is the PRIMARY here and
-      // is not dressed as a danger. What marks it as consequential is the
-      // sentence above it, which is why that sentence is not optional.
+      // `LimitsPanel` makes "Edit signed limits" its `.flow-primary` — the
+      // signature-requiring action is the PRIMARY here and is not dressed as a
+      // danger. The sentence above it is what marks it as consequential.
       FlowPrimary(
         label = "Edit signed limits",
         enabled = true,

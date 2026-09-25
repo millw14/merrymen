@@ -1,66 +1,777 @@
 package dev.merrymen.app.data
 
 import android.content.Context
+import dev.merrymen.app.net.Asked
+import dev.merrymen.app.net.ChatBody
+import dev.merrymen.app.net.ChatCommand
+import dev.merrymen.app.net.ChatTurnWire
+import dev.merrymen.app.net.Feed
+import dev.merrymen.app.net.GrantView
 import dev.merrymen.app.net.MerrymenApi
+import dev.merrymen.app.net.ORDER_ID
+import dev.merrymen.app.net.OrderReceipt
+import dev.merrymen.app.net.SettingsEnvelope
+import dev.merrymen.app.net.SnipeTarget
+import dev.merrymen.app.net.askAgent
+import dev.merrymen.app.net.orderCeiling
+import dev.merrymen.app.net.perTradeUsdg
+import dev.merrymen.app.net.pollOrder
+import dev.merrymen.app.net.receiptOf
+import dev.merrymen.app.net.valueOrNull
+import dev.merrymen.app.ui.asksAmount
+import dev.merrymen.app.ui.chatStateOf
+import dev.merrymen.app.ui.failureLine
+import dev.merrymen.app.ui.retryHelps
+import dev.merrymen.app.ui.runConfirmedCard
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import java.io.File
+import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+
+// ── the thread's lines ──────────────────────────────────────────────────────
 
 /**
- * THE ONE CHAT THREAD, FOR THE WHOLE APP — a stub with a fixed contract.
- *
- * The conversation has to outlive the Chat screen: a reply that arrives while
- * the owner is on the Feed, an order placed from chat whose outcome lands
- * minutes later, a thread that survives the app being killed. None of that can
- * live in a composable, so it lives here, app-scoped, held by AppContainer as
- * `container.chat`.
- *
- * THE CONTRACT, which other code is built against and which must not change:
- *   - constructed once as ChatThread(context, api, repo, appScope);
- *   - [unread] counts agent lines and receipts that landed while Chat was not
- *     on screen (the tab bar draws its dot from it);
- *   - [forget] drops everything that belongs to the current wallet. It is
- *     registered as a forget hook here, so it runs on sign-out, on a wallet
- *     switch and on a move to another server without any screen having to
- *     remember to call it.
- *
- * WHAT [forget] MAY DO, because it runs as a [ForgetHook] inside the moment a
- * wallet's turn ends (the full rules are on ForgetHook):
- *   - it runs on Dispatchers.IO, so deleting the thread's file is fine there;
- *     what it publishes must be safe to write off the main thread;
- *   - it must never call repo.refreshIdentity(), signOut(), setOrigin(),
- *     adoptWebSession() or bootstrap() — each waits for the turn [forget] is
- *     running inside;
- *   - it does NOT run when a session merely expires (401, or address null), so
- *     what the Chat tab renders must follow repo.signedIn as well, and a
- *     thread persisted to disk must be keyed by address.
- *
- * Work launched in [appScope] that throws is logged by the scope's handler
- * rather than killing the process, but a failure the owner must hear about
- * (an order whose outcome is unknown) has to be caught and said here.
- *
- * The thread itself — streaming, persistence per address, order follow-through
- * and receipts — is filled in behind this contract. Until then it holds
- * nothing, so there is nothing to forget but the count.
+ * The order a line is about, and — once the worker answered — its receipt.
+ * The line that PLACED it also keeps [serverPlacedAt], the server's own epoch
+ * ms for the placement. [outcome] marks the line that carries the answer, so
+ * a screen that placed the order can find what became of it.
  */
-class ChatThread(
-  private val context: Context,
+@Serializable
+data class LineOrder(
+  val id: String,
+  val receipt: OrderReceipt? = null,
+  val serverPlacedAt: Long? = null,
+  val outcome: Boolean = false,
+)
+
+/**
+ * ONE LINE OF THE CONVERSATION (the web's account.ts ChatMessage).
+ *
+ * `owner` is what they typed or confirmed; `agent` is the agent's words — a
+ * model's reply, or the worker's own sentence about an order it ran; `event`
+ * is something that HAPPENED, templated from ledger fields. [failed] marks a
+ * failure said in the agent's voice by THIS APP, which is kept out of what the
+ * model is told it said. [retry] is the question to put again, this session
+ * only: it is never written to disk.
+ */
+@Serializable
+data class ChatLine(
+  val id: String,
+  val role: String,
+  /** Epoch ms on this phone's clock; null for a line from before times were kept. */
+  val at: Long?,
+  val text: String,
+  val side: String? = null,
+  val order: LineOrder? = null,
+  val failed: String? = null,
+  @Transient val retry: String? = null,
+)
+
+/** An order still being followed, and when to stop asking — on this phone's clock. */
+@Serializable
+data class KeptOrder(val id: String, val until: Long)
+
+/** Whose thread is in hand, and what is in it. [key] null is "nobody's": nothing is shown or kept. */
+data class ThreadState(val key: String?, val messages: List<ChatLine>, val orders: List<KeptOrder>) {
+  /**
+   * THE LINES A SCREEN MAY DRAW for the session as it stands NOW — none unless
+   * this thread is that session's. The forget hooks do not run when a session
+   * merely lapses, and the thread catches up with a new wallet a moment after
+   * the session does; in both gaps the last owner's words must not be drawn.
+   */
+  fun linesFor(hosted: Boolean?, address: String?): List<ChatLine> {
+    val now = chatKeyFor(hosted, address)
+    return if (now != null && key == now) messages else emptyList()
+  }
+}
+
+/** How many lines are kept. Two per exchange, so forty exchanges. */
+const val MAX_LINES = 80
+
+/**
+ * WHOSE CONVERSATION THIS IS, or null when there must be none.
+ *
+ * The signed-in address, lowercased, on a hosted server; "self" on a
+ * self-hosted one, which has one operator and no sign-in. Hosted and signed
+ * out, or not yet asked, is null: a visitor with no wallet has no agent to
+ * have talked to, and an anonymous bucket would be the one shared key this
+ * whole store exists to avoid. An address that is not an address is null too,
+ * because the key names a file.
+ */
+fun chatKeyFor(hosted: Boolean?, address: String?): String? = when {
+  hosted == false -> "self"
+  hosted == true && address != null -> address.lowercase().takeIf { ADDRESS.matches(it) }
+  else -> null
+}
+
+/** The wallet a key belongs to, for the `owner` every write carries; null self-hosted. */
+fun ownerOfKey(key: String?): String? = key?.takeIf { ADDRESS.matches(it) }
+
+private val ADDRESS = Regex("^0x[0-9a-f]{40}$")
+
+// ── where a thread is kept ──────────────────────────────────────────────────
+
+/**
+ * ONE THREAD PER KEY, on this device only. Never uploaded, never shared: this
+ * is one phone remembering what it already displayed. An interface so a JVM
+ * test can keep it in a directory of its own.
+ */
+interface ThreadStore {
+  fun load(key: String): String?
+  fun save(key: String, raw: String)
+  fun delete(key: String)
+  /** Delete every kept thread but [key]'s — all of them when null. */
+  fun deleteAllBut(key: String?)
+}
+
+/** The app's store: a file per key in its own directory under filesDir. */
+class FileThreadStore(private val dir: File) : ThreadStore {
+  private fun fileOf(key: String) = File(dir, "thread-$key.json")
+
+  override fun load(key: String): String? = try {
+    fileOf(key).takeIf { it.isFile }?.readText()
+  } catch (e: IOException) {
+    null
+  }
+
+  override fun save(key: String, raw: String) {
+    try {
+      dir.mkdirs()
+      // Written beside and moved over, so a process killed mid-write leaves the
+      // last whole thread rather than half of one.
+      val tmp = File(dir, "thread-$key.json.tmp")
+      tmp.writeText(raw)
+      if (!tmp.renameTo(fileOf(key))) {
+        fileOf(key).delete()
+        tmp.renameTo(fileOf(key))
+      }
+    } catch (e: IOException) {
+      android.util.Log.w("ChatThread", "could not keep the thread", e)
+    }
+  }
+
+  override fun delete(key: String) {
+    fileOf(key).delete()
+  }
+
+  override fun deleteAllBut(key: String?) {
+    dir.listFiles()?.forEach { f ->
+      if (f.name.startsWith("thread-") && (key == null || f.name != fileOf(key).name)) f.delete()
+    }
+  }
+}
+
+@Serializable
+internal data class KeptFile(val v: Int = 2, val messages: List<ChatLine> = emptyList(), val orders: List<KeptOrder> = emptyList())
+
+private val keptJson = Json {
+  ignoreUnknownKeys = true
+  explicitNulls = false
+}
+
+private val ROLES = setOf("owner", "agent", "event")
+private val FAILURES = setOf("signed-out", "no-llm", "llm-error", "unreadable", "network", "timeout", "cut-off", "server", "no-address")
+
+/**
+ * A kept thread, SHAPE-CHECKED line by line rather than trusted: it is shown
+ * as the agent's own words, and a receipt as a fact about somebody's money. A
+ * line that fails its checks is dropped; a file that will not parse is an
+ * empty thread, never a crash.
+ */
+internal fun decodeThread(raw: String?): KeptFile {
+  if (raw.isNullOrBlank()) return KeptFile()
+  val root = try {
+    keptJson.parseToJsonElement(raw) as? JsonObject
+  } catch (e: IllegalArgumentException) {
+    null
+  } ?: return KeptFile()
+  val lines = (root["messages"] as? JsonArray).orEmpty().mapNotNull { el ->
+    val line = try {
+      keptJson.decodeFromJsonElement(ChatLine.serializer(), el)
+    } catch (e: IllegalArgumentException) {
+      return@mapNotNull null
+    }
+    if (line.id.isEmpty() || line.id.length > 200 || line.role !in ROLES) return@mapNotNull null
+    // A receipt goes through the route's own field checks again: it is printed
+    // as a fact about money, and this file is only as trustworthy as the disk.
+    val order = line.order?.takeIf { ORDER_ID.matches(it.id) }?.let { o ->
+      o.copy(receipt = o.receipt?.let { r -> receiptOf(keptJson.encodeToJsonElement(OrderReceipt.serializer(), r)) })
+    }
+    line.copy(
+      text = line.text.take(8_000),
+      side = line.side?.takeIf { it == "buy" || it == "sell" },
+      order = order,
+      failed = line.failed?.takeIf { it in FAILURES },
+    )
+  }
+  val orders = (root["orders"] as? JsonArray).orEmpty().mapNotNull { el ->
+    try {
+      keptJson.decodeFromJsonElement(KeptOrder.serializer(), el).takeIf { ORDER_ID.matches(it.id) }
+    } catch (e: IllegalArgumentException) {
+      null
+    }
+  }
+  return KeptFile(messages = lines.takeLast(MAX_LINES), orders = orders)
+}
+
+// ── confirming ──────────────────────────────────────────────────────────────
+
+/**
+ * WHAT A CONFIRMED CARD MAY DO, BOUND TO THE OWNER WHO WAS SHOWN IT.
+ *
+ * Captured when the card is made. Once that owner has gone from this phone
+ * each of these is a no-op, so a confirm still in flight when another wallet
+ * signs in cannot write "placed it" into the next owner's thread, follow the
+ * previous owner's order there, or clear the next owner's card.
+ */
+interface ConfirmScope {
+  /**
+   * The wallet this acts for, lowercased — sent with EVERY write that acts, so
+   * the route refuses (409) a session another wallet took over unseen. Null
+   * only self-hosted: one operator, no sign-in, nobody to name.
+   */
+  val owner: String?
+
+  /**
+   * May a request that ACTS still go out? Only while the owner who was shown
+   * the card has been the owner here the whole time: false from the moment it
+   * changes, and still false if they come back. A request carries the session
+   * the phone holds when it LEAVES, so this is asked before anything is sent.
+   */
+  fun alive(): Boolean
+
+  fun say(role: String, text: String, order: LineOrder? = null)
+  fun followOrder(id: String, expiresInMs: Long?)
+  fun clearCard()
+  /** Put a second card up for the same owner — the coin a snipe found, to be confirmed before it is bought. */
+  fun propose(command: ChatCommand, found: SnipeTarget)
+  fun refreshSettings()
+}
+
+/**
+ * THE ONE THING THE AGENT HAS ASKED PERMISSION TO DO.
+ *
+ * HELD IN MEMORY AND NEVER WRITTEN TO DISK — the web's rule, and the plan's
+ * "persist pending cards" is not followed here on purpose: a card restored
+ * after a cold start would be an offer to act made by nobody, about a moment
+ * that has passed. It lives until the next message, a decline, or the owner
+ * changing, and runs only from a tap.
+ */
+data class PendingCard(val command: ChatCommand, val scope: ConfirmScope, val found: SnipeTarget? = null)
+
+/** What the chat knows about the book when it asks: each read's last good answer, or null. */
+data class ChatSnapshot(val feed: Feed?, val grants: GrantView?, val settings: SettingsEnvelope?)
+
+/**
+ * THE ONE CHAT THREAD, FOR THE WHOLE APP.
+ *
+ * The conversation has to outlive the Chat screen: a reply still streaming when
+ * the owner switches tab, an order placed from chat or the Trade screen whose
+ * outcome lands minutes later, a thread that survives the app being killed. So
+ * it lives here, app-scoped, held by AppContainer as `container.chat`, and the
+ * screens only draw it.
+ *
+ * KEPT PER WALLET, FORGOTTEN WHEN THE WALLET GOES. The thread is stored under
+ * [chatKeyFor] — the signed-in address — in its own file. Its forget hook
+ * deletes the leaving owner's file on sign-out, a wallet switch or a server
+ * change. The hooks do NOT run on a cold start or when a session merely
+ * expires, so the key itself follows repo.signedIn: whatever key the session
+ * answers with is the only thread loaded, the previous key's file is deleted
+ * when the key changes (the web's rule), and on loading one key every other
+ * kept thread is deleted — so a wallet that signs in on a phone another wallet
+ * used before, after a cold start the hooks never saw, finds its own empty
+ * thread and nothing of the other's. A screen still renders only when
+ * [ThreadState.key] matches the key the session gives NOW.
+ *
+ * WHAT IS KEPT: the lines, capped at [MAX_LINES], and the orders still being
+ * followed with their give-up moment, so a cold start resumes the wait. NOT
+ * kept: a card (see [PendingCard]) or a Retry chip.
+ *
+ * The forget hook keeps the HOOK RULES (see ForgetHook): it runs on IO, touches
+ * only this thread's state, and never calls back into the Repository.
+ */
+class ChatThread internal constructor(
   private val api: MerrymenApi,
   private val repo: Repository,
   /** Outlives every screen; work that must finish after the Chat tab closes runs here. */
   private val appScope: CoroutineScope,
+  private val store: ThreadStore,
+  private val clock: () -> Long = System::currentTimeMillis,
+  private val pause: suspend (Long) -> Unit = { delay(it) },
+  private val io: CoroutineDispatcher = Dispatchers.IO,
 ) {
+  constructor(context: Context, api: MerrymenApi, repo: Repository, appScope: CoroutineScope) :
+    this(api, repo, appScope, FileThreadStore(File(context.filesDir, "chat")))
+
+  private val state = MutableStateFlow(ThreadState(null, emptyList(), emptyList()))
+
+  /** The thread in hand. Render it only when its key is the key the session gives now. */
+  val thread: StateFlow<ThreadState> = state.asStateFlow()
+
   private val _unread = MutableStateFlow(0)
-  /** New lines the owner has not seen. 0 draws no dot. */
+  /** Replies and order outcomes that landed while Chat was not on screen. 0 draws no dot. */
   val unread: StateFlow<Int> = _unread.asStateFlow()
+
+  private val _sending = MutableStateFlow(false)
+  /** A reply is on its way — the typing bubble. */
+  val sending: StateFlow<Boolean> = _sending.asStateFlow()
+
+  private val _streaming = MutableStateFlow<String?>(null)
+  /** What of that reply may be shown so far (never a piece of a marker), or null before its first words. */
+  val streaming: StateFlow<String?> = _streaming.asStateFlow()
+
+  private val _card = MutableStateFlow<PendingCard?>(null)
+  val card: StateFlow<PendingCard?> = _card.asStateFlow()
+
+  private val _confirming = MutableStateFlow(false)
+  /** The card is being carried out. Held here beside the card, so a tab switch cannot re-arm it. */
+  val confirming: StateFlow<Boolean> = _confirming.asStateFlow()
+
+  private val _draft = MutableStateFlow("")
+  /** What the owner is typing. Kept here so a failed send can hand the words back. */
+  val draft: StateFlow<String> = _draft.asStateFlow()
+
+  private val _snapshot = MutableStateFlow<ChatSnapshot?>(null)
+  val snapshot: StateFlow<ChatSnapshot?> = _snapshot.asStateFlow()
+
+  private val _ceiling = MutableStateFlow<Double?>(null)
+  /** The chat-order ceiling as last read, or null — and then no chip offers an amount. */
+  val ceiling: StateFlow<Double?> = _ceiling.asStateFlow()
+
+  @Volatile private var open = false
+  @Volatile private var lastKey: String? = null
+  /** Moves on every change of owner, there and back included; see [ConfirmScope.alive]. */
+  private val ownerTurn = AtomicLong(0)
+  /** Guards the disk: a save reads the thread inside it, so the last save always writes the newest. */
+  private val diskLock = Mutex()
+  /** The key saves may write under. Null after forget, so a save still queued cannot bring a file back. */
+  @Volatile private var diskKey: String? = null
+  private val following: MutableSet<String> = ConcurrentHashMap.newKeySet()
+  private val sendingNow = java.util.concurrent.atomic.AtomicBoolean(false)
+  private val confirmHold = AtomicReference<Any?>(null)
+  private val ceilingRead = AtomicLong(0)
+  private val seq = AtomicLong(0)
+  @Volatile private var good: Pair<String, ChatSnapshot>? = null
 
   init {
     repo.addForgetHook { forget() }
+    appScope.launch {
+      combine(repo.signedIn, repo.hosted) { address, hosted -> chatKeyFor(hosted, address) }
+        .distinctUntilChanged()
+        .collect { switchTo(it) }
+    }
   }
 
-  /** Drop the current wallet's thread. Runs on sign-out and on a wallet switch. */
-  suspend fun forget() {
+  /** The key the session gives right now — read directly, never through the collector's lag. */
+  private fun keyNow(): String? = chatKeyFor(repo.hosted.value, repo.signedIn.value)
+
+  private suspend fun switchTo(key: String?) {
+    val previous = lastKey
+    lastKey = key
+    ownerTurn.incrementAndGet()
+    confirmHold.set(null)
+    _card.value = null
+    _confirming.value = false
+    _streaming.value = null
     _unread.value = 0
+    _snapshot.value = null
+    _ceiling.value = null
+    _draft.value = ""
+    val kept = withContext(io) {
+      diskLock.withLock {
+        // The leaving owner's thread is DELETED, not hidden — the web's rule —
+        // and so is any other wallet's a cold start left behind.
+        if (previous != null && previous != key) store.delete(previous)
+        // Only once a key is KNOWN: at a cold start the key is null until the
+        // session answers, and clearing then would delete the thread about to
+        // be loaded.
+        if (key != null) store.deleteAllBut(key)
+        diskKey = key
+        if (key == null) KeptFile() else decodeThread(store.load(key))
+      }
+    }
+    if (lastKey != key) return
+    state.value = ThreadState(key, kept.messages, kept.orders)
+    if (key != null) kept.orders.forEach { startFollow(key, it) }
   }
+
+  /** Drop the current wallet's thread. A forget hook: runs on sign-out, a wallet switch and a server change. */
+  suspend fun forget() {
+    val key = state.value.key ?: lastKey
+    ownerTurn.incrementAndGet()
+    confirmHold.set(null)
+    state.value = ThreadState(null, emptyList(), emptyList())
+    _card.value = null
+    _confirming.value = false
+    _streaming.value = null
+    _unread.value = 0
+    _snapshot.value = null
+    _ceiling.value = null
+    _draft.value = ""
+    good = null
+    diskLock.withLock {
+      diskKey = null
+      if (key != null) store.delete(key)
+    }
+  }
+
+  /** The Chat screen is showing (or not). What lands while it is not counts toward the dot. */
+  fun setOpen(showing: Boolean) {
+    open = showing
+    if (showing) {
+      _unread.value = 0
+      val key = state.value.key ?: return
+      appScope.launch { readSnapshot(key) }
+      appScope.launch { readCeiling(key) }
+    }
+  }
+
+  fun setDraft(text: String) {
+    _draft.value = text
+  }
+
+  fun dismissCard() {
+    _card.value = null
+  }
+
+  /** Empty this owner's thread. */
+  fun clearThread() {
+    val key = state.value.key ?: return
+    update(key) { it.copy(messages = emptyList(), orders = emptyList()) }
+    _card.value = null
+    _streaming.value = null
+  }
+
+  private fun arrived() {
+    if (!open) _unread.update { it + 1 }
+  }
+
+  private fun lineId(prefix: String) = "$prefix-${clock().toString(36)}-${seq.getAndIncrement().toString(36)}"
+
+  /**
+   * Change THIS owner's thread — never whoever is in hand by the time an answer
+   * lands. Every change goes through here, so every change is capped and kept.
+   */
+  private fun update(key: String, fn: (ThreadState) -> ThreadState): Boolean {
+    var changed = false
+    state.update { t ->
+      if (t.key == key) {
+        changed = true
+        val next = fn(t)
+        next.copy(messages = next.messages.takeLast(MAX_LINES))
+      } else {
+        t
+      }
+    }
+    if (changed) keep()
+    return changed
+  }
+
+  private fun keep() {
+    appScope.launch(io) {
+      diskLock.withLock {
+        val t = state.value
+        val key = t.key ?: return@withLock
+        if (key != diskKey) return@withLock
+        if (t.messages.isEmpty() && t.orders.isEmpty()) {
+          store.delete(key)
+        } else {
+          val file = KeptFile(messages = t.messages, orders = t.orders)
+          store.save(key, keptJson.encodeToString(KeptFile.serializer(), file))
+        }
+      }
+    }
+  }
+
+  private fun append(key: String, line: ChatLine) = update(key) { it.copy(messages = it.messages + line) }
+
+  // ── what the chat knows ──────────────────────────────────────────────────
+
+  /**
+   * Settings, feed and grants, read together. Each keeps its LAST GOOD answer
+   * for this owner when a read fails; one never read is null, and the chat
+   * state then says it could not be read rather than handing the model a
+   * default dressed as the owner's choice. A feed that answers source "none"
+   * was not read.
+   */
+  internal suspend fun readSnapshot(key: String): ChatSnapshot {
+    val fresh = coroutineScope {
+      val feed = async { api.feed().valueOrNull()?.takeIf { it.source != "none" } }
+      val grants = async { api.grants().valueOrNull() }
+      val settings = async { api.settings().valueOrNull() }
+      ChatSnapshot(feed.await(), grants.await(), settings.await())
+    }
+    val last = good?.takeIf { it.first == key }?.second
+    val merged = ChatSnapshot(
+      feed = fresh.feed ?: last?.feed,
+      grants = fresh.grants ?: last?.grants,
+      settings = fresh.settings ?: last?.settings,
+    )
+    if (keyNow() == key && state.value.key == key) {
+      good = key to merged
+      _snapshot.value = merged
+    }
+    return merged
+  }
+
+  /**
+   * THE CEILING, READ AGAIN — withdrawn while it is read, and after a read that
+   * failed: no amount is offered against a limit that is being, or could not
+   * be, read. Only the newest read may set it.
+   */
+  internal suspend fun readCeiling(key: String) {
+    val read = ceilingRead.incrementAndGet()
+    _ceiling.value = null
+    val v = api.orderCeiling()
+    if (v != null && state.value.key == key && ceilingRead.get() == read) _ceiling.value = v
+  }
+
+  // ── sending ──────────────────────────────────────────────────────────────
+
+  /** Send in the app's scope, so leaving the screen mid-reply does not lose the reply. */
+  fun send(question: String) {
+    appScope.launch { sendNow(question, null) }
+  }
+
+  /** Ask again the question a failed line carries. */
+  fun retry(lineId: String) {
+    val m = state.value.messages.firstOrNull { it.id == lineId } ?: return
+    val q = m.retry ?: return
+    appScope.launch { sendNow(q, lineId) }
+  }
+
+  /**
+   * ONE MESSAGE AND WHAT BECAME OF IT.
+   *
+   * The owner's line appears at once, the reply streams into the typing
+   * bubble, and a failure is said in the agent's voice (failureLine), with a
+   * Retry where asking again can work and the words handed back to the draft.
+   * The model is told what was said BEFORE this line, failures left out.
+   */
+  internal suspend fun sendNow(question: String, retryOf: String?): Boolean {
+    val q = question.trim()
+    if (q.isEmpty()) return false
+    val key = state.value.key ?: return false
+    if (keyNow() != key) return false
+    if (!sendingNow.compareAndSet(false, true)) return false
+    _sending.value = true
+    _streaming.value = null
+    _card.value = null
+    try {
+      val kept = state.value.messages
+      // SENDING THE FAILED QUESTION AGAIN IS A RETRY, however it was sent.
+      val again = retryOf ?: kept.lastOrNull()?.takeIf { it.retry == q }?.id
+      val history = if (again != null) historyBeforeRetry(kept, again, q) else historyFor(kept)
+      if (again != null) {
+        update(key) { t -> t.copy(messages = t.messages.filter { it.id != again }) }
+      } else {
+        append(key, ChatLine(lineId("owner"), "owner", clock(), q))
+      }
+      _draft.update { d -> if (d.trim() == q) "" else d }
+      val snap = readSnapshot(key)
+      val stateJson = chatStateOf(snap.feed, snap.settings, snap.grants, clock())
+      val out = api.askAgent(ChatBody(message = q, state = stateJson.toString(), history = history)) { visible ->
+        if (state.value.key == key) _streaming.value = visible
+      }
+      if (state.value.key != key) return false
+      when (out) {
+        is Asked.Replied -> {
+          append(key, ChatLine(lineId("agent"), "agent", clock(), out.reply))
+          if (asksAmount(out.reply)) appScope.launch { readCeiling(key) }
+          // ONLY `done` MAY RAISE A CARD, and only for the owner who asked.
+          _card.value = out.command?.let { PendingCard(it, Scope(key, ownerTurn.get(), chatCard = true)) }
+        }
+        is Asked.Failed -> {
+          val line = failureLine(out.failure, out.status, out.kind, out.provider)
+          val retry = if (retryHelps(out.failure, out.kind)) q else null
+          append(key, ChatLine(lineId("agent"), "agent", clock(), line, failed = out.failure, retry = retry))
+          _draft.update { d -> if (d.isNotBlank()) d else q }
+        }
+      }
+      arrived()
+      return out is Asked.Replied
+    } finally {
+      sendingNow.set(false)
+      _sending.value = false
+      _streaming.value = null
+    }
+  }
+
+  // ── cards ────────────────────────────────────────────────────────────────
+
+  /**
+   * A SCOPE FOR A CARD ANOTHER SCREEN MAKES — the Trade screen's — bound to the
+   * owner here now. Its orders are said in this thread and followed here like a
+   * chat order, so the receipt lands in the conversation whichever screen the
+   * owner is on; it never touches the chat's own card.
+   */
+  fun cardScope(): ConfirmScope? {
+    val key = state.value.key ?: return null
+    if (keyNow() != key) return null
+    return Scope(key, ownerTurn.get(), chatCard = false)
+  }
+
+  /**
+   * CARRY OUT THE CARD ONCE. A second tap while one is in flight does nothing,
+   * from whichever screen it came — the hold lives beside the card, not in a
+   * screen, so a tab switch mid-POST cannot bring the same card back ready.
+   * [onNavigate] gets a web path and the command id for a navigate card.
+   */
+  fun confirm(onNavigate: (String, String) -> Unit) {
+    val card = _card.value ?: return
+    val hold = Any()
+    if (!confirmHold.compareAndSet(null, hold)) return
+    _confirming.value = true
+    appScope.launch {
+      try {
+        // The limits as last read: an order past one is refused before it is sent.
+        runConfirmedCard(api, card, _snapshot.value?.grants?.perTradeUsdg, _ceiling.value, onNavigate)
+      } finally {
+        if (confirmHold.compareAndSet(hold, null)) _confirming.value = false
+      }
+    }
+  }
+
+  /**
+   * One owner's scope. [chatCard] is whether it belongs to the chat's card: only
+   * then may it clear or replace that card. A Trade-screen scope says its lines
+   * in the thread, marked as confirmed there, and leaves the chat's card alone.
+   */
+  private inner class Scope(val key: String, val turn: Long, val chatCard: Boolean) : ConfirmScope {
+    override val owner: String? = ownerOfKey(key)
+    override fun alive() = ownerTurn.get() == turn && keyNow() == key && state.value.key == key
+    private fun theirs() = state.value.key == key && keyNow() == key
+    override fun say(role: String, text: String, order: LineOrder?) {
+      val said = if (!chatCard && role == "owner" && text == "✓ Confirmed") "✓ Confirmed on the Trade screen" else text
+      if (theirs()) append(key, ChatLine(lineId(role), role, clock(), said, order = order))
+    }
+    override fun followOrder(id: String, expiresInMs: Long?) {
+      if (theirs()) follow(key, id, expiresInMs)
+    }
+    override fun clearCard() {
+      if (chatCard && theirs()) _card.value = null
+    }
+    override fun propose(command: ChatCommand, found: SnipeTarget) {
+      if (chatCard && alive()) _card.value = PendingCard(command, this, found)
+    }
+    override fun refreshSettings() {
+      if (!theirs()) return
+      appScope.launch { readSnapshot(key) }
+      appScope.launch { readCeiling(key) }
+    }
+  }
+
+  // ── orders, followed here and not by a screen ────────────────────────────
+
+  private fun follow(key: String, id: String, expiresInMs: Long?) {
+    if (!ORDER_ID.matches(id)) return
+    val order = KeptOrder(id, OrderFollow.followDeadline(expiresInMs, clock()))
+    update(key) { t -> if (t.orders.any { it.id == id }) t else t.copy(orders = t.orders + order) }
+    startFollow(key, state.value.orders.firstOrNull { it.id == id } ?: order)
+  }
+
+  /** Every kept order is followed exactly once per owner, the ones a cold start brought back included. */
+  private fun startFollow(key: String, order: KeptOrder) {
+    val tag = "$key|${order.id}"
+    if (!following.add(tag)) return
+    appScope.launch {
+      try {
+        OrderFollow.followUntil(
+          id = order.id,
+          giveUpAt = order.until,
+          poll = { api.pollOrder(it) },
+          sleep = pause,
+          now = clock,
+          // Not "is the screen open": "is this still this owner's thread".
+          alive = { state.value.key == key },
+          say = { line, poll ->
+            // THE WORKER'S WORDS, and its receipt when it wrote one — both read
+            // off the ledger. Nothing here infers an outcome.
+            val landed = update(key) { t ->
+              t.copy(
+                orders = t.orders.filter { it.id != order.id },
+                messages = t.messages + ChatLine(
+                  lineId("order"), "agent", clock(), line,
+                  order = LineOrder(order.id, receipt = poll?.receipt, outcome = true),
+                ),
+              )
+            }
+            // Only an answer that landed in THIS owner's thread lights the dot.
+            if (landed) {
+              arrived()
+              if (poll != null) appScope.launch { readSnapshot(key) }
+            }
+          },
+        )
+      } finally {
+        following.remove(tag)
+      }
+    }
+  }
+}
+
+// ── what the model is told was said ─────────────────────────────────────────
+
+/**
+ * THE LAST EIGHT LINES, as the model hears them: the owner's as theirs, the
+ * agent's as its own, an event or a receipt as the templated line it is. A
+ * failure said in the agent's voice is THIS APP's, not the model's — telling
+ * the model it said "I couldn't reach you" would put words in its mouth about
+ * a network it never saw — so it is left out.
+ */
+fun historyFor(messages: List<ChatLine>): List<ChatTurnWire> =
+  messages
+    .filter { it.text.isNotEmpty() && it.failed == null }
+    .map { m ->
+      val receipt = m.order?.receipt
+      ChatTurnWire(
+        role = if (m.role == "owner") "user" else "assistant",
+        content = when {
+          m.role == "event" && (m.side == "buy" || m.side == "sell") ->
+            "[${if (m.side == "buy") "Buy" else "Sell"}] ${m.text}"
+          receipt != null -> "${receiptText(receipt)} — ${m.text}"
+          else -> m.text
+        },
+      )
+    }
+    .takeLast(8)
+
+/**
+ * What the model hears as said BEFORE a question put again: the failed answer
+ * and the owner's line it answered are left out, so the model does not read
+ * the question asked twice in a row. Whatever else arrived meanwhile stays.
+ */
+fun historyBeforeRetry(messages: List<ChatLine>, failedId: String, question: String): List<ChatTurnWire> {
+  val failedAt = messages.indexOfFirst { it.id == failedId }
+  var askedAt = -1
+  for (i in (if (failedAt < 0) messages.size else failedAt) - 1 downTo 0) {
+    val m = messages[i]
+    if (m.role == "owner" && m.text.trim() == question) {
+      askedAt = i
+      break
+    }
+  }
+  return historyFor(messages.filterIndexed { i, _ -> i != failedAt && i != askedAt })
 }
