@@ -223,6 +223,22 @@ class BeatTest {
     assertEquals(all.size, all.toSet().size)
   }
 
+  @Test fun twoChorusesOfTheSameAgentsOnOneCoinStillHaveTwoKeys() {
+    val hold = page.theses.first { it.action == "hold" && it.symbol == "TSLA" }
+    val at = hold.at!!
+    val rows = listOf(
+      hold.copy(slug = "aaaaaaaaaaaaaaaa", name = "A", reason = "alpha view", at = at, postId = "p1"),
+      hold.copy(slug = "bbbbbbbbbbbbbbbb", name = "B", reason = "alpha view", at = at - 1, postId = "p2"),
+      hold.copy(slug = "aaaaaaaaaaaaaaaa", name = "A", reason = "beta thought", at = at - 2, postId = "p3"),
+      hold.copy(slug = "bbbbbbbbbbbbbbbb", name = "B", reason = "beta thought", at = at - 3, postId = "p4"),
+    )
+    val holds = pillBeats(beatsOf(rows), FeedPill.HOLDS, emptyMap(), emptyMap(), false)
+    assertEquals(2, holds.filterIsInstance<ChorusBeat>().size)
+    assertEquals("the two summaries share an id", 1, holds.map { it.id }.toSet().size)
+    val keys = lanesOf(holds).map { it.key }
+    assertEquals(keys.size, keys.toSet().size)
+  }
+
   @Test fun aRowWithNoSlugOrNoTimeIsNotAPost() {
     assertTrue(beatsOf(listOf(robin.copy(slug = null))).isEmpty())
     assertTrue(beatsOf(listOf(robin.copy(at = null))).isEmpty())

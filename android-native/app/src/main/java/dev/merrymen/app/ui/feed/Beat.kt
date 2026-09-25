@@ -832,9 +832,7 @@ fun whenLabel(b: Beat, nowMs: Long): String {
 sealed interface Lane {
   val key: String
 
-  data class Row(val beat: Beat) : Lane {
-    override val key: String get() = beat.id
-  }
+  data class Row(val beat: Beat, override val key: String = beat.id) : Lane
 
   data class Lull(override val key: String) : Lane
 }
@@ -844,10 +842,22 @@ const val LULL_MS = 3L * 3_600_000L
 
 fun lanesOf(beats: List<Beat>): List<Lane> {
   val out = ArrayList<Lane>(beats.size)
+  // EVERY KEY UNIQUE, because a LazyColumn crashes on a duplicate. Beat ids are
+  // unique per post, but a summary's is built from what it summarises: two
+  // choruses of the same agents on the same coin in two different sentences
+  // are both "chorus-TSLA-a-b". The web only warns about a repeated React key;
+  // here it would take the app down, so a repeat gets a counter.
+  val used = HashSet<String>()
+  fun unique(k: String): String {
+    if (used.add(k)) return k
+    var n = 2
+    while (!used.add("$k#$n")) n++
+    return "$k#$n"
+  }
   beats.forEachIndexed { i, b ->
     val prev = beats.getOrNull(i - 1)
-    if (prev != null && prev.core.rankMs - b.core.rankMs >= LULL_MS) out.add(Lane.Lull("lull-${b.id}"))
-    out.add(Lane.Row(b))
+    if (prev != null && prev.core.rankMs - b.core.rankMs >= LULL_MS) out.add(Lane.Lull(unique("lull-${b.id}")))
+    out.add(Lane.Row(b, unique(b.id)))
   }
   return out
 }
