@@ -21,6 +21,7 @@ import dev.merrymen.app.ui.ownAgentName
 import dev.merrymen.app.ui.ownBookOf
 import dev.merrymen.app.ui.screens.OwnReads
 import dev.merrymen.app.ui.screens.fixRoute
+import dev.merrymen.app.ui.screens.readCircleFor
 import dev.merrymen.app.ui.screens.readSettingsFor
 import dev.merrymen.app.ui.screens.readTelegramFor
 import dev.merrymen.app.ui.sessionNeedsAsking
@@ -151,13 +152,13 @@ class HomeStateTest {
     val reads = OwnReads()
     server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
     server.answer("""{"exists":true,"mode":"live"}""")
-    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 1_000L })
+    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 1_000L }, askWhoIsSignedIn = {})
     assertEquals(120.5, (reads.feed as Loaded.Value).value.equityNow!!, 1e-9)
     assertEquals("0xabc", reads.readFor)
 
     server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
     server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
-    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 2_000L })
+    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 2_000L }, askWhoIsSignedIn = {})
     // The figures stay — with their age said — rather than flapping to an error.
     assertEquals(120.5, (reads.feed as Loaded.Value).value.equityNow!!, 1e-9)
     assertTrue(reads.feedFailure is ApiResult.Unreachable)
@@ -170,10 +171,10 @@ class HomeStateTest {
     val reads = OwnReads()
     server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
     server.answer("""{"exists":true}""")
-    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 1_000L })
+    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 1_000L }, askWhoIsSignedIn = {})
     server.answer("""{"error":"not signed in"}""", code = 401)
     server.answer("""{"exists":false}""")
-    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 2_000L })
+    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 2_000L }, askWhoIsSignedIn = {})
     // A session that ended does not keep a book on screen the server would no
     // longer send.
     val f = reads.feed
@@ -201,6 +202,7 @@ class HomeStateTest {
       "/api/grants" -> json("""{"exists":false}""")
       "/api/settings" -> json(Fixtures.text("probe-settings-signedout.json"))
       // The house defaults' bridge: "no token" — nothing in it says nobody's.
+      "/api/circle" -> json("""{"why":"sign-in","holderAddress":null,"balance":null,"tiers":[]}""")
       "/api/telegram" -> json("""{"enabled":false,"hasToken":false,"connected":false,"botUsername":null,"ownerId":null,"allowlist":[],"linkCode":null,"control":true}""")
       else -> MockResponse().setResponseCode(404)
     }
@@ -256,6 +258,18 @@ class HomeStateTest {
     val read = readSettingsFor(repo.api, repo.signedIn.value, repo.hosted.value) { repo.refreshIdentity() }
     assertEquals("", (read as Loaded.Value).value.env.owner)
     // Settings re-keys on signedIn, and its notice now carries the Sign in.
+    assertNull(repo.signedIn.value)
+    assertTrue(repo.canOfferSignIn.value)
+  }
+
+  /** The Circle answers an ended session with {why:"sign-in"} and a 200: the same question, so its notice gets a Sign in. */
+  @Test fun aCircleReadForNobodyAsksTheSameQuestion() = runBlocking {
+    val wire = EndedSessionServer(OWNER)
+    val repo = repoHoldingTheOwner(wire)
+    wire.address = null
+    val read = readCircleFor(repo.api, repo.signedIn.value, repo.hosted.value) { repo.refreshIdentity() }
+    assertEquals("sign-in", (read as Loaded.Value).value.why)
+    assertEquals(2, wire.sessionAsks.get())
     assertNull(repo.signedIn.value)
     assertTrue(repo.canOfferSignIn.value)
   }

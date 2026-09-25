@@ -35,6 +35,8 @@ import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
+import dev.merrymen.app.net.ApiResult
+import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.CircleTier
 import dev.merrymen.app.net.CircleView
 import dev.merrymen.app.ui.LoadedBlock
@@ -46,6 +48,7 @@ import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.numerals
 import dev.merrymen.app.ui.sans
+import dev.merrymen.app.ui.sessionNeedsAsking
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -136,16 +139,43 @@ private fun CardBlurb(text: String, modifier: Modifier = Modifier) {
   )
 }
 
+/**
+ * READ WHERE THE WALLET STANDS, AND ASK WHO IS SIGNED IN WHEN IT SAYS NOBODY.
+ *
+ * GET /api/circle answers an ended session with a 200 {why: "sign-in"}, never
+ * a 401, and while this app still holds the old address canOfferSignIn is
+ * false — so the page said "Sign in to see where your wallet stands" with no
+ * button to do it, the dead end Settings and Home already ask their way out
+ * of. An answer made for nobody while an address is held asks the session
+ * route first ([sessionNeedsAsking]); an ended session turns repo.signedIn to
+ * null, and the notice gets its Sign in.
+ */
+internal suspend fun readCircleFor(
+  api: MerrymenApi,
+  signedIn: String?,
+  hosted: Boolean?,
+  askWhoIsSignedIn: suspend () -> Unit,
+): Loaded<CircleView> {
+  val r = api.circle()
+  if (sessionNeedsAsking(r, (r as? ApiResult.Ok)?.value?.why == "sign-in", signedIn, hosted)) askWhoIsSignedIn()
+  return r.toLoaded()
+}
+
 @Composable
 fun CircleScreen(nav: NavHostController) {
   val c = LocalContainer.current
   // SIGN-IN ONLY WHERE THERE IS ONE (hosted, and nobody signed in). A
   // self-hosted box has no sign-in, and an offer there leads nowhere.
   val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
+  val signedIn by c.repo.signedIn.collectAsState()
   var state by remember { mutableStateOf<Loaded<CircleView>>(Loaded.Loading) }
   val scope = rememberCoroutineScope()
-  suspend fun load() { state = c.api.circle().toLoaded() }
-  LaunchedEffect(Unit) { load() }
+  suspend fun load() {
+    state = readCircleFor(c.api, c.repo.signedIn.value, c.repo.hosted.value) { c.repo.refreshIdentity() }
+  }
+  // Keyed on the wallet: a session that ended (or another that signed in) is
+  // a different reader, and what is shown is read for them.
+  LaunchedEffect(signedIn) { load() }
 
   Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
     Header("The Merry Circle", nav)

@@ -164,7 +164,10 @@ internal class OwnReads {
     hosted: Boolean?,
     withStrip: Boolean,
     nowMs: () -> Long,
-    askWhoIsSignedIn: suspend () -> Unit = {},
+    // No default, on purpose: a screen that forgot to pass the repository's
+    // refreshIdentity would still compile, and an ended session would go back
+    // to "Couldn't read your book" with no Sign in. Every caller says how.
+    askWhoIsSignedIn: suspend () -> Unit,
   ) {
     val f = api.feed()
     if (sessionNeedsAsking(f, (f as? ApiResult.Ok)?.value?.source == "none", signedIn, hosted)) askWhoIsSignedIn()
