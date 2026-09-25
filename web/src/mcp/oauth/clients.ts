@@ -110,8 +110,8 @@ export function validRedirectUri(raw: unknown): string | null {
 }
 
 /**
- * An app-scheme redirect (cursor://…, vscode://…, javascript:…): anything that
- * parses as a URL but is not http or https. Such a URI is IGNORED in a
+ * An app-scheme redirect (cursor://…, vscode://…): a scheme://… URI whose
+ * scheme is not http or https. Such a URI is IGNORED in a
  * registration rather than failing it, and never stored, so no code can ever
  * be sent to it. Clients list several callbacks at once and use whichever the
  * server keeps: Cursor registers cursor://anysphere.cursor-mcp/oauth/callback
@@ -120,7 +120,10 @@ export function validRedirectUri(raw: unknown): string | null {
  * malformed http(s) URI still fails the registration (see validRedirectUri).
  */
 function isAppScheme(raw: unknown): boolean {
-  if (typeof raw !== "string" || raw.length > 2048) return false;
+  // "scheme://…" only (RFC 8252 §7.1 private-use form). A scheme-less
+  // "localhost:8787/callback" parses with protocol "localhost:", and
+  // javascript:/data: have no "//": those still fail the registration.
+  if (typeof raw !== "string" || raw.length > 2048 || !APP_SCHEME.test(raw)) return false;
   try {
     const { protocol } = new URL(raw);
     return protocol !== "http:" && protocol !== "https:";
@@ -128,6 +131,7 @@ function isAppScheme(raw: unknown): boolean {
     return false;
   }
 }
+const APP_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
 
 /**
  * A valid redirect URI in canonical form (URL.href): ASCII only (IDNA host,

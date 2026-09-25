@@ -239,7 +239,7 @@ export function ConsentClient() {
                 ))}
                 <li className="mcp-summary-never"><X size={16} aria-hidden /><p><strong>Never</strong> <span>move your funds, see your keys, turn on live trading or loosen your limits.</span></p></li>
               </ul>
-              {summary.length === 0 && <p className="mcp-summary-note">{agents.size === 0 && visibleScopes.some((s) => s.needsAgent && scopes.has(s.id))
+              {summary.length === 0 && <p className="mcp-summary-note">{!noAgent && agents.size === 0 && visibleScopes.some((s) => s.needsAgent && scopes.has(s.id))
                 ? <>Nothing would be shared: what’s ticked needs your agent. Share your agent, or choose something else under “Change what {appName} can do”.</>
                 : <>Nothing is ticked yet. Choose at least one thing under “Change what {appName} can do”.</>}</p>}
               {note && <p className="mcp-summary-note">{note}</p>}

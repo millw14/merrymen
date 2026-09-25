@@ -329,6 +329,9 @@ test("DCR rejects unsafe metadata", async () => {
     { redirect_uris: ["cursor://anysphere.cursor-mcp/oauth/callback"] },
     // An app scheme is ignored, a bad http(s) redirect still fails the registration.
     { redirect_uris: ["cursor://anysphere.cursor-mcp/oauth/callback", "http://evil.test/cb"] },
+    // Not app schemes, just malformed: a scheme-less loopback, and schemes with no "//".
+    { redirect_uris: ["localhost:8787/callback", "https://ok.test/cb"] },
+    { redirect_uris: ["javascript:alert(1)", "https://ok.test/cb"] },
     { redirect_uris: Array.from({ length: 11 }, (_, i) => `https://ok.test/cb${i}`) },
   ]) {
     const r = await registerClient(d, bad, 1);

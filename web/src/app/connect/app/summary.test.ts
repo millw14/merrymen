@@ -118,6 +118,26 @@ test("a connection made without the only agent keeps it unshared; Share alone th
   for (const s of nonStaff) if (s.level === "sensitive") assert.ok(!agentDefaults.includes(s.id), s.id);
 });
 
+test("agent permissions granted for an agent the owner no longer has are not carried to their new one", () => {
+  // Shared agent zzzz (since recreated as aaaa) with trade suggestions: Share must not carry them over.
+  const moved = initialSelection(view({ previous: { scopes: ["market:read", "portfolio:read", "trade:propose", "social:write"], agentSlugs: ["zzzz"] } }));
+  assert.equal(moved.fromPrevious, true);
+  assert.deepEqual([...moved.agents], []);
+  for (const id of ["trade:propose", "social:write"]) assert.ok(!moved.scopes.has(id), id);
+  assert.ok(moved.scopes.has("market:read"));
+  const shared = accessSummary(nonStaff, moved.scopes, true);
+  assert.ok(!shared.some((g) => g.level === "sensitive"), "ticking Share adds the usual access, never a suggestion permission");
+  // Several agents, none of the old ones left: the same rule.
+  const several = initialSelection(view({ agents: [{ slug: "aaaa" }, { slug: "bbbb" }], previous: { scopes: ["market:read", "trade:propose"], agentSlugs: ["zzzz"] } }));
+  assert.deepEqual([...several.scopes], ["market:read"]);
+});
+
+test("with no agent at all, the defaults tick nothing that needs one", () => {
+  const start = initialSelection(view({ agents: [] }));
+  for (const s of nonStaff) if (s.needsAgent) assert.ok(!start.scopes.has(s.id), s.id);
+  assert.ok(start.scopes.size > 0);
+});
+
 test("a previous choice that grants nothing starts from the defaults", () => {
   // Nothing left that this request offers.
   assert.equal(initialSelection(view({ previous: { scopes: [], agentSlugs: ["aaaa"] } })).fromPrevious, false);

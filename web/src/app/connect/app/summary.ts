@@ -110,7 +110,8 @@ export interface Selection {
  */
 export function initialSelection(view: SelectionView): Selection {
   const defaults: Selection = {
-    scopes: new Set(view.scopes.filter((s) => s.defaultOn).map((s) => s.id)),
+    // With no agent at all, agent permissions start unticked: there is nothing to apply them to.
+    scopes: new Set(view.scopes.filter((s) => s.defaultOn && (!s.needsAgent || view.agents.length > 0)).map((s) => s.id)),
     agents: new Set(view.agents.map((a) => a.slug)),
     fromPrevious: false,
   };
@@ -119,9 +120,13 @@ export function initialSelection(view: SelectionView): Selection {
   // The server already cut these down; checked again so an unexpected id can never be ticked.
   const offered = new Map(view.scopes.map((s) => [s.id, s]));
   const owned = new Set(view.agents.map((a) => a.slug));
-  const scopes = previous.scopes.filter((id) => offered.has(id));
   const agents = previous.agentSlugs.filter((slug) => owned.has(slug));
-  if (!scopes.some((id) => agents.length > 0 || !offered.get(id)!.needsAgent)) return defaults;
+  // An agent permission was granted FOR an agent. When none of those agents
+  // is still the owner's (the identity was recreated), it is not carried over
+  // to whichever agent they share now: a sensitive one (trade suggestions)
+  // would follow a single Share tick onto an agent it was never granted for.
+  const scopes = previous.scopes.filter((id) => offered.has(id) && (agents.length > 0 || !offered.get(id)!.needsAgent));
+  if (!scopes.length) return defaults;
   if (view.agents.length === 1 && agents.length === 0) {
     const agentDefaults = view.scopes.filter((s) => s.defaultOn && s.needsAgent).map((s) => s.id);
     return { scopes: new Set([...scopes, ...agentDefaults]), agents: new Set(), fromPrevious: true };
