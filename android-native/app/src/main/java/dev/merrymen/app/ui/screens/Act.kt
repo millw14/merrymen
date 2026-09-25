@@ -804,6 +804,30 @@ private fun Caveat(text: String) {
 
 private val SUGGESTED_SYMBOL = Regex("^[A-Z0-9]{1,12}$")
 
+/** What the Trade screen shows in place of its form: a title (none while asking), a sentence, and whether to offer Sign in. */
+internal data class TradeClosed(val title: String?, val body: String, val signIn: Boolean)
+
+/**
+ * WHETHER THERE IS ANYBODY TO TRADE FOR, or null when there is.
+ *
+ * An order is placed for the wallet that confirms it (the chat's key), and a
+ * signed-out reader has none. The screen used to draw the whole form anyway:
+ * a symbol, an amount, a Buy tap — and only then "Sign in to trade", with no
+ * way to do it. Signed out on a hosted server it now says so before anything
+ * is typed, with Sign in beside it as Chat, Settings and Risk do; before the
+ * session has answered it claims nothing either way (Chat's words); and a
+ * self-hosted server, where nobody signs in, keeps the form.
+ */
+internal fun tradeClosedOf(hosted: Boolean?, known: Boolean, signedIn: String?, canOfferSignIn: Boolean): TradeClosed? = when {
+  chatKeyFor(hosted, signedIn) != null -> null
+  hosted == true && known && signedIn == null -> TradeClosed(
+    title = "Sign in to trade",
+    body = "An order is placed for the wallet that confirms it, so there is nothing to place until you sign in.",
+    signIn = canOfferSignIn,
+  )
+  else -> TradeClosed(title = null, body = "Checking who's signed in…", signIn = false)
+}
+
 /**
  * Place a buy or a sell, or go after a coin by name — ALWAYS THROUGH A CARD.
  *
@@ -840,18 +864,25 @@ fun TradeScreen(nav: NavHostController) {
   val thread by c.chat.thread.collectAsState()
   val signedIn by c.repo.signedIn.collectAsState()
   val hosted by c.repo.hosted.collectAsState()
+  val known by c.repo.identityKnown.collectAsState()
+  val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
   val scope = rememberCoroutineScope()
+  val key = chatKeyFor(hosted, signedIn)
 
   // THE SYMBOLS WORTH OFFERING: the basket as it stands (the owner's, else the
   // default) and what is held. Still free text — a chip only fills the field.
   // Read per session, like everything this screen shows: a wallet that signs
   // in here is offered its own coins, and a card, a note or an outcome made
   // for the last wallet goes with it (its scope would refuse to act anyway).
-  LaunchedEffect(signedIn) {
+  // Keyed on the chat's key rather than the address alone, so a self-hosted
+  // server that answers after the screen opened still gets its chips; with
+  // nobody to trade for there is nothing to offer, and nothing is read.
+  LaunchedEffect(key) {
     card = null
     note = null
     watching = null
     suggestions = emptyList()
+    if (key == null) return@LaunchedEffect
     val env = c.api.settings().valueOrNull()
     val feed = c.api.feed().valueOrNull()?.takeIf { it.source != "none" }
     suggestions = (env?.list("basketSymbols").orEmpty() + feed?.positions?.map { it.symbol }.orEmpty())
@@ -862,7 +893,6 @@ fun TradeScreen(nav: NavHostController) {
 
   // What became of the order this screen placed, as the thread heard it — for
   // this owner's thread only.
-  val key = chatKeyFor(hosted, signedIn)
   val outcome = watching?.let { id ->
     if (thread.key != key) null else thread.messages.lastOrNull { it.order?.id == id && it.order.outcome }
   }
@@ -878,6 +908,23 @@ fun TradeScreen(nav: NavHostController) {
       }
       busy = false
     }
+  }
+
+  val closed = tradeClosedOf(hosted, known, signedIn, canOfferSignIn)
+  if (closed != null) {
+    Page("Trade", nav) {
+      if (closed.title == null) {
+        Prose(text = closed.body, size = 15.sp, lineHeight = 20.25.sp, color = MerryColors.faint)
+      } else {
+        Notice(
+          closed.title,
+          closed.body,
+          actionLabel = if (closed.signIn) "Sign in" else null,
+          onAction = if (closed.signIn) ({ nav.navigate(Routes.SIGN_IN) }) else null,
+        )
+      }
+    }
+    return
   }
 
   Page("Trade", nav) {
