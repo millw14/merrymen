@@ -42,6 +42,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.time.Instant
 import java.time.OffsetDateTime
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * THE WRITE PATHS, AND WHAT THE CHAT IS TOLD, IN ONE PLACE SO THEIR RULES ARE
@@ -1030,6 +1031,8 @@ sealed interface TradeStep {
   data class Done(val placed: Placed) : TradeStep
   data class Next(val card: TradeCard) : TradeStep
   data class Said(val line: String) : TradeStep
+  /** A confirm was already being carried out here: this tap did nothing, and the first one's answer is the one to show. */
+  data object Held : TradeStep
 }
 
 private val TRADE_SYMBOL = Regex("^[A-Z0-9]{1,12}$")
@@ -1042,6 +1045,17 @@ private val TRADE_SYMBOL = Regex("^[A-Z0-9]{1,12}$")
  * in the thread whichever screen the owner is on.
  */
 class TradeDesk(private val api: MerrymenApi, private val scopeNow: () -> ConfirmScope?) {
+  /**
+   * TWO TAPS IN ONE INSTANT ARE ONE TAP — the web's rule, and the chat's
+   * confirmHold. The screen's "busy" only disables the button once it redraws,
+   * and two taps can land before that: each started its own confirm, and each
+   * sent its own POST /api/orders. The server's minute-bucket id usually makes
+   * the second a duplicate, but not when the minute turns between them. So the
+   * hold is taken here, the moment a confirm starts, and a second one while it
+   * runs does nothing at all.
+   */
+  private val confirming = AtomicBoolean(false)
+
   /** What a card is checked and labelled against: the limits and the rail, read fresh for each card. */
   private class Read(val ceiling: Double?, val grants: GrantView?, val settings: SettingsEnvelope?)
 
@@ -1064,9 +1078,22 @@ class TradeDesk(private val api: MerrymenApi, private val scopeNow: () -> Confir
     return TradeOpen.Card(cardFor(kind, what, usdg, read(), scope, null))
   }
 
-  /** Carry out [card] for its own owner. A snipe's lookup returns the found coin's card, never an order. */
+  /**
+   * Carry out [card] for its own owner. A snipe's lookup returns the found
+   * coin's card, never an order. [TradeStep.Held] when a confirm is already
+   * running here: nothing is sent for the second tap.
+   */
   suspend fun confirm(card: TradeCard): TradeStep {
     if (!card.canConfirm) return TradeStep.Said((card.limit as LimitCheck.Over).line)
+    if (!confirming.compareAndSet(false, true)) return TradeStep.Held
+    try {
+      return carryOut(card)
+    } finally {
+      confirming.set(false)
+    }
+  }
+
+  private suspend fun carryOut(card: TradeCard): TradeStep {
     val scope = card.scope
     if (card.kind == "snipe") {
       return when (val looked = lookupConfirmedSnipe(api, scope, card.subject, card.usdg)) {

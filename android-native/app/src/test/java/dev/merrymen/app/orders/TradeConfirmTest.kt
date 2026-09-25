@@ -3,6 +3,7 @@ package dev.merrymen.app.orders
 import dev.merrymen.app.chat.ChatRig
 import dev.merrymen.app.chat.ChatRig.Companion.A
 import dev.merrymen.app.chat.ChatRig.Companion.json
+import dev.merrymen.app.chat.waitFor
 import dev.merrymen.app.ui.COMMANDS
 import dev.merrymen.app.ui.LIMIT_UNREAD
 import dev.merrymen.app.ui.LimitCheck
@@ -14,6 +15,7 @@ import dev.merrymen.app.ui.TradeDesk
 import dev.merrymen.app.ui.TradeOpen
 import dev.merrymen.app.ui.TradeStep
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
@@ -22,6 +24,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * THE TRADE SCREEN PLACES NOTHING WITHOUT A CARD.
@@ -141,5 +146,24 @@ class TradeConfirmTest {
       json("""{"values":{"liveTradingEnabled":true},"defaults":{"liveTradingEnabled":false},"owner":"$A"}""")
     }
     assertEquals(MONEY_LIVE_ON, open("buy", "NVDA", 5.0).money)
+  }
+
+  @Test fun twoTapsBeforeTheButtonGreysOutPlaceOneOrder() {
+    grants(20)
+    val gate = CountDownLatch(1)
+    rig.route("POST /api/orders") {
+      gate.await(10, TimeUnit.SECONDS)
+      json("""{"id":"$id","queued":true,"expiresInMs":495000}""")
+    }
+    val card = open("buy", "NVDA", 5.0)
+    val first = CompletableFuture.supplyAsync { runBlocking { desk.confirm(card) } }
+    waitFor("the first tap's order on the wire") { rig.writes().size == 1 }
+    // The second tap lands while the first is still waiting on its answer.
+    val second = runBlocking { withTimeoutOrNull(3_000) { desk.confirm(card) } }
+    gate.countDown()
+    assertEquals(TradeStep.Held, second)
+    assertTrue(first.get(10, TimeUnit.SECONDS) is TradeStep.Done)
+    assertEquals("one order for two taps", 1, rig.writes().count { it.path == "/api/orders" })
+    assertEquals("said and followed once", 1, scope.followed.size)
   }
 }

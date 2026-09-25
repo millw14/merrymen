@@ -832,12 +832,18 @@ fun TradeScreen(nav: NavHostController) {
         busy = busy,
         onDismiss = { card = null },
         onConfirm = {
+          // Read at the tap, not at the last redraw: a second tap that lands
+          // before the button greys out is not a second order. The desk holds
+          // the same line on its own (TradeStep.Held), where a test can see it.
+          if (busy) return@TradeConfirm
           busy = true
           // IN THE APP'S SCOPE, NOT THE SCREEN'S. A placement cancelled because
           // the owner tapped back would be a POST whose answer nobody reads — an
           // order that may exist, never followed and never said.
           c.appScope.launch {
             val step = desk.confirm(pending)
+            // The confirm already running owns the card and the busy flag.
+            if (step is TradeStep.Held) return@launch
             if (!pending.scope.alive()) {
               // The owner changed while it ran. What happened was said in THEIR
               // thread; this screen now belongs to somebody else.
@@ -858,6 +864,7 @@ fun TradeScreen(nav: NavHostController) {
                     is Placed.Refused -> null
                   }
                 }
+                TradeStep.Held -> Unit
               }
             }
             busy = false
