@@ -69,7 +69,7 @@ export function assistantSetupMarkdown({ server, app }: AssistantSetupInput): st
     "",
     "## What the connection can and cannot do",
     "",
-    `It sees only the agent and the permissions the owner allows when signing in, and the owner can disconnect it at any time at ${app}/connect/apps. It can suggest trades or setting changes only if the owner allowed that, and nothing happens until they approve each one in ${CONNECTOR_NAME}. It can never move funds, see keys, turn on live trading or loosen the owner's limits. Paper (practice) and live money are always reported separately.`,
+    `It sees only the agent and the permissions the owner allows when signing in, and the owner can disconnect it at any time at ${app}/connect/apps. It can suggest trades or setting changes only if the owner allowed that, and nothing happens until they approve each one in ${CONNECTOR_NAME}. It can never move funds, see keys, turn on live trading or loosen the owner's signed limits. Paper (practice) and live money are always reported separately.`,
   ];
   return lines.join("\n");
 }

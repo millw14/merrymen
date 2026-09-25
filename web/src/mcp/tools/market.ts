@@ -41,6 +41,7 @@ import {
   tokenKind,
   tokenView,
   trustedIdentity,
+  type CandleView,
   type DiscoverItem,
   type OwnerToken,
   type WatchlistRow,
@@ -295,15 +296,35 @@ const getTokenTool = defineTool({
 
 // ── get_candles ─────────────────────────────────────────────────────────────
 
+/** The most bars one answer carries (what the reader keeps), and how many it carries unless asked. */
+const CANDLES_MAX = 300;
+const CANDLES_DEFAULT = 100;
+
+/**
+ * The newest `limit` bars of a series (oldest first, as the chart reads it),
+ * with the gap count measured over the range those bars span: a count over
+ * the whole read would describe slots that are not in the answer.
+ */
+function newestBars(v: Pick<CandleView, "bars" | "gaps" | "interval_s">, limit: number): { bars: CandleView["bars"]; gaps: number | null; bars_available: number } {
+  const bars = v.bars.slice(-limit);
+  const first = bars[0];
+  const last = bars[bars.length - 1];
+  const gaps = v.gaps === null || !first || !last || !v.interval_s
+    ? v.gaps
+    : Math.max(0, Math.floor((Date.parse(last.time) - Date.parse(first.time)) / 1000 / v.interval_s) + 1 - bars.length);
+  return { bars, gaps, bars_available: v.bars.length };
+}
+
 const getCandlesTool = defineTool({
   name: "get_candles",
   title: "Price candles",
-  description: "Up to 300 USD price bars (15m, 1h, 4h or 1d) for a token from the market index, read from the pool the index lists for that token (the same series the Merrymen token page charts). The reader refuses bars that describe the other side of the pair. Each bar's volume is display-only (see notes). Budgeted: it can spend the index's quota.",
+  description: `The newest USD price bars (15m, 1h, 4h or 1d) for a token from the market index: ${CANDLES_DEFAULT} unless limit asks for fewer or more (at most ${CANDLES_MAX}). Read from the pool the index lists for that token (the same series the Merrymen token page charts). The reader refuses bars that describe the other side of the pair. Each bar's volume is display-only (see notes). Budgeted: it can spend the index's quota.`,
   capability: "market.read",
   input: z.object({
     address: ADDRESS_ARG,
     pool_id: CANDLE_POOL_ID_ARG.optional(),
     window: z.enum(CANDLE_WINDOWS).default("1h"),
+    limit: LIMIT_ARG(CANDLES_MAX, CANDLES_DEFAULT),
     chain_id: CHAIN_ARG,
   }).strict(),
   output: z.object({
@@ -321,8 +342,9 @@ const getCandlesTool = defineTool({
       low: z.number(),
       close: z.number(),
       volume_display_only: z.number(),
-    })).max(300),
-    gaps: z.number().nullable().describe("Bar slots inside the range with no bar"),
+    })).max(CANDLES_MAX),
+    bars_available: z.number().describe("Bars the index returned; bars holds the newest `limit` of them"),
+    gaps: z.number().nullable().describe("Bar slots inside the range of the returned bars with no bar"),
     last_bar_partial: z.boolean().nullable(),
     last_bar_age_s: z.number().nullable(),
     stale: z.boolean().describe("True when these are the last good bars and the index has since refused"),
@@ -336,12 +358,14 @@ const getCandlesTool = defineTool({
   annotations: { readOnlyHint: true, openWorldHint: true },
   budget: PROVIDER_BUDGET,
   timeoutMs: 20_000,
-  async handler({ address, pool_id, window, chain_id }, ctx) {
+  async handler({ address, pool_id, window, limit, chain_id }, ctx) {
     mainnetOnly(chain_id);
     const v = await candlesFor({ address, poolId: pool_id, window, readers: marketReaders() }).catch(serviceError);
+    const kept = newestBars(v, limit);
     return {
       data: {
         ...v,
+        ...kept,
         quote_symbol: untrusted(v.quote_symbol, 16),
         notes: [
           "volume_display_only is the index's per-bar quote volume. The candle reader itself marks it as not a figure to publish: on bonding-curve pools it has measured several times the pool's real volume. Use it for shape only.",
@@ -350,7 +374,9 @@ const getCandlesTool = defineTool({
         served_at: at(ctx),
         untrusted_note: UNTRUSTED_NOTE,
       },
-      summary: v.state === "ok" ? `${v.bars.length} ${window} bars.` : `No bars: ${v.reason ?? v.state}.`,
+      summary: v.state === "ok"
+        ? `${kept.bars.length} ${window} bars${kept.bars.length < kept.bars_available ? `, the newest of ${kept.bars_available}` : ""}.`
+        : `No bars: ${v.reason ?? v.state}.`,
     };
   },
 });

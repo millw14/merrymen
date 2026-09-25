@@ -356,7 +356,8 @@ const cancelJobTool = defineTool({
   capability: "jobs.run",
   input: z.object({ job_id: JOB_ID }).strict(),
   output: JOB_BASE.extend({ outcome: z.enum(["cancelled", "requested", "already_finished"]), note: z.string() }),
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // Destructive: a cancelled job cannot be resumed and keeps no result; it has to be run again from the start.
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   async handler(args, ctx) {
     await ownedJob(ctx, args.job_id);
     const d = await ctx.mcp();
