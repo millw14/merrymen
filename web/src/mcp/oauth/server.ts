@@ -503,14 +503,17 @@ export async function refreshTokens(deps: OAuthDeps, form: URLSearchParams, clie
       return { reuse: true as const, row };
     }
     if (row.expires_at <= now || row.family_expires_at <= now) throw new OAuthError("invalid_grant", "the refresh token has expired; reconnect the app");
-    const resource = form.get("resource");
-    if (resource && normalizeResource(resource) !== row.resource) throw new OAuthError("invalid_target", "resource does not match");
     if (!conn || conn.status !== "active") throw new OAuthError("invalid_grant", "the connection was revoked");
     // A token for an address this server no longer serves (the MCP endpoint
     // moved: MERRYMEN_MCP_RESOURCE_URL changed) would mint access tokens /mcp
     // refuses, and the client would loop on 401s. invalid_grant makes it
-    // start a new authorization against the current address instead.
+    // start a new authorization against the current address instead. Checked
+    // BEFORE the resource parameter: a client that already switched to the
+    // new address sends resource=<new URL> with its old token, and must be
+    // told to reconnect, not that its target is wrong.
     if (row.resource !== cfg.resource) throw new OAuthError("invalid_grant", `this connection was made for ${row.resource}; the server is now ${cfg.resource}. Connect again.`);
+    const resource = form.get("resource");
+    if (resource && normalizeResource(resource) !== row.resource) throw new OAuthError("invalid_target", "resource does not match");
     // A refresh can narrow scope, never widen it, and never beyond what the
     // owner's current consent allows. A requested scope the token does not
     // hold is dropped, not refused (RFC 6749 §6 lets the server issue fewer):
