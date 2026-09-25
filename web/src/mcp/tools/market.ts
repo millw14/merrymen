@@ -18,6 +18,7 @@
  */
 import { createHash } from "node:crypto";
 import * as z from "zod";
+import { coinPrice } from "@/lib/format";
 import { CANDLE_WINDOWS } from "@/lib/read-candles";
 import { settingsReader, type SettingsView } from "@/lib/services/settings-view";
 import {
@@ -286,7 +287,7 @@ const getTokenTool = defineTool({
         untrusted_note: UNTRUSTED_NOTE,
       },
       summary: v.price.value !== null
-        ? `${v.symbol_trusted && v.symbol ? v.symbol : "Token"}: $${v.price.value} (${v.price.source}); discoverable ${v.discoverable.state}, priceable ${v.priceable.state}.`
+        ? `${v.symbol_trusted && v.symbol ? v.symbol : "Token"}: ${coinPrice(v.price.value)} (${v.price.source}); discoverable ${v.discoverable.state}, priceable ${v.priceable.state}.`
         : `No price: ${v.price.missing_reason}`,
     };
   },

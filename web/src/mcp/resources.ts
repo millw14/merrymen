@@ -10,11 +10,13 @@
  */
 import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/server";
 import { McpError, asMcpError } from "./errors";
-import { logEvent, pseudonym, recordToolCall, writeAudit } from "./observe";
+import { logEvent, pseudonym, rateHit, recordToolCall, writeAudit } from "./observe";
 import { hasCapability, requireCapability } from "./policy";
 import type { Capability } from "./scopes";
 import type { Principal } from "./oauth/server";
 import { makeContext, type RunDeps, type ToolContext } from "./tool";
+
+const RESOURCE_READS_PER_MINUTE = 60;
 
 export interface ResourceContent {
   text: string;
@@ -41,6 +43,8 @@ export interface ResourceDef {
   /** For templates: the concrete resources this connection can read. */
   list?: (ctx: ToolContext) => Promise<ResourceListing[]>;
   read(uri: URL, vars: Record<string, string>, ctx: ToolContext): Promise<ResourceContent>;
+  /** Protocol `_meta` (e.g. an MCP Apps view's CSP), on the list entry and the read content. Never authority. */
+  meta?: Readonly<Record<string, unknown>>;
 }
 
 const isTemplate = (uri: string) => /\{[a-z_]+\}/i.test(uri);
@@ -53,8 +57,12 @@ async function runRead(def: ResourceDef, uri: URL, vars: Record<string, string>,
   const ctx = makeContext(p, trace, controller.signal, deps);
   try {
     if (def.capability) requireCapability(p, def.capability);
+    // Resource reads share the per-connection budget of a tool call: some
+    // (exports, portfolio snapshots) are as costly as the matching tool.
+    const v = await rateHit(await ctx.mcp(), `resource:${p.connectionId}:m`, 60, RESOURCE_READS_PER_MINUTE, ctx.now());
+    if (!v.ok) throw new McpError("rate_limited", "Too many resource reads; slow down.", { retryAfterSec: v.retryAfterSec });
     const c = await def.read(uri, vars, ctx);
-    return { contents: [{ uri: uri.href, mimeType: c.mimeType, text: c.text }] };
+    return { contents: [{ uri: uri.href, mimeType: c.mimeType, text: c.text, ...(def.meta ? { _meta: def.meta } : {}) }] };
   } catch (error) {
     const e = asMcpError(error);
     outcome = e.code;
@@ -76,7 +84,7 @@ async function runRead(def: ResourceDef, uri: URL, vars: Record<string, string>,
 export function registerResources(server: McpServer, p: Principal, defs: readonly ResourceDef[], trace: string, deps?: RunDeps): void {
   for (const def of defs) {
     if (def.capability && !hasCapability(p, def.capability)) continue;
-    const meta = { title: def.title, description: def.description, mimeType: def.mimeType };
+    const meta = { title: def.title, description: def.description, mimeType: def.mimeType, ...(def.meta ? { _meta: def.meta } : {}) };
     if (!isTemplate(def.uri)) {
       server.registerResource(def.name, def.uri, meta, async (uri: URL) => runRead(def, uri, {}, p, trace, deps));
       continue;

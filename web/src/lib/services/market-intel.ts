@@ -42,6 +42,7 @@ import { screenPools, type GeckoPool } from "../../../../worker/src/venues/gecko
 import { readPoolEvidence, summarizeEvidence, type PoolEvidence } from "../../../../worker/src/venues/pool-evidence";
 import { ACTIVITY_GATE } from "../../../../worker/src/venues/pons-activity";
 import { tokenLabelSync } from "../../../../worker/src/token-label";
+import { usdFixed } from "@/lib/format";
 import { fetchMarket, type MarketData, type MarketToken } from "@/lib/market";
 import { readCandles, type CandleRead, type CandleWindow } from "@/lib/read-candles";
 import { sharedPools, sharedRead, type DiscoveryRow, type FreshRow, type Payload } from "@/lib/read-discoveries";
@@ -161,7 +162,7 @@ export const CHAINLINK_SOURCE = "Chainlink feed, read on chain";
 
 const iso = (sec: number | null | undefined): string | null =>
   typeof sec === "number" && Number.isFinite(sec) && sec > 0 ? new Date(sec * 1000).toISOString() : null;
-const dollars = (v: number): string => `$${Math.round(v).toLocaleString("en-US")}`;
+const dollars = (v: number): string => usdFixed(v, 0);
 
 /**
  * The dashboard's display screen. read-discoveries.ts keeps it as a private

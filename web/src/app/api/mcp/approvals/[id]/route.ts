@@ -24,6 +24,7 @@ import {
   type Binding, type ProposalRow, type Revalidation, type TradeBinding,
 } from "@/lib/services/proposals";
 import { addressableSymbol } from "@/mcp/tools/proposals";
+import { readAgentRow } from "@/lib/services/agent-status";
 import { sellableAssets } from "@merrymen/core";
 import { specFor, validStoredSetting } from "../../../../../../../worker/src/telegram/setting-spec";
 import { PUT as settingsPut } from "../../../settings/route";
@@ -67,6 +68,14 @@ async function revalidateTrade(tenant: `0x${string}`, b: TradeBinding, now: numb
   if (addressable.symbol !== b.symbol) return { ok: false, why: "The token's symbol changed in your settings since this was proposed. Ask for a fresh proposal." };
   if (!sellableAssets({ grantFeatures: agent.features, grantTokens: agent.grantTokens }).has(b.token)) {
     return { ok: false, why: "Your signed permission no longer covers this token." };
+  }
+  // The page told the owner "practice" or "real money" from the book the
+  // agent was in when this was proposed. If that changed since, the approval
+  // would be for something other than what they read: refuse it.
+  const mode = await withReadDb(async (db) => (db ? (await readAgentRow(db, b.account))?.mode ?? null : null));
+  const book = mode === "live" ? "live" : mode === "paper" ? "paper" : "unknown";
+  if (book !== b.book) {
+    return { ok: false, why: `Your agent is now in ${book === "live" ? "live (real money)" : book === "paper" ? "practice (paper)" : "an unknown"} mode, not the mode this proposal was made in. Nothing was sent; ask for a fresh proposal.` };
   }
   const notes: string[] = [];
   if (b.side === "buy") {

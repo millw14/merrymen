@@ -11,6 +11,7 @@ import { DECISIONS_RESOURCES } from "./tools/decisions";
 import { MARKET_RESOURCES } from "./tools/market";
 import { REPORTS_RESOURCES } from "./tools/reports";
 import { PUBLIC_RESOURCES } from "./tools/public";
+import { APP_RESOURCES } from "./apps";
 
 function capabilitiesDoc(): string {
   const scopes = SCOPES.filter((s) => s.level !== "staff").map((s) => `- \`${s.id}\` (${s.level}): ${s.title}. ${s.detail}`).join("\n");
@@ -72,4 +73,5 @@ export const ALL_RESOURCES: readonly ResourceDef[] = [
   ...MARKET_RESOURCES,
   ...REPORTS_RESOURCES,
   ...PUBLIC_RESOURCES,
+  ...APP_RESOURCES,
 ];

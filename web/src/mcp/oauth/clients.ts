@@ -46,6 +46,8 @@ const CIMD_MAX_BYTES = 64 * 1024;
 const CIMD_TIMEOUT_MS = 5000;
 const CIMD_DEFAULT_TTL = 3600;
 const CIMD_MAX_TTL = 86_400;
+/** How old a cached metadata document may be and still be used when a re-fetch fails. */
+const CIMD_STALE_OK_SEC = 86_400;
 const MAX_REDIRECTS = 10;
 const NAME_MAX = 100;
 
@@ -54,7 +56,7 @@ function cleanName(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const name = raw.trim();
   if (!name || name.length > NAME_MAX) return null;
-  if (/[\u0000-\u001f\u007f​-‏‪-‮⁦-⁩]/.test(name)) return null;
+  if (/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/.test(name)) return null;
   return name;
 }
 
@@ -135,6 +137,7 @@ interface ClientRow {
   auth_method: string;
   secret_hash: string | null;
   expires_at: number | null;
+  fetched_at?: number | null;
 }
 
 function rowToClient(row: ClientRow): McpClient {
@@ -212,7 +215,7 @@ export function parseCimd(clientId: string, body: Buffer): Omit<McpClient, "secr
 
 export async function resolveClient(d: McpDb, clientId: unknown, now: number, fetcher: CimdFetcher = defaultFetcher): Promise<McpClient> {
   if (typeof clientId !== "string" || !clientId || clientId.length > 512) throw new ClientError("invalid_client", "missing or malformed client_id");
-  const row = await d.db.prepare("SELECT client_id, kind, client_name, redirect_uris, auth_method, secret_hash, expires_at FROM mcp_clients WHERE client_id = ?").get(clientId) as ClientRow | undefined;
+  const row = await d.db.prepare("SELECT client_id, kind, client_name, redirect_uris, auth_method, secret_hash, expires_at, fetched_at FROM mcp_clients WHERE client_id = ?").get(clientId) as ClientRow | undefined;
   if (row && (row.kind !== "cimd" || (row.expires_at ?? 0) > now)) return rowToClient(row);
   if (!isCimdClientId(clientId)) throw new ClientError("invalid_client", "unknown client_id");
 
@@ -220,6 +223,11 @@ export async function resolveClient(d: McpDb, clientId: unknown, now: number, fe
   try {
     fetched = await fetcher(clientId);
   } catch {
+    // Serve stale on a network failure, for a bounded time: the copy we hold
+    // was verified when fetched, and a flaky network between us and the
+    // client's host should not lock owners out of connecting. A document that
+    // was never fetched successfully, or is over a day old, is not used.
+    if (row && row.kind === "cimd" && (row.fetched_at ?? 0) > now - CIMD_STALE_OK_SEC) return rowToClient(row);
     throw new ClientError("temporarily_unavailable", "could not fetch the client metadata document");
   }
   if (fetched.status !== 200) throw new ClientError("invalid_client", "client metadata document is unavailable");

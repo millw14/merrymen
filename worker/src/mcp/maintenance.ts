@@ -36,6 +36,8 @@ export async function runMcpMaintenancePass(shared: Db, now = Math.floor(Date.no
     ["DELETE FROM mcp_rate WHERE window_start < ?", [now - r.rateSec]],
     ["DELETE FROM mcp_exports WHERE expires_at < ?", [now]],
     ["DELETE FROM mcp_research WHERE expires_at < ?", [now - 30 * 86_400]],
+    // Conversations: a year of history is kept; older messages go.
+    ["DELETE FROM mcp_messages WHERE created_at < ?", [now - 365 * 86_400]],
     ["DELETE FROM notify_deliveries WHERE created_at < ? AND status IN ('sent','dead','skipped')", [now - r.deliveriesSec]],
     ["DELETE FROM mcp_jobs WHERE finished_at IS NOT NULL AND finished_at < ?", [now - r.jobsSec]],
     // Dynamically registered clients that never became (or no longer are) a

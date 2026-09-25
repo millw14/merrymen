@@ -35,7 +35,7 @@ export function usd(v: number | null | undefined, dp = 2): number | null {
  */
 export function untrusted(text: string | null | undefined, max = 500): string | null {
   if (typeof text !== "string") return null;
-  const clean = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f​-‏‪-‮⁦-⁩]/g, "").trim();
+  const clean = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, "").trim();
   if (!clean) return null;
   return clean.length > max ? `${clean.slice(0, max)}…` : clean;
 }

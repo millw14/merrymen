@@ -277,7 +277,7 @@ test("CIMD: the document must name itself, be public, and list safe redirects", 
   assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify({ client_id: "https://evil.test/x", redirect_uris: ["https://evil.test/cb"] }))), /does not match/);
   assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify({ client_id: id, redirect_uris: ["https://ok/cb"], token_endpoint_auth_method: "client_secret_basic" }))), /public clients/);
   assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify({ client_id: id, redirect_uris: ["javascript:alert(1)"] }))), /redirect_uris/);
-  assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify({ client_id: id, client_name: "Claude‮", redirect_uris: ["https://ok.test/cb"], client_secret: "x" }))), /secret/);
+  assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify({ client_id: id, client_name: "Claude\u202e", redirect_uris: ["https://ok.test/cb"], client_secret: "x" }))), /secret/);
 
   const d = await makeTestDb();
   const deps = makeDeps(d, {

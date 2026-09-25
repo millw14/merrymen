@@ -7,6 +7,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { KeyRound, Plug, ShieldCheck, Unplug } from "lucide-react";
+import { fullDateTime } from "@/lib/format";
 import { SignIn } from "@/terminal/HostedControls";
 import { BrandLockup } from "../BrandLockup";
 
@@ -26,7 +27,7 @@ interface Connection {
 interface AvailableScope { id: string; title: string; detail: string; level: string; needsAgent: boolean }
 interface Listing { endpoint: string; connections: Connection[]; agents: Array<{ slug: string; account: string | null }>; available_scopes: AvailableScope[] }
 
-const when = (sec: number | null) => sec ? new Date(sec * 1000).toLocaleString() : "never";
+const when = (sec: number | null) => sec ? fullDateTime(sec * 1000) : "never";
 
 async function call<T>(method: "GET" | "POST", body?: Record<string, unknown>): Promise<T> {
   const response = await fetch("/api/mcp/connections", {

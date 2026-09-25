@@ -184,12 +184,15 @@ export async function runTool(def: ToolDef, rawArgs: unknown, principal: Princip
   let outcome = "ok";
   let d: McpDb | null = null;
   try {
+    // The database first, so a refused call is audited like any other.
+    d = await (deps.mcp ?? mcpDb)().catch(() => {
+      throw new McpError("upstream_unavailable", "Merrymen's database is not reachable right now.", { retryAfterSec: 15 });
+    });
     if (def.anyOf?.length) {
       if (!def.anyOf.some((c) => hasCapability(principal, c))) requireCapability(principal, def.anyOf[0]!);
     } else {
       requireCapability(principal, def.capability);
     }
-    d = await (deps.mcp ?? mcpDb)();
     await enforceBudget(d, def, principal, now());
     const parsed = def.input.safeParse(rawArgs ?? {});
     if (!parsed.success) {

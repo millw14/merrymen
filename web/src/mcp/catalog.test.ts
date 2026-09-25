@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { ADVERTISED_SCOPES, SCOPES, scopeFor, type Capability } from "./scopes";
 import { ALL_TOOLS } from "./tools";
@@ -67,6 +67,21 @@ test("resources have unique names and merrymen:// or ui:// URIs", () => {
     names.add(r.name);
     assert.match(r.uri, /^(merrymen|ui):\/\//, r.name);
   }
+});
+
+test("no invisible or bidirectional characters hide in the MCP source (write them as \\u escapes)", () => {
+  const roots = ["web/src/mcp", "web/src/lib/services", "web/src/app/api/mcp", "web/src/app/connect", "web/src/app/oauth", "worker/src/mcp"];
+  const invisible = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff\u00ad]/;
+  const walk = (d: string): string[] => {
+    try {
+      return readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]));
+    } catch {
+      return [];
+    }
+  };
+  const offenders = roots.flatMap((r) => walk(path.join(process.cwd(), r)))
+    .filter((f) => /\.(ts|tsx|css)$/.test(f) && invisible.test(readFileSync(f, "utf8")));
+  assert.deepEqual(offenders, []);
 });
 
 test("the docs name every tool and every error code", () => {
