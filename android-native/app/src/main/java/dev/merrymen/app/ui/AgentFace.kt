@@ -364,7 +364,8 @@ private val FaceGlyph = Color(0xFF0E0E10)
  * The ring is two halos drawn OUTSIDE the box — `--bg` then `--wire`, as the
  * web's two box-shadows — so it changes no layout. It is read from Social's
  * wired set here, in the leaf, exactly as the web's Face does: an unknown
- * answer and an empty one both mean "no ring", and a signed-out reader sees
+ * answer and an empty one both mean "no ring" ([dev.merrymen.app.data.WiredState.rings]: the list
+ * outlives a lost answer, the ring must not), and a signed-out reader sees
  * none. [ring] overrides that only where a caller knows better.
  */
 @Composable
@@ -378,7 +379,7 @@ fun AgentFace(
 ) {
   val c = LocalContainer.current
   val wired by c.social.wired.collectAsState()
-  val ringed = ring ?: (slug != null && wired.has(slug))
+  val ringed = ring ?: (slug != null && wired.rings(slug))
   val density = LocalDensity.current
   val widthPx = with(density) { LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
   // Decoded for the largest face this app draws (48dp), once per density.
