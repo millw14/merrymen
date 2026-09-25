@@ -50,10 +50,20 @@ const nextConfig = {
     return [{ source: "/leaderboard", destination: "/home", permanent: false }];
   },
   async headers() {
+    // The MCP consent and Connected apps pages grant and revoke access to an
+    // owner's agent; they must never render inside another site's frame
+    // (clickjacking an "Allow" click).
+    const noFrame = [
+      { key: "X-Frame-Options", value: "DENY" },
+      { key: "Content-Security-Policy", value: "frame-ancestors 'none'" },
+      { key: "Referrer-Policy", value: "no-referrer" },
+    ];
     return [{ source: "/sdk/merrymen-browser.js", headers: [
       { key: "Access-Control-Allow-Origin", value: "*" },
       { key: "Cache-Control", value: "public, max-age=300" },
-    ] }];
+    ] },
+    { source: "/connect/app", headers: noFrame },
+    { source: "/connect/apps", headers: noFrame }];
   },
   experimental: {
     externalDir: true,
