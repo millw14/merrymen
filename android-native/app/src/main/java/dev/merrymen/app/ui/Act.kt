@@ -4,7 +4,6 @@ import dev.merrymen.app.data.ChatLine
 import dev.merrymen.app.data.ChatSnapshot
 import dev.merrymen.app.data.ConfirmScope
 import dev.merrymen.app.data.LineOrder
-import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.OrderFollow
 import dev.merrymen.app.data.PendingCard
 import dev.merrymen.app.data.Repository
@@ -938,12 +937,6 @@ suspend fun applyRisk(repo: Repository, level: String, owner: String?): Acted {
       else Acted.Ok("Saved. ${riskProfile(level).blurb}")
     else -> settingsWriteFailed(r)
   }
-}
-
-/** Loaded is used by callers that render through LoadedBlock. */
-fun Acted.asLoaded(): Loaded<String> = when (this) {
-  is Acted.Ok -> Loaded.Value(line)
-  is Acted.Failed -> Loaded.Refused(400, line)
 }
 
 // ── the Trade screen: a card first, always ──────────────────────────────────
