@@ -18,6 +18,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -138,6 +139,9 @@ private fun CardBlurb(text: String, modifier: Modifier = Modifier) {
 @Composable
 fun CircleScreen(nav: NavHostController) {
   val c = LocalContainer.current
+  // SIGN-IN ONLY WHERE THERE IS ONE (hosted, and nobody signed in). A
+  // self-hosted box has no sign-in, and an offer there leads nowhere.
+  val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
   var state by remember { mutableStateOf<Loaded<CircleView>>(Loaded.Loading) }
   val scope = rememberCoroutineScope()
   suspend fun load() { state = c.api.circle().toLoaded() }
@@ -152,7 +156,7 @@ fun CircleScreen(nav: NavHostController) {
     ) {
       LoadedBlock(
         state,
-        onSignIn = { nav.navigate(Routes.SIGN_IN) },
+        onSignIn = if (canOfferSignIn) ({ nav.navigate(Routes.SIGN_IN) }) else null,
         onRetry = { scope.launch { load() } },
       ) { v ->
         // FOUR ANSWERS, FOUR SENTENCES. `balance` is null for three of them, and
@@ -161,8 +165,8 @@ fun CircleScreen(nav: NavHostController) {
           "sign-in" -> Notice(
             title = "Sign in",
             body = "Sign in to see where your wallet stands.",
-            actionLabel = "Sign in",
-            onAction = { nav.navigate(Routes.SIGN_IN) },
+            actionLabel = if (canOfferSignIn) "Sign in" else null,
+            onAction = if (canOfferSignIn) ({ nav.navigate(Routes.SIGN_IN) }) else null,
           )
           // Linking a SEPARATE holder wallet is a signature flow this client
           // does not carry yet, so the copy no longer promises it — it states

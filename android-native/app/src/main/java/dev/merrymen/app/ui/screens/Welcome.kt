@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -85,6 +87,12 @@ import kotlinx.coroutines.launch
 fun WelcomeScreen(nav: NavHostController) {
   val c = LocalContainer.current
   val scope = rememberCoroutineScope()
+  // THE SIGN-IN DOORS ONLY WHERE A SIGN-IN EXISTS. A self-hosted server says
+  // {hosted:false} and has none, so there the page offers the one door that is
+  // real. While the server has not answered, the doors stay: the page draws
+  // before the network, and the sign-in screen itself refuses to open a
+  // sign-in the server does not have.
+  val hosted by c.repo.hosted.collectAsState()
 
   fun signIn() {
     // Seen, plainly — a reader on the web sign-in has been past the welcome.
@@ -135,7 +143,7 @@ fun WelcomeScreen(nav: NavHostController) {
 
         // PRIMARY — the mint pill, dark ink text, the X mark drawn rather than
         // pulled from an icon set that does not carry it.
-        PillButton(
+        if (hosted != false) PillButton(
           background = MerryColors.mint,
           content = MerryColors.ink,
           border = null,
@@ -149,7 +157,7 @@ fun WelcomeScreen(nav: NavHostController) {
         Spacer(Modifier.height(12.dp))
 
         // SECONDARY — transparent over a hairline, the wallet drawn as a stroke.
-        PillButton(
+        if (hosted != false) PillButton(
           background = Color.Transparent,
           content = MerryColors.tx,
           border = MerryColors.line,
@@ -163,7 +171,7 @@ fun WelcomeScreen(nav: NavHostController) {
         Spacer(Modifier.height(20.dp))
 
         Text(
-          "Continue as guest  →",
+          if (hosted == false) "Continue  →" else "Continue as guest  →",
           style = TextStyle(fontFamily = sans(16.sp, FontWeight.Medium), fontSize = 16.sp, textAlign = TextAlign.Center),
           color = MerryColors.mint,
           modifier = Modifier.fillMaxWidth().clickable(onClick = ::guest).padding(vertical = 8.dp),
