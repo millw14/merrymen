@@ -380,6 +380,23 @@ export async function readTokenFacts(
   return { address: a, identity: trustedIdentity(a, o.customTokens), stock, row, index: indexStateOf(pools, row), stockMarket };
 }
 
+/**
+ * The facts that need no market read: identity and registry membership only.
+ * For an agent on another chain, where every market read here (the index, the
+ * Chainlink/halt read) describes mainnet and would be the wrong chain's facts.
+ */
+export function localTokenFacts(address: string, customTokens: readonly OwnerToken[]): TokenFacts {
+  const a = address.toLowerCase();
+  return {
+    address: a,
+    identity: trustedIdentity(a, customTokens),
+    stock: stockOf(a),
+    row: null,
+    index: { read: "unread", observed_at: null, truncated: false },
+    stockMarket: { row: null, read: "not_applicable", fetched_at: null },
+  };
+}
+
 /** Is it listed by something that finds tokens? A custom token is the owner's choice, not a discovery. */
 export function discoverability(f: Pick<TokenFacts, "identity" | "row" | "index">): Verdict {
   if (f.identity && f.identity.source !== "custom") {
@@ -630,17 +647,22 @@ export interface SearchResult {
   index: { reachable: boolean; observed_at: string | null; truncated: boolean };
 }
 
-const WATCHLIST_SEARCH_SQL = "SELECT token, symbol, label FROM mcp_watchlist WHERE tenant = ? AND chain_id = 4663 ORDER BY created_at DESC LIMIT 100";
+const WATCHLIST_SEARCH_SQL = "SELECT token, label FROM mcp_watchlist WHERE tenant = ? AND chain_id = 4663 ORDER BY created_at DESC, token ASC LIMIT 100";
 
 /**
  * Search the tokens this caller can see: the curated registry, the index's
  * pools, and the caller's own custom tokens and watchlist. `db` holds the
  * watchlist; `tenant` scopes it. Nothing per-owner is kept after the call.
+ *
+ * The caller decides what private sources the connection may see: pass no
+ * custom tokens and `includeWatchlist: false` for a connection holding only
+ * the public market scope.
  */
 export async function searchTokens(db: Db, o: {
   tenant: string;
   query: string;
   customTokens: readonly OwnerToken[];
+  includeWatchlist: boolean;
   readers: MarketReaders;
   offset: number;
   limit: number;
@@ -684,14 +706,17 @@ export async function searchTokens(db: Db, o: {
     c.sources.add("custom_token");
     if (!c.symbolTrusted) trust(c, t.symbol, null);
   }
-  const watched = await db.prepare(WATCHLIST_SEARCH_SQL).all(o.tenant.toLowerCase()) as Array<{ token: string; symbol: string | null; label: string | null }>;
+  const watched = o.includeWatchlist
+    ? await db.prepare(WATCHLIST_SEARCH_SQL).all(o.tenant.toLowerCase()) as Array<{ token: string; label: string | null }>
+    : [];
   for (const w of watched) {
     if (!ADDRESS_RE.test(String(w.token).toLowerCase())) continue;
     const c = get(w.token);
     c.sources.add("watchlist");
     c.label = w.label;
-    // The stored symbol was a registry or owner ticker when it was added.
-    if (!c.symbolTrusted && w.symbol) trust(c, w.symbol, null);
+    // No symbol is taken from the row: trust is re-derived from what vouches
+    // for the address NOW (the registry and custom-token loops above), so a
+    // ticker the owner has since removed is not still presented as trusted.
   }
 
   const pools = await o.readers.pools().catch(() => null);
@@ -760,7 +785,9 @@ export async function searchTokens(db: Db, o: {
       symbol_trusted: c.symbolTrusted,
       name: c.name,
       name_trusted: c.nameTrusted,
-      kind: tokenKind(c.address, true),
+      // Known only when a source describes it; a watchlist entry alone is the
+      // owner's note about an address, not a fact about it (as get_token says).
+      kind: tokenKind(c.address, !!(c.row || c.symbolTrusted)),
       sources: [...c.sources].sort(),
       matched_on: on,
       flags,
@@ -803,20 +830,37 @@ export type PoolSource = "argument" | "discovery";
  * index listed for this token. A caller-supplied id is only ever a name the
  * provider looks up; the reader then checks the bars' base token against
  * `token` and refuses a series about the other side of the pair.
+ *
+ * `listedOnly` pins a caller's id to the pool the index lists for the token.
+ * readCandles caches by pool and window, NOT by token, and that cache is the
+ * one the public token pages read (/api/tokens/[address] asks for exactly the
+ * listed pool of the token in its URL, with no base check on a cache hit). A
+ * caller asking for another token's listed pool with the OTHER side of its pair
+ * would get a verified series about that side — which is then cached under the
+ * pool and served to every viewer of the first token's page as its chart. So
+ * for candles the only (pool, token) pair ever read is the one the dashboard
+ * itself reads. Pool evidence is cached per pool AND token, so it needs no pin.
  */
-async function resolvePool(address: string, poolId: string | undefined, r: MarketReaders): Promise<
+async function resolvePool(address: string, poolId: string | undefined, r: MarketReaders, listedOnly = false): Promise<
   { poolId: string; source: PoolSource } | { poolId: null; state: "no_pool" | "index_unreachable" }
 > {
+  let id: string | null = null;
   if (poolId !== undefined) {
-    const id = poolId.toLowerCase();
+    id = poolId.toLowerCase();
     if (!POOL_ID_RE.test(id)) throw new MarketInputError("pool_id must be a 0x-prefixed 20-byte pool address or 32-byte pool id");
-    return { poolId: id, source: "argument" };
+    if (!listedOnly) return { poolId: id, source: "argument" };
   }
   const pools = await r.pools().catch(() => null);
   if (!pools || (pools.asked > 0 && pools.reached === 0)) return { poolId: null, state: "index_unreachable" };
   const row = pools.byToken.get(address.toLowerCase());
-  if (!row || !POOL_ID_RE.test(row.poolId.toLowerCase())) return { poolId: null, state: "no_pool" };
-  return { poolId: row.poolId.toLowerCase(), source: "discovery" };
+  const listed = row && POOL_ID_RE.test(row.poolId.toLowerCase()) ? row.poolId.toLowerCase() : null;
+  if (id !== null && id !== listed) {
+    throw new MarketInputError(listed
+      ? "pool_id is not the pool the index lists for this token; omit it to use that pool (see get_token pool.pool_id)."
+      : "The index lists no pool for this token, so no pool_id can be charted for it.");
+  }
+  if (!listed) return { poolId: null, state: "no_pool" };
+  return { poolId: listed, source: id !== null ? "argument" : "discovery" };
 }
 
 const CANDLE_CACHE_S: Record<CandleWindow, number> = { "15m": 120, "1h": 300, "4h": 900, "1d": 1800 };
@@ -842,7 +886,7 @@ export interface CandleView {
 
 export async function candlesFor(o: { address: string; poolId?: string; window: CandleWindow; readers: MarketReaders }): Promise<CandleView> {
   const address = o.address.toLowerCase();
-  const pool = await resolvePool(address, o.poolId, o.readers);
+  const pool = await resolvePool(address, o.poolId, o.readers, true);
   const base = {
     address,
     window: o.window,
@@ -852,14 +896,15 @@ export async function candlesFor(o: { address: string; poolId?: string; window: 
   if (pool.poolId === null) {
     return {
       ...base, pool_id: null, pool_source: null, state: pool.state,
-      reason: pool.state === "no_pool" ? "The index lists no pool for this token; pass pool_id if you know it." : "The market index could not be read just now.",
+      reason: pool.state === "no_pool" ? "The index lists no pool for this token, so there is no chart for it here." : "The market index could not be read just now.",
       interval_s: null, bars: [], gaps: null, last_bar_partial: null, last_bar_age_s: null, stale: false, quote_symbol: null,
     };
   }
   let read = await o.readers.candles(pool.poolId, address, o.window);
   // readCandles caches by pool and window, not by token: its base check ran
-  // against whichever token first asked. With a caller-chosen pool id that can
-  // be a different token, so the base is checked again here, failing closed.
+  // against whichever token first asked. The pool is pinned to this token's
+  // listed pool above, so that is the dashboard's own pair; the base is still
+  // checked again here, failing closed, in case anything else fed that cache.
   if (read.state === "ok" && (read.base ?? "") !== address) {
     read = { ...read, state: "mismatch", candles: [], gaps: 0, lastBarAgeSec: null, stale: false };
   }
@@ -1207,7 +1252,7 @@ export class WatchlistFullError extends Error {
 export interface WatchlistRow {
   chain_id: number;
   address: string;
-  /** A registry or owner ticker recorded when the token was added; null otherwise. */
+  /** A public registry ticker (cash, stock token, official coin) recorded when the token was added; null otherwise. */
   symbol: string | null;
   /** The owner's own words (raw). */
   label: string | null;
@@ -1236,6 +1281,15 @@ export async function listWatchlist(db: Db, tenant: string): Promise<WatchlistRo
  * Add a token, or update the label and note of one already watched. A field
  * left undefined keeps what is stored; an explicit null clears it. Watching
  * never buys anything: nothing reads this table to trade.
+ *
+ * The stored symbol is a PUBLIC registry ticker only (cash, stock tokens,
+ * official coins), never the owner's own custom ticker: that is a setting, and
+ * a connection allowed to manage the watchlist is not thereby allowed to read
+ * settings. Surfaces that may see the owner's tokens derive it at read time.
+ *
+ * Under concurrent adds on Postgres the cap can be overshot by the number of
+ * adds in flight (each counts before the other commits); the insert itself is
+ * conflict-safe, so a race on the SAME token updates instead of failing.
  */
 export async function addToWatchlist(db: Db, o: {
   tenant: string;
@@ -1243,28 +1297,31 @@ export async function addToWatchlist(db: Db, o: {
   address: string;
   label?: string | null;
   note?: string | null;
-  customTokens: readonly OwnerToken[];
   now: number;
 }): Promise<{ added: boolean; row: WatchlistRow; count: number }> {
   const tenant = o.tenant.toLowerCase();
   const token = o.address.toLowerCase();
   if (!ADDRESS_RE.test(token)) throw new MarketInputError("address must be a 0x-prefixed 20-byte address");
-  const symbol = trustedIdentity(token, o.customTokens)?.symbol ?? null;
+  const symbol = o.chainId === 4663 ? trustedIdentity(token, [])?.symbol ?? null : null;
   return db.tx(async (tx) => {
     const existing = await tx.prepare("SELECT token FROM mcp_watchlist WHERE tenant = ? AND chain_id = ? AND token = ?").get(tenant, o.chainId, token);
+    let added = false;
     if (!existing) {
       const n = await tx.prepare("SELECT COUNT(*) AS n FROM mcp_watchlist WHERE tenant = ?").get(tenant) as { n: number | string };
       if (Number(n.n) >= WATCHLIST_MAX) throw new WatchlistFullError();
-      await tx.prepare("INSERT INTO mcp_watchlist (tenant, chain_id, token, symbol, label, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      const r = await tx.prepare(`INSERT INTO mcp_watchlist (tenant, chain_id, token, symbol, label, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tenant, chain_id, token) DO NOTHING`)
         .run(tenant, o.chainId, token, symbol, o.label ?? null, o.note ?? null, o.now);
-    } else {
+      added = r.changes > 0;
+    }
+    if (!added) {
       if (o.label !== undefined) await tx.prepare("UPDATE mcp_watchlist SET label = ? WHERE tenant = ? AND chain_id = ? AND token = ?").run(o.label, tenant, o.chainId, token);
       if (o.note !== undefined) await tx.prepare("UPDATE mcp_watchlist SET note = ? WHERE tenant = ? AND chain_id = ? AND token = ?").run(o.note, tenant, o.chainId, token);
-      if (symbol) await tx.prepare("UPDATE mcp_watchlist SET symbol = ? WHERE tenant = ? AND chain_id = ? AND token = ?").run(symbol, tenant, o.chainId, token);
+      await tx.prepare("UPDATE mcp_watchlist SET symbol = ? WHERE tenant = ? AND chain_id = ? AND token = ?").run(symbol, tenant, o.chainId, token);
     }
     const row = await tx.prepare("SELECT chain_id, token, symbol, label, note, created_at FROM mcp_watchlist WHERE tenant = ? AND chain_id = ? AND token = ?").get(tenant, o.chainId, token) as WatchDbRow;
     const n = await tx.prepare("SELECT COUNT(*) AS n FROM mcp_watchlist WHERE tenant = ?").get(tenant) as { n: number | string };
-    return { added: !existing, row: watchRow(row), count: Number(n.n) };
+    return { added, row: watchRow(row), count: Number(n.n) };
   });
 }
 

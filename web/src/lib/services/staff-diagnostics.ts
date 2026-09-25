@@ -41,11 +41,22 @@ export type Hasher = (value: string) => string | null;
 /** Longest input normalisePattern reads. Worker and provider messages are unbounded; a pattern needs the head only. */
 export const PATTERN_INPUT_MAX = 2000;
 
+/**
+ * Producers whose tail is the OWNER'S OWN CONTENT. The Telegram remote-control
+ * agent (worker/src/telegram/agent.ts, pc.ts) records, at warn level, the task
+ * an owner typed ("task started — <task>"), the files, commands, URLs and
+ * keystrokes it used on their machine, and why a task failed. No rule below
+ * can tell a sentence an owner wrote from one a developer wrote (a task is
+ * plain words), so these keep only the producer's own words.
+ */
+const OWNER_TAIL = /^(\s*Telegram(?: agent)?: (?:task started|failed|wrote|sent file|opened(?: app| URL)?|pressed|ran(?: shell)?))(?![A-Za-z])[^]*$/i;
+
 export function normalizePattern(text: string | null | undefined, max = 140, scrub?: (s: string) => string): string | null {
   if (typeof text !== "string") return null;
   // Bounded before any regex runs: the name scrubber alone is thousands of
   // alternatives per position.
   let s = text.slice(0, PATTERN_INPUT_MAX).replace(/[\u0000-\u001f\u007f]/g, " ");
+  s = s.replace(OWNER_TAIL, "$1 …");
   s = s.replace(/\b(?:https?|wss?):\/\/[^\s"'<>)\]]+/gi, "<url>");
   s = s.replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, "<email>");
   // Telegram / X handles: an owner's (or a stranger's) account name.
@@ -87,14 +98,16 @@ export function nameScrubber(names: readonly (string | null | undefined)[]): ((s
   return (s) => s.replace(re, "<name>");
 }
 
-/** The fleet's agent names, for nameScrubber. Bounded; a missing table is no names. */
+/**
+ * The fleet's agent names, for nameScrubber. Bounded. A failed read PROPAGATES:
+ * the names are what keeps an owner-chosen name out of the patterns, so a read
+ * error must fail the call rather than publish unscrubbed text. (`agents` is
+ * created with `events` and `trades` by the same schema, so there is no
+ * legitimate "no agents table" case here.)
+ */
 async function readAgentNames(db: Db): Promise<string[]> {
-  try {
-    const rows = await db.prepare("SELECT DISTINCT name FROM agents WHERE name IS NOT NULL LIMIT 5000").all() as Array<{ name: string | null }>;
-    return rows.map((r) => r.name).filter((n): n is string => typeof n === "string");
-  } catch {
-    return [];
-  }
+  const rows = await db.prepare("SELECT DISTINCT name FROM agents WHERE name IS NOT NULL LIMIT 5000").all() as Array<{ name: string | null }>;
+  return rows.map((r) => r.name).filter((n): n is string => typeof n === "string");
 }
 
 const CODE = /^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/;
@@ -207,6 +220,8 @@ export interface FleetHealth {
   };
   mirror: {
     tables: Array<{ table: string; tenants: number; never_copied: number; lag_s: { min: number | null; median: number | null; p90: number | null; max: number | null } }>;
+    /** mirror_state rows of owners with no current grant: no longer mirrored, so their lag only grows. Excluded above. */
+    rows_without_current_grant: number;
     note: string;
   } | null;
   observed_at: string;
@@ -231,16 +246,19 @@ interface AgentRow {
  * a JSON projection so the sealed session key and the serialized grant never
  * leave the database. Null when the table cannot be read.
  */
-async function readCurrentAccounts(db: Db, limit: number): Promise<{ byAccount: Map<string, `0x${string}`>; truncated: boolean } | null> {
+async function readCurrentAccounts(db: Db, limit: number): Promise<{ byAccount: Map<string, `0x${string}`>; tenants: Set<string>; truncated: boolean } | null> {
   try {
     const rows = await db.prepare(`SELECT tenant, grant_json->>'smartAccount' AS smart_account FROM grants ORDER BY tenant LIMIT ?`).all(limit + 1) as Array<{ tenant: string; smart_account: string | null }>;
     const byAccount = new Map<string, `0x${string}`>();
+    const tenants = new Set<string>();
     for (const r of rows.slice(0, limit)) {
       const account = typeof r.smart_account === "string" ? r.smart_account.toLowerCase() : "";
       const tenant = typeof r.tenant === "string" ? r.tenant.toLowerCase() : "";
-      if (account && /^0x[0-9a-f]{40}$/.test(tenant)) byAccount.set(account, tenant as `0x${string}`);
+      if (!/^0x[0-9a-f]{40}$/.test(tenant)) continue;
+      tenants.add(tenant);
+      if (account) byAccount.set(account, tenant as `0x${string}`);
     }
-    return { byAccount, truncated: rows.length > limit };
+    return { byAccount, tenants, truncated: rows.length > limit };
   } catch {
     // No grants table (a fresh database) cannot tell current from retired.
     return null;
@@ -385,24 +403,44 @@ export async function readFleetHealth(db: Db, o: FleetHealthOptions): Promise<Fl
       latest_mark_book: book,
       note: "Current agents that are not frozen. An equity mark is written only after a complete valuation, so its age is how long since the last successful cycle; paper and live marks are counted by the book of each agent's latest mark.",
     },
-    mirror: await readMirrorLag(db, o.now, warnings),
+    mirror: await readMirrorLag(db, o.now, warnings, grants?.tenants ?? null),
     observed_at: iso(o.now),
     warnings,
   };
 }
 
-async function readMirrorLag(db: Db, now: number, warnings: string[]): Promise<FleetHealth["mirror"]> {
-  let rows: Array<{ table_name: string; updated_at: number | string | null }>;
+const MIRROR_ROWS_MAX = 20_000;
+
+/**
+ * Lag per mirrored table, over owners with a CURRENT grant only. The
+ * orchestrator mirrors only tenants it runs a child for; once a grant is gone
+ * (kill switch, departed owner) its mirror_state rows stay behind with an
+ * updated_at that never moves again, so counting them would pin max and p90
+ * at "weeks" for good and hide a live stall. `currentTenants` null (grants
+ * unreadable) counts every row; the caller has already warned about that.
+ */
+async function readMirrorLag(db: Db, now: number, warnings: string[], currentTenants: ReadonlySet<string> | null): Promise<FleetHealth["mirror"]> {
+  let rows: Array<{ tenant: string | null; table_name: string; updated_at: number | string | null }>;
   try {
-    rows = await db.prepare("SELECT table_name, updated_at FROM mirror_state ORDER BY table_name LIMIT 20000").all() as typeof rows;
+    rows = await db.prepare("SELECT tenant, table_name, updated_at FROM mirror_state ORDER BY table_name, tenant LIMIT ?").all(MIRROR_ROWS_MAX + 1) as typeof rows;
   } catch {
     // The orchestrator creates mirror_state on its first pass; before that
-    // there is no lag to report, which is not the same as zero lag.
-    warnings.push("mirror_state is not present (the orchestrator has not mirrored yet), so mirror lag is unknown.");
+    // there is no lag to report, which is not the same as zero lag. (Any other
+    // read failure lands here too, so the warning does not claim which.)
+    warnings.push("mirror_state could not be read (the orchestrator has not created it yet, or the read failed), so mirror lag is unknown.");
     return null;
   }
+  if (rows.length > MIRROR_ROWS_MAX) {
+    rows = rows.slice(0, MIRROR_ROWS_MAX);
+    warnings.push(`More than ${MIRROR_ROWS_MAX} mirror_state rows exist; only the first ${MIRROR_ROWS_MAX} were read.`);
+  }
+  let withoutGrant = 0;
   const byTable = new Map<string, { tenants: number; never: number; lags: number[] }>();
   for (const r of rows) {
+    if (currentTenants && !currentTenants.has(String(r.tenant ?? "").toLowerCase())) {
+      withoutGrant += 1;
+      continue;
+    }
     const table = typeof r.table_name === "string" && CODE.test(r.table_name) && r.table_name.length <= 40 ? r.table_name : "other";
     const t = byTable.get(table) ?? { tenants: 0, never: 0, lags: [] };
     t.tenants += 1;
@@ -421,7 +459,8 @@ async function readMirrorLag(db: Db, now: number, warnings: string[]): Promise<F
         lag_s: { min: lags[0] ?? null, median: quantile(lags, 0.5), p90: quantile(lags, 0.9), max: lags.length ? lags[lags.length - 1]! : null },
       };
     }),
-    note: "Lag is now minus mirror_state.updated_at per owner and table. The cursor advances only when rows were copied, so a quiet agent shows a large lag on its log tables without anything being wrong; a large lag on a busy table (trades, equity) is the signal.",
+    rows_without_current_grant: withoutGrant,
+    note: "Lag is now minus mirror_state.updated_at per owner and table, over owners with a current grant (rows of owners without one are no longer mirrored and are counted in rows_without_current_grant instead). The cursor advances only when rows were copied, so a quiet agent shows a large lag on its log tables without anything being wrong; a large lag on a busy table (trades, equity) is the signal.",
   };
 }
 

@@ -103,6 +103,41 @@ function hash(v: unknown): string | null {
   return typeof v === "string" && HASH.test(v) ? v.toLowerCase() : null;
 }
 
+/**
+ * A token column as an address, or a bounded plain label when the row holds
+ * something else. Never raw text of any length or alphabet: it is echoed in
+ * warnings as well as in the field.
+ */
+function tokenOf(v: unknown): string {
+  const a = addr(v);
+  if (a) return a;
+  const s = typeof v === "string" ? v.trim() : "";
+  return /^[A-Za-z0-9._:-]{1,42}$/.test(s) ? s : "unknown";
+}
+
+/** The heartbeat's mode as one of the words the worker writes; anything else is "unknown", never echoed. */
+function modeWord(v: unknown): "paper" | "live" | "idle" | "unknown" | null {
+  if (v === null || v === undefined) return null;
+  return v === "paper" || v === "live" || v === "idle" ? v : "unknown";
+}
+
+/**
+ * SQL for "landed with a transaction hash": the same test statusOf applies in
+ * code (a 0x-prefixed 32-byte hash), so a filter or a count of confirmed
+ * operations can never include a row the list shows as landed_without_tx_hash.
+ */
+const CONFIRMED_SQL = "t.status = 'landed' AND t.tx_hash LIKE '0x%' AND length(t.tx_hash) = 66";
+/** Its complement among landed rows, NULL-safe (a NOT over a NULL hash would count nothing). */
+const LANDED_NO_HASH_SQL = "t.status = 'landed' AND (t.tx_hash IS NULL OR NOT (t.tx_hash LIKE '0x%' AND length(t.tx_hash) = 66))";
+
+/**
+ * A redeploy's re-recorded copy of an operation (worker token-label.ts
+ * isRestartCopy; chat-tools NOT_A_COPY): a bare 'swap' aimed at the account
+ * itself, with no decision and no fill side, stamped at the restart. It is not
+ * a trade in the step it is stamped in, so it must not excuse that step's cash.
+ */
+const NOT_A_RESTART_COPY = "NOT (kind = 'swap' AND target IS NOT NULL AND lower(target) = lower(agent_id) AND decision_id IS NULL AND fill_side IS NULL)";
+
 export function txUrl(chainId: number, tx: string | null): string | null {
   return tx ? `${explorerFor(chainId)}/tx/${tx}` : null;
 }
@@ -203,8 +238,8 @@ export interface BookPortfolio {
 }
 
 export interface PortfolioView {
-  /** The worker's last heartbeat mode: paper, live or idle. */
-  agent_mode: string | null;
+  /** The worker's last heartbeat mode: paper, live or idle ("unknown" for any other value). */
+  agent_mode: "paper" | "live" | "idle" | "unknown" | null;
   /** The book of the newest valuation of any book. */
   latest_valuation_book: Book | null;
   current_book: Book | null;
@@ -277,7 +312,7 @@ async function readBookPositions(db: Db, scope: LedgerScope, holder: string, boo
       .prepare(`SELECT COUNT(*) AS n FROM positions WHERE lower(agent_id) IN (${qs(others.length)})`)
       .get(...others)) as { n: number } | undefined;
     const n = Number(left?.n ?? 0);
-    if (n > 0) warnings.push(`${n} position row(s) recorded under an earlier smart account of this agent are not shown: they were not revalued with the latest valuation and are not current holdings of it.`);
+    if (n > 0) warnings.push(`${n} position row(s) recorded under another smart account of this agent are not shown: that account did not write the latest valuation, so they are not holdings as of it.`);
   }
   // Whether each cost still carries a quote-booked fill, replayed the way the
   // desk replays it. Unreadable or ambiguous vouches for nothing (null).
@@ -291,7 +326,7 @@ async function readBookPositions(db: Db, scope: LedgerScope, holder: string, boo
     quote = null;
   }
   return mine.map((r) => {
-    const token = addr(r.token) ?? String(r.token ?? "").slice(0, 42);
+    const token = tokenOf(r.token);
     const stale = Number(r.price_stale ?? 0) === 1;
     const rawPrice = num(r.price_usd);
     const price = rawPrice !== null && rawPrice > 0 ? rawPrice : null;
@@ -328,18 +363,26 @@ async function readBookPositions(db: Db, scope: LedgerScope, holder: string, boo
  * unknown basis). Launch tokens in the class vault never reach `positions`:
  * the worker carries them at cost, so this is the only place they show.
  */
-async function readClassHoldings(db: Db, scope: LedgerScope): Promise<ClassHoldingView[]> {
+/** The most class-vault holdings one read lists; a real book is a handful. */
+const CLASS_HOLDINGS_LIMIT = 200;
+
+async function readClassHoldings(db: Db, scope: LedgerScope, warnings: string[]): Promise<ClassHoldingView[]> {
   if (!scope.accounts.length) return [];
+  // The standing states are filtered IN SQL, before the limit: class_positions
+  // keeps every token the vault ever held, so a limit over all states would let
+  // a long tail of closed round trips push a position still held off the list.
   const rows = (await db
     .prepare(`SELECT agent_id, token, symbol, decimals, quote_token, vault, entry_tx, cost_usdg, qty_raw, state, first_seen
-         FROM class_positions WHERE lower(agent_id) IN (${qs(scope.accounts.length)}) ORDER BY first_seen DESC LIMIT 200`)
+         FROM class_positions WHERE lower(agent_id) IN (${qs(scope.accounts.length)}) AND state IN ('open', 'recovered')
+        ORDER BY first_seen DESC LIMIT ${CLASS_HOLDINGS_LIMIT + 1}`)
     .all(...scope.accounts)) as Record<string, unknown>[];
-  const shaped = rows.map((r) => ({ row: r, token: String(r.token ?? ""), quoteToken: str(r.quote_token), state: str(r.state) }));
+  if (rows.length > CLASS_HOLDINGS_LIMIT) warnings.push(`Only the ${CLASS_HOLDINGS_LIMIT} newest class-vault holdings are listed.`);
+  const shaped = rows.slice(0, CLASS_HOLDINGS_LIMIT).map((r) => ({ row: r, token: String(r.token ?? ""), quoteToken: str(r.quote_token), state: str(r.state) }));
   return activeClassPositions(shaped).map(({ row, state }) => {
     const entry = hash(row.entry_tx);
     const recovered = state === "recovered";
     return {
-      token: addr(row.token) ?? String(row.token ?? "").slice(0, 42),
+      token: tokenOf(row.token),
       symbol: str(row.symbol),
       state: recovered ? "recovered" : "open",
       qty_raw: typeof row.qty_raw === "string" && /^\d{1,80}$/.test(row.qty_raw) ? row.qty_raw : null,
@@ -395,7 +438,7 @@ export async function readPortfolio(db: Db, scope: LedgerScope, o: { now: number
     };
   }
   const row = scope.current ? await readAgentRow(db, scope.current) : null;
-  const agentMode = row?.mode ?? null;
+  const agentMode = modeWord(row?.mode);
   const newest = await readLatestMark(db, scope, null);
   const marks: Record<Book, MarkView | null> = { paper: await readLatestMark(db, scope, "paper"), live: await readLatestMark(db, scope, "live") };
   const latestBook = newest?.mode ?? null;
@@ -411,7 +454,7 @@ export async function readPortfolio(db: Db, scope: LedgerScope, o: { now: number
     books[latestBook].positions_held_here = true;
     books[latestBook].positions = await readBookPositions(db, scope, newest.account, latestBook, warnings, new Map());
   }
-  books.live.class_vault_positions = await readClassHoldings(db, scope);
+  books.live.class_vault_positions = await readClassHoldings(db, scope, warnings);
 
   const heartbeatBook: Book | null = agentMode === "paper" || agentMode === "live" ? agentMode : null;
   const current = latestBook ?? heartbeatBook;
@@ -557,7 +600,9 @@ function bookOfRow(ledger: string, rule: unknown): TradeBookLabel {
   if (ledger === "paper") return "paper";
   if (ledger === "landed" || ledger === "submitted" || ledger === "reverted") return "live";
   // A refusal filled nothing in either book; only a refused PAPER fill says which.
-  if (ledger === "rejected" && typeof rule === "string" && /^paper:/i.test(rule.trim())) return "paper";
+  // The same prefix test the SQL filters and counts use (LIKE 'paper:%'), so a
+  // row is never listed under one book and counted under another.
+  if (ledger === "rejected" && typeof rule === "string" && rule.startsWith("paper:")) return "paper";
   return "none";
 }
 
@@ -598,7 +643,8 @@ function tradeOf(r: Record<string, unknown>, chainId: number): TradeView & { op_
     display_name: str(r.display_name),
     amount_usdg: money(num(r.amount_usdg)),
     fill_qty_raw: typeof r.fill_qty_raw === "string" && /^\d{1,80}$/.test(r.fill_qty_raw) ? r.fill_qty_raw : null,
-    fill_price_usd: num(r.fill_price_usd),
+    // A zero or negative fill price is a price nobody recorded, not a free coin.
+    fill_price_usd: (() => { const p = num(r.fill_price_usd); return p !== null && p > 0 ? p : null; })(),
     fill_cash_usdg: money(num(r.fill_cash_usdg)),
     realized_pnl_usdg: money(realized),
     realized_pnl_measured: null,
@@ -655,7 +701,7 @@ export interface TradeCursor {
 }
 
 const STATUS_SQL: Record<Exclude<TradeFilter["status"], "all">, string> = {
-  confirmed: "t.status = 'landed' AND t.tx_hash IS NOT NULL AND t.tx_hash <> ''",
+  confirmed: CONFIRMED_SQL,
   submitted: "t.status = 'submitted'",
   failed: "t.status = 'reverted'",
   refused: "t.status = 'rejected'",
@@ -746,7 +792,14 @@ export interface TradeDetail {
 export function receiptExplanation(t: TradeView): string {
   switch (t.status) {
     case "confirmed":
-      return "Confirmed: the operation landed on chain with a successful receipt, and the fill was read from it. The transaction hash links to the block explorer.";
+      // Landed says the operation succeeded on chain; how its FILL was booked is
+      // basis_source's to say. A quote-booked fill is the worker's estimate from
+      // before the trade, taken because the receipt could not be read.
+      return t.basis_source === "receipt"
+        ? "Confirmed: the operation landed on chain with a successful receipt, and the fill was read from it. The transaction hash links to the block explorer."
+        : t.basis_source === "quote"
+          ? "Confirmed on chain (the transaction hash links to the block explorer), but the receipt could not be read, so the fill amounts were booked from the pre-trade quote: an estimate, not a measurement."
+          : "Confirmed on chain (the transaction hash links to the block explorer). The ledger does not record the fill as read from the receipt, so treat its fill amounts as unverified.";
     case "landed_without_tx_hash":
       return "The worker recorded this operation as landed, but no transaction hash is on record, so it cannot be checked on chain here. Treat it as unconfirmed.";
     case "submitted":
@@ -838,13 +891,16 @@ export async function periodWindow(db: Db, scope: LedgerScope, period: Period, n
   const epoch = row?.epoch ?? null;
   let first: number | null = null;
   if (scope.current && epoch !== null) {
+    // A run that has not been valued yet (a reset a moment ago) starts now:
+    // falling back to the first valuation ever would measure a closed run
+    // under the new run's name.
     const r = (await db.prepare("SELECT MIN(at) AS at FROM equity WHERE lower(agent_id) = ? AND epoch = ?").get(scope.current, epoch)) as { at: number | null } | undefined;
     first = num(r?.at);
+    return { period, since: first ?? now, until: now, run_epoch: epoch };
   }
-  if (first === null) {
-    const r = (await db.prepare(`SELECT MIN(at) AS at FROM equity WHERE lower(agent_id) IN (${qs(scope.accounts.length)})`).get(...scope.accounts)) as { at: number | null } | undefined;
-    first = num(r?.at);
-  }
+  // No agents row to name the run: everything on record is the only run known.
+  const r = (await db.prepare(`SELECT MIN(at) AS at FROM equity WHERE lower(agent_id) IN (${qs(scope.accounts.length)})`).get(...scope.accounts)) as { at: number | null } | undefined;
+  first = num(r?.at);
   return { period, since: first ?? now, until: now, run_epoch: epoch };
 }
 
@@ -875,6 +931,8 @@ export interface BookPerformance {
   book: Book;
   has_valuation: boolean;
   valued_in_window: boolean;
+  /** The one run (account and accounting epoch) the series, change and flows are measured in; see RunKey. */
+  measured_run: { account: string; epoch: number | null } | null;
   start: { at: number; equity_usdg: number } | null;
   end: { at: number; equity_usdg: number } | null;
   change_usdg: number | null;
@@ -909,20 +967,65 @@ export interface PerformanceView {
 
 type Row = Record<string, unknown>;
 
-async function markAt(db: Db, scope: LedgerScope, book: Book, cond: string, order: "ASC" | "DESC", ...args: unknown[]): Promise<{ at: number; equity: number; account: string } | null> {
+interface MarkPoint {
+  at: number;
+  equity: number;
+  account: string;
+  epoch: number | null;
+}
+
+/**
+ * ONE RUN OF ONE BOOK: one smart account, one accounting epoch.
+ *
+ * A performance series never crosses a run boundary, because the ledger does
+ * not carry value across one the way a series would read it: a paper reset
+ * restarts the simulated balance by fiat (a jump no trade made), an accounting
+ * change books the closing equity forward as an 'epoch-carry' flow (a deposit
+ * nobody made), and a re-signed permission is another account with its own
+ * epochs. Joined, each reads as a gain, a loss or a deposit. The worker's own
+ * performance readers carry the same account-and-epoch predicate
+ * (history-files.ts, chat-tools.ts; core explain.ts "Epoch").
+ */
+interface RunKey {
+  account: string;
+  epoch: number | null;
+}
+
+function runWhere(run: RunKey): { sql: string; args: unknown[] } {
+  return run.epoch === null
+    ? { sql: "lower(agent_id) = ? AND epoch IS NULL", args: [run.account] }
+    : { sql: "lower(agent_id) = ? AND epoch = ?", args: [run.account, run.epoch] };
+}
+
+function markPoint(r: Row | undefined): MarkPoint | null {
+  const eq = num(r?.equity_usdg);
+  return r && eq !== null ? { at: Number(r.at), equity: eq, account: String(r.agent_id).toLowerCase(), epoch: num(r.epoch) } : null;
+}
+
+/** A mark of this book on any of the agent's accounts, in any run. */
+async function markAt(db: Db, scope: LedgerScope, book: Book, cond: string, order: "ASC" | "DESC", ...args: unknown[]): Promise<MarkPoint | null> {
   const r = (await db
-    .prepare(`SELECT at, equity_usdg, agent_id FROM equity WHERE lower(agent_id) IN (${qs(scope.accounts.length)}) AND mode = ? AND ${cond}
+    .prepare(`SELECT at, equity_usdg, agent_id, epoch FROM equity WHERE lower(agent_id) IN (${qs(scope.accounts.length)}) AND mode = ? AND ${cond}
       ORDER BY at ${order}, id ${order} LIMIT 1`)
     .get(...scope.accounts, book, ...args)) as Row | undefined;
-  const eq = num(r?.equity_usdg);
-  return r && eq !== null ? { at: Number(r.at), equity: eq, account: String(r.agent_id).toLowerCase() } : null;
+  return markPoint(r);
+}
+
+/** A mark of this book inside one run (its account is one the scope already vouched for). */
+async function runMarkAt(db: Db, run: RunKey, book: Book, cond: string, order: "ASC" | "DESC", ...args: unknown[]): Promise<MarkPoint | null> {
+  const rw = runWhere(run);
+  const r = (await db
+    .prepare(`SELECT at, equity_usdg, agent_id, epoch FROM equity WHERE ${rw.sql} AND mode = ? AND ${cond}
+      ORDER BY at ${order}, id ${order} LIMIT 1`)
+    .get(...rw.args, book, ...args)) as Row | undefined;
+  return markPoint(r);
 }
 
 async function opCounts(db: Db, scope: LedgerScope, w: Window): Promise<{ ops: OpCounts; refused: number; gas: number; unpriced: number; sponsored: number }> {
   const r = (await db
     .prepare(`SELECT
-        COUNT(CASE WHEN t.status = 'landed' AND t.tx_hash IS NOT NULL AND t.tx_hash <> '' THEN 1 END) AS confirmed,
-        COUNT(CASE WHEN t.status = 'landed' AND (t.tx_hash IS NULL OR t.tx_hash = '') THEN 1 END) AS landed_no_hash,
+        COUNT(CASE WHEN ${CONFIRMED_SQL} THEN 1 END) AS confirmed,
+        COUNT(CASE WHEN ${LANDED_NO_HASH_SQL} THEN 1 END) AS landed_no_hash,
         COUNT(CASE WHEN t.status = 'submitted' THEN 1 END) AS submitted,
         COUNT(CASE WHEN t.status = 'reverted' THEN 1 END) AS failed,
         COUNT(CASE WHEN t.status = 'paper' THEN 1 END) AS paper_fills,
@@ -1003,7 +1106,7 @@ async function bookPerformance(db: Db, scope: LedgerScope, book: Book, w: Window
     ? { ...counts.ops, paper_fills: 0, paper_refused: 0 }
     : { confirmed: 0, landed_without_tx_hash: 0, submitted: 0, failed: 0, paper_fills: counts.ops.paper_fills, paper_refused: counts.ops.paper_refused };
   const out: BookPerformance = {
-    book, has_valuation: false, valued_in_window: false, start: null, end: null,
+    book, has_valuation: false, valued_in_window: false, measured_run: null, start: null, end: null,
     change_usdg: null, net_flows_usdg: null, flows_count: null, flows_evidenced: null, change_excluding_flows_usdg: null,
     return_pct: null, max_drawdown_pct: null, attribution: noAttr("this book has no valuation in the window"),
     realized_pnl_usdg: null, realized_sells_counted: null, realized_sells_excluded: null,
@@ -1032,22 +1135,34 @@ async function bookPerformance(db: Db, scope: LedgerScope, book: Book, w: Window
   else if ((realized.excluded ?? 0) > 0) caveats.push(`${realized.excluded} sell(s) are left out of realized P&L because their cost or proceeds were estimated rather than read from a receipt.`);
 
   // ── the valuation series ──
-  // A calendar window opens at the last valuation before it (else its first
-  // inside it), as the worker's periodChange does. A RUN opens inside itself:
-  // the mark before it belongs to the previous run, across a paper reset.
-  const before = w.period === "run" ? null : await markAt(db, scope, book, "at <= ?", "DESC", w.since);
-  const open = before ?? (await markAt(db, scope, book, w.period === "run" ? "at >= ? AND at <= ?" : "at > ? AND at <= ?", "ASC", w.since, w.until));
+  // The book's CURRENT RUN (RunKey): the account and epoch of its newest
+  // valuation in the window. A calendar window opens at the run's last
+  // valuation before it (else its first inside it), as the worker's
+  // periodChange does; a RUN period opens inside itself. Neither opens from a
+  // mark of an earlier run.
   const close = await markAt(db, scope, book, "at <= ?", "DESC", w.until);
-  if (!open || !close) return out;
+  if (!close) return out;
   out.has_valuation = true;
   if (close.at < w.since || (close.at === w.since && w.period !== "run")) {
     out.attribution = noAttr("this book has no valuation in the window");
     caveats.push(`This book was not valued during the window; its last valuation was at ${iso(close.at)}.`);
     return out;
   }
+  const run: RunKey = { account: close.account, epoch: close.epoch };
+  const rw = runWhere(run);
+  out.measured_run = { account: run.account, epoch: run.epoch };
+  const before = w.period === "run" ? null : await runMarkAt(db, run, book, "at <= ?", "DESC", w.since);
+  const open = before ?? (await runMarkAt(db, run, book, w.period === "run" ? "at >= ? AND at <= ?" : "at > ? AND at <= ?", "ASC", w.since, w.until));
+  if (!open) return out;
   out.valued_in_window = true;
   out.start = { at: open.at, equity_usdg: money(open.equity)! };
   out.end = { at: close.at, equity_usdg: money(close.equity)! };
+  if (!before && w.period !== "run") {
+    // The run began after the window opened. Any earlier mark of this book —
+    // inside the window or before it — is another run's.
+    const earlier = await markAt(db, scope, book, "at < ?", "DESC", open.at);
+    if (earlier) caveats.push(`Measured from the first valuation of this book's current run (${iso(open.at)}): the valuations before it belong to an earlier run (a paper reset, an accounting change or another smart account) and are not joined to this one.`);
+  }
   if (open.at === close.at) {
     // One valuation measures a level, not a change: unchanged is not known.
     out.attribution = noAttr("only one valuation of this book in the window");
@@ -1059,32 +1174,54 @@ async function bookPerformance(db: Db, scope: LedgerScope, book: Book, w: Window
   if (open.at < w.since) caveats.push(`Measured from the last valuation before the window opened (${iso(open.at)}).`);
 
   const shape = (await db
-    .prepare(`SELECT COUNT(*) AS n, COUNT(DISTINCT lower(agent_id)) AS accounts, MIN(epoch) AS lo, MAX(epoch) AS hi FROM equity
-        WHERE lower(agent_id) IN (${qs(scope.accounts.length)}) AND mode = ? AND at >= ? AND at <= ?`)
-    .get(...scope.accounts, book, open.at, close.at)) as Row | undefined;
+    .prepare(`SELECT COUNT(*) AS n FROM equity WHERE ${rw.sql} AND mode = ? AND at >= ? AND at <= ?`)
+    .get(...rw.args, book, open.at, close.at)) as Row | undefined;
   const rawCount = Number(shape?.n ?? 0) || 0;
-  if (Number(shape?.accounts ?? 0) > 1) caveats.push("The window spans more than one smart account (a re-signed permission); both are included.");
-  if (num(shape?.lo) !== null && num(shape?.lo) !== num(shape?.hi)) caveats.push("The window crosses an accounting epoch boundary (a paper reset or an accounting change), so the start and end may not be one continuous book.");
 
-  // Flows: real money in or out. Live only.
-  let flows: Array<{ at: number; signed: number; evidenced: boolean }> = [];
+  // Flows: real money in or out of the run's account. Live only.
+  //   - An 'epoch-carry' is an accounting bridge (a closed run's equity written
+  //     forward as the next one's opening balance), not money anyone moved.
+  //   - One chain log is one flow, whichever spelling of the account it was
+  //     recorded under (the unique index keys on the exact spelling).
+  const flows: Array<{ at: number; signed: number; evidenced: boolean }> = [];
   if (live) {
     const fr = (await db
-      .prepare(`SELECT direction, amount_usdg, source, at FROM flows
-          WHERE lower(agent_id) IN (${qs(scope.accounts.length)}) AND at > ? AND at <= ? ORDER BY at ASC, id ASC LIMIT ${FLOW_READ_LIMIT + 1}`)
-      .all(...scope.accounts, open.at, close.at)) as Row[];
+      .prepare(`SELECT direction, amount_usdg, source, tx_hash, log_index, at FROM flows
+          WHERE lower(agent_id) = ? AND at > ? AND at <= ? ORDER BY at ASC, id ASC LIMIT ${FLOW_READ_LIMIT + 1}`)
+      .all(run.account, open.at, close.at)) as Row[];
     if (fr.length > FLOW_READ_LIMIT) {
       caveats.push(`More than ${FLOW_READ_LIMIT} flows in the window; net flows were not summed.`);
     } else {
-      flows = fr
-        .map((r) => ({ at: Number(r.at), signed: (r.direction === "in" ? 1 : r.direction === "out" ? -1 : NaN) * (num(r.amount_usdg) ?? NaN), evidenced: isEvidencedFlow(String(r.source ?? "")) }))
-        .filter((x) => Number.isFinite(x.signed));
+      const seen = new Set<string>();
+      let carries = 0;
+      let duplicates = 0;
+      for (const r of fr) {
+        const source = String(r.source ?? "");
+        if (source === "epoch-carry") {
+          carries++;
+          continue;
+        }
+        const tx = typeof r.tx_hash === "string" && r.tx_hash !== "" ? r.tx_hash.toLowerCase() : null;
+        const li = num(r.log_index);
+        if (tx && li !== null) {
+          const k = `${tx}:${li}`;
+          if (seen.has(k)) {
+            duplicates++;
+            continue;
+          }
+          seen.add(k);
+        }
+        const signed = (r.direction === "in" ? 1 : r.direction === "out" ? -1 : NaN) * (num(r.amount_usdg) ?? NaN);
+        if (Number.isFinite(signed)) flows.push({ at: Number(r.at), signed, evidenced: isEvidencedFlow(source) });
+      }
       const net = flows.reduce((s, x) => s + x.signed, 0);
       out.net_flows_usdg = money(net);
       out.flows_count = flows.length;
       out.flows_evidenced = flows.filter((x) => x.evidenced).length;
       out.change_excluding_flows_usdg = money(close.equity - open.equity - net);
-      if (flows.length > out.flows_evidenced) caveats.push(`${flows.length - out.flows_evidenced} flow(s) in the window are not backed by a chain log or an epoch carry (they were inferred), so the split between deposits and results is less certain.`);
+      if (carries > 0) caveats.push(`${carries} run carry-over(s) (a closed run's balance bridged into the next) are not counted as deposits.`);
+      if (duplicates > 0) caveats.push(`${duplicates} flow row(s) repeat a chain log already counted (the same transfer recorded under another spelling of the account) and are counted once.`);
+      if (flows.length > out.flows_evidenced) caveats.push(`${flows.length - out.flows_evidenced} flow(s) in the window are not backed by a chain log (an own transfer or an inferred cash change), so the split between deposits and results is less certain.`);
     }
   } else {
     out.net_flows_usdg = 0;
@@ -1099,9 +1236,9 @@ async function bookPerformance(db: Db, scope: LedgerScope, book: Book, w: Window
   const closes = (await db
     .prepare(`SELECT at, equity_usdg FROM (
         SELECT at, id, equity_usdg, ROW_NUMBER() OVER (PARTITION BY CAST(at / ${bucket} AS INTEGER) ORDER BY at DESC, id DESC) AS r
-          FROM equity WHERE lower(agent_id) IN (${qs(scope.accounts.length)}) AND mode = ? AND at > ? AND at <= ?
+          FROM equity WHERE ${rw.sql} AND mode = ? AND at > ? AND at <= ?
       ) b WHERE r = 1 ORDER BY at ASC LIMIT ${SERIES_MAX_POINTS + 5}`)
-    .all(...scope.accounts, book, open.at, close.at)) as Row[];
+    .all(...rw.args, book, open.at, close.at)) as Row[];
   let series: SeriesPoint[] = [{ at: open.at, equity_usdg: money(open.equity)! }];
   for (const c of closes) {
     const v = num(c.equity_usdg);
@@ -1128,16 +1265,19 @@ async function bookPerformance(db: Db, scope: LedgerScope, book: Book, w: Window
     out.attribution = noAttr(`the window holds more than ${ATTRIBUTION_MAX_MARKS} valuations; choose a shorter period`);
   } else {
     const raw = (await db
-      .prepare(`SELECT at, equity_usdg, cash_usdg FROM equity WHERE lower(agent_id) IN (${qs(scope.accounts.length)}) AND mode = ? AND at >= ? AND at <= ?
+      .prepare(`SELECT at, equity_usdg, cash_usdg FROM equity WHERE ${rw.sql} AND mode = ? AND at >= ? AND at <= ?
           ORDER BY at ASC, id ASC LIMIT ${ATTRIBUTION_MAX_MARKS + 1}`)
-      .all(...scope.accounts, book, open.at, close.at)) as Row[];
+      .all(...rw.args, book, open.at, close.at)) as Row[];
     const marks: BookMark[] = raw
       .map((r) => ({ at: Number(r.at), equity: num(r.equity_usdg) ?? NaN, cash: num(r.cash_usdg) ?? NaN }))
       .filter((m) => Number.isFinite(m.equity) && Number.isFinite(m.cash));
+    // A trade in a step explains its cash. A redeploy's re-recorded copy is
+    // stamped at the restart, inside exactly the step a break judges, so it is
+    // left out: it would pass a move no trade made off as trading.
     const times = (await db
-      .prepare(`SELECT created_at FROM trades WHERE lower(agent_id) IN (${qs(scope.accounts.length)}) AND status IN (${live ? "'landed','submitted'" : "'paper'"})
-          AND created_at >= ? AND created_at <= ? ORDER BY created_at ASC LIMIT ${TRADE_TIMES_LIMIT + 1}`)
-      .all(...scope.accounts, open.at, close.at)) as Row[];
+      .prepare(`SELECT created_at FROM trades WHERE lower(agent_id) = ? AND status IN (${live ? "'landed','submitted'" : "'paper'"})
+          AND created_at >= ? AND created_at <= ? AND ${NOT_A_RESTART_COPY} ORDER BY created_at ASC LIMIT ${TRADE_TIMES_LIMIT + 1}`)
+      .all(run.account, open.at, close.at)) as Row[];
     if (times.length > TRADE_TIMES_LIMIT) {
       out.attribution = noAttr("too many trades in the window to attribute; choose a shorter period");
     } else if (marks.length < 2) {
@@ -1170,7 +1310,7 @@ export async function readPerformance(db: Db, scope: LedgerScope, period: Period
   const w = await periodWindow(db, scope, period, now);
   if (!scope.accounts.length) {
     const empty = (book: Book): BookPerformance => ({
-      book, has_valuation: false, valued_in_window: false, start: null, end: null, change_usdg: null, net_flows_usdg: null,
+      book, has_valuation: false, valued_in_window: false, measured_run: null, start: null, end: null, change_usdg: null, net_flows_usdg: null,
       flows_count: null, flows_evidenced: null, change_excluding_flows_usdg: null, return_pct: null, max_drawdown_pct: null,
       attribution: { available: false, why_unavailable: "no smart account yet", flows_usdg: null, trading_usdg: null, unattributed_usdg: null, valuation_gaps: null },
       realized_pnl_usdg: null, realized_sells_counted: null, realized_sells_excluded: null, fees_accrued_usdg: null, fee_accruals: null,

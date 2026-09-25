@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { KeyRound, Plug, ShieldCheck, Unplug } from "lucide-react";
 import { SignIn } from "@/terminal/HostedControls";
+import { BrandLockup } from "../BrandLockup";
 
 interface ScopeTag { id: string; title: string; level: string }
 interface Connection {
@@ -104,7 +105,7 @@ export function AppsClient() {
   return (
     <div className="terminal-host partner-connect mcp-connect">
       <header className="connect-header">
-        <a href="/" className="connect-brand" aria-label="Merrymen home">merrymen<span aria-hidden>↗</span></a>
+        <BrandLockup />
         <span className="connect-header-label"><ShieldCheck size={14} aria-hidden /> Connected apps</span>
       </header>
       <main className="connect-main">

@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, Check, Cpu, Laptop, ShieldCheck, Unplug } from "lucide-react";
 import { SignIn } from "@/terminal/HostedControls";
+import { BrandLockup } from "../BrandLockup";
 
 const STORAGE = "merrymen.mcp-consent";
 
@@ -24,15 +25,20 @@ interface ConsentView {
 }
 
 async function consent<T>(body: Record<string, unknown>): Promise<T> {
-  const response = await fetch("/api/mcp/consent", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    cache: "no-store",
-    credentials: "same-origin",
-    referrerPolicy: "no-referrer",
-    signal: AbortSignal.timeout(20_000),
-  });
+  let response: Response;
+  try {
+    response = await fetch("/api/mcp/consent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      cache: "no-store",
+      credentials: "same-origin",
+      referrerPolicy: "no-referrer",
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch {
+    throw new Error("Merrymen took too long to answer. Check your connection and try again.");
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(typeof data.error_description === "string" ? data.error_description : `Could not load this request (${response.status}).`);
   return data as T;
@@ -119,7 +125,7 @@ export function ConsentClient() {
   return (
     <div className="terminal-host partner-connect mcp-connect">
       <header className="connect-header">
-        <a href="/" className="connect-brand" aria-label="Merrymen home">merrymen<span aria-hidden>↗</span></a>
+        <BrandLockup />
         <span className="connect-header-label"><ShieldCheck size={14} aria-hidden /> AI assistant connection</span>
       </header>
       <main className="connect-main">

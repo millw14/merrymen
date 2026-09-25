@@ -113,7 +113,7 @@ const PORTFOLIO_OUTPUT = z.object({
   accounting_method: z.literal("weighted-average cost"),
   current_book: BOOK.nullable(),
   current_book_why: z.string(),
-  agent_mode: z.string().nullable().describe("The worker's last heartbeat: paper, live or idle"),
+  agent_mode: z.enum(["paper", "live", "idle", "unknown"]).nullable().describe("The worker's last heartbeat: paper, live or idle (unknown for anything else; null before any heartbeat)"),
   latest_valuation_book: BOOK.nullable(),
   books_agree: z.boolean().nullable(),
   books: z.object({ paper: BOOK_PORTFOLIO, live: BOOK_PORTFOLIO }),
@@ -416,6 +416,8 @@ const BOOK_PERF = z.object({
   money: MONEY_OF,
   has_valuation: z.boolean(),
   valued_in_window: z.boolean(),
+  measured_run: z.object({ account: z.string(), epoch: z.number().nullable() }).nullable()
+    .describe("The one run (smart account and accounting epoch) the equity figures are measured in. A series never joins a paper reset, an accounting change or a re-signed account to what came before."),
   start: z.object({ at: z.string(), equity_usdg: z.number() }).nullable(),
   end: z.object({ at: z.string(), equity_usdg: z.number() }).nullable(),
   change_usdg: z.number().nullable(),
@@ -462,7 +464,7 @@ async function performanceData(ctx: ToolContext, ref: string | undefined, period
 const getPerformance = defineTool({
   name: "get_performance",
   title: "Performance",
-  description: "How each book did over a period, paper and live separately: start and end equity, change, net deposits/withdrawals, change excluding them, time-weighted return, max drawdown, what trading vs flows vs unexplained changes account for, evidenced realized P&L, fees accrued, gas, operation counts, a downsampled equity series (≤200 points) and caveats.",
+  description: "How each book did over a period, paper and live separately: start and end equity, change, net deposits/withdrawals, change excluding them, time-weighted return, max drawdown, what trading vs flows vs unexplained changes account for, evidenced realized P&L, fees accrued, gas, operation counts, a downsampled equity series (≤200 points) and caveats. Equity figures stay inside the book's current run: a paper reset, an accounting change or a re-signed account starts a new one.",
   capability: "portfolio.read",
   input: z.object({ agent: AGENT_ARG, period: PERIOD }).strict(),
   output: z.object({
@@ -514,7 +516,7 @@ const COMPARE_ROW = z.object({
   fees_accrued_usdg: z.number().nullable(),
   gas_usdg: z.number().nullable(),
   fills: z.number().describe("confirmed on-chain operations (live) or paper fills (paper)"),
-  failed_or_refused: z.number(),
+  failed_or_refused: z.number().describe("live: operations that reverted on chain; paper: refused paper fills. Refusals before anything was sent belong to neither book (get_performance refused_ops)"),
   caveats: z.array(z.string()),
 });
 

@@ -381,8 +381,8 @@ const getPublicAgent = defineTool({
       avg_hold_sec: z.number().nullable(),
     }),
     funding: z.object({
-      funded: z.boolean().nullable().describe("Null when the deposit records could not be read"),
-      contributions_evidenced: z.boolean(),
+      funded: z.boolean().nullable().describe("A deposit or withdrawal is on record this run (not that money is still in); null when the deposit records could not be read"),
+      contributions_evidenced: z.boolean().describe("The worker assessed this run's deposits as evidence (chain receipts or a reconciling carry); false also covers not yet assessed"),
       flows_with_tx: z.number().nullable(),
       flows_total: z.number().nullable(),
     }),
@@ -428,6 +428,9 @@ const getPublicAgent = defineTool({
     const unread = Object.entries(p.reads).filter(([, v]) => v === false).map(([k]) => k);
     if (unread.length) warnings.push(`Some records could not be read (${unread.join(", ")}); the figures built on them are missing, not zero.`);
     if (p.valuation.book === "unknown") warnings.push("The newest valuation could not be read or names no book, so no live return is claimed.");
+    else if (p.valuation.book !== p.stats.book) {
+      warnings.push(`The newest valuation is from the ${p.valuation.book} book but the last heartbeat says ${p.mode}: the growth index is the ${p.valuation.book} book's, while stats, top trades and holdings follow the ${p.stats.book} book.`);
+    }
     if (!p.growth.complete) warnings.push("The growth index does not reach back to the start of the run (read cap).");
     if ((p.live.unpricedGasTrades ?? 0) > 0) warnings.push(`${p.live.unpricedGasTrades} landed trade(s) had gas that could not be priced; the return does not include it.`);
     warnings.push(...thesesWarnings(p.theses));

@@ -34,11 +34,20 @@ import { PRIVATE_REVIEW_SOURCE } from "../../../../worker/src/market-review";
 import { rejectRuleRemedy } from "../../../../worker/src/thesis-policy";
 import { blockerAdvice } from "../live-blocker";
 import { blockerView, freshWithin, readAgentRow, type AgentLedgerRow } from "./agent-status";
-import { normAccounts, readWindowTrades, tallyRefusals, txHashOrNull, type RefusalBucket, type RuleFamily, type Scalar, type WindowTrade } from "./decisions";
+import {
+  FILL_KINDS, REVIEW_SOURCES, SHADOW_DECISION_SOURCES, countFills, normAccounts, readWindowTrades, tallyRefusals, txHashOrNull,
+  type RefusalBucket, type RuleFamily, type Scalar, type WindowTrade,
+} from "./decisions";
 import type { SettingsView } from "./settings-view";
 
 // ── inputs ───────────────────────────────────────────────────────────────────
 
+/**
+ * The window's decisions by what they were. `total` counts only rows that
+ * could lead to a trade: a Brain SHADOW run is recorded to be watched and is
+ * never sent (thesis-policy SHADOW_SOURCES), so its buys are not attempts and
+ * its failures stop nothing; those are counted apart, in `shadow_*`.
+ */
 export interface DecisionTally {
   total: number;
   buys: number;
@@ -48,21 +57,35 @@ export interface DecisionTally {
   gate_forced_holds: number;
   stale_mark_holds: number;
   unknown_holds: number;
+  /** Quiet-market reviews (market-review.ts): written while the strategy proposes nothing. */
+  quiet_reviews: number;
   views: number;
   brain_refused: number;
   brain_unreachable: number;
   brain_malformed: number;
   dropped: number;
+  shadow_decisions: number;
+  shadow_failures: number;
   first_at: number | null;
   last_at: number | null;
+  /** When the live (non-shadow) Brain runs in the window failed, first and last. */
+  brain_failure_first_at: number | null;
+  brain_failure_last_at: number | null;
 }
 
 export const EMPTY_TALLY: DecisionTally = {
   total: 0, buys: 0, sells: 0, other_actions: 0, model_holds: 0, gate_forced_holds: 0, stale_mark_holds: 0, unknown_holds: 0,
-  views: 0, brain_refused: 0, brain_unreachable: 0, brain_malformed: 0, dropped: 0, first_at: null, last_at: null,
+  quiet_reviews: 0, views: 0, brain_refused: 0, brain_unreachable: 0, brain_malformed: 0, dropped: 0,
+  shadow_decisions: 0, shadow_failures: 0, first_at: null, last_at: null, brain_failure_first_at: null, brain_failure_last_at: null,
 };
 
-export type EventKind = "market_unreadable" | "provider_failure" | "brain_refused" | "execution_failure" | "policy_notice" | "arm_failure" | "funding_notice" | "other";
+/**
+ * `brain_failure` is kept apart from `provider_failure`: every failed Brain run
+ * writes BOTH an event and a decision row (brain-shadow.ts), and the decision
+ * row is the one that says whether it was a live or a shadow run — so Brain
+ * failures are counted from decisions, and the event is only reported.
+ */
+export type EventKind = "market_unreadable" | "provider_failure" | "brain_failure" | "brain_refused" | "execution_failure" | "policy_notice" | "arm_failure" | "funding_notice" | "other";
 
 /**
  * What a warn/err event is about, from the fixed openings the worker writes
@@ -72,7 +95,8 @@ export type EventKind = "market_unreadable" | "provider_failure" | "brain_refuse
 export function classifyEvent(message: string): EventKind {
   const m = message.slice(0, 120);
   if (/^the market could not be read this tick/i.test(m)) return "market_unreadable";
-  if (/^(strategist driver failed|desk: the model could not be reached|desk: the model stopped without|desk: ran out of steps|strategist emitted \d+ malformed|brain (unreachable|malformed):)/i.test(m)) return "provider_failure";
+  if (/^brain (unreachable|malformed):/i.test(m)) return "brain_failure";
+  if (/^(strategist driver failed|desk: the model could not be reached|desk: the model stopped without|desk: ran out of steps|strategist emitted \d+ malformed)/i.test(m)) return "provider_failure";
   if (/^brain refused:/i.test(m)) return "brain_refused";
   if (/^this agent CANNOT START/.test(m)) return "arm_failure";
   if (/^no ETH in the account/i.test(m)) return "funding_notice";
@@ -87,7 +111,7 @@ export type EventTally = Record<EventKind, EventCount> & { scanned: number; trun
 const emptyCount = (): EventCount => ({ count: 0, first_at: null, last_at: null });
 export function emptyEvents(): EventTally {
   return {
-    market_unreadable: emptyCount(), provider_failure: emptyCount(), brain_refused: emptyCount(), execution_failure: emptyCount(),
+    market_unreadable: emptyCount(), provider_failure: emptyCount(), brain_failure: emptyCount(), brain_refused: emptyCount(), execution_failure: emptyCount(),
     policy_notice: emptyCount(), arm_failure: emptyCount(), funding_notice: emptyCount(), other: emptyCount(), scanned: 0, truncated: false,
   };
 }
@@ -197,25 +221,40 @@ export async function readInactivityInputs(db: Db, a: {
     ? ((await db.prepare("SELECT at, cash_usdg, eth_wei FROM equity WHERE lower(agent_id) = ? AND mode = 'live' ORDER BY at DESC LIMIT 1").get(current)) as Record<string, unknown> | undefined)
     : undefined;
 
+  // Private reviews are the unchanged ones (market-review.ts): the same quiet
+  // tick as a published review, so they are counted with it, not dropped.
+  const shadowList = SHADOW_DECISION_SOURCES.map(() => "?").join(", ");
+  const reviewList = REVIEW_SOURCES.map(() => "?").join(", ");
   const groups = (await db.prepare(`SELECT action, hold_kind,
         CASE WHEN dropped_rule IN ('brain-refused', 'brain-unreachable', 'brain-malformed') THEN dropped_rule
              WHEN dropped_rule IS NOT NULL THEN 'dropped' ELSE NULL END AS drop_kind,
+        CASE WHEN source IN (${shadowList}) THEN 'shadow' WHEN source IN (${reviewList}) THEN 'review' ELSE 'own' END AS origin,
         COUNT(*) AS n, MIN(at) AS first_at, MAX(at) AS last_at
-      FROM decisions WHERE ${inList} AND at >= ? AND source <> ?
-      GROUP BY 1, 2, 3 LIMIT 200`).all(...accParams, since, PRIVATE_REVIEW_SOURCE)) as Array<Record<string, unknown>>;
+      FROM decisions WHERE ${inList} AND at >= ?
+      GROUP BY 1, 2, 3, 4 LIMIT 400`).all(...SHADOW_DECISION_SOURCES, ...REVIEW_SOURCES, ...accParams, since)) as Array<Record<string, unknown>>;
   const decisions = { ...EMPTY_TALLY };
   for (const g of groups) {
     const count = n(g.n) ?? 0;
     const action = g.action === null || g.action === undefined ? null : String(g.action);
     const drop = g.drop_kind === null || g.drop_kind === undefined ? null : String(g.drop_kind);
+    if (g.origin === "shadow") {
+      decisions.shadow_decisions += count;
+      if (drop === "brain-unreachable" || drop === "brain-malformed") decisions.shadow_failures += count;
+      continue;
+    }
     decisions.total += count;
     const f = n(g.first_at);
     const l = n(g.last_at);
     if (f !== null) decisions.first_at = decisions.first_at === null ? f : Math.min(decisions.first_at, f);
     if (l !== null) decisions.last_at = decisions.last_at === null ? l : Math.max(decisions.last_at, l);
-    if (drop === "brain-refused") decisions.brain_refused += count;
-    else if (drop === "brain-unreachable") decisions.brain_unreachable += count;
-    else if (drop === "brain-malformed") decisions.brain_malformed += count;
+    if (g.origin === "review") decisions.quiet_reviews += count;
+    else if (drop === "brain-refused") decisions.brain_refused += count;
+    else if (drop === "brain-unreachable" || drop === "brain-malformed") {
+      if (drop === "brain-unreachable") decisions.brain_unreachable += count;
+      else decisions.brain_malformed += count;
+      if (f !== null) decisions.brain_failure_first_at = decisions.brain_failure_first_at === null ? f : Math.min(decisions.brain_failure_first_at, f);
+      if (l !== null) decisions.brain_failure_last_at = decisions.brain_failure_last_at === null ? l : Math.max(decisions.brain_failure_last_at, l);
+    }
     else if (drop === "dropped") decisions.dropped += count;
     else if (action === "buy") decisions.buys += count;
     else if (action === "sell") decisions.sells += count;
@@ -233,8 +272,12 @@ export async function readInactivityInputs(db: Db, a: {
       ORDER BY at DESC LIMIT 1`).get(...accParams, PRIVATE_REVIEW_SOURCE, a.now - 30 * 86_400)) as { reason: string | null; at: number } | undefined;
 
   const trades = acc.length ? await readWindowTrades(db, acc, since) : { rows: [], truncated: false };
-  const lastLive = (await db.prepare(`SELECT created_at, tx_hash FROM trades WHERE ${inList} AND status = 'landed' ORDER BY created_at DESC LIMIT 1`).get(...accParams)) as { created_at: number; tx_hash: string | null } | undefined;
-  const lastPaper = (await db.prepare(`SELECT created_at FROM trades WHERE ${inList} AND status = 'paper' ORDER BY created_at DESC LIMIT 1`).get(...accParams)) as { created_at: number } | undefined;
+  // A fill of a market position: a landed transfer or vault deposit is not a trade.
+  const fillKinds = FILL_KINDS.map(() => "?").join(", ");
+  const lastLive = (await db.prepare(`SELECT created_at, tx_hash FROM trades WHERE ${inList} AND status = 'landed' AND kind IN (${fillKinds})
+      ORDER BY created_at DESC LIMIT 1`).get(...accParams, ...FILL_KINDS)) as { created_at: number; tx_hash: string | null } | undefined;
+  const lastPaper = (await db.prepare(`SELECT created_at FROM trades WHERE ${inList} AND status = 'paper' AND kind IN (${fillKinds})
+      ORDER BY created_at DESC LIMIT 1`).get(...accParams, ...FILL_KINDS)) as { created_at: number } | undefined;
 
   // Messages are read to be CLASSIFIED in memory and are never returned.
   const eventRows = (await db.prepare(`SELECT message, created_at FROM events WHERE ${inList} AND created_at >= ? AND level IN ('warn', 'err')
@@ -264,10 +307,14 @@ export async function readInactivityInputs(db: Db, a: {
 
   let actedAfterPause: number | null = null;
   if (pause?.state === "paused") {
+    // Past the pause gate only. The Brain decides before it; an owner's chat
+    // transfer (submitChatTransfer) never consults it and writes a `chat`
+    // decision and a `transfer` trade while paused, so neither proves a resume.
     const dAfter = (await db.prepare(`SELECT MAX(at) AS at FROM decisions WHERE ${inList} AND at > ?
-        AND source NOT IN ('brain', 'brain-shadow') AND COALESCE(provenance, '') <> 'brain'`)
+        AND source NOT IN ('brain', 'brain-shadow', 'chat') AND COALESCE(provenance, '') NOT IN ('brain', 'owner-command')`)
       .get(...accParams, pause.at)) as { at: number | null } | undefined;
-    const tAfter = (await db.prepare(`SELECT MAX(created_at) AS at FROM trades WHERE ${inList} AND created_at > ?`).get(...accParams, pause.at)) as { at: number | null } | undefined;
+    const tAfter = (await db.prepare(`SELECT MAX(created_at) AS at FROM trades WHERE ${inList} AND created_at > ? AND kind IN (${fillKinds})`)
+      .get(...accParams, pause.at, ...FILL_KINDS)) as { at: number | null } | undefined;
     const both = [n(dAfter?.at), n(tAfter?.at)].filter((x): x is number => x !== null);
     actedAfterPause = both.length ? Math.max(...both) : null;
   }
@@ -400,13 +447,7 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
   const blocker = row?.live_blocker ?? null;
 
   const rows = i.trades.rows;
-  const landed = rows.filter((t) => t.status === "landed");
-  const fills = {
-    live_landed: landed.length,
-    live_confirmed: landed.filter((t) => txHashOrNull(t.tx_hash) !== null).length,
-    paper: rows.filter((t) => t.status === "paper").length,
-    submitted_unresolved: rows.filter((t) => t.status === "submitted").length,
-  };
+  const fills = countFills(rows);
   const refusals = tallyRefusals(rows);
   const family = (f: RuleFamily | RuleFamily[]) => {
     const fs = Array.isArray(f) ? f : [f];
@@ -462,7 +503,7 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
   // ── live rail ──
   {
     const view = blockerView(blocker);
-    const observed = { mode: row?.mode ?? null, live_blocker: blocker, live_trading_intended: liveIntended };
+    const observed = { mode: row?.mode ?? null, live_blocker: blocker === null ? null : blocker.slice(0, 40), live_trading_intended: liveIntended };
     if (!row) {
       add({ category: "live_rail", status: "unknown", kind: null, summary: "The worker has not reported its live rail.", observed });
     } else if (row.mode === "live" && !blocker) {
@@ -472,7 +513,9 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
         add({ category: "live_rail", status: "unknown", kind: null, summary: "Your settings say live trading is on, but the worker last reported it off. It picks the change up on its next tick, unless a setting on the agent's own machine overrides it.", observed, recorded_at: beat });
       } else if (i.railNotice?.wouldBlock) {
         const r = i.railNotice.wouldBlock;
-        add({ category: "live_rail", status: "warning", kind: "live_rail_blocked", summary: `Live trading is off. When you turn it on: ${liveBlockerText(r)}.`, observed: { ...observed, would_block_live: r }, recorded_at: i.railNotice.at, remedy: railRemedy(r) });
+        // Written once per CHANGE of the blocker (index.ts), so a later fix (a
+        // funded account) does not refresh it while live stays off: dated.
+        add({ category: "live_rail", status: "warning", kind: "live_rail_blocked", summary: `Live trading is off. As of ${iso(i.railNotice.at)}, when you turn it on: ${liveBlockerText(r)}.`, observed: { ...observed, would_block_live: r }, recorded_at: i.railNotice.at, remedy: railRemedy(r) });
       } else if (i.railNotice && (i.railNotice.state === "paper" || i.railNotice.state === "off")) {
         add({ category: "live_rail", status: "ok", kind: null, summary: `Live trading is off by choice; as of ${iso(i.railNotice.at)} nothing else would block it once you turn it on.`, observed, recorded_at: i.railNotice.at });
       } else {
@@ -528,7 +571,8 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
       };
       const evidence: string[] = [];
       if (!s.launchBuying.enabled) evidence.push("Launch buying is off, so it does not buy new launches.");
-      if (s.scoutEnabled && (s.scoutBudgetUsdg ?? 0) <= 0) evidence.push("The scout budget is 0, so coins it discovers are never bought.");
+      if (s.scoutEnabled && s.scoutBudgetUsdg !== null && s.scoutBudgetUsdg <= 0) evidence.push("The scout budget is 0, so coins it discovers are never bought.");
+      else if (s.scoutEnabled && s.scoutBudgetUsdg === null) evidence.push("No scout budget is set; the default is 0, so coins it discovers are not bought unless the agent's own machine sets one.");
       if (s.assetMode) evidence.push(`Asset mode: ${s.assetMode}.`);
       const turnOn = "Turn on Live trading in Settings when you want it to trade your real funds.";
       if (!s.liveTradingEnabled && !s.paperTradingEnabled) {
@@ -579,38 +623,58 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
 
   // ── provider (model / Brain service) ──
   {
-    const failures = i.events.provider_failure.count + i.decisions.brain_unreachable + i.decisions.brain_malformed;
-    const made = i.decisions.total - i.decisions.brain_unreachable - i.decisions.brain_malformed;
-    const observed = { failures_in_window: failures, brain_unreachable: i.decisions.brain_unreachable, brain_malformed: i.decisions.brain_malformed, model_failure_events: i.events.provider_failure.count, decisions_made: made };
-    const last = i.events.provider_failure.last_at;
+    // A failed Brain run writes an event AND a decision row; it is counted once,
+    // from the row, which also says whether it was a live or a shadow run. A
+    // shadow run's failure stops nothing, so it is reported and never blocks.
+    const d0 = i.decisions;
+    const failures = i.events.provider_failure.count + d0.brain_unreachable + d0.brain_malformed;
+    // Quiet-market reviews are written by the tick whatever the model did, so
+    // they are not evidence that a model or Brain run succeeded.
+    const made = d0.total - d0.brain_unreachable - d0.brain_malformed - d0.quiet_reviews;
+    const observed = {
+      failures_in_window: failures, brain_unreachable: d0.brain_unreachable, brain_malformed: d0.brain_malformed,
+      model_failure_events: i.events.provider_failure.count, shadow_brain_failures: d0.shadow_failures, decisions_made: made,
+    };
+    const lasts = [i.events.provider_failure.last_at, d0.brain_failure_last_at].filter((x): x is number => x !== null);
+    const firsts = [i.events.provider_failure.first_at, d0.brain_failure_first_at].filter((x): x is number => x !== null);
+    const last = lasts.length ? Math.max(...lasts) : null;
     const remedy = ["If the agent uses your own model provider key (Settings), check that it is valid and has credit; otherwise this is on Merrymen's side."];
+    const shadowNote = d0.shadow_failures ? [`${d0.shadow_failures} Brain shadow run(s) also failed; shadow runs are only watched, so they stop nothing.`] : [];
     if (!failures) {
-      add({ category: "provider", status: "ok", kind: null, summary: "No model or Brain service failure is recorded in the window.", observed });
+      add({ category: "provider", status: "ok", kind: null, summary: "No model or Brain service failure that could stop trading is recorded in the window.", observed, evidence: shadowNote });
     } else if (made <= 0) {
-      add({ category: "provider", status: "blocking", kind: "provider_failure", summary: `Every model or Brain run recorded in the window failed (${failures} failure(s)); no decision was made. The error text stays in the agent's own log.`, observed, recorded_at: last, since: i.events.provider_failure.first_at ?? i.decisions.first_at, remedy });
+      add({ category: "provider", status: "blocking", kind: "provider_failure", summary: `Every model or Brain run recorded in the window failed (${failures} failure(s)); no decision was made. The error text stays in the agent's own log.`, observed, recorded_at: last, since: firsts.length ? Math.min(...firsts) : null, remedy, evidence: shadowNote });
     } else {
-      add({ category: "provider", status: "warning", kind: "provider_failure", summary: `${failures} model or Brain run(s) in the window failed; ${made} decision(s) were still made.`, observed, recorded_at: last, remedy });
+      add({ category: "provider", status: "warning", kind: "provider_failure", summary: `${failures} model or Brain run(s) in the window failed; ${made} decision(s) were still made.`, observed, recorded_at: last, remedy, evidence: shadowNote });
     }
   }
 
   // ── what the model / strategy chose ──
   const d = i.decisions;
+  // A quiet-market review and a view with no action are the same fact: its
+  // strategy had nothing to propose.
   const holdKinds: Array<[CauseKind, number]> = [
     ["model_hold", d.model_holds], ["brain_gate_hold", d.gate_forced_holds], ["stale_mark_hold", d.stale_mark_holds],
-    ["hold_kind_unrecorded", d.unknown_holds], ["strategy_idle", d.views], ["brain_refused", d.brain_refused], ["proposal_dropped", d.dropped],
+    ["hold_kind_unrecorded", d.unknown_holds], ["strategy_idle", d.views + d.quiet_reviews], ["brain_refused", d.brain_refused], ["proposal_dropped", d.dropped],
   ];
   const topHold = [...holdKinds].sort((a, b) => b[1] - a[1])[0];
   {
     const observed: Record<string, Scalar> = {
       decisions: d.total, buys: d.buys, sells: d.sells, model_holds: d.model_holds, gate_forced_holds: d.gate_forced_holds, stale_mark_holds: d.stale_mark_holds,
-      holds_kind_unrecorded: d.unknown_holds, views: d.views, brain_refused: d.brain_refused, proposals_dropped: d.dropped,
+      holds_kind_unrecorded: d.unknown_holds, quiet_market_reviews: d.quiet_reviews, views: d.views, brain_refused: d.brain_refused, proposals_dropped: d.dropped,
+      brain_shadow_decisions: d.shadow_decisions,
     };
-    const breakdown = `${d.model_holds} model hold(s), ${d.gate_forced_holds} gate-forced hold(s), ${d.stale_mark_holds} stale-mark hold(s), ${d.unknown_holds} hold(s) of unrecorded kind, ${d.views} view(s) with no action, ${d.brain_refused} Brain refusal(s), ${d.dropped} proposal(s) dropped`;
+    const breakdown = `${d.model_holds} model hold(s), ${d.gate_forced_holds} gate-forced hold(s), ${d.stale_mark_holds} stale-mark hold(s), ${d.unknown_holds} hold(s) of unrecorded kind, ${d.views} view(s) with no action, ${d.quiet_reviews} quiet-market review(s), ${d.brain_refused} Brain refusal(s), ${d.dropped} proposal(s) dropped`;
     const viewNote = i.latestView ? [`The newest reason it gave for not acting was written at ${iso(i.latestView.at)} (see latest_view).`] : [];
+    const shadowNote = d.shadow_decisions ? [`${d.shadow_decisions} Brain shadow decision(s) are not counted: shadow runs are recorded to be watched and are never sent as orders.`] : [];
+    const choseNot = holdKinds.reduce((x, [, v]) => x + v, 0);
     if (d.total === 0) {
-      add({ category: "model_holds", status: "unknown", kind: null, summary: "No decisions were recorded in the window. A strategy that proposes nothing writes its reason only when the reason changes, so it may be older than the window.", observed, evidence: viewNote });
+      add({ category: "model_holds", status: "unknown", kind: null, summary: "No decisions that could lead to a trade were recorded in the window. A strategy that proposes nothing writes its reason only when the reason changes, so it may be older than the window.", observed, evidence: [...viewNote, ...shadowNote] });
+    } else if (d.buys + d.sells === 0 && choseNot > 0) {
+      add({ category: "model_holds", status: "warning", kind: topHold[0], summary: `${d.total} decision(s) in the window, none a buy or sell: ${breakdown}.`, observed, recorded_at: d.last_at, since: d.first_at, evidence: [...viewNote, ...shadowNote] });
     } else if (d.buys + d.sells === 0) {
-      add({ category: "model_holds", status: "warning", kind: topHold[1] > 0 ? topHold[0] : "model_hold", summary: `${d.total} decision(s) in the window, none a buy or sell: ${breakdown}.`, observed, recorded_at: d.last_at, since: d.first_at, evidence: viewNote });
+      // Every row was a failed run or another action: not a choice to hold (see provider).
+      add({ category: "model_holds", status: "unknown", kind: null, summary: `${d.total} decision row(s) in the window, none a buy, sell, hold or view: failed model or Brain runs (see provider) or other actions (${d.other_actions}).`, observed, recorded_at: d.last_at, evidence: shadowNote });
     } else {
       add({ category: "model_holds", status: "ok", kind: null, summary: `It decided to buy or sell ${d.buys + d.sells} time(s) in the window (${d.buys} buy, ${d.sells} sell).`, observed, recorded_at: d.last_at });
     }
@@ -671,40 +735,50 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
     const c = by.get(cat)!;
     if (c.status === "blocking") { primary = fromCheck(c); break; }
   }
+  // A new permission the stopped worker has not picked up yet: until it does,
+  // nothing else can move, so that is the answer rather than a softer factor.
+  if (!primary && by.get("permission")!.kind === "permission_pending") primary = fromCheck(by.get("permission")!);
   // 2. It traded.
   if (!primary && fills.live_landed > 0) {
     primary = { category: "none", kind: "trading", since: null, evidence: [],
       summary: `It has traded in this window: ${fills.live_landed} live fill(s), ${fills.live_confirmed} confirmed with a transaction hash${fills.paper ? `, plus ${fills.paper} paper fill(s)` : ""}.` };
   }
   if (!primary && fills.paper > 0) {
-    primary = liveIntended
-      ? { category: "live_rail", kind: "live_rail_blocked", since: null, evidence: [by.get("live_rail")!.summary],
-        summary: `It filled ${fills.paper} time(s) on paper although live trading is on: the live rail was not available for those fills.` }
-      : { category: "settings_consent", kind: "paper_by_choice", since: null, evidence: [],
+    const rail = by.get("live_rail")!;
+    if (!liveIntended) {
+      primary = { category: "settings_consent", kind: "paper_by_choice", since: null, evidence: [],
         summary: `It is trading on paper, as configured: ${fills.paper} simulated fill(s) in the window. Live trading is off, so no real orders are placed.` };
+    } else if (rail.status !== "ok") {
+      primary = { category: "live_rail", kind: "live_rail_blocked", since: null, evidence: [rail.summary],
+        summary: `It filled ${fills.paper} time(s) on paper although live trading is on: the live rail was not available for those fills.` };
+    }
+    // Live on and the rail now reported available: those paper fills predate the
+    // switch or a blocker that has since cleared, so they explain nothing about
+    // why there is no live fill. The steps below decide.
   }
   // 3. It tried, and every attempt was turned back: the most frequent kind of
   //    "no" — unless it mostly chose not to try, in which case the holds are the
   //    story and the refusals are a factor beside it.
   const choseNotTo = d.total - d.buys - d.sells - d.brain_unreachable - d.brain_malformed - d.other_actions;
   if (!primary && countOf(refusals) >= choseNotTo) {
-    const lanes: Array<[number, CheckCategory | "unknown", CauseKind]> = [
-      [countOf(family(["policy", "preflight"])), "policy_refusals", "policy_refusal"],
-      [countOf(family("quote")), "quote_failures", "quote_failure"],
-      [countOf(family("execution")), "execution_failures", "execution_failure"],
-      [countOf(family("live_rail")), "live_rail", "live_rail_blocked"],
-      [countOf(family("funding")), "funding", "unfunded"],
-      [countOf(family("consent")), "settings_consent", "consent_off"],
-      [countOf(family("other")), "unknown", "unrecognised_refusal"],
+    const lanes: Array<[RefusalBucket[], CheckCategory | "unknown", CauseKind]> = [
+      [family(["policy", "preflight"]), "policy_refusals", "policy_refusal"],
+      [family("quote"), "quote_failures", "quote_failure"],
+      [family("execution"), "execution_failures", "execution_failure"],
+      [family("live_rail"), "live_rail", "live_rail_blocked"],
+      [family("funding"), "funding", "unfunded"],
+      [family("consent"), "settings_consent", "consent_off"],
+      [family("other"), "unknown", "unrecognised_refusal"],
     ];
-    const [count, cat, kind] = lanes.sort((a, b) => b[0] - a[0])[0];
+    const [laneBuckets, cat, kind] = lanes.sort((a, b) => countOf(b[0]) - countOf(a[0]))[0];
+    const count = countOf(laneBuckets);
     if (count > 0) {
       const c = cat === "unknown" ? null : by.get(cat)!;
-      const buckets = refusals.slice(0, 3).map((b) => `${b.label ?? b.key}: ${b.count}× (last ${iso(b.last_at)})`);
+      const buckets = laneBuckets.slice(0, 3).map((b) => `${b.label ?? b.key}: ${b.count}× (last ${iso(b.last_at)})`);
       primary = c && (c.status === "blocking" || c.status === "warning") && c.kind === kind
         ? { ...fromCheck(c), evidence: [...buckets, ...c.evidence] }
-        : { category: cat, kind, since: Math.min(...refusals.map((b) => b.first_at)), evidence: buckets,
-          summary: cat === "unknown" ? `Every attempt in the window was refused by a rule this server does not recognise (${count}×).` : `Every attempt in the window was turned back (${count}×).` };
+        : { category: cat, kind, since: Math.min(...laneBuckets.map((b) => b.first_at)), evidence: buckets,
+          summary: cat === "unknown" ? `Its attempts in the window were refused by a rule this server does not recognise (${count}×), and none filled live.` : `Its attempts in the window were turned back (${count}×), and none filled live.` };
     }
   }
   // 4. Nothing reached the wall: the model's service failed, or it chose not to act.
@@ -720,10 +794,14 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
     } else if (fills.submitted_unresolved > 0) {
       primary = { category: "execution_failures", kind: "awaiting_confirmation", since: null, evidence: by.get("execution_failures")!.evidence,
         summary: `${fills.submitted_unresolved} operation(s) were sent and are not yet confirmed in the shared records.` };
-    } else {
+    } else if (fills.paper > 0) {
+      primary = { category: "model_holds", kind: "no_trade_reached_wall", since: d.first_at, evidence: [by.get("live_rail")!.summary],
+        summary: `Its only fills in the window were on paper (${fills.paper}). Live trading is on and the rail now reports available, so those came before the switch or before a blocker cleared; no live fill is on record since.` };
+    } else if (d.buys + d.sells > 0) {
       primary = { category: "model_holds", kind: "no_trade_reached_wall", since: d.first_at, evidence: [],
         summary: `It decided to buy or sell ${d.buys + d.sells} time(s), but no trade reached the wall, or its record has not arrived yet.` };
     }
+    // Otherwise every row was a failed run or another action: the softer signals decide.
   }
   // 5. Softer signals.
   for (const cat of ["provider", "settings_consent", "market_data", "data_freshness"] as const) {
@@ -733,7 +811,9 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
   }
   if (!primary) {
     primary = { category: "unknown", kind: "no_activity", since: null, evidence: i.latestView ? [`Its newest stated reason for not acting was written at ${iso(i.latestView.at)} (see latest_view).`] : [],
-      summary: "No decisions, trades or failures were recorded in this window, and nothing in the shared records blocks it. If the strategy proposed nothing, the reason is only in the agent's own log." };
+      summary: fills.paper
+        ? `No live fill and no decision that could lead to one is recorded in this window (only ${fills.paper} paper fill(s)), and nothing in the shared records blocks it. If the strategy proposed nothing, the reason is only in the agent's own log.`
+        : `No decisions that could lead to a trade, no trades and no failures were recorded in this window${d.shadow_decisions ? ` (only ${d.shadow_decisions} Brain shadow decision(s), which are never sent)` : ""}, and nothing in the shared records blocks it. If the strategy proposed nothing, the reason is only in the agent's own log.` };
   }
 
   const other_factors = CHECK_ORDER.map((c) => by.get(c)!)

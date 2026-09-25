@@ -18,6 +18,7 @@ import {
   ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, agentFixture, connectAs, installFixtures, makeDeps, makeTestDb, type TestDb,
 } from "../testing";
 import { makeContext, runTool, type ToolDef } from "../tool";
+import { translateQuery, type Db } from "../../../../worker/src/db";
 import { encodeCursor } from "./shared";
 import { DECISIONS_RESOURCES, DECISIONS_TOOLS } from "./decisions";
 
@@ -90,10 +91,10 @@ function decision(d: TestDb, account: string, s: DecisionSeed) {
     s.signals ?? null, s.hold ?? null, s.evidence ?? null, s.provenance ?? null, s.display ?? null, s.mark ?? null, s.at);
 }
 
-function trade(d: TestDb, account: string, t: { status: string; rule?: string | null; decision?: string | null; tx?: string | null; op?: string | null; at: number; buy?: string | null; sell?: string | null; amount?: number; realized?: number | null; basis?: string | null; cash?: number | null }): number {
+function trade(d: TestDb, account: string, t: { status: string; kind?: string; rule?: string | null; decision?: string | null; tx?: string | null; op?: string | null; at: number; buy?: string | null; sell?: string | null; amount?: number; realized?: number | null; basis?: string | null; cash?: number | null }): number {
   const r = d.raw.prepare(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, reject_rule, decision_id, realized_pnl_usdg, basis_source, fill_cash_usdg, created_at)
-    VALUES (?, 'swap', 'router', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-    account, t.sell ?? null, t.buy ?? null, t.amount ?? 10, t.op ?? null, t.tx ?? null, t.status, t.rule ?? null, t.decision ?? null, t.realized ?? null, t.basis ?? null, t.cash ?? null, t.at);
+    VALUES (?, ?, 'router', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    account, t.kind ?? "swap", t.sell ?? null, t.buy ?? null, t.amount ?? 10, t.op ?? null, t.tx ?? null, t.status, t.rule ?? null, t.decision ?? null, t.realized ?? null, t.basis ?? null, t.cash ?? null, t.at);
   return Number(r.lastInsertRowid);
 }
 
@@ -358,13 +359,14 @@ test("get_refusals: histogram with labels, remedies, examples; free text classif
   trade(d, ACCOUNT_A, { status: "rejected", rule: "no-route", at: NOW - 200 });
   trade(d, ACCOUNT_A, { status: "rejected", rule: "preflight: size 2.10 USDG is under the 5 USDG minimum", at: NOW - 300 });
   trade(d, ACCOUNT_A, { status: "rejected", rule: "couldn't submit: getaddrinfo ENOTFOUND rpc.secret-host.example", at: NOW - 400 });
+  trade(d, ACCOUNT_A, { status: "rejected", rule: "review: 403 Forbidden from https://broker.hidden.example/v2/orders?apikey=zzz", at: NOW - 450 });
   trade(d, ACCOUNT_A, { status: "reverted", rule: "prefund", op: txh(5), at: NOW - 500 });
   trade(d, ACCOUNT_A, { status: "rejected", rule: "daily-cap", at: NOW - 30 * 3600 }); // outside the window
   trade(d, ACCOUNT_A, { status: "landed", tx: txh(6), at: NOW - 50 }); // not a refusal
 
   const r = await call("get_refusals", { window_hours: 24 }, pa);
   assert.equal(r.res.isError, undefined, r.text);
-  assert.equal(r.sc.total, 7);
+  assert.equal(r.sc.total, 8);
   const by = Object.fromEntries(r.sc.refusals.map((x: any) => [x.rule, x]));
   assert.equal(r.sc.refusals[0].rule, "daily-cap");
   assert.equal(by["daily-cap"].count, 3);
@@ -379,6 +381,10 @@ test("get_refusals: histogram with labels, remedies, examples; free text classif
   assert.equal(by["prefund"].status, "reverted");
   assert.match(by["prefund"].remedy, /ETH/);
   assert.ok(!r.text.includes("secret-host"), "raw error text leaked");
+  // A broker's raw review exception is withheld the same way.
+  assert.equal(by["order-review"].detail_withheld, true);
+  assert.equal(by["order-review"].latest_detail_untrusted, null);
+  assert.ok(!r.text.includes("broker.hidden") && !r.text.includes("apikey"), "raw broker error leaked");
   assert.match(r.sc.book_note, /no book/);
   assert.equal(errCode(await call("get_refusals", { window_hours: 500 }, pa)), "invalid_input");
 });
@@ -607,6 +613,155 @@ test("inactivity: the mirror's own timestamp decides data freshness when the hea
   assert.ok(r.sc.other_factors.some((f: any) => f.category === "data_freshness"));
 });
 
+test("inactivity: Brain shadow runs and quiet-market reviews are not the agent's choices; an idle strategy is the cause", async () => {
+  const s = await setup();
+  agentRow(s.d, ACCOUNT_A, OWNER_A, { mode: "live" });
+  mark(s.d, ACCOUNT_A, { mode: "live", at: NOW - 60 });
+  // The Brain in shadow says buy, and sometimes fails: none of it is ever sent.
+  for (let k = 0; k < 3; k++) decision(s.d, ACCOUNT_A, { id: `sh-buy-${k}`, at: NOW - 400 * (k + 1), source: "brain-shadow", provenance: "brain", action: "buy" });
+  for (let k = 0; k < 2; k++) decision(s.d, ACCOUNT_A, { id: `sh-fail-${k}`, at: NOW - 450 * (k + 1), source: "brain-shadow", action: null, symbol: null, size: null, dropped: "brain-unreachable", reason: "no decision (unreachable): x" });
+  // The tick's quiet-market reviews (market-review.ts): hold rows with no hold kind.
+  for (let k = 0; k < 4; k++) decision(s.d, ACCOUNT_A, { id: `rv-${k}`, at: NOW - 300 * (k + 1), source: k === 0 ? "market-review" : "market-review-private", provenance: "deterministic-strategy", action: "hold", size: null });
+  decision(s.d, ACCOUNT_A, { id: "view", at: NOW - 5000, source: "strategy:momentum", action: null, symbol: null, size: null, reason: "nothing clears the bar" });
+
+  const r = await explain(s);
+  assert.equal(r.primary.category, "model_holds");
+  assert.equal(r.primary.kind, "strategy_idle", r.primary.summary);
+  assert.equal(r.sc.decisions_in_window.total, 5);
+  assert.equal(r.sc.decisions_in_window.buys, 0, "a shadow buy is not an attempt");
+  assert.equal(r.sc.decisions_in_window.quiet_market_reviews, 4);
+  assert.equal(r.sc.decisions_in_window.holds_kind_unrecorded, 0);
+  assert.equal(r.sc.decisions_in_window.brain_shadow_decisions, 5);
+  assert.equal(r.sc.decisions_in_window.brain_shadow_failures, 2);
+  assert.equal(r.checks.provider.status, "ok", "a failed shadow run stops nothing");
+  assert.equal(r.checks.provider.observed.shadow_brain_failures, 2);
+
+  // The list says the same: a shadow buy was never an order; a review is not a choice to hold.
+  const list = await call("list_decisions", { limit: 50 }, s.pa);
+  const by = Object.fromEntries(list.sc.decisions.map((x: any) => [x.id, x]));
+  assert.equal(by["sh-buy-0"].outcome.category, "shadow_only");
+  assert.equal(by["rv-0"].hold.kind, "QUIET_REVIEW");
+});
+
+test("inactivity: a failed live Brain run is one failure, not two (its event and its row)", async () => {
+  const s = await setup();
+  agentRow(s.d, ACCOUNT_A, OWNER_A, { mode: "live" });
+  mark(s.d, ACCOUNT_A, { mode: "live", at: NOW - 60 });
+  decision(s.d, ACCOUNT_A, { id: "live-fail", at: NOW - 300, source: "brain", action: null, symbol: null, size: null, dropped: "brain-unreachable", reason: "no decision (unreachable): fetch failed https://brain.internal/?t=sk-zzzz" });
+  event(s.d, ACCOUNT_A, "err", "brain unreachable: fetch failed https://brain.internal/?t=sk-zzzz", NOW - 300);
+  const r = await explain(s);
+  assert.equal(r.primary.kind, "provider_failure");
+  assert.equal(r.checks.provider.status, "blocking");
+  assert.equal(r.checks.provider.observed.failures_in_window, 1);
+  assert.equal(r.checks.provider.recorded_at, new Date((NOW - 300) * 1000).toISOString());
+  assert.equal(r.sc.events_in_window.brain_failure, 1);
+  assert.equal(r.sc.events_in_window.provider_failure, 0);
+  assert.ok(!r.text.includes("brain.internal") && !r.text.includes("sk-zzzz"));
+});
+
+test("inactivity: a landed transfer or vault deposit is not trading, and a re-written operation counts once", async () => {
+  const s = await setup();
+  agentRow(s.d, ACCOUNT_A, OWNER_A, { mode: "live" });
+  mark(s.d, ACCOUNT_A, { mode: "live", at: NOW - 60 });
+  trade(s.d, ACCOUNT_A, { status: "landed", kind: "transfer", tx: txh(11), op: txh(12), at: NOW - 200 });
+  trade(s.d, ACCOUNT_A, { status: "landed", kind: "vault-deposit", tx: txh(13), op: txh(14), at: NOW - 300 });
+  const idle = await explain(s);
+  assert.notEqual(idle.primary.kind, "trading");
+  assert.equal(idle.sc.fills_in_window.live_landed, 0);
+  assert.equal(idle.sc.last_trade.live, null);
+
+  // One swap, and the reconciler's bare copy of it under the same op hash (distinct-trades.ts).
+  trade(s.d, ACCOUNT_A, { status: "landed", tx: txh(15), op: txh(16), at: NOW - 100 });
+  trade(s.d, ACCOUNT_A, { status: "landed", op: txh(16), at: NOW - 90 });
+  const traded = await explain(s);
+  assert.equal(traded.primary.kind, "trading");
+  assert.equal(traded.sc.fills_in_window.live_landed, 1);
+  assert.equal(traded.sc.fills_in_window.live_confirmed, 1);
+});
+
+test("inactivity: an owner's chat transfer after /pause does not read as a resume", async () => {
+  const s = await setup();
+  agentRow(s.d, ACCOUNT_A, OWNER_A, { mode: "live" });
+  mark(s.d, ACCOUNT_A, { mode: "live", at: NOW - 60 });
+  event(s.d, ACCOUNT_A, "warn", "Telegram: paused by chat 42", NOW - 3600);
+  // submitChatTransfer never consults the pause gate.
+  decision(s.d, ACCOUNT_A, { id: "xfer", at: NOW - 600, source: "chat", provenance: "owner-command", action: "transfer", symbol: "USDG" });
+  trade(s.d, ACCOUNT_A, { status: "landed", kind: "transfer", decision: "xfer", tx: txh(21), op: txh(22), at: NOW - 590 });
+  const r = await explain(s);
+  assert.equal(r.primary.category, "paused");
+  assert.equal(r.checks.paused.status, "blocking");
+});
+
+test("inactivity: paper fills from before live was switched on do not read as a blocked rail", async () => {
+  const s = await setup({ settingsA: { liveTradingEnabled: true } });
+  agentRow(s.d, ACCOUNT_A, OWNER_A, { mode: "live", blocker: null });
+  mark(s.d, ACCOUNT_A, { mode: "live", at: NOW - 60 });
+  trade(s.d, ACCOUNT_A, { status: "paper", at: NOW - 20_000 });
+  for (let k = 0; k < 3; k++) decision(s.d, ACCOUNT_A, { id: `mh-${k}`, at: NOW - 600 * (k + 1), action: "hold", hold: "MODEL_HOLD", size: null });
+  const r = await explain(s);
+  assert.equal(r.checks.live_rail.status, "ok");
+  assert.notEqual(r.primary.kind, "live_rail_blocked", r.primary.summary);
+  assert.equal(r.primary.kind, "model_hold");
+  assert.equal(r.sc.fills_in_window.paper, 1);
+});
+
+/** Records every ledger statement and refuses any write, so the family is provably read-only on the ledger. */
+function recordingLedger(inner: Db, log: Array<{ sql: string; n: number }>): Db {
+  const refuse = async (): Promise<never> => { throw new Error("a read-only tool wrote to the shared ledger"); };
+  return {
+    prepare(sql: string) {
+      const st = inner.prepare(sql);
+      return {
+        run: refuse,
+        get: async (...p: unknown[]) => { log.push({ sql, n: p.length }); return st.get(...p); },
+        all: async (...p: unknown[]) => { log.push({ sql, n: p.length }); return st.all(...p); },
+      };
+    },
+    exec: refuse,
+    tx: refuse,
+  };
+}
+
+test("every ledger statement the family runs is read-only and translates to Postgres with matching placeholders", async () => {
+  const s = await setup();
+  agentRow(s.d, ACCOUNT_A, OWNER_A, { mode: "live" });
+  mark(s.d, ACCOUNT_A, { mode: "live", at: NOW - 60 });
+  decision(s.d, ACCOUNT_A, { id: "p-1", at: NOW - 100, evidence: JSON.stringify({ act: "enter" }), signals: JSON.stringify({ price_usd: 1 }) });
+  trade(s.d, ACCOUNT_A, { status: "rejected", rule: "daily-cap", decision: "p-1", at: NOW - 99 });
+  event(s.d, ACCOUNT_A, "warn", "Telegram: paused by chat 1", NOW - 3000);
+  const log: Array<{ sql: string; n: number }> = [];
+  const deps = { now: () => NOW, ledger: <T,>(fn: (db: Db | null) => Promise<T>) => fn(recordingLedger(s.d.db, log)) };
+  const runs: Array<[string, Record<string, unknown>]> = [
+    ["list_decisions", { include_evidence: true, token: "NVDA", action: "buy", since: new Date((NOW - 86_400) * 1000).toISOString() }],
+    ["list_decisions", { token: TOKEN }],
+    ["get_decision", { decision_id: "p-1" }],
+    ["get_refusals", {}],
+    ["explain_agent_inactivity", {}],
+  ];
+  for (const [name, args] of runs) {
+    const r = await runTool(tool(name), args, s.pa, "trace-pg", deps);
+    assert.equal(r.isError, undefined, `${name}: ${JSON.stringify(r.structuredContent)}`);
+  }
+  // A second page, so the keyset clause is exercised too.
+  decision(s.d, ACCOUNT_A, { id: "p-0", at: NOW - 200 });
+  const first = await runTool(tool("list_decisions"), { limit: 1 }, s.pa, "trace-pg", deps);
+  const cursor = (first.structuredContent as { next_cursor: string }).next_cursor;
+  assert.ok(cursor);
+  assert.equal((await runTool(tool("list_decisions"), { limit: 1, cursor }, s.pa, "trace-pg", deps)).isError, undefined);
+  const ctxA = makeContext(s.pa, "t", new AbortController().signal, deps);
+  await DECISIONS_RESOURCES[0].list!(ctxA);
+
+  assert.ok(log.length >= 15, `only ${log.length} statements recorded`);
+  for (const { sql, n } of log) {
+    const pg = translateQuery(sql);
+    const holesUsed = [...pg.matchAll(/\$(\d+)/g)].map((m) => Number(m[1]));
+    assert.equal(holesUsed.length ? Math.max(...holesUsed) : 0, n, `placeholder count differs from arguments:\n${sql}`);
+    assert.ok(!pg.replace(/'[^']*'/g, "").includes("?"), `untranslated placeholder:\n${sql}`);
+    assert.ok(!/\b(datetime|strftime|julianday|json_extract|ifnull|instr|glob|printf)\s*\(/i.test(sql), `sqlite-only function:\n${sql}`);
+    assert.ok(!sql.includes('"'), `double-quoted literal or identifier:\n${sql}`);
+  }
+});
+
 // ── pure pieces ─────────────────────────────────────────────────────────────
 
 test("describeRule, classifyEvent and parseRailNotice keep their vocabularies", () => {
@@ -622,7 +777,14 @@ test("describeRule, classifyEvent and parseRailNotice keep their vocabularies", 
   assert.equal(weird.key, "unrecognised");
   assert.equal(weird.detail_withheld, true);
   assert.equal(describeRule(null, "landed"), null);
-  assert.equal(classifyEvent("brain unreachable: fetch failed"), "provider_failure");
+  // A failed Brain run is counted from its decision row; the event is reported apart.
+  assert.equal(classifyEvent("brain unreachable: fetch failed"), "brain_failure");
+  assert.equal(classifyEvent("strategist driver failed: 401"), "provider_failure");
+  // An order review's raw broker exception is classified, never relayed.
+  const review = describeRule("review: HTTP 500 from https://broker.example/v2/orders?key=abc", "rejected")!;
+  assert.equal(review.key, "order-review");
+  assert.equal(review.detail, null);
+  assert.equal(review.detail_withheld, true);
   assert.equal(classifyEvent("this agent CANNOT START and is not trading: boom"), "arm_failure");
   assert.equal(classifyEvent("swap reverted on-chain: 0x…"), "execution_failure");
   assert.equal(classifyEvent("Telegram: paused by chat 1"), "other");
@@ -645,4 +807,7 @@ test("diagnoseInactivity: a permission signed after the last heartbeat is pendin
   assert.equal(perm.status, "warning");
   assert.equal(perm.kind, "permission_pending");
   assert.notEqual(dx.primary.kind, "not_permitted");
+  // Until the worker picks it up nothing else moves, so it is the answer, not a footnote.
+  assert.equal(dx.primary.kind, "permission_pending");
+  assert.equal(dx.checks.find((c) => c.category === "worker_liveness")!.status, "unknown", "a frozen heartbeat after expiry is not a dead worker");
 });

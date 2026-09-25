@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { mcpConfig } from "@/mcp/config";
 import "../connect.css";
 import "../mcp-connect.css";
+import { BrandLockup } from "../BrandLockup";
 
 export const metadata: Metadata = {
   title: "Connect Merrymen to your AI assistant · merrymen",
@@ -19,7 +20,7 @@ export default function ConnectMcpPage() {
   return (
     <div className="terminal-host partner-connect mcp-connect">
       <header className="connect-header">
-        <a href="/" className="connect-brand" aria-label="Merrymen home">merrymen<span aria-hidden>↗</span></a>
+        <BrandLockup />
         <span className="connect-header-label">Connect an AI assistant</span>
       </header>
       <main className="connect-main">

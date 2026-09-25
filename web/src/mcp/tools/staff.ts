@@ -84,8 +84,9 @@ const fleetHealth = defineTool({
     }),
     mirror: z.object({
       tables: z.array(z.object({ table: z.string(), tenants: z.number(), never_copied: z.number(), lag_s: lagStats })),
+      rows_without_current_grant: z.number().describe("mirror_state rows of owners with no current grant; no longer mirrored, so excluded from the lag figures"),
       note: z.string(),
-    }).nullable().describe("Null when mirror_state does not exist yet (lag unknown, not zero)"),
+    }).nullable().describe("Null when mirror_state could not be read (lag unknown, not zero)"),
     observed_at: z.string(),
     warnings: z.array(z.string()),
   }),
@@ -111,6 +112,7 @@ const fleetHealth = defineTool({
 });
 
 const tradeStatus = z.enum(["landed", "paper", "submitted", "rejected", "reverted", "other"]);
+const ruleField = z.string().describe("A reject-rule slug when known=true; otherwise untrusted: a prefix or normalised pattern of worker text");
 
 const executionFailures = defineTool({
   name: "staff_execution_failures",
@@ -127,8 +129,8 @@ const executionFailures = defineTool({
       count: z.number(),
       with_tx_hash: z.number().describe("Rows carrying an on-chain tx hash; a 'landed' row is a confirmed live trade only with one"),
     })),
-    by_rule: z.array(z.object({ status: tradeStatus, rule: z.string(), known: z.boolean(), label: z.string().nullable(), count: z.number() })),
-    reverted_by_rule: z.array(z.object({ rule: z.string(), known: z.boolean(), label: z.string().nullable(), count: z.number() })),
+    by_rule: z.array(z.object({ status: tradeStatus, rule: ruleField, known: z.boolean(), label: z.string().nullable(), count: z.number() })),
+    reverted_by_rule: z.array(z.object({ rule: ruleField, known: z.boolean(), label: z.string().nullable(), count: z.number() })),
     rules_complete: z.boolean().describe("False when the rule grouping hit its cap and some rule-bearing rows are not attributed"),
     unreconciled: z.object({
       older_than_s: z.number(),
@@ -205,7 +207,7 @@ const providerErrors = defineTool({
     const top = d.patterns[0];
     return {
       data,
-      summary: `Last ${window_hours}h: ${d.totals.err} error and ${d.totals.warn} warning event(s) in ${d.pattern_groups_total} pattern(s)${top ? `; most frequent (${top.count}×) is a ${top.level} pattern` : ""}.`,
+      summary: `Last ${window_hours}h: ${d.totals.err} error and ${d.totals.warn} warning event(s) in ${d.pattern_groups_total} pattern(s)${top ? `; the most frequent pattern (${top.count}×) is ${top.level === "err" ? "an error" : "a warning"}` : ""}.`,
     };
   },
 });

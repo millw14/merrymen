@@ -162,8 +162,18 @@ function maxAge(cacheControl: string | string[] | undefined): number {
 export type CimdFetcher = (url: string) => Promise<{ status: number; body: Buffer; cacheControl?: string | string[] }>;
 
 const defaultFetcher: CimdFetcher = async (url) => {
-  const res = await fetchPublicHttps(url, { maxBytes: CIMD_MAX_BYTES, timeoutMs: CIMD_TIMEOUT_MS, maxRedirects: 0 });
-  return { status: res.status, body: res.body, cacheControl: res.headers["cache-control"] };
+  // One retry on a network-level failure: a single dropped connection should
+  // not turn "Connect" into an error page. A non-200 answer is not retried.
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetchPublicHttps(url, { maxBytes: CIMD_MAX_BYTES, timeoutMs: CIMD_TIMEOUT_MS, maxRedirects: 0 });
+      return { status: res.status, body: res.body, cacheControl: res.headers["cache-control"] };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 };
 
 /** Parse and validate a CIMD document for `clientId`. Throws ClientError on any defect. */

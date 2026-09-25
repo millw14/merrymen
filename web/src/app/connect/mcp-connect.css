@@ -33,3 +33,6 @@
 .mcp-connect .mcp-docs h3 { font-size: 15px; font-weight: 500; margin: 24px 0 8px; }
 .mcp-connect .mcp-docs p, .mcp-connect .mcp-docs li { color: var(--tx-2); font-size: 13px; line-height: 1.7; }
 .mcp-connect .mcp-docs code { font-size: 12px; }
+.mcp-connect .mcp-brand { display: flex; align-items: center; gap: 10px; color: var(--tx); text-decoration: none; }
+.mcp-connect .mcp-brand .mcp-wordmark { color: var(--tx); text-decoration: none; }
+.mcp-connect .mcp-brand .logo-mark { color: #a5ce1f; flex-shrink: 0; }

@@ -2,6 +2,7 @@
 import { mcpConfig } from "@/mcp/config";
 import { PUBLIC_CORS, ipLimited, oauthDeps, preflight, readForm } from "@/mcp/oauth/deps";
 import { jsonResponse } from "@/mcp/oauth/metadata";
+import { logEvent } from "@/mcp/observe";
 import { OAuthError, authenticateClient, revokeToken } from "@/mcp/oauth/server";
 
 export const dynamic = "force-dynamic";
@@ -20,6 +21,7 @@ export async function POST(req: Request): Promise<Response> {
     return new Response(null, { status: 200, headers: { ...PUBLIC_CORS, "Cache-Control": "no-store" } });
   } catch (error) {
     if (error instanceof OAuthError) return jsonResponse(error.body(), error.status, PUBLIC_CORS);
+    logEvent("revoke_failed", { error: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : "unknown" });
     return jsonResponse({ error: "server_error" }, 500, PUBLIC_CORS);
   }
 }

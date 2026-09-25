@@ -299,13 +299,18 @@ export function judgeEligibility(o: {
     if (assetMode === "stocks") fails.push("the asset mode is stocks only");
     if (!vaultSealed) fails.push("the signed permission carries no class vault (pons-class)");
     if (!launchOn) fails.push("launch buying is off or sized at zero");
+    // A class buy is unpriceable BY CONSTRUCTION (worker class-side.ts
+    // scoutFlagsFor: isClassBuy ⇒ buyUnpriceable), so policy.ts runs
+    // scoutAllows on every one: with scout mode off or a zero budget the wall
+    // refuses the class buy just as it refuses any other unpriceable buy.
+    if (!scoutOn) fails.push("scout mode is off or its budget is 0, and every class buy is charged to the scout budget");
     if (facts.row && !facts.row.onCurve) fails.push("the index lists it off a bonding curve, and the class route trades curves only");
     if (fails.length || looks === false) {
       add("class_route", "fail", `The class route cannot buy it: ${fails.join("; ")}.`);
     } else if (looks === null) {
       add("class_route", "unknown", "Whether the agent is on paper could not be read, and paper cannot use the class route.");
     } else {
-      add("class_route", "unknown", `Its prerequisites are met. Whether this coin qualifies depends on reads only the worker makes: a USDG-quoted curve that has not graduated, with at least ${classMinDepth} USDG of real depth, found in its factory-filtered launch feed. The permission's class marker is visible here; its sealed vault address is not.`);
+      add("class_route", "unknown", `Its prerequisites are met. Whether this coin qualifies depends on reads only the worker makes: a USDG-quoted curve that has not graduated, with at least ${classMinDepth} USDG of real depth, found in its factory-filtered launch feed; the buy must also fit the scout budget and its per-token cap. The permission's class marker is visible here; its sealed vault address is not.`);
     }
   }
 

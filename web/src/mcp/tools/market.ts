@@ -30,6 +30,7 @@ import {
   candlesFor,
   discoverTokens,
   listWatchlist,
+  localTokenFacts,
   marketReaders,
   ownerTokens,
   poolActivity,
@@ -45,6 +46,7 @@ import {
 } from "@/lib/services/market-intel";
 import { checkEligibility, judgeEligibility } from "@/lib/services/eligibility";
 import { McpError } from "../errors";
+import { hasCapability } from "../policy";
 import type { ResourceDef } from "../resources";
 import { defineTool, type ToolContext } from "../tool";
 import { ADDRESS_ARG, AGENT_ARG, CHAIN_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, untrusted } from "./shared";
@@ -60,8 +62,12 @@ const flagsOut = z.array(z.enum(["impersonates_trusted_ticker", "duplicate_symbo
 const kindOut = z.enum(["stock", "established", "memecoin", "unknown"]);
 const fact = z.object({ value: z.number().nullable(), source: z.string().nullable(), missing_reason: z.string().nullable() });
 
-const POOL_ID_ARG = z.string().regex(POOL_ID_RE, "a lowercase 0x-prefixed 20-byte pool address or 32-byte pool id")
+const POOL_ID_RULE = z.string().regex(POOL_ID_RE, "a lowercase 0x-prefixed 20-byte pool address or 32-byte pool id");
+const POOL_ID_ARG = POOL_ID_RULE
   .describe("The index's pool id (see get_token pool.pool_id). Optional: defaults to the pool the index lists for the token.");
+/** Candles are only ever read for the token's listed pool (see resolvePool in market-intel.ts on the shared chart cache). */
+const CANDLE_POOL_ID_ARG = POOL_ID_RULE
+  .describe("Optional, and if given it must be the pool the index lists for this token (get_token pool.pool_id); any other pool is refused.");
 const CURSOR_ARG = z.string().min(1).max(512).optional().describe("next_cursor from the previous page");
 
 /** Tools that spend the index's per-pool quota share one budget. */
@@ -85,8 +91,14 @@ function serviceError(error: unknown): never {
 /**
  * The owner's own tokens for this call only. A settings outage degrades the
  * answer (said in a warning) rather than failing a public market read.
+ *
+ * The owner's custom tokens are SETTINGS, which only agents:read ("See your
+ * agent's status and settings") may see. market:read promises "Nothing
+ * private", and watchlist:manage is not a settings scope, so without
+ * agents.read no custom token is read, searched, trusted or used as a flag.
  */
 async function ownerContext(ctx: ToolContext): Promise<{ settings: SettingsView | null; custom: OwnerToken[]; warning: string | null }> {
+  if (!hasCapability(ctx.principal, "agents.read")) return { settings: null, custom: [], warning: null };
   try {
     const settings = await settingsReader().settingsFor(ctx.principal.tenant);
     return { settings, custom: ownerTokens(settings?.customTokens), warning: null };
@@ -117,7 +129,7 @@ const trustedOr = (trusted: boolean, text: string | null, max: number) => (trust
 const searchTokensTool = defineTool({
   name: "search_tokens",
   title: "Search tokens",
-  description: "Find tokens by address, ticker or name across Merrymen's curated registry (stock tokens, cash), the market index's pools, and your own added tokens and watchlist. The address is the identity: tickers are not unique on this chain, so results are grouped by ticker and flag duplicates and impostors of trusted tickers. Each result says whether it is discoverable and priceable. " + DEFINITIONS,
+  description: "Find tokens by address, ticker or name across Merrymen's curated registry (stock tokens, cash), the market index's pools, and — when this connection may see them — your own added tokens (agents:read) and watchlist (watchlist:manage). The address is the identity: tickers are not unique on this chain, so results are grouped by ticker and flag duplicates and impostors of trusted tickers. Each result says whether it is discoverable and priceable. " + DEFINITIONS,
   capability: "market.read",
   input: z.object({
     query: z.string().trim().min(1).max(64).describe("A 0x address, a ticker (with or without $) or part of a name"),
@@ -164,7 +176,12 @@ const searchTokensTool = defineTool({
     const offset = offsetOf(ctx, scope, cursor);
     const owner = await ownerContext(ctx);
     const { db } = await ctx.mcp();
-    const r = await searchTokens(db, { tenant: ctx.principal.tenant, query, customTokens: owner.custom, readers: marketReaders(), offset, limit });
+    const r = await searchTokens(db, {
+      tenant: ctx.principal.tenant, query, customTokens: owner.custom,
+      // The watchlist is the owner's own list; market:read alone may not read it.
+      includeWatchlist: hasCapability(ctx.principal, "watchlist.manage"),
+      readers: marketReaders(), offset, limit,
+    });
     const warnings: string[] = [];
     if (owner.warning) warnings.push(owner.warning);
     if (!r.index.reachable) warnings.push("The market index could not be read just now, so only the registry and your own tokens were searched.");
@@ -280,11 +297,11 @@ const getTokenTool = defineTool({
 const getCandlesTool = defineTool({
   name: "get_candles",
   title: "Price candles",
-  description: "Up to 300 USD price bars (15m, 1h, 4h or 1d) for a token's pool from the market index. The pool defaults to the one the index lists for the token. The reader refuses bars that describe the other side of the pair. Each bar's volume is display-only (see notes). Budgeted: it can spend the index's quota.",
+  description: "Up to 300 USD price bars (15m, 1h, 4h or 1d) for a token from the market index, read from the pool the index lists for that token (the same series the Merrymen token page charts). The reader refuses bars that describe the other side of the pair. Each bar's volume is display-only (see notes). Budgeted: it can spend the index's quota.",
   capability: "market.read",
   input: z.object({
     address: ADDRESS_ARG,
-    pool_id: POOL_ID_ARG.optional(),
+    pool_id: CANDLE_POOL_ID_ARG.optional(),
     window: z.enum(CANDLE_WINDOWS).default("1h"),
     chain_id: CHAIN_ARG,
   }).strict(),
@@ -571,7 +588,13 @@ const checkTokenEligibilityTool = defineTool({
     } catch {
       throw new McpError("upstream_unavailable", "The agent's settings could not be read just now.", { retryAfterSec: 30 });
     }
-    const facts = await readTokenFacts(address, { readers: marketReaders(), customTokens: ownerTokens(settings?.customTokens), stockMarket: true });
+    const custom = ownerTokens(settings?.customTokens);
+    // Every market read here describes mainnet. For an agent on another chain
+    // those would be the wrong chain's facts (a mainnet pool, a mainnet halt
+    // flag), so only identity is used and the market checks say unknown.
+    const facts = a.chainId === null || a.chainId === 4663
+      ? await readTokenFacts(address, { readers: marketReaders(), customTokens: custom, stockMarket: true })
+      : localTokenFacts(address, custom);
     const input = {
       address,
       agent: { account: a.account, chainId: a.chainId, expiresAt: a.expiresAt, features: a.features, grantTokens: a.grantTokens },
@@ -601,7 +624,7 @@ const OWNER_TEXT_NOTE = "label and note are text written through your own connec
 const watchItemOut = z.object({
   address: z.string(),
   chain_id: z.number(),
-  symbol: z.string().nullable().describe("A registry or your own ticker; null for other tokens (use get_token)"),
+  symbol: z.string().nullable().describe("A registry ticker, or your own ticker for a token you added when this connection may read your settings (agents:read); null otherwise (use get_token)"),
   kind: kindOut,
   label: z.string().nullable(),
   note: z.string().nullable(),
@@ -614,7 +637,7 @@ function watchOut(r: WatchlistRow, custom: readonly OwnerToken[]) {
     address: r.address,
     chain_id: r.chain_id,
     symbol: identity?.symbol ?? untrusted(r.symbol, 32),
-    kind: r.chain_id === 4663 ? tokenKind(r.address, true) : "unknown" as const,
+    kind: r.chain_id === 4663 ? tokenKind(r.address, !!identity) : "unknown" as const,
     label: untrusted(r.label, 64),
     note: untrusted(r.note, 500),
     added_at: r.added_at,
@@ -664,16 +687,17 @@ const addToWatchlistTool = defineTool({
     limit: z.number(),
     note: z.string(),
   }),
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // Destructive: on a token already watched it overwrites (or, with "", clears) the owner's label and note.
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   async handler({ address, chain_id, label, note }, ctx) {
-    const owner = await ownerContext(ctx);
     const { db } = await ctx.mcp();
     // Control and bidi characters are stripped before storage; an empty string clears.
     const clean = (v: string | undefined, max: number) => (v === undefined ? undefined : untrusted(v, max));
     const r = await addToWatchlist(db, {
       tenant: ctx.principal.tenant, chainId: chain_id, address,
-      label: clean(label, 64), note: clean(note, 500), customTokens: owner.custom, now: ctx.now(),
+      label: clean(label, 64), note: clean(note, 500), now: ctx.now(),
     }).catch(serviceError);
+    const owner = await ownerContext(ctx);
     return {
       data: { added: r.added, item: watchOut(r.row, owner.custom), count: r.count, limit: WATCHLIST_MAX, note: "Watching a token never buys it." },
       summary: r.added ? `Now watching ${r.row.address} (${r.count}/${WATCHLIST_MAX}).` : `Already watched; updated ${r.row.address}.`,

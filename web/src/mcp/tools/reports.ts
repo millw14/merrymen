@@ -15,8 +15,9 @@
  */
 import * as z from "zod";
 import {
-  EXPORT_ID, EXPORT_MAX_ROWS, EXPORT_TTL_SEC, buildExport, exportAgentSlug, exportMimeType, listExports, newExportId,
-  purgeExpiredExports, readExport, readReportSummary, saveExport, type BookValuation, type ExportRecord, type TradeLine,
+  EXPORT_ID, EXPORT_LIVE_MAX_BYTES, EXPORT_LIVE_MAX_COUNT, EXPORT_MAX_BYTES, EXPORT_MAX_ROWS, EXPORT_TTL_SEC, buildExport, exportAgentSlug,
+  exportMimeType, listExports, liveExportUsage, newExportId, purgeExpiredExports, readExport, readReportSummary, saveExport,
+  type BookValuation, type ExportRecord, type TradeLine,
 } from "@/lib/services/reports";
 import { settingsReader } from "@/lib/services/settings-view";
 import { mcpConfig } from "../config";
@@ -89,7 +90,8 @@ const summaryOutput = z.object({
     realized_pnl: realized,
     fees: z.object({ accrued_usdg: z.number(), accruals: z.number(), note: z.string() }),
     gas: z.object({
-      usdg: z.number().nullable().describe("Gas the owner paid on landed operations; null when some of it could not be priced or was never recorded"),
+      usdg: z.number().nullable().describe("Gas the owner paid on landed operations, summed over the operations whose gas was priced in USDG; null when landed operations paid gas and none of it was priced"),
+      complete: z.boolean().describe("False when some landed operation's gas is unpriced or unrecorded: a non-null usdg is then a floor, not the total"),
       priced_ops: z.number(),
       unpriced_ops: z.number(),
       sponsored_ops: z.number(),
@@ -166,7 +168,7 @@ const getSummary = defineTool({
     const live = s.live;
     const paper = s.paper;
     const summary = `${settings?.agentName ?? a.slug}, last ${period === "week" ? "7 days" : "24 hours"}. `
-      + `Live: ${live.trades.confirmed_count} confirmed trade(s), equity change ${money(usd(live.valuation.change_usdg))} USDG. `
+      + `Live: ${live.trades.confirmed_count} confirmed operation(s), equity change ${money(usd(live.valuation.change_usdg))} USDG. `
       + `Paper (simulated): ${paper.trades.paper_fill_count} fill(s), equity change ${money(usd(paper.valuation.change_usdg))} USDG. `
       + `${s.refusals.total} refusal(s); ${s.action_items.length} action item(s).`;
     return {
@@ -273,7 +275,7 @@ const ISO_ARG = z.iso.datetime({ offset: true }).max(40);
 const createExport = defineTool({
   name: "create_export",
   title: "Create an export",
-  description: `Build a downloadable export for one agent and keep it for 24 hours: trades (one row per operation, with book, status, amounts, transaction, evidenced realized P&L and gas), decisions (what it decided and why; never its private inputs) or portfolio (the latest valuation and holdings per book). CSV or JSON, at most ${EXPORT_MAX_ROWS} rows or 2 MB (newest kept, truncation noted). Returns an export id, a resource URI and a link the owner can open in a signed-in browser. Expired exports of this owner are removed. Limited to 20 per hour.`,
+  description: `Build a downloadable export for one agent and keep it for 24 hours: trades (one row per operation, with book, status, amounts, transaction, evidenced realized P&L and gas), decisions (what it decided and why; never its private inputs) or portfolio (the latest valuation and holdings per book). CSV or JSON, at most ${EXPORT_MAX_ROWS} rows or 2 MB (newest kept, truncation noted). Returns an export id, a resource URI and a link the owner can open in a signed-in browser. Expired exports of this owner are removed. Limited to 20 per hour, and to ${EXPORT_LIVE_MAX_COUNT} unexpired exports per owner at once.`,
   capability: "reports.read",
   input: z.object({
     agent: AGENT_ARG,
@@ -306,13 +308,22 @@ const createExport = defineTool({
       if (!Number.isFinite(since) || !Number.isFinite(until) || since >= until) throw new McpError("invalid_input", "since must be before until, and not in the future.");
       if (until - since > MAX_SPAN_SEC) throw new McpError("invalid_input", "An export window may span at most 366 days.");
     }
+    const d = await ctx.mcp();
+    await purgeExpiredExports(d.db, ctx.principal.tenant, now);
+    // What this owner may hold at once, checked before the ledger is read. A
+    // new export may be as large as EXPORT_MAX_BYTES, so the byte cap is never
+    // passed.
+    const usage = await liveExportUsage(d.db, ctx.principal.tenant, now);
+    if (usage.count >= EXPORT_LIVE_MAX_COUNT || usage.bytes + EXPORT_MAX_BYTES > EXPORT_LIVE_MAX_BYTES) {
+      throw new McpError("quota_exceeded", `This owner already holds ${usage.count} unexpired export(s) (${Math.round(usage.bytes / 1024)} KB); at most ${EXPORT_LIVE_MAX_COUNT} or ${EXPORT_LIVE_MAX_BYTES / (1024 * 1024)} MB are kept at once. Reuse one from list_exports, or wait for the oldest to expire.`, {
+        retryAfterSec: Math.max(1, (usage.oldestExpiresAt ?? now + 60) - now),
+      });
+    }
     const built = await ctx.ledger((db) => buildExport(db, {
       kind: args.kind, format: args.format, agentSlug: a.slug, accounts: a.accounts, since, until, now, includeRefusals: args.include_refusals,
     }, clean));
     const notes = [...built.notes];
     if (!windowed && (args.since || args.until)) notes.unshift("since and until are ignored for a portfolio export: it is the latest state.");
-    const d = await ctx.mcp();
-    await purgeExpiredExports(d.db, ctx.principal.tenant, now);
     const rec: ExportRecord & { content: string } = {
       id: newExportId(), tenant: ctx.principal.tenant, connection_id: ctx.principal.connectionId, kind: args.kind, format: args.format,
       filename: built.filename, bytes: built.bytes, created_at: now, expires_at: now + EXPORT_TTL_SEC, content: built.content,

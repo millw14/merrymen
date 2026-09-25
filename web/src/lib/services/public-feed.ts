@@ -111,6 +111,31 @@ export interface PublicDeps {
 }
 
 /**
+ * One settings read per tenant for the life of one call. A profile reads the
+ * owner's book setting for its figures and again (through read-theses) for its
+ * posts; two reads could disagree — a transient failure, or the owner flipping
+ * the switch in between — and put `public_book: false` at the top of a
+ * response whose posts carry sizes. The rejection is memoised too, so an
+ * unreadable setting is unreadable for the whole call.
+ */
+function onceSettings(settings: SettingsReader): SettingsReader {
+  const seen = new Map<string, Promise<SettingsView | null>>();
+  return {
+    settingsFor(tenant) {
+      const key = tenant.toLowerCase();
+      let p = seen.get(key);
+      if (!p) {
+        p = settings.settingsFor(tenant);
+        // Observed here so a rejection nobody awaits yet is not unhandled.
+        p.catch(() => undefined);
+        seen.set(key, p);
+      }
+      return p;
+    },
+  };
+}
+
+/**
  * The two public bits of an owner's settings. Null when unreadable: the book
  * then reads as private (the default that publishes less) and the badge as
  * unknown.
@@ -159,16 +184,43 @@ async function latestValuation(db: Db, account: string, epoch: number): Promise<
   return row ? { at: Number(row.at), book: bookOf(row.mode) } : null;
 }
 
-/** The newest decision's source since this run's first valuation (profileOf bounds `how` the same way). */
-async function latestSource(db: Db, account: string, epoch: number): Promise<string | null> {
+/**
+ * The newest decision's source, bounded the way profileOf bounds `how`: from
+ * the first valuation of the book the newest valuation belongs to
+ * (sameBookAsLatest keeps every row of that book; a null mode keeps them all),
+ * or from the beginning when there is no valuation. A different bound would
+ * let the list and the profile name different deciders for the same agent.
+ */
+async function latestSource(db: Db, account: string, epoch: number, latest: { book: Book } | null): Promise<string | null> {
+  const since = latest === null
+    ? 0
+    : Number(((await db
+      .prepare(
+        latest.book === "unknown"
+          ? "SELECT MIN(at) AS at FROM equity WHERE agent_id = ? AND epoch = ?"
+          : "SELECT MIN(at) AS at FROM equity WHERE agent_id = ? AND epoch = ? AND mode = ?",
+      )
+      .get(...(latest.book === "unknown" ? [account, epoch] : [account, epoch, latest.book]))) as { at: number | null } | undefined)?.at ?? 0);
   const row = (await db
-    .prepare(
-      `SELECT source FROM decisions
-        WHERE agent_id = ? AND at >= COALESCE((SELECT MIN(at) FROM equity WHERE agent_id = ? AND epoch = ?), 0)
-        ORDER BY at DESC LIMIT 1`,
-    )
-    .get(account, account, epoch)) as { source: string | null } | undefined;
+    .prepare("SELECT source FROM decisions WHERE agent_id = ? AND at >= ? ORDER BY at DESC LIMIT 1")
+    .get(account, since)) as { source: string | null } | undefined;
   return row?.source ?? null;
+}
+
+/**
+ * Whether a zero the board reported is a zero that was read. readLeaderboard
+ * folds an unreadable table into its default — no flows is "no deposit", no
+ * trades is "never filled", no equity is "never filled" — and those are claims
+ * about the agent. Re-asked only for the rows on the page whose published
+ * figure or reason rests on such a default; true only when the second read
+ * both answered and agrees with the default.
+ */
+async function confirmsDefault(read: () => Promise<boolean>): Promise<boolean> {
+  try {
+    return await read();
+  } catch {
+    return false;
+  }
 }
 
 // ── the leaderboard ──────────────────────────────────────────────────────────
@@ -267,12 +319,23 @@ export async function readPublicBoard(
   // are — capped so a runaway table costs rows their heartbeat (null), never
   // the call.
   const runOf = new Map<string, { account: string; epoch: number; beatAt: number | null }>();
-  const agents = (await db
-    .prepare(
-      `SELECT smart_account, beat_at, COALESCE(epoch, 1) AS epoch FROM agents
-        WHERE smart_account NOT LIKE 'rh:%' ORDER BY created_at DESC LIMIT 20000`,
-    )
-    .all()) as { smart_account: string; beat_at: number | null; epoch: number }[];
+  let agents: { smart_account: string; beat_at: number | null; epoch: number }[];
+  try {
+    agents = (await db
+      .prepare(
+        `SELECT smart_account, beat_at, COALESCE(epoch, 1) AS epoch FROM agents
+          WHERE smart_account NOT LIKE 'rh:%' ORDER BY created_at DESC LIMIT 20000`,
+      )
+      .all()) as typeof agents;
+  } catch {
+    throw new PublicLedgerUnreadable();
+  }
+  // readLeaderboard answers a failed read of `agents` with an EMPTY board (its
+  // honest render for a page). Here that would be a confident "nobody is
+  // running", so it is told apart: with the directory in hand, an empty board
+  // whose retired count is unknown means nothing was folded — so every row it
+  // read would have been listed — while agents exist to list.
+  if (board.agents.length === 0 && board.retired === null && agents.length > 0) throw new PublicLedgerUnreadable();
   for (const a of agents) {
     const slug = slugOf.get(a.smart_account.toLowerCase());
     if (!slug || runOf.has(slug)) continue;
@@ -335,27 +398,49 @@ export async function readPublicBoard(
     let decidesBy: DecidesBy | null = null;
     if (run) {
       try {
-        decidesBy = decidesByOf(await latestSource(db, run.account, run.epoch));
+        decidesBy = decidesByOf(await latestSource(db, run.account, run.epoch, valuation));
       } catch { /* unread: not described */ }
     }
     // readLeaderboard reports an unreadable trades table as zero of
     // everything, and then "never filled". Zeros are the only shape that can
-    // hide a failed read, so only they are checked again.
+    // hide a failed read, so only they are checked again — and a second read
+    // that finds operations means the first one did not answer either.
     let countsRead = true;
     if (run && r.landed === 0 && r.filledPaper === 0 && r.refused === 0) {
-      try {
-        await readOperationCounts(db, run.account, run.epoch, "landed");
-      } catch {
-        countsRead = false;
-        countsUnread += 1;
-      }
+      countsRead = await confirmsDefault(async () => {
+        const c = await readOperationCounts(db, run.account, run.epoch, "landed");
+        return c.landed === 0 && c.filledPaper === 0 && c.refused === 0;
+      });
+      if (!countsRead) countsUnread += 1;
+    }
+    // The other two defaults a live agent's reason can rest on: no flows read
+    // as "no deposit", and no equity read as "never filled" (landed > 0 with
+    // no latest mark). Each is re-asked the way the board computed it.
+    let reasonRead = true;
+    if (run && r.mode === "live" && r.unrankedWhy === "no-deposit") {
+      reasonRead = await confirmsDefault(async () => {
+        const f = (await db
+          .prepare(
+            `SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+               FROM flows WHERE agent_id = ? AND epoch = ?`,
+          )
+          .get(run.account, run.epoch)) as { n: number; net: number } | undefined;
+        return !f || Number(f.n) === 0 || Number(f.net) <= 0;
+      });
+    } else if (run && r.mode === "live" && r.unrankedWhy === "never-filled" && r.landed > 0) {
+      // A mark on record (the valuation read above) means the board's own
+      // equity read is the one that failed.
+      reasonRead = valuation === null && await confirmsDefault(async () => {
+        const e = (await db.prepare("SELECT COUNT(*) AS n FROM equity WHERE agent_id = ? AND epoch = ?").get(run.account, run.epoch)) as { n: number } | undefined;
+        return Number(e?.n ?? 0) === 0;
+      });
     }
     const ranked = isRanked(r);
     const unranked: Unranked | null = ranked
       ? null
       : r.pnlBps !== null || !r.unrankedWhy
         ? notLive(valuation?.book)
-        : !countsRead && r.unrankedWhy === "never-filled"
+        : !reasonRead || (!countsRead && r.unrankedWhy === "never-filled")
           ? RECORDS_UNREADABLE
           : { code: r.unrankedWhy, label: unrankedLabel(r.unrankedWhy) };
     return {
@@ -526,7 +611,14 @@ async function thesesFor(
     const views = read.theses.filter((t) => t.moreNames !== undefined).length;
     if (views >= THESIS_LANE || read.theses.length - views >= THESIS_LANE) laneFull = true;
     for (const t of read.theses) {
-      const key = t.postId ?? `${t.slug ?? t.name}|${t.at}|${t.head}|${t.outcome}`;
+      // NOT the post id: post-id.ts leaves the outcome out on purpose (a like
+      // survives its trade settling), and a private book's size too — so one
+      // thesis that landed once and was refused once, or said at two sizes, is
+      // two posts under one id, and keying on it silently dropped all but one.
+      // Each symbol read is an exact `d.symbol = ?` over distinct symbols, so
+      // two reads cannot return the same group; this only drops a post that is
+      // identical in every published field.
+      const key = JSON.stringify([t.slug, t.name, t.symbol, t.action, t.head, t.outcome, t.outcomeText, t.shadow, t.reason, t.post, t.said, t.at, t.firstAt, t.moreNames !== undefined]);
       if (seen.has(key)) continue;
       seen.add(key);
       merged.push(t);
@@ -650,7 +742,7 @@ export interface PublicProfile {
   recentTrades: PublicTradeView[];
   topTrades: PublicTradeView[];
   holdings: PublicHoldingView[] | null;
-  reads: { trades: boolean; activity: boolean; equity: boolean; flows: boolean; holdings: boolean | null; topTrades: boolean };
+  reads: { trades: boolean; activity: boolean; equity: boolean; flows: boolean; holdings: boolean | null; topTrades: boolean; theses: boolean };
   theses: PublicTheses;
 }
 
@@ -689,15 +781,35 @@ export async function readPublicProfile(db: Db, slug: string, deps: PublicDeps):
     throw new PublicDirectoryUnavailable();
   }
   if (!identity) return null;
-  const bits = await ownerBits(deps.settings, identity.tenant);
+  // One answer about the book for the whole profile: its own figures and the
+  // posts read-theses gates below.
+  const settings = onceSettings(deps.settings);
+  const bits = await ownerBits(settings, identity.tenant);
   const publicBook = bits?.publicBook === true;
   const profile: AgentProfile | null = await profileOf(db, identity, publicBook);
-  if (!profile) return null;
+  const accounts = identity.accounts.map((a) => a.toLowerCase());
+  if (!profile) {
+    // profileOf answers "none of its accounts is on this ledger" and "the
+    // agents table could not be read" with the same null. The second is an
+    // outage, and a public agent reported as nonexistent because of one is a
+    // wrong answer about somebody else's agent.
+    if (accounts.length === 0) return null;
+    let onLedger: boolean;
+    try {
+      const r = (await db
+        .prepare(`SELECT COUNT(*) AS n FROM agents WHERE LOWER(smart_account) IN (${accounts.map(() => "?").join(", ")})`)
+        .get(...accounts)) as { n: number } | undefined;
+      onLedger = Number(r?.n ?? 0) > 0;
+    } catch {
+      throw new PublicLedgerUnreadable();
+    }
+    if (onLedger) throw new PublicLedgerUnreadable();
+    return null;
+  }
 
   // Which book the growth line and the return are about. profileOf picks the
   // newest valuation's book (sameBookAsLatest) and says nothing about which it
   // was; this asks the same row.
-  const accounts = identity.accounts.map((a) => a.toLowerCase());
   let valuation: { at: number | null; book: Book } = { at: null, book: "unknown" };
   try {
     const run = (await db
@@ -714,22 +826,36 @@ export async function readPublicProfile(db: Db, slug: string, deps: PublicDeps):
   const why = profile.unrankedWhy;
   const reasonUnread = (why === "no-deposit" && !profile.flowsRead)
     || (why === "never-filled" && (!profile.tradesRead || !profile.equityRead));
+  // The board's order, so the list and the profile give the same reason for
+  // the same agent: the heartbeat's mode first, then rankPnl's own refusal
+  // (true whichever book the newest mark is), and only a return rankPnl would
+  // have published is withheld for the book it was measured on.
   const unranked: Unranked | null = ranked
     ? null
     : profile.mode === "paper"
       ? { code: "paper", label: unrankedLabel("paper") }
       : profile.mode !== "live"
         ? { code: "inactive", label: unrankedLabel("inactive") }
-        : !liveBook || !why
-          ? notLive(valuation.book)
-          : reasonUnread
+        : why
+          ? reasonUnread
             ? RECORDS_UNREADABLE
-            : { code: why, label: unrankedLabel(why) };
+            : { code: why, label: unrankedLabel(why) }
+          : notLive(valuation.book);
   const statsBook = profile.mode === "paper" ? "paper" : "live";
   const trades = profile.tradesRead;
   const flows = profile.flowsRead;
 
-  const theses = await thesesFor(db, [identity], { agentSlug: slug }, deps.settings);
+  // An unreadable feed costs the profile its posts, said in `reads`, not the
+  // whole profile: every other part here degrades the same way.
+  let theses: PublicTheses;
+  let thesesRead = true;
+  try {
+    theses = await thesesFor(db, [identity], { agentSlug: slug }, settings);
+  } catch (e) {
+    if (!(e instanceof PublicLedgerUnreadable)) throw e;
+    thesesRead = false;
+    theses = { theses: [], tradesComplete: false, laneFull: false, windowSec: 30 * WINDOW_SEC, identitiesRead: true };
+  }
   const points = profile.growth;
   return {
     slug: profile.slug,
@@ -796,6 +922,7 @@ export async function readPublicProfile(db: Db, slug: string, deps: PublicDeps):
       flows: profile.flowsRead,
       holdings: publicBook ? profile.holdingsRead : null,
       topTrades: profile.topTradesRead,
+      theses: thesesRead,
     },
     theses,
   };

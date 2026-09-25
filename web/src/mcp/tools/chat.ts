@@ -76,7 +76,7 @@ function messageView(m: StoredMessage) {
 const sendMessageTool = defineTool({
   name: "send_message",
   title: "Message your agent",
-  description: "Send your agent a message (1–2000 characters) and get its reply. The agent answers from its current state as Merrymen records it, recent messages in this conversation, and your active research notes (shown to it as untrusted). The reply is text only: this cannot trade, change settings or pause the agent, and if the agent suggests an action it is removed (proposal_stripped) and must be done in Merrymen. request_id is your idempotency key: sending the same request_id and message again returns the stored exchange (even while pending) without calling the model again (a replay still counts toward the message budget, so poll a pending reply with get_conversation instead). Omit conversation_id to start a new conversation; a conversation holds up to 100 of your messages.",
+  description: "Send your agent a message (1–2000 characters) and get its reply. The agent answers from its current state as Merrymen records it, recent messages in this conversation, and your active research notes (shown to it as untrusted); the reply is written by Merrymen's language-model provider, which receives that state. The reply is text only: this cannot trade, change settings or pause the agent, and if the agent suggests an action it is removed (proposal_stripped) and must be done in Merrymen. request_id is your idempotency key: sending the same request_id and message again returns the stored exchange (even while pending) without calling the model again (a replay still counts toward the message budget, so poll a pending reply with get_conversation instead). Omit conversation_id to start a new conversation; a conversation holds up to 100 of your messages.",
   capability: "chat.send",
   input: z.object({
     agent: AGENT_ARG,
@@ -99,13 +99,15 @@ const sendMessageTool = defineTool({
     untrusted_note: z.string(),
     observed_at: z.string(),
   }),
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // Open world: the reply comes from an external language-model provider, and
+  // the agent's state is sent to it.
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   // Every new message is a model call billed to Merrymen.
   budget: { bucket: "llm_chat", perMinute: 6, perHour: 30, perDay: 150 },
   timeoutMs: 35_000,
   async handler(args, ctx) {
     const a = await ctx.agent(args.agent);
-    const { db } = await ctx.mcp();
+    const { db, dialect } = await ctx.mcp();
     const r = await guarded(() => sendMessage(db, {
       tenant: ctx.principal.tenant,
       agentSlug: a.slug,
@@ -113,6 +115,7 @@ const sendMessageTool = defineTool({
       message: args.message,
       requestId: args.request_id,
       conversationId: args.conversation_id,
+      dialect,
     }, { ...conversationDeps(), now: ctx.now }));
     const status = r.agent.status;
     const summary = status === "complete"
@@ -197,7 +200,7 @@ const listConversationsTool = defineTool({
     agent: z.string(),
     conversations: z.array(z.object({
       conversation_id: z.string(),
-      messages: z.number(),
+      messages: z.number().describe("Your messages plus the agent's replies; Merrymen notices are not counted"),
       pending_replies: z.number(),
       started_at: z.string(),
       last_message_at: z.string(),

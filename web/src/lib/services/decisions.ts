@@ -26,11 +26,23 @@
 import { liveBlockerText, type RefuseRule } from "@merrymen/core";
 import type { Db } from "../../../../worker/src/db";
 import { readDecisionLifecycle, type DecisionLifecycle } from "../../../../worker/src/decision-lifecycle";
-import { PRIVATE_REVIEW_SOURCE } from "../../../../worker/src/market-review";
+import { PRIVATE_REVIEW_SOURCE, RESEARCH_UNAVAILABLE_SOURCE, REVIEW_SOURCE } from "../../../../worker/src/market-review";
 import { ACCOUNT_WIDE_RULES } from "../../../../worker/src/owner-refusal";
 import { isProvenance, type Provenance } from "../../../../worker/src/provenance";
 import type { RevertClass } from "../../../../worker/src/revert";
-import { classifyDrop, rejectRuleLabel, rejectRuleRemedy } from "../../../../worker/src/thesis-policy";
+import { classifyDrop, rejectRuleLabel, rejectRuleRemedy, SHADOW_SOURCES } from "../../../../worker/src/thesis-policy";
+
+/**
+ * The quiet-market review (market-review.ts quietReviewRow): a `hold` row the
+ * tick writes every few minutes while its strategy has nothing to propose. It
+ * is commentary on one shared oracle series, not the agent's own trading
+ * choice, so it is never counted as a hold the model chose.
+ */
+export const REVIEW_SOURCES: readonly string[] = [REVIEW_SOURCE, PRIVATE_REVIEW_SOURCE, RESEARCH_UNAVAILABLE_SOURCE];
+/** Brain runs recorded to be watched, never sent as orders (thesis-policy SHADOW_SOURCES). */
+export const SHADOW_DECISION_SOURCES: readonly string[] = SHADOW_SOURCES;
+/** The trade kinds that are a fill of a market position (profile-trades.ts, social.ts use the same pair). */
+export const FILL_KINDS: readonly string[] = ["swap", "curve-trade"];
 
 /** A decision id: a UUID, or `dec_<hex>` minted by the Brain. Anything else is not an id. */
 export const DECISION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -206,7 +218,9 @@ export function describeRule(raw: string | null | undefined, status: string | nu
     const detail = tail.trim() ? tail.trim() : null;
     if (kind.toLowerCase() === "preflight") return view("preflight", "preflight", "the decision was not actionable as sized (the worker's pre-flight refused it)", { detail });
     if (kind.toLowerCase() === "paper") return view("paper-fill-refused", "execution", "the paper book refused the simulated fill", { detail });
-    return view("order-review", "execution", "the broker's order review refused the terms", { detail });
+    // `review: <e.message>` (index.ts) is the broker client's raw exception
+    // text — a provider error, so it is classified and never relayed.
+    return view("order-review", "execution", "the broker's order review refused the terms", { detail_withheld: detail !== null });
   }
   if (Object.prototype.hasOwnProperty.call(RAIL_FAMILY, rule)) {
     const family = RAIL_FAMILY[rule as RefuseRule];
@@ -231,19 +245,21 @@ export function describeRule(raw: string | null | undefined, status: string | nu
 
 // ── holds, drops and outcomes ────────────────────────────────────────────────
 
-export const HOLD_KINDS = ["MODEL_HOLD", "GATE_FORCED_HOLD", "STALE_MARK_HOLD", "UNKNOWN"] as const;
+export const HOLD_KINDS = ["MODEL_HOLD", "GATE_FORCED_HOLD", "STALE_MARK_HOLD", "QUIET_REVIEW", "UNKNOWN"] as const;
 export type HoldKind = (typeof HOLD_KINDS)[number];
 
 export const HOLD_KIND_TEXT: Readonly<Record<HoldKind, string>> = {
   MODEL_HOLD: "The model itself chose to hold.",
   GATE_FORCED_HOLD: "A gate in the Brain overruled the model's answer and forced a hold (for example a risk or data-quality gate that was shut). The model's own view may have been different.",
   STALE_MARK_HOLD: "It held while its price mark was stale, so the hold says nothing about the market.",
+  QUIET_REVIEW: "A periodic market review written while its strategy had nothing to propose. It is commentary on one market's public price series, not a trading choice.",
   UNKNOWN: "Not recorded: the row predates hold kinds, or its producer does not report one.",
 };
 
-export function holdView(action: string | null, holdKind: string | null): { kind: HoldKind; explained: string } | null {
+export function holdView(action: string | null, holdKind: string | null, source: string | null = null): { kind: HoldKind; explained: string } | null {
   if (action !== "hold") return null;
-  const kind: HoldKind = holdKind === "MODEL_HOLD" || holdKind === "GATE_FORCED_HOLD" || holdKind === "STALE_MARK_HOLD" ? holdKind : "UNKNOWN";
+  const kind: HoldKind = holdKind === "MODEL_HOLD" || holdKind === "GATE_FORCED_HOLD" || holdKind === "STALE_MARK_HOLD" ? holdKind
+    : source !== null && REVIEW_SOURCES.includes(source) ? "QUIET_REVIEW" : "UNKNOWN";
   return { kind, explained: HOLD_KIND_TEXT[kind] };
 }
 
@@ -273,7 +289,7 @@ export function explanationOf(reason: string | null, dropped: string | null): { 
 
 export const OUTCOME_CATEGORIES = [
   "confirmed", "landed_without_tx_hash", "paper_fill", "submitted_unconfirmed", "reverted", "rejected",
-  "dropped", "hold", "view", "no_trade_recorded",
+  "dropped", "hold", "view", "shadow_only", "no_trade_recorded",
 ] as const;
 export type OutcomeCategory = (typeof OUTCOME_CATEGORIES)[number];
 
@@ -287,10 +303,11 @@ export const OUTCOME_TEXT: Readonly<Record<OutcomeCategory, string>> = {
   dropped: "Dropped before it reached the wall; no trade was attempted.",
   hold: "A hold: no trade was intended.",
   view: "A view with no action (the agent explaining why it is not acting).",
+  shadow_only: "A Brain decision made in shadow: recorded so it can be watched and graded, never sent as an order.",
   no_trade_recorded: "No trade row is linked to it: it never reached the wall, or the record has not arrived yet.",
 };
 
-export function outcomeCategory(action: string | null, dropped: string | null, trade: { status: string; tx_hash: string | null } | null): OutcomeCategory {
+export function outcomeCategory(action: string | null, dropped: string | null, trade: { status: string; tx_hash: string | null } | null, source: string | null = null): OutcomeCategory {
   if (trade) {
     switch (trade.status) {
       case "landed": return txHashOrNull(trade.tx_hash) ? "confirmed" : "landed_without_tx_hash";
@@ -303,6 +320,7 @@ export function outcomeCategory(action: string | null, dropped: string | null, t
   if (dropped) return "dropped";
   if (action === "hold") return "hold";
   if (action === null) return "view";
+  if (source !== null && SHADOW_DECISION_SOURCES.includes(source)) return "shadow_only";
   return "no_trade_recorded";
 }
 
@@ -541,10 +559,13 @@ export async function readOwnerDecision(db: Db, accounts: readonly string[], dec
 
 export interface WindowTrade {
   id: number;
+  agent_id: string;
+  kind: string;
   status: string;
   reject_rule: string | null;
   decision_id: string | null;
   tx_hash: string | null;
+  user_op_hash: string | null;
   created_at: number;
 }
 
@@ -555,20 +576,50 @@ export const WINDOW_TRADE_CAP = 5000;
 export async function readWindowTrades(db: Db, accounts: readonly string[], since: number): Promise<{ rows: WindowTrade[]; truncated: boolean }> {
   const acc = normAccounts(accounts);
   if (!acc.length) return { rows: [], truncated: false };
-  const rows = (await db.prepare(`SELECT id, status, reject_rule, decision_id, tx_hash, created_at FROM trades
+  const rows = (await db.prepare(`SELECT id, agent_id, kind, status, reject_rule, decision_id, tx_hash, user_op_hash, created_at FROM trades
       WHERE lower(agent_id) IN (${holes(acc.length)}) AND created_at >= ? ORDER BY id DESC LIMIT ?`)
     .all(...acc, since, WINDOW_TRADE_CAP + 1)) as Record<string, unknown>[];
   const truncated = rows.length > WINDOW_TRADE_CAP;
   return {
     rows: rows.slice(0, WINDOW_TRADE_CAP).map((r) => ({
       id: Number(r.id),
+      agent_id: String(r.agent_id).toLowerCase(),
+      kind: String(r.kind),
       status: String(r.status),
       reject_rule: str(r.reject_rule),
       decision_id: str(r.decision_id),
       tx_hash: str(r.tx_hash),
+      user_op_hash: str(r.user_op_hash),
       created_at: Number(r.created_at),
     })),
     truncated,
+  };
+}
+
+/**
+ * Market fills in the window, one per OPERATION (distinct-trades.ts): a
+ * redeploy's reconciler re-wrote successful operations as bare 'swap' copies
+ * under the same user-op hash, and a count of rows would read each twice.
+ * Transfers, vault deposits and pre-flight refusals are not fills.
+ */
+export function countFills(rows: readonly WindowTrade[]): { live_landed: number; live_confirmed: number; paper: number; submitted_unresolved: number } {
+  const ops = new Map<string, WindowTrade>();
+  const rank = (t: WindowTrade) => (t.status === "submitted" ? 0 : 1) + (txHashOrNull(t.tx_hash) ? 2 : 0);
+  for (const t of rows) {
+    if (!FILL_KINDS.includes(t.kind)) continue;
+    if (t.status !== "landed" && t.status !== "paper" && t.status !== "submitted") continue;
+    const op = t.user_op_hash ? t.user_op_hash.toLowerCase() : "";
+    const key = op ? `${t.agent_id}|${op}` : `row:${t.id}`;
+    const prev = ops.get(key);
+    if (!prev || rank(t) > rank(prev)) ops.set(key, t);
+  }
+  const all = [...ops.values()];
+  const landed = all.filter((t) => t.status === "landed");
+  return {
+    live_landed: landed.length,
+    live_confirmed: landed.filter((t) => txHashOrNull(t.tx_hash) !== null).length,
+    paper: all.filter((t) => t.status === "paper").length,
+    submitted_unresolved: all.filter((t) => t.status === "submitted").length,
   };
 }
 

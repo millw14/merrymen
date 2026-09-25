@@ -2,6 +2,7 @@
 import { mcpConfig } from "@/mcp/config";
 import { PUBLIC_CORS, ipLimited, oauthDeps, preflight, readForm } from "@/mcp/oauth/deps";
 import { jsonResponse } from "@/mcp/oauth/metadata";
+import { logEvent } from "@/mcp/observe";
 import { OAuthError, authenticateClient, exchangeCode, refreshTokens } from "@/mcp/oauth/server";
 
 export const dynamic = "force-dynamic";
@@ -28,6 +29,7 @@ export async function POST(req: Request): Promise<Response> {
       if (error.status === 401) headers["WWW-Authenticate"] = 'Basic realm="merrymen"';
       return jsonResponse(error.body(), error.status, headers);
     }
+    logEvent("token_failed", { error: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : "unknown" });
     return jsonResponse({ error: "server_error", error_description: "unexpected error; retry" }, 500, PUBLIC_CORS);
   }
 }

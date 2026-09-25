@@ -71,7 +71,7 @@ const EVIDENCE = z.object({
 
 const DECISION = z.object({
   id: z.string(),
-  at: z.string(),
+  at: z.string().nullable(),
   source: z.string().nullable(),
   strategy: z.string().nullable(),
   provider: z.string().nullable(),
@@ -107,7 +107,7 @@ function kvOut(entries: KeyValue[]): Array<{ key: string; value: string | number
 /** One decision row as the owner sees it. Every third-party string passes through untrusted(). */
 function decisionOut(d: OwnerDecisionRow, withEvidence: boolean): DecisionOut {
   const t = d.trade;
-  const category = outcomeCategory(d.action, d.dropped_rule, t);
+  const category = outcomeCategory(d.action, d.dropped_rule, t, d.source);
   const explanation = explanationOf(d.reason, d.dropped_rule);
   const drop = dropView(d.dropped_rule);
   let evidence: DecisionOut["evidence"] = null;
@@ -121,7 +121,7 @@ function decisionOut(d: OwnerDecisionRow, withEvidence: boolean): DecisionOut {
   }
   return {
     id: d.id,
-    at: isoOrNull(d.at) ?? new Date(0).toISOString(),
+    at: isoOrNull(d.at),
     source: untrusted(d.source, 80),
     strategy: untrusted(d.strategy, 80),
     provider: untrusted(d.provider, 60),
@@ -136,7 +136,7 @@ function decisionOut(d: OwnerDecisionRow, withEvidence: boolean): DecisionOut {
     stored_explanation: untrusted(explanation.text, 600),
     stored_explanation_withheld: explanation.withheld,
     dropped: drop ? { kind: drop.kind, label: drop.label, rule_text_untrusted: untrusted(drop.rule_text, 160) } : null,
-    hold: holdView(d.action, d.hold_kind),
+    hold: holdView(d.action, d.hold_kind, d.source),
     outcome: {
       category,
       explained: OUTCOME_TEXT[category],
@@ -185,6 +185,8 @@ const listDecisions = defineTool({
     observed_at: z.string(),
   }),
   annotations: { readOnlyHint: true, openWorldHint: false },
+  // A page with evidence reads up to ~1.6 MB of JSON columns; a brake on a loop.
+  budget: { perMinute: 30 },
   async handler(args, ctx) {
     const a = await ctx.agent(args.agent);
     const limit = args.include_evidence ? Math.min(args.limit, EVIDENCE_PAGE_MAX) : args.limit;
@@ -324,7 +326,7 @@ const getDecision = defineTool({
     const o = data.decision.outcome;
     return {
       data,
-      summary: `${data.decision.action ?? "view"} at ${data.decision.at}: ${o.category}${o.book ? ` (${o.book})` : ""}${o.rule?.label ? ` — ${o.rule.label}` : ""}.`,
+      summary: `${data.decision.action ?? "view"} at ${data.decision.at ?? "an unrecorded time"}: ${o.category}${o.book ? ` (${o.book})` : ""}${o.rule?.label ? ` — ${o.rule.label}` : ""}.`,
     };
   },
 });
@@ -447,18 +449,21 @@ const explainInactivity = defineTool({
     checks: z.array(CHECK),
     decisions_in_window: z.object({
       total: COUNT, buys: COUNT, sells: COUNT, other_actions: COUNT, model_holds: COUNT, gate_forced_holds: COUNT, stale_mark_holds: COUNT,
-      holds_kind_unrecorded: COUNT, views_no_action: COUNT, brain_refused: COUNT, brain_unreachable: COUNT, brain_malformed: COUNT,
+      holds_kind_unrecorded: COUNT, quiet_market_reviews: COUNT, views_no_action: COUNT, brain_refused: COUNT, brain_unreachable: COUNT, brain_malformed: COUNT,
       proposals_dropped: COUNT, first_at: z.string().nullable(), last_at: z.string().nullable(),
+      brain_shadow_decisions: COUNT.describe("Brain shadow runs: recorded to be watched, never sent as orders, so not counted above"),
+      brain_shadow_failures: COUNT,
     }),
     refusals_in_window: z.array(z.object({
       rule: z.string(), family: z.enum(RULE_FAMILIES), status: z.enum(["rejected", "reverted"]), label: z.string().nullable(),
       remedy: z.string().nullable(), count: COUNT, last_at: z.string().nullable(),
     })),
     events_in_window: z.object({
-      market_unreadable: COUNT, provider_failure: COUNT, brain_refused: COUNT, execution_failure: COUNT, policy_notice: COUNT,
+      market_unreadable: COUNT, provider_failure: COUNT, brain_failure: COUNT, brain_refused: COUNT, execution_failure: COUNT, policy_notice: COUNT,
       arm_failure: COUNT, funding_notice: COUNT, other_not_relayed: COUNT, note: z.string(),
     }),
-    fills_in_window: z.object({ live_landed: COUNT, live_confirmed: COUNT, paper: COUNT, submitted_unresolved: COUNT }),
+    fills_in_window: z.object({ live_landed: COUNT, live_confirmed: COUNT, paper: COUNT, submitted_unresolved: COUNT })
+      .describe("Market fills (swaps and launch-curve trades; not transfers or vault moves), one per operation. live_confirmed = landed with a transaction hash"),
     last_successful_cycle: z.object({ at: z.string().nullable(), book: z.enum(["paper", "live"]).nullable(), meaning: z.string() }).nullable(),
     last_trade: z.object({
       live: z.object({ at: z.string().nullable(), tx_hash: z.string().nullable(), confirmed: z.boolean() }).nullable(),
@@ -498,18 +503,19 @@ const explainInactivity = defineTool({
       })),
       decisions_in_window: {
         total: d.total, buys: d.buys, sells: d.sells, other_actions: d.other_actions, model_holds: d.model_holds, gate_forced_holds: d.gate_forced_holds,
-        stale_mark_holds: d.stale_mark_holds, holds_kind_unrecorded: d.unknown_holds, views_no_action: d.views, brain_refused: d.brain_refused,
-        brain_unreachable: d.brain_unreachable, brain_malformed: d.brain_malformed, proposals_dropped: d.dropped,
+        stale_mark_holds: d.stale_mark_holds, holds_kind_unrecorded: d.unknown_holds, quiet_market_reviews: d.quiet_reviews, views_no_action: d.views,
+        brain_refused: d.brain_refused, brain_unreachable: d.brain_unreachable, brain_malformed: d.brain_malformed, proposals_dropped: d.dropped,
         first_at: isoOrNull(d.first_at), last_at: isoOrNull(d.last_at),
+        brain_shadow_decisions: d.shadow_decisions, brain_shadow_failures: d.shadow_failures,
       },
       refusals_in_window: dx.refusals.slice(0, 12).map((b) => ({
         rule: b.key, family: b.family, status: b.status, label: b.label, remedy: b.remedy, count: b.count, last_at: isoOrNull(b.last_at),
       })),
       events_in_window: {
-        market_unreadable: e.market_unreadable.count, provider_failure: e.provider_failure.count, brain_refused: e.brain_refused.count,
+        market_unreadable: e.market_unreadable.count, provider_failure: e.provider_failure.count, brain_failure: e.brain_failure.count, brain_refused: e.brain_refused.count,
         execution_failure: e.execution_failure.count, policy_notice: e.policy_notice.count, arm_failure: e.arm_failure.count,
         funding_notice: e.funding_notice.count, other_not_relayed: e.other.count,
-        note: "Warnings and errors from the agent's event log, counted by kind. Their text is not relayed here because it can carry raw provider errors, chat ids and addresses; Merrymen's activity log shows it.",
+        note: "Warnings and errors from the agent's event log, counted by kind. Their text is not relayed here because it can carry raw provider errors, chat ids and addresses; Merrymen's activity log shows it. brain_failure events are the same failed Brain runs (live and shadow) as the brain_unreachable, brain_malformed and brain_shadow_failures decision counts, not further failures.",
       },
       fills_in_window: dx.fills_in_window,
       last_successful_cycle: dx.last_successful_cycle
@@ -550,6 +556,8 @@ export const DECISIONS_RESOURCES: ResourceDef[] = [
       for (const a of agents.slice(0, 4)) {
         const rows = await ctx.ledger((db) => readOwnerDecisions(db, a.accounts, { since: null, action: null, symbol: null, address: null, before: null, limit: 9, withEvidence: false }));
         for (const r of rows.slice(0, 10)) {
+          // Only ids the read below would accept become URIs.
+          if (!DECISION_ID_RE.test(r.id)) continue;
           // Titles carry only our own words: a symbol is third-party text.
           out.push({ uri: `merrymen://agents/${a.slug}/decisions/${r.id}`, name: `decision-${r.id}`, title: `${action(r.action) ?? "view"} decision at ${isoOrNull(r.at) ?? "unknown time"}`, mimeType: "application/json" });
         }

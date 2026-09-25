@@ -79,16 +79,18 @@ const STOCKS: MarketData = {
   })),
 };
 
-function fakeReaders(o: { pools?: "down"; payload?: Payload; stocks?: "down" } = {}) {
-  const calls = { candles: [] as string[][], evidence: [] as string[][] };
+function fakeReaders(o: { pools?: "down"; payload?: Payload; stocks?: "down"; cachedBase?: string } = {}) {
+  const calls = { candles: [] as string[][], evidence: [] as string[][], pools: 0, stocks: 0 };
   const readers: MarketReaders = {
     async pools() {
+      calls.pools++;
       return o.pools === "down" ? { byToken: new Map(), asked: 3, reached: 0, truncated: false, nowSec: NOW - 30 } : POOLS;
     },
     async discoveries() {
       return o.payload ?? PAYLOAD;
     },
     async stocks() {
+      calls.stocks++;
       if (o.stocks === "down") throw new Error("rpc down");
       return STOCKS;
     },
@@ -96,7 +98,7 @@ function fakeReaders(o: { pools?: "down"; payload?: Payload; stocks?: "down" } =
       calls.candles.push([poolId, token, window]);
       // A shared cache keyed by pool can hold a series another token's request verified.
       return {
-        state: "ok", reason: null, base: poolId === BIG_POOL ? BIG : token, quoteSymbol: "WETH\u202e", interval: 3600, label: "hourly", gaps: 1, lastBarAgeSec: 1800,
+        state: "ok", reason: null, base: o.cachedBase ?? token, quoteSymbol: "WETH\u202e", interval: 3600, label: "hourly", gaps: 1, lastBarAgeSec: 1800,
         candles: [{ t: NOW - 9000, o: 1, h: 2, l: 0.5, c: 1.5, v: 100 }, { t: NOW - 1800, o: 1.5, h: 1.8, l: 1.4, c: 1.6, v: 40 }],
       };
     },
@@ -230,6 +232,32 @@ test("search: the caller's own tokens and watchlist are searched, and never anot
   assert.equal(memeA.symbol_trusted, true);
 });
 
+test("market:read alone sees nothing private: no watchlist, no custom tokens, no custom-ticker trust or flags", async () => {
+  const { d, deps, a } = await setup();
+  await ok(a, "add_to_watchlist", { address: UNKNOWN, label: "moonshot idea" });
+  const marketOnly = (await connectAs(deps, OWNER_A, { scopes: ["market:read"] })).principal;
+  assert.equal((await ok(marketOnly, "search_tokens", { query: "moonshot" })).total_matches, 0, "watchlist labels are not searchable");
+  assert.equal((await ok(marketOnly, "search_tokens", { query: UNKNOWN })).total_matches, 0, "watchlist addresses are not searchable");
+  const chump = (await ok(marketOnly, "search_tokens", { query: "CHUMP" })).results.find((h: { address: string }) => h.address === MEME);
+  assert.deepEqual(chump.sources, ["discovery"], "the owner's custom token is not revealed");
+  assert.equal(chump.symbol_trusted, false);
+  const token = await ok(marketOnly, "get_token", { address: MEME });
+  assert.equal(token.symbol_trusted, false);
+  // With watchlist:manage but not agents:read, the watchlist is searchable and the custom tokens still are not.
+  const watchOnly = (await connectAs(deps, OWNER_A, { scopes: ["market:read", "watchlist:manage"] })).principal;
+  assert.equal((await ok(watchOnly, "search_tokens", { query: "moonshot" })).total_matches, 1);
+  assert.deepEqual((await ok(watchOnly, "search_tokens", { query: "CHUMP" })).results.find((h: { address: string }) => h.address === MEME).sources, ["discovery"]);
+  // The watchlist row never stores the owner's custom ticker, so a watchlist-only connection cannot read it back.
+  await ok(a, "add_to_watchlist", { address: MEME });
+  assert.equal((d.raw.prepare("SELECT symbol FROM mcp_watchlist WHERE tenant = ? AND token = ?").get(OWNER_A, MEME) as { symbol: string | null }).symbol, null);
+  const listed = (await ok(watchOnly, "list_watchlist", {})).items.find((i: { address: string }) => i.address === MEME);
+  assert.equal(listed.symbol, null);
+  assert.equal((await ok(a, "list_watchlist", {})).items.find((i: { address: string }) => i.address === MEME).symbol, "CHUMP");
+  // A registry token keeps its public ticker in the row.
+  await ok(watchOnly, "add_to_watchlist", { address: NVDA });
+  assert.equal((await ok(watchOnly, "list_watchlist", {})).items.find((i: { address: string }) => i.address === NVDA).symbol, "NVDA");
+});
+
 test("search pagination: a cursor only works for the owner and the query it was issued for", async () => {
   const { a, b } = await setup();
   const p1 = await ok(a, "search_tokens", { query: "NEON", limit: 1 });
@@ -330,12 +358,40 @@ test("get_candles resolves the token's pool from discovery and marks bar volume 
   assert.ok(r.notes.some((n: string) => /display-only|shape only/.test(n)));
 });
 
-test("get_candles: a caller-chosen pool whose bars describe another token is a mismatch, not this token's chart", async () => {
-  const { a } = await setup();
-  const r = await ok(a, "get_candles", { address: MEME, pool_id: BIG_POOL });
+test("get_candles never reads another token's pool, so the shared chart cache cannot be pointed at the wrong side of a pair", async () => {
+  const { a, calls } = await setup();
+  // The attack: ask for BIG's listed pool with MEME as the token. readCandles
+  // caches by pool, not token, and the public token page for BIG reads that
+  // cache without a base check — so the series must never be fetched.
+  assert.equal(await errCode(a, "get_candles", { address: MEME, pool_id: BIG_POOL }), "invalid_input");
+  // A well-formed pool the index lists for nobody is refused too.
+  assert.equal(await errCode(a, "get_candles", { address: MEME, pool_id: `0x${"12".repeat(32)}` }), "invalid_input");
+  // A token with no listed pool cannot be charted through a guessed one.
+  assert.equal(await errCode(a, "get_candles", { address: UNKNOWN, pool_id: MEME_POOL }), "invalid_input");
+  assert.equal(calls.candles.length, 0, "no refused pool reached the provider");
+  // Naming the token's own listed pool is allowed.
+  const r = await ok(a, "get_candles", { address: MEME, pool_id: MEME_POOL });
   assert.equal(r.pool_source, "argument");
+  assert.equal(r.state, "ok");
+  assert.deepEqual(calls.candles, [[MEME_POOL, MEME, "1h"]]);
+});
+
+test("get_candles: a cached series about the other side of the pair is a mismatch, not this token's chart", async () => {
+  const { a } = await setup({ readers: { cachedBase: BIG } });
+  const r = await ok(a, "get_candles", { address: MEME });
+  assert.equal(r.pool_source, "discovery");
   assert.equal(r.state, "mismatch");
   assert.deepEqual(r.bars, []);
+  assert.equal(r.last_bar_partial, null);
+});
+
+test("get_pool_activity may name another pool: evidence is cached per pool AND token and checked against the token", async () => {
+  const { a, calls } = await setup();
+  const r = await ok(a, "get_pool_activity", { address: MEME, pool_id: BIG_POOL });
+  assert.equal(r.pool_source, "argument");
+  assert.deepEqual(calls.evidence[0], [BIG_POOL, MEME]);
+  assert.equal(await errCode(a, "get_pool_activity", { address: MEME, pool_id: "https://evil.test" }), "invalid_input");
+  assert.equal(calls.evidence.length, 1);
 });
 
 test("get_candles for a token with no indexed pool says so instead of drawing anything", async () => {
@@ -489,11 +545,31 @@ test("eligibility: the class route's prerequisites for a launchpad coin", async 
   assert.match(check(paper, "class_route").detail, /on paper/);
   assert.equal(paper.executable.state, "no");
   d.raw.prepare("UPDATE agents SET mode = 'live' WHERE smart_account = ?").run(ACCOUNT_A);
+  // Live, vault sealed, launch buying on — but a class buy is unpriceable by
+  // construction and the wall charges it to the scout budget, which is off.
+  const noScout = await ok(a, "check_token_eligibility", { address: CURVE });
+  assert.equal(noScout.book, "live");
+  assert.equal(check(noScout, "class_route").result, "fail");
+  assert.match(check(noScout, "class_route").detail, /scout/);
+  assert.equal(noScout.executable.state, "no");
+  install(d, { directory: dirWith({ features: ["pons-class"] }), settingsA: { ...classSettings, scoutEnabled: true, scoutBudgetUsdg: 20 } });
   const live = await ok(a, "check_token_eligibility", { address: CURVE });
-  assert.equal(live.book, "live");
   assert.equal(check(live, "class_route").result, "unknown");
   assert.equal(live.executable.state, "unknown");
   assert.equal(check(live, "price_guard").result, "fail", "a curve price never authorises a buy");
+});
+
+test("eligibility for a testnet agent reads no mainnet market data", async () => {
+  const { d, a, calls } = await setup();
+  install(d, { directory: dirWith({ chainId: 46630, features: ["tradeable-v2"] }) });
+  const r = await ok(a, "check_token_eligibility", { address: NVDA });
+  assert.equal(r.chain_id, 46630);
+  assert.equal(calls.pools, 0);
+  assert.equal(calls.stocks, 0, "no mainnet halt flag is read for a testnet agent");
+  assert.equal(check(r, "trading_not_paused").result, "unknown");
+  assert.equal(r.priceable.state, "unknown");
+  assert.equal(r.discoverable.state, "unknown");
+  assert.notEqual(r.executable.state, "yes");
 });
 
 test("eligibility: another owner's agent is not found whatever id is passed, and it needs agents:read", async () => {
@@ -568,6 +644,9 @@ test("through the SDK: the family is listed with output schemas and a call retur
   assert.deepEqual(tools.map((t) => t.name).sort(), MARKET_TOOLS.map((t) => t.name).sort());
   for (const t of tools) assert.ok(t.outputSchema, `${t.name} declares an output schema`);
   assert.equal(tools.find((t) => t.name === "remove_from_watchlist")?.annotations?.readOnlyHint, false);
+  const addAnn = tools.find((t) => t.name === "add_to_watchlist")?.annotations as { readOnlyHint?: boolean; destructiveHint?: boolean } | undefined;
+  assert.equal(addAnn?.readOnlyHint, false);
+  assert.equal(addAnn?.destructiveHint, true, "it can overwrite or clear the owner's label and note");
   for (const [name, args] of [["get_token", { address: FAKE_NVDA }], ["discover_tokens", { list: "new" }], ["check_token_eligibility", { address: MEME }]] as const) {
     const r = await rpcResult(await send(mcpRequest(tokens.access_token, "tools/call", { name, arguments: args })));
     assert.equal(r.result?.isError, undefined, `${name}: ${JSON.stringify(r)}`);

@@ -12,6 +12,7 @@ import { oauthDeps } from "@/mcp/oauth/deps";
 import { jsonResponse } from "@/mcp/oauth/metadata";
 import { OAuthError, decideRequest, describeRequest } from "@/mcp/oauth/server";
 import { ClientError } from "@/mcp/oauth/clients";
+import { logEvent } from "@/mcp/observe";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -47,6 +48,7 @@ export async function POST(req: Request): Promise<Response> {
   } catch (error) {
     if (error instanceof OAuthError) return jsonResponse(error.body(), error.status);
     if (error instanceof ClientError) return jsonResponse({ error: error.code, error_description: error.message }, error.code === "temporarily_unavailable" ? 503 : 400);
+    logEvent("consent_failed", { error: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : "unknown" });
     return jsonResponse({ error: "server_error", error_description: "Something went wrong. Try again." }, 500);
   }
 }

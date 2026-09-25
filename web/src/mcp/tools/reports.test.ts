@@ -11,7 +11,7 @@ import { afterEach, test } from "node:test";
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import { CASH } from "@merrymen/core";
 import { mintSession } from "@/lib/auth";
-import { EXPORT_MAX_BYTES, EXPORT_MAX_ROWS, csvCell, normalizeRefusal } from "@/lib/services/reports";
+import { EXPORT_LIVE_MAX_BYTES, EXPORT_LIVE_MAX_COUNT, EXPORT_MAX_BYTES, EXPORT_MAX_ROWS, csvCell, normalizeRefusal } from "@/lib/services/reports";
 import { GET as downloadExport } from "../../app/api/mcp/exports/[id]/route";
 import type { AgentDirectory } from "../agents";
 import { handleMcpRequest } from "../http";
@@ -226,7 +226,9 @@ test("summary: paper and live are separate books, each with its own figures", as
   assert.equal(live.gas.priced_ops, 2);
   assert.equal(live.gas.unpriced_ops, 1);
   assert.equal(live.gas.unrecorded_ops, 2, "landed with no gas record at all is counted, not summed as zero");
+  assert.equal(live.gas.complete, false, "a partial gas sum says it is a floor");
   assert.ok(live.gas.notes.some((n: string) => /could not be priced/.test(n)));
+  assert.ok(live.gas.notes.some((n: string) => /floor/.test(n)));
   assert.ok(!("gas" in paper) && !("fees" in paper) && !("net_flows" in paper));
   assert.ok(s.warnings.some((w: string) => /submitted and have no final outcome/.test(w)));
 });
@@ -282,6 +284,24 @@ test("summary: an agent with no records says unknown, never zero", async () => {
     assert.equal(book.realized_pnl.usdg, null);
   }
   assert.equal(s.live.gas.usdg, 0, "nothing landed, so nothing was paid");
+  assert.equal(s.live.gas.complete, true);
+});
+
+test("summary: the refusal total counts every refusal, even past the grouped rules", async () => {
+  const { d, a } = await setup({ seed: false });
+  agentRow(d.raw, ACCOUNT_A, OWNER_A, "live", null);
+  d.raw.exec("BEGIN");
+  // Each failed submission stores its own raw text, so each is its own group.
+  for (let i = 0; i < 520; i++) trade(d.raw, { status: "rejected", at: NOW - 5000 + i, rule: `couldn't submit: RPC https://provider.example/k=${i} timed out` });
+  for (let i = 0; i < 3; i++) trade(d.raw, { status: "rejected", at: NOW - 100 + i, rule: "no-gas" });
+  d.raw.exec("COMMIT");
+  const s = data(await run("get_summary", {}, a));
+  assert.equal(s.refusals.total, 523, "the total is not cut at the grouped read");
+  const top = Object.fromEntries(s.refusals.top.map((r: { rule: string; count: number }) => [r.rule, r.count]));
+  assert.equal(top["no-gas"], 3);
+  assert.ok(top["submit-failed"] > 0 && top["submit-failed"] < 520);
+  assert.ok(s.warnings.some((w: string) => /counted in the total but not in the top rules/.test(w)));
+  assert.ok(!JSON.stringify(s).includes("provider.example"));
 });
 
 test("summary: gas nobody priced is null, and a sell with no evidence has no realized figure", async () => {
@@ -372,6 +392,10 @@ test("refusal rules: only a publishable slug survives, never the detail", () => 
   assert.equal(normalizeRefusal("preflight: $0.40 < $5").rule, "preflight");
   assert.equal(normalizeRefusal("fence-price-floor").rule, "fence-price-floor");
   assert.equal(normalizeRefusal("Some Free Text!").rule, "other");
+  // An unknown head on free text is as author-written as its tail: neither is published.
+  assert.equal(normalizeRefusal("sk-live-4f9a2: 401 from https://rpc.example").rule, "other");
+  assert.equal(normalizeRefusal("provider-x: boom").rule, "other");
+  assert.equal(normalizeRefusal("paper: no liquidity for ZZZ").rule, "paper-refused");
   assert.equal(normalizeRefusal(null).rule, "unspecified");
 });
 
@@ -451,6 +475,57 @@ test("create_export decisions (JSON): no signals, reasons labelled untrusted", a
   assert.ok(!("signals_json" in evil));
   assert.equal(r.format, "json");
   assert.match(r.mime_type, /^application\/json/);
+});
+
+test("create_export decisions: a Brain run's raw service error is withheld, in CSV and JSON", async () => {
+  const { d, a } = await setup({ seed: false });
+  decision(d.raw, "dec-brain-down", { at: NOW - 300, dropped: "brain-unreachable", reason: "no decision (unreachable): fetch failed https://brain.internal.example/?token=BRAIN_TOKEN_X" });
+  decision(d.raw, "dec-brain-bad", { at: NOW - 200, dropped: "brain-malformed", reason: "no decision (malformed): Unexpected token < in JSON at position 0 from https://brain.internal.example" });
+  decision(d.raw, "dec-ok", { at: NOW - 100, action: "hold", reason: "Quiet market." });
+  for (const format of ["csv", "json"] as const) {
+    const r = data(await run("create_export", { kind: "decisions", format }, a));
+    const content = await exportContent(d, r.export_id);
+    assert.ok(!content.includes("brain.internal.example") && !content.includes("BRAIN_TOKEN_X"), `${format}: raw service error withheld`);
+    assert.ok(content.includes("Quiet market."), `${format}: an ordinary reason is kept`);
+    assert.ok(content.includes("brain-unreachable"), `${format}: the drop's rule slug stays`);
+  }
+  const doc = JSON.parse(await exportContent(d, data(await run("create_export", { kind: "decisions", format: "json" }, a)).export_id));
+  const down = doc.rows.find((x: { id: string }) => x.id === "dec-brain-down");
+  assert.equal(down.reason, null);
+  assert.equal(down.reason_withheld, true);
+  assert.equal(doc.rows.find((x: { id: string }) => x.id === "dec-ok").reason_withheld, false);
+});
+
+test("create_export: another owner's agent id is not found and nothing is stored", async () => {
+  const { d, b } = await setup();
+  for (const kind of ["trades", "decisions", "portfolio"] as const) {
+    const r = await run("create_export", { agent: SLUG_A, kind }, b);
+    assert.equal(errorCode(r), "not_found", kind);
+    assert.ok(!JSON.stringify(r).includes(ACCOUNT_A));
+  }
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM mcp_exports").get() as { n: number }).n, 0);
+  // B's own export holds only B's rows.
+  const own = data(await run("create_export", { kind: "trades" }, b));
+  const content = await exportContent(d, own.export_id);
+  assert.ok(content.includes("SECRET_B") && !content.includes("0xtx1") && !content.includes(ACCOUNT_A));
+});
+
+test("create_export: an owner holds a bounded number of unexpired exports at once", async () => {
+  const { d, a, b } = await setup({ seed: false });
+  const put = d.raw.prepare(`INSERT INTO mcp_exports (id, tenant, connection_id, kind, format, filename, content, bytes, created_at, expires_at) VALUES (?, ?, 'c', 'trades', 'csv', ?, 'x', ?, ?, ?)`);
+  for (let i = 0; i < EXPORT_LIVE_MAX_COUNT; i++) put.run(`exp_${i.toString(16).padStart(32, "0")}`, OWNER_A, `merrymen-${SLUG_A}-trades-x.csv`, 1, NOW - 100, NOW + 3600 + i);
+  const full = await run("create_export", { kind: "portfolio" }, a);
+  assert.equal(errorCode(full), "quota_exceeded");
+  assert.equal((full.structuredContent as { error: { retry_after_s: number } }).error.retry_after_s, 3600);
+  // Another owner's holdings do not count against B.
+  data(await run("create_export", { kind: "portfolio" }, b));
+  // Expired ones do not count either: once they lapse, A can export again.
+  data(await run("create_export", { kind: "portfolio" }, a, NOW + 3600 + EXPORT_LIVE_MAX_COUNT));
+
+  // The byte cap holds too: one huge live export leaves no room for another 2 MB file.
+  d.raw.exec("DELETE FROM mcp_exports");
+  put.run(`exp_${"f".repeat(32)}`, OWNER_A, `merrymen-${SLUG_A}-trades-y.csv`, EXPORT_LIVE_MAX_BYTES - EXPORT_MAX_BYTES + 1, NOW - 100, NOW + 3600);
+  assert.equal(errorCode(await run("create_export", { kind: "portfolio" }, a)), "quota_exceeded");
 });
 
 test("create_export portfolio: the latest valuation of each book, holdings of the current one, unknown kept blank", async () => {

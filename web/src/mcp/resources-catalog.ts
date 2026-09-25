@@ -6,6 +6,11 @@
 import type { ResourceDef } from "./resources";
 import { SCOPES } from "./scopes";
 import { ERROR_CODES } from "./errors";
+import { PORTFOLIO_RESOURCES } from "./tools/portfolio";
+import { DECISIONS_RESOURCES } from "./tools/decisions";
+import { MARKET_RESOURCES } from "./tools/market";
+import { REPORTS_RESOURCES } from "./tools/reports";
+import { PUBLIC_RESOURCES } from "./tools/public";
 
 function capabilitiesDoc(): string {
   const scopes = SCOPES.filter((s) => s.level !== "staff").map((s) => `- \`${s.id}\` (${s.level}): ${s.title}. ${s.detail}`).join("\n");
@@ -60,4 +65,11 @@ export const DOC_RESOURCES: ResourceDef[] = [
   },
 ];
 
-export const ALL_RESOURCES: readonly ResourceDef[] = [...DOC_RESOURCES];
+export const ALL_RESOURCES: readonly ResourceDef[] = [
+  ...DOC_RESOURCES,
+  ...PORTFOLIO_RESOURCES,
+  ...DECISIONS_RESOURCES,
+  ...MARKET_RESOURCES,
+  ...REPORTS_RESOURCES,
+  ...PUBLIC_RESOURCES,
+];

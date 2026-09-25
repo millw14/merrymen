@@ -26,7 +26,7 @@
  * written before the model is called, so a client that gives up waiting can
  * read the reply later instead of sending (and paying for) the message again.
  */
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { Db } from "../../../../worker/src/db";
 import { sanitizeText } from "../../../../worker/src/research/news";
 import { STATE_BUDGET } from "../chat-state";
@@ -107,7 +107,14 @@ type ChatSeams = Pick<AgentChatOptions, "credentials" | "complete">;
 
 /** Anything marker-shaped, closed or cut off at the end of the text. Used to scrub, never to act. */
 const MARKER_SHAPE = /<<\s*CMD[\s\S]*?(?:>>|$)/gi;
-const hasMarker = (s: string) => /<<\s*CMD/i.test(s);
+/**
+ * The text markers are looked for in: NFKC folds lookalikes (fullwidth ＜＜ＣＭＤ)
+ * onto ASCII, and invisible format characters (zero-width, soft hyphen, word
+ * joiners) are dropped so `<<\u200bCMD` cannot slip between the angle brackets
+ * and the word.
+ */
+const markerView = (s: string) => s.normalize("NFKC").replace(/[\u00ad\u200b-\u200f\u2060-\u2064\ufeff]/g, "");
+const hasMarker = (s: string) => /<<\s*CMD/i.test(markerView(s));
 
 /**
  * The production wiring: the partner runtime builds the state, the partner
@@ -152,7 +159,7 @@ export function partnerDeps(seams: { runtime?: RuntimeOverrides; chat?: ChatSeam
           // that one was suggested.
           complete: async (creds, request) => {
             const raw = await complete(creds, request);
-            sawProposal = hasMarker(raw.normalize("NFKC"));
+            sawProposal = hasMarker(raw);
             return raw;
           },
         },
@@ -195,13 +202,26 @@ function withTimeout<T>(work: Promise<T>, ms: number, code: string): Promise<T> 
   return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 }
 
-/** Remove every command marker, terminated or not, including lookalike spellings. */
+/**
+ * Remove every command marker, terminated or not, including lookalike and
+ * zero-width-split spellings. A reply with no marker is returned exactly as
+ * written: NFKC is for finding markers, and applied to ordinary prose it
+ * changes meaning ("10²" would become "102", "½" would become "1⁄2").
+ */
 export function stripProposals(text: string): { text: string; stripped: boolean } {
-  const normal = text.normalize("NFKC");
-  const stripped = hasMarker(normal);
-  const cleaned = stripped ? normal.replace(MARKER_SHAPE, "").replace(/\n{3,}/g, "\n\n") : normal;
-  return { text: cleaned.trim(), stripped };
+  const view = markerView(text);
+  if (!/<<\s*CMD/i.test(view)) return { text: text.trim(), stripped: false };
+  return { text: view.replace(MARKER_SHAPE, "").replace(/\n{3,}/g, "\n\n").trim(), stripped: true };
 }
+
+/**
+ * Postgres serialises one conversation's sends, and one owner's research
+ * submissions, with a transaction-scoped advisory lock in the repo's two-key
+ * form: a namespace per purpose, then a 32-bit key derived from the object.
+ */
+const CONVERSATION_LOCK_NS = 1_297_692_111;
+const RESEARCH_LOCK_NS = 1_297_692_112;
+const lockKey = (s: string) => createHash("sha256").update(s).digest().readInt32BE(0);
 
 /** The visible defang generateAgentReply applies to its input, applied here too. */
 const deCmd = (s: string) => s.replace(/<<\s*CMD/gi, "‹quoted CMD");
@@ -260,8 +280,13 @@ export interface SendInput {
   message: string;
   requestId: string;
   conversationId?: string;
-  /** Postgres serialises sends into one conversation with an advisory lock; SQLite serialises writers on its own. */
-  dialect?: "postgres" | "sqlite";
+  /**
+   * Postgres serialises sends into one conversation with an advisory lock;
+   * SQLite serialises writers on its own. Required: production is always
+   * Postgres, and without the lock two sends at once both pass the busy check
+   * under READ COMMITTED and both reach the model.
+   */
+  dialect: "postgres" | "sqlite";
 }
 
 export interface SendResult {
@@ -388,7 +413,9 @@ export async function sendMessage(db: Db, input: SendInput, d: ConversationDeps)
   const claimed = await db.tx(async (tx): Promise<{ user: StoredMessage; agent: StoredMessage; seq: number } | null> => {
     let seq = 0;
     if (existing) {
-      if (input.dialect === "postgres") await tx.prepare("SELECT pg_advisory_xact_lock(hashtext(?))").get(`mcp_conversation:${tenant}:${conversationId}`);
+      if (input.dialect === "postgres") {
+        await tx.prepare("SELECT pg_advisory_xact_lock(?, ?)").get(CONVERSATION_LOCK_NS, lockKey(`${tenant}:${conversationId}`));
+      }
       if ((await exchangeRows(tx, tenant, input.requestId)).length) return null;
       seq = await openConversation(tx, tenant, input.agentSlug, conversationId, now);
     }
@@ -479,8 +506,10 @@ export async function listConversations(db: Db, q: {
   tenant: Tenant; agentSlug: string; limit: number; before?: { at: number; id: string } | null; now: number;
 }): Promise<Page<ConversationSummary>> {
   const tenant = q.tenant.toLowerCase();
-  // A pending reply older than PENDING_STALE_S was lost; it is not counted as still coming.
-  const params: unknown[] = [q.now - PENDING_STALE_S, tenant, tenant, q.agentSlug];
+  // A pending reply older than PENDING_STALE_S was lost; it is not counted as
+  // still coming. Same boundary as stillPending (>=), so a reply is never
+  // "pending" here and "lost" in get_conversation.
+  const params: unknown[] = [q.now - PENDING_STALE_S, tenant, q.agentSlug, tenant, q.agentSlug];
   let having = "";
   if (q.before) {
     having = " HAVING MAX(created_at) < ? OR (MAX(created_at) = ? AND conversation_id < ?)";
@@ -488,9 +517,9 @@ export async function listConversations(db: Db, q: {
   }
   params.push(q.limit + 1);
   const rows = await db.prepare(`SELECT conversation_id, COUNT(*) AS messages,
-      SUM(CASE WHEN role = 'agent' AND status = 'pending' AND created_at > ? THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN role = 'agent' AND status = 'pending' AND created_at >= ? THEN 1 ELSE 0 END) AS pending,
       MIN(created_at) AS started_at, MAX(created_at) AS last_message_at,
-      (SELECT m2.content FROM mcp_messages m2 WHERE m2.tenant = ? AND m2.conversation_id = m.conversation_id AND m2.role = 'user'
+      (SELECT m2.content FROM mcp_messages m2 WHERE m2.tenant = ? AND m2.agent_slug = ? AND m2.conversation_id = m.conversation_id AND m2.role = 'user'
         ORDER BY m2.created_at ASC, m2.id ASC LIMIT 1) AS first_message
     FROM mcp_messages m WHERE tenant = ? AND agent_slug = ? AND role IN ('user', 'agent')
     GROUP BY conversation_id${having}
@@ -581,7 +610,7 @@ export async function submitResearch(db: Db, input: ResearchInput): Promise<{ no
   return db.tx(async (tx) => {
     // The active-note cap is per owner; serialise an owner's submissions so two
     // at once cannot both pass it. SQLite serialises writers on its own.
-    if (input.dialect === "postgres") await tx.prepare("SELECT pg_advisory_xact_lock(hashtext(?))").get(`mcp_research:${tenant}`);
+    if (input.dialect === "postgres") await tx.prepare("SELECT pg_advisory_xact_lock(?, ?)").get(RESEARCH_LOCK_NS, lockKey(tenant));
     const same = await tx.prepare(`SELECT ${NOTE_COLUMNS} FROM mcp_research
         WHERE tenant = ? AND agent_slug = ? AND title = ? AND body = ? AND expires_at > ? LIMIT 1`)
       .get(tenant, input.agentSlug, title, body, input.now) as Record<string, unknown> | undefined;
@@ -643,14 +672,15 @@ const hostOf = (u: string) => {
 };
 
 /**
- * One note as fenced text. The fence is fixed; everything inside is flattened,
- * stripped of control and bidi characters, cannot spell the fence (sanitizeText
- * neutralises `<untrusted` and `</untrusted`), and has command markers
- * defanged. Source links are reduced to their hosts: provenance, not
- * destinations, in a model's context.
+ * One note as fenced text. The fence is fixed; everything inside is folded to
+ * NFKC first (so a fullwidth ＜/untrusted＞ or ＜＜CMD is caught below as the
+ * ASCII it imitates), flattened, stripped of control and bidi characters,
+ * cannot spell the fence (sanitizeText neutralises `<untrusted` and
+ * `</untrusted`), and has command markers defanged. Source links are reduced to
+ * their hosts: provenance, not destinations, in a model's context.
  */
 export function fenceNote(n: ResearchNote): string {
-  const clean = (s: string | null, max: number) => deCmd(sanitizeText(s ?? "", max));
+  const clean = (s: string | null, max: number) => deCmd(sanitizeText((s ?? "").normalize("NFKC"), max));
   const hosts = [...new Set(n.sources.map(hostOf).filter((h): h is string => !!h))].slice(0, 5);
   const parts = [
     `Title: ${clean(n.title, 120)}`,

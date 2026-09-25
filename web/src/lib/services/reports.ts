@@ -40,6 +40,7 @@ import { distinctTrades, OP_COPY_REACH_SEC } from "../distinct-trades";
 import { OP_KEY, readEvidencedSells } from "../profile-trades";
 import { readDeskPositions } from "../desk-positions";
 import { readAgentStatus, type AgentStatusView } from "./agent-status";
+import { explanationOf } from "./decisions";
 import type { SettingsView } from "./settings-view";
 
 export type BookName = "paper" | "live";
@@ -106,7 +107,9 @@ export function normalizeRefusal(raw: string | null | undefined): { rule: string
   const prefix = colon > 0 ? r.slice(0, colon).trim().toLowerCase() : "";
   const known = PREFIX_RULES[prefix];
   if (known) return { rule: known.rule, label: known.label, remedy: null };
-  if (SLUG.test(prefix)) return { rule: prefix, label: null, remedy: null };
+  // Free text with an unknown head is not a rule: the head is as author-written
+  // as the tail (it could be a provider name, a host or a key), so none of it
+  // is published.
   return { rule: "other", label: "a refusal whose detail is not published", remedy: null };
 }
 
@@ -166,7 +169,12 @@ export interface LiveBookSummary {
   trades: { confirmed_count: number; confirmed: TradeLine[]; landed_without_tx_count: number; submitted_count: number; reverted_count: number };
   realized_pnl: RealizedView;
   fees: { accrued_usdg: number; accruals: number };
-  gas: { usdg: number | null; priced_ops: number; unpriced_ops: number; sponsored_ops: number; unrecorded_ops: number; notes: string[] };
+  /**
+   * `usdg` sums the priced part; null when landed operations paid gas and none
+   * of it was priced. `complete` is false when some landed operation's gas is
+   * unpriced or unrecorded, so a non-null `usdg` is then a floor.
+   */
+  gas: { usdg: number | null; complete: boolean; priced_ops: number; unpriced_ops: number; sponsored_ops: number; unrecorded_ops: number; notes: string[] };
 }
 
 export interface PaperBookSummary {
@@ -221,6 +229,8 @@ export const SUMMARY_TRADES_LISTED = 20;
 /** Sells replayed for realized P&L in one summary. */
 const SUMMARY_SELLS_MAX = 5_000;
 const FLOWS_MAX = 5_000;
+/** Distinct stored refusal rules grouped per summary; the total is counted separately. */
+const REFUSAL_GROUPS_MAX = 500;
 const EXPIRY_WARN_SEC = 7 * 86_400;
 
 interface FlowRow {
@@ -237,7 +247,8 @@ function flowRows(rows: Record<string, unknown>[]): FlowRow[] {
   for (const r of rows) {
     const at = num(r.at);
     const amount = num(r.amount_usdg);
-    if (at === null || amount === null) continue;
+    // 'in' | 'out' (store.ts). Anything else carries no sign we can trust, so it is not counted either way.
+    if (at === null || amount === null || (r.direction !== "in" && r.direction !== "out")) continue;
     const tx = str(r.tx_hash)?.toLowerCase() ?? null;
     const li = num(r.log_index);
     if (tx && li !== null) {
@@ -548,22 +559,33 @@ export async function readReportSummary(db: Db, input: SummaryInput, clean: Text
   if (gasMissing > 0) gasNotes.push(`${gasMissing} landed operation(s) carry no gas record at all; the total excludes them.`);
   // Zero only when it was measured: nothing landed, or everything that landed was sponsored.
   const gasTotal = gasPriced > 0 ? gasUsdg : gasUnpriced > 0 || gasMissing > 0 ? null : 0;
+  const gasComplete = gasUnpriced === 0 && gasMissing === 0;
+  if (gasTotal !== null && !gasComplete) gasNotes.push("The gas total is a floor: it covers only the operations whose gas was priced (complete is false).");
 
   // Refusals: rows that moved nothing. Grouped by a publishable slug, never the raw detail.
+  // The total is counted on its own: free-text rules ("couldn't submit: …")
+  // are distinct per row, so the grouped read below can stop before the tail.
+  const refusalCount = await db.prepare(
+    `SELECT COUNT(*) AS n FROM trades t WHERE ${scope.on("t.agent_id")} AND t.status = 'rejected' AND t.created_at >= ? AND t.created_at < ?`,
+  ).get(...scope.args, since, until) as Record<string, unknown> | undefined;
   const refusalRows = (await db.prepare(
     `SELECT t.reject_rule AS rule, COUNT(*) AS n FROM trades t
       WHERE ${scope.on("t.agent_id")} AND t.status = 'rejected' AND t.created_at >= ? AND t.created_at < ?
-      GROUP BY t.reject_rule ORDER BY n DESC LIMIT 500`,
+      GROUP BY t.reject_rule ORDER BY n DESC LIMIT ${REFUSAL_GROUPS_MAX + 1}`,
   ).all(...scope.args, since, until)) as Record<string, unknown>[];
   const byRule = new Map<string, { rule: string; label: string | null; remedy: string | null; count: number }>();
-  let refusalTotal = 0;
-  for (const r of refusalRows) {
+  let grouped = 0;
+  for (const r of refusalRows.slice(0, REFUSAL_GROUPS_MAX)) {
     const n = num(r.n) ?? 0;
-    refusalTotal += n;
+    grouped += n;
     const norm = normalizeRefusal(str(r.rule));
     const cur = byRule.get(norm.rule) ?? { ...norm, count: 0 };
     cur.count += n;
     byRule.set(norm.rule, cur);
+  }
+  const refusalTotal = num(refusalCount?.n) ?? grouped;
+  if (refusalTotal > grouped) {
+    warnings.push(`${refusalTotal - grouped} refusal(s) carry rare free-text rules and are counted in the total but not in the top rules.`);
   }
   const topRefusals = [...byRule.values()].sort((a, b) => b.count - a.count || a.rule.localeCompare(b.rule)).slice(0, 5);
 
@@ -629,7 +651,7 @@ export async function readReportSummary(db: Db, input: SummaryInput, clean: Text
       trades: { confirmed_count: confirmed, confirmed: confirmedList, landed_without_tx_count: landedNoTx, submitted_count: submitted, reverted_count: reverted },
       realized_pnl: realized.live,
       fees: { accrued_usdg: num(fee?.fee) ?? 0, accruals: num(fee?.n) ?? 0 },
-      gas: { usdg: gasTotal, priced_ops: gasPriced, unpriced_ops: gasUnpriced, sponsored_ops: gasSponsored, unrecorded_ops: gasMissing, notes: gasNotes },
+      gas: { usdg: gasTotal, complete: gasComplete, priced_ops: gasPriced, unpriced_ops: gasUnpriced, sponsored_ops: gasSponsored, unrecorded_ops: gasMissing, notes: gasNotes },
     },
     paper: {
       valuation: paperVal,
@@ -651,6 +673,12 @@ export type ExportFormat = "csv" | "json";
 export const EXPORT_MAX_ROWS = 5_000;
 export const EXPORT_MAX_BYTES = 2 * 1024 * 1024;
 export const EXPORT_TTL_SEC = 86_400;
+/**
+ * What one owner may hold in unexpired exports at once. The hourly budget alone
+ * would let a runaway client park 480 files of 2 MB in shared Postgres per day.
+ */
+export const EXPORT_LIVE_MAX_COUNT = 50;
+export const EXPORT_LIVE_MAX_BYTES = 50 * 1024 * 1024;
 /** Head room kept for the header, the JSON envelope and the truncation note. */
 const ENVELOPE_RESERVE = 8 * 1024;
 
@@ -869,6 +897,10 @@ async function decisionsTable(db: Db, scope: Scope, since: number, until: number
   const out: Cell[][] = rows.slice(0, EXPORT_MAX_ROWS).map((r) => {
     const hold = str(r.hold_kind);
     const action = str(r.action);
+    // A Brain run that could not reach or parse its service stored the raw
+    // service error as its reason (URLs, internals): the decisions service's own
+    // rule withholds it, and a file must not carry what the tools withhold.
+    const explanation = explanationOf(str(r.reason), str(r.dropped_rule));
     return [
       clean(str(r.id), 80),
       iso(num(r.at) ?? 0),
@@ -878,18 +910,20 @@ async function decisionsTable(db: Db, scope: Scope, since: number, until: number
       clean(str(r.symbol), 32),
       clean(str(r.display_name), 64),
       num(r.size_usdg),
-      clean(str(r.reason), 2000),
+      clean(explanation.text, 2000),
+      explanation.withheld !== null,
       clean(str(r.dropped_rule), 200),
       hold && /^[A-Z_]{1,32}$/.test(hold) ? hold : null,
     ];
   });
   return {
-    columns: ["id", "at", "account", "source", "action", "symbol", "name", "size_usdg", "reason", "dropped_rule", "hold_kind"],
+    columns: ["id", "at", "account", "source", "action", "symbol", "name", "size_usdg", "reason", "reason_withheld", "dropped_rule", "hold_kind"],
     rows: out,
     more,
     notes: [
       "Every decision the agent recorded, including dropped proposals and holds. Decisions belong to no book and moved no money by themselves.",
       "reason is the deciding model's or strategy's own words; dropped_rule can embed a symbol the model supplied.",
+      "reason_withheld is true when the stored text is a raw service error (a Brain run that could not reach or parse its service); it is not exported, and the agent's activity log in Merrymen shows it.",
       "source market-review-private is a quiet market review the agent writes every few minutes when nothing changed.",
     ],
     untrusted: ["symbol", "name", "reason", "dropped_rule"],
@@ -922,7 +956,7 @@ async function portfolioTable(db: Db, scope: Scope, clean: TextCleaner): Promise
     const account = (str(m.agent_id) ?? "").toLowerCase();
     rows.push([book, "valuation", iso(num(m.at) ?? 0), account, num(m.epoch), ...blank(9),
       num(m.cash_usdg), num(m.vault_usdg), num(m.positions_usdg), num(m.equity_usdg),
-      "equity = cash + savings vault + positions (+ holdings carried at cost); gas ETH excluded"]);
+      "equity can exceed cash + vault + positions by USDG held in launch or Trencher vaults and by holdings carried at cost; gas ETH is excluded"]);
     if (book === current) {
       const spellings = (await db.prepare("SELECT DISTINCT p.agent_id FROM positions p WHERE lower(p.agent_id) = ? LIMIT 4").all(account)) as Record<string, unknown>[];
       for (const s of spellings) {
@@ -1093,6 +1127,14 @@ export async function listExports(
   ).all(tenant.toLowerCase(), now, ...slugs.map((s) => `merrymen-${s}-%`),
     ...(o.before ? [o.before.created_at, o.before.created_at, o.before.id] : []), Math.max(1, Math.min(o.limit, 200)))) as Record<string, unknown>[];
   return rows.map((r) => recordOf(r, false)).filter((r): r is ExportRecord => r !== null);
+}
+
+/** How much this owner holds in unexpired exports right now. */
+export async function liveExportUsage(db: Db, tenant: string, now: number): Promise<{ count: number; bytes: number; oldestExpiresAt: number | null }> {
+  const row = await db.prepare(
+    "SELECT COUNT(*) AS n, COALESCE(SUM(bytes), 0) AS b, MIN(expires_at) AS oldest FROM mcp_exports WHERE tenant = ? AND expires_at > ?",
+  ).get(tenant.toLowerCase(), now) as Record<string, unknown> | undefined;
+  return { count: num(row?.n) ?? 0, bytes: num(row?.b) ?? 0, oldestExpiresAt: num(row?.oldest) };
 }
 
 /** Drop this owner's expired exports; they can no longer be read by anyone. */

@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, Check, ShieldCheck, X } from "lucide-react";
 import { SignIn } from "@/terminal/HostedControls";
+import { BrandLockup } from "../../BrandLockup";
 
 interface View {
   id: string;
@@ -136,12 +137,14 @@ export function ApproveClient({ id }: { id: string }) {
   }
 
   const expired = v ? v.expires_at * 1000 < Date.now() : false;
-  const title = v?.kind === "trade" ? "Approve this trade?" : v?.kind === "settings" ? "Approve these setting changes?" : v?.kind === "agent_draft" ? "Approve this agent setup?" : v?.kind === "post" ? "Approve this post?" : "Review a request";
+  const deciding = v?.status === "awaiting_approval";
+  const noun = v?.kind === "trade" ? "Trade" : v?.kind === "settings" ? "Setting changes" : v?.kind === "agent_draft" ? "Agent setup" : v?.kind === "post" ? "Post" : "Request";
+  const title = v && !deciding ? `${noun}: ${(STATUS_TEXT[v.status] ?? v.status).toLowerCase()}` : v?.kind === "trade" ? "Approve this trade?" : v?.kind === "settings" ? "Approve these setting changes?" : v?.kind === "agent_draft" ? "Approve this agent setup?" : v?.kind === "post" ? "Approve this post?" : "Review a request";
 
   return (
     <div className="terminal-host partner-connect mcp-connect">
       <header className="connect-header">
-        <a href="/" className="connect-brand" aria-label="Merrymen home">merrymen<span aria-hidden>↗</span></a>
+        <BrandLockup />
         <span className="connect-header-label"><ShieldCheck size={14} aria-hidden /> Approval</span>
       </header>
       <main className="connect-main">

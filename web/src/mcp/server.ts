@@ -9,6 +9,7 @@
  */
 import { McpServer, type AuthInfo } from "@modelcontextprotocol/server";
 import { hasCapability } from "./policy";
+import { mcpConfig } from "./config";
 import type { Principal } from "./oauth/server";
 import { runTool, type RunDeps, type ToolDef } from "./tool";
 import { registerResources, type ResourceDef } from "./resources";
@@ -24,8 +25,13 @@ export function principalOf(authInfo: AuthInfo | undefined): Principal | null {
 }
 
 export function buildServer(principal: Principal | null, opts: { tools?: readonly ToolDef[]; resources?: readonly ResourceDef[]; deps?: RunDeps; trace?: string } = {}): McpServer {
+  const issuer = mcpConfig().issuer;
   const server = new McpServer(
-    { name: "merrymen", title: "Merrymen", version: SERVER_VERSION, websiteUrl: "https://merrymen.dev" },
+    {
+      name: "merrymen", title: "Merrymen", version: SERVER_VERSION, websiteUrl: "https://merrymen.dev",
+      // The current mark (the redesigned terminal's LogoMark), served by the web app.
+      ...(issuer ? { icons: [{ src: `${issuer}/mcp-icon.svg`, mimeType: "image/svg+xml", sizes: ["any"] }] } : {}),
+    },
     { instructions: SERVER_INSTRUCTIONS, capabilities: { tools: {}, resources: {}, prompts: {} } },
   );
   if (!principal) return server;
