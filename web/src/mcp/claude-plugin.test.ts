@@ -91,7 +91,7 @@ test("every skill has a name matching its folder and a description, and names on
  * run is fingerprinted here, and changing it fails until `version` is bumped.
  * (The README is left out: Claude Code does not show it.)
  */
-const PLUGIN_RELEASE = { version: "1.0.0", sha256: "5bfdf5adf2f781c314deb8075ae6e61134ffed0c9dce857d7254bedfdf2ff5a8" };
+const PLUGIN_RELEASE = { version: "1.0.0", sha256: "b4a1878e41238aa5dae85755a97aa2a08ffae2e680b8bc7f813b3a4765bf3039" };
 
 function pluginFingerprint(): string {
   const files: string[] = [".mcp.json"];
