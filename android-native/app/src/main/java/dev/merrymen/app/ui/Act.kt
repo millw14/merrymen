@@ -486,6 +486,12 @@ fun liveConsentOf(settings: SettingsEnvelope?): Boolean? {
  * Live trading on is said as real money that may not be spent. Anything unread
  * or anything else is said as unknown and to be treated as real. A card never
  * assumes practice.
+ *
+ * So PAPER IS A HOSTED LINE. A self-hosted /api/grants reads the worker's
+ * heartbeat file, which carries the mode and never the blocker, so its paper
+ * agent's card says unknown — and a fresh self-hosted upgrade is where the
+ * live-intent stand-down, under which the worker takes consent as given, is
+ * set (worker/src/settings.ts).
  */
 fun moneyLine(grants: GrantView?, settings: SettingsEnvelope?): String {
   val mode = grants?.mode

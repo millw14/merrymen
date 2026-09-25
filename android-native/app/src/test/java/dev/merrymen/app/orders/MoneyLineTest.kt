@@ -62,7 +62,21 @@ class MoneyLineTest {
     assertEquals("never chosen: the default is the answer", MONEY_PAPER, moneyLine(off, settings()))
     assertEquals("chosen off", MONEY_PAPER, moneyLine(off, settings(saved = JsonPrimitive(false), default = null)))
     assertEquals("a null saved value is a choice nobody made", MONEY_PAPER, moneyLine(off, settings(saved = JsonNull)))
-    assertEquals("self-hosted names no owner and still answers", MONEY_PAPER, moneyLine(off, settings(owner = null)))
+  }
+
+  /**
+   * SELF-HOSTED NEVER SAYS PAPER. Its /api/grants reads the worker's heartbeat
+   * FILE, which carries the mode and never the blocker (web/src/app/api/grants/
+   * route.ts sets liveBlocker only from the ledger row, read when there is no
+   * file), so the worker's half of "Live trading is off" never arrives — and
+   * self-hosted is where the house's live-intent stand-down runs. Its settings
+   * read still answers: naming no owner is not a read made signed out.
+   */
+  @Test fun selfHostedPaperIsNeverVouchedFor() {
+    val selfHosted = grants("paper", null)
+    assertEquals(false, liveConsentOf(settings(owner = null)))
+    assertEquals(MONEY_UNKNOWN, moneyLine(selfHosted, settings(owner = null)))
+    assertEquals(MONEY_LIVE_ON, moneyLine(selfHosted, settings(saved = JsonPrimitive(true), owner = null)))
   }
 
   @Test fun paperWithLiveTradingOnIsSaidAsRealMoney() {
