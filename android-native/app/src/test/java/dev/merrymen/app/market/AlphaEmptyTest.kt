@@ -1,7 +1,9 @@
 package dev.merrymen.app.market
 
+import dev.merrymen.app.net.AlphaRead
 import dev.merrymen.app.net.AlphaView
 import dev.merrymen.app.net.ApiResult
+import dev.merrymen.app.net.alphaRead
 import dev.merrymen.app.net.Fixtures
 import dev.merrymen.app.net.answer
 import dev.merrymen.app.net.apiFor
@@ -33,13 +35,18 @@ class AlphaEmptyTest {
 
   @After fun stop() = server.shutdown()
 
-  private fun read(body: String): AlphaView = runBlocking {
+  /** Read the way the screen reads it: alphaRead, which keeps whether `verdictsWhy` was sent. */
+  private fun desk(body: String): AlphaRead = runBlocking {
     server.answer(body)
-    when (val r = apiFor(server).alpha()) {
+    when (val r = apiFor(server).alphaRead()) {
       is ApiResult.Ok -> r.value
       else -> { fail("expected Ok, got $r"); error("unreachable") }
     }
   }
+
+  private fun read(body: String): AlphaView = desk(body).view
+
+  private fun emptyCopy(body: String): AlphaEmptyCopy? = desk(body).let { alphaEmptyCopy(it.view, it.verdictsWhySaid) }
 
   private fun open(
     verdictsWhy: String? = null,
@@ -61,7 +68,7 @@ class AlphaEmptyTest {
     """"verdict":{"conviction":3,"reason":"steady buyers"},"research":null}]"""
 
   @Test fun noModelSaysTheScoutCouldNotLookNotThatNothingQualified() {
-    val copy = alphaEmptyCopy(read(open(verdictsWhy = "no-model")))!!
+    val copy = emptyCopy(open(verdictsWhy = "no-model"))!!
     assertTrue("our failure, drawn as a notice", copy.ours)
     assertEquals("Research has not run yet.", copy.title)
     assertTrue(copy.body.contains("no model configured"))
@@ -70,7 +77,7 @@ class AlphaEmptyTest {
   }
 
   @Test fun modelFailedSaysTheScoutCouldNotLook() {
-    val copy = alphaEmptyCopy(read(open(verdictsWhy = "model-failed")))!!
+    val copy = emptyCopy(open(verdictsWhy = "model-failed"))!!
     assertTrue(copy.ours)
     assertEquals("Research is unavailable.", copy.title)
     assertTrue(copy.body.contains("failed this pass"))
@@ -78,14 +85,34 @@ class AlphaEmptyTest {
   }
 
   @Test fun aConsideredPassIsTheOnlyEmptyStateAboutTheMarket() {
-    val copy = alphaEmptyCopy(read(open(verdictsWhy = null)))!!
+    val copy = emptyCopy(open(verdictsWhy = null))!!
     assertFalse(copy.ours)
     assertEquals("No picks this time.", copy.title)
   }
 
+  /**
+   * NULL IS A CONSIDERED PASS ONLY WHEN THE SERVER SAID NULL. An older or
+   * partial server that sends no `verdictsWhy` at all decodes to the same null,
+   * and has told us nothing about whether the scout looked.
+   */
+  @Test fun aServerThatNeverSaidWhyIsNotAConsideredPass() {
+    val unsaid = """{"locked":false,"tier":null,"picks":[],"passed":[],"researched":true,""" +
+      """"truncated":false,"degraded":false,"indexUnreachable":false}"""
+    val d = desk(unsaid)
+    assertNull(d.view.verdictsWhy)
+    assertFalse(d.verdictsWhySaid)
+    val copy = alphaEmptyCopy(d.view, d.verdictsWhySaid)!!
+    assertTrue("never read as the market having nothing", copy.ours)
+    assertFalse(copy.title.contains("No picks"))
+    assertTrue(copy.body, copy.body.contains("didn't say whether the scout looked"))
+    // The same payload with the key sent as null is the pass.
+    assertTrue(desk(open(verdictsWhy = null)).verdictsWhySaid)
+  }
+
   @Test fun anUnreachableIndexIsOurOutageEvenWithNoVerdictReason() {
-    val a = read(open(verdictsWhy = null, indexUnreachable = true))
-    val copy = alphaEmptyCopy(a)!!
+    val d = desk(open(verdictsWhy = null, indexUnreachable = true))
+    val a = d.view
+    val copy = alphaEmptyCopy(a, d.verdictsWhySaid)!!
     assertTrue(copy.ours)
     assertTrue(copy.body.contains("not a quiet market"))
     // Said once, by the empty state; not again as a page note.
@@ -93,14 +120,14 @@ class AlphaEmptyTest {
   }
 
   @Test fun aReasonThisBuildDoesNotKnowFailsClosed() {
-    val copy = alphaEmptyCopy(read(open(verdictsWhy = "quota-exceeded")))!!
+    val copy = emptyCopy(open(verdictsWhy = "quota-exceeded"))!!
     assertTrue("an unknown reason is never read as a considered pass", copy.ours)
   }
 
   @Test fun picksMeanNoEmptyState() {
     val a = read(open(picks = onePick))
     assertEquals(1, a.pickRows.size)
-    assertNull(alphaEmptyCopy(a))
+    assertNull(alphaEmptyCopy(a, verdictsWhySaid = true))
   }
 
   @Test fun theDisclosuresAreSaidOnceForThePage() {
@@ -146,7 +173,7 @@ class AlphaEmptyTest {
       alphaPerks(locked),
     )
     // The locked view is unchanged otherwise: no empty-state copy, no notes.
-    assertNull(alphaEmptyCopy(locked))
+    assertNull(alphaEmptyCopy(locked, verdictsWhySaid = false))
     assertTrue(alphaNotes(locked).isEmpty())
     assertEquals(4, locked.pickCount)
   }

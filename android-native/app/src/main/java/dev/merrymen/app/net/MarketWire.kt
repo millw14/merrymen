@@ -123,3 +123,28 @@ private fun JsonObject?.num(k: String): Double? =
 
 private fun JsonObject?.whole(k: String): Long? =
   (this?.get(k) as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull?.takeIf { it >= 0 }
+
+/**
+ * THE ALPHA DESK, and whether the server SAID why no row carries a verdict.
+ *
+ * AlphaView decodes `verdictsWhy` as a nullable String, which folds two
+ * different answers into one null: the key sent as null ("the scout looked
+ * and kept nothing", a fact about the market) and the key not sent at all (an
+ * older or partial server that never told us whether the scout looked).
+ * Reading the second as the first states a considered pass nobody made, so
+ * the key's presence is kept beside the view.
+ */
+data class AlphaRead(val view: AlphaView, val verdictsWhySaid: Boolean)
+
+/** GET /api/alpha — decoded exactly as MerrymenApi.alpha() is, plus [AlphaRead.verdictsWhySaid]. */
+suspend fun MerrymenApi.alphaRead(): ApiResult<AlphaRead> {
+  val raw = callAt("/api/alpha") { get() }
+  val said = (raw as? ApiResult.Ok)?.value?.let { body ->
+    try {
+      (json.parseToJsonElement(body) as? JsonObject)?.containsKey("verdictsWhy") == true
+    } catch (e: IllegalArgumentException) {
+      false
+    }
+  } ?: false
+  return decoded<AlphaView>(raw).map { AlphaRead(it, said) }
+}

@@ -66,6 +66,8 @@ import dev.merrymen.app.market.alphaNotes
 import dev.merrymen.app.market.alphaPerks
 import dev.merrymen.app.market.alphaTierBadge
 import dev.merrymen.app.market.refreshLoop
+import dev.merrymen.app.net.AlphaRead
+import dev.merrymen.app.net.alphaRead
 import dev.merrymen.app.ui.BottomInsetSpacer
 import dev.merrymen.app.ui.Empty
 import dev.merrymen.app.ui.LoadedBlock
@@ -295,11 +297,13 @@ fun AlphaScreen(nav: NavHostController) {
   val signedIn by c.repo.signedIn.collectAsState()
   // KEYED ON THE WALLET: a desk read for one session is not shown under
   // another, and a sign-in reads the desk again at once.
-  var state by remember(signedIn) { mutableStateOf<Loaded<dev.merrymen.app.net.AlphaView>>(Loaded.Loading) }
+  // alphaRead, not alpha(): it keeps whether the server SAID why no row has
+  // a verdict, which the empty state needs (alphaEmptyCopy).
+  var state by remember(signedIn) { mutableStateOf<Loaded<AlphaRead>>(Loaded.Loading) }
   var refreshFailed by remember(signedIn) { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
   suspend fun load(): Boolean {
-    val r = c.api.alpha().toLoaded()
+    val r = c.api.alphaRead().toLoaded()
     if (r is Loaded.Value || state !is Loaded.Value) {
       state = r
       refreshFailed = false
@@ -326,7 +330,7 @@ fun AlphaScreen(nav: NavHostController) {
       verticalAlignment = Alignment.CenterVertically,
     ) {
       PageTitle("Alpha")
-      (state as? Loaded.Value)?.value?.let { alphaTierBadge(it) }?.let { TierBadge(it) }
+      (state as? Loaded.Value)?.value?.let { alphaTierBadge(it.view) }?.let { TierBadge(it) }
     }
 
     // `.alpha-page > .alpha-intro` — polish.css:145: 17px/1.5 `--tx-2`,
@@ -346,14 +350,15 @@ fun AlphaScreen(nav: NavHostController) {
       )
     }
 
-    LoadedBlock(state, onSignIn = { nav.navigate(Routes.SIGN_IN) }, onRetry = { scope.launch { load() } }) { a ->
+    LoadedBlock(state, onSignIn = { nav.navigate(Routes.SIGN_IN) }, onRetry = { scope.launch { load() } }) { read ->
+      val a = read.view
       if (a.locked) {
         // THE BODY IS NOT HERE TO HIDE. The server omits `picks` entirely when
         // locked; there is nothing to blur, which is the point.
         AlphaGate(a, nav)
         InsideAlpha(picks = a.pickCount, passed = passedCount(a.passed))
       } else {
-        AlphaDesk(a, nav, onRetry = { scope.launch { load() } })
+        AlphaDesk(a, read.verdictsWhySaid, nav, onRetry = { scope.launch { load() } })
       }
     }
     BottomInsetSpacer()
@@ -394,14 +399,19 @@ private fun TierBadge(text: String) {
  * The other two are our failure and read as a notice.
  */
 @Composable
-private fun AlphaDesk(a: dev.merrymen.app.net.AlphaView, nav: NavHostController, onRetry: () -> Unit) {
+private fun AlphaDesk(
+  a: dev.merrymen.app.net.AlphaView,
+  verdictsWhySaid: Boolean,
+  nav: NavHostController,
+  onRetry: () -> Unit,
+) {
   val notes = alphaNotes(a)
   if (notes.isNotEmpty()) {
     Column(Modifier.padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
       notes.forEach { HostedNote(it) }
     }
   }
-  val empty = alphaEmptyCopy(a)
+  val empty = alphaEmptyCopy(a, verdictsWhySaid)
   AlphaKept(a, nav) {
     when {
       empty == null -> Unit

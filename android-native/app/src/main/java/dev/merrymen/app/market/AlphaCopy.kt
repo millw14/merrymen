@@ -58,9 +58,11 @@ data class AlphaEmptyCopy(
  *
  * A verdictsWhy this build does not know is read as "could not look", never as
  * a considered pass: failing closed here costs a vaguer sentence; failing open
- * costs a false statement about the market.
+ * costs a false statement about the market. So is one the server never sent
+ * ([verdictsWhySaid] false, from alphaRead): null is the considered pass only
+ * when the server said null.
  */
-fun alphaEmptyCopy(a: AlphaView): AlphaEmptyCopy? {
+fun alphaEmptyCopy(a: AlphaView, verdictsWhySaid: Boolean): AlphaEmptyCopy? {
   if (a.locked || a.pickRows.isNotEmpty()) return null
   if (a.indexUnreachable) {
     return AlphaEmptyCopy(
@@ -70,11 +72,21 @@ fun alphaEmptyCopy(a: AlphaView): AlphaEmptyCopy? {
     )
   }
   return when (a.verdictsWhy) {
-    null -> AlphaEmptyCopy(
-      title = "No picks this time.",
-      body = "The scout looked at what the index returned and kept nothing this pass.",
-      ours = false,
-    )
+    null -> if (verdictsWhySaid) {
+      AlphaEmptyCopy(
+        title = "No picks this time.",
+        body = "The scout looked at what the index returned and kept nothing this pass.",
+        ours = false,
+      )
+    } else {
+      // The key was never sent: nobody told us the scout looked.
+      AlphaEmptyCopy(
+        title = "Research is unavailable.",
+        body = "This server didn't say whether the scout looked this pass, so nothing here is a verdict — " +
+          "which is not the same as nothing qualifying.",
+        ours = true,
+      )
+    }
     // The web's words (Alpha.tsx: "Research has not run yet." / "Research is
     // unavailable."), with the half of the sentence that matters most said out
     // loud: this is not the market having nothing worth keeping.
