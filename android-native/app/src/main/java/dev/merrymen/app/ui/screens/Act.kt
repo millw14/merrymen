@@ -50,6 +50,7 @@ import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
+import dev.merrymen.app.net.Discoveries
 import dev.merrymen.app.net.ProposalsView
 import dev.merrymen.app.ui.Acted
 import dev.merrymen.app.ui.BottomInsetSpacer
@@ -481,6 +482,66 @@ private fun Note(text: String, modifier: Modifier = Modifier) {
 
 // ── PROPOSALS ───────────────────────────────────────────────────────────────
 
+/** What an empty "Coins to consider" says, and whether it may offer Sign in. */
+internal data class ProposalsEmpty(val title: String, val body: String, val signIn: Boolean)
+
+/**
+ * AN EMPTY LIST SAYS ONLY WHAT THE ROUTE KNOWS.
+ *
+ * "signed-out" is also the whole answer of a SELF-HOSTED server
+ * (proposals/route.ts answers it before looking at any session): there it
+ * offered a Sign in that led to "This server has no sign-in", the dead offer
+ * Home and You no longer make. So Sign in is offered only where there is one.
+ *
+ * "nothing-vetted" is answered whenever no row of the sweep carries a
+ * verdict — including when the scout could not look (no model, or the model
+ * failed). Said as "Nothing has cleared the screen recently", that was a
+ * statement about the market out of our own outage, the one the Alpha desk
+ * stopped making. The sweep's verdictsWhy tells the two apart; unread, the
+ * list claims nothing about the market either way.
+ */
+internal fun proposalsEmptyCopy(why: String, hosted: Boolean?, canOfferSignIn: Boolean, verdicts: Loaded<Discoveries>?): ProposalsEmpty =
+  when (why) {
+    "signed-out" -> when (hosted) {
+      false -> ProposalsEmpty(
+        "Not on this server",
+        "Coins to consider come from the hosted service's scout. This server doesn't offer them.",
+        signIn = false,
+      )
+      else -> ProposalsEmpty("Sign in to see these", "These are scoped to your agent's signature.", signIn = canOfferSignIn)
+    }
+    "no-grant" -> ProposalsEmpty("No agent yet", "Create an agent first — there is nothing to widen yet.", signIn = false)
+    "all-covered" -> ProposalsEmpty("Nothing new", "Everything the scout liked is already covered by your key.", signIn = false)
+    "unreadable" -> ProposalsEmpty("Couldn't read the scout", "That is our read failing, not an empty shortlist.", signIn = false)
+    "nothing-vetted" -> {
+      val sweep = (verdicts as? Loaded.Value)?.value
+      val couldNotLook = when {
+        sweep == null -> null
+        sweep.indexUnreachable -> "The index didn't answer, so nothing was vetted"
+        sweep.verdictsWhy == "no-model" -> "The scout has no model configured, so nothing was vetted"
+        sweep.verdictsWhy == "model-failed" -> "The scout's model failed this pass, so nothing was vetted"
+        sweep.verdictsWhy != null -> "The scout could not look this pass, so nothing was vetted"
+        else -> null
+      }
+      when {
+        couldNotLook != null ->
+          ProposalsEmpty("Nothing was vetted", "$couldNotLook — which is not the same as nothing qualifying.", signIn = false)
+        sweep == null -> ProposalsEmpty(
+          "Nothing vetted to add right now",
+          "This app couldn't check whether the scout looked this pass, so this says nothing about the market.",
+          signIn = false,
+        )
+        else -> ProposalsEmpty(
+          "Nothing vetted to add right now",
+          "When the scout keeps a coin your key doesn't cover, it shows up here.",
+          signIn = false,
+        )
+      }
+    }
+    else -> ProposalsEmpty("Nothing to show", "The server gave a reason this app doesn't know yet.", signIn = false)
+  }
+
+
 /**
  * Coins the scout has vetted, and the one-tap approval.
  *
@@ -512,7 +573,11 @@ fun ProposalsScreen(nav: NavHostController) {
   var note by remember { mutableStateOf<String?>(null) }
   // WHO THE LIST WAS READ FOR. An approval writes for that wallet or not at all.
   var shownFor by remember { mutableStateOf<String?>(null) }
+  // Whether the scout looked, read only when the list came back "nothing-vetted".
+  var verdicts by remember { mutableStateOf<Loaded<Discoveries>?>(null) }
   val signedIn by c.repo.signedIn.collectAsState()
+  val hosted by c.repo.hosted.collectAsState()
+  val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
   val scope = rememberCoroutineScope()
 
   // The wallet is taken BEFORE the read and published WITH its answer, never
@@ -522,6 +587,9 @@ fun ProposalsScreen(nav: NavHostController) {
   suspend fun load() {
     val who = c.repo.signedIn.value
     val read = c.api.proposals().toLoaded()
+    // "nothing-vetted" is also what the route says when the scout could not
+    // look at all; the sweep it read from says which (proposalsEmptyCopy).
+    verdicts = if ((read as? Loaded.Value)?.value?.why == "nothing-vetted") c.api.discoveries().toLoaded() else null
     shownFor = who
     state = read
   }
@@ -535,26 +603,19 @@ fun ProposalsScreen(nav: NavHostController) {
 
   Page("Coins to consider", nav) {
     note?.let { Notice("Watchlist", it) }
-    LoadedBlock(current, onSignIn = { nav.navigate(Routes.SIGN_IN) }, onRetry = { scope.launch { load() } }) { v ->
+    LoadedBlock(
+      current,
+      onSignIn = if (canOfferSignIn) ({ nav.navigate(Routes.SIGN_IN) }) else null,
+      onRetry = { scope.launch { load() } },
+    ) { v ->
       if (v.proposals.isEmpty()) {
         // FIVE REASONS FOR AN EMPTY LIST, and they are not the same sentence.
+        val empty = proposalsEmptyCopy(v.why, hosted, canOfferSignIn, verdicts)
         Notice(
-          title = when (v.why) {
-            "signed-out" -> "Sign in to see these"
-            "no-grant" -> "No agent yet"
-            "all-covered" -> "Nothing new"
-            "unreadable" -> "Couldn't read the scout"
-            else -> "Nothing vetted yet"
-          },
-          body = when (v.why) {
-            "signed-out" -> "These are scoped to your agent's signature."
-            "no-grant" -> "Create an agent first — there is nothing to widen yet."
-            "all-covered" -> "Everything the scout liked is already covered by your key."
-            "unreadable" -> "That is our read failing, not an empty shortlist."
-            else -> "Nothing has cleared the screen recently. That is not the same as nothing looking good."
-          },
-          actionLabel = if (v.why == "signed-out") "Sign in" else null,
-          onAction = { nav.navigate(Routes.SIGN_IN) },
+          title = empty.title,
+          body = empty.body,
+          actionLabel = if (empty.signIn) "Sign in" else null,
+          onAction = if (empty.signIn) ({ nav.navigate(Routes.SIGN_IN) }) else null,
         )
       } else {
         SectionCard("Before you approve", gap = 12.dp) {
@@ -1024,6 +1085,7 @@ fun RiskScreen(nav: NavHostController) {
   var busy by remember { mutableStateOf(false) }
   var note by remember { mutableStateOf<String?>(null) }
   val signedIn by c.repo.signedIn.collectAsState()
+  val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
   val scope = rememberCoroutineScope()
 
   // WHOSE DIALS these are follows the session: a wallet that signs in while the
@@ -1040,6 +1102,7 @@ fun RiskScreen(nav: NavHostController) {
     current = riskLevelOf(r.valueOrNull()?.values)
   }
   val settings = read?.valueOrNull()
+  val page = riskPageOf(read, current, saved, busy)
 
   Page("How much risk?", nav) {
     note?.let { Notice("Risk", it) }
@@ -1047,6 +1110,14 @@ fun RiskScreen(nav: NavHostController) {
       is ApiResult.Refused -> Notice("Risk", "I couldn't read your current dials — ${r.message}")
       is ApiResult.Unreachable -> Notice("Risk", "I couldn't read your current dials, so none is marked. " + r.said)
       else -> Unit
+    }
+    if (page.signedOut) {
+      Notice(
+        "Sign in to set your risk",
+        "These dials are your agent's, so they are read and saved for the wallet signed in.",
+        actionLabel = if (canOfferSignIn) "Sign in" else null,
+        onAction = if (canOfferSignIn) ({ nav.navigate(Routes.SIGN_IN) }) else null,
+      )
     }
 
     // `.risk-options` — a column at gap 8, not a stack of cards at the page gap.
@@ -1061,7 +1132,7 @@ fun RiskScreen(nav: NavHostController) {
           figures = "Sells at ${p.stopLossBps / 100}% down or ${p.takeProfitBps / 100}% up · " +
             "$${p.buyPerTickUsdg} a trade · slippage ${p.slippageBps / 100.0}%",
           selected = current == p.level,
-          enabled = !busy,
+          enabled = page.rungsEnabled,
           onClick = {
             busy = true
             note = null
@@ -1081,7 +1152,7 @@ fun RiskScreen(nav: NavHostController) {
         )
       }
     }
-    if (settings != null && current == null && saved == null) {
+    if (page.byHand) {
       Note("Your dials are set by hand right now — picking a level replaces them.")
     }
 
@@ -1100,6 +1171,28 @@ fun RiskScreen(nav: NavHostController) {
       )
     }
   }
+}
+
+/** What the risk page may say and offer, from the settings read. */
+internal data class RiskPage(val signedOut: Boolean, val byHand: Boolean, val rungsEnabled: Boolean)
+
+/**
+ * A READ FOR NOBODY IS NOT A SET OF DIALS. Hosted and signed out, /api/settings
+ * answers 200 with owner "" and no values, and riskLevelOf({}) is null — so the
+ * page said "Your dials are set by hand right now" about an account that does
+ * not exist, and a tap sent a PUT for owner "" that the route refused with its
+ * bare "not signed in". Signed out, the rungs are drawn but not live, and the
+ * page says to sign in, as Trade and Coins to consider do. A read that failed
+ * leaves the rungs live: applyRisk reads the owner again before it writes.
+ */
+internal fun riskPageOf(read: ApiResult<SettingsEnvelope>?, current: String?, saved: String?, busy: Boolean): RiskPage {
+  val settings = (read as? ApiResult.Ok)?.value
+  val signedOut = settings?.owner == ""
+  return RiskPage(
+    signedOut = signedOut,
+    byHand = settings != null && !signedOut && current == null && saved == null,
+    rungsEnabled = !busy && !signedOut,
+  )
 }
 
 /** One rung. See [RiskScreen] for the provenance of every number in here. */
