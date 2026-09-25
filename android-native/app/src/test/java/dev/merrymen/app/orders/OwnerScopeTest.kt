@@ -57,8 +57,9 @@ class FakeScope(override val owner: String?, var live: Boolean = true) : Confirm
   override fun clearCard() {
     cleared++
   }
-  override fun propose(command: ChatCommand, found: SnipeTarget) {
+  override fun propose(command: ChatCommand, found: SnipeTarget): Boolean {
     proposed = command to found
+    return true
   }
   override fun refreshSettings() = Unit
 }

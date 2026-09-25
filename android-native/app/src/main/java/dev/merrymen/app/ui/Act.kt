@@ -730,13 +730,20 @@ suspend fun lookupConfirmedSnipe(api: MerrymenApi, scope: ConfirmScope, query: S
           val short = target.text("short") ?: "${address.take(6)}…${address.takeLast(4)}"
           val coin = SnipeTarget(symbol, address, short, covered = true)
           val named = if (out.text("matchedOn") == "name") " — matched on its name, not its ticker" else ""
-          val line = "Found it — $symbol at $short$named. Nothing is placed yet: confirm it and I'll buy ${usdCents(usdg)} of it."
-          scope.say("owner", "✓ Confirmed")
-          scope.say("agent", line)
-          scope.propose(
+          // The card first, so the line says what is on screen: a newer
+          // question may have taken the card's place while this looked.
+          val carded = scope.propose(
             ChatCommand("buy", mapOf("symbol" to JsonPrimitive(symbol), "usdgAmount" to JsonPrimitive(usdg))),
             coin,
           )
+          val line = if (carded) {
+            "Found it — $symbol at $short$named. Nothing is placed yet: confirm it and I'll buy ${usdCents(usdg)} of it."
+          } else {
+            "Found it — $symbol at $short$named. Nothing is placed: you've asked something else since, so there's no card " +
+              "for it. Ask again if you still want ${usdCents(usdg)} of it."
+          }
+          scope.say("owner", "✓ Confirmed")
+          scope.say("agent", line)
           Looked.Found(coin, usdg, line)
         }
         else -> {

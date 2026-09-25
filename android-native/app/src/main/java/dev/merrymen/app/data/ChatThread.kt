@@ -298,8 +298,15 @@ interface ConfirmScope {
   fun say(role: String, text: String, order: LineOrder? = null)
   fun followOrder(id: String, expiresInMs: Long?)
   fun clearCard()
-  /** Put a second card up for the same owner — the coin a snipe found, to be confirmed before it is bought. */
-  fun propose(command: ChatCommand, found: SnipeTarget)
+  /**
+   * Put a second card up for the same owner — the coin a snipe found, to be
+   * confirmed before it is bought. True when the owner will see it on a card:
+   * the chat's, or the Trade screen's own next card (that screen draws it from
+   * the look-up's answer; this scope leaves the chat's card alone). False when
+   * the chat's card up is no longer the one being carried out (a newer question
+   * cleared it or raised its own): nothing is swapped in under the owner's thumb.
+   */
+  fun propose(command: ChatCommand, found: SnipeTarget): Boolean
   fun refreshSettings()
 }
 
@@ -826,6 +833,13 @@ class ChatThread internal constructor(
    * One owner's scope. [chatCard] is whether it belongs to the chat's card: only
    * then may it clear or replace that card. A Trade-screen scope says its lines
    * in the thread, marked as confirmed there, and leaves the chat's card alone.
+   *
+   * AND ONLY ITS OWN CARD. The composer stays open while a card is carried
+   * out, and a question sent meanwhile clears the card and raises its reply's.
+   * A confirm still running (a snipe look-up can take 15s) then cleared that
+   * newer card, or swapped it for "Found it — buy $X of COIN" with Yes in the
+   * same place, between the owner reading it and tapping. So a scope touches
+   * the card only while the card up is the one it was made for.
    */
   private inner class Scope(val key: String, val turn: Long, val chatCard: Boolean) : ConfirmScope {
     override val owner: String? = ownerOfKey(key)
@@ -839,10 +853,17 @@ class ChatThread internal constructor(
       if (theirs()) follow(key, id, expiresInMs)
     }
     override fun clearCard() {
-      if (chatCard && theirs()) _card.value = null
+      if (chatCard && theirs()) _card.update { if (it?.scope === this) null else it }
     }
-    override fun propose(command: ChatCommand, found: SnipeTarget) {
-      if (chatCard && alive()) _card.value = PendingCard(command, this, found)
+    override fun propose(command: ChatCommand, found: SnipeTarget): Boolean {
+      if (!chatCard) return true
+      if (!alive()) return false
+      var put = false
+      _card.update { now ->
+        put = now?.scope === this
+        if (put) PendingCard(command, this, found) else now
+      }
+      return put
     }
     override fun refreshSettings() {
       if (!theirs()) return

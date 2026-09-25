@@ -15,6 +15,7 @@ import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.TimeUnit
@@ -119,5 +120,46 @@ class ChatTurnTest {
     }
     val took = System.currentTimeMillis() - t0
     assertTrue("the cancel waited for the server's answer ($took ms)", took < 1_500)
+  }
+
+  /**
+   * A CONFIRM STILL RUNNING TOUCHES ONLY ITS OWN CARD. The composer stays open
+   * while a snipe's look-up runs; a question sent meanwhile raises its own
+   * card, and the look-up answering later swapped that card for "Found it —
+   * buy $5 of CASHCAT" under the owner's thumb.
+   */
+  @Test fun aLookUpThatAnswersLateNeverReplacesTheNewerCard() {
+    rig.route("POST /api/chat") { s ->
+      // By the message itself: the history carries the first question too.
+      if (s.body.contains("\"message\":\"ape into cash cat")) {
+        json("""{"reply":"Going after it.","command":{"id":"snipe","args":{"query":"cash cat","usdgAmount":5}}}""")
+      } else {
+        json("""{"reply":"I can do that.","command":{"id":"buy","args":{"symbol":"NVDA","usdgAmount":5}}}""")
+      }
+    }
+    rig.route("POST /api/snipe") {
+      json(
+        """{"outcome":"resolved","target":{"symbol":"CASHCAT","address":"0x1da81ca017949efbe07972776580d04592ba9b63","short":"0x1da8…9b63"},
+           "usdgAmount":5,"matchedOn":"ticker"}""",
+      ).setHeadersDelay(1, TimeUnit.SECONDS)
+    }
+    val chat = rig.thread()
+    rig.signIn(A)
+    waitFor("A") { chat.thread.value.key == A }
+    runBlocking { chat.sendNow("ape into cash cat with 5", null) }
+    chat.confirm { _, _ -> }
+    waitFor("the look-up is out") { rig.seen.any { it.path == "/api/snipe" } }
+
+    runBlocking { chat.sendNow("buy $5 of nvda", null) }
+    val newer = chat.card.value!!
+    assertEquals("buy", newer.command.id)
+    assertNull(newer.found)
+
+    waitFor("the look-up answers") { chat.thread.value.messages.any { it.text.startsWith("Found it — CASHCAT") } }
+    waitFor("the confirm is done") { !chat.confirming.value }
+    assertTrue("the newer card is still the one up", chat.card.value === newer)
+    val found = chat.thread.value.messages.last { it.text.startsWith("Found it — CASHCAT") }.text
+    assertTrue(found, found.contains("there's no card for it"))
+    assertTrue("nothing was placed", rig.writes().none { it.path == "/api/orders" })
   }
 }
