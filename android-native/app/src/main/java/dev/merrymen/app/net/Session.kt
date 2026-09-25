@@ -36,6 +36,17 @@ interface SessionStore : OriginSource {
   /** Delete the site password an older build stored. Idempotent. */
   suspend fun dropRetiredGatePassword()
 
+  /**
+   * Whether the retired mm_gate cookie has been expired in the WebView's store
+   * on this install. Repository.bootstrap does that once, not on every start:
+   * it wakes the WebView on the main thread for a cookie that is gone after the
+   * first time.
+   */
+  suspend fun webViewGateExpired(): Boolean
+
+  /** Record that it has. Survives sign-out: sign-out empties the WebView's store anyway. */
+  suspend fun markWebViewGateExpired()
+
   /** Sign-out: forget the stored session, keep the origin. */
   suspend fun clearSession()
 }
@@ -66,6 +77,8 @@ class Session(private val context: Context) : SessionStore, CookieBlob {
     val TENANT = stringPreferencesKey("tenant")
     val WATCHLIST = stringSetPreferencesKey("watchlist")
     val WELCOMED = androidx.datastore.preferences.core.booleanPreferencesKey("welcomed")
+    /** The retired mm_gate cookie is gone from the WebView's store; see [webViewGateExpired]. */
+    val WEBVIEW_GATE_EXPIRED = androidx.datastore.preferences.core.booleanPreferencesKey("webview-gate-expired")
   }
 
   /**
@@ -138,6 +151,12 @@ class Session(private val context: Context) : SessionStore, CookieBlob {
   override suspend fun dropRetiredGatePassword() {
     if (context.sessionStore.data.first()[Keys.RETIRED_GATE] == null) return
     context.sessionStore.edit { it.remove(Keys.RETIRED_GATE) }
+  }
+
+  override suspend fun webViewGateExpired(): Boolean = context.sessionStore.data.first()[Keys.WEBVIEW_GATE_EXPIRED] == true
+
+  override suspend fun markWebViewGateExpired() {
+    context.sessionStore.edit { it[Keys.WEBVIEW_GATE_EXPIRED] = true }
   }
 
   override suspend fun cookiesRaw(): String? = context.sessionStore.data.first()[Keys.COOKIES]

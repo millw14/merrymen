@@ -132,6 +132,7 @@ class Repository(
    * dropped by the turn count rather than folded in.
    */
   suspend fun setOrigin(value: String): OriginCheck {
+    identity.refuseInsideHook("setOrigin")
     val checked = checkOrigin(value, session.fallbackOrigin)
     if (checked !is OriginCheck.Ok) return checked
     val before = session.originNow()
@@ -157,10 +158,22 @@ class Repository(
    * by the first WebView page: 0.1.0 had seeded it into the WebView's store,
    * and the sign-in hand-back copied it straight back. So it is expired there
    * as well (and the hand-back skips it; see WebAuth.RETIRED_COOKIES).
+   *
+   * THE WEBVIEW'S SIDE ONCE PER INSTALL, NOT ONCE PER START. Touching the
+   * WebView's store starts the WebView itself on the main thread and flushes
+   * to disk, and Home waits for this call — a cost every cold start paid for
+   * a cookie that is gone after the first. So it runs until it has worked
+   * once and is recorded ([SessionStore.webViewGateExpired]); a start whose
+   * WebView refused (missing, mid-update) leaves no record and the next start
+   * tries again. The jar's side is a map lookup, and stays on every start.
    */
   suspend fun bootstrap(): Loaded<Unit> {
+    identity.refuseInsideHook("bootstrap")
     session.dropRetiredGatePassword()
-    cookies.drop(session.originNow(), "mm_gate")
+    cookies.dropFromJar("mm_gate")
+    if (!session.webViewGateExpired() && cookies.expireInWebView(session.originNow(), "mm_gate")) {
+      session.markWebViewGateExpired()
+    }
     return when (val v = api.version()) {
       is ApiResult.Ok -> {
         refreshIdentity()
@@ -186,18 +199,27 @@ class Repository(
    * Server change describes a session that no longer exists, and is dropped.
    */
   suspend fun refreshIdentity() {
+    identity.refuseInsideHook("refreshIdentity")
     val asOf = identity.turn
     identity.answered(api.session(), asOf)
   }
 
   /** Called after the WebView flow settles, to pick up a fresh session cookie. */
   suspend fun adoptWebSession() {
+    identity.refuseInsideHook("adoptWebSession")
     cookies.harvest(session.originNow())
     refreshIdentity()
   }
 
-  /** Sign-out has to reach the SERVER, or the session outlives the app. */
+  /**
+   * Sign-out has to reach the SERVER, or the session outlives the app.
+   *
+   * Refused first thing from inside a forget hook ([Identity.refuseInsideHook]):
+   * everything after that line is destructive, and a hook that got past it
+   * would wipe the session while the wallet stayed published.
+   */
   suspend fun signOut() {
+    identity.refuseInsideHook("signOut")
     api.logout()
     cookies.forgetAll()
     session.clearSession()

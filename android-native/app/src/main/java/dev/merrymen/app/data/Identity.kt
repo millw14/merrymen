@@ -27,8 +27,10 @@ import kotlin.coroutines.coroutineContext
  *   - It must NOT call back into Repository's identity methods
  *     (refreshIdentity, signOut, setOrigin, adoptWebSession, bootstrap). They
  *     wait for the turn this hook is running inside, so the call would wait for
- *     itself forever. The runner turns that into a logged failure of the one
- *     hook instead of a frozen app; the hook still did not do its job.
+ *     itself forever. Instead the call throws before it does anything — no
+ *     logout sent, no cookie wiped, no server stored — and the runner logs
+ *     that as the one hook's failure rather than freezing the app. The hook
+ *     still did not do its job.
  *   - It must not assume it runs on EVERY end of a session. It does not run
  *     when a session simply expires (a 401, or the route answering address
  *     null): nothing proves the next wallet is a different one yet. What a
@@ -172,15 +174,30 @@ class Identity(private val hookContext: CoroutineContext = Dispatchers.IO) {
   }
 
   /**
+   * THROWS WHEN CALLED FROM INSIDE A FORGET HOOK, before anything else happens.
+   *
+   * Repository calls this FIRST in each of its identity methods. Checking only
+   * at the lock was too late: signOut had already posted logout and wiped both
+   * cookie stores, and setOrigin had already stored the new server, before the
+   * lock refused — so a hook that broke the rule left a wallet published with
+   * no session behind it, or the old server's verdict standing against a new
+   * one. Refused here, the hook fails with nothing done, and the runner logs it.
+   */
+  internal suspend fun refuseInsideHook(what: String) {
+    check(coroutineContext[RunningHooksKey] == null) {
+      "a forget hook called $what; hooks must not call refreshIdentity, signOut, setOrigin, adoptWebSession or bootstrap"
+    }
+  }
+
+  /**
    * The lock, refusing to be taken from inside a forget hook. The Mutex is not
    * reentrant, so a hook that asked for it would wait for the turn it is itself
    * part of, and the app would stop answering. Failing the hook is recoverable;
-   * that is not.
+   * that is not. (Repository refuses earlier still; this is for a caller of
+   * Identity itself.)
    */
   private suspend fun <T> locked(block: suspend () -> T): T {
-    check(coroutineContext[RunningHooksKey] == null) {
-      "a forget hook called back into identity; hooks must not call refreshIdentity, signOut or setOrigin"
-    }
+    refuseInsideHook("into identity")
     return lock.withLock { block() }
   }
 

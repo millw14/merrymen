@@ -112,13 +112,15 @@ object WebAuth {
   /**
    * Expire cookie [name] in the WebView's own store for [origin]. The
    * platform has no delete-one call; a Max-Age of 0 on the same name and path
-   * is the delete.
+   * is the delete. False when [origin] is not a web address, so nothing was
+   * expired and nobody may record that it was.
    */
-  fun expire(origin: String, name: String) {
-    val url = origin.toHttpUrlOrNull() ?: return
+  fun expire(origin: String, name: String): Boolean {
+    val url = origin.toHttpUrlOrNull() ?: return false
     val cm = CookieManager.getInstance()
     cm.setCookie(origin, "$name=; Max-Age=0; Path=/" + if (url.isHttps) "; Secure" else "")
     cm.flush()
+    return true
   }
 
   /**
@@ -155,7 +157,7 @@ object WebAuth {
 
 /**
  * THE TWO COOKIE STORES THIS APP KEEPS IN STEP — OkHttp's jar and the
- * WebView's — as the three things Repository does to them.
+ * WebView's — as the things Repository does to them.
  *
  * An interface so Repository runs on the JVM: CookieManager is the platform's,
  * and a unit test records what was asked of it instead. [DeviceCookies] is the
@@ -165,8 +167,15 @@ interface CookieStores {
   /** Copy the WebView's cookies for [origin] into the jar, as after a sign-in. */
   suspend fun harvest(origin: String)
 
-  /** Forget cookie [name] in both stores (the WebView's for [origin]). */
-  suspend fun drop(origin: String, name: String)
+  /** Forget cookie [name] in the jar, whichever host set it. No platform call: cheap on every start. */
+  suspend fun dropFromJar(name: String)
+
+  /**
+   * Expire cookie [name] in the WebView's store for [origin]. True only when
+   * it was done. Wakes the WebView on the main thread and flushes to disk, so
+   * it is not something a cold start does every time; see Repository.bootstrap.
+   */
+  suspend fun expireInWebView(origin: String, name: String): Boolean
 
   /** Forget every cookie in both stores: a sign-out. */
   suspend fun forgetAll()
@@ -177,9 +186,9 @@ interface CookieStores {
  * side runs on IO; CookieManager is the WebView's, so its side runs on Main.
  *
  * EVERY PLATFORM CALL IS CAUGHT. CookieManager.getInstance() throws when the
- * WebView package is missing or mid-update, and [drop] runs on every cold
- * start: a start that died there would be a crash on launch, for a cookie
- * nothing reads.
+ * WebView package is missing or mid-update, and [expireInWebView] runs on a
+ * cold start: a start that died there would be a crash on launch, for a cookie
+ * nothing reads. A refusal is reported as not done, so it is tried again.
  */
 class DeviceCookies(private val jar: PersistentCookieJar) : CookieStores {
   override suspend fun harvest(origin: String) {
@@ -189,10 +198,12 @@ class DeviceCookies(private val jar: PersistentCookieJar) : CookieStores {
     if (cookies.isNotEmpty()) withContext(Dispatchers.IO) { jar.saveFromResponse(url, cookies) }
   }
 
-  override suspend fun drop(origin: String, name: String) {
+  override suspend fun dropFromJar(name: String) {
     withContext(Dispatchers.IO) { jar.drop(name) }
-    web("expire $name") { WebAuth.expire(origin, name) }
   }
+
+  override suspend fun expireInWebView(origin: String, name: String): Boolean =
+    web("expire $name") { WebAuth.expire(origin, name) } == true
 
   override suspend fun forgetAll() {
     withContext(Dispatchers.IO) { jar.clear() }

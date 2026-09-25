@@ -76,6 +76,8 @@ class MemoryStore(
 
   /** The retired site password, as a 0.1.0 install left it. Null once dropped. */
   var gatePassword: String? = null
+  /** Whether a start has already expired mm_gate in the WebView's store. */
+  var webViewGateExpired = false
   /** The jar's blob, exactly as the jar wrote it. */
   var cookieBlob: String? = null
   var sessionsCleared = 0
@@ -86,6 +88,10 @@ class MemoryStore(
   }
   override suspend fun dropRetiredGatePassword() {
     gatePassword = null
+  }
+  override suspend fun webViewGateExpired(): Boolean = webViewGateExpired
+  override suspend fun markWebViewGateExpired() {
+    webViewGateExpired = true
   }
   override suspend fun clearSession() {
     sessionsCleared++
@@ -107,15 +113,27 @@ class MemoryStore(
 class MemoryCookies(val jar: PersistentCookieJar) : CookieStores {
   val web = linkedMapOf<String, String>()
 
+  /** How many times the WebView's store was opened to expire a cookie — the cost a cold start must not pay twice. */
+  var webExpiries = 0
+
+  /** Set to make the WebView's store refuse, as a missing or mid-update WebView does. */
+  var webRefuses = false
+
   override suspend fun harvest(origin: String) {
     val url = origin.toHttpUrlOrNull() ?: return
     val raw = web.entries.joinToString("; ") { "${it.key}=${it.value}" }
     jar.saveFromResponse(url, WebAuth.webCookies(raw, url))
   }
 
-  override suspend fun drop(origin: String, name: String) {
+  override suspend fun dropFromJar(name: String) {
     jar.drop(name)
+  }
+
+  override suspend fun expireInWebView(origin: String, name: String): Boolean {
+    webExpiries++
+    if (webRefuses || origin.toHttpUrlOrNull() == null) return false
     web.remove(name)
+    return true
   }
 
   override suspend fun forgetAll() {

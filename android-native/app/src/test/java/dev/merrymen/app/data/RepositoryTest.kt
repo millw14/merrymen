@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import okhttp3.Cookie
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -136,11 +137,56 @@ class RepositoryTest {
     repo.addForgetHook { repo.refreshIdentity() }
     repo.addForgetHook { after = true }
     server.answer("{}") // logout
-    server.session(null) // the hook's own session read
+    server.session("0xAAA") // what the hook's read would be told, if it were sent
     // Without the guard this waits for the turn it is part of, forever.
     withTimeout(10_000) { repo.signOut() }
     assertTrue(after)
     assertNull(repo.signedIn.value)
+    assertEquals("the hook's read was refused before it was sent", 2, server.requestCount)
+  }
+
+  // Refused at the lock, the next four were refused too late: the logout had
+  // gone, both cookie stores were wiped or the new server stored, and only then
+  // did identity say no — a wallet published with no session behind it, or the
+  // old server's verdict standing against a new one. Each is refused now before
+  // it does anything, and the hooks after it still run.
+
+  /** Sign 0xAAA out with [offender] as a forget hook; true if the hook after it ran. */
+  private suspend fun signOutWithHook(offender: ForgetHook): Boolean {
+    signedInAsA()
+    var after = false
+    repo.addForgetHook(offender)
+    repo.addForgetHook { after = true }
+    server.answer("{}") // the one logout
+    server.answer("{}") // what a second one would be told
+    withTimeout(10_000) { repo.signOut() }
+    assertNull(repo.signedIn.value)
+    return after
+  }
+
+  @Test fun aHookThatSignsOutIsRefusedBeforeItPostsOrWipes() = runBlocking {
+    assertTrue(signOutWithHook { repo.signOut() })
+    assertEquals("the session read and ONE logout", 2, server.requestCount)
+    assertEquals(1, store.sessionsCleared)
+  }
+
+  @Test fun aHookThatMovesServerIsRefusedBeforeItStoresOne() = runBlocking {
+    assertTrue(signOutWithHook { repo.setOrigin("https://staging.merrymen.dev") })
+    assertEquals(server.origin(), store.originNow())
+  }
+
+  @Test fun aHookThatAdoptsTheWebSessionIsRefusedBeforeItHarvests() = runBlocking {
+    // The WebView store is emptied before the hooks run; anything in it now
+    // was put there after, and must not be copied into an emptied jar.
+    assertTrue(signOutWithHook { cookies.web["mm_session"] = "stale"; repo.adoptWebSession() })
+    assertTrue(jar.loadForRequest("${server.origin()}/".toHttpUrl()).isEmpty())
+  }
+
+  @Test fun aHookThatRestartsIsRefusedBeforeItDropsAnything() = runBlocking {
+    store.gatePassword = "still here"
+    assertTrue(signOutWithHook { repo.bootstrap() })
+    assertEquals("no start ran from inside the turn", "still here", store.gatePassword)
+    assertEquals("the session read and the logout; no version asked", 2, server.requestCount)
   }
 
   // ── a cold start ─────────────────────────────────────────────────────────
@@ -169,6 +215,43 @@ class RepositoryTest {
     repo.adoptWebSession()
     assertEquals("mm_session=abc", sentCookies(server))
     assertFalse(store.cookieBlob!!.contains("mm_gate"))
+  }
+
+  @Test fun theWebViewIsWokenForTheRetiredCookieOnceNotOnEveryStart() = runBlocking {
+    cookies.web["mm_gate"] = "beta-password"
+    server.answer("""{"version":"0.21.0"}""")
+    server.session(null)
+    repo.bootstrap()
+    assertEquals(1, cookies.webExpiries)
+    assertFalse(cookies.web.containsKey("mm_gate"))
+    assertTrue(store.webViewGateExpired)
+
+    // Every later start: the jar's side still runs, and the WebView is left
+    // alone — waking it cost the main thread on every cold start before Home.
+    val here = "${server.origin()}/".toHttpUrl()
+    jar.saveFromResponse(here, listOf(Cookie.parse(here, "mm_gate=beta-password; Path=/")!!))
+    server.answer("""{"version":"0.21.0"}""")
+    server.session(null)
+    repo.bootstrap()
+    assertEquals("a later start does not open the WebView's store", 1, cookies.webExpiries)
+    assertTrue(jar.loadForRequest(here).none { it.name == "mm_gate" })
+  }
+
+  @Test fun aWebViewThatRefusedIsAskedAgainOnTheNextStart() = runBlocking {
+    cookies.web["mm_gate"] = "beta-password"
+    cookies.webRefuses = true // missing, or mid-update
+    server.answer("""{"version":"0.21.0"}""")
+    server.session(null)
+    repo.bootstrap()
+    assertFalse("nothing was done, so nothing is recorded", store.webViewGateExpired)
+
+    cookies.webRefuses = false
+    server.answer("""{"version":"0.21.0"}""")
+    server.session(null)
+    repo.bootstrap()
+    assertEquals(2, cookies.webExpiries)
+    assertFalse(cookies.web.containsKey("mm_gate"))
+    assertTrue(store.webViewGateExpired)
   }
 
   @Test fun anOwnerWhoFixesASchemelessServerIsStillSignedIn() = runBlocking {
