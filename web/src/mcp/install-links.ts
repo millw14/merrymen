@@ -46,8 +46,27 @@ export interface InstallLinks {
   chatgpt: string;
 }
 
+/**
+ * The Claude Code plugin (plugins/merrymen in this repository, listed by the
+ * marketplace in .claude-plugin/marketplace.json). Its .mcp.json names this
+ * production address, so the plugin is offered only by a page that serves it:
+ * a staging or self-hosted server would be handed a plugin pointing elsewhere.
+ */
+export const PLUGIN_SERVER_URL = "https://mcp.merrymen.dev/mcp";
+export const PLUGIN_MARKETPLACE_REPO = "millw14/merrymen";
+export const PLUGIN_ID = "merrymen@merrymen";
+
+/**
+ * Slash commands to type inside Claude Code, ONE AT A TIME (pasted together
+ * they would be sent as one message), or null when this server is not the one
+ * the plugin points at.
+ */
+export function claudeCodePluginCommands(serverUrl: string): [string, string] | null {
+  return serverUrl === PLUGIN_SERVER_URL ? [`/plugin marketplace add ${PLUGIN_MARKETPLACE_REPO}`, `/plugin install ${PLUGIN_ID}`] : null;
+}
+
 export interface InstallCommands {
-  /** Add, then sign in (`claude mcp login` opens the browser). */
+  /** Without the plugin: add, then sign in (`claude mcp login` opens the browser). */
   claudeCode: string[];
   /** Codex starts the sign-in by itself after `add`. */
   codex: string[];

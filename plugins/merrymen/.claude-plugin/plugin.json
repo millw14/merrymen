@@ -1,0 +1,14 @@
+{
+  "name": "merrymen",
+  "displayName": "Merrymen",
+  "version": "1.0.0",
+  "description": "Your Merrymen trading agent in Claude Code: its status, why it has or hasn't traded, your portfolio, weekly reviews and token research. Look-only by default; nothing moves money.",
+  "author": {
+    "name": "Merrymen",
+    "url": "https://merrymen.dev"
+  },
+  "homepage": "https://app.merrymen.dev/connect/mcp",
+  "repository": "https://github.com/millw14/merrymen",
+  "license": "MIT",
+  "keywords": ["merrymen", "trading", "agents", "portfolio", "robinhood-chain"]
+}
