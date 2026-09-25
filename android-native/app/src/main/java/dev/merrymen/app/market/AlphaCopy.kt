@@ -1,6 +1,7 @@
 package dev.merrymen.app.market
 
 import dev.merrymen.app.net.AlphaView
+import java.util.Locale
 
 /**
  * WHAT THE OPEN ALPHA DESK SAYS ABOUT ITSELF, before it says anything about a
@@ -127,3 +128,32 @@ fun alphaTierBadge(a: AlphaView): String? {
 /** The entry tier's perks for the locked gate, verbatim from CIRCLE_TIERS, blanks dropped. */
 fun alphaPerks(a: AlphaView): List<String> =
   if (!a.locked) emptyList() else a.need?.perks.orEmpty().map { it.trim() }.filter { it.isNotEmpty() }
+
+/** An Alpha row's change figure, and which way it points (null: no direction to colour). */
+data class AlphaChange(val text: String, val up: Boolean?)
+
+/**
+ * A DAY'S CHANGE ONLY ON A POOL A DAY OLD — the rule Markets keeps
+ * ([coinChange24h]), on the Alpha desk too.
+ *
+ * The index's change24hPct on a pool hours old is a change since launch
+ * wearing a day's name; the capture of 2026-09-25 had "SI / WETH 0.01%" at
+ * +18,062.8% on an age of six hours. The desk printed it raw beside the coin
+ * while Markets wrote "new pool" for the same coin — the doNotDo's "a '24h'
+ * change on a 9-hour-old pool". Under a day old it says so; an unknown age is
+ * not assumed old enough.
+ */
+fun alphaChange(change: Double?, ageDays: Double?): AlphaChange {
+  val age = ageDays?.takeIf { it.isFinite() && it >= 0 }
+  if (age != null && age < 1.0) return AlphaChange("new pool", null)
+  val chg = change?.takeIf { it.isFinite() }
+  if (chg == null || age == null) return AlphaChange("—", null)
+  return AlphaChange((if (chg >= 0) "+" else "") + String.format(Locale.US, "%.1f", chg) + "%", chg >= 0)
+}
+
+/**
+ * The label over a row's "24h" volume: qualified with the pool's age when it
+ * is younger than a day, as the token page's tape is ([poolAgeNote]) — the
+ * total is real, but under "24h" alone it reads as a full day's rate.
+ */
+fun alphaVolumeLabel(ageDays: Double?): String = poolAgeNote(ageDays, 86_400)?.let { "24h · $it" } ?: "24h"

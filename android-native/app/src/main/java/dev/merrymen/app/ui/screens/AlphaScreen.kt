@@ -61,10 +61,12 @@ import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
 import dev.merrymen.app.market.WhileResumed
+import dev.merrymen.app.market.alphaChange
 import dev.merrymen.app.market.alphaEmptyCopy
 import dev.merrymen.app.market.alphaNotes
 import dev.merrymen.app.market.alphaPerks
 import dev.merrymen.app.market.alphaTierBadge
+import dev.merrymen.app.market.alphaVolumeLabel
 import dev.merrymen.app.market.refreshLoop
 import dev.merrymen.app.net.AlphaRead
 import dev.merrymen.app.net.alphaRead
@@ -743,7 +745,8 @@ private fun AlphaRow(el: JsonElement, passed: Boolean, nav: NavHostController) {
   val token = o.str("token")
   val onCurve = o.flag("onCurve") == true
   val graduated = o.flag("graduated") == true
-  val chg = o.num("change24hPct")
+  // A day's change only on a pool a day old (alphaChange), as Markets says it.
+  val chg = alphaChange(o.num("change24hPct"), o.num("ageDays"))
   val verdict = o["verdict"] as? JsonObject
 
   Column(
@@ -795,20 +798,16 @@ private fun AlphaRow(el: JsonElement, passed: Boolean, nav: NavHostController) {
       // what a reader takes in first. Green is a claim. The flat branch is used
       // here and the web bug is reported rather than replicated.
       Text(
-        text = if (chg == null || !chg.isFinite()) {
-          "—"
-        } else {
-          (if (chg >= 0) "+" else "") + String.format(Locale.US, "%.1f", chg) + "%"
-        },
+        text = chg.text,
         maxLines = 1,
         style = TextStyle(
           fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
           fontSize = 13.sp,
         ),
-        color = when {
-          chg == null || !chg.isFinite() -> MerryColors.faint
-          chg < 0 -> MerryColors.down
-          else -> MerryColors.up
+        color = when (chg.up) {
+          null -> MerryColors.faint
+          false -> MerryColors.down
+          true -> MerryColors.up
         },
       )
     }
@@ -859,7 +858,7 @@ private fun AlphaRow(el: JsonElement, passed: Boolean, nav: NavHostController) {
         Fig("depth", depth)
       }
       Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-        Fig("24h", compactUsd(o.num("volume24hUsd")))
+        Fig(alphaVolumeLabel(o.num("ageDays")), compactUsd(o.num("volume24hUsd")))
         Fig("buyers", o.int("buyers24h")?.toString() ?: "—")
       }
     }
