@@ -43,6 +43,8 @@ class DecodeFixturesTest {
     "/api/market" to ("probe-market.json" to 200),
     "/api/alpha" to ("probe-alpha-signedout.json" to 200),
     "/api/agents/q4sxmmxay96ew2vq" to ("probe-agent.json" to 200),
+    // A live agent with fills and TOP TRADES, private book (cluster C, profile page).
+    "/api/agents/bm74qsj64fygkhjh" to ("probe-agent-live.json" to 200),
     "/api/groupchat?limit=2" to ("probe-groupchat_limit_2.json" to 200),
     "/api/orders/ceiling" to ("probe-orders_ceiling.json" to 401),
     // The four the adversarial review captured signed out, live, on the same
