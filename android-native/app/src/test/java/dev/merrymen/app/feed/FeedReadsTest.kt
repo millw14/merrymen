@@ -6,6 +6,7 @@ import androidx.lifecycle.LifecycleRegistry
 import dev.merrymen.app.net.Fixtures
 import dev.merrymen.app.net.answer
 import dev.merrymen.app.net.apiFor
+import dev.merrymen.app.ui.feed.DISCOVERIES_EVERY_MS
 import dev.merrymen.app.ui.feed.FeedReads
 import dev.merrymen.app.ui.feed.ReadFailure
 import dev.merrymen.app.ui.feed.ReadLoop
@@ -16,6 +17,7 @@ import dev.merrymen.app.ui.feed.pollWhileResumed
 import dev.merrymen.app.ui.feed.staleLine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -146,6 +148,52 @@ class FeedReadsTest {
         owner.registry.currentState = Lifecycle.State.RESUMED
         runCurrent()
         assertEquals(5, reads)
+        job.cancel()
+      }
+    } finally {
+      Dispatchers.resetMain()
+    }
+  }
+
+  /**
+   * The app backgrounded while the first read was still on the network: it
+   * answered nothing, and coming back must read at once — not sit on the
+   * spinner for the rest of a cadence as though it had.
+   */
+  @OptIn(ExperimentalCoroutinesApi::class)
+  @Test fun aReadCutOffByAPauseIsNotTakenForAHealthyOne() {
+    val main = StandardTestDispatcher()
+    Dispatchers.setMain(main)
+    try {
+      runTest(main) {
+        val owner = object : LifecycleOwner {
+          val registry = LifecycleRegistry.createUnsafe(this)
+          override val lifecycle: Lifecycle get() = registry
+        }
+        var started = 0
+        var answered = 0
+        val loop = ReadLoop(DISCOVERIES_EVERY_MS) {
+          started++
+          delay(2_000) // the network
+          answered++
+          true
+        }
+        owner.registry.currentState = Lifecycle.State.RESUMED
+        val job = launch { owner.lifecycle.pollWhileResumed(listOf(loop)) { testScheduler.currentTime } }
+        runCurrent()
+        advanceTimeBy(500)
+        owner.registry.currentState = Lifecycle.State.STARTED // backgrounded mid-read
+        runCurrent()
+        advanceTimeBy(500)
+        assertEquals(1, started)
+        assertEquals("the read never came back", 0, answered)
+        assertNull(loop.lastRunAtMs)
+
+        owner.registry.currentState = Lifecycle.State.RESUMED
+        runCurrent()
+        assertEquals("it sets off again the moment the screen is back", 2, started)
+        advanceTimeBy(2_001)
+        assertEquals(1, answered)
         job.cancel()
       }
     } finally {

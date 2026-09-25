@@ -62,13 +62,22 @@ class ReadLoop(val everyMs: Long, private val read: suspend () -> Boolean) {
   var failures: Int = 0
     private set
 
-  /** When this read last started, on the loop's clock. Null until it has. */
+  /**
+   * When the last read that CAME BACK was started, on the loop's clock. Null
+   * until one has.
+   *
+   * Stamped when the answer lands, never when the read sets off. A read cut
+   * off by the screen leaving RESUMED — the app backgrounded, a dialog up
+   * during the first read — answered nothing; stamped as it set off, and
+   * counting no failure, it passed for a healthy read a moment ago, and on
+   * return the feed sat on its spinner for up to ten seconds and its rows
+   * went unpriced for up to two minutes.
+   */
   var lastRunAtMs: Long? = null
     private set
 
   /** Read now — a Retry, or the timer. */
   suspend fun readNow(nowMs: Long): Boolean = one.withLock {
-    lastRunAtMs = nowMs
     val ok = try {
       read()
     } catch (e: CancellationException) {
@@ -77,6 +86,7 @@ class ReadLoop(val everyMs: Long, private val read: suspend () -> Boolean) {
       // A read that threw is a failed read, and the loop keeps its schedule.
       false
     }
+    lastRunAtMs = nowMs
     failures = if (ok) 0 else failures + 1
     ok
   }
