@@ -418,6 +418,9 @@ fun SettingsScreen(nav: NavHostController) {
   var saveLines by remember(signedIn) { mutableStateOf<List<String>>(emptyList()) }
   var ownerChanged by remember(signedIn) { mutableStateOf(false) }
   var saving by remember { mutableStateOf(false) }
+  // The practice-book restart: armed by a first tap, and one request at a time.
+  var resetArmed by remember(signedIn) { mutableStateOf(false) }
+  var resetting by remember(signedIn) { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
 
   suspend fun load() {
@@ -610,30 +613,34 @@ fun SettingsScreen(nav: NavHostController) {
         }
       }
 
-      PanelSectionHeading("Practice")
-      Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        NoteLine(
-          "Starting over restores the practice stake and clears simulated positions. " +
-            "On the live rail the worker refuses it — real trades are never deleted.",
-        )
-        KillButton("Restart the practice book") {
-          scope.launch {
-            when (val r = c.api.paperReset()) {
-              is ApiResult.Ok -> {
-                note = "Queued. Your agent restarts the practice book on its next tick."
+      // ONLY FOR THE WALLET THE FORM WAS READ FOR (paperResetOffered). The
+      // route is not owner-bound, so a control drawn over a signed-out read
+      // or a failed one restarted whichever wallet the session held.
+      if (paperResetOffered(state, signedIn, hosted)) {
+        PanelSectionHeading("Practice")
+        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+          NoteLine(
+            "Starting over restores the practice stake and clears simulated positions. " +
+              "On the live rail the worker refuses it — real trades are never deleted.",
+          )
+          KillButton(if (resetArmed) "Tap again to restart the practice book" else "Restart the practice book") {
+            when (paperResetTap(armed = resetArmed, busy = resetting)) {
+              PaperResetTap.Arm -> {
+                resetArmed = true
+                note = PAPER_RESET_ARMED
                 noteBad = false
               }
-              is ApiResult.Refused -> {
-                note = if (r.status == 401) "Sign in to restart the practice book." else r.message
-                noteBad = true
+              PaperResetTap.Fire -> {
+                resetArmed = false
+                resetting = true
+                scope.launch {
+                  val said = paperResetSaid(c.api.paperReset())
+                  note = said.text
+                  noteBad = said.bad
+                  resetting = false
+                }
               }
-              // A LOST ANSWER TO A WRITE IS NOT A FAILURE: the restart may be
-              // queued. Said as unknown, and not sent again on its own.
-              is ApiResult.Unreachable -> {
-                note = "Couldn't tell whether the restart was queued. ${r.said.trimEnd('.')}. Check the " +
-                  "practice book after your agent's next tick before asking again."
-                noteBad = true
-              }
+              PaperResetTap.Busy -> Unit
             }
           }
         }
@@ -641,6 +648,62 @@ fun SettingsScreen(nav: NavHostController) {
     }
     Spacer(Modifier.height(LocalBottomInset.current))
   }
+}
+
+/**
+ * WHETHER "Restart the practice book" IS OFFERED: only over a form read for
+ * the wallet signed in now, or on a self-hosted server (one operator, owner
+ * null there). /api/paper-reset is not owner-bound — it restarts whichever
+ * wallet the session holds — so it was not offered over a read made signed
+ * out (owner ""), a failed read, or a read for another wallet.
+ */
+internal fun paperResetOffered(state: Loaded<SettingsRead>, signedIn: String?, hosted: Boolean?): Boolean {
+  val env = (state as? Loaded.Value)?.value?.env ?: return false
+  val owner = env.owner ?: return hosted == false
+  return owner.isNotEmpty() && owner.equals(signedIn, ignoreCase = true)
+}
+
+/** What a tap on the restart does. */
+internal enum class PaperResetTap { Arm, Fire, Busy }
+
+/**
+ * TWO TAPS, AND ONE REQUEST AT A TIME. The web sends paper-reset only behind
+ * a confirm that says what is lost; a stray single tap here restarted the
+ * book, and it cannot be undone. The first tap arms and says what happens,
+ * the second sends, and a tap while one is out sends nothing.
+ */
+internal fun paperResetTap(armed: Boolean, busy: Boolean): PaperResetTap = when {
+  busy -> PaperResetTap.Busy
+  armed -> PaperResetTap.Fire
+  else -> PaperResetTap.Arm
+}
+
+internal const val PAPER_RESET_ARMED =
+  "Tap again to restart — your practice cash goes back to the starting stake and earlier paper trades " +
+    "stop counting. If your agent is trading for real, it refuses, and nothing is deleted."
+
+/** A note for the form, and whether it is bad news. */
+internal data class SettingsNote(val text: String, val bad: Boolean)
+
+/**
+ * WHAT THE RESTART'S ANSWER MEANS. A 200 is the command QUEUED, not done, and
+ * the worker refuses it on the live rail — so it is said as asked, with that
+ * refusal named, never "restarted". A lost answer may still be queued: said
+ * as unknown, and not sent again on its own.
+ */
+internal fun paperResetSaid(r: ApiResult<*>): SettingsNote = when (r) {
+  is ApiResult.Ok -> SettingsNote(
+    "Asked your agent to restart the practice book on its next tick. If it is trading for real it will refuse, " +
+      "and nothing is deleted.",
+    bad = false,
+  )
+  is ApiResult.Refused ->
+    SettingsNote(if (r.status == 401) "Sign in to restart the practice book. Nothing was restarted." else r.message, bad = true)
+  is ApiResult.Unreachable -> SettingsNote(
+    "Couldn't tell whether the restart was queued. ${r.said.trimEnd('.')}. Check the practice book after your " +
+      "agent's next tick before asking again.",
+    bad = true,
+  )
 }
 
 /**
