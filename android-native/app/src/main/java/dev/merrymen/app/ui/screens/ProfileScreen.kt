@@ -235,6 +235,7 @@ fun ProfileScreen(nav: NavHostController) {
             )
           } else {
             staleLine(reads.feedFailure, reads.feedAtMs, nowMs)?.let { Prose(it, 13.sp, 18.85.sp, MerryColors.tx2) }
+            AccountStatusNote(reads, nowMs, onRetry = { scope.launch { load() } })
             AccountPerson(signedIn, g)
             AccountBalance(book.feed, g, nav)
             YourAgent(book.feed, g, nav)

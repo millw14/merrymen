@@ -735,6 +735,47 @@ internal fun reportImageWrite(kind: AgentImageKind, slug: String, w: ImageWrite,
   }
 }
 
+/** What the page says about the account status read, and whether it offers Try again. */
+internal data class StatusLine(val text: String, val retry: Boolean)
+
+/**
+ * THE ACCOUNT STATUS (/api/grants) WHEN IT WAS NOT READ JUST NOW. The blocker,
+ * the LIVE / PAPER / IDLE chip, the strip and the account's balances all come
+ * from it, and each draws nothing without a read — so without a sentence, a
+ * failed read looked exactly like an agent with nothing stopping it. Kept from
+ * an earlier read, it is captioned with its age; never read, it says that
+ * this is our read failing and offers Try again. A 401 says nothing here: the
+ * session ended, and the page's own sign-in says that.
+ */
+internal fun accountStatusLine(grants: Loaded<GrantView>, failure: ApiResult<*>?, readAtMs: Long?, nowMs: Long): StatusLine? {
+  if (grants is Loaded.Value) {
+    if (failure == null || readAtMs == null) return null
+    val why = when (failure) {
+      is ApiResult.Unreachable -> failure.said.trimEnd('.')
+      is ApiResult.Refused -> failure.message.trimEnd('.')
+      is ApiResult.Ok -> return null
+    }
+    return StatusLine("Couldn't refresh your agent's status just now ($why). What is shown was read ${ago(readAtMs, nowMs)}.", retry = false)
+  }
+  val failed = (grants is Loaded.Refused && grants.status != 401) || grants is Loaded.Unreachable
+  if (!failed) return null
+  return StatusLine(
+    "Couldn't read your agent's status just now — that's our read failing, not a fact about your account. " +
+      "Whether anything is stopping it isn't shown until it reads.",
+    retry = true,
+  )
+}
+
+@Composable
+internal fun AccountStatusNote(reads: OwnReads, nowMs: Long, onRetry: () -> Unit, modifier: Modifier = Modifier) {
+  val line = accountStatusLine(reads.grants, reads.grantsFailure, reads.grantsAtMs, nowMs) ?: return
+  if (line.retry) {
+    Notice(title = "Account status unavailable", body = line.text, actionLabel = "Try again", onAction = onRetry, modifier = modifier)
+  } else {
+    Prose(line.text, 13.sp, 18.85.sp, MerryColors.tx2, modifier = modifier)
+  }
+}
+
 /** A refresh's failure, when the figures on screen are from an earlier read — said with their age. */
 internal fun staleLine(failed: ApiResult<*>?, readAtMs: Long?, nowMs: Long): String? {
   if (failed == null || readAtMs == null) return null

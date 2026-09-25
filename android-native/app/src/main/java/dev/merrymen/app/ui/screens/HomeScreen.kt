@@ -154,6 +154,8 @@ internal class OwnReads {
   var feedAtMs by mutableStateOf<Long?>(null)
   var feedFailure by mutableStateOf<ApiResult<*>?>(null)
   var grants by mutableStateOf<Loaded<GrantView>>(Loaded.Loading)
+  var grantsAtMs by mutableStateOf<Long?>(null)
+  var grantsFailure by mutableStateOf<ApiResult<*>?>(null)
   var telegram by mutableStateOf<TelegramStatus?>(null)
   var settings by mutableStateOf<SettingsEnvelope?>(null)
   var readFor by mutableStateOf<String?>(null)
@@ -182,8 +184,21 @@ internal class OwnReads {
         readFor = signedIn
       }
     }
+    // THE ACCOUNT STATUS KEEPS THE FEED'S RULE: a refresh with no answer, or a
+    // 5xx, keeps the last good read and records that it failed, so the page can
+    // say how old it is (accountStatusLine); a refusal replaces it. It used to
+    // keep the old read in silence, and a first read that failed took the
+    // blocker, the mode and the balances off the page without a word — an
+    // agent that could not trade looked like one with nothing wrong.
     val g = api.grants()
-    if (!(grants is Loaded.Value && g is ApiResult.Unreachable)) grants = g.toLoaded()
+    val keepG = grants is Loaded.Value && (g is ApiResult.Unreachable || (g is ApiResult.Refused && g.status >= 500))
+    if (keepG) {
+      grantsFailure = g
+    } else {
+      grants = g.toLoaded()
+      grantsFailure = null
+      if (g is ApiResult.Ok) grantsAtMs = nowMs()
+    }
     // THE STRIP ONLY FOR AN AGENT THAT EXISTS: no bot to connect and no
     // strategy to run otherwise. Best effort — a failed read stays "checking…".
     val exists = (grants as? Loaded.Value)?.value?.exists == true
@@ -396,7 +411,9 @@ private fun OwnHome(feed: Feed, reads: OwnReads, nowMs: Long, hosted: Boolean?, 
       Prose(it, 13.sp, 18.85.sp, MerryColors.tx2, modifier = Modifier.padding(bottom = 16.dp))
     }
     // THE BLOCKER IS PINNED ABOVE EVERYTHING (Agent.tsx): it is short, and it is
-    // the one thing on this screen that must not be scrolled past.
+    // the one thing on this screen that must not be scrolled past. When the
+    // status could not be read, that is said in its place.
+    AccountStatusNote(reads, nowMs, onRetry = onChanged, modifier = Modifier.padding(bottom = 16.dp))
     AccountBlockerPanel(reads.grants, onFix = { nav.navigate(fixRoute(it)) }, modifier = Modifier.padding(bottom = 28.dp))
 
     // `polish.css:90-94` — `.hero-who { gap:12px }`, the face at 40x40, the

@@ -20,6 +20,7 @@ import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.ownAgentName
 import dev.merrymen.app.ui.ownBookOf
 import dev.merrymen.app.ui.screens.OwnReads
+import dev.merrymen.app.ui.screens.accountStatusLine
 import dev.merrymen.app.ui.screens.fixRoute
 import dev.merrymen.app.ui.screens.readCircleFor
 import dev.merrymen.app.ui.screens.readSettingsFor
@@ -165,6 +166,57 @@ class HomeStateTest {
     // No answer — not an answer this app could not read.
     assertFalse((reads.feedFailure as ApiResult.Unreachable).unreadable)
     assertEquals(1_000L, reads.feedAtMs)
+  }
+
+  /**
+   * THE ACCOUNT STATUS IS NEVER MISSING IN SILENCE. The blocker, the mode chip
+   * and the balances come from /api/grants and draw nothing without it; a
+   * first read that failed took them off the page with no sentence, and an
+   * agent that could not trade looked like one with nothing wrong.
+   */
+  @Test fun aStatusReadThatFailedIsSaidWhereTheBlockerGoes() = runBlocking {
+    val reads = OwnReads()
+    server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
+    server.answer("""{"error":"store down"}""", code = 503)
+    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 1_000L }, askWhoIsSignedIn = {})
+    val line = accountStatusLine(reads.grants, reads.grantsFailure, reads.grantsAtMs, 1_000L)!!
+    assertTrue(line.retry)
+    assertTrue(line.text, line.text.startsWith("Couldn't read your agent's status just now"))
+
+    // No answer at all is said the same way.
+    server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
+    server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+    val fresh = OwnReads()
+    fresh.load(api, "0xabc", true, withStrip = false, nowMs = { 1_000L }, askWhoIsSignedIn = {})
+    assertTrue(accountStatusLine(fresh.grants, fresh.grantsFailure, fresh.grantsAtMs, 1_000L)!!.retry)
+  }
+
+  @Test fun aStatusKeptFromAnEarlierReadSaysHowOldItIs() = runBlocking {
+    val reads = OwnReads()
+    server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
+    server.answer("""{"exists":true,"mode":"live","liveBlocker":"no-gas"}""")
+    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 1_000L }, askWhoIsSignedIn = {})
+    assertNull(accountStatusLine(reads.grants, reads.grantsFailure, reads.grantsAtMs, 1_000L))
+
+    // A 5xx on the refresh keeps the blocker on screen now, and says its age.
+    server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
+    server.answer("""{"error":"store down"}""", code = 503)
+    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 181_000L }, askWhoIsSignedIn = {})
+    assertEquals("no-gas", (reads.grants as Loaded.Value).value.liveBlocker)
+    val kept = accountStatusLine(reads.grants, reads.grantsFailure, reads.grantsAtMs, 181_000L)!!
+    assertFalse(kept.retry)
+    assertTrue(kept.text, kept.text.endsWith("What is shown was read 3m ago."))
+
+    // A good read clears the caption.
+    server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
+    server.answer("""{"exists":true,"mode":"live"}""")
+    reads.load(api, "0xabc", true, withStrip = false, nowMs = { 200_000L }, askWhoIsSignedIn = {})
+    assertNull(accountStatusLine(reads.grants, reads.grantsFailure, reads.grantsAtMs, 200_000L))
+  }
+
+  @Test fun anEndedSessionIsTheSignInsToSayNotTheStatusLines() {
+    assertNull(accountStatusLine(Loaded.Refused(401, "not signed in"), null, null, 1_000L))
+    assertNull(accountStatusLine(Loaded.Loading, null, null, 1_000L))
   }
 
   @Test fun aRefreshTheServerRefusesReplacesTheBook() = runBlocking {
