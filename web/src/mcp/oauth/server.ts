@@ -76,9 +76,16 @@ function normalizeResource(raw: string): string {
   }
 }
 
-/** Resolve a client_id the way every endpoint must: never a metadata document served from one of our own hosts. */
-export function clientFor(deps: Pick<OAuthDeps, "d" | "cfg" | "fetcher">, clientId: unknown, now: number): Promise<McpClient> {
-  return resolveClient(deps.d, clientId, now, { ownHosts: ownHostsOf(deps.cfg), fetcher: deps.fetcher });
+/**
+ * Resolve a client_id the way every endpoint must: never a metadata document
+ * served from one of our own hosts. `cacheNew` (may a fetched metadata document
+ * create a cache row) is for the consent steps only: authorize, and the consent
+ * page resolving the client its parked request names. The token and revocation
+ * endpoints never pass it, so a caller with no code or token cannot make this
+ * server store anything (see ResolveOptions.cacheNew).
+ */
+export function clientFor(deps: Pick<OAuthDeps, "d" | "cfg" | "fetcher">, clientId: unknown, now: number, o: { cacheNew?: boolean } = {}): Promise<McpClient> {
+  return resolveClient(deps.d, clientId, now, { ownHosts: ownHostsOf(deps.cfg), fetcher: deps.fetcher, cacheNew: o.cacheNew === true });
 }
 
 export async function startAuthorization(deps: OAuthDeps, p: URLSearchParams): Promise<AuthorizeOutcome> {
@@ -86,7 +93,7 @@ export async function startAuthorization(deps: OAuthDeps, p: URLSearchParams): P
   const now = deps.now();
   let client: McpClient;
   try {
-    client = await clientFor(deps, p.get("client_id"), now);
+    client = await clientFor(deps, p.get("client_id"), now, { cacheNew: true });
   } catch (e) {
     const ce = e instanceof ClientError ? e : new ClientError("invalid_client", "unknown client");
     return { kind: "page_error", status: ce.code === "temporarily_unavailable" ? 503 : 400, error: ce.code, description: ce.message };
@@ -198,7 +205,8 @@ function offeredScopes(requested: string[], staff: boolean): string[] {
 export async function describeRequest(deps: OAuthDeps, requestId: unknown, tenant: Tenant | null): Promise<ConsentView> {
   const now = deps.now();
   const row = await pendingRequest(deps.d, requestId, now);
-  const client = await clientFor(deps, row.client_id, now);
+  // The client_id comes from the parked request (cached at authorize), never from this caller.
+  const client = await clientFor(deps, row.client_id, now, { cacheNew: true });
   const redirect = new URL(row.redirect_uri);
   const staff = !!tenant && deps.cfg.staffTenants.has(tenant.toLowerCase());
   const scopes = offeredScopes(row.scopes.split(" ").filter(Boolean), staff).filter((id) => id !== OFFLINE_ACCESS).map((id) => {
@@ -238,7 +246,7 @@ export async function decideRequest(deps: OAuthDeps, requestId: unknown, tenant:
   // connection) and the client (a metadata document may need re-fetching).
   const owned = decision.approve ? await deps.agents.agentsFor(owner) : [];
   const peek = await pendingRequest(d, requestId, now);
-  const client = await clientFor(deps, peek.client_id, now);
+  const client = await clientFor(deps, peek.client_id, now, { cacheNew: true });
   const result = await d.db.tx(async (db) => {
     const tx: McpDb = { db, dialect: d.dialect };
     const row = await pendingRequest(tx, requestId, now, true);
@@ -321,6 +329,8 @@ export async function authenticateClient(deps: OAuthDeps, form: URLSearchParams,
   }
   let client: McpClient;
   try {
+    // Never caches a new metadata document: a client with no code or token
+    // cannot succeed here, so this endpoint must not let it store a row.
     client = await clientFor(deps, clientId, deps.now());
   } catch {
     throw new OAuthError("invalid_client", "unknown client", 401);

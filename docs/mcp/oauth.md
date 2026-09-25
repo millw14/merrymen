@@ -54,10 +54,19 @@ limited to the agents and scopes that owner chose.
      transport (public addresses only, pinned DNS, https, no redirects, 64 KB,
      5 s), accepts only a `200` answer with an `application/json` (or
      `application/*+json`) `Content-Type`, requires the document's
-     `client_id` to equal the URL exactly, accepts only public clients,
-     validates every redirect URI (at most 10, 4 KB together), and caches it
-     (≤ 24 h). Only the fields Merrymen uses (name and redirect URIs) are
-     stored, never the fetched body.
+     `client_id` to equal the URL exactly, accepts only public clients, and
+     validates every redirect URI: at most 10, kept in canonical form
+     (`URL.href`: ASCII, percent-encoded, IDNA host), and at most 2 KB
+     together, counted in UTF-8 bytes as stored. The document's own spelling
+     of a redirect still matches at `/oauth/authorize`, because the canonical
+     form is exactly where the code is sent. Only the steps that start or
+     complete a consent (`/oauth/authorize` and the consent page) cache a
+     document, for up to 24 h. `/oauth/token` and `/oauth/revoke` use a
+     fetched document for that one request and at most refresh a copy that is
+     already cached, so a caller with no code or token cannot make Merrymen
+     store anything. The cache keeps only the name (up to 100 characters) and
+     the redirect URIs, each once, never the fetched body: at most about 3 KB
+     per client including its URL.
    - **Dynamic Client Registration** (`POST /oauth/register`), for clients that
      do not use CIMD. Open but rate limited per IP. Public (`none`) or
      confidential (`client_secret_basic` / `client_secret_post`) clients.
@@ -127,8 +136,9 @@ limited to the agents and scopes that owner chose.
   query string. The MCP server never forwards a token anywhere.
 - The public endpoints read request bodies with a hard bound (16 KB for
   `/oauth/token`, `/oauth/revoke` and `/oauth/register`, 8 KB for the consent
-  API): a declared `Content-Length` over the bound is refused unread, and a
-  chunked body is cancelled as soon as it passes the bound.
+  and Connected apps APIs): a declared `Content-Length` over the bound is
+  refused unread, and a chunked body is cancelled as soon as it passes the
+  bound.
 
 ## Revocation
 

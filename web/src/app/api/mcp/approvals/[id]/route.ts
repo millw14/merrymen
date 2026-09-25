@@ -15,6 +15,7 @@ import { mcpConfig } from "@/mcp/config";
 import { mcpDb } from "@/mcp/db";
 import { agentDirectory } from "@/mcp/agents";
 import { jsonResponse } from "@/mcp/oauth/metadata";
+import { readBoundedText } from "@/mcp/oauth/deps";
 import { writeAudit } from "@/mcp/observe";
 import { readLedger as withReadDb } from "@/mcp/tool";
 import { settingsReader } from "@/lib/services/settings-view";
@@ -35,6 +36,8 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const ID = /^prp_[0-9a-f]{32}$/;
+/** A decision and a 64-hex hash: a few dozen bytes. */
+const BODY_MAX = 4096;
 
 async function holding(account: string, token: string) {
   return withReadDb(async (db) => {
@@ -221,8 +224,10 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
   if (!tenant) return jsonResponse({ error: "login_required" }, 401);
   const { id } = await context.params;
   if (!ID.test(id)) return jsonResponse({ error: "not_found" }, 404);
-  const text = await req.text();
-  if (text.length > 4096) return jsonResponse({ error: "invalid_request" }, 400);
+  // Bounded as it is read: `req.text()` buffers a chunked body of any size
+  // before a length check can run (and counts characters, not bytes).
+  const text = await readBoundedText(req, BODY_MAX);
+  if (text === null) return jsonResponse({ error: "invalid_request" }, 400);
   let body: { decision?: unknown; hash?: unknown };
   try {
     body = JSON.parse(text) as typeof body;

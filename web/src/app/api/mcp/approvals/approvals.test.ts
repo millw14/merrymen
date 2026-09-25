@@ -116,6 +116,29 @@ test("approve queues exactly one order under the agent's account, and a replay i
   assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM agent_commands").get() as { n: number }).n, 1);
 });
 
+test("the decision body is read bounded: an endless body is refused without being buffered, and the cap is in bytes", async () => {
+  const { d, id, hash } = await setup();
+  let pulled = 0;
+  // 10 MiB offered one KiB at a time; the cap is 4 KiB.
+  const endless = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulled++;
+      controller.enqueue(new Uint8Array(1024).fill(0x20));
+      if (pulled >= 10 * 1024) controller.close();
+    },
+  });
+  const headers = { "content-type": "application/json", cookie: `mm_session=${mintSession(OWNER_A)}`, origin: "https://app.test" };
+  const init = { method: "POST", headers, body: endless, duplex: "half" } as RequestInit;
+  const res = await POST(new Request(`https://app.test/api/mcp/approvals/${id}`, init), params(id));
+  assert.equal(res.status, 400);
+  assert.ok(pulled <= 8, `read ${pulled} KiB of a body capped at 4 KiB`);
+  // 1500 three-byte characters: under 4096 characters, over 4096 bytes.
+  const wide = await POST(req(id, { body: { decision: "approve", hash, pad: "€".repeat(1500) } }), params(id));
+  assert.equal(wide.status, 400);
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM agent_commands").get() as { n: number }).n, 0);
+  assert.equal(statusOf(d, id), "awaiting_approval");
+});
+
 test("a book change between proposal and approval is refused: practice never becomes real money unseen", async () => {
   const { d, id, hash } = await setup("paper");
   d.raw.prepare("UPDATE agents SET mode = 'live' WHERE smart_account = ?").run(ACCOUNT_A);

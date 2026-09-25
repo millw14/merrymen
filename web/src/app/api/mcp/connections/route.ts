@@ -9,12 +9,16 @@ import { mcpConfig } from "@/mcp/config";
 import { mcpDb } from "@/mcp/db";
 import { agentDirectory } from "@/mcp/agents";
 import { jsonResponse } from "@/mcp/oauth/metadata";
+import { readBoundedText } from "@/mcp/oauth/deps";
 import { OAuthError, createPersonalToken, listConnections, revokeConnection } from "@/mcp/oauth/server";
 import { scopeInfo, SCOPES } from "@/mcp/scopes";
 import { writeAudit } from "@/mcp/observe";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+
+/** The largest POST body this route reads (a revoke or a create_token is a few hundred bytes). */
+const BODY_MAX = 8 * 1024;
 
 export async function GET(req: Request): Promise<Response> {
   const cfg = mcpConfig();
@@ -48,8 +52,10 @@ export async function POST(req: Request): Promise<Response> {
   if (req.headers.get("origin") !== cfg.issuer) return jsonResponse({ error: "forbidden", error_description: "cross-site request" }, 403);
   const tenant = tenantOf(req);
   if (!tenant) return jsonResponse({ error: "login_required" }, 401);
-  const text = await req.text();
-  if (text.length > 8 * 1024) return jsonResponse({ error: "invalid_request" }, 400);
+  // Bounded read: req.text() would buffer a chunked body of any size before a
+  // length check could run.
+  const text = await readBoundedText(req, BODY_MAX);
+  if (text === null) return jsonResponse({ error: "invalid_request", error_description: "body too large" }, 400);
   let body: Record<string, unknown>;
   try {
     body = JSON.parse(text) as Record<string, unknown>;

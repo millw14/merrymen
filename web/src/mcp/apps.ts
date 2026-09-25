@@ -1132,7 +1132,7 @@ var STATUS_TEXT = {
   confirmed: "Confirmed on chain: the receipt and the recorded fill agree.",
   paper_filled: "Filled in the practice (paper) book. No real money moved.",
   refused: "The agent's limits, policy or the on-chain permission refused it. Nothing was traded.",
-  failed: "It did not complete. See the result.",
+  failed: "It did not complete, or its outcome could not be confirmed. See the result.",
   expired: "It expired without running. Nothing was sent.",
   cancelled: "Cancelled. Nothing was sent.",
   rejected: "The owner declined it.",
@@ -1148,7 +1148,12 @@ var KNOWN_SUMMARY = {
   action: 1, token: 1, book: 1, book_note: 1, expected_out: 1, min_out: 1, price_impact_bps: 1, assistant_note: 1, requested_by: 1,
   text: 1, diff: 1, settings: 1, after_approval: 1, risk_level: 1
 };
-var RESULT_SKIP = { worker_line: 1, notes: 1 };
+// Keys resultBlock renders itself (or, worker_line, never: a raw worker line
+// is no longer sent, and would not be shown if it were).
+var RESULT_SKIP = {
+  worker_line: 1, notes: 1, agent_said_untrusted: 1, outcome_unknown: 1, simulated_because: 1,
+  rule: 1, rule_family: 1, rule_label: 1, rule_remedy: 1, rule_detail_withheld: 1
+};
 
 function render(d) {
   if (typeof d.proposal_id === "string") { renderProposal(d); return true; }
@@ -1197,8 +1202,22 @@ function outcomeBook(status, res) {
   return null;
 }
 
+// A reject rule as a result states it (services/proposals.ts ruleFields): the
+// label, family and remedy are Merrymen's own words; the slug came through
+// the agent's worker, so it stays marked as third-party text.
+function ruleRows(g, r, title) {
+  var slug = typeof r.rule === "string" ? utInline(r.rule, false) : null;
+  var label = str(r.rule_label, 200);
+  if (!label && !slug) return;
+  row(g, title, label ? nodes(label, slug) : slug, human(r.rule_family));
+  if (r.rule_remedy) row(g, "What you can do", str(r.rule_remedy, 400));
+  if (r.rule_detail_withheld === true) row(g, "Rule detail", "withheld: it was provider text, which is never relayed");
+}
+
 function resultBlock(parent, res) {
   var g = grid(parent);
+  // Not "it failed": no record that is clearly this order's arrived in time.
+  if (res.outcome_unknown === true) row(g, "Outcome", "outcome not confirmed — check your trades");
   Object.keys(res).filter(function (k) { return !has(RESULT_SKIP, k); }).slice(0, 30).forEach(function (k) {
     var v = res[k];
     if (k === "tx_hash") row(g, "Transaction", v === null || v === undefined ? null : mono(str(v, 80)));
@@ -1206,11 +1225,13 @@ function resultBlock(parent, res) {
     else if (k === "fill_qty_raw") row(g, "Filled (raw token units)", v === null || v === undefined ? null : mono(str(v, 80)));
     else if (k === "order_expires_at") row(g, "Order window closes", whenSec(v));
     else if (k === "duplicate") row(g, "Already queued", yesNo(v));
-    // The rule text comes from the agent's worker, not from Merrymen.
-    else if (k === "rule") row(g, "Rule", typeof v === "string" ? utInline(v, false) : null);
     else row(g, human(k) || "?", valueText(v));
   });
-  if (typeof res.worker_line === "string") untrustedBox(parent, "The agent's own report", res.worker_line, 300);
+  ruleRows(g, res, "Rule");
+  var sim = obj(res.simulated_because);
+  if (sim) ruleRows(g, sim, "Why it was simulated");
+  // The agent's own sentence (cut of provider text, but still the agent's words).
+  if (typeof res.agent_said_untrusted === "string") untrustedBox(parent, "The agent's own report", res.agent_said_untrusted, 300);
   if (Array.isArray(res.notes) && res.notes.length) { put(parent, "h3", null, "Checked at approval"); bullets(parent, res.notes, 10, "small"); }
 }
 
@@ -1242,7 +1263,7 @@ function generic(parent, rec, skip) {
   keys.forEach(function (k) { row(g, human(k) || "?", valueText(o[k])); });
 }
 
-function timeline(parent, kind, status, decided) {
+function timeline(parent, kind, status, decided, failLabel) {
   var steps = kind === "trade"
     ? [["awaiting_approval", "Awaiting approval"], ["approved", "Approved"], ["submitted", "Submitted to the agent"], ["executing", "Executing"], ["confirmed", "Confirmed on chain"]]
     : [["awaiting_approval", "Awaiting approval"], ["applied", "Applied"]];
@@ -1259,7 +1280,7 @@ function timeline(parent, kind, status, decided) {
   var done = status === "confirmed" || status === "paper_filled" || status === "applied";
   var ol = put(parent, "ol", "timeline");
   for (var j = 0; j < steps.length; j++) {
-    if (j === failAt) { put(ol, "li", "step failed", FAIL_TEXT[status]); break; }
+    if (j === failAt) { put(ol, "li", "step failed", failLabel || FAIL_TEXT[status]); break; }
     var cls = failAt >= 0 ? (j < failAt ? "step done" : "step") : j < idx || (done && j === idx) ? "step done" : j === idx ? "step current" : "step";
     put(ol, "li", cls, steps[j][1]);
   }
@@ -1289,9 +1310,12 @@ function renderProposal(d) {
   header(str(s.action, 160) || "Proposal", str(d.proposal_id, 40));
   var st = section(root, "Status");
   var hd = put(st, "div", "check-hd");
-  hd.appendChild(chip(human(status) || UNKNOWN, pick(STATUS_TONE, status, "unk")));
+  // "failed" with outcome_unknown is not a failure the evidence shows: the
+  // order finished and no record that is clearly its own arrived in time.
+  var unconfirmed = status === "failed" && !!res && res.outcome_unknown === true;
+  hd.appendChild(unconfirmed ? chip("outcome not confirmed", "warn") : chip(human(status) || UNKNOWN, pick(STATUS_TONE, status, "unk")));
   put(st, "p", null, str(d.status_explained, 400) || pick(STATUS_TEXT, status, ""));
-  timeline(st, kind, status, !!d.decided_at);
+  timeline(st, kind, status, !!d.decided_at, unconfirmed ? "Outcome not confirmed" : null);
   var g = grid(st);
   if (d.created_at) row(g, "Created", when(d.created_at));
   row(g, status === "awaiting_approval" ? "Expires" : "Approval window", when(d.expires_at), status === "awaiting_approval" ? null : "Only matters while it waits for approval");

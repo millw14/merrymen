@@ -786,6 +786,30 @@ test("inactivity: a landed transfer or vault deposit is not trading, and a re-wr
   assert.equal(traded.sc.fills_in_window.live_confirmed, 1);
 });
 
+test("inactivity: a redeploy's copy of an older operation is not a recent fill, a trade in the window, or a resume after /pause", async () => {
+  const s = await setup();
+  agentRow(s.d, ACCOUNT_A, OWNER_A, { mode: "live" });
+  mark(s.d, ACCOUNT_A, { mode: "live", at: NOW - 60 });
+  // A swap three days ago (outside the window), and the reconciler's bare copy of it, stamped at a restart 100 s ago.
+  decision(s.d, ACCOUNT_A, { id: "old-buy", at: NOW - 3 * 86_400 - 5 });
+  trade(s.d, ACCOUNT_A, { status: "landed", tx: txh(31), op: txh(32), decision: "old-buy", side: "buy", buy: TOKEN, sell: USDG, at: NOW - 3 * 86_400 });
+  trade(s.d, ACCOUNT_A, { status: "landed", tx: txh(31), op: txh(32), buy: TOKEN, sell: USDG, at: NOW - 100 });
+  // A vault deposit inside the window, re-recorded as a bare 'swap' under its hash.
+  trade(s.d, ACCOUNT_A, { status: "landed", kind: "vault-deposit", tx: txh(33), op: txh(34), at: NOW - 5000 });
+  trade(s.d, ACCOUNT_A, { status: "landed", tx: txh(33), op: txh(34), at: NOW - 90 });
+  const r = await explain(s);
+  // The inactivity alert (worker notify.ts lastFillAt) collapses copies the same way: last fill three days ago.
+  assert.equal(r.sc.last_trade.live.at, new Date((NOW - 3 * 86_400) * 1000).toISOString(), "the operation's own time, never the restart's");
+  assert.equal(r.sc.fills_in_window.live_landed, 0, "neither copy is a fill in the window");
+  assert.notEqual(r.primary.kind, "trading", r.primary.summary);
+
+  // A /pause an hour ago: the copies written at the restart since are not the agent acting again.
+  event(s.d, ACCOUNT_A, "warn", "Telegram: paused by chat 7", NOW - 3600);
+  const p = await explain(s);
+  assert.equal(p.primary.category, "paused", p.primary.summary);
+  assert.equal(p.checks.paused.status, "blocking");
+});
+
 test("inactivity: an owner's chat transfer after /pause does not read as a resume", async () => {
   const s = await setup();
   agentRow(s.d, ACCOUNT_A, OWNER_A, { mode: "live" });

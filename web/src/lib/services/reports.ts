@@ -40,7 +40,7 @@ import { distinctTrades, OP_COPY_REACH_SEC } from "../distinct-trades";
 import { OP_KEY, readEvidencedSells } from "../profile-trades";
 import { readDeskPositions } from "../desk-positions";
 import { readAgentStatus, type AgentStatusView } from "./agent-status";
-import { explanationOf } from "./decisions";
+import { explanationOf, FILL_KINDS } from "./decisions";
 import type { SettingsView } from "./settings-view";
 
 export type BookName = "paper" | "live";
@@ -232,6 +232,12 @@ const FLOWS_MAX = 5_000;
 /** Distinct stored refusal rules grouped per summary; the total is counted separately. */
 const REFUSAL_GROUPS_MAX = 500;
 const EXPIRY_WARN_SEC = 7 * 86_400;
+/**
+ * The fill kinds (decisions.ts FILL_KINDS) as an SQL list. Constants of our
+ * own, never input, so inlined rather than bound: the counts read groups on it
+ * in its SELECT, where a bound list would have to be passed twice.
+ */
+const FILL_KINDS_SQL = FILL_KINDS.filter((k) => /^[a-z-]+$/.test(k)).map((k) => `'${k}'`).join(", ");
 
 interface FlowRow {
   at: number;
@@ -490,8 +496,16 @@ export async function readReportSummary(db: Db, input: SummaryInput, clean: Text
   if ((num(unlabelled?.n) ?? 0) > 0) warnings.push(`${num(unlabelled?.n)} valuation(s) in this window predate book labels and are counted in neither book.`);
 
   // Operation counts and gas, one row per operation.
+  //
+  // THE LIVE COUNTS ARE OPERATIONS, and are published as such ("confirmed
+  // operations"): a landed transfer or vault move is money the owner's account
+  // really moved and paid gas for, so it belongs in them. THE PAPER COUNT IS
+  // PUBLISHED AS FILLS, so it counts fills only (swaps and curve trades), the
+  // rule the summary alert and explain_agent_inactivity count fills by: a
+  // simulated vault move is not a fill.
   const counts = (await db.prepare(
-    `SELECT t.status AS status, CASE WHEN t.tx_hash IS NOT NULL AND t.tx_hash <> '' THEN 1 ELSE 0 END AS has_tx, COUNT(*) AS n,
+    `SELECT t.status AS status, CASE WHEN t.tx_hash IS NOT NULL AND t.tx_hash <> '' THEN 1 ELSE 0 END AS has_tx,
+            CASE WHEN t.kind IN (${FILL_KINDS_SQL}) THEN 1 ELSE 0 END AS is_fill, COUNT(*) AS n,
             SUM(CASE WHEN t.gas_usdg IS NOT NULL THEN t.gas_usdg ELSE 0 END) AS gas_usdg,
             SUM(CASE WHEN t.gas_usdg IS NOT NULL THEN 1 ELSE 0 END) AS gas_priced,
             SUM(CASE WHEN t.gas_wei IS NOT NULL AND t.gas_usdg IS NULL THEN 1 ELSE 0 END) AS gas_unpriced,
@@ -499,9 +513,9 @@ export async function readReportSummary(db: Db, input: SummaryInput, clean: Text
             SUM(CASE WHEN t.gas_wei IS NULL AND t.gas_usdg IS NULL AND t.sponsored_gas_wei IS NULL THEN 1 ELSE 0 END) AS gas_missing
        FROM ${distinctTrades(`${scope.on("t.agent_id")} AND t.created_at >= ?`)}
       WHERE t.created_at >= ? AND t.created_at < ? AND t.status IN ('landed','submitted','reverted','paper')
-      GROUP BY t.status, CASE WHEN t.tx_hash IS NOT NULL AND t.tx_hash <> '' THEN 1 ELSE 0 END`,
+      GROUP BY t.status, CASE WHEN t.tx_hash IS NOT NULL AND t.tx_hash <> '' THEN 1 ELSE 0 END, CASE WHEN t.kind IN (${FILL_KINDS_SQL}) THEN 1 ELSE 0 END`,
   ).all(...scope.args, reach, since, until)) as Record<string, unknown>[];
-  let confirmed = 0, landedNoTx = 0, submitted = 0, reverted = 0, paperFills = 0;
+  let confirmed = 0, landedNoTx = 0, submitted = 0, reverted = 0, paperFills = 0, paperOther = 0;
   let gasUsdg = 0, gasPriced = 0, gasUnpriced = 0, gasSponsored = 0, gasMissing = 0;
   for (const c of counts) {
     const n = num(c.n) ?? 0;
@@ -516,10 +530,13 @@ export async function readReportSummary(db: Db, input: SummaryInput, clean: Text
       gasMissing += num(c.gas_missing) ?? 0;
     } else if (c.status === "submitted") submitted += n;
     else if (c.status === "reverted") reverted += n;
-    else if (c.status === "paper") paperFills += n;
+    else if (c.status === "paper") {
+      if (num(c.is_fill) === 1) paperFills += n; else paperOther += n;
+    }
   }
   if (submitted > 0) warnings.push(`${submitted} live operation(s) were submitted and have no final outcome in the ledger yet; they are not counted as confirmed.`);
   if (landedNoTx > 0) warnings.push(`${landedNoTx} landed operation(s) carry no transaction hash, so they are not reported as confirmed.`);
+  if (paperOther > 0) warnings.push(`${paperOther} paper (simulated) operation(s) in this window were not swaps or curve trades (for example a simulated vault move), so they are not counted as paper fills.`);
 
   const listed = async (where: string) => ((await db.prepare(
     `SELECT ${TRADE_LINE_COLS} FROM ${distinctTrades(`${scope.on("t.agent_id")} AND t.created_at >= ?`)} ${DECISION_JOIN}
@@ -527,7 +544,7 @@ export async function readReportSummary(db: Db, input: SummaryInput, clean: Text
       ORDER BY t.created_at DESC, t.id DESC LIMIT ?`,
   ).all(...scope.args, reach, since, until, SUMMARY_TRADES_LISTED)) as Record<string, unknown>[]).map((r) => tradeLine(r, clean));
   const confirmedList = await listed("t.status = 'landed' AND t.tx_hash IS NOT NULL AND t.tx_hash <> ''");
-  const paperList = await listed("t.status = 'paper'");
+  const paperList = await listed(`t.status = 'paper' AND t.kind IN (${FILL_KINDS_SQL})`);
 
   const realized = await readRealized(db, scope, since, until);
 

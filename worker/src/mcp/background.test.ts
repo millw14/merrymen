@@ -4,25 +4,56 @@ import path from "node:path";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite, type Db, type Stmt } from "../db";
-import { boundedDb, makeMcpBackground, mcpBackgroundEnabled, LOCK_TIMEOUT_MS, STATEMENT_TIMEOUT_MS } from "./background";
+import {
+  boundedDb, makeMcpBackground, mcpBackgroundEnabled, CALL_TIMEOUT_MS, LOCK_TIMEOUT_MS, PASS_LEASE_MS, STATEMENT_TIMEOUT_MS, TX_TIMEOUT_MS, type DbBounds,
+} from "./background";
 import { MCP_SCHEMA, MCP_SCHEMA_LOCK, MCP_SCHEMA_OBJECTS, SCHEMA_LOCK_TIMEOUT_MS, ensureMcpSchema } from "./schema";
 import { resetMaintenanceForTest, retentionStatements, runMcpMaintenancePass } from "./maintenance";
 
 const settle = (ms = 10) => new Promise((r) => setTimeout(r, ms));
 const never = <T>() => new Promise<T>(() => {});
+const BOUNDS: DbBounds = { callMs: 1_000, txMs: TX_TIMEOUT_MS, statementMs: STATEMENT_TIMEOUT_MS, lockMs: LOCK_TIMEOUT_MS, postgres: true };
 
-/** A Db that records every statement and answers each with `answer(sql)`. */
-function recordingDb(answer: (sql: string) => unknown = () => undefined): { db: Db; seen: string[] } {
+/** How `p` stands after `ms`: settled either way, or still pending (a test must never hang on it). */
+async function within<T>(p: Promise<T>, ms: number): Promise<{ value: T } | { error: unknown } | "pending"> {
+  const pending = settle(ms).then(() => "pending" as const);
+  return Promise.race([p.then((value) => ({ value }), (error: unknown) => ({ error })), pending]);
+}
+
+/**
+ * A Db that records every statement and answers each with `answer(sql)`.
+ * `checkout` holds each transaction until it resolves (a pool with no free
+ * connection); `delayMs(sql)` holds one statement's answer.
+ */
+function recordingDb(
+  answer: (sql: string) => unknown = () => undefined,
+  o: { checkout?: () => Promise<void>; delayMs?: (sql: string) => number } = {},
+): { db: Db; seen: string[] } {
   const seen: string[] = [];
+  const wait = async (sql: string) => {
+    const ms = o.delayMs?.(sql) ?? 0;
+    if (ms > 0) await settle(ms);
+  };
   const stmt = (sql: string): Stmt => ({
-    run: async () => { seen.push(sql); return { changes: 0, lastInsertRowid: 0 }; },
-    get: async () => { seen.push(sql); return answer(sql); },
-    all: async () => { seen.push(sql); return []; },
+    run: async () => { seen.push(sql); await wait(sql); return { changes: 0, lastInsertRowid: 0 }; },
+    get: async () => { seen.push(sql); await wait(sql); return answer(sql); },
+    all: async () => { seen.push(sql); await wait(sql); return []; },
   });
   const db: Db = {
     prepare: stmt,
     exec: async (sql) => { seen.push(sql === MCP_SCHEMA ? "<MCP_SCHEMA>" : sql); },
-    tx: async (fn) => { seen.push("BEGIN"); const out = await fn(db); seen.push("COMMIT"); return out; },
+    tx: async (fn) => {
+      await o.checkout?.();
+      seen.push("BEGIN");
+      try {
+        const out = await fn(db);
+        seen.push("COMMIT");
+        return out;
+      } catch (e) {
+        seen.push("ROLLBACK");
+        throw e;
+      }
+    },
   };
   return { db, seen };
 }
@@ -122,22 +153,54 @@ test("a database call that never answers fails the pass at its bound, and the ne
 
 test("boundedDb: a transaction starts by bounding its statements and lock waits in Postgres, and a hung call rejects", async () => {
   const pg = recordingDb();
-  const bounded = boundedDb(pg.db, { callMs: 1_000, statementMs: STATEMENT_TIMEOUT_MS, lockMs: LOCK_TIMEOUT_MS, postgres: true });
+  const bounded = boundedDb(pg.db, BOUNDS);
   await bounded.tx((t) => t.prepare("SELECT 1").get());
   assert.deepEqual(pg.seen, ["BEGIN", `SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`, `SET LOCAL lock_timeout = ${LOCK_TIMEOUT_MS}`, "SELECT 1", "COMMIT"]);
 
   const lite = recordingDb();
-  await boundedDb(lite.db, { callMs: 1_000, statementMs: 1, lockMs: 1, postgres: false }).tx((t) => t.prepare("SELECT 1").get());
+  await boundedDb(lite.db, { ...BOUNDS, postgres: false }).tx((t) => t.prepare("SELECT 1").get());
   assert.deepEqual(lite.seen, ["BEGIN", "SELECT 1", "COMMIT"], "SQLite has no such settings");
 
   const hung: Db = { prepare: () => ({ run: never, get: never, all: never }), exec: never, tx: never };
-  await assert.rejects(boundedDb(hung, { callMs: 20, statementMs: 1, lockMs: 1, postgres: true }).prepare("SELECT 1").get(), { name: "DbCallTimeout" });
+  await assert.rejects(boundedDb(hung, { ...BOUNDS, callMs: 20 }).prepare("SELECT 1").get(), { name: "DbCallTimeout" });
+});
+
+test("boundedDb: a transaction whose connection never comes is given up at its bound; one handed a connection late runs nothing and rolls back", async () => {
+  // A pool that never hands out a connection (it has no checkout timeout of its own).
+  let ran = false;
+  const hung: Db = { prepare: () => ({ run: never, get: never, all: never }), exec: never, tx: never };
+  const gaveUp = await within(boundedDb(hung, { ...BOUNDS, txMs: 20 }).tx(async () => { ran = true; }), 500);
+  assert.ok(gaveUp !== "pending" && "error" in gaveUp && (gaveUp.error as Error).name === "DbCallTimeout", "the pass stops waiting at txMs");
+  assert.equal(ran, false);
+
+  // A pool that hands the connection over only after the pass stopped waiting.
+  let free!: () => void;
+  const checkout = new Promise<void>((r) => { free = r; });
+  const late = recordingDb(() => undefined, { checkout: () => checkout });
+  const out = await within(boundedDb(late.db, { ...BOUNDS, txMs: 20 }).tx(async (t) => { ran = true; await t.prepare("INSERT x").run(); }), 500);
+  assert.ok(out !== "pending" && "error" in out, "given up while waiting for the pool");
+  free();
+  await settle(20);
+  assert.equal(ran, false, "the abandoned transaction's work never runs");
+  assert.deepEqual(late.seen, ["BEGIN", "ROLLBACK"], "it rolls back at once and hands the connection back");
+});
+
+test("boundedDb: work that finishes after the transaction's bound rolls back instead of committing, and sends nothing more", async () => {
+  const slow = recordingDb(() => ({ n: 1 }), { delayMs: (sql) => (sql === "SELECT slow" ? 60 : 0) });
+  const out = await within(boundedDb(slow.db, { ...BOUNDS, txMs: 20 }).tx(async (t) => {
+    await t.prepare("SELECT slow").get();
+    await t.prepare("INSERT after").run();
+  }), 500);
+  assert.ok(out !== "pending" && "error" in out && (out.error as Error).name === "DbCallTimeout");
+  await settle(80);
+  assert.deepEqual(slow.seen, ["BEGIN", `SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`, `SET LOCAL lock_timeout = ${LOCK_TIMEOUT_MS}`, "SELECT slow", "ROLLBACK"]);
+  assert.ok(TX_TIMEOUT_MS > CALL_TIMEOUT_MS && TX_TIMEOUT_MS < PASS_LEASE_MS, "longer than any one call it holds, inside the pass's lease");
 });
 
 test("retention runs each DELETE in its own bounded transaction", async () => {
   const { db, seen } = recordingDb();
   resetMaintenanceForTest();
-  await runMcpMaintenancePass(boundedDb(db, { callMs: 1_000, statementMs: STATEMENT_TIMEOUT_MS, lockMs: LOCK_TIMEOUT_MS, postgres: true }), 2_000_000_000, true);
+  await runMcpMaintenancePass(boundedDb(db, BOUNDS), 2_000_000_000, true);
   const deletes = seen.filter((s) => s.startsWith("DELETE"));
   assert.equal(deletes.length, retentionStatements(2_000_000_000).length);
   for (const d of deletes) {

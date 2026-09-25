@@ -26,7 +26,7 @@ answer: missing data sources return `upstream_unavailable`.
 | `unauthenticated` | no | No valid access token. Reconnect the app. |
 | `insufficient_scope` | no | The connection was not granted the scope this needs (`details.required_scope`). Reconnect and allow it. |
 | `forbidden` | no | This connection may not act on that object (for example no agent is shared with it). |
-| `not_found` | no | No such object, **or it is not yours**. Other owners' objects are always reported as not found. |
+| `not_found` | no | No such object, **or it is not yours**. Other owners' objects are always reported as not found, and so are objects about an agent not shared with this connection (a proposal, an export) or of a kind it may not handle. |
 | `invalid_input` | no | An argument is missing, malformed or out of range. |
 | `conflict` | no | The object is in the wrong state (already approved, too late to cancel), or an idempotency key was reused for a different request. |
 | `expired` | no | The object expired (a proposal, an export). |
@@ -39,6 +39,21 @@ answer: missing data sources return `upstream_unavailable`.
 
 Input that fails the tool's JSON schema is rejected by the protocol layer
 before the tool runs, with a text message starting `Input validation error`.
+
+## Outcomes that are not errors
+
+A proposal's own status is data, not a tool error: `get_proposal` succeeds and
+reports it. Two of them are easy to misread:
+
+- `failed` with `result.outcome_unknown: true`: the agent finished the order,
+  but no trade record that is clearly this order's reached the ledger in time.
+  It is **not** a statement that nothing happened. Check the agent's trades
+  (`get_trades`) before proposing the same trade again.
+- `executing`: also covers an order the agent has finished whose trade record
+  has not reached the ledger yet. Poll again; it is not an outcome.
+
+See [examples.md](examples.md#prepare-a-trade-and-approve-it) for every
+status and the keys its `result` carries.
 
 ## HTTP errors on `/mcp`
 

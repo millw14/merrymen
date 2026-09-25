@@ -69,9 +69,45 @@ test("resources have unique names and merrymen:// or ui:// URIs", () => {
   }
 });
 
-test("no invisible or bidirectional characters hide in the MCP source (write them as \\u escapes)", () => {
-  const roots = ["web/src/mcp", "web/src/lib/services", "web/src/app/api/mcp", "web/src/app/connect", "web/src/app/oauth", "worker/src/mcp"];
-  const invisible = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff\u00ad]/;
+/**
+ * A character that must never appear literally in source, by Unicode category
+ * rather than by a list (a list missed U+0085, U+009B, U+061C and U+2028/2029,
+ * all of which editing tools have written into this tree): every control
+ * character (Cc) except tab, line feed and carriage return; every format
+ * character (Cf: bidi marks, embeddings, overrides and isolates, zero-width
+ * characters, BOM, soft hyphen, the Arabic letter mark); and the line and
+ * paragraph separators (Zl, Zp). Written as property classes so this file
+ * cannot itself carry one.
+ */
+const HIDDEN = /(?![\t\n\r])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/** Where each hidden character is, as `line:column U+XXXX`. */
+function hiddenCharacters(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(HIDDEN)) {
+    const at = m.index ?? 0;
+    const before = text.slice(0, at);
+    const line = before.split("\n").length;
+    const column = at - before.lastIndexOf("\n");
+    out.push(`${line}:${column} U+${m[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`);
+  }
+  return out;
+}
+
+test("the hidden-character guard catches every control, format and separator character, and nothing a source file needs", () => {
+  const C = (...cps: number[]) => String.fromCodePoint(...cps);
+  const caught = [0x0, 0x7, 0x1b, 0x7f, 0x85, 0x9b, 0xad, 0x61c, 0x180e, 0x200b, 0x200d, 0x200e, 0x202e, 0x2028, 0x2029, 0x2060, 0x2066, 0x2069, 0xfeff, 0xfff9, 0xe0001];
+  for (const cp of caught) assert.equal(hiddenCharacters(`a${C(cp)}b`).length, 1, `U+${cp.toString(16)}`);
+  assert.deepEqual(hiddenCharacters(`x\ny${C(0x2028)}`), ["2:2 U+2028"]);
+  // Tabs, newlines, CRLF endings and ordinary non-ASCII text are fine.
+  assert.deepEqual(hiddenCharacters(`\tif (a) {\r\n  b; // \u00b7 \u2014 \u201cquoted\u201d \u2026 \u22121 \u2713 ${C(0xa0)} \u00e9 \u65e5\u672c ${C(0x1f600)}\n}`), []);
+});
+
+test("no invisible, bidirectional, control or separator characters hide in the MCP source (write them as \\u escapes)", () => {
+  const roots = [
+    "web/src/mcp", "web/src/lib/services", "web/src/app/mcp", "web/src/app/api/mcp", "web/src/app/connect", "web/src/app/oauth",
+    "web/src/app/.well-known", "worker/src/mcp",
+  ];
   const walk = (d: string): string[] => {
     try {
       return readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]));
@@ -79,8 +115,9 @@ test("no invisible or bidirectional characters hide in the MCP source (write the
       return [];
     }
   };
-  const offenders = roots.flatMap((r) => walk(path.join(process.cwd(), r)))
-    .filter((f) => /\.(ts|tsx|css)$/.test(f) && invisible.test(readFileSync(f, "utf8")));
+  const files = roots.flatMap((r) => walk(path.join(process.cwd(), r))).filter((f) => /\.(ts|tsx|js|jsx|mjs|cjs|css|json)$/.test(f));
+  assert.ok(files.some((f) => f.endsWith(path.join("worker", "src", "mcp", "notify.ts"))), "the roots resolve (run from the repository root)");
+  const offenders = files.flatMap((f) => hiddenCharacters(readFileSync(f, "utf8")).map((at) => `${path.relative(process.cwd(), f)}:${at}`));
   assert.deepEqual(offenders, []);
 });
 

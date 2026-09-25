@@ -18,7 +18,7 @@ import {
   PROPOSAL_TTL_SEC, TERMINAL, cancelProposal, changeRow, createProposal, currentValues, expireIfDue, followTrade, listProposalRows, ownerOrderCeiling, proposalRow,
   resultView, ProposalError, type Binding, type ChangeRow, type ProposalKind, type ProposalRow, type TradeBinding,
 } from "@/lib/services/proposals";
-import { SETTING_SPECS, specFor, validStoredSetting, stockSymbols } from "../../../../worker/src/telegram/setting-spec";
+import { SETTING_SPECS, specFor, validStoredSetting } from "../../../../worker/src/telegram/setting-spec";
 import { admitOwnerLine } from "../../../../worker/src/groupchat/policy";
 import { readAgentRow } from "@/lib/services/agent-status";
 import { mcpConfig } from "../config";
@@ -82,6 +82,21 @@ export function addressableSymbol(token: string, settings: SettingsView | null):
     return { why: `Another of the agent's tokens also uses the symbol ${symbol}, so an order could not tell them apart. Remove the duplicate in Settings first.` };
   }
   return { symbol };
+}
+
+/**
+ * A basket symbol spelled the way the settings route and the worker match it
+ * (exactly): the typed spelling when it is one of `selectable`, else the one
+ * selectable symbol it matches ignoring case. Null when it matches none, or
+ * several that differ only in case — picking one of those would be a guess.
+ * Stored as typed, "nvda" or "wbtc" for a token added as "wBTC" is refused at
+ * approval, or dropped by the worker's resolver.
+ */
+export function basketSpelling(typed: string, selectable: readonly string[]): string | null {
+  if (selectable.includes(typed)) return typed;
+  const upper = typed.toUpperCase();
+  const hits = [...new Set(selectable.filter((s) => s.toUpperCase() === upper))];
+  return hits.length === 1 ? hits[0]! : null;
 }
 
 async function holdingOf(ctx: ToolContext, agent: OwnedAgent, token: string): Promise<{ rawBalance: bigint; valueUsdg: number | null } | null> {
@@ -294,18 +309,25 @@ const proposeSettings = defineTool({
     const reader = settingsReader();
     const settings = await reader.settingsFor(ctx.principal.tenant);
     const current = (await reader.specValuesFor?.(ctx.principal.tenant)) ?? {};
-    const basketAllowed = new Set([...stockSymbols(), ...(settings?.customTokens ?? []).map((c) => c.symbol.toUpperCase())]);
+    // Spelled as the settings route checks them (exactly): the stock tokens, then the owner's added tokens.
+    const selectable = [...STOCK_TOKENS.map((t) => t.symbol), ...(settings?.customTokens ?? []).map((c) => c.symbol)];
     const changes: Record<string, unknown> = {};
     const diff: ChangeRow[] = [];
-    for (const [key, value] of Object.entries(args.changes)) {
+    for (const [key, typed] of Object.entries(args.changes)) {
       const spec = specFor(key);
       if (!spec) throw new McpError("invalid_input", `"${key.slice(0, 40)}" cannot be changed from here. Allowed: ${SETTING_SPECS.map((s) => s.key).join(", ")}.`);
-      if (!validStoredSetting(key, value)) {
+      if (!validStoredSetting(key, typed)) {
         const bounds = spec.min !== undefined || spec.max !== undefined ? ` (${spec.min ?? "…"}–${spec.max ?? "…"} in stored units${spec.kind === "pct" ? ", basis points" : spec.kind === "hoursAsSec" ? ", seconds" : ""})` : spec.values ? ` (one of ${spec.values.join(", ")})` : "";
         throw new McpError("invalid_input", `${key}: not a valid value for ${spec.label}${bounds}.`);
       }
-      if (spec.kind === "symbols" && (value as string[]).some((s) => !basketAllowed.has(s.toUpperCase()))) {
-        throw new McpError("invalid_input", "basketSymbols may only contain stock tokens or tokens the owner added in Settings.");
+      let value: unknown = typed;
+      if (spec.kind === "symbols") {
+        const spelled = (typed as string[]).map((s) => basketSpelling(s, selectable));
+        if (spelled.some((s) => s === null)) {
+          throw new McpError("invalid_input", "basketSymbols may only contain stock tokens or tokens the owner added in Settings, each naming exactly one of them.");
+        }
+        value = [...new Set(spelled as string[])];
+        if (!validStoredSetting(key, value)) throw new McpError("invalid_input", `${key}: not a valid value for ${spec.label}.`);
       }
       if (spec.kind === "strategy" && !(KNOWN_STRATEGIES as readonly string[]).includes(value as string)) {
         throw new McpError("invalid_input", `strategy must be one of ${KNOWN_STRATEGIES.join(", ")}.`);
@@ -376,15 +398,15 @@ const createDraft = defineTool({
     if (args.strategy) settings.strategy = args.strategy;
     if (args.asset_mode) settings.assetMode = args.asset_mode;
     if (args.basket) {
-      const stock = new Map(STOCK_TOKENS.map((t) => [t.symbol.toUpperCase(), t.symbol]));
-      const custom = shared ? new Map(((await settingsReader().settingsFor(tenant))?.customTokens ?? []).map((c) => [c.symbol.toUpperCase(), c.symbol])) : null;
+      const custom = shared ? ((await settingsReader().settingsFor(tenant))?.customTokens ?? []).map((c) => c.symbol) : null;
+      const selectable = [...STOCK_TOKENS.map((t) => t.symbol), ...(custom ?? [])];
       const basket: string[] = [];
       for (const s of args.basket) {
-        const known = stock.get(s.toUpperCase()) ?? custom?.get(s.toUpperCase());
+        const known = basketSpelling(s, selectable);
         // With an agent shared, the owner's added tokens are checked (and spelled) here, as
         // propose_settings_change does. Without one, the answer must not depend on them: the
         // symbol is kept as typed and the approval checks it against the owner's tokens.
-        if (!known && custom) throw new McpError("invalid_input", "basket may only contain stock tokens or tokens added in Settings.");
+        if (!known && custom) throw new McpError("invalid_input", "basket may only contain stock tokens or tokens added in Settings, each naming exactly one of them.");
         basket.push(known ?? s);
       }
       settings.basketSymbols = [...new Set(basket)];

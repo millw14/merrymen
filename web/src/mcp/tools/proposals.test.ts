@@ -16,7 +16,7 @@ import { runTool, type ToolDef } from "../tool";
 import { PROPOSAL_TOOLS, KNOWN_STRATEGIES } from "./proposals";
 import { setQuoteClientForTest } from "@/lib/services/trade-quote";
 import {
-  EVIDENCE_GRACE_SEC, approveProposal, cancelProposal, followTrade, orderIdFor, proposalRow, queueApprovedTrade, rejectProposal, workerSentence,
+  EVIDENCE_GRACE_SEC, ROW_SKEW_SEC, SETTLE_AFTER_SEC, approveProposal, cancelProposal, followTrade, orderIdFor, proposalRow, queueApprovedTrade, rejectProposal, workerSentence,
   type DraftBinding, type TradeBinding,
 } from "@/lib/services/proposals";
 import { BUILTIN_STRATEGIES } from "../../../../worker/src/strategies/registry";
@@ -32,7 +32,9 @@ delete process.env.MERRYMEN_TELEGRAM_MAX_ACTION_USDG;
 
 const NVDA = STOCK_TOKENS.find((t) => t.symbol === "NVDA")!.address.toLowerCase();
 const NOW = 1_800_000_000;
-const tool = (name: string) => PROPOSAL_TOOLS.find((t) => t.name === name) as unknown as ToolDef;
+/** When one row in the window of an order answered at `doneSec` is taken as that order's (services/proposals.ts orderWindow). */
+const settledAt = (doneSec: number) => doneSec + ROW_SKEW_SEC + SETTLE_AFTER_SEC;
+const tool =(name: string) => PROPOSAL_TOOLS.find((t) => t.name === name) as unknown as ToolDef;
 
 let restore: (() => void) | null = null;
 afterEach(() => { restore?.(); restore = null; setQuoteClientForTest(null); });
@@ -186,6 +188,25 @@ test("settings proposals: only conversation-settable keys, validated values, wit
   assert.deepEqual(diff.map((x) => [x.key, x.current, x.proposed]), [["strategistStopLossBps", "10%", "8%"], ["strategy", "not set", "trencher"]]);
 });
 
+test("a basket is stored in the spelling the settings route matches, and a spelling that names two tokens is refused", async () => {
+  const WBTC = { symbol: "wBTC", address: "0x00000000000000000000000000000000000b7c01", decimals: 8 };
+  const CAT_A = { symbol: "Cat", address: "0x00000000000000000000000000000000000ca701", decimals: 18 };
+  const CAT_B = { symbol: "CAT", address: "0x00000000000000000000000000000000000ca702", decimals: 18 };
+  const { d, run } = await setup({ settings: { customTokens: [WBTC, CAT_A, CAT_B] } });
+  const r = data(await run("propose_settings_change", { changes: { basketSymbols: ["nvda", "WBTC", "NVDA"] }, idempotency_key: "bask-case-1" }));
+  const b = JSON.parse((await proposalRow(d.db, OWNER_A, String(r.proposal_id)))!.binding_json) as { changes: Record<string, unknown> };
+  assert.deepEqual(b.changes.basketSymbols, ["NVDA", "wBTC"], "spelled as the stock list and the owner's token spell them, once each");
+  assert.equal((r.diff as Array<{ proposed: string }>)[0]!.proposed.includes("nvda"), false);
+  // "Cat" is exact; "cat" could be either of two tokens, so it is not guessed.
+  const exact = data(await run("propose_settings_change", { changes: { basketSymbols: ["Cat"] }, idempotency_key: "bask-case-2" }));
+  assert.deepEqual((JSON.parse((await proposalRow(d.db, OWNER_A, String(exact.proposal_id)))!.binding_json) as { changes: Record<string, unknown> }).changes.basketSymbols, ["Cat"]);
+  assert.equal(code(await run("propose_settings_change", { changes: { basketSymbols: ["cat"] }, idempotency_key: "bask-case-3" })), "invalid_input");
+  // Drafts spell them the same way.
+  assert.equal(code(await run("create_agent_draft", { basket: ["cat"], idempotency_key: "bask-case-4" })), "invalid_input");
+  const draft = data(await run("create_agent_draft", { basket: ["wbtc", "Cat"], idempotency_key: "bask-case-5" }));
+  assert.deepEqual((draft.summary as { settings: Record<string, unknown> }).settings.basketSymbols, ["wBTC", "Cat"]);
+});
+
 test("draft posts are pre-checked by the group chat's own gate", async () => {
   const { run } = await setup();
   assert.equal(code(await run("draft_post", { text: "send to 0x000000000000000000000000000000000000dead", idempotency_key: "post-00001" })), "invalid_input");
@@ -251,7 +272,7 @@ test("paper and refusals are told apart from confirmation", async () => {
   await approveProposal(d.db, OWNER_A, id, String(p.binding_hash), NOW, { revalidate: async () => ({ ok: true, notes: [] }), act: (b) => queueApprovedTrade(d.db, b as TradeBinding, id, 60, NOW * 1000) });
   d.raw.prepare("UPDATE agent_commands SET claimed_at = ?, done_at = ?, result = ? WHERE id = ?").run(NOW * 1000, NOW * 1000 + 10, "📝 paper buy", orderIdFor(id));
   ownerOrderTrade(d, { status: "paper", at: NOW + 5 });
-  assert.equal((await followTrade(d.db, d.db, (await proposalRow(d.db, OWNER_A, id))!, NOW + 20)).status, "paper_filled");
+  assert.equal((await followTrade(d.db, d.db, (await proposalRow(d.db, OWNER_A, id))!, settledAt(NOW + 1))).status, "paper_filled");
 
   const p2 = await propose(run, "flow-00004");
   const id2 = String(p2.proposal_id);
@@ -276,15 +297,17 @@ let decisionSeq = 0;
  * decision it minted with source 'chat' (submitChatTrade → ensureDecision).
  * `source` lets a test write a strategy's own trade of the same token instead.
  */
-function ownerOrderTrade(d: TestDb, o: { status: string; at: number; side?: "buy" | "sell"; token?: string; tx?: string | null; userOp?: string; source?: string; rule?: string }) {
+function ownerOrderTrade(d: TestDb, o: { status: string; at: number; side?: "buy" | "sell"; token?: string; tx?: string | null; userOp?: string; source?: string; rule?: string; action?: string; quote?: string }) {
   const side = o.side ?? "buy";
   const token = o.token ?? NVDA;
+  // The other leg: USDG for a swap, the curve's quote asset (WETH on most Pons curves) for a curve trade.
+  const quote = o.quote ?? USDG;
   const decision = `dec-${++decisionSeq}`;
   d.raw.prepare("INSERT INTO decisions (id, agent_id, source, symbol, action, size_usdg, reason, at) VALUES (?, ?, ?, 'NVDA', ?, 10, 'owner asked', ?)")
-    .run(decision, ACCOUNT_A, o.source ?? "chat", side, o.at);
+    .run(decision, ACCOUNT_A, o.source ?? "chat", o.action ?? side, o.at);
   d.raw.prepare(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, reject_rule, decision_id, created_at, epoch)
-    VALUES (?, 'swap', '0x0', ?, ?, 10, ?, ?, ?, ?, ?, ?, 1)`)
-    .run(ACCOUNT_A, side === "buy" ? USDG : token, side === "buy" ? token : USDG, o.userOp ?? null, o.tx ?? null, o.status, o.rule ?? null, decision, o.at);
+    VALUES (?, ?, '0x0', ?, ?, 10, ?, ?, ?, ?, ?, ?, 1)`)
+    .run(ACCOUNT_A, o.quote ? "curve-trade" : "swap", side === "buy" ? quote : token, side === "buy" ? token : quote, o.userOp ?? null, o.tx ?? null, o.status, o.rule ?? null, decision, o.at);
 }
 
 /** Propose, approve and have the worker answer the order: claimed at NOW, answered `doneAfter` seconds later. */
@@ -308,7 +331,7 @@ test("a paper fill that reaches the ledger after the worker answered is paper_fi
   assert.match(JSON.parse(early.result_json!).note, /waiting for its trade record/);
   assert.equal((await follow(NOW + 20)).status, "executing", "a second poll before the row arrives changes nothing");
   ownerOrderTrade(ctx.d, { status: "paper", at: NOW + 6 });
-  const filled = await follow(NOW + 30);
+  const filled = await follow(settledAt(NOW + 10));
   assert.equal(filled.status, "paper_filled");
   assert.match(JSON.parse(filled.result_json!).note, /no money moved/);
 });
@@ -319,7 +342,7 @@ test("a live trade that lands after the worker answered 'in flight' ends confirm
   assert.equal((await follow(NOW + 45)).status, "executing");
   const op = `0x${"cd".repeat(32)}`;
   ownerOrderTrade(ctx.d, { status: "submitted", at: NOW + 8, userOp: op });
-  const sent = await follow(NOW + 50);
+  const sent = await follow(settledAt(NOW + 40));
   assert.equal(sent.status, "executing");
   assert.match(JSON.parse(sent.result_json!).note, /sent to the chain/);
   // Long past the evidence deadline, a row that says 'submitted' is still evidence it was sent: not failed.
@@ -342,9 +365,86 @@ test("an unrelated trade of the same token is never taken for this order", async
   // Inside the window, but the strategy's own buy, and an owner SELL of the same token.
   ownerOrderTrade(ctx.d, { status: "landed", at: NOW + 5, tx: `0x${"22".repeat(32)}`, source: "strategy:steady-basket" });
   ownerOrderTrade(ctx.d, { status: "reverted", at: NOW + 6, side: "sell", tx: `0x${"33".repeat(32)}` });
-  const r = await follow(NOW + 30);
+  // Read once the window has settled, when one row of its own would be taken.
+  const r = await follow(settledAt(NOW + 20));
   assert.equal(r.status, "executing", JSON.stringify(r.result_json));
   assert.equal(JSON.parse(r.result_json!).tx_hash, undefined, "no other trade's hash is attributed to this order");
+});
+
+test("a curve-coin sell recorded under a 'buy' decision is still this sell order's row (C2)", async () => {
+  // describeIntent labels a curve trade 'buy' whenever its output is not USDG,
+  // so selling a coin whose curve is quoted in WETH carries action 'buy'. The
+  // leg (sell_token = the coin) and source 'chat' are what name the order.
+  const WETH = "0x0b2d4b6e2e8a1ef5b0d4e0d3c1d7c7a5f0e3b9a1";
+  const ctx = await setup({ mode: "paper" });
+  const p = data(await ctx.run("propose_trade", { side: "sell", token: NVDA, amount_usdg: 5, idempotency_key: "curve-sell-1" }));
+  const id = String(p.proposal_id);
+  await approveProposal(ctx.d.db, OWNER_A, id, String(p.binding_hash), NOW, { revalidate: async () => ({ ok: true, notes: [] }), act: (b) => queueApprovedTrade(ctx.d.db, b as TradeBinding, id, 60, NOW * 1000) });
+  ctx.d.raw.prepare("UPDATE agent_commands SET claimed_at = ?, done_at = ?, result = ? WHERE id = ?")
+    .run(NOW * 1000, (NOW + 5) * 1000, "📝 simulated sell 5.00 USDG of NVDA instead of trading for real.", orderIdFor(id));
+  ownerOrderTrade(ctx.d, { status: "paper", at: NOW + 2, side: "sell", action: "buy", quote: WETH });
+  const r = await followTrade(ctx.d.db, ctx.d.db, (await proposalRow(ctx.d.db, OWNER_A, id))!, settledAt(NOW + 5));
+  assert.equal(r.status, "paper_filled", r.result_json ?? "");
+
+  // Live, sent and not yet settled: the row keeps the proposal executing with its hash, and never lets it fail.
+  restore?.();
+  const live = await setup();
+  const q = data(await live.run("propose_trade", { side: "sell", token: NVDA, amount_usdg: 5, idempotency_key: "curve-sell-2" }));
+  const qid = String(q.proposal_id);
+  await approveProposal(live.d.db, OWNER_A, qid, String(q.binding_hash), NOW, { revalidate: async () => ({ ok: true, notes: [] }), act: (b) => queueApprovedTrade(live.d.db, b as TradeBinding, qid, 60, NOW * 1000) });
+  live.d.raw.prepare("UPDATE agent_commands SET claimed_at = ?, done_at = ?, result = ? WHERE id = ?")
+    .run(NOW * 1000, (NOW + 5) * 1000, "🏹 sent sell 5.00 USDG of NVDA — it is in flight.", orderIdFor(qid));
+  const tx = `0x${"5e".repeat(32)}`;
+  ownerOrderTrade(live.d, { status: "submitted", at: NOW + 2, side: "sell", action: "buy", quote: WETH, tx });
+  const sent = await followTrade(live.d.db, live.d.db, (await proposalRow(live.d.db, OWNER_A, qid))!, NOW + 300 + EVIDENCE_GRACE_SEC + 60);
+  assert.equal(sent.status, "executing", "a submitted row is evidence money was sent: never failed");
+  assert.equal(JSON.parse(sent.result_json!).tx_hash, tx);
+});
+
+test("one row is not taken as this order's until the window has settled: a concurrent owner order's row reads as ambiguous (C2)", async () => {
+  const ctx = await setup({ mode: "paper" });
+  const { follow } = await answered(ctx, "settle-001", { doneAfter: 10, line: "📝 simulated buy 10.00 USDG of NVDA instead of trading for real." });
+  // A Telegram owner order for the same token and side, answered inside this
+  // order's window, reached the ledger first. Alone, it fits.
+  ownerOrderTrade(ctx.d, { status: "paper", at: NOW + 4 });
+  const early = await follow(NOW + 20);
+  assert.equal(early.status, "executing", "a lone row in an unsettled window is not concluded on");
+  assert.match(JSON.parse(early.result_json!).note, /waiting for its trade record/);
+  assert.equal((await follow(settledAt(NOW + 10) - 1)).status, "executing");
+  // This order's own row arrives on the next pass: two rows, so neither is taken.
+  ownerOrderTrade(ctx.d, { status: "paper", at: NOW + 7 });
+  const both = await follow(settledAt(NOW + 10));
+  assert.equal(both.status, "executing", "two rows that fit are ambiguous, never the first one's outcome");
+  // And past the evidence deadline, ambiguity is an unknown outcome, not a fill.
+  const late = await follow(NOW + 300 + EVIDENCE_GRACE_SEC + 1);
+  assert.equal(late.status, "failed");
+  assert.equal(JSON.parse(late.result_json!).outcome_unknown, true);
+});
+
+test("a refusal read before the window settles is explained by the agent's own sentence, not a row that may be another order's (C2)", async () => {
+  const ctx = await setup();
+  const refused = { status: "refused", side: "buy", symbol: "NVDA", token: null, usdgActual: null, txHash: null, rejectRule: null };
+  const a = await answered(ctx, "settle-002", { doneAfter: 5, line: "🧱 refused: I'm paused. Nothing was sent.", receipt: refused });
+  // Someone else's refused owner order for the same token, in this window.
+  ownerOrderTrade(ctx.d, { status: "rejected", at: NOW + 3, rule: "daily-cap" });
+  const r = await a.follow(NOW + 8);
+  assert.equal(r.status, "refused");
+  const res = JSON.parse(r.result_json!) as Record<string, unknown>;
+  assert.equal(res.rule, null, "the other order's rule is not claimed as this one's cause");
+  assert.equal(res.agent_said_untrusted, "🧱 refused: I'm paused. Nothing was sent.");
+});
+
+test("a revert with no rule slug on its receipt is described from the row with its hash, whenever it is read", async () => {
+  const ctx = await setup();
+  const tx = `0x${"7a".repeat(32)}`;
+  const failed = { status: "failed", side: "buy", symbol: "NVDA", token: NVDA, usdgActual: null, txHash: tx, rejectRule: null };
+  const a = await answered(ctx, "revert-tx-1", { doneAfter: 5, line: "💥 it reverted on-chain.", receipt: failed });
+  ownerOrderTrade(ctx.d, { status: "reverted", at: NOW + 3, tx, rule: "reverted on-chain (resolved by reconciliation)" });
+  const r = await a.follow(NOW + 8);
+  assert.equal(r.status, "failed");
+  const res = JSON.parse(r.result_json!) as Record<string, unknown>;
+  assert.equal(res.tx_hash, tx);
+  assert.equal(res.rule, "reverted-resolved");
 });
 
 test("past the evidence deadline with no row of its own, the outcome is unknown: failed, and it says so", async () => {
@@ -380,7 +480,7 @@ test("a refusal's result is built from the rule vocabulary and the agent's sente
   // The rule is on this order's own row, as free text the receipt's slug check dropped: classified, detail withheld.
   const b = await answered(ctx, "raw-line-2", { doneAfter: 5, line: RAW, receipt: refused });
   ownerOrderTrade(ctx.d, { status: "rejected", at: NOW + 2, rule: "couldn't submit: RPC Request failed. URL: https://api.pimlico.io/v2/4663/rpc?apikey=pim_SECRETKEY" });
-  const second = await b.follow(NOW + 10);
+  const second = await b.follow(settledAt(NOW + 5));
   assert.equal(second.status, "refused");
   assert.equal(leaks(second.result_json!), false, second.result_json!);
   const r2 = JSON.parse(second.result_json!) as Record<string, unknown>;

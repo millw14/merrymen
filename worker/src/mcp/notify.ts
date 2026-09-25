@@ -212,7 +212,7 @@ export function canonicalParams(params: NotifyParams): string {
 /** One plain sentence saying what a subscription will send. */
 export function describeSubscription(kind: NotifyKind, params: NotifyParams): string {
   switch (kind) {
-    case "trade_confirmed": return "A message for each live trade confirmed on chain (with its transaction).";
+    case "trade_confirmed": return "A message for each live trade (a swap or launchpad curve trade) confirmed on chain, with its transaction. Transfers and savings-vault moves are not trades and are not announced.";
     case "risk_halt": return "A message when the kill switch is used or the drawdown breaker trips (a tripped breaker at most once every 6 hours).";
     case "provider_failure": return "A message when market data, the decision service or the AI model provider fails (at most once every 6 hours).";
     case "stale_data": return "A message when a running agent stops reporting a heartbeat (at most once every 6 hours).";
@@ -569,6 +569,13 @@ export interface BasisReplayFill {
 }
 
 const EVIDENCED_SOURCES: ReadonlySet<string> = new Set(["receipt", "paper"]);
+/**
+ * The one basis_source that says a leg was ESTIMATED: booked from the
+ * pre-trade quote because the receipt could not be read (worker/src/
+ * order-receipt.ts: "receipt" | "paper" | "quote"). A missing source is
+ * unknown provenance — not evidence, but not known to be an estimate either.
+ */
+const ESTIMATED_SOURCE = "quote";
 
 /**
  * WHICH SELLS REALIZED AGAINST A COST NOTHING ESTIMATED — the same replay as
@@ -606,6 +613,50 @@ export function vouchedSells(fills: readonly BasisReplayFill[], complete: boolea
   return vouched;
 }
 
+/**
+ * THE SELLS WHOSE COST PROVABLY HELD AN ESTIMATE — what a message may call
+ * "estimated". vouchedSells declines a sell for reasons that are not an
+ * estimate (a read cut short, a row with no side or quantity, a cost of
+ * unknown provenance), and not vouching is not the same as knowing the cost
+ * was estimated. This says so only when it is shown: a buy booked from the
+ * quote (ESTIMATED_SOURCE) whose cost is still in the basis the sell realised
+ * against, i.e. the coin has not been flat since.
+ *
+ * The proof needs nothing before the rows it reads, so a cut read (a newest
+ * suffix of the coin's tape) still proves what it proves: after a quote-booked
+ * buy of q the account holds at least q whatever came earlier, and each later
+ * row of known side and quantity moves that floor the way it moves the
+ * holding. While the floor is above zero the coin has not been flat, so that
+ * buy's cost is in the basis. A buy of unknown quantity cannot lower a holding
+ * and leaves the floor; any other row of unknown side or quantity ends the
+ * proof. `fills` oldest first, contiguous (no row between two of them left out).
+ */
+export function estimatedCostSells(fills: readonly BasisReplayFill[]): Set<string> {
+  const out = new Set<string>();
+  /** Per coin: a floor under the holding, present only while a quote-booked buy is provably still in its basis. */
+  const floor = new Map<string, bigint>();
+  for (const f of fills) {
+    const qty = f.qty !== null && /^\d+$/.test(f.qty.trim()) ? BigInt(f.qty.trim()) : null;
+    const held = floor.get(f.token);
+    if (f.side === "sell" && held !== undefined && held > 0n) out.add(f.op);
+    if (f.side === "buy") {
+      if (qty === null) continue;
+      if (f.source === ESTIMATED_SOURCE) floor.set(f.token, (held ?? 0n) + qty);
+      else if (held !== undefined) floor.set(f.token, held + qty);
+      continue;
+    }
+    if (f.side === null || qty === null) {
+      floor.delete(f.token);
+      continue;
+    }
+    if (held === undefined) continue;
+    const left = held > qty ? held - qty : 0n;
+    if (left === 0n) floor.delete(f.token);
+    else floor.set(f.token, left);
+  }
+  return out;
+}
+
 /** Rows one coin's replay reads before it vouches for nothing (web/src/lib/profile-trades.ts BASIS_REPLAY_ROWS). */
 const BASIS_REPLAY_ROWS = 5_000;
 
@@ -618,11 +669,15 @@ const BASIS_REPLAY_ROWS = 5_000;
  * account's rows carry; an account written under two spellings would replay as
  * two partial tapes, and vouches for nothing (portfolio.ts readTradeSpelling —
  * here over the three spellings this pass reads every account under, which the
- * trades index can serve). Returns op keys (opKeyOf). NEVER THROWS: a replay
- * that cannot be read vouches for nothing, and nothing is printed as measured.
+ * trades index can serve). Returns op keys (opKeyOf): `measured`, and apart
+ * from it `estimatedCost`, the sells estimatedCostSells shows realised against
+ * a quote-booked cost. NEVER THROWS: a replay that cannot be read vouches for
+ * nothing and shows nothing, so nothing is printed as measured and nothing is
+ * called estimated.
  */
-async function evidencedLiveSells(shared: Db, sells: readonly TradeRow[]): Promise<Set<string>> {
+async function evidencedLiveSells(shared: Db, sells: readonly TradeRow[]): Promise<{ measured: Set<string>; estimatedCost: Set<string> }> {
   const out = new Set<string>();
+  const estimatedCost = new Set<string>();
   const byAccount = new Map<string, TradeRow[]>();
   for (const t of sells) {
     const token = typeof t.sell_token === "string" ? t.sell_token.toLowerCase() : "";
@@ -668,29 +723,48 @@ async function evidencedLiveSells(shared: Db, sells: readonly TradeRow[]): Promi
         byCoin.set(coin, [...(byCoin.get(coin) ?? []), { op, side, token: coin, qty, source }]);
       }
       const vouched = new Set<string>();
+      const estimated = new Set<string>();
       for (const fills of byCoin.values()) {
         for (const op of vouchedSells(fills, fills.length <= BASIS_REPLAY_ROWS)) vouched.add(op);
+        // A cut read is a newest suffix of the tape, which the proof accepts.
+        for (const op of estimatedCostSells(fills)) estimated.add(op);
       }
       for (const t of rows) {
         const op = opKeyOf(t);
         if (vouched.has(op) && sellSource.get(op) === "receipt") out.add(op);
+        else if (estimated.has(op)) estimatedCost.add(op);
       }
     } catch {
-      /* unreplayable: nothing from this account is printed as measured */
+      /* unreplayable: nothing from this account is printed as measured, or called estimated */
     }
   }
-  return out;
+  return { measured: out, estimatedCost };
 }
+
+/** What the replay established about a sell's realised P&L (evidencedLiveSells). */
+export type PnlEvidence = "measured" | "estimated_cost" | "unconfirmed";
+
+/** Why a sell's realised P&L is left out of its message: each sentence claims only what its case shows. */
+export const PNL_NOT_STATED = {
+  estimated_proceeds: "Realised P&L is not stated: its proceeds were estimated from the quote, not read from a receipt.",
+  estimated_cost: "Realised P&L is not stated: part of the cost it sold against was estimated from the quote, not read from a receipt.",
+  unconfirmed: "Realised P&L is not stated: it could not be confirmed that both its cost and its proceeds were read from receipts.",
+} as const;
 
 /**
  * What a confirmed trade's message may say about money, and no more than the
  * ledger evidences. The cash leg is stated as a fact only when it was read from
  * the receipt; a leg booked from the pre-trade quote is an estimate and says
  * so, and a row with no filled amount at all states its ORDER size as that.
- * A realised P&L is stated only for a sell `measured` vouches for; otherwise it
- * is left out and the message says why.
+ * A realised P&L is stated only for a sell the replay measured; otherwise it
+ * is left out, and the message gives only the reason the evidence supports:
+ * "estimated" when its own proceeds were booked from the quote or the replay
+ * showed a quote-booked cost in its basis, and otherwise, neutrally, that it
+ * could not be confirmed both sides came from receipts. A replay that could
+ * not run (an account written under two spellings, a read that failed, a tape
+ * cut short) is not evidence of an estimate. Only fills reach here (evalTrades).
  */
-function tradeText(scope: AgentScope, t: TradeRow, measured: boolean): string {
+function tradeText(scope: AgentScope, t: TradeRow, pnlEvidence: PnlEvidence): string {
   const symbol = plain(t.fill_symbol, 16) ?? "a token";
   const fill = num(t.fill_cash_usdg);
   const order = num(t.amount_usdg);
@@ -706,72 +780,124 @@ function tradeText(scope: AgentScope, t: TradeRow, measured: boolean): string {
     else if (fill !== null) money = ` (about ${usd(Math.abs(fill))} USDG, estimated)`;
     else if (order !== null) money = ` (${usd(Math.abs(order))} USDG requested)`;
   }
-  const what = side ? `${side} ${symbol}${money}.` : `A ${plain(t.kind, 24) ?? "trade"} landed${money}.`;
+  // No fill side recorded: say what kind of trade landed, never which way it went.
+  const what = side ? `${side} ${symbol}${money}.` : `A ${t.kind === "curve-trade" ? "launchpad curve trade" : "swap"} landed${money}.`;
   const pnl = num(t.realized_pnl_usdg);
   let realized = "";
   if (t.fill_side === "sell" && pnl !== null) {
-    realized = measured
+    realized = t.basis_source === "receipt" && pnlEvidence === "measured"
       ? ` Realised P&L ${signed(pnl)} USDG.`
-      : " Realised P&L is not stated: part of the cost it sold against, or its proceeds, was estimated rather than read from a receipt.";
+      : ` ${t.basis_source === ESTIMATED_SOURCE
+        ? PNL_NOT_STATED.estimated_proceeds
+        : pnlEvidence === "estimated_cost" ? PNL_NOT_STATED.estimated_cost : PNL_NOT_STATED.unconfirmed}`;
   }
   return `${scope.name} · LIVE\n${what}${realized}\nConfirmed on chain: ${t.tx_hash}`;
 }
 
+const TRADE_COLS = "id, agent_id, status, kind, tx_hash, user_op_hash, sell_token, fill_side, fill_symbol, fill_cash_usdg, amount_usdg, realized_pnl_usdg, basis_source, created_at";
+const TRADE_COLS_T = TRADE_COLS.split(", ").map((c) => `t.${c}`).join(", ");
+
 /**
- * Live trades that landed with a transaction. Trades are resolved IN PLACE
- * (a 'submitted' row later becomes 'landed' and gains its tx hash), so a plain
- * id cursor would skip every trade that was still in flight when it passed.
- * The cursor keeps a scan watermark plus the few ids still pending, and
- * re-checks those; the dedupe key is the transaction, so a re-recorded copy
- * of the same operation cannot notify twice.
+ * The row that speaks for each given row's OPERATION (the copy distinctTrades
+ * keeps), by the given row's id. A redeploy re-records an operation as a bare
+ * 'swap' stamped at the restart, so a landed row may be the copy of a vault
+ * deposit (which must not be announced as a trade) or of a trade from before
+ * the subscription (which is not news). A row with no op hash is its own
+ * operation. The copies of an operation are at most OP_COPY_REACH_SEC younger
+ * than it, so the collapse reaches that far back past the oldest row asked
+ * about. Narrowing the scope to the asked-about op hashes keeps each of their
+ * partitions whole, so it does not change which copy speaks.
+ */
+async function operationsOf(shared: Db, scope: AgentScope, rows: readonly TradeRow[]): Promise<Map<number, TradeRow>> {
+  const out = new Map<number, TradeRow>();
+  const hashOf = (t: TradeRow) => (typeof t.user_op_hash === "string" && t.user_op_hash !== "" ? t.user_op_hash.toLowerCase() : null);
+  const hashed = rows.filter((t) => hashOf(t) !== null);
+  for (const t of rows) if (hashOf(t) === null) out.set(Number(t.id), t);
+  if (!hashed.length) return out;
+  const ops = [...new Set(hashed.map((t) => hashOf(t)!))];
+  const from = Math.min(...hashed.map((t) => Number(t.created_at))) - OP_COPY_REACH_SEC;
+  const speakers = (await shared
+    .prepare(`SELECT ${TRADE_COLS_T} FROM ${distinctTrades(
+      `t.agent_id IN (${placeholders(scope.ids.length)}) AND t.created_at >= ? AND lower(t.user_op_hash) IN (${placeholders(ops.length)})`,
+    )}`)
+    .all(...scope.ids, from, ...ops)) as TradeRow[];
+  const key = (t: TradeRow) => `${String(t.agent_id).toLowerCase()}|${hashOf(t)}`;
+  const byOp = new Map(speakers.filter((s) => hashOf(s) !== null).map((s) => [key(s), s] as const));
+  for (const t of hashed) out.set(Number(t.id), byOp.get(key(t)) ?? t);
+  return out;
+}
+
+/**
+ * Live TRADES that landed with a transaction: fills (FILL_KINDS), read one
+ * operation at a time. A landed transfer or savings-vault move is not a trade
+ * and is not announced, and neither is a redeploy's re-recorded copy of one
+ * (operationsOf), nor a copy of a trade from before the subscription or past
+ * TRADE_MAX_AGE_SEC — the operation's own row decides, never the copy's.
+ *
+ * Trades are resolved IN PLACE (a 'submitted' row later becomes 'landed' and
+ * gains its tx hash), so a plain id cursor would skip every trade that was
+ * still in flight when it passed. The cursor keeps a scan watermark plus the
+ * few ids still pending, and re-checks those; the dedupe key is the
+ * operation's transaction, so a re-recorded copy cannot notify twice.
  */
 async function evalTrades(shared: Db, sub: SubRow, scope: AgentScope, cursor: Record<string, unknown>, now: number): Promise<Evaluation> {
   if (!scope.ids.length) return { candidates: [], cursor: null };
   const after = num(cursor.t) ?? 0;
   const pendingIn = Array.isArray(cursor.p) ? cursor.p.map(num).filter((n): n is number => n !== null).slice(-MAX_PENDING_TRADES) : [];
-  const cols = "id, agent_id, status, kind, tx_hash, user_op_hash, sell_token, fill_side, fill_symbol, fill_cash_usdg, amount_usdg, realized_pnl_usdg, basis_source, created_at";
   const idsIn = placeholders(scope.ids.length);
   const recheck = pendingIn.length
-    ? ((await shared.prepare(`SELECT ${cols} FROM trades WHERE id IN (${placeholders(pendingIn.length)}) AND agent_id IN (${idsIn})`)
+    ? ((await shared.prepare(`SELECT ${TRADE_COLS} FROM trades WHERE id IN (${placeholders(pendingIn.length)}) AND agent_id IN (${idsIn})`)
       .all(...pendingIn, ...scope.ids)) as TradeRow[])
     : [];
   const scan = (await shared
-    .prepare(`SELECT ${cols} FROM trades WHERE agent_id IN (${idsIn}) AND id > ? AND created_at >= ? ORDER BY id ASC LIMIT ?`)
+    .prepare(`SELECT ${TRADE_COLS} FROM trades WHERE agent_id IN (${idsIn}) AND id > ? AND created_at >= ? ORDER BY id ASC LIMIT ?`)
     .all(...scope.ids, after, sub.created_at, 100)) as TradeRow[];
 
-  const emitted: Array<{ key: string; row: TradeRow }> = [];
+  const txOf = (t: TradeRow) => (typeof t.tx_hash === "string" && TX.test(t.tx_hash) ? t.tx_hash.toLowerCase() : null);
+  const landed: TradeRow[] = [];
   const pending = new Set<number>();
-  const seen = new Set<string>();
-  const consider = (t: TradeRow): "emit" | "pending" | "done" => {
-    const tx = typeof t.tx_hash === "string" && TX.test(t.tx_hash) ? t.tx_hash.toLowerCase() : null;
-    if (t.status === "landed" && tx) return now - Number(t.created_at) <= TRADE_MAX_AGE_SEC ? "emit" : "done";
+  const consider = (t: TradeRow): "landed" | "pending" | "done" => {
+    if (t.status === "landed" && txOf(t)) return now - Number(t.created_at) <= TRADE_MAX_AGE_SEC ? "landed" : "done";
     const inFlight = t.status === "submitted" || t.status === "landed";
     return inFlight && now - Number(t.created_at) < PENDING_TRADE_MAX_AGE_SEC ? "pending" : "done";
   };
-  const emit = (t: TradeRow) => {
-    const tx = t.tx_hash!.toLowerCase();
-    if (seen.has(tx)) return;
-    seen.add(tx);
-    emitted.push({ key: `trade_confirmed:${sub.id}:${tx}`, row: t });
-  };
   for (const t of recheck) {
     const v = consider(t);
-    if (v === "emit") emit(t);
+    if (v === "landed") landed.push(t);
     else if (v === "pending") pending.add(Number(t.id));
   }
   let watermark = after;
   for (const t of scan) {
-    if (emitted.length >= TRADES_PER_EVAL) break; // the rest next pass: the watermark stops here
+    if (landed.length >= TRADES_PER_EVAL) break; // the rest next pass: the watermark stops here
     const v = consider(t);
-    if (v === "emit") emit(t);
+    if (v === "landed") landed.push(t);
     else if (v === "pending") pending.add(Number(t.id));
     watermark = Math.max(watermark, Number(t.id));
   }
+
+  const ops = landed.length ? await operationsOf(shared, scope, landed) : new Map<number, TradeRow>();
+  const emitted: Array<{ key: string; row: TradeRow }> = [];
+  const seen = new Set<string>();
+  for (const t of landed) {
+    const op = ops.get(Number(t.id)) ?? t;
+    const tx = txOf(op);
+    if (op.status !== "landed" || !tx) continue; // the operation's own row does not say it landed
+    if (!(FILL_KINDS as readonly string[]).includes(String(op.kind))) continue; // a transfer or vault move, or a copy of one: not a trade
+    const at = Number(op.created_at);
+    if (at < sub.created_at || now - at > TRADE_MAX_AGE_SEC) continue; // a copy of an older operation: history, not news
+    if (seen.has(tx)) continue;
+    seen.add(tx);
+    emitted.push({ key: `trade_confirmed:${sub.id}:${tx}`, row: op });
+  }
   // Only the sells whose realised P&L the message would state need the replay.
-  const measured = await evidencedLiveSells(shared, emitted
+  const evidence = await evidencedLiveSells(shared, emitted
     .map((e) => e.row)
     .filter((t) => t.fill_side === "sell" && num(t.realized_pnl_usdg) !== null && t.basis_source === "receipt"));
-  const candidates: Candidate[] = emitted.map((e) => ({ key: e.key, text: tradeText(scope, e.row, measured.has(opKeyOf(e.row))), book: "live" }));
+  const pnlOf = (t: TradeRow): PnlEvidence => {
+    const op = opKeyOf(t);
+    return evidence.measured.has(op) ? "measured" : evidence.estimatedCost.has(op) ? "estimated_cost" : "unconfirmed";
+  };
+  const candidates: Candidate[] = emitted.map((e) => ({ key: e.key, text: tradeText(scope, e.row, pnlOf(e.row)), book: "live" }));
   const p = [...pending].sort((a, b) => a - b).slice(-MAX_PENDING_TRADES);
   const changed = watermark !== after || p.join(",") !== pendingIn.join(",");
   return { candidates, cursor: changed ? { ...cursor, t: watermark, p } : null };

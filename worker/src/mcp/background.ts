@@ -22,9 +22,12 @@
  * each subscription and delivery by compare-and-set (notify.ts), and retention
  * is idempotent DELETEs. Without the lease one hung call silenced that pass
  * until the process restarted, and jobs.ts's own stale-pass recovery was never
- * reached. The database work is bounded too (boundedDb): every call gives up
- * after CALL_TIMEOUT_MS, and inside a transaction Postgres itself cancels a
- * statement past STATEMENT_TIMEOUT_MS or a lock wait past LOCK_TIMEOUT_MS.
+ * reached. The WAIT on the database is bounded too (boundedDb): the pass stops
+ * waiting on any one statement after CALL_TIMEOUT_MS and on a whole transaction
+ * (asking the pool for a connection, its statements and COMMIT) after
+ * TX_TIMEOUT_MS, and inside a transaction Postgres itself cancels a statement
+ * past STATEMENT_TIMEOUT_MS or a lock wait past LOCK_TIMEOUT_MS. What those
+ * bounds do not reach is in boundedDb's comment.
  */
 import { createPublicClient, http } from "viem";
 import { robinhoodChain } from "../../../packages/core/src/index";
@@ -48,6 +51,13 @@ export const STATEMENT_TIMEOUT_MS = 15_000;
 export const LOCK_TIMEOUT_MS = 5_000;
 /** The pass stops waiting on any one database call after this: past the server's own cut-off, so that normally fires first. */
 export const CALL_TIMEOUT_MS = STATEMENT_TIMEOUT_MS + 5_000;
+/**
+ * The pass stops waiting on one transaction after this, from asking the pool
+ * for a connection to COMMIT: longer than any one call it holds, so a single
+ * slow statement is cut by the server or by CALL_TIMEOUT_MS first, and well
+ * inside PASS_LEASE_MS.
+ */
+export const TX_TIMEOUT_MS = CALL_TIMEOUT_MS + 10_000;
 
 export interface McpBackgroundOptions {
   /** The shared Postgres (the same pooled driver the mirror uses). */
@@ -59,6 +69,7 @@ export interface McpBackgroundOptions {
   clockMs?: () => number;
   leaseMs?: number;
   callTimeoutMs?: number;
+  txTimeoutMs?: number;
 }
 
 export function mcpBackgroundEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -73,13 +84,20 @@ export class DbCallTimeout extends Error {
   }
 }
 
-/** Rejects with DbCallTimeout when `p` has not settled within `ms`. `p` itself is not cancelled. */
-function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+/**
+ * Rejects with DbCallTimeout when `p` has not settled within `ms`, calling
+ * `onTimeout` first. `p` itself is not cancelled (a later rejection of it is
+ * handled by the race, never unhandled).
+ */
+function withDeadline<T>(p: Promise<T>, ms: number, onTimeout?: () => void): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
     p,
     new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new DbCallTimeout()), ms);
+      timer = setTimeout(() => {
+        onTimeout?.();
+        reject(new DbCallTimeout());
+      }, ms);
     }),
   ]).finally(() => {
     if (timer) clearTimeout(timer);
@@ -89,6 +107,8 @@ function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
 export interface DbBounds {
   /** Client-side: the most any one call is waited on. */
   callMs: number;
+  /** Client-side: the most one transaction is waited on, pool checkout and COMMIT included. */
+  txMs: number;
   /** Server-side, inside transactions (Postgres only). */
   statementMs: number;
   lockMs: number;
@@ -96,38 +116,72 @@ export interface DbBounds {
 }
 
 /**
- * The shared Db, bounded for background work. Every call races `callMs`, so a
- * pass cannot wait for ever on a pool that never hands out a connection, a
- * half-open socket or a row lock; it fails, logs, and the next tick retries.
- * Every transaction starts with SET LOCAL statement_timeout and lock_timeout,
- * so Postgres also cancels the statement itself and hands the connection back
- * clean. SET LOCAL ends with the transaction, so nothing leaks onto the pooled
- * connection the mirror shares; statements outside a transaction have only the
- * client-side bound (a session-level SET would leak, and the Db seam has no
- * per-statement options). Retention runs each DELETE in its own transaction
- * for that reason (maintenance.ts).
+ * The shared Db, bounded for background work, so a pass cannot wait for ever
+ * on a pool that never hands out a connection, a half-open socket or a row
+ * lock: it fails, logs, and the next tick retries.
+ *
+ * - Every statement races `callMs`.
+ * - Every transaction races `txMs` as a whole: the pool checkout (the pool has
+ *   no connection timeout of its own), each statement, COMMIT. A transaction
+ *   the pass has stopped waiting for is ABANDONED: if the pool hands it a
+ *   connection later it runs nothing and rolls back, a statement it has not
+ *   sent yet is never sent, and work that finishes late rolls back instead of
+ *   committing. (One the deadline catches inside COMMIT may still commit;
+ *   every pass is safe with that, as it is with a second replica.)
+ * - Every transaction starts with SET LOCAL statement_timeout and lock_timeout,
+ *   so Postgres also cancels a slow statement itself and hands the connection
+ *   back clean. SET LOCAL ends with the transaction, so nothing leaks onto the
+ *   pooled connection the mirror shares.
+ *
+ * NOT BOUNDED HERE, because the Db seam cannot reach it: the CONNECTION. A
+ * statement stuck on a half-open socket keeps its connection checked out, and
+ * a ROLLBACK queues behind it, until the socket itself fails; the pool sets no
+ * query timeout or keepalive (worker/src/db.ts). A statement outside a
+ * transaction that the pass stopped waiting for still runs whenever the pool
+ * gets to it, and has only the client-side bound (a session-level SET would
+ * leak onto the shared connection, and the seam has no per-statement options);
+ * retention runs each DELETE in its own transaction for that reason
+ * (maintenance.ts).
  */
 export function boundedDb(db: Db, b: DbBounds): Db {
+  return boundedWithin(db, b, () => false);
+}
+
+/** `boundedDb` for a handle inside a transaction: `abandoned` says the pass has stopped waiting for that transaction. */
+function boundedWithin(db: Db, b: DbBounds, abandoned: () => boolean): Db {
+  const call = <T>(send: () => Promise<T>): Promise<T> =>
+    abandoned() ? Promise.reject(new DbCallTimeout()) : withDeadline(send(), b.callMs);
   return {
     prepare(sql) {
       const stmt = db.prepare(sql);
       return {
-        run: (...params) => withDeadline(stmt.run(...params), b.callMs),
-        get: (...params) => withDeadline(stmt.get(...params), b.callMs),
-        all: (...params) => withDeadline(stmt.all(...params), b.callMs),
+        run: (...params) => call(() => stmt.run(...params)),
+        get: (...params) => call(() => stmt.get(...params)),
+        all: (...params) => call(() => stmt.all(...params)),
       };
     },
-    exec: (sql) => withDeadline(db.exec(sql), b.callMs),
-    tx: (fn) =>
-      db.tx(async (tx) => {
-        const bounded = boundedDb(tx, b);
+    exec: (sql) => call(() => db.exec(sql)),
+    tx: (fn) => {
+      let gaveUp = false;
+      const dropped = () => gaveUp || abandoned();
+      const work = db.tx(async (tx) => {
+        // Handed a connection after the pass stopped waiting: do nothing, roll back, give it back.
+        if (dropped()) throw new DbCallTimeout();
+        const bounded = boundedWithin(tx, b, dropped);
         if (b.postgres) {
           // Integers are milliseconds to Postgres; SET takes no bind parameters.
           await bounded.prepare(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(b.statementMs))}`).run();
           await bounded.prepare(`SET LOCAL lock_timeout = ${Math.max(1, Math.floor(b.lockMs))}`).run();
         }
-        return fn(bounded);
-      }),
+        const out = await fn(bounded);
+        // Never COMMIT what the pass has already reported as failed.
+        if (dropped()) throw new DbCallTimeout();
+        return out;
+      });
+      return withDeadline(work, b.txMs, () => {
+        gaveUp = true;
+      });
+    },
   };
 }
 
@@ -138,7 +192,13 @@ export function makeMcpBackground(o: McpBackgroundOptions): () => void {
   const env = o.env ?? process.env;
   const clock = o.clockMs ?? (() => performance.now());
   const leaseMs = o.leaseMs ?? PASS_LEASE_MS;
-  const bounds: DbBounds = { callMs: o.callTimeoutMs ?? CALL_TIMEOUT_MS, statementMs: STATEMENT_TIMEOUT_MS, lockMs: LOCK_TIMEOUT_MS, postgres: true };
+  const bounds: DbBounds = {
+    callMs: o.callTimeoutMs ?? CALL_TIMEOUT_MS,
+    txMs: o.txTimeoutMs ?? TX_TIMEOUT_MS,
+    statementMs: STATEMENT_TIMEOUT_MS,
+    lockMs: LOCK_TIMEOUT_MS,
+    postgres: true,
+  };
   let schema: Promise<boolean> | null = null;
   /** Each pass's slot: when the running one started, and which one it is (a late finisher must not free a newer pass's slot). */
   const slots = new Map<PassName, { gen: number; startedAt: number }>();

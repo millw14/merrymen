@@ -11,8 +11,9 @@
  *    fetch it through the repo's SSRF-guarded transport (DNS pinned to public
  *    addresses, https only, no redirects, byte cap, timeout), accept only a 200
  *    JSON answer, require the document's client_id to equal the URL exactly,
- *    and cache only the fields we use, briefly. Claude and Codex both use this
- *    when advertised.
+ *    and cache only the fields we use (bounded, canonical), briefly, and only
+ *    from the consent steps (see ResolveOptions.cacheNew). Claude and Codex
+ *    both use this when advertised.
  * 2. Dynamic Client Registration (RFC 7591), kept for clients that have not
  *    moved to CIMD. Registration is open (as the MCP spec expects) but rate
  *    limited, and a registered client proves nothing about who it is: the
@@ -60,8 +61,13 @@ const CIMD_MAX_TTL = 86_400;
 /** How old a cached metadata document may be and still be used when a re-fetch fails. */
 const CIMD_STALE_OK_SEC = 86_400;
 const MAX_REDIRECTS = 10;
-/** A metadata document's redirect_uris, serialised, may not exceed this (real clients list a few short URLs). */
-const CIMD_REDIRECTS_MAX_CHARS = 4096;
+/**
+ * A metadata document's redirect_uris, as stored (canonical hrefs, serialised
+ * as JSON), may not exceed this many UTF-8 bytes. Real clients list a few
+ * short URLs. With the ≤ 512-byte client_id and the ≤ 300-byte name, a cached
+ * row stays under about 3 KB.
+ */
+export const CIMD_REDIRECTS_MAX_BYTES = 2048;
 const NAME_MAX = 100;
 
 /**
@@ -100,6 +106,17 @@ export function validRedirectUri(raw: unknown): string | null {
   return null;
 }
 
+/**
+ * A valid redirect URI in canonical form (URL.href): ASCII only (IDNA host,
+ * percent-encoded path and query), default port and dot segments removed.
+ * That is also the form a code is actually sent to (the redirect Location is
+ * built by the same parser), so storing it loses nothing redirectMatches needs.
+ */
+function canonicalRedirectUri(raw: unknown): string | null {
+  const ok = validRedirectUri(raw);
+  return ok === null ? null : new URL(ok).href;
+}
+
 function isLoopback(url: URL): boolean {
   return url.protocol === "http:" && LOOPBACK.has(url.hostname);
 }
@@ -118,6 +135,11 @@ export function isLoopbackRedirect(raw: string): boolean {
  * loopback redirect may use any port, because native clients bind an
  * ephemeral one. Scheme, host, path and query must still match exactly, and
  * localhost never matches 127.0.0.1 (they can be different listeners).
+ *
+ * A metadata document's redirects are stored in canonical form (URL.href), so
+ * the requested URI also matches when ITS canonical form is registered. That
+ * form is exactly where the code goes (the redirect Location is serialised by
+ * the same parser), so this compares the real destination, not a looser one.
  */
 export function redirectMatches(registered: readonly string[], requested: string): boolean {
   let req: URL;
@@ -127,8 +149,9 @@ export function redirectMatches(registered: readonly string[], requested: string
     return false;
   }
   if (!validRedirectUri(requested)) return false;
+  const destination = req.href;
   for (const r of registered) {
-    if (r === requested) return true;
+    if (r === requested || r === destination) return true;
     let reg: URL;
     try {
       reg = new URL(r);
@@ -298,11 +321,13 @@ export function parseCimd(clientId: string, body: Buffer): Omit<McpClient, "secr
   if (method !== "none") throw new ClientError("invalid_client_metadata", "only public clients (token_endpoint_auth_method none) are supported by metadata documents");
   if ("client_secret" in doc || "client_secret_expires_at" in doc) throw new ClientError("invalid_client_metadata", "a metadata document must not contain a client secret");
   const uris = Array.isArray(doc.redirect_uris) ? doc.redirect_uris : [];
-  const redirectUris = uris.map(validRedirectUri).filter((u): u is string => !!u);
+  // Canonical ASCII hrefs, never the raw strings: what is stored is what a
+  // code can be sent to, and its size is its byte count.
+  const redirectUris = uris.map(canonicalRedirectUri).filter((u): u is string => !!u);
   if (!redirectUris.length || redirectUris.length !== uris.length || redirectUris.length > MAX_REDIRECTS) {
     throw new ClientError("invalid_redirect_uri", "client metadata redirect_uris must be https or loopback URLs");
   }
-  if (JSON.stringify(redirectUris).length > CIMD_REDIRECTS_MAX_CHARS) {
+  if (Buffer.byteLength(JSON.stringify(redirectUris), "utf8") > CIMD_REDIRECTS_MAX_BYTES) {
     throw new ClientError("invalid_redirect_uri", "client metadata redirect_uris are too long");
   }
   if (doc.grant_types !== undefined && !(Array.isArray(doc.grant_types) && doc.grant_types.includes("authorization_code"))) {
@@ -325,6 +350,17 @@ export interface ResolveOptions {
   /** Hostnames a metadata document may never be served from: `ownHostsOf(cfg)`. */
   ownHosts: ReadonlySet<string>;
   fetcher?: CimdFetcher;
+  /**
+   * May a freshly fetched metadata document create a NEW cache row? Only the
+   * consent steps (authorize, and the consent page, which only ever resolves
+   * the client_id its parked request names) pass true. Any URL is a client_id
+   * until fetched, so every endpoint that cached would let anyone park rows in
+   * the shared database. Everywhere else (the token and revocation endpoints,
+   * where a client holding no code or token cannot succeed anyway) a fetched
+   * document serves that one request and only refreshes a row that already
+   * exists. Default false.
+   */
+  cacheNew?: boolean;
 }
 
 export async function resolveClient(d: McpDb, clientId: unknown, now: number, opts: ResolveOptions): Promise<McpClient> {
@@ -357,20 +393,24 @@ export async function resolveClient(d: McpDb, clientId: unknown, now: number, op
   }
   const client = parseCimd(clientId, fetched.body);
   const ttl = maxAge(fetched.cacheControl);
-  // Only the fields we use are kept, never the fetched body: anyone can make
-  // this server fetch a document, so the raw bytes (padding and all) must not
-  // land in the shared database.
-  await d.db.prepare(`INSERT INTO mcp_clients (client_id, kind, client_name, redirect_uris, auth_method, secret_hash, metadata_json, created_at, fetched_at, expires_at)
-    VALUES (?, 'cimd', ?, ?, 'none', NULL, ?, ?, ?, ?)
-    ON CONFLICT (client_id) DO UPDATE SET client_name = excluded.client_name, redirect_uris = excluded.redirect_uris,
-      metadata_json = excluded.metadata_json, fetched_at = excluded.fetched_at, expires_at = excluded.expires_at`)
-    .run(clientId, client.clientName, JSON.stringify(client.redirectUris), cimdStoredMetadata(client), now, now, now + ttl);
+  // Only the fields we use are kept, each once and bounded (name ≤ 100
+  // characters, redirects ≤ CIMD_REDIRECTS_MAX_BYTES of canonical ASCII), never
+  // the fetched body: anyone can make this server fetch a document, so the raw
+  // bytes (padding and all) must not land in the shared database. The name and
+  // redirects have their own columns, so metadata_json holds nothing more.
+  const redirects = JSON.stringify(client.redirectUris);
+  if (opts.cacheNew) {
+    await d.db.prepare(`INSERT INTO mcp_clients (client_id, kind, client_name, redirect_uris, auth_method, secret_hash, metadata_json, created_at, fetched_at, expires_at)
+      VALUES (?, 'cimd', ?, ?, 'none', NULL, '{}', ?, ?, ?)
+      ON CONFLICT (client_id) DO UPDATE SET client_name = excluded.client_name, redirect_uris = excluded.redirect_uris,
+        metadata_json = excluded.metadata_json, fetched_at = excluded.fetched_at, expires_at = excluded.expires_at`)
+      .run(clientId, client.clientName, redirects, now, now, now + ttl);
+  } else if (row) {
+    await d.db.prepare(`UPDATE mcp_clients SET client_name = ?, redirect_uris = ?, metadata_json = '{}', fetched_at = ?, expires_at = ?
+      WHERE client_id = ? AND kind = 'cimd'`)
+      .run(client.clientName, redirects, now, now + ttl, clientId);
+  }
   return { ...client, secretHash: null };
-}
-
-/** The canonical, bounded record kept for a metadata-document client (≤ ~4.3 KB). */
-export function cimdStoredMetadata(client: Pick<McpClient, "clientName" | "redirectUris">): string {
-  return JSON.stringify({ client_name: client.clientName, redirect_uris: client.redirectUris, token_endpoint_auth_method: "none" });
 }
 
 export interface RegistrationResult {

@@ -18,8 +18,8 @@ import { TELEGRAM_STATE_DDL } from "../telegram-store";
 import { STOCK_TOKENS } from "../../../packages/core/src/tokens";
 import { ensureMcpSchema } from "./schema";
 import {
-  ALERT_WINDOW_SEC, MAX_ATTEMPTS, QUEUE_MAX_AGE_SEC, RETRY_BACKOFF_SEC, canonicalParams, chainlinkPriceReader, hostedRecipient, normalizeNotifyParams,
-  plain, runNotifyPass, sendErrorCode, staleAfterSec, summaryPeriod, telegramSend, vouchedSells, type FeedClient, type NotifyDeps, type NotifyParams,
+  ALERT_WINDOW_SEC, MAX_ATTEMPTS, PNL_NOT_STATED, QUEUE_MAX_AGE_SEC, RETRY_BACKOFF_SEC, canonicalParams, chainlinkPriceReader, estimatedCostSells, hostedRecipient,
+  normalizeNotifyParams, plain, runNotifyPass, sendErrorCode, staleAfterSec, summaryPeriod, telegramSend, vouchedSells, type FeedClient, type NotifyDeps, type NotifyParams,
   type NotifyRecipient, type PriceReading, type SendResult,
 } from "./notify";
 
@@ -744,14 +744,18 @@ test("trade_confirmed: a realised P&L is stated only when its cost and proceeds 
   const byTx = (n: number) => f.calls.map((c) => c.text).find((t) => t.includes(tx(n)))!;
   assert.equal(f.calls.length, 6);
 
-  assert.match(byTx(43), /Sold CHUMP for 14\.00 USDG\./);
   assert.doesNotMatch(byTx(43), /Realised P&L [+−]/, "a P&L against a quote-booked cost is not stated as a result");
-  assert.match(byTx(43), /Realised P&L is not stated/);
+  // The replay SAW the quote-booked buy still in the basis, so "estimated" is a shown fact here.
+  assert.ok(byTx(43).includes(
+    "Sold CHUMP for 14.00 USDG. Realised P&L is not stated: part of the cost it sold against was estimated from the quote, not read from a receipt.\n",
+  ), byTx(43));
 
   assert.match(byTx(44), /Sold GOOD for 13\.00 USDG\. Realised P&L \+3\.00 USDG\./);
 
-  assert.match(byTx(45), /Sold QUOTED for about 7\.00 USDG \(estimated from the quote: the receipt could not be read\)\./);
   assert.doesNotMatch(byTx(45), /Realised P&L [+−]/);
+  assert.ok(byTx(45).includes(
+    "Sold QUOTED for about 7.00 USDG (estimated from the quote: the receipt could not be read). Realised P&L is not stated: its proceeds were estimated from the quote, not read from a receipt.\n",
+  ), byTx(45));
 
   assert.match(byTx(46), /Bought NVDA \(order size 25\.00 USDG; the filled amount is not recorded\)\./);
   assert.doesNotMatch(byTx(46), /for 25\.00/, "an order size is never printed as what was paid");
@@ -779,7 +783,66 @@ test("trade_confirmed: an account the ledger spells two ways vouches for no P&L 
   f.advance(61);
   await f.pass();
   const sell = f.calls.map((c) => c.text).find((t) => t.includes(tx(53)))!;
-  assert.match(sell, /Sold CHUMP for 11\.00 USDG\. Realised P&L is not stated/);
+  // Both sides here ARE receipts: the replay could not run, which is not evidence of an estimate.
+  assert.ok(sell.includes(
+    "Sold CHUMP for 11.00 USDG. Realised P&L is not stated: it could not be confirmed that both its cost and its proceeds were read from receipts.\n",
+  ), sell);
+  assert.doesNotMatch(sell, /estimated/);
+});
+
+test("trade_confirmed: a cost of unknown provenance is not stated as a P&L, and not called estimated either", async () => {
+  const f = await setup();
+  f.sub("trade_confirmed", {}, { createdAt: NOW - 3600 });
+  // A buy the ledger holds no basis source for: not evidence, but not known to be a quote.
+  trade(f, { side: "buy", symbol: "GOOD", buyToken: GOOD, qty: "10", cash: 10, basis: null, tx: tx(54), op: "0xb8", at: NOW - 7200 });
+  trade(f, { side: "sell", symbol: "GOOD", sellToken: GOOD, qty: "10", cash: 13, pnl: 3, tx: tx(55), op: "0xs7", at: NOW - 300 });
+  await f.pass();
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0]!.text, `Shogun · LIVE\nSold GOOD for 13.00 USDG. ${PNL_NOT_STATED.unconfirmed}\nConfirmed on chain: ${tx(55)}`);
+  assert.equal(PNL_NOT_STATED.unconfirmed, "Realised P&L is not stated: it could not be confirmed that both its cost and its proceeds were read from receipts.");
+});
+
+test("trade_confirmed announces trades only: a transfer, a vault move, or a redeploy's copy of one (or of an older trade) is not news", async () => {
+  const f = await setup();
+  f.sub("trade_confirmed", {}, { createdAt: NOW - 3600 });
+  // Money moves, not trades.
+  trade(f, { kind: "transfer", side: null, fill: null, basis: null, tx: tx(90), at: NOW - 500 });
+  trade(f, { kind: "vault-deposit", side: null, fill: null, basis: null, op: "0xd9", decision: "dv", tx: tx(91), at: NOW - 400 });
+  // A redeploy re-recorded the deposit as a bare swap (the hash spelled differently): it is still the deposit.
+  trade(f, { side: null, fill: null, basis: null, op: "0xD9", tx: tx(91), at: NOW - 100 });
+  // A swap from before the subscription, and the redeploy's fresh-looking copy of it.
+  trade(f, { side: "buy", op: "0xe1", decision: "de", tx: tx(92), at: NOW - 5000 });
+  trade(f, { side: null, fill: null, basis: null, op: "0xE1", tx: tx(92), at: NOW - 90 });
+  // Trades: a launchpad curve buy, a swap, and a swap whose fill side was never recorded.
+  trade(f, { kind: "curve-trade", side: "buy", symbol: "PONS", op: "0xc9", decision: "dc", tx: tx(93), at: NOW - 80 });
+  trade(f, { side: "buy", symbol: "NVDA", cash: 12, op: "0xf8", decision: "df", tx: tx(94), at: NOW - 70 });
+  trade(f, { side: null, fill: null, basis: null, amount: 25, op: "0xf9", tx: tx(95), at: NOW - 60 });
+  await f.pass();
+  assert.deepEqual(f.calls.map((c) => c.text), [
+    `Shogun · LIVE\nBought PONS for 10.00 USDG.\nConfirmed on chain: ${tx(93)}`,
+    `Shogun · LIVE\nBought NVDA for 12.00 USDG.\nConfirmed on chain: ${tx(94)}`,
+    `Shogun · LIVE\nA swap landed (25.00 USDG requested).\nConfirmed on chain: ${tx(95)}`,
+  ]);
+  assert.equal(f.deliveries().length, 3);
+});
+
+test("estimatedCostSells: 'estimated' only where a quote-booked buy is provably still in the basis, even on a cut read", () => {
+  const b = (op: string, qty: string | null, source: string | null) => ({ op, side: "buy" as const, token: "0xm", qty, source });
+  const s = (op: string, qty: string | null) => ({ op, side: "sell" as const, token: "0xm", qty, source: "receipt" });
+  // A quote buy, part sold, then the rest: both sales realised against it.
+  assert.deepEqual([...estimatedCostSells([b("q", "10", "quote"), s("s1", "4"), s("s2", "6")])], ["s1", "s2"]);
+  // Once the floor reaches zero the coin may have gone flat: the next round trip is not called estimated.
+  assert.deepEqual([...estimatedCostSells([b("q", "10", "quote"), s("s1", "10"), b("r", "5", "receipt"), s("s2", "5")])], ["s1"]);
+  // Receipt buys on top keep the quote buy in the basis until the holding it proves is sold.
+  assert.deepEqual([...estimatedCostSells([b("q", "10", "quote"), b("r", "5", "receipt"), s("s1", "12"), s("s2", "3"), s("s3", "1")])], ["s1", "s2"]);
+  // Unknown provenance, or no side, or a sell of unknown size, proves nothing.
+  assert.deepEqual([...estimatedCostSells([b("n", "10", null), s("s1", "10")])], []);
+  assert.deepEqual([...estimatedCostSells([b("q", "10", "quote"), { op: "x", side: null, token: "0xm", qty: null, source: "receipt" }, s("s1", "1")])], []);
+  assert.deepEqual([...estimatedCostSells([b("q", "10", "quote"), s("s1", null), s("s2", "1")])], ["s1"]);
+  // A buy of unknown size cannot lower a holding: the proof carries through it.
+  assert.deepEqual([...estimatedCostSells([b("q", "10", "quote"), b("u", null, "receipt"), s("s1", "1")])], ["s1"]);
+  // Coins are kept apart.
+  assert.deepEqual([...estimatedCostSells([b("q", "10", "quote"), { ...s("s1", "1"), token: "0xother" }])], []);
 });
 
 test("vouchedSells mirrors the web replay: it vouches for nothing it could not read whole", () => {

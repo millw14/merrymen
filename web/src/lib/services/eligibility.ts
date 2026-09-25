@@ -7,8 +7,9 @@
  * (core tokens.ts assetModeAllows), the price guards (worker pool-price.ts and
  * quarantine.ts scoutAllows), the class route's prerequisites (worker
  * class-entry-gate.ts), and the Trencher route's (worker index.ts
- * trenchCandidates and policy.ts custody "trencher", which skips the asset
- * allowlist and the no-exit rule for a vault-custodied buy). This asks each of
+ * trenchCandidates, whose fast arm alone builds a vault-custodied buy, and
+ * policy.ts custody "trencher", which skips the asset allowlist and the no-exit
+ * rule for that buy only). This asks each of
  * them from the same inputs the worker uses and says plainly which ones cannot
  * be checked from here.
  *
@@ -22,6 +23,8 @@
  * (features + extra token addresses), which is everything sellableAssets reads.
  * Settings are seen through the allowlist projection (settings-view.ts), which
  * does not carry the owner's price floors, so those are the defaults and say so.
+ * It does carry the Trencher's live and fast switches; whether a Brain is
+ * connected (its URL and token) it does not, and the Trencher route says so.
  */
 import {
   CASH,
@@ -325,27 +328,48 @@ export function judgeEligibility(o: {
   // asset allowlist or the no-exit rule: the wall instead requires the vault
   // and a coin the worker verified on chain for it (knownTrencherAssets). Which
   // coins those are comes from the worker's own discovery tape and pool checks.
+  //
+  // ONLY THE FAST TRENCHER BUILDS ONE. trenchCandidates sets the vault custody
+  // inside `if (cfg.trencherFastEnabled)` alone; its other arm hands the
+  // strategy discovery candidates that carry no custody, and policy.ts holds
+  // those to the allowlist and the no-exit rule like any other buy. So with the
+  // fast Trencher off (its default) there is no vault route to answer for them.
+  //
+  // `trencherPrereqsMet` is the one state in which this route stands in for
+  // the ordinary route's allowlist and no-exit refusals (see the verdict). An
+  // unread book is not it: if the agent trades live with live trenching off,
+  // the feed is empty and those refusals are exactly why it cannot buy.
+  let trencherPrereqsMet = false;
   {
     const vaultSealed = o.agent.features.includes(GRANT_TRENCHER);
     const priceOk = checkNamed("price_guard").result !== "fail" || checkNamed("scout_budget").result === "pass";
+    const fastSetting = o.settings?.trencherFastEnabled ?? null;
+    const liveTrenching = o.settings?.trencherLiveEnabled === true;
     if (stock || a === USDG) {
       add("trencher_route", "not_applicable", "The Trencher route buys discovered coins only.");
     } else if (!vaultSealed) {
       add("trencher_route", "not_applicable", "The signed permission carries no Trencher vault (trencher-vault-v1), so there is no Trencher route.");
     } else if (o.settings?.strategy !== "trencher") {
       add("trencher_route", "not_applicable", "The permission carries a Trencher vault, but the agent's strategy is not Trencher, so nothing uses it.");
+    } else if (fastSetting !== true) {
+      add("trencher_route", "not_applicable", `The fast Trencher ${fastSetting === false ? "is off" : "is not turned on (it is off by default)"} in the owner's settings, and only the fast Trencher buys into the sealed vault. Without it the Trencher's buys carry no vault custody, so they are ordinary buys: the checks above, including the asset allowlist and the no-exit rule, decide them.`);
     } else {
       const fails: string[] = [];
       if (assetMode === "stocks") fails.push("the asset mode is stocks only, which empties the Trencher's candidate feed");
-      // The worker gates live trenching only while it trades live; on paper the feed runs.
-      if (o.mode !== "paper" && o.settings?.trencherLiveEnabled !== true) {
-        fails.push("live trenching (“let trencher trade for real”) is off, so while the agent trades live the worker gives the Trencher no candidates");
+      // The worker gates live trenching whenever it is not on paper (live, or
+      // idle: not trading); on paper the feed runs. An unread book decides
+      // nothing either way, so it is not a failure (below).
+      if ((o.mode === "live" || o.mode === "idle") && !liveTrenching) {
+        fails.push("live trenching (“let trencher trade for real”) is off and the agent is not on paper, so the worker gives the Trencher no candidates");
       }
       if (!priceOk) fails.push("the Trencher opens a position only on a pool price the worker trusts (or inside the scout budget), and this token's price fails the guards");
       if (fails.length) {
         add("trencher_route", "fail", `The Trencher route cannot buy it: ${fails.join("; ")}.`);
+      } else if (o.mode === "unknown" && !liveTrenching) {
+        add("trencher_route", "unknown", "Whether the agent is on paper could not be read, and that decides this route: live trenching (“let trencher trade for real”) is off, so while the agent is not on paper the worker gives the Trencher no candidates; on paper its feed runs.");
       } else {
-        add("trencher_route", "unknown", `Its prerequisites are met: the permission seals a Trencher vault, the strategy is Trencher, ${o.mode === "paper" ? "and the asset mode allows it (on paper live trenching is not needed)" : "and live trenching and the asset mode allow it"}. Whether this coin qualifies depends on the worker's own discovery and vault-verified assets: a high-volume pool on its discovery tape, verified on chain for the sealed vault, with the fast Trencher on and a connected Brain approving the entry (settings this server cannot see). The worker caps each entry at 5 USDG and the vault at 25 USDG of buys a day. The asset allowlist and the no-exit rule do not apply to this route.`);
+        trencherPrereqsMet = true;
+        add("trencher_route", "unknown", `Its prerequisites are met: the permission seals a Trencher vault, the strategy is Trencher, the fast Trencher is on in the owner's settings, ${o.mode === "paper" ? "and the asset mode allows it (on paper live trenching is not needed)" : "and live trenching and the asset mode allow it"}. Whether this coin qualifies depends on the worker's own discovery and vault-verified assets: a high-volume pool on its discovery tape, verified on chain for the sealed vault, and a connected Brain approving the entry (whether a Brain is connected is not visible here). The worker caps each entry at 5 USDG and the vault at 25 USDG of buys a day. The asset allowlist and the no-exit rule do not apply to this route.`);
       }
     }
   }
@@ -390,10 +414,12 @@ export function judgeEligibility(o: {
       ],
     };
   } else {
-    // An open Trencher route answers for the ordinary route's allowlist and
-    // no-exit refusals: they are not why this agent could not buy it.
+    // A Trencher route whose prerequisites are met answers for the ordinary
+    // route's allowlist and no-exit refusals: they are not why this agent could
+    // not buy it. One that hangs on an unread book does not: if the agent is
+    // live, those refusals are exactly why.
     const open = [
-      ...hardUnknown, ...(routeC === "unknown" ? [trencherCheck] : []), ...(routeA === "no" && routeC !== "unknown" ? routeFails : []),
+      ...hardUnknown, ...(routeC === "unknown" ? [trencherCheck] : []), ...(routeA === "no" && !trencherPrereqsMet ? routeFails : []),
       ...(routeA === "unknown" ? [price, scout] : []), ...(routeB === "unknown" ? [classCheck] : []),
     ];
     executable = { state: "unknown", reasons: [...open.map((c) => c.detail), caveat] };
@@ -403,7 +429,9 @@ export function judgeEligibility(o: {
   // results: on an open Trencher route the allowlist and the no-exit rule do
   // not apply (policy.ts skips both for a vault-custodied buy), so failing
   // them there would tell the owner to re-sign or add a token for nothing.
-  if (routeC === "unknown") {
+  // Only then: with the fast Trencher off, or the route hanging on an unread
+  // book, the worker may well refuse the buy on exactly those rules.
+  if (trencherPrereqsMet) {
     const onTrencher: Partial<Record<CheckName, string>> = {
       grant_can_sell: "Not required on the Trencher route: a vault-custodied buy is not held to the no-exit rule, since the sealed Trencher vault, not a per-token approval, sells it.",
       watched_by_agent: "Not required on the Trencher route: a vault-custodied buy skips the asset allowlist; the wall checks it against the coins the worker verified on chain for the vault instead.",

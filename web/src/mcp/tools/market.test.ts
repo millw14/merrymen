@@ -674,13 +674,16 @@ test("untrusted() strips every Unicode control and format character: C1 controls
 test("eligibility: a Trencher agent's vault route is not refused by the allowlist and no-exit rules it skips", async () => {
   const { d, a } = await setup();
   d.raw.prepare("UPDATE agents SET mode = 'live' WHERE smart_account = ?").run(ACCOUNT_A);
-  const trencher = { ...SETTINGS_A, strategy: "trencher", liveTradingEnabled: true, trencherLiveEnabled: true };
+  // Only the fast Trencher builds a vault-custodied buy (worker index.ts trenchCandidates).
+  const trencher = { ...SETTINGS_A, strategy: "trencher", liveTradingEnabled: true, trencherLiveEnabled: true, trencherFastEnabled: true };
   const vault = dirWith({ features: ["tradeable-v2", "trencher-vault-v1"] });
   // A high-volume Uniswap-v3 coin from its discovery universe: not watched, not sealed for a sale.
   install(d, { directory: vault, settingsA: trencher });
   const r = await ok(a, "check_token_eligibility", { address: BIG });
   assert.equal(check(r, "trencher_route").result, "unknown");
   assert.match(check(r, "trencher_route").detail, /discovery and vault-verified assets/);
+  assert.match(check(r, "trencher_route").detail, /fast Trencher is on in the owner's settings/);
+  assert.doesNotMatch(check(r, "trencher_route").detail, /cannot see/, "the fast setting is read, not guessed at");
   assert.equal(r.executable.state, "unknown", "it depends on the worker's discovery, not on rules that do not apply");
   assert.match(r.executable.reasons[0], /Trencher vault/);
   assert.ok(!r.executable.reasons.some((x: string) => /refuses to buy it|only trades USDG/.test(x)), "no refusal the Trencher route skips is given as a reason");
@@ -712,4 +715,57 @@ test("eligibility: a Trencher agent's vault route is not refused by the allowlis
   assert.equal(check(none, "trencher_route").result, "not_applicable");
   assert.equal(none.executable.state, "no");
   assert.equal(check(none, "grant_can_sell").result, "fail");
+});
+
+test("eligibility: with the fast Trencher off (its default) there is no vault route, and the ordinary refusals stand", async () => {
+  const { d, a } = await setup();
+  d.raw.prepare("UPDATE agents SET mode = 'live' WHERE smart_account = ?").run(ACCOUNT_A);
+  const vault = dirWith({ features: ["tradeable-v2", "trencher-vault-v1"] });
+  // The default Trencher set-up: vault sealed, live trenching on, the fast Trencher never touched.
+  const base = { ...SETTINGS_A, strategy: "trencher", liveTradingEnabled: true, trencherLiveEnabled: true };
+  for (const [label, settingsA, wording] of [
+    ["unset", base, /is not turned on \(it is off by default\)/],
+    ["off", { ...base, trencherFastEnabled: false }, /fast Trencher is off/],
+  ] as const) {
+    install(d, { directory: vault, settingsA });
+    const r = await ok(a, "check_token_eligibility", { address: BIG });
+    const route = check(r, "trencher_route");
+    assert.equal(route.result, "not_applicable", label);
+    assert.match(route.detail, wording, label);
+    assert.match(route.detail, /asset allowlist and the no-exit rule/, label);
+    // The worker holds a custody-less Trencher buy to both rules, so they are not waved through.
+    for (const name of ["grant_can_sell", "watched_by_agent"]) {
+      assert.equal(check(r, name).result, "fail", `${label}: ${name}`);
+      assert.doesNotMatch(check(r, name).detail, /Trencher route/, `${label}: ${name}`);
+    }
+    assert.equal(r.executable.state, "no", `${label}: the worker would refuse it`);
+    assert.ok(r.executable.reasons.some((x: string) => /refuses to buy it/.test(x)), label);
+  }
+});
+
+test("eligibility: an unread book never makes the Trencher route a definite failure, nor waves the ordinary refusals through", async () => {
+  const { d, a } = await setup();
+  // No agents row: the book (paper or live) cannot be read.
+  d.raw.prepare("DELETE FROM agents WHERE smart_account = ?").run(ACCOUNT_A);
+  const vault = dirWith({ features: ["tradeable-v2", "trencher-vault-v1"] });
+  const fast = { ...SETTINGS_A, strategy: "trencher", liveTradingEnabled: true, trencherFastEnabled: true };
+
+  // Live trenching off: on paper the feed runs, live it is empty — so unknown, like class_route.
+  install(d, { directory: vault, settingsA: { ...fast, trencherLiveEnabled: false } });
+  const r = await ok(a, "check_token_eligibility", { address: BIG });
+  assert.equal(r.book, "unknown");
+  assert.equal(check(r, "trencher_route").result, "unknown");
+  assert.match(check(r, "trencher_route").detail, /could not be read/);
+  assert.equal(r.executable.state, "unknown", "not 'no': on paper the route would be open");
+  // If it is live, the allowlist and no-exit refusals are why it cannot buy: kept, and given as reasons.
+  assert.equal(check(r, "grant_can_sell").result, "fail");
+  assert.equal(check(r, "watched_by_agent").result, "fail");
+  assert.ok(r.executable.reasons.some((x: string) => /refuses to buy it/.test(x)));
+
+  // Live trenching on: the book no longer matters to the route, so its prerequisites are met.
+  install(d, { directory: vault, settingsA: { ...fast, trencherLiveEnabled: true } });
+  const on = await ok(a, "check_token_eligibility", { address: BIG });
+  assert.equal(check(on, "trencher_route").result, "unknown");
+  assert.match(check(on, "trencher_route").detail, /prerequisites are met/);
+  assert.equal(check(on, "grant_can_sell").result, "not_applicable");
 });

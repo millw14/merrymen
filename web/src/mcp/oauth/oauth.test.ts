@@ -10,7 +10,7 @@ import { test } from "node:test";
 import type { Db, Stmt } from "../../../../worker/src/db";
 import type { McpDb } from "../db";
 import {
-  acceptableCimdResponse, isCimdClientId, ownHostsOf, registerClient, parseCimd, redirectMatches, resolveClient, validRedirectUri, type CimdFetcher,
+  CIMD_REDIRECTS_MAX_BYTES, acceptableCimdResponse, isCimdClientId, ownHostsOf, registerClient, parseCimd, redirectMatches, resolveClient, validRedirectUri, type CimdFetcher,
 } from "./clients";
 import { pkceS256 } from "./crypto";
 import { FORM_MAX, readBoundedText, readForm } from "./deps";
@@ -19,7 +19,11 @@ import {
   refreshTokens, revokeConnection, revokeToken, startAuthorization, verifyAccessToken,
 } from "./server";
 import { authorizationServerMetadata, protectedResourceMetadata, bearerChallenge } from "./metadata";
-import { ACCOUNT_A, OWNER_A, OWNER_B, SLUG_A, SLUG_B, VERIFIER, connectAs, makeDeps, makeTestDb, testConfig } from "../testing";
+import { scopeInfo } from "../scopes";
+import { DOC_RESOURCES } from "../resources-catalog";
+import { mintSession } from "../../lib/auth";
+import { POST as connectionsPost } from "../../app/api/mcp/connections/route";
+import { ACCOUNT_A, OWNER_A, OWNER_B, SLUG_A, SLUG_B, VERIFIER, connectAs, installFixtures, makeDeps, makeTestDb, testConfig } from "../testing";
 
 const REDIRECT = "http://127.0.0.1:33418/callback";
 
@@ -469,20 +473,96 @@ test("CIMD: only a 200 answer labelled JSON is a metadata document", async () =>
   assert.equal(ok.displayHost, "client.example");
 });
 
-test("CIMD: only the parsed fields are stored, never the fetched body", async () => {
+test("CIMD: only the parsed fields are stored, once, as canonical ASCII, bounded in bytes", async () => {
   const d = await makeTestDb();
   const own = ownHostsOf(testConfig());
+  const at = 1_800_000_000;
   const padded = cimdFetcher(["https://client.example/cb"], {}, { padding: "x".repeat(60_000) });
-  for (let i = 0; i < 5; i++) await resolveClient(d, `https://client.example/c/${i}`, 1_800_000_000, { ownHosts: own, fetcher: padded });
-  const rows = d.raw.prepare("SELECT metadata_json FROM mcp_clients WHERE kind = 'cimd'").all() as Array<{ metadata_json: string }>;
+  for (let i = 0; i < 5; i++) await resolveClient(d, `https://client.example/c/${i}`, at, { ownHosts: own, fetcher: padded, cacheNew: true });
+  const rows = d.raw.prepare("SELECT client_name, metadata_json, redirect_uris FROM mcp_clients WHERE kind = 'cimd'").all() as Array<{ client_name: string; metadata_json: string; redirect_uris: string }>;
   assert.equal(rows.length, 5);
   for (const r of rows) {
-    assert.ok(r.metadata_json.length < 200, `stored ${r.metadata_json.length} bytes`);
-    assert.deepEqual(JSON.parse(r.metadata_json), { client_name: "Claude Code", redirect_uris: ["https://client.example/cb"], token_endpoint_auth_method: "none" });
+    // The name and the redirects have their own columns: nothing is stored twice.
+    assert.equal(r.metadata_json, "{}");
+    assert.equal(r.client_name, "Claude Code");
+    assert.deepEqual(JSON.parse(r.redirect_uris), ["https://client.example/cb"]);
   }
-  // A document whose redirect list alone is oversized is refused, so no row can grow past a few KB.
+
+  // Stored as canonical hrefs (the form a code is actually sent to), and the
+  // document's own spellings still match at authorize.
+  const han = String.fromCodePoint(0x6f22);
+  const spelled = [`https://client.example/${han}/cb`, "http://127.0.0.1:33418", "https://Client.Example:443/a/../back"];
+  const canon = await resolveClient(d, "https://client.example/canon", at, { ownHosts: own, fetcher: cimdFetcher(spelled), cacheNew: true });
+  assert.deepEqual(canon.redirectUris, ["https://client.example/%E6%BC%A2/cb", "http://127.0.0.1:33418/", "https://client.example/back"]);
+  const stored = (d.raw.prepare("SELECT redirect_uris FROM mcp_clients WHERE client_id = ?").get("https://client.example/canon") as { redirect_uris: string }).redirect_uris;
+  assert.equal(Buffer.byteLength(stored, "utf8"), stored.length, "ASCII only");
+  for (const raw of spelled) assert.ok(redirectMatches(canon.redirectUris, raw), raw);
+  assert.ok(redirectMatches(canon.redirectUris, "http://127.0.0.1:50000"), "a loopback redirect may use any port");
+  assert.ok(!redirectMatches(canon.redirectUris, "https://client.example/other"));
+  assert.ok(!redirectMatches(canon.redirectUris, "https://client.example/x/../other"));
+  const deps = makeDeps(d, { fetcher: cimdFetcher(spelled) });
+  const start = await startAuthorization(deps, authorizeParams("https://client.example/canon", { redirect_uri: spelled[0] }));
+  assert.equal(start.kind, "consent");
+  const decided = await decideRequest(deps, requestOf((start as { location: string }).location), OWNER_A, { approve: true, agentSlugs: [SLUG_A] });
+  assert.equal(new URL(decided.location).pathname, "/%E6%BC%A2/cb", "the code goes to the registered (canonical) URL");
+
+  // The cap is UTF-8 bytes of what is stored: ten short-looking non-ASCII
+  // redirects that fit a 4096-character count are refused.
+  const wide = Array.from({ length: 10 }, (_, i) => `https://e.example/${i}${han.repeat(100)}`);
+  assert.ok(JSON.stringify(wide).length < 4096);
+  await assert.rejects(resolveClient(d, "https://client.example/wide", at, { ownHosts: own, fetcher: cimdFetcher(wide), cacheNew: true }), /too long/);
   const long = Array.from({ length: 10 }, (_, i) => `https://client.example/${"p".repeat(1000)}/${i}`);
-  await assert.rejects(resolveClient(d, "https://client.example/long", 1_800_000_000, { ownHosts: own, fetcher: cimdFetcher(long) }), /too long/);
+  await assert.rejects(resolveClient(d, "https://client.example/long", at, { ownHosts: own, fetcher: cimdFetcher(long), cacheNew: true }), /too long/);
+
+  // The worst row anyone can make this server keep: the longest client_id, the
+  // longest name in 3-byte characters, and redirects at the byte cap.
+  const fits = Array.from({ length: 10 }, (_, i) => `https://client.example/${"p".repeat(160)}/${i}`);
+  assert.ok(Buffer.byteLength(JSON.stringify(fits)) <= CIMD_REDIRECTS_MAX_BYTES);
+  const longId = `https://client.example/${"a".repeat(512 - 23)}`;
+  assert.equal(longId.length, 512);
+  const worst: CimdFetcher = async (url) => ({
+    status: 200, contentType: "application/json", cacheControl: "max-age=86400",
+    body: Buffer.from(JSON.stringify({ client_id: url, client_name: han.repeat(100), redirect_uris: fits })),
+  });
+  await resolveClient(d, longId, at, { ownHosts: own, fetcher: worst, cacheNew: true });
+  const row = d.raw.prepare("SELECT client_id, client_name, redirect_uris, metadata_json FROM mcp_clients WHERE client_id = ?").get(longId) as Record<string, string>;
+  const bytes = Object.values(row).reduce((n, v) => n + Buffer.byteLength(v, "utf8"), 0);
+  assert.ok(bytes < 3 * 1024, `the row holds ${bytes} bytes`);
+});
+
+test("CIMD: the token and revocation endpoints never cache a new metadata document; they only refresh one authorize cached", async () => {
+  const d = await makeTestDb();
+  let fetches = 0;
+  const serve = cimdFetcher(["http://127.0.0.1/callback"], { cacheControl: "max-age=86400" });
+  const deps = makeDeps(d, { fetcher: async (url) => { fetches += 1; return serve(url); } });
+  const count = () => (d.raw.prepare("SELECT COUNT(*) AS n FROM mcp_clients").get() as { n: number }).n;
+  for (let i = 0; i < 20; i++) {
+    const id = `https://client.example/probe/${i}`;
+    // /oauth/token and /oauth/revoke authenticate the client first, and a public
+    // metadata-document client passes that step; with no code or token it can go no further.
+    const client = await authenticateClient(deps, new URLSearchParams({ client_id: id, grant_type: "authorization_code", code: "x" }), null);
+    assert.equal(client.clientId, id);
+    await assert.rejects(exchangeCode(deps, new URLSearchParams({ grant_type: "authorization_code", code: "c".repeat(40), client_id: id }), client), /invalid/);
+    await revokeToken(deps, new URLSearchParams({ token: "t".repeat(40), client_id: id }), client);
+  }
+  assert.equal(fetches, 20);
+  assert.equal(count(), 0, "nothing is stored for a client that never started an authorization");
+
+  // A copy cached at authorize is used while fresh, then re-fetched and refreshed in place.
+  const id = "https://client.example/oauth/metadata.json";
+  const start = await startAuthorization(deps, authorizeParams(id, { redirect_uri: "http://127.0.0.1:61234/callback" }));
+  assert.equal(start.kind, "consent");
+  assert.equal(count(), 1);
+  const fetchedAt = () => (d.raw.prepare("SELECT fetched_at FROM mcp_clients WHERE client_id = ?").get(id) as { fetched_at: number }).fetched_at;
+  const cachedAt = fetchedAt();
+  const before = fetches;
+  await authenticateClient(deps, new URLSearchParams({ client_id: id }), null);
+  assert.equal(fetches, before, "a fresh cached copy is used without fetching");
+  deps.advance(86_401);
+  await authenticateClient(deps, new URLSearchParams({ client_id: id }), null);
+  assert.equal(fetches, before + 1);
+  assert.equal(count(), 1);
+  assert.equal(fetchedAt(), cachedAt + 86_401);
 });
 
 test("OAuth bodies are read with a bound: a chunked body with no Content-Length is cut off, not buffered", async () => {
@@ -531,6 +611,56 @@ test("offline_access is never an owner choice: not offered, echoed when asked, a
   const plain = await connectAs(deps, OWNER_A, { scopes: ["market:read", "portfolio:read"], redirect: "http://127.0.0.1:40001/callback" });
   assert.equal(plain.tokens.scope, "market:read portfolio:read");
   assert.match(plain.tokens.refresh_token, /^mcp_rt_/);
+});
+
+test("offline_access is described to assistants as what it is: accepted for compatibility, granting nothing extra", async () => {
+  const info = scopeInfo("offline_access")!;
+  assert.match(info.detail, /compatibility/);
+  assert.match(info.detail, /grants nothing extra/);
+  assert.match(info.detail, /refresh tokens whether or not/);
+  assert.match(info.detail, /disconnect/);
+  // The scope catalogue every connection can read is built from this text.
+  const catalogue = DOC_RESOURCES.find((r) => r.name === "capabilities")!;
+  const doc = await catalogue.read(new URL(catalogue.uri), {}, undefined as never);
+  const line = (doc as { text: string }).text.split("\n").find((l) => l.startsWith("- `offline_access`"))!;
+  assert.match(line, /grants nothing extra/);
+  assert.doesNotMatch(line, /without signing in again|stay connected/i);
+});
+
+test("Connected apps: the owner's POST body is read with a bound, never buffered whole", async () => {
+  const keys = ["MERRYMEN_HOSTED", "DATABASE_URL", "MERRYMEN_PUBLIC_ORIGIN", "MERRYMEN_SESSION_SECRET", "MERRYMEN_OAUTH_ISSUER", "MERRYMEN_MCP_RESOURCE_URL", "MERRYMEN_MCP_ENABLED"] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  Object.assign(process.env, { MERRYMEN_HOSTED: "1", DATABASE_URL: "postgres://unused-in-tests", MERRYMEN_PUBLIC_ORIGIN: "https://app.test", MERRYMEN_SESSION_SECRET: "s".repeat(48) });
+  for (const k of ["MERRYMEN_OAUTH_ISSUER", "MERRYMEN_MCP_RESOURCE_URL", "MERRYMEN_MCP_ENABLED"]) delete process.env[k];
+  const d = await makeTestDb();
+  const restore = installFixtures(d);
+  try {
+    const headers = { origin: "https://app.test", cookie: `mm_session=${mintSession(OWNER_A)}`, "content-type": "application/json" };
+    let pulled = 0;
+    const chunk = new Uint8Array(4096).fill(32);
+    const stream = new ReadableStream<Uint8Array>({
+      pull(c) {
+        if (pulled >= 1000) { c.close(); return; }
+        pulled += 1;
+        c.enqueue(chunk);
+      },
+    });
+    const big = await connectionsPost(new Request("https://app.test/api/mcp/connections", { method: "POST", headers, body: stream, duplex: "half" } as RequestInit & { duplex: "half" }));
+    assert.equal(big.status, 400);
+    assert.ok(pulled <= Math.ceil((8 * 1024) / chunk.length) + 3, `pulled ${pulled} of 1000 chunks`);
+    // An ordinary body is still read: revoking a connection the owner does not have is not_found.
+    const small = await connectionsPost(new Request("https://app.test/api/mcp/connections", {
+      method: "POST", headers, body: JSON.stringify({ action: "revoke", id: `mcpcon_${"0".repeat(32)}` }),
+    }));
+    assert.equal(small.status, 404);
+    assert.deepEqual(await small.json(), { error: "not_found" });
+  } finally {
+    restore();
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
 });
 
 test("a self-registered app is shown and recorded under the host its code actually goes to", async () => {

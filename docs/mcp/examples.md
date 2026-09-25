@@ -85,12 +85,38 @@ Needs `trade:propose`.
 3. You open the link, sign in, see exactly what will happen (paper or real
    money, the bound minimum, a fresh price, your limits) and approve or decline.
 4. `get_proposal {proposal_id}` follows it: `submitted` → `executing` →
-   `confirmed` (only once the on-chain receipt and the recorded fill agree), or
-   `paper_filled`, `refused`, `failed`, `expired`. `cancel_proposal` withdraws it
-   until your agent picks it up.
+   `filled_awaiting_ledger` → `confirmed` (only once the on-chain receipt and
+   the recorded fill agree), or `paper_filled`, `refused`, `failed`,
+   `expired`. `executing` is not an outcome: it also covers an order the agent
+   has finished whose trade record has not reached the ledger yet, so poll
+   again. `cancel_proposal` withdraws it until your agent picks it up.
+
+What `result` carries, by outcome:
+
+| Status | Keys in `result` |
+|---|---|
+| `confirmed` | `tx_hash`, `usdg_actual` (the USDG the order moved, only when known exactly — read from the receipt, or a buy's own input — otherwise null, never the quote's estimate), `fill_qty_raw`, `basis_source` (`receipt`; `quote` when the fill was booked from the quote because the receipt could not be read; null when not recorded) |
+| `filled_awaiting_ledger` | `tx_hash`, `note` |
+| `executing` | `note`, and `tx_hash` once the transaction was sent |
+| `paper_filled` | `note`, and `simulated_because` (a rule) when the agent booked it on paper for a reason |
+| `refused` | `why`, `rule`, `rule_family`, `rule_label`, `rule_remedy` (`rule_detail_withheld: true` when raw error text was deliberately not relayed); `rule: null` with `agent_said_untrusted` (the agent's own sentence, cut and marked untrusted) when no rule was recorded |
+| `failed` | as `refused`, plus `tx_hash` when it reached the chain and reverted — **or** `why` and `outcome_unknown: true` |
+| `expired`, `cancelled`, `rejected` | `why` |
+
+**`outcome_unknown: true` means "check your trades", not "it did not
+happen".** The agent finished the order, but no trade record that is clearly
+this order's reached the ledger in time, so Merrymen will not say either way.
+Look at `get_trades` before proposing the same trade again.
 
 Your agent re-checks its limits, the market and its permission before it
 executes, and may still refuse.
+
+**Which proposals an assistant sees.** Only those about an agent shared with
+its own connection, of kinds its permissions cover (a trade needs
+`trade:propose`, a setting change or draft `drafts:write`, a post
+`social:write`), plus agent drafts, which belong to no agent yet. Anything
+else — another agent's proposal, or another owner's — is `not_found` to
+`get_proposal`, `list_proposals` and `cancel_proposal`.
 
 ## Change a setting
 
@@ -98,7 +124,29 @@ executes, and may still refuse.
 (needs `drafts:write`) returns a before/after diff and an approval link. Only
 settings you could change by chat are allowed; live trading, safety floors,
 custom tokens and Telegram controls stay on the dashboard, and signed limits
-need a new signature.
+need a new signature. If a setting changes after the proposal was made, the
+approval refuses rather than overwrite it; ask for a fresh proposal.
+
+## Draft an agent setup
+
+`create_agent_draft {name: "Robin", strategy: "steady-basket", basket: ["NVDA","AAPL"], risk_level: "balanced", idempotency_key}`
+(needs `drafts:write`) returns an approval link and:
+
+- `left_out`: what the draft could not carry, each with `key` and `why`. A
+  risk level carries only settings that can be changed by conversation (stop
+  loss, take profit, amount per buy, max per AI trade, slippage); the
+  price-impact safety floor (`maxImpactBps`) is left out and stays a
+  dashboard setting.
+- `diff`: each drafted setting's current value → drafted value, **only when
+  an agent is shared with this connection**; otherwise `null`, and the
+  assistant never learns your current settings. The approval page always
+  shows you the full before/after.
+
+Approving saves the draft to your settings. If you already run an agent, the
+changes apply to it at once; if not, you still choose its limits and sign its
+trading permission yourself — a draft never creates trading authority. As
+with a setting change, approval refuses if any drafted setting changed since
+the draft was made.
 
 ## Alerts
 
@@ -108,8 +156,22 @@ need a new signature.
 background worker, deduplicated and retried; `list_deliveries` shows what was
 sent.
 
+`trade_confirmed` announces live **trades** only: swaps and launchpad curve
+trades, one message per operation, with its transaction. A transfer or a
+savings-vault move is not a trade and is not announced, and neither is a copy
+of an older operation that a redeploy wrote into the ledger again. A sell's
+realised P&L is stated only when both its proceeds and the cost it sold
+against were read from receipts. Otherwise the message says why it is left
+out, and only as far as the evidence goes: "estimated" when the sale's own
+proceeds, or a buy still in the cost it sold against, was booked from the
+quote; otherwise that it could not be confirmed both sides came from
+receipts — which is not a claim that anything was estimated.
+
 ## Weekly report and export
 
 `get_summary {period: "week"}` for a structured summary; `create_export {kind:
 "trades", format: "csv"}` for a file that expires in 24 hours, readable as the
-resource `merrymen://exports/{id}` or downloadable while signed in.
+resource `merrymen://exports/{id}`. Its `download_url` opens
+`/connect/export/<id>` in Merrymen: sign in as the owner and press Download
+(the file is served only to your own signed-in session, never to the link
+itself).

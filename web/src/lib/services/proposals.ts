@@ -352,7 +352,7 @@ const TRADE_COLS = "t.status, t.tx_hash, t.created_at, t.amount_usdg, t.fill_cas
  * window. The orchestrator stamps the claim and the answer, the agent's
  * process stamps the row, on the same machine; this is skew, not slack.
  */
-const ROW_SKEW_SEC = 10;
+export const ROW_SKEW_SEC = 10;
 
 /**
  * How long past the order's own deadline (or its answer, if later) the ledger
@@ -362,6 +362,18 @@ const ROW_SKEW_SEC = 10;
  * is called unknown, never "did not happen".
  */
 export const EVIDENCE_GRACE_SEC = 10 * 60;
+
+/**
+ * How long after an order's window closes before ONE row that fits it is taken
+ * as this order's. Every row that could fit was written by the window's end,
+ * and the mirror copies them in the order they were written, every 15 s or
+ * more (the orchestrator's RECONCILE_MS). A Telegram owner order for the same
+ * token and side, answered inside this order's window, can reach the ledger a
+ * pass before this order's own row does; read then, it would be the only row
+ * and would be taken as this one. Three passes later both are there, and two
+ * rows are ambiguous rather than a wrong answer.
+ */
+export const SETTLE_AFTER_SEC = 45;
 
 const num = (v: unknown): number | null => {
   const n = typeof v === "string" && v.trim() !== "" ? Number(v) : typeof v === "number" ? v : NaN;
@@ -406,38 +418,54 @@ export function workerSentence(line: string | null | undefined): string | null {
  * An owner order leaves no id of its own on the trade row, so it is named by
  * everything the worker does leave, together:
  *  - the account, and a decision minted for an OWNER order (source 'chat',
- *    submitChatTrade) with the same side — a strategy's own trade of the same
- *    token is not this order;
- *  - the leg the order was about: what a buy bought, what a sell sold;
+ *    submitChatTrade) — a strategy's own trade of the same token is not this
+ *    order;
+ *  - the leg the order was about: what a buy bought (buy_token), what a sell
+ *    sold (sell_token). That alone fixes the side. The decision's action does
+ *    not: describeIntent (worker/src/index.ts) calls a curve trade a buy
+ *    whenever its output is not USDG, so selling a launchpad coin whose curve
+ *    is quoted in WETH is recorded as action 'buy' on a row whose sell_token
+ *    is the coin;
  *  - a row written between the claim and the answer. The worker writes its
  *    row (paper, submitted, or the outcome) before it answers, and settles a
  *    submitted row IN PLACE, so the row keeps that created_at when it lands.
  *    An earlier trade of the same token is outside the window.
  * Two rows that fit are two owner orders for one token in one window (a
- * Telegram order beside this one): ambiguous, so neither is taken.
+ * Telegram order beside this one): ambiguous, so neither is taken. And one
+ * row is only "one" once the window has settled (SETTLE_AFTER_SEC): before
+ * that, the other order's row may simply not have arrived yet.
  */
-async function orderTrade(ledger: Db, o: { account: string; side: "buy" | "sell"; token: string; fromSec: number; toSec: number }): Promise<{ kind: "none" | "ambiguous" } | { kind: "one"; row: TradeRowLite }> {
+async function orderTrade(ledger: Db, o: { account: string; side: "buy" | "sell"; token: string; fromSec: number; toSec: number; settleSec: number; now: number }): Promise<{ kind: "none" | "ambiguous" | "unsettled" } | { kind: "one"; row: TradeRowLite }> {
   const leg = o.side === "buy" ? "t.buy_token" : "t.sell_token";
   const rows = await ledger.prepare(`SELECT ${TRADE_COLS} FROM trades t JOIN decisions d ON d.id = t.decision_id
-    WHERE lower(t.agent_id) = ? AND lower(d.agent_id) = ? AND d.source = 'chat' AND lower(d.action) = ? AND lower(${leg}) = ?
+    WHERE lower(t.agent_id) = ? AND lower(d.agent_id) = ? AND d.source = 'chat' AND lower(${leg}) = ?
       AND t.created_at >= ? AND t.created_at <= ?
     ORDER BY t.id ASC LIMIT 2`)
-    .all(o.account.toLowerCase(), o.account.toLowerCase(), o.side, o.token.toLowerCase(), o.fromSec, o.toSec) as TradeRowLite[];
-  if (rows.length === 1) return { kind: "one", row: rows[0]! };
-  return { kind: rows.length ? "ambiguous" : "none" };
+    .all(o.account.toLowerCase(), o.account.toLowerCase(), o.token.toLowerCase(), o.fromSec, o.toSec) as TradeRowLite[];
+  if (rows.length > 1) return { kind: "ambiguous" };
+  if (!rows.length) return { kind: "none" };
+  return o.now >= o.settleSec ? { kind: "one", row: rows[0]! } : { kind: "unsettled" };
 }
 
-/** The claim-to-answer window of a finished order, and how long its evidence may take. */
-async function orderWindow(ledger: Db, row: ProposalRow, expiresAtMs: number | null, now: number): Promise<{ fromSec: number; toSec: number; deadlineSec: number }> {
+/** The claim-to-answer window of a finished order, when one row in it can be taken as the order's, and how long its evidence may take. */
+async function orderWindow(ledger: Db, row: ProposalRow, expiresAtMs: number | null, now: number): Promise<{ fromSec: number; toSec: number; settleSec: number; deadlineSec: number }> {
   const cmd = await ledger.prepare("SELECT claimed_at, done_at FROM agent_commands WHERE id = ? AND agent_id = ?")
     .get(row.order_id, row.agent_account) as { claimed_at: unknown; done_at: unknown } | undefined;
   const claimedMs = num(cmd?.claimed_at) ?? (row.decided_at ?? row.created_at) * 1000;
   const doneMs = num(cmd?.done_at) ?? now * 1000;
+  const toSec = Math.ceil(doneMs / 1000) + ROW_SKEW_SEC;
   return {
     fromSec: Math.floor(claimedMs / 1000) - ROW_SKEW_SEC,
-    toSec: Math.ceil(doneMs / 1000) + ROW_SKEW_SEC,
+    toSec,
+    settleSec: toSec + SETTLE_AFTER_SEC,
     deadlineSec: Math.ceil(Math.max(expiresAtMs ?? doneMs, doneMs) / 1000) + EVIDENCE_GRACE_SEC,
   };
+}
+
+/** A trade row by its transaction hash: exact, so it needs no window. */
+async function rowByTx(ledger: Db, account: string, txHash: string): Promise<TradeRowLite | null> {
+  return (await ledger.prepare(`SELECT ${TRADE_COLS} FROM trades t
+    WHERE lower(t.agent_id) = ? AND lower(t.tx_hash) = ? ORDER BY t.id DESC LIMIT 1`).get(account.toLowerCase(), txHash.toLowerCase()) as TradeRowLite | undefined) ?? null;
 }
 
 /** The USDG a landed row moved, only when known exactly (the rule order-receipt.ts applies to a receipt). */
@@ -447,7 +475,7 @@ function usdgMoved(side: "buy" | "sell", t: TradeRowLite): number | null {
   return null;
 }
 
-const WAITING_NOTE = "The agent finished the order; waiting for its trade record to reach the ledger before saying what happened. This usually takes under a minute.";
+const WAITING_NOTE = "The agent finished the order; waiting for its trade record to reach the ledger, and for the ledger to settle, before saying what happened. This usually takes about a minute.";
 
 /**
  * Follow a submitted trade through the order queue and the ledger and settle
@@ -463,6 +491,10 @@ const WAITING_NOTE = "The agent finished the order; waiting for its trade record
  * receipt stays 'executing' until its row says what happened, and only past
  * EVIDENCE_GRACE_SEC is it closed — as an outcome that could not be confirmed.
  *
+ * NOR IS THE FIRST ROW TO ARRIVE NECESSARILY THIS ORDER'S. Nothing is read off
+ * a row found by the window (orderTrade) until the window has settled, so a
+ * second owner order's row shows up as ambiguity rather than being taken.
+ *
  * Results are built from the receipt's status and the reject-rule vocabulary;
  * the worker's own line is never relayed raw (see workerSentence).
  */
@@ -476,7 +508,7 @@ export async function followTrade(mcp: Db, ledger: Db, row: ProposalRow, now: nu
   let result: Record<string, unknown> | undefined;
   const mine = async () => {
     const w = await orderWindow(ledger, row, typeof body.expiresAt === "number" ? body.expiresAt : null, now);
-    return { w, m: await orderTrade(ledger, { account: row.agent_account!, side: binding.side, token: binding.token, ...w }) };
+    return { w, m: await orderTrade(ledger, { account: row.agent_account!, side: binding.side, token: binding.token, ...w, now }) };
   };
   if (body.state === "none") return row;
   if (body.state === "queued") next = "submitted";
@@ -487,16 +519,17 @@ export async function followTrade(mcp: Db, ledger: Db, row: ProposalRow, now: nu
     const line = typeof body.result === "string" ? body.result : null;
     // A refusal or a failure with no rule slug on its receipt: the rule may
     // still be on this order's own row (free text the slug check dropped), and
-    // is described from there; failing that, the agent's own sentence, cut.
-    const explain = async (slug: string | null, status: string): Promise<Record<string, unknown>> => {
+    // is described from there — the row with the receipt's hash, or the one
+    // row in a settled window. Failing that, the agent's own sentence, cut:
+    // it is this order's by construction, where an unsettled row may not be.
+    const explain = async (slug: string | null, status: string, txHash: string | null): Promise<Record<string, unknown>> => {
       if (slug) return ruleFields(slug, status);
-      const { m } = await mine();
-      if (m.kind === "one" && m.row.reject_rule) return ruleFields(m.row.reject_rule, m.row.status);
+      const own = txHash ? await rowByTx(ledger, row.agent_account!, txHash) : await mine().then(({ m }) => (m.kind === "one" ? m.row : null));
+      if (own?.reject_rule) return ruleFields(own.reject_rule, own.status);
       return { rule: null, agent_said_untrusted: workerSentence(line) };
     };
     if (receipt?.status === "filled" && receipt.txHash) {
-      const landed = await ledger.prepare(`SELECT ${TRADE_COLS} FROM trades t
-        WHERE lower(t.agent_id) = ? AND lower(t.tx_hash) = ? ORDER BY t.id DESC LIMIT 1`).get(row.agent_account.toLowerCase(), receipt.txHash.toLowerCase()) as TradeRowLite | undefined;
+      const landed = await rowByTx(ledger, row.agent_account, receipt.txHash);
       if (landed?.status === "landed") {
         next = "confirmed";
         result = { tx_hash: receipt.txHash, usdg_actual: receipt.usdgActual, fill_qty_raw: landed.fill_qty_raw, basis_source: landed.basis_source };
@@ -506,12 +539,12 @@ export async function followTrade(mcp: Db, ledger: Db, row: ProposalRow, now: nu
       }
     } else if (receipt?.status === "refused") {
       next = "refused";
-      result = { why: "the agent's limits, policy or on-chain permission refused it; nothing was sent", ...(await explain(receipt.rejectRule, "rejected")) };
+      result = { why: "the agent's limits, policy or on-chain permission refused it; nothing was sent", ...(await explain(receipt.rejectRule, "rejected", null)) };
     } else if (receipt?.status === "failed") {
       next = "failed";
       result = receipt.txHash
-        ? { why: "it reached the chain and reverted; nothing moved but the gas", tx_hash: receipt.txHash, ...(await explain(receipt.rejectRule, "reverted")) }
-        : { why: "the agent handed the order to execution and no trade was recorded for it", tx_hash: null, ...(await explain(receipt.rejectRule, "rejected")) };
+        ? { why: "it reached the chain and reverted; nothing moved but the gas", tx_hash: receipt.txHash, ...(await explain(receipt.rejectRule, "reverted", receipt.txHash)) }
+        : { why: "the agent handed the order to execution and no trade was recorded for it", tx_hash: null, ...(await explain(receipt.rejectRule, "rejected", null)) };
     } else if (receipt?.status === "expired") {
       next = "expired";
       result = { why: "the order's window closed before it ran; nothing was sent" };

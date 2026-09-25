@@ -125,9 +125,12 @@ export const SCOPES: readonly ScopeInfo[] = [
     capabilities: ["staff.diagnostics"],
   },
   {
+    // Served to every connected assistant through the scope catalogue resource
+    // (resources-catalog.ts), so it must not read like a control the owner has:
+    // refresh tokens are issued whether or not a client asks for this.
     id: "offline_access", level: "read", needsAgent: false, defaultOn: true,
-    title: "Stay connected",
-    detail: "Keep this connection working without signing in again, until you disconnect it or it expires.",
+    title: "Offline access (compatibility only)",
+    detail: "Accepted for compatibility with standard OAuth clients; it grants nothing extra. Every connection gets refresh tokens whether or not it asks for this scope, and access ends when you disconnect the app on Connected apps or the connection reaches its time limit.",
     capabilities: [],
   },
 ];

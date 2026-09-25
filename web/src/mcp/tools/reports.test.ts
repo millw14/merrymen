@@ -327,6 +327,27 @@ test("summary: a run that changed inside the window is not compared across the r
   assert.ok(s.paper.valuation.notes.some((n: string) => /earlier run/.test(n)));
 });
 
+test("summary: paper fills count swaps and curve trades only; the live counts are operations and are labelled so", async () => {
+  const { d, a } = await setup({ seed: false });
+  agentRow(d.raw, ACCOUNT_A, OWNER_A, "paper", null);
+  trade(d.raw, { status: "paper", at: NOW - 3000, side: "buy", sell: USDG, buy: TOKEN, qty: "10", basis: "paper", cash: 5 });
+  trade(d.raw, { status: "paper", kind: "curve-trade", at: NOW - 2000, side: "buy", sell: USDG, buy: TOKEN2, qty: "1", basis: "paper", cash: 2 });
+  // A simulated vault move: a paper operation, not a fill (the summary alert counts fills only).
+  trade(d.raw, { status: "paper", kind: "vault-deposit", at: NOW - 1000, amount: 50 });
+  // Live: a confirmed swap and a confirmed transfer, both operations the owner's account really made and paid gas for.
+  trade(d.raw, { status: "landed", at: NOW - 900, op: "0xl1", tx: "0xtl1", side: "buy", sell: USDG, buy: TOKEN, cash: 10 });
+  trade(d.raw, { status: "landed", kind: "transfer", at: NOW - 800, op: "0xl2", tx: "0xtl2", amount: 5 });
+  const r = await run("get_summary", {}, a);
+  const s = data(r);
+  assert.equal(s.paper.trades.paper_fill_count, 2, "a simulated vault move is not a fill");
+  assert.deepEqual(s.paper.trades.paper_fills.map((t: { kind: string }) => t.kind).sort(), ["curve-trade", "swap"]);
+  assert.ok(s.warnings.some((w: string) => /1 paper \(simulated\) operation\(s\).*not counted as paper fills/.test(w)));
+  assert.equal(s.live.trades.confirmed_count, 2, "the live count is of operations, transfers included");
+  const text = r.content[0]!.text;
+  assert.match(text, /Live: 2 confirmed operation\(s\)/, "and the text says operations, not trades");
+  assert.match(text, /Paper \(simulated\): 2 fill\(s\)/);
+});
+
 test("summary: permission expiring within 7 days is a blocker with an action", async () => {
   const soon = NOW + 3 * DAY;
   const { a } = await setup({ directory: fixtureDirectory({ [OWNER_A]: [agentFixture(SLUG_A, ACCOUNT_A, { expiresAt: soon })], [OWNER_B]: [agentFixture(SLUG_B, ACCOUNT_B)] }) });

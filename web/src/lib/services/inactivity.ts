@@ -25,13 +25,15 @@
  *
  * Reuses: agent-status.ts (the agents row, `freshWithin` — the watchdog's one
  * freshness rule — and `blockerView`), core's `liveBlockerText`, live-blocker's
- * `blockerAdvice`, and decisions.ts (`describeRule`, `tallyRefusals`, which in
- * turn use thesis-policy's labels and remedies).
+ * `blockerAdvice`, decisions.ts (`describeRule`, `tallyRefusals`, which in
+ * turn use thesis-policy's labels and remedies), and distinct-trades.ts: trade
+ * rows are read one per operation, the rule the inactivity alert applies too.
  */
 import { liveBlockerText, type RefuseRule } from "@merrymen/core";
 import type { Db } from "../../../../worker/src/db";
 import { PRIVATE_REVIEW_SOURCE } from "../../../../worker/src/market-review";
 import { rejectRuleRemedy } from "../../../../worker/src/thesis-policy";
+import { distinctTrades, OP_COPY_REACH_SEC } from "../distinct-trades";
 import { blockerAdvice } from "../live-blocker";
 import { blockerView, freshWithin, readAgentRow, type AgentLedgerRow } from "./agent-status";
 import {
@@ -195,6 +197,63 @@ const n = (v: unknown): number | null => {
 const EVENT_SCAN_CAP = 1000;
 
 /**
+ * When this identity last FILLED in one book: the newest swap or curve trade,
+ * ONE ROW PER OPERATION (distinct-trades.ts). A landed transfer or vault move
+ * is not a fill, and a redeploy's re-recorded copy of an older operation is
+ * that operation, not a new fill: stamped at the restart, it would otherwise
+ * read as the agent trading minutes ago.
+ *
+ * The same rule and the same scoping as the inactivity alert
+ * (worker/src/mcp/notify.ts lastFillAt), so the two never disagree about when
+ * the agent last traded: the newest fill-kind row bounds the answer from above,
+ * and a survivor within OP_COPY_REACH_SEC of it is exact once the collapse
+ * reaches OP_COPY_REACH_SEC further back (its original, if it has one, is
+ * inside). Only when every such row in that span was a copy is the whole
+ * history collapsed.
+ */
+async function lastFillIn(db: Db, inList: string, accParams: readonly string[], status: "landed" | "paper"): Promise<{ at: number; tx_hash: string | null } | null> {
+  const kinds = FILL_KINDS.map(() => "?").join(", ");
+  const newestRow = (await db.prepare(`SELECT MAX(created_at) AS at FROM trades WHERE ${inList} AND status = ? AND kind IN (${kinds})`)
+    .get(...accParams, status, ...FILL_KINDS)) as { at: unknown } | undefined;
+  const newest = n(newestRow?.at);
+  if (newest === null) return null;
+  const collapsed = async (from: number | null) => {
+    const scope = from === null ? inList : `${inList} AND created_at >= ?`;
+    const row = (await db.prepare(`SELECT t.created_at, t.tx_hash FROM ${distinctTrades(scope)}
+        WHERE t.status = ? AND t.kind IN (${kinds}) AND t.created_at >= ?
+        ORDER BY t.created_at DESC, t.id DESC LIMIT 1`)
+      .get(...accParams, ...(from === null ? [] : [from - OP_COPY_REACH_SEC]), status, ...FILL_KINDS, from ?? 0)) as { created_at: unknown; tx_hash: unknown } | undefined;
+    const at = n(row?.created_at);
+    return at === null ? null : { at, tx_hash: row?.tx_hash === null || row?.tx_hash === undefined ? null : String(row.tx_hash) };
+  };
+  return (await collapsed(newest - OP_COPY_REACH_SEC)) ?? (await collapsed(null));
+}
+
+/**
+ * The window's trade rows, one per operation as distinct-trades.ts collapses
+ * them: a hashed row is kept only when it is its operation's surviving row.
+ * So a redeploy's copy of an operation from before the window (its original
+ * outside it) is dropped instead of counting as a fill in the window, and a
+ * vault move re-recorded as a 'swap' collapses into the vault move instead of
+ * reading as a trade. Rows without a hash (refusals, paper fills) are each
+ * their own operation and pass through.
+ *
+ * The survivors are ranked over a scope reaching OP_COPY_REACH_SEC before the
+ * window, as the alert's and the web's readers do, and read only down to the
+ * oldest row id the window read returned, so this stays bounded by its cap.
+ */
+async function collapseWindowTrades(db: Db, inList: string, accParams: readonly string[], since: number, read: { rows: WindowTrade[]; truncated: boolean }): Promise<{ rows: WindowTrade[]; truncated: boolean }> {
+  const hashed = read.rows.filter((r) => !!r.user_op_hash);
+  if (!hashed.length) return read;
+  const minId = hashed.reduce((m, r) => Math.min(m, r.id), Number.POSITIVE_INFINITY);
+  const survivors = (await db.prepare(`SELECT t.id FROM ${distinctTrades(`${inList} AND created_at >= ?`)}
+      WHERE t.user_op_hash IS NOT NULL AND t.user_op_hash <> '' AND t.created_at >= ? AND t.id >= ?`)
+    .all(...accParams, since - OP_COPY_REACH_SEC, since, minId)) as Array<{ id: unknown }>;
+  const keep = new Set(survivors.map((s) => n(s.id)).filter((x): x is number => x !== null));
+  return { rows: read.rows.filter((r) => !r.user_op_hash || keep.has(r.id)), truncated: read.truncated };
+}
+
+/**
  * Every bounded read the diagnosis needs. `accounts` is the identity's whole
  * account history (activity in the window is read across all of it); the
  * books, the heartbeat and the rail are read for the CURRENT account only.
@@ -273,13 +332,13 @@ export async function readInactivityInputs(db: Db, a: {
   const view = (await db.prepare(`SELECT reason, at FROM decisions WHERE ${inList} AND action IS NULL AND dropped_rule IS NULL AND source <> ? AND at >= ?
       ORDER BY at DESC LIMIT 1`).get(...accParams, PRIVATE_REVIEW_SOURCE, a.now - 30 * 86_400)) as { reason: string | null; at: number } | undefined;
 
-  const trades = acc.length ? await readWindowTrades(db, acc, since) : { rows: [], truncated: false };
-  // A fill of a market position: a landed transfer or vault deposit is not a trade.
+  // One row per operation, as every other reader of trades counts them.
+  const trades = acc.length ? await collapseWindowTrades(db, inList, accParams, since, await readWindowTrades(db, acc, since)) : { rows: [], truncated: false };
+  // A fill of a market position: a landed transfer or vault deposit is not a
+  // trade, and a redeploy's copy is its original operation (lastFillIn).
   const fillKinds = FILL_KINDS.map(() => "?").join(", ");
-  const lastLive = (await db.prepare(`SELECT created_at, tx_hash FROM trades WHERE ${inList} AND status = 'landed' AND kind IN (${fillKinds})
-      ORDER BY created_at DESC LIMIT 1`).get(...accParams, ...FILL_KINDS)) as { created_at: number; tx_hash: string | null } | undefined;
-  const lastPaper = (await db.prepare(`SELECT created_at FROM trades WHERE ${inList} AND status = 'paper' AND kind IN (${fillKinds})
-      ORDER BY created_at DESC LIMIT 1`).get(...accParams, ...FILL_KINDS)) as { created_at: number } | undefined;
+  const lastLive = acc.length ? await lastFillIn(db, inList, accParams, "landed") : null;
+  const lastPaper = acc.length ? await lastFillIn(db, inList, accParams, "paper") : null;
 
   // Messages are read to be CLASSIFIED in memory and are never returned.
   const eventRows = (await db.prepare(`SELECT message, created_at FROM events WHERE ${inList} AND created_at >= ? AND level IN ('warn', 'err')
@@ -315,8 +374,11 @@ export async function readInactivityInputs(db: Db, a: {
     const dAfter = (await db.prepare(`SELECT MAX(at) AS at FROM decisions WHERE ${inList} AND at > ?
         AND source NOT IN ('brain', 'brain-shadow', 'chat') AND COALESCE(provenance, '') NOT IN ('brain', 'owner-command')`)
       .get(...accParams, pause.at)) as { at: number | null } | undefined;
-    const tAfter = (await db.prepare(`SELECT MAX(created_at) AS at FROM trades WHERE ${inList} AND created_at > ? AND kind IN (${fillKinds})`)
-      .get(...accParams, pause.at, ...FILL_KINDS)) as { at: number | null } | undefined;
+    // One row per operation: a redeploy while paused re-records old operations
+    // stamped at the restart, and a copy is not the agent acting again.
+    const tAfter = (await db.prepare(`SELECT MAX(t.created_at) AS at FROM ${distinctTrades(`${inList} AND created_at >= ?`)}
+        WHERE t.created_at > ? AND t.kind IN (${fillKinds})`)
+      .get(...accParams, pause.at - OP_COPY_REACH_SEC, pause.at, ...FILL_KINDS)) as { at: number | null } | undefined;
     const both = [n(dAfter?.at), n(tAfter?.at)].filter((x): x is number => x !== null);
     actedAfterPause = both.length ? Math.max(...both) : null;
   }
@@ -342,8 +404,8 @@ export async function readInactivityInputs(db: Db, a: {
     decisions,
     latestView: view ? { at: Number(view.at), reason: view.reason ?? null } : null,
     trades,
-    lastLive: lastLive ? { at: Number(lastLive.created_at), tx_hash: lastLive.tx_hash ?? null } : null,
-    lastPaper: lastPaper ? { at: Number(lastPaper.created_at) } : null,
+    lastLive,
+    lastPaper: lastPaper ? { at: lastPaper.at } : null,
     actedAfterPause,
     events,
     railNotice: railRow ? parseRailNotice(String(railRow.message), Number(railRow.created_at)) : null,

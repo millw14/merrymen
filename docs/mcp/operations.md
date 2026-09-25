@@ -5,7 +5,7 @@
 The MCP server is part of the **web** service (the Next.js app), not a separate
 service. It adds these routes: `/mcp`, `/.well-known/oauth-protected-resource[/mcp]`,
 `/.well-known/oauth-authorization-server`, `/oauth/{authorize,token,register,revoke}`,
-`/connect/{app,apps,approve/:id,mcp}` pages and `/api/mcp/*`.
+`/connect/{app,apps,approve/:id,export/:id,mcp}` pages and `/api/mcp/*`.
 
 Three background passes run in the **orchestrator** (the only durable scheduler):
 backtest jobs (`worker/src/mcp/jobs.ts`), notification evaluation and delivery
@@ -17,10 +17,28 @@ The passes are started from the reconcile loop and never awaited
 (`worker/src/mcp/background.ts`). Each holds its slot as a lease of 2 minutes:
 a pass still running after that is presumed hung and the next tick starts
 another beside it (every pass is safe to run twice, as two replicas would).
-Every database call of a pass gives up after 20 s, and inside a transaction
-Postgres cancels a statement after 15 s and a lock wait after 5 s
-(`SET LOCAL`, so nothing leaks onto the shared pool's connections). A log line
-`mcp: the <pass> pass started N s ago has not finished` means a pass hung.
+A log line `mcp: the <pass> pass started N s ago has not finished` means a
+pass hung.
+
+What is bounded, and what is not (`boundedDb` in `background.ts`):
+
+- A pass stops **waiting** on one statement after 20 s, and on one
+  transaction after 30 s in all — getting a connection from the pool (which
+  has no checkout timeout of its own), its statements and COMMIT. A
+  transaction the pass has stopped waiting for is abandoned: if the pool hands
+  it a connection later it runs nothing and rolls back, and work that
+  finishes late rolls back instead of committing. (One cut off inside COMMIT
+  may still have committed; every pass is safe with that.)
+- Inside a transaction Postgres itself cancels a statement after 15 s and a
+  lock wait after 5 s (`SET LOCAL`, so nothing leaks onto the shared pool's
+  connections). Retention runs each DELETE in its own transaction for this.
+- **Not bounded:** the connection itself. A statement stuck on a half-open
+  socket keeps its pooled connection checked out (and a ROLLBACK queued behind
+  it) until the socket fails, because the shared pool sets no query timeout
+  or TCP keepalive (`worker/src/db.ts`, shared with the mirror). A statement
+  outside a transaction that the pass stopped waiting for still runs whenever
+  the pool gets to it, with no server-side timeout. A cut-off wait frees the
+  pass, not the connection.
 
 State lives in shared Postgres, in tables prefixed `mcp_` and `notify_`
 (`worker/src/mcp/schema.ts`). Each process checks the catalog once at start
@@ -179,8 +197,11 @@ revocation, audit rows after 180 days, rate-limit windows after 3 days,
 deliveries after 90 days, finished jobs after 30 days, research notes 30 days
 after expiry, conversation messages after a year, exports at expiry (24 h).
 Dynamically registered clients that no active connection uses go 30 days after
-registration; cached client metadata documents that no active connection uses
-go as soon as their cache expires (one an active connection uses is kept).
+registration. Cached client metadata documents that no active connection uses
+go as soon as their cache expires. One an active connection uses goes once it
+has expired and a day has passed since it was fetched — the window in which
+an expired copy may still be served when a fresh fetch fails — and is fetched
+again on its next use, so no cached document is kept for ever.
 
 Every one of these DELETEs is an index range scan on its time column (the
 indexes are in `schema.ts`; `maintenance.test.ts` checks each plan), and each

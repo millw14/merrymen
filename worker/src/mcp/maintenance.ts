@@ -29,6 +29,13 @@ export const MCP_RETENTION = {
   jobsSec: 30 * 86_400,
   /** Dynamically registered clients no active connection uses: 30 days after registration. */
   dcrUnusedSec: 30 * 86_400,
+  /**
+   * How long after it was fetched an expired client metadata document may
+   * still be served when a fresh fetch fails (web/src/mcp/oauth/clients.ts
+   * CIMD_STALE_OK_SEC). Past it the row is used by nothing: resolveClient
+   * fetches the document again, and without a row the same.
+   */
+  cimdStaleOkSec: 86_400,
 } as const;
 
 /** The retention statements for one run, in order. Exported so the test can check each one's plan. */
@@ -55,11 +62,15 @@ export function retentionStatements(now: number): Array<[string, unknown[]]> {
     // is fetched again on its next use whether its row is here or not. Anyone
     // can make the server cache one (any URL is a client_id until fetched), so
     // a document no active connection uses goes AS SOON AS it expires — a week
-    // of grace let one caller park gigabytes in the shared database. A row a
-    // live connection uses is kept: those are bounded by real connections.
+    // of grace let one caller park gigabytes in the shared database. One an
+    // active connection uses goes once it is expired AND past the window in
+    // which an expired copy may still be served when a fetch fails
+    // (cimdStaleOkSec from its fetch): after that nothing reads it, and the
+    // next use fetches it afresh. Nothing is kept for ever, including rows
+    // stored before only the parsed fields were kept.
     // (A row with no expiry at all is read as expired, as resolveClient reads it.)
-    ["DELETE FROM mcp_clients WHERE kind = 'cimd' AND expires_at < ? AND client_id NOT IN (SELECT client_id FROM mcp_connections WHERE status = 'active')", [now]],
-    ["DELETE FROM mcp_clients WHERE kind = 'cimd' AND expires_at IS NULL AND client_id NOT IN (SELECT client_id FROM mcp_connections WHERE status = 'active')", []],
+    ["DELETE FROM mcp_clients WHERE kind = 'cimd' AND expires_at < ? AND (fetched_at < ? OR client_id NOT IN (SELECT client_id FROM mcp_connections WHERE status = 'active'))", [now, now - r.cimdStaleOkSec]],
+    ["DELETE FROM mcp_clients WHERE kind = 'cimd' AND expires_at IS NULL AND (fetched_at < ? OR client_id NOT IN (SELECT client_id FROM mcp_connections WHERE status = 'active'))", [now - r.cimdStaleOkSec]],
   ];
 }
 

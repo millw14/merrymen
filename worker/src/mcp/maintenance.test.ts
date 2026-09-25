@@ -35,27 +35,41 @@ test("retention deletes only what is past its window, and runs at most hourly", 
   assert.equal((await runMcpMaintenancePass(db, now + 10)).ran, false, "not again within the hour");
 });
 
-test("a cached client metadata document no active connection uses goes as soon as it expires; one a live connection uses stays", async () => {
+test("a cached client metadata document no active connection uses goes as soon as it expires; one a live connection uses goes once its stale window has passed", async () => {
   const raw = new DatabaseSync(":memory:");
   const db = wrapSqlite(raw);
   await ensureMcpSchema(db, "sqlite");
   const now = 2_000_000_000;
-  const cimd = (id: string, expiresAt: number) =>
+  const stale = MCP_RETENTION.cimdStaleOkSec;
+  assert.equal(stale, 86_400, "the window web/src/mcp/oauth/clients.ts serves an expired copy in (CIMD_STALE_OK_SEC)");
+  const cimd = (id: string, fetchedAt: number, expiresAt: number | null) =>
     raw.prepare(`INSERT INTO mcp_clients (client_id, kind, redirect_uris, auth_method, metadata_json, created_at, fetched_at, expires_at)
-      VALUES (?, 'cimd', '[]', 'none', '{}', ?, ?, ?)`).run(id, now - 86_400, now - 86_400, expiresAt);
+      VALUES (?, 'cimd', '[]', 'none', '{}', ?, ?, ?)`).run(id, fetchedAt, fetchedAt, expiresAt);
   const connection = (id: string, clientId: string, status: string) =>
     raw.prepare(`INSERT INTO mcp_connections (id, tenant, client_id, kind, scopes, agent_slugs, status, created_at, updated_at) VALUES (?, 't', ?, 'oauth', '', '[]', ?, 1, 1)`)
       .run(id, clientId, status);
-  cimd("https://stranger.example/c?1", now - 1); // expired a second ago, never connected
-  cimd("https://stranger.example/c?2", now - 60); // connected once, since revoked
-  connection("c-revoked", "https://stranger.example/c?2", "revoked");
-  cimd("https://app.example/client.json", now - 30 * 86_400); // long expired, but a live connection uses it
-  connection("c-live", "https://app.example/client.json", "active");
-  cimd("https://fresh.example/c", now + 3600); // still fresh
+  const live = (clientId: string) => connection(`c-${clientId}`, clientId, "active");
+  // Nobody uses these: gone the moment the cache expires, however recently fetched.
+  cimd("https://stranger.example/c1", now - 60, now - 1);
+  cimd("https://stranger.example/c2", now - 60, now - 30);
+  connection("c-revoked", "https://stranger.example/c2", "revoked");
+  cimd("https://stranger.example/c3", now - 60, null); // no expiry reads as expired
+  // A live connection uses these.
+  cimd("https://app.example/stale-over", now - stale - 1, now - 3600); // expired and past the stale window: re-fetched on use
+  live("https://app.example/stale-over");
+  cimd("https://app.example/legacy", now - 90 * 86_400, now - 89 * 86_400); // stored long ago (and never refreshed): not kept for ever
+  live("https://app.example/legacy");
+  cimd("https://app.example/stale-ok", now - stale + 3600, now - 3600); // expired, but still servable if a fetch fails
+  live("https://app.example/stale-ok");
+  cimd("https://app.example/null-over", now - stale - 1, null);
+  live("https://app.example/null-over");
+  cimd("https://app.example/null-ok", now - 60, null);
+  live("https://app.example/null-ok");
+  cimd("https://fresh.example/c", now - 60, now + 3600); // still fresh, used by nobody
   resetMaintenanceForTest();
   assert.deepEqual(await runMcpMaintenancePass(db, now), { ran: true, errors: 0 });
   const left = raw.prepare("SELECT client_id FROM mcp_clients ORDER BY client_id").all().map((r) => (r as { client_id: string }).client_id);
-  assert.deepEqual(left, ["https://app.example/client.json", "https://fresh.example/c"]);
+  assert.deepEqual(left, ["https://app.example/null-ok", "https://app.example/stale-ok", "https://fresh.example/c"]);
 });
 
 test("every retention statement searches its table through an index on the time column it prunes by, never a scan", async () => {
@@ -64,8 +78,9 @@ test("every retention statement searches its table through an index on the time 
   const now = 2_000_000_000;
   for (const [sql, params] of retentionStatements(now)) {
     const table = /^DELETE FROM (\w+)/.exec(sql)![1]!;
-    // The column the statement prunes by: the one compared with `< ?` (or tested for NULL).
-    const column = (/(\w+) < \?/.exec(sql) ?? /(\w+) IS NULL/.exec(sql))![1]!;
+    // The column the statement prunes by: the first one its WHERE tests, after the kind.
+    const where = sql.slice(sql.indexOf(" WHERE ") + " WHERE ".length).replace(/^kind = '\w+' AND /, "");
+    const column = /^(\w+) /.exec(where)![1]!;
     const plan = (raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...(params as never[])) as Array<{ detail: string }>).map((r) => r.detail);
     // Only the table being pruned: the small NOT IN list over mcp_connections may be read whole.
     const own = plan.filter((d) => new RegExp(`^(SEARCH|SCAN) ${table}\\b`).test(d));

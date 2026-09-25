@@ -29,6 +29,14 @@ export interface SettingsView {
   scoutBudgetUsdg: number | null;
   launchBuying: { enabled: boolean; perEntryUsdg: number | null; maxPositions: number | null; maxHoldSec: number | null; minDepthUsdg: number | null };
   trencherLiveEnabled: boolean | null;
+  /**
+   * The fast Trencher (worker settings.ts trencherFastEnabled, off by default).
+   * Only it builds a vault-custodied Trencher buy (worker index.ts
+   * trenchCandidates), so it decides whether the Trencher vault route exists.
+   * Null when the owner never stored it: the worker then uses its default (off),
+   * or an install-wide environment override a self-hosted operator may set.
+   */
+  trencherFastEnabled: boolean | null;
   telegram: {
     enabled: boolean;
     notifyEnabled: boolean;
@@ -81,6 +89,7 @@ export function projectSettings(raw: Record<string, unknown> | null | undefined)
       minDepthUsdg: n(s.classMinDepthUsdg),
     },
     trencherLiveEnabled: b(s.trencherLiveEnabled),
+    trencherFastEnabled: b(s.trencherFastEnabled),
     telegram: {
       enabled: s.telegramEnabled === true,
       notifyEnabled: s.telegramNotifyEnabled !== false,
