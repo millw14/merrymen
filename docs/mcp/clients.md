@@ -1,6 +1,6 @@
 # Connecting clients
 
-**Server address:** `https://app.merrymen.dev/mcp` (Streamable HTTP, OAuth 2.1).
+**Server address:** `https://mcp.merrymen.dev/mcp` (Streamable HTTP, OAuth 2.1).
 
 Every client below uses the same server and the same tools. There is no
 client-specific business logic: Claude, Codex and everything else see exactly
@@ -20,7 +20,7 @@ permission for is not listed at all.
 ## Claude (claude.ai, Claude Desktop, Claude mobile)
 
 1. Settings → **Connectors** → **Add custom connector**.
-2. Name: `Merrymen`. URL: `https://app.merrymen.dev/mcp`.
+2. Name: `Merrymen`. URL: `https://mcp.merrymen.dev/mcp`.
 3. Click **Connect**. Claude opens Merrymen; sign in, choose access, approve.
 
 Claude identifies itself with its Client ID Metadata Document, so the consent
@@ -32,7 +32,7 @@ organisation first.
 ## Claude Code
 
 ```bash
-claude mcp add --transport http merrymen https://app.merrymen.dev/mcp
+claude mcp add --transport http merrymen https://mcp.merrymen.dev/mcp
 claude mcp login merrymen
 ```
 
@@ -46,7 +46,7 @@ Add the server to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.merrymen]
-url = "https://app.merrymen.dev/mcp"
+url = "https://mcp.merrymen.dev/mcp"
 ```
 
 then sign in:
@@ -67,7 +67,7 @@ Create a personal access token on [Connected apps](https://app.merrymen.dev/conn
 
 ```toml
 [mcp_servers.merrymen]
-url = "https://app.merrymen.dev/mcp"
+url = "https://mcp.merrymen.dev/mcp"
 bearer_token_env_var = "MERRYMEN_MCP_TOKEN"
 ```
 

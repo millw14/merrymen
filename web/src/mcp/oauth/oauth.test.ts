@@ -956,3 +956,24 @@ test("authorize refuses a state with a control character on its own page, never 
     assert.equal((await startAuthorization(deps, authorizeParams(dcr, { state }))).kind, "consent", state);
   }
 });
+
+test("after the endpoint moves, refreshing a connection made for the old address is invalid_grant, not a token /mcp refuses", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const { tokens, clientId } = await connectAs(deps, OWNER_A);
+  const client = await resolveClient(d, clientId, deps.now(), { ownHosts: ownHostsOf(deps.cfg) });
+  const moved = { ...deps, cfg: { ...deps.cfg, resource: "https://mcp.app.test/mcp" } };
+  await assert.rejects(
+    refreshTokens(moved, new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refresh_token!, client_id: clientId }), client),
+    (e: unknown) => e instanceof OAuthError && e.error === "invalid_grant" && /Connect again/.test(e.description),
+  );
+  // A client that already switched to the new address sends it as `resource` with its old token:
+  // still told to reconnect (invalid_grant), not invalid_target.
+  await assert.rejects(
+    refreshTokens(moved, new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refresh_token!, client_id: clientId, resource: "https://mcp.app.test/mcp" }), client),
+    (e: unknown) => e instanceof OAuthError && e.error === "invalid_grant" && /Connect again/.test(e.description),
+  );
+  // Where the address did not move, the same token still refreshes.
+  const same = await refreshTokens(deps, new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refresh_token!, client_id: clientId }), client);
+  assert.ok(same.access_token);
+});

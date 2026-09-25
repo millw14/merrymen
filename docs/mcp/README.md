@@ -5,7 +5,7 @@ Merryman from whichever AI assistant you already use: Claude (web, desktop,
 mobile, Claude Code), Codex, ChatGPT's developer mode, or any other client that
 speaks MCP over Streamable HTTP with OAuth.
 
-**Server address:** `https://app.merrymen.dev/mcp`
+**Server address:** `https://mcp.merrymen.dev/mcp`
 
 Merrymen stays the source of truth for your identity, your agent, your limits,
 your accounting and every trade. The assistant is a window onto it, with only

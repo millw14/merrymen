@@ -80,24 +80,36 @@ is needed; tables are created on first request.
 After a deploy, verify:
 
 ```bash
-curl -s https://app.merrymen.dev/api/mcp/health
-curl -s https://app.merrymen.dev/.well-known/oauth-protected-resource/mcp
+curl -s https://mcp.merrymen.dev/api/mcp/health          # endpoint: https://mcp.merrymen.dev/mcp
+curl -s https://mcp.merrymen.dev/.well-known/oauth-protected-resource/mcp
 curl -s https://app.merrymen.dev/.well-known/oauth-authorization-server
-curl -si -X POST https://app.merrymen.dev/mcp -H 'content-type: application/json' -d '{}' | head -5   # expect 401 + WWW-Authenticate
+curl -si -X POST https://mcp.merrymen.dev/mcp -H 'content-type: application/json' -d '{}' | head -5   # expect 401 + WWW-Authenticate
 ```
 
-### A dedicated hostname (optional)
+### The dedicated hostname
 
-To serve the endpoint at `https://mcp.merrymen.dev/mcp`:
+The MCP endpoint's canonical address is **`https://mcp.merrymen.dev/mcp`**
+(since 2026-09-25). It is the same **web** service under a second custom
+domain; the OAuth issuer stays `https://app.merrymen.dev`, because the owner's
+sign-in cookie (and so consent, Connected apps and approvals) lives there.
 
-1. Add a custom domain `mcp.merrymen.dev` to the **web** service in Railway and
-   set its target port (8080) — the CLI leaves it unset.
-2. At the DNS provider (Vercel DNS for merrymen.dev): a `CNAME mcp → <railway target>`
-   and the `_railway-verify.mcp` TXT record Railway shows in its dashboard.
-3. Wait for Railway to issue the certificate.
-4. Set `MERRYMEN_MCP_RESOURCE_URL=https://mcp.merrymen.dev/mcp` on web. The
-   OAuth issuer stays `https://app.merrymen.dev` (the owner's sign-in cookie
-   lives there). Existing connections must reconnect once (new audience).
+How it is set up (repeat these steps for another hostname):
+
+1. Railway, **web** service: custom domain `mcp.merrymen.dev`, target port
+   8080 (`railway domain mcp.merrymen.dev --service web --port 8080`; without
+   `--port` the domain has no port and answers "Application not found").
+2. Vercel DNS for merrymen.dev (the zone's wildcard would otherwise send the
+   name to Vercel): `CNAME mcp → 6a8l8zfi.up.railway.app` and the TXT record
+   `_railway-verify.mcp` that the domain command prints.
+3. Railway verifies ownership and issues a Let's Encrypt certificate
+   (`railway domain status <id> --service web`: `Verified: yes`,
+   `CERTIFICATE_STATUS_TYPE_VALID`).
+4. `MERRYMEN_MCP_RESOURCE_URL=https://mcp.merrymen.dev/mcp` on web. Tokens are
+   bound to this URL, so changing it again disconnects every app once: their
+   access tokens get `401 invalid_token` and their refresh gets
+   `invalid_grant`, which makes a client start a new sign-in. The protected-resource metadata names this URL, which is what
+   spec-following clients check against the address they were given: connect
+   them to `https://mcp.merrymen.dev/mcp`, not the app host.
 
 ## Observability
 

@@ -7,8 +7,8 @@ TypeScript and Python SDK clients) can connect without a pre-shared secret.
 
 | | URL (production defaults) |
 |---|---|
-| MCP endpoint (resource) | `https://app.merrymen.dev/mcp` |
-| Protected-resource metadata (RFC 9728) | `https://app.merrymen.dev/.well-known/oauth-protected-resource/mcp` (also at the root well-known path) |
+| MCP endpoint (resource) | `https://mcp.merrymen.dev/mcp` |
+| Protected-resource metadata (RFC 9728) | `https://mcp.merrymen.dev/.well-known/oauth-protected-resource/mcp` (also at the root well-known path) |
 | Authorization-server metadata (RFC 8414) | `https://app.merrymen.dev/.well-known/oauth-authorization-server` |
 | Authorization endpoint | `https://app.merrymen.dev/oauth/authorize` |
 | Token endpoint | `https://app.merrymen.dev/oauth/token` |
@@ -98,7 +98,7 @@ limited to the agents and scopes that owner chose.
    `response_type=code`, `code_challenge` + `code_challenge_method=S256`
    (required; `plain` is refused), `redirect_uri` (must match a registered one
    exactly; loopback redirects may use any port per RFC 8252), `state`,
-   `scope`, and `resource=https://app.merrymen.dev/mcp` (RFC 8707; any other
+   `scope`, and `resource=https://mcp.merrymen.dev/mcp` (RFC 8707; any other
    resource is refused with `invalid_target`).
 
    **Errors before consent are shown on a Merrymen page, not redirected.**

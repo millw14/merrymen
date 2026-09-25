@@ -23,6 +23,31 @@ export async function oauthDeps(): Promise<OAuthDeps> {
  * The address Railway's edge saw. X-Forwarded-For's LAST entry is appended by
  * the proxy we trust; earlier entries are whatever the client claimed.
  */
+const REQUEST_URL = Object.getOwnPropertyDescriptor(Request.prototype, "url")?.get;
+
+/**
+ * The request URL exactly as it arrived. Next.js's NextRequest.url does NOT
+ * give that: its URL parser (next/dist/server/web/next-url.js,
+ * REGEX_LOCALHOST_HOSTNAME) rewrites the first `127.x.x.x`, `[::1]` or
+ * `localhost` found ANYWHERE in the URL to `localhost` — the query string
+ * included. So `redirect_uri=http://127.0.0.1:53690/callback` reaches a route
+ * as `http://localhost:53690/callback`: a client that registered its loopback
+ * redirect as 127.0.0.1 is refused, a code meant for 127.0.0.1 is sent to
+ * localhost (and the token exchange, which compares the redirect it is sent in
+ * the body, then fails), and a `state` holding such text comes back changed.
+ * NextRequest extends the platform Request, whose own `url` getter still holds
+ * the original string.
+ */
+export function rawRequestUrl(request: Request): string {
+  try {
+    const raw = REQUEST_URL?.call(request) as unknown;
+    if (typeof raw === "string" && raw) return raw;
+  } catch {
+    /* not a platform Request: fall back */
+  }
+  return request.url;
+}
+
 export function clientIp(request: Request): string {
   const xff = request.headers.get("x-forwarded-for");
   if (xff) {
