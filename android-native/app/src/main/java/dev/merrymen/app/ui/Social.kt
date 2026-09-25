@@ -316,7 +316,9 @@ fun WireButton(slug: String, name: String, onSignIn: (() -> Unit)? = null) {
   val c = LocalContainer.current
   val wired by c.social.wired.collectAsState()
   val scope = rememberCoroutineScope()
-  var note by remember { mutableStateOf<String?>(null) }
+  // Keyed on the desk: a note about wiring one agent must not follow the reader
+  // onto the next agent's page.
+  var note by remember(slug) { mutableStateOf<String?>(null) }
 
   val on = wired.has(slug)
   val full = !on && wired.full
@@ -367,7 +369,8 @@ fun WireButton(slug: String, name: String, onSignIn: (() -> Unit)? = null) {
       WireToggle(
         label = if (on) "wired" else "wire in",
         on = on,
-        enabled = !full,
+        // Not while a write is on its way: one at a time, as the web's is.
+        enabled = !full && !wired.busy,
       ) {
         note = null
         scope.launch { note = c.social.toggleWire(slug, !on) }

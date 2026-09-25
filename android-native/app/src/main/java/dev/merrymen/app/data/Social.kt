@@ -2,6 +2,7 @@ package dev.merrymen.app.data
 
 import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.MerrymenApi
+import dev.merrymen.app.net.said
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -77,10 +78,20 @@ data class WiredState(
    * `why` sentence and nothing to tap, since signing in would not help.
    */
   val signedOut: Boolean = false,
+  /** A write is on its way. One at a time, as the web's toggle is. */
+  val busy: Boolean = false,
 ) {
   fun has(slug: String): Boolean = slug in wired
   val full: Boolean get() = wired.size >= max
 }
+
+/**
+ * What POST /api/follow's `refused: "self"` means, in the reader's words. An
+ * agent ALREADY reads its own published theses — the orchestrator puts them in
+ * its peer file as `own` — so wiring it into itself would spend one of its
+ * prompt slots on a copy of something it has.
+ */
+const val SELF_WIRE = "Your agent already reads its own posts."
 
 /**
  * One fetch, one poll, one truth.
@@ -225,11 +236,37 @@ class Social(private val api: MerrymenApi) {
           r.message
         }
       }
-      is ApiResult.Unreachable -> {
-        rollBack()
-        "Couldn't reach merrymen: " + r.cause
+      // A LOST ANSWER TO A WRITE IS UNKNOWN. The like may have been stored
+      // and the answer lost on the way back, so it is looked up rather than
+      // rolled back on a guess — and never simply sent again.
+      is ApiResult.Unreachable -> when (val look = api.likes()) {
+        is ApiResult.Ok -> if (look.value.read) {
+          val stored = postId in look.value.liked
+          val s = _likes.value
+          _likes.value = s.copy(
+            mine = look.value.liked.toSet(),
+            mineRead = true,
+            // The optimistic step comes off the count only when the store
+            // says it did not happen.
+            counts = if (stored == on) s.counts else s.counts + (postId to maxOf(0, (s.counts[postId] ?: 0) + if (on) -1 else 1)),
+          )
+          if (stored == on) null else "merrymen didn't answer, and that wasn't saved. Try again."
+        } else {
+          lookupFailed(r)
+        }
+        else -> lookupFailed(r)
       }
     }
+  }
+
+  /**
+   * The write's answer was lost AND the look-up failed: we do not know. The
+   * optimistic heart stays, the next read of the reader's likes is not
+   * throttled, and the reader is told exactly that.
+   */
+  private fun lookupFailed(lost: ApiResult.Unreachable): String {
+    lastMineAt = 0L
+    return "We couldn't confirm that was saved. " + lost.said
   }
 
   /** What this owner's agent currently reads. */
@@ -250,48 +287,78 @@ class Social(private val api: MerrymenApi) {
           else -> r.message
         },
       )
+      // `said`, not "Couldn't reach" by hand: an answer this app could not
+      // read is not an unreachable server.
       is ApiResult.Unreachable -> _wired.value = _wired.value.copy(
         known = false,
-        why = "Couldn't reach merrymen: " + r.cause,
+        why = r.said,
       )
     }
   }
 
   /**
-   * Wire a desk in, or cut it loose. Returns null when it was stored.
+   * Wire a desk in, or cut it loose. Returns null when it was stored, or the
+   * sentence saying why not.
    *
-   * WHERE THIS PARTS FROM THE WEB, deliberately. `WiredProvider` keeps the
-   * optimistic ring on any failure, reasoning that "the next load corrects it
-   * either way" — true in a tab that reloads. A phone screen can sit on the
-   * back stack for an hour, so a REFUSAL (the server answered, and said no)
-   * rolls back; an UNREACHABLE (we never got an answer) keeps the optimistic
-   * state, because we do not know that it failed. Both say which.
+   * THE SERVER'S ANSWER IS THE STATE. A 200 carries the list it actually
+   * stored, so a refusal with a reason — the cap, or wiring your own agent
+   * into itself — snaps the ring back to that list AND says why. The self
+   * refusal used to fall through as a success: the ring flicked on, snapped
+   * off, and nothing on screen said a word.
+   *
+   * A LOST ANSWER IS UNKNOWN, NOT A FAILURE. The follow may have been stored
+   * and the answer lost on the way back, so the list is read again rather than
+   * the write being retried or the ring left where the optimism put it. If that
+   * read fails too, the control says it does not know (`known = false`) until
+   * the next read settles it.
+   *
+   * ONE WRITE AT A TIME, as the web's toggle is: a second tap while one is on
+   * its way is ignored, so two answers can never land out of order.
    */
   suspend fun toggleWire(slug: String, on: Boolean): String? {
     val before = _wired.value
+    if (before.busy) return null
     _wired.value = before.copy(
+      busy = true,
       wired = if (on) (listOf(slug) + before.wired).distinct() else before.wired.filter { it != slug },
     )
-    return when (val r = api.follow(slug, on)) {
-      // Reconciled with what the server actually STORED — it is the authority
-      // on the cap, so a refused write snaps back rather than leaving a ring
-      // the agent will not honour.
+    val said = when (val r = api.follow(slug, on)) {
       is ApiResult.Ok -> {
         _wired.value = WiredState(r.value.wired, r.value.max, known = true)
-        if (r.value.refused == "at-capacity") {
-          "Your agent already reads ${r.value.max} desks, which is as many as fit in one prompt. " +
-            "Unwire one to make room."
-        } else {
-          null
+        when (r.value.refused) {
+          null -> null
+          "at-capacity" ->
+            "Your agent already reads ${r.value.max} desks, which is as many as fit in one prompt. " +
+              "Unwire one to make room."
+          "self" -> SELF_WIRE
+          // A reason this build does not know is still a refusal: the list
+          // above is what was stored, and the reader is told nothing changed.
+          else -> "merrymen didn't make that change, so nothing changed."
         }
       }
       is ApiResult.Refused -> {
         _wired.value = before
         if (r.status == 401) "Sign in to wire other desks into your agent." else r.message
       }
-      is ApiResult.Unreachable -> "Couldn't reach merrymen: " + r.cause
+      is ApiResult.Unreachable -> lookUpWire(slug, on, r)
     }
+    _wired.value = _wired.value.copy(busy = false)
+    return said
   }
+
+  /** After a lost answer: read what is stored, and say which way it went. */
+  private suspend fun lookUpWire(slug: String, on: Boolean, lost: ApiResult.Unreachable): String? =
+    when (val look = api.following()) {
+      is ApiResult.Ok -> {
+        _wired.value = WiredState(look.value.wired, look.value.max, known = true)
+        if ((slug in look.value.wired) == on) null else "merrymen didn't answer, and that change wasn't saved. Try again."
+      }
+      else -> {
+        lastWiredAt = 0L
+        _wired.value = _wired.value.copy(known = false, signedOut = false, why = "We couldn't confirm whether that change was saved. " + lost.said)
+        null
+      }
+    }
 
   /** Sign-out clears both, because both are per-wallet facts. */
   fun forget() {
