@@ -28,6 +28,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -66,6 +67,7 @@ import dev.merrymen.app.ui.RISK_PROFILES
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.SectionCard
 import dev.merrymen.app.ui.applyRisk
+import dev.merrymen.app.ui.currentFormOwner
 import dev.merrymen.app.ui.approveProposals
 import dev.merrymen.app.ui.sans
 import dev.merrymen.app.ui.LimitCheck
@@ -576,7 +578,7 @@ fun ProposalsScreen(nav: NavHostController) {
   // WHO THE LIST WAS READ FOR. An approval writes for that wallet or not at all.
   var shownFor by remember { mutableStateOf<String?>(null) }
   // AND ON WHICH SERVER (a server turn): an approval goes there or nowhere.
-  var shownOn by remember { mutableStateOf(-1L) }
+  var shownOn by remember { mutableLongStateOf(-1L) }
   // Whether the scout looked, read only when the list came back "nothing-vetted".
   var verdicts by remember { mutableStateOf<Loaded<Discoveries>?>(null) }
   val signedIn by c.repo.signedIn.collectAsState()
@@ -604,11 +606,13 @@ fun ProposalsScreen(nav: NavHostController) {
   }
   // Read again whenever the session changes hands: the forget hooks do not run
   // when a session lapses, so what is on screen follows signedIn itself.
-  LaunchedEffect(signedIn) {
+  // Or the Server does: two self-hosted servers are both signed out.
+  val form = currentFormOwner(c.repo)
+  LaunchedEffect(form) {
     note = null
     load()
   }
-  val current = if (shownFor.equals(signedIn, ignoreCase = true)) state else Loaded.Loading
+  val current = if (shownFor.equals(signedIn, ignoreCase = true) && shownOn == form.serverTurn) state else Loaded.Loading
 
   Page("Coins to consider", nav) {
     note?.let { Notice("Watchlist", it) }
@@ -1148,7 +1152,10 @@ fun RiskScreen(nav: NavHostController) {
   // screen is open is shown its own rung, never the last wallet's. A tap while
   // the new read is out has no owner in hand, so applyRisk reads one first; a
   // tap already in flight carries the old owner, which the route refuses (409).
-  LaunchedEffect(signedIn) {
+  // The Server changing is read the same way: two self-hosted servers are both
+  // signed out, so the key is the server as well (currentFormOwner).
+  val form = currentFormOwner(c.repo)
+  LaunchedEffect(form) {
     read = null
     current = null
     saved = null

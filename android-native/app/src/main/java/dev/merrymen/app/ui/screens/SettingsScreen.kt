@@ -55,10 +55,12 @@ import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
+import dev.merrymen.app.data.formOwnerOf
 import dev.merrymen.app.data.toLoaded
 import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.OriginCheck
+import dev.merrymen.app.net.ServerBound
 import dev.merrymen.app.net.SettingsRead
 import dev.merrymen.app.net.TelegramStatus
 import dev.merrymen.app.net.said
@@ -72,6 +74,7 @@ import dev.merrymen.app.ui.SETTINGS_OWNER_CHANGED
 import dev.merrymen.app.ui.SaveLookup
 import dev.merrymen.app.ui.SettingsDraft
 import dev.merrymen.app.ui.SettingsSaveOutcome
+import dev.merrymen.app.ui.currentFormOwner
 import dev.merrymen.app.ui.settingLabel
 import dev.merrymen.app.ui.saveSettingsDraft
 import dev.merrymen.app.ui.settleUnknownSave
@@ -391,6 +394,14 @@ private fun KillButton(label: String, modifier: Modifier = Modifier, onClick: ()
  * repo.signedIn, so a wallet switch throws away the old wallet's draft rather
  * than offering to save it onto the new one.
  *
+ * AND ON THE SERVER ([currentFormOwner]). Keyed on the wallet alone, a Server
+ * change between two self-hosted servers — null on both sides — kept the old
+ * server's unsaved edits, Live-trading consent and public-book step over the
+ * new server's values, and Save applied them there. Now the read, the draft,
+ * the notes, the save's report and the armed restart all start again when the
+ * server does, and every save is bound to the server its form was read from
+ * (ServerBound): one that would go out after the Server changed is not sent.
+ *
  * A SAVE IS REPORTED AS WHAT IT WAS. "Saved" only when the server said ok;
  * keys it ignored listed as NOT saved; its own refusals one line each; and an
  * answer that never came back is looked up — the settings read again and
@@ -402,25 +413,31 @@ fun SettingsScreen(nav: NavHostController) {
   val signedIn by c.repo.signedIn.collectAsState()
   val hosted by c.repo.hosted.collectAsState()
   val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
-  // Keyed on the wallet: another wallet's read, draft and notes never survive a switch.
-  var state by remember(signedIn) { mutableStateOf<Loaded<SettingsRead>>(Loaded.Loading) }
-  var telegram by remember(signedIn) { mutableStateOf<TelegramStatus?>(null) }
-  var draft by remember(signedIn) { mutableStateOf(SettingsDraft()) }
+  // WHOSE FORM THIS IS: the server it was read from and the wallet it was read for.
+  val form = currentFormOwner(c.repo)
+  // Keyed on both: another wallet's — or another server's — read, draft,
+  // consent and notes never survive a change.
+  var state by remember(form) { mutableStateOf<Loaded<SettingsRead>>(Loaded.Loading) }
+  var telegram by remember(form) { mutableStateOf<TelegramStatus?>(null) }
+  var draft by remember(form) { mutableStateOf(SettingsDraft()) }
   var origin by remember { mutableStateOf("") }
-  var note by remember(signedIn) { mutableStateOf<String?>(null) }
+  var note by remember(form) { mutableStateOf<String?>(null) }
   // WHETHER THE LAST THING THAT HAPPENED WENT WRONG. forms.css keeps "Saved"
   // and a failure apart — `.mm-note` is `--tx-2`, `.mm-danger` is `--down` —
   // and a failure that reads like a confirmation is the specific mistake this
   // product keeps writing rules against.
-  var noteBad by remember(signedIn) { mutableStateOf(false) }
+  var noteBad by remember(form) { mutableStateOf(false) }
+  // What "Save and reconnect" said. NOT keyed: the change it reports is the
+  // one that starts the rest of this form again.
+  var serverNote by remember { mutableStateOf<SettingsNote?>(null) }
   // The save's own report, under the button: the server's lines, or the keys
   // that did not save.
-  var saveLines by remember(signedIn) { mutableStateOf<List<String>>(emptyList()) }
-  var ownerChanged by remember(signedIn) { mutableStateOf(false) }
+  var saveLines by remember(form) { mutableStateOf<List<String>>(emptyList()) }
+  var ownerChanged by remember(form) { mutableStateOf(false) }
   var saving by remember { mutableStateOf(false) }
   // The practice-book restart: armed by a first tap, and one request at a time.
-  var resetArmed by remember(signedIn) { mutableStateOf(false) }
-  var resetting by remember(signedIn) { mutableStateOf(false) }
+  var resetArmed by remember(form) { mutableStateOf(false) }
+  var resetting by remember(form) { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
 
   suspend fun load() {
@@ -428,7 +445,7 @@ fun SettingsScreen(nav: NavHostController) {
     telegram = (c.api.telegram() as? ApiResult.Ok)?.value
   }
 
-  LaunchedEffect(signedIn) {
+  LaunchedEffect(form) {
     origin = c.repo.originNow()
     load()
   }
@@ -467,23 +484,23 @@ fun SettingsScreen(nav: NavHostController) {
           scope.launch {
             when (val saved = c.repo.setOrigin(origin)) {
               // NOTHING WAS SAVED, and the owner is told why in the red line
-              // above the field.
-              is OriginCheck.Refused -> {
-                note = saved.why
-                noteBad = true
-              }
+              // under the field.
+              is OriginCheck.Refused -> serverNote = SettingsNote(saved.why, bad = true)
               is OriginCheck.Ok -> {
                 origin = saved.origin
+                serverNote = SettingsNote("Saved. Reloading.", bad = false)
                 // A NEW ORIGIN IS A NEW SERVER, so who we are there has to be
                 // asked again before its settings are read.
                 c.repo.refreshIdentity()
-                note = "Saved. Reloading."
-                noteBad = false
-                load()
+                // ANOTHER SERVER STARTS THE FORM AGAIN: its key moved, and the
+                // new form reads that server's settings itself. Only the same
+                // server, written differently, is read again from here.
+                if (formOwnerOf(c.repo.serverTurn.value, c.repo.signedIn.value) == form) load()
               }
             }
           }
         }
+        serverNote?.let { if (it.bad) DangerLine(it.text) else NoteLine(it.text) }
       }
 
       LoadedBlock(
@@ -535,7 +552,9 @@ fun SettingsScreen(nav: NavHostController) {
           ) {
             saveLines = emptyList()
             saving = true
-            scope.launch {
+            // TO THE SERVER THIS FORM WAS READ FROM, or nowhere — its look-up
+            // included (ServerBound).
+            scope.launch(ServerBound(form.serverTurn)) {
               // THE FORM'S OWNER GOES WITH IT, and a session the app already
               // knows to be another wallet's sends nothing (saveSettingsDraft).
               val save = c.api.saveSettingsDraft(draft, env, c.repo.signedIn.value)
@@ -633,7 +652,8 @@ fun SettingsScreen(nav: NavHostController) {
               PaperResetTap.Fire -> {
                 resetArmed = false
                 resetting = true
-                scope.launch {
+                // The book this form was read for, on its own server, or none.
+                scope.launch(ServerBound(form.serverTurn)) {
                   val said = paperResetSaid(c.api.paperReset())
                   note = said.text
                   noteBad = said.bad

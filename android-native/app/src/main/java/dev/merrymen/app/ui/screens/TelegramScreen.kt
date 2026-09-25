@@ -35,6 +35,7 @@ import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.toLoaded
 import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.MerrymenApi
+import dev.merrymen.app.net.ServerBound
 import dev.merrymen.app.net.TelegramStatus
 import dev.merrymen.app.net.TelegramTest
 import dev.merrymen.app.net.said
@@ -45,6 +46,7 @@ import dev.merrymen.app.ui.Notice
 import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.TelegramRow
+import dev.merrymen.app.ui.currentFormOwner
 import dev.merrymen.app.ui.sans
 import dev.merrymen.app.ui.telegramRowOf
 import dev.merrymen.app.ui.telegramStartUrl
@@ -113,14 +115,18 @@ fun TelegramScreen(nav: NavHostController) {
   val hosted by c.repo.hosted.collectAsState()
   val identityKnown by c.repo.identityKnown.collectAsState()
   val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
-  var state by remember(signedIn) { mutableStateOf<Loaded<TelegramStatus>>(Loaded.Loading) }
-  var test by remember(signedIn) { mutableStateOf<String?>(null) }
+  // Keyed on the server as well as the wallet (currentFormOwner): two
+  // self-hosted servers are both "signed out", and one bot's status or test
+  // line is not the other's.
+  val form = currentFormOwner(c.repo)
+  var state by remember(form) { mutableStateOf<Loaded<TelegramStatus>>(Loaded.Loading) }
+  var test by remember(form) { mutableStateOf<String?>(null) }
   var testing by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
   val uri = LocalUriHandler.current
   val mayRead = signedIn != null || hosted == false
   suspend fun load() { state = readTelegramFor(c.api, signedIn, c.repo.hosted.value) { c.repo.refreshIdentity() } }
-  LaunchedEffect(signedIn, mayRead) { if (mayRead) load() }
+  LaunchedEffect(form, mayRead) { if (mayRead) load() }
 
   Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
     Header("Telegram", nav)
@@ -193,7 +199,8 @@ fun TelegramScreen(nav: NavHostController) {
             if (testing) return@TelegramAction
             testing = true
             test = null
-            scope.launch {
+            // The bot of the server this page was read from, or none.
+            scope.launch(ServerBound(form.serverTurn)) {
               test = telegramTestLine(c.api.telegramTest(null))
               testing = false
               load()

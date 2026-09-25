@@ -8,6 +8,7 @@ import dev.merrymen.app.net.SessionStore
 import dev.merrymen.app.net.checkOrigin
 import dev.merrymen.app.net.isOtherServer
 import dev.merrymen.app.net.serverOf
+import dev.merrymen.app.net.ServerBound
 import dev.merrymen.app.net.ServerTurns
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -57,6 +58,26 @@ fun <T> ApiResult<T>.toLoaded(): Loaded<T> = when (this) {
  * is about the session.
  */
 fun Loaded<*>.needsSignIn(): Boolean = this is Loaded.Refused && status == 401
+
+/**
+ * WHOSE UNSAVED WORK A SCREEN IS HOLDING: the server it was read from and the
+ * wallet it was read for.
+ *
+ * A draft, a consent half given, a restart armed, a save's report — each was
+ * made against one server's values for one wallet, and must not outlive
+ * either. Keyed on the wallet alone, a Server change between two self-hosted
+ * servers (null on both sides) kept the old server's unsaved edits over the
+ * new server's values, and Save could apply one server's trading and risk
+ * settings to the other.
+ *
+ * [serverTurn] is the SETTLED turn — the one a finished move arrived at — so
+ * the key moves once, when the new server's address can be read, not twice.
+ * It is also the turn a save from this form is bound to ([ServerBound]).
+ */
+data class FormOwner(val serverTurn: Long, val signedIn: String?)
+
+/** The [FormOwner] for [turn] (Repository.serverTurn) and [signedIn]; see there. */
+fun formOwnerOf(turn: Long, signedIn: String?): FormOwner = FormOwner(turn - turn % 2, signedIn)
 
 /** The first wait before [Repository.askUntilKnown] asks again, and the longest it waits. */
 const val IDENTITY_RETRY_FIRST_MS = 3_000L
@@ -188,6 +209,9 @@ class Repository(
    * WHICH SERVER THE APP IS ON, as a number that moves when the Server in
    * Settings becomes another host ([ServerTurns]). A screen notes the turn it
    * read in, and binds what the owner decides there to it (ServerBound).
+   * What a screen holds that nobody has saved is keyed on it with the wallet
+   * ([formOwnerOf]), because [signedIn] alone does not move between two
+   * self-hosted servers: it is null on both.
    */
   val serverTurn: StateFlow<Long> get() = api.servers.now
 
