@@ -202,6 +202,8 @@ fun LeaderboardScreen(nav: NavHostController) {
   val scope = rememberCoroutineScope()
   val lifecycle = LocalLifecycleOwner.current.lifecycle
   LaunchedEffect(lifecycle, reads) { lifecycle.pollWhileResumed(listOf(reads.loop)) }
+  // What the reader's agent reads, for the wire rings on the faces. Throttled.
+  LaunchedEffect(Unit) { c.social.refreshWired() }
   // THE READER'S OWN ROW, marked "you" — from their own feed, and only when it
   // named an agent it actually read.
   val mine by produceState<String?>(null, signedIn) {

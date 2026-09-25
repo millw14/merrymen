@@ -179,7 +179,11 @@ fun FeedScreen(nav: NavHostController) {
   LaunchedEffect(lifecycle, reads) { lifecycle.pollWhileResumed(reads.loops) }
   // The counts and this reader's own likes travel on separate routes, both
   // throttled inside Social — coming back to this tab does not re-poll them.
-  LaunchedEffect(Unit) { c.social.refresh() }
+  // And what the reader's agent reads, for the wire rings — throttled too.
+  LaunchedEffect(Unit) {
+    c.social.refresh()
+    c.social.refreshWired()
+  }
 
   // FIVE SECONDS, so an age reads "12s" then "17s" rather than sitting on one
   // number for half a minute (wire.tsx `useNow(5_000)`); and only while seen.
