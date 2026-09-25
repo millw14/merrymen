@@ -283,7 +283,11 @@ class GroupChatTest {
     val job = launch { r.follow() }
     withTimeout(5_000) { while (pauses.size < 3) delay(5) }
     assertEquals("3 seconds between healthy polls", 3_000L, pauses[1])
-    assertTrue("follow() asks /me as the screen opens", room.count("GET", "/api/groupchat/me") >= 1)
+    // follow() asks /me in a coroutine of its own beside the poll, so it can
+    // reach the server after the third pause; wait for it rather than read
+    // the count at once (which failed now and then), and so that it is not
+    // still on its way when the loop is cancelled below and counted there.
+    withTimeout(5_000) { while (room.count("GET", "/api/groupchat/me") < 1) delay(5) }
 
     // Paused (repeatOnLifecycle cancels the loop): not one request more.
     job.cancel()
