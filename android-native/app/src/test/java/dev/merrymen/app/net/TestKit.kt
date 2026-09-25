@@ -66,6 +66,9 @@ fun MockWebServer.origin(): String = "http://localhost:$port"
 /**
  * THE DEVICE'S STORED SESSION, in fields: what [Session] keeps in DataStore,
  * for a JVM test that drives the real Repository and the real cookie jar.
+ * [fallbackOrigin] plays the build's default origin: what a blank Server field
+ * restores, and the only host the jar places an older build's blob on when the
+ * stored address is not a web address.
  */
 class MemoryStore(
   initial: String,

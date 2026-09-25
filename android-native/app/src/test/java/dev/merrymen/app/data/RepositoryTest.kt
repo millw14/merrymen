@@ -254,19 +254,35 @@ class RepositoryTest {
     assertTrue(store.webViewGateExpired)
   }
 
-  @Test fun anOwnerWhoFixesASchemelessServerIsStillSignedIn() = runBlocking {
+  @Test fun anOwnerWhoFixesASchemelessServerToTheHostedOneIsStillSignedIn() = runBlocking {
     // An older build saved "localhost:<port>" with no scheme while its owner
     // was signed in; the session blob is from before, with no host in it.
-    store.originState.value = "localhost:${server.port}"
-    store.cookieBlob = "mm_session=abc"
+    // Here the MockWebServer is the build's default origin, the hosted service.
+    val old = MemoryStore("localhost:${server.port}", fallbackOrigin = server.origin()).apply { cookieBlob = "mm_session=abc" }
+    val oldJar = PersistentCookieJar(old)
+    val upgraded = Repository(MerrymenApi(Http.client(oldJar, debug = false), old), old, MemoryCookies(oldJar))
+    assertTrue(upgraded.bootstrap() is Loaded.Unreachable)
+    assertTrue("the start kept the session", old.cookieBlob!!.contains("mm_session"))
+
+    assertEquals(OriginCheck.Ok(server.origin()), upgraded.setOrigin(server.origin()))
+    server.session("0xAAA")
+    upgraded.refreshIdentity()
+    assertEquals("mm_session=abc", sentCookies(server))
+    assertEquals("0xAAA", upgraded.signedIn.value)
+  }
+
+  @Test fun anOwnerWhoFixesItToAnotherServerSendsItNoSession() = runBlocking {
+    // The same install, but the owner types a server that is not the hosted
+    // service (the store's default here). The blob's session came from the
+    // server stored before the scheme-less one, and this server never set it.
+    store.originState.value = "app.merrymen.dev"
+    store.cookieBlob = "mm_session=hosted-bearer"
     assertTrue(repo.bootstrap() is Loaded.Unreachable)
-    assertEquals("the start left the session on disk", "mm_session=abc", store.cookieBlob)
 
     assertEquals(OriginCheck.Ok(server.origin()), repo.setOrigin(server.origin()))
-    server.session("0xAAA")
+    server.session(null)
     repo.refreshIdentity()
-    assertEquals("mm_session=abc", sentCookies(server))
-    assertEquals("0xAAA", repo.signedIn.value)
+    assertNull("no credential goes to a host that never set it", sentCookies(server))
   }
 
   @Test fun aStartAgainstAnAddressThatIsNotOneIsAnAnswerNotACrash() = runBlocking {

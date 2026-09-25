@@ -67,48 +67,53 @@ class CookieJarTest {
     assertTrue(jar(store).names(other).isEmpty())
   }
 
-  // ── an older build's blob with no address to put it on yet ───────────────
+  // ── an older build's blob beside an address that is not one ──────────────
+  //
+  // An older build let the Server be saved with no scheme, and from there it
+  // could reach nothing, so a session in its blob came from whichever server
+  // was stored BEFORE, and nothing says which. It is placed on the build's
+  // default origin, the hosted service, and never on an address typed later.
 
-  @Test fun anOlderBuildsBlobWaitsForAnAddressThatParses() {
-    // A 0.2.0 owner, signed in, who then saved the Server with no scheme: the
-    // blob came from a real server, and the stored address names none.
+  @Test fun anOlderBuildsBlobBesideANonAddressBelongsToTheHostedServiceOnly() {
     val store = MemoryStore("app.merrymen.dev").apply { cookieBlob = "mm_gate=pw\nmm_session=abc" }
     val first = jar(store)
     first.drop("mm_gate") // what every start does first
-    assertTrue(first.names(hosted).isEmpty())
-    assertEquals("left on disk exactly as it was", "mm_gate=pw\nmm_session=abc", store.cookieBlob)
-
-    // The owner fixes the address; the next start still has the session.
-    store.originState.value = "https://app.merrymen.dev"
-    val cold = jar(store)
-    assertEquals(listOf("mm_session=abc"), cold.names(hosted))
-    assertTrue(cold.names(other).isEmpty())
+    assertEquals(listOf("mm_session=abc"), first.names(hosted))
+    assertTrue(first.names(other).isEmpty())
     assertTrue("rewritten with its host at once", store.cookieBlob!!.startsWith("["))
     assertFalse("the retired password is never read back in", store.cookieBlob!!.contains("mm_gate"))
+
+    // The owner fixes the address to the hosted service: still signed in,
+    // after a cold start too.
+    store.originState.value = "https://app.merrymen.dev"
+    assertEquals(listOf("mm_session=abc"), jar(store).names(hosted))
   }
 
-  @Test fun theSameRunPicksItUpOnceTheAddressIsFixed() {
-    val store = MemoryStore("app.merrymen.dev").apply { cookieBlob = "mm_session=abc" }
+  @Test fun aServerTypedAfterwardsGetsNoneOfIt() {
+    // The review's case: the jar used to hold the blob until an address
+    // parsed and then put it THERE, so the first server the owner typed was
+    // handed a session it never set.
+    val store = MemoryStore("app.merrymen.dev").apply { cookieBlob = "mm_session=hosted-bearer" }
+    val j = jar(store)
+    j.drop("mm_gate")
+    store.originState.value = "https://evil.example"
+    assertTrue("the same run", j.names(other).isEmpty())
+    assertTrue("a cold start", jar(store).names(other).isEmpty())
+    assertFalse(store.cookieBlob!!.contains("evil.example"))
+    // And it is still the hosted service's, should the owner go back there.
+    assertEquals(listOf("mm_session=hosted-bearer"), jar(store).names(hosted))
+  }
+
+  @Test fun withNoDefaultThatParsesItIsDroppedNotGuessed() {
+    val store = MemoryStore("app.merrymen.dev", fallbackOrigin = "not an address").apply { cookieBlob = "mm_session=abc" }
     val j = jar(store)
     assertTrue(j.names(hosted).isEmpty())
-    store.originState.value = "https://app.merrymen.dev"
-    assertEquals(listOf("mm_session=abc"), j.names(hosted))
+    assertEquals("[]", store.cookieBlob)
+    store.originState.value = "https://evil.example"
+    assertTrue(jar(store).names(other).isEmpty())
   }
 
-  @Test fun aCookieSetWhileTheBlobWaitsDoesNotWriteOverIt() {
-    // Nothing is written while it waits, so an answer from somewhere else
-    // cannot replace the only copy of that session with its own cookie.
-    val store = MemoryStore("app.merrymen.dev").apply { cookieBlob = "mm_session=abc" }
-    val j = jar(store)
-    j.set(other, "theirs=1; Path=/")
-    assertEquals("mm_session=abc", store.cookieBlob)
-    store.originState.value = "https://app.merrymen.dev"
-    assertEquals(listOf("mm_session=abc"), j.names(hosted))
-    assertEquals(listOf("theirs=1"), j.names(other))
-    assertEquals("both, once it has a host", setOf("mm_session=abc", "theirs=1"), jar(store).let { it.names(hosted) + it.names(other) }.toSet())
-  }
-
-  @Test fun aSignOutForgetsAWaitingBlobToo() {
+  @Test fun aSignOutForgetsItToo() {
     val store = MemoryStore("app.merrymen.dev").apply { cookieBlob = "mm_session=abc" }
     jar(store).clear()
     assertEquals("[]", store.cookieBlob)
