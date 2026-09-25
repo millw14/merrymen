@@ -130,10 +130,9 @@ object WebAuth {
    * drift: CookieManager writes to disk lazily, so a process death can cost it a
    * cookie the jar kept. A handoff page (the grant, the limits, a deposit) that
    * opened signed out would ask the owner to sign in a second time before it
-   * could act for them. Copying the jar's cookies into CookieManager before the
-   * first load hands the page the session the app is already using. `Secure`
-   * because the origin is https; the platform store keeps httpOnly cookies like
-   * `mm_session` faithfully.
+   * could act for them. Copying the session into CookieManager before the first
+   * load hands the page the session the app is already using. What is copied,
+   * and with which attributes, is [seedLines].
    */
   fun seed(origin: String, jar: PersistentCookieJar) {
     val url = origin.toHttpUrlOrNull() ?: return
@@ -141,11 +140,54 @@ object WebAuth {
     cm.setAcceptCookie(true)
     // Only what the jar would send to this origin: it is scoped by host now,
     // so another server's session never lands in this server's page.
-    for (c in jar.loadForRequest(url)) {
-      cm.setCookie(origin, "${c.name}=${c.value}; Path=/" + if (url.isHttps) "; Secure" else "")
+    for (line in seedLines(jar.loadForRequest(url), cm.getCookie(origin), url, System.currentTimeMillis())) {
+      cm.setCookie(origin, line)
     }
     cm.flush()
   }
+
+  /**
+   * THE SESSION, AS THE SERVER SETS IT: the Set-Cookie lines [seed] hands
+   * CookieManager, from the cookies the jar [held] for [url] and the WebView's
+   * own line for it ([webRaw]).
+   *
+   * HttpOnly AND SameSite=Strict, ALWAYS. The server sets mm_session httpOnly
+   * so that no script on the page can read it (web/src/lib/auth.ts
+   * sessionCookieOptions), and CookieManager lets native code overwrite an
+   * httpOnly cookie with one that is not. This used to write "name=value;
+   * Path=/" on every handoff, which replaced the server's copy with one
+   * `document.cookie` could read: any script running in the page (an XSS, a
+   * compromised bundled SDK) could then take the session that places orders
+   * and turns Live trading on. The jar cannot say which cookies were httpOnly
+   * (the WebView's line never did), so the attributes come from what the
+   * server is known to set, not from the jar.
+   *
+   * ONLY THE SESSION. A cookie the page's own script sets (mm_locale, the
+   * language, written through `document.cookie`) belongs to the page; seeded
+   * httpOnly, the script that owns it could no longer read or change it, and
+   * no handoff needs it. A session the WebView already holds with the same
+   * value is left exactly as the server set it, expiry included. The age is
+   * the jar's when it knows one; a copy harvested from the WebView carries
+   * none, so it is a session cookie there, and the next handoff seeds it again.
+   */
+  fun seedLines(held: List<Cookie>, webRaw: String?, url: HttpUrl, nowMs: Long): List<String> {
+    val inWeb = webRaw.orEmpty().split(';').mapNotNull { part ->
+      val t = part.trim()
+      val eq = t.indexOf('=')
+      if (eq <= 0) null else t.substring(0, eq) to t.substring(eq + 1)
+    }.toMap()
+    return held.filter { it.name in SESSION_COOKIES && inWeb[it.name] != it.value }.map { c ->
+      buildString {
+        append(c.name).append('=').append(c.value)
+        append("; Path=/; HttpOnly; SameSite=Strict")
+        if (url.isHttps) append("; Secure")
+        if (c.persistent) append("; Max-Age=").append(((c.expiresAt - nowMs) / 1000).coerceAtLeast(1))
+      }
+    }
+  }
+
+  /** The server's own httpOnly session cookie: the one thing a handoff hands over. */
+  val SESSION_COOKIES: Set<String> = setOf("mm_session")
 
   /** Sign-out has to clear BOTH jars, or the next sign-in silently reuses one. */
   fun forget(jar: PersistentCookieJar) {
@@ -255,8 +297,9 @@ fun WebFlow(
   }
   DisposableEffect(Unit) {
     CookieManager.getInstance().setAcceptCookie(true)
-    // Hand the WebView any session cookie the app already holds, so a handoff
-    // page opens signed in as the same wallet the app is.
+    // Hand the WebView the session the app already holds, httpOnly as the
+    // server set it, so a handoff page opens signed in as the same wallet the
+    // app is (WebAuth.seedLines).
     WebAuth.seed(origin, jar)
     onDispose { CookieManager.getInstance().flush() }
   }
