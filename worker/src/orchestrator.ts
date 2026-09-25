@@ -67,6 +67,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
 import { getGrantStore } from "./grant-store";
+import { honourKillRequest, killRequested } from "./kill-request";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
@@ -439,6 +440,19 @@ export function staleThresholdSec(tickSeconds: number): number {
 }
 
 const children = new Map<string, Child>();
+
+/**
+ * Test seam: count a child as running without spawning a worker, so a test
+ * can drive the real reconcile() over it. The fake needs only `kill`.
+ */
+export function adoptChildForTest(
+  tenant: `0x${string}`,
+  smartAccount: `0x${string}`,
+  proc: Pick<ChildProcess, "kill">,
+): void {
+  const lc = tenant.toLowerCase() as `0x${string}`;
+  children.set(lc, { proc: proc as ChildProcess, tenant: lc, smartAccount, startedAt: Date.now(), restarts: 0, staleSec: 600, firstBeatSec: 600 });
+}
 /**
  * The advisory lease held for each tenant we are running, keyed by lowercased
  * tenant. Acquired in reconcile() BEFORE the first spawn and held across crash
@@ -686,6 +700,8 @@ async function promoteChatSettings(tenant: `0x${string}`, chat: ChatSettings | n
 
 /** Write the tenant's session-key-only grant into its child's grant.json. */
 async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` | null> {
+  // A TELEGRAM KILL IS PENDING: hand this home no key. See kill-request.ts.
+  if (killRequested(childHome(tenant))) return null;
   const grant = await getGrantStore().get(tenant);
   if (!grant) return null;
 
@@ -756,8 +772,14 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` 
  * NOT `writeGrantForChild`. That one also mints a public identity, which is
  * spawn-time work: idempotent, but a store write, and running it for every
  * tenant every fifteen seconds would be pure waste.
+ *
+ * NEVER INTO A HOME WITH A PENDING KILL. The "no file, write it" rule below
+ * is how a hosted Telegram /kill used to come undone: the child deleted its
+ * copy, and this function put it back from the store within a pass. Until
+ * reconcile has removed the stored grant, the missing file is the kill.
  */
 async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
+  if (killRequested(childHome(tenant))) return;
   let grant;
   try {
     grant = await getGrantStore().get(tenant);
@@ -1144,6 +1166,12 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     log(`${tenant}: no healthy lease — not spawning (another replica may hold it)`);
     return;
   }
+  // Checked here as well as in writeGrantForChild, so the log says why. A
+  // crash-restart lands here without passing reconcile's kill check first.
+  if (killRequested(childHome(tenant))) {
+    log(`${tenant}: a Telegram kill is pending — not spawning`);
+    return;
+  }
   const smartAccount = await writeGrantForChild(tenant);
   if (!smartAccount) {
     log(`${tenant}: no grant in the store — not spawning`);
@@ -1267,6 +1295,25 @@ export async function reconcile(): Promise<void> {
     log(`store unreadable, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
     return;
   }
+  // A TELEGRAM KILL, CARRIED OUT HERE. It must happen before `wanted` is built.
+  // A tenant whose stored grant this removes is dropped from the list. It is
+  // then not wanted, and the kill-switch branch at the bottom stands its child
+  // down and wipes its home, the same as for a web DELETE /api/grants.
+  // See kill-request.ts.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const kept: `0x${string}`[] = [];
+  for (const tenant of tenants) {
+    const lc = tenant.toLowerCase() as `0x${string}`;
+    const k = await honourKillRequest(store, lc, childHome(lc), nowSec);
+    if (k.outcome === "revoked") {
+      log(`${lc}: Telegram kill honoured — grant removed from the store`);
+      continue;
+    }
+    if (k.outcome === "superseded") log(`${lc}: a grant signed after the Telegram kill replaces it — arming that one`);
+    if (k.outcome === "failed") log(`${lc}: Telegram kill pending, could not remove the grant yet (${k.error}) — nothing arms meanwhile`);
+    kept.push(tenant);
+  }
+  tenants = kept;
   const wanted = new Set(tenants.map((t) => t.toLowerCase()));
 
   // A lease whose connection dropped no longer protects its tenant — Postgres

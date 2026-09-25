@@ -42,8 +42,31 @@ export type PendingAction =
    */
   | { kind: "setting"; key: string; value: unknown; expiresAt: number };
 
+/**
+ * What a kill actually did, so the reply can say exactly that.
+ *
+ * `revocation` is present only for a HOSTED kill (kill-request.ts). There the
+ * grant lives in the tenant store and this agent only holds a copy of it.
+ * `queued`: the copy is gone and the server will remove the stored grant.
+ * `failed`: the copy is gone, but the request that stops the server restoring
+ * it could not be written.
+ */
+export interface KillResult {
+  ok: boolean;
+  reason?: string;
+  archived?: string | null;
+  revocation?: "queued" | "failed";
+}
+
 export interface CommandDeps {
   controlEnabled: boolean;
+  /**
+   * Hosted fleet (MERRYMEN_HOSTED)? The kill prompt has to say what a kill
+   * does HERE. Self-hosted it archives an owner key on the owner's machine.
+   * Hosted there is no owner key on the server to archive. Optional: absent
+   * means self-hosted, which is what every fixture predating it describes.
+   */
+  hosted?: boolean;
   /** Current chat per-action ceiling (telegramMaxActionUsdg). */
   maxActionUsdg: number;
   /** On-chain per-trade ceiling for clamping /cap; undefined when no grant armed. */
@@ -78,8 +101,12 @@ export interface CommandDeps {
   setStrategy(name: string): { ok: boolean; reason?: string };
   setCap(usdg: number): void;
   setPaused(paused: boolean): void;
-  /** Destroy the grant. Archives the owner key first — `archived` names the account kept. */
-  kill(): { ok: boolean; reason?: string; archived?: string | null };
+  /**
+   * Destroy the grant. Self-hosted it archives the owner key first, and
+   * `archived` names the account kept. Hosted it queues the store removal
+   * (`revocation`).
+   */
+  kill(): KillResult;
   link(code: string): { ok: boolean; reason?: string };
   /** Build a bounded TradeIntent and route it through processIntent → policy wall. */
   trade(side: "buy" | "sell", symbol: string, usdg: number): Promise<string>;
@@ -294,6 +321,23 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
         case "kill": {
           const r = deps.kill();
           if (!r.ok) return `nothing to kill: ${r.reason ?? "no grant"}`;
+          // HOSTED: say what happened. Nothing was archived, and the stored
+          // grant is removed by the server on its next pass. It is not gone
+          // yet at the moment this is sent.
+          if (r.revocation === "queued") {
+            return (
+              `🛑 KILL SWITCH — trading permission revoked. The band stands down on the next tick, and the server ` +
+              `removes the stored grant on its next pass, so it is not handed back.\n` +
+              `Your funds stay in your smart account. Sign a new grant in the dashboard to ride again.`
+            );
+          }
+          if (r.revocation === "failed") {
+            return (
+              `⚠️ KILL SWITCH — only half done. This agent's copy of the key is gone, but I could not record the kill, ` +
+              `so the server may hand the key back on its next pass.\n` +
+              `Revoke it for good in the dashboard: You → Wallet &amp; permissions → discard &amp; start over.`
+            );
+          }
           return (
             `🛑 KILL SWITCH — grant destroyed, the band stands down on the next tick.\n` +
             (r.archived
@@ -402,6 +446,15 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       return deps.removeWatcher(cmd.id);
     case "kill": {
       deps.setPending({ kind: "kill", expiresAt: now() + CONFIRM_TTL_SEC });
+      if (deps.hosted) {
+        // Hosted there is no owner key on the server (the grant store refuses
+        // one) and no `merrymen recover` to run on it.
+        return (
+          `⚠️ <b>confirm kill</b> — this revokes my trading permission and stands the band down.\n` +
+          `Your funds stay in your smart account; the server never held your owner key.\n\n` +
+          `/confirm to kill (${CONFIRM_TTL_SEC}s) or /cancel.`
+        );
+      }
       return (
         `⚠️ <b>confirm kill</b> — this destroys the grant and stands the band down.\n` +
         `Your owner key is archived to <code>~/.merrymen/grants/</code> first, so ` +

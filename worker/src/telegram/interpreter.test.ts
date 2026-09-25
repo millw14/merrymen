@@ -300,6 +300,38 @@ describe("executeCommand — code disposes", () => {
     assert.match(done, /KILL SWITCH/);
   });
 
+  it("SELF-HOSTED KILL WORDING IS UNCHANGED: the owner key is archived on this machine", async () => {
+    const d = deps({ kill: () => ({ ok: true, archived: "0xabc" }) });
+    const asked = await executeCommand({ kind: "kill" }, d);
+    assert.match(asked, /~\/\.merrymen\/grants\//);
+    const done = await executeCommand({ kind: "confirm" }, d);
+    assert.match(done, /grant destroyed/);
+    assert.match(done, /merrymen recover/);
+  });
+
+  it("HOSTED KILL PROMISES NO ARCHIVE: the server never held the owner key", async () => {
+    // Hosted, grant.json holds only the session key and there is no CLI to
+    // run on the server. The self-hosted wording promised both.
+    const d = deps({ hosted: true, kill: () => ({ ok: true, archived: null, revocation: "queued" }) });
+    const asked = await executeCommand({ kind: "kill" }, d);
+    assert.match(asked, /confirm kill/i);
+    assert.doesNotMatch(asked, /merrymen recover|~\/\.merrymen\/grants/);
+    assert.match(asked, /server never held your owner key/);
+    const done = await executeCommand({ kind: "confirm" }, d);
+    assert.match(done, /KILL SWITCH/);
+    // It is NOT yet gone from the store when this is sent, so it must not say so.
+    assert.doesNotMatch(done, /destroyed|archived/);
+    assert.match(done, /removes the stored grant on its next pass/);
+  });
+
+  it("a hosted kill that could not be recorded says the key may come back, and where to stop it for good", async () => {
+    const d = deps({ hosted: true, kill: () => ({ ok: true, archived: null, revocation: "failed" }) });
+    await executeCommand({ kind: "kill" }, d);
+    const done = await executeCommand({ kind: "confirm" }, d);
+    assert.match(done, /only half done/);
+    assert.match(done, /Wallet &amp; permissions → discard &amp; start over/);
+  });
+
   it("kill is refused at confirm time if control was turned off in between", async () => {
     // Same re-vetting a parked transfer gets: the gate is checked when the
     // action fires, not only when it was parked.

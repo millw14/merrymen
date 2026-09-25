@@ -1,7 +1,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { StoredGrant } from "../../packages/core/src/index";
-import { homePaths } from "./home";
+import { homePaths, merrymenHome } from "./home";
+import { killRequested } from "./kill-request";
 
 /** Reads the grant handoff written by web's /api/grants (~/.merrymen/grant.json). */
 export function loadGrantFile(): StoredGrant | null {
@@ -13,6 +14,20 @@ export function loadGrantFile(): StoredGrant | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The grant the worker may ARM: the file's, unless a hosted kill is pending
+ * in this home.
+ *
+ * Only a hosted /kill leaves the request (kill-request.ts). Until the
+ * orchestrator has removed the stored grant, it can race a copy of the key
+ * back into this home. The copy is still on disk, but it is not a grant.
+ * Self-hosted there is never a request, so this is loadGrantFile.
+ */
+export function loadArmableGrant(): StoredGrant | null {
+  const grant = loadGrantFile();
+  return grant && killRequested(merrymenHome()) ? null : grant;
 }
 
 /**

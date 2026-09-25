@@ -63,6 +63,21 @@ export interface GrantStore {
   tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null>;
   /** Forget a tenant's grant (the kill switch). */
   remove(tenant: `0x${string}`): Promise<void>;
+  /**
+   * Forget a tenant's grant IF it was stored at or before `atSec` (unix
+   * seconds, compared with the record's server-stamped `updatedAt`).
+   *
+   * The kill switch for a kill that was asked for somewhere else — Telegram,
+   * inside the tenant's child — and carried out later by the orchestrator. In
+   * between, the owner may have signed a new grant on purpose, and that one
+   * must survive. `grantedAt` cannot decide it: the browser stamps it, so a
+   * skewed clock would pass an old grant off as new. `updatedAt` is stamped
+   * here, on the server, at the moment of the put.
+   *
+   * One conditional DELETE, so a put racing the kill cannot be lost to a
+   * read-then-delete. A tie counts as covered: the grant is removed.
+   */
+  removeUnlessNewer(tenant: `0x${string}`, atSec: number): Promise<"removed" | "absent" | "newer">;
 }
 
 /** Split a full grant into a persistable record, refusing anything with an owner key. */
@@ -137,6 +152,26 @@ export class FileGrantStore implements GrantStore {
   }
   async remove(tenant: `0x${string}`): Promise<void> {
     await rm(this.file(tenant), { force: true });
+  }
+  async removeUnlessNewer(tenant: `0x${string}`, atSec: number): Promise<"removed" | "absent" | "newer"> {
+    let raw: string;
+    try {
+      raw = await readFile(this.file(tenant), "utf8");
+    } catch (e) {
+      // Only a missing file is "absent". Any other read failure is not an
+      // answer, and the caller must not treat it as a completed kill.
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+      throw e;
+    }
+    let updatedAt = Number.NaN;
+    try {
+      updatedAt = Number((JSON.parse(raw) as StoredRecord).updatedAt);
+    } catch {
+      /* an unreadable record cannot prove it is newer — it is removed below */
+    }
+    if (updatedAt > atSec) return "newer";
+    await rm(this.file(tenant), { force: true });
+    return "removed";
   }
   async tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null> {
     const want = smartAccount.toLowerCase();
@@ -244,6 +279,16 @@ export class PgGrantStore implements GrantStore {
   async remove(tenant: `0x${string}`): Promise<void> {
     const c = await this.client();
     await c.query(`DELETE FROM grants WHERE tenant = $1`, [tenant.toLowerCase()]);
+  }
+  async removeUnlessNewer(tenant: `0x${string}`, atSec: number): Promise<"removed" | "absent" | "newer"> {
+    const c = await this.client();
+    const t = tenant.toLowerCase();
+    const { rows } = await c.query(`DELETE FROM grants WHERE tenant = $1 AND updated_at <= $2 RETURNING tenant`, [t, atSec]);
+    if (rows.length > 0) return "removed";
+    // Nothing deleted: either there is no row, or it was put after the kill.
+    // This read only names which — the decision was the DELETE above.
+    const left = await c.query(`SELECT 1 FROM grants WHERE tenant = $1`, [t]);
+    return left.rows.length > 0 ? "newer" : "absent";
   }
   async tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null> {
     const c = await this.client();
