@@ -110,6 +110,26 @@ export function validRedirectUri(raw: unknown): string | null {
 }
 
 /**
+ * An app-scheme redirect (cursor://…, vscode://…, javascript:…): anything that
+ * parses as a URL but is not http or https. Such a URI is IGNORED in a
+ * registration rather than failing it, and never stored, so no code can ever
+ * be sent to it. Clients list several callbacks at once and use whichever the
+ * server keeps: Cursor registers cursor://anysphere.cursor-mcp/oauth/callback
+ * together with https://www.cursor.com/… and http://localhost:8787/callback,
+ * and a server that refuses the whole set can never be added to Cursor. A
+ * malformed http(s) URI still fails the registration (see validRedirectUri).
+ */
+function isAppScheme(raw: unknown): boolean {
+  if (typeof raw !== "string" || raw.length > 2048) return false;
+  try {
+    const { protocol } = new URL(raw);
+    return protocol !== "http:" && protocol !== "https:";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * A valid redirect URI in canonical form (URL.href): ASCII only (IDNA host,
  * percent-encoded path and query), default port and dot segments removed.
  * That is also the form a code is actually sent to (the redirect Location is
@@ -345,10 +365,12 @@ export function parseCimd(clientId: string, body: Buffer): Omit<McpClient, "secr
   if (method !== "none") throw new ClientError("invalid_client_metadata", "only public clients (token_endpoint_auth_method none) are supported by metadata documents");
   if ("client_secret" in doc || "client_secret_expires_at" in doc) throw new ClientError("invalid_client_metadata", "a metadata document must not contain a client secret");
   const uris = Array.isArray(doc.redirect_uris) ? doc.redirect_uris : [];
+  // App-scheme callbacks are left out, never stored (isAppScheme).
+  const kept = uris.filter((u) => !isAppScheme(u));
   // Canonical ASCII hrefs, never the raw strings: what is stored is what a
   // code can be sent to, and its size is its byte count.
-  const redirectUris = uris.map(canonicalRedirectUri).filter((u): u is string => !!u);
-  if (!redirectUris.length || redirectUris.length !== uris.length || redirectUris.length > MAX_REDIRECTS) {
+  const redirectUris = kept.map(canonicalRedirectUri).filter((u): u is string => !!u);
+  if (!redirectUris.length || redirectUris.length !== kept.length || uris.length > MAX_REDIRECTS) {
     throw new ClientError("invalid_redirect_uri", "client metadata redirect_uris must be https or loopback URLs");
   }
   if (Buffer.byteLength(JSON.stringify(redirectUris), "utf8") > CIMD_REDIRECTS_MAX_BYTES) {
@@ -466,9 +488,12 @@ export async function registerClient(d: McpDb, raw: unknown, now: number): Promi
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail("invalid_client_metadata", "body must be a JSON object");
   const m = raw as Record<string, unknown>;
   const uris = Array.isArray(m.redirect_uris) ? m.redirect_uris : [];
-  const redirectUris = uris.map(validRedirectUri).filter((u): u is string => !!u);
-  if (!redirectUris.length || redirectUris.length !== uris.length || redirectUris.length > MAX_REDIRECTS) {
-    return fail("invalid_redirect_uri", "redirect_uris must be 1-10 https or loopback http URLs without fragments");
+  // App-scheme callbacks are left out, never stored (isAppScheme); the
+  // response lists only what was kept, which is what the client may use.
+  const kept = uris.filter((u) => !isAppScheme(u));
+  const redirectUris = kept.map(validRedirectUri).filter((u): u is string => !!u);
+  if (!redirectUris.length || redirectUris.length !== kept.length || uris.length > MAX_REDIRECTS) {
+    return fail("invalid_redirect_uri", "redirect_uris must be 1-10 https or loopback http URLs without fragments (app-scheme callbacks such as cursor:// are ignored)");
   }
   const method = (m.token_endpoint_auth_method ?? "client_secret_basic") as string;
   if (!["none", "client_secret_post", "client_secret_basic"].includes(method)) {

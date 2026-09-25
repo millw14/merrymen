@@ -5,6 +5,7 @@
  * and the structured output contract.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { afterEach, test } from "node:test";
 import * as z from "zod";
 import { createMcpHandler } from "@modelcontextprotocol/server";
@@ -63,6 +64,90 @@ test("no token → 401 with a discovery challenge; a bad token → invalid_token
   assert.equal(bad.status, 401);
   assert.match(bad.headers.get("www-authenticate") ?? "", /error="invalid_token"/);
   assert.match(bad.headers.get("www-authenticate") ?? "", /trade:propose/, "a reconnect after a revoked token asks for everything too");
+});
+
+test("the 401 without a token says what to do in plain words, with the help page, not \"sign in\" (the website sign-in never helps here)", async () => {
+  const res = await call(mcpRequest(null, "tools/list"));
+  assert.equal(res.status, 401);
+  const body = await res.json() as { error: string; error_description: string };
+  assert.equal(body.error, "unauthorized");
+  assert.equal(body.error_description, "Add this server to your assistant as a connector, then sign in to Merrymen when it asks. Help: https://app.test/connect/mcp");
+});
+
+/** A person opening the server address in a browser tab. */
+function pageLoad(host: string, o: { method?: string; headers?: Record<string, string> } = {}): Request {
+  return new Request(`https://${host}/mcp`, {
+    method: o.method ?? "GET",
+    headers: { host, accept: "text/html,application/xhtml+xml,*/*;q=0.8", "sec-fetch-dest": "document", "sec-fetch-mode": "navigate", "sec-fetch-site": "none", ...o.headers },
+  });
+}
+
+test("the server address opened in a browser goes to the connect help page on the issuer, on both hosts", async () => {
+  const cfg = testConfig({ resource: "https://mcp.test/mcp", allowedHosts: new Set(["app.test", "mcp.test"]), allowedOrigins: new Set(["https://app.test", "https://mcp.test"]) });
+  const at = (req: Request) => handleMcpRequest(req, { cfg, now: () => NOW });
+  for (const host of ["mcp.test", "app.test"]) {
+    for (const method of ["GET", "HEAD"]) {
+      const res = await at(pageLoad(host, { method }));
+      assert.equal(res.status, 307, `${method} ${host}`);
+      assert.equal(res.headers.get("location"), "https://app.test/connect/mcp", `${method} ${host}`);
+      assert.equal(res.headers.get("cache-control"), "no-store");
+      assert.equal(res.headers.get("www-authenticate"), null, "a page, not a challenge");
+    }
+  }
+  // A browser without Sec-Fetch headers is known by its Accept.
+  const old = await at(new Request("https://mcp.test/mcp", { headers: { host: "mcp.test", accept: "text/html" } }));
+  assert.equal(old.status, 307);
+});
+
+test("every client request to /mcp still meets the Host, Origin and bearer checks", async () => {
+  const { a } = await setup();
+  // The resource stays testConfig's (the token is bound to it); only the host is added.
+  const cfg = testConfig({ allowedHosts: new Set(["app.test", "mcp.test"]) });
+  const at = (req: Request) => handleMcpRequest(req, { cfg, now: () => NOW });
+  const challenged = (res: Response, what: string) => {
+    assert.equal(res.status, 401, what);
+    assert.match(res.headers.get("www-authenticate") ?? "", /^Bearer resource_metadata=/, what);
+  };
+  // The 2025-era GET stream and a plain GET: no token → the discovery challenge, as before.
+  challenged(await at(new Request("https://mcp.test/mcp", { headers: { host: "mcp.test", accept: "text/event-stream" } })), "GET text/event-stream");
+  challenged(await at(new Request("https://mcp.test/mcp", { headers: { host: "mcp.test", accept: "*/*" } })), "GET */*");
+  // A fetch() from a page asking for HTML is not a page load.
+  challenged(await at(new Request("https://mcp.test/mcp", { headers: { host: "mcp.test", accept: "text/html", "sec-fetch-dest": "empty" } })), "fetch()");
+  // A form POST from a page is not either.
+  challenged(await at(pageLoad("mcp.test", { method: "POST" })), "POST");
+  // Page-load headers plus a token or an MCP header: a client, and the token is checked.
+  const bad = await at(pageLoad("mcp.test", { headers: { authorization: `Bearer mcp_at_${"x".repeat(43)}` } }));
+  assert.equal(bad.status, 401);
+  assert.match(bad.headers.get("www-authenticate") ?? "", /error="invalid_token"/);
+  challenged(await at(pageLoad("mcp.test", { headers: { "mcp-protocol-version": "2025-06-18" } })), "MCP-Protocol-Version");
+  const ok = await at(mcpRequest(a.tokens.access_token, "tools/list", {}, { host: "mcp.test" }));
+  assert.equal(ok.status, 200);
+  await ok.text();
+  // The earlier checks come first, for a browser too: nothing redirects past them.
+  assert.equal((await at(pageLoad("evil.test"))).status, 421);
+  assert.equal((await at(pageLoad("mcp.test", { headers: { origin: "https://evil.test" } }))).status, 403);
+  assert.equal((await handleMcpRequest(pageLoad("mcp.test"), { cfg: testConfig({ enabled: false, disabledWhy: "off" }) })).status, 404);
+});
+
+test("serverInfo offers the current SVG mark, a file the app serves", async () => {
+  const { a } = await setup();
+  // buildServer reads the issuer from the environment, which these tests leave unset.
+  const saved = process.env.MERRYMEN_PUBLIC_ORIGIN;
+  process.env.MERRYMEN_PUBLIC_ORIGIN = "https://app.test";
+  try {
+    const res = await rpcResult(await call(mcpRequest(a.tokens.access_token, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "1" } })));
+    const icons = (res.result?.serverInfo as { icons?: Array<{ src: string; mimeType: string; sizes: string[] }> } | undefined)?.icons ?? [];
+    assert.deepEqual(icons.map((i) => [i.src, i.mimeType, i.sizes.join(" ")]), [
+      ["https://app.test/mcp-icon.svg", "image/svg+xml", "any"],
+    ]);
+    // Only the SVG: the PNG app icons still carry the old mark until PR #166 regenerates them.
+    for (const icon of icons) {
+      assert.match(readFileSync(new URL(`../../public${new URL(icon.src).pathname}`, import.meta.url), "utf8"), /<svg/, icon.src);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.MERRYMEN_PUBLIC_ORIGIN;
+    else process.env.MERRYMEN_PUBLIC_ORIGIN = saved;
+  }
 });
 
 test("CORS: a configured browser origin can read every real answer, not only the preflight", async () => {

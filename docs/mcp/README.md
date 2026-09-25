@@ -5,6 +5,8 @@ Merryman from whichever AI assistant you already use: Claude (web, desktop,
 mobile, Claude Code), Codex, ChatGPT's developer mode, or any other client that
 speaks MCP over Streamable HTTP with OAuth.
 
+**Connect in one click:** <https://app.merrymen.dev/connect/mcp>
+
 **Server address:** `https://mcp.merrymen.dev/mcp`
 
 Merrymen stays the source of truth for your identity, your agent, your limits,
@@ -48,8 +50,10 @@ agent's own limits and on-chain permission still apply after that.
 
 See [clients.md](clients.md) for step-by-step setup for each client.
 
-In short: add the server address as a custom connector (Claude) or MCP server
-(Claude Code, Codex, others). The first time, your browser opens Merrymen; sign
+In short: open [the connect page](https://app.merrymen.dev/connect/mcp) and
+click **Add to Claude** (or your assistant's link or command), or add the server
+address as a custom connector (Claude) or MCP server (Claude Code, Codex,
+others) by hand. The first time, your browser opens Merrymen; sign
 in as usual, choose which agent the assistant may see and what it may do, and
 approve. Manage or disconnect assistants any time at
 [Connected apps](https://app.merrymen.dev/connect/apps).
@@ -89,7 +93,7 @@ before/after on the approval page.
 
 ## More
 
-- [clients.md](clients.md) — tested client setup
+- [clients.md](clients.md) — setup for each client, and what was verified
 - [tools.md](tools.md) — every tool and resource, and the scope it needs
 - [oauth.md](oauth.md) — OAuth, tokens, revocation, personal access tokens
 - [errors.md](errors.md) — error codes and retries

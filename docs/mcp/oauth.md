@@ -45,7 +45,8 @@ limited to the agents and scopes that owner chose.
    requested, so a narrower challenge would put the write and sensitive
    scopes out of reach of every OAuth client. Asking grants nothing by itself:
    the owner ticks what the app gets, and the sensitive scopes start unticked
-   (a decision that names no scopes gets only the scopes that start ticked).
+   unless the owner's still-active connection with the same client already
+   has them (a decision that names no scopes gets only the default scopes).
    An `/oauth/authorize` request with no `scope` at all is treated as asking
    for read access plus chat.
 2. It reads the protected-resource metadata (which names the authorization
@@ -117,8 +118,12 @@ limited to the agents and scopes that owner chose.
    (a verified CIMD host; or, for a dynamically registered client, "not
    verified by Merrymen" and the host of the redirect the code will actually
    go to, which is also what **Connected apps** records for the connection),
-   chooses which of their agents the client may see and which scopes to allow
-   (sensitive scopes start unticked), and approves or declines. The decision
+   reads a plain summary of what it could see and do, and approves or
+   declines; the full scope list (and whether to share each agent) is one
+   click away. The page starts from the defaults (sensitive scopes unticked),
+   or, when the owner's connection with this same client is still active,
+   from what that connection holds (cut down to what this request offers), so
+   a reconnect never silently drops a scope the owner granted. The decision
    is a same-origin POST that requires the owner's session; the page cannot be
    framed.
 7. Only now does the browser go back to the client's `redirect_uri`: with

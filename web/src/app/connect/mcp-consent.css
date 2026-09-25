@@ -1,0 +1,42 @@
+/* The one-click consent screen (/connect/app): the owner's agent as a card,
+   the plain-words summary of what the app could do, and the full permission
+   list folded away behind "Change what … can do". Builds on connect.css and
+   mcp-connect.css (the checklist and badges are theirs). */
+
+.mcp-connect .mcp-agent-card { display: flex; align-items: center; gap: 13px; margin: 20px 0 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); }
+.mcp-connect .mcp-agent-card-icon { display: grid; place-items: center; width: 40px; height: 40px; flex-shrink: 0; border: 1px solid #c8ff0030; border-radius: 12px; background: #c8ff0008; color: #c8ff00; }
+.mcp-connect .mcp-agent-card > div { min-width: 0; }
+.mcp-connect .mcp-agent-card strong { display: block; font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }
+.mcp-connect .mcp-agent-card div > span { display: block; margin-top: 3px; color: var(--tx-2); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+
+.mcp-connect .mcp-summary { margin: 14px 0 22px; padding: 4px 16px; border: 1px solid var(--line); border-radius: 14px; background: #ffffff04; }
+.mcp-connect .mcp-summary ul { list-style: none; margin: 0; padding: 0; }
+.mcp-connect .mcp-summary li { display: flex; gap: 12px; padding: 13px 0; }
+.mcp-connect .mcp-summary li + li { border-top: 1px solid var(--line); }
+.mcp-connect .mcp-summary li > svg { flex-shrink: 0; margin-top: 2px; color: #c8ff00; }
+.mcp-connect .mcp-summary li > p { min-width: 0; margin: 0; }
+.mcp-connect .mcp-summary strong { display: block; color: var(--tx); font-size: 13px; font-weight: 500; }
+.mcp-connect .mcp-summary li span { display: block; margin-top: 3px; color: var(--tx-2); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.mcp-connect .mcp-summary-sensitive > svg { color: #ffcf7a; }
+.mcp-connect .mcp-summary-staff > svg { color: #f9a0a0; }
+.mcp-connect .mcp-summary .mcp-summary-never > svg { color: var(--tx-2); }
+.mcp-connect .mcp-summary-note { margin: 0; padding: 11px 0 13px; border-top: 1px solid var(--line); color: var(--tx-2); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+
+.mcp-connect .mcp-customize-toggle { display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%; min-height: 44px; margin: 14px 0 0; padding: 8px 0 0; border-top: 1px solid var(--line); color: var(--tx-2); font-size: 12px; text-align: center; overflow-wrap: anywhere; }
+.mcp-connect .mcp-customize-toggle:hover { color: var(--tx); }
+.mcp-connect .mcp-customize-toggle svg { flex-shrink: 0; transition: transform .15s ease; }
+.mcp-connect .mcp-customize-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.mcp-connect .mcp-customize[hidden] { display: none; }
+.mcp-connect .mcp-customize .mcp-checks { margin: 4px 0 22px; }
+.mcp-connect .mcp-customize + .connect-boundary { margin-top: 14px; }
+
+@media (max-width: 450px) {
+  .mcp-connect .mcp-agent-card { padding: 12px 13px; }
+  .mcp-connect .mcp-summary { padding: 2px 13px; }
+  .mcp-connect .mcp-summary li { gap: 10px; }
+}
+@media (prefers-reduced-motion: reduce) { .mcp-connect .mcp-customize-toggle svg { transition: none; } }
+
+/* The single agent's Share box, at the card's right edge. */
+.mcp-connect .mcp-agent-card-share { display: flex; align-items: center; gap: 7px; margin-left: auto; flex-shrink: 0; min-height: 44px; padding-left: 8px; color: var(--tx-2); font-size: 12px; cursor: pointer; }
+.mcp-connect .mcp-agent-card-share input { width: 17px; height: 17px; margin: 0; accent-color: #c8ff00; cursor: pointer; }

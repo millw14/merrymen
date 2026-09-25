@@ -140,7 +140,8 @@
   .terminal-host .account-agent-note { font-size:13px; line-height:1.5; margin:10px 0 0; }
   .terminal-host .profile-account .account-control { background:var(--card); border:1px solid var(--line); border-top:0; }
   .terminal-host .profile-account .account-control:nth-child(2) { border-top:1px solid var(--line); border-radius:12px 12px 0 0; }
-  .terminal-host .profile-account .account-control:nth-child(4) { border-radius:0 0 12px 12px; }
+  /* The last row, whichever it is: "Connect to Claude" is shown only on hosted installs. */
+  .terminal-host .profile-account .account-control:not(:has(~ .account-control)) { border-radius:0 0 12px 12px; }
   .terminal-host .account-control strong { font-size:16px; }
   .terminal-host .account-control small { font-size:13px; }
   .terminal-host .alpha-page > .alpha-intro { font-size:17px; line-height:1.5; color:var(--tx-2); margin:0 0 18px; }

@@ -5,7 +5,8 @@ import { strategyName } from "../strategy";
 import { Empty, Face } from "../ui";
 import { BalanceFigure } from "../studio";
 import Link from "next/link";
-import { SlidersHorizontal, Wallet, Settings, ChevronRight } from "lucide-react";
+import { SlidersHorizontal, Wallet, Settings, ChevronRight, Plug } from "lucide-react";
+import { CONNECT_ASSISTANT_HREF, useConnectAssistantOffered } from "../assistant-connect";
 
 export function You({
   onLimits,
@@ -31,6 +32,8 @@ export function You({
   mine: LiveMine | null;
   history: number[];
 }) {
+  // Before the early return: a hook may not be skipped on some renders.
+  const assistants = useConnectAssistantOffered();
   if (!mine)
     return (
       <Empty
@@ -115,6 +118,8 @@ export function You({
         </button>
         <button type="button" className="account-control" onClick={onStop}><Wallet size={24} aria-hidden="true"/><span><strong>Wallet & permissions</strong></span><ChevronRight size={18} aria-hidden="true"/></button>
         <Link className="account-control" href="/settings"><Settings size={24} aria-hidden="true"/><span><strong>Settings</strong></span><ChevronRight size={18} aria-hidden="true"/></Link>
+        {/* Hosted only: a self-hosted install has no assistant connections (assistant-connect.ts). */}
+        {assistants && <Link className="account-control" href={CONNECT_ASSISTANT_HREF}><Plug size={24} aria-hidden="true"/><span><strong>Connect to Claude</strong><small>Ask Claude about your agent</small></span><ChevronRight size={18} aria-hidden="true"/></Link>}
         <section className="profile-usage" aria-label="Daily limit usage">
         <div className="account-usage">
           <div>

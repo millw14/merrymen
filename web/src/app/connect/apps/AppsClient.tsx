@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { KeyRound, Plug, ShieldCheck, Unplug } from "lucide-react";
 import { fullDateTime } from "@/lib/format";
 import { SignIn } from "@/terminal/HostedControls";
+import { installLinks } from "@/mcp/install-links";
 import { BrandLockup } from "../BrandLockup";
 
 interface ScopeTag { id: string; title: string; level: string }
@@ -181,7 +182,12 @@ export function AppsClient() {
           </>}
           {/* The controls are hidden while signed out: nothing pressed there could be sent. */}
           {!loading && listing && !signedOut && <>
-            {listing.connections.length === 0 && <p className="mcp-note">Nothing is connected. Add Merrymen to your assistant with the server address on the left.</p>}
+            {/* Nothing connected: offer the same one-click install as the connect hub, not a bare address. */}
+            {listing.connections.length === 0 && <div className="mcp-hub-empty">
+              <p className="mcp-note">Nothing is connected. Add Merrymen to Claude in one click, or pick another assistant.</p>
+              <a className="flow-primary" href={installLinks(listing.endpoint).claude} target="_blank" rel="noopener noreferrer">Add Merrymen to Claude<span className="sr-only"> (opens in a new tab)</span></a>
+              <a className="connect-cancel" href="/connect/mcp">Other assistants</a>
+            </div>}
             <ul className="mcp-apps">{listing.connections.map((c) => (
               <li key={c.id} className="mcp-app">
                 <header>
