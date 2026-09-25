@@ -244,11 +244,12 @@ const getAgentControls = defineTool({
  */
 export const AGENT_CONTROLS = [
   { control: "pause / resume", where: "Telegram /pause and /resume (only while Settings → Advanced settings → Telegram controls → 'allow control commands' is on)", effect: "Pausing stops the whole trading cycle: new entries AND exits, including stop-loss and take-profit. Owner orders are refused while paused. It is kept on the agent's own machine, so it is not offered here: a remote pause that silently disabled protective exits would be unsafe.", available_here: false },
-  // Telegram /kill is deliberately NOT named: on hosted Merrymen (the only place
-  // MCP runs) it deletes only the agent machine's copy of the key, and the
-  // orchestrator restores it from the grant store within a reconcile (~15 s),
-  // so the agent keeps signing. The web page removes it from the store.
-  { control: "kill switch", where: "Merrymen → You → Wallet & permissions (/grant) → 'discard & start over'. Use this rather than the Telegram kill command: on hosted Merrymen that command only removes the copy of the key on the agent machine, and it is restored within about 15 seconds.", effect: "Removes the stored trading key so the agent can no longer sign anything. Funds stay in the owner's smart account. Starting over on the web page also restarts a paper book; live positions and trades are never deleted.", available_here: false },
+  // Telegram /kill is named again. On hosted Merrymen (the only place MCP runs)
+  // it used to delete only the agent machine's copy of the key, and the
+  // orchestrator restored it from the grant store. It now leaves a kill
+  // request that the orchestrator carries out against the store, as the web
+  // page's DELETE does (worker/src/kill-request.ts).
+  { control: "kill switch", where: "Merrymen → You → Wallet & permissions (/grant) → 'discard & start over', or Telegram /kill, then /confirm (only while Settings → Advanced settings → Telegram controls → 'allow control commands' is on)", effect: "Removes the stored trading key so the agent can no longer sign anything. The Telegram command stops the agent on its next tick, and the server removes the stored key on its next pass. Funds stay in the owner's smart account. Starting over on the web page also restarts a paper book; live positions and trades are never deleted.", available_here: false },
   { control: "live trading on/off", where: "Merrymen → You → Settings (/settings) → 'live trading'", effect: "Off means no real orders; the agent practises on paper if paper trading is on. Only the owner can turn it on.", available_here: false },
   { control: "limits (per trade, per day, drawdown, expiry)", where: "Merrymen → You → Trading limits → 'Edit signed limits' (re-sign on Wallet & permissions, /grant)", effect: "Changing a signed limit requires a new owner signature.", available_here: false },
   { control: "setting changes", where: "propose_settings_change (owner approves in Merrymen)", effect: "Strategy, basket and risk settings can be proposed here and take effect only after the owner approves them.", available_here: true },

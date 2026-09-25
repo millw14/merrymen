@@ -226,9 +226,14 @@ UPDATE mcp_proposals SET status = 'expired', updated_at = EXTRACT(EPOCH FROM now
 Orders already queued by an approval are ordinary owner orders: the worker's
 own expiry, one-order-at-a-time slot, caps, policy and the on-chain permission
 still apply, and the owner can stop the agent from Merrymen (You → Wallet &
-permissions → 'discard & start over'). Not with Telegram `/kill`: on hosted
-Merrymen it removes only the agent machine's copy of the key, and the
-orchestrator restores it from the grant store within about 15 seconds.
+permissions → 'discard & start over') or with Telegram `/kill`, then `/confirm`
+(needs "allow control commands" on). On hosted Merrymen the Telegram kill
+stops the agent on its next tick and leaves a kill request. The orchestrator
+carries it out on its next pass: it removes the stored grant, the same as the
+web page's DELETE, and never restores the key while the request is pending.
+A grant the owner signs more than a few seconds after the kill is kept and
+arms. See
+`worker/src/kill-request.ts`.
 
 ## Rollback
 
