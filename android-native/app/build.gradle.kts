@@ -1,9 +1,34 @@
+import java.util.Properties
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.android)
   alias(libs.plugins.kotlin.serialization)
   alias(libs.plugins.kotlin.compose)
 }
+
+/**
+ * THE RELEASE KEY LIVES OUTSIDE THIS REPO, and so does everything that unlocks
+ * it. A properties file names the keystore (relative to itself) and its
+ * passwords:
+ *
+ *   storeFile=merrymen-release.jks
+ *   storePassword=…
+ *   keyAlias=merrymen
+ *   keyPassword=…
+ *
+ * It is read from -Pmerrymen.signing=<path>, else $MERRYMEN_SIGNING, else
+ * ~/.merrymen-release/keystore.properties. With none of them, assembleRelease
+ * builds an UNSIGNED apk, as it always has — CI and every other machine build
+ * exactly what they did before. Losing this key means no sideloaded install
+ * can ever be updated in place again, so it is backed up, never committed.
+ */
+val signingFile: File? = listOfNotNull(
+  project.findProperty("merrymen.signing") as String?,
+  System.getenv("MERRYMEN_SIGNING"),
+  "${System.getProperty("user.home")}/.merrymen-release/keystore.properties",
+).map(::File).firstOrNull { it.isFile }
+val signingKeys: Properties? = signingFile?.let { f -> Properties().apply { f.inputStream().use(::load) } }
 
 android {
   namespace = "dev.merrymen.app"
@@ -30,6 +55,17 @@ android {
     )
   }
 
+  signingConfigs {
+    if (signingFile != null && signingKeys != null) {
+      create("release") {
+        storeFile = signingFile.parentFile.resolve(signingKeys.getProperty("storeFile"))
+        storePassword = signingKeys.getProperty("storePassword")
+        keyAlias = signingKeys.getProperty("keyAlias")
+        keyPassword = signingKeys.getProperty("keyPassword")
+      }
+    }
+  }
+
   buildTypes {
     debug {
       applicationIdSuffix = ".debug"
@@ -39,6 +75,7 @@ android {
       isMinifyEnabled = true
       isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+      signingConfig = signingConfigs.findByName("release")
     }
   }
 
