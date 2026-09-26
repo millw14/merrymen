@@ -125,3 +125,34 @@ jobs:
       - name: Test
         working-directory: gateway
         run: npm test
+
+  android:
+    name: android
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The native Android app had no job, so nothing ran its 600-odd JVM tests
+    # but whoever last built it by hand. That includes the mirror tests, which
+    # read web and worker files straight from this checkout (chat-commands.ts,
+    # live-blocker.ts, Settings.tsx, thesis-policy.ts, risk-level.ts) and fail
+    # when the web side drifts from the copy the app carries. Without this job,
+    # a web PR that adds a chat command turns Android red with nobody watching,
+    # so it runs on every PR, not only on ones that touch android-native/.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+          cache-dependency-path: |
+            android-native/**/*.gradle.kts
+            android-native/gradle/libs.versions.toml
+            android-native/gradle/wrapper/gradle-wrapper.properties
+
+      # Unit tests, lint (errors fail the build; warnings do not) and a debug
+      # APK, so a manifest or resource merge that only packaging catches is
+      # caught here too. The runner image ships the Android SDK.
+      - name: Test, lint and build
+        working-directory: android-native
+        run: ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
