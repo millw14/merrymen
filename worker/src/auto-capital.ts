@@ -272,9 +272,10 @@ export interface AutoCapitalDeps {
   minAgeBlocks?: bigint;
 }
 
-async function balanceOf(rpc: RpcCall, token: string, holder: string): Promise<bigint> {
+async function balanceOf(rpc: RpcCall, token: string, holder: string, block?: bigint): Promise<bigint> {
   const data = "0x70a08231" + holder.toLowerCase().replace(/^0x/, "").padStart(64, "0");
-  return BigInt((await rpc("eth_call", [{ to: token, data }, "latest"])) as string);
+  const tag = block === undefined ? "latest" : "0x" + block.toString(16);
+  return BigInt((await rpc("eth_call", [{ to: token, data }, tag])) as string);
 }
 
 /**
@@ -406,6 +407,45 @@ export async function runAutoCapitalPass(d: AutoCapitalDeps): Promise<AutoCapita
       if (!dec.apply) {
         d.log(`capital| ${c.account} NOT booked — ${dec.why}`);
         if (!dec.retry) d.refused.set(key, c.cashRaw);
+        continue;
+      }
+
+      // THE SNAPSHOT AGAIN, AT THE LAST MOMENT. The decision above rests on a
+      // balance read before the head was fixed and a history read up to that
+      // head, and the history scan can take a while. Money that moved after it —
+      // a withdrawal, say — is in neither, while the old balance still equals
+      // the old deposits. So: a fresh head, every movement since the scanned one,
+      // and the balance AT that fresh head. Anything moved, or any difference,
+      // and nothing is written; the next pass judges the new state.
+      const confirmHead = BigInt((await d.rpc("eth_blockNumber", [])) as string);
+      if (confirmHead > head) {
+        const since = (
+          await (d.scan ?? scanFleetCapital)(d.rpc, {
+            accounts: [c.account],
+            knownAccounts,
+            usdgToken: d.usdgToken,
+            fromBlock: head + 1n,
+            toBlock: confirmHead,
+            custodyAddressesFor: (a) => vaultsOf.get(a.toLowerCase()),
+            log: (m) => d.log(`capital| ${m}`),
+          })
+        ).get(key);
+        if (!since || !since.complete || since.movements.length > 0) {
+          d.log(
+            `capital| ${c.account} NOT booked — ` +
+              (since && since.complete
+                ? `${since.movements.length} USDG movement(s) since block ${head}; judging again next pass`
+                : `could not confirm nothing moved since block ${head}; trying again next pass`),
+          );
+          continue;
+        }
+      }
+      const cashAtConfirm = await balanceOf(d.rpc, d.usdgToken, c.account, confirmHead);
+      if (cashAtConfirm !== c.cashRaw) {
+        d.log(
+          `capital| ${c.account} NOT booked — the balance moved from ${usdgOf(c.cashRaw)} to ${usdgOf(cashAtConfirm)} ` +
+            "while it was being judged; judging again next pass",
+        );
         continue;
       }
 

@@ -272,30 +272,55 @@ async function seedAgent(db: Db, hwm: number) {
     .run(ACCT);
 }
 
-function fakeRpc(balances: Record<string, bigint>) {
+/**
+ * A node: a head that can move between reads, and a balance that can change
+ * after the first read of it — the two ways money moves while a pass judges.
+ */
+function fakeRpc(balances: Record<string, bigint>, chain: { heads?: bigint[]; balanceAfterFirst?: bigint } = {}) {
+  let headReads = 0;
+  const balanceReads = new Map<string, number>();
   return async (method: string, params: unknown[]): Promise<unknown> => {
-    if (method === "eth_blockNumber") return "0x" + HEAD.toString(16);
+    if (method === "eth_blockNumber") {
+      const heads = chain.heads ?? [HEAD];
+      return "0x" + heads[Math.min(headReads++, heads.length - 1)]!.toString(16);
+    }
     if (method === "eth_call") {
       const data = (params[0] as { data: string }).data;
-      const holder = "0x" + data.slice(-40);
-      return "0x" + (balances[holder.toLowerCase()] ?? 0n).toString(16);
+      const holder = ("0x" + data.slice(-40)).toLowerCase();
+      const n = balanceReads.get(holder) ?? 0;
+      balanceReads.set(holder, n + 1);
+      const value = n > 0 && chain.balanceAfterFirst !== undefined ? chain.balanceAfterFirst : (balances[holder] ?? 0n);
+      return "0x" + value.toString(16);
     }
     throw new Error(`unexpected rpc ${method}`);
   };
 }
 
+/** A scan that honours the block range, as the node does: movements outside it are not returned. */
 function scanOf(cap: AccountCapital) {
   const calls: string[][] = [];
   const known: (readonly string[] | undefined)[] = [];
-  const scan = async (_rpc: unknown, args: { accounts: readonly string[]; knownAccounts?: readonly string[] }) => {
+  const scan = async (
+    _rpc: unknown,
+    args: { accounts: readonly string[]; knownAccounts?: readonly string[]; fromBlock: bigint; toBlock: bigint },
+  ) => {
     calls.push([...args.accounts]);
     known.push(args.knownAccounts);
-    return new Map([[ACCT.toLowerCase(), cap]]);
+    const movements = cap.movements.filter(
+      (m) => BigInt(m.blockNumber) >= args.fromBlock && BigInt(m.blockNumber) <= args.toBlock,
+    );
+    return new Map([[ACCT.toLowerCase(), { ...cap, movements, totals: totalCapital(movements) }]]);
   };
   return { scan: scan as never, calls, known };
 }
 
-const pass = (db: Db, cap: AccountCapital, refused = new Map<string, bigint>(), balance = 10_872_801n) => {
+const pass = (
+  db: Db,
+  cap: AccountCapital,
+  refused = new Map<string, bigint>(),
+  balance = 10_872_801n,
+  chain: { heads?: bigint[]; balanceAfterFirst?: bigint } = {},
+) => {
   const s = scanOf(cap);
   const lines: string[] = [];
   return {
@@ -304,7 +329,7 @@ const pass = (db: Db, cap: AccountCapital, refused = new Map<string, bigint>(), 
     run: () =>
       runAutoCapitalPass({
         db,
-        rpc: fakeRpc({ [ACCT.toLowerCase()]: balance }),
+        rpc: fakeRpc({ [ACCT.toLowerCase()]: balance }, chain),
         usdgToken: USDG,
         chainId: CHAIN,
         tenants: [{ tenant: TENANT, smartAccount: ACCT, vaults: [] }],
@@ -313,8 +338,7 @@ const pass = (db: Db, cap: AccountCapital, refused = new Map<string, bigint>(), 
         scan: s.scan,
         nowSec: () => 5_000,
       }),
-  };
-};
+  };};
 
 test("end to end: the unbooked deposits become receipts, and the child would resume with contributions known", async () => {
   const db = await freshDb();
@@ -462,6 +486,32 @@ test("end to end: an account that has traded live is never scanned", async () =>
   const p = pass(db, capital(DEPOSITS()));
   assert.deepEqual(await p.run(), []);
   assert.equal(p.calls.length, 0);
+});
+
+test("end to end: money that moves after the history scan stops the booking, and is judged again next pass", async () => {
+  const db = await freshDb();
+  await seedAgent(db, 10.872801);
+  const refused = new Map<string, bigint>();
+  // A withdrawal mined after the scanned head: invisible to the history scan,
+  // and the balance read before it still equals the deposits.
+  const late = move("0x" + "a".repeat(64), Number(HEAD) + 50, "1000000", "capital-out");
+  const p = pass(db, capital([...DEPOSITS(), late]), refused, 10_872_801n, { heads: [HEAD, HEAD + 100n] });
+  assert.deepEqual(await p.run(), []);
+  assert.deepEqual(p.calls, [[ACCT], [ACCT]], "the history, then the window since it");
+  assert.ok(p.lines.some((l) => l.includes("1 USDG movement(s) since block")), p.lines.join("\n"));
+  const count = (await db.prepare("SELECT COUNT(*) AS n FROM flows").get()) as { n: number };
+  assert.equal(Number(count.n), 0);
+  assert.equal(refused.size, 0, "not remembered as refused — the new state gets its own judgement");
+});
+
+test("end to end: a balance that changes while the account is judged stops the booking", async () => {
+  const db = await freshDb();
+  await seedAgent(db, 10.872801);
+  const p = pass(db, capital(DEPOSITS()), new Map(), 10_872_801n, { balanceAfterFirst: 5_000_000n });
+  assert.deepEqual(await p.run(), []);
+  assert.ok(p.lines.some((l) => l.includes("the balance moved")), p.lines.join("\n"));
+  const count = (await db.prepare("SELECT COUNT(*) AS n FROM flows").get()) as { n: number };
+  assert.equal(Number(count.n), 0);
 });
 
 // ── the wiring ──────────────────────────────────────────────────────────────
