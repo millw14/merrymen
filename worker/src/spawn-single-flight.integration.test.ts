@@ -114,8 +114,11 @@ async function eventually(done: () => boolean, turns = 100): Promise<void> {
   for (let i = 0; i < turns && !done(); i++) await new Promise((r) => realSetTimeout(r, 5));
 }
 
-/** Run `during` inside the next grant-store read, the first await of every spawn. */
-function duringNextGrantRead(during: () => void | Promise<void>): { fired: () => boolean } {
+/**
+ * Run `during` inside the next grant-store read, the first await of every
+ * spawn. `cancel` puts the store back if no read came.
+ */
+function duringNextGrantRead(during: () => void | Promise<void>): { fired: () => boolean; cancel: () => void } {
   const read = store.get.bind(store);
   let fired = false;
   store.get = async (tenant) => {
@@ -126,7 +129,7 @@ function duringNextGrantRead(during: () => void | Promise<void>): { fired: () =>
     }
     return read(tenant);
   };
-  return { fired: () => fired };
+  return { fired: () => fired, cancel: () => void (store.get = read) };
 }
 
 /** A stored grant, and the child reconcile spawns for it. */
@@ -151,10 +154,13 @@ describe("one child per tenant", () => {
     latest().crash(1); // the real exit handler: restart #1, due in 2 s
 
     // The restart comes due at the worst moment: inside the first await of
-    // any spawn this pass starts.
-    duringNextGrantRead(() => mock.timers.tick(5_000));
+    // any spawn this pass starts. If the pass starts none, it comes due after.
+    // (The hook is gone by then. A tick inside a tick runs the same mocked
+    // timer twice, which no real timer does.)
+    const read = duringNextGrantRead(() => mock.timers.tick(5_000));
     await reconcile();
-    mock.timers.tick(5_000); // and if no spawn ran into it, it comes due now
+    read.cancel();
+    mock.timers.tick(5_000);
     await eventually(() => spawned.length > 2);
 
     assert.equal(spawned.length, 2, "one restart, one worker");
@@ -196,6 +202,30 @@ describe("one child per tenant", () => {
     mock.timers.tick(60_000);
     await eventually(() => spawned.length > 9);
     assert.equal(spawned.length, 9, "given up: neither the timer nor reconcile respawns it for the cool-off");
+  });
+
+  it("a restart whose spawn gives up leaves the tenant to the next reconcile", async () => {
+    // A restart's spawn can stop short: a lost lease, a paper book that
+    // would not restore, a grant read that comes back empty for a moment.
+    // Here, the last. The tenant is still wanted, so a pass must pick it up.
+    await armed();
+    mock.timers.enable({ apis: ["setTimeout"] });
+    latest().crash(1);
+    const read = store.get.bind(store);
+    let emptied = false;
+    store.get = async () => {
+      store.get = read;
+      emptied = true;
+      return null;
+    };
+    mock.timers.tick(5_000);
+    await eventually(() => emptied);
+    await eventually(() => spawned.length > 1, 20);
+    assert.ok(emptied, "the restart's spawn read the grant");
+    assert.equal(spawned.length, 1, "and gave up");
+
+    await reconcile();
+    assert.equal(spawned.length, 2, "the next pass spawned it");
   });
 
   it("a watchdog kill leaves one restart behind: the watchdog's, on its ladder", async () => {
