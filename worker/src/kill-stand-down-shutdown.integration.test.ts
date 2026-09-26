@@ -55,7 +55,7 @@ function fakeChild() {
   return proc;
 }
 
-it("a SIGTERM mid-stand-down: that lease is kept and the exit waits until the kill record has landed", async () => {
+it("a SIGTERM mid-stand-down: no lease is released and the exit waits until the kill record has landed", async () => {
   const sharedRaw = new DatabaseSync(":memory:");
   const shared = wrapSqlite(sharedRaw);
   await applyLedgerSchema(shared);
@@ -98,17 +98,15 @@ it("a SIGTERM mid-stand-down: that lease is kept and the exit waits until the ki
   stopFleet((code) => order.push(`exit ${code}`));
   await sleep(1_300); // past the one-second exit timer
 
-  assert.deepEqual(
-    order,
-    ["other: lease released"],
-    "a lease with no write in flight still goes at once; the one under the write, and the exit, wait",
-  );
+  // OTHER is due to be stood down by the same pass, after KILLED. A lease
+  // released here would have skipped its last mirror.
+  assert.deepEqual([...order], [], "no lease is released, and there is no exit, while the pass's write is in flight");
   assert.equal(existsSync(childHome(KILLED)), true, "the home is kept while the write is in flight");
 
   open();
   await pass;
   for (let i = 0; i < 100 && !order.includes("exit 0"); i++) await sleep(20);
-  assert.deepEqual(order, ["other: lease released", "killed: lease released", "exit 0"], "the exit comes last");
+  assert.deepEqual(order, ["killed: lease released", "other: lease released", "exit 0"], "each stand-down releases its own lease, and the exit comes last");
   assert.equal(existsSync(childHome(KILLED)), false);
   assert.equal(
     (sharedRaw.prepare(`SELECT status FROM agents WHERE smart_account = ?`).get(ACCOUNT) as { status: string }).status,

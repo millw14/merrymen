@@ -20,7 +20,8 @@
  * yet" about an agent they had just switched off.
  *
  * So before the home goes, the stand-down does three things:
- *   1. one last mirror, through the same mirrorTenant the mirror pass uses;
+ *   1. one last mirror, drained to the end (drainTenant: mirrorTenant, the
+ *      mirror pass's own copy, repeated until nothing is left behind);
  *   2. the agents row set to 'killed', as the worker's own kill path sets it;
  *   3. a KILL SWITCH event, unless the child already wrote one since it was
  *      spawned. The mirror runs first, so a kill event the child wrote is
@@ -32,7 +33,7 @@
  */
 import { getAddress, isAddress } from "viem";
 import type { Db } from "./db";
-import { mirrorTenant, openChildLedger, type MirrorReport } from "./ledger-mirror";
+import { drainTenant, openChildLedger, type DrainReport } from "./ledger-mirror";
 
 /**
  * The event the orchestrator writes for a kill the child never recorded.
@@ -46,7 +47,7 @@ export const STAND_DOWN_EVENT =
 
 export interface StandDownRecord {
   /** The last mirror's report. Null when the child's ledger could not be opened. */
-  mirror: MirrorReport | null;
+  mirror: DrainReport | null;
   /** Set when the last mirror threw. mirrorTenant is written not to. */
   mirrorError?: string;
   /** Rows the 'killed' update changed. 0 when the account has no shared agents row yet. */
@@ -93,7 +94,7 @@ export async function recordStandDown(args: {
   const handle = openChildLedger(args.home);
   if (handle) {
     try {
-      out.mirror = await mirrorTenant({ tenant: args.tenant, child: handle.db, shared: args.shared });
+      out.mirror = await drainTenant({ tenant: args.tenant, child: handle.db, shared: args.shared });
     } catch (e) {
       out.mirrorError = message(e);
     } finally {

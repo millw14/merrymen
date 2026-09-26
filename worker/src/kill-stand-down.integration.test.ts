@@ -212,6 +212,35 @@ describe("the kill switch stands a child down", () => {
     assert.equal(status(shared.raw), "killed");
   });
 
+  it("a backlog bigger than one mirror batch is drained, not cut off at 500", async () => {
+    // A mirror pass copies at most 500 rows per table. The stand-down is the
+    // child's last pass, so anything past one batch used to go with the home.
+    const shared = await sharedLedger();
+    const child = await childLedger();
+    await previousMirrorPass(shared.db);
+    const t0 = nowSec() - 20_000;
+    child.exec("BEGIN");
+    const ev = child.prepare(`INSERT INTO events (agent_id, level, message) VALUES (?, 'ok', ?)`);
+    for (let i = 0; i < 1234; i++) ev.run(ACCOUNT, `backlog ${i}`);
+    const tr = child.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, status) VALUES (?, 'swap', 'router', 1, 'paper')`);
+    for (let i = 0; i < 777; i++) tr.run(ACCOUNT);
+    // Ten seconds apart, so the decisions cursor (on `at`, with a 300 s
+    // lookback) can move past each batch.
+    const de = child.prepare(`INSERT INTO decisions (id, agent_id, source, action, reason, at) VALUES (?, ?, 'strategy:momentum', 'hold', 'wait', ?)`);
+    for (let i = 0; i < 1100; i++) de.run(`backlog-${i}`, ACCOUNT, t0 + i * 10);
+    child.exec("COMMIT");
+    child.close();
+
+    adoptLeasedChildForTest({ tenant: TENANT, smartAccount: ACCOUNT, proc: fakeChild(), shared: shared.db });
+    await reconcile();
+
+    assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM events WHERE message LIKE 'backlog %'`), 1234);
+    assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM trades WHERE lower(agent_id) = lower(?)`, ACCOUNT), 777);
+    assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM decisions WHERE id LIKE 'backlog-%'`), 1100);
+    assert.equal(status(shared.raw), "killed");
+    assert.equal(existsSync(home()), false);
+  });
+
   it("a KILL SWITCH from an earlier run does not stand in for this one", async () => {
     const shared = await sharedLedger();
     // A kill before this child was spawned: the owner killed, then re-signed.

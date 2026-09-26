@@ -1225,3 +1225,96 @@ export async function mirrorTenant(args: {
     ...(Object.keys(failed).length ? { failed } : {}),
   };
 }
+
+/** What drainTenant adds to a mirror report. */
+export interface DrainReport extends MirrorReport {
+  /** mirrorTenant calls made. */
+  rounds: number;
+  /** Cursored tables still holding rows the shared ledger has not reached. Empty when fully drained. */
+  behind: string[];
+}
+
+/**
+ * COPY A LEDGER THAT IS ABOUT TO BE DELETED, ALL OF IT.
+ *
+ * mirrorTenant copies at most one batch per table per call. That is right for
+ * a pass on a fifteen-second clock, because the rest follows on the next pass.
+ * A child stood down by the kill switch has no next pass: its home is deleted
+ * straight after. A backlog bigger than a batch (after a stalled mirror, or a
+ * busy stretch) would be cut off and lost with the home.
+ *
+ * So this repeats mirrorTenant until no cursored table has a row beyond its
+ * cursor, judged against the child ledger itself rather than against the
+ * counts. `trades` counts only what it inserted, and `decisions` counts its
+ * re-read overlap, so neither count says whether more is left.
+ *
+ * It stops early only when a round changed no cursor at all. A table that
+ * fails every round would otherwise spin for ever. `behind` names what was
+ * left, and `failed` names why.
+ */
+export async function drainTenant(args: { tenant: string; child: Db; shared: Db; batch?: number }): Promise<DrainReport> {
+  const batch = args.batch ?? MIRROR_BATCH;
+  const total: DrainReport = { tenant: args.tenant, copied: {}, rounds: 0, behind: [] };
+  let before = await cursorsOf(args.shared, args.tenant);
+  for (;;) {
+    const r = await mirrorTenant({ tenant: args.tenant, child: args.child, shared: args.shared, batch });
+    total.rounds += 1;
+    // Row counts add up across rounds. A snapshot count describes the state
+    // NOW, so the latest round's stands.
+    for (const [k, v] of Object.entries(r.copied)) {
+      total.copied[k] = DRAIN_SUMMED.has(k) || k.endsWith(NOT_COPIED) ? (total.copied[k] ?? 0) + v : v;
+    }
+    if (r.restarted) total.restarted = { ...r.restarted, ...total.restarted };
+    if (r.failed) total.failed = r.failed;
+    else delete total.failed;
+    total.behind = await behindCursors(args.child, args.shared, args.tenant, r.copied.decisions === batch);
+    if (!total.behind.length) return total;
+    const after = await cursorsOf(args.shared, args.tenant);
+    // CHANGED, not risen. A child rebuilt by a redeploy rewinds its cursor on
+    // the first round, so that round's cursor ends LOWER than it began, and it
+    // still copied a batch. Past the rewind every cursor only moves one way,
+    // so this still ends.
+    if (![...after].every(([t, v]) => before.get(t) === v) || after.size !== before.size) {
+      before = after;
+      continue;
+    }
+    return total;
+  }
+}
+
+/** The copied keys that count rows, which add up across a drain's rounds. */
+const DRAIN_SUMMED = new Set<string>([...LOG_TABLES.map((t) => t.table), "decisions", "trades_resolved"]);
+
+async function cursorsOf(shared: Db, tenant: string): Promise<Map<string, number>> {
+  const rows = (await shared
+    .prepare(`SELECT table_name, last_id FROM mirror_state WHERE tenant = ?`)
+    .all(tenant)) as { table_name: string; last_id: number }[];
+  return new Map(rows.map((r) => [String(r.table_name), Number(r.last_id)]));
+}
+
+/**
+ * The cursored tables whose child rows the shared ledger has not reached.
+ *
+ * `decisions` is cursored on `at`, and its batch can end partway through one
+ * second. A full last batch therefore counts as behind even when no row is
+ * newer than the cursor.
+ */
+async function behindCursors(child: Db, shared: Db, tenant: string, decisionsFull: boolean): Promise<string[]> {
+  const cursor = await cursorsOf(shared, tenant);
+  const out: string[] = [];
+  for (const { table } of LOG_TABLES) {
+    try {
+      const m = (await child.prepare(`SELECT MAX(id) AS m FROM ${table}`).get()) as { m: number | null } | undefined;
+      if (m?.m !== null && m?.m !== undefined && Number(m.m) > (cursor.get(table) ?? 0)) out.push(table);
+    } catch {
+      // A child ledger that predates the table has nothing in it to leave behind.
+    }
+  }
+  try {
+    const d = (await child.prepare(`SELECT MAX(at) AS m FROM decisions`).get()) as { m: number | null } | undefined;
+    if (decisionsFull || (d?.m !== null && d?.m !== undefined && Number(d.m) > (cursor.get("decisions") ?? 0))) out.push("decisions");
+  } catch {
+    // As above.
+  }
+  return out;
+}
