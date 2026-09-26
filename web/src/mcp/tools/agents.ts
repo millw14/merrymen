@@ -7,7 +7,7 @@ import { readAgentRow, readAgentStatus, blockerView, freshWithin } from "@/lib/s
 import { settingsReader } from "@/lib/services/settings-view";
 import { hasCapability } from "../policy";
 import type { Principal } from "../oauth/server";
-import { defineTool } from "../tool";
+import { defineTool, withToolRefs } from "../tool";
 import { AGENT_ARG, isoOrNull } from "./shared";
 
 const blocker = z.object({ rule: z.string(), text: z.string(), owner_can_fix: z.boolean(), is_fault: z.boolean() }).nullable();
@@ -15,7 +15,7 @@ const blocker = z.object({ rule: z.string(), text: z.string(), owner_can_fix: z.
 const listAgents = defineTool({
   name: "list_agents",
   title: "List my agents",
-  description: "List the Merrymen agents the owner shared with this connection: id, name, account, mode (paper/live) and status. Use the id as `agent` in other tools.",
+  ...withToolRefs("List the Merrymen agents the owner shared with this connection: id, name, account, mode (paper/live) and status. Use the id as `agent` in other tools.", " Use the id as `agent` in other tools."),
   capability: "agents.read",
   input: z.object({}).strict(),
   output: z.object({

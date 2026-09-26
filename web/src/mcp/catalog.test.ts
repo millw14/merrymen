@@ -8,10 +8,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { ADVERTISED_SCOPES, SCOPES, scopeFor, type Capability } from "./scopes";
+import * as z from "zod";
+import { ADVERTISED_SCOPES, SCOPES, scopeFor, type Capability, type McpProfile } from "./scopes";
 import { ALL_TOOLS } from "./tools";
 import { ALL_RESOURCES } from "./resources-catalog";
 import { ERROR_CODES } from "./errors";
+import { resourceInProfile, toolInProfile } from "./server";
+import { withToolRefs, type ToolDef } from "./tool";
+import { MODEL_INSTRUCTION, OTHER_TOOLS, schemaDescriptions, toolNamePattern } from "./testing";
 
 const CAPABILITIES: Capability[] = [
   "market.read", "agents.read", "portfolio.read", "decisions.read", "chat.send", "research.submit", "watchlist.manage",
@@ -147,3 +151,87 @@ test("the docs name every tool and every error code", () => {
   const errors = readFileSync(path.join(docs, "errors.md"), "utf8");
   for (const code of Object.keys(ERROR_CODES)) assert.ok(errors.includes(`\`${code}\``), `docs/mcp/errors.md is missing ${code}`);
 });
+
+// ── the directory profile's tool text ───────────────────────────────────────
+// Anthropic's connector directory asks that tool descriptions carry no
+// instructions about model behaviour or other tools. The directory profile
+// (/mcp/directory) serves each tool's directoryDescription (withToolRefs); the
+// full server keeps its pointers to the next tool.
+
+const TOOL_NAME = toolNamePattern(ALL_TOOLS.map((t) => t.name));
+
+/** What a client reads about a tool on a profile: its description, then every field description of its input and output. */
+function servedTexts(t: ToolDef, profile: McpProfile): string[] {
+  const own = profile === "directory" ? t.directoryDescription ?? t.description : t.description;
+  return [
+    own,
+    ...schemaDescriptions(z.toJSONSchema(t.input, { io: "input", unrepresentable: "any" })),
+    ...schemaDescriptions(z.toJSONSchema(t.output, { io: "output", unrepresentable: "any" })),
+  ];
+}
+
+const otherToolsIn = (self: string, text: string) => [...text.matchAll(TOOL_NAME)].map((m) => m[1]).filter((n) => n !== self);
+
+/** Why a text may not be served on the directory profile, or null when it may. */
+function directoryOffence(self: string, text: string): string | null {
+  const others = otherToolsIn(self, text);
+  if (others.length) return `names ${others.join(", ")}`;
+  if (OTHER_TOOLS.test(text)) return "points at other tools";
+  if (MODEL_INSTRUCTION.test(text)) return "instructs the model";
+  return null;
+}
+
+test("withToolRefs cuts each ref exactly once, and refuses one that is missing, repeated or empty", () => {
+  assert.deepEqual(withToolRefs("Lists them. Use one with get_x.", " Use one with get_x."), { description: "Lists them. Use one with get_x.", directoryDescription: "Lists them.", directoryCuts: [" Use one with get_x."] });
+  assert.equal(withToolRefs("A (see a_b) and (see c_d).", " (see a_b)", " (see c_d)").directoryDescription, "A and.");
+  assert.throws(() => withToolRefs("No pointer here.", " (see get_x)"), /must occur exactly once/);
+  assert.throws(() => withToolRefs("get_x, then get_x.", "get_x"), /must occur exactly once/);
+  assert.throws(() => withToolRefs("Anything.", ""), /must occur exactly once/);
+});
+
+test("a directory description is exactly the full one with its pointers to other tools cut, and nothing else", () => {
+  const cut = ALL_TOOLS.filter((t) => t.directoryDescription !== undefined || t.directoryCuts !== undefined);
+  assert.ok(cut.length > 0);
+  for (const t of cut) {
+    assert.ok(t.directoryCuts?.length && t.directoryDescription !== undefined, `${t.name}: built by hand, not with withToolRefs`);
+    // Re-derived from the full description: nothing added, nothing else removed.
+    assert.equal(withToolRefs(t.description, ...t.directoryCuts!).directoryDescription, t.directoryDescription, `${t.name}: not the full description with its cuts removed`);
+    for (const ref of t.directoryCuts!) {
+      assert.ok(otherToolsIn(t.name, ref).length > 0 || OTHER_TOOLS.test(ref), `${t.name}: the cut ${JSON.stringify(ref)} is not a pointer to another tool`);
+    }
+    const short = t.directoryDescription!;
+    assert.equal(short.trim(), short, `${t.name}: a cut left stray whitespace`);
+    assert.ok(!/ {2}| [.,;:)]|\( /.test(short), `${t.name}: a cut left stray spacing or punctuation: ${short}`);
+  }
+});
+
+test("nothing the directory profile serves about a tool points at another tool or tells the model what to do", () => {
+  const offenders: string[] = [];
+  for (const t of ALL_TOOLS.filter((x) => toolInProfile(x, "directory"))) {
+    for (const text of [t.title, ...servedTexts(t, "directory")]) {
+      const why = directoryOffence(t.name, text);
+      if (why) offenders.push(`${t.name} ${why}: ${text}`);
+    }
+  }
+  assert.deepEqual(offenders, []);
+});
+
+test("nor does any resource the directory profile lists", () => {
+  const offenders: string[] = [];
+  for (const r of ALL_RESOURCES.filter((x) => resourceInProfile(x, "directory"))) {
+    for (const text of [r.title, r.description]) {
+      const why = directoryOffence("", text);
+      if (why) offenders.push(`${r.uri} ${why}: ${text}`);
+    }
+  }
+  assert.deepEqual(offenders, []);
+});
+
+test("the full server's descriptions give no model instructions either (their pointers to the next tool stay)", () => {
+  const offenders: string[] = [];
+  for (const t of ALL_TOOLS) for (const text of servedTexts(t, "full")) if (MODEL_INSTRUCTION.test(text)) offenders.push(`${t.name}: ${text}`);
+  assert.deepEqual(offenders, []);
+  // The pointers themselves are kept where they help a client choose the next tool.
+  assert.match(ALL_TOOLS.find((t) => t.name === "list_agents")!.description, /Use the id as `agent` in other tools/);
+});
+

@@ -146,6 +146,37 @@ export function installFixtures(d: McpDb, o: { directory?: AgentDirectory; setti
   };
 }
 
+// ── what the directory profile may say (Anthropic's connector directory asks
+// that tool descriptions carry no instructions about model behaviour or other
+// tools) ────────────────────────────────────────────────────────────────────
+
+/** Any of these tool names as a whole word (get_trade does not match inside get_trades). */
+export function toolNamePattern(names: readonly string[]): RegExp {
+  return new RegExp(`(?<![a-z_])(${names.join("|")})(?![a-z_])`, "g");
+}
+
+/** A pointer at other tools in general ("use the id in other tools"). */
+export const OTHER_TOOLS = /\bother tools?\b/i;
+
+/**
+ * Wording that tells the reading model what to do, instead of saying what a
+ * tool, field or resource is. Tool names are matched separately (the full
+ * server may point at the next tool; the directory profile may not).
+ */
+export const MODEL_INSTRUCTION = /\btreat\b[^.]{0,40}\bas\b|\binstructions?\b|\bignore\b|\byou (?:must|should)\b|\b(?:always|never|first) (?:ask|call|use|confirm|show|tell|follow)\b|\b(?:ask|tell|confirm with) the user\b|\bbefore (?:treating|reading|calling|acting)\b/i;
+
+/** Every "description" string anywhere in a JSON Schema (a tool's inputSchema or outputSchema). */
+export function schemaDescriptions(node: unknown, into: string[] = []): string[] {
+  if (Array.isArray(node)) for (const v of node) schemaDescriptions(v, into);
+  else if (node && typeof node === "object") {
+    for (const [k, v] of Object.entries(node)) {
+      if (k === "description" && typeof v === "string") into.push(v);
+      else schemaDescriptions(v, into);
+    }
+  }
+  return into;
+}
+
 // ── a minimal MCP client over the handler, for tests ────────────────────────
 
 export type Era = "legacy" | "modern";
