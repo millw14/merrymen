@@ -78,11 +78,18 @@ describe("A2 — the exit handler only cleans up its own child", () => {
     // ticking, still hitting the RPC, invisible to the watchdog.
     // Measured: 105 spawns against 61 exits in one window.
     const src = strip(at("./orchestrator.ts"));
-    assert.match(src, /if \(children\.get\(tenant\) === child\) children\.delete\(tenant\);/);
+    assert.match(src, /const ours = children\.get\(tenant\) === child;\s*if \(ours\) children\.delete\(tenant\);/);
     // And the unconditional form must be gone from the exit path.
     const exitAt = src.indexOf('proc.on("exit"');
-    const guardAt = src.indexOf("if (children.get(tenant) === child)", exitAt);
+    const guardAt = src.indexOf("const ours = children.get(tenant) === child;", exitAt);
     assert.ok(exitAt > 0 && guardAt > exitAt, "the guard must be inside the exit handler");
+    // AND AN EXIT THAT IS NOT OURS SCHEDULES NO RESTART. killChild and the
+    // watchdog took the entry out before they signalled, and the watchdog
+    // restarts the child itself. A second restart from here was #0 at one
+    // second, ahead of the watchdog's, so a wedging child never climbed the
+    // ladder. Behaviour: spawn-single-flight.integration.test.ts.
+    const handler = src.slice(exitAt, src.indexOf("scheduleRestart(", exitAt));
+    assert.match(handler, /if \(!ours\) return;/, "only an exit nobody caused is restarted");
     // THE RESPAWN MOVED, THE PROPERTY DID NOT. Both restart paths now go
     // through `scheduleRestart` — the watchdog used to spawn on the line after
     // its SIGKILL with no delay and no ceiling — so the check that a

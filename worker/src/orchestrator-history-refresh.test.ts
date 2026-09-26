@@ -61,7 +61,11 @@ describe("history refresh after the startup repair", () => {
   });
 
   it("spawn still writes the history exactly once", () => {
-    const spawn = fn("spawnChild");
+    // spawnChild is the single-flight guard; the spawn itself is the function it wraps.
+    const guard = fn("spawnChild");
+    assert.ok(guard);
+    assert.equal(calls(guard, "spawnChildUnguarded").length, 1, "spawnChild runs the spawn, once");
+    const spawn = fn("spawnChildUnguarded");
     assert.ok(spawn);
     assert.equal(calls(spawn, "writeHistoryForChild").length, 1);
   });

@@ -230,24 +230,41 @@ function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string, e
   }
   const delay = Math.min(30_000, 1_000 * 2 ** Math.min(restarts, 5));
   log(`${tenant} rallying again in ${Math.round(delay / 1000)}s (restart #${restarts}, ${why})`);
-  setTimeout(() => {
-    if (epoch !== epochOf(tenant)) return;
-    if (!stopping && !children.has(tenant)) void spawnChild(tenant, restarts);
-  }, delay);
+  // One restart per tenant: the latest death's.
+  cancelRestart(tenant);
+  restartPending.set(
+    tenant,
+    setTimeout(() => {
+      restartPending.delete(tenant);
+      if (epoch !== epochOf(tenant)) return;
+      if (!stopping && !children.has(tenant)) void spawnChild(tenant, restarts);
+    }, delay),
+  );
+}
+
+/**
+ * Restarts scheduled and not yet fired, by tenant. reconcile() leaves these
+ * tenants to their timer (see its spawn loop), so the timer is the only thing
+ * that restarts a crashed child.
+ */
+const restartPending = new Map<string, NodeJS.Timeout>();
+
+function cancelRestart(tenant: string): void {
+  clearTimeout(restartPending.get(tenant));
+  restartPending.delete(tenant);
 }
 
 /**
  * How many times the kill switch has stood each tenant down. A run records
  * the count it was spawned under, and its restarts carry it.
  *
- * A RESTART BELONGS TO THE RUN THAT DIED, and a stand-down ends that run. The
- * stood-down child's own exit schedules a restart like any other exit. So
- * does a crash just before the kill. Either can fire after the stand-down,
- * up to 30 s later. If the owner re-signed meanwhile, it lands on the new
- * run: skipping its backoff, or spawning a second child beside the one
- * reconcile is spawning. And an exit at the top of the ladder set a
- * five-minute give-up that held the re-sign back. Bumping the count at the
- * stand-down makes every such restart a no-op, however late it fires.
+ * A RESTART BELONGS TO THE RUN THAT DIED, and a stand-down ends that run. A
+ * crash just before the kill leaves a restart pending, which can fire after
+ * the stand-down, up to 30 s later. If the owner re-signed meanwhile, it
+ * lands on the new run and skips its backoff. The stand-down cancels it
+ * (cancelRestart), and the count makes every such restart a no-op however it
+ * got there. The stood-down child's own exit schedules none: killChild took
+ * its entry out first, so the exit handler does not count it as a crash.
  */
 const killEpoch = new Map<string, number>();
 
@@ -1197,7 +1214,38 @@ export function setSpawnForTest(fn: (tenant: `0x${string}`) => ChildProcess): vo
   startWorker = fn;
 }
 
+/**
+ * Tenants with a spawn in flight. ONE AT A TIME PER TENANT.
+ *
+ * A spawn awaits the grant store, the settings store, the anchor, the paper
+ * restore and the basis seed before it records the child in `children`. Both
+ * callers check `children` first: the restart timer, and reconcile's spawn
+ * loop. A second call made in that window passed the same check and started a
+ * second worker. The later `children.set` replaced the first, which went on
+ * trading with no watchdog and no mirror, in the same home and sqlite file.
+ */
+const spawning = new Set<string>();
+
+/** The only way to spawn a tenant's child: never a second beside a running or starting one. */
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
+  if (spawning.has(tenant)) {
+    log(`${tenant}: already being spawned — not starting a second child`);
+    return;
+  }
+  if (children.has(tenant)) {
+    log(`${tenant}: already running — not starting a second child`);
+    return;
+  }
+  spawning.add(tenant);
+  try {
+    await spawnChildUnguarded(tenant, restarts);
+  } finally {
+    spawning.delete(tenant);
+  }
+}
+
+/** Call spawnChild, never this: it is not single-flight on its own. */
+async function spawnChildUnguarded(tenant: `0x${string}`, restarts: number): Promise<void> {
   if (stopping) return;
   // The exit handler's restart timer, firing into a home the kill switch is
   // about to delete. See `standingDown`.
@@ -1295,9 +1343,19 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // was orphaned: still ticking, still hitting the RPC, invisible to the
     // watchdog, never mirrored, sharing one home and one sqlite file with its
     // own replacement. Measured: 105 spawns against 61 exits in one window.
-    if (children.get(tenant) === child) children.delete(tenant);
+    const ours = children.get(tenant) === child;
+    if (ours) children.delete(tenant);
     if (stopping) return;
     log(`${tenant} exited (${code})`);
+    // AN EXIT WE CAUSED IS NOT A CRASH. killChild and the watchdog take the
+    // entry out before they signal, so it is no longer ours. The watchdog
+    // schedules its own restart, with the count its ladder has reached.
+    // killChild's callers (the kill switch, a lost lease, a fleet halt) want
+    // none. A restart here as well was a second timer beside the watchdog's.
+    // A wedge is always more than 90 s into its run, so this one read as a
+    // fresh incident: restart #0, one second. It fired first, and every wedge
+    // started the ladder again from the bottom.
+    if (!ours) return;
     // A long healthy run that then dies is a fresh incident, not a crash loop.
     const freshRestarts = Date.now() - child.startedAt > 60_000 ? 0 : restarts + 1;
     scheduleRestart(tenant, freshRestarts, `exit ${code}`, child.epoch);
@@ -1317,9 +1375,9 @@ function envTickSeconds(): number {
  *
  * The delete below is now load-bearing in the way this function always claimed:
  * the exit handler compares identity, so removing our entry first genuinely
- * does mark the exit as intentional. Before that comparison existed, this
- * survived only because `releaseLease` happened to win a race against the
- * handler's 1s respawn timer.
+ * does mark the exit as intentional, and it schedules no restart for it.
+ * Before that comparison existed, this survived only because `releaseLease`
+ * happened to win a race against the handler's 1s respawn timer.
  */
 function killChild(tenant: string): void {
   const child = children.get(tenant);
@@ -1482,6 +1540,18 @@ export async function reconcile(): Promise<void> {
     const lc = tenant.toLowerCase() as `0x${string}`;
     if (children.has(lc)) continue;
     /**
+     * NOR IS ONE WAITING ON ITS RESTART. The same mistake as the give-up
+     * below, one step earlier in the ladder.
+     *
+     * This loop respawned a crashed child at the next pass with `restarts` 0,
+     * while its restart timer was still pending. That reset the ladder on
+     * every pass that fell inside a backoff, so a crash loop rarely reached
+     * MAX_RESTARTS. And it raced the timer: a timer that fired while this
+     * spawn was still awaiting passed the same `children` check and started a
+     * second worker. The timer restarts it, with the count it has reached.
+     */
+    if (restartPending.has(lc)) continue;
+    /**
      * A TENANT THE RESTART POLICY GAVE UP ON IS NOT A TENANT THAT ISN'T RUNNING.
      *
      * This loop's job is "spawn anything wanted that is not running", and a
@@ -1561,16 +1631,16 @@ export async function reconcile(): Promise<void> {
  * Tenants between the kill switch's SIGTERM and their released lease.
  * spawnChild refuses them.
  *
- * The exit handler treats a stood-down child like any other exit and
- * schedules a restart one second later. The stand-down now takes at least
- * that long, because it carries the child's ledger up first, and the lease is
- * held throughout. If the owner re-signed in that window, the store has a
- * grant again, so the restart would spawn a new child into the home that is
- * about to be deleted, under the lease that is about to be released.
+ * A restart that comes due in that window would spawn into the home that is
+ * about to be deleted, under the lease that is about to be released, if the
+ * owner had re-signed meanwhile. The stand-down carries the child's ledger up
+ * first, so the window is seconds long. The stood-down child's own exit
+ * schedules no restart (see the exit handler), and one pending from an
+ * earlier crash is cancelled and voided by `killEpoch`. This is the last
+ * guard behind both.
  *
  * A tenant killed with no child running is in here too, while its home is
- * mirrored and deleted. The restarts themselves are voided by `killEpoch`,
- * which also covers the ones that fire after the stand-down.
+ * mirrored and deleted.
  */
 const standingDown = new Set<string>();
 
@@ -1654,7 +1724,10 @@ async function standDownKilled(tenant: string): Promise<void> {
   killEpoch.set(tenant, epochOf(tenant) + 1);
   // A re-sign arms at once. It does not wait out a cool-off the killed
   // grant's crash loop earned, nor start from that loop's restart count.
+  // Nor a pending restart, which reconcile's spawn loop would otherwise wait
+  // on until the voided timer fired.
   gaveUpUntil.delete(tenant);
+  cancelRestart(tenant);
   try {
     const child = children.get(tenant);
     const home = childHome(tenant);
