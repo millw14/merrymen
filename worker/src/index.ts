@@ -153,7 +153,8 @@ import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus, readHolderStatusResult } from "./circle";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
-import { archiveCurrentGrant, grantExpired, grantKey, loadGrantFile } from "./grant";
+import { archiveCurrentGrant, grantExpired, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
+import { killHosted, killRequested } from "./kill-request";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
 import { execModeOf, liveBlockerText, publishedMode, type ExecMode, type RefuseRule } from "./exec-mode";
 import { limitsFromGrant } from "./limits";
@@ -5169,7 +5170,10 @@ async function main() {
    * armed after the sync. Kill switch = grant file deleted by web's DELETE.
    */
   async function syncGrant(): Promise<boolean> {
-    const grant = loadGrantFile();
+    // A PENDING HOSTED KILL MEANS NO GRANT, whatever grant.json says (see
+    // loadArmableGrant). A copy raced back into this home goes through the
+    // kill branch below. It is not re-armed.
+    const grant = loadArmableGrant();
 
     // RECONCILE THE NAME BEFORE ANY RETURN, or it never happens.
     //
@@ -11704,7 +11708,31 @@ async function main() {
     },
     kill: () => {
       try {
-        if (!loadGrantFile()) return { ok: false, reason: "no grant" };
+        const grant = loadGrantFile();
+        if (isHostedMode()) {
+          // HOSTED: grant.json is only this child's copy. The orchestrator
+          // restores a missing copy from the tenant store every pass, so
+          // deleting it alone was a kill that undid itself in fifteen seconds.
+          // killHosted leaves a request the orchestrator carries out against
+          // the store. See kill-request.ts.
+          if (!grant) {
+            return {
+              ok: false,
+              reason: killRequested(merrymenHome()) ? "already killed — the server is removing the grant" : "no grant",
+            };
+          }
+          const r = killHosted(merrymenHome(), homePaths.grant(), grant, Math.floor(Date.now() / 1000));
+          void addEvent(
+            active?.agentId ?? grant.smartAccount,
+            "warn",
+            r.revocation === "queued"
+              ? "kill switch (Telegram) — this agent's copy of the key is gone; the server is deleting the stored grant. Funds stay in the smart account."
+              : `kill switch (Telegram) — this copy of the key is gone, but the kill could not be recorded (${r.reason}), so the server may restore it. ` +
+                  "Revoke it for good on the web: Wallet & permissions → discard & start over.",
+          );
+          return r;
+        }
+        if (!grant) return { ok: false, reason: "no grant" };
         // ARCHIVE FIRST. grant.json is a single slot and, for a grant that has
         // never been replaced, the only on-disk copy of the owner key — the key
         // `merrymen recover` needs to sweep the account. Deleting it without a

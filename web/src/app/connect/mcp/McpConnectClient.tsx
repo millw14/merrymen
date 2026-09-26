@@ -27,6 +27,13 @@ interface ConnectionLite { clientName: string | null; clientHost: string | null;
 /** How long the status read may take before the page stops waiting for it. */
 const STATUS_TIMEOUT_MS = 10_000;
 
+/**
+ * merrymen.dev's static copy of the production setup text, the one a search
+ * finds (assistant-setup.test.ts pins it to llmsTxt()). Any other server
+ * serves its own at <app>/llms.txt.
+ */
+const SITE_LLMS_TXT = "https://merrymen.dev/llms.txt";
+
 /** "last used 5 min ago", from epoch seconds. */
 export function lastUsedWords(lastUsedAt: number | null, nowSec: number): string {
   if (!lastUsedAt) return "not used yet";
@@ -153,11 +160,13 @@ function Row({ name, children }: { name: string; children: ReactNode }) {
   return <li className="mcp-hub-row"><h3>{name}</h3>{children}</li>;
 }
 
-export function McpConnectClient({ url, enabled, disabledWhy }: { url: string; enabled: boolean; disabledWhy: string | null }) {
+export function McpConnectClient({ url, app, enabled, disabledWhy }: { url: string; app: string; enabled: boolean; disabledWhy: string | null }) {
   const links = installLinks(url);
   const commands = installCommands(url);
   // The Claude Code plugin, offered only where this page serves the address it points at.
   const plugin = claudeCodePluginCommands(url);
+  // The setup text an assistant follows (mcp/assistant-setup.ts) for this server's address.
+  const llms = plugin ? SITE_LLMS_TXT : `${app}/llms.txt`;
   const addressId = useId();
   const [connected, setConnected] = useState<ReturnType<typeof connectedSummary>>(null);
 
@@ -233,6 +242,8 @@ export function McpConnectClient({ url, enabled, disabledWhy }: { url: string; e
                     <p className="mcp-hub-fine">Added Merrymen to Claude already? Claude Code signed in to the same account has it too. Without the plugin, from a terminal:</p>
                   </> : <p>Added it to Claude already? It’s in Claude Code too. Otherwise:</p>}
                   <Command lines={commands.claudeCode} label="Copy both Claude Code terminal commands" />
+                  <p className="mcp-hub-fine">Or just tell Claude Code:</p>
+                  <Command lines={[`Set up the Merrymen MCP server. Instructions: ${llms}`]} label="Copy the sentence to tell Claude Code" />
                 </Row>
                 <Row name="ChatGPT">
                   <p>Turn on Developer mode (Settings → Security and login), then create an app with the address below.</p>
@@ -298,8 +309,18 @@ export function McpConnectClient({ url, enabled, disabledWhy }: { url: string; e
                 <li>Claude asks before each action. To stop it asking for read-only look-ups, open Claude → Customize → Connectors → Merrymen and set Read-only tools to Always allow.</li>
                 <li>It only sees the agent and permissions you allow when you connect. Disconnect it any time on <a href="/connect/apps">Connected apps</a>.</li>
                 <li>It can suggest trades or setting changes only if you allow that, and nothing happens until you approve them in Merrymen.</li>
-                <li>It can never move your funds, see your keys, turn on live trading or loosen your limits.</li>
+                <li>It can never move your funds, see your keys, turn on live trading or loosen your signed limits.</li>
                 <li>Paper (practice) results are always kept apart from real money.</li>
+              </ul>
+            </section>
+
+            {/* Small print for an assistant that fetched this page while setting Merrymen up: llms.txt in brief. */}
+            <section className="mcp-hub-section mcp-hub-ai" aria-labelledby="mcp-hub-ai">
+              <h2 id="mcp-hub-ai">For AI assistants</h2>
+              <ul>
+                <li>Claude Code: run <code>claude mcp list</code> first; an entry at <code>{url}</code> means it is already set up. Otherwise run <code>{commands.claudeCode[0]}</code>, then ask the user to type <code>/mcp</code>, choose Merrymen and Authenticate (do not run <code>claude mcp login</code> yourself). No API key or token is needed; never ask for one.</li>
+                <li>claude.ai, Claude Desktop or Claude mobile: you cannot add it from a chat. Give the user the <Out href={links.claude}>Add to Claude link</Out>.</li>
+                <li>Full instructions: <a href={llms}>{llms}</a></li>
               </ul>
             </section>
           </>}

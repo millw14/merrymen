@@ -14,6 +14,7 @@
  * trade that is not this agent's reads exactly like one that does not exist.
  */
 import assert from "node:assert/strict";
+import * as z from "zod";
 import { afterEach, test } from "node:test";
 import { explorerFor } from "@merrymen/core";
 import { MAX_FOLLOWS, type FollowEdge } from "../../../../worker/src/follow-store";
@@ -752,4 +753,34 @@ test("social tools: every schema converts to JSON Schema, and the annotations sa
   assert.equal(tool("follow_agent").capability, "social.write");
   assert.equal(tool("unfollow_agent").capability, "social.write");
   assert.equal(tool("list_following").capability, "agents.read");
+});
+
+// ── the directory profile: no tool it lacks is named ────────────────────────
+
+test("share_trade_summary names draft_post only to a connection that has it: never in its description, schema or on the directory profile", async () => {
+  const def = tool("share_trade_summary");
+  const surface = JSON.stringify({ description: def.description, input: z.toJSONSchema(def.input as never), output: z.toJSONSchema(def.output as never) });
+  assert.ok(!surface.includes("draft_post"), "the description and schema are the same on every profile");
+
+  const { d, a } = await setup({ publicBookA: false });
+  seedShare(d);
+  const withPost = await call("share_trade_summary", { period: "day" }, a);
+  assert.match(withPost.sc.posting, /to draft_post: it is posted only after the owner approves it/);
+
+  const directory: Principal = { ...a, profile: "directory" };
+  const noPost: Principal = { ...a, scopes: new Set([...a.scopes].filter((s) => s !== "social:write")) };
+  for (const [what, p] of [["directory", directory], ["no social:write", noPost]] as const) {
+    const r = await call("share_trade_summary", { period: "day" }, p);
+    assert.equal(errCode(r), undefined, r.text);
+    assert.ok(!r.text.includes("draft_post"), `${what}: ${r.sc.posting}`);
+    assert.match(r.sc.posting, /posts nothing, and this connection cannot post/, what);
+    assert.equal(typeof r.sc.post_line, "string", `${what}: the line itself is still offered`);
+  }
+  // The null-line warning too.
+  d.raw.prepare("UPDATE agents SET name = ? WHERE smart_account = ?").run("Robin of scam.com", ACCOUNT_A);
+  const refused = await call("share_trade_summary", { period: "day" }, directory);
+  assert.ok(refused.sc.warnings.some((w: string) => /post_line is null; the owner can write a line of their own\.$/.test(w)), refused.text);
+  assert.ok(!refused.text.includes("draft_post"));
+  const refusedFull = await call("share_trade_summary", { period: "day" }, a);
+  assert.ok(refusedFull.sc.warnings.some((w: string) => w.endsWith("a line of their own for draft_post.")));
 });

@@ -13,7 +13,9 @@ import { afterEach, test } from "node:test";
 import { resetMetricsForTest } from "../observe";
 import { runTool, type CallToolResult, type ToolDef } from "../tool";
 import { OWNER_A, SLUG_A, connectAs, installFixtures, makeDeps, makeTestDb } from "../testing";
-import { AGENT_CONTROLS, AGENT_TOOLS } from "./agents";
+import { ALL_TOOLS } from "./index";
+import { toolInProfile } from "../server";
+import { AGENT_CONTROLS, AGENT_TOOLS, SETTINGS_CONTROL_HERE, SETTINGS_CONTROL_IN_APP } from "./agents";
 
 const NOW = 1_800_000_000;
 const ROOT = join(import.meta.dirname, "..", "..", "..", "..");
@@ -46,15 +48,51 @@ test("get_agent_controls returns the controls list, and the kill switch is where
   const def = AGENT_TOOLS.find((t) => t.name === "get_agent_controls") as unknown as ToolDef;
   const r: CallToolResult = await runTool(def, { agent: SLUG_A }, a.principal, "trace-test", { now: () => NOW });
   assert.equal(r.isError, undefined, r.content[0]?.text);
-  assert.deepEqual((r.structuredContent as { controls: unknown }).controls, AGENT_CONTROLS);
+  // Read-only: no drafts:write, so setting changes point at Merrymen's Settings, not at propose_settings_change.
+  assert.deepEqual((r.structuredContent as { controls: unknown }).controls, [...AGENT_CONTROLS.filter((c) => c.control !== "setting changes"), SETTINGS_CONTROL_IN_APP]);
 
   const kill = where("kill switch");
   assert.ok(kill.includes("You → Wallet & permissions (/grant) → 'discard & start over'"), kill);
-  // Hosted /kill does not stop the agent (the orchestrator restores the key), so it is named only as what NOT to use.
-  assert.ok(!kill.includes("Telegram /kill, then /confirm"), kill);
-  assert.ok(kill.includes("rather than the Telegram kill command"), kill);
+  // Hosted /kill now removes the stored grant (worker/src/kill-request.ts), so it is named as a kill switch again.
+  assert.ok(kill.includes("Telegram /kill, then /confirm"), kill);
+  assert.ok(!kill.includes("rather than the Telegram kill command"), kill);
   for (const c of AGENT_CONTROLS) {
     assert.ok(!/dashboard|→ Stop/.test(c.where), `${c.control}: no invented dashboard or Stop button (${c.where})`);
+  }
+});
+
+test("get_agent_controls never names a tool the connection lacks: on the directory profile, setting changes point at Merrymen's Settings", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  restore = installFixtures(d);
+  const def = AGENT_TOOLS.find((t) => t.name === "get_agent_controls") as unknown as ToolDef;
+  const controlsOf = async (principal: Parameters<typeof runTool>[2]) => {
+    const r: CallToolResult = await runTool(def, { agent: SLUG_A }, principal, "trace-test", { now: () => NOW });
+    assert.equal(r.isError, undefined, r.content[0]?.text);
+    return (r.structuredContent as { controls: Array<{ control: string; where: string; effect: string; available_here: boolean }> }).controls;
+  };
+  const excluded = ALL_TOOLS.filter((t) => !toolInProfile(t, "directory")).map((t) => t.name);
+  assert.ok(excluded.includes("propose_settings_change"));
+
+  // Full server with drafts:write: as before, the setting change is proposed here.
+  const full = await connectAs(deps, OWNER_A, { scopes: ["agents:read", "drafts:write", "offline_access"] });
+  const onFull = await controlsOf(full.principal);
+  assert.deepEqual(onFull.find((c) => c.control === "setting changes"), SETTINGS_CONTROL_HERE);
+  assert.equal(SETTINGS_CONTROL_HERE.available_here, true);
+
+  // The directory profile, even with drafts:write forced onto the principal.
+  const dir = await connectAs(deps, OWNER_A, { profile: "directory", scopes: ["agents:read", "offline_access"], clientId: full.clientId });
+  assert.equal(dir.principal.profile, "directory");
+  for (const principal of [dir.principal, { ...dir.principal, scopes: new Set([...dir.principal.scopes, "drafts:write"]) }]) {
+    const controls = await controlsOf(principal);
+    assert.equal(controls.length, onFull.length, "the same controls, only where they live differs");
+    for (const c of controls) {
+      for (const name of excluded) assert.ok(!c.where.includes(name) && !c.effect.includes(name), `${c.control} names ${name}`);
+      assert.equal(c.available_here, false, c.control);
+    }
+    const settings = controls.find((c) => c.control === "setting changes")!;
+    assert.deepEqual(settings, SETTINGS_CONTROL_IN_APP);
+    assert.ok(settings.where.includes("Settings (/settings)"), settings.where);
   }
 });
 

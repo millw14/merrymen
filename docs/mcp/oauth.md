@@ -9,6 +9,7 @@ TypeScript and Python SDK clients) can connect without a pre-shared secret.
 |---|---|
 | MCP endpoint (resource) | `https://mcp.merrymen.dev/mcp` |
 | Protected-resource metadata (RFC 9728) | `https://mcp.merrymen.dev/.well-known/oauth-protected-resource/mcp` (also at the root well-known path) |
+| Directory profile: a second, limited resource ([below](#the-directory-profile-mcpdirectory)) | `https://mcp.merrymen.dev/mcp/directory`, metadata at `https://mcp.merrymen.dev/.well-known/oauth-protected-resource/mcp/directory` |
 | Authorization-server metadata (RFC 8414) | `https://app.merrymen.dev/.well-known/oauth-authorization-server` |
 | Authorization endpoint | `https://app.merrymen.dev/oauth/authorize` |
 | Token endpoint | `https://app.merrymen.dev/oauth/token` |
@@ -29,7 +30,7 @@ request's `Host` header, because tokens are bound to them.
 | **Client application** | Claude, Codex, your app | Its `client_id`: a Client ID Metadata Document URL, or an id from dynamic registration. A client id is *not* authority over any owner. |
 | **Owner (end user)** | A Merrymen account holder | Their own Merrymen sign-in (wallet or Privy), on the consent page. |
 | **Agent** | An owner's Merryman | Owned by the signed-in tenant according to the identity store at the moment of each call. |
-| **Connection** | One owner's consent for one client | A row the owner can see and revoke on **Connected apps**. Tokens belong to a connection. |
+| **Connection** | One owner's consent for one client on one resource (`/mcp` or `/mcp/directory`) | A row the owner can see and revoke on **Connected apps**. Tokens belong to a connection. |
 
 There is **no application-level key that reaches every owner**. Every token is
 issued to one connection, i.e. to one owner's explicit consent for one client,
@@ -99,8 +100,10 @@ limited to the agents and scopes that owner chose.
    `response_type=code`, `code_challenge` + `code_challenge_method=S256`
    (required; `plain` is refused), `redirect_uri` (must match a registered one
    exactly; loopback redirects may use any port per RFC 8252), `state`,
-   `scope`, and `resource=https://mcp.merrymen.dev/mcp` (RFC 8707; any other
-   resource is refused with `invalid_target`).
+   `scope`, and `resource=https://mcp.merrymen.dev/mcp` (RFC 8707). The only
+   other resource accepted is the directory profile's
+   (`https://mcp.merrymen.dev/mcp/directory`); any other is refused with
+   `invalid_target`, and a request with no `resource` means the canonical one.
 
    **Errors before consent are shown on a Merrymen page, not redirected.**
    Registration is open, so a registered https redirect proves nothing, and
@@ -137,7 +140,8 @@ limited to the agents and scopes that owner chose.
 ## Tokens
 
 - **Access tokens** (`mcp_at_…`): opaque 256-bit random values, valid 1 hour,
-  audience-bound to the MCP resource URL. Stored only as SHA-256 hashes and
+  audience-bound to the resource URL they were issued for (`/mcp` or
+  `/mcp/directory`; each endpoint refuses the other's tokens). Stored only as SHA-256 hashes and
   looked up on every request, so revocation is immediate. There is no signing
   key that could be stolen or confused with the dashboard's session secret.
 - **Refresh tokens** (`mcp_rt_…`) are **always issued** with every code
@@ -201,6 +205,79 @@ name gets JSON-RPC error `-32602` ("Tool … not found"). To add a permission
 later, the owner disconnects the app on **Connected apps** and connects it
 again (its next sign-in asks for every scope), ticking that permission on the
 consent page; or uses a personal access token that includes it.
+
+## The directory profile (`/mcp/directory`)
+
+A second address for the same server, made for Anthropic's connector
+directory: `https://mcp.merrymen.dev/mcp/directory`. The canonical `/mcp` is
+unchanged and stays what owners add as a custom connector.
+
+**What it excludes, and why.** A directory connection can never hold
+`trade:propose`, `drafts:write` or `social:write`, nor the staff scope. Those
+are the scopes that let an assistant *prepare* something with consequences (a
+trade, a setting change, an agent draft, a follow, a post), even though each
+still waits for the owner's approval in Merrymen. A listing anyone can add in
+one click is kept to research, reading, chat, the watchlist, alerts, reports
+and backtests; an owner who wants proposals adds the full server as a custom
+connector. The limit is by scope level (`read` and `write` only:
+`DIRECTORY_SCOPES` in `web/src/mcp/scopes.ts`), so a sensitive scope added
+later stays outside the directory until someone decides otherwise. Tools that
+exist only on the full server: `quote_trade`, `propose_trade`,
+`propose_settings_change`, `create_agent_draft`, `draft_post`,
+`follow_agent`, `unfollow_agent`, `get_proposal`, `list_proposals`,
+`cancel_proposal`, and the staff tools.
+
+**Its own resource.** `/.well-known/oauth-protected-resource/mcp/directory`
+names `resource: https://mcp.merrymen.dev/mcp/directory` and lists only the
+scopes above as `scopes_supported`; the 401 challenge on `/mcp/directory`
+points `resource_metadata` at that document and asks for only those scopes.
+The root and `/mcp` documents, the canonical challenge and the
+authorization-server metadata are unchanged.
+
+**Enforced at every step, each check independent of the others:**
+
+1. `/oauth/authorize` with `resource=…/mcp/directory` intersects the
+   requested scopes with the directory list **before** the request is parked,
+   so the consent screen can never offer a sensitive scope (a request that
+   asks only for excluded scopes is `invalid_scope`).
+2. The consent screen and the decision filter the parked request again, and
+   an explicit choice of an excluded scope is refused (`invalid_scope`), never
+   quietly granted.
+3. The code exchange and every refresh drop an excluded scope from whatever
+   the code or token row says, and a code mints only for a connection on its
+   own address.
+4. Verification drops them from the principal; the server built for
+   `/mcp/directory` registers no tool, resource or prompt that needs one; and
+   the policy check on every call refuses them whatever the token holds.
+
+**Audience separation.** A token is bound to the resource it was issued for:
+`/mcp/directory` accepts only directory tokens and `/mcp` only canonical ones.
+A refresh keeps a token on its own resource (a `resource` parameter naming
+the other address is `invalid_target`), and the moved-endpoint rule applies to
+both: a token for an address this server no longer serves gets
+`invalid_grant` at refresh, so the client signs in again. Personal access
+tokens are canonical only.
+
+**One connection per address.** claude.ai uses the same `client_id` (its
+metadata document) for a custom connector and a directory connector, and an
+owner may have both. So a connection is one owner's consent for one client
+**on one resource**: `mcp_connections.resource` holds the directory URL for a
+directory connection and is NULL for the canonical one (as is every row
+written before the column existed), and there is at most one active OAuth
+connection per (owner, client, resource). Connecting, reconnecting or
+disconnecting either never changes or revokes the other, and the consent
+screen's starting point ("what you granted before") is read from the
+connection on the same address only. **Connected apps** marks a directory
+connection "Via the Claude directory listing".
+
+**Switching it off.** `MERRYMEN_MCP_DIRECTORY=0` on web: `/mcp/directory` and
+its metadata answer 404, `/oauth/authorize` refuses the address
+(`invalid_target`), and directory tokens stop verifying and refreshing
+(`invalid_grant`); `/mcp` is untouched. `MERRYMEN_MCP_DIRECTORY_RESOURCE_URL`
+can move the address to another origin (https), never to another path: the
+route is always `/mcp/directory`, and an override naming any other path (or
+the canonical one) switches the profile off rather than advertise an address
+that answers 404. `/api/mcp/health` says which.
 
 ## The partner API
 

@@ -62,11 +62,13 @@ function startHistoryRepair(): void {
   })().catch(e=>log(`historical fills: FAILED — ${e instanceof Error ? e.message : String(e)}`));
 }
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
 import { getGrantStore } from "./grant-store";
+import { KILL_DONE_TEXT, honourKillRequest, killRequested, type KillOutcome } from "./kill-request";
+import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
@@ -440,6 +442,19 @@ export function staleThresholdSec(tickSeconds: number): number {
 }
 
 const children = new Map<string, Child>();
+
+/**
+ * Test seam: count a child as running without spawning a worker, so a test
+ * can drive the real reconcile() over it. The fake needs only `kill`.
+ */
+export function adoptChildForTest(
+  tenant: `0x${string}`,
+  smartAccount: `0x${string}`,
+  proc: Pick<ChildProcess, "kill">,
+): void {
+  const lc = tenant.toLowerCase() as `0x${string}`;
+  children.set(lc, { proc: proc as ChildProcess, tenant: lc, smartAccount, startedAt: Date.now(), restarts: 0, staleSec: 600, firstBeatSec: 600 });
+}
 /**
  * The advisory lease held for each tenant we are running, keyed by lowercased
  * tenant. Acquired in reconcile() BEFORE the first spawn and held across crash
@@ -687,6 +702,8 @@ async function promoteChatSettings(tenant: `0x${string}`, chat: ChatSettings | n
 
 /** Write the tenant's session-key-only grant into its child's grant.json. */
 async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` | null> {
+  // A TELEGRAM KILL IS PENDING: hand this home no key. See kill-request.ts.
+  if (killRequested(childHome(tenant))) return null;
   const grant = await getGrantStore().get(tenant);
   if (!grant) return null;
 
@@ -757,8 +774,14 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` 
  * NOT `writeGrantForChild`. That one also mints a public identity, which is
  * spawn-time work: idempotent, but a store write, and running it for every
  * tenant every fifteen seconds would be pure waste.
+ *
+ * NEVER INTO A HOME WITH A PENDING KILL. The "no file, write it" rule below
+ * is how a hosted Telegram /kill used to come undone: the child deleted its
+ * copy, and this function put it back from the store within a pass. Until
+ * reconcile has removed the stored grant, the missing file is the kill.
  */
 async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
+  if (killRequested(childHome(tenant))) return;
   let grant;
   try {
     grant = await getGrantStore().get(tenant);
@@ -1151,6 +1174,12 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     log(`${tenant}: no healthy lease — not spawning (another replica may hold it)`);
     return;
   }
+  // Checked here as well as in writeGrantForChild, so the log says why. A
+  // crash-restart lands here without passing reconcile's kill check first.
+  if (killRequested(childHome(tenant))) {
+    log(`${tenant}: a Telegram kill is pending — not spawning`);
+    return;
+  }
   const smartAccount = await writeGrantForChild(tenant);
   if (!smartAccount) {
     log(`${tenant}: no grant in the store — not spawning`);
@@ -1263,6 +1292,84 @@ function killChild(tenant: string): void {
   }, 3_000);
 }
 
+/**
+ * Tell the owner a Telegram kill is DONE: the stored grant is deleted. Sent
+ * from here, not from the child, because only this process knows the DELETE
+ * succeeded (see kill-request.ts). It goes through the owner's own bot to the
+ * chat that proved the /link code, like the MCP alerts. It ignores the alert
+ * switch, because this is the answer to a command the owner just gave.
+ * Best effort: a confirmation that fails to send is logged. The owner was
+ * told what to do if none arrives.
+ */
+let confirmKillDone = async (tenant: `0x${string}`): Promise<void> => {
+  const url = process.env.DATABASE_URL;
+  if (!url) return;
+  try {
+    const to = await hostedRecipient(await makePgDb(url))(tenant);
+    if (!to) {
+      log(`${tenant}: Telegram kill done, but there is no linked owner chat to confirm it to`);
+      return;
+    }
+    const sent = await telegramSend()(to.botToken, to.chatId, KILL_DONE_TEXT);
+    if (!sent.ok) log(`${tenant}: Telegram kill done, but the confirmation did not send — ${sent.reason ?? "unknown"}`);
+  } catch (e) {
+    log(`${tenant}: Telegram kill done, but the confirmation did not send — ${e instanceof Error ? e.message : String(e)}`);
+  }
+};
+
+/** Test seam: capture the confirmation instead of sending it. */
+export function setKillConfirmForTest(fn: (tenant: `0x${string}`) => Promise<void>): void {
+  confirmKillDone = fn;
+}
+
+/**
+ * Carry out one tenant's pending Telegram kill, if it has one. Called from
+ * reconcile, from the three-second order ferry and on shutdown. They can
+ * overlap, which is safe: the DELETE is conditional and atomic, so exactly
+ * one call sees `removed` and confirms to the owner.
+ */
+async function honourKill(tenant: `0x${string}`, nowSec: number): Promise<KillOutcome> {
+  const k = await honourKillRequest(getGrantStore(), tenant, childHome(tenant), nowSec);
+  if (k.outcome === "revoked" && k.removed) {
+    log(`${tenant}: Telegram kill honoured — grant removed from the store`);
+    void confirmKillDone(tenant);
+  }
+  if (k.outcome === "superseded") log(`${tenant}: a grant signed after the Telegram kill replaces it — arming that one`);
+  if (k.outcome === "failed") log(`${tenant}: Telegram kill pending, could not remove the grant yet (${k.error}) — nothing arms meanwhile`);
+  return k;
+}
+
+/**
+ * Every child home holding a pending request, whether or not its child is
+ * running. Read from the disk rather than the children map, so a kill left
+ * by a child that has since crashed is not missed.
+ */
+function pendingKillTenants(): `0x${string}`[] {
+  let names: string[];
+  try {
+    names = readdirSync(path.join(merrymenHome(), "children"));
+  } catch {
+    return [];
+  }
+  return names.filter((n): n is `0x${string}` => /^0x[0-9a-f]{40}$/.test(n) && killRequested(childHome(n)));
+}
+
+/**
+ * Carry out every pending kill now. This is what keeps a kill from waiting a
+ * whole reconcile pass (fifteen seconds plus the pass itself) in a home that a
+ * redeploy would discard. Never throws: the order ferry calls it.
+ */
+export async function honourPendingKills(): Promise<void> {
+  const nowSec = Math.floor(Date.now() / 1000);
+  for (const tenant of pendingKillTenants()) {
+    try {
+      await honourKill(tenant, nowSec);
+    } catch (e) {
+      log(`${tenant}: Telegram kill could not be honoured this time — ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+}
+
 /** Bring the running set in line with the store: spawn new tenants, stop killed ones. */
 export async function reconcile(): Promise<void> {
   if (stopping) return;
@@ -1274,6 +1381,21 @@ export async function reconcile(): Promise<void> {
     log(`store unreadable, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
     return;
   }
+  // A TELEGRAM KILL, CARRIED OUT HERE. It must happen before `wanted` is built.
+  // A tenant whose stored grant this removes is dropped from the list. It is
+  // then not wanted, and the kill-switch branch at the bottom stands its child
+  // down and wipes its home, the same as for a web DELETE /api/grants. The
+  // order ferry usually got there first (honourPendingKills). Then this
+  // finds the grant already absent, which is also `revoked`.
+  // See kill-request.ts.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const kept: `0x${string}`[] = [];
+  for (const tenant of tenants) {
+    const lc = tenant.toLowerCase() as `0x${string}`;
+    if ((await honourKill(lc, nowSec)).outcome === "revoked") continue;
+    kept.push(tenant);
+  }
+  tenants = kept;
   const wanted = new Set(tenants.map((t) => t.toLowerCase()));
 
   // A lease whose connection dropped no longer protects its tenant — Postgres
@@ -1623,6 +1745,11 @@ async function ferryOrdersNow(): Promise<void> {
 async function orderFerryLoop(): Promise<void> {
   for (;;) {
     if (stopping) return;
+    // Telegram kills ride this clock, not reconcile's: a request sits in a
+    // home a redeploy discards, so it is carried to the store within seconds
+    // (kill-request.ts). Before the halt check on purpose. A fleet halt stops
+    // trading, and a kill makes the stop outlive the halt.
+    await honourPendingKills();
     if (!haltRequested()) await ferryOrdersNow();
     await new Promise((r) => setTimeout(r, ORDER_FERRY_MS));
   }
@@ -5351,8 +5478,21 @@ export async function runOrchestrator(): Promise<void> {
     // Release every advisory lease so a restarting replica can take over at once
     // rather than waiting for our dropped connections to time out server-side.
     // Best-effort and unawaited — we exit in a second regardless.
-    for (const tenant of [...leases.keys()]) void releaseLease(tenant);
-    setTimeout(() => process.exit(0), 1_000);
+    const release = () => {
+      for (const tenant of [...leases.keys()]) void releaseLease(tenant);
+    };
+    // A TELEGRAM KILL STILL WAITING IN A HOME goes to the store before the
+    // leases do, so the replica taking over never arms that grant. The home
+    // does not survive this container (kill-request.ts). Bounded, and it
+    // changes nothing when no kill is pending. It only helps if Railway gives
+    // the old deployment draining time. The default is none.
+    if (pendingKillTenants().length === 0) {
+      release();
+      setTimeout(() => process.exit(0), 1_000);
+      return;
+    }
+    void Promise.race([honourPendingKills(), new Promise((r) => setTimeout(r, 3_000))]).finally(release);
+    setTimeout(() => process.exit(0), 4_000);
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);

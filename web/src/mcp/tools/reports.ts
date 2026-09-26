@@ -26,8 +26,14 @@ import type { ResourceDef } from "../resources";
 import { defineTool, type ToolContext } from "../tool";
 import { AGENT_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, isCursorInt, untrusted, usd } from "./shared";
 
-/** Content above this is not inlined in a tool result; the resource and the download carry it. */
-export const INLINE_CONTENT_MAX = 200 * 1024;
+/**
+ * Content above this is not inlined in a tool result; the resource and the
+ * download carry it. Kept small because an inlined export is sent whole, and
+ * twice (the structured result and its JSON text copy), into the assistant's
+ * context, where a large tool result crowds out the conversation or is cut
+ * off by the client long before an export's 2 MB.
+ */
+export const INLINE_CONTENT_MAX = 32 * 1024;
 /** How far back an export may reach, and its default when `since` is omitted. */
 const MAX_SPAN_SEC = 366 * 86_400;
 const DEFAULT_SPAN_SEC = 30 * 86_400;

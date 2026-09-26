@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 
 export const metadata: Metadata = {
   title: "Docs",
@@ -6,7 +7,7 @@ export const metadata: Metadata = {
 };
 
 const TOC = [
-  ["Getting started", [["install", "Install"], ["wallet", "Create & fund a wallet"], ["run", "Run it"]]],
+  ["Getting started", [["install", "Install"], ["wallet", "Create & fund a wallet"], ["run", "Run it"], ["claude", "Use it from Claude"]]],
   ["Telegram", [["telegram", "Set up Telegram"], ["commands", "Commands"], ["transfers", "Transfers"], ["pc-control", "PC remote control"], ["voice", "Voice & vision"], ["soul", "The soul"]]],
   ["Trading", [["strategies", "Strategies"], ["custom", "Write your own bot"], ["virtuals", "Stream to Virtuals"]]],
   ["Reference", [["safety", "Safety model"], ["config", "Configuration"], ["troubleshooting", "Troubleshooting"], ["faq", "FAQ"]]],
@@ -136,6 +137,19 @@ merrymen kill       # kill switch — destroys the grant`}
           check → quote simulation → execute → record</strong>. It re-reads your settings every tick,
           so dashboard changes apply within one tick — no restart.
         </p>
+
+        {/* ── claude ── */}
+        <h2 id="claude">Use it from Claude (MCP)</h2>
+        <p>
+          Connect Claude to your agent and it can check on it, explain why it has or hasn&apos;t
+          traded, and, if you allow it, suggest trades or setting changes that only happen once you
+          approve them in Merrymen. The quickest way: tell Claude “set up merrymen mcp”, or add it
+          in one click from <Link className="link" href="/claude">Set up Merrymen in Claude</Link>.
+        </p>
+        <div className="callout">
+          The MCP server is for hosted Merrymen (app.merrymen.dev); the rest of this guide covers the
+          self-hosted install.
+        </div>
 
         {/* ── telegram ── */}
         <h2 id="telegram">Set up Telegram</h2>
