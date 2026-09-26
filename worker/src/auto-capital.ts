@@ -148,6 +148,11 @@ export function decideAutoCapital(a: {
   onchainCashRaw: bigint;
   /** The account's class vault(s): what each has ever done, and what it holds now. */
   vaults: readonly VaultFacts[];
+  /**
+   * ERC-20 transfers of anything but USDG ever received by the account or its
+   * vaults. Null when the node would not say.
+   */
+  otherTokensIn: number | null;
   head: bigint;
   minAgeBlocks?: bigint;
   hwmGrossUsdg: number;
@@ -193,6 +198,14 @@ export function decideAutoCapital(a: {
       return no(`its class vault ${v.address} has ${v.cap.movements.length} USDG movement(s) — an operator's call`);
     }
     if (v.cashRaw !== 0n) return no(`its class vault ${v.address} holds ${usdgOf(v.cashRaw)} USDG — an operator's call`);
+  }
+
+  // AND NOTHING BUT USDG, EVER. A token sent straight to the account (or its
+  // vault) is capital the USDG logs cannot see; once the agent values it, it
+  // would read as profit above a peak set to the USDG deposits alone.
+  if (a.otherTokensIn === null) return no("could not establish that no other token was ever received", true);
+  if (a.otherTokensIn > 0) {
+    return no(`it has received ${a.otherTokensIn} transfer(s) of tokens other than USDG — an operator's call`);
   }
 
   const deposits = BigInt(cap.totals.netContributionsRaw);
@@ -295,6 +308,40 @@ export interface AutoCapitalDeps {
   scan?: typeof scanFleetCapital;
   nowSec?: () => number;
   minAgeBlocks?: bigint;
+}
+
+const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+/**
+ * How many ERC-20 transfers of anything but USDG ever reached these addresses,
+ * in [fromBlock, toBlock]. One filter per address on the recipient topic and no
+ * token address, so every token is included. Null when the node refused: an
+ * unread history is not an empty one.
+ */
+async function otherTokenTransfersIn(
+  rpc: RpcCall,
+  usdg: string,
+  addresses: readonly string[],
+  fromBlock: bigint,
+  toBlock: bigint,
+): Promise<number | null> {
+  let n = 0;
+  for (const a of addresses) {
+    try {
+      const logs = (await rpc("eth_getLogs", [
+        {
+          fromBlock: "0x" + fromBlock.toString(16),
+          toBlock: "0x" + toBlock.toString(16),
+          topics: [TRANSFER, null, "0x" + a.toLowerCase().replace(/^0x/, "").padStart(64, "0")],
+        },
+      ])) as { address: string; topics: string[] }[] | null;
+      // Three topics is an ERC-20 Transfer; ERC-721 carries a fourth and is not valued as capital.
+      n += (logs ?? []).filter((l) => l.topics.length === 3 && l.address.toLowerCase() !== usdg.toLowerCase()).length;
+    } catch {
+      return null;
+    }
+  }
+  return n;
 }
 
 async function balanceOf(rpc: RpcCall, token: string, holder: string, block?: bigint): Promise<bigint> {
@@ -433,6 +480,7 @@ export async function runAutoCapitalPass(d: AutoCapitalDeps): Promise<AutoCapita
         cap: chain.get(key),
         onchainCashRaw: c.cashRaw,
         vaults,
+        otherTokensIn: await otherTokenTransfersIn(d.rpc, d.usdgToken, [c.account, ...c.t.vaults], 0n, head),
         head,
         minAgeBlocks: d.minAgeBlocks,
         hwmGrossUsdg: num(c.agent.hwm_usdg),
@@ -465,11 +513,12 @@ export async function runAutoCapitalPass(d: AutoCapitalDeps): Promise<AutoCapita
         });
         const since = custody.map((a) => window.get(a.toLowerCase()));
         const moved = since.reduce((n, s) => n + (s?.movements.length ?? 0), 0);
-        if (since.some((s) => !s || !s.complete) || moved > 0) {
+        const tokens = await otherTokenTransfersIn(d.rpc, d.usdgToken, custody, head + 1n, confirmHead);
+        if (since.some((s) => !s || !s.complete) || tokens === null || moved + tokens > 0) {
           d.log(
             `capital| ${c.account} NOT booked — ` +
-              (since.every((s) => s && s.complete)
-                ? `${moved} USDG movement(s) since block ${head}; judging again next pass`
+              (since.every((s) => s && s.complete) && tokens !== null
+                ? `${moved + (tokens ?? 0)} transfer(s) since block ${head}; judging again next pass`
                 : `could not confirm nothing moved since block ${head}; trying again next pass`),
           );
           continue;

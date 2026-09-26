@@ -110,6 +110,7 @@ const decide = (
     hwmGrossUsdg: 10.872801,
     hwmWithdrawnUsdg: 0,
     ...over,
+    otherTokensIn: over.otherTokensIn === undefined ? 0 : over.otherTokensIn,
   });
 };
 
@@ -176,6 +177,7 @@ test("an account past its first accounting epoch is refused: its carry and its d
     cap,
     onchainCashRaw: 10_872_801n,
     vaults: [],
+    otherTokensIn: 0,
     head: HEAD,
     hwmGrossUsdg: 10.872801,
     hwmWithdrawnUsdg: 0,
@@ -303,7 +305,14 @@ async function seedAgent(db: Db, hwm: number) {
  */
 function fakeRpc(
   balances: Record<string, bigint>,
-  chain: { heads?: bigint[]; balanceAfterFirst?: bigint; code?: Record<string, string> } = {},
+  chain: {
+    heads?: bigint[];
+    balanceAfterFirst?: bigint;
+    code?: Record<string, string>;
+    /** Non-USDG ERC-20 transfers received, by recipient: the token and the block. */
+    tokensIn?: Record<string, { token: string; block: number }[]>;
+    tokenLogsRefused?: boolean;
+  } = {},
 ) {
   let headReads = 0;
   const balanceReads = new Map<string, number>();
@@ -319,6 +328,14 @@ function fakeRpc(
       balanceReads.set(holder, n + 1);
       const value = n > 0 && chain.balanceAfterFirst !== undefined ? chain.balanceAfterFirst : (balances[holder] ?? 0n);
       return "0x" + value.toString(16);
+    }
+    if (method === "eth_getLogs") {
+      if (chain.tokenLogsRefused) throw new Error("429 Too Many Requests");
+      const p = params[0] as { fromBlock: string; toBlock: string; topics: (string | null)[] };
+      const to = ("0x" + String(p.topics[2]).slice(-40)).toLowerCase();
+      return (chain.tokensIn?.[to] ?? [])
+        .filter((t) => BigInt(t.block) >= BigInt(p.fromBlock) && BigInt(t.block) <= BigInt(p.toBlock))
+        .map((t) => ({ address: t.token, topics: [p.topics[0], "0x" + "0".repeat(64), p.topics[2]] }));
     }
     if (method === "eth_getCode") return chain.code?.[String(params[0]).toLowerCase()] ?? "0x";
     throw new Error(`unexpected rpc ${method}`);
@@ -357,7 +374,7 @@ const pass = (
   cap: AccountCapital,
   refused = new Map<string, bigint>(),
   balance = 10_872_801n,
-  chain: { heads?: bigint[]; balanceAfterFirst?: bigint; code?: Record<string, string> } = {},
+  chain: Parameters<typeof fakeRpc>[1] = {},
   custody: { vaults?: string[]; vaultCaps?: Record<string, AccountCapital> } = {},
 ) => {
   const s = scanOf(cap, custody.vaultCaps);
@@ -537,7 +554,7 @@ test("end to end: money that moves after the history scan stops the booking, and
   const p = pass(db, capital([...DEPOSITS(), late]), refused, 10_872_801n, { heads: [HEAD, HEAD + 100n] });
   assert.deepEqual(await p.run(), []);
   assert.deepEqual(p.calls, [[ACCT], [ACCT]], "the history, then the window since it");
-  assert.ok(p.lines.some((l) => l.includes("1 USDG movement(s) since block")), p.lines.join("\n"));
+  assert.ok(p.lines.some((l) => l.includes("1 transfer(s) since block")), p.lines.join("\n"));
   const count = (await db.prepare("SELECT COUNT(*) AS n FROM flows").get()) as { n: number };
   assert.equal(Number(count.n), 0);
   assert.equal(refused.size, 0, "not remembered as refused — the new state gets its own judgement");
@@ -581,6 +598,50 @@ test("end to end: a deployed vault blocks the booking", async () => {
   const p = pass(db, capital(DEPOSITS()), new Map(), 10_872_801n, { code: { [VAULT.toLowerCase()]: "0x6080" } }, { vaults: [VAULT] });
   assert.deepEqual(await p.run(), []);
   assert.ok(p.lines.some((l) => l.includes("has been deployed")), p.lines.join("\n"));
+});
+
+test("a token other than USDG, ever received, is an operator's call; an unread token history is retried", () => {
+  const sent = decide(DEPOSITS(), { otherTokensIn: 1 });
+  assert.equal(sent.apply, false);
+  assert.equal(sent.retry, false);
+  assert.match(sent.why, /tokens other than USDG/);
+  const unread = decide(DEPOSITS(), { otherTokensIn: null });
+  assert.equal(unread.apply, false);
+  assert.equal(unread.retry, true);
+});
+
+test("end to end: a token sent straight to the account blocks the booking", async () => {
+  const db = await freshDb();
+  await seedAgent(db, 10.872801);
+  const INU = "0x1111111111111111111111111111111111111111";
+  const p = pass(db, capital(DEPOSITS()), new Map(), 10_872_801n, {
+    tokensIn: { [ACCT.toLowerCase()]: [{ token: INU, block: 71_900_000 }] },
+  });
+  assert.deepEqual(await p.run(), []);
+  assert.ok(p.lines.some((l) => l.includes("tokens other than USDG")), p.lines.join("\n"));
+  const count = (await db.prepare("SELECT COUNT(*) AS n FROM flows").get()) as { n: number };
+  assert.equal(Number(count.n), 0);
+});
+
+test("end to end: a node that will not list token transfers is retried, never guessed empty", async () => {
+  const db = await freshDb();
+  await seedAgent(db, 10.872801);
+  const refused = new Map<string, bigint>();
+  const p = pass(db, capital(DEPOSITS()), refused, 10_872_801n, { tokenLogsRefused: true });
+  assert.deepEqual(await p.run(), []);
+  assert.equal(refused.size, 0);
+});
+
+test("end to end: a token that arrives while the account is judged stops the booking", async () => {
+  const db = await freshDb();
+  await seedAgent(db, 10.872801);
+  const INU = "0x1111111111111111111111111111111111111111";
+  const p = pass(db, capital(DEPOSITS()), new Map(), 10_872_801n, {
+    heads: [HEAD, HEAD + 100n],
+    tokensIn: { [ACCT.toLowerCase()]: [{ token: INU, block: Number(HEAD) + 50 }] },
+  });
+  assert.deepEqual(await p.run(), []);
+  assert.ok(p.lines.some((l) => l.includes("transfer(s) since block")), p.lines.join("\n"));
 });
 
 // ── the wiring ──────────────────────────────────────────────────────────────
