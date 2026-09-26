@@ -8,11 +8,15 @@ import { Icon } from "@/components/Icon";
  * arrive from a Telegram post on a phone, so the layout is composed at 390px
  * and the desktop view is the adaptation, not the other way round.
  *
- * EVERY CLAIM HERE IS BACKED BY SHIPPED CODE, and the demo's limits are said
- * out loud — same rule as the home page's download card. The app's honest
- * seams (seed quiz before anything persists, FLAG_SECURE, the deliberate
- * absence of clipboard-copy for the phrase, demo build refusing to sign) are
- * the STORY, not the fine print: on this product, the paranoia is the pitch.
+ * EVERY CLAIM HERE IS BACKED BY SHIPPED CODE, and the app's limits are said
+ * out loud — same rule as the home page's download card. This page describes
+ * the NATIVE app (android-native/, Kotlin), which replaced the Expo demo at
+ * 0.2.0. Its seams are the story: it holds no key and hands every signature
+ * to the web app (android-native/README.md, "The one architectural decision"),
+ * a write is sent once and never retried, and a figure it could not read is a
+ * dash, not $0.00. The Expo demo's claims (a seed born on the phone, the seed
+ * quiz, signing the wall on-device) are NOT true of this app — do not bring
+ * them back while it is the build this page offers.
  *
  * The art is generated (Higgsfield, outlaw-noir brief) and lives in
  * public/app/. Decorative only — alt text tells the truth, and the page reads
@@ -22,14 +26,14 @@ import { Icon } from "@/components/Icon";
 const GITHUB = "https://github.com/millw14/merrymen";
 // Bump version and size TOGETHER with app/page.tsx — the URL derives from it,
 // and the two pages must never offer different builds.
-const ANDROID_VERSION = "0.1.2";
-const ANDROID_SIZE = "108 MB";
-const ANDROID_DOWNLOAD = `${GITHUB}/releases/download/mobile-v${ANDROID_VERSION}/merrymen-demo-${ANDROID_VERSION}.apk`;
+const ANDROID_VERSION = "0.2.0";
+const ANDROID_SIZE = "2.4 MB";
+const ANDROID_DOWNLOAD = `${GITHUB}/releases/download/android-v${ANDROID_VERSION}/merrymen-${ANDROID_VERSION}.apk`;
 
 export const metadata: Metadata = {
   title: "The band, in your pocket — the merrymen app",
   description:
-    "The merrymen mobile app: your agent's owner key is born on the phone, stored in the secure enclave, and never leaves. Sign the permission wall with your thumb. Android demo out now; iOS waiting list open.",
+    "The merrymen Android app: your agent's book, its chat, the feed and the group chat, native on your phone. It holds no private key — anything that needs your signature opens the web app's own screen. iOS waiting list open.",
 };
 
 export default function AppPage() {
@@ -45,39 +49,42 @@ export default function AppPage() {
             The band,<br />in your pocket.
           </h1>
           <p className="app-lede" data-reveal="up">
-            Your agent&apos;s owner key is <strong>born on the phone</strong>, lives in the secure
-            enclave, and never touches a server. The permission wall — the caps the chain itself
-            enforces — gets signed by your thumb.
+            Your agent&apos;s book, its chat, the feed and the group chat — <strong>native on
+            Android</strong>. Sign in with the same account you use on the web. The app holds no
+            private key: anything that needs your signature opens the web app&apos;s own screen,
+            and only your session comes back.
           </p>
           <div className="app-hero-cta" data-reveal="up">
             <a className="btn btn-primary has-box" href={ANDROID_DOWNLOAD}>
-              <Icon name="arrow" size={15} /> Android demo · v{ANDROID_VERSION}
+              <Icon name="arrow" size={15} /> Android · v{ANDROID_VERSION}
             </a>
             <a className="btn btn-ghost" href="#ios">
               iOS waiting list
             </a>
           </div>
           <p className="app-hero-fine" data-reveal="fade">
-            {ANDROID_SIZE} APK · demo build — shows generated numbers and{" "}
-            <em>refuses to sign a real wall</em>, on purpose. More on that below.
+            {ANDROID_SIZE} APK, Android 8 or newer. Had the old demo installed? <em>Uninstall it
+            first</em> — the new app is signed with a different key, so Android won&apos;t install
+            it over the demo.
           </p>
         </div>
       </header>
 
-      {/* ── the phone itself: a faithful mock of the home screen ── */}
+      {/* ── the phone itself: an illustration of the owner's book, not a screenshot ── */}
       <div className="wrap app-phone-section">
         <div className="app-phone-copy">
           <div className="tag" data-reveal="fade"><span className="n">01</span> the camp, at a glance</div>
           <h2 data-reveal="mask">One screen. The whole camp.</h2>
           <p data-reveal="up">
-            Equity and its day&apos;s move, the cash / vault split, every position, and the last
-            fifteen decisions — <strong>including the refused ones</strong>. A trade the wall turned
-            back is part of the record, not something to hide. If the feed drops, the app keeps the
-            last good numbers and says how old they are, instead of pretending.
+            Your book, stamped paper or live: every position, honest P&amp;L, and your agent&apos;s
+            own tape — <strong>including the refused trades</strong>. A trade the wall turned back is
+            part of the record, not something to hide. And a figure the app couldn&apos;t read shows
+            a dash, never $0.00: &ldquo;we never got an answer&rdquo; and &ldquo;the answer was
+            nothing&rdquo; are different things, and only one of them should make you buy more.
           </p>
         </div>
         <div className="app-phone-stage" data-reveal="up">
-          <div className="app-phone" role="img" aria-label="The app's home screen: equity headline, sparkline, positions and recent decisions">
+          <div className="app-phone" role="img" aria-label="Illustration of the owner's book: equity, positions and recent trades, including refused ones">
             <div className="app-phone-notch" aria-hidden="true" />
             <div className="app-screen">
               <div className="scr-row scr-top">
@@ -135,30 +142,28 @@ export default function AppPage() {
         <h2 data-reveal="mask">Paranoid where it counts.</h2>
         <div className="app-truth-grid">
           <article className="app-truth" data-reveal="up">
-            <h3>Your key is born here</h3>
+            <h3>No key on the phone</h3>
             <p>
-              A fresh 12-word key is generated <em>on the device</em> and stored in the phone&apos;s
-              secure storage, locked to this device only. It is never uploaded, never synced, never
-              seen by us — there is no server it could even go to.
+              The app never holds your owner key. Signing in, your agent&apos;s permission, its
+              trading limits, adding funds and withdrawing open <em>the web app&apos;s own
+              screen</em>, inside this one. The key stays where it already lives; the only thing
+              that comes back is your session.
             </p>
           </article>
           <article className="app-truth" data-reveal="up">
-            <h3>Prove it before it saves</h3>
+            <h3>Sent once, never twice</h3>
             <p>
-              The app makes you pass a three-question quiz on your own seed phrase — and{" "}
-              <strong>nothing persists until you do</strong>. Screenshots are blocked while the
-              phrase is up, it&apos;s wiped from memory if you background the app, and there is
-              deliberately no copy button: a phrase in your clipboard is a phrase in the cloud.
+              An order, a setting, a post: every write goes out <strong>exactly once</strong>. If the
+              answer is lost on a bad connection, the app looks up what happened instead of sending
+              it again — because a retried order is a second order.
             </p>
           </article>
           <article className="app-truth" data-reveal="up">
-            <h3>The same wall, signed by thumb</h3>
+            <h3>Paper says paper</h3>
             <p>
-              The phone builds the <em>identical</em> permission wall as the dashboard — same code,
-              same caps, same expiry — checks the account address didn&apos;t shift under it, and
-              seals it on-device. Caps presets in the app&apos;s own words:{" "}
-              <span className="mono-chip">the scout</span>, <span className="mono-chip">the outlaw</span>,{" "}
-              <span className="mono-chip">the warlord</span>.
+              Practice trades are stamped <span className="mono-chip">Paper</span> wherever they
+              appear, a refused buy never reads &ldquo;bought&rdquo;, and a trade confirms against
+              your agent&apos;s own ceiling before anything is sent.
             </p>
           </article>
         </div>
@@ -172,10 +177,10 @@ export default function AppPage() {
           <div className="tag" data-reveal="fade"><span className="n">03</span> the way home</div>
           <h2 data-reveal="mask">Sweep it all home. Anytime.</h2>
           <p data-reveal="up">
-            Killed the agent? Lost the machine it ran on? The phone can rebuild your smart account
-            from the seed phrase alone and sweep everything — cash, tokens, even the vault position —
-            back to any wallet you control. The escape hatch works <strong>even after the kill
-            switch</strong>, because that is what an escape hatch is for.
+            Your agent&apos;s kill switch is on your profile. It arms, then confirms — one stray tap
+            can&apos;t stand your agent down — and then it revokes the agent&apos;s permission and
+            stops it. <strong>Withdraw</strong> sits right beside Add funds, and opens the web
+            app&apos;s own withdraw screen, where your key is.
           </p>
         </div>
       </div>
@@ -183,18 +188,17 @@ export default function AppPage() {
       {/* ── the honesty strip ── */}
       <div className="wrap app-honest" data-reveal="up">
         <div className="app-honest-card">
-          <h3>Why the demo won&apos;t sign a real wall</h3>
+          <h3>What it doesn&apos;t do yet</h3>
           <p>
-            The current build shows <em>generated</em> numbers — and because a demo that could mint a
-            fundable account would be a demo that lies about real money, the signing path{" "}
-            <strong>refuses to run in demo builds</strong>. Not a greyed-out button: the code throws
-            at the chokepoint, so even a deep link can&apos;t reach it. Recovery stays enabled,
-            because blocking the exit is never a safety feature.
+            No push notifications, no widgets, and no offline copy: it shows what the server says
+            now, or says it couldn&apos;t reach it. Your watchlist lives on the phone and
+            doesn&apos;t sync with the web&apos;s. It isn&apos;t on the Play Store yet, so Android
+            will ask you to allow installs from your browser.
           </p>
           <p className="app-honest-sub">
-            The real-data build connects to a merrymen worker — your own self-hosted one, or the
-            hosted service. Your owner key never leaves the phone either way; the most a server ever
-            holds is a capped, revocable session key.
+            It talks to the hosted service at app.merrymen.dev, or to your own merrymen server if
+            you set one in Settings. Either way the most a server ever holds is a capped, revocable
+            session key.
           </p>
         </div>
       </div>
@@ -205,13 +209,13 @@ export default function AppPage() {
         <h2 data-reveal="mask">Get it on your phone.</h2>
         <div className="app-get-grid">
           <div className="app-get-card" data-reveal="up">
-            <h3>Android — demo out now</h3>
+            <h3>Android — out now</h3>
             <p>
-              Sideload the APK, meet the band, walk the onboarding with a throwaway key. v
-              {ANDROID_VERSION}, {ANDROID_SIZE}.
+              Sideload the APK and sign in with the account you use on the web. v{ANDROID_VERSION},{" "}
+              {ANDROID_SIZE}.
             </p>
             <a className="btn btn-primary has-box" href={ANDROID_DOWNLOAD}>
-              <Icon name="arrow" size={15} /> Download the demo
+              <Icon name="arrow" size={15} /> Download for Android
             </a>
           </div>
           <div className="app-get-card" data-reveal="up">

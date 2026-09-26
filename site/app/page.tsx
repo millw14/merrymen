@@ -59,31 +59,22 @@ const DESKTOP_SIZE = "147 MB";
 const WINDOWS_DOWNLOAD = `${GITHUB}/releases/download/desktop-v${DESKTOP_VERSION}/merrymen.Setup.${DESKTOP_VERSION}.exe`;
 
 /**
- * The Android build, and it is NOT the desktop app's equal — do not let the copy
- * imply it is.
+ * The Android build: the NATIVE app (android-native/, Kotlin) since 0.2.0, which
+ * replaced the Expo demo (mobile/, tags mobile-v*). It reads the real hosted
+ * service, but it is still not the desktop app's equal: it holds no key, so
+ * signing in, the permission, limits, deposits and withdrawals open the web app
+ * inside it (android-native/README.md). Say that, not more.
  *
- * This is the `demo` EAS profile: it ships with no feed origin, so every balance,
- * position and trade it shows is generated on the phone. It also refuses to sign
- * a permission wall (mobile/src/crypto/signGrant.ts throws when isMock), because
- * signing one would mint a real Robinhood Chain account that real money could be
- * sent to while the app reported fiction about it. So the honest label is "demo",
- * the size line says the numbers are invented, and the button never sits under a
- * heading that promises a working agent.
+ * Signed with its own release key, not the one EAS signed the demo with, so a
+ * phone holding the demo must uninstall it first; /app says so beside the button.
  *
- * Hosted as a RELEASE ASSET, not in the repo: at 108 MB the APK is over GitHub's
- * 100 MiB per-file limit and a push carrying it is rejected outright.
- *
- * Same rule as the Windows link — bump version and size together, and deep-link
- * the exact artifact rather than the releases page.
+ * Hosted as a RELEASE ASSET under android-v<version>, never in the repo. Same rule
+ * as the Windows link — bump version and size together (here AND in app/app/page.tsx),
+ * and deep-link the exact artifact rather than the releases page.
  */
-// 0.1.0 and 0.1.1 both aborted on launch on Android 14+ — blocking
-// DETECT_SCREEN_CAPTURE while expo-screen-capture was installed, which registers
-// a callback at module creation with no permission check. Both release pages now
-// say so rather than quietly serving a dead build. Bumping this constant is the
-// whole fix on the site's side, because the URL is derived from it.
-const ANDROID_VERSION = "0.1.2";
-const ANDROID_SIZE = "108 MB";
-const ANDROID_DOWNLOAD = `${GITHUB}/releases/download/mobile-v${ANDROID_VERSION}/merrymen-demo-${ANDROID_VERSION}.apk`;
+const ANDROID_VERSION = "0.2.0";
+const ANDROID_SIZE = "2.4 MB";
+const ANDROID_DOWNLOAD = `${GITHUB}/releases/download/android-v${ANDROID_VERSION}/merrymen-${ANDROID_VERSION}.apk`;
 
 function Wordmark() {
   return (
@@ -158,7 +149,7 @@ export default function Home() {
             <summary>More ways to use Merrymen <span>Desktop & mobile beta</span></summary>
             <div className="download-options">
               <div><h3>On your desktop</h3><a href={WINDOWS_DOWNLOAD} className="btn btn-ghost">Download for Windows <Icon name="arrow" size={15}/></a><p>Windows {DESKTOP_VERSION} · {DESKTOP_SIZE}<br/>macOS and Linux: <a className="link" href="#install">the one-line install</a></p></div>
-              <div><h3>Explore the Android demo</h3><a href={ANDROID_DOWNLOAD} className="btn btn-ghost">Download Android demo <Icon name="arrow" size={15}/></a><p>Android {ANDROID_VERSION} · {ANDROID_SIZE}<br/>The mobile beta doesn&apos;t trade yet — it shows generated data, and it won&apos;t sign a permission wall.</p></div>
+              <div><h3>On Android</h3><a href={ANDROID_DOWNLOAD} className="btn btn-ghost">Download for Android <Icon name="arrow" size={15}/></a><p>Android {ANDROID_VERSION} · {ANDROID_SIZE}<br/>Your agent, native on your phone. Sign in with your web account; <Link className="link" href="/app">more about the app</Link>.</p></div>
               <div><h3>On iPhone?</h3><p>There&apos;s no iOS build yet. Leave your email for one message when there is something to install.</p><IosBetaForm/></div>
             </div>
           </details>

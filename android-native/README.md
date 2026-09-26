@@ -87,6 +87,38 @@ is kept for the build's default origin (the hosted service) and sent to no
 other host, so fixing the field to that server keeps the owner signed in, and
 typing any other server sends it nothing.
 
+## Releasing
+
+Releases are sideloaded APKs on GitHub, tagged `android-v<version>` with the
+asset `merrymen-<version>.apk`; the site's download buttons derive their URL
+from `ANDROID_VERSION` in `site/app/page.tsx` and `site/app/app/page.tsx`.
+
+**The key.** `app/build.gradle.kts` signs a release with the key named in
+`~/.merrymen-release/keystore.properties` (or `-Pmerrymen.signing=<file>`, or
+`$MERRYMEN_SIGNING`). Without that file `assembleRelease` builds an unsigned
+APK, which is what CI and every other machine get. The key made for 0.2.0 is
+RSA 4096, alias `merrymen`, certificate SHA-256
+`56:55:00:66:31:A5:37:12:01:FD:DD:91:CB:6E:08:29:67:14:96:5B:58:52:D9:76:29:2C:47:23:2C:29:0C:B3`.
+**Every later release must be signed with that same key**: Android refuses an
+update signed by another, so losing it strands every installed copy. Back up
+the whole `~/.merrymen-release/` folder somewhere that is not this repo.
+
+It is not the key EAS signed the Expo demo (`mobile/`, `mobile-v0.1.x`) with,
+and both use the package `dev.merrymen.app`, so a phone holding the demo has
+to uninstall it before 0.2.0 will install.
+
+**Cutting one:**
+
+1. Bump `versionCode` and `versionName` in `app/build.gradle.kts`.
+2. `./gradlew --no-daemon --max-workers=2 assembleRelease` (R8 is on: run the
+   APK on the emulator and open Feed, Leaderboard and You before publishing,
+   because a stripped serializer only fails at runtime).
+3. Check the signature is the key above:
+   `java -jar "$ANDROID_HOME/build-tools/<ver>/lib/apksigner.jar" verify --print-certs app/build/outputs/apk/release/app-release.apk`.
+4. Publish: `gh release create android-v<version> <apk>#merrymen-<version>.apk`,
+   with the APK's SHA-256 and the certificate fingerprint in the notes.
+5. Bump `ANDROID_VERSION` and `ANDROID_SIZE` in both site pages together.
+
 ---
 
 ## The one architectural decision
