@@ -10,6 +10,7 @@ import {
 } from "@/terminal/HostedControls";
 import { CreateAgent } from "@/terminal/screens/CreateAgent";
 import { loadGrant, type Grant } from "@/lib/session";
+import { BrandLockup } from "./BrandLockup";
 
 const TOKEN_STORAGE = "merrymen.partner-connect";
 
@@ -181,7 +182,7 @@ export function ConnectClient() {
   return (
     <div className="terminal-host partner-connect">
       <header className="connect-header">
-        <a href="/" className="connect-brand" aria-label="Merrymen home">merrymen<span aria-hidden>↗</span></a>
+        <BrandLockup />
         <span className="connect-header-label"><ShieldCheck size={14} aria-hidden /> App connection</span>
       </header>
       <main className="connect-main">
