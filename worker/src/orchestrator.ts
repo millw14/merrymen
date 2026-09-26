@@ -91,7 +91,7 @@ import { custodyAddressesOf } from "./custody";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
-import { recordStandDown } from "./stand-down";
+import { lastRunOnDisk, recordStandDown } from "./stand-down";
 import { TELEGRAM_STATE_DDL, publishTenantTelegram, readTenantTelegram } from "./telegram-store";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
@@ -1156,6 +1156,23 @@ async function writeBootstrapForChild(
   }
 }
 
+/** Start a tenant's worker process. A test swaps it for a fake (setSpawnForTest). */
+let startWorker = (tenant: `0x${string}`): ChildProcess =>
+  spawn(
+    process.execPath,
+    [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
+    { cwd: ROOT, env: childEnv(tenant), stdio: ["ignore", "pipe", "pipe"] },
+  );
+
+/**
+ * Test seam: start `fn`'s process in place of a worker. Everything else in
+ * spawnChild runs as it does in production, including the exit handler and
+ * the restart it schedules.
+ */
+export function setSpawnForTest(fn: (tenant: `0x${string}`) => ChildProcess): void {
+  startWorker = fn;
+}
+
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
   // The exit handler's restart timer, firing into a home the kill switch is
@@ -1223,12 +1240,8 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
   const staleSec = staleThresholdSec(tickSeconds);
   const firstBeatSec = firstBeatGraceSec(tickSeconds);
-  const proc = spawn(
-    process.execPath,
-    [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
-    { cwd: ROOT, env: childEnv(tenant), stdio: ["ignore", "pipe", "pipe"] },
-  );
-  const child: Child = { proc, tenant, smartAccount, startedAt: Date.now(), restarts, staleSec, firstBeatSec };
+  const proc = startWorker(tenant);
+  const child: Child ={ proc, tenant, smartAccount, startedAt: Date.now(), restarts, staleSec, firstBeatSec };
   children.set(tenant, child);
   const tag = `[${tenant.slice(0, 8)}]`;
   const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
@@ -1345,13 +1358,33 @@ async function honourKill(tenant: `0x${string}`, nowSec: number): Promise<KillOu
  * by a child that has since crashed is not missed.
  */
 function pendingKillTenants(): `0x${string}`[] {
+  return homesOnDisk().filter((t) => killRequested(childHome(t)));
+}
+
+/** Every tenant with a child home on this container's disk, running or not. */
+function homesOnDisk(): `0x${string}`[] {
   let names: string[];
   try {
     names = readdirSync(path.join(merrymenHome(), "children"));
   } catch {
     return [];
   }
-  return names.filter((n): n is `0x${string}` => /^0x[0-9a-f]{40}$/.test(n) && killRequested(childHome(n)));
+  return names.filter((n): n is `0x${string}` => /^0x[0-9a-f]{40}$/.test(n));
+}
+
+/**
+ * Tenants whose grant is gone and that this replica still holds something
+ * of, with no child running: a lease, or a home with a session key or a kill
+ * request in it. Read from the disk as well as the lease map, so a home the
+ * lease map has forgotten (a fleet halt released every lease) is found too.
+ */
+function killedWithNoChild(wanted: Set<string>): string[] {
+  const found = new Set<string>(leases.keys());
+  for (const tenant of homesOnDisk()) {
+    const home = childHome(tenant);
+    if (existsSync(path.join(home, "grant.json")) || killRequested(home)) found.add(tenant);
+  }
+  return [...found].filter((t) => !wanted.has(t) && !children.has(t) && !standingDown.has(t));
 }
 
 /**
@@ -1475,10 +1508,20 @@ export async function reconcile(): Promise<void> {
       await standDownKilled(tenant);
     }
   }
-  // Release any lease we still hold for a tenant that is no longer wanted — both
-  // the kill-switch case above and a lease left over from a child that has since
-  // exited. Holding a lease for a tenant we won't arm would block another replica
-  // (or a later re-arm) for no reason.
+  // AND ANY KILLED TENANT WITH NO CHILD RUNNING: crashed and waiting on its
+  // restart, or in the give-up cool-off. The loop above never sees it, since
+  // it is not in `children`, and releasing its lease below used to be all it
+  // got. Its home stayed on disk until the container went, grant.json and the
+  // session key in it included. Its last rows were never mirrored and nothing
+  // recorded the kill. A crash-looping agent is the one an owner kills.
+  for (const tenant of killedWithNoChild(wanted)) {
+    log(`${tenant} grant removed while no child was running — standing its home down`);
+    await standDownKilled(tenant);
+  }
+  // Release any lease we still hold for a tenant that is no longer wanted.
+  // Every stand-down above releases its own, so this is the backstop. Holding
+  // a lease for a tenant we won't arm would block another replica (or a later
+  // re-arm) for no reason.
   for (const tenant of [...leases.keys()]) {
     if (!wanted.has(tenant)) await releaseLease(tenant);
   }
@@ -1494,6 +1537,10 @@ export async function reconcile(): Promise<void> {
  * held throughout. If the owner re-signed in that window, the store has a
  * grant again, so the restart would spawn a new child into the home that is
  * about to be deleted, under the lease that is about to be released.
+ *
+ * A tenant killed with no child running is in here too. Its crash restart is
+ * still pending, and the stand-down mirrors its home before deleting it.
+ * Once the lease is released, spawnChild refuses the timer for want of one.
  */
 const standingDown = new Set<string>();
 
@@ -1521,6 +1568,11 @@ async function sharedLedger(): Promise<Db | null> {
   if (sharedForTest) return sharedForTest;
   const url = process.env.DATABASE_URL;
   return url ? makePgDb(url) : null;
+}
+
+/** Test seam: set the shared ledger a stand-down records into, for a child spawned through setSpawnForTest. */
+export function setSharedLedgerForTest(shared: Db | null): void {
+  sharedForTest = shared;
 }
 
 /**
@@ -1558,25 +1610,46 @@ export function adoptLeasedChildForTest(args: {
  * SIGTERM still comes first, so stopping the agent never waits on a database.
  * The recording is best-effort and time-boxed. The home is deleted and the
  * lease released whether or not it succeeds.
+ *
+ * WITH NO CHILD RUNNING, the same minus the SIGTERM. The kill landed between
+ * a crash and its restart, or in the give-up cool-off, and the home is still
+ * on disk. The account and the run's start come from the home
+ * (lastRunOnDisk), since there is no Child to read them from.
  */
 async function standDownKilled(tenant: string): Promise<void> {
-  const child = children.get(tenant);
-  if (!child) return;
+  if (standingDown.has(tenant)) return;
   standingDown.add(tenant);
+  // A re-sign arms at once. It does not wait out a cool-off the killed
+  // grant's crash loop earned, nor start from that loop's restart count.
+  gaveUpUntil.delete(tenant);
   try {
-    const exited = exitOf(child.proc, STAND_DOWN_EXIT_MS);
-    killChild(tenant);
-    // Read the ledger once nothing can write to it any more.
-    await exited;
-    try {
-      await recordKill(tenant, child);
-    } catch (e) {
-      log(`${tenant}: recording the kill failed — ${e instanceof Error ? e.message : String(e)}`);
+    const child = children.get(tenant);
+    const home = childHome(tenant);
+    // Held before this stand-down began: this replica has owned the tenant
+    // since its child ran, so the home is its latest ledger.
+    const leased = leases.has(tenant);
+    let run: KilledRun | null = null;
+    if (child) {
+      const exited = exitOf(child.proc, STAND_DOWN_EXIT_MS);
+      killChild(tenant);
+      // Read the ledger once nothing can write to it any more.
+      await exited;
+      run = { smartAccount: child.smartAccount, since: Math.floor(child.startedAt / 1000), lastMirror: true };
+    } else if (existsSync(home)) {
+      if (!leased && !(await leaseToStandDown(tenant))) return;
+      run = { ...lastRunOnDisk(home, Math.floor(Date.now() / 1000)), lastMirror: leased };
     }
-    try {
-      rmSync(childHome(tenant), { recursive: true, force: true });
-    } catch {
-      /* best-effort cleanup */
+    if (run) {
+      try {
+        await recordKill(tenant, run);
+      } catch (e) {
+        log(`${tenant}: recording the kill failed — ${e instanceof Error ? e.message : String(e)}`);
+      }
+      try {
+        rmSync(home, { recursive: true, force: true });
+      } catch {
+        /* best-effort cleanup */
+      }
     }
     await releaseLease(tenant);
   } finally {
@@ -1584,8 +1657,41 @@ async function standDownKilled(tenant: string): Promise<void> {
   }
 }
 
-/** The last mirror and the kill record, for the stood-down child. Never throws. */
-async function recordKill(tenant: string, child: Child): Promise<void> {
+/**
+ * Take the lease of a killed tenant whose home this replica holds no lease
+ * for, e.g. after a fleet halt released them all. The lease means only one
+ * replica ever records the kill and deletes the home. False when another
+ * replica holds it: its own stand-down releases it, and the next pass here
+ * tries again.
+ */
+async function leaseToStandDown(tenant: string): Promise<boolean> {
+  let lease: TenantLease | null;
+  try {
+    lease = await acquireTenantLease(tenant as `0x${string}`);
+  } catch (e) {
+    log(`${tenant}: could not take the lease to clear its home, next pass — ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+  if (!lease) {
+    log(`${tenant}: another replica holds its lease — leaving its home here until it lets go`);
+    return false;
+  }
+  leases.set(tenant, lease);
+  return true;
+}
+
+/** What a stand-down records a kill against. */
+interface KilledRun {
+  /** Null when nothing names it: the kill is then logged as not recorded. */
+  smartAccount: string | null;
+  /** Unix seconds. A KILL SWITCH the child wrote at or after this is this kill's. */
+  since: number;
+  /** False for a home this replica did not hold the lease over while its child ran. See recordStandDown. */
+  lastMirror: boolean;
+}
+
+/** The last mirror and the kill record, for the stood-down tenant. Never throws. */
+async function recordKill(tenant: string, run: KilledRun): Promise<void> {
   // The mirror's own rule: only the replica holding the lease may write for
   // this tenant (see the note in mirrorLedgers).
   const lease = leases.get(tenant);
@@ -1606,9 +1712,10 @@ async function recordKill(tenant: string, child: Child): Promise<void> {
     recordStandDown({
       tenant,
       home: childHome(tenant),
-      smartAccount: child.smartAccount,
-      since: Math.floor(child.startedAt / 1000),
+      smartAccount: run.smartAccount,
+      since: run.since,
       shared,
+      lastMirror: run.lastMirror,
     }),
     new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), STAND_DOWN_RECORD_MS);
@@ -1625,6 +1732,8 @@ async function recordKill(tenant: string, child: Child): Promise<void> {
     }
     const counts = mirrorCountsLine(tenant, r.mirror);
     if (counts) log(`${counts} · last pass before the kill switch deletes its home`);
+  } else if (!run.lastMirror) {
+    log(`${tenant}: no last mirror — this replica took the lease only to stand the tenant down, so its copy may be stale`);
   } else {
     log(`${tenant}: no last mirror — ${r.mirrorError ?? "no ledger on disk"}`);
   }

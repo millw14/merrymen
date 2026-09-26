@@ -28,9 +28,16 @@
  *
  * Each step is independent and none throws. The stand-down itself (SIGTERM,
  * the home deleted, the lease released) never waits on any of them succeeding.
+ *
+ * A tenant can also be killed while NO child is running: between a crash and
+ * its restart, or in the give-up cool-off. Its home is still on disk. The same
+ * three steps apply, with the account read from the home (lastRunOnDisk).
  */
+import { readFileSync, statSync } from "node:fs";
+import path from "node:path";
 import { getAddress, isAddress } from "viem";
 import type { Db } from "./db";
+import { readKillRequest } from "./kill-request";
 import { mirrorTenant, openChildLedger, type MirrorReport } from "./ledger-mirror";
 
 /**
@@ -73,15 +80,62 @@ function spellings(account: string): [string, string, string] {
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+/**
+ * WHOSE RUN A HOME HOLDS, AND SINCE WHEN, for a killed tenant with no child
+ * running. There is no Child to ask, so the home is read.
+ *
+ * grant.json first. The orchestrator writes it on every spawn and every
+ * re-sign. A child writes its own KILL SWITCH only once it has no armable
+ * grant (index.ts syncGrant), and while a kill is pending nothing writes the
+ * file back. So the file is no newer than a kill event this grant's run
+ * wrote, and newer than any an earlier grant's run wrote. Its mtime is the
+ * `since` a running child's `startedAt` would have given.
+ *
+ * Then a pending Telegram kill request. The child deleted grant.json when it
+ * left the request, and the request names the account. The child's own KILL
+ * SWITCH comes after it.
+ *
+ * Neither: nothing on disk names the account, and the kill cannot be recorded.
+ */
+export function lastRunOnDisk(home: string, nowSec: number): { smartAccount: string | null; since: number } {
+  const file = path.join(home, "grant.json");
+  try {
+    const grant = JSON.parse(readFileSync(file, "utf8")) as { smartAccount?: unknown };
+    if (typeof grant.smartAccount === "string" && ADDRESS.test(grant.smartAccount)) {
+      return { smartAccount: grant.smartAccount, since: Math.floor(statSync(file).mtimeMs / 1000) };
+    }
+  } catch {
+    // No grant.json, or not a grant: a Telegram kill may name the account instead.
+  }
+  const request = readKillRequest(home, nowSec);
+  if (request && request !== "unreadable" && request.smartAccount && ADDRESS.test(request.smartAccount)) {
+    return { smartAccount: request.smartAccount, since: request.killedAt };
+  }
+  return { smartAccount: null, since: nowSec };
+}
+
 export async function recordStandDown(args: {
   tenant: string;
   /** The child's home, which the caller deletes once this returns. */
   home: string;
-  /** The smart account the child was trading from (agent_id in every ledger table). */
-  smartAccount: string;
+  /**
+   * The smart account the child was trading from (agent_id in every ledger
+   * table). Null when nothing names it: the last mirror still runs, and the
+   * kill is reported as not recorded.
+   */
+  smartAccount: string | null;
   /** When this child was spawned, unix seconds. A kill event at or after it is this run's. */
   since: number;
   shared: Db;
+  /**
+   * False skips the last mirror. The caller passes it for a home this replica
+   * did not hold the lease over while its child ran. Another replica may have
+   * run the tenant since, and `positions` and `cost_basis` mirror as
+   * delete-then-insert snapshots, so a stale copy would overwrite live rows.
+   */
+  lastMirror?: boolean;
   nowSec?: number;
 }): Promise<StandDownRecord> {
   const nowSec = args.nowSec ?? Math.floor(Date.now() / 1000);
@@ -89,7 +143,7 @@ export async function recordStandDown(args: {
 
   // 1. THE LAST MIRROR. The child has been signalled already, so this reads
   // its ledger as it finally stood.
-  const handle = openChildLedger(args.home);
+  const handle = args.lastMirror === false ? null : openChildLedger(args.home);
   if (handle) {
     try {
       out.mirror = await mirrorTenant({ tenant: args.tenant, child: handle.db, shared: args.shared });
@@ -100,9 +154,15 @@ export async function recordStandDown(args: {
     }
   }
 
+  if (!args.smartAccount) {
+    out.recordError = "nothing in the home names the smart account (no grant.json, no kill request)";
+    return out;
+  }
+  const smartAccount = args.smartAccount;
+
   // 2 + 3. THE KILL ITSELF, in one transaction: a 'killed' row without its
   // event, or the event without the row, would each tell half the story.
-  const ids = spellings(args.smartAccount);
+  const ids = spellings(smartAccount);
   try {
     await args.shared.tx(async (db) => {
       const r = await db
@@ -123,7 +183,7 @@ export async function recordStandDown(args: {
       // One event per kill: the risk_halt alert fires once per KILL SWITCH row.
       await db
         .prepare(`INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', ?, ?)`)
-        .run(args.smartAccount, STAND_DOWN_EVENT, nowSec);
+        .run(smartAccount, STAND_DOWN_EVENT, nowSec);
       out.event = "written";
     });
   } catch (e) {
