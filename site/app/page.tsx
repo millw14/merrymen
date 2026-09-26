@@ -203,10 +203,11 @@ export default function Home() {
             <p>
               No strategist, Telegram message, or voice note ever constructs calldata, moves funds,
               or touches your PC without passing a closed, typed command set and — for money — the
-              on-chain policy wall. Trades pass caps enforced by the account contract. Transfers are
-              amount-capped and confirm-gated. PC actions are off by default, allowlisted, and
-              confirmed. A prompt-injected “send everything to 0xevil” can at worst produce a
-              confirmation card you will see and cancel.
+              on-chain policy wall. Trades pass caps enforced by the account contract. Transfers out
+              through chat are refused — a wallet signed today carries no transfer permission, so a
+              prompt-injected “send everything to 0xevil” is turned back and nothing moves. Money
+              comes home with your owner key. PC actions are off by default, allowlisted, and
+              confirmed.
             </p>
             <p>
               And you don&apos;t take our word for it: your dashboard shows the account contract,
@@ -290,11 +291,11 @@ export default function Home() {
               <h3>Run the whole band from your phone.</h3>
               <p>
                 Link a bot and chat with your merryman in plain English or slash commands. Check the
-                book, trade, transfer with a confirm, set price alerts, get a daily report — all
+                book, trade, set price alerts, get a daily report — all
                 inside the same permission walls. It even speaks first.
               </p>
               <ul className="feature-list">
-                {["“how are we doing?” · “pause everything”", "Trade pings, drawdown & gas warnings, daily digest", "Transfers are triple-guarded and always confirmed", "Voice notes work too"].map((t) => (
+                {["“how are we doing?” · “pause everything”", "Trade pings, drawdown & gas warnings, daily digest", "No sending money out from chat — that’s your owner key’s job", "Voice notes work too"].map((t) => (
                   <li key={t}>{t}</li>
                 ))}
               </ul>
