@@ -15,8 +15,13 @@ import {
 } from "./testing";
 import { resetMetricsForTest } from "./observe";
 import { McpError } from "./errors";
-import { ADVERTISED_SCOPES } from "./scopes";
-import { buildServer, principalOf } from "./server";
+import { ADVERTISED_SCOPES, SCOPES, capabilityAllowedIn, scopeFor } from "./scopes";
+import { buildServer, principalOf, resourceInProfile, toolInProfile } from "./server";
+import { APP_RESOURCES, APP_VIEW_URI } from "./apps";
+import { ALL_TOOLS } from "./tools";
+import { ALL_RESOURCES } from "./resources-catalog";
+import { hasCapability, requireCapability } from "./policy";
+import type { Principal } from "./oauth/server";
 import type { ResourceDef } from "./resources";
 import { defineTool, runTool } from "./tool";
 
@@ -428,4 +433,226 @@ test("audit rows record the call without argument text", async () => {
   assert.equal(rows[0].tenant, OWNER_A);
   assert.equal(rows[0].capability, "agents.read");
   assert.equal(rows[0].outcome, "ok");
+});
+
+// ── the directory profile (/mcp/directory) ──────────────────────────────────
+
+/** Every tool reachable with trade:propose, drafts:write or social:write (see scopes.ts and tools/). */
+const DIRECTORY_EXCLUDED_TOOLS = [
+  "cancel_proposal", "create_agent_draft", "draft_post", "follow_agent", "get_proposal", "list_proposals",
+  "propose_settings_change", "propose_trade", "quote_trade", "unfollow_agent",
+];
+const DIR_PATH = "/mcp/directory";
+const callDir = (req: Request, cfg = testConfig()) => handleMcpRequest(req, { cfg, now: () => NOW, profile: "directory" });
+const dirRequest = (token: string | null, method: string, params: Record<string, unknown> = {}, o: { era?: Era } = {}) => mcpRequest(token, method, params, { ...o, path: DIR_PATH });
+const listNames = async (res: Response) => ((await rpcResult(res)).result?.tools as Array<{ name: string }>).map((t) => t.name);
+
+/** Owner A connected to both addresses from the same app: the full server with trade:propose, and the directory. */
+async function setupBoth() {
+  const { d, deps, a } = await setup(["market:read", "agents:read", "portfolio:read", "decisions:read", "trade:propose", "drafts:write", "social:write", "offline_access"]);
+  const dir = await connectAs(deps, OWNER_A, { profile: "directory", clientId: a.clientId });
+  return { d, deps, full: a, dir };
+}
+
+/** Force every scope onto a connection and its tokens, as if every check before verification had failed. */
+function forceAllScopes(d: Awaited<ReturnType<typeof setup>>["d"], connectionId: string) {
+  const all = [...SCOPES.map((s) => s.id)].sort().join(" ");
+  d.raw.prepare("UPDATE mcp_connections SET scopes = ? WHERE id = ?").run(all, connectionId);
+  d.raw.prepare("UPDATE mcp_tokens SET scopes = ? WHERE connection_id = ?").run(all, connectionId);
+}
+
+test("the excluded tools are exactly those reachable with a sensitive scope, and none exists on the directory profile", () => {
+  const isStaff = (t: (typeof ALL_TOOLS)[number]) => t.capability === "staff.diagnostics";
+  const excluded = ALL_TOOLS.filter((t) => !isStaff(t) && !toolInProfile(t, "directory")).map((t) => t.name).sort();
+  assert.deepEqual(excluded, DIRECTORY_EXCLUDED_TOOLS);
+  for (const t of ALL_TOOLS) {
+    const outside = [t.capability, ...(t.anyOf ?? [])].some((c) => ["trade:propose", "drafts:write", "social:write", "staff:diagnostics"].includes(scopeFor(c)));
+    assert.equal(toolInProfile(t, "directory"), !outside, t.name);
+    assert.equal(toolInProfile(t, "full"), true, `${t.name} on the full server`);
+  }
+});
+
+test("directory endpoint: no token → 401 whose challenge names the directory's own metadata and only the scopes it can grant", async () => {
+  await setup();
+  const res = await callDir(dirRequest(null, "tools/list"));
+  assert.equal(res.status, 401);
+  const challenge = res.headers.get("www-authenticate") ?? "";
+  assert.match(challenge, /resource_metadata="https:\/\/app\.test\/\.well-known\/oauth-protected-resource\/mcp\/directory"/);
+  const asked = (/scope="([^"]*)"/.exec(challenge)?.[1] ?? "").split(" ");
+  assert.deepEqual(asked, ADVERTISED_SCOPES.filter((s) => !["trade:propose", "drafts:write", "social:write"].includes(s)));
+  const bad = await callDir(dirRequest(`mcp_at_${"x".repeat(43)}`, "tools/list"));
+  assert.equal(bad.status, 401);
+  assert.match(bad.headers.get("www-authenticate") ?? "", /error="invalid_token"/);
+  assert.doesNotMatch(bad.headers.get("www-authenticate") ?? "", /trade:propose/);
+  // The canonical endpoint's challenge is unchanged.
+  assert.match((await call(mcpRequest(null, "tools/list"))).headers.get("www-authenticate") ?? "", /oauth-protected-resource\/mcp", scope="[^"]*trade:propose/);
+});
+
+test("a directory token is refused at /mcp, and a /mcp token at the directory endpoint", async () => {
+  const { full, dir } = await setupBoth();
+  const fullAtDir = await callDir(dirRequest(full.tokens.access_token, "tools/list"));
+  assert.equal(fullAtDir.status, 401);
+  assert.match(fullAtDir.headers.get("www-authenticate") ?? "", /error="invalid_token"/);
+  assert.match(fullAtDir.headers.get("www-authenticate") ?? "", /oauth-protected-resource\/mcp\/directory/);
+  const dirAtFull = await call(mcpRequest(dir.tokens.access_token, "tools/list"));
+  assert.equal(dirAtFull.status, 401);
+  assert.match(dirAtFull.headers.get("www-authenticate") ?? "", /error="invalid_token"/);
+  // Each works where it belongs.
+  assert.ok((await listNames(await call(mcpRequest(full.tokens.access_token, "tools/list")))).includes("propose_trade"));
+  assert.ok((await listNames(await callDir(dirRequest(dir.tokens.access_token, "tools/list")))).includes("list_agents"));
+});
+
+test("tools/list on the directory endpoint never includes a trade, setting, draft, follow or post tool, even with every scope forced onto the connection", async () => {
+  const { d, full, dir } = await setupBoth();
+  for (const era of ["legacy", "modern"] as const) {
+    const names = await listNames(await callDir(dirRequest(dir.tokens.access_token, "tools/list", {}, { era })));
+    for (const t of DIRECTORY_EXCLUDED_TOOLS) assert.ok(!names.includes(t), `${era}: ${t}`);
+    assert.ok(names.includes("get_agent_status") && names.includes("get_portfolio"), era);
+  }
+  // Every earlier check bypassed: the connection and its tokens hold every scope.
+  forceAllScopes(d, dir.principal.connectionId);
+  forceAllScopes(d, full.principal.connectionId);
+  const forced = await listNames(await callDir(dirRequest(dir.tokens.access_token, "tools/list")));
+  for (const t of DIRECTORY_EXCLUDED_TOOLS) assert.ok(!forced.includes(t), `forced: ${t}`);
+  assert.ok(!forced.some((n) => ALL_TOOLS.find((t) => t.name === n)?.capability === "staff.diagnostics"), "no staff tool either");
+  // The same forcing on the full server does list them, so the test would see a leak.
+  const fullNames = await listNames(await call(mcpRequest(full.tokens.access_token, "tools/list")));
+  for (const t of DIRECTORY_EXCLUDED_TOOLS) assert.ok(fullNames.includes(t), `full: ${t}`);
+  // Calling one by name gets no tool.
+  for (const name of ["propose_trade", "quote_trade", "follow_agent", "draft_post", "create_agent_draft"]) {
+    const res = await rpcResult(await callDir(dirRequest(dir.tokens.access_token, "tools/call", { name, arguments: {} })));
+    assert.ok(res.error || res.result?.isError, name);
+    assert.ok(!JSON.stringify(res).includes("approval_url"), name);
+  }
+  // Resources and prompts: nothing that needs an excluded capability.
+  const excludedResources = ALL_RESOURCES.filter((r) => r.capability && !capabilityAllowedIn("directory", r.capability)).map((r) => r.uri);
+  const resources = (await rpcResult(await callDir(dirRequest(dir.tokens.access_token, "resources/list")))).result?.resources as Array<{ uri: string }>;
+  const templates = (await rpcResult(await callDir(dirRequest(dir.tokens.access_token, "resources/templates/list")))).result?.resourceTemplates as Array<{ uriTemplate: string }>;
+  for (const uri of excludedResources) {
+    assert.ok(!resources.some((r) => r.uri === uri), uri);
+    assert.ok(!templates.some((r) => r.uriTemplate === uri), uri);
+  }
+  // The proposal view needs no scope, but renders only quote_trade, propose_trade and
+  // get_proposal: not offered on the directory, and not readable there either.
+  assert.ok(!resources.some((r) => r.uri === APP_VIEW_URI.proposal), "no proposal view on the directory");
+  for (const view of ["portfolio", "decision", "token"] as const) assert.ok(resources.some((r) => r.uri === APP_VIEW_URI[view]), view);
+  const proposalRead = await rpcResult(await callDir(dirRequest(dir.tokens.access_token, "resources/read", { uri: APP_VIEW_URI.proposal })));
+  assert.ok(proposalRead.error && !proposalRead.result, JSON.stringify(proposalRead));
+  const fullResources = (await rpcResult(await call(mcpRequest(full.tokens.access_token, "resources/list")))).result?.resources as Array<{ uri: string }>;
+  assert.ok(fullResources.some((r) => r.uri === APP_VIEW_URI.proposal), "the full server still offers it");
+  const prompts = (await rpcResult(await callDir(dirRequest(dir.tokens.access_token, "prompts/list")))).result?.prompts as Array<{ name: string }>;
+  assert.ok(Array.isArray(prompts));
+  // The scope catalogue a directory connection reads describes only what it can hold.
+  const doc = await rpcResult(await callDir(dirRequest(dir.tokens.access_token, "resources/read", { uri: "merrymen://docs/capabilities" })));
+  const text = ((doc.result?.contents as Array<{ text: string }>)[0]!).text;
+  assert.ok(text.includes("`market:read`") && !text.includes("`trade:propose`"), text.slice(0, 300));
+});
+
+test("resourceInProfile: only the proposal view among the views is left off the directory, and every resource stays on the full server", () => {
+  for (const r of APP_RESOURCES) {
+    assert.equal(r.capability, null, r.uri);
+    assert.equal(resourceInProfile(r, "directory"), r.uri !== APP_VIEW_URI.proposal, r.uri);
+  }
+  for (const r of ALL_RESOURCES) assert.equal(resourceInProfile(r, "full"), true, r.uri);
+  // A resource that only needs a capability the directory lacks is left off by capability alone.
+  const needs = (capability: ResourceDef["capability"], profileAnyOf?: ResourceDef["profileAnyOf"]) =>
+    ({ name: "x", title: "x", description: "x", mimeType: "text/plain", capability, profileAnyOf, uri: "merrymen://x", read: async () => ({ mimeType: "text/plain", text: "" }) }) as ResourceDef;
+  assert.equal(resourceInProfile(needs("trade.propose"), "directory"), false);
+  assert.equal(resourceInProfile(needs(null, ["trade.propose", "portfolio.read"]), "directory"), true, "any one allowed capability is enough");
+  assert.equal(resourceInProfile(needs(null, []), "directory"), true, "an empty list restricts nothing");
+});
+
+test("a principal carrying every scope on the directory profile can use none of the sensitive capabilities", () => {
+  const principal: Principal = {
+    tenant: OWNER_A, connectionId: "mcpcon_x", clientId: "c", clientName: null, clientHost: null, kind: "oauth",
+    scopes: new Set(SCOPES.map((s) => s.id)), agentSlugs: [SLUG_A], tokenExpiresAt: NOW + 60, staff: true, profile: "directory",
+  };
+  for (const c of ["trade.propose", "drafts.write", "social.write", "staff.diagnostics"] as const) {
+    assert.equal(hasCapability(principal, c), false, c);
+    assert.throws(() => requireCapability(principal, c), (e: unknown) => e instanceof McpError && e.code === "insufficient_scope" && /directory listing/.test(e.message), c);
+  }
+  assert.equal(hasCapability(principal, "portfolio.read"), true);
+  assert.equal(hasCapability({ ...principal, profile: "full" }, "trade.propose"), true, "the same principal on the full server");
+  // The server built for the directory profile narrows even a full-profile principal handed to it.
+  assert.ok(buildServer({ ...principal, profile: "full" }, { profile: "directory" }));
+});
+
+test("the directory endpoint serves the directory instructions, and the canonical one the full ones", async () => {
+  const { full, dir } = await setupBoth();
+  const init = { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "1" } };
+  const d = await rpcResult(await callDir(dirRequest(dir.tokens.access_token, "initialize", init)));
+  assert.match(String(d.result?.instructions), /cannot propose trades/);
+  const f = await rpcResult(await call(mcpRequest(full.tokens.access_token, "initialize", init)));
+  assert.match(String(f.result?.instructions), /Trade and setting "proposals"/);
+});
+
+test("the directory endpoint keeps /mcp's Host, Origin and browser checks, and is absent when switched off", async () => {
+  const { dir, full } = await setupBoth();
+  const cfg = testConfig({ allowedHosts: new Set(["app.test", "mcp.test"]) });
+  // A person opening the address in a browser goes to the help page.
+  const page = await callDir(new Request("https://mcp.test/mcp/directory", { headers: { host: "mcp.test", accept: "text/html", "sec-fetch-dest": "document" } }), cfg);
+  assert.equal(page.status, 307);
+  assert.equal(page.headers.get("location"), "https://app.test/connect/mcp");
+  assert.equal((await callDir(new Request("https://evil.test/mcp/directory", { method: "POST", headers: { host: "evil.test" } }), cfg)).status, 421);
+  assert.equal((await callDir(dirRequest(dir.tokens.access_token, "tools/list"), testConfig({ allowedOrigins: new Set(["https://app.test"]) }))).status, 200);
+  const foreign = await callDir(mcpRequest(dir.tokens.access_token, "tools/list", {}, { path: DIR_PATH, headers: { origin: "https://evil.test" } }));
+  assert.equal(foreign.status, 403);
+  // MERRYMEN_MCP_DIRECTORY=0: 404 there, and /mcp untouched.
+  const off = testConfig({ directoryResource: "" });
+  assert.equal((await callDir(dirRequest(dir.tokens.access_token, "tools/list"), off)).status, 404);
+  assert.equal((await callDir(dirRequest(null, "tools/list"), off)).status, 404);
+  assert.equal((await handleMcpRequest(mcpRequest(full.tokens.access_token, "tools/list"), { cfg: off, now: () => NOW })).status, 200);
+});
+
+test("the directory route and its discovery document, through the Next route handlers", async () => {
+  const keys = ["MERRYMEN_HOSTED", "DATABASE_URL", "MERRYMEN_PUBLIC_ORIGIN", "MERRYMEN_MCP_RESOURCE_URL", "MERRYMEN_SESSION_SECRET", "MERRYMEN_OAUTH_ISSUER", "MERRYMEN_MCP_DIRECTORY", "MERRYMEN_MCP_DIRECTORY_RESOURCE_URL"] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  try {
+    Object.assign(process.env, {
+      MERRYMEN_HOSTED: "1", DATABASE_URL: "postgres://unused", MERRYMEN_PUBLIC_ORIGIN: "https://app.test",
+      MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp", MERRYMEN_SESSION_SECRET: "s".repeat(40),
+    });
+    for (const k of ["MERRYMEN_OAUTH_ISSUER", "MERRYMEN_MCP_DIRECTORY", "MERRYMEN_MCP_DIRECTORY_RESOURCE_URL"] as const) delete process.env[k];
+    const wellKnown = await import("../app/.well-known/oauth-protected-resource/[[...path]]/route");
+    const route = await import("../app/mcp/directory/route");
+    const doc = async (path?: string[]) => wellKnown.GET(new Request("https://mcp.test/x"), { params: Promise.resolve({ path }) });
+    const dirDoc = await doc(["mcp", "directory"]);
+    assert.equal(dirDoc.status, 200);
+    const body = await dirDoc.json() as { resource: string; scopes_supported: string[] };
+    assert.equal(body.resource, "https://mcp.test/mcp/directory");
+    assert.ok(!body.scopes_supported.includes("trade:propose") && body.scopes_supported.includes("market:read"));
+    for (const path of [undefined, ["mcp"]]) {
+      const canon = await (await doc(path)).json() as { resource: string; scopes_supported: string[] };
+      assert.equal(canon.resource, "https://mcp.test/mcp", String(path));
+      assert.ok(canon.scopes_supported.includes("trade:propose"), "root and /mcp documents unchanged");
+    }
+    assert.equal((await doc(["mcp", "other"])).status, 404);
+    // The route itself: the directory challenge, before any database work.
+    const res = await route.POST(new Request("https://mcp.test/mcp/directory", { method: "POST", headers: { host: "mcp.test", "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "{}" }));
+    assert.equal(res.status, 401);
+    assert.match(res.headers.get("www-authenticate") ?? "", /resource_metadata="https:\/\/mcp\.test\/\.well-known\/oauth-protected-resource\/mcp\/directory"/);
+    assert.equal(route.OPTIONS(new Request("https://mcp.test/mcp/directory", { method: "OPTIONS" })).status, 204);
+    // The kill switch: route, preflight and document all gone; /mcp's document stays.
+    process.env.MERRYMEN_MCP_DIRECTORY = "0";
+    assert.equal((await route.POST(new Request("https://mcp.test/mcp/directory", { method: "POST", headers: { host: "mcp.test" }, body: "{}" }))).status, 404);
+    assert.equal(route.OPTIONS(new Request("https://mcp.test/mcp/directory", { method: "OPTIONS" })).status, 404);
+    assert.equal((await doc(["mcp", "directory"])).status, 404);
+    assert.equal((await doc(["mcp"])).status, 200);
+  } finally {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+});
+
+test("the server built for the directory profile registers no excluded tool even for a principal that verified with every scope on the full server", async () => {
+  const { d, full } = await setupBoth();
+  forceAllScopes(d, full.principal.connectionId);
+  // Only the server build differs: the token verifies as a full-server principal holding everything.
+  const handler = createMcpHandler(({ authInfo }) => buildServer(principalOf(authInfo), { profile: "directory" }), { legacy: "stateless", responseMode: "auto" });
+  const res = await handleMcpRequest(mcpRequest(full.tokens.access_token, "tools/list"), { cfg: testConfig(), now: () => NOW, fetch: (r, auth) => handler.fetch(r, { authInfo: auth }) });
+  const names = await listNames(res);
+  for (const t of DIRECTORY_EXCLUDED_TOOLS) assert.ok(!names.includes(t), t);
+  assert.ok(names.includes("get_portfolio"));
 });

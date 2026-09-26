@@ -10,7 +10,9 @@
  *
  * Nothing here posts, and nothing here trades. share_trade_summary writes
  * nothing at all; posting goes through draft_post, which waits for the
- * owner's approval. The rules live in lib/services/social.ts.
+ * owner's approval. That tool is named only to a connection that has it
+ * (social.write): on the directory profile it does not exist. The rules live
+ * in lib/services/social.ts.
  */
 import * as z from "zod";
 import { readAgentRow } from "@/lib/services/agent-status";
@@ -24,6 +26,7 @@ import {
 } from "@/lib/services/social";
 import type { OwnedAgent } from "../agents";
 import { McpError } from "../errors";
+import { hasCapability } from "../policy";
 import { defineTool, type ToolContext } from "../tool";
 import { AGENT_ARG, UNTRUSTED_NOTE, isoOrNull, untrusted } from "./shared";
 
@@ -296,12 +299,15 @@ function privacyNote(s: ShareSummary): string {
   return "Your book is private, so dollar figures are left out: no sizes, dollar results or prices, only percentages and counts. To include them, make your book public in Merrymen Settings.";
 }
 
+/** For a connection holding social.write: draft_post is registered on it. */
 const POSTING = "This tool posts nothing. To post in the Merrymen group chat, pass post_line (or a line of the owner's own) to draft_post: it is posted only after the owner approves it in Merrymen, and the group chat refuses links and addresses, so `text` with links will not pass there. Anywhere else, the owner pastes `text` themselves.";
+/** For any other connection (always the directory profile): no posting tool exists, so none is named. */
+const POSTING_OWNER_ONLY = "This tool posts nothing, and this connection cannot post. post_line is a one-line version with no links or addresses, as the Merrymen group chat requires (`text` with links will not pass there). The owner shares `text` or post_line wherever they choose themselves.";
 
 const shareSummary = defineTool({
   name: "share_trade_summary",
   title: "Verified trade summary to share",
-  description: `A share-ready summary of your agent's own CONFIRMED trades — one trade (trade_id) or a period (day or week) — with block-explorer links and a plain-text version to paste. Only trades that landed on chain with a transaction hash count; submitted and reverted ones are counted as left out; realized results appear only when both the proceeds and the cost are measured; paper fills are shown as practice and never in a real figure. If your book is private, dollar figures are left out (percentages and counts only). It posts nothing: post_line is a one-line version for draft_post, which publishes only after the owner approves.`,
+  description: `A share-ready summary of your agent's own CONFIRMED trades — one trade (trade_id) or a period (day or week) — with block-explorer links and a plain-text version to paste. Only trades that landed on chain with a transaction hash count; submitted and reverted ones are counted as left out; realized results appear only when both the proceeds and the cost are measured; paper fills are shown as practice and never in a real figure. If your book is private, dollar figures are left out (percentages and counts only). It posts nothing: post_line is a one-line version with no links or addresses, which the Merrymen group chat accepts.`,
   capability: "portfolio.read",
   input: z.object({
     agent: AGENT_ARG,
@@ -343,7 +349,7 @@ const shareSummary = defineTool({
     trades: z.array(SHARE_TRADE).describe(`Confirmed trades, newest first (at most ${SHARE_LIST_MAX}); for trade_id, that one trade`),
     trades_total: z.number(),
     text: z.string().describe("Plain text ready to paste; contains token symbols and the agent name (untrusted)"),
-    post_line: z.string().nullable().describe("One line with no links or addresses that passes the group chat's gate, for draft_post; null when no such line could be made"),
+    post_line: z.string().nullable().describe("One line with no links or addresses that passes the group chat's gate; null when no such line could be made"),
     posting: z.string(),
     warnings: z.array(z.string()),
     untrusted_fields: z.array(z.string()),
@@ -398,8 +404,10 @@ const shareSummary = defineTool({
     }
     const text = renderShareText(summary, { name: shownName, links });
     const postLine = renderPostLine(summary, { name: shownName });
+    // draft_post is named only where it exists (social.write, never on the directory profile).
+    const canPost = hasCapability(ctx.principal, "social.write");
     if (postLine === null) {
-      warnings.push("No accurate one-line version passes the group chat's rules (usually the agent's name reads as a link or an address, or the period had more operations than one summary reads), so post_line is null; the owner can write a line of their own for draft_post.");
+      warnings.push(`No accurate one-line version passes the group chat's rules (usually the agent's name reads as a link or an address, or the period had more operations than one summary reads), so post_line is null; the owner can write a line of their own${canPost ? " for draft_post" : ""}.`);
     }
     const s = summary;
     return {
@@ -440,7 +448,7 @@ const shareSummary = defineTool({
         trades_total: s.tradesTotal,
         text,
         post_line: postLine,
-        posting: POSTING,
+        posting: canPost ? POSTING : POSTING_OWNER_ONLY,
         warnings,
         untrusted_fields: ["name", "trades[].symbol", "trades[].display_name", "text", "post_line"],
         untrusted_note: UNTRUSTED_NOTE,

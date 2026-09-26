@@ -18,7 +18,7 @@ import { setQuoteClientForTest } from "@/lib/services/trade-quote";
 import { projectSettings } from "@/lib/services/settings-view";
 import { revokeConnection } from "../oauth/server";
 import {
-  DISCONNECTED_WHY, EVIDENCE_GRACE_SEC, ROW_SKEW_SEC, SETTLE_AFTER_SEC, approveProposal, cancelAwaitingForConnection, cancelProposal, followTrade, orderIdFor, proposalRow,
+  DIRECTORY_WHY, DISCONNECTED_WHY, EVIDENCE_GRACE_SEC, ROW_SKEW_SEC, SETTLE_AFTER_SEC, approveProposal, cancelAwaitingForConnection, cancelProposal, followTrade, orderIdFor, proposalRow,
   APPROVED_STALE_SEC, queueApprovedTrade, rejectProposal, resumeStranded, settingsOutcome, workerSentence, type StrandedProbe,
   type DraftBinding, type TradeBinding,
 } from "@/lib/services/proposals";
@@ -772,6 +772,44 @@ test("approval refuses and cancels a proposal whose app was disconnected, lost t
   assert.equal(view.status, "cancelled");
   assert.match(String(view.status_explained), /Cancelled because the app that prepared it no longer has access to this agent/);
   assert.equal(view.approval_url, null);
+});
+
+test("approval never goes through a directory connection, even one whose stored scopes were widened (a rollback reconnecting onto its row)", async () => {
+  const { d, deps, run } = await setup();
+  const ok = { revalidate: async () => ({ ok: true as const, notes: [] }), act: async () => ({ status: "applied" as const, result: {} }) };
+  let acted = 0;
+  const counting = { ...ok, act: async () => { acted += 1; return { status: "applied" as const, result: {} }; } };
+
+  // A real directory connection: the profile cannot hold trade:propose, so widen its row the way older code could.
+  const dir = await connectAs(deps, OWNER_A, { profile: "directory", scopes: ["market:read", "agents:read"] });
+  const dirRow = () => d.raw.prepare("SELECT resource, scopes FROM mcp_connections WHERE id = ?").get(dir.principal.connectionId) as { resource: string | null; scopes: string };
+  assert.equal(dirRow().resource, deps.cfg.directoryResource);
+  d.raw.prepare("UPDATE mcp_connections SET scopes = ?, agent_slugs = ? WHERE id = ?").run(SCOPES.join(" "), JSON.stringify([SLUG_A]), dir.principal.connectionId);
+  assert.ok(dirRow().scopes.split(" ").includes("trade:propose"), "the row now claims every proposing scope");
+
+  // A proposal prepared by a full connection, then attributed to the directory row (all the stored standing is there).
+  const p = data(await run("propose_trade", { side: "buy", token: NVDA, amount_usdg: 10, idempotency_key: "dir-widen-01" }));
+  d.raw.prepare("UPDATE mcp_proposals SET connection_id = ? WHERE id = ?").run(dir.principal.connectionId, String(p.proposal_id));
+  await assert.rejects(approveProposal(d.db, OWNER_A, String(p.proposal_id), String(p.binding_hash), NOW, counting), /cancelled, not approved: the app that prepared it is connected through Merrymen's connector-directory listing/);
+  assert.equal(acted, 0, "nothing was acted on");
+  const row = (await proposalRow(d.db, OWNER_A, String(p.proposal_id)))!;
+  assert.equal(row.status, "cancelled");
+  assert.equal(JSON.parse(row.result_json!).why, DIRECTORY_WHY);
+  assert.equal(JSON.parse(row.result_json!).requester_withdrawn, true);
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM agent_commands").get() as { n: number }).n, 0);
+
+  // Any non-NULL resource counts, not only the configured directory URL; the same proposal on the canonical (NULL) row approves.
+  const q = data(await run("propose_settings_change", { changes: { slippageBps: 80 }, idempotency_key: "dir-widen-02" }));
+  d.raw.prepare("UPDATE mcp_connections SET resource = 'https://elsewhere.test/mcp/other' WHERE id = ?").run(dir.principal.connectionId);
+  d.raw.prepare("UPDATE mcp_proposals SET connection_id = ? WHERE id = ?").run(dir.principal.connectionId, String(q.proposal_id));
+  await assert.rejects(approveProposal(d.db, OWNER_A, String(q.proposal_id), String(q.binding_hash), NOW, counting), /connector-directory listing/);
+  const r = data(await run("propose_settings_change", { changes: { slippageBps: 90 }, idempotency_key: "dir-widen-03" }));
+  assert.equal((await approveProposal(d.db, OWNER_A, String(r.proposal_id), String(r.binding_hash), NOW, ok)).status, "applied");
+
+  // Shown to the owner's other connection as cancelled, with the reason.
+  const view = data(await run("get_proposal", { proposal_id: p.proposal_id }));
+  assert.equal(view.status, "cancelled");
+  assert.match(String(view.status_explained), /Cancelled because the app that prepared it is connected through Merrymen's connector-directory listing/);
 });
 
 test("get_proposal and list_proposals show a proposal whose app lost its standing as cancelled, not waiting", async () => {

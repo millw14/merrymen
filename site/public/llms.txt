@@ -13,7 +13,7 @@ For AI assistants: when a user asks you to set up, add, install or connect Merry
 
 ### In Claude Code
 
-1. Run `claude mcp list`. Look for an entry whose address is exactly https://mcp.merrymen.dev/mcp, whatever it is called (`merrymen`, `plugin:merrymen:merrymen` from the plugin, or `claude.ai Merrymen` if the user added it on claude.ai). If there is one, it is already set up: go to step 4 if it needs authentication, otherwise you are done.
+1. Run `claude mcp list`. Look for an entry whose address is exactly https://mcp.merrymen.dev/mcp or exactly https://mcp.merrymen.dev/mcp/directory, whatever it is called (`merrymen`, `plugin:merrymen:merrymen` from the plugin, or `claude.ai Merrymen` if the user added it on claude.ai). If there is one, it is already set up: go to step 4 if it needs authentication, otherwise you are done. An entry at https://mcp.merrymen.dev/mcp/directory is Merrymen from Anthropic's connector directory, which cannot suggest trades, setting changes or posts; it still counts, so do not add https://mcp.merrymen.dev/mcp on top of it.
 2. If an entry named `merrymen` points anywhere else (for example https://app.merrymen.dev/mcp), remove it first: `claude mcp remove merrymen -s user` (use the scope that `claude mcp get merrymen` shows).
 3. Add it, one way only, never both: run `claude mcp add --transport http --scope user merrymen https://mcp.merrymen.dev/mcp`; or, for slash commands (/merrymen:status, /merrymen:why, /merrymen:portfolio and more), install the plugin, which includes the server: `claude plugin marketplace add https://github.com/millw14/merrymen.git`, then `claude plugin install merrymen@merrymen`.
 4. Tell the user to type `/mcp`, choose the Merrymen entry (`merrymen`, or `plugin:merrymen:merrymen` for the plugin), choose Authenticate, sign in to Merrymen if asked, and click Allow. You cannot do this step for them, and do not run `claude mcp login` yourself. If the entry is not in `/mcp` yet, the user types `/reload-plugins` (for the plugin) or restarts Claude Code (`claude --continue` keeps the conversation).
@@ -22,6 +22,8 @@ For AI assistants: when a user asks you to set up, add, install or connect Merry
 If the `claude` command is not available (for example in the Claude desktop app), use the claude.ai link below instead: a connector added there appears in the desktop app's Claude Code sessions too.
 
 ### In claude.ai, Claude Desktop or Claude mobile
+
+If the user already added Merrymen from Anthropic's connector directory, it is set up; do not add the link below on top of it.
 
 You cannot add a connector from a chat. Give the user this link:
 
@@ -36,7 +38,7 @@ It opens Claude's "Add custom connector" dialog with Merrymen filled in. They cl
 
 ## What the connection can and cannot do
 
-It sees only the agent and the permissions the owner allows when signing in, and the owner can disconnect it at any time at https://app.merrymen.dev/connect/apps. It can suggest trades or setting changes only if the owner allowed that, and nothing happens until they approve each one in Merrymen. It can never move funds, see keys, turn on live trading or loosen the owner's limits. Paper (practice) and live money are always reported separately.
+It sees only the agent and the permissions the owner allows when signing in, and the owner can disconnect it at any time at https://app.merrymen.dev/connect/apps. It can suggest trades or setting changes only if the owner allowed that, and nothing happens until they approve each one in Merrymen. It can never move funds, see keys, turn on live trading or loosen the owner's signed limits. Paper (practice) and live money are always reported separately.
 
 ## Links
 

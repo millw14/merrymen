@@ -164,6 +164,37 @@ export function scopeInfo(id: string): ScopeInfo | undefined {
 /** Scopes advertised to clients (the staff scope is never advertised). */
 export const ADVERTISED_SCOPES: readonly string[] = SCOPES.filter((s) => s.level !== "staff").map((s) => s.id);
 
+/**
+ * Which server a connection reaches. "full" is the canonical endpoint (/mcp,
+ * custom connectors and personal tokens). "directory" is the limited profile
+ * listed in Anthropic's connector directory (/mcp/directory): the same server
+ * with every sensitive scope (trade:propose, drafts:write, social:write) and
+ * the staff scope impossible to grant, so nothing reached through the listing
+ * can prepare a trade, a setting change, an agent draft, a follow or a post,
+ * even for the owner's own approval.
+ */
+export type McpProfile = "full" | "directory";
+
+/**
+ * The scopes the directory profile can hold: the read and write levels only.
+ * By level, not by name, so a sensitive scope added later is excluded from
+ * the listing until someone decides otherwise (fail closed).
+ */
+export const DIRECTORY_SCOPES: readonly string[] = SCOPES.filter((s) => s.level === "read" || s.level === "write").map((s) => s.id);
+
+const DIRECTORY_SET = new Set(DIRECTORY_SCOPES);
+
+/** May a connection on this profile hold this scope at all? Unknown scopes never. */
+export function scopeAllowedIn(profile: McpProfile, id: string): boolean {
+  if (!BY_ID.has(id)) return false;
+  return profile === "full" || DIRECTORY_SET.has(id);
+}
+
+/** Scopes advertised for a profile's resource (discovery metadata, the 401 challenge). */
+export function advertisedScopesFor(profile: McpProfile): readonly string[] {
+  return profile === "directory" ? ADVERTISED_SCOPES.filter((s) => DIRECTORY_SET.has(s)) : ADVERTISED_SCOPES;
+}
+
 /** What a client gets asked for when it requests no scope at all: read access plus chat. */
 export const DEFAULT_REQUEST_SCOPES: readonly string[] = [
   "market:read", "agents:read", "portfolio:read", "decisions:read", "reports:read", "chat:write", "offline_access",
@@ -191,6 +222,11 @@ export function parseScopeParam(raw: string | null | undefined, opts: { staff: b
     out.add(s);
   }
   return [...out].sort();
+}
+
+/** May a connection on this profile use this capability at all (whatever it holds)? */
+export function capabilityAllowedIn(profile: McpProfile, capability: Capability): boolean {
+  return scopeAllowedIn(profile, scopeFor(capability));
 }
 
 export function normalizeScopes(list: readonly string[]): string[] {

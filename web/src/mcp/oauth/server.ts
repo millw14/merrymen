@@ -13,10 +13,19 @@
  * the owner's session, their keys, trading authority, or access to another
  * owner's agents. The owner picks which of their agents a connection may see;
  * the tenant comes from the owner's own sign-in, never from the client.
+ *
+ * Two resources, one authorization server: the canonical endpoint (full
+ * server) and the directory profile (config.ts directoryResource), which can
+ * never hold a sensitive or staff scope. A connection belongs to one resource
+ * (mcp_connections.resource, NULL for the canonical one), and so does every
+ * token under it: a directory token is refused at the canonical endpoint and
+ * the other way round. The directory's scope limit is applied at every step
+ * that can produce a scope (authorize, consent, decide, code exchange,
+ * refresh, verification), each on its own, so no single mistake grants one.
  */
-import type { McpConfig } from "../config";
+import { profileOfResource, type McpConfig } from "../config";
 import { lockSuffix, type McpDb } from "../db";
-import { scopeInfo, normalizeScopes, parseScopeParam, scopeString, type ScopeInfo } from "../scopes";
+import { scopeAllowedIn, scopeInfo, normalizeScopes, parseScopeParam, scopeString, type McpProfile, type ScopeInfo } from "../scopes";
 import type { AgentDirectory } from "../agents";
 import {
   ClientError, consentHost, isLoopbackRedirect, ownHostsOf, redirectMatches, resolveClient, type CimdFetcher, type McpClient,
@@ -84,6 +93,35 @@ function normalizeResource(raw: string): string {
 }
 
 /**
+ * What mcp_connections.resource holds for a connection to this profile: NULL
+ * for the canonical resource (so every row from before the column existed is
+ * one), the directory URL for the directory profile. Lookups compare
+ * COALESCE(resource, '') with connectionKey(), the expression the
+ * one-active unique index is built on.
+ */
+function connectionResource(profile: McpProfile, resource: string): string | null {
+  return profile === "full" ? null : resource;
+}
+
+function connectionKey(profile: McpProfile, resource: string): string {
+  return connectionResource(profile, resource) ?? "";
+}
+
+/**
+ * The profile a connection row belongs to under the current configuration,
+ * or null when its resource is not served any more (the directory profile was
+ * switched off or moved).
+ */
+function connectionProfile(cfg: McpConfig, stored: string | null): McpProfile | null {
+  return stored === null ? "full" : profileOfResource(cfg, stored) === "directory" ? "directory" : null;
+}
+
+/** The addresses tokens can be issued for, for an invalid_target message. */
+function servedResources(cfg: McpConfig): string {
+  return [cfg.resource, cfg.directoryResource].filter(Boolean).join(" and ");
+}
+
+/**
  * Resolve a client_id the way every endpoint must: never a metadata document
  * served from one of our own hosts. `cacheNew` (may a fetched metadata document
  * create a cache row) is for the consent steps only: authorize, and the consent
@@ -144,11 +182,17 @@ export async function startAuthorization(deps: OAuthDeps, p: URLSearchParams): P
   if (!PKCE_CHALLENGE.test(challenge)) return fail("invalid_request", "code_challenge must be a base64url SHA-256 value");
   const resources = p.getAll("resource");
   if (resources.length > 1) return fail("invalid_target", "exactly one resource may be requested");
+  // No resource still means the canonical one (clients that predate RFC 8707).
   const resource = resources[0] ? normalizeResource(resources[0]) : cfg.resource;
-  if (resource !== cfg.resource) return fail("invalid_target", `this authorization server only issues tokens for ${cfg.resource}`);
+  const profile = profileOfResource(cfg, resource);
+  if (!profile) return fail("invalid_target", `this authorization server only issues tokens for ${servedResources(cfg)}`);
   // Staff scope is filtered per owner at consent time; keep it in the request.
-  const scopes = parseScopeParam(p.get("scope"), { staff: true });
-  if (!scopes.length) return fail("invalid_scope", "none of the requested scopes exist");
+  // The directory profile's limit is applied HERE, before the request is
+  // parked, so the consent screen can never even offer a sensitive scope.
+  const scopes = parseScopeParam(p.get("scope"), { staff: true }).filter((s) => scopeAllowedIn(profile, s));
+  if (!scopes.length) {
+    return fail("invalid_scope", profile === "directory" ? "none of the requested scopes can be granted through this address" : "none of the requested scopes exist");
+  }
 
   const requestId = randomCredential("mcpr_", 32);
   await d.db.prepare(`INSERT INTO mcp_auth_requests (id_hash, client_id, redirect_uri, code_challenge, state, scopes, resource, created_at, expires_at, status)
@@ -207,6 +251,12 @@ export interface ConsentView {
    * an app the owner disconnected starts fresh from the defaults.
    */
   previous: { scopes: string[]; agentSlugs: string[]; since: number; partial: boolean } | null;
+  /**
+   * Which address the app is connecting to: "directory" for the limited
+   * listing (it can never be offered a sensitive scope), "full" otherwise.
+   * `previous` is the owner's connection on THIS address only.
+   */
+  profile: McpProfile;
 }
 
 /**
@@ -230,10 +280,23 @@ async function pendingRequest(d: McpDb, requestId: unknown, now: number, lock = 
   return row;
 }
 
-function offeredScopes(requested: string[], staff: boolean): string[] {
+/**
+ * The profile a parked request is for. Authorize only parks a resource this
+ * server serves; one it no longer serves (the directory profile switched off,
+ * or an address moved, while the consent screen was open) is refused rather
+ * than turned into a code for an audience nothing accepts.
+ */
+function requestProfile(cfg: McpConfig, row: RequestRow): McpProfile {
+  const profile = profileOfResource(cfg, row.resource);
+  if (!profile) throw new OAuthError("invalid_request", "this sign-in link is for an address this server no longer serves; start the connection again from your app", 410);
+  return profile;
+}
+
+/** What a request may offer: known scopes, staff only for staff, and only what the profile can hold (checked again here, whatever was parked). */
+function offeredScopes(requested: string[], staff: boolean, profile: McpProfile): string[] {
   return requested.filter((s) => {
     const info = scopeInfo(s);
-    return !!info && (info.level !== "staff" || staff);
+    return !!info && (info.level !== "staff" || staff) && scopeAllowedIn(profile, s);
   });
 }
 
@@ -253,20 +316,21 @@ async function agentNameOf(deps: OAuthDeps, tenant: Tenant): Promise<string | nu
 }
 
 /**
- * The owner's active connection with this client, as a starting point for
- * the consent screen (see ConsentView.previous). The client_id is the parked
- * request's and the tenant the owner's own sign-in, never caller input. What
- * the connection holds is read the way a request would still grant it (known
- * scopes; the staff scope only for staff), so a scope that would be dropped
- * anyway never counts as one this request takes away.
+ * The owner's active connection with this client ON THIS RESOURCE, as a
+ * starting point for the consent screen (see ConsentView.previous). The
+ * client_id and resource are the parked request's and the tenant the owner's
+ * own sign-in, never caller input. What the connection holds is read the way
+ * a request would still grant it (known scopes; the staff scope only for
+ * staff; the profile's limit), so a scope that would be dropped anyway never
+ * counts as one this request takes away.
  */
-async function previousGrant(d: McpDb, tenant: Tenant, clientId: string, staff: boolean, offered: readonly string[], owned: readonly string[]): Promise<ConsentView["previous"]> {
+async function previousGrant(d: McpDb, tenant: Tenant, clientId: string, key: string, staff: boolean, profile: McpProfile, offered: readonly string[], owned: readonly string[]): Promise<ConsentView["previous"]> {
   // At most one row: the mcp_connections_one_active unique index.
   const row = await d.db.prepare(`SELECT scopes, agent_slugs, created_at FROM mcp_connections
-    WHERE tenant = ? AND client_id = ? AND kind = 'oauth' AND status = 'active'`)
-    .get(tenant.toLowerCase(), clientId) as { scopes: string; agent_slugs: string; created_at: number } | undefined;
+    WHERE tenant = ? AND client_id = ? AND COALESCE(resource, '') = ? AND kind = 'oauth' AND status = 'active'`)
+    .get(tenant.toLowerCase(), clientId, key) as { scopes: string; agent_slugs: string; created_at: number } | undefined;
   if (!row) return null;
-  const held = offeredScopes(row.scopes.split(" ").filter(Boolean), staff).filter((s) => s !== OFFLINE_ACCESS);
+  const held = offeredScopes(row.scopes.split(" ").filter(Boolean), staff, profile).filter((s) => s !== OFFLINE_ACCESS);
   let slugs: string[] = [];
   try {
     const parsed = JSON.parse(row.agent_slugs);
@@ -285,18 +349,21 @@ async function previousGrant(d: McpDb, tenant: Tenant, clientId: string, staff: 
 export async function describeRequest(deps: OAuthDeps, requestId: unknown, tenant: Tenant | null): Promise<ConsentView> {
   const now = deps.now();
   const row = await pendingRequest(deps.d, requestId, now);
+  const profile = requestProfile(deps.cfg, row);
   // The client_id comes from the parked request (cached at authorize), never from this caller.
   const client = await clientFor(deps, row.client_id, now, { cacheNew: true });
   const redirect = new URL(row.redirect_uri);
   const staff = !!tenant && deps.cfg.staffTenants.has(tenant.toLowerCase());
-  const scopes = offeredScopes(row.scopes.split(" ").filter(Boolean), staff).filter((id) => id !== OFFLINE_ACCESS).map((id) => {
+  const scopes = offeredScopes(row.scopes.split(" ").filter(Boolean), staff, profile).filter((id) => id !== OFFLINE_ACCESS).map((id) => {
     const i = scopeInfo(id)!;
     return { id: i.id, title: i.title, phrase: i.phrase, detail: i.detail, level: i.level, needsAgent: i.needsAgent, defaultOn: i.defaultOn };
   });
   const owned = tenant ? await deps.agents.agentsFor(tenant) : [];
   const name = tenant && owned.length === 1 ? await agentNameOf(deps, tenant) : null;
   const agents = owned.map((a) => ({ slug: a.slug, account: a.account, name }));
-  const previous = tenant ? await previousGrant(deps.d, tenant, row.client_id, staff, scopes.map((s) => s.id), owned.map((a) => a.slug)) : null;
+  const previous = tenant
+    ? await previousGrant(deps.d, tenant, row.client_id, connectionKey(profile, row.resource), staff, profile, scopes.map((s) => s.id), owned.map((a) => a.slug))
+    : null;
   return {
     client: {
       name: client.clientName,
@@ -311,6 +378,7 @@ export async function describeRequest(deps: OAuthDeps, requestId: unknown, tenan
     expiresAt: row.expires_at,
     maxDays: Math.max(1, Math.floor(deps.cfg.refreshFamilyMaxSec / 86_400)),
     previous,
+    profile,
   };
 }
 
@@ -340,7 +408,8 @@ export async function decideRequest(deps: OAuthDeps, requestId: unknown, tenant:
       await db.prepare("UPDATE mcp_auth_requests SET status = 'denied' WHERE id_hash = ?").run(row.id_hash);
       return { location: back({ error: "access_denied", error_description: "the owner declined the connection" }), connectionId: null };
     }
-    const requested = offeredScopes(row.scopes.split(" ").filter(Boolean), staff);
+    const profile = requestProfile(cfg, row);
+    const requested = offeredScopes(row.scopes.split(" ").filter(Boolean), staff, profile);
     // No explicit choice means what the consent page starts a new connection
     // with ticked, never every requested scope: clients ask for all of them
     // (see bearerChallenge), and a sensitive scope is granted only when the
@@ -349,6 +418,10 @@ export async function decideRequest(deps: OAuthDeps, requestId: unknown, tenant:
     const chosen = Array.isArray(decision.scopes)
       ? decision.scopes.filter((s): s is string => typeof s === "string")
       : requested.filter((s) => scopeInfo(s)?.defaultOn === true);
+    // Named on its own (it is also never in `requested` here), so a consent
+    // that somehow carried a sensitive scope for the directory is refused
+    // with a reason, never quietly narrowed into a grant.
+    if (profile === "directory" && chosen.some((s) => !!scopeInfo(s) && !scopeAllowedIn(profile, s))) throw new OAuthError("invalid_scope", "this app is connected through the directory listing, which cannot be given that permission");
     if (chosen.some((s) => !requested.includes(s))) throw new OAuthError("invalid_scope", "consent includes a scope the app did not request");
     const ownedSlugs = new Set(owned.map((a) => a.slug));
     const slugs = Array.isArray(decision.agentSlugs) ? [...new Set(decision.agentSlugs.filter((s): s is string => typeof s === "string"))] : [];
@@ -358,22 +431,29 @@ export async function decideRequest(deps: OAuthDeps, requestId: unknown, tenant:
     const granted = chosen.filter((s) => s !== OFFLINE_ACCESS && (slugs.length > 0 || !scopeInfo(s)?.needsAgent));
     if (!granted.length) throw new OAuthError("invalid_scope", "choose at least one kind of access, or cancel");
     // offline_access is not the owner's choice (it controls nothing): echoed when asked for.
-    const scopes = normalizeScopes(requested.includes(OFFLINE_ACCESS) ? [...granted, OFFLINE_ACCESS] : granted);
+    // The profile's limit once more on what is stored (defense in depth).
+    const scopes = normalizeScopes(requested.includes(OFFLINE_ACCESS) ? [...granted, OFFLINE_ACCESS] : granted).filter((s) => scopeAllowedIn(profile, s));
     // What Connected apps will show: for a self-registered app, the host the
     // code is actually going to, not whichever redirect it registered first.
     const host = consentHost(client, row.redirect_uri);
 
     await db.prepare("UPDATE mcp_auth_requests SET status = 'approved' WHERE id_hash = ?").run(row.id_hash);
-    const existing = await db.prepare(`SELECT id FROM mcp_connections WHERE tenant = ? AND client_id = ? AND kind = 'oauth' AND status = 'active'${lockSuffix(tx)}`)
-      .get(owner, client.clientId) as { id: string } | undefined;
+    // One active connection per (owner, app, resource): the same app may be
+    // connected to the full server and to the directory profile at once
+    // (claude.ai uses one client_id for both), and approving one never
+    // touches the other's scopes or tokens.
+    const key = connectionKey(profile, row.resource);
+    const existing = await db.prepare(`SELECT id FROM mcp_connections
+      WHERE tenant = ? AND client_id = ? AND COALESCE(resource, '') = ? AND kind = 'oauth' AND status = 'active'${lockSuffix(tx)}`)
+      .get(owner, client.clientId, key) as { id: string } | undefined;
     const connectionId = existing?.id ?? randomId("mcpcon_");
     if (existing) {
       await db.prepare("UPDATE mcp_connections SET scopes = ?, agent_slugs = ?, client_name = ?, client_host = ?, updated_at = ? WHERE id = ?")
         .run(scopeString(scopes), JSON.stringify(slugs), client.clientName, host, now, connectionId);
     } else {
-      await db.prepare(`INSERT INTO mcp_connections (id, tenant, client_id, client_name, client_host, kind, scopes, agent_slugs, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'oauth', ?, ?, 'active', ?, ?)`)
-        .run(connectionId, owner, client.clientId, client.clientName, host, scopeString(scopes), JSON.stringify(slugs), now, now);
+      await db.prepare(`INSERT INTO mcp_connections (id, tenant, client_id, client_name, client_host, kind, scopes, agent_slugs, status, created_at, updated_at, resource)
+        VALUES (?, ?, ?, ?, ?, 'oauth', ?, ?, 'active', ?, ?, ?)`)
+        .run(connectionId, owner, client.clientId, client.clientName, host, scopeString(scopes), JSON.stringify(slugs), now, now, connectionResource(profile, row.resource));
     }
     const code = randomCredential("mcpcode_", 32);
     await db.prepare(`INSERT INTO mcp_codes (code_hash, connection_id, client_id, redirect_uri, code_challenge, resource, scopes, family, expires_at, used_at)
@@ -455,6 +535,8 @@ interface ConnectionRow {
   tenant: string;
   status: string;
   scopes: string;
+  /** NULL: the canonical resource (see connectionResource). */
+  resource: string | null;
 }
 
 async function issuePair(db: McpDb["db"], cfg: McpConfig, now: number, o: {
@@ -497,7 +579,7 @@ async function issuePair(db: McpDb["db"], cfg: McpConfig, now: number, o: {
  * lock clause is empty and the order of statements is what the tests pin.
  */
 async function lockConnection(tx: McpDb, connectionId: string): Promise<ConnectionRow | undefined> {
-  return await tx.db.prepare(`SELECT id, tenant, status, scopes FROM mcp_connections WHERE id = ?${lockSuffix(tx)}`)
+  return await tx.db.prepare(`SELECT id, tenant, status, scopes, resource FROM mcp_connections WHERE id = ?${lockSuffix(tx)}`)
     .get(connectionId) as ConnectionRow | undefined;
 }
 
@@ -535,9 +617,18 @@ export async function exchangeCode(deps: OAuthDeps, form: URLSearchParams, clien
     if (marked.changes !== 1) throw new OAuthError("invalid_grant", "the authorization code was already used");
     const conn = await lockConnection(tx, row.connection_id);
     if (!conn || conn.status !== "active") throw new OAuthError("invalid_grant", "the connection was revoked");
+    // The code's audience must be one this server serves now, and the
+    // connection's own: a directory code only ever mints for a directory
+    // connection, and a canonical code for a canonical one.
+    const profile = profileOfResource(cfg, row.resource);
+    if (!profile || connectionProfile(cfg, conn.resource) !== profile) {
+      throw new OAuthError("invalid_grant", "the authorization code is for an address this server no longer serves; connect again");
+    }
+    const scopes = row.scopes.split(" ").filter((s) => s && scopeAllowedIn(profile, s));
+    if (!scopes.length) throw new OAuthError("invalid_grant", "the authorization code carries no scope this address can grant");
     const tokens = await issuePair(db, cfg, now, {
       connectionId: row.connection_id, clientId: client.clientId, family: row.family,
-      familyExpiresAt: now + cfg.refreshFamilyMaxSec, scopes: row.scopes.split(" ").filter(Boolean), resource: row.resource,
+      familyExpiresAt: now + cfg.refreshFamilyMaxSec, scopes, resource: row.resource,
     });
     return { replay: false as const, row, tokens, tenant: conn.tenant };
   });
@@ -585,7 +676,11 @@ export async function refreshTokens(deps: OAuthDeps, form: URLSearchParams, clie
     // BEFORE the resource parameter: a client that already switched to the
     // new address sends resource=<new URL> with its old token, and must be
     // told to reconnect, not that its target is wrong.
-    if (row.resource !== cfg.resource) throw new OAuthError("invalid_grant", `this connection was made for ${row.resource}; the server is now ${cfg.resource}. Connect again.`);
+    // A token stays on the resource it was issued for (both profiles follow
+    // the same rule), and on its own connection's resource.
+    const profile = profileOfResource(cfg, row.resource);
+    if (!profile) throw new OAuthError("invalid_grant", `this connection was made for ${row.resource}; the server is now ${cfg.resource}. Connect again.`);
+    if (connectionProfile(cfg, conn.resource) !== profile) throw new OAuthError("invalid_grant", "the refresh token does not match its connection's address; connect again");
     const resource = form.get("resource");
     if (resource && normalizeResource(resource) !== row.resource) throw new OAuthError("invalid_target", "resource does not match");
     // A refresh can narrow scope, never widen it, and never beyond what the
@@ -598,7 +693,8 @@ export async function refreshTokens(deps: OAuthDeps, form: URLSearchParams, clie
     const allowed = new Set(conn.scopes.split(" ").filter(Boolean));
     const asked = form.get("scope");
     const wanted = asked ? asked.split(/\s+/).filter(Boolean) : [...held];
-    const scopes = wanted.filter((s) => held.has(s) && allowed.has(s));
+    // ...and never beyond what the token's profile can hold.
+    const scopes = wanted.filter((s) => held.has(s) && allowed.has(s) && scopeAllowedIn(profile, s));
     if (!scopes.length) throw new OAuthError("invalid_scope", "none of the requested scopes are held by this connection; a refresh cannot add scopes");
     const marked = await db.prepare("UPDATE mcp_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND revoked_at IS NULL").run(now, row.token_hash);
     if (marked.changes !== 1) {
@@ -647,30 +743,47 @@ export interface Principal {
   agentSlugs: readonly string[];
   tokenExpiresAt: number;
   staff: boolean;
+  /**
+   * Which endpoint the token was verified for. "directory" principals can
+   * never use a capability outside the directory profile (policy.ts), whatever
+   * their scopes say. Absent means "full" (principals built by hand in tests).
+   */
+  profile?: McpProfile;
 }
 
 const TOUCH_EVERY_SEC = 60;
 
-/** Resolve a bearer token to its principal, or null. Never throws for a bad token. */
-export async function verifyAccessToken(d: McpDb, cfg: McpConfig, raw: string, now: number): Promise<Principal | null> {
+/**
+ * Resolve a bearer token to its principal, or null. Never throws for a bad
+ * token. `profile` is the endpoint the request arrived at: the token must
+ * have been issued for exactly that endpoint's resource, and its connection
+ * must belong to it (a directory token is refused at the canonical endpoint
+ * and the other way round). Personal access tokens are canonical only.
+ */
+export async function verifyAccessToken(d: McpDb, cfg: McpConfig, raw: string, now: number, profile: McpProfile = "full"): Promise<Principal | null> {
   if (!/^mcp_(at|pat)_[A-Za-z0-9_-]{20,100}$/.test(raw)) return null;
+  const expected = profile === "directory" ? cfg.directoryResource : cfg.resource;
+  if (!expected) return null;
   const row = await d.db.prepare(`SELECT t.kind, t.scopes AS token_scopes, t.resource, t.expires_at, t.revoked_at, t.client_id,
-      c.id AS connection_id, c.tenant, c.status, c.scopes AS connection_scopes, c.agent_slugs, c.client_name, c.client_host, c.kind AS connection_kind, c.last_used_at
+      c.id AS connection_id, c.tenant, c.status, c.scopes AS connection_scopes, c.agent_slugs, c.client_name, c.client_host, c.kind AS connection_kind, c.last_used_at,
+      c.resource AS connection_resource
     FROM mcp_tokens t JOIN mcp_connections c ON c.id = t.connection_id WHERE t.token_hash = ?`).get(sha256hex(raw)) as {
     kind: string; token_scopes: string; resource: string; expires_at: number; revoked_at: number | null; client_id: string;
     connection_id: string; tenant: string; status: string; connection_scopes: string; agent_slugs: string; client_name: string | null;
-    client_host: string | null; connection_kind: string; last_used_at: number | null;
+    client_host: string | null; connection_kind: string; last_used_at: number | null; connection_resource: string | null;
   } | undefined;
   if (!row) return null;
   if (row.kind !== "access" && row.kind !== "personal") return null;
   if (row.revoked_at !== null || row.expires_at <= now || row.status !== "active") return null;
   // Audience binding (RFC 8707): a token minted for another resource is not ours.
-  if (row.resource !== cfg.resource) return null;
+  if (row.resource !== expected) return null;
+  if (connectionProfile(cfg, row.connection_resource) !== profile) return null;
+  if (profile !== "full" && (row.kind === "personal" || row.connection_kind === "personal")) return null;
   const tenant = row.tenant.toLowerCase();
   if (!/^0x[0-9a-f]{40}$/.test(tenant)) return null;
   const staff = cfg.staffTenants.has(tenant);
   const connectionScopes = new Set(row.connection_scopes.split(" ").filter(Boolean));
-  const scopes = new Set(row.token_scopes.split(" ").filter((s) => connectionScopes.has(s) && (s !== "staff:diagnostics" || staff)));
+  const scopes = new Set(row.token_scopes.split(" ").filter((s) => connectionScopes.has(s) && (s !== "staff:diagnostics" || staff) && scopeAllowedIn(profile, s)));
   let agentSlugs: string[] = [];
   try {
     const parsed = JSON.parse(row.agent_slugs);
@@ -692,6 +805,7 @@ export async function verifyAccessToken(d: McpDb, cfg: McpConfig, raw: string, n
     agentSlugs,
     tokenExpiresAt: row.expires_at,
     staff,
+    profile,
   };
 }
 
@@ -707,12 +821,20 @@ export interface ConnectionSummary {
   agentSlugs: string[];
   createdAt: number;
   lastUsedAt: number | null;
+  /**
+   * The address the connection was made through: "full" (the canonical
+   * server) or "directory" (the limited directory listing). A connection
+   * whose address is no longer served (the directory profile switched off)
+   * still reads "directory": it is listed so the owner can disconnect it.
+   */
+  profile: McpProfile;
 }
 
 export async function listConnections(d: McpDb, tenant: Tenant): Promise<ConnectionSummary[]> {
-  const rows = await d.db.prepare(`SELECT id, kind, client_name, client_host, client_id, scopes, agent_slugs, created_at, last_used_at
+  const rows = await d.db.prepare(`SELECT id, kind, client_name, client_host, client_id, scopes, agent_slugs, created_at, last_used_at, resource
     FROM mcp_connections WHERE tenant = ? AND status = 'active' ORDER BY created_at DESC LIMIT 100`).all(tenant.toLowerCase()) as Array<{
     id: string; kind: string; client_name: string | null; client_host: string | null; client_id: string; scopes: string; agent_slugs: string; created_at: number; last_used_at: number | null;
+    resource: string | null;
   }>;
   return rows.map((r) => ({
     id: r.id,
@@ -724,6 +846,7 @@ export async function listConnections(d: McpDb, tenant: Tenant): Promise<Connect
     agentSlugs: (() => { try { return JSON.parse(r.agent_slugs) as string[]; } catch { return []; } })(),
     createdAt: r.created_at,
     lastUsedAt: r.last_used_at,
+    profile: r.resource === null ? "full" : "directory",
   }));
 }
 

@@ -633,6 +633,9 @@ export function resultView(json: string | null): Record<string, unknown> | null 
 /** Why a proposal is cancelled when its app is disconnected (stored as result.why). */
 export const DISCONNECTED_WHY = "the app that prepared it was disconnected";
 
+/** Why a proposal is refused when its app is connected through the directory listing, which can never ask for approvals (stored as result.why). */
+export const DIRECTORY_WHY = "the app that prepared it is connected through Merrymen's connector-directory listing, which can never ask for approvals";
+
 /**
  * Whether the connection that prepared a proposal still stands behind it: it
  * is still active, still holds the scope for this kind, and — for a proposal
@@ -641,12 +644,21 @@ export const DISCONNECTED_WHY = "the app that prepared it was disconnected";
  * no longer shared) must not be approvable: the owner withdrew the app's
  * standing to ask for it. A proposal with no recorded connection cannot be
  * traced to an app at all, and fails closed.
+ *
+ * A connection to any resource but the canonical one (resource IS NOT NULL:
+ * the directory listing's /mcp/directory) never stands behind a proposal,
+ * whatever its stored scopes say. The directory profile is never granted a
+ * proposing scope, but this check does not rely on that: scopes widened on
+ * such a row by other code (a rollback to code that does not know a
+ * connection's address, reconnecting onto the directory row) still approve
+ * nothing.
  */
 export async function connectionStanding(mcp: Db, row: Pick<ProposalRow, "tenant" | "connection_id" | "kind" | "agent_slug">): Promise<{ ok: true } | { ok: false; why: string }> {
   if (!row.connection_id) return { ok: false, why: "Merrymen cannot tell which app prepared it" };
-  const c = await mcp.prepare("SELECT status, scopes, agent_slugs FROM mcp_connections WHERE id = ? AND tenant = ?")
-    .get(row.connection_id, row.tenant.toLowerCase()) as { status: string; scopes: string; agent_slugs: string } | undefined;
+  const c = await mcp.prepare("SELECT status, scopes, agent_slugs, resource FROM mcp_connections WHERE id = ? AND tenant = ?")
+    .get(row.connection_id, row.tenant.toLowerCase()) as { status: string; scopes: string; agent_slugs: string; resource: string | null } | undefined;
   if (!c || c.status !== "active") return { ok: false, why: DISCONNECTED_WHY };
+  if (c.resource !== null && c.resource !== undefined) return { ok: false, why: DIRECTORY_WHY };
   if (!c.scopes.split(" ").includes(scopeFor(KIND_CAPABILITY[row.kind]))) {
     return { ok: false, why: "the app that prepared it is no longer allowed to ask for this (you changed what it may do)" };
   }

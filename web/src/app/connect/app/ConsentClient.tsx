@@ -237,7 +237,7 @@ export function ConsentClient() {
                 {summary.map((g) => (
                   <li key={g.level} className={`mcp-summary-${g.level}`}><Check size={16} aria-hidden /><p><strong>{g.label}</strong> <span>{g.text}</span></p></li>
                 ))}
-                <li className="mcp-summary-never"><X size={16} aria-hidden /><p><strong>Never</strong> <span>move your funds, see your keys, turn on live trading or loosen your limits.</span></p></li>
+                <li className="mcp-summary-never"><X size={16} aria-hidden /><p><strong>Never</strong> <span>move your funds, see your keys, turn on live trading or loosen your signed limits.</span></p></li>
               </ul>
               {summary.length === 0 && <p className="mcp-summary-note">{!noAgent && agents.size === 0 && visibleScopes.some((s) => s.needsAgent && scopes.has(s.id))
                 ? <>Nothing would be shared: what’s ticked needs your agent. Share your agent, or choose something else under “Change what {appName} can do”.</>
@@ -275,7 +275,12 @@ export function ConsentClient() {
           {error && <div className="connect-error" role="alert"><p>{error}</p>{request && <button disabled={loading || busy} onClick={() => void load()}>Try again</button>}</div>}
         </section>
       </main>
-      <footer className="connect-footer">Merrymen stays the source of truth. Assistants only get the access you choose here.</footer>
+      <footer className="connect-footer">
+        Merrymen stays the source of truth. Assistants only get the access you choose here.{" "}
+        <a href="https://merrymen.dev/privacy" target="_blank" rel="noopener noreferrer">Privacy policy</a>
+        {" · "}
+        <a href="https://merrymen.dev/terms" target="_blank" rel="noopener noreferrer">Terms</a>
+      </footer>
     </div>
   );
 }

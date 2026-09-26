@@ -32,6 +32,7 @@
  */
 import { mcpConfig } from "./config";
 import type { ResourceDef } from "./resources";
+import type { Capability } from "./scopes";
 import type { ToolDef } from "./tool";
 
 /** MIME type the extension defines for a view (RESOURCE_MIME_TYPE in @modelcontextprotocol/ext-apps). */
@@ -1477,6 +1478,9 @@ export interface AppResourceDef extends ResourceDef {
   meta: Readonly<Record<string, unknown>>;
 }
 
+/** The capabilities the tools the proposal view renders are reachable with (tools/proposals.ts, ANY_PROPOSAL). */
+const PROPOSAL_VIEW_CAPABILITIES: readonly Capability[] = ["trade.propose", "drafts.write", "social.write"];
+
 function appResource(view: AppView): AppResourceDef {
   const v = VIEWS[view];
   return {
@@ -1486,6 +1490,11 @@ function appResource(view: AppView): AppResourceDef {
     mimeType: MCP_APP_MIME,
     // Pure presentation: the page carries no owner data, so it needs no scope.
     capability: null,
+    // The proposal view renders only quote_trade, propose_trade and
+    // get_proposal, none of which exist on the directory profile, so it is not
+    // listed there. Still no scope: any connection that can hold one of these
+    // may read it.
+    ...(view === "proposal" ? { profileAnyOf: PROPOSAL_VIEW_CAPABILITIES } : {}),
     uri: APP_VIEW_URI[view],
     meta: APP_RESOURCE_META,
     async read() {

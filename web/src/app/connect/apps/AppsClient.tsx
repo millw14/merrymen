@@ -23,6 +23,8 @@ interface Connection {
   agentSlugs: string[];
   createdAt: number;
   lastUsedAt: number | null;
+  /** "directory": connected through the limited Claude directory listing (/mcp/directory). */
+  profile?: "full" | "directory";
   recent: Array<{ action: string; outcome: string; at: number }>;
 }
 interface AvailableScope { id: string; title: string; detail: string; level: string; needsAgent: boolean }
@@ -194,6 +196,8 @@ export function AppsClient() {
                   <div>
                     <h3>{c.kind === "personal" ? <><KeyRound size={14} aria-hidden /> {c.clientName ?? "Personal token"}</> : <><Plug size={14} aria-hidden /> {c.clientName ?? c.clientHost ?? "AI assistant"}</>}</h3>
                     <div className="mcp-meta">{c.kind === "personal" ? "Personal access token" : `via ${c.clientHost ?? c.clientId}`} · connected {when(c.createdAt)} · last used {when(c.lastUsedAt)}</div>
+                    {/* The same app can be connected twice, once per address: say which this one is. */}
+                    {c.profile === "directory" && <div className="mcp-meta">Via the Claude directory listing, which can never suggest trades, setting changes or posts</div>}
                     <div className="mcp-meta">Agents: {c.agentSlugs.length ? c.agentSlugs.join(", ") : "none (research only)"}</div>
                   </div>
                 </header>

@@ -10,12 +10,13 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { afterEach, describe, it } from "node:test";
 import { readFileSync } from "node:fs";
-import { assistantSetupMarkdown, llmsTxt } from "./assistant-setup";
+import { PRODUCTION_DIRECTORY_URL, assistantSetupMarkdown, llmsTxt } from "./assistant-setup";
+import { DIRECTORY_ROUTE_PATH } from "./config";
 import { PLUGIN_ID, PLUGIN_MARKETPLACE_URL, PLUGIN_SERVER_URL, installCommands, installLinks } from "./install-links";
 import { dedicatedMcpHost, mcpHostLanding } from "./landing";
 
-const PRODUCTION = { server: PLUGIN_SERVER_URL, app: "https://app.merrymen.dev" };
-const STAGING = { server: "https://mcp.example.test/mcp", app: "https://app.example.test" };
+const PRODUCTION = { server: PLUGIN_SERVER_URL, app: "https://app.merrymen.dev", directory: PRODUCTION_DIRECTORY_URL };
+const STAGING = { server: "https://mcp.example.test/mcp", app: "https://app.example.test", directory: "https://mcp.example.test/mcp/directory" };
 const RETIRED = "https://app.merrymen.dev/mcp";
 const REGENERATE = "node_modules/.bin/tsx scripts/llms-txt.ts > site/public/llms.txt";
 
@@ -68,9 +69,26 @@ describe("the production text", () => {
   it("counts a server as set up by its address, and replaces an entry left at an old one", () => {
     // Anyone who followed stale text has `merrymen -> https://app.merrymen.dev/mcp`; a name match alone sent them to sign in there.
     const check = lines.find((l) => l.startsWith("1. "))!;
-    assert.ok(check.includes("an entry whose address is exactly https://mcp.merrymen.dev/mcp, whatever it is called"), check);
+    assert.ok(check.includes("an entry whose address is exactly https://mcp.merrymen.dev/mcp or exactly https://mcp.merrymen.dev/mcp/directory, whatever it is called"), check);
     const replace = lines.find((l) => l.startsWith("2. "))!;
     assert.ok(replace.includes("points anywhere else (for example https://app.merrymen.dev/mcp)") && replace.includes("`claude mcp remove merrymen -s user`"), replace);
+  });
+
+  it("counts a connector at the directory address as set up, and never adds the full server on top of it", () => {
+    assert.equal(PRODUCTION_DIRECTORY_URL, "https://mcp.merrymen.dev/mcp/directory");
+    assert.equal(PRODUCTION_DIRECTORY_URL, `${new URL(PLUGIN_SERVER_URL).origin}${DIRECTORY_ROUTE_PATH}`, "the path the directory route serves");
+    const check = lines.find((l) => l.startsWith("1. "))!;
+    assert.ok(check.includes("an entry whose address is exactly https://mcp.merrymen.dev/mcp or exactly https://mcp.merrymen.dev/mcp/directory, whatever it is called"), check);
+    assert.ok(check.includes("If there is one, it is already set up"), check);
+    assert.ok(check.includes("An entry at https://mcp.merrymen.dev/mcp/directory is Merrymen from Anthropic's connector directory") && check.includes("do not add https://mcp.merrymen.dev/mcp on top of it."), check);
+    // Only step 1 names it: it is never an address to add.
+    assert.equal(lines.filter((l) => l.includes(PRODUCTION_DIRECTORY_URL)).length, 1);
+    assert.ok(!lines.some((l) => l.includes(`merrymen ${PRODUCTION_DIRECTORY_URL}`)), "no add command for the directory address");
+    assert.ok(text.includes("If the user already added Merrymen from Anthropic's connector directory, it is set up; do not add the link below on top of it."));
+  });
+
+  it("says the connection can never loosen the owner's signed limits", () => {
+    assert.ok(text.includes("It can never move funds, see keys, turn on live trading or loosen the owner's signed limits."));
   });
 
   it("leaves the sign-in to the user, and says what to do when the new entry is not listed yet", () => {
@@ -85,6 +103,10 @@ describe("the production text", () => {
     // The health route answers JSON.stringify output: no space after the colon.
     assert.ok(text.includes(`https://mcp.merrymen.dev/api/mcp/health returns JSON with "ready":true.`));
     assert.ok(text.includes("and in Claude Code when Claude Code is signed in with the same claude.ai account"), "a claude.ai connector reaches Claude Code only on that login");
+  });
+
+  it("says which limits it can never loosen: the signed ones (a settings proposal the owner approves can still change others)", () => {
+    assert.ok(text.includes("It can never move funds, see keys, turn on live trading or loosen the owner's signed limits."));
   });
 
   it("is llms.txt-shaped: one H1 title, a blockquote summary, the setup, then links", () => {
@@ -108,6 +130,15 @@ describe("a staging or self-hosted server", () => {
     assert.ok(text.includes("https://mcp.example.test/api/mcp/health"));
     assert.ok(text.includes("https://app.example.test/connect/mcp"));
     assert.ok(text.includes("https://app.example.test/connect/apps"));
+  });
+
+  it("counts its own directory address, and says nothing of one when the directory profile is off", () => {
+    assert.ok(text.includes("an entry whose address is exactly https://mcp.example.test/mcp or exactly https://mcp.example.test/mcp/directory, whatever it is called"));
+    for (const off of [{ ...STAGING, directory: "" }, { server: STAGING.server, app: STAGING.app }]) {
+      const t = llmsTxt(off);
+      assert.ok(t.includes("an entry whose address is exactly https://mcp.example.test/mcp, whatever it is called"));
+      assert.ok(!t.includes("/directory") && !t.includes("connector directory"), "no directory address or note");
+    }
   });
 
   it("offers no plugin (it points at production) and no retired-address line", () => {
@@ -146,7 +177,7 @@ it("site/public/llms.txt (merrymen.dev's copy) is exactly the production text", 
 });
 
 describe("GET /llms.txt on the app", () => {
-  const KEYS = ["MERRYMEN_HOSTED", "DATABASE_URL", "MERRYMEN_PUBLIC_ORIGIN", "MERRYMEN_OAUTH_ISSUER", "MERRYMEN_MCP_RESOURCE_URL", "MERRYMEN_SESSION_SECRET", "MERRYMEN_MCP_ENABLED"] as const;
+  const KEYS = ["MERRYMEN_HOSTED", "DATABASE_URL", "MERRYMEN_PUBLIC_ORIGIN", "MERRYMEN_OAUTH_ISSUER", "MERRYMEN_MCP_RESOURCE_URL", "MERRYMEN_SESSION_SECRET", "MERRYMEN_MCP_ENABLED", "MERRYMEN_MCP_DIRECTORY", "MERRYMEN_MCP_DIRECTORY_RESOURCE_URL"] as const;
   const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
   afterEach(() => {
     for (const k of KEYS) {
@@ -178,6 +209,17 @@ describe("GET /llms.txt on the app", () => {
     const body = await res.text();
     assert.equal(body, llmsTxt(STAGING));
     assert.ok(body.includes("claude mcp add --transport http --scope user merrymen https://mcp.example.test/mcp"));
+    assert.ok(body.includes("or exactly https://mcp.example.test/mcp/directory,"), "the configured directory address counts as set up");
+  });
+
+  it("takes the directory address from configuration, and drops it when the directory profile is off", async () => {
+    const route = await import("@/app/llms.txt/route");
+    hosted({ MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://dir.example.test/mcp/directory" });
+    assert.equal(await route.GET().text(), llmsTxt({ ...STAGING, directory: "https://dir.example.test/mcp/directory" }));
+    hosted({ MERRYMEN_MCP_DIRECTORY: "0" });
+    const off = await route.GET().text();
+    assert.equal(off, llmsTxt({ server: STAGING.server, app: STAGING.app }));
+    assert.ok(!off.includes("/directory"));
   });
 
   it("says connections are off, and gives nothing to install, when they are", async () => {
