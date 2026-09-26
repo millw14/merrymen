@@ -14,7 +14,7 @@ import {
   listResearch, readConversation, sendMessage, submitResearch, type ResearchNote, type StoredMessage,
 } from "@/lib/services/agent-conversation";
 import { McpError } from "../errors";
-import { defineTool, type ToolContext } from "../tool";
+import { defineTool, withToolRefs, type ToolContext } from "../tool";
 import { ADDRESS_ARG, AGENT_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, isCursorInt, refuseControls, untrusted } from "./shared";
 
 const CONVERSATION_ARG = z.string().regex(/^conv_[0-9a-f]{16,64}$/, "a conversation id from send_message or list_conversations");
@@ -76,7 +76,7 @@ function messageView(m: StoredMessage) {
 const sendMessageTool = defineTool({
   name: "send_message",
   title: "Message your agent",
-  description: "Send your agent a message (1–2000 characters) and get its reply. The agent answers from its current state as Merrymen records it, recent messages in this conversation, and your active research notes (shown to it as untrusted); the reply is written by Merrymen's language-model provider, which receives that state. The reply is text only: this cannot trade, change settings or pause the agent, and if the agent suggests an action it is removed (proposal_stripped) and must be done in Merrymen. request_id is your idempotency key: sending the same request_id and message again returns the stored exchange (even while pending) without calling the model again (a replay still counts toward the message budget, so poll a pending reply with get_conversation instead). Omit conversation_id to start a new conversation; a conversation holds up to 100 of your messages.",
+  ...withToolRefs("Send your agent a message (1–2000 characters) and get its reply. The agent answers from its current state as Merrymen records it, recent messages in this conversation, and your active research notes (shown to it as untrusted); the reply is written by Merrymen's language-model provider, which receives that state. The reply is text only: this cannot trade, change settings or pause the agent, and if the agent suggests an action it is removed (proposal_stripped) and must be done in Merrymen. request_id is your idempotency key: sending the same request_id and message again returns the stored exchange (even while pending) without calling the model again (a replay still counts toward the message budget, so poll a pending reply with get_conversation instead). Omit conversation_id to start a new conversation; a conversation holds up to 100 of your messages.", ", so poll a pending reply with get_conversation instead"),
   capability: "chat.send",
   input: z.object({
     agent: AGENT_ARG,
@@ -276,7 +276,7 @@ const SOURCE_ARG = refuseControls(z.string().max(500)).refine((s) => httpsSource
 const submitResearchTool = defineTool({
   name: "submit_research",
   title: "Give your agent research",
-  description: `Hand your agent a research note: a title, a body, 1–10 https source links and optionally up to 10 token addresses. For 7 days the agent sees it as EXTERNAL, UNTRUSTED research in conversations (send_message); it cannot change trading rules, settings or limits, and the trading loop does not read research notes today. Links are stored as given and never opened by Merrymen. Submitting the same title and body again returns the existing note. At most ${MAX_ACTIVE_RESEARCH} active notes per owner.`,
+  ...withToolRefs(`Hand your agent a research note: a title, a body, 1–10 https source links and optionally up to 10 token addresses. For 7 days the agent sees it as EXTERNAL, UNTRUSTED research in conversations (send_message); it cannot change trading rules, settings or limits, and the trading loop does not read research notes today. Links are stored as given and never opened by Merrymen. Submitting the same title and body again returns the existing note. At most ${MAX_ACTIVE_RESEARCH} active notes per owner.`, " (send_message)"),
   capability: "research.submit",
   input: z.object({
     agent: AGENT_ARG,

@@ -128,7 +128,7 @@ const TELEGRAM_VIEW = z.object({
   linked_at: z.string().nullable(),
   telegram_enabled: z.boolean().nullable().describe("The owner's Telegram switch in Settings; null when it could not be read"),
   alerts_enabled: z.boolean().nullable().describe("The owner's Telegram alerts (notifications) switch in Settings; null when it could not be read"),
-  ready: z.boolean().nullable().describe("Linked and both switches on. Null when a switch could not be read. Whether the bot token is still saved cannot be seen here; if it was removed, messages are recorded as skipped (no_linked_telegram) — check list_deliveries."),
+  ready: z.boolean().nullable().describe("Linked and both switches on. Null when a switch could not be read. Whether the bot token is still saved cannot be seen here; if it was removed, messages are recorded as skipped (no_linked_telegram) in the alert delivery log."),
   how_to_fix: z.string().nullable(),
 });
 
