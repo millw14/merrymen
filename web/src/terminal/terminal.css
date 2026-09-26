@@ -4692,6 +4692,18 @@ html[lang|="ko"] .terminal-host {
   margin-top: 30px;
 }
 
+/* Chat-attached images (PnL cards): bounded, tappable to save. The src is
+always same-origin (built by the client, never model text), and the anchor
+downloads via the route's attachment disposition. */
+:where(.terminal-host) .desk-turn-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin-top: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
 :where(.terminal-host) .portfolio-dialog {
   position: fixed;
   inset: 0;

@@ -215,3 +215,32 @@ describe("what it refuses to trust or to crash on", () => {
     clearThread("k", hostile);
   });
 });
+
+describe("chat-attached card images persist, and only in the allowlisted shape", () => {
+  it("keeps our own card URL across a reload", () => {
+    const s = memStore();
+    const key = "merrymen.chat.self";
+    const withImage: ChatMessage = {
+      ...line(1, "agent"),
+      image: { src: "/api/pnl?trade=7", alt: "P&L card for closed NEON" },
+    };
+    saveThread(key, thread([withImage]), s);
+    const back = loadThread(key, s).messages;
+    assert.deepEqual(back[0]!.image, { src: "/api/pnl?trade=7", alt: "P&L card for closed NEON" });
+  });
+
+  it("drops anything that is not exactly our card URL shape", () => {
+    const s = memStore();
+    const key = "merrymen.chat.self";
+    const cases: ChatMessage[] = [
+      { ...line(1, "agent"), image: { src: "https://evil.example/x.png", alt: "x" } },
+      { ...line(2, "agent"), image: { src: "/api/pnl?trade=abc", alt: "x" } },
+      { ...line(3, "agent"), image: { src: "/api/other?x=1", alt: "x" } },
+      { ...line(4, "agent"), image: { src: "/api/pnl?trade=7", alt: "x".repeat(201) } },
+    ];
+    for (const c of cases) {
+      saveThread(key, thread([c]), s);
+      assert.equal(loadThread(key, s).messages[0]!.image, undefined, JSON.stringify(c.image));
+    }
+  });
+});

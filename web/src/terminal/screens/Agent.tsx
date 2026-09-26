@@ -350,6 +350,44 @@ export function Agent({
         window.location.href = cmd.to!;
         return;
       }
+      if (cmd.via === "show") {
+        // DISPLAY, not action: resolve the owner's latest closed trade and
+        // show its card inline. Read-only end to end — no write, no order,
+        // no navigation. The picture comes from GET /api/pnl (the same
+        // renderer Telegram sends); this branch only finds WHICH trade.
+        on.say({ role: "owner", text: "✓ Confirmed" });
+        const latest = (await fetch("/api/pnl/latest", {
+          headers: { "content-type": "application/json" },
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null)) as {
+          none?: boolean;
+          tradeId?: number;
+          symbol?: string;
+          status?: string | null;
+          realizedPnlUsdg?: number;
+        } | null;
+        if (!latest || latest.none || typeof latest.tradeId !== "number") {
+          on.say({
+            role: "agent",
+            text: "No closed trades with a card to draw yet — closes land here with their picture once they happen.",
+          });
+          return;
+        }
+        const paper = latest.status === "paper";
+        const pnl = typeof latest.realizedPnlUsdg === "number" ? latest.realizedPnlUsdg : 0;
+        // money() owns signs and symbols (see format.test.ts) — no hand-placed "$" anywhere.
+        const signed = pnl < 0 ? money(pnl) : `+${money(pnl)}`;
+        on.say({
+          role: "agent",
+          text: `${latest.symbol ?? "Position"} closed${paper ? " (📜 paper — simulated, nothing signed)" : ""}: ${signed}. Tap the picture to save it.`,
+          image: {
+            src: `/api/pnl?trade=${latest.tradeId}`,
+            alt: `P&L card for closed ${latest.symbol ?? "position"}${paper ? " (paper)" : ""}`,
+          },
+        });
+        return;
+      }
       if (cmd.via === "snipe") {
         // A SNIPE ANSWERS IN FOUR WAYS AND ONLY ONE OF THEM IS A TRADE.
         //
@@ -909,7 +947,13 @@ export function Agent({
             <p className="desk-confirm-say">{commandFor(pending.id)!.say(pending.args)}</p>
             <div className="desk-confirm-row">
               <button type="button" onClick={confirm} disabled={running}>
-                {running ? "Doing it…" : commandFor(pending.id)!.via === "navigate" ? "Take me there" : "Yes, do it"}
+                {running
+                  ? "Doing it…"
+                  : commandFor(pending.id)!.via === "navigate"
+                    ? "Take me there"
+                    : commandFor(pending.id)!.via === "show"
+                      ? "Show it"
+                      : "Yes, do it"}
               </button>
               <button
                 type="button"
@@ -1057,6 +1101,22 @@ function ChatLine({
           {receipt && <ReceiptRow {...receiptParts(receipt)} />}
           {card}
           <p>{m.text}</p>
+          {m.image && (
+            <a href={m.image.src} download>
+              <img
+                src={m.image.src}
+                alt={m.image.alt}
+                className="desk-turn-image"
+                loading="lazy"
+                // The lookup gates cardability and /api/pnl re-validates
+                // before drawing — but if the image still fails, hide it
+                // rather than showing a torn icon; the caption stands alone.
+                onError={(e) => {
+                  (e.target as HTMLImageElement).style.display = "none";
+                }}
+              />
+            </a>
+          )}
           {m.failed ? (
             <div className="chat-failed-actions">
               {m.retry && onRetry && (

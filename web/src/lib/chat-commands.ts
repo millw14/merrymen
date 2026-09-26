@@ -92,7 +92,14 @@ export interface ChatCommand {
    * answers are not a trade, a trade, and an error. They are three different
    * replies, only one of which places anything.
    */
-  via: "settings" | "navigate" | "order" | "snipe";
+  via: "settings" | "navigate" | "order" | "snipe" | "show";
+  /**
+   * For `show`: display-only commands resolve client-side into content that is
+   * already the owner's to see (never a write, never an order, never a
+   * navigation). They still pass through the pending card + click like every
+   * other command — nothing renders from a model marker without the owner
+   * asking for it first by tapping. `pnl` is the only one today.
+   */
   /** For `settings`: which keys this command may write. Nothing else is sent. */
   writes?: readonly string[];
   /**
@@ -429,6 +436,16 @@ const REGISTRY: ChatCommand[] = [
     to: "/grant#resign",
     weighty: true,
     say: () => `Take you to re-sign my trading permission — free, one signature, nothing moves on-chain.`,
+  },
+  {
+    id: "pnl",
+    via: "show",
+    // READ-ONLY BY CONSTRUCTION: no writes, no order, no navigation — the
+    // client resolves this into the owner's own latest closed-trade card
+    // (same renderer Telegram sends) without leaving the conversation. The
+    // pending card + click still gate it: a picture appears only after a tap,
+    // never straight from a model marker.
+    say: () => `Show you the card for my latest closed trade — paper or live, labeled which.`,
   },
 ];
 

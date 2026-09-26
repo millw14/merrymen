@@ -53,6 +53,14 @@ export interface ChatMessage {
   tradeKey?: string;
   /** That trade, as the tape last read it. Never stored: re-read each session. */
   trade?: Thesis;
+  /**
+   * A same-origin image to render under the text (PnL card today). URL
+   * string only — never bytes, never a model-chosen address — so persisted
+   * lines stay small and re-resolve tenant-scoped on load. The `show` rail
+   * is the only writer, and it builds the URL from a server-resolved trade
+   * id, never from model text.
+   */
+  image?: { src: string; alt: string };
   /** Set on a failure said in the agent's voice. Kept out of what the model is told it said. */
   failed?: ChatFailure;
   /** The question to put again, for the Retry chip. This session only. */

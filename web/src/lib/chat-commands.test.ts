@@ -314,9 +314,22 @@ describe("no secret is ever a command result", () => {
     // house-wide discovery index, and this owner's own watchlist — no balance,
     // no key, no other tenant, and nothing the caller could not read from the
     // coins page. See api/snipe/route.ts.
+    //
+    // `show` is the second: the client resolves it into content (today only
+    // the owner's own latest PnL card image URL) rather than an action. What
+    // it may carry back is bounded the same way: a same-origin URL built by
+    // OUR code from a tenant-scoped lookup — never model text, never a query
+    // string the model chose, never anything but the owner's own data. A show
+    // rail that echoed model-chosen URLs would be an open redirect into the
+    // transcript; this one cannot, because the URL shape is fixed in the
+    // client and only the trade id (a server-resolved integer) varies.
     for (const cmd of CHAT_COMMANDS) {
       assert.ok(
-        cmd.via === "settings" || cmd.via === "navigate" || cmd.via === "order" || cmd.via === "snipe",
+        cmd.via === "settings" ||
+          cmd.via === "navigate" ||
+          cmd.via === "order" ||
+          cmd.via === "snipe" ||
+          cmd.via === "show",
         `${cmd.id} has a kind of effect nothing here has reasoned about`,
       );
     }
@@ -511,5 +524,27 @@ describe("the risk level writes settings, never the word", () => {
     const said = commandFor("set-risk")!.say({ level: "bold" });
     assert.match(said, /per-trade and per-day caps/i);
     assert.match(said, /only a new signature/i);
+  });
+});
+
+describe("pnl — the read-only show command", () => {
+  it("resolves from the registry with no arguments", () => {
+    const cmd = commandFor("pnl");
+    assert.ok(cmd, "unknown ids must not resolve, but pnl is registered");
+    assert.equal(cmd!.via, "show");
+    // Complete with {} so the card appears — never a refusal for a read.
+    const { command } = splitCommand("Here it is.\n<<CMD pnl {}>>");
+    assert.deepEqual(command, { id: "pnl", args: {} });
+  });
+
+  it("is listed for the model with no argument names to invent", () => {
+    assert.ok(COMMAND_IDS.includes("pnl"));
+    assert.match(COMMAND_SPEC, /pnl \{\}/);
+  });
+
+  it("asks for nothing and writes nothing", () => {
+    const cmd = commandFor("pnl")!;
+    assert.deepEqual(commandPayload(cmd, {}), {}, "show commands carry no payload anywhere");
+    assert.match(cmd.say({}), /latest closed trade/i);
   });
 });
