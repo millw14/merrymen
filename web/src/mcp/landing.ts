@@ -45,9 +45,13 @@ export interface DedicatedMcpHost {
   issuer: string;
   /** Canonical resource URL, e.g. https://mcp.merrymen.dev/mcp. */
   resource: string;
-  /** Its path, e.g. /mcp. */
-  resourcePath: string;
 }
+
+/**
+ * config.ts's CANONICAL_ROUTE_PATH (see the parity test): the one path the
+ * endpoint is served at, so the only one a resource URL may name.
+ */
+export const MCP_ROUTE_PATH = "/mcp";
 
 /** config.ts's originOf, verbatim in behaviour (see the parity test). */
 function originOf(raw: string | undefined): URL | null {
@@ -68,31 +72,31 @@ type McpEnv = Partial<Record<"MERRYMEN_OAUTH_ISSUER" | "MERRYMEN_PUBLIC_ORIGIN" 
 /**
  * The dedicated MCP host, or null when there is none: not hosted (MCP is a
  * hosted feature, and a self-hosted install must behave exactly as before), no
- * valid issuer or resource, a resource at the root (then "/" IS the endpoint),
- * or a resource on the issuer's own host (then there is no second domain, and
- * "/" is the terminal, as it should be).
+ * valid issuer or resource, a resource at any path but MCP_ROUTE_PATH (the
+ * root included: config.ts switches MCP off then, so there is no endpoint to
+ * point anyone at), or a resource on the issuer's own host (then there is no
+ * second domain, and "/" is the terminal, as it should be).
  */
 export function dedicatedMcpHost(env: McpEnv, hosted: boolean): DedicatedMcpHost | null {
   if (!hosted) return null;
   const issuerUrl = originOf(env.MERRYMEN_OAUTH_ISSUER ?? env.MERRYMEN_PUBLIC_ORIGIN);
   if (!issuerUrl) return null;
   const issuer = issuerUrl.origin;
-  const resourceUrl = originOf(env.MERRYMEN_MCP_RESOURCE_URL ?? `${issuer}/mcp`);
+  const resourceUrl = originOf(env.MERRYMEN_MCP_RESOURCE_URL ?? `${issuer}${MCP_ROUTE_PATH}`);
   if (!resourceUrl || resourceUrl.host === issuerUrl.host) return null;
-  const resourcePath = resourceUrl.pathname.replace(/\/+$/, "");
-  if (!resourcePath) return null;
-  return { host: resourceUrl.host, issuer, resource: `${resourceUrl.origin}${resourcePath}`, resourcePath };
+  if (resourceUrl.pathname.replace(/\/+$/, "") !== MCP_ROUTE_PATH) return null;
+  return { host: resourceUrl.host, issuer, resource: `${resourceUrl.origin}${MCP_ROUTE_PATH}` };
 }
 
 /**
- * What the MCP host serves itself, whoever asks: the endpoint, discovery,
- * OAuth, the API, Next's assets and any file (icons, the service worker, the
- * manifest). Redirecting any of these would break a client or a page.
+ * What the MCP host serves itself, whoever asks: the endpoint (always under
+ * /mcp), discovery, OAuth, the API, Next's assets and any file (icons, the
+ * service worker, the manifest). Redirecting any of these would break a client
+ * or a page.
  */
-function servedHere(pathname: string, resourcePath: string): boolean {
+function servedHere(pathname: string): boolean {
   const first = (pathname.split("/")[1] ?? "").toLowerCase();
   if (first === "mcp" || first === ".well-known" || first === "api" || first === "oauth" || first === "_next") return true;
-  if (pathname === resourcePath || pathname.startsWith(`${resourcePath}/`)) return true;
   return /\.[a-z0-9]+$/i.test(pathname);
 }
 
@@ -120,7 +124,7 @@ export function mcpHostLanding(
 ): Landing | null {
   if (!mcp) return null;
   if ((req.headers.get("host") ?? "").trim().toLowerCase() !== mcp.host) return null;
-  if (servedHere(req.pathname, mcp.resourcePath)) return null;
+  if (servedHere(req.pathname)) return null;
   const browser = isBrowserNavigation(req.method, req.headers);
   if (req.pathname === "/") return browser ? { status: 307, location: connectHelpUrl(mcp.issuer) } : { status: 308, location: mcp.resource };
   if (!browser) return null;

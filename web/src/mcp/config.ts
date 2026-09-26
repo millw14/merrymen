@@ -21,7 +21,12 @@ export interface McpConfig {
   disabledWhy: string | null;
   /** OAuth issuer, e.g. https://app.merrymen.dev (no trailing slash). */
   issuer: string;
-  /** Canonical MCP resource URL, e.g. https://mcp.merrymen.dev/mcp (production, MERRYMEN_MCP_RESOURCE_URL). Tokens are bound to exactly this. */
+  /**
+   * Canonical MCP resource URL, e.g. https://mcp.merrymen.dev/mcp (production,
+   * MERRYMEN_MCP_RESOURCE_URL). Tokens are bound to exactly this. Always at
+   * CANONICAL_ROUTE_PATH; "" (and MCP off) when the configured URL is not
+   * usable or names any other path.
+   */
   resource: string;
   /**
    * The directory profile's resource URL, e.g. https://mcp.merrymen.dev/mcp/directory:
@@ -52,10 +57,18 @@ export interface McpConfig {
 const ADDRESS = /^0x[0-9a-f]{40}$/;
 
 /**
+ * The one path the MCP endpoint is served at (app/mcp/route.ts;
+ * next.config.mjs has no rewrites). The canonical resource URL may name
+ * another origin (production: https://mcp.merrymen.dev/mcp), never another
+ * path: the URL is what clients are told to POST to, and any other path is a
+ * 404. landing.ts keeps a copy for the edge middleware (a test pins the two).
+ */
+export const CANONICAL_ROUTE_PATH = "/mcp";
+
+/**
  * The one path the directory profile is served at (app/mcp/directory/route.ts;
  * next.config.mjs has no rewrites). Its resource URL may name another origin,
- * never another path: the URL is what clients are told to POST to, and any
- * other path is a 404.
+ * never another path, for the same reason as CANONICAL_ROUTE_PATH.
  */
 export const DIRECTORY_ROUTE_PATH = "/mcp/directory";
 
@@ -82,21 +95,25 @@ function positive(raw: string | undefined, fallback: number, min: number, max: n
 export function mcpConfig(env: NodeJS.ProcessEnv = process.env): McpConfig {
   const issuerUrl = originOf(env.MERRYMEN_OAUTH_ISSUER ?? env.MERRYMEN_PUBLIC_ORIGIN);
   const issuer = issuerUrl ? issuerUrl.origin : "";
-  const resourceUrl = originOf(env.MERRYMEN_MCP_RESOURCE_URL ?? (issuer ? `${issuer}/mcp` : undefined));
+  const configuredResource = originOf(env.MERRYMEN_MCP_RESOURCE_URL ?? (issuer ? `${issuer}${CANONICAL_ROUTE_PATH}` : undefined));
   // The resource keeps its path; normalise away a trailing slash so the
-  // metadata's `resource` matches the URL clients were given exactly.
-  const resource = resourceUrl ? `${resourceUrl.origin}${resourceUrl.pathname.replace(/\/+$/, "") || ""}` : "";
+  // metadata's `resource` matches the URL clients were given exactly. Only the
+  // origin may differ from the served path: any other path (the root
+  // included) is treated like an unusable URL, so nothing advertises an
+  // address that answers 404.
+  const configuredPath = configuredResource ? configuredResource.pathname.replace(/\/+$/, "") : "";
+  const resourceUrl = configuredPath === CANONICAL_ROUTE_PATH ? configuredResource : null;
+  const resource = resourceUrl ? `${resourceUrl.origin}${configuredPath}` : "";
   // The directory profile: DIRECTORY_ROUTE_PATH on the canonical endpoint's
-  // origin, unless overridden to another origin. Off when switched off, when an
-  // override names any other path (nothing would answer there), and when it
-  // would share the canonical path: the path picks the protected-resource
-  // document, and one path cannot name two resources.
-  const directoryUrl = env.MERRYMEN_MCP_DIRECTORY === "0" || !resourceUrl || !resource
+  // origin, unless overridden to another origin. Off when switched off, when
+  // there is no usable canonical endpoint, and when an override names any
+  // other path (nothing would answer there). It can never share the
+  // canonical path: the two route paths differ.
+  const directoryUrl = env.MERRYMEN_MCP_DIRECTORY === "0" || !resourceUrl
     ? null
     : originOf(env.MERRYMEN_MCP_DIRECTORY_RESOURCE_URL ?? `${resourceUrl.origin}${DIRECTORY_ROUTE_PATH}`);
   const directoryPath = directoryUrl ? directoryUrl.pathname.replace(/\/+$/, "") : "";
-  const canonicalPath = resourceUrl ? resourceUrl.pathname.replace(/\/+$/, "") : "";
-  const directoryResource = directoryUrl && directoryPath === DIRECTORY_ROUTE_PATH && directoryPath !== canonicalPath ? `${directoryUrl.origin}${directoryPath}` : "";
+  const directoryResource = directoryUrl && directoryPath === DIRECTORY_ROUTE_PATH ? `${directoryUrl.origin}${directoryPath}` : "";
   const directoryHost = directoryResource ? directoryUrl?.host : undefined;
 
   const extraOrigins = (env.MERRYMEN_MCP_ALLOWED_ORIGINS ?? "")
@@ -112,7 +129,8 @@ export function mcpConfig(env: NodeJS.ProcessEnv = process.env): McpConfig {
   else if (!env.DATABASE_URL) disabledWhy = "hosted MCP requires DATABASE_URL";
   else if (env.MERRYMEN_MCP_ENABLED === "0") disabledWhy = "MCP is switched off (MERRYMEN_MCP_ENABLED=0)";
   else if (!issuer) disabledWhy = "MERRYMEN_PUBLIC_ORIGIN (or MERRYMEN_OAUTH_ISSUER) must be an https origin";
-  else if (!resource) disabledWhy = "MERRYMEN_MCP_RESOURCE_URL must be an https URL";
+  else if (!configuredResource) disabledWhy = "MERRYMEN_MCP_RESOURCE_URL must be an https URL";
+  else if (!resource) disabledWhy = `MERRYMEN_MCP_RESOURCE_URL must have the path ${CANONICAL_ROUTE_PATH}, the only path the MCP endpoint is served at (only the origin may change)`;
   else if ((env.MERRYMEN_SESSION_SECRET ?? "").length < 32) disabledWhy = "MERRYMEN_SESSION_SECRET is required for owner sign-in";
 
   return {

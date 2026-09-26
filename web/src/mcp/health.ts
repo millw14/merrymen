@@ -25,11 +25,11 @@ export interface DirectoryHealth {
 export function directoryHealth(cfg: McpConfig, env: NodeJS.ProcessEnv = process.env): DirectoryHealth {
   if (cfg.directoryResource) return { endpoint: cfg.directoryResource, why: null };
   if (env.MERRYMEN_MCP_DIRECTORY === "0") return { endpoint: null, why: "switched off (MERRYMEN_MCP_DIRECTORY=0)" };
+  // Checked before the override: with no usable canonical endpoint (a bad
+  // MERRYMEN_MCP_RESOURCE_URL, including one at any path but /mcp) no override
+  // can help, so name the variable that can.
   if (!cfg.resource) return { endpoint: null, why: "no canonical endpoint to derive it from (MERRYMEN_MCP_RESOURCE_URL)" };
-  // Checked before the override: with the canonical endpoint on the directory's
-  // only path, no override can help, so name the variable that can.
-  if (new URL(cfg.resource).pathname.replace(/\/+$/, "") === DIRECTORY_ROUTE_PATH) return { endpoint: null, why: `the canonical endpoint (MERRYMEN_MCP_RESOURCE_URL) is at ${DIRECTORY_ROUTE_PATH}, the directory profile's own path` };
-  return { endpoint: null, why: `MERRYMEN_MCP_DIRECTORY_RESOURCE_URL is not usable: it must be an https URL (http only for localhost) with no query, fragment or credentials, whose path is ${DIRECTORY_ROUTE_PATH} (the only path the directory profile is served at; only the origin may change), and not the canonical endpoint's` };
+  return { endpoint: null, why: `MERRYMEN_MCP_DIRECTORY_RESOURCE_URL is not usable: it must be an https URL (http only for localhost) with no query, fragment or credentials, whose path is ${DIRECTORY_ROUTE_PATH} (the only path the directory profile is served at; only the origin may change)` };
 }
 
 export interface HealthDeps {
