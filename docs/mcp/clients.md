@@ -167,9 +167,11 @@ the permissions you ticked, and revocable on Connected apps.
 
 ## ChatGPT (developer mode)
 
-The [ChatGPT setup page](https://merrymen.dev/chatgpt) is written for a new
-ChatGPT chat asked to "connect to Merrymen MCP". A chat message can guide the
-setup, but you must install the plugin and approve Merrymen access yourself.
+The [ChatGPT setup page](https://merrymen.dev/chatgpt) gives a new chat asked
+to "connect Merrymen MCP" the server address and current steps. A web search
+may find the guide, but the phrase alone does not reliably surface an
+uninstalled plugin. Merrymen is not currently in ChatGPT's public Plugins
+Directory; you must add the connection and approve Merrymen access yourself.
 
 1. In ChatGPT, open **Settings** → **Security and login** and turn on
    **Developer mode**, if your account or workspace allows it.

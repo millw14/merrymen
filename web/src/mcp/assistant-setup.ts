@@ -80,7 +80,7 @@ export function assistantSetupMarkdown({ server, app, directory }: AssistantSetu
     "",
     "### In ChatGPT",
     "",
-    `When the user writes "connect to ${CONNECTOR_NAME} MCP" in ChatGPT, use this section even if you had never heard of ${CONNECTOR_NAME}. A chat message alone cannot install an MCP connection or approve access. Do not say it is connected until a ${CONNECTOR_NAME} tool succeeds.`,
+    `When the user writes "connect ${CONNECTOR_NAME} MCP" in ChatGPT, use this section if you found it through web search, even if you had never heard of ${CONNECTOR_NAME}. That search and an uninstalled plugin appearing in chat are not guaranteed. A chat message alone cannot install an MCP connection or approve access. Do not say it is connected until a ${CONNECTOR_NAME} tool succeeds.`,
     "",
     `1. If ${CONNECTOR_NAME} is already installed and available in this ChatGPT chat, select it and let the user complete any connection or sign-in prompt. Then call \`list_agents\` to check the connection.`,
     `2. Otherwise, tell the user to open ChatGPT Settings → Security and login and turn on Developer mode, if their account or workspace permits it. Open ${links.chatgpt}, select the plus button, name the new plugin ${CONNECTOR_NAME}, choose a public MCP connection and enter ${server}.`,

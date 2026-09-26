@@ -20,9 +20,11 @@ positions and trade outcomes from the dashboard or Telegram.
 **Use it from Claude:** tell Claude “set up merrymen mcp”, or add it in one
 click: <https://merrymen.dev/claude> (hosted Merrymen).
 
-**Use it from ChatGPT:** ask “connect to Merrymen MCP”. The server address and
-current setup steps are at <https://merrymen.dev/chatgpt>. You still add the
-connection in ChatGPT and approve access in Merrymen.
+**Connect it to ChatGPT:** the official server address and current setup steps
+are at <https://merrymen.dev/chatgpt>. A fresh chat asked to “connect Merrymen
+MCP” may find that guide through web search, but the message alone does not
+reliably surface an uninstalled plugin. For now, you add the connection in
+ChatGPT and approve access in Merrymen.
 
 The account contract enforces the permissions sealed into its session key:
 allowed calls and assets, per-call limits and expiry. The worker adds daily

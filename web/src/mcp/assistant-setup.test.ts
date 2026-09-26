@@ -54,7 +54,8 @@ describe("the production text", () => {
     const end = text.indexOf("### Other assistants\n", start);
     assert.ok(start > 0 && end > start, "ChatGPT has its own setup section");
     const chatgpt = text.slice(start, end);
-    assert.ok(chatgpt.includes('"connect to Merrymen MCP"'));
+    assert.ok(chatgpt.includes('"connect Merrymen MCP"'));
+    assert.ok(chatgpt.includes("an uninstalled plugin appearing in chat are not guaranteed"));
     assert.ok(chatgpt.includes("A chat message alone cannot install an MCP connection or approve access"));
     assert.ok(chatgpt.includes("Settings → Security and login") && chatgpt.includes("Developer mode"));
     assert.ok(chatgpt.includes(installLinks(PLUGIN_SERVER_URL).chatgpt));
