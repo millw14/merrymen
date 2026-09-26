@@ -25,6 +25,13 @@ export const metadata: Metadata = {
  * curve is caller-supplied and unpinnable (the Pons adapter and class vault
  * permissions), so it is named rather than hidden.
  *
+ * Section 8 splits withdrawal by owner, as the code does: a Privy-owned account
+ * (web/src/terminal/Providers.tsx loginMethods, CreateAgent.tsx) has no
+ * exportable key and withdraws only through the hosted app's relay
+ * (web/src/lib/recover-client.ts, RecoverPanel.tsx); a browser-key account can
+ * also run `merrymen recover` (cli/bin.mjs), which refuses without a bundler key.
+ * Never promise withdrawal "when the hosted service is down" to the first kind.
+ *
  * The date is fixed, not `new Date()`: it says when these words last changed.
  */
 const LAST_UPDATED = "September 26, 2026";
@@ -174,10 +181,26 @@ export default function Terms() {
         <p>
           Your agent&apos;s account is yours. The key that owns it stays with the wallet behind your
           sign-in, or in the browser that created it; we never hold it. So we cannot recover it,
-          reverse a transaction, or move your funds out for you. Keep your sign-in and any key
-          backup safe: whoever controls them controls the account. You can move your funds out with
-          your owner key at any time, including when the hosted service is unavailable.
+          reverse a transaction, or move your funds out for you. Keep your sign-in and any recovery
+          key safe: whoever controls them controls the account. How you withdraw depends on how the
+          account was made:
         </p>
+        <ul>
+          <li>
+            <strong>Signed in with X or email.</strong> The account is owned by the wallet Privy
+            provides for that login, and its key is never exported. You withdraw on
+            app.merrymen.dev, from Withdraw, signed in with that same login. Withdrawing therefore depends on
+            app.merrymen.dev and Privy being available, and on you keeping access to that X account
+            or email address.
+          </li>
+          <li>
+            <strong>Made with a key generated in your browser.</strong> You can withdraw on
+            app.merrymen.dev with that key, or use your recovery key with the self-hosted
+            software&apos;s <code className="inline">merrymen recover</code> command, which needs a
+            bundler key of your own (such as a free Pimlico key) and works even when the hosted
+            service is unavailable.
+          </li>
+        </ul>
 
         <h2 id="availability">9 · Availability and no warranty</h2>
         <p>
@@ -208,7 +231,7 @@ export default function Terms() {
             stays valid on the chain until the expiry you signed, but the hosted worker no longer
             has it;
           </li>
-          <li>move your funds out with your owner key; and</li>
+          <li>withdraw your funds as section 8 describes; and</li>
           <li>email <a className="link" href="mailto:support@merrymen.dev">support@merrymen.dev</a> to have your account data deleted.</li>
         </ul>
         <p>

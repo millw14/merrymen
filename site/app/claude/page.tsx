@@ -36,8 +36,9 @@ const CONNECTED_APPS = "https://app.merrymen.dev/connect/apps";
  * points at: the same server without any tool behind the three unticked
  * scopes (drafts:write, trade:propose, social:write), so without suggesting a
  * trade, a setting change or a post, and without following or unfollowing an
- * agent. Not checked against llms.txt, which (today) describes only the full
- * server.
+ * agent. Both are checked against llms.txt, whose first Claude Code step counts
+ * an entry at either address as set up; this page's Claude Code section must
+ * say the same.
  */
 const FULL_SERVER = "https://mcp.merrymen.dev/mcp";
 const DIRECTORY_SERVER = "https://mcp.merrymen.dev/mcp/directory";
@@ -85,7 +86,7 @@ const EXAMPLES: ReadonlyArray<{ prompt: string; note?: string }> = [
  */
 function assertCopiedFromLlmsTxt() {
   const llms = readFileSync(join(process.cwd(), "public", "llms.txt"), "utf8");
-  const stale = [CLAUDE_LINK, CLAUDE_ORG_LINK, MCP_ADD, PLUGIN_MARKETPLACE_ADD, PLUGIN_INSTALL, CONNECT_HUB, CONNECTED_APPS].filter((s) => !llms.includes(s));
+  const stale = [CLAUDE_LINK, CLAUDE_ORG_LINK, MCP_ADD, PLUGIN_MARKETPLACE_ADD, PLUGIN_INSTALL, CONNECT_HUB, CONNECTED_APPS, FULL_SERVER, DIRECTORY_SERVER].filter((s) => !llms.includes(s));
   if (stale.length) throw new Error(`app/claude/page.tsx no longer matches public/llms.txt; copy these again: ${stale.join(" | ")}`);
 }
 
@@ -161,9 +162,12 @@ export default function ClaudeSetup() {
           Already added Merrymen on claude.ai? Claude Code signed in with the same claude.ai account
           has it too. <code className="inline">claude mcp list</code> shows it (as{" "}
           <code className="inline">merrymen</code>, <code className="inline">plugin:merrymen:merrymen</code> or{" "}
-          <code className="inline">claude.ai Merrymen</code>) at https://mcp.merrymen.dev/mcp when it
-          is set up. An entry named <code className="inline">merrymen</code> at any other address is
-          an old one: remove it with <code className="inline">claude mcp remove merrymen -s user</code>.
+          <code className="inline">claude.ai Merrymen</code>) when it is set up, at{" "}
+          <code className="inline" style={{ overflowWrap: "anywhere" }}>{FULL_SERVER}</code>, or at{" "}
+          <code className="inline" style={{ overflowWrap: "anywhere" }}>{DIRECTORY_SERVER}</code> if you added it from
+          Claude&apos;s connector directory. Either one counts: don&apos;t add the other on top of
+          it. An entry named <code className="inline">merrymen</code> at any other address is an old
+          one: remove it with <code className="inline">claude mcp remove merrymen -s user</code>.
           Otherwise, in a terminal:
         </p>
         <pre className="code">{MCP_ADD}</pre>
@@ -206,8 +210,8 @@ ${PLUGIN_INSTALL}`}</pre>
           When you connect, a Merrymen page asks which agent to share with Claude and what Claude
           may do. These are all the permissions. The ticked ones are ticked for you; open{" "}
           <strong>Change what Claude can do</strong> on that page to change them. Most need your
-          agent shared; research, the watchlist, backtests and setting-change suggestions work
-          without one.
+          agent shared. Research, the watchlist, backtests and drafting a new agent setup work
+          without one; suggesting changes to an agent&apos;s settings needs that agent shared.
         </p>
         <div style={{ overflowX: "auto" }}>
           <table>

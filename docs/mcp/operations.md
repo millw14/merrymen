@@ -56,12 +56,24 @@ instead).
 `mcp_connections_one_active` moved from `(tenant, client_id)` to
 `(tenant, client_id, COALESCE(resource, ''))`, so one owner can connect the
 same app to both addresses. It runs by itself on the first boot of the new
-code, in one transaction under the same lock and timeout: `ALTER TABLE …
-ADD COLUMN IF NOT EXISTS resource TEXT`, `DROP INDEX IF EXISTS
-mcp_connections_one_active`, then the schema recreates the index with the new
-definition. The same catalog query that checks for missing objects also sees
-a missing column or an old index definition (`pg_attribute`,
-`pg_get_indexdef`), so an already-migrated boot still runs no DDL. Existing
+code, in one transaction under the same advisory lock and timeout. On a
+database that already has every MCP table and index it touches
+`mcp_connections` alone: `LOCK TABLE mcp_connections IN ACCESS EXCLUSIVE
+MODE` first, then `ALTER TABLE … ADD COLUMN IF NOT EXISTS resource TEXT`,
+`DROP INDEX IF EXISTS mcp_connections_one_active` and `CREATE UNIQUE INDEX IF
+NOT EXISTS mcp_connections_one_active ON mcp_connections (tenant, client_id,
+COALESCE(resource, '')) WHERE status = 'active' AND kind = 'oauth'` (each
+only if still needed). It does not run the whole schema DDL, which locks
+every MCP table in turn and so could deadlock with a consent approval or code
+exchange in flight (the boot holding `mcp_connections` and waiting on
+`mcp_codes`, the request the other way round). While it waits for its one
+lock it holds no MCP table, and once it has it, it waits for nothing else, so
+the worst case is the 5 s timeout and a retry on the next request or tick. A
+database also missing a table or index takes the full path: the same column
+and index steps, then the whole schema. The same catalog query that checks
+for missing objects also sees a missing column or an old index definition
+(`pg_attribute`, `pg_get_indexdef`), so an already-migrated boot still runs
+no DDL. Existing
 rows keep NULL and mean exactly what they did; no data is rewritten. The new
 index is less strict than the old one, so existing data always satisfies it.
 The index keeps its name on purpose: code from before the change looks for
@@ -290,13 +302,22 @@ ignores them. Nothing in the rollback touches trading state. If a rollback
 happens while approvals are pending, their orders (if any were queued) remain
 normal owner orders as above.
 
-**Rolling back past the directory profile.** Code from before it runs on the
-migrated schema (it finds the index by name, and its inserts leave `resource`
-NULL), but it does not know a connection's address: for an owner holding both
-a full and a directory connection with the same app, its reconnect lookup
-could pick the directory row. Before such a rollback, end the directory
-connections with the SQL under [Emergency](#emergency-revoke-everything) (the
-`resource IS NOT NULL` statements). The column and index can stay.
+**Rolling back past the directory profile.** Before rolling back to an image
+older than the directory profile (anything without `/mcp/directory`), revoke
+every directory connection and its tokens: the rows `WHERE resource IS NOT
+NULL`, with the two `resource IS NOT NULL` statements under
+[Emergency](#emergency-revoke-everything), run in that order (tokens, then
+connections). The older code assumes one active row per `(tenant,
+client_id)`: it runs on the migrated schema (it finds the index by name, and
+its inserts leave `resource` NULL), but it does not know a connection's
+address, so for an owner holding both a full and a directory connection with
+the same app its lookups can pick the directory row, and a reconnect can
+write the full server's scopes onto it. Approval still refuses any proposal
+whose connection has a non-NULL `resource` (`connectionStanding` in
+`web/src/lib/services/proposals.ts`), but only once the new code is back; the
+older code has no such check. The column and index can stay. Rolling forward
+again needs nothing: the next boot sees the index definition and rebuilds it
+if the older code put its own back.
 
 ## Retention
 

@@ -18,6 +18,30 @@
  */
 import type { Db } from "../db";
 
+/**
+ * THE CONNECTION'S RESOURCE (2026-09, the directory profile). An owner may
+ * connect the same app (claude.ai uses one client_id for a custom connector
+ * and a directory connector) once per MCP resource, so the one-active rule is
+ * per (tenant, client_id, resource). NULL means the canonical resource: every
+ * row written before this column existed keeps meaning exactly what it did,
+ * and the index folds NULL to '' so two canonical rows still collide (a plain
+ * unique index treats NULLs as distinct).
+ *
+ * `CREATE TABLE IF NOT EXISTS` adds no column to a table that already exists,
+ * and `CREATE INDEX IF NOT EXISTS` keeps an index whose definition changed,
+ * so an existing database needs the column added (the index expression names
+ * it), the old index dropped and the new one created: see ensureMcpSchema for
+ * how. The index keeps its name on purpose: code from before this change
+ * checks for that name at boot, and a new name would make it recreate the
+ * old, stricter index, which fails once an owner holds one connection per
+ * resource.
+ */
+export const CONNECTION_RESOURCE_DDL = "ALTER TABLE mcp_connections ADD COLUMN resource TEXT";
+export const ONE_ACTIVE_INDEX = "mcp_connections_one_active";
+/** The one-active index, as MCP_SCHEMA creates it (one string, so the migration cannot drift from a fresh database). */
+export const ONE_ACTIVE_INDEX_DDL = `CREATE UNIQUE INDEX IF NOT EXISTS ${ONE_ACTIVE_INDEX}
+  ON mcp_connections (tenant, client_id, COALESCE(resource, '')) WHERE status = 'active' AND kind = 'oauth'`;
+
 export const MCP_SCHEMA = `
 CREATE TABLE IF NOT EXISTS mcp_clients (
   client_id TEXT PRIMARY KEY,
@@ -64,8 +88,7 @@ CREATE TABLE IF NOT EXISTS mcp_connections (
   resource TEXT
 );
 CREATE INDEX IF NOT EXISTS mcp_connections_tenant ON mcp_connections (tenant, status);
-CREATE UNIQUE INDEX IF NOT EXISTS mcp_connections_one_active
-  ON mcp_connections (tenant, client_id, COALESCE(resource, '')) WHERE status = 'active' AND kind = 'oauth';
+${ONE_ACTIVE_INDEX_DDL};
 CREATE TABLE IF NOT EXISTS mcp_codes (
   code_hash TEXT PRIMARY KEY,
   connection_id TEXT NOT NULL,
@@ -274,27 +297,6 @@ export const MCP_SCHEMA_OBJECTS: readonly string[] = [...MCP_SCHEMA.matchAll(/CR
 /** How long a boot that has to run the DDL waits for any one lock before giving up (and retrying later). */
 export const SCHEMA_LOCK_TIMEOUT_MS = 5_000;
 
-/**
- * THE CONNECTION'S RESOURCE (2026-09, the directory profile). An owner may
- * connect the same app (claude.ai uses one client_id for a custom connector
- * and a directory connector) once per MCP resource, so the one-active rule is
- * per (tenant, client_id, resource). NULL means the canonical resource: every
- * row written before this column existed keeps meaning exactly what it did,
- * and the index folds NULL to '' so two canonical rows still collide (a plain
- * unique index treats NULLs as distinct).
- *
- * `CREATE TABLE IF NOT EXISTS` adds no column to a table that already exists,
- * and `CREATE INDEX IF NOT EXISTS` keeps an index whose definition changed,
- * so an existing database needs both steps below, run BEFORE MCP_SCHEMA in the
- * same transaction: the column (the index expression names it), then the old
- * index dropped so MCP_SCHEMA creates the new one. The index keeps its name on
- * purpose: code from before this change checks for that name at boot, and a
- * new name would make it recreate the old, stricter index, which fails once
- * an owner holds one connection per resource.
- */
-export const CONNECTION_RESOURCE_DDL = "ALTER TABLE mcp_connections ADD COLUMN resource TEXT";
-export const ONE_ACTIVE_INDEX = "mcp_connections_one_active";
-
 interface SchemaState {
   /** How many of MCP_SCHEMA_OBJECTS are missing. */
   missing: number;
@@ -352,6 +354,23 @@ const work = (s: SchemaState) => s.missing + (s.addColumn ? 1 : 0) + (s.rebuildI
  * (the caller retries on its next request or tick). The advisory lock still
  * serialises two replicas creating the schema at once; the one that waited
  * checks again and finds nothing left to do.
+ *
+ * ONLY mcp_connections WHEN ONLY THE CONNECTION-RESOURCE MIGRATION IS PENDING.
+ * MCP_SCHEMA takes a lock on every MCP table it names, one after another, and
+ * holds each until COMMIT. After the ALTER holds mcp_connections exclusively,
+ * that walk would then wait on (say) mcp_codes behind a consent approval or a
+ * code exchange that holds mcp_codes and is itself waiting on mcp_connections:
+ * a deadlock. So an existing database whose every table and index is there
+ * runs just the migration: on Postgres the one table lock it needs, taken
+ * first and at full strength (LOCK TABLE … ACCESS EXCLUSIVE, what the ALTER
+ * and the DROP INDEX take anyway), then the ALTER, the DROP and the CREATE,
+ * none of which locks any other MCP table. Waiting for that one lock holds no
+ * MCP table, and holding it waits for nothing else, so it cannot close a
+ * cycle; it can only time out and retry. Every step is idempotent (the ALTER
+ * reaches Postgres as ADD COLUMN IF NOT EXISTS, and each runs only when the
+ * catalog, re-read under the advisory lock, says it is still needed). A
+ * database missing any table or index (a fresh one included) takes the full
+ * path as before: the migration steps, then MCP_SCHEMA.
  */
 export async function ensureMcpSchema(db: Db, dialect: "postgres" | "sqlite"): Promise<void> {
   if (work(await inspectSchema(db, dialect)) === 0) return;
@@ -364,7 +383,15 @@ export async function ensureMcpSchema(db: Db, dialect: "postgres" | "sqlite"): P
     // Postgres): another replica may have done some or all of it meanwhile.
     const state = await inspectSchema(tx, dialect);
     if (work(state) === 0) return;
-    // The connection-resource migration, before MCP_SCHEMA (see CONNECTION_RESOURCE_DDL).
+    if (state.missing === 0) {
+      // Only the connection-resource migration: mcp_connections and nothing else.
+      if (dialect === "postgres") await tx.exec("LOCK TABLE mcp_connections IN ACCESS EXCLUSIVE MODE");
+      if (state.addColumn) await tx.exec(CONNECTION_RESOURCE_DDL);
+      if (state.rebuildIndex) await tx.exec(`DROP INDEX IF EXISTS ${ONE_ACTIVE_INDEX}`);
+      await tx.exec(ONE_ACTIVE_INDEX_DDL);
+      return;
+    }
+    // Something is missing: the migration steps, before MCP_SCHEMA (see CONNECTION_RESOURCE_DDL).
     if (state.addColumn) await tx.exec(CONNECTION_RESOURCE_DDL);
     if (state.rebuildIndex) await tx.exec(`DROP INDEX IF EXISTS ${ONE_ACTIVE_INDEX}`);
     await tx.exec(MCP_SCHEMA);

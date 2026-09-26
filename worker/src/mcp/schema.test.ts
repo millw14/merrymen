@@ -2,17 +2,22 @@
  * The connection-resource migration (mcp_connections.resource, 2026-09): an
  * existing database gains the column and the one-active index is rebuilt per
  * (tenant, client_id, resource), rows written before it keep meaning the
- * canonical resource, and a boot with nothing to do still runs no DDL.
+ * canonical resource, and a boot with nothing to do still runs no DDL. When
+ * the migration is all there is to do, it runs on mcp_connections alone (no
+ * whole-schema DDL locking every MCP table); a fresh database is unchanged.
  *
  * SQLite runs for real. Postgres is checked by the statements ensureMcpSchema
  * sends, in order, and their translation (the repo has no Postgres server; the
- * same DDL was also run against PGlite by hand when this landed).
+ * same DDL was also run against PGlite by hand when this landed, and the
+ * migration-only path again when it moved off MCP_SCHEMA: PGlite 0.5.8 /
+ * Postgres 18.3, where pg_locks at COMMIT showed locks on mcp_connections
+ * alone, against 14 MCP tables for the full path).
  */
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { translateQuery, translateSchema, wrapSqlite, type Db, type Stmt } from "../db";
-import { CONNECTION_RESOURCE_DDL, MCP_SCHEMA, MCP_SCHEMA_OBJECTS, ONE_ACTIVE_INDEX, ensureMcpSchema } from "./schema";
+import { CONNECTION_RESOURCE_DDL, MCP_SCHEMA, MCP_SCHEMA_OBJECTS, ONE_ACTIVE_INDEX, ONE_ACTIVE_INDEX_DDL, ensureMcpSchema } from "./schema";
 
 /** MCP_SCHEMA as it was before the column: no `resource`, and the (tenant, client_id) one-active index. */
 function legacySchema(): string {
@@ -50,7 +55,7 @@ test("SQLite: an existing database gains the column and the per-resource index; 
   assert.doesNotMatch(indexSql(raw), /resource/);
   const { db, execs } = counted(raw);
   await ensureMcpSchema(db, "sqlite");
-  assert.deepEqual(execs, [CONNECTION_RESOURCE_DDL, `DROP INDEX IF EXISTS ${ONE_ACTIVE_INDEX}`, "<MCP_SCHEMA>"], "column first, old index dropped, then the schema recreates it");
+  assert.deepEqual(execs, [CONNECTION_RESOURCE_DDL, `DROP INDEX IF EXISTS ${ONE_ACTIVE_INDEX}`, ONE_ACTIVE_INDEX_DDL], "column first, old index dropped, then only that index recreated (not the whole schema)");
   assert.match(indexSql(raw), /\(tenant, client_id, COALESCE\(resource, ''\)\) WHERE status = 'active' AND kind = 'oauth'/);
   const rows = raw.prepare("SELECT id, scopes, status, resource FROM mcp_connections ORDER BY id").all() as Array<{ id: string; scopes: string; status: string; resource: string | null }>;
   assert.deepEqual(rows.map((r) => [r.id, r.status, r.resource]), [["mcpcon_1", "active", null], ["mcpcon_2", "active", null], ["mcpcon_3", "revoked", null]]);
@@ -88,7 +93,32 @@ test("SQLite: an old-style index put back after the migration (code from before 
   raw.exec(`DROP INDEX ${ONE_ACTIVE_INDEX}`);
   raw.exec(`CREATE UNIQUE INDEX ${ONE_ACTIVE_INDEX} ON mcp_connections (tenant, client_id) WHERE status = 'active' AND kind = 'oauth'`);
   await ensureMcpSchema(db, "sqlite");
-  assert.deepEqual(execs.slice(1), [`DROP INDEX IF EXISTS ${ONE_ACTIVE_INDEX}`, "<MCP_SCHEMA>"]);
+  assert.deepEqual(execs.slice(1), [`DROP INDEX IF EXISTS ${ONE_ACTIVE_INDEX}`, ONE_ACTIVE_INDEX_DDL]);
+  assert.match(indexSql(raw), /COALESCE\(resource, ''\)/);
+});
+
+test("SQLite: the migration-only path creates the index exactly as a fresh database has it, and is safe to run again", async () => {
+  const fresh = new DatabaseSync(":memory:");
+  await ensureMcpSchema(wrapSqlite(fresh), "sqlite");
+  const migrated = new DatabaseSync(":memory:");
+  migrated.exec(legacySchema());
+  await ensureMcpSchema(wrapSqlite(migrated), "sqlite");
+  assert.equal(indexSql(migrated), indexSql(fresh));
+  // Every step again, by hand, on the migrated database: each is a no-op or idempotent where SQLite allows it.
+  migrated.exec(`DROP INDEX IF EXISTS ${ONE_ACTIVE_INDEX}`);
+  migrated.exec(ONE_ACTIVE_INDEX_DDL);
+  migrated.exec(ONE_ACTIVE_INDEX_DDL);
+  assert.equal(indexSql(migrated), indexSql(fresh));
+});
+
+test("SQLite: an old database that is also missing a table takes the full path (migration steps, then the whole schema)", async () => {
+  const raw = new DatabaseSync(":memory:");
+  raw.exec(legacySchema());
+  raw.exec("DROP TABLE mcp_exports");
+  const { db, execs } = counted(raw);
+  await ensureMcpSchema(db, "sqlite");
+  assert.deepEqual(execs, [CONNECTION_RESOURCE_DDL, `DROP INDEX IF EXISTS ${ONE_ACTIVE_INDEX}`, "<MCP_SCHEMA>"]);
+  assert.ok(raw.prepare("SELECT 1 FROM sqlite_master WHERE name = 'mcp_exports'").get());
   assert.match(indexSql(raw), /COALESCE\(resource, ''\)/);
 });
 
@@ -113,16 +143,44 @@ function pgRecorder(state: Record<string, unknown>): { db: Db; seen: string[]; p
   return { db, seen, params };
 }
 
-test("Postgres: a database with the old table and index is migrated under the lock timeout and the advisory lock, column before index before schema", async () => {
+/** Every MCP table, and the ones a statement names (a whole word: an index name such as mcp_connections_one_active is not its table). */
+const MCP_TABLES = [...MCP_SCHEMA.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)/g)].map((m) => m[1]!);
+const tablesNamed = (sql: string) => MCP_TABLES.filter((t) => new RegExp(`\\b${t}\\b`).test(sql));
+
+test("Postgres: an old table and index with everything else in place is migrated on mcp_connections alone: one table lock taken first, then column, index drop, index create; never the whole schema", async () => {
   const { db, seen } = pgRecorder({ n: "0", has_table: true, has_column: false, index_def: LEGACY_PG_INDEX });
   await ensureMcpSchema(db, "postgres");
   const at = (p: RegExp | string) => seen.findIndex((s) => (typeof p === "string" ? s === p : p.test(s)));
-  const order = [at("BEGIN"), at(/^SET LOCAL lock_timeout/), at(/pg_advisory_xact_lock/), at(CONNECTION_RESOURCE_DDL), at(`DROP INDEX IF EXISTS ${ONE_ACTIVE_INDEX}`), at("<MCP_SCHEMA>"), at("COMMIT")];
+  const order = [at("BEGIN"), at(/^SET LOCAL lock_timeout/), at(/pg_advisory_xact_lock/), at("LOCK TABLE mcp_connections IN ACCESS EXCLUSIVE MODE"), at(CONNECTION_RESOURCE_DDL), at(`DROP INDEX IF EXISTS ${ONE_ACTIVE_INDEX}`), at(ONE_ACTIVE_INDEX_DDL), at("COMMIT")];
   assert.ok(order.every((i) => i >= 0), seen.join("\n"));
   assert.deepEqual([...order].sort((a, b) => a - b), order, seen.join("\n"));
-  // What Postgres receives for the ALTER is idempotent.
+  assert.ok(!seen.includes("<MCP_SCHEMA>"), "the whole-schema DDL (a lock on every MCP table) is not run");
+  // After the advisory lock, the only statements are the catalog re-read (to_regclass/pg_attribute: no table lock)
+  // and statements that name no MCP table but mcp_connections (the DROP names only its index, whose table that is).
+  const after = seen.slice(at(/pg_advisory_xact_lock/) + 1, at("COMMIT"));
+  assert.ok(MCP_TABLES.length > 10 && MCP_TABLES.includes("mcp_codes"));
+  for (const s of after) {
+    if (/to_regclass/.test(s)) continue;
+    assert.ok(tablesNamed(s).every((t) => t === "mcp_connections"), s);
+  }
+  // The table lock comes before any other statement that locks anything.
+  assert.equal(after.filter((s) => !/to_regclass/.test(s))[0], "LOCK TABLE mcp_connections IN ACCESS EXCLUSIVE MODE");
+  // What Postgres receives is idempotent, and the index is the one a fresh database gets.
   assert.equal(translateSchema(CONNECTION_RESOURCE_DDL), "ALTER TABLE mcp_connections ADD COLUMN IF NOT EXISTS resource TEXT");
-  assert.match(translateSchema(MCP_SCHEMA), /mcp_connections_one_active\s+ON mcp_connections \(tenant, client_id, COALESCE\(resource, ''\)\) WHERE status = 'active' AND kind = 'oauth'/);
+  assert.equal(translateSchema("LOCK TABLE mcp_connections IN ACCESS EXCLUSIVE MODE"), "LOCK TABLE mcp_connections IN ACCESS EXCLUSIVE MODE");
+  assert.equal(translateSchema(ONE_ACTIVE_INDEX_DDL), ONE_ACTIVE_INDEX_DDL);
+  assert.match(ONE_ACTIVE_INDEX_DDL, /^CREATE UNIQUE INDEX IF NOT EXISTS mcp_connections_one_active\s+ON mcp_connections \(tenant, client_id, COALESCE\(resource, ''\)\) WHERE status = 'active' AND kind = 'oauth'$/);
+  assert.ok(MCP_SCHEMA.includes(`${ONE_ACTIVE_INDEX_DDL};`), "a fresh database gets the very same statement");
+});
+
+test("Postgres: an old database that is also missing an object takes the full path, unchanged (migration steps, then the schema)", async () => {
+  const { db, seen } = pgRecorder({ n: "1", has_table: true, has_column: false, index_def: LEGACY_PG_INDEX });
+  await ensureMcpSchema(db, "postgres");
+  const at = (p: RegExp | string) => seen.findIndex((s) => (typeof p === "string" ? s === p : p.test(s)));
+  const order = [at(/pg_advisory_xact_lock/), at(CONNECTION_RESOURCE_DDL), at(`DROP INDEX IF EXISTS ${ONE_ACTIVE_INDEX}`), at("<MCP_SCHEMA>"), at("COMMIT")];
+  assert.ok(order.every((i) => i >= 0), seen.join("\n"));
+  assert.deepEqual([...order].sort((a, b) => a - b), order, seen.join("\n"));
+  assert.ok(!seen.some((s) => s.startsWith("LOCK TABLE")) && !seen.includes(ONE_ACTIVE_INDEX_DDL));
 });
 
 test("Postgres: only the pieces still missing run (column present with the old index: rebuild only; column missing and no index: ALTER only)", async () => {
@@ -130,10 +188,13 @@ test("Postgres: only the pieces still missing run (column present with the old i
   await ensureMcpSchema(onlyIndex.db, "postgres");
   assert.ok(!onlyIndex.seen.includes(CONNECTION_RESOURCE_DDL));
   assert.ok(onlyIndex.seen.includes(`DROP INDEX IF EXISTS ${ONE_ACTIVE_INDEX}`));
+  assert.ok(onlyIndex.seen.includes(ONE_ACTIVE_INDEX_DDL) && !onlyIndex.seen.includes("<MCP_SCHEMA>"));
+  assert.ok(onlyIndex.seen.indexOf("LOCK TABLE mcp_connections IN ACCESS EXCLUSIVE MODE") < onlyIndex.seen.indexOf(`DROP INDEX IF EXISTS ${ONE_ACTIVE_INDEX}`), "the table is locked before the DROP locks its index");
   const onlyColumn = pgRecorder({ n: "0", has_table: true, has_column: false, index_def: null });
   await ensureMcpSchema(onlyColumn.db, "postgres");
   assert.ok(onlyColumn.seen.includes(CONNECTION_RESOURCE_DDL));
   assert.ok(!onlyColumn.seen.some((s) => s.startsWith("DROP INDEX")));
+  assert.ok(!onlyColumn.seen.includes("<MCP_SCHEMA>"));
   // A fresh database (no table yet): no ALTER, no DROP, just the schema.
   const fresh = pgRecorder({ n: String(MCP_SCHEMA_OBJECTS.length), has_table: false, has_column: false, index_def: null });
   await ensureMcpSchema(fresh.db, "postgres");

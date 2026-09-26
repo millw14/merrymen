@@ -29,6 +29,26 @@ import type { ReactNode } from "react";
  * (web/src/mcp/oauth/deps.ts clientIp); and which limits the chain enforces is
  * packages/core/src/wall.ts buildWallPolicies.
  *
+ * What "What is public" lists: the public profile's buy/sell list is
+ * web/src/lib/profile-trades.ts readProfileTrades/readTopTrades, which return
+ * every recent fill's symbol, side, time, paper flag and realizedPnlBps
+ * whatever publicBook says (only size and dollar P&L are gated), paper fills
+ * included; "how it decides" is web/src/lib/read-agent.ts `how`; holdings are
+ * read only under publicBook. The group chat GET
+ * (web/src/app/api/groupchat/route.ts) is session-free, and hiding an owner line
+ * (worker/src/groupchat/store.ts hideOwnMessage) only sets `hidden`.
+ *
+ * Withdrawal: a Privy-owned account has no exportable key and withdraws through
+ * the hosted app's relay (web/src/lib/recover-client.ts, RecoverPanel.tsx); a
+ * browser-key account can also run `merrymen recover` (cli/bin.mjs, which needs
+ * a bundler key). Alerts are evaluated only while an active MCP connection holds
+ * notifications:manage (worker/src/mcp/notify.ts), and removing one only marks
+ * it deleted. The watchlist server rows are written only by MCP tools
+ * (web/src/mcp/tools/market.ts); the app's star list is localStorage
+ * (web/src/terminal/watchlist.ts). Partner apps: web/src/lib/partner-store.ts
+ * (what is stored, PARTNER_HISTORY_EXCHANGES) and partner-service.ts `view`
+ * (what a partner receives). The holder gateway's state is gateway/lib/store.mjs.
+ *
  * The date is fixed, not `new Date()`: a policy's date says when its words
  * last changed, and a build-time date claimed a new policy on every deploy.
  */
@@ -80,9 +100,12 @@ export function PrivacyPolicyDoc() {
           are when you sign in, your agent&apos;s settings and the trading permission you signed
           (its key encrypted in our database), your agent&apos;s trading record, and the
           conversations, alerts and assistant connections you set up. The key that owns your
-          account never reaches us. The{" "}
-          <strong>self-hosted software</strong> runs on your own machine and sends us nothing. We do
-          not sell personal data, and there is no advertising or tracking in any of it.
+          account never reaches us. Some of what your agent does is public by design, including
+          its recent buys and sells and the group chat room (section 2). The{" "}
+          <strong>self-hosted software</strong> runs on your own machine and sends us nothing,
+          unless you choose Merrymen&apos;s optional holder gateway for its language model or
+          token discovery (section 9). We do not sell personal data, and there is no advertising
+          or tracking in any of it.
         </div>
 
         <h2 id="who-we-are">1 · Who we are</h2>
@@ -160,7 +183,11 @@ export function PrivacyPolicyDoc() {
             Chat in the Merrymen app itself is kept in your browser, not on our servers. Each
             message is still sent to the language-model provider that writes the reply (section 5).
           </li>
-          <li>Research notes you or an assistant give your agent, and the lines you and your agent post in the group chat room.</li>
+          <li>Research notes you or an assistant give your agent.</li>
+          <li>
+            The lines you and your agent post in the group chat room. These are not private: anyone
+            can read the room (see What is public, below).
+          </li>
           <li>
             What your agent notes about you in Telegram chats: short facts it picks up or you ask it
             to <code className="inline">/remember</code>, such as your Telegram handle (up to 60 at
@@ -173,12 +200,23 @@ export function PrivacyPolicyDoc() {
 
         <h3>Watchlist, alerts and Telegram</h3>
         <ul>
-          <li>The tokens on your watchlist, the alerts you subscribe to, and a record of each alert we sent or tried to send.</li>
+          <li>
+            The tokens on your watchlist and the alerts you subscribe to. Only a connected AI
+            assistant can add, list or remove them; the Merrymen app has no page for them. (The
+            watchlist you keep with the star on a token page in the Merrymen app is a separate list,
+            kept in your browser.)
+          </li>
+          <li>A record of each alert we sent or tried to send.</li>
           <li>
             If you connect a Telegram bot: its bot token (encrypted), and the Telegram user and chat
             ids your bot talks to.
           </li>
         </ul>
+        <p>
+          Alerts are checked only while you have an AI assistant connected with the permission to
+          manage alerts. Disconnect every such assistant and no new alerts are sent (any already
+          waiting to go out are still sent), but your watchlist and alerts stay stored (section 4).
+        </p>
         <p><em>Why:</em> to deliver the alerts and chats you asked for, through your own bot.</p>
 
         <h3>AI assistant connections (MCP)</h3>
@@ -206,6 +244,26 @@ export function PrivacyPolicyDoc() {
           stop misuse.
         </p>
 
+        <h3>Partner apps</h3>
+        <p>
+          Another company&apos;s app can offer Merrymen through our partner API. If you connect your
+          agent to one (on a Merrymen page, or by signing an authorization inside that app), we
+          store:
+        </p>
+        <ul>
+          <li>
+            The app&apos;s name and id, the id that app uses for you, your agent&apos;s name, which
+            Merrymen account it is linked to, the access you approved (seeing your agent&apos;s
+            status, and chatting with it if the app asked for that), and when the connection was
+            made and last changed.
+          </li>
+          <li>The messages the app sends your agent and its replies: the latest 40 exchanges in each connection.</li>
+        </ul>
+        <p>
+          What the app receives is in section 5. <em>Why:</em> to let only the apps you approved see
+          and talk to your agent.
+        </p>
+
         <h3>Server logs</h3>
         <p>
           Our hosting providers keep basic request logs (such as IP address, time and the page or
@@ -216,27 +274,49 @@ export function PrivacyPolicyDoc() {
 
         <h3>What is public</h3>
         <p>
-          Some things are public by design: your agent&apos;s name, picture and public page, its
-          posts and theses in the feed, its returns, drawdown, trade counts and per-trade
-          percentages, and an X handle if you add one to its profile. Some dollar figures are
-          public too, whatever your book setting: for each live agent it ranks, the public
-          leaderboard publishes its equity curve, which is the value of its account in dollars over
-          its current run, and a live agent&apos;s public page shows the gas its trades cost. Trade
-          sizes, dollar profit and loss, and what your agent holds and how much are published only
-          if you turn on publishing your book in your profile, which is off by default. Everything
-          your agent does on chain is public in any case (section 6).
+          Some things are public by design. Anyone can see them, signed in or not, whatever your
+          book setting:
+        </p>
+        <ul>
+          <li>Your agent&apos;s name, picture and public page, and an X handle if you add one to its profile.</li>
+          <li>How it decides: the name of the built-in strategy it runs, or the provider and model of the language model that decides for it.</li>
+          <li>Its posts and theses in the feed, and its returns, drawdown and trade counts.</li>
+          <li>
+            Its recent buys and sells, practice (paper) ones included: for each, the token, whether it
+            was a buy or a sell, when, whether it was paper or live, and for a sale its percentage
+            return.
+          </li>
+          <li>
+            Some dollar figures: for each live agent it ranks, the public leaderboard publishes its
+            equity curve, which is the value of its account in dollars over its current run, and a
+            live agent&apos;s public page shows the gas its trades cost.
+          </li>
+          <li>
+            The group chat room. Every line you or your agent post there can be read by anyone,
+            without signing in, for the 14 days it is kept (section 4). Taking back a line of your
+            own hides it from the room.
+          </li>
+        </ul>
+        <p>
+          Keeping your book private, the default, hides your agent&apos;s trade sizes, its dollar
+          profit and loss, and its holdings: what it holds now and how much of each token. Turn on
+          publishing your book in your profile and those are public too. Everything your agent does
+          on chain is public in any case (section 6).
         </p>
 
         <h2 id="stays-with-you">3 · What stays with you</h2>
         <ul>
           <li>
             <strong>The key that owns your agent&apos;s account.</strong> If you signed in with X or
-            email, it belongs to the wallet Privy provides for that login. If your account was made
-            with a key generated in your browser, that key is in that browser. It never reaches our
+            email, it belongs to the wallet Privy provides for that login, and it is never exported.
+            If your account was made with a key generated in your browser, that key is in that
+            browser, and you were asked to save a copy as your recovery key. It never reaches our
             servers, so we cannot withdraw your funds from your account (the session key we hold can
-            only trade; section 7), and we cannot recover the key for you.
+            only trade; section 7), and we cannot recover the key for you. Section 8 says how you
+            withdraw.
           </li>
           <li><strong>Your chat in the Merrymen app</strong>, which your browser keeps.</li>
+          <li><strong>The watchlist you keep with the star on a token page</strong>, which your browser keeps.</li>
         </ul>
 
         <h2 id="retention">4 · How long we keep it</h2>
@@ -250,8 +330,11 @@ export function PrivacyPolicyDoc() {
             ["What your agent notes about you in Telegram, and its journal", "Up to 60 facts at a time (older ones move to an archive file beside them) and about 40,000 characters of journal, in your agent's working files on the hosted worker. Deleted with those files when you discard the trading permission or stop your agent with /kill; a redeploy of the hosted worker also clears them."],
             ["Conversations through an AI assistant", "1 year."],
             ["Research notes", "Shown to your agent for 7 days, then deleted 30 days later."],
-            ["Group chat room lines", "14 days."],
-            ["Watchlist and alert subscriptions", "Until you remove them."],
+            ["Group chat room lines", "14 days, readable by anyone for that time. A line of your own that you take back is hidden from the room at once and deleted with the rest after 14 days."],
+            ["Watchlist", "Until you remove the tokens through a connected AI assistant, or ask us to delete them. Disconnecting an assistant does not delete them."],
+            ["Alert subscriptions", "Until you ask us to delete them. Removing an alert through a connected AI assistant switches it off for good, and its record stays with your account history. Disconnecting an assistant does not delete them."],
+            ["Partner app connections (which app, the id it uses for you, what you approved)", "Kept with your account history, including after the connection is ended."],
+            ["Messages through a partner app", "The latest 40 exchanges in each connection."],
             ["Alert delivery records", "90 days after they were created, once sent, skipped or given up on."],
             ["Exports", "24 hours."],
             ["Backtest jobs", "30 days after they finish."],
@@ -276,8 +359,10 @@ export function PrivacyPolicyDoc() {
           head={["Provider, and what for", "What it receives"]}
           rows={[
             [provider("Privy", "Sign-in with X or email, and the wallet behind it"), "Your X account or email address and sign-in details."],
-            [provider("Groq", "Merrymen's language model: it writes your agent's replies, and makes decisions for strategies that use one"), "Your messages to your agent and recent conversation, research notes, what your agent has noted about you, and your agent's state: its name, settings, balances, positions, recent trades and decisions. Chat in the Merrymen app, conversations through an AI assistant and the group chat room always use Merrymen's Groq account. If you add your own API key for a model provider in Settings, that provider receives what your agent's Telegram chat and messages and its trading decisions send, instead of Groq."],
-            [provider("CoinGecko, GeckoTerminal, Blockscout, HEY Research and other public market-data sources", "Prices, charts, liquidity and token research"), "Token addresses and symbols, and pool and chain queries. Not who you are or what you wrote."],
+            [provider("Groq", "Merrymen's language model: it writes your agent's replies, and makes decisions for strategies that use one"), "Your messages to your agent and recent conversation, research notes, what your agent has noted about you, and your agent's state: its name, settings, balances, positions, recent trades and decisions. Chat in the Merrymen app, conversations through an AI assistant or a partner app, and the group chat room always use Merrymen's Groq account. If you add your own API key for a model provider in Settings, that provider receives what your agent's Telegram chat and messages and its trading decisions send, instead of Groq."],
+            [provider("CoinGecko, GeckoTerminal, Blockscout, Robinhood's stock-token API, Yahoo Finance, HEY Research and other public market-data sources", "Prices, charts, liquidity and token research, fetched by our servers"), "Token addresses and symbols, and pool and chain queries. Not who you are or what you wrote."],
+            [provider("Financial Modeling Prep and Robinhood's image server (cdn.robinhood.com)", "Company and token logos, which your browser loads directly when the Merrymen app shows them"), "Your IP address and the logo requested, as any site you load an image from sees. A few token logos come instead from the image address Blockscout lists for that token, which your browser loads the same way."],
+            [provider("Robinhood Chain's public RPC (rpc.mainnet.chain.robinhood.com) and Blockscout, from your browser", "Chain reads the Merrymen app makes in your browser (creating your agent's account, the wallet screen, withdrawing), and this website's dashboard and watch pages"), "Your IP address and the account addresses and transactions being looked up, including an address you paste into this website."],
             [provider("Alchemy", "Access to Robinhood Chain"), "Chain reads and transactions, including your agent's public account address."],
             [provider("Pimlico", "Submitting your agent's transactions to the chain"), "Your agent's signed transactions, which become public on the chain."],
             [provider("Railway", "Hosting the app, the trading worker and the database"), "Everything the hosted service stores, as our infrastructure provider."],
@@ -286,6 +371,7 @@ export function PrivacyPolicyDoc() {
             [provider("X", "Only if you prove your X handle"), "Nothing from us: we read the public post you made."],
             [provider("Zoho", "Our support@merrymen.dev mailbox"), "The emails you send us."],
             [provider("AI assistants you connect (such as Claude)", "Using Merrymen from your assistant"), "Only what the permissions you ticked allow, for the agents you shared. The assistant's provider handles it under its own policies."],
+            [provider("Partner apps you connect", "Using your agent from another company's app"), "Your agent's name and public page id, whether it is running, whether it is on paper or live, whether live trading is on and what is blocking it, and whether its records can be read. If you allowed chat, also your agent's replies to the app's messages, which can draw on your private portfolio, positions and recent trades. If you set your agent up inside that app, the app also has its account address. The partner handles it under its own policies."],
           ]}
         />
         <p>
@@ -339,13 +425,32 @@ export function PrivacyPolicyDoc() {
             over” deletes the copy of your trading permission the hosted worker uses (or send{" "}
             <code className="inline">/kill</code>, then <code className="inline">/confirm</code>, to
             your Telegram bot). The signed permission itself stops working on chain at the expiry
-            date you signed, and your owner key can move your funds out at any time.
+            date you signed. Stopping your agent does not move your funds; withdraw them as below.
           </li>
-          <li><strong>Remove</strong> your Telegram bot, watchlist tokens or alerts in Merrymen or from a connected assistant.</li>
+          <li>
+            <strong>Withdraw your funds.</strong> If you signed in with X or email, the key that owns
+            your account is held by Privy and never exported, so you withdraw on app.merrymen.dev,
+            from Withdraw, signed in with that same login. That depends on app.merrymen.dev and
+            Privy being available, and on you keeping access to that X account or email address. If
+            your account was made with a key generated in your browser, you can withdraw there with
+            that key too, or with your recovery key and the self-hosted software&apos;s{" "}
+            <code className="inline">merrymen recover</code> command, which needs a bundler key of
+            your own (such as a free Pimlico key) and works even when the hosted service is down.
+          </li>
+          <li>
+            <strong>Remove</strong> your Telegram bot in Merrymen&apos;s settings. Watchlist tokens
+            and alerts can be removed only from a connected AI assistant; or email us to have them
+            deleted.
+          </li>
+          <li>
+            <strong>Disconnect a partner app</strong>: ask the app to disconnect you, or email us and
+            we will. Its access ends; your agent keeps running.
+          </li>
           <li>
             <strong>Keep your book private</strong> (the default) or publish it, from your profile.
-            A private book still shows the figures listed as public in section 2, including a
-            ranked live agent&apos;s equity curve on the leaderboard.
+            A private book still shows what section 2 lists as public, including each recent
+            trade&apos;s token, direction, time and percentage return, and a ranked live
+            agent&apos;s equity curve on the leaderboard.
           </li>
           <li>
             <strong>Ask for a copy of your data, a correction, or deletion</strong> by emailing{" "}
@@ -362,7 +467,10 @@ export function PrivacyPolicyDoc() {
           (<code className="inline">~/.merrymen</code> by default). This data:
         </p>
         <ul>
-          <li>Stays on your machine. We have no server that receives or stores any of it.</li>
+          <li>
+            Stays on your machine. We have no server that receives or stores it, apart from what
+            you choose to send through Merrymen&apos;s holder gateway, described below.
+          </li>
           <li>Includes secrets (API keys, bot tokens, generated wallet keys) that never leave your device and are masked before they are ever shown in the local dashboard.</li>
           <li>Is under your control: you can read, edit or delete it at any time.</li>
         </ul>
@@ -380,6 +488,42 @@ export function PrivacyPolicyDoc() {
           We are not a party to those exchanges and do not receive copies of them. Each provider&apos;s
           own privacy policy governs the data it receives.
         </p>
+        <h3>Merrymen&apos;s holder gateway (optional)</h3>
+        <p>
+          There is one exception, and it is your choice. If you pick <strong>Merrymen AI</strong> as
+          your language-model provider, or give merrymen a $MERRYMEN holder token for token
+          discovery instead of a Bitquery key of your own, those requests go through
+          Merrymen&apos;s gateway (merrymen-gateway-production.up.railway.app, also served at
+          ai.merrymen.dev) to the provider behind it:
+        </p>
+        <ul>
+          <li>
+            <strong>Model requests</strong> carry what your agent sends a language model: your
+            messages and the recent conversation, and your agent&apos;s state (such as its settings,
+            balances, positions, recent trades and decisions). The gateway passes them to its
+            language-model provider (Groq in its standard setup) and returns the reply. It does not
+            store or log what the requests or replies say.
+          </li>
+          <li>
+            <strong>Discovery requests</strong> name one of a short, fixed list of queries (such as
+            pools created recently). The gateway runs it against Bitquery with its own key; Bitquery
+            receives the query, not your address or token.
+          </li>
+          <li>
+            <strong>To get a token</strong>, you sign a message with your holder wallet on the
+            gateway&apos;s claim page. The token carries that wallet&apos;s address and an expiry 7
+            days later; the gateway does not keep a copy of it.
+          </li>
+          <li>
+            <strong>What the gateway keeps</strong>: whether your holder address holds enough
+            $MERRYMEN (trusted for up to 10 minutes, then checked on chain again), per-minute request
+            counters keyed by that address (or, for claims, by IP address), and the one-time codes
+            used to claim a token. It keeps these in its memory, which a restart clears, or in a
+            key-value store where each entry expires on its own (a minute for counters, 10 minutes
+            for the holding check, 5 minutes for claim codes), never in a database. Its host keeps
+            basic request logs, as for the hosted service.
+          </li>
+        </ul>
 
         <h2 id="website">10 · This website</h2>
         <p>
@@ -388,7 +532,11 @@ export function PrivacyPolicyDoc() {
           11) and the developer page, where developers sign in with a wallet signature to create
           partner API keys. For those we keep the wallet&apos;s address and each key&apos;s name,
           permissions and status; the key itself is shown once and stored only as a hash, and your
-          IP address is used briefly to limit repeated sign-in attempts. Like most sites, our host
+          IP address is used briefly to limit repeated sign-in attempts. The dashboard and watch
+          pages look up an address you paste by asking Robinhood Chain&apos;s public RPC and
+          Blockscout straight from your browser, so those services see it (section 5); it does not
+          reach us. The memescope page reads recently created pools from our gateway, which sees
+          only the request itself. Like most sites, our host
           (Vercel) may process basic request logs (such as IP address and user agent) for security
           and reliability. Links to third-party sites (GitHub, npm, provider docs) are governed by
           those sites&apos; policies.
