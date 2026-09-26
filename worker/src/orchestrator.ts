@@ -91,6 +91,7 @@ import { custodyAddressesOf } from "./custody";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
+import { recordStandDown } from "./stand-down";
 import { TELEGRAM_STATE_DDL, publishTenantTelegram, readTenantTelegram } from "./telegram-store";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
@@ -1157,6 +1158,12 @@ async function writeBootstrapForChild(
 
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
+  // The exit handler's restart timer, firing into a home the kill switch is
+  // about to delete. See `standingDown`.
+  if (standingDown.has(tenant)) {
+    log(`${tenant}: being stood down by the kill switch — not spawning`);
+    return;
+  }
   // The advisory lease is a precondition, taken by reconcile() before the FIRST
   // spawn and held across restarts — so this path (including the crash-restart
   // that re-enters here) never re-acquires it, which would open a window for
@@ -1465,12 +1472,7 @@ export async function reconcile(): Promise<void> {
   for (const tenant of [...children.keys()]) {
     if (!wanted.has(tenant)) {
       log(`${tenant} grant removed — standing it down`);
-      killChild(tenant);
-      try {
-        rmSync(childHome(tenant), { recursive: true, force: true });
-      } catch {
-        /* best-effort cleanup */
-      }
+      await standDownKilled(tenant);
     }
   }
   // Release any lease we still hold for a tenant that is no longer wanted — both
@@ -1479,6 +1481,160 @@ export async function reconcile(): Promise<void> {
   // (or a later re-arm) for no reason.
   for (const tenant of [...leases.keys()]) {
     if (!wanted.has(tenant)) await releaseLease(tenant);
+  }
+}
+
+/**
+ * Tenants between the kill switch's SIGTERM and their released lease.
+ * spawnChild refuses them.
+ *
+ * The exit handler treats a stood-down child like any other exit and
+ * schedules a restart one second later. The stand-down now takes at least
+ * that long, because it carries the child's ledger up first, and the lease is
+ * held throughout. If the owner re-signed in that window, the store has a
+ * grant again, so the restart would spawn a new child into the home that is
+ * about to be deleted, under the lease that is about to be released.
+ */
+const standingDown = new Set<string>();
+
+/** How long a stood-down child gets to exit before its ledger is read anyway. killChild SIGKILLs at 3 s. */
+const STAND_DOWN_EXIT_MS = 4_000;
+/** A ceiling on recording the kill, so a shared database that hangs cannot hold the fleet loop. */
+const STAND_DOWN_RECORD_MS = 15_000;
+
+/** Resolves once `proc` has exited, or after `ms`, whichever comes first. */
+function exitOf(proc: ChildProcess, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
+    const timer = setTimeout(resolve, ms);
+    proc.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+/** Test seam: the shared ledger a stand-down records into, in place of DATABASE_URL. */
+let sharedForTest: Db | null = null;
+
+async function sharedLedger(): Promise<Db | null> {
+  if (sharedForTest) return sharedForTest;
+  const url = process.env.DATABASE_URL;
+  return url ? makePgDb(url) : null;
+}
+
+/**
+ * Test seam: a running child with a healthy lease, and the shared ledger its
+ * stand-down records into. A test can then drive the real reconcile() kill
+ * switch with no worker process and no Postgres.
+ */
+export function adoptLeasedChildForTest(args: {
+  tenant: `0x${string}`;
+  smartAccount: `0x${string}`;
+  /** What the stand-down uses of a ChildProcess. */
+  proc: {
+    kill(signal?: NodeJS.Signals | number): boolean;
+    once(event: "exit", listener: () => void): unknown;
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+  };
+  shared: Db | null;
+}): void {
+  const lc = args.tenant.toLowerCase() as `0x${string}`;
+  children.set(lc, { proc: args.proc as unknown as ChildProcess, tenant: lc, smartAccount: args.smartAccount, startedAt: Date.now(), restarts: 0, staleSec: 600, firstBeatSec: 600 });
+  leases.set(lc, { tenant: lc, backend: "none", healthy: () => true, release: async () => {} });
+  sharedForTest = args.shared;
+}
+
+/**
+ * THE KILL SWITCH, CARRIED OUT: stop the child, record what it did, then
+ * delete its home.
+ *
+ * THE ORDER IS THE FIX. This used to SIGTERM and delete the home in the same
+ * breath. mirrorLedgers() runs after reconcile(), so everything the child had
+ * written since the previous pass went with the home, including, for a
+ * Telegram /kill, its own record of the kill. See stand-down.ts.
+ *
+ * SIGTERM still comes first, so stopping the agent never waits on a database.
+ * The recording is best-effort and time-boxed. The home is deleted and the
+ * lease released whether or not it succeeds.
+ */
+async function standDownKilled(tenant: string): Promise<void> {
+  const child = children.get(tenant);
+  if (!child) return;
+  standingDown.add(tenant);
+  try {
+    const exited = exitOf(child.proc, STAND_DOWN_EXIT_MS);
+    killChild(tenant);
+    // Read the ledger once nothing can write to it any more.
+    await exited;
+    try {
+      await recordKill(tenant, child);
+    } catch (e) {
+      log(`${tenant}: recording the kill failed — ${e instanceof Error ? e.message : String(e)}`);
+    }
+    try {
+      rmSync(childHome(tenant), { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
+    await releaseLease(tenant);
+  } finally {
+    standingDown.delete(tenant);
+  }
+}
+
+/** The last mirror and the kill record, for the stood-down child. Never throws. */
+async function recordKill(tenant: string, child: Child): Promise<void> {
+  // The mirror's own rule: only the replica holding the lease may write for
+  // this tenant (see the note in mirrorLedgers).
+  const lease = leases.get(tenant);
+  if (!lease || !lease.healthy()) {
+    log(`${tenant}: stood down without a last mirror — this replica no longer holds its lease`);
+    return;
+  }
+  let shared: Db | null;
+  try {
+    shared = await sharedLedger();
+  } catch (e) {
+    log(`${tenant}: stood down without a last mirror — shared db unavailable: ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+  if (!shared) return;
+  let timer: NodeJS.Timeout | undefined;
+  const r = await Promise.race([
+    recordStandDown({
+      tenant,
+      home: childHome(tenant),
+      smartAccount: child.smartAccount,
+      since: Math.floor(child.startedAt / 1000),
+      shared,
+    }),
+    new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), STAND_DOWN_RECORD_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+  if (!r) {
+    log(`${tenant}: last mirror still running after ${STAND_DOWN_RECORD_MS / 1000}s — deleting the home anyway`);
+    return;
+  }
+  if (r.mirror) {
+    if (r.mirror.failed) {
+      const why = Object.entries(r.mirror.failed).map(([k, v]) => `${k}: ${v}`).join(" | ");
+      log(`ledger mirror: ${tenant} STALLED on its last pass — ${why}`);
+    }
+    const counts = mirrorCountsLine(tenant, r.mirror);
+    if (counts) log(`${counts} · last pass before the kill switch deletes its home`);
+  } else {
+    log(`${tenant}: no last mirror — ${r.mirrorError ?? "no ledger on disk"}`);
+  }
+  if (r.event === "failed") {
+    log(`${tenant}: kill NOT recorded in the shared db — ${r.recordError}`);
+  } else {
+    log(
+      `${tenant}: kill recorded — agents row set to killed (${r.marked} row${r.marked === 1 ? "" : "s"}), ` +
+        (r.event === "written" ? "KILL SWITCH event written" : "the child's own KILL SWITCH event was already there"),
+    );
   }
 }
 
