@@ -168,6 +168,21 @@ test("anything but deposits is an operator's call, and stays refused until money
   }
 });
 
+test("an account past its first accounting epoch is refused: its carry and its deposits would count twice", () => {
+  const { plan, cap } = planFor(DEPOSITS(), { agent: agentRow({ epoch: 2 }) });
+  const d = decideAutoCapital({
+    plan,
+    cap,
+    onchainCashRaw: 10_872_801n,
+    vaultCashRaw: 0n,
+    head: HEAD,
+    hwmGrossUsdg: 10.872801,
+    hwmWithdrawnUsdg: 0,
+  });
+  assert.equal(d.apply, false);
+  assert.match(d.why, /epoch 2/);
+});
+
 test("a balance the deposits do not explain is refused", () => {
   const d = decide(DEPOSITS(), { onchainCashRaw: 10_000_000n });
   assert.equal(d.apply, false);

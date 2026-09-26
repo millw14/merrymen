@@ -154,6 +154,10 @@ export function decideAutoCapital(a: {
   if (!cap) return no("no chain scan result", true);
   if (!cap.complete) return no("the chain scan did not cover every window — trying again next pass", true);
   if (plan.blocked) return no(plan.blocked, !plan.chainComplete);
+  // ONE EPOCH ONLY. A later epoch opens on a carried balance, and the chain's
+  // deposits span every epoch, so booking them all into this one would count
+  // the money twice.
+  if (plan.epoch !== 1) return no(`the account is in accounting epoch ${plan.epoch} — an operator's call`);
   if (cap.movements.length === 0) return no("no USDG has ever moved on this account");
 
   // EVERY MOVEMENT A DEPOSIT, or nothing is decided here. A withdrawal, a trade
