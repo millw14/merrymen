@@ -171,7 +171,7 @@ merrymen kill       # kill switch — destroys the grant`}
             <tr><td><code className="inline">/status /positions /pnl /trades</code></td><td>read the live book</td></tr>
             <tr><td><code className="inline">/report · /brag · /why</code></td><td>daily report · shareable scorecard · explain the last trade</td></tr>
             <tr><td><code className="inline">/buy &lt;SYM&gt; &lt;usdg&gt; · /sell …</code></td><td>trade (passes the policy wall)</td></tr>
-            <tr><td><code className="inline">/transfer &lt;0x…&gt; &lt;usdg&gt;</code></td><td>send USDG out — always asks to /confirm</td></tr>
+            <tr><td><code className="inline">/transfer &lt;0x…&gt; &lt;usdg&gt;</code></td><td>send USDG out — refused on any wallet signed since 2 Aug 2026 (see <a href="#transfers">Transfers</a>)</td></tr>
             <tr><td><code className="inline">/alert &lt;SYM&gt; &gt; &lt;price&gt;</code></td><td>one-shot price alerts · /alerts · /unalert</td></tr>
             <tr><td><code className="inline">/pause /resume · /strategy · /cap</code></td><td>steer the worker (cap only tightens)</td></tr>
             <tr><td><code className="inline">/name · /soul · /remember</code></td><td>name it, see who it is, teach it about you</td></tr>
@@ -186,17 +186,31 @@ merrymen kill       # kill switch — destroys the grant`}
 
         {/* ── transfers ── */}
         <h2 id="transfers">Transfers</h2>
-        <p>Sending USDG out of the account is triple-guarded:</p>
-        <ul>
-          <li><strong>Off by default</strong> — enable “allow transfers” in settings.</li>
-          <li><strong>Amount-capped on-chain</strong> — the grant&apos;s call policy caps the per-transfer amount.</li>
-          <li><strong>Always confirmed</strong> — every transfer echoes the full recipient address and waits for an explicit <code className="inline">/confirm</code> (90s), plus a daily transfer budget.</li>
-        </ul>
         <p>
-          A prompt-injected “send everything to 0xevil” can at worst produce a confirmation card you
-          will see and <code className="inline">/cancel</code>. Transfers need a wallet created with the transfer
-          permission; a pre-transfer grant gets a “re-create your wallet” reply instead.
+          Sending USDG out through chat is <strong>refused</strong> for any wallet signed since
+          2 August 2026. The wall only grants a USDG transfer to withdrawal addresses registered when
+          the grant is signed, and no signer registers one — so the call policy carries no transfer
+          permission at all, and <code className="inline">/transfer</code> is turned back before
+          anything is built. With “allow transfers” off, the reply says transfers from chat are off;
+          with it on, the reply is “this wall carries no transfer permission — no withdrawal address
+          was registered when it was signed”. Re-creating the wallet doesn&apos;t change that: a
+          wallet signed today registers no withdrawal address either.
         </p>
+        <p>Money leaves through the <strong>owner key</strong>, which no wall can block:</p>
+        <ul>
+          <li><strong>Hosted</strong> — <strong>Withdraw</strong> in your profile on app.merrymen.dev.</li>
+          <li><strong>Self-hosted</strong> — <code className="inline">merrymen recover</code> sweeps the smart account to a wallet you control.</li>
+        </ul>
+        <div className="callout">
+          <strong>Wallets signed before 2 August 2026</strong>, if their key hasn&apos;t expired,
+          still carry the older transfer permission: any recipient, amount-capped on-chain at the
+          per-trade size. For those,{" "}
+          <code className="inline">/transfer</code> still works behind “allow transfers” (off by
+          default), a daily transfer budget, and an explicit <code className="inline">/confirm</code>{" "}
+          (90s) after the full recipient address is echoed back — so a prompt-injected “send
+          everything to 0xevil” can at worst produce a confirmation card you will see and{" "}
+          <code className="inline">/cancel</code>.
+        </div>
 
         {/* ── pc control ── */}
         <h2 id="pc-control">PC remote control</h2>
@@ -312,7 +326,7 @@ merrymen kill       # kill switch — destroys the grant`}
         </p>
         <ul>
           <li><strong>Trades</strong> pass caps enforced by the account contract; every swap is simulated first.</li>
-          <li><strong>Transfers</strong> are amount-capped on-chain, off by default, and confirm-gated.</li>
+          <li><strong>Transfers</strong> out through chat are refused: no wallet signed since 2 August 2026 carries a transfer permission. Money leaves with your owner key.</li>
           <li><strong>PC actions</strong> are off by default, per-capability, allowlisted, and the sharp ones are confirmed.</li>
           <li><strong>Secrets</strong> live only in <code className="inline">~/.merrymen</code> and are masked before they ever reach the browser.</li>
           <li><strong>The kill switch</strong> destroys the grant; hard on-chain key expiry is the backstop.</li>
