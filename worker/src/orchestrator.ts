@@ -88,6 +88,14 @@ import { datasetLines, viewRun } from "./brain-dataset";
 import { auditIdentity, type GrantClaimLite, type IdentityRowLite } from "./identity-audit";
 import { replayLines, scoreDecision, type Observation, type PricedDecision } from "./replay";
 import { custodyAddressesOf } from "./custody";
+import {
+  autoCapitalEnv,
+  runAutoCapitalPass,
+  withVerifiedCash,
+  type AutoCapitalKnobs,
+  type AutoCapitalTenant,
+  type VerifiedCash,
+} from "./auto-capital";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
@@ -1119,6 +1127,18 @@ async function writeBootstrapForChild(
       await db.exec(RISK_PERIOD_SCHEMA);
       riskPeriod = (await readRiskPeriod(db, smartAccount)) ?? undefined;
       accounting = await deriveBootstrapAccounting(db, smartAccount, now);
+      // A BALANCE THIS PROCESS JUST VERIFIED, for an account whose deposits the
+      // capital pass booked. Until the child writes an equity row of its own,
+      // the newest one predates the deposits and would read them as drift.
+      const verified = verifiedCash.get(smartAccount.toLowerCase());
+      if (verified) {
+        const newest = (await db
+          .prepare("SELECT at FROM equity WHERE LOWER(agent_id) = ? ORDER BY at DESC, id DESC LIMIT 1")
+          .get(smartAccount.toLowerCase())) as { at: unknown } | undefined;
+        const newestAt = newest ? Number(newest.at) : null;
+        accounting = withVerifiedCash(accounting, verified, newestAt);
+        if (newestAt !== null && newestAt > verified.atSec) verifiedCash.delete(smartAccount.toLowerCase());
+      }
     } catch (e) {
       accounting = { kind: "unknown", why: e instanceof Error ? e.message : String(e), observedAt: now };
     }
@@ -4450,6 +4470,10 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     );
     const chain = await scanFleetCapital(rpc, {
       accounts,
+      // SCANNED SCOPED, CLASSIFIED FLEET-WIDE. Narrowing the scan must not narrow
+      // what counts as ours: a transfer from a hosted account outside the scope
+      // would otherwise read as an outside deposit and be booked as capital.
+      knownAccounts: allAccounts,
       usdgToken,
       fromBlock: 0n,
       toBlock: head,
@@ -5201,6 +5225,104 @@ let groupChatKnobs: GroupChatEnv | null = null;
 /** The MCP background tick, built on the first reconcile pass (worker/src/mcp/background.ts). */
 let mcpBackground: (() => void) | null = null;
 
+/**
+ * DEPOSITS NOBODY BOOKED, booked from the chain (auto-capital.ts).
+ *
+ * On its own clock, started and never awaited like the room, and only for the
+ * tenants this replica holds. What it books, it restarts: a child arms against
+ * its anchor once, so the new contributions reach it only through a fresh one.
+ */
+let autoCapitalKnobs: AutoCapitalKnobs | null = null;
+let autoCapitalInFlight = false;
+let autoCapitalNextAt = 0;
+/** account → the balance it was refused at; skipped until that balance moves. */
+const autoCapitalRefused = new Map<string, bigint>();
+/** account → the balance the pass verified when it booked, for the next anchor written. */
+const verifiedCash = new Map<string, VerifiedCash>();
+
+function startAutoCapitalPass(): void {
+  if (autoCapitalInFlight || stopping) return;
+  if (!autoCapitalKnobs) {
+    autoCapitalKnobs = autoCapitalEnv();
+    log(autoCapitalKnobs.note);
+    // A minute after boot, not on the first pass: the mirror is still carrying
+    // every child's rows up, and a flow it has not copied yet is one this pass
+    // would not see.
+    autoCapitalNextAt = Date.now() + 60_000;
+  }
+  if (!autoCapitalKnobs.enabled || !process.env.DATABASE_URL || Date.now() < autoCapitalNextAt) return;
+  autoCapitalNextAt = Date.now() + autoCapitalKnobs.everyMs;
+  autoCapitalInFlight = true;
+  void runAutoCapital().finally(() => {
+    autoCapitalInFlight = false;
+  });
+}
+
+async function runAutoCapital(): Promise<void> {
+  try {
+    const shared = await makePgDb(process.env.DATABASE_URL!);
+    const gs = getGrantStore();
+    const tenants: AutoCapitalTenant[] = [];
+    for (const [tenant, child] of [...children]) {
+      const held = leases.get(tenant);
+      if (!held || !held.healthy()) continue;
+      if (killRequested(childHome(tenant))) continue;
+      const g = await gs.get(tenant as `0x${string}`);
+      // Mainnet only: the USDG the scan reads is the 4663 deployment.
+      if (!g || Number(g.chainId) !== 4663) continue;
+      tenants.push({ tenant, smartAccount: child.smartAccount, vaults: custodyAddressesOf(g) });
+    }
+    const rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
+    let rpcId = 1;
+    const rpc = async (method: string, params: unknown[]): Promise<unknown> => {
+      const r = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method, params }),
+      });
+      const j = (await r.json()) as { result?: unknown; error?: { message?: string } };
+      if (j.error) throw new Error(j.error.message ?? "rpc error");
+      return j.result ?? null;
+    };
+    const booked = await runAutoCapitalPass({
+      db: shared,
+      rpc,
+      usdgToken: String(CASH.USDG),
+      chainId: Number(process.env.MERRYMEN_CHAIN_ID ?? 4663),
+      tenants,
+      refused: autoCapitalRefused,
+      log,
+    });
+    for (const b of booked) {
+      verifiedCash.set(b.account.toLowerCase(), { cashRaw: b.cashRaw, atSec: Math.floor(Date.now() / 1000) });
+      restartForNewAnchor(b.tenant, "its deposits were just booked from the chain");
+    }
+  } catch (e) {
+    log(`capital| pass failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * Restart one child through the ordinary exit path, so the respawn writes a
+ * fresh anchor. The entry stays in `children` on purpose: the exit handler
+ * treats that as a crash and schedules the respawn, which is exactly what
+ * `killChild` (which deletes it first) is built to prevent.
+ */
+function restartForNewAnchor(tenant: string, why: string): void {
+  const child = children.get(tenant);
+  if (!child) return;
+  log(`${tenant}: restarting so it arms against its new anchor — ${why}`);
+  child.proc.kill("SIGTERM");
+  setTimeout(() => {
+    if (children.get(tenant) !== child) return;
+    try {
+      child.proc.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }, 10_000);
+}
+
 function startGroupChatPass(): void {
   if (groupChatInFlight || stopping) return;
   if (!groupChatKnobs) {
@@ -5396,6 +5518,9 @@ export async function runOrchestrator(): Promise<void> {
       // the room can see, and inside this branch, so FLEET_HALT silences it
       // too. Started, never awaited — see startGroupChatPass.
       startGroupChatPass();
+      // DEPOSITS NOBODY BOOKED: after the mirror for the same reason as the
+      // room, and inside this branch so FLEET_HALT stops it too.
+      startAutoCapitalPass();
       // THE MCP SERVER'S BACKGROUND WORK (backtest jobs, alerts, retention).
       // Started, never awaited, like the room: nothing here is on the trading
       // path, and each pass has its own budget and in-flight guard.
