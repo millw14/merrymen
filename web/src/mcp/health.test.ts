@@ -41,9 +41,21 @@ test("health says the directory is off, and why, without echoing the bad value",
   // One on the canonical path is refused too, and reported the same way.
   const same = envOf({ ...BASE, MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://mcp.test/mcp/" });
   assert.match(directoryHealth(mcpConfig(same), same).why ?? "", /not usable/);
-  // A usable override is reported as the endpoint.
-  const good = envOf({ ...BASE, MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://mcp.test/listing" });
-  assert.deepEqual(directoryHealth(mcpConfig(good), good), { endpoint: "https://mcp.test/listing", why: null });
+  // So is one on a path the directory is not served at, and the reason names the path it must have.
+  const elsewhere = envOf({ ...BASE, MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://mcp.test/listing" });
+  assert.equal(mcpConfig(elsewhere).directoryResource, "");
+  assert.match(directoryHealth(mcpConfig(elsewhere), elsewhere).why ?? "", /not usable.*whose path is \/mcp\/directory/);
+  // A canonical endpoint on the directory's own path leaves it nowhere to go, and says so.
+  const taken = envOf({ ...BASE, MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp/directory" });
+  assert.equal(mcpConfig(taken).directoryResource, "");
+  assert.match(directoryHealth(mcpConfig(taken), taken).why ?? "", /\(MERRYMEN_MCP_RESOURCE_URL\) is at \/mcp\/directory/);
+  // Even beside a valid override: no override can fix that, so it is not the one blamed.
+  const takenOver = envOf({ ...BASE, MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp/directory/", MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://dir.test/mcp/directory" });
+  assert.equal(mcpConfig(takenOver).directoryResource, "");
+  assert.match(directoryHealth(mcpConfig(takenOver), takenOver).why ?? "", /\(MERRYMEN_MCP_RESOURCE_URL\) is at \/mcp\/directory/);
+  // A usable override (another origin, the served path) is reported as the endpoint.
+  const good = envOf({ ...BASE, MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://dir.test/mcp/directory" });
+  assert.deepEqual(directoryHealth(mcpConfig(good), good), { endpoint: "https://dir.test/mcp/directory", why: null });
 });
 
 test("a database outage is 503 and still reports the directory; a disabled server reports neither", async () => {

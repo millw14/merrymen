@@ -274,9 +274,10 @@ connection "Via the Claude directory listing".
 its metadata answer 404, `/oauth/authorize` refuses the address
 (`invalid_target`), and directory tokens stop verifying and refreshing
 (`invalid_grant`); `/mcp` is untouched. `MERRYMEN_MCP_DIRECTORY_RESOURCE_URL`
-overrides the address (https, and never the canonical path); the route itself
-is always `/mcp/directory`, so an override only makes sense behind a proxy
-that maps it there.
+can move the address to another origin (https), never to another path: the
+route is always `/mcp/directory`, and an override naming any other path (or
+the canonical one) switches the profile off rather than advertise an address
+that answers 404. `/api/mcp/health` says which.
 
 ## The partner API
 

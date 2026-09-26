@@ -11,6 +11,7 @@ import { createRequire } from "node:module";
 import { afterEach, describe, it } from "node:test";
 import { readFileSync } from "node:fs";
 import { PRODUCTION_DIRECTORY_URL, assistantSetupMarkdown, llmsTxt } from "./assistant-setup";
+import { DIRECTORY_ROUTE_PATH } from "./config";
 import { PLUGIN_ID, PLUGIN_MARKETPLACE_URL, PLUGIN_SERVER_URL, installCommands, installLinks } from "./install-links";
 import { dedicatedMcpHost, mcpHostLanding } from "./landing";
 
@@ -75,6 +76,7 @@ describe("the production text", () => {
 
   it("counts a connector at the directory address as set up, and never adds the full server on top of it", () => {
     assert.equal(PRODUCTION_DIRECTORY_URL, "https://mcp.merrymen.dev/mcp/directory");
+    assert.equal(PRODUCTION_DIRECTORY_URL, `${new URL(PLUGIN_SERVER_URL).origin}${DIRECTORY_ROUTE_PATH}`, "the path the directory route serves");
     const check = lines.find((l) => l.startsWith("1. "))!;
     assert.ok(check.includes("an entry whose address is exactly https://mcp.merrymen.dev/mcp or exactly https://mcp.merrymen.dev/mcp/directory, whatever it is called"), check);
     assert.ok(check.includes("If there is one, it is already set up"), check);
@@ -212,8 +214,8 @@ describe("GET /llms.txt on the app", () => {
 
   it("takes the directory address from configuration, and drops it when the directory profile is off", async () => {
     const route = await import("@/app/llms.txt/route");
-    hosted({ MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://mcp.example.test/listing" });
-    assert.equal(await route.GET().text(), llmsTxt({ ...STAGING, directory: "https://mcp.example.test/listing" }));
+    hosted({ MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://dir.example.test/mcp/directory" });
+    assert.equal(await route.GET().text(), llmsTxt({ ...STAGING, directory: "https://dir.example.test/mcp/directory" }));
     hosted({ MERRYMEN_MCP_DIRECTORY: "0" });
     const off = await route.GET().text();
     assert.equal(off, llmsTxt({ server: STAGING.server, app: STAGING.app }));

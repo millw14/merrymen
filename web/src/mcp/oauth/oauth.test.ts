@@ -1152,7 +1152,7 @@ async function exchange(deps: ReturnType<typeof makeDeps>, clientId: string, loc
   return exchangeCode(deps, form, await clientOf(deps, clientId));
 }
 
-test("directory profile: <resource>/directory by default, overridable, off with MERRYMEN_MCP_DIRECTORY=0, never the canonical path", () => {
+test("directory profile: /mcp/directory on the endpoint's origin by default, only the origin overridable, off with MERRYMEN_MCP_DIRECTORY=0, never the canonical path", () => {
   const base = { MERRYMEN_PUBLIC_ORIGIN: "https://app.test", MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp" } as unknown as NodeJS.ProcessEnv;
   const cfg = mcpConfig(base);
   assert.equal(cfg.resource, "https://mcp.test/mcp");
@@ -1164,12 +1164,16 @@ test("directory profile: <resource>/directory by default, overridable, off with 
   assert.equal(mcpConfig({ ...base, MERRYMEN_MCP_DIRECTORY: "0" }).directoryResource, "", "the kill switch");
   assert.equal(mcpConfig({ ...base, MERRYMEN_MCP_DIRECTORY: "1" }).directoryResource, "https://mcp.test/mcp/directory");
   assert.equal(mcpConfig({ ...base, MERRYMEN_MCP_DIRECTORY: "0" }).resource, "https://mcp.test/mcp", "switching the directory off leaves the canonical endpoint alone");
-  const over = mcpConfig({ ...base, MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://dir.test/listing/" });
-  assert.equal(over.directoryResource, "https://dir.test/listing");
+  const over = mcpConfig({ ...base, MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://dir.test/mcp/directory/" });
+  assert.equal(over.directoryResource, "https://dir.test/mcp/directory");
   assert.ok(over.allowedHosts.has("dir.test"), "the directory answers on its own host");
-  for (const bad of ["http://dir.test/x", "https://mcp.test/mcp", "https://other.test/mcp", "https://mcp.test/", "not a url", "https://dir.test/x?y=1", "https://u:p@dir.test/x"]) {
+  // Only the origin may change: the route is app/mcp/directory, so any other
+  // path would be advertised to clients and answer 404.
+  for (const bad of ["https://dir.test/listing", "https://mcp.test/listing", "https://mcp.test/mcp/directory/x", "https://mcp.test/directory", "https://dir.test/MCP/directory", "http://dir.test/mcp/directory", "https://mcp.test/mcp", "https://other.test/mcp", "https://mcp.test/", "not a url", "https://dir.test/mcp/directory?y=1", "https://u:p@dir.test/mcp/directory"]) {
     assert.equal(mcpConfig({ ...base, MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: bad }).directoryResource, "", bad);
   }
+  assert.equal(mcpConfig({ ...base, MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/v2/mcp" }).directoryResource, "https://mcp.test/mcp/directory", "the default is the served path, not <resource>/directory");
+  assert.equal(mcpConfig({ ...base, MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp/directory" }).directoryResource, "", "a canonical endpoint on the directory's path leaves no room for it");
   assert.equal(profileOfResource(cfg, "https://mcp.test/mcp"), "full");
   assert.equal(profileOfResource(cfg, "https://mcp.test/mcp/directory"), "directory");
   for (const other of ["https://mcp.test/mcp/", "https://mcp.test/mcp/directory/x", "", null]) assert.equal(profileOfResource(cfg, other), null, String(other));

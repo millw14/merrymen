@@ -28,7 +28,8 @@ export interface McpConfig {
    * the same server with the sensitive scopes impossible to grant (scopes.ts,
    * DIRECTORY_SCOPES), for Anthropic's connector directory. Tokens are bound
    * to exactly this and refused at `resource`, and the other way round. ""
-   * when switched off (MERRYMEN_MCP_DIRECTORY=0) or not a usable URL.
+   * when switched off (MERRYMEN_MCP_DIRECTORY=0), not a usable URL, or at any
+   * path but DIRECTORY_ROUTE_PATH.
    */
   directoryResource: string;
   /** Origins a browser-originated request to /mcp may carry. Requests with no Origin are server-to-server clients. */
@@ -49,6 +50,14 @@ export interface McpConfig {
 }
 
 const ADDRESS = /^0x[0-9a-f]{40}$/;
+
+/**
+ * The one path the directory profile is served at (app/mcp/directory/route.ts;
+ * next.config.mjs has no rewrites). Its resource URL may name another origin,
+ * never another path: the URL is what clients are told to POST to, and any
+ * other path is a 404.
+ */
+export const DIRECTORY_ROUTE_PATH = "/mcp/directory";
 
 function originOf(raw: string | undefined): URL | null {
   if (!raw) return null;
@@ -77,15 +86,17 @@ export function mcpConfig(env: NodeJS.ProcessEnv = process.env): McpConfig {
   // The resource keeps its path; normalise away a trailing slash so the
   // metadata's `resource` matches the URL clients were given exactly.
   const resource = resourceUrl ? `${resourceUrl.origin}${resourceUrl.pathname.replace(/\/+$/, "") || ""}` : "";
-  // The directory profile: <resource>/directory unless overridden. Off when
-  // switched off, and when it would share the canonical path: the path picks
-  // the protected-resource document, and one path cannot name two resources.
-  const directoryUrl = env.MERRYMEN_MCP_DIRECTORY === "0" || !resource
+  // The directory profile: DIRECTORY_ROUTE_PATH on the canonical endpoint's
+  // origin, unless overridden to another origin. Off when switched off, when an
+  // override names any other path (nothing would answer there), and when it
+  // would share the canonical path: the path picks the protected-resource
+  // document, and one path cannot name two resources.
+  const directoryUrl = env.MERRYMEN_MCP_DIRECTORY === "0" || !resourceUrl || !resource
     ? null
-    : originOf(env.MERRYMEN_MCP_DIRECTORY_RESOURCE_URL ?? `${resource}/directory`);
+    : originOf(env.MERRYMEN_MCP_DIRECTORY_RESOURCE_URL ?? `${resourceUrl.origin}${DIRECTORY_ROUTE_PATH}`);
   const directoryPath = directoryUrl ? directoryUrl.pathname.replace(/\/+$/, "") : "";
   const canonicalPath = resourceUrl ? resourceUrl.pathname.replace(/\/+$/, "") : "";
-  const directoryResource = directoryUrl && directoryPath && directoryPath !== canonicalPath ? `${directoryUrl.origin}${directoryPath}` : "";
+  const directoryResource = directoryUrl && directoryPath === DIRECTORY_ROUTE_PATH && directoryPath !== canonicalPath ? `${directoryUrl.origin}${directoryPath}` : "";
   const directoryHost = directoryResource ? directoryUrl?.host : undefined;
 
   const extraOrigins = (env.MERRYMEN_MCP_ALLOWED_ORIGINS ?? "")

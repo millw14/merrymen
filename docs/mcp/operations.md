@@ -95,7 +95,7 @@ dashboard's chat orders use.
 | `MERRYMEN_OAUTH_ISSUER` | web | public origin | Only if the issuer must differ from the public origin. |
 | `MERRYMEN_MCP_RESOURCE_URL` | web | `<origin>/mcp` | The canonical resource URL tokens are bound to, e.g. `https://mcp.merrymen.dev/mcp`. Changing it invalidates every existing token (audience changes); clients simply reconnect. |
 | `MERRYMEN_MCP_DIRECTORY` | web | on | `0` switches the directory profile off: `/mcp/directory` and its metadata answer 404, authorize refuses its address, and directory tokens stop working (`invalid_grant` at refresh). `/mcp` is untouched. |
-| `MERRYMEN_MCP_DIRECTORY_RESOURCE_URL` | web | `<resource>/directory` | The directory profile's resource URL, e.g. `https://mcp.merrymen.dev/mcp/directory`. Must be https and not share the canonical path. Changing it disconnects every directory connection once, like the canonical one. The route is always `/mcp/directory`. |
+| `MERRYMEN_MCP_DIRECTORY_RESOURCE_URL` | web | `/mcp/directory` on the resource's origin | The directory profile's resource URL, e.g. `https://mcp.merrymen.dev/mcp/directory`. Only the origin may change: it must be https and its path exactly `/mcp/directory`, the only path the route serves; any other path (or the canonical one) switches the directory profile off, and `/api/mcp/health` says why. Changing it disconnects every directory connection once, like the canonical one. |
 | `MERRYMEN_MCP_ALLOWED_ORIGINS` | web | — | Extra browser origins allowed to call `/mcp` (comma separated). Server-side clients send no Origin and are unaffected. |
 | `MERRYMEN_MCP_STAFF_TENANTS` | web | — | Comma-separated owner addresses that may grant themselves `staff:diagnostics`. Re-checked on every call. |
 | `MERRYMEN_MCP_ACCESS_TTL_SEC`, `_REFRESH_TTL_SEC`, `_REFRESH_FAMILY_MAX_SEC` | web | 3600, 30 d, 90 d | Token lifetimes (bounded). |
@@ -104,8 +104,10 @@ dashboard's chat orders use.
 `GET /api/mcp/health` reports `enabled`, the reason when disabled, database
 latency, the deployed commit, the canonical `endpoint` and `directory`: the
 directory profile's `endpoint`, or `null` with a `why` naming the variable that
-turned it off (`MERRYMEN_MCP_DIRECTORY=0`, or an unusable
-`MERRYMEN_MCP_DIRECTORY_RESOURCE_URL`). It returns `503` with `Retry-After`
+turned it off (`MERRYMEN_MCP_DIRECTORY=0`; an unusable
+`MERRYMEN_MCP_DIRECTORY_RESOURCE_URL`, including one on any path but
+`/mcp/directory`; or a `MERRYMEN_MCP_RESOURCE_URL` that is itself at
+`/mcp/directory`). It returns `503` with `Retry-After`
 when not ready.
 
 ## Deploying

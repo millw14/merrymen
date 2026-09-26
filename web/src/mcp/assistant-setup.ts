@@ -28,8 +28,14 @@ export interface AssistantSetupInput {
   directory?: string;
 }
 
-/** Production's directory address (MERRYMEN_MCP_DIRECTORY_RESOURCE_URL unset: <resource>/directory). */
-export const PRODUCTION_DIRECTORY_URL = `${PLUGIN_SERVER_URL}/directory`;
+/**
+ * Production's directory address (MERRYMEN_MCP_DIRECTORY_RESOURCE_URL unset):
+ * the directory's served path, config.ts DIRECTORY_ROUTE_PATH, on the
+ * endpoint's origin. Spelled out rather than imported so this text module (run
+ * by scripts/llms-txt.ts) stays free of server configuration; the test checks
+ * the two agree.
+ */
+export const PRODUCTION_DIRECTORY_URL = `${new URL(PLUGIN_SERVER_URL).origin}/mcp/directory`;
 
 /** The address production used before the dedicated MCP host (retired for spec-strict clients). */
 const OLD_ADDRESS = "https://app.merrymen.dev/mcp";
