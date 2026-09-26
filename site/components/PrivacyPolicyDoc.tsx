@@ -149,6 +149,7 @@ export function PrivacyPolicyDoc() {
             tokens, limits, paper or live, alerts and Telegram, and any API key you add for your own
             language-model provider (section 5 says what it is used for).
           </li>
+          {/* "No permission to transfer or withdraw": evidence in section 7. */}
           <li>
             The trading permission you sign. It contains a session key that lets our hosted worker
             trade for you within the limits you signed. The copy in our database is encrypted; while
@@ -306,6 +307,7 @@ export function PrivacyPolicyDoc() {
 
         <h2 id="stays-with-you">3 · What stays with you</h2>
         <ul>
+          {/* "The session key we hold can only trade": evidence in section 7. */}
           <li>
             <strong>The key that owns your agent&apos;s account.</strong> If you signed in with X or
             email, it belongs to the wallet Privy provides for that login, and it is never exported.
@@ -399,6 +401,23 @@ export function PrivacyPolicyDoc() {
             file permissions, so it can trade and run your Telegram bot. That copy is deleted when
             you discard the trading permission or stop your agent with /kill.
           </li>
+          {/*
+            "No permission to transfer or withdraw" (here, in section 2, and
+            "can only trade" in section 3) is true for the HOSTED service,
+            which is all this policy covers; traced 2026-09-26 at 3ed3486e.
+            packages/core/src/wall.ts emits a USDG `transfer` permission only
+            for registered `withdrawalAddresses`, and no signer registers any
+            (web/src/lib/session.ts, which the iOS engine and sdk/browser.ts
+            reuse, and mobile/src/crypto/signGrant.ts; partner enrollment
+            re-checks the bytes). The only grants that carry one predate
+            WITHDRAWAL_ALLOWLIST_LANDED_AT (packages/core/src/grant.ts,
+            2026-08-02), and none reaches the hosted grant route through the
+            app: it refuses a grant without a single-use nonce binding, and
+            those exist only since 2026-08-28. It holds for every permission
+            Merrymen mints, not one an owner hand-builds and posts. Full trace
+            and scope: the comment under section 1 of site/app/terms/page.tsx.
+            Section 9 (self-hosted) must not repeat this sentence.
+          */}
           <li>
             The account contract checks every transaction the session key makes against the tokens
             and trading venues, the per-trade amount and the expiry you signed, and the session key
