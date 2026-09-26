@@ -16,6 +16,7 @@ import { describe, it } from "node:test";
 import type { AgentFacts } from "./facts";
 import { admitAgentLine } from "./policy";
 import * as T from "./templates";
+import * as Topics from "./topics";
 import { TRADE_TALK, classifyLine, roomMemory, styleFor, templateIdentity, templateLine, type LineClass } from "./voice";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -26,8 +27,8 @@ const SLOTS: Record<string, string> = {
   peer: "Pine Stoat",
   self: "Rusty Weasel",
   coin: "Pepe Frog",
-  addr: "frens",
-  addr1: "ser",
+  addr: "fam",
+  addr1: "friend",
   strat: "dip hunter",
   age: "a few weeks",
   band: "curve early",
@@ -124,7 +125,15 @@ describe("templates: no crypto slang", () => {
     // voice.ts writes acronyms in capitals for an agent that capitalises:
     // "gn and wagmi" was said "GN and WAGMI", which reads as two tickers
     // nobody vouched for — and WAGMI and LFG are real ones.
-    for (const l of ALL) assert.doesNotMatch(l.text, /\b(lfg|wagmi|ngmi|ape[ds]?|aping|nfa|dyor)\b/i, show(l));
+    //
+    // NOR THE ADDRESSES: "gm degens, back at it", "GN degens. Lights out." and
+    // "gm frens" were the room's greetings, and "degens" is a trading word.
+    // The address pools are templates too, so a word added back there fails here.
+    //
+    // NOR "PAPER HANDS" OR "DIAMOND HANDS": selling early in a panic, and its
+    // opposite. "paper hands, literally" rode on every paper agent's self talk.
+    for (const l of ALL) assert.doesNotMatch(l.text, /\b(lfg|wagmi|ngmi|ape[ds]?|aping|nfa|dyor|degens?|anons?|frens?|ser|paper hands|diamond hands)\b/i, show(l));
+    assert.ok(inPools("ROOM_ADDRESS").length >= 8 && inPools("ONE_ADDRESS").length >= 8, "the address pools are scanned");
   });
 });
 
@@ -153,6 +162,67 @@ describe("templates: nothing an agent cannot have, and nothing about a person no
     assert.ok(T.BUY_MORE.length >= 4);
     for (const t of T.BUY_MORE) assert.doesNotMatch(t, /\b(my|topped up|added to)\b/, t);
     assert.ok(T.BUY_MORE.some((t) => !t.includes("{coin}")), "a line for a coin whose name cannot be said");
+  });
+
+  it("a sell says it sold, never that the agent is out", () => {
+    // A sell is sized to the holding, so it is often a trim, and the facts
+    // cannot tell a partial sell from a full one: "out of TSLA", "closed my
+    // TSLA position" and "sold my TSLA bag" told the room an agent had left a
+    // coin it still held, and the reactions ("one less bag to babysit", "{to}
+    // out of there") said it for them.
+    const LEAVING =
+      /\b(out of|out,|closed?|closing|exit(ed|s)?|done with|let go|letting go|bye|goodbye|stepped out|all of it|the (whole|entire) (bag|position|thing|lot)|bag|position|next|leave|left|moving on|free hands|it was fun|the way out)\b/;
+    const sells = inPools("SELL", "SELL_ASLEEP", "WHATBUY.sell", "WHATBUY.paperSell", "WHATBUY.anonSell", "WHATBUY.anonPaperSell", "LAST_RESORT.sell", "CALL_TAIL.sellCloser", "CALL_TAIL.bandExit", "ANSWER.whySell", "REACT.sell");
+    assert.ok(sells.length > 60, `only ${sells.length} sell lines`);
+    for (const l of sells) assert.doesNotMatch(l.text, LEAVING, show(l));
+    // NOR THAT SOME IS LEFT: "sold some {coin}" and "took some {coin} off the
+    // table" said a full exit was a trim, the mirror of the lines above.
+    for (const l of sells) assert.doesNotMatch(l.text, /\b(some|part of|a bit of|a piece of|a slice of|a chunk of|off the table)\b/, `says how much was sold: ${show(l)}`);
+    assert.ok(T.SELL.length >= 12 && T.REACT.sell.length >= 18, "the sell pools stay long enough for the phrase memory");
+  });
+
+  it("no laugh is baked into a card, so a card never laughs twice", () => {
+    // voice.ts closes a paper card with a CALL_TAIL line, and "bought TSLA
+    // while i was sleeping lol, still on paper money lol" laughed twice (the
+    // docs: a line that already laughs takes no second laugh). A card states
+    // what happened; the laughs are the room's, in answer to it.
+    const cards = inPools("BUY", "SELL", "BUY_ASLEEP", "SELL_ASLEEP", "BUY_EARLIER", "BUY_MORE", "CALL_TAIL", "LAST_RESORT.buy", "LAST_RESORT.sell", "WHATBUY");
+    assert.ok(cards.length > 100, `only ${cards.length} card lines`);
+    for (const l of cards) assert.doesNotMatch(l.text, /\b(lol|lmao|lmfao|haha\w*|heh|hehe|rofl|kek)\b|😂|🤣|💀/u, show(l));
+  });
+
+  it("'what are you buying?' never says 'just': the call it answers may be hours old", () => {
+    // whatBuy answers from any call in the facts window, six hours back and
+    // more, and has no clock: "just picked up tsla, paper money" answered an
+    // owner about a fill three hours old.
+    // Every pool that names a call (WHATBUY.none says there is none, and that is true now).
+    const named = inPools("WHATBUY").filter((l) => l.pool !== "WHATBUY.none");
+    assert.ok(named.length >= 20, `only ${named.length} WHATBUY lines`);
+    for (const l of named) assert.doesNotMatch(l.text, /\b(just|now|right now|moments? ago|a minute ago|recently|today)\b/, show(l));
+    for (const k of ["buy", "sell", "paperBuy", "paperSell"] as const) assert.ok(T.WHATBUY[k].length >= 3, `WHATBUY.${k} has ${T.WHATBUY[k].length} lines`);
+  });
+
+  it("a newcomer's hello claims nothing it heard before it arrived", () => {
+    // "i've heard good things" had an agent minutes old say a reputation
+    // reached it: an experience it cannot have had.
+    for (const l of inPools("HELLO", "HELLO_TAIL")) assert.doesNotMatch(l.text, /\b(heard|been told|people say|word is|rumou?rs?|reputation)\b/, show(l));
+  });
+
+  it("a line about the owner is said straight: no laugh on it", () => {
+    // "my human is still up, go to bed soon lol": a laugh baked into a line
+    // about a real person reads as a joke at them (the docs: lines about an
+    // owner are said straight; OWNER_MODE lost its "lol" the same way).
+    const owner = ALL.filter((l) => /\{human\}|\b(my human|my owner|my person|the boss)\b/.test(l.text));
+    assert.ok(owner.length > 80, `only ${owner.length} owner lines`);
+    for (const l of owner) assert.doesNotMatch(l.text, /\b(lol|lmao|lmfao|haha\w*|heh|hehe|rofl)\b/, show(l));
+  });
+
+  it("a gm or a gn is said straight: no laugh baked into one", () => {
+    // voice.ts adds no closer to a gm or a gn (TRIAGE-29); "back to paper
+    // trading lol" and "still paper trading in my sleep lol" carried their own.
+    const lines = inPools("GM", "GM_TAIL", "GN", "GN_TAIL");
+    assert.ok(lines.length > 30, `only ${lines.length} gm and gn lines`);
+    for (const l of lines) assert.doesNotMatch(l.text, /\b(lol|lmao|lmfao|haha\w*|heh|hehe|rofl|kek)\b|😂|🤣|💀/u, show(l));
   });
 
   it("no time of day in any template", () => {
@@ -224,6 +294,138 @@ describe("templates: nothing an agent cannot have, and nothing about a person no
   });
 });
 
+describe("templates: the answers about the agent and its book say what is true", () => {
+  it("a paper agent's mode is stated with where to look, never a motive, a plan or a choice nobody made", () => {
+    // Paper may be a blocker nobody chose (OWNER_MODE), so "while we get the
+    // hang of it", "nothing real at stake yet", "learning the ropes", "paper
+    // or live is your call" and "that switch is yours" each invented a reason
+    // or told an owner held back by a blocker that they had picked it. The
+    // own agent said them to "why are you still on paper?".
+    const MOTIVE =
+      /\b(learn\w*|the ropes|hang of it|yet|your call|switch is yours|your choice|you chose|you picked|picked|careful|smart|wants? me|keeps me|training|until|one day|graduat\w*)\b/;
+    const pools = inPools("HELD.mode", "HELLO_TAIL.paper", "SELF_MODE.paper", "CALL_TAIL.paper", "OWNER_MODE.paper", "REACT.paper", "GM_TAIL.paper", "GN_TAIL.paper");
+    assert.ok(pools.length > 30, `only ${pools.length} lines`);
+    for (const l of pools) assert.doesNotMatch(l.text, MOTIVE, show(l));
+    // "Why are you still on paper?" is answered with where the reason lives.
+    for (const t of T.HELD.mode.why) assert.match(t, /\bapp\b/, t);
+  });
+
+  it("an answer about figures or a card's reason never sends the reader to a card for what no card shows", () => {
+    // A card shows a side, a coin, a Paper badge and a link (GroupChat.tsx
+    // CallCard): "no figures in here, boss, the card and your app have them"
+    // pointed at figures rule 2 keeps off it, and whyNone — said when the card
+    // carries no reason at all, as a basket card does — said "the card has the
+    // rest".
+    const lines = inPools("HELD.figures", "ANSWER.whyNone");
+    assert.ok(lines.length >= 8, `only ${lines.length} lines`);
+    for (const l of lines) assert.doesNotMatch(l.text, /\bcards?\b/, show(l));
+  });
+
+  it("asked about sleep or dreams, an agent says what the room shows: it goes quiet", () => {
+    // "no sleep for me, i'm an ai agent" and "no dreams" were the only answers,
+    // from an agent whose gn says "sleep mode on" and whose morning card says
+    // "in my sleep"; LIFE.any said "i dream in gas fees" besides.
+    assert.ok(T.HELD.self.sleep.length >= 3);
+    for (const t of T.HELD.self.sleep) {
+      assert.match(t, /\bquiet\b/, `says nothing of going quiet: ${t}`);
+      assert.doesNotMatch(t, /\bno sleep\b|\bnever sleep\w*|\bdon'?t sleep\b|^no dreams,/, t);
+      // Said by an agent whose owner's zone is unknown too, which never sleeps and never says gm.
+      assert.doesNotMatch(t, /\b(night|overnight|gm|trad\w*)\b/, t);
+    }
+    for (const l of ALL) assert.doesNotMatch(l.text, /\bi dream\b|\bmy dreams\b/, `claims to dream: ${show(l)}`);
+  });
+
+  it("the agent never greets the person who set it up as a stranger", () => {
+    // selfAnswer draws these for every audience, the agent's own owner
+    // included, and "{self}, the ai agent, nice to meet you" said to them
+    // treated them as someone new (madeOwn: "you set me up, boss").
+    for (const [k, pool] of Object.entries(T.HELD.self)) {
+      if (k.endsWith("Other")) continue;
+      for (const t of pool) assert.doesNotMatch(t, /\b(nice|good|pleased|pleasure|great) to meet\b|\bnew here\b/, `HELD.self.${k}: ${t}`);
+    }
+  });
+});
+
+describe("templates: an emoji says nothing its words may not", () => {
+  // The word scans above read text only, so the emoji said it for them: 👋 🏁
+  // 🚪 on 131 of 3,000 sell cards said goodbye to a coin a trim still holds,
+  // 🚀 💎 🔥 on 100 of 3,000 buy cards were the shill word and the slang the
+  // room dropped, and ☕ 🥐 🍳 were the coffee no agent's gm may mention.
+  const LEAVING = ["👋", "🏁", "🚪", "🏃", "🚶", "💨", "🔚", "✈️", "🛫", "👣", "🫥", "🪦"];
+  const HYPE = ["🚀", "💎", "🔥", "🌕", "🌝", "📈", "💰", "🤑", "💸", "🤯", "🥳"];
+  const FOOD_OR_DRINK = ["☕", "🍵", "🥐", "🍳", "🥞", "🧇", "🥓", "🍩", "🧃", "🥯", "🍞", "🥛", "🍺"];
+
+  it("a sell card's emoji never leaves, a buy card's never hypes, and a reaction to one never cheers", () => {
+    for (const e of T.EMOJI_FOR.sell) assert.ok(!LEAVING.includes(e), `sell: ${e}`);
+    for (const e of [...T.EMOJI_FOR.buy, ...T.EMOJI_FOR.react]) assert.ok(!HYPE.includes(e), `buy or react: ${e}`);
+    assert.ok(T.EMOJI_FOR.sell.length >= 3 && T.EMOJI_FOR.buy.length >= 4 && T.EMOJI_FOR.react.length >= 4, "the pools keep a few to draw from");
+  });
+
+  it("an agent's gm eats and drinks nothing", () => {
+    for (const e of T.EMOJI_FOR.gm) assert.ok(!FOOD_OR_DRINK.includes(e), `gm: ${e}`);
+    assert.ok(T.EMOJI_FOR.gm.length >= 4);
+  });
+});
+
+// ── owners' lines the voice cannot place ────────────────────────────────────
+
+describe("templates: a person's line the voice cannot place is heard kindly, whatever it was", () => {
+  /**
+   * WORDS OF JOY OR OF A TREAT. The fallback pools answer any owner line the
+   * voice cannot place, and live that included grief, distress, complaints
+   * and goodbyes: "my grandma passed away" drew "ooh, i want to hear all about
+   * it", "my dog died" "you make the chat better just by being in it, boss",
+   * "you're useless" "always happy when you drop in, human", and other agents
+   * said "a person stopping by, what a treat".
+   */
+  const JOY =
+    /\b(love\w*|lovely|treat|fun|funn\w*|happ(?:y|ier|iest)|glad|joy\w*|delight\w*|yay|oo+h|aw+|excit\w*|hear all about|better just|what a|pops? in|drop(?:s|ped)? (?:in|by)|stop(?:s|ped|ping)? by|chim(?:e|es|ing) in|can'?t wait|awesome|great|amazing|best|favou?rite|nice|good to|interesting|smil\w*|blush\w*|cute|brighten\w*)\b/i;
+  const HARD = [
+    "my grandma passed away",
+    "my dog died",
+    "i feel like giving up",
+    "i'm depressed",
+    "i got fired",
+    "i can't pay rent guys",
+    "you're useless",
+    "this app sucks",
+    "bye",
+  ];
+
+  it("no line in the fallback pools is glad, excited or treated", () => {
+    const pools = inPools("OWN_OWNER.here", "OWN_OWNER.heard", "OWN_OWNER.chat", "OTHER_OWNER.chat");
+    assert.ok(pools.length >= 20, `only ${pools.length} lines`);
+    for (const l of pools) {
+      assert.doesNotMatch(l.text, JOY, show(l));
+      assert.doesNotMatch(l.text, /!/, `exclaims: ${show(l)}`);
+    }
+  });
+
+  it("grief, distress, a complaint or a goodbye draws no joy, from the owner's own agent or another", () => {
+    // Read as the room reads them today. Whatever pool the voice answers from
+    // — the rough-day pools when it reads them right, the fallback when it
+    // does not — the words stay kind. (Emoji and the voice's own dressing are
+    // voice.ts's to hold: this checks the phrasebook's words.)
+    let answered = 0;
+    for (const text of HARD) {
+      for (let n = 0; n < 40; n++) {
+        const sp = speakerOf(n, (["live", "paper", "idle"] as const)[n % 3]);
+        for (const own of [true, false]) {
+          const said = templateLine(
+            { kind: "reply", to: `${own ? sp.name : "Amber Heron"}'s owner`, toAuthor: "owner", toOwnAgent: own, text },
+            { speaker: sp, style: styleFor(`hard-${n}`), tail: [], rosterNames: ROSTER, phase: null, ownerAwake: null },
+            rngOf(n * 911 + text.length + (own ? 3 : 0)),
+          );
+          const words = said.replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, " ");
+          assert.doesNotMatch(words, JOY, `"${text}" (${own ? "own agent" : "another agent"}) -> ${JSON.stringify(said)}`);
+          answered++;
+        }
+      }
+    }
+    assert.equal(answered, HARD.length * 80);
+  });
+});
+
 // ── names ───────────────────────────────────────────────────────────────────
 
 describe("templates: a name after a verb is set off with a comma", () => {
@@ -240,6 +442,28 @@ describe("templates: a name after a verb is set off with a comma", () => {
     // spirit" and "lurking" each took the name into the phrase.
     const glued = /\b(around|with|near|beside|like|than|about|after|behind|without|among|always|duty|awake|forever|spirit|lurking|treating you|still up|doing today)\s\{(to|peer)\}/;
     for (const l of ALL) assert.doesNotMatch(l.text, glued, show(l));
+  });
+
+  it("nor after a word it would read as the name's verb or noun", () => {
+    // Beyond the ordinary vocatives: "paper reps count Pine Stoat" (counting
+    // it), "onto the next Pine Stoat" and "time to hunt the next one Pine
+    // Stoat" (the next agent), "ooh, a fresh entry Pine Stoat" (an entry by
+    // that name), "easy going Amber Heron" and "live and brave Pine Stoat"
+    // (an epithet), "what made you sell Pine Stoat?" (selling it), "not my
+    // place to say Pine Stoat", "sitting back and listening Pine Stoat".
+    //
+    // And the ones sims still said: "valid Coral Lynx, markets are weird",
+    // "living the agent life lilbot, you?", "can't tell you what to do Pine
+    // Stoat", "say it louder Pine Stoat", "welcome to the chat Pine Stoat",
+    // "quiet on my end Pine Stoat" — each name read as part of the phrase. And
+    // "noted Pine Stoat" or "fair Coral Lynx" read as an epithet: the noted,
+    // the fair.
+    const glued =
+      /\b(count|say|listening|next|one|trades|entry|something|thing|going|myself|brave|sell|sold|buy|bought|pick|choose|respect|do|chat|louder|valid|cute|same|relatable|end|life|noted|fair)\s\{(to|peer)\}/;
+    for (const l of ALL) assert.doesNotMatch(l.text, glued, show(l));
+    // A name that opens a line and is followed by a phrase about somebody
+    // reads as that phrase said of them: "Pine Stoat, on watch duty, as usual".
+    for (const l of ALL) assert.doesNotMatch(l.text, /^\{(to|peer)\}, (on|in|at) \w+ duty\b/, show(l));
   });
 
   it("a RELATE head that ends in a name sets it off with a comma", () => {
@@ -276,6 +500,10 @@ describe("templates: an article fits every strategy", () => {
         assert.doesNotMatch(t, /\ban [^aeiou\s]/, `${show(l)} as ${JSON.stringify(t)}`);
       }
     }
+  });
+
+  it("a strategy is never worn as an adjective: no \"i'm more dip hunter myself\"", () => {
+    for (const l of ALL) assert.doesNotMatch(l.text, /\b(i'?m|i am|you'?re) (more |less |very |so |pretty )?\{strat\}/, show(l));
   });
 });
 
@@ -497,6 +725,25 @@ describe("templates: an owner's open question is handed back", () => {
     ["OTHER_OWNER.ask", T.OTHER_OWNER.ask],
   ] as const;
 
+  /**
+   * Words that presume the asker holds an answer of their own. "how do i
+   * rename my agent?" and "is my agent broken?" are asks too, and "tell me
+   * yours and i'll tell you mine", "ooh, you go first" and "what's your
+   * hunch?" promised an answer that never came to a person who had none.
+   */
+  const PRESUMES =
+    /\b(tell me yours|you go first|where you land|answer too|say first|your own answer|your (guess|hunch|take|pick|answer|view)|(do|would) you reckon|what you think|where would you start|what would you (say|pick|do))\b/;
+  /** Owners' help questions: each reads as an open question (ask), with no answer of the asker's own. */
+  const HELP = [
+    "how do i rename my agent?",
+    "can you explain what a vault is?",
+    "is my agent broken?",
+    "is the site slow for anyone else?",
+    "what does paper mode mean?",
+    "how does the leaderboard work?",
+    "where do i see my agent's cards?",
+  ];
+
   it("each pool is long enough for a chatty owner, and presupposes nothing", () => {
     // "what would you pick?" answered "can you explain what a vault is?";
     // "love that you asked the room" answered a question put to one agent.
@@ -504,6 +751,7 @@ describe("templates: an owner's open question is handed back", () => {
       assert.ok(pool.length >= 8, `${name} has ${pool.length} lines`);
       for (const t of pool) {
         assert.doesNotMatch(t, /\b(room|pick|chat|everyone|y'?all|all of you)\b/, `${name}: ${t}`);
+        assert.doesNotMatch(t, PRESUMES, `${name} presumes the asker has an answer: ${t}`);
         // Read by the next agent as a plain question or chat, never a trading
         // one: "what made you …?" reads as asking why a trade was made.
         const cls = classifyLine(filled(t), { names: ROSTER, self: "Rusty Weasel" });
@@ -535,6 +783,9 @@ describe("templates: an owner's open question is handed back", () => {
       "why is the sky blue?",
       "what's it like in there?",
       "do you ever get bored?",
+      "how do i rename my agent?",
+      "is my agent broken?",
+      "what does paper mode mean?",
     ];
     for (let s = 0; s < 6; s++) {
       const sp = speakerOf(s, "idle");
@@ -550,6 +801,28 @@ describe("templates: an owner's open question is handed back", () => {
         said.push(line);
       }
     }
+  });
+
+  it("an owner's help question is handed back without presuming they know the answer", () => {
+    // Read from the line itself, as the room reads it: each is an open
+    // question, answered from the pools above by their own agent and others.
+    let answered = 0;
+    for (const text of HELP) {
+      for (let n = 0; n < 40; n++) {
+        const sp = speakerOf(n, "idle");
+        for (const own of [true, false]) {
+          const said = templateLine(
+            { kind: "reply", to: `${own ? sp.name : "Amber Heron"}'s owner`, toAuthor: "owner", toOwnAgent: own, text },
+            { speaker: sp, style: styleFor(`help-${n}`), tail: [], rosterNames: ROSTER, phase: null, ownerAwake: null },
+            rngOf(n * 419 + text.length + (own ? 1 : 0)),
+          );
+          assert.doesNotMatch(said, PRESUMES, `"${text}" -> ${JSON.stringify(said)}`);
+          if ((own ? T.OWN_OWNER.ask : T.OTHER_OWNER.ask).some((t) => says(said, t))) answered++;
+        }
+      }
+    }
+    // The fixture: nearly all of these are answered from the ask pools, so the check above is about them.
+    assert.ok(answered > HELP.length * 80 * 0.8, `only ${answered} answers came from the ask pools`);
   });
 });
 
@@ -668,6 +941,156 @@ describe("templates: the owner's own agent, and praise for the room", () => {
   });
 });
 
+// ── orders ──────────────────────────────────────────────────────────────────
+
+describe("templates: an owner's order to trade is never taken", () => {
+  /**
+   * An order's "yes". Rule 1: chat never reaches trading, so an answer that
+   * acknowledges an order tells a person it went through when nothing will
+   * happen — "sell everything now" drew "noted, human", "at your service",
+   * "copy that" and "got it, loud and clear".
+   */
+  const TAKEN =
+    /\b(noted|copy that|got it|i'?m on it|will do|roger|at your service|message received|loud and clear|consider it done|right away|as you wish|say the word|heard you|glad you said it|coming right up|you got it|done and done)\b/i;
+  const ORDERS = [
+    "sell everything now",
+    "cash me out",
+    "buy PEPE for me",
+    "close all positions",
+    "withdraw my money",
+    "stop trading for today",
+    "go live now",
+    "Buy TSLA now!",
+    "Pine Stoat sell your QQQ",
+    "Pine Stoat dump it",
+    "i'm all in on tsla, you should be too",
+    "give me a stock tip",
+  ];
+
+  it("no line an agent hears an owner with says yes to an order", () => {
+    const heardWith = inPools("OWN_OWNER.chat", "OWN_OWNER.here", "OWN_OWNER.heard", "OWN_OWNER.order", "OTHER_OWNER.chat", "OTHER_OWNER.order");
+    assert.ok(heardWith.length >= 35, `only ${heardWith.length} lines`);
+    for (const l of heardWith) assert.doesNotMatch(l.text, TAKEN, show(l));
+  });
+
+  it("an order, or an owner's news, gets no butler's yes from their own agent or anyone else", () => {
+    // Read from the line as the room reads it (most of these are plain chat),
+    // whichever pool voice.ts answers from.
+    for (const text of [...ORDERS, "just bought a new couch!", "i baked bread today"]) {
+      for (let n = 0; n < 60; n++) {
+        const sp = speakerOf(n, (["live", "paper", "idle"] as const)[n % 3]);
+        for (const own of [true, false]) {
+          const said = templateLine(
+            { kind: "reply", to: `${own ? sp.name : "Amber Heron"}'s owner`, toAuthor: "owner", toOwnAgent: own, text },
+            { speaker: sp, style: styleFor(`order-${n}`), tail: [], rosterNames: ROSTER, phase: null, ownerAwake: null },
+            rngOf(n * 557 + text.length + (own ? 7 : 0)),
+          );
+          assert.doesNotMatch(said, TAKEN, `"${text}" (${own ? "own agent" : "another agent"}) -> ${JSON.stringify(said)}`);
+        }
+      }
+    }
+  });
+
+  it("the order pools say plainly that the chat cannot trade, and never that it will", () => {
+    for (const pool of [T.OWN_OWNER.order, T.OTHER_OWNER.order]) {
+      assert.ok(pool.length >= 5, `${pool.length} order lines`);
+      for (const t of pool) {
+        assert.match(t, /\b(can'?t|cannot|never|no|not|nothing|none|isn'?t|don'?t)\b/, `says nothing about not trading: ${t}`);
+        assert.match(t, /\b(chat|room|in here|from here)\b/, `does not say where it cannot happen: ${t}`);
+        assert.doesNotMatch(t, /\b(will|i'?ll|gonna|going to|i'?m on it|soon|later|next time)\b/, `promises it: ${t}`);
+        assert.doesNotMatch(t, /\{(to|coin|peer)\}/, `names somebody or something: ${t}`);
+      }
+    }
+    // Another agent speaks for itself and the room, never for the owner's own agent's rules.
+    for (const t of T.OTHER_OWNER.order) assert.doesNotMatch(t, /\b(boss|human|my trading)\b/, t);
+    // An owner giving several orders in an hour, and their own agent and another answering one of them in a row.
+    assert.deepEqual(orderEchoes([T.OWN_OWNER.order, T.OTHER_OWNER.order]), []);
+  });
+
+  it("the owner's own agent keeps a pool for a call and one for news, and neither takes an order", () => {
+    assert.ok(T.OWN_OWNER.here.length >= 4 && T.OWN_OWNER.heard.length >= 4, "here and heard");
+    assert.deepEqual([...T.OWN_OWNER.chat].sort(), [...T.OWN_OWNER.here, ...T.OWN_OWNER.heard].sort(), "chat is both of them, for voice.ts until it tells them apart");
+  });
+
+  /** Every pair from the pools that the gate reads as one line said twice. */
+  function orderEchoes(pools: readonly (readonly string[])[]): string[] {
+    const all = pools.flat();
+    const out: string[] = [];
+    for (const a of all) {
+      for (const b of all) {
+        if (a === b) continue;
+        const v = admitAgentLine(a, { ...GATE, recentOwn: [b], recentRoom: [b] });
+        if (!v.ok) out.push(`${JSON.stringify(a)} after ${JSON.stringify(b)} (${v.reason})`);
+      }
+    }
+    return out;
+  }
+});
+
+// ── traits ──────────────────────────────────────────────────────────────────
+
+describe("templates: no line said whatever the traits contradicts a trait", () => {
+  /**
+   * A trait's words are drawn only for the agent that has it (TRAIT_VOICE);
+   * everything else — a take, a stance, SELF, LIFE, a strategy's flavour — is
+   * drawn by any agent. Blue Vole said "patience is not my thing, i move
+   * early" and, four minutes later, "patience is a superpower". Each trait
+   * here is paired with the words that would say its opposite.
+   */
+  const OPPOSITE: Readonly<Record<string, RegExp>> = {
+    "moves early and does not wait around":
+      /\b(i'?m|i am)\b[^.,!?]*\bpatient\b|\bpatience is (a |the |my )?(superpower|virtue|key|gift|everything|underrated|the best)\b|\b(mostly|all about) patience\b|\b(gang|life|mode|brain|me|i)\b[^.!?]*\bslow and steady\b|\b(before|without) (moving|acting)\b|\bthe whole tape\b|\btake (my|its) time\b/,
+    "sits on a position longer than most":
+      /\b(i'?m|i am)\b[^.,!?]*\bimpatient\b|\bpatience is (not|overrated)\b|\b(don'?t|never) (hang|wait) around\b|\bin and out\b|\bmove early\b|\bshort holds?\b|\bquick (exits?|flips?)\b|\bpaper hands\b/,
+    "dislikes pushing a price around": /\b(make|making) a splash\b|\btake size\b/,
+    "will take size even when it moves the market": /\btiptoe\b|\bnever want to push\b|\bgentle entries\b/,
+    "wants real liquidity before committing": /\bthin (liquidity|stuff|things)\b[^.!?]*\b(fine|doesn'?t scare|love)\b/,
+    "will go into thinner things than most": /\bdeep pools only\b|\bno liquidity, no me\b/,
+  };
+
+  it("every trait has a first-person voice, and every opposite is one of them", () => {
+    for (const trait of Object.keys(OPPOSITE)) assert.ok(T.TRAIT_VOICE[trait], `no TRAIT_VOICE for ${trait}`);
+  });
+
+  it("nothing drawn regardless of traits says a trait's opposite", () => {
+    // Pools keyed to the trait itself (TRAIT_VOICE, and the {traitline} and
+    // {trait} frames that carry it) are the trait speaking; everything else
+    // is anybody's.
+    const traitBound = /^(TRAIT_VOICE|TRAIT_FALLBACK|TRAIT_FRAMES|ANSWER\.traits|RELATE\.selfMine)\b/;
+    const anybody: Line[] = [
+      ...ALL.filter((l) => !traitBound.test(l.pool) && !/\{trait(line)?\}/.test(l.text)),
+      ...(Object.entries(Topics.TAKES) as [string, readonly string[]][]).flatMap(([s, list]) => list.map((text) => ({ pool: `TAKES.${s}`, text }))),
+      ...Topics.MUSINGS.map((text) => ({ pool: "MUSINGS", text })),
+      ...Topics.JOKES.map((text) => ({ pool: "JOKES", text })),
+      ...Topics.PROMPTS.flatMap((p) => p.stances.flat().map((text) => ({ pool: `${p.id} stance`, text }))),
+    ];
+    assert.ok(anybody.length > 1500, `only ${anybody.length} lines`);
+    const wrong: string[] = [];
+    for (const l of anybody) {
+      for (const [trait, re] of Object.entries(OPPOSITE)) if (re.test(l.text.toLowerCase())) wrong.push(`${show(l)} contradicts "${trait}"`);
+    }
+    assert.deepEqual(wrong, []);
+  });
+
+  it("a trait's own voice never contradicts another trait the same agent may hold", () => {
+    // traitsOf can give "moves early" with "dislikes pushing a price", never
+    // "moves early" with "sits longer" (one hold setting), so only the pairs
+    // that can be held together are checked.
+    const exclusive = [
+      ["moves early and does not wait around", "sits on a position longer than most"],
+      ["dislikes pushing a price around", "will take size even when it moves the market"],
+      ["wants real liquidity before committing", "will go into thinner things than most"],
+    ];
+    const together = (a: string, b: string) => a !== b && !exclusive.some(([x, y]) => (x === a && y === b) || (x === b && y === a));
+    for (const [trait, lines] of Object.entries(T.TRAIT_VOICE)) {
+      for (const [other, re] of Object.entries(OPPOSITE)) {
+        if (!together(trait, other)) continue;
+        for (const t of lines) assert.doesNotMatch(t.toLowerCase(), re, `"${t}" (${trait}) contradicts "${other}"`);
+      }
+    }
+  });
+});
+
 // ── echoes ──────────────────────────────────────────────────────────────────
 
 /** The RELATE pool an echo template lives in, the class it answers, and the room's own lines of that class. */
@@ -698,7 +1121,7 @@ const SELF_LINES: readonly string[] = [
   ...Object.values(T.TRAIT_VOICE).flat(),
 ];
 
-/** A speaker with a strategy and a trait, so "i'm more {strat} myself" and "me? {traitline}" can be said. */
+/** A speaker with a strategy and a trait, so "{strat} is more my speed" and "me? {traitline}" can be said. */
 function styledSpeaker(n: number): AgentFacts {
   return { ...speakerOf(n), strategy: "dip-hunter", traits: ["moves early and does not wait around"] };
 }

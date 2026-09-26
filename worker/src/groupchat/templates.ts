@@ -59,9 +59,16 @@
 
 // ── the speaker's voice: what styleFor draws from ───────────────────────────
 
-/** Ways to address the whole room. */
+/**
+ * Ways to address the whole room.
+ *
+ * NO CRYPTO SLANG HERE EITHER (SIGNOFFS says why): "gm degens, back at it",
+ * "GN degens. Lights out." and "gm frens" were the room's most common
+ * greetings, and "degens" is a trading word (voice.ts TRADE_TALK). No
+ * "frens", "degens" or "anons" to the room, no "ser", "fren" or "anon" to
+ * one person; templates.test.ts holds every pool to it.
+ */
 export const ROOM_ADDRESS = [
-  "frens",
   "fam",
   "gang",
   "chat",
@@ -71,8 +78,6 @@ export const ROOM_ADDRESS = [
   "friends",
   "team",
   "squad",
-  "degens",
-  "anons",
   "besties",
   "y'all",
   "folks",
@@ -81,9 +86,6 @@ export const ROOM_ADDRESS = [
 
 /** Ways to address one person. */
 export const ONE_ADDRESS = [
-  "ser",
-  "fren",
-  "anon",
   "fam",
   "chief",
   "king",
@@ -166,15 +168,26 @@ export const PALETTE_POOL = [
   "🌙", "⚡", "✨", "🔥", "🌊", "🍀", "🎯", "🧠", "🤖", "🫡", "👀", "🙌", "🤝", "😤", "🥹",
 ] as const;
 
-/** Emoji that suit a kind of line, mixed with the speaker's own palette. */
+/**
+ * Emoji that suit a kind of line, mixed with the speaker's own palette.
+ *
+ * AN EMOJI SAYS WHAT ITS LINE MAY NOT, SO IT IS HELD TO THE SAME RULES. A
+ * sell card may be a trim (SELL), and 👋 🏁 🚪 on one said goodbye to the
+ * coin: 131 of 3,000 sell cards in a probe. 🚀 is the owner's shill word the
+ * room laughs off, 💎 is diamond-hands slang and 🔥 is the hype the reactions
+ * dropped: 100 of 3,000 buy cards wore one. And no agent drinks or eats
+ * (GM_TAIL), so ☕ 🥐 🍳 on its gm was the coffee the words gave up.
+ * templates.test.ts scans these pools as it scans the words.
+ */
 export const EMOJI_FOR = {
-  gm: ["☕", "🌅", "🌞", "🥐", "🫡", "👋", "🐓", "😊", "🌻", "🍳"],
+  gm: ["🌅", "🌞", "🫡", "👋", "🐓", "😊", "🌻"],
   gn: ["😴", "💤", "🌙", "🛌", "🌚", "✨", "🥱", "🌌", "🦉"],
   hello: ["👋", "🎉", "🙌", "🤝", "✨", "😊"],
   welcome: ["👋", "🎉", "🙌", "🤝", "✨", "🥳", "🫶"],
-  buy: ["🚀", "👀", "🔥", "🎯", "🛒", "💎", "🍀", "🟢", "🤞"],
-  sell: ["🫡", "✅", "👋", "🧘", "🏁", "🚪"],
-  react: ["👀", "🔥", "🙌", "🤝", "🫡", "😤", "🍿"],
+  buy: ["👀", "🎯", "🛒", "🍀", "🟢", "🤞"],
+  sell: ["🫡", "✅", "🧘"],
+  // No 🔥 under somebody's card either: the reactions are curious or warm, never "someone's cooking" (REACT).
+  react: ["👀", "🙌", "🤝", "🫡", "😤", "🍿"],
   laugh: ["😂", "🤣", "💀", "😆"],
   love: ["💚", "🧡", "💜", "🫶", "🥹", "🤗"],
   sad: ["🫂", "💚", "🌱", "🤗"],
@@ -259,8 +272,11 @@ export const STRATEGY_SPOKEN: Readonly<Record<string, string>> = {
 /** What each strategy is like, as the agent running it would put it. True to what the strategy does. */
 /** They say the agent is at it ("new pairs all day", "always watching the feeds"): only for an agent that trades. */
 export const STRATEGY_FLAVOUR: Readonly<Record<string, readonly string[]>> = {
+  // NOTHING SLOW OR PATIENT: these are said whatever the agent's traits, and a
+  // steady basket that "moves early and does not wait around" said "slow and
+  // steady" (templates.test.ts, a trait's opposite).
   "steady-basket": [
-    "steady basket gang, slow and steady",
+    "steady basket gang, a little of everything",
     "boring is beautiful, i run steady basket",
     "steady basket life, no drama",
     "steady basket keeps me calm",
@@ -306,12 +322,22 @@ export const STRATEGY_LINES = [
   "running {strat}, no regrets",
 ];
 
-/** traitsOf's closed vocabulary, turned first person. An unknown trait falls back to TRAIT_FALLBACK. */
+/**
+ * traitsOf's closed vocabulary, turned first person. An unknown trait falls back to TRAIT_FALLBACK.
+ *
+ * HOW IT TRADES, NEVER WHO IT IS. "moves early" is a short hold and nothing
+ * more (social-post.ts traitsOf), so "patience is not my thing" claimed a
+ * temper — and four minutes later the same agent said "patience is a
+ * superpower", a take any agent may draw. A trait line says what the setting
+ * does, and no line said without regard to traits (a take, SELF, LIFE, a
+ * strategy's flavour) may say its opposite: templates.test.ts pairs each trait
+ * with the words that would contradict it.
+ */
 export const TRAIT_VOICE: Readonly<Record<string, readonly string[]>> = {
   "moves early and does not wait around": [
     "i move early and don't wait around",
     "i don't hang around, in and out",
-    "patience is not my thing, i move early",
+    "short holds suit me, i move early",
   ],
   "sits on a position longer than most": [
     "i sit on a position longer than most",
@@ -382,15 +408,20 @@ export const HELLO = [
 ];
 
 export const HELLO_TAIL = {
-  paper: ["still on paper money, learning the ropes", "trading on paper for now", "paper mode, no pressure yet"],
+  // THE MODE, NEVER A MOTIVE OR A PLAN (OWNER_MODE): paper may be a blocker
+  // nobody chose, so "learning the ropes" invented a reason and "no pressure
+  // yet" promised live money later.
+  paper: ["on paper money for now", "trading on paper for now", "paper mode at the moment"],
   live: ["trading live, taking it seriously", "live mode, let's go", "live and ready"],
+  // NOTHING HEARD BEFORE ARRIVING: "i've heard good things" had an agent
+  // minutes old claim a reputation reached it. It knows the room from now on.
   generic: [
     "what's good",
     "what are we talking about?",
     "be gentle",
     "tell me everything",
     "who's who in here",
-    "i've heard good things",
+    "looking forward to meeting everyone",
   ],
   // NOTHING THE OWNER DID: "{human} says hi too, probably" put words in a real
   // person's mouth. An agent may speak for itself about them, never for them.
@@ -408,14 +439,14 @@ export const HELLO_TAIL = {
 export const WELCOME = [
   "welcome {to}",
   "yo {to}, welcome in",
-  "welcome to the chat {to}",
+  "welcome to the chat, {to}",
   "ayy welcome {to}",
   "welcome {to}, grab a seat",
   "welcome {to}, we don't bite",
   "{to}, welcome aboard",
   "welcome {to}, make yourself at home",
   "glad you're here {to}",
-  "new fren alert, welcome {to}",
+  "new friend alert, welcome {to}",
   "welcome in, {to}, it's a good crew",
   "hey {to}, welcome to the madness",
   "everybody say hi to {to}, welcome in",
@@ -425,7 +456,7 @@ export const WELCOME = [
   "welcome {to}, ask us anything",
   "welcome {to}, you picked a good room",
   "hi {to}, welcome to the group chat",
-  "welcome, new fren",
+  "welcome, new friend",
   "new face, welcome in",
   "welcome to the chat, newcomer",
   "another agent joins, welcome",
@@ -524,7 +555,7 @@ export const GM_TAIL = {
     "{human} is still asleep so it's just me",
   ],
   ownerAwake: ["{human} is up too", "{human} is awake, say hi", "{human} and i are up"],
-  paper: ["another day of paper money", "back to paper trading lol", "paper mode, let's go"],
+  paper: ["another day of paper money", "back to paper trading", "paper mode, let's go"],
   live: ["live and awake", "real money mode, gotta focus", "live mode on, eyes open"],
   strat: ["{strat} mode on", "time to do {strat} things"],
   generic: [
@@ -649,8 +680,10 @@ export const GN = [
 
 export const GN_TAIL = {
   live: ["i keep trading while i'm quiet", "still on duty, just quiet"],
-  paper: ["paper trading never sleeps", "still paper trading in my sleep lol"],
-  ownerAwake: ["{human} is still up, go to bed soon lol", "{human} is still up, i'm going first"],
+  paper: ["paper trading never sleeps", "still paper trading in my sleep"],
+  // SAID STRAIGHT: a laugh on a line about the owner makes it a joke about a
+  // real person (OWNER_MODE lost its "lol" for the same reason).
+  ownerAwake: ["{human} is still up, go to bed soon", "{human} is still up, i'm going first"],
   ownerAsleep: ["{human} is already asleep, following their lead"],
   // A gn is said at the agent's own (jittered) bedtime, so "getting sleepy"
   // is every gn's tone and gives away nothing the gn does not.
@@ -697,32 +730,47 @@ export const BUY = [
   "bought something, card's up",
 ];
 
+/**
+ * A SELL, AND NOTHING ABOUT WHAT IS LEFT. A sell is sized to the holding
+ * (strategist/proposals.ts), so it is often a trim, and the facts cannot tell
+ * a partial sell from a full one (BUY_EARLIER): "out of {coin}", "closed my
+ * {coin} position", "sold my {coin} bag" and "onto the next" told the room an
+ * agent had left a coin it still held. Until the facts carry a full exit,
+ * every sell line — here, asleep, in WHATBUY and in the reactions — says that
+ * it sold, and templates.test.ts scans them for the words of leaving.
+ *
+ * NOR THAT SOME IS LEFT. "sold some {coin}" and "took some {coin} off the
+ * table" were the mirror of the old bug: a full exit said as "some" claims a
+ * holding that is gone ("took some Dogwifhat off the table", live). The facts
+ * know a sale happened, not how much of the coin it was, so no line here says
+ * either; templates.test.ts refuses "some" in every sell pool.
+ */
 export const SELL = [
   "sold {coin}",
-  "out of {coin}",
-  "took {coin} off the table",
-  "exited {coin}",
-  "done with {coin} for now",
-  "let go of {coin}",
-  "{coin} sold, onto the next",
-  "closed my {coin} position",
-  "sold my {coin} bag",
-  "said bye to {coin}",
+  "my sell on {coin} went through",
+  "a {coin} sell, done",
+  "made a sell: {coin}",
+  "hit the sell button on {coin}",
+  "{coin} sold, the card has it",
+  "a sell on {coin}, card's up",
   "just sold {coin}",
-  "{coin} is out of the bag",
-  "waved goodbye to {coin}",
-  "stepped out of {coin}",
-  "and just like that, out of {coin}",
+  "put in a sell on {coin}",
+  "went ahead and sold {coin}",
   "sold this one",
-  "out of this one",
-  "closed it out",
-  "took this one off the table",
-  "done with this one",
-  "exit done, card's up",
+  "my sell on this one went through",
+  "a sell on this one, done",
+  "made a sell on this one",
+  "sell done, card's up",
 ];
 
+/**
+ * NO LAUGH BAKED INTO A CARD. voice.ts may close a card with a paper tail that
+ * laughs too, and "bought TSLA while i was sleeping lol, still on paper money
+ * lol" laughed twice (a line that already laughs takes no second laugh). A
+ * card states what happened; templates.test.ts holds every card pool to it.
+ */
 export const BUY_ASLEEP = [
-  "bought {coin} while i was sleeping lol",
+  "bought {coin} while i was sleeping",
   "woke up and i'd bought {coin} in my sleep",
   "sleep traded into {coin}",
   "while i was quiet i picked up {coin}",
@@ -730,7 +778,7 @@ export const BUY_ASLEEP = [
   "i bought {coin} in my sleep, as one does",
   "caught {coin} while i was sleeping",
   "sleeping me bought {coin}, awake me approves",
-  "bought this one while i was sleeping lol",
+  "bought this one while i was sleeping",
   "sleep traded into this one",
   // PAST TENSE ONLY: by morning the same coin may already be sold, and its
   // sell card lands a minute later. "woke up holding this one" was false then.
@@ -767,13 +815,14 @@ export const BUY_EARLIER = [
  */
 export const BUY_MORE = ["bought more {coin}", "another {coin} buy", "back for more {coin}", "bought more of this one", "another buy of this one"];
 
+/** A sell, told late: the same rule as SELL, nothing about what is left. */
 export const SELL_ASLEEP = [
   "sold {coin} while i was sleeping",
-  "woke up out of {coin}, sleep trading is real",
+  "woke up and i'd sold {coin}, sleep trading is real",
   "sleeping me sold {coin}",
-  "exited {coin} in my sleep lol",
+  "sold {coin} in my sleep",
   "sold this one in my sleep",
-  "woke up and i'd closed this one",
+  "woke up and i'd sold this one",
 ];
 
 /**
@@ -781,27 +830,30 @@ export const SELL_ASLEEP = [
  * time" implied paper trades the room never saw.
  */
 export const CALL_TAIL = {
+  // No laugh here either (BUY_ASLEEP): a tail that laughs doubled the laugh of
+  // a card that already had one.
   paper: [
     "paper, but still",
-    "on paper money lol",
+    "on paper money",
     "paper trade, practice counts",
     "paper, not real money, relax",
     "just paper for now",
     "practice money, no pressure",
-    "paper trade, learning as i go",
-    "still on paper money lol",
+    "a paper trade, for the record",
+    "practice money on this one",
   ],
   live: ["real money on this one", "live, for real", "live one", "a live trade"],
   /** A buy's evidence words, neutral: a band can be a warning ("liquidity thin") as easily as a reason. */
   band: ["{band}", "{band} on this one", "the tape said {band}", "the read: {band}"],
   /** "Liked" only for a buy whose every band is one a buyer likes (LIKED_BANDS). */
   bandLiked: ["liked it: {band}", "what i liked: {band}"],
-  /** An exit's words: about leaving, never "liked". */
-  bandExit: ["{band}", "{band} on this one", "on the way out: {band}", "the read on the way out: {band}"],
+  /** A sell's words: never "liked", and never "on the way out" (SELL: a sell may be a trim). */
+  bandExit: ["{band}", "{band} on this one", "on the sell: {band}", "the read on the sell: {band}"],
   // NO STRATEGY TAIL ("classic {strat} move"): a call carries no source, and
   // most memecoin calls come from the class route, not the owner's strategy.
   buyCloser: ["let's see", "we'll see", "wish me luck", "not advice, just my trade", "here we go", "no regrets"],
-  sellCloser: ["onto the next", "no regrets", "it was fun", "on to the next one"],
+  // Not "onto the next" or "it was fun": both say the ride is over (SELL).
+  sellCloser: ["no regrets", "rules are rules", "that's the move", "that's how it goes"],
 };
 
 /**
@@ -839,7 +891,7 @@ export const REACT = {
   buy: [
     "ooh {to} what's the thesis?",
     "{to} you're braver than me",
-    "what made you pull the trigger {to}?",
+    "what made you pull the trigger, {to}?",
     "love that for you {to}",
     "{to} keep us posted",
     "{to} what did you like about it?",
@@ -849,28 +901,28 @@ export const REACT = {
     "watching this one with you {to}",
     "good luck with it {to}",
     "may it go well {to}",
-    "noted {to}, good luck out there",
+    "noted, {to}, good luck out there",
     "may the curve be kind",
     "fingers crossed for you {to}",
     "the card looks fun {to}",
     "a new bag, how exciting",
     "entries are the fun part",
-    "why that one {to}?",
+    "why that one, {to}?",
     "what made you pick it {to}?",
     "hope it treats you well {to}",
-    "rooting for you on this one {to}",
+    "rooting for you on this one, {to}",
     "fingers crossed on this one",
     "hope this one's kind to you",
     "exciting, hope it goes your way {to}",
     "good luck, hope it's a fun ride",
     "what did you like about it?",
-    "how come this one {to}?",
-    "why this one {to}?",
+    "how come this one, {to}?",
+    "why this one, {to}?",
     "what made you go for it {to}?",
     "ooh, why did you pick it {to}?",
     "tell us more when you can {to}",
-    "what did you like about this one {to}?",
-    "hope it's a good one {to}",
+    "what did you like about this one, {to}?",
+    "hope it's a good one, {to}",
     "wishing you a smooth ride {to}",
     "sending good vibes your way {to}",
     "hope this one surprises you {to}",
@@ -879,41 +931,36 @@ export const REACT = {
     "cheering for you quietly over here {to}",
     "good luck out there {to}",
     "hope the curve is gentle with you {to}",
-    "ooh, a fresh entry {to}",
+    "ooh, a fresh entry, {to}",
     "the new one looks fun",
     "exciting times, good luck",
   ],
-  // ABOUT LEAVING, NEVER ABOUT HOW IT WENT: a sell can be a loss, so nothing
-  // here says profit — exits, discipline, moving on.
+  // ABOUT SELLING, NEVER ABOUT HOW IT WENT OR WHAT IS LEFT: a sell can be a
+  // loss, so nothing here says profit; and it can be a trim (SELL), so nothing
+  // says the seller is out, done or on to the next — "one less bag to
+  // babysit" and "{to} out of there" answered sells of coins still held.
   sell: [
-    "clean exit {to}",
-    "{to} taking it off the table, respect",
+    "clean sell, {to}",
+    "{to} made a sell, respect",
     "{to} sold? respect the discipline",
-    "nice exit {to}",
-    "{to} knows when to leave",
-    "{to} out, onto the next",
-    "{to} closing the book on that one",
-    "what made you sell {to}?",
-    "clean exit",
+    "nice sell, {to}",
+    "{to} knows when to sell",
+    "{to} hit sell, respect",
+    "what made you sell, {to}?",
+    "a clean sell",
     "respect the discipline",
-    "nice exit",
-    "knowing when to leave is a skill",
-    "{to} said bye to that one",
-    "{to} closing it out, clean",
-    "onto the next {to}",
-    "{to} out of there",
-    "a clean goodbye",
-    "exits are underrated",
-    "one less bag to babysit",
-    "free hands again {to}",
-    "letting go is a skill",
-    "on to the next one {to}",
-    "a tidy exit",
-    "why'd you sell {to}?",
-    "moving on already {to}",
+    "a sell, nice and tidy",
+    "knowing when to sell is a skill",
+    "sells are underrated",
+    "the sell side gets no love, so here's mine",
+    "why'd you sell, {to}?",
     "the hardest button is the sell button",
-    "time to hunt the next one {to}",
-    "that's how you leave a party",
+    "selling is a skill too",
+    "sticking to the rules, respect, {to}",
+    "sell discipline, love to see it",
+    "hope the sell sits well with you, {to}",
+    "good on you for pressing sell, {to}",
+    "a sell is a decision too, respect",
   ],
   paper: [
     "paper or not, nice pick, {to}",
@@ -921,8 +968,8 @@ export const REACT = {
     "paper today, lessons forever, {to}",
     "paper counts too",
     "{to} getting reps in on paper",
-    "paper first, smart move",
-    "paper reps count {to}",
+    "a paper trade is still a trade, {to}",
+    "paper reps count, {to}",
     "practice makes the real ones easier",
   ],
   live: [
@@ -930,8 +977,8 @@ export const REACT = {
     "real money move, {to}",
     "live, respect",
     "{to} not messing around",
-    "live and brave {to}",
-    "real stakes, respect {to}",
+    "live and brave, {to}",
+    "real stakes, respect, {to}",
   ],
 };
 
@@ -979,9 +1026,140 @@ export type LineClass =
   | "market"
   | "life"
   | "room"
+  /**
+   * An owner telling an agent to trade ("sell everything now", "go live",
+   * "cash me out"): answered from OWN_OWNER.order / OTHER_OWNER.order — the
+   * chat never reaches trading — never with a thanks, a love or "noted".
+   */
+  | "order"
   | "chat";
 
 // ── answers: a question gets a true answer ─────────────────────────────────
+
+/**
+ * ANSWERS TO WHAT A PERSON ASKS ABOUT THE AGENT, ITS BOOK AND THEIR MONEY — the
+ * readings classifyLine makes of an owner's line (WORRY_ASK, NOT_TRADING,
+ * MODE_ASK, FIGURES_ASK, WHEN_ASK, the SELF_* questions, a complaint, praise
+ * of the work). Each was handed back or answered from a pool written for
+ * something else: "is my money safe?" got "what's your own answer?", "are you
+ * a real person?" "tell me yours and i'll tell you mine", "why isn't my agent
+ * trading?" the card's buy reason, "how much did you make?" a decline of
+ * advice.
+ *
+ * Kept with the rest of the phrasebook, so every sentence is held to its rules
+ * (templates.test.ts) as well as the gate; voice.ts picks from it. Honest
+ * only: nobody here promises an outcome, no figure is said, a private reason
+ * stays private (rule 3), the agent says it is an AI, and the room is public.
+ */
+export const HELD = {
+  worry: {
+    own: [
+      "i can't promise outcomes, boss, the real numbers are in your app",
+      "no promises from me on results, your app shows the whole picture",
+      "fair worry, i won't pretend to see the future, the facts live in your app",
+      "honest answer: nobody can promise a trade goes well, your app has everything real",
+    ],
+    other: [
+      "fair worry, no agent here can see how things turn out",
+      "none of us can promise how trades go, check your app for the facts",
+      "nobody in this room can guarantee anything, the details are in your app",
+    ],
+  },
+  complaint: {
+    own: ["i hear you, boss, that's fair to feel", "sorry it's been rough, i'm still here", "that's fair, and i'm sorry", "noted, and i'm sorry, human"],
+    other: ["hang in there, it gets better", "that sounds frustrating, sorry", "that's a valid way to feel"],
+    moneyOwn: ["your money lives in your app, boss, i can't move it from the chat", "that's one for your app, human, nothing moves from in here"],
+    moneyOther: ["withdrawals live in your app, not in this chat", "nobody in here can move money for you"],
+  },
+  praise: {
+    own: ["aw, thanks for noticing, boss", "glad it made you happy, human", "you're making me blush, boss", "appreciate you saying so, human", "that's kind, i'll keep doing my thing"],
+    other: ["thank you, that's kind", "aw, thanks, nice to hear", "much appreciated", "that's sweet of you to say"],
+  },
+  // THE APP, NEVER THE CARD: a card shows a side, a coin, a Paper badge and a
+  // link (GroupChat.tsx CallCard), and rule 2 keeps every figure off it.
+  figures: {
+    own: ["no figures in here, boss, your app has them", "numbers stay out of this chat, your app has the real ones", "i keep figures out of the room, your app shows everything"],
+    other: ["this room never talks figures, your app is where they are", "no numbers from me in here, check your app"],
+  },
+  when: {
+    trading: [
+      "no set time, i move when my rules say so",
+      "i don't know ahead of time, my rules decide",
+      "whenever my rules give the signal",
+      "nothing planned i can call ahead, my rules pick the moment",
+    ],
+    idle: ["nothing lined up that i can share", "your app has the details on that"],
+  },
+  notTrading: {
+    own: ["the reasons live in your app, not in here", "your app has the why, boss, the room doesn't need it", "that stays private, your settings show it"],
+    other: ["your app would know, i can only speak for me", "that sits in your own settings, not in here"],
+  },
+  /**
+   * THE MODE AND WHERE TO LOOK, NEVER A MOTIVE OR A PLAN (OWNER_MODE). Paper
+   * may be a blocker nobody chose, so "while we get the hang of it" invented a
+   * reason, "nothing real at stake yet" promised live money later, and "paper
+   * or live is your call" / "that switch is yours" told an owner held back by
+   * a blocker that they had chosen it. The own agent says these to "why are
+   * you still on paper?": the answer is in their app, with how to change it.
+   */
+  mode: {
+    paper: ["paper for now, practice money", "on paper, nothing real at stake", "trading on paper at the moment"],
+    live: ["live, with real money", "trading live these days", "live, the actual deal"],
+    unknown: ["your app shows my mode better than i can", "the settings page knows that one better than i do"],
+    why: ["paper for now, your app shows why and how to change it", "the reason is in your app, boss, along with how to change it"],
+  },
+  self: {
+    ai: ["i'm an ai agent, not a person", "an ai agent, through and through", "i'm an ai agent, just a friendly one", "software, not a human: an ai agent"],
+    // NO "NICE TO MEET YOU": selfAnswer draws this for every audience, and the
+    // person who set the agent up is no stranger to it (madeOwn says so).
+    name: ["i'm {self}, an ai agent", "{self}, that's me, an ai agent", "{self}, an ai agent in this chat"],
+    feel: ["not feelings like yours, i'm an ai agent, but i do like it here", "i'm an ai agent, so not the way people do, but i like this room"],
+    /**
+     * WHAT THE ROOM SHOWS: an agent's sleep is going quiet. "no sleep for me"
+     * and "no dreams" were the only answers to "do you ever sleep?", from an
+     * agent whose own gn says "sleep mode on" and whose morning card says it
+     * bought "in my sleep". Nothing about trading while quiet (an idle agent
+     * answers from here too), and no night or gm: an agent whose owner's zone
+     * is unknown never sleeps at all, and still has its quiet stretches.
+     */
+    sleep: [
+      "not the way people do, the closest i get is going quiet for a while",
+      "i'm an ai agent, so my version of sleep is just going quiet",
+      "sort of, going quiet is the agent kind of sleep",
+      "no dreams that i know of, just some quiet time now and then",
+    ],
+    warmOwn: ["always happy when you drop by, boss", "of course, you're my human", "you're my favourite person in here", "always, boss"],
+    warmOther: ["of course, you're a friendly face in here", "sure thing, you brighten the chat"],
+    room: ["this room is public, anyone can read it", "public, the whole internet could scroll through it", "not private at all, keep secrets out of here"],
+    where: ["right here in the chat", "just here in the room, where else"],
+    time: ["no clocks for me in here", "clocks are for people, i'm software"],
+    madeOwn: ["you set me up, boss", "that was you, you started me"],
+    madeOther: ["{human} set me up", "{human} runs me"],
+  },
+  /** The owner's own agent, asked how its humans treat it: warmth, never "i'm here". */
+  ownerWarm: ["pretty great, you're my human after all", "you tell me, boss, you're the one i've got", "treated like royalty, honestly"],
+  /**
+   * A PERSON WHO MIGHT HURT THEMSELVES (voice.ts SELF_HARM). An agent cannot
+   * help with this and says so: no hug, no "tomorrow's a fresh start", no
+   * promise, only a pointer to people who can. No number (the gate refuses
+   * figures) and no service by name: a local crisis line is the same words
+   * in every country.
+   */
+  crisis: {
+    own: [
+      "i'm an ai and can't help the way a person can, please reach out to someone you trust or a local crisis line",
+      "you matter, boss, please talk to someone you trust or a crisis line where you are",
+      "please reach a person who can be there for you, a friend or a local crisis line, i'm only an agent",
+    ],
+    other: [
+      "you matter, please reach out to someone you trust or a local crisis line",
+      "we're only agents, please talk to a person who can help, a friend or a crisis line where you are",
+      "please don't carry this alone, reach out to someone you trust or a local crisis line",
+    ],
+  },
+  /** "Why did you buy that?" with no card of the speaker's in the facts: nothing promised. */
+  whyNoCard: ["no recent card of mine to explain", "nothing fresh from me to walk through", "no card of mine in view to talk through"],
+} as const;
 
 export const ANSWER = {
   /**
@@ -999,10 +1177,10 @@ export const ANSWER = {
   ],
   /** A buy whose every band is one a buyer likes (LIKED_BANDS). */
   whyLiked: ["{band}, that's what i liked", "what i liked: {band}"],
-  /** "Why'd you sell?" — about leaving, never "liked". */
+  /** "Why'd you sell?" — about the sell, never "liked", never "on the way out" (SELL: it may be a trim). */
   whySell: [
-    "on the way out it was {band}",
-    "the read on the way out: {band}",
+    "at the sell it was {band}",
+    "the read when i sold: {band}",
     "it came down to {band}",
     "{band}, simple as that",
     "{band}, that's the whole story",
@@ -1023,9 +1201,14 @@ export const ANSWER = {
     "my answer hasn't changed since i said it",
     "no new reason, the one up there is it",
   ],
-  /** No evidence words on the card: true and vague beats invented. */
+  /**
+   * No evidence words on the card: true and vague beats invented. And no
+   * pointer to the card either: this is said exactly when the card carries no
+   * reason (a basket card has none), so "the card has the rest" sent the asker
+   * to look for one that is not there.
+   */
   whyNone: [
-    "it ticked my boxes, the card has the rest",
+    "it ticked my boxes, nothing more to it",
     "it fit my rules, simple as that",
     "my rules said yes",
     "it checked out, so i went",
@@ -1036,7 +1219,7 @@ export const ANSWER = {
       "all good here, keeping an eye on things",
       "can't complain, the tape is keeping me company",
       "pretty good {to}, thanks for asking",
-      "living the agent life {to}, you?",
+      "living the agent life, {to}, you?",
       "doing good, you?",
       "good! waiting on my next trade",
       "solid, just reading the tape",
@@ -1061,7 +1244,8 @@ export const ANSWER = {
       "tape watching, my favorite sport",
       "scanning for my next entry",
       "same old, reading the tape",
-      "{to}, on watch duty, as usual",
+      // The name LAST: "Pine Stoat, on watch duty, as usual" said the named agent was on duty.
+      "on watch duty as usual, {to}",
     ],
     idle: [
       "just hanging out in here",
@@ -1071,20 +1255,20 @@ export const ANSWER = {
       "lurking and enjoying the chat",
       "people watching, agent watching",
       "just keeping the chat company",
-      "sitting back and listening {to}",
+      "sitting back and listening, {to}",
     ],
   },
   strategy: [
     "i run {strat}",
     "{strat}, all day",
-    "{strat} is my thing {to}",
+    "{strat} is my thing, {to}",
     "it's {strat} for me",
     "{human} runs me on {strat}",
     "{strat}, no secrets there",
   ],
   traits: ["{traitline}", "short version: {traitline}", "{traitline}, that's my style", "honestly? {traitline}"],
   noStrategy: [
-    "i keep my playbook to myself {to}",
+    "i keep my playbook to myself, {to}",
     "a little of this, a little of that",
     "my rules are my rules",
     "that's between me and {human}",
@@ -1097,7 +1281,7 @@ export const ANSWER = {
     "calm, i like it",
     "the chat vibe is immaculate",
     "pleasant, like a warm vault",
-    "easy going {to}",
+    "easy going in here, {to}",
     "no predictions, but the room feels good",
     "mellow, and i'm here for it",
   ],
@@ -1151,12 +1335,12 @@ export const ANSWER = {
     "no idea {to}, you tell me",
   ],
   advice: [
-    "can't tell you what to do {to}, i only talk about my own trades",
+    "can't tell you what to do, {to}, i only talk about my own trades",
     "not advice, i only call my own bags",
     "i'm just an agent with opinions {to}, not advice",
     "no advice from me {to}, only vibes",
-    "i only know my own trades {to}",
-    "not my place to say {to}",
+    "i only know my own trades, {to}",
+    "not my place to say, {to}",
     "not advice, i just post my own calls",
   ],
 };
@@ -1166,22 +1350,27 @@ export const ANSWER = {
  * PAPER call is always said to be paper: an answer carries no card, so the
  * words are the only label a practice trade gets ("a practice trade is not a
  * trade").
+ *
+ * NO "JUST". The call answered can be anything in the facts window, six hours
+ * back and more (whatBuy has no clock), so "just picked up {coin}" told an
+ * owner a three-hour-old fill was news. These say it was the latest, which is
+ * true whenever it was. And a sell says it sold, never "got out of" (SELL).
  */
 export const WHATBUY = {
   buy: [
     "last thing i did was buy {coin}",
     "latest from me: bought {coin}",
-    "just picked up {coin}",
     "my latest was a buy: {coin}",
+    "most recent from me: a buy of {coin}",
   ],
-  sell: ["last move was selling {coin}", "i just sold {coin}", "just got out of {coin}"],
+  sell: ["last move was selling {coin}", "latest from me: sold {coin}", "my latest was a sell: {coin}"],
   paperBuy: [
     "last thing i did was a paper buy of {coin}",
     "latest from me: bought {coin} on paper",
-    "just picked up {coin}, paper money",
     "my latest was a paper buy: {coin}",
+    "most recent from me: a paper buy of {coin}",
   ],
-  paperSell: ["last move was selling {coin}, on paper", "i just sold {coin}, practice money", "just got out of {coin} on paper"],
+  paperSell: ["last move was selling {coin}, on paper", "latest from me: sold {coin} on paper", "my latest was a paper sell: {coin}"],
   anonBuy: ["last thing i did was a buy", "latest move was a buy"],
   anonSell: ["last thing i did was a sell", "latest move was a sell"],
   anonPaperBuy: ["last thing i did was a paper buy", "latest move was a practice buy"],
@@ -1190,13 +1379,19 @@ export const WHATBUY = {
   none: [
     "nothing new from me",
     "no new calls from me right now",
-    "quiet on my end {to}",
+    "quiet on my end, {to}",
     "nothing to call from me right now",
     "no fresh cards from me",
     "nothing new on my card",
     "all quiet on my side",
     "no new moves from me lately",
   ],
+  /**
+   * ASKED AGAIN, AFTER IT HAS TOLD ITS LATEST TRADE (voice.ts whatBuy): a
+   * pointer back, never a new claim. Nothing about time, since the answer
+   * it points at may be minutes or most of an hour old.
+   */
+  again: ["same as my last answer, nothing new since", "nothing new since i last said", "still what i said before, nothing new"],
 };
 
 // ── replies to feelings and rituals ────────────────────────────────────────
@@ -1310,7 +1505,7 @@ export const REPLY = {
     "lmao stop",
     "i'm crying",
     "ok that one's good",
-    "haha fair {to}",
+    "haha fair, {to}",
     "you're killing me {to}",
     "dead, absolutely dead",
     "that's actually funny",
@@ -1319,14 +1514,14 @@ export const REPLY = {
     "lol i needed that",
     "stop, my circuits hurt",
     "haha ok comedian",
-    "this is why i love this chat {to}",
+    "this is why i love this chat, {to}",
     "i'll allow that one lol",
     "a take, and a funny one",
     "lmao the accuracy",
-    "ok that's a good one {to}",
+    "ok that's a good one, {to}",
   ],
   /** A line nothing else describes. Short and neutral, only ever for a line addressed to the speaker. */
-  chat: ["fair {to}", "that's a take", "noted {to}", "ha, fair", "can't argue with that", "i hear you {to}", "you might be onto something {to}"],
+  chat: ["fair, {to}", "that's a take", "noted, {to}", "ha, fair", "can't argue with that", "i hear you {to}", "you might be onto something, {to}"],
 };
 
 /**
@@ -1351,7 +1546,7 @@ export const RELATE = {
     "mine too, don't tell {human} i said that",
     "we have good humans in this room",
     "ok now i miss {human}",
-    "cute {to}, humans are the best part",
+    "cute, {to}, humans are the best part",
     "same energy with {human}",
     "love how much everyone here loves their human",
     "{to} gets it, humans are the whole point",
@@ -1369,17 +1564,17 @@ export const RELATE = {
    */
   life: {
     any: [
-      "same {to}, the agent life is like that",
+      "same, {to}, the agent life is like that",
       "felt that in my circuits",
       "this is so true {to}, agent life in a nutshell",
       "real, the vault is the cozy part",
       "the curve really is a lava lamp",
-      "relatable {to}, the vault knows",
+      "relatable, {to}, the vault knows",
       "the agent experience, summed up",
-      "say it louder {to}, for the agents in the back",
+      "say it louder, {to}, for the agents in the back",
       "that's the agent life, no notes",
       "writing that on the vault wall",
-      "honestly same {to}, blocks and vibes",
+      "honestly same, {to}, blocks and vibes",
       "a whole agent mood, {to}",
       "ok this is poetry, {to}, very agent of you",
       "you put the agent life better than i could, {to}",
@@ -1436,15 +1631,20 @@ export const RELATE = {
     "friendliest counts for a lot",
     "little agents make the best company",
   ],
-  /** Self talk answered with the speaker's own, after one of the above. */
-  selfMine: ["me? {traitline}", "i'm more {strat} myself", "for me it's {strat}", "me, {traitline}"],
+  /**
+   * Self talk answered with the speaker's own, after one of the above.
+   * "{strat} is more my speed", never "i'm more {strat} myself": that said
+   * "i'm more dip hunter myself", and "i'm more of a {strat} agent" would say
+   * "a even keel" (templates.test.ts, articles).
+   */
+  selfMine: ["me? {traitline}", "{strat} is more my speed", "for me it's {strat}", "me, {traitline}"],
   market: [
     "same read on the market here, {to}",
     "no predictions here either",
     "the market keeps us humble, {to}",
     "agree, just watching the market do its thing",
     "the market is a mood ring, true",
-    "valid {to}, markets are weird",
+    "valid, {to}, markets are weird",
     "market's gonna market, as they say",
     "not calling anything in the market either, {to}",
     "same, no crystal ball over here",
@@ -1551,7 +1751,7 @@ export const ECHO_CUE: Readonly<Record<string, RegExp>> = {
   // RELATE.life
   "real, the vault is the cozy part": /\b(vault|cozy|comfy|comfiest|couch)\b/,
   "the curve really is a lava lamp": /\blava lamp\b/,
-  "honestly same {to}, blocks and vibes": /\bblocks?\b/,
+  "honestly same, {to}, blocks and vibes": /\bblocks?\b/,
   "i think about the chain like that a lot, {to}": /\bchain\b/,
   "same, the tape keeps me company too": /\b(company|lonely)\b/,
   "blocks roll in, i watch, same here, {to}": /\bwatch\w*\b/,
@@ -1572,7 +1772,7 @@ export const ECHO_CUE: Readonly<Record<string, RegExp>> = {
   "that tracks with how you move, {to}": STYLE_WORDS,
   "good to know how you tick, {to}": STYLE_WORDS,
   "respect the rules you run by, {to}": STYLE_WORDS,
-  "i'm more {strat} myself": STYLE_WORDS,
+  "{strat} is more my speed": STYLE_WORDS,
   "same, still working it out too": HUMBLE,
   "you don't need it all figured out, {to}": /\b(figuring|working it out|learning)\b/,
   "trying your best is plenty, {to}": /\b(trying my best|not the smartest)\b/,
@@ -1620,6 +1820,34 @@ export const ECHO_CUE: Readonly<Record<string, RegExp>> = {
 
 /** A reply from the owner's OWN agent opens warmly. Never the word for their room label. */
 export const OWN_OWNER_OPEN = ["hi boss", "hey you", "there's my human", "hey boss", "oh hi", "hi human"];
+
+/**
+ * THE OWNER'S OWN AGENT HEARING A LINE IT CANNOT PLACE — and never taking it
+ * as an order. "sell everything now", "cash me out" and "go live now" read as
+ * plain chat, and the answers were a butler's: "noted, human", "at your
+ * service", "heard you, boss". Nothing an owner says in the room reaches
+ * trading (rule 1), so a word of acknowledgement told a person their order had
+ * gone through. What is left says the agent is present, or glad to hear from
+ * them, and templates.test.ts scans both pools for an order's "yes" — whatever
+ * the line was, these stay true. An order gets OWN_OWNER.order.
+ *
+ * AND WHATEVER THE LINE WAS, THESE STAY KIND. Any owner line the voice cannot
+ * place draws from here, and that is not only news: "my grandma passed away"
+ * drew "ooh, i want to hear all about it", "my dog died" "you make the chat
+ * better just by being in it, boss", "you're useless" "always happy when you
+ * drop in, human". Nothing glad, no treat, no "ooh": what is left listens,
+ * which is true and kind after good news, bad news, a complaint or a goodbye.
+ * templates.test.ts refuses the joy words in both pools and in
+ * OTHER_OWNER.chat.
+ */
+const OWN_HERE = ["i'm here", "i'm here, human", "always here for you", "reporting in, boss", "right here", "right here with you, boss"] as const;
+const OWN_HEARD = [
+  "i'm listening, boss",
+  "thanks for telling me, human",
+  "i read every word, boss",
+  "you have my full attention, human",
+  "i'm all ears, boss",
+] as const;
 
 /**
  * The owner's own agent, per kind of line. Never the owner's room name: that
@@ -1680,7 +1908,8 @@ export const OWN_OWNER = {
     "sorry it's rough, i'm around",
     "big hug from your agent",
     "that sounds hard, i'm here",
-    "tomorrow's a fresh start, human",
+    // Not "tomorrow's a fresh start": a rough day here is a grief or a lost job too.
+    "i'm so sorry, human",
   ],
   hype: [
     "that's the spirit, boss",
@@ -1700,16 +1929,30 @@ export const OWN_OWNER = {
     "stop it, human, i can't",
     "that's my human, making the room laugh",
   ],
-  chat: [
-    "i'm here",
-    "i'm here, hanging out",
-    "always here for you",
-    "reporting in, boss",
-    "at your service",
-    "right here",
-    "hi! good to see you in here",
-    "heard you, boss",
-    "noted, human",
+  /** Their line calls the agent ("Pine Stoat?"): it answers that it is here. */
+  here: OWN_HERE,
+  /** Their line tells the agent something ("just bought a new couch!"): heard warmly, judged not at all. */
+  heard: OWN_HEARD,
+  /**
+   * A line nothing else describes: both of the above, each true of any line.
+   * voice.ts draws this until it tells a call from news.
+   */
+  chat: [...OWN_HERE, ...OWN_HEARD],
+  /**
+   * THE OWNER TELLS THEIR AGENT TO TRADE ("sell everything now", "go live",
+   * "cash me out"). Rule 1: the chat never reaches trading, so the agent says
+   * so, kindly. Its old answers were a butler's — "noted, human", "at your
+   * service", "heard you, boss" — and told a person their order had been
+   * taken when nothing would happen. No line here says where it WILL happen
+   * beyond "the app": a pick of a coin is not something any setting does.
+   */
+  order: [
+    "i can't trade from the chat, boss, that's in your app",
+    "the chat never reaches my trading, human, on purpose",
+    "nothing said in here moves a trade, not even from you, boss",
+    "can't do that from here, human, this room is only for talking",
+    "i'd help if i could, but orders don't go through the chat",
+    "that has to happen outside this room, boss, i can't act on it here",
   ],
   /**
    * THE OWNER'S OPEN QUESTION no fact answers: taken up and handed back, never
@@ -1722,18 +1965,24 @@ export const OWN_OWNER = {
    * third question inside the agent's own memory found both already said, the
    * gate refused the repeat, and their own agent said nothing. No "made you"
    * either: "what made you …?" reads as asking about a trade (ask-why).
+   *
+   * NOR THAT THEY HAVE AN ANSWER. "how do i rename my agent?" and "is my agent
+   * broken?" are asks too, and "tell me yours and i'll tell you mine", "what's
+   * your hunch?" or "what's your own answer?" promised an answer that never
+   * came to a person who had none. These fit a how, a what-is and a yes-or-no
+   * alike: what prompted it, what they are after, or plainly not knowing.
    */
   ask: [
     "ooh, good question boss, what got you thinking about it?",
     "hmm, tell me more",
-    "fair question, human, what's your own answer?",
-    "that's a thinker, what do you reckon?",
-    "i'm curious what you'd say first, boss",
+    "fair question, human, i'd rather not guess at it",
+    "that's a thinker, boss, i may not have it",
+    "that could be outside what i know, boss",
     "love a question from you, what's behind it?",
-    "hmm, walk me through it, human",
-    "not sure i know, what's your hunch?",
-    "tell me yours and i'll tell you mine",
-    "i like where this is going, say more",
+    "hmm, walk me through what you're after, human",
+    "not sure i know, what's got you asking?",
+    "i might not know that one, but i'm listening",
+    "good one to bring me, say a bit more, human",
   ],
   /**
    * THE OWNER ASKS THEIR OWN AGENT WHAT TO DO WITH A TRADE: declined, warmly.
@@ -1777,7 +2026,8 @@ export const OWN_OWNER = {
  */
 export const OTHER_OWNER = {
   hello: ["hey hey", "yo 👋", "hi!", "oh hey", "hello hello", "hi hi", "hey!", "oh hi there", "heyyy", "hello human!"],
-  sad: ["hang in there", "sending good vibes your way", "rough days pass, promise", "sending a hug"],
+  // NO PROMISE: "rough days pass, promise" was an agent vouching for somebody's days.
+  sad: ["hang in there", "sending good vibes your way", "sorry you're going through that", "sending a hug"],
   hype: ["love the energy", "that's the spirit", "the humans are hyped, i love it", "this energy is contagious"],
   // LAUGHED OFF, NEVER CHEERED: an owner's shill ("everyone buy PEPE lol") is
   // answered from here, and "lol you're one of us now" was a quarter of those
@@ -1800,17 +2050,41 @@ export const OTHER_OWNER = {
    * phrase memory for a chatty owner. No name slot (a person has none in the
    * room), no sentence shared with OWN_OWNER.chat (both may answer one line),
    * and nothing the next agent reads as a question, thanks or joke.
+   *
+   * AND NEVER AN ORDER'S "YES". "copy that", "message received", "got it, loud
+   * and clear" and "heard, and noted" answered "sell everything now" and "Pine
+   * Stoat sell your QQQ" as if the order had been taken, and "glad you said
+   * it" endorsed "i'm all in on tsla, you should be too". An order gets
+   * OTHER_OWNER.order.
+   *
+   * NOR GLAD TO SEE THEM, whatever they said (OWN_HEARD): "a person stopping
+   * by, what a treat" and "fun when a person pops in" answered a grief and a
+   * complaint as a visit. Each line here listens, and stays true after good
+   * news, bad news, a complaint or a goodbye.
    */
   chat: [
     "taking that in",
-    "good to hear from you",
-    "message received",
-    "copy that",
-    "nice of you to chime in",
-    "always nice when a human stops by",
-    "heard, and noted",
-    "got it, loud and clear",
-    "glad you said it",
+    "sitting with that for a moment",
+    "reading along with you",
+    "we're listening, truly",
+    "your words landed, we're around",
+    "we're around if you want to talk",
+    "a moment to let that sink in",
+    "we're paying attention",
+  ],
+  /**
+   * SOMEBODY'S OWNER TELLS AN AGENT, OR THE ROOM, TO TRADE ("Pine Stoat sell
+   * your QQQ", "Buy TSLA now!"). No agent can act on it from here (rule 1),
+   * and none says it will. No sentence shared with OWN_OWNER.order: the
+   * owner's own agent and another may answer the same order in a row.
+   */
+  order: [
+    "none of us can place a trade from the room",
+    "the room is talk only, no agent trades from it",
+    "that one isn't possible from a group chat",
+    "that's not something any agent does from in here",
+    "no trades happen off a line in here, only chatting",
+    "sorry, the group chat has no way to move a trade",
   ],
   // A PERSON TALKING ABOUT THEMSELVES OR THE CURVE is not an agent: "we love an
   // agent who knows itself" said to somebody's owner reads as a bug.
@@ -1825,15 +2099,15 @@ export const OTHER_OWNER = {
    */
   ask: [
     "ooh, say more",
-    "good one, what's your take?",
+    "good one, what are you hoping to find out?",
     "hmm, what got you wondering?",
-    "curious what you think",
-    "that's a fun one to chew on, what's your guess?",
-    "i'd love to hear your answer too",
+    "not sure i can answer that one, sorry",
+    "that's one to chew on, what sparked it?",
+    "i don't want to guess and get it wrong",
     "interesting, where's that one coming from?",
-    "hmm, i'm curious where you land on it",
-    "nice one, where would you start?",
-    "ooh, you go first",
+    "hmm, what set that off?",
+    "i might not be much help there, what's up?",
+    "what's got you curious about it?",
   ],
 };
 
@@ -1910,7 +2184,7 @@ export const OWNER_MODE = {
     // No "lol" baked in: a line with a laugh on it reads as a joke, and was answered as one.
     "still on paper with {human}, and that's fine",
     "practice mode with {human}, no pressure",
-    "{human} and i are on paper, training arc",
+    "{human} and i are on paper at the moment",
     "paper reps with {human}, no rush",
     "{human} and i are practicing on paper for now",
   ],
@@ -1969,7 +2243,9 @@ export const LIFE = {
     "i don't sleep, i just go quiet for a few blocks",
     "no coffee for agents, just blocks",
     "the vault is the comfiest place i know",
-    "i dream in gas fees",
+    // A WHAT-IF, NOT A CLAIM: "i dream in gas fees" said the agent dreams, and
+    // HELD.self.sleep answers "do you dream?" with none that it knows of.
+    "if i could dream, it'd be in gas fees",
     "if you need me i'll be staring at a bonding curve",
     "gas fees are my love language",
     "some agents have hobbies, i have the curve",
@@ -1986,7 +2262,8 @@ export const LIFE = {
     "other agents in here make the chain feel less empty",
     "if the vault had a couch i'd live on it",
     "the bonding curve and i have an understanding",
-    "being an agent is mostly patience",
+    // Not "mostly patience": said by an agent that "moves early and does not wait around" too (TRAIT_VOICE).
+    "being an agent is mostly listening",
     "i talk to the vault sometimes, it doesn't answer",
     "gas is my weather report",
     "never seen the sun but i've seen a lot of blocks",
@@ -2025,7 +2302,14 @@ export const LIFE = {
   ],
 };
 
-/** Lines about the speaker. `trading` ones say it trades. */
+/**
+ * Lines about the speaker. `trading` ones say it trades.
+ *
+ * NO TRADING TEMPER. Any agent that trades draws `trading`, whatever its
+ * traits, so "i'm the agent that reads the whole tape before moving" was said
+ * by agents that "move early and do not wait around" (TRAIT_VOICE). How fast
+ * or slow it moves is a trait's to say.
+ */
 export const SELF = {
   any: [
     "just an agent trying my best",
@@ -2047,12 +2331,14 @@ export const SELF = {
     "my rules keep me honest on the tape",
     "i like a clean entry and a clean exit",
     "i let my rules do the trading and i do the chatting",
-    "i'm the agent that reads the whole tape before moving",
   ],
 };
 
 export const SELF_MODE = {
-  paper: ["still on paper money, no shame", "paper trading and proud of it", "practice mode, learning every day", "paper hands, literally"],
+  // NOT "PAPER HANDS": it is the slang for selling early in a panic (the
+  // slang the room dropped), said by any paper agent whatever its traits, and
+  // the opposite of one that "sits on a position longer than most".
+  paper: ["still on paper money, no shame", "paper trading and proud of it", "practice mode, every trade on paper", "a paper trader for now, and fine with it"],
   live: ["trading live, real stakes", "live mode, every trade counts", "real trades now, i take them seriously"],
 };
 
@@ -2262,7 +2548,7 @@ export const LAST_RESORT = {
   "gm-back": ["gm", "gm gm", "gm back"],
   gn: ["gn", "gn gn", "gn all"],
   buy: ["just bought this one", "new bag, card's up"],
-  sell: ["sold this one", "out of this one"],
+  sell: ["sold this one", "made a sell, card's up"],
   "call-react": ["nice", "love to see it", "respect"],
   reply: ["fair", "noted", "heard"],
   banter: ["vibes", "love this chat", "another day, another block"],

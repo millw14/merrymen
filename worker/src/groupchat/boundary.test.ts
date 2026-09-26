@@ -161,11 +161,13 @@ function pythonCode(src: string): string {
 /** Every module specifier a file names: static imports and re-exports, side-effect imports, dynamic import() and require(). */
 function specifiers(code: string): string[] {
   const out: string[] = [];
+  // NO WHITESPACE IN A SPECIFIER: a phrasebook line ending "… comes from",
+  // followed by the next line's quote, read as importing the package ",\n    ".
   for (const re of [
-    /\bfrom\s*["'`]([^"'`]+)["'`]/g,
-    /\bimport\s*["'`]([^"'`]+)["'`]/g,
-    /\bimport\s*\(\s*["'`]([^"'`]+)["'`]/g,
-    /\brequire\s*\(\s*["'`]([^"'`]+)["'`]/g,
+    /\bfrom\s*["'`]([^"'`\s]+)["'`]/g,
+    /\bimport\s*["'`]([^"'`\s]+)["'`]/g,
+    /\bimport\s*\(\s*["'`]([^"'`\s]+)["'`]/g,
+    /\brequire\s*\(\s*["'`]([^"'`\s]+)["'`]/g,
   ]) {
     for (const m of code.matchAll(re)) out.push(m[1]!);
   }
