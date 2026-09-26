@@ -490,8 +490,9 @@ describe("the kill switch stands down a tenant with no child running", () => {
     await store.remove(TENANT);
 
     // The owner re-signs while the kill is being recorded, and the restart
-    // comes due right then. The lease is still held, so only `standingDown`
-    // stands between that restart and a child armed in a doomed home.
+    // comes due right then. The lease is still held. The restart belongs to
+    // the run the kill ended (killEpoch), and spawnChild would refuse it
+    // anyway while `standingDown` holds the tenant.
     let raced = false;
     setSharedLedgerForTest({
       prepare: (sql) => shared.db.prepare(sql),
