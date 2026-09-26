@@ -1433,8 +1433,33 @@ export async function honourPendingKills(): Promise<void> {
   }
 }
 
+/**
+ * The passes in flight that write for a tenant under its lease: reconcile(),
+ * through its kill switch, and mirrorLedgers(). stopFleet waits for them
+ * before it releases any lease.
+ *
+ * A reconcile pass checks `stopping` once, on entry, and then awaits the
+ * store, the lease server and the settings files before it reaches the
+ * kill-switch branch. A SIGTERM in that gap must not release a lease the pass
+ * is about to stand down under, because that lease is what gates its last
+ * mirror. And a mirror pass part-way through a tenant is a write that must
+ * not outlive its lease, like the stand-down's.
+ */
+const leaseWork = new Set<Promise<unknown>>();
+
+function underLease<T>(work: Promise<T>): Promise<T> {
+  leaseWork.add(work);
+  const done = () => leaseWork.delete(work);
+  work.then(done, done);
+  return work;
+}
+
 /** Bring the running set in line with the store: spawn new tenants, stop killed ones. */
-export async function reconcile(): Promise<void> {
+export function reconcile(): Promise<void> {
+  return underLease(reconcilePass());
+}
+
+async function reconcilePass(): Promise<void> {
   if (stopping) return;
   const store = getGrantStore();
   let tenants: `0x${string}`[];
@@ -1558,26 +1583,29 @@ export async function reconcile(): Promise<void> {
 }
 
 /**
- * Tenants between the kill switch's SIGTERM and their released lease.
- * spawnChild refuses them.
+ * Tenants between the kill switch's SIGTERM and their released lease, each
+ * with a promise that settles once its lease has been let go.
  *
- * The exit handler treats a stood-down child like any other exit and
- * schedules a restart one second later. The stand-down now takes at least
- * that long, because it carries the child's ledger up first, and the lease is
- * held throughout. If the owner re-signed in that window, the store has a
- * grant again, so the restart would spawn a new child into the home that is
- * about to be deleted, under the lease that is about to be released.
+ * spawnChild refuses them. The exit handler treats a stood-down child like
+ * any other exit and schedules a restart one second later. The stand-down
+ * now takes at least that long, because it carries the child's ledger up
+ * first, and the lease is held throughout. If the owner re-signed in that
+ * window, the store has a grant again, so the restart would spawn a new child
+ * into the home that is about to be deleted, under the lease that is about to
+ * be released.
  *
  * A tenant killed with no child running is in here too, while its home is
  * mirrored and deleted. The restarts themselves are voided by `killEpoch`,
  * which also covers the ones that fire after the stand-down.
+ *
+ * stopFleet waits for them, and for the reconcile pass that starts them,
+ * before it releases any lease or exits. See standDownKilled for why the
+ * lease must outlive the write.
  */
-const standingDown = new Set<string>();
+const standingDown = new Map<string, Promise<void>>();
 
 /** How long a stood-down child gets to exit before its ledger is read anyway. killChild SIGKILLs at 3 s. */
 const STAND_DOWN_EXIT_MS = 4_000;
-/** A ceiling on recording the kill, so a shared database that hangs cannot hold the fleet loop. */
-const STAND_DOWN_RECORD_MS = 15_000;
 
 /** Resolves once `proc` has exited, or after `ms`, whichever comes first. */
 function exitOf(proc: ChildProcess, ms: number): Promise<void> {
@@ -1621,10 +1649,12 @@ export function adoptLeasedChildForTest(args: {
     signalCode: NodeJS.Signals | null;
   };
   shared: Db | null;
+  /** Called when reconcile releases the lease. */
+  onLeaseRelease?: () => void;
 }): void {
   const lc = args.tenant.toLowerCase() as `0x${string}`;
   children.set(lc, { proc: args.proc as unknown as ChildProcess, tenant: lc, smartAccount: args.smartAccount, startedAt: Date.now(), restarts: 0, epoch: epochOf(lc), staleSec: 600, firstBeatSec: 600 });
-  leases.set(lc, { tenant: lc, backend: "none", healthy: () => true, release: async () => {} });
+  leases.set(lc, { tenant: lc, backend: "none", healthy: () => true, release: async () => args.onLeaseRelease?.() });
   sharedForTest = args.shared;
 }
 
@@ -1638,8 +1668,17 @@ export function adoptLeasedChildForTest(args: {
  * Telegram /kill, its own record of the kill. See stand-down.ts.
  *
  * SIGTERM still comes first, so stopping the agent never waits on a database.
- * The recording is best-effort and time-boxed. The home is deleted and the
- * lease released whether or not it succeeds.
+ * The recording is best-effort: the home is deleted and the lease released
+ * whether or not it succeeds.
+ *
+ * BUT ONLY ONCE IT HAS SETTLED, and deliberately with no timeout. A timeout
+ * can stop the waiting, not the write. The mirror would carry on after the
+ * lease was gone, and its snapshot replace (delete-then-insert of positions
+ * and cost basis) could land on top of whichever child holds the lease next,
+ * here after a re-sign or on another replica. Holding the lease until the
+ * write lands is what keeps that impossible. It costs nothing new: a shared
+ * database that hangs already holds this loop in mirrorLedgers(), which has
+ * never had a timeout either.
  *
  * WITH NO CHILD RUNNING, the same minus the SIGTERM. The kill landed between
  * a crash and its restart, or in the give-up cool-off, and the home is still
@@ -1648,7 +1687,8 @@ export function adoptLeasedChildForTest(args: {
  */
 async function standDownKilled(tenant: string): Promise<void> {
   if (standingDown.has(tenant)) return;
-  standingDown.add(tenant);
+  let settled!: () => void;
+  standingDown.set(tenant, new Promise<void>((resolve) => (settled = resolve)));
   // The run ends here: no restart it scheduled, or that its exit below
   // schedules, fires.
   killEpoch.set(tenant, epochOf(tenant) + 1);
@@ -1687,6 +1727,7 @@ async function standDownKilled(tenant: string): Promise<void> {
     await releaseLease(tenant);
   } finally {
     standingDown.delete(tenant);
+    settled();
   }
 }
 
@@ -1740,31 +1781,24 @@ async function recordKill(tenant: string, run: KilledRun): Promise<void> {
     return;
   }
   if (!shared) return;
-  let timer: NodeJS.Timeout | undefined;
-  const r = await Promise.race([
-    recordStandDown({
-      tenant,
-      home: childHome(tenant),
-      smartAccount: run.smartAccount,
-      since: run.since,
-      shared,
-      lastMirror: run.lastMirror,
-    }),
-    new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), STAND_DOWN_RECORD_MS);
-    }),
-  ]).finally(() => clearTimeout(timer));
-  if (!r) {
-    log(`${tenant}: last mirror still running after ${STAND_DOWN_RECORD_MS / 1000}s — deleting the home anyway`);
-    return;
-  }
+  const r = await recordStandDown({
+    tenant,
+    home: childHome(tenant),
+    smartAccount: run.smartAccount,
+    since: run.since,
+    shared,
+    lastMirror: run.lastMirror,
+  });
   if (r.mirror) {
     if (r.mirror.failed) {
       const why = Object.entries(r.mirror.failed).map(([k, v]) => `${k}: ${v}`).join(" | ");
       log(`ledger mirror: ${tenant} STALLED on its last pass — ${why}`);
     }
     const counts = mirrorCountsLine(tenant, r.mirror);
-    if (counts) log(`${counts} · last pass before the kill switch deletes its home`);
+    if (counts) log(`${counts} · last pass (${r.mirror.rounds} round${r.mirror.rounds === 1 ? "" : "s"}) before the kill switch deletes its home`);
+    // Loud, because these rows go with the home. The home cannot be kept for
+    // them: it holds the session key the kill switch exists to destroy.
+    if (r.mirror.behind.length) log(`ledger mirror: ${tenant} LEFT BEHIND on its last pass, deleted with the home — ${r.mirror.behind.join(", ")}`);
   } else if (!run.lastMirror) {
     log(`${tenant}: no last mirror — this replica took the lease only to stand the tenant down, so its copy may be stale`);
   } else {
@@ -5195,7 +5229,11 @@ async function runNewsPass(): Promise<void> {
   }
 }
 
-async function mirrorLedgers(): Promise<void> {
+function mirrorLedgers(): Promise<void> {
+  return underLease(mirrorLedgersPass());
+}
+
+async function mirrorLedgersPass(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url || children.size === 0) return;
   let shared;
@@ -5599,6 +5637,58 @@ function haltRequested(): boolean {
   }
 }
 
+/**
+ * SIGTERM / SIGINT: call the whole fleet home, let go of the leases, exit.
+ * Exported so a test can drive it with a stand-in for process.exit.
+ */
+export function stopFleet(exit: (code: number) => void = (code) => process.exit(code)): void {
+  stopping = true;
+  log("stopping — calling the whole fleet home");
+  for (const child of children.values()) child.proc.kill("SIGTERM");
+  // FIRST, LET THE WRITES UNDER A LEASE FINISH. A reconcile pass in flight
+  // may be on its way to standing a tenant down, and a stand-down holds its
+  // lease until its last mirror and kill record have settled
+  // (standDownKilled). A mirror pass may be part-way through a tenant.
+  // Letting a lease go sooner would skip that last mirror, or hand the tenant
+  // to another replica while a write could still land on the next child's
+  // snapshots. No new reconcile starts once `stopping` is set, and the main
+  // loop starts no new mirror pass either.
+  //
+  // The wait has no limit on purpose. If the shared database never answers,
+  // the platform's SIGKILL ends it, which drops the write and the lease
+  // together, and Postgres rolls back whatever the write had not committed.
+  const settled = async () => {
+    for (;;) {
+      const inFlight = [...leaseWork, ...standingDown.values()];
+      if (!inFlight.length) return;
+      await Promise.allSettled(inFlight);
+    }
+  };
+  // THEN release every advisory lease so a restarting replica can take over
+  // at once rather than waiting for our dropped connections to time out
+  // server-side. Best-effort and unawaited. The exit follows a second after
+  // the signal at the earliest, and never before the kill switch has settled.
+  const release = () => {
+    for (const tenant of [...leases.keys()]) void releaseLease(tenant);
+  };
+  const exitWhenSettled = (ms: number) => setTimeout(() => void settled().then(() => exit(0)), ms);
+  // A TELEGRAM KILL STILL WAITING IN A HOME goes to the store before the
+  // leases do, so the replica taking over never arms that grant. The home
+  // does not survive this container (kill-request.ts). Bounded, and it
+  // changes nothing when no kill is pending. It only helps if Railway gives
+  // the old deployment draining time. The default is none.
+  if (pendingKillTenants().length === 0) {
+    void settled().then(release);
+    exitWhenSettled(1_000);
+    return;
+  }
+  void Promise.race([honourPendingKills(), new Promise((r) => setTimeout(r, 3_000))])
+    .catch(() => {})
+    .then(settled)
+    .finally(release);
+  exitWhenSettled(4_000);
+}
+
 export async function runOrchestrator(): Promise<void> {
   if (!isHostedMode()) {
     log("MERRYMEN_HOSTED is not set — the orchestrator only runs in hosted mode. Refusing to start.");
@@ -5613,29 +5703,7 @@ export async function runOrchestrator(): Promise<void> {
   // this very deploy just cleared. It runs from the loop instead — see
   // COHORT_VET_AFTER_PASSES.
 
-  const stop = () => {
-    stopping = true;
-    log("stopping — calling the whole fleet home");
-    for (const child of children.values()) child.proc.kill("SIGTERM");
-    // Release every advisory lease so a restarting replica can take over at once
-    // rather than waiting for our dropped connections to time out server-side.
-    // Best-effort and unawaited — we exit in a second regardless.
-    const release = () => {
-      for (const tenant of [...leases.keys()]) void releaseLease(tenant);
-    };
-    // A TELEGRAM KILL STILL WAITING IN A HOME goes to the store before the
-    // leases do, so the replica taking over never arms that grant. The home
-    // does not survive this container (kill-request.ts). Bounded, and it
-    // changes nothing when no kill is pending. It only helps if Railway gives
-    // the old deployment draining time. The default is none.
-    if (pendingKillTenants().length === 0) {
-      release();
-      setTimeout(() => process.exit(0), 1_000);
-      return;
-    }
-    void Promise.race([honourPendingKills(), new Promise((r) => setTimeout(r, 3_000))]).finally(release);
-    setTimeout(() => process.exit(0), 4_000);
-  };
+  const stop = () => stopFleet();
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 

@@ -218,6 +218,38 @@ describe("the kill switch stands a child down", () => {
     assert.equal(status(shared.raw), "killed");
   });
 
+  it("a backlog bigger than one mirror batch is drained, not cut off at 500", async () => {
+    // A mirror pass copies at most 500 rows per table. The stand-down is the
+    // child's last pass, so anything past one batch used to go with the home.
+    const shared = await sharedLedger();
+    const child = await childLedger();
+    await previousMirrorPass(shared.db);
+    const t0 = nowSec() - 20_000;
+    child.exec("BEGIN");
+    const ev = child.prepare(`INSERT INTO events (agent_id, level, message) VALUES (?, 'ok', ?)`);
+    for (let i = 0; i < 1234; i++) ev.run(ACCOUNT, `backlog ${i}`);
+    const tr = child.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, status) VALUES (?, 'swap', 'router', 1, 'paper')`);
+    for (let i = 0; i < 777; i++) tr.run(ACCOUNT);
+    // Ten seconds apart, so the decisions cursor (on `at`, with a 300 s
+    // lookback) can move past each batch.
+    const de = child.prepare(`INSERT INTO decisions (id, agent_id, source, action, reason, at) VALUES (?, ?, 'strategy:momentum', 'hold', 'wait', ?)`);
+    for (let i = 0; i < 1100; i++) de.run(`backlog-${i}`, ACCOUNT, t0 + i * 10);
+    // And a bucket that cursor cannot move through: 700 in one second.
+    for (let i = 0; i < 700; i++) de.run(`dense-${i}`, ACCOUNT, t0 + 11_005);
+    child.exec("COMMIT");
+    child.close();
+
+    adoptLeasedChildForTest({ tenant: TENANT, smartAccount: ACCOUNT, proc: fakeChild(), shared: shared.db });
+    await reconcile();
+
+    assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM events WHERE message LIKE 'backlog %'`), 1234);
+    assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM trades WHERE lower(agent_id) = lower(?)`, ACCOUNT), 777);
+    assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM decisions WHERE id LIKE 'backlog-%'`), 1100);
+    assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM decisions WHERE id LIKE 'dense-%'`), 700);
+    assert.equal(status(shared.raw), "killed");
+    assert.equal(existsSync(home()), false);
+  });
+
   it("a KILL SWITCH from an earlier run does not stand in for this one", async () => {
     const shared = await sharedLedger();
     // A kill before this child was spawned: the owner killed, then re-signed.
@@ -249,6 +281,45 @@ describe("the kill switch stands a child down", () => {
 
     assert.equal(proc.signals[0], "SIGTERM");
     assert.equal(existsSync(home()), false);
+  });
+
+  it("a slow shared database: the lease and the home are held until the write lands", async () => {
+    // A timeout could stop the waiting, not the write. Released early, the
+    // lease could pass to a new child whose snapshots the late write would
+    // then overwrite. So nothing is let go while a write is in flight.
+    const shared = await sharedLedger();
+    const child = await childLedger();
+    lastRows(child);
+    child.close();
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    let reached!: () => void;
+    const atGate = new Promise<void>((r) => (reached = r));
+    const slow: Db = {
+      prepare: (sql) => shared.db.prepare(sql),
+      exec: (sql) => shared.db.exec(sql),
+      tx<T>(fn: (db: Db) => Promise<T>): Promise<T> {
+        reached();
+        return gate.then(() => shared.db.tx(fn));
+      },
+    };
+    let released = false;
+    const proc = fakeChild();
+    adoptLeasedChildForTest({ tenant: TENANT, smartAccount: ACCOUNT, proc, shared: slow, onLeaseRelease: () => (released = true) });
+
+    const pass = reconcile();
+    await atGate;
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(proc.signals[0], "SIGTERM", "the child is already stopped");
+    assert.equal(released, false, "the lease is held while the write is in flight");
+    assert.equal(existsSync(home()), true, "and so is the home");
+
+    open();
+    await pass;
+    assert.equal(released, true);
+    assert.equal(existsSync(home()), false);
+    assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM events WHERE message = 'the last thing the child said'`), 1);
+    assert.equal(status(shared.raw), "killed");
   });
 
   it("with no shared database at all the stand-down is what it always was", async () => {
