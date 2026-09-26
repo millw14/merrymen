@@ -339,10 +339,25 @@ export async function runAutoCapitalPass(d: AutoCapitalDeps): Promise<AutoCapita
   }
   if (candidates.length === 0) return [];
 
+  // EVERY ACCOUNT THIS SYSTEM CONTROLS, not just the ones being scanned. The
+  // classifier calls a transfer from a hosted account internal only if it knows
+  // the sender is one; left out, an owner moving money from an old account (or
+  // one agent paying another) would be booked here as a fresh outside deposit.
+  // Internal is not a deposit, so such an account is refused below.
+  const roster = (await d.db.prepare("SELECT smart_account FROM agents").all()) as { smart_account: unknown }[];
+  const knownAccounts = [
+    ...new Set(
+      [...roster.map((r) => String(r.smart_account)), ...d.tenants.map((t) => t.smartAccount)].map((a) =>
+        a.toLowerCase(),
+      ),
+    ),
+  ];
+
   const head = BigInt((await d.rpc("eth_blockNumber", [])) as string);
   const vaultsOf = new Map(candidates.map((c) => [c.account.toLowerCase(), c.t.vaults]));
   const chain = await (d.scan ?? scanFleetCapital)(d.rpc, {
     accounts: candidates.map((c) => c.account),
+    knownAccounts,
     usdgToken: d.usdgToken,
     fromBlock: 0n,
     toBlock: head,
@@ -424,22 +439,30 @@ export async function runAutoCapitalPass(d: AutoCapitalDeps): Promise<AutoCapita
         continue;
       }
 
+      // RECORDED BEFORE ANYTHING ELSE CAN FAIL. The deposits are committed; if
+      // the caller never hears so, the child is never restarted, keeps its old
+      // anchor, and the next pass skips the account because its ledger now
+      // agrees with its balance. The owner's note below is best effort.
       const deposits = plan.insert.length;
-      await d.db
-        .prepare("INSERT INTO events (agent_id, level, message) VALUES (?, ?, ?)")
-        .run(
-          c.account,
-          "ok",
-          `📥 your deposits are on record — ${deposits} transfer(s) totalling ${usdgOf(dec.depositsRaw)} USDG, read ` +
-            "from the chain. They count as the money you put in, not as profit, so your agent can size trades against them.",
-        );
+      booked.push({ tenant: c.t.tenant, account: c.account, cashRaw: c.cashRaw, deposits });
+      try {
+        await d.db
+          .prepare("INSERT INTO events (agent_id, level, message) VALUES (?, ?, ?)")
+          .run(
+            c.account,
+            "ok",
+            `📥 your deposits are on record — ${deposits} transfer(s) totalling ${usdgOf(dec.depositsRaw)} USDG, read ` +
+              "from the chain. They count as the money you put in, not as profit, so your agent can size trades against them.",
+          );
+      } catch (e) {
+        d.log(`capital| ${c.account} booked, but the owner's note was not written — ${e instanceof Error ? e.message : String(e)}`);
+      }
       d.log(
         `capital| ${c.account} BOOKED — ${dec.why}; contributions ${result.contributionsBeforeUsdg.toFixed(6)} -> ` +
           `${result.contributionsAfterUsdg.toFixed(6)}, quarantined ${result.quarantined}` +
           (dec.hwmGrossTarget !== null ? `, peak raised to ${usdgOf(dec.depositsRaw)}` : "") +
           ` (run ${runId})`,
       );
-      booked.push({ tenant: c.t.tenant, account: c.account, cashRaw: c.cashRaw, deposits });
     } catch (e) {
       d.log(`capital| ${c.account} failed — ${e instanceof Error ? e.message : String(e)}`);
     }

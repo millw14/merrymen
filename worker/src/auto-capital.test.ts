@@ -286,11 +286,13 @@ function fakeRpc(balances: Record<string, bigint>) {
 
 function scanOf(cap: AccountCapital) {
   const calls: string[][] = [];
-  const scan = async (_rpc: unknown, args: { accounts: readonly string[] }) => {
+  const known: (readonly string[] | undefined)[] = [];
+  const scan = async (_rpc: unknown, args: { accounts: readonly string[]; knownAccounts?: readonly string[] }) => {
     calls.push([...args.accounts]);
+    known.push(args.knownAccounts);
     return new Map([[ACCT.toLowerCase(), cap]]);
   };
-  return { scan: scan as never, calls };
+  return { scan: scan as never, calls, known };
 }
 
 const pass = (db: Db, cap: AccountCapital, refused = new Map<string, bigint>(), balance = 10_872_801n) => {
@@ -420,6 +422,35 @@ test("end to end: a refused account is not rescanned until its balance moves", a
   assert.equal(third.calls.length, 1, "the balance moved, so it is looked at again");
   const count = (await db.prepare("SELECT COUNT(*) AS n FROM flows").get()) as { n: number };
   assert.equal(Number(count.n), 0, "nothing was written for an account with a withdrawal");
+});
+
+test("end to end: the scan classifies against every hosted account, not only the one being judged", async () => {
+  const db = await freshDb();
+  await seedAgent(db, 10.872801);
+  const OTHER = "0x75cD5d5c395f271df7a1D5A1Aecb637f29C59148";
+  await db
+    .prepare(
+      `INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at)
+       VALUES (?, ?, ?, ?, '{}', 0, 0)`,
+    )
+    .run(OTHER, OTHER, OTHER, CHAIN);
+  const p = pass(db, capital(DEPOSITS()));
+  await p.run();
+  assert.deepEqual(p.calls, [[ACCT]], "only the candidate is scanned");
+  assert.ok(p.known[0]?.includes(OTHER.toLowerCase()), "but a transfer from any hosted account reads as internal");
+  assert.ok(p.known[0]?.includes(ACCT.toLowerCase()));
+});
+
+test("end to end: a booking the owner's note could not follow is still reported, so the child is restarted", async () => {
+  const db = await freshDb();
+  await seedAgent(db, 10.872801);
+  await db.exec("DROP TABLE events");
+  const p = pass(db, capital(DEPOSITS()));
+  const booked = await p.run();
+  assert.equal(booked.length, 1, p.lines.join("\n"));
+  assert.ok(p.lines.some((l) => l.includes("owner's note was not written")));
+  const count = (await db.prepare("SELECT COUNT(*) AS n FROM flows WHERE agent_id = ?").get(ACCT)) as { n: number };
+  assert.equal(Number(count.n), 2);
 });
 
 test("end to end: an account that has traded live is never scanned", async () => {

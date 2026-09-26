@@ -4470,6 +4470,10 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     );
     const chain = await scanFleetCapital(rpc, {
       accounts,
+      // SCANNED SCOPED, CLASSIFIED FLEET-WIDE. Narrowing the scan must not narrow
+      // what counts as ours: a transfer from a hosted account outside the scope
+      // would otherwise read as an outside deposit and be booked as capital.
+      knownAccounts: allAccounts,
       usdgToken,
       fromBlock: 0n,
       toBlock: head,

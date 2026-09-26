@@ -170,3 +170,43 @@ describe("the fleet sweep", () => {
     for (const t of shapes) assert.notEqual(t[t.length - 1], null, "no trailing null");
   });
 });
+
+describe("what counts as ours", () => {
+  /**
+   * A SCOPED SCAN MUST STILL KNOW THE WHOLE FLEET. The automatic deposit pass
+   * scans only the accounts it is judging, and the classifier used to take
+   * "accounts this system controls" from that same list. So USDG moved from
+   * another hosted account — an owner consolidating after a re-sign, one agent
+   * paying another — read as an outside deposit and would have been booked as
+   * the recipient's capital.
+   */
+  const HOSTED = "0x00000000000000000000000000000000000000aa";
+  const FROM_HOSTED = transferLog({ from: HOSTED, to: ACCT, amount: 5_000_000n, tx: "0xmove", block: 4_200_000, idx: 0 });
+  const rpc: RpcCall = async (method, params) => {
+    if (method === "eth_getTransactionReceipt") return { logs: [FROM_HOSTED] };
+    const topics = (params[0] as { topics: (string | string[] | null)[] }).topics;
+    // Only the inbound sweep (topic2 = the account, as an OR-list) finds the transfer.
+    const to = topics[2];
+    const list = to === null || to === undefined ? [] : Array.isArray(to) ? to : [to];
+    return list.some((t) => t.toLowerCase() === pad32(ACCT)) ? [FROM_HOSTED] : [];
+  };
+
+  it("reads a transfer from a hosted account outside the scan as internal when told the roster", async () => {
+    const out = await scanFleetCapital(rpc, {
+      accounts: [ACCT],
+      knownAccounts: [ACCT, HOSTED],
+      usdgToken: USDG,
+      fromBlock: 0n,
+      toBlock: 5_000_000n,
+    });
+    const cap = out.get(ACCT)!;
+    assert.equal(cap.movements.length, 1);
+    assert.equal(cap.movements[0]!.classification.kind, "internal");
+    assert.equal(cap.totals.grossContributionsRaw, "0");
+  });
+
+  it("and, without the roster, still classifies against the scanned accounts as before", async () => {
+    const out = await scanFleetCapital(rpc, { accounts: [ACCT], usdgToken: USDG, fromBlock: 0n, toBlock: 5_000_000n });
+    assert.equal(out.get(ACCT)!.movements[0]!.classification.kind, "capital-in");
+  });
+});
