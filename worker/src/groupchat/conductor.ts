@@ -54,7 +54,7 @@
 import type { Db } from "../db";
 import { describeLlmFailure } from "../llm-failure";
 import { isAsleep, localDay, localMinutes, phaseOf, sleepWindow } from "./clock";
-import { loadFacts, type AgentFacts, type CallFact, type ChatProfile } from "./facts";
+import { loadFacts, sameCoin, type AgentFacts, type CallFact, type ChatProfile } from "./facts";
 import { admitAgentLine, type AgentLineCtx } from "./policy";
 import {
   agentActivity,
@@ -669,12 +669,6 @@ function summarise(labels: Label[]): string {
 function quietGapMs(awake: number, jitter: number): number {
   const base = Math.min(QUIET_MAX_SEC, Math.max(QUIET_MIN_SEC, QUIET_BASE_SEC / Math.sqrt(Math.max(1, awake))));
   return base * (0.5 + jitter) * SEC;
-}
-
-/** Two cards for the same coin: the same contract, else the same ticker or name. */
-function sameCoin(a: CallRef, b: CallRef): boolean {
-  if (a.token && b.token) return a.token.toLowerCase() === b.token.toLowerCase();
-  return (!!a.symbol && a.symbol === b.symbol) || (!!a.name && a.name === b.name);
 }
 
 function trimHour(list: number[], nowMs: number): void {

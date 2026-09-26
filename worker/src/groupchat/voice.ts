@@ -173,6 +173,13 @@ export interface SpeakCtx {
   addressable?: string[];
   /** The room's recent sentences, so nobody repeats what anybody said. Undefined: nothing is remembered. */
   memory?: RoomMemory | null;
+  /**
+   * THE ROOM'S THREAD-STARTERS OVER A LONG WINDOW (conductor TOPIC_MEMORY_MS):
+   * an off-trading question, take, musing or joke not started in it is
+   * preferred over one that was, so the phrasebook rotates instead of cycling
+   * every few hours. Undefined: no preference.
+   */
+  topicMemory?: RoomMemory | null;
 }
 
 // ── dice ────────────────────────────────────────────────────────────────────
@@ -563,6 +570,13 @@ export interface ClassifyOpts {
   kind?: MessageKind | null;
   /** Names to take out before reading ("Moon Frog" is a name, not hype). */
   names?: readonly string[];
+  /**
+   * Who wrote the line. An OWNER's words are free text: a trading question or
+   * a shill has to be caught by what it says, not by which template made it.
+   */
+  author?: AuthorKind | null;
+  /** The room's coin names and tickers (every card's symbol and name): in an owner's line, a coin makes it trading talk. */
+  coins?: readonly string[];
 }
 
 /**

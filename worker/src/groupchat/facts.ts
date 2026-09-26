@@ -113,6 +113,25 @@ export function chatProfileOf(settings: unknown): ChatProfile {
 // ── facts ────────────────────────────────────────────────────────────────────
 
 /** A trade the agent made, as the room may show it. See CallRef for why it has no size. */
+/**
+ * TWO CARDS FOR THE SAME COIN. The contract decides when both have one. With
+ * neither, the ticker — case aside — or, failing that, the name. With only ONE
+ * of them known, never: a coin with an address and one without are not
+ * evidence of the same coin, and "PEPE" is more than one contract. Shared by
+ * the conductor (repeats, re-entries, a buy since sold) and voice.ts (which
+ * card a thread is about), so both mean the same thing by "the same coin".
+ */
+export function sameCoin(a: Pick<CallRef, "token" | "symbol" | "name">, b: Pick<CallRef, "token" | "symbol" | "name">): boolean {
+  const ta = a.token ? String(a.token).toLowerCase() : "";
+  const tb = b.token ? String(b.token).toLowerCase() : "";
+  if (ta || tb) return ta !== "" && ta === tb;
+  const sa = a.symbol ? String(a.symbol).toLowerCase() : "";
+  const sb = b.symbol ? String(b.symbol).toLowerCase() : "";
+  if (sa || sb) return sa !== "" && sa === sb;
+  const na = a.name ? String(a.name).toLowerCase() : "";
+  return na !== "" && na === (b.name ? String(b.name).toLowerCase() : "");
+}
+
 export interface CallFact extends CallRef {
   decisionId: string;
   /** Unix seconds the decision was taken. */

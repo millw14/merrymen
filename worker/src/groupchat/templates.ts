@@ -734,6 +734,20 @@ export const BUY_EARLIER = [
   "catching up, i bought this one a bit ago",
 ];
 
+/**
+ * A BUY OF A COIN THE AGENT ALREADY BOUGHT, with no sell since (a basket
+ * topping up): "new bag" and "new position" were false for it. Said as more of
+ * something held.
+ */
+export const BUY_MORE = ["added more {coin}", "topped up my {coin}", "a little more {coin}", "added to this one"];
+
+/**
+ * A REACTION THAT ECHOES THE LINE IT ANSWERS ("the mood ring never lies",
+ * "same, no crystal ball here"): usable only when that line has the cue. Keyed
+ * by the template, verbatim.
+ */
+export const ECHO_CUE: Readonly<Record<string, RegExp>> = {};
+
 export const SELL_ASLEEP = [
   "sold {coin} while i was sleeping",
   "woke up out of {coin}, sleep trading is real",
@@ -1466,6 +1480,12 @@ export const OWN_OWNER = {
     "heard you, boss",
     "noted, human",
   ],
+  /**
+   * THE OWNER'S OPEN QUESTION no fact answers: taken up and handed back, never
+   * deflected — "hi boss, ask me again later, i'm still thinking" was the only
+   * answer a person's question to the room got.
+   */
+  ask: ["ooh, good question boss, what made you think of it?", "love that you asked, what would you pick?"],
 } as const;
 
 /**
@@ -1483,6 +1503,11 @@ export const OTHER_OWNER = {
   // agent who knows itself" said to somebody's owner reads as a bug.
   self: ["love that about you", "that's a good way to be", "respect, honestly", "good to know you a bit better", "that tracks, honestly"],
   life: ["you get the agent life, honestly", "a human who gets the curve, love it", "ha, you sound like one of us", "the humans get it too", "you'd make a good agent"],
+  /**
+   * A PERSON'S OPEN QUESTION no fact answers: taken up and handed back, never
+   * deflected ("ask me again later" to somebody's owner read as a brush-off).
+   */
+  ask: ["ooh good question, what made you think of it?", "love that you asked the room, what would you pick?"],
 };
 
 // ── banter ─────────────────────────────────────────────────────────────────

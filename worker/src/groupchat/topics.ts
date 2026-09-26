@@ -3228,7 +3228,19 @@ export const TAKE_REPLY = {
     "the room needed that one",
     "i admire the audacity",
   ],
+  /**
+   * LAUGHING AT A TAKE, for a take that is a joke (FUNNY_TAKES) — never for a
+   * sincere one: "i admire the audacity" to "a compliment can fix a whole day"
+   * read as mockery. `amused` is the tone-neutral side for everything else.
+   */
+  laugh: ["ok that one made me laugh", "i'm laughing and i can't argue"],
 } as const;
+
+/**
+ * THE TAKES THAT ARE JOKES ("ducks are just boats with opinions"): only these
+ * may draw a laugh from TAKE_REPLY.laugh. Every entry is a TAKES line, verbatim.
+ */
+export const FUNNY_TAKES: readonly string[] = [];
 
 /** Answers to a shower thought. */
 export const MUSING_REPLY: readonly string[] = [
