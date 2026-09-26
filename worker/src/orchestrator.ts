@@ -487,6 +487,21 @@ export function adoptChildForTest(
  * switch), when its lease goes unhealthy, or on shutdown.
  */
 const leases = new Map<string, TenantLease>();
+
+/**
+ * Tenants whose home this replica has held the lease over ever since a child
+ * of ours last wrote to it. Set when a child is spawned. Cleared whenever
+ * the lease is let go: released, lost, or dropped by a fleet halt.
+ *
+ * A held lease alone does not say this. reconcile() takes one before a spawn,
+ * and the spawn can stop short, e.g. when the grant is deleted between the
+ * tenant list and the grant read. The lease is then held over a home an
+ * earlier run left, perhaps before a halt, and perhaps before another
+ * replica ran the tenant. Only a home in this set may be mirrored with no
+ * child running: `positions` and `cost_basis` mirror as delete-then-insert
+ * snapshots, so a stale copy would overwrite the live rows.
+ */
+const ledgerOwned = new Set<string>();
 let stopping = false;
 
 function log(msg: string): void {
@@ -495,6 +510,7 @@ function log(msg: string): void {
 
 /** Release and forget a tenant's lease. Best-effort; safe if none is held. */
 async function releaseLease(tenant: string): Promise<void> {
+  ledgerOwned.delete(tenant);
   const lease = leases.get(tenant);
   if (!lease) return;
   leases.delete(tenant);
@@ -1273,6 +1289,8 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   const proc = startWorker(tenant);
   const child: Child = { proc, tenant, smartAccount, startedAt: Date.now(), restarts, epoch, staleSec, firstBeatSec };
   children.set(tenant, child);
+  // Under the lease spawnChild checked above, which reconcile has held since.
+  ledgerOwned.add(tenant);
   const tag = `[${tenant.slice(0, 8)}]`;
   const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
     stream?.on("data", (c: Buffer) =>
@@ -1655,6 +1673,7 @@ export function adoptLeasedChildForTest(args: {
   const lc = args.tenant.toLowerCase() as `0x${string}`;
   children.set(lc, { proc: args.proc as unknown as ChildProcess, tenant: lc, smartAccount: args.smartAccount, startedAt: Date.now(), restarts: 0, epoch: epochOf(lc), staleSec: 600, firstBeatSec: 600 });
   leases.set(lc, { tenant: lc, backend: "none", healthy: () => true, release: async () => args.onLeaseRelease?.() });
+  ledgerOwned.add(lc);
   sharedForTest = args.shared;
 }
 
@@ -1698,9 +1717,9 @@ async function standDownKilled(tenant: string): Promise<void> {
   try {
     const child = children.get(tenant);
     const home = childHome(tenant);
-    // Held before this stand-down began: this replica has owned the tenant
-    // since its child ran, so the home is its latest ledger.
-    const leased = leases.has(tenant);
+    // Not "a lease is held": that lease may have been taken for a spawn that
+    // never happened, over a home an earlier run left behind. See ledgerOwned.
+    const owned = leases.has(tenant) && ledgerOwned.has(tenant);
     let run: KilledRun | null = null;
     if (child) {
       const exited = exitOf(child.proc, STAND_DOWN_EXIT_MS);
@@ -1709,8 +1728,8 @@ async function standDownKilled(tenant: string): Promise<void> {
       await exited;
       run = { smartAccount: child.smartAccount, since: Math.floor(child.startedAt / 1000), lastMirror: true };
     } else if (existsSync(home)) {
-      if (!leased && !(await leaseToStandDown(tenant))) return;
-      run = { ...lastRunOnDisk(home, Math.floor(Date.now() / 1000)), lastMirror: leased };
+      if (!leases.has(tenant) && !(await leaseToStandDown(tenant))) return;
+      run = { ...lastRunOnDisk(home, Math.floor(Date.now() / 1000)), lastMirror: owned };
     }
     if (run) {
       try {
@@ -1760,7 +1779,7 @@ interface KilledRun {
   smartAccount: string | null;
   /** Unix seconds. A KILL SWITCH the child wrote at or after this is this kill's. */
   since: number;
-  /** False for a home this replica did not hold the lease over while its child ran. See recordStandDown. */
+  /** False unless this replica has held the lease over the home since its child last wrote it (ledgerOwned). See recordStandDown. */
   lastMirror: boolean;
 }
 
@@ -1800,7 +1819,7 @@ async function recordKill(tenant: string, run: KilledRun): Promise<void> {
     // them: it holds the session key the kill switch exists to destroy.
     if (r.mirror.behind.length) log(`ledger mirror: ${tenant} LEFT BEHIND on its last pass, deleted with the home — ${r.mirror.behind.join(", ")}`);
   } else if (!run.lastMirror) {
-    log(`${tenant}: no last mirror — this replica took the lease only to stand the tenant down, so its copy may be stale`);
+    log(`${tenant}: no last mirror — no child of this replica has written the home under its current lease, so the copy may be stale`);
   } else {
     log(`${tenant}: no last mirror — ${r.mirrorError ?? "no ledger on disk"}`);
   }

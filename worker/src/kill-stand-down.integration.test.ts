@@ -642,6 +642,91 @@ describe("the kill switch stands down a tenant with no child running", () => {
     assert.equal(spawned.length, 10, "the re-sign armed on the next pass");
   });
 
+  it("killed between a crash and its restart, on a slow shared database: the home and the lease are held until the write lands", async () => {
+    // A timeout can stop the waiting, not the write. This stand-down used to
+    // race its record against 15 s, then delete the home and release the
+    // lease with the mirror still writing. A re-signed run could then take
+    // the lease and have its positions and cost basis overwritten.
+    const shared = await armed();
+    const child = await childLedger();
+    await previousMirrorPass(shared.db);
+    lastRows(child);
+    child.close();
+    mock.timers.enable({ apis: ["setTimeout"] });
+    spawned[0]!.crash(1);
+    await store.remove(TENANT);
+
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    let reached!: () => void;
+    const atGate = new Promise<void>((r) => (reached = r));
+    setSharedLedgerForTest({
+      prepare: (sql) => shared.db.prepare(sql),
+      exec: (sql) => shared.db.exec(sql),
+      tx<T>(fn: (db: Db) => Promise<T>): Promise<T> {
+        reached();
+        return gate.then(() => shared.db.tx(fn));
+      },
+    });
+    const pass = reconcile();
+    await atGate;
+    mock.timers.tick(60_000); // however long the write takes
+
+    // The owner re-signs while the write is in flight, and a pass comes round.
+    await store.put(TENANT, grantAt(nowSec()));
+    await reconcile();
+    assert.equal(existsSync(home()), true, "the home is held while the write is in flight");
+    assert.equal(spawned.length, 1, "and no new run starts under the lease it still holds");
+
+    open();
+    await pass;
+    assert.equal(existsSync(home()), false);
+    assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM events WHERE message = 'the last thing the child said'`), 1);
+    assert.equal(status(shared.raw), "killed");
+    await reconcile();
+    assert.equal(spawned.length, 2, "the re-signed grant arms once the stand-down has let go");
+  });
+
+  it("a lease re-taken for a spawn that never happened does not make an old home this replica's: recorded and deleted, not mirrored", async () => {
+    // A fleet halt released every lease and left the homes. Then the grant
+    // is deleted between reconcile's tenant list and the spawn's grant read.
+    // The pass takes the lease and spawns nothing, and the kill lands on the
+    // next pass. The lease is held, but no child of this replica ever wrote
+    // that home under it.
+    //
+    // This replica ran the tenant once, under a lease it has since let go.
+    await armed();
+    await store.remove(TENANT);
+    await reconcile();
+    spawned.length = 0;
+    // And what a halt leaves in place of the stand-down's clean-up: the
+    // home, with rows the shared ledger may since have moved past.
+    const shared = await sharedLedger();
+    setSharedLedgerForTest(shared.db);
+    const child = await childLedger();
+    await previousMirrorPass(shared.db);
+    lastRows(child);
+    child.close();
+    writeFileSync(grantFile(), JSON.stringify(grantAt(nowSec() - 3600), null, 2));
+    await store.put(TENANT, grantAt(nowSec() - 3600));
+    const read = store.get.bind(store);
+    store.get = async (tenant) => {
+      store.get = read;
+      await store.remove(TENANT); // DELETE /api/grants, mid-pass
+      return read(tenant);
+    };
+
+    await reconcile();
+    assert.equal(spawned.length, 0, "the spawn found no grant");
+    assert.equal(existsSync(grantFile()), true, "and the pass left the old home, under the lease it took");
+
+    await reconcile();
+    assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM events WHERE message = 'the last thing the child said'`), 0, "the old copy was not mirrored");
+    assert.equal(status(shared.raw), "killed");
+    assert.deepEqual(killEvents(shared.raw), [STAND_DOWN_EVENT]);
+    assert.equal(existsSync(home()), false);
+  });
+
   it("a home this replica holds no lease for, as a fleet halt leaves it: the kill is recorded and the key deleted, but the copy is not mirrored", async () => {
     // Another replica may have run the tenant since this copy was written.
     // `positions` and `cost_basis` mirror as snapshots, so a stale copy would
