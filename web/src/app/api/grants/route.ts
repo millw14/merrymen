@@ -24,6 +24,7 @@ import {
   type StoredGrant,
 } from "@merrymen/core";
 import { requestOrigin, tenantOf, verifyGrantBinding } from "@/lib/auth";
+import { checkCanonicalWall } from "@/lib/canonical-wall";
 import { privyTokenOf, verifyPrivyToken } from "@/lib/privy";
 import { withReadDb } from "@/lib/ledger";
 import { getGrantStore } from "@merrymen/grant-store";
@@ -207,6 +208,50 @@ export async function POST(req: Request) {
         { status: 400 },
       );
     }
+
+    // ── THE SERVER STORES THE MERRYMEN WALL, OR NOTHING ──────────────────
+    //
+    // Every check above is about WHO is asking and whether the caps are
+    // usable. None of them looked at what the permission actually permits —
+    // and the worker trusts this payload's metadata about exactly that:
+    // `grantFeatures` opens routes in its mirror (limitsFromGrant), a
+    // `transfer` marker dated before the withdrawal allowlist is read as a
+    // free-form-recipient transfer (grantHasTransfer), and `grantTokens` and
+    // the sealed adapters say what it may sell and call. A tenant could post a
+    // hand-built permission carrying a USDG `transfer`, the Rialto target or
+    // the v4 UniversalRouter, and it was stored as-is. The site's terms say the
+    // session key has no transfer permission; this is what makes that true of
+    // everything this route accepts, not only of what our signers produce.
+    //
+    // The same rebuild-and-compare partner enrollment has always done
+    // (canonical-wall.ts): the canonical wall is rebuilt from this grant's own
+    // caps, times, tokens and sealed addresses and compared byte for byte with
+    // what the worker would install, and any marker the wall does not mint is
+    // refused.
+    //
+    // BEFORE THE BINDING, because it is pure: a refusal here costs no RPC and
+    // burns no single-use nonce.
+    //
+    // A STALE CLIENT IS REFUSED TOO, deliberately. The wall is built in the
+    // signing client, so a tab open from before a deploy that changed wall.ts
+    // seals the OLD wall — which is no longer what this server, or the worker's
+    // mirror, believes a grant permits. Everything per-owner (tokens, adapters,
+    // vaults, Trencher scope) is read from the grant itself, so only a change
+    // to wall.ts can cause this, and the remedy is the one the duplicate
+    // refusal above already gives: reload and sign again.
+    const wall = checkCanonicalWall(grant as unknown as Record<string, unknown>);
+    if (!wall.ok) {
+      return NextResponse.json(
+        {
+          error:
+            `${wall.why}. This service only accepts the Merrymen permission wall. If this page was open ` +
+            `from before an update, reload it and sign again.`,
+          code: wall.code,
+        },
+        { status: wall.status },
+      );
+    }
+
     const binding = grant.binding;
     // Version-agnostic presence check. WHICH signatures a claim needs is the
     // validator's decision, not this route's — demanding a walletSignature here
