@@ -128,6 +128,16 @@ export interface AutoCapitalDecision {
   depositsRaw: bigint;
 }
 
+/** One class vault, as the pass found it. */
+export interface VaultFacts {
+  address: string;
+  /** Its own USDG history, scanned like the account's. */
+  cap: AccountCapital | undefined;
+  /** Contract code at the address. A counterfactual vault nobody used has none. */
+  deployed: boolean;
+  cashRaw: bigint;
+}
+
 /**
  * Book it or leave it. PURE. Every refusal says why, because the refusal is what
  * an operator reads next to MERRYMEN_REPAIR.
@@ -136,8 +146,8 @@ export function decideAutoCapital(a: {
   plan: AccountPlan;
   cap: AccountCapital | undefined;
   onchainCashRaw: bigint;
-  /** USDG sitting in the account's class vault(s). */
-  vaultCashRaw: bigint;
+  /** The account's class vault(s): what each has ever done, and what it holds now. */
+  vaults: readonly VaultFacts[];
   head: bigint;
   minAgeBlocks?: bigint;
   hwmGrossUsdg: number;
@@ -168,7 +178,22 @@ export function decideAutoCapital(a: {
     const kinds = [...new Set(other.map((m) => m.classification.kind))].join(", ");
     return no(`the account has ${other.length} movement(s) that are not deposits (${kinds}) — an operator's call`);
   }
-  if (a.vaultCashRaw !== 0n) return no(`its class vault holds ${usdgOf(a.vaultCashRaw)} USDG — an operator's call`);
+  // THE VAULT IS CUSTODY TOO, and it is judged on its whole history, not on its
+  // balance today. An owner can pay USDG straight into it and spend it on a
+  // token (the orchestrator's HWM repair documents a 5.785344 USDG payment of
+  // exactly that kind): the vault then holds no USDG and no account-scoped scan
+  // ever saw the money, so booking the account's deposits alone would set the
+  // peak below what the owner put in and show the vault's principal as profit.
+  // A vault that was never deployed has never done anything; any other is an
+  // operator's call.
+  for (const v of a.vaults) {
+    if (!v.cap || !v.cap.complete) return no(`the history of its class vault ${v.address} could not be read in full`, true);
+    if (v.deployed) return no(`its class vault ${v.address} has been deployed — an operator's call`);
+    if (v.cap.movements.length > 0) {
+      return no(`its class vault ${v.address} has ${v.cap.movements.length} USDG movement(s) — an operator's call`);
+    }
+    if (v.cashRaw !== 0n) return no(`its class vault ${v.address} holds ${usdgOf(v.cashRaw)} USDG — an operator's call`);
+  }
 
   const deposits = BigInt(cap.totals.netContributionsRaw);
   // THE BALANCE MUST BE THE DEPOSITS, TO THE MICRO-USDG. If it is not, money
@@ -357,7 +382,8 @@ export async function runAutoCapitalPass(d: AutoCapitalDeps): Promise<AutoCapita
   const head = BigInt((await d.rpc("eth_blockNumber", [])) as string);
   const vaultsOf = new Map(candidates.map((c) => [c.account.toLowerCase(), c.t.vaults]));
   const chain = await (d.scan ?? scanFleetCapital)(d.rpc, {
-    accounts: candidates.map((c) => c.account),
+    // The vaults are scanned too: their own history is part of what is judged.
+    accounts: [...candidates.map((c) => c.account), ...candidates.flatMap((c) => c.t.vaults)],
     knownAccounts,
     usdgToken: d.usdgToken,
     fromBlock: 0n,
@@ -371,8 +397,16 @@ export async function runAutoCapitalPass(d: AutoCapitalDeps): Promise<AutoCapita
   for (const c of candidates) {
     const key = c.account.toLowerCase();
     try {
-      let vaultCashRaw = 0n;
-      for (const v of c.t.vaults) vaultCashRaw += await balanceOf(d.rpc, d.usdgToken, v);
+      const vaults: VaultFacts[] = [];
+      for (const v of c.t.vaults) {
+        const code = (await d.rpc("eth_getCode", [v, "latest"])) as string | null;
+        vaults.push({
+          address: v,
+          cap: chain.get(v.toLowerCase()),
+          deployed: typeof code === "string" && code !== "0x" && code !== "",
+          cashRaw: await balanceOf(d.rpc, d.usdgToken, v),
+        });
+      }
       const epoch = num(c.agent.epoch) || 1;
       const flows = (await d.db
         .prepare(
@@ -398,7 +432,7 @@ export async function runAutoCapitalPass(d: AutoCapitalDeps): Promise<AutoCapita
         plan,
         cap: chain.get(key),
         onchainCashRaw: c.cashRaw,
-        vaultCashRaw,
+        vaults,
         head,
         minAgeBlocks: d.minAgeBlocks,
         hwmGrossUsdg: num(c.agent.hwm_usdg),
@@ -419,22 +453,23 @@ export async function runAutoCapitalPass(d: AutoCapitalDeps): Promise<AutoCapita
       // and nothing is written; the next pass judges the new state.
       const confirmHead = BigInt((await d.rpc("eth_blockNumber", [])) as string);
       if (confirmHead > head) {
-        const since = (
-          await (d.scan ?? scanFleetCapital)(d.rpc, {
-            accounts: [c.account],
-            knownAccounts,
-            usdgToken: d.usdgToken,
-            fromBlock: head + 1n,
-            toBlock: confirmHead,
-            custodyAddressesFor: (a) => vaultsOf.get(a.toLowerCase()),
-            log: (m) => d.log(`capital| ${m}`),
-          })
-        ).get(key);
-        if (!since || !since.complete || since.movements.length > 0) {
+        const custody = [c.account, ...c.t.vaults];
+        const window = await (d.scan ?? scanFleetCapital)(d.rpc, {
+          accounts: custody,
+          knownAccounts,
+          usdgToken: d.usdgToken,
+          fromBlock: head + 1n,
+          toBlock: confirmHead,
+          custodyAddressesFor: (a) => vaultsOf.get(a.toLowerCase()),
+          log: (m) => d.log(`capital| ${m}`),
+        });
+        const since = custody.map((a) => window.get(a.toLowerCase()));
+        const moved = since.reduce((n, s) => n + (s?.movements.length ?? 0), 0);
+        if (since.some((s) => !s || !s.complete) || moved > 0) {
           d.log(
             `capital| ${c.account} NOT booked — ` +
-              (since && since.complete
-                ? `${since.movements.length} USDG movement(s) since block ${head}; judging again next pass`
+              (since.every((s) => s && s.complete)
+                ? `${moved} USDG movement(s) since block ${head}; judging again next pass`
                 : `could not confirm nothing moved since block ${head}; trying again next pass`),
           );
           continue;

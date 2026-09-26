@@ -28,6 +28,7 @@ import {
   decideAutoCapital,
   runAutoCapitalPass,
   withVerifiedCash,
+  type VaultFacts,
 } from "./auto-capital";
 
 const CHAIN = 4663;
@@ -104,7 +105,7 @@ const decide = (
     plan,
     cap,
     onchainCashRaw: 10_872_801n,
-    vaultCashRaw: 0n,
+    vaults: [],
     head: HEAD,
     hwmGrossUsdg: 10.872801,
     hwmWithdrawnUsdg: 0,
@@ -174,7 +175,7 @@ test("an account past its first accounting epoch is refused: its carry and its d
     plan,
     cap,
     onchainCashRaw: 10_872_801n,
-    vaultCashRaw: 0n,
+    vaults: [],
     head: HEAD,
     hwmGrossUsdg: 10.872801,
     hwmWithdrawnUsdg: 0,
@@ -189,8 +190,32 @@ test("a balance the deposits do not explain is refused", () => {
   assert.match(d.why, /not the sum of the deposits/);
 });
 
-test("USDG in the class vault is refused", () => {
-  assert.equal(decide(DEPOSITS(), { vaultCashRaw: 1n }).apply, false);
+const VAULT = "0x7d1a5ec0c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5";
+const vault = (over: Partial<VaultFacts> = {}): VaultFacts => ({
+  address: VAULT,
+  cap: { ...capital([]), account: VAULT },
+  deployed: false,
+  cashRaw: 0n,
+  ...over,
+});
+
+test("a class vault nobody ever used does not stand in the way", () => {
+  assert.equal(decide(DEPOSITS(), { vaults: [vault()] }).apply, true);
+});
+
+test("a class vault is judged on its whole history, not its balance today", () => {
+  // Paid into directly and spent on a token: no USDG left, but the owner's money went through it.
+  const spent = [move("0x" + "b".repeat(64), 71_900_000, "5785344"), move("0x" + "b".repeat(63) + "c", 71_900_100, "5785344", "trade-out")];
+  const history = decide(DEPOSITS(), { vaults: [vault({ cap: { ...capital(spent), account: VAULT } })] });
+  assert.equal(history.apply, false);
+  assert.match(history.why, /USDG movement/);
+  const deployed = decide(DEPOSITS(), { vaults: [vault({ deployed: true })] });
+  assert.equal(deployed.apply, false);
+  assert.match(deployed.why, /deployed/);
+  assert.equal(decide(DEPOSITS(), { vaults: [vault({ cashRaw: 1n })] }).apply, false);
+  const unread = decide(DEPOSITS(), { vaults: [vault({ cap: { ...capital([], false), account: VAULT } })] });
+  assert.equal(unread.apply, false);
+  assert.equal(unread.retry, true);
 });
 
 test("a peak ABOVE every deposit is not touched and not explained away", () => {
@@ -276,7 +301,10 @@ async function seedAgent(db: Db, hwm: number) {
  * A node: a head that can move between reads, and a balance that can change
  * after the first read of it — the two ways money moves while a pass judges.
  */
-function fakeRpc(balances: Record<string, bigint>, chain: { heads?: bigint[]; balanceAfterFirst?: bigint } = {}) {
+function fakeRpc(
+  balances: Record<string, bigint>,
+  chain: { heads?: bigint[]; balanceAfterFirst?: bigint; code?: Record<string, string> } = {},
+) {
   let headReads = 0;
   const balanceReads = new Map<string, number>();
   return async (method: string, params: unknown[]): Promise<unknown> => {
@@ -292,12 +320,13 @@ function fakeRpc(balances: Record<string, bigint>, chain: { heads?: bigint[]; ba
       const value = n > 0 && chain.balanceAfterFirst !== undefined ? chain.balanceAfterFirst : (balances[holder] ?? 0n);
       return "0x" + value.toString(16);
     }
+    if (method === "eth_getCode") return chain.code?.[String(params[0]).toLowerCase()] ?? "0x";
     throw new Error(`unexpected rpc ${method}`);
   };
 }
 
 /** A scan that honours the block range, as the node does: movements outside it are not returned. */
-function scanOf(cap: AccountCapital) {
+function scanOf(cap: AccountCapital, others: Record<string, AccountCapital> = {}) {
   const calls: string[][] = [];
   const known: (readonly string[] | undefined)[] = [];
   const scan = async (
@@ -306,10 +335,19 @@ function scanOf(cap: AccountCapital) {
   ) => {
     calls.push([...args.accounts]);
     known.push(args.knownAccounts);
-    const movements = cap.movements.filter(
-      (m) => BigInt(m.blockNumber) >= args.fromBlock && BigInt(m.blockNumber) <= args.toBlock,
+    const inRange = (c: AccountCapital): AccountCapital => {
+      const movements = c.movements.filter(
+        (m) => BigInt(m.blockNumber) >= args.fromBlock && BigInt(m.blockNumber) <= args.toBlock,
+      );
+      return { ...c, movements, totals: totalCapital(movements) };
+    };
+    return new Map(
+      args.accounts.map((a) => {
+        const k = a.toLowerCase();
+        const c = k === ACCT.toLowerCase() ? cap : (others[k] ?? { ...capital([]), account: a });
+        return [k, inRange(c)] as const;
+      }),
     );
-    return new Map([[ACCT.toLowerCase(), { ...cap, movements, totals: totalCapital(movements) }]]);
   };
   return { scan: scan as never, calls, known };
 }
@@ -319,9 +357,10 @@ const pass = (
   cap: AccountCapital,
   refused = new Map<string, bigint>(),
   balance = 10_872_801n,
-  chain: { heads?: bigint[]; balanceAfterFirst?: bigint } = {},
+  chain: { heads?: bigint[]; balanceAfterFirst?: bigint; code?: Record<string, string> } = {},
+  custody: { vaults?: string[]; vaultCaps?: Record<string, AccountCapital> } = {},
 ) => {
-  const s = scanOf(cap);
+  const s = scanOf(cap, custody.vaultCaps);
   const lines: string[] = [];
   return {
     ...s,
@@ -332,7 +371,7 @@ const pass = (
         rpc: fakeRpc({ [ACCT.toLowerCase()]: balance }, chain),
         usdgToken: USDG,
         chainId: CHAIN,
-        tenants: [{ tenant: TENANT, smartAccount: ACCT, vaults: [] }],
+        tenants: [{ tenant: TENANT, smartAccount: ACCT, vaults: custody.vaults ?? [] }],
         refused,
         log: (m) => lines.push(m),
         scan: s.scan,
@@ -512,6 +551,36 @@ test("end to end: a balance that changes while the account is judged stops the b
   assert.ok(p.lines.some((l) => l.includes("the balance moved")), p.lines.join("\n"));
   const count = (await db.prepare("SELECT COUNT(*) AS n FROM flows").get()) as { n: number };
   assert.equal(Number(count.n), 0);
+});
+
+test("end to end: the vault is scanned with the account, and an untouched one does not block the booking", async () => {
+  const db = await freshDb();
+  await seedAgent(db, 10.872801);
+  const p = pass(db, capital(DEPOSITS()), new Map(), 10_872_801n, {}, { vaults: [VAULT] });
+  assert.equal((await p.run()).length, 1, p.lines.join("\n"));
+  assert.deepEqual(p.calls[0], [ACCT, VAULT], "the vault's own history is read");
+});
+
+test("end to end: a vault the owner paid into and spent from blocks the booking", async () => {
+  const db = await freshDb();
+  await seedAgent(db, 10.872801);
+  const spent = [move("0x" + "b".repeat(64), 71_900_000, "5785344"), move("0x" + "b".repeat(63) + "c", 71_900_100, "5785344", "trade-out")];
+  const p = pass(db, capital(DEPOSITS()), new Map(), 10_872_801n, {}, {
+    vaults: [VAULT],
+    vaultCaps: { [VAULT.toLowerCase()]: { ...capital(spent), account: VAULT } },
+  });
+  assert.deepEqual(await p.run(), []);
+  assert.ok(p.lines.some((l) => l.includes("USDG movement(s) — an operator's call")), p.lines.join("\n"));
+  const count = (await db.prepare("SELECT COUNT(*) AS n FROM flows").get()) as { n: number };
+  assert.equal(Number(count.n), 0);
+});
+
+test("end to end: a deployed vault blocks the booking", async () => {
+  const db = await freshDb();
+  await seedAgent(db, 10.872801);
+  const p = pass(db, capital(DEPOSITS()), new Map(), 10_872_801n, { code: { [VAULT.toLowerCase()]: "0x6080" } }, { vaults: [VAULT] });
+  assert.deepEqual(await p.run(), []);
+  assert.ok(p.lines.some((l) => l.includes("has been deployed")), p.lines.join("\n"));
 });
 
 // ── the wiring ──────────────────────────────────────────────────────────────
