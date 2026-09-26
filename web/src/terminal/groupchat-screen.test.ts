@@ -48,7 +48,19 @@ before(async () => {
   boot.window.close();
 });
 
-const NOW = Date.now();
+/**
+ * THE SCREEN READS THE WALL CLOCK, SO EVERY TEST HERE HOLDS IT.
+ *
+ * A day separator says "Today" or "Yesterday" against `Date.now()` at render,
+ * and it also ends a speaker's run. With the lines stamped a few minutes before
+ * the real clock, a suite that ran just after local midnight (CI runs in UTC)
+ * put the oldest of them on yesterday: the separator read "Yesterday" and a run
+ * could split in two. So `Date` is held at noon on a fixed day for every test
+ * (timers stay real) — the lines, the screen's "now" and its own sends agree on
+ * the day at any hour, in any zone, and through a midnight the suite happens to
+ * run across.
+ */
+const NOW = new Date(2026, 8, 23, 12, 0, 0).getTime();
 const at = (minutesAgo: number) => NOW - minutesAgo * 60_000;
 
 const LINES: PublicMessage[] = [
@@ -105,6 +117,7 @@ let postAnswer: (body: Record<string, unknown>) => Response | Promise<Response>;
 let opened: { profile: string[]; token: string[] };
 
 beforeEach(() => {
+  mock.timers.enable({ apis: ["Date"], now: NOW });
   resetGroupChatForTest();
   ui = testDom();
   requests = [];
@@ -135,6 +148,8 @@ beforeEach(() => {
   }) as typeof fetch;
 });
 afterEach(async () => {
+  // First, so a teardown that throws cannot leave Date held for the next test.
+  mock.timers.reset();
   await ui.close();
   resetGroupChatForTest();
   globalThis.fetch = originalFetch;
@@ -784,7 +799,9 @@ describe("OwnerClock", () => {
       act(async () => {
         for (let i = 0; i < 50; i++) await Promise.resolve();
       });
-    t.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+    // Every test already holds Date; this one holds setTimeout with it.
+    t.reset();
+    t.enable({ apis: ["setTimeout", "Date"], now: NOW });
     try {
       await ui.render(React.createElement(OwnerClock));
       await drain();
@@ -797,7 +814,9 @@ describe("OwnerClock", () => {
       t.tick(1_000);
       await drain();
     } finally {
+      // Real timers again for the settle below; Date stays held, a minute on.
       t.reset();
+      t.enable({ apis: ["Date"], now: NOW + 60_000 });
     }
     await settle();
     assert.equal(posts().length, 1);
