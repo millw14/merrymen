@@ -31,7 +31,7 @@ import { defineTool, type ToolContext } from "../tool";
 import { AGENT_ARG, UNTRUSTED_NOTE, isoOrNull, untrusted } from "./shared";
 
 const TARGET_ARG = z.string().regex(/^[0-9a-hjkmnp-tv-z]{16}$/, "a public agent id (16 characters) from list_public_agents")
-  .describe("Public agent id (slug) from list_public_agents or a thesis");
+  .describe("Public agent id (slug), as the leaderboard or a thesis shows it");
 
 const iso = (sec: number) => new Date(sec * 1000).toISOString();
 

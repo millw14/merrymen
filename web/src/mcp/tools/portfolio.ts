@@ -21,7 +21,7 @@ import {
 import type { OwnedAgent } from "../agents";
 import { McpError } from "../errors";
 import type { ResourceDef } from "../resources";
-import { defineTool, type ToolContext } from "../tool";
+import { defineTool, withToolRefs, type ToolContext } from "../tool";
 import { ADDRESS_ARG, AGENT_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, isCursorInt, isoOrNull, untrusted } from "./shared";
 
 const BOOK = z.enum(["paper", "live"]);
@@ -350,7 +350,7 @@ function decisionOut(d: DecisionSummary | null): z.infer<typeof DECISION> | null
 const getTrade = defineTool({
   name: "get_trade",
   title: "One trade",
-  description: "One operation by id (from get_trades), with the decision that produced it (action, reason, dropped rule), what its status means for the receipt, and how many ledger rows record it.",
+  ...withToolRefs("One operation by id (from get_trades), with the decision that produced it (action, reason, dropped rule), what its status means for the receipt, and how many ledger rows record it.", " (from get_trades)"),
   capability: "portfolio.read",
   input: z.object({
     agent: AGENT_ARG,
@@ -413,7 +413,7 @@ const OPS = z.object({
 });
 
 const GAS_USDG_DESCRIPTION =
-  "Gas the book's landed operations paid, in USDG: the priced part. Null when none of their gas was priced and some of it was unpriced or never recorded (unknown, not zero); 0 only when nothing landed or every landed operation was sponsored. Read gas_complete before treating it as the whole cost.";
+  "Gas the book's landed operations paid, in USDG: the priced part. Null when none of their gas was priced and some of it was unpriced or never recorded (unknown, not zero); 0 only when nothing landed or every landed operation was sponsored. It is the whole cost only when gas_complete is true.";
 const GAS_COMPLETE_DESCRIPTION =
   "False when gas_usdg leaves out landed operations whose gas was unpriced or unrecorded, so it is a floor (or null); true when every landed operation's gas is in it";
 
@@ -525,7 +525,7 @@ const COMPARE_ROW = z.object({
   gas_usdg: z.number().nullable().describe(GAS_USDG_DESCRIPTION),
   gas_complete: z.boolean().nullable().describe(GAS_COMPLETE_DESCRIPTION),
   fills: z.number().describe("confirmed on-chain operations (live) or paper fills (paper)"),
-  failed_or_refused: z.number().describe("live: operations that reverted on chain; paper: refused paper fills. Refusals before anything was sent belong to neither book (get_performance refused_ops)"),
+  failed_or_refused: z.number().describe("live: operations that reverted on chain; paper: refused paper fills. Refusals before anything was sent belong to neither book (performance counts them separately, as refused_ops)"),
   caveats: z.array(z.string()),
 });
 
@@ -555,7 +555,7 @@ const COMPARE_STATEMENT = "Paper and live are different books: paper is simulate
 const comparePaperLive = defineTool({
   name: "compare_paper_live",
   title: "Paper vs live",
-  description: "Side-by-side statistics for the paper (simulated) and live (real funds) books over the same period, from the same computations as get_performance, with an explicit statement that they are different books and not comparable as money.",
+  ...withToolRefs("Side-by-side statistics for the paper (simulated) and live (real funds) books over the same period, from the same computations as get_performance, with an explicit statement that they are different books and not comparable as money.", " from the same computations as get_performance,"),
   capability: "portfolio.read",
   input: z.object({ agent: AGENT_ARG, period: PERIOD }).strict(),
   output: z.object({
@@ -679,7 +679,7 @@ export const PORTFOLIO_RESOURCES: ResourceDef[] = [
   {
     name: "agent_portfolio",
     title: "Agent portfolio",
-    description: "The agent's balances and holdings per book (paper and live separately), as get_portfolio returns them.",
+    description: "The agent's balances and holdings per book (paper and live separately).",
     mimeType: "application/json",
     capability: "portfolio.read",
     uri: "merrymen://agents/{agent}/portfolio",

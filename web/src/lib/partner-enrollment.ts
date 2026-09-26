@@ -2,12 +2,11 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { recoverMessageAddress, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { toCallPolicy, toTimestampPolicy } from "@zerodev/permissions/policies";
-import { getActionSelector } from "@zerodev/sdk";
 import {
-  accountsMatch, buildWallPolicies, carriesOwnerKey, grantWallOptions, STOCK_TOKENS,
+  accountsMatch, carriesOwnerKey, STOCK_TOKENS,
   type Derivation, type MerrymenSettings, type StoredGrant,
 } from "@merrymen/core";
+import { checkCanonicalWall } from "./canonical-wall";
 import {
   canonicalJson, partnerEnrollmentMessage, partnerGrantDigest,
   type PartnerEnrollmentClaim, type PartnerEnrollmentSettings,
@@ -131,81 +130,12 @@ function validGrant(input: unknown, now: number): StoredGrant {
     return fail(400, "invalid_grant", "The grant expiry must match its signed duration and remain in the future");
   }
   if (typeof body.serialized !== "string" || body.serialized.length < 20 || body.serialized.length > 240_000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(body.serialized)) return fail(400, "invalid_grant", "Invalid serialized permission or permission too large for embedded activation");
-  let params: Record<string, unknown>;
-  try { params = object(JSON.parse(Buffer.from(body.serialized, "base64").toString("utf8")), "serialized permission"); }
-  catch { return fail(400, "invalid_grant", "The serialized permission cannot be read"); }
-  onlyFields(params, ["permissionParams", "action", "validityData", "accountParams", "enableSignature", "privateKey", "isPreInstalled"]);
-  if (params.privateKey !== body.demoSessionPrivateKey) return fail(400, "invalid_grant", "The serialized permission carries a different session key");
-  // ABI rules legitimately contain bytes32 values, so the outer grant's broad
-  // raw-key detector cannot scan this decoded object. Recognize the owner's
-  // actual key by its derived address instead; reject custody-named fields too.
-  const inspect = (value: unknown, key = ""): void => {
-    if (/(?:owner.*(?:key|secret)|mnemonic|seed.?phrase|private.?key)/i.test(key)) return fail(422, "owner_key_forbidden", "The serialized permission contains unexpected key material");
-    if (typeof value === "string") {
-      const candidate = /^(?:0x)?([0-9a-fA-F]{64})$/.exec(value);
-      if (candidate) {
-        let candidateAddress: string | null = null;
-        try { candidateAddress = privateKeyToAccount(`0x${candidate[1]}`).address.toLowerCase(); } catch { /* An ABI word need not be a valid secret scalar. */ }
-        if (candidateAddress === owner) return fail(422, "owner_key_forbidden", "The serialized permission contains the owner private key");
-      }
-    } else if (Array.isArray(value)) value.forEach(v => inspect(v));
-    else if (value && typeof value === "object") Object.entries(value).forEach(([k, v]) => inspect(v, k));
-  };
-  Object.entries(params).forEach(([key, value]) => { if (key !== "privateKey") inspect(value, key); });
-  const action = object(params.action, "permission action");
-  onlyFields(action, ["selector", "address"]);
-  const validity = object(params.validityData, "permission validity");
-  onlyFields(validity, ["validAfter", "validUntil"]);
-  if (params.isPreInstalled !== false || action.address !== ZERO || action.selector !== getActionSelector("0.7") || Number(validity.validAfter) !== 0 || Number(validity.validUntil) !== 0) {
-    return fail(400, "invalid_grant", "Embedded enrollment requires the standard owner-enabled Kernel permission action");
-  }
-  const account = object(params.accountParams, "serialized account");
-  onlyFields(account, ["initCode", "accountAddress"]);
-  if (asAddress(account.accountAddress, "serialized account address") !== smartAccount || typeof account.initCode !== "string" || !/^0x[0-9a-fA-F]+$/.test(account.initCode)) return fail(400, "invalid_grant", "The serialized account does not match this grant");
-  const permission = object(params.permissionParams, "serialized permission parameters");
-  onlyFields(permission, ["policies", "permissionId"]);
-  if (!Array.isArray(permission.policies) || permission.policies.length > 8) return fail(400, "invalid_grant", "The permission policies are missing or invalid");
-  const policies = permission.policies.map(p => {
-    const record = object(p, "permission policy");
-    onlyFields(record, ["policyParams"]);
-    const policy = object(record.policyParams, "permission policy parameters");
-    if (policy.type === "timestamp") onlyFields(policy, ["type", "policyAddress", "policyFlag", "validAfter", "validUntil"]);
-    else if (policy.type === "call") onlyFields(policy, ["type", "policyAddress", "policyFlag", "policyVersion", "permissions"]);
-    else return fail(400, "invalid_grant", "This embedded grant carries an unsupported permission policy");
-    return policy;
-  });
-  if (!policies.some(p => p.type === "call") || !policies.some(p => p.type === "timestamp" && Number(p.validUntil) === body.expiresAt && Number(p.validAfter) === body.grantedAt)) {
-    return fail(400, "invalid_grant", "The permission must carry a call policy and the grant's exact expiry");
-  }
-  if (body.grantTokens !== undefined && (!Array.isArray(body.grantTokens) || body.grantTokens.length > 50 || body.grantTokens.some(a => typeof a !== "string" || !ADDRESS.test(a)))) return fail(400, "invalid_grant", "Invalid granted token addresses");
-  const featureSet = new Set(["tradeable-v2", "v4-adapter", "pons-adapter", "pons-class"]);
-  if (!Array.isArray(body.grantFeatures) || !body.grantFeatures.includes("tradeable-v2") || body.grantFeatures.some(f => typeof f !== "string" || !featureSet.has(f))) return fail(400, "invalid_grant", "The embedded permission must use the current supported wall features");
-  for (const [field, marker] of [["v4AdapterAddress", "v4-adapter"], ["ponsAdapterAddress", "pons-adapter"], ["ponsClassVaultAddress", "pons-class"], ["ponsClassVaultFactoryAddress", "pons-class"]]) {
-    if (body[field] !== undefined) asAddress(body[field], field);
-    if ((body[field] !== undefined) !== body.grantFeatures.includes(marker)) return fail(400, "invalid_grant", "Permission adapter metadata does not match its feature markers");
-  }
-  // A hash signed by the owner authenticates the submitted bytes; it does not
-  // prove those bytes implement the limits advertised beside them. Rebuild the
-  // canonical wall and compare encoded policies, including recipient pins and
-  // per-trade caps. ABI metadata can differ without changing those bytes.
-  try {
-    const expected = buildWallPolicies({
-      caps: caps as unknown as StoredGrant["caps"], smartAccount, now: Number(body.grantedAt),
-      ...grantWallOptions(body as unknown as StoredGrant),
-      v4AdapterAddress: body.v4AdapterAddress as Address | undefined,
-      ponsAdapterAddress: body.ponsAdapterAddress as Address | undefined,
-      ponsClassVaultAddress: body.ponsClassVaultAddress as string | undefined,
-      ponsClassVaultFactoryAddress: body.ponsClassVaultFactoryAddress as string | undefined,
-    }).policies;
-    const submitted = policies.map(p => p.type === "call" ? toCallPolicy(p as never) : toTimestampPolicy(p as never));
-    if (expected.length !== submitted.length || expected.some((p, i) => p.getPolicyInfoInBytes().toLowerCase() !== submitted[i].getPolicyInfoInBytes().toLowerCase() || p.getPolicyData().toLowerCase() !== submitted[i].getPolicyData().toLowerCase())) {
-      return fail(400, "invalid_wall", "The serialized permission does not implement the advertised Merrymen limits");
-    }
-  } catch (error) {
-    if (error instanceof PartnerError) throw error;
-    return fail(400, "invalid_wall", "The serialized permission policies cannot be verified");
-  }
-  if (typeof params.enableSignature !== "string" || !/^0x[0-9a-fA-F]{130}$/.test(params.enableSignature)) return fail(400, "invalid_grant", "The owner-signed permission enable signature is missing");
+  // The serialized permission and the wall it installs: decoded, checked for
+  // owner-key material, and rebuilt from this grant's own caps, times, tokens
+  // and sealed addresses, then compared byte for byte. Shared with hosted
+  // POST /api/grants so the two doors cannot drift — see canonical-wall.ts.
+  const wall = checkCanonicalWall({ ...body, owner, smartAccount });
+  if (!wall.ok) return fail(wall.status, wall.code, wall.why);
   // A legacy/Privy binding, if present in the input, is not evidence for this
   // flow. Do not persist unverified DIDs or repurpose their security model.
   const { binding: _binding, ...grant } = body;
