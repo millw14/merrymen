@@ -26,8 +26,9 @@
  *      spawned. The mirror runs first, so a kill event the child wrote is
  *      already in the shared table when that is checked.
  *
- * Each step is independent and none throws. The stand-down itself (SIGTERM,
- * the home deleted, the lease released) never waits on any of them succeeding.
+ * Each step is independent and none throws. SIGTERM never waits on any of
+ * them. The home is deleted and the lease released once they have settled,
+ * whether or not they succeeded (see standDownKilled in orchestrator.ts).
  */
 import { getAddress, isAddress } from "viem";
 import type { Db } from "./db";

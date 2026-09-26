@@ -245,6 +245,45 @@ describe("the kill switch stands a child down", () => {
     assert.equal(existsSync(home()), false);
   });
 
+  it("a slow shared database: the lease and the home are held until the write lands", async () => {
+    // A timeout could stop the waiting, not the write. Released early, the
+    // lease could pass to a new child whose snapshots the late write would
+    // then overwrite. So nothing is let go while a write is in flight.
+    const shared = await sharedLedger();
+    const child = await childLedger();
+    lastRows(child);
+    child.close();
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    let reached!: () => void;
+    const atGate = new Promise<void>((r) => (reached = r));
+    const slow: Db = {
+      prepare: (sql) => shared.db.prepare(sql),
+      exec: (sql) => shared.db.exec(sql),
+      tx<T>(fn: (db: Db) => Promise<T>): Promise<T> {
+        reached();
+        return gate.then(() => shared.db.tx(fn));
+      },
+    };
+    let released = false;
+    const proc = fakeChild();
+    adoptLeasedChildForTest({ tenant: TENANT, smartAccount: ACCOUNT, proc, shared: slow, onLeaseRelease: () => (released = true) });
+
+    const pass = reconcile();
+    await atGate;
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(proc.signals[0], "SIGTERM", "the child is already stopped");
+    assert.equal(released, false, "the lease is held while the write is in flight");
+    assert.equal(existsSync(home()), true, "and so is the home");
+
+    open();
+    await pass;
+    assert.equal(released, true);
+    assert.equal(existsSync(home()), false);
+    assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM events WHERE message = 'the last thing the child said'`), 1);
+    assert.equal(status(shared.raw), "killed");
+  });
+
   it("with no shared database at all the stand-down is what it always was", async () => {
     const child = await childLedger();
     child.close();

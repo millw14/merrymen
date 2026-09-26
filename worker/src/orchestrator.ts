@@ -1499,8 +1499,6 @@ const standingDown = new Set<string>();
 
 /** How long a stood-down child gets to exit before its ledger is read anyway. killChild SIGKILLs at 3 s. */
 const STAND_DOWN_EXIT_MS = 4_000;
-/** A ceiling on recording the kill, so a shared database that hangs cannot hold the fleet loop. */
-const STAND_DOWN_RECORD_MS = 15_000;
 
 /** Resolves once `proc` has exited, or after `ms`, whichever comes first. */
 function exitOf(proc: ChildProcess, ms: number): Promise<void> {
@@ -1539,10 +1537,12 @@ export function adoptLeasedChildForTest(args: {
     signalCode: NodeJS.Signals | null;
   };
   shared: Db | null;
+  /** Called when reconcile releases the lease. */
+  onLeaseRelease?: () => void;
 }): void {
   const lc = args.tenant.toLowerCase() as `0x${string}`;
   children.set(lc, { proc: args.proc as unknown as ChildProcess, tenant: lc, smartAccount: args.smartAccount, startedAt: Date.now(), restarts: 0, staleSec: 600, firstBeatSec: 600 });
-  leases.set(lc, { tenant: lc, backend: "none", healthy: () => true, release: async () => {} });
+  leases.set(lc, { tenant: lc, backend: "none", healthy: () => true, release: async () => args.onLeaseRelease?.() });
   sharedForTest = args.shared;
 }
 
@@ -1556,8 +1556,17 @@ export function adoptLeasedChildForTest(args: {
  * Telegram /kill, its own record of the kill. See stand-down.ts.
  *
  * SIGTERM still comes first, so stopping the agent never waits on a database.
- * The recording is best-effort and time-boxed. The home is deleted and the
- * lease released whether or not it succeeds.
+ * The recording is best-effort: the home is deleted and the lease released
+ * whether or not it succeeds.
+ *
+ * BUT ONLY ONCE IT HAS SETTLED, and deliberately with no timeout. A timeout
+ * can stop the waiting, not the write. The mirror would carry on after the
+ * lease was gone, and its snapshot replace (delete-then-insert of positions
+ * and cost basis) could land on top of whichever child holds the lease next,
+ * here after a re-sign or on another replica. Holding the lease until the
+ * write lands is what keeps that impossible. It costs nothing new: a shared
+ * database that hangs already holds this loop in mirrorLedgers(), which has
+ * never had a timeout either.
  */
 async function standDownKilled(tenant: string): Promise<void> {
   const child = children.get(tenant);
@@ -1601,23 +1610,13 @@ async function recordKill(tenant: string, child: Child): Promise<void> {
     return;
   }
   if (!shared) return;
-  let timer: NodeJS.Timeout | undefined;
-  const r = await Promise.race([
-    recordStandDown({
-      tenant,
-      home: childHome(tenant),
-      smartAccount: child.smartAccount,
-      since: Math.floor(child.startedAt / 1000),
-      shared,
-    }),
-    new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), STAND_DOWN_RECORD_MS);
-    }),
-  ]).finally(() => clearTimeout(timer));
-  if (!r) {
-    log(`${tenant}: last mirror still running after ${STAND_DOWN_RECORD_MS / 1000}s — deleting the home anyway`);
-    return;
-  }
+  const r = await recordStandDown({
+    tenant,
+    home: childHome(tenant),
+    smartAccount: child.smartAccount,
+    since: Math.floor(child.startedAt / 1000),
+    shared,
+  });
   if (r.mirror) {
     if (r.mirror.failed) {
       const why = Object.entries(r.mirror.failed).map(([k, v]) => `${k}: ${v}`).join(" | ");
