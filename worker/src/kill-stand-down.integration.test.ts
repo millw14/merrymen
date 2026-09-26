@@ -381,7 +381,7 @@ describe("the kill switch stands down a tenant with no child running", () => {
     child.close();
 
     mock.timers.enable({ apis: ["setTimeout"] });
-    spawned[0].crash(1); // out of `children`, its restart scheduled
+    spawned[0]!.crash(1); // out of `children`, its restart scheduled
     await store.remove(TENANT); // DELETE /api/grants, before the restart comes due
     await reconcile();
 
@@ -451,7 +451,7 @@ describe("the kill switch stands down a tenant with no child running", () => {
     child.close();
 
     mock.timers.enable({ apis: ["setTimeout"] });
-    spawned[0].crash(1);
+    spawned[0]!.crash(1);
     await reconcile();
 
     assert.equal(await store.get(TENANT), null, "the request was carried out");
@@ -474,7 +474,7 @@ describe("the kill switch stands down a tenant with no child running", () => {
     child.close();
 
     mock.timers.enable({ apis: ["setTimeout"] });
-    spawned[0].crash(1);
+    spawned[0]!.crash(1);
     await reconcile();
 
     assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM events WHERE message = ?`, CHAT_KILL), 1);
@@ -486,7 +486,7 @@ describe("the kill switch stands down a tenant with no child running", () => {
   it("a restart that comes due mid-stand-down, after a re-sign, does not arm into the home being deleted", async () => {
     const shared = await armed();
     mock.timers.enable({ apis: ["setTimeout"] });
-    spawned[0].crash(1);
+    spawned[0]!.crash(1);
     await store.remove(TENANT);
 
     // The owner re-signs while the kill is being recorded, and the restart
@@ -516,6 +516,58 @@ describe("the kill switch stands down a tenant with no child running", () => {
 
     await reconcile();
     assert.equal(spawned.length, 2, "the re-signed grant arms on the next pass");
+  });
+
+  it("the killed run's restart does not land on the re-signed run", async () => {
+    // Killed while running: the stood-down child's own exit schedules a
+    // restart like any other exit. The owner re-signs, the new run crashes,
+    // and both restarts come due together.
+    await armed();
+    mock.timers.enable({ apis: ["setTimeout"] });
+    await store.remove(TENANT);
+    await reconcile();
+    assert.equal(existsSync(home()), false, "stood down");
+    await store.put(TENANT, grantAt(nowSec()));
+    await reconcile();
+    assert.equal(spawned.length, 2, "the re-signed grant armed");
+
+    spawned[1]!.crash(1);
+    mock.timers.tick(5_000);
+    await eventually(() => spawned.length > 3);
+    assert.equal(spawned.length, 3, "one restart, the new run's own, and no second child beside it");
+  });
+
+  it("nor does a restart left pending by a crash before the kill", async () => {
+    await armed();
+    mock.timers.enable({ apis: ["setTimeout"] });
+    spawned[0]!.crash(1);
+    await store.remove(TENANT);
+    await reconcile();
+    await store.put(TENANT, grantAt(nowSec()));
+    await reconcile();
+    assert.equal(spawned.length, 2, "the re-signed grant armed");
+
+    spawned[1]!.crash(1);
+    mock.timers.tick(5_000);
+    await eventually(() => spawned.length > 3);
+    assert.equal(spawned.length, 3, "one restart, the new run's own, and no second child beside it");
+  });
+
+  it("killed while running on its last restart: its exit starts no cool-off, and a re-sign arms at once", async () => {
+    await armed();
+    mock.timers.enable({ apis: ["setTimeout"] });
+    for (let n = 1; n <= 8; n++) {
+      spawned.at(-1)!.crash(1);
+      mock.timers.tick(30_000);
+      await eventually(() => spawned.length === n + 1);
+    }
+    assert.equal(spawned.length, 9, "the ninth run is up: one more quick death and the policy gives up");
+
+    await store.remove(TENANT);
+    await reconcile(); // its SIGTERM is that death
+    await store.put(TENANT, grantAt(nowSec()));
+    await reconcile();
+    assert.equal(spawned.length, 10, "the re-sign armed on the next pass");
   });
 
   it("a home this replica holds no lease for, as a fleet halt leaves it: the kill is recorded and the key deleted, but the copy is not mirrored", async () => {

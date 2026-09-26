@@ -216,8 +216,10 @@ const gaveUpUntil = new Map<string, { until: number; restarts: number }>();
  * un-braked restart, and every one of those restarts is another cold arm
  * against the endpoint that caused it.
  */
-function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string): void {
+function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string, epoch: number): void {
   if (stopping) return;
+  // The kill switch ended the run this restart belongs to. See `killEpoch`.
+  if (epoch !== epochOf(tenant)) return;
   if (restarts > MAX_RESTARTS) {
     gaveUpUntil.set(tenant, { until: Date.now() + GIVE_UP_COOLOFF_MS, restarts });
     log(
@@ -229,8 +231,28 @@ function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string): 
   const delay = Math.min(30_000, 1_000 * 2 ** Math.min(restarts, 5));
   log(`${tenant} rallying again in ${Math.round(delay / 1000)}s (restart #${restarts}, ${why})`);
   setTimeout(() => {
+    if (epoch !== epochOf(tenant)) return;
     if (!stopping && !children.has(tenant)) void spawnChild(tenant, restarts);
   }, delay);
+}
+
+/**
+ * How many times the kill switch has stood each tenant down. A run records
+ * the count it was spawned under, and its restarts carry it.
+ *
+ * A RESTART BELONGS TO THE RUN THAT DIED, and a stand-down ends that run. The
+ * stood-down child's own exit schedules a restart like any other exit. So
+ * does a crash just before the kill. Either can fire after the stand-down,
+ * up to 30 s later. If the owner re-signed meanwhile, it lands on the new
+ * run: skipping its backoff, or spawning a second child beside the one
+ * reconcile is spawning. And an exit at the top of the ladder set a
+ * five-minute give-up that held the re-sign back. Bumping the count at the
+ * stand-down makes every such restart a no-op, however late it fires.
+ */
+const killEpoch = new Map<string, number>();
+
+function epochOf(tenant: string): number {
+  return killEpoch.get(tenant) ?? 0;
 }
 
 /** The worker entrypoint each child runs — the same main() the CLI supervises. */
@@ -407,6 +429,8 @@ interface Child {
   smartAccount: `0x${string}`;
   startedAt: number;
   restarts: number;
+  /** The tenant's kill-switch count when this child was spawned. Its restarts carry it. See `killEpoch`. */
+  epoch: number;
   /**
    * Seconds without a heartbeat before this child is considered wedged.
    *
@@ -453,7 +477,7 @@ export function adoptChildForTest(
   proc: Pick<ChildProcess, "kill">,
 ): void {
   const lc = tenant.toLowerCase() as `0x${string}`;
-  children.set(lc, { proc: proc as ChildProcess, tenant: lc, smartAccount, startedAt: Date.now(), restarts: 0, staleSec: 600, firstBeatSec: 600 });
+  children.set(lc, { proc: proc as ChildProcess, tenant: lc, smartAccount, startedAt: Date.now(), restarts: 0, epoch: epochOf(lc), staleSec: 600, firstBeatSec: 600 });
 }
 /**
  * The advisory lease held for each tenant we are running, keyed by lowercased
@@ -1197,6 +1221,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     log(`${tenant}: a Telegram kill is pending — not spawning`);
     return;
   }
+  const epoch = epochOf(tenant);
   const smartAccount = await writeGrantForChild(tenant);
   if (!smartAccount) {
     log(`${tenant}: no grant in the store — not spawning`);
@@ -1240,8 +1265,13 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
   const staleSec = staleThresholdSec(tickSeconds);
   const firstBeatSec = firstBeatGraceSec(tickSeconds);
+  // The kill switch stood this tenant down while the files above were written.
+  if (epochOf(tenant) !== epoch) {
+    log(`${tenant}: stood down by the kill switch while spawning — not spawning`);
+    return;
+  }
   const proc = startWorker(tenant);
-  const child: Child ={ proc, tenant, smartAccount, startedAt: Date.now(), restarts, staleSec, firstBeatSec };
+  const child: Child = { proc, tenant, smartAccount, startedAt: Date.now(), restarts, epoch, staleSec, firstBeatSec };
   children.set(tenant, child);
   const tag = `[${tenant.slice(0, 8)}]`;
   const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
@@ -1270,7 +1300,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     log(`${tenant} exited (${code})`);
     // A long healthy run that then dies is a fresh incident, not a crash loop.
     const freshRestarts = Date.now() - child.startedAt > 60_000 ? 0 : restarts + 1;
-    scheduleRestart(tenant, freshRestarts, `exit ${code}`);
+    scheduleRestart(tenant, freshRestarts, `exit ${code}`, child.epoch);
   });
   log(`${tenant} spawned (pid ${proc.pid}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
 }
@@ -1538,9 +1568,9 @@ export async function reconcile(): Promise<void> {
  * grant again, so the restart would spawn a new child into the home that is
  * about to be deleted, under the lease that is about to be released.
  *
- * A tenant killed with no child running is in here too. Its crash restart is
- * still pending, and the stand-down mirrors its home before deleting it.
- * Once the lease is released, spawnChild refuses the timer for want of one.
+ * A tenant killed with no child running is in here too, while its home is
+ * mirrored and deleted. The restarts themselves are voided by `killEpoch`,
+ * which also covers the ones that fire after the stand-down.
  */
 const standingDown = new Set<string>();
 
@@ -1593,7 +1623,7 @@ export function adoptLeasedChildForTest(args: {
   shared: Db | null;
 }): void {
   const lc = args.tenant.toLowerCase() as `0x${string}`;
-  children.set(lc, { proc: args.proc as unknown as ChildProcess, tenant: lc, smartAccount: args.smartAccount, startedAt: Date.now(), restarts: 0, staleSec: 600, firstBeatSec: 600 });
+  children.set(lc, { proc: args.proc as unknown as ChildProcess, tenant: lc, smartAccount: args.smartAccount, startedAt: Date.now(), restarts: 0, epoch: epochOf(lc), staleSec: 600, firstBeatSec: 600 });
   leases.set(lc, { tenant: lc, backend: "none", healthy: () => true, release: async () => {} });
   sharedForTest = args.shared;
 }
@@ -1619,6 +1649,9 @@ export function adoptLeasedChildForTest(args: {
 async function standDownKilled(tenant: string): Promise<void> {
   if (standingDown.has(tenant)) return;
   standingDown.add(tenant);
+  // The run ends here: no restart it scheduled, or that its exit below
+  // schedules, fires.
+  killEpoch.set(tenant, epochOf(tenant) + 1);
   // A re-sign arms at once. It does not wait out a cool-off the killed
   // grant's crash loop earned, nor start from that loop's restart count.
   gaveUpUntil.delete(tenant);
@@ -5552,7 +5585,7 @@ export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
       // failure a rate limit actually produces was the one that got the
       // un-braked restart, and every restart is another cold arm against the
       // endpoint that caused it.
-      scheduleRestart(tenant as `0x${string}`, restarts + 1, "heartbeat stale");
+      scheduleRestart(tenant as `0x${string}`, restarts + 1, "heartbeat stale", child.epoch);
     }
   }
 }

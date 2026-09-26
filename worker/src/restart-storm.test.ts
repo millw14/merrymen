@@ -39,7 +39,7 @@ describe("there is exactly one restart policy", () => {
     // which is what it was.
     const src = orch();
     const watchdog = src.slice(src.indexOf("heartbeat stale ("), src.indexOf("heartbeat stale (") + 1400);
-    assert.match(watchdog, /scheduleRestart\(tenant as `0x\$\{string\}`, restarts \+ 1, "heartbeat stale"\)/);
+    assert.match(watchdog, /scheduleRestart\(tenant as `0x\$\{string\}`, restarts \+ 1, "heartbeat stale", child\.epoch\)/);
     assert.ok(
       !/kill\("SIGKILL"\);[\s\S]{0,200}void spawnChild\(/.test(src),
       "the watchdog must not restart on the same line as the kill",
@@ -47,7 +47,7 @@ describe("there is exactly one restart policy", () => {
   });
 
   it("and so does an exit", () => {
-    assert.match(orch(), /scheduleRestart\(tenant, freshRestarts, `exit \$\{code\}`\)/);
+    assert.match(orch(), /scheduleRestart\(tenant, freshRestarts, `exit \$\{code\}`, child\.epoch\)/);
   });
 
   it("and the policy itself both waits and gives up", () => {
