@@ -11,7 +11,7 @@ import * as z from "zod";
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import { handleMcpRequest } from "./http";
 import {
-  ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, connectAs, errorOf, installFixtures, makeDeps, makeTestDb, mcpRequest, rpcResult, testConfig, type Era,
+  ACCOUNT_A, ACCOUNT_B, MODEL_INSTRUCTION, OTHER_TOOLS, OWNER_A, OWNER_B, SLUG_A, SLUG_B, connectAs, errorOf, installFixtures, makeDeps, makeTestDb, mcpRequest, rpcResult, schemaDescriptions, testConfig, toolNamePattern, type Era,
 } from "./testing";
 import { resetMetricsForTest } from "./observe";
 import { McpError } from "./errors";
@@ -546,6 +546,44 @@ test("tools/list on the directory endpoint never includes a trade, setting, draf
   const doc = await rpcResult(await callDir(dirRequest(dir.tokens.access_token, "resources/read", { uri: "merrymen://docs/capabilities" })));
   const text = ((doc.result?.contents as Array<{ text: string }>)[0]!).text;
   assert.ok(text.includes("`market:read`") && !text.includes("`trade:propose`"), text.slice(0, 300));
+});
+
+test("tools/list on the directory endpoint names no other tool and instructs nothing in any description; the full server keeps its pointers", async () => {
+  const { d, full, dir } = await setupBoth();
+  forceAllScopes(d, dir.principal.connectionId);
+  forceAllScopes(d, full.principal.connectionId);
+  const toolName = toolNamePattern(ALL_TOOLS.map((t) => t.name));
+  const offence = (self: string, text: string) => {
+    const others = [...text.matchAll(toolName)].map((m) => m[1]).filter((n) => n !== self);
+    return others.length ? `names ${others.join(", ")}` : OTHER_TOOLS.test(text) ? "points at other tools" : MODEL_INSTRUCTION.test(text) ? "instructs the model" : null;
+  };
+  type Listed = { name: string; title?: string; description?: string; inputSchema?: unknown; outputSchema?: unknown };
+  const expected = ALL_TOOLS.filter((t) => toolInProfile(t, "directory")).map((t) => t.name).sort();
+  for (const era of ["legacy", "modern"] as const) {
+    const tools = (await rpcResult(await callDir(dirRequest(dir.tokens.access_token, "tools/list", {}, { era })))).result?.tools as Listed[];
+    assert.deepEqual(tools.map((t) => t.name).sort(), expected, era);
+    for (const t of tools) {
+      const def = ALL_TOOLS.find((x) => x.name === t.name)!;
+      assert.equal(t.description, def.directoryDescription ?? def.description, `${era}: ${t.name} is served its directory description`);
+      for (const text of [t.title ?? "", t.description ?? "", ...schemaDescriptions(t.inputSchema), ...schemaDescriptions(t.outputSchema)]) {
+        assert.equal(offence(t.name, text), null, `${era}: ${t.name}: ${text}`);
+      }
+    }
+    // The resources it lists describe themselves without naming a tool either.
+    const resources = (await rpcResult(await callDir(dirRequest(dir.tokens.access_token, "resources/list", {}, { era })))).result?.resources as Array<{ uri: string; description?: string }>;
+    const templates = (await rpcResult(await callDir(dirRequest(dir.tokens.access_token, "resources/templates/list", {}, { era })))).result?.resourceTemplates as Array<{ uriTemplate: string; description?: string }>;
+    assert.ok(resources.length > 0 && templates.length > 0, era);
+    for (const r of [...resources.map((x) => ({ id: x.uri, text: x.description ?? "" })), ...templates.map((x) => ({ id: x.uriTemplate, text: x.description ?? "" }))]) {
+      assert.equal(offence("", r.text), null, `${era}: ${r.id}: ${r.text}`);
+    }
+  }
+  // The full server serves the full descriptions, pointers included.
+  const fullTools = (await rpcResult(await call(mcpRequest(full.tokens.access_token, "tools/list")))).result?.tools as Listed[];
+  for (const def of ALL_TOOLS.filter((t) => t.directoryDescription !== undefined)) {
+    const served = fullTools.find((t) => t.name === def.name);
+    assert.equal(served?.description, def.description, def.name);
+  }
+  assert.match(fullTools.find((t) => t.name === "run_backtest")!.description!, /Poll get_job/);
 });
 
 test("resourceInProfile: only the proposal view among the views is left off the directory, and every resource stays on the full server", () => {
