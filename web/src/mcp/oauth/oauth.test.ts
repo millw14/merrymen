@@ -28,7 +28,7 @@ import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "../../../../worker/src/db";
 import { applyLedgerSchema } from "../../../../worker/src/store";
 import { MCP_SCHEMA, ensureMcpSchema } from "../../../../worker/src/mcp/schema";
-import { mcpConfig, profileOfResource, protectedResourceMetadataUrl, resourcePath } from "../config";
+import { CANONICAL_ROUTE_PATH, mcpConfig, profileOfResource, protectedResourceMetadataUrl, resourcePath } from "../config";
 import { ADVERTISED_SCOPES, DIRECTORY_SCOPES, advertisedScopesFor } from "../scopes";
 import { randomCredential, randomId, sha256hex } from "./crypto";
 
@@ -1172,8 +1172,13 @@ test("directory profile: /mcp/directory on the endpoint's origin by default, onl
   for (const bad of ["https://dir.test/listing", "https://mcp.test/listing", "https://mcp.test/mcp/directory/x", "https://mcp.test/directory", "https://dir.test/MCP/directory", "http://dir.test/mcp/directory", "https://mcp.test/mcp", "https://other.test/mcp", "https://mcp.test/", "not a url", "https://dir.test/mcp/directory?y=1", "https://u:p@dir.test/mcp/directory"]) {
     assert.equal(mcpConfig({ ...base, MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: bad }).directoryResource, "", bad);
   }
-  assert.equal(mcpConfig({ ...base, MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/v2/mcp" }).directoryResource, "https://mcp.test/mcp/directory", "the default is the served path, not <resource>/directory");
-  assert.equal(mcpConfig({ ...base, MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp/directory" }).directoryResource, "", "a canonical endpoint on the directory's path leaves no room for it");
+  // With no usable canonical endpoint (any path but /mcp is one) there is
+  // no directory profile either.
+  for (const canonical of ["https://mcp.test/v2/mcp", "https://mcp.test/mcp/directory", "https://mcp.test/"]) {
+    const off = mcpConfig({ ...base, MERRYMEN_MCP_RESOURCE_URL: canonical });
+    assert.equal(off.resource, "", canonical);
+    assert.equal(off.directoryResource, "", canonical);
+  }
   assert.equal(profileOfResource(cfg, "https://mcp.test/mcp"), "full");
   assert.equal(profileOfResource(cfg, "https://mcp.test/mcp/directory"), "directory");
   for (const other of ["https://mcp.test/mcp/", "https://mcp.test/mcp/directory/x", "", null]) assert.equal(profileOfResource(cfg, other), null, String(other));
@@ -1473,4 +1478,76 @@ test("after the migration, a connection and tokens written before the resource c
   assert.notEqual(dir.principal.connectionId, conn);
   assert.equal((await listConnections(d, OWNER_A)).length, 2);
   assert.ok((await verifyAccessToken(d, deps.cfg, next.access_token, now))?.scopes.has("trade:propose"), "the old connection kept its grant");
+});
+
+/** mcpConfig reads hosted mode from process.env (isHostedMode), everything else from the env it is given. */
+function hostedConfig(env: Record<string, string>): ReturnType<typeof mcpConfig> {
+  const saved = process.env.MERRYMEN_HOSTED;
+  process.env.MERRYMEN_HOSTED = "1";
+  try {
+    return mcpConfig({ DATABASE_URL: "postgres://unused-in-tests", MERRYMEN_SESSION_SECRET: "s".repeat(48), ...env } as unknown as NodeJS.ProcessEnv);
+  } finally {
+    if (saved === undefined) delete process.env.MERRYMEN_HOSTED;
+    else process.env.MERRYMEN_HOSTED = saved;
+  }
+}
+
+const PRODUCTION_RESOURCE = "https://mcp.merrymen.dev/mcp";
+const PRODUCTION_ENV = { MERRYMEN_PUBLIC_ORIGIN: "https://app.merrymen.dev", MERRYMEN_MCP_RESOURCE_URL: PRODUCTION_RESOURCE };
+
+test("canonical resource: production's MERRYMEN_MCP_RESOURCE_URL gives the same resource string, metadata and challenge as before", () => {
+  const cfg = hostedConfig(PRODUCTION_ENV);
+  assert.equal(cfg.enabled, true, String(cfg.disabledWhy));
+  assert.equal(cfg.resource, PRODUCTION_RESOURCE, "byte-identical: every existing token is bound to exactly this");
+  assert.equal(cfg.issuer, "https://app.merrymen.dev");
+  assert.equal(resourcePath(cfg), CANONICAL_ROUTE_PATH);
+  assert.equal(protectedResourceMetadataUrl(cfg), "https://mcp.merrymen.dev/.well-known/oauth-protected-resource/mcp");
+  assert.equal(protectedResourceMetadata(cfg).resource, PRODUCTION_RESOURCE);
+  assert.match(bearerChallenge(cfg), /resource_metadata="https:\/\/mcp\.merrymen\.dev\/\.well-known\/oauth-protected-resource\/mcp"/);
+  assert.ok(cfg.allowedHosts.has("mcp.merrymen.dev") && cfg.allowedHosts.has("app.merrymen.dev"));
+  // Spellings of the same URL normalise to the same string, as they always did.
+  for (const same of ["https://mcp.merrymen.dev/mcp/", "https://mcp.merrymen.dev/mcp//", " https://MCP.merrymen.dev/mcp ", "https://mcp.merrymen.dev:443/mcp"]) {
+    assert.equal(hostedConfig({ ...PRODUCTION_ENV, MERRYMEN_MCP_RESOURCE_URL: same }).resource, PRODUCTION_RESOURCE, same);
+  }
+  // Unset, it is the issuer's own /mcp; and the origin alone may be moved.
+  assert.equal(hostedConfig({ MERRYMEN_PUBLIC_ORIGIN: "https://app.merrymen.dev" }).resource, "https://app.merrymen.dev/mcp");
+  const moved = hostedConfig({ ...PRODUCTION_ENV, MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test:8443/mcp" });
+  assert.equal(moved.enabled, true);
+  assert.equal(moved.resource, "https://mcp.test:8443/mcp");
+  assert.ok(moved.allowedHosts.has("mcp.test:8443"));
+});
+
+test("canonical resource: a token and refresh token minted under production's configuration still work under it", async () => {
+  const d = await makeTestDb();
+  // As production's config read before the path rule: the same issuer and resource strings.
+  const before = makeDeps(d, { cfg: testConfig({ issuer: "https://app.merrymen.dev", resource: PRODUCTION_RESOURCE, allowedHosts: new Set(["app.merrymen.dev", "mcp.merrymen.dev"]) }) });
+  const { tokens, clientId } = await connectAs(before, OWNER_A);
+  const after = makeDeps(d, { cfg: hostedConfig(PRODUCTION_ENV) });
+  assert.ok(await verifyAccessToken(d, after.cfg, tokens.access_token, after.now()), "the access token still verifies");
+  const client = await resolveClient(d, clientId, after.now(), { ownHosts: ownHostsOf(after.cfg) });
+  const refreshed = await refreshTokens(after, new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: clientId, resource: PRODUCTION_RESOURCE }), client);
+  assert.ok(await verifyAccessToken(d, after.cfg, refreshed.access_token, after.now()), "and refreshing does not ask the owner to reconnect");
+});
+
+test("canonical resource: only the origin may change; any other path (the root included) switches MCP off and names MERRYMEN_MCP_RESOURCE_URL", () => {
+  // app/mcp/route.ts is the only route that serves the endpoint and
+  // next.config.mjs has no rewrites, so every one of these was advertised (in
+  // llms.txt, health, the protected-resource metadata, the 401 challenge and
+  // the install links) and answered every client POST with 404.
+  for (const bad of [
+    "https://mcp.test/v2/mcp", "https://mcp.test/", "https://mcp.test", "https://mcp.test/MCP", "https://mcp.test/mcpx",
+    "https://mcp.test/mcp/directory", "https://mcp.test/mcp/x", "https://mcp.test/api/mcp", "https://mcp.test/%6Dcp", "https://app.merrymen.dev/v1/mcp",
+  ]) {
+    const cfg = hostedConfig({ ...PRODUCTION_ENV, MERRYMEN_MCP_RESOURCE_URL: bad });
+    assert.equal(cfg.enabled, false, bad);
+    assert.equal(cfg.resource, "", `${bad}: nothing to advertise`);
+    assert.equal(cfg.disabledWhy, "MERRYMEN_MCP_RESOURCE_URL must have the path /mcp, the only path the MCP endpoint is served at (only the origin may change)", bad);
+    assert.deepEqual([...cfg.allowedHosts], ["app.merrymen.dev"], `${bad}: treated like an unusable URL, so its host is not allowed either`);
+  }
+  // An unusable URL keeps its own reason.
+  for (const bad of ["http://mcp.test/mcp", "not a url", "https://mcp.test/mcp?x=1", "https://mcp.test/mcp#f", "https://u:p@mcp.test/mcp"]) {
+    const cfg = hostedConfig({ ...PRODUCTION_ENV, MERRYMEN_MCP_RESOURCE_URL: bad });
+    assert.equal(cfg.enabled, false, bad);
+    assert.equal(cfg.disabledWhy, "MERRYMEN_MCP_RESOURCE_URL must be an https URL", bad);
+  }
 });

@@ -13,8 +13,8 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { before, describe, it } from "node:test";
 import { NextRequest } from "next/server";
-import { mcpConfig } from "@/mcp/config";
-import { dedicatedMcpHost, isBrowserNavigation, mcpHostLanding } from "@/mcp/landing";
+import { CANONICAL_ROUTE_PATH, mcpConfig } from "@/mcp/config";
+import { MCP_ROUTE_PATH, dedicatedMcpHost, isBrowserNavigation, mcpHostLanding } from "@/mcp/landing";
 
 // The middleware reads its configuration once, at import (as it does in
 // production), so the environment is set first and the module imported after.
@@ -148,8 +148,10 @@ describe("every other host behaves exactly as before", () => {
     assert.equal(dedicatedMcpHost({ MERRYMEN_PUBLIC_ORIGIN: "https://app.test", MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp" }, false), null);
   });
 
-  it("a resource at the root of its host is the endpoint itself: nothing to route", () => {
-    assert.equal(dedicatedMcpHost({ MERRYMEN_PUBLIC_ORIGIN: "https://app.test", MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/" }, true), null);
+  it("a resource at any path but /mcp (the root included) is no endpoint at all: MCP is off, so nothing to route", () => {
+    for (const r of ["https://mcp.test/", "https://mcp.test", "https://mcp.test/v2/mcp", "https://mcp.test/mcp/directory", "https://mcp.test/MCP"]) {
+      assert.equal(dedicatedMcpHost({ MERRYMEN_PUBLIC_ORIGIN: "https://app.test", MERRYMEN_MCP_RESOURCE_URL: r }, true), null, r);
+    }
   });
 });
 
@@ -157,7 +159,10 @@ describe("the MCP domain comes from configuration exactly as config.ts reads it"
   const envs: Array<Record<string, string>> = [
     { MERRYMEN_PUBLIC_ORIGIN: "https://app.test", MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp" },
     { MERRYMEN_PUBLIC_ORIGIN: " https://app.test/ ", MERRYMEN_MCP_RESOURCE_URL: "https://MCP.test/mcp/" },
+    { MERRYMEN_OAUTH_ISSUER: "https://auth.test", MERRYMEN_PUBLIC_ORIGIN: "https://app.test", MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp" },
     { MERRYMEN_OAUTH_ISSUER: "https://auth.test", MERRYMEN_PUBLIC_ORIGIN: "https://app.test", MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/v1/mcp" },
+    { MERRYMEN_PUBLIC_ORIGIN: "https://app.test", MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/" },
+    { MERRYMEN_PUBLIC_ORIGIN: "https://app.test", MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp/directory" },
     { MERRYMEN_PUBLIC_ORIGIN: "https://app.test", MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test:8443/mcp" },
     { MERRYMEN_PUBLIC_ORIGIN: "http://localhost:3100", MERRYMEN_MCP_RESOURCE_URL: "http://127.0.0.1:3100/mcp" },
     { MERRYMEN_PUBLIC_ORIGIN: "http://app.test", MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp" },
@@ -181,6 +186,8 @@ describe("the MCP domain comes from configuration exactly as config.ts reads it"
       assert.ok(cfg.allowedHosts.has(mcp.host), "the endpoint answers on the host redirects are issued for");
     });
   }
+
+  it("both read the one served path", () => assert.equal(MCP_ROUTE_PATH, CANONICAL_ROUTE_PATH));
 });
 
 describe("a page load is told apart from a client", () => {

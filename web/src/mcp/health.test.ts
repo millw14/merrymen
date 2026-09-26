@@ -45,14 +45,16 @@ test("health says the directory is off, and why, without echoing the bad value",
   const elsewhere = envOf({ ...BASE, MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://mcp.test/listing" });
   assert.equal(mcpConfig(elsewhere).directoryResource, "");
   assert.match(directoryHealth(mcpConfig(elsewhere), elsewhere).why ?? "", /not usable.*whose path is \/mcp\/directory/);
-  // A canonical endpoint on the directory's own path leaves it nowhere to go, and says so.
+  // A canonical endpoint at any path but /mcp (the directory's own included)
+  // is no endpoint at all: MCP is off, and the directory blames that variable.
   const taken = envOf({ ...BASE, MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp/directory" });
+  assert.equal(mcpConfig(taken).resource, "");
   assert.equal(mcpConfig(taken).directoryResource, "");
-  assert.match(directoryHealth(mcpConfig(taken), taken).why ?? "", /\(MERRYMEN_MCP_RESOURCE_URL\) is at \/mcp\/directory/);
+  assert.match(directoryHealth(mcpConfig(taken), taken).why ?? "", /no canonical endpoint.*\(MERRYMEN_MCP_RESOURCE_URL\)/);
   // Even beside a valid override: no override can fix that, so it is not the one blamed.
-  const takenOver = envOf({ ...BASE, MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp/directory/", MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://dir.test/mcp/directory" });
+  const takenOver = envOf({ ...BASE, MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/v2/mcp", MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://dir.test/mcp/directory" });
   assert.equal(mcpConfig(takenOver).directoryResource, "");
-  assert.match(directoryHealth(mcpConfig(takenOver), takenOver).why ?? "", /\(MERRYMEN_MCP_RESOURCE_URL\) is at \/mcp\/directory/);
+  assert.match(directoryHealth(mcpConfig(takenOver), takenOver).why ?? "", /no canonical endpoint.*\(MERRYMEN_MCP_RESOURCE_URL\)/);
   // A usable override (another origin, the served path) is reported as the endpoint.
   const good = envOf({ ...BASE, MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://dir.test/mcp/directory" });
   assert.deepEqual(directoryHealth(mcpConfig(good), good), { endpoint: "https://dir.test/mcp/directory", why: null });
