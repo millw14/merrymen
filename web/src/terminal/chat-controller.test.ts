@@ -1446,6 +1446,72 @@ describe("one proposal is one order", () => {
   });
 });
 
+describe("a confirm still running touches only its own card", () => {
+  // MO-5. The composer stays open while a card is carried out, and a question
+  // sent meanwhile puts up its own card. A snipe's lookup can answer up to
+  // SNIPE_LOOKUP_MS later, and when it did, its confirm cleared whatever card
+  // was up — the newer one, before the owner had read it or tapped it.
+  const card = () => Array.from(ui.container.querySelectorAll(".desk-confirm button")).map((b) => b.textContent);
+  const cardSays = () => ui.container.querySelector(".desk-confirm-say")?.textContent ?? null;
+
+  /** A snipe card is confirmed and its lookup held; a buy question sent meanwhile puts up its own card. */
+  async function newerCardMidLookup() {
+    const held = deferred<Response>();
+    routes["POST /api/chat"] = (_url, init) =>
+      /snipe/.test((JSON.parse(String(init?.body)) as { message: string }).message)
+        ? json({ reply: "Going after it.", command: { id: "snipe", args: { query: "pepe", usdgAmount: 5 } } })
+        : json({ reply: "I can do that.", command: { id: "buy", args: { symbol: "WIF", usdgAmount: 5 } } });
+    routes["POST /api/snipe"] = () => held.promise;
+    routes["POST /api/orders"] = () => json({ id: ORDER_ID, queued: true, expiresAt: Date.now() + 300_000, expiresInMs: 300_000 });
+    routes["GET /api/orders"] = () => json({ id: ORDER_ID, state: "running" });
+    await ui.render(h());
+    await settle();
+    await typeAndSend("snipe pepe with $5");
+    await until(() => buttons("Yes, do it").length === 1, "the snipe card");
+    await ui.click("Yes, do it");
+    await settle();
+    assert.equal(count("POST", "/api/snipe"), 1, "the lookup is out");
+    await typeAndSend("buy $5 of WIF");
+    await until(() => /I can do that\./.test(text()), "the newer reply");
+    const newer = cardSays();
+    assert.match(newer ?? "", /WIF/, "the newer question's card is up");
+    return { held, newer };
+  }
+
+  it("A LOOKUP THAT ANSWERS LATE NEVER CLEARS THE NEWER CARD — and places only the order that was confirmed", async () => {
+    const { held, newer } = await newerCardMidLookup();
+    held.resolve(json({ outcome: "resolved", say: "PEPE is the one you mean.", target: { symbol: "PEPE" }, usdgAmount: 5 }));
+    await until(() => /Placed, not filled/.test(text()), "the snipe's order placed");
+    await settle();
+    assert.equal(cardSays(), newer, "the WIF card is still the one up");
+    assert.deepEqual(card(), ["Yes, do it", "Not now"], "and ready to tap once the snipe is done");
+    const orders = calls.filter((c) => c.method === "POST" && c.url === "/api/orders");
+    assert.deepEqual(orders.map((c) => c.body!.symbol), ["PEPE"], "one order: the confirmed snipe's coin, not the newer card's");
+  });
+
+  it("NOR DOES A LOOKUP THAT ANSWERS WITH A QUESTION OF ITS OWN", async () => {
+    const { held, newer } = await newerCardMidLookup();
+    held.resolve(json({ outcome: "ambiguous", say: "Two coins answer to pepe — which one?" }));
+    await until(() => /Two coins answer to pepe/.test(text()), "the lookup's answer");
+    await settle();
+    assert.equal(cardSays(), newer, "the WIF card is still the one up");
+    assert.equal(count("POST", "/api/orders"), 0, "and nothing was placed");
+  });
+
+  it("while its own card is still up, a confirm clears it as before", async () => {
+    routes["POST /api/chat"] = () => json({ reply: "Going after it.", command: { id: "snipe", args: { query: "pepe", usdgAmount: 5 } } });
+    routes["POST /api/snipe"] = () => json({ outcome: "ambiguous", say: "Two coins answer to pepe — which one?" });
+    await ui.render(h());
+    await settle();
+    await typeAndSend("snipe pepe with $5");
+    await until(() => buttons("Yes, do it").length === 1, "the snipe card");
+    await ui.click("Yes, do it");
+    await until(() => /Two coins answer to pepe/.test(text()), "the lookup's answer");
+    await settle();
+    assert.equal(cardSays(), null, "the card it carried out is gone");
+  });
+});
+
 describe("nothing is done twice by accident", () => {
   it("TWO SENDS BEFORE THE REPLY ARE ONE MESSAGE", async () => {
     // A double tap on Send, both landing before the screen has redrawn with

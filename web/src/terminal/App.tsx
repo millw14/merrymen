@@ -504,6 +504,7 @@ export function App() {
             onDesk={() => goTab("agent")}
             onGroupChat={() => openScreen({ kind: "groupchat" })}
             hasAgent={account?.status.exists === true}
+            mode={account?.status.mode ?? null}
           />
         )}
         {screen.kind === "tab" && screen.tab === "feed" && (
@@ -707,6 +708,7 @@ export function App() {
           stopped={stopped}
           perTrade={perTrade}
           perDay={perDay}
+          mode={account?.status.mode ?? null}
           onScreen={openScreen}
           onTab={goTab}
         />

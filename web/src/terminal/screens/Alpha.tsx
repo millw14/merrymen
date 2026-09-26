@@ -4,6 +4,7 @@ import { compactUsd, coinPrice } from "../live";
 import { Empty } from "../ui";
 import type { AlphaExtras, DiscoveryRow } from "@/lib/read-discoveries";
 import { count } from "@/lib/format";
+import { alphaChange, alphaVolumeLabel } from "../alpha-change";
 
 /**
  * ALPHA — what the scout looked at, and what it threw out.
@@ -200,7 +201,9 @@ function Desk({ wire, onToken }: { wire: Extract<Wire, { locked: false }>; onTok
 }
 
 function Row({ r, onToken, passed = false }: { r: Item; onToken: (id: string) => void; passed?: boolean }) {
-  const up = (r.change24hPct ?? 0) >= 0;
+  // A day's change only on a pool a day old (alpha-change.ts): the index's
+  // figure on an hours-old pool is its move since launch.
+  const chg = alphaChange(r.change24hPct, r.ageDays);
   return (
     <li className={`alpha-row${passed ? " out" : ""}`}>
       <button type="button" className="alpha-hit" onClick={() => onToken(r.token)}>
@@ -213,9 +216,7 @@ function Row({ r, onToken, passed = false }: { r: Item; onToken: (id: string) =>
           {r.onCurve && <span className="alpha-chip">on its curve</span>}
           {r.graduated && <span className="alpha-chip up">graduated</span>}
         </span>
-        <span className={`alpha-chg mono ${up ? "up" : "down"}`}>
-          {r.change24hPct === null ? "—" : `${up ? "+" : ""}${r.change24hPct.toFixed(1)}%`}
-        </span>
+        <span className={`alpha-chg mono${chg.up === null ? "" : chg.up ? " up" : " down"}`}>{chg.text}</span>
       </button>
 
       {r.verdict && (
@@ -246,7 +247,7 @@ function Row({ r, onToken, passed = false }: { r: Item; onToken: (id: string) =>
           {r.onCurve ? "pre-grad" : compactUsd(r.reserveUsd)}
         </span>
         <span>
-          <i>24h</i>
+          <i>{alphaVolumeLabel(r.ageDays)}</i>
           {compactUsd(r.volume24hUsd)}
         </span>
         <span>
