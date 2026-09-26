@@ -21,6 +21,7 @@ import path from "node:path";
 import { after, before, it, mock } from "node:test";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { bindingMessage } from "@merrymen/core";
+import { signerGrant } from "@/lib/canonical-wall-fixture";
 
 const ORIGIN = "https://app.merrymen.dev";
 const SMART = "0x00000000000000000000000000000000000000a1" as const;
@@ -73,12 +74,11 @@ async function claim() {
   const owner = privateKeyToAccount(generatePrivateKey());
   const nonce = auth.issueChallengeNonce(ORIGIN);
   const message = bindingMessage({ origin: ORIGIN, nonce, owner: owner.address, smartAccount: SMART, chainId: CHAIN });
+  // A REAL PERMISSION, because the route now refuses anything that is not the
+  // canonical wall before it reaches the ownership read this file is about.
+  const { grant: signed } = await signerGrant({ account: SMART, owner });
   const grant = {
-    serialized: "not-a-permission-account",
-    smartAccount: SMART,
-    owner: owner.address,
-    chainId: CHAIN,
-    caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 20, maxOpsPerDay: 20 },
+    ...signed,
     binding: {
       nonce,
       walletSignature: await wallet.signMessage({ message }),
