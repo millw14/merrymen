@@ -11,20 +11,26 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import type { AgentFacts } from "./facts";
 import { admitAgentLine } from "./policy";
 import {
+  FUNNY_TAKES,
+  GENTLE_MUSINGS,
   JOKES,
   JOKE_REPLY,
   JOKE_SHAPE,
   MUSINGS,
   MUSING_MARK,
   MUSING_REPLY,
+  MUSING_REPLY_WARM,
+  MUSING_REPLY_WRY,
   PROMPTS,
   SUBJECTS,
   TAKES,
   TAKE_REPLY,
   type Subject,
 } from "./topics";
+import { roomMemory, styleFor, templateLine } from "./voice";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -80,11 +86,20 @@ const takeLines: Line[] = (Object.entries(TAKES) as [Subject, readonly string[]]
 );
 const musingLines: Line[] = MUSINGS.map((text) => ({ pool: "musing", text }));
 const jokeLines: Line[] = JOKES.map((text) => ({ pool: "joke", text }));
+/**
+ * EVERY REPLY POOL, BY ITS OWN KEYS: a line moved into a new side (`laugh`)
+ * or a new pool is held to every rule below the moment it exists. The old list
+ * named agree, disagree and amused, so the laughs moved out of `amused` would
+ * have left the gate's sight. FUNNY_TAKES is not a pool of its own words (each
+ * is a TAKES line, gated there) and is checked against TAKES below.
+ */
 const replyLines: Line[] = [
-  ...TAKE_REPLY.agree.map((text) => ({ pool: "take reply agree", text })),
-  ...TAKE_REPLY.disagree.map((text) => ({ pool: "take reply disagree", text })),
-  ...TAKE_REPLY.amused.map((text) => ({ pool: "take reply amused", text })),
+  ...(Object.entries(TAKE_REPLY) as [string, readonly string[]][]).flatMap(([side, list]) =>
+    list.map((text) => ({ pool: `take reply ${side}`, text })),
+  ),
   ...MUSING_REPLY.map((text) => ({ pool: "musing reply", text })),
+  ...MUSING_REPLY_WARM.map((text) => ({ pool: "musing reply warm", text })),
+  ...MUSING_REPLY_WRY.map((text) => ({ pool: "musing reply wry", text })),
   ...JOKE_REPLY.map((text) => ({ pool: "joke reply", text })),
 ];
 const questionLines = [...roomLines, ...peerLines];
@@ -155,6 +170,49 @@ describe("topics: shape and volume", () => {
     }
   });
 
+  it("a name is set off with commas, so it never reads as part of the phrase", () => {
+    // Live, "hot {to}, give me sunshine" said "hot Pine Plover, give me
+    // sunshine", "cook {to}, obviously" said "cook Quiet Pike", and "{peer} is
+    // leaving someone on read rude?" asked whether an agent was rude. A name
+    // opens the line or follows ", ", and is followed by the end, "," "?" or "!".
+    for (const l of [...stanceLines, ...peerLines]) {
+      for (const m of l.text.matchAll(/\{(to|peer)\}/g)) {
+        const before = l.text.slice(0, m.index);
+        const after = l.text.slice(m.index! + m[0].length);
+        assert.ok(before === "" || before.endsWith(", "), `name glued to the words before it: ${show(l)}`);
+        assert.ok(after === "" || /^[,?!]/.test(after), `name glued to the words after it: ${show(l)}`);
+      }
+    }
+  });
+
+  it("every stance fits every wording of its question", () => {
+    // ONE STANCE LIST ANSWERS EVERY WORDING, chosen without looking at which
+    // was asked, so a wording that asks a different KIND of question gets
+    // answers written for another: "are cheat codes a crime?" got "yes,
+    // infinite lives sounds amazing", "camping, fun or a nightmare?" got
+    // "yes, …", "if you had a time machine, where are you going?" got
+    // "neither, …". Three shapes a reader notices at once:
+    // - a bare yes or no (a yes/no word and a comma) to an either/or question;
+    // - a bare yes or no to a what/which/where question;
+    // - "neither" to a question that offered no choice.
+    const yesNoQuestion = /\byes or no\b|\bor (not|no|never)\s*\?\s*$|\bin or out\b/;
+    const eitherOr = (q: string) => /\bor\b/.test(q) && !yesNoQuestion.test(q);
+    const wh = (q: string) => /^(what|which|where|who|how|when)\b/.test(q.replace(/^\{peer\}, /, "")) && !/\bor\b/.test(q);
+    const bareYesNo = /^(yes|yeah|yep|no|nope|never|always|absolutely|absolutely not|definitely|sure|of course|hard no|nah|not a chance),/;
+    const wrong: string[] = [];
+    for (const p of PROMPTS) {
+      const wordings = [...p.room, ...p.peer];
+      for (const s of p.stances.flat()) {
+        for (const q of wordings) {
+          if (bareYesNo.test(s) && eitherOr(q)) wrong.push(`${p.id}: "${q}" <- "${s}" (a yes or no to a choice)`);
+          if (bareYesNo.test(s) && wh(q)) wrong.push(`${p.id}: "${q}" <- "${s}" (a yes or no to a what)`);
+          if (/^neither\b/.test(s) && !eitherOr(q)) wrong.push(`${p.id}: "${q}" <- "${s}" (neither, with no choice offered)`);
+        }
+      }
+    }
+    assert.deepEqual(wrong, []);
+  });
+
   it("takes, musings, jokes and replies carry no slot", () => {
     for (const l of [...takeLines, ...musingLines, ...jokeLines, ...replyLines]) assert.doesNotMatch(l.text, /[{}]/, show(l));
   });
@@ -175,12 +233,18 @@ describe("topics: shape and volume", () => {
   });
 
   it("musings, jokes and reply pools are long enough", () => {
-    assert.ok(MUSINGS.length >= 70, `only ${MUSINGS.length} musings`);
+    // A HUNDRED AND MORE: the long memory of what the room started holds two
+    // days (voice.ts pickRotated), and a simulated two days said 129 shower
+    // thoughts from 76 — 52 of them repeats.
+    assert.ok(MUSINGS.length >= 100, `only ${MUSINGS.length} musings`);
+    assert.ok(GENTLE_MUSINGS.length >= 30, `only ${GENTLE_MUSINGS.length} gentle musings`);
     assert.ok(JOKES.length >= 70, `only ${JOKES.length} jokes`);
     for (const k of ["agree", "disagree", "amused"] as const) {
       assert.ok(TAKE_REPLY[k].length >= 20, `only ${TAKE_REPLY[k].length} ${k} replies`);
     }
+    assert.ok(TAKE_REPLY.laugh.length >= 15, `only ${TAKE_REPLY.laugh.length} laughs at a joke take`);
     assert.ok(MUSING_REPLY.length >= 35, `only ${MUSING_REPLY.length} musing replies`);
+    assert.ok(MUSING_REPLY_WARM.length >= 5 && MUSING_REPLY_WRY.length >= 5, "the warm and the wry musing replies");
     assert.ok(JOKE_REPLY.length >= 35, `only ${JOKE_REPLY.length} joke replies`);
   });
 
@@ -382,6 +446,173 @@ describe("topics: takes, musings and jokes are told apart", () => {
       for (const r of readings(l.text)) {
         assert.doesNotMatch(r, MUSING_MARK, `reads as a musing: ${show(l)}`);
         assert.doesNotMatch(r, JOKE_SHAPE, `reads as a joke: ${show(l)}`);
+      }
+    }
+  });
+});
+
+// ── tone: a laugh only for a joke ───────────────────────────────────────────
+
+/** Words that laugh at a line, or call it a stunt. */
+const LAUGHING = /\b(laugh\w*|hilarious|cackl\w*|bold|audacity|menace|chaos|conviction|confidence|brave|commitment|wild|funn\w*|lol|haha|lmao)\b/;
+const WARM_WORDS = /\b(beautiful|calming|comforting|poetry|wholesome|soft|lovely|nice thoughts)\b/;
+/** Words that presume the line answered was a warm one. */
+const SWEET = /\b(sweet|heart|lovely|beautiful|wholesome|comforting)\b/;
+const WRY_WORDS = /\b(hate|why would you|brain teaser|rude|did not need|never unhearing)\b/;
+
+function rngOf(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const SPEAKERS = ["Rusty Weasel", "Pine Stoat", "Winter Raven"];
+
+function speakerOf(i: number): AgentFacts {
+  return {
+    tenant: `tenant-${i}`,
+    agentId: `agent-${i}`,
+    slug: `tone-${i}`,
+    name: SPEAKERS[i % SPEAKERS.length]!,
+    mode: "idle",
+    ageDays: 20,
+    strategy: null,
+    traits: [],
+    calls: [],
+  };
+}
+
+/** What agent `i` answers to `text`, said by somebody else in the room. */
+function answerOf(i: number, text: string): string {
+  const sp = speakerOf(i);
+  return templateLine(
+    { kind: "reply", to: "Agent 47", toAuthor: "agent", toOwnAgent: false, text },
+    { speaker: sp, style: styleFor(sp.slug!), tail: [], rosterNames: ROSTER, phase: null, ownerAwake: null },
+    rngOf(i * 7919 + text.length),
+  );
+}
+
+/** Whether `line` says one of `pool`'s sentences (names out), the way the room's memory reads it. */
+function saysOneOf(line: string, pool: readonly string[]): boolean {
+  const mem = roomMemory([line], ROSTER);
+  return pool.some((t) => {
+    const pieces = memoryKey(t) === "" ? [] : [memoryKey(t)];
+    return pieces.length > 0 && mem.has(pieces);
+  });
+}
+
+describe("topics: a laugh only for a joke", () => {
+  it("the amused side is warm and never laughs, and pushing back never calls a take a stunt", () => {
+    // `amused` is what an asker says to an answer that is not its own side and
+    // what one agent in four says to any take. Live, it said "i'm cackling" to
+    // "winter, the first snowfall is magic" and "i admire the audacity" to "a
+    // compliment can fix a whole day".
+    for (const l of TAKE_REPLY.amused) assert.doesNotMatch(l, LAUGHING, `amused, but laughing: ${JSON.stringify(l)}`);
+    // NOR SWEET: "that's a sweet thought" answered "horror, i like a jump
+    // scare". A warm answer presumes a warm line; those wait for a gentle
+    // shower thought (MUSING_REPLY_WARM).
+    for (const l of TAKE_REPLY.amused) assert.doesNotMatch(l, SWEET, `amused, but presuming a warm line: ${JSON.stringify(l)}`);
+    for (const l of TAKE_REPLY.disagree) assert.doesNotMatch(l, /\b(bold|brave|confidence|audacity)\b/, `a stunt: ${JSON.stringify(l)}`);
+    for (const l of [...TAKE_REPLY.agree]) assert.doesNotMatch(l, LAUGHING, `agreeing, but laughing: ${JSON.stringify(l)}`);
+  });
+
+  it("the funny takes are real takes, and plenty of them", () => {
+    const takes = new Set((Object.values(TAKES) as (readonly string[])[]).flat());
+    assert.ok(FUNNY_TAKES.length >= 20, `only ${FUNNY_TAKES.length} funny takes: a laugh answers only these`);
+    assert.equal(new Set(FUNNY_TAKES).size, FUNNY_TAKES.length, "a funny take listed twice");
+    for (const f of FUNNY_TAKES) assert.ok(takes.has(f), `not a TAKES line, verbatim: ${JSON.stringify(f)}`);
+  });
+
+  it("a sincere take is never laughed at, by any agent", () => {
+    const funny = new Set(FUNNY_TAKES);
+    const sincere = (Object.values(TAKES) as (readonly string[])[]).flat().filter((t) => !funny.has(t));
+    for (const take of sincere) {
+      for (let i = 0; i < 8; i++) {
+        const said = answerOf(i, take);
+        assert.doesNotMatch(said.toLowerCase(), LAUGHING, `"${take}" -> "${said}"`);
+      }
+    }
+  });
+
+  it("an answer to a question, or a take, is never called sweet, whatever it says", () => {
+    // Live in the sim: "horror, i like a jump scare" -> "That's a sweet
+    // thought". An asker whose side it is not answers from `amused`, and so
+    // does one agent in four to any take.
+    let answers = 0;
+    const lines = [...PROMPTS.flatMap((p) => p.stances.flat()), ...(Object.values(TAKES) as (readonly string[])[]).flat()];
+    for (const s of lines) {
+      const text = fill(s);
+      for (let i = 0; i < 4; i++) {
+        const said = answerOf(i, text);
+        answers++;
+        assert.doesNotMatch(said.toLowerCase(), SWEET, `"${text}" -> "${said}"`);
+      }
+    }
+    assert.ok(answers > 1000, `only ${answers} answers`);
+  });
+
+  it("an answer to a question is never laughed at, by the asker or anyone else", () => {
+    for (const p of PROMPTS) {
+      for (const stance of p.stances) {
+        for (const s of stance) {
+          const text = fill(s);
+          for (let i = 0; i < 3; i++) {
+            const said = answerOf(i, text);
+            assert.doesNotMatch(said.toLowerCase(), LAUGHING, `${p.id}: "${text}" -> "${said}"`);
+          }
+        }
+      }
+    }
+  });
+
+  it("a take written as a joke may be laughed at", () => {
+    const sides = Object.values(TAKE_REPLY) as (readonly string[])[];
+    let laughs = 0;
+    for (const take of FUNNY_TAKES) {
+      for (let i = 0; i < 12; i++) {
+        const said = answerOf(i, take);
+        assert.ok(sides.some((pool) => saysOneOf(said, pool)), `not an answer to a take: "${take}" -> "${said}"`);
+        if (saysOneOf(said, TAKE_REPLY.laugh)) laughs++;
+      }
+    }
+    assert.ok(laughs > 0, "no joke take ever drew a laugh");
+  });
+});
+
+describe("topics: a shower thought is answered in its own tone", () => {
+  it("the shared musing replies suit any thought: nothing warm for wordplay, nothing wry for a gentle one", () => {
+    // Live, "that's such a calming thought" answered "ever wonder what the
+    // first person to milk a cow was thinking", and "thank you, i hate it"
+    // answered "a snail carries its whole house and never complains".
+    for (const l of MUSING_REPLY) {
+      assert.doesNotMatch(l, WARM_WORDS, `warm, said to wordplay too: ${JSON.stringify(l)}`);
+      assert.doesNotMatch(l, WRY_WORDS, `wry, said to a gentle thought too: ${JSON.stringify(l)}`);
+    }
+    for (const l of MUSING_REPLY_WARM) assert.doesNotMatch(l, WRY_WORDS, JSON.stringify(l));
+    for (const l of MUSING_REPLY_WRY) assert.doesNotMatch(l, WARM_WORDS, JSON.stringify(l));
+  });
+
+  it("the gentle thoughts are real shower thoughts, and the rest is wordplay", () => {
+    const musings = new Set(MUSINGS);
+    assert.ok(GENTLE_MUSINGS.length >= 10 && GENTLE_MUSINGS.length < MUSINGS.length, `${GENTLE_MUSINGS.length} gentle musings`);
+    assert.equal(new Set(GENTLE_MUSINGS).size, GENTLE_MUSINGS.length, "a gentle musing listed twice");
+    for (const g of GENTLE_MUSINGS) assert.ok(musings.has(g), `not a MUSINGS line, verbatim: ${JSON.stringify(g)}`);
+  });
+
+  it("a shower thought draws only the shared replies until the engine tells the tones apart", () => {
+    // MUSING_REPLY_WARM and MUSING_REPLY_WRY are data for voice.ts to draw by
+    // the thought's tone; until it does, neither may reach the room.
+    for (const m of MUSINGS.slice(0, 20)) {
+      for (let i = 0; i < 4; i++) {
+        const said = answerOf(i, m);
+        assert.ok(saysOneOf(said, [...MUSING_REPLY, ...MUSING_REPLY_WARM, ...MUSING_REPLY_WRY]), `"${m}" -> "${said}"`);
+        if (!GENTLE_MUSINGS.includes(m)) assert.ok(!saysOneOf(said, MUSING_REPLY_WARM), `warm, to wordplay: "${m}" -> "${said}"`);
+        if (GENTLE_MUSINGS.includes(m)) assert.ok(!saysOneOf(said, MUSING_REPLY_WRY), `wry, to a gentle thought: "${m}" -> "${said}"`);
       }
     }
   });

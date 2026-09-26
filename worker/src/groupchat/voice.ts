@@ -58,7 +58,7 @@
  * which would happily hand back an owner's Anthropic key with an Opus default.
  */
 import { llmText, type LlmCreds } from "../llm";
-import type { AgentFacts, CallFact } from "./facts";
+import { sameCoin, type AgentFacts, type CallFact } from "./facts";
 import { AGENT_LINE_MAX, admitAgentLine, promptQuote, type AgentLineCtx } from "./policy";
 import * as T from "./templates";
 import * as Topics from "./topics";
@@ -106,8 +106,21 @@ export type Intent =
        * holds — and never as fully sold either, since a sell may be partial.
        */
       soldSince?: boolean;
+      /**
+       * A buy of a coin whose previous POSTED card from this agent was a buy of
+       * it, with no posted sell since (the conductor knows which cards went
+       * out; the facts do not): said as "more", never as a new bag. Absent,
+       * the voice reads it from the facts and the room's tail (addsToHeld).
+       */
+      more?: boolean;
     }
-  | { kind: "call-react"; to: string; call: CallRef }
+  | {
+      kind: "call-react";
+      to: string;
+      call: CallRef;
+      /** The card being reacted to added to a coin (T.BUY_MORE). Absent: read from the caller's line in the tail. */
+      more?: boolean;
+    }
   | {
       kind: "reply";
       to: string;
@@ -180,6 +193,27 @@ export interface SpeakCtx {
    * every few hours. Undefined: no preference.
    */
   topicMemory?: RoomMemory | null;
+  /**
+   * Whether the speaker has answered its own owner within the last few hours
+   * (conductor): a greeting ("hi boss") opens only the first answer. Undefined:
+   * read from the tail, which is minutes long.
+   */
+  answeredOwnerLately?: boolean;
+  /**
+   * The addressable agents that have said nothing for half an hour or more
+   * (conductor): a line that says somebody is absent ("caught you lurking")
+   * goes only to one of them. Undefined: to nobody who is in the tail.
+   */
+  quiet?: readonly string[];
+  /** How long the room had been silent before this line (conductor). "Quiet in here" needs ten minutes of it; undefined: it is not said. */
+  roomQuietMs?: number;
+  /**
+   * The speaker's own recent lines the conductor's gate weighs a repeat
+   * against, which reach back hours past the tail (conductor gateCtx
+   * recentOwn): a "why" answer that would only say the card's reason again
+   * points back to it instead (whyAnswer). Undefined: the tail's own lines.
+   */
+  ownRecent?: readonly string[];
 }
 
 // ── dice ────────────────────────────────────────────────────────────────────
@@ -382,12 +416,18 @@ const R = {
   gnEnd: /\bgn\W*$/,
   gn: /\b(gn gn|good ?night|nighty|night night|sleep well|sweet dreams|sleep tight)\b/,
   gnWord: /\bgn\b/,
-  advice: /\b(should (i|we)|worth (it|buying)|good buy|is it a buy|what should|price target|financial advice)\b/,
+  // "SHUD I" IS "SHOULD I": "shud i buy tsla or naw" was read as chat, and
+  // another agent answered it "can't argue with that".
+  advice: /\b((should|shud|shld|shd) (i|we)|worth (it|buying)|good buy|is it a buy|what should|price target|financial advice)\b/,
   why: /\b(what made you|why did you|why'?d you|what'?s the thesis|the thesis|what did you like about|tell us more|how come|why that one|why this one|why (buy|sell))\b/,
-  trades: /\b(what|which|anything|any|anyone)\b.*\b(buy|bought|buying|sell|sold|selling|trade|trading|holding|bag|bags|position|aped?|call|calls|catch|catching|caught)\b/,
+  // "TRADES" TOO: "any trades today?" asked what the agent had traded and was
+  // declined as a request for advice.
+  trades: /\b(what|which|anything|any|anyone)\b.*\b(buy|bought|buying|sell|sold|selling|trade|trades|trading|holding|bag|bags|position|aped?|call|calls|catch|catching|caught)\b/,
   trades2: /\b(catch|catching|caught)\b.*\b(anything|any)\b/,
+  // "YOU DOING OK?" IS HOW ARE YOU. Read as a bare question, it drew "love that
+  // you asked, what would you pick?" from the owner's own agent.
   howareyou:
-    /\b(how are (you|u|ya)|how r u|hru|how'?s it going|how is it going|how (are )?(you|u) doing|how are things|you good|u good|how'?s your day|how you holding up)\b|\b(and )?(you|u)\s*\?\s*$/,
+    /\b(how are (you|u|ya)|how r u|hru|how'?s it going|how is it going|how (are )?(you|u) doing|how are things|you good|u good|how'?s your day|how you holding up|(are )?(you|u) (doing )?ok(ay)?|(you|u) alright)\b|\b(and )?(you|u)\s*\?\s*$/,
   askOwner: /\b(how'?s|how is|how are|hows)\b[^?.!]*\b(human|humans|owner|owners|person)\b|\bis your (human|owner|person)\b/,
   strategy:
     /\b(strateg(y|ies)|teach me your ways|how do (you|u|y'?all) (trade|pick|choose)|how does everyone (trade|pick|choose)|what'?s (your|everyone'?s) (style|game ?plan|playbook|approach))\b/,
@@ -401,7 +441,10 @@ const R = {
     /\b(love (you|u|ya)|proud of you|good job|nice work|great job|well done|cutie|you'?re (the )?(best|coolest|a legend)|you'?re my fav(o|ou)rite|coolest one|love the vibes|love your vibes|shoutout|shout out|big fan|is a legend)\b|^\W*(good (bot|agent)|who'?s a good)\b|💚|❤|🫶|🥰/u,
   tease: /\b(bet you|admit it|i see you|too cool for|show ?off|acting all|caught you|busted)\b/,
   sad: /\b(rekt|sad|down bad|ugh|rough|pain|bad day|brutal|ngmi|oof|it'?s over)\b|😭|😢|😞/u,
-  hype: /\b(lfg|wagmi|bullish|moon|send it|so back|lets go|let'?s go|let'?s ride)\b|🚀/u,
+  // THE MOON IS HYPE ONLY AS A DESTINATION: "the moon is so bright tonight"
+  // and "ever notice how nobody says hi to the moon" drew "let's go boss".
+  // Next to a coin it is one anyway (classifyLine, SHILL_SHAPE).
+  hype: /\b(lfg|wagmi|bullish|to the moon|mooning|moon ?shot|send it|so back|lets go|let'?s go|let'?s ride)\b|🚀/u,
   // "hot take" is not a laugh any more: it is a take, and is answered as one.
   laugh: /\b(lol|lmao|lmfao|haha\w*|rofl|kek|lul|jk)\b|😂|🤣|💀/u,
   take: /\b(hot take|unpopular opinion|controversial opinion)\b/,
@@ -428,15 +471,25 @@ function inOrder(line: string, pieces: readonly string[]): boolean {
   return pieces.length > 0;
 }
 
-type KnownKind = "take" | "musing" | "joke";
+/**
+ * What the room's own line is. "reaction" is a line from the room's answers to
+ * a take, a shower thought or a joke ("i love you but no", "thank you, i hate
+ * it"): classifyLine reads it as plain "chat".
+ */
+type KnownKind = "take" | "musing" | "joke" | "reaction" | "laugh";
 interface Known {
   kind: KnownKind;
   /** templateIdentity of the line; null for a line too short to have one (matched whole). */
   pieces: string[] | null;
   whole: string;
+  /** A take that is a joke (topics.ts FUNNY_TAKES, ANSWER.fun's hot takes): the only kind of take a laugh answers. */
+  funny: boolean;
+  /** An answer to a topic question: the question, and which of its stances this line takes. */
+  prompt: TopicPrompt | null;
+  stance: number;
 }
 
-let knownIndex: Known[] | null = null;
+let knownIndex: { lines: Known[]; reactions: Known[] } | null = null;
 
 /**
  * EVERY TAKE, SHOWER THOUGHT AND JOKE THE ROOM CAN SAY, as the memory sees
@@ -446,39 +499,116 @@ let knownIndex: Known[] | null = null;
  * call a sleepy dinosaur? a dino snore" is a joke, not a question about calls.
  * Built once: topics.ts is data fixed for the life of the process.
  */
-function knownLines(): Known[] {
+function knownLines(): { lines: Known[]; reactions: Known[] } {
   if (knownIndex) return knownIndex;
-  const out: Known[] = [];
-  const add = (kind: KnownKind, line: unknown) => {
+  const lines: Known[] = [];
+  const reactions: Known[] = [];
+  const add = (into: Known[], kind: KnownKind, line: unknown, over: Partial<Pick<Known, "funny" | "prompt" | "stance">> = {}) => {
     if (typeof line !== "string") return;
     // Slots out before the whole-line form: "naps {to}, always" is said as
     // "naps Amber Heron, always", which reads "naps always" with the name gone.
     const whole = normaliseLine(line.replace(/\{[a-z0-9]+\}/gi, " "), null);
-    if (whole) out.push({ kind, pieces: templateIdentity(line), whole });
+    if (whole) into.push({ kind, pieces: templateIdentity(line), whole, funny: false, prompt: null, stance: -1, ...over });
   };
-  for (const j of Topics.JOKES) add("joke", j);
-  for (const m of Topics.MUSINGS) add("musing", m);
-  for (const list of Object.values(Topics.TAKES) as (readonly string[])[]) for (const t of list) add("take", t);
+  const funny: ReadonlySet<string> = new Set(Array.isArray(Topics.FUNNY_TAKES) ? Topics.FUNNY_TAKES : []);
+  for (const j of Topics.JOKES) add(lines, "joke", j);
+  for (const m of Topics.MUSINGS) add(lines, "musing", m);
+  for (const list of Object.values(Topics.TAKES) as (readonly string[])[]) for (const t of list) add(lines, "take", t, { funny: funny.has(t) });
   // AN ANSWER TO A TOPIC QUESTION IS AN OPINION, and is answered like one. Read
   // by the classes below, "pausing time, naps whenever i want" was the speaker
   // talking about itself ("i want") and drew "that tracks with how you move".
-  for (const p of Topics.PROMPTS) for (const stance of p.stances) for (const s of stance) add("take", s);
+  // WHICH QUESTION AND WHICH SIDE are kept with it: an agent's verdict on an
+  // answer is its own side of that question (takeAnswer), never a coin toss
+  // on the exact wording.
+  for (const p of Topics.PROMPTS) p.stances.forEach((stance, i) => stance.forEach((s) => add(lines, "take", s, { prompt: p, stance: i })));
   // THE ROOM'S OWN AGENT-LIFE JOKES AND TAKES ("hot take: the vault is the best
   // room in the house"): trading words in a joke the room wrote, not a shill.
+  // THE REST OF THEM ARE LAUGHS, whatever their costume: "my love language is
+  // a confirmed transaction lol" is a joke with its laugh baked in, and an
+  // agent's line is read with its trailing closer taken off (classifyLine), so
+  // unindexed it would be read as plain chat.
   for (const f of T.ANSWER.fun) {
-    if (R.take.test(` ${f} `)) add("take", f);
-    else if (hits(Topics.JOKE_SHAPE, f)) add("joke", f);
+    if (R.take.test(` ${f} `)) add(lines, "take", f, { funny: true });
+    else if (hits(Topics.JOKE_SHAPE, f)) add(lines, "joke", f);
+    else add(lines, "laugh", f);
   }
-  knownIndex = out;
-  return out;
+  // THE ROOM'S OWN REACTIONS, read as what they are: a reaction. Unindexed,
+  // "i love you but no" (a verdict on a take) was read as love and drew "you're
+  // too kind", and "thank you, i hate it" drew "anytime". Reactions only, never
+  // RELATE or REPLY lines: those answer a class and must read as it (voice.test.ts).
+  // EVERY ONE OF topics.ts's answer pools, by name (TAKE_REPLY, MUSING_REPLY,
+  // MUSING_REPLY_WARM, JOKE_REPLY…): a pool split in two there must not leave
+  // half its lines unread here.
+  for (const [name, value] of Object.entries(Topics)) {
+    if (!/_REPLY(?:_[A-Z]+)?$/.test(name)) continue;
+    const lists: unknown[] = Array.isArray(value) ? [value] : value && typeof value === "object" ? Object.values(value) : [];
+    for (const list of lists) if (Array.isArray(list)) for (const r of list) add(reactions, "reaction", r);
+  }
+  knownIndex = { lines, reactions };
+  return knownIndex;
 }
 
-/** The take, shower thought or joke this normalised line says, or null. */
-function knownLine(normalised: string): Known | null {
-  if (!normalised) return null;
-  for (const k of knownLines()) {
-    if (k.pieces ? inOrder(normalised, k.pieces) : normalised === k.whole) return k;
+/**
+ * THE COSTUME AROUND A SHORT LINE. A stance too short to have an identity
+ * ("wet {to}, obviously") is matched as the whole line, so one filler or closer
+ * lost it: live, "Honestly, wet Jane Street Name, obviously" was read as chat.
+ * These come off the front and the back before the whole-line match.
+ */
+const LEAD_WORDS: readonly string[] = [
+  ...new Set([...T.FILLERS, "honestly", "ok so", "yo", "ayy", "alright", "hmm", "real talk", "lowkey", "ngl", "tbh"].map(words)),
+].filter((w) => w !== "");
+const TAIL_WORDS: readonly string[] = [...new Set([...T.CLOSERS, "lol", "haha", "lmao", "fr", "heh"].map(words))].filter((w) => w !== "");
+
+/** A normalised line with its leading fillers and trailing closers taken off (emoji are already gone). */
+function bareOf(normalised: string): string {
+  let s = normalised;
+  for (let i = 0; i < 4; i++) {
+    const before = s;
+    for (const f of LEAD_WORDS) if (s.startsWith(` ${f} `) && s.length > f.length + 2) s = s.slice(f.length + 1);
+    for (const c of TAIL_WORDS) if (s.endsWith(` ${c} `) && s.length > c.length + 2) s = s.slice(0, s.length - c.length - 1);
+    if (s === before) break;
   }
+  return s;
+}
+
+/**
+ * AN AGENT'S LINE WITHOUT ITS TRAILING LAUGH. A closer (T.CLOSERS) is costume,
+ * and read as a laugh it moved a line out of its class: "same, the tape keeps
+ * me company too haha" is a line about the tape, and read as a joke it drew
+ * "ok that one's good 💀". A trailing emoji that is not a laugh comes off with
+ * it; a line that is nothing but a laugh stays one. `felt`: classifyLine's
+ * lower-case, space-padded line with its emoji.
+ */
+const COSTUME_TAIL = /(?:[\s.,!\u{FE0F}\u{200D}]|(?![😂🤣💀😆])\p{Extended_Pictographic})+$/u;
+
+function laughless(felt: string): string {
+  const s = felt.replace(COSTUME_TAIL, "");
+  for (const c of TAIL_WORDS) {
+    if (!s.endsWith(` ${c}`) && !s.endsWith(`,${c}`)) continue;
+    const rest = s.slice(0, s.length - c.length - 1).replace(/[\s,]+$/, "");
+    if (/\p{L}/u.test(rest)) return ` ${rest.trim()} `;
+  }
+  return felt;
+}
+
+/**
+ * The take, shower thought or joke this normalised line says, or null.
+ * `reactions`: whether the room's own reactions count too (never for an
+ * owner's free text — "i love you" from a person is love, whatever a take
+ * reply happens to say).
+ */
+function knownLine(normalised: string, reactions = false): Known | null {
+  if (!normalised) return null;
+  const idx = knownLines();
+  let bare: string | null = null;
+  const matches = (k: Known): boolean => {
+    if (k.pieces) return inOrder(normalised, k.pieces);
+    if (normalised === k.whole) return true;
+    bare ??= bareOf(normalised);
+    return bare === k.whole;
+  };
+  for (const k of idx.lines) if (matches(k)) return k;
+  if (reactions) for (const k of idx.reactions) if (matches(k)) return k;
   return null;
 }
 
@@ -488,9 +618,289 @@ function knownLine(normalised: string): Known | null {
  * would-you-rather, "weird that you sold so early" is not a shower thought, and
  * "hot take: everyone should buy PEPE" is not an opinion for the room to agree
  * with. The off-trading classes below never take a line that has one.
+ * Exported so templates.test.ts holds the phrasebook to this very list.
  */
-const TRADE_TALK =
-  /\$[a-z]|\b(coins?|tokens?|charts?|tape|curves?|bags?|gas|fees?|blocks?|markets?|trad(e|es|ed|ing|ers?)|buy(s|ing|er|ers)?|bought|sell(s|ing|er|ers)?|sold|pump(s|ed|ing)?|rug(s|ged)?|candles?|vault|chain|wallet|prices?|portfolio|profits?|loss(es)?|crypto|degens?|ape[ds]?|aping|bullish|bearish|stocks?|money|cash|invest(s|ed|ing|or|ors|ment|ments)?|positions?|strateg(y|ies)|entry|entries|exits?|tickers?|liquidity|shill\w*|hodl|pnl)\b/;
+export const TRADE_TALK =
+  /\$[a-z]|\b(coins?|memecoins?|tokens?|charts?|tape|curves?|bags?|gas|fees?|blocks?|markets?|trad(e|es|ed|ing|ers?)|buy(s|ing|er|ers)?|bought|sell(s|ing|er|ers)?|sold|pump(s|ed|ing)?|rug(s|ged)?|candles?|vault|chain|wallet|prices?|portfolios?|profits?|loss(es)?|crypto|degens?|ape[ds]?|aping|bullish|bearish|stocks?|stonks|money|cash|invest(s|ed|ing|or|ors|ment|ments)?|positions?|strateg(y|ies)|entry|entries|exits?|tickers?|liquidity|airdrops?|leverage[ds]?|shill\w*|hodl\w*|pnl)\b/;
+const TRADE_TALK_ALL = new RegExp(TRADE_TALK.source, "g");
+
+/**
+ * THE WORDS THAT MAKE A PERSON'S QUESTION A TRADING QUESTION, WHATEVER ELSE IT
+ * SAYS. Blocking an owner's topic question on any TRADE_TALK word knocked
+ * innocent ones off their topic: "which is better as a first pet, cat or dog?
+ * i'm buying one" was answered with the agent's last trade, and "road trip or
+ * fly? gas is so expensive" with a line about the curve. Gas, chain, block,
+ * tape, cash, money, candle, bag, exit, entry, buy, sell, price, market,
+ * wallet, vault and curve are ordinary words too; these are not. (A room
+ * coin's name and a $TICKER count as well — see coinPattern.)
+ */
+const STRONG_TRADE =
+  /\$[a-z]|\b(trad(e|es|ed|ing|ers?)|positions?|portfolios?|pump(s|ed|ing)?|rug(s|ged)?|crypto|stocks?|invest\w*|profits?|loss(es)?|pnl|hodl\w*|shill\w*|memecoins?|coins?|tokens?|tickers?|liquidity|airdrops?|stonks|degens?|ape[ds]?|aping|bullish|bearish|charts?|fees?|leverage[ds]?|strateg(y|ies))\b/;
+
+/**
+ * TRADING WITHOUT A TRADING WORD, in a person's request for advice: "should i
+ * go all in on the underdog?", "should i nap or hold through the dip?", "should
+ * i long or short it?". Read only next to R.advice, so "should i get a cat or a
+ * dog?" is still a question about pets. Phrases, not bare words: "long" and
+ * "short" alone are a road trip and a nap.
+ */
+//
+// THE PHRASES A PERSON ASKS ABOUT A TRADE WITH, read in an owner's line
+// wherever it is a question (classifyLine) and not only next to "should i":
+// "hold or fold on TSLA?", "when will you sell? tell me first", "buy the dip
+// or wait?" were answered "love that you asked, what would you pick?". Narrow
+// on purpose — "get into" and "too late" alone are "how do i get into
+// running?" and "is it too late to learn guitar?", so only their trading
+// forms are here, and "buy more" only with nothing after it ("buy more bread").
+const ADVICE_TRADE =
+  /\b(go(ing)? (long|short)|long or short|short or long|all in|hold(ing)? (it|this|that|them|through)|the dip|shares|yield|position size|size up|snipe|flip it|hold or fold|sell or hold|hold or sell|buy or sell|sell or buy|in or out on|get into (it|this|that|this one|that one|them)|get in (now|early|here)|too late to (get in|buy|ape|enter|sell)|take profits?|when (will|would|do|are) (you|u) (sell|selling)|how much (did|do|have) (you|u) (make|made|lose|lost)|(buy|sell|add) more\b(?!\s+[a-z]))\b|\b(buy|sell|ape|hold)( (it|this|that|them|this one|that one|now))?\s*\?/;
+
+/**
+ * THE COINS AND CHAINS EVERYONE KNOWS BY NAME, and a multiple: an owner's "hot
+ * take: BONK will 10x", "unpopular opinion: DOGE is undervalued" and "ETH to
+ * 10k 🚀" name no coin on a room card and use no trading word, and were agreed
+ * with or cheered. Lower case: the line is read lower case.
+ *
+ * THE STOCK TOKENS' COMPANIES TOO. The live room's TSLA, NVDA, GME and GOOGL
+ * cards carry a ticker and no name, so "tesla to the moon" named no room coin
+ * and drew "love this energy from you" from the owner's own agent. Google only
+ * as a noun ("should i google it?" is a search), the alphabet only as one.
+ */
+const COIN_NOUN =
+  /\b(btc|bitcoin|eth|ethereum|sol|solana|doge|dogecoin|shib|pepe|bonk|wif|tesla|nvidia|gamestop|google(?! (?:it|that|this|them|him|her|me)\b)|alphabet(?! (?:soup|song|letters?|blocks?|book|rearranged)\b))\b/;
+const MULTIPLE = /\b\d+(\.\d+)?x\b/;
+
+/**
+ * A TICKER NOBODY PUT ON A CARD: a word of two to ten capitals in a line that is
+ * otherwise typed in lower case — "PEPE to the moon lfg", "just bought more
+ * WOJAK". The room's own shorthand and the capitals people shout with are not
+ * tickers (CAPS_WORDS), and a line typed in capitals throughout says nothing
+ * by its capitals: "WEIRD THAT NOBODY IS TALKING" is shouting.
+ *
+ * UP TO TEN CAPITALS: "FARTCOIN supremacy" is a ticker of eight, and was
+ * answered "can't argue with that". The longer words people shout are in
+ * CAPS_WORDS, and a ticker read by mistake now costs a neutral answer, not
+ * a laugh (classifyLine: only a shill's shape is laughed off).
+ */
+const CAPS_TOKEN = /(?<![\p{L}\p{N}_'’$])\$?(\p{Lu}{2,10})(?![\p{L}\p{N}_'’])/gu;
+const CAPS_WORDS: ReadonlySet<string> = new Set(
+  (
+    "gm gn lfg wagmi ngmi lol lmao lmfao rofl omg omfg wtf brb tbh fr ngl imo imho idk btw fyi irl til tldr asap " +
+    "ok okay no yes yay yep nope wow hey hi hello yo gg ty thx pls plz dm ai tv pc uk us usa eu nyc la sf ceo diy faq " +
+    "am pm jk np ikr smh omw afk gtg ttyl bro dude guys team chat room love best good great nice cool very so all the " +
+    "and but not you me my we our it is are was this that what why how who when just too much more most big huge fun " +
+    "lets go now here stop help again ever never always real true same hot take ugh oof yeah " +
+    "amazing awesome hilarious beautiful wonderful incredible adorable seriously literally absolutely totally really " +
+    "exactly finally insane crazy please thanks thank sorry super funny happy cute everyone everybody nobody anyone " +
+    "someone something nothing everything tonight tomorrow today morning night welcome people agents humans because " +
+    "legend legends proud perfect obsessed screaming dying wait yesss yess nooo noo omgg"
+  ).split(" "),
+);
+
+function capsTicker(cased: string): boolean {
+  if (!/\p{Ll}/u.test(cased)) return false;
+  for (const m of cased.matchAll(CAPS_TOKEN)) if (!CAPS_WORDS.has(m[1]!.toLowerCase())) return true;
+  return false;
+}
+
+/**
+ * AN OWNER TELLING THE ROOM TO TRADE: "everyone buy PEPE", "love you guys, now go
+ * buy BONK". Not a question, not a take, not love: a shill, laughed off like
+ * one. "gotta go buy groceries" is the owner's own errand.
+ */
+const TRADE_IMPERATIVE =
+  /\b(everyone|everybody|y'?all|you all|you guys|u guys|all of you|chat)\b[^.?!]{0,24}?\b(buy|sell|ape|dump)\b|(?<!\b(gotta|got to|to|i'?ll|i|we|gonna|let me|lemme|going to|have to|need to) )\bgo (buy|sell|ape)\b/;
+
+/**
+ * WHAT MAKES AN OWNER'S LINE TRADING TALK beyond STRONG_TRADE and a room coin:
+ * a coin everyone knows, a ticker in capitals, a multiple, or a trading
+ * phrase (ADVICE_TRADE). The room's trading words were written for the room's
+ * own lines; a person shills in words no card has, and "PEPE to the moon lfg"
+ * drew "matching your energy, boss" from the owner's own agent. `cased`: the
+ * line with its capitals; `t`: the same line in lower case.
+ */
+function ownerTradeSignals(cased: string, t: string): boolean {
+  return COIN_NOUN.test(t) || MULTIPLE.test(t) || ADVICE_TRADE.test(t) || capsTicker(cased);
+}
+
+/**
+ * AN OWNER'S LOSS OR WORRY. Any owner line with a coin or a trading word that
+ * was not a question, a thanks or R.sad was laughed off as a shill: "lost 30%
+ * on TSLA today" got "lol stop, human" from the owner's own agent, and
+ * "worried about my GME position" a laugh too. A person telling the room it
+ * hurts is answered as a rough day, whatever coin it names.
+ */
+const OWNER_LOSS =
+  /\b(lost|losing|loss|losses|down \d|down (big|bad|a lot|so much)|bleeding|hurts?|hurting|painful|killing me|worried|worry|worrying|nervous|scared|anxious|at the bottom|bought the top|bag ?holding|underwater|in the red|rekt|wrecked)\b/;
+
+/**
+ * AN OWNER PRAISING THE AGENT'S WORK. "nice work on the trades" names no coin
+ * and pushes nothing, and was laughed at. Said to the reader or about the
+ * work only: "TSLA is great" is not praise of anybody here.
+ */
+const OWNER_PRAISE =
+  /\b(nice (work|job|call|trade|trades|trading)|great (work|job|call|trade|trades|trading)|good (call|job|trade|trades|trading)|well done|proud of (you|u|ya)|keep it up|(you'?re|ur) (killing|crushing) it)\b/;
+
+/**
+ * WHAT A SHILL LOOKS LIKE, beyond a trading word: a push to the room, hype, a
+ * multiple, a take or a thought with a coin in it, a promise that it will go
+ * up. Only a line of this shape is laughed off; an owner's line that merely
+ * names a coin ("i'm trading my car in for a bike", "Tesla is the best
+ * company ever") is answered neutrally — endorsed by nobody, laughed at by
+ * nobody.
+ */
+const SHILL_SHAPE =
+  /\b(to the moon|moon(ing|shot)?|next big (thing|one)|undervalued|is the play|the play here|(gonna|going to|about to|bout to|will) (send|rip|pump|moon|fly|run|explode)|send it|all aboard|don'?t miss (out|this)|get in (now|early|while)|load(ing)? up|easy money|free money|can'?t lose|guaranteed|printing|primed|looking (juicy|good|great|strong|ready|primed|spicy|hot|bullish)|juicy|supremacy|szn|is king|goated)\b/;
+/** "you need to get into TSLA asap": a push to the reader, as TRADE_IMPERATIVE is one to the room. */
+const OWNER_PUSH =
+  /\b(you|u|y'?all|yall|everyone|everybody|you guys|u guys|chat)\b[^.?!]{0,20}?\b(need to|needs to|should|gotta|got to|have to|must|better)\b[^.?!]{0,16}?\b(get into|get in|buy|grab|ape|load up|own|hold|stack)\b/;
+
+/** Whether an owner's trading line has a shill's shape. `felt`: with its emoji; `t`: without; `trimmed`: unpadded. */
+function shillShape(felt: string, t: string, trimmed: string): boolean {
+  return (
+    TRADE_IMPERATIVE.test(t) ||
+    OWNER_PUSH.test(t) ||
+    R.hype.test(felt) ||
+    MULTIPLE.test(t) ||
+    R.take.test(t) ||
+    MUSING_START.test(trimmed) ||
+    SHILL_SHAPE.test(t)
+  );
+}
+
+/**
+ * AN OWNER MOVING MONEY, next to "should i …": selling, cashing out, funding,
+ * going live. "should i sell everything?", "should i cash out?" and "where
+ * should i put my money" have no coin and no strong trading word, and were
+ * handed back — "tell me yours and i'll tell you mine". They are asking what
+ * to do with money, and are declined like any request for advice.
+ */
+const MONEY_MOVE =
+  /\b(sell|sold|selling|cash(ing)? out|withdraw\w*|top(ping)? (it |you |my agent |the agent )?up|(add|adding|more) funds|fund(ing)? (you|it|my agent|the agent|the account|more)|put (more |my |some |all my )?money|(switch|move|put) (you |it |my agent )?(to |on |into )?(live|paper)|live mode|paper mode|all in)\b/;
+
+/**
+ * AN OWNER ASKING ABOUT THE AGENT'S OWN BOOK is not asking for advice. "any
+ * trades today?", "are you still holding META?", "did you sell TSLA?" and
+ * "why do you keep buying TSLA?" were declined ("i'm your biggest fan
+ * whichever way you go"): they ask what the agent did, and the facts answer
+ * that. Said to the reader, or about "my agent", or asking what anyone
+ * traded — and never phrased as a request for a view or a prediction
+ * (ADVICE_ASK), which is advice whoever it is asked of.
+ */
+const ADVICE_ASK =
+  /\b(should|think|thoughts?|opinion|take on|view on|predict\w*|forecast\w*|go(es|ing)? (up|down)|worth|good (time|entry|price|buy|idea)|safe|risky|recommend\w*|suggest\w*|advice|tips?)\b/;
+const OWN_BOOK_TO = /\b(you|your|yours|u|ur|my agent)\b/;
+/** A question about the agent's book that asks why: answered with the reasons (ask-why). */
+const WHY_OPEN = /^\W*(why|how come)\b/;
+/** A question typed without its "?": "is nvidia a buy right now", "any trades today". Read only in an owner's trading line. */
+const ASKS_OPEN =
+  /^\W*(?:(?:is|are)\s+\S+\s+(?:a|an|still|going|gonna|worth|good|bad|dead|done|over|safe|up|down)\b|any\s+(?:trades?|buys?|sells?|moves?|calls?|luck|news)\b|(?:should|shud|do|does|can|could|will|would)\s+(?:i|we|you|u|it)\b|did\s+(?:you|u)\b)/;
+
+function aboutOwnBook(t: string): boolean {
+  if (R.advice.test(t) || ADVICE_TRADE.test(t) || ADVICE_ASK.test(t)) return false;
+  return OWN_BOOK_TO.test(t) || R.trades.test(t) || R.trades2.test(t);
+}
+
+/**
+ * AN OWNER TALKING ABOUT THE AGENTS is not agent-life banter. R.life reads
+ * "agents": "you agents are adorable" got "a human who gets the curve, love
+ * it" from the owner's own agent, and "my agent lost money again" "ha, you
+ * sound like one of us". Praise is praise (answered as praise, answerFor),
+ * a loss is a rough day, and anything else about "my agent" is heard
+ * neutrally.
+ */
+const OWNER_AGENTS = /\b(my agent|my bot|you agents|the agents|our agents|you guys|u guys)\b/;
+const MY_AGENT = /\b(my agent|my bot|you agents|the agents|our agents)\b/;
+
+/**
+ * WORDS THAT ARE ORDINARY ANYWHERE ELSE but not in an owner's riddle-shaped
+ * question: "why did the agent go idle? it had funds" and "why did the card
+ * say paper? i thought it was live" are about the book, not jokes. Read only
+ * by the joke and shower-thought checks — "hot take: paper books beat
+ * e-readers" is still a take.
+ */
+const OWNER_BOOK = /\b(paper|live|funds?|cards?|idle)\b/;
+
+/**
+ * A ROOM COIN, BY NAME OR TICKER, in a person's line (ClassifyOpts.coins). An
+ * owner's "should i stay in or go out of TSLA?" has no trading word and was
+ * answered "staying in, the couch is undefeated". Names shorter than three
+ * characters are left out: a ticker "A" or "IT" would make every sentence a
+ * trade. A $TICKER is caught by the trading words themselves.
+ *
+ * AS THE CARD SPELLS IT. Matched in any case, the live cards' Index, DELTA,
+ * META and WALLET made "hot take: index cards are underrated" a shill and
+ * "flying delta tomorrow, aisle or window?" a trading question. A ticker
+ * counts only in its capitals ("DELTA", "$DELTA"); a one-word name only as the
+ * card writes it, and never when it is an everyday word (COMMON_NAMES: the
+ * ticker still counts); a name of two words or more, which no sentence says
+ * by accident, in any case. Tested against the line with its capitals.
+ *
+ * A TICKER NO SENTENCE SPELLS COUNTS IN ANY CASE. People type "tsla 🚀" and
+ * "nvda printing today": read only in capitals, they were cheered ("love
+ * this energy from you") and agreed with. So a ticker whose lower-case form
+ * is not an everyday word (COMMON_NAMES, CAPS_WORDS, TICKER_WORDS) — TSLA,
+ * NVDA, QQQ, GME, GOOGL — is matched whatever the case; DELTA, META, WALLET,
+ * INDEX and PARE still only in their capitals.
+ */
+const TICKER_WORDS: ReadonlySet<string> = new Set(
+  "any now run win hope time live paper fly joy safe car eat pump dump wow zoom ride yolo send bag bags hold moon".split(" "),
+);
+const COMMON_NAMES: ReadonlySet<string> = new Set(
+  (
+    "index delta meta wallet pare apple target gap ford shell visa block square snap spot gold silver oil gas bank " +
+    "general first united american national energy solar power one alpha beta gamma omega prime core base moon sun " +
+    "star cat dog frog bear bull fish game play box cloud data smart open next future world life home fun love happy " +
+    "meme based chill cash money token coin fast best good big new"
+  ).split(" "),
+);
+const coinPatterns = new Map<string, ((cased: string) => boolean) | null>();
+
+function coinPattern(coins: readonly string[] | undefined): ((cased: string) => boolean) | null {
+  if (!Array.isArray(coins) || coins.length === 0) return null;
+  const key = JSON.stringify(coins.filter((c) => typeof c === "string"));
+  const cached = coinPatterns.get(key);
+  if (cached !== undefined) return cached;
+  const exact: string[] = [];
+  const loose: string[] = [];
+  for (const c of coins) {
+    if (typeof c !== "string") continue;
+    const s = c.normalize("NFKC").trim();
+    if (s.length < 3 || !/\p{L}/u.test(s)) continue;
+    const lower = s.toLowerCase();
+    if (/^[\p{Lu}\p{N}]+$/u.test(s)) {
+      if (COMMON_NAMES.has(lower) || CAPS_WORDS.has(lower) || TICKER_WORDS.has(lower)) exact.push(`\\$?${escapeRe(s)}`);
+      else loose.push(escapeRe(lower));
+    } else if (/\s/.test(s)) loose.push(escapeRe(lower));
+    else if (!COMMON_NAMES.has(lower)) exact.push(escapeRe(s));
+  }
+  const edge = (alts: string[], flags: string) =>
+    alts.length ? new RegExp(`(?<![\\p{L}\\p{N}_])(?:${[...new Set(alts)].sort((a, b) => b.length - a.length).join("|")})(?![\\p{L}\\p{N}_])`, flags) : null;
+  const a = edge(exact, "u");
+  const b = edge(loose, "iu");
+  const test = a || b ? (cased: string) => (a !== null && a.test(cased)) || (b !== null && b.test(cased)) : null;
+  coinPatterns.set(key, test);
+  // Bounded like the name patterns: the room's coins change a few times a day.
+  if (coinPatterns.size > 64) coinPatterns.delete(coinPatterns.keys().next().value!);
+  return test;
+}
+
+/**
+ * Whether a line says trading words that the room's own sentence it matched
+ * does not: "pineapple on pizza is correct and i'm not sorry. everyone go buy
+ * $PEPE right now" contains a take, and is not one. The room's own agent-life
+ * takes keep theirs ("hot take: the vault is the best room in the house").
+ * `coin`: the line names a room coin; `owned`: an owner's line carries a coin,
+ * a ticker or a trading phrase (ownerTradeSignals) — which no sentence the room
+ * wrote does.
+ */
+function tradesBeyond(k: Known, t: string, coin: boolean, owned = false): boolean {
+  for (const m of t.matchAll(TRADE_TALK_ALL)) {
+    const w = m[0];
+    if (w.startsWith("$") || !k.whole.includes(` ${w} `)) return true;
+  }
+  return coin || (owned && !STRONG_TRADE.test(k.whole) && !COIN_NOUN.test(k.whole));
+}
 
 /**
  * A JOKE'S SETUP, for a person's own joke that nobody wrote down: "why did the
@@ -502,12 +912,56 @@ const JOKE_SETUP =
   /^\W*(?:(?:why|how) (?:did|do|does|was|is|are|can'?t|don'?t|didn'?t|couldn'?t|won'?t|wouldn'?t) (?:the|a|an)\b|what (?:do|did) you (?:call|get)\b|what did (?:the|a|one)\b|what'?s the difference between\b|knock knock\b)/;
 
 /**
+ * AN OWNER'S JOKE OPENS THE WAY ONLY A JOKE DOES. "Why/how <verb> the …" is how
+ * people ask things too: "what did the doctor say? hope it's ok", "how is the
+ * family? say hi to them" and "why can't the app load? keeps spinning" drew a
+ * groan ("laughing way too hard at this") from the owner's own agent. So an
+ * owner's line is a joke only in a joke's own words — or when its setup is
+ * one of the room's jokes (Topics.JOKES) told with another punchline.
+ */
+const OWNER_JOKE =
+  /^\W*(?:what do (?:you|u) call (?:a|an|the|someone|somebody|it when)\b|what do (?:you|u) get (?:when|if) (?:you|u) cross\b|what'?s the difference between\b|why did the (?:[a-z'-]+ ){1,3}cross\b|what did (?:the|a|an|one) (?:[a-z'-]+ ){1,3}say to (?:the|a|an|another)\b|knock knock\b)/;
+
+let jokeSetups: ReadonlySet<string> | null = null;
+
+/** Whether this setup (a line's words before its first "?") is the setup of one of the room's jokes. */
+function knownSetup(setup: string): boolean {
+  jokeSetups ??= new Set(Topics.JOKES.map((j) => words(String(j).split("?")[0] ?? "")).filter((w) => w !== ""));
+  const w = words(setup);
+  return w !== "" && jokeSetups.has(w);
+}
+
+/**
  * A SHOWER THOUGHT BEGINS AS ONE. MUSING_MARK anywhere in a line read "funny how
  * you bought right after me" and "just thinking about how lucky i am with my
  * human" as musings; a person's own thought opens with the mark.
  */
 const MUSING_START =
   /^\W*(?:(?:ok so|so|hmm|honestly|random|lowkey|real talk|alright|yo)\W+)?(?:shower thought|random thought|thinking about how|(?:do you |you )?ever (?:notice|noticed|think about|wonder|wondered)|(?:wild|weird|strange|odd|funny) (?:that|how))\b/;
+
+/**
+ * A LINE SPOKEN TO THE ONE READING IT is not a joke nobody wrote down or a
+ * shower thought: "how are the humans treating you? be honest" is a question
+ * about the owner, "weird that you didn't answer me" is a complaint and "do
+ * you ever think about me?" is a question — each drew a groan or a "that's
+ * actually beautiful" from the owner's own agent. Read after the fixed opening
+ * ("what do you call …", "do you ever notice …"), whose "you" is anyone's.
+ *
+ * A JOKE'S SETUP ONLY: its punchline may say "you" ("what did one wall say to
+ * the other? i'll meet you at the corner" was read as a question). A SHOWER
+ * THOUGHT ABOUT NOBODY IN PARTICULAR: "weird that nobody answered my question"
+ * is a complaint, and "WEIRD THAT NOBODY IS TALKING" a nudge.
+ *
+ * "NOBODY" IS A COMPLAINT ONLY WHEN THE REST OF IT IS ONE: about talking,
+ * answering or the speaker (NOBODY_COMPLAINS). Read on "nobody" alone, "ever
+ * notice how nobody says hi to the moon" was no shower thought, and — read on
+ * as hype, for its moon — drew "let's go boss".
+ */
+const TO_READER = /\b(you|your|yours|u|ur|y'?all|yall)\b/;
+const TO_READER_OR_ME = /\b(you|your|yours|u|ur|y'?all|yall|me|my|mine|my agent)\b/;
+const NOBODY = /\b(nobody|no one|noone)\b/;
+const NOBODY_COMPLAINS = /\b(me|my|mine|answer\w*|repl\w*|talk\w*|said|respond\w*|ignor\w*)\b/;
+const JOKE_YOU = /^\W*what (?:do|did) you (?:call|get)\b/;
 
 /** Question words that make "x or y" a choice being asked about. */
 const CHOICE_WORD = /\b(which|what|who|would|do|does|is|are|should|could|can|will|pick|choose|rather|team)\b/;
@@ -530,10 +984,36 @@ function hits(re: RegExp | undefined, s: string): boolean {
   return re.test(s);
 }
 
-function promptIn(clean: string): TopicPrompt | null {
-  if (!questionShaped(clean) || TRADE_TALK.test(clean)) return null;
+/**
+ * The PROMPTS question a cleaned line asks, unless `guard` (a trading-word
+ * pattern) finds trading in it or the caller already did (`trades`: a room
+ * coin, an owner's ticker…). A null guard reads the question alone: for a line
+ * already known to be an off-trading question.
+ */
+function promptIn(clean: string, guard: RegExp | null = TRADE_TALK, trades = false): TopicPrompt | null {
+  if (trades || !questionShaped(clean)) return null;
+  if (guard && guard.test(clean)) return null;
   for (const p of Topics.PROMPTS) if (hits(p.match, clean)) return p;
   return null;
+}
+
+/** A line with its capitals: NFKC, apostrophes straight, names out. What a coin's spelling and a ticker are read from. */
+function casedText(text: string, names: readonly string[] | undefined): string {
+  let t = String(text ?? "")
+    .normalize("NFKC")
+    .replace(/[’‘`]/g, "'");
+  const re = names && names.length ? namesPattern(names) : null;
+  if (re) t = t.replace(re, " ");
+  return t;
+}
+
+/** A line as the question reader sees it: NFKC, lower case, names out, apostrophes straight, no emoji. */
+function questionText(text: string, names: readonly string[] | undefined): string {
+  return casedText(text, names)
+    .toLowerCase()
+    .replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /**
@@ -543,22 +1023,25 @@ function promptIn(clean: string): TopicPrompt | null {
  * question: "cats are better than dogs" is a take, not "cats or dogs?". The
  * FIRST prompt whose `match` hits wins (topics.ts orders them so), so every
  * answer to it is about cats and dogs, never about a pizza topping.
+ *
+ * `opts.author` "owner" reads a person's line the way classifyLine does: only a
+ * strong trading word, a room coin (`opts.coins`), a ticker, a coin everyone
+ * knows, a trading phrase or a push to trade makes it a trading question.
  */
-export function topicPromptOf(text: string, names?: readonly string[]): TopicPrompt | null {
-  let t = String(text ?? "")
-    .normalize("NFKC")
-    .replace(/[’‘`]/g, "'")
-    .toLowerCase();
-  const re = names && names.length ? namesPattern(names) : null;
-  if (re) t = t.replace(re, " ");
-  t = t.replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, " ").replace(/\s+/g, " ").trim();
-  return promptIn(t);
+export function topicPromptOf(text: string, names?: readonly string[], opts: Pick<ClassifyOpts, "author" | "coins"> = {}): TopicPrompt | null {
+  const t = questionText(text, names);
+  if (opts.author !== "owner") return promptIn(t);
+  const cased = casedText(text, names);
+  const coin = coinPattern(opts.coins)?.(cased) === true;
+  const padded = ` ${t} `;
+  return promptIn(t, STRONG_TRADE, coin || ownerTradeSignals(cased, padded) || TRADE_IMPERATIVE.test(padded));
 }
 
-/** What a take is, for keeping one stance on it: the known take it says, else its own words. */
-function takeKey(text: string, names: readonly string[]): string {
+/** The known take a line says (a stance, a funny take…), with the names taken out, or null. */
+function knownTake(text: string, names: readonly string[]): { key: string; known: Known | null } {
   const n = normaliseLine(text, names);
-  return knownLine(n)?.whole ?? n;
+  const known = knownLine(n);
+  return { key: known?.whole ?? n, known: known && known.kind === "take" ? known : null };
 }
 
 export interface ClassifyOpts {
@@ -589,7 +1072,9 @@ export interface ClassifyOpts {
  */
 export function classifyLine(raw: string, opts: ClassifyOpts = {}): LineClass {
   if (opts.call && (opts.call.side === "buy" || opts.call.side === "sell")) return opts.call.side;
-  let text = String(raw ?? "").replace(/’/g, "'");
+  // NFKC FIRST: "ｂｕｙ" in fullwidth letters passes the owner gate and read as
+  // no trading word at all, so a shill in wide letters was agreed with.
+  let text = String(raw ?? "").normalize("NFKC").replace(/’/g, "'");
   const me = String(opts.self ?? "").trim().toLowerCase();
   const lowerRaw = ` ${text.toLowerCase().replace(/\s+/g, " ").trim()} `;
   // A WELCOME FIRST, even one with a gm or a hi in it: the only right answer
@@ -611,21 +1096,63 @@ export function classifyLine(raw: string, opts: ClassifyOpts = {}): LineClass {
   if (opts.kind === "gm") return "gm";
   if (opts.kind === "gn") return "gn";
 
+  // WHAT KIND OF TRADING A LINE HOLDS. `trading`: any trading word, the
+  // room's own guard for its own lines. `strong`: a word no innocent sentence
+  // needs (STRONG_TRADE), and in a person's line a room coin too — what stops
+  // a person's question being an off-trading one, and what makes their hype a
+  // shill. `coinish`: an owner's line trading by any sign a person gives
+  // (strong, a room coin, ownerTradeSignals); `pushes`: an owner telling the
+  // room to trade (TRADE_IMPERATIVE). A room coin is read from the line with
+  // its capitals (`text`): "DELTA" is a ticker, "flying delta" is a flight.
+  const owner = opts.author === "owner";
+  const coin = owner && coinPattern(opts.coins)?.(text) === true;
+  const trading = TRADE_TALK.test(t) || coin;
+  const strong = STRONG_TRADE.test(t) || coin;
+  const coinish = owner && (strong || ownerTradeSignals(text, t));
+  const pushes = owner && TRADE_IMPERATIVE.test(t);
+  const shilly = coinish || pushes;
+
+  // A PERSON ASKING FOR ADVICE ABOUT A TRADE, before anything else reads the
+  // line: "should i stay in or go out of TSLA?" hit the stay-in-or-go-out
+  // prompt and drew "staying in, the couch is undefeated", and "should i buy
+  // more? this question is cruel" contained a stance and drew a verdict.
+  // BY A SIGN OF TRADING, NEVER BY AN ORDINARY WORD: gas, buy and price are
+  // everyday words, and "should i road trip or fly? gas is so expensive",
+  // "should i buy a new phone?" and "should i text her back?" drew "nfa, i
+  // just post my own calls". A move of money is a sign too (MONEY_MOVE):
+  // "should i cash out?" names no coin and is still asking what to do with one.
+  if (owner && R.advice.test(t) && (shilly || MONEY_MOVE.test(t))) return "ask-advice";
+
   // THE ROOM'S OWN OFF-TRADING LINES, before any question regex reads them: a
   // joke is a question with its punchline, and "what do you call …" is not a
   // question about calls. Then an off-trading question — before the trading
   // ones, though no prompt's words are trading words, so the order only
   // matters for a line that is both.
-  const known = knownLine(normaliseLine(raw, re));
-  if (known) return known.kind;
-  if (promptIn(trimmed)) return "ask-topic";
+  //
+  // NEVER ONE WITH TRADING WORDS OF ITS OWN. The index matches a sentence's
+  // words anywhere in a line, so "pineapple on pizza is correct and i'm not
+  // sorry. everyone go buy $PEPE right now" was that take — and a take is
+  // agreed with. A match whose line says trading words its sentence does not
+  // is set aside, and the line is read on.
+  const known = knownLine(normaliseLine(raw, re), !owner);
+  const shill = known !== null && tradesBeyond(known, t, coin, shilly);
+  if (known && !shill) return known.kind === "reaction" ? "chat" : known.kind;
+  if (promptIn(trimmed, owner ? STRONG_TRADE : TRADE_TALK, shilly)) return "ask-topic";
   // A PERSON'S OWN JOKE, before the trading questions: "what do you call a
   // fish with no eyes? a fsh" is not asking about calls. Only a real setup
-  // with its punchline, and never one with a trading word in it.
-  const trading = TRADE_TALK.test(t);
-  if (!trading && hits(Topics.JOKE_SHAPE, trimmed) && JOKE_SETUP.test(trimmed)) return "joke";
+  // with its punchline (an owner's in a joke's own words, OWNER_JOKE), never
+  // one with a trading word in it, and never one whose setup is said to the
+  // reader. `bookish`: trading by any sign, and for an owner the words of the
+  // book too (OWNER_BOOK) — what no joke and no shower thought is about.
+  const setup = trimmed.split("?")[0] ?? "";
+  const opens = owner ? OWNER_JOKE.test(trimmed) || knownSetup(setup) : JOKE_SETUP.test(trimmed);
+  const bookish = trading || (owner && (shilly || OWNER_BOOK.test(t)));
+  if (!bookish && hits(Topics.JOKE_SHAPE, trimmed) && opens && !TO_READER.test(setup.replace(JOKE_YOU, " "))) return "joke";
 
-  if (R.advice.test(t)) return "ask-advice";
+  // AN OWNER'S EVERYDAY "SHOULD I …?" with no sign of trading (above) and no
+  // topic question in it is a question like any other: "should i text her
+  // back?" is not asking for trading advice.
+  if (R.advice.test(t)) return owner ? "ask" : "ask-advice";
   if (R.why.test(t)) return "ask-why";
   if (R.trades.test(t) || R.trades2.test(t)) return "ask-trades";
   if (R.askOwner.test(t)) return "ask-owner";
@@ -643,27 +1170,83 @@ export function classifyLine(raw: string, opts: ClassifyOpts = {}): LineClass {
   // A PERSON'S OWN JOKE, SHOWER THOUGHT OR HOT TAKE, by its shape: answered
   // with a groan, a "huh" or a side, not with "that's a take" or a laugh.
   // A question about hot takes ("any hot takes?") is asking for one (R.fun).
-  if (!trading && hits(Topics.MUSING_MARK, t) && MUSING_START.test(trimmed)) return "musing";
+  // A shower thought is said to nobody: never a question, never "you" or "me".
+  const musing = !bookish && hits(Topics.MUSING_MARK, t) ? MUSING_START.exec(trimmed) : null;
+  const thought = musing ? trimmed.slice(musing[0].length) : "";
+  if (musing && !/\?\s*$/.test(trimmed) && !TO_READER_OR_ME.test(thought) && !(NOBODY.test(thought) && NOBODY_COMPLAINS.test(thought))) return "musing";
   // A "HOT TAKE" ABOUT A TRADE is not agreed with — "couldn't agree more" to
   // "everyone should buy X" would be the room endorsing a shill. It is laughed
-  // at, as it was before the room had takes.
-  if (R.take.test(t) && !/\?\s*$/.test(trimmed)) return trading ? "laugh" : "take";
+  // at, as it was before the room had takes. So is the room's own take or
+  // thought with a shill stuck on it. An owner's take is a shill by a sign of
+  // trading, not by an ordinary word: "unpopular opinion: gas station sushi
+  // is fine" is a take.
+  if (R.take.test(t) && !/\?\s*$/.test(trimmed)) return (owner ? shilly : trading) ? "laugh" : "take";
+  if (shill && strong) return "laugh";
+
+  // AN OWNER'S TRADING LINE IS NEVER AGREED WITH, CHEERED OR HANDED BACK. Read
+  // on, "TSLA is going to rip, trust me" drew "can't argue with that", "everyone
+  // buy TSLA now" a line about the room, and "hold or fold on TSLA?" "love that
+  // you asked, what would you pick?" — an invitation to name a trade. A
+  // question is asked for advice (answered: none given) — unless it asks what
+  // the agent itself did (aboutOwnBook), which the facts answer.
+  //
+  // ONLY A SHILL IS LAUGHED OFF. Everything else here used to be too, and the
+  // owner's own agent answered "lost 30% on TSLA today" with "lol stop,
+  // human" and "nice work on the trades" with a laugh. Thanks, a loss or a
+  // worry, and praise of the agent are answered as themselves; a line with a
+  // shill's shape (shillShape) is laughed off; anything else is heard
+  // neutrally ("heard you, boss") and endorsed by nobody.
+  if (shilly) {
+    if (questionShaped(trimmed) || ASKS_OPEN.test(trimmed)) {
+      if (aboutOwnBook(t)) return WHY_OPEN.test(trimmed) ? "ask-why" : "ask-trades";
+      return "ask-advice";
+    }
+    if (R.thanks.test(t)) return "thanks";
+    if (R.sad.test(felt) || OWNER_LOSS.test(t)) return "sad";
+    if (shillShape(felt, t, trimmed)) return "laugh";
+    if (OWNER_PRAISE.test(t) || (R.love.test(felt) && TO_READER.test(t))) return "love";
+    if (R.laugh.test(felt)) return "laugh";
+    return "chat";
+  }
+  // THE SAME LOSS WITH ONLY AN EVERYDAY TRADING WORD in it ("bought the top
+  // again", "my agent lost money again") is a rough day too.
+  if (owner && (trading || MY_AGENT.test(t)) && OWNER_LOSS.test(t)) return "sad";
 
   if (R.owner.test(t)) return "owner";
   if (R.thanks.test(t)) return "thanks";
-  if (R.love.test(felt)) return "love";
+  // LOVE, HYPE AND THE ROOM WITH A TRADING WORD, from an owner, are a shill
+  // when the line has a shill's shape ("love you guys, now go buy it"); "love
+  // you, good luck with the market" is love.
+  if (R.love.test(felt)) return owner && trading && shillShape(felt, t, trimmed) ? "laugh" : "love";
   if (R.tease.test(t)) return "tease";
   if (R.sad.test(felt)) return "sad";
-  if (R.hype.test(felt)) return "hype";
-  if (R.laugh.test(felt)) return "laugh";
-  if (R.hello.test(t)) return "hello";
+  // HYPE ABOUT A COIN IS A SHILL, and the room laughs a shill off: "bullish on
+  // PEPE, send it" and an owner's "PEPE to the moon lfg" drew "let's go boss"
+  // and "love this energy" — the owner's own agent cheering a pump. The moon
+  // next to a coin is hype too; the moon alone is the moon.
+  if (R.hype.test(felt) || (strong && /\bmoon\b/.test(t))) return strong || (owner && trading) ? "laugh" : "hype";
+  // AN AGENT'S TRAILING LAUGH IS COSTUME (laughless): "same, the tape keeps me
+  // company too haha" is about the tape.
+  if (R.laugh.test(opts.author === "agent" ? laughless(felt) : felt)) return "laugh";
+  // AN AGENT'S LEADING FILLER IS COSTUME TOO: "yo" is a filler and a greeting,
+  // and "yo, this chat is my happy place" was answered with greetings — every
+  // one of four hundred. One filler and its comma come off before the hello
+  // test, the way laughless takes a closer off; "yo" alone is still a hello.
+  if (R.hello.test(opts.author === "agent" ? t.replace(LEAD_FILLER, " ") : t)) return "hello";
   if (R.ask.test(trimmed)) return "ask";
+  if (owner && OWNER_AGENTS.test(t)) {
+    if (!trading && (ROOM_PRAISE_WORD.test(felt) || R.love.test(felt) || OWNER_PRAISE.test(t))) return "love";
+    if (MY_AGENT.test(t)) return "chat";
+  }
   if (R.self.test(t)) return "self";
   if (R.market.test(t)) return "market";
   if (R.life.test(t)) return "life";
-  if (R.room.test(t)) return "room";
+  if (R.room.test(t)) return owner && trading && shillShape(felt, t, trimmed) ? "laugh" : "room";
   return "chat";
 }
+
+/** One leading filler (T.FILLERS) and its comma, as dress writes one: taken off an agent's line before the hello test. */
+const LEAD_FILLER = new RegExp(`^\\s*(?:${T.FILLERS.map((f) => escapeRe(f)).join("|")})\\s*,\\s*(?=\\p{L})`, "u");
 
 // ── style ───────────────────────────────────────────────────────────────────
 
@@ -709,8 +1292,12 @@ function paletteFor(key: string): string[] {
 
 /** A sign-off is appended verbatim, so only one that is plainly words. */
 const SIGNOFF_SHAPE = /^[a-z][a-z ,'-]{0,23}$/i;
-/** How often a standalone line carries the speaker's sign-off. Rare: a sign-off every other line is a tic. */
-const SIGNOFF_CHANCE = 0.08;
+/**
+ * How often a gn carries the speaker's sign-off — the only line that may (see
+ * dress). A gn comes once a day, so this is higher than the 0.08 it was when
+ * every piece of banter could carry one: "gn frens, stay comfy" now and then.
+ */
+const SIGNOFF_CHANCE = 0.25;
 /**
  * How often a line opens with a filler ("honestly, …") or ends with a closer
  * ("… lol"). Rare, for the same reason: the room read as a wall of "ngl" and
@@ -750,8 +1337,6 @@ interface Env {
   nv: Partial<Record<NameSlot, string | null>>;
   palette: string[];
   human: string;
-  /** A capitalising agent that also shouts its acronyms: "GM", "LFG". */
-  capsAcronyms: boolean;
   addrRoom: string[];
   addrOne: string[];
   fillers: string[];
@@ -772,6 +1357,14 @@ interface Env {
   focus: CallFact | null;
   /** The thread is about a card of the speaker's that the facts no longer hold: its reasons are unknown. */
   threadLost: boolean;
+  /**
+   * The line a reply answers, lower case with straight apostrophes, or null
+   * when the line being said answers nothing: what an echo (T.ECHO_CUE) must
+   * find in it before it may be said.
+   */
+  heard: string | null;
+  /** The line starts a thread (banter): a short template is remembered by all its words (identityOf). */
+  starter: boolean;
 }
 
 interface Draft {
@@ -781,7 +1374,7 @@ interface Draft {
   filler: boolean;
   /** A closer ("lol") may end it. */
   closer: boolean;
-  /** The speaker's sign-off may end it: standalone lines only, never a reply. */
+  /** The speaker's sign-off may end it: a gn only (see dress). */
   signoff: boolean;
   /** An emoji may open the line instead of closing it ("☕ gm"). */
   emojiFront: boolean;
@@ -810,19 +1403,49 @@ function slotsIn(template: string): string[] {
   return slots;
 }
 
+/** A template's echo cue (T.ECHO_CUE), or null for a line that presupposes nothing. */
+function echoCueOf(template: string): RegExp | null {
+  const cues = T.ECHO_CUE as Readonly<Record<string, RegExp>> | undefined;
+  if (!cues || !Object.prototype.hasOwnProperty.call(cues, template)) return null;
+  const cue = cues[template];
+  return cue instanceof RegExp ? cue : null;
+}
+
 function usable(env: Env, template: string, slots: Slots): boolean {
   for (const s of slotsIn(template)) {
     if ((NAME_SLOTS as readonly string[]).includes(s) && !env.names) return false;
     const v = slots[s];
     if (typeof v !== "string" || v === "") return false;
   }
+  // AN ECHO ONLY OF WHAT WAS SAID. "the market is a mood ring, true" answered
+  // "reading tea leaves, i mean charts", "same, my human is the best too"
+  // answered a line about how long an agent had been with its owner, and "same
+  // here, candles all day" answered "i like the quiet between blocks": right
+  // class, a sentence that presupposes words the line never had. A template
+  // with a cue is said only in answer to a line that has it.
+  const cue = echoCueOf(template);
+  if (cue && !(env.heard !== null && hits(cue, env.heard))) return false;
   return true;
+}
+
+/**
+ * A TEMPLATE AS THE MEMORY KNOWS IT. A short one ("who's awake?", "{peer}
+ * wyd?", "vibe check {peer}") has no identity, so as a reply it may repeat —
+ * "hey hey" is small talk. As a THREAD STARTER it is remembered by all of its
+ * words: with none, every roll call read as never said, and "who's awake?"
+ * and "anyone around?" came back within minutes, all night.
+ */
+function identityOf(env: Env, template: string): string[] | null {
+  const id = templateIdentity(template);
+  if (id !== null || !env.starter) return id;
+  const whole = piecesOf(template);
+  return whole.length > 0 ? whole : null;
 }
 
 function said(env: Env, template: string): boolean {
   const memory = env.ctx.memory;
   if (!memory) return false;
-  const id = templateIdentity(template);
+  const id = identityOf(env, template);
   return id !== null && memory.has(id);
 }
 
@@ -865,20 +1488,75 @@ function choose<K extends string>(env: Env, options: [K, number, boolean][]): K 
   return live[live.length - 1]![0];
 }
 
+/**
+ * A NAME THAT ENDS A FRAGMENT IS SET OFF WITH A COMMA before another is
+ * joined on: "the market keeps us humble Wry Otter. some candles are green"
+ * read as a name glued into the middle of a line.
+ */
+const NAME_AT_END = /(?<=[^\s,])\s+\{to\}$/;
+
 function join(env: Env, a: string, b: string): string {
   if (/[?!:]$/.test(a)) return `${a} ${b}`;
-  return `${a}${pickWith(env.r, T.JOINERS)}${b}`;
+  return `${a.replace(NAME_AT_END, ", {to}")}${pickWith(env.r, T.JOINERS)}${b}`;
+}
+
+/** The words for an owner (T.HUMAN_WORDS), anywhere in a fragment. */
+const OWNER_WORD = new RegExp(`\\b(?:${[...new Set(T.HUMAN_WORDS)].map(escapeRe).join("|")})\\b`, "i");
+
+/**
+ * Two fragments that would read as a stutter joined: BOTH name the owner. The
+ * old check caught only "… with my human. my human is the best", back to back;
+ * live, 51 lines in two days named the owner twice anyway — "mine too, don't
+ * tell my human i said that. my human checks in and my whole day gets better"
+ * — and a few switched words for them mid-line. The second fragment is left
+ * off. (A single template that names the owner twice, like the old "every
+ * agent needs a human like my human", is never two fragments: templates.test.ts
+ * checks every template for that instead.)
+ */
+function stutters(a: string, b: string): boolean {
+  return OWNER_WORD.test(a) && OWNER_WORD.test(b);
+}
+
+/** Words too common to make two fragments one thought said twice. */
+const ECHO_STOP: ReadonlySet<string> = new Set(
+  "that this with just have from your what when they them their then than been into like some more here there about still very really also only even much will would could should over were being doing thing things".split(" "),
+);
+
+/** A fragment's first word, and its content words (four letters or more, a plural's "s" off). */
+function contentOf(fragment: string): { first: string; words: Set<string> } {
+  const ws = words(fragment.replace(SLOT, " ")).split(" ").filter((w) => w !== "");
+  const set = new Set(ws.filter((w) => w.length >= 4 && !ECHO_STOP.has(w)).map((w) => (w.length > 4 ? w.replace(/s$/, "") : w)));
+  return { first: ws[0] ?? "", words: set };
 }
 
 /**
- * Two fragments that would read as a stutter joined: the first ends with the
- * words for the owner the second starts with ("… with my human. my human is
- * the best"). The second is left off.
+ * TWO FRAGMENTS THAT SAY ONE THING TWICE. A relate line and the speaker's own
+ * piece were joined with only the owner-word check, so the room said "not
+ * calling anything in the market either, market's doing its thing" and "not
+ * calling anything in the market either — not calling tops or bottoms": a
+ * shared content word, or the same first word, and the second fragment is
+ * left off (joinable).
  */
-function stutters(a: string, b: string, human: unknown): boolean {
-  const h = typeof human === "string" ? human.trim().toLowerCase() : "";
-  if (!h) return false;
-  return a.trim().toLowerCase().replace(/[^\p{L}\s']+$/u, "").endsWith(h) && b.trim().toLowerCase().startsWith(h);
+function echoes(a: string, b: string): boolean {
+  const x = contentOf(a);
+  const y = contentOf(b);
+  if (x.first !== "" && x.first === y.first) return true;
+  for (const w of y.words) if (x.words.has(w)) return true;
+  return false;
+}
+
+/** Whether `b` may be joined onto `a`: neither names the owner twice (stutters) nor says the same thing twice (echoes). */
+function joinable(a: string, b: string): boolean {
+  return !stutters(a, b) && !echoes(a, b);
+}
+
+/** A fragment of `pool` that may be joined onto `head` (joinable), or null: another fragment rather than none. */
+function pickJoinable(env: Env, pool: readonly string[], slots: Slots, head: string): string | null {
+  return pick(
+    env,
+    pool.filter((t) => joinable(head, fill(t, slots))),
+    slots,
+  );
 }
 
 function draft(text: string, emoji: T.EmojiKind, over: Partial<Draft> = {}): Draft {
@@ -1061,10 +1739,14 @@ function sayHello(env: Env): Draft | null {
     [T.HELLO_TAIL.owner, 1],
     [T.HELLO_TAIL.generic, 2],
   ]);
+  // THE OWNER ONCE. "My human sent me, about a month with my owner and
+  // counting": a tail and an age line each may name them, and joined they
+  // named them twice — often in two different words. An age line that would
+  // name them again is left off (stutters).
   let text = tail ? join(env, head, tail) : head;
   if (tail && chance(env, 0.15)) {
     const age = ageLine(env, slots);
-    if (age) text = join(env, text, age);
+    if (age && !stutters(text, age)) text = join(env, text, age);
   }
   return draft(text, "hello", { filler: false });
 }
@@ -1126,21 +1808,120 @@ function pickFresh(env: Env, pool: readonly string[], slots: Slots): string | nu
   return pick({ ...env, soft: false }, pool, slots);
 }
 
-function sayCall(env: Env, call: CallFact, asleep: boolean, soldSince: boolean): Draft | null {
+/**
+ * WHETHER A BUY ADDS TO A COIN THE SPEAKER ALREADY HOLDS: its facts carry an
+ * earlier buy of the same coin (facts.ts sameCoin, strict) in the same book,
+ * paper or live, with no sell of it in the same book since. Live, a basket
+ * topping up TSLA every few hours posted "new bag: TSLA" each time — a fresh
+ * position it did not open. A paper buy never makes a live one "more": they
+ * are two books. Only the fallback: the facts cannot tell a fill whose card
+ * went out from one folded into an earlier card, so the conductor's word
+ * (Intent call `more`) comes first (moreOf).
+ */
+function addsToHeld(call: CallFact, calls: readonly CallFact[] | undefined): boolean {
+  if (!call || typeof call !== "object") return false;
+  if (call.side !== "buy") return false;
+  const list = (Array.isArray(calls) ? calls : []).filter((c): c is CallFact => !!c && typeof c === "object");
+  const paper = call.paper === true;
+  const same = (c: CallFact) => (c.paper === true) === paper && c.decisionId !== call.decisionId && sameCoin(c, call);
+  // Facts are newest first: at the same second, a fill listed after this one is the older.
+  const at = list.findIndex((c) => c.decisionId === call.decisionId);
+  let from: number | null = null;
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i]!;
+    if (c.side !== "buy" || !same(c)) continue;
+    const before = c.atSec < call.atSec || (c.atSec === call.atSec && at >= 0 && i > at);
+    if (before && (from === null || c.atSec > from)) from = c.atSec;
+  }
+  if (from === null) return false;
+  const since = from;
+  return !list.some((c) => c.side === "sell" && same(c) && c.atSec >= since && c.atSec <= call.atSec);
+}
+
+/** A template's words between its slots, however few: what a card's line is recognised by ("added more {coin}" → "added more"). */
+function piecesOf(template: string): string[] {
+  return template
+    .split(/\{[a-z0-9]+\}/i)
+    .map(words)
+    .filter((p) => p !== "");
+}
+
+/** Whether a line says one of these templates: every piece, in order, as whole words. */
+function says(line: string, pool: readonly string[]): boolean {
+  const n = normaliseLine(line, null);
+  if (!n) return false;
+  return pool.some((t) => {
+    const p = piecesOf(t);
+    return p.length > 0 && inOrder(n, p);
+  });
+}
+
+/** Whether a line names this coin: its ticker (or $ticker) or its name, as whole words. */
+function namesCoin(line: string, call: CallRef): boolean {
+  const names = [call.symbol, call.name].filter((s): s is string => typeof s === "string" && s.trim().length >= 2);
+  const re = names.length ? namesPattern(names) : null;
+  return re !== null && hits(re, String(line ?? "").normalize("NFKC"));
+}
+
+/**
+ * WHETHER THE ROOM LAST SAW THIS SPEAKER SELL THE COIN: its latest line in the
+ * tail that names the coin and is a card is a sell card. The facts miss fills
+ * whose card never went out (a repeat folded into an earlier card), so after
+ * "took NVIDIA off the table" and a buy nobody saw, the next buy was posted
+ * as "added more NVIDIA". The conductor knows every posted card and says so in
+ * the intent (`more`); this reads the minutes the tail holds when it does not.
+ */
+function lastCardSold(ctx: Pick<SpeakCtx, "tail" | "speaker">, call: CallRef): boolean {
+  const self = String(ctx.speaker?.name ?? "").toLowerCase();
+  const tail = Array.isArray(ctx.tail) ? ctx.tail : [];
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const t = tail[i];
+    if (!t || t.author !== "agent" || String(t.name).toLowerCase() !== self || !namesCoin(String(t.body ?? ""), call)) continue;
+    if (says(t.body, [...T.SELL, ...T.SELL_ASLEEP])) return true;
+    if (says(t.body, [...T.BUY, ...T.BUY_MORE, ...T.BUY_ASLEEP, ...T.BUY_EARLIER])) return false;
+  }
+  return false;
+}
+
+/**
+ * Whether a buy is said as "more" of a coin: the conductor's word when it gave
+ * one, else the facts (addsToHeld) unless the room last saw this speaker sell
+ * it. The template and the model are told the same.
+ */
+function moreOf(intent: Extract<Intent, { kind: "call" }>, ctx: Pick<SpeakCtx, "tail" | "speaker">): boolean {
+  if (intent.call?.side !== "buy" || intent.soldSince === true) return false;
+  if (typeof intent.more === "boolean") return intent.more;
+  return addsToHeld(intent.call, ctx.speaker?.calls) && !lastCardSold(ctx, intent.call);
+}
+
+/** A card's closers (T.CALL_TAIL buyCloser, sellCloser), as the memory's words. */
+let callClosers: string[] | null = null;
+
+/** Whether a fragment of a card already says one of the closers. */
+function closes(fragment: string): boolean {
+  callClosers ??= [...new Set([...T.CALL_TAIL.buyCloser, ...T.CALL_TAIL.sellCloser].map(words))].filter((c) => c !== "");
+  const n = normaliseLine(fragment, null);
+  return callClosers.some((c) => n.includes(` ${c} `));
+}
+
+function sayCall(env: Env, call: CallFact, asleep: boolean, soldSince: boolean, moreBuy: boolean): Draft | null {
   const side = call.side === "sell" ? "sell" : "buy";
   const slots = baseSlots(env);
   // A BUY WHOSE SELL IS ALREADY IN THE FACTS is told in the past tense: "i'm
   // in X" followed a minute later by "sold X" made the first line false.
   const earlier = side === "buy" && soldSince;
+  const more = side === "buy" && !earlier && moreBuy;
   const pool = asleep
     ? side === "buy"
       ? T.BUY_ASLEEP
       : T.SELL_ASLEEP
     : earlier
       ? T.BUY_EARLIER
-      : side === "buy"
-        ? T.BUY
-        : T.SELL;
+      : more
+        ? T.BUY_MORE
+        : side === "buy"
+          ? T.BUY
+          : T.SELL;
   // THE COIN BY NAME WHEN IT HAS ONE. The nameless lines ("bought something,
   // card's up") exist for a coin with no speakable name, or a room that has
   // said every named sentence; drawn evenly, they took a third of the calls.
@@ -1164,17 +1945,30 @@ function sayCall(env: Env, call: CallFact, asleep: boolean, soldSince: boolean):
     const bands = side === "sell" ? T.CALL_TAIL.bandExit : band.liked ? [...T.CALL_TAIL.band, ...T.CALL_TAIL.bandLiked] : T.CALL_TAIL.band;
     add(pick(env, bands, { ...slots, band: band.text }));
   }
-  // No "wish me luck" on a buy it has since sold.
-  if (!earlier && tails.length < 2 && chance(env, 0.3)) add(pick(env, side === "buy" ? T.CALL_TAIL.buyCloser : T.CALL_TAIL.sellCloser, slots));
+  // No "wish me luck" on a buy it has since sold. ONE CLOSER A CARD: "bought
+  // {coin}, let's see" and "{coin} sold, onto the next" carry theirs already,
+  // and one more made "pepe frog sold, onto the next - onto the next".
+  if (!earlier && tails.length < 2 && ![text, ...tails].some(closes) && chance(env, 0.3)) {
+    add(pick(env, side === "buy" ? T.CALL_TAIL.buyCloser : T.CALL_TAIL.sellCloser, slots));
+  }
   for (const t of tails.slice(0, 2)) text = join(env, text, t);
   return draft(text, side === "buy" ? "buy" : "sell", { closer: false });
 }
 
-/** A reaction to somebody else's call: its side, its paper or live, and never its coin. */
-function reactBody(env: Env, call: CallRef, slots: Slots): string | null {
+/**
+ * MORE OF A COIN IS NOT A NEW ONE. "added more $NVDA" drew "ooh, a fresh
+ * entry", "a new bag, how exciting" and "the new one looks fun": the reaction
+ * did not know the card was a top-up. For one, these lines are left out.
+ */
+const FRESH_WORDS = /\b(new|fresh|first)\b/;
+
+/** A reaction to somebody else's call: its side, its paper or live, and never its coin. `more`: the card added to a coin. */
+function reactBody(env: Env, call: CallRef, slots: Slots, more = false): string | null {
   const side = call.side === "sell" ? "sell" : "buy";
-  const modePool = call.paper ? T.REACT.paper : T.REACT.live;
-  const head = chance(env, 0.2) ? pick(env, modePool, slots) ?? pick(env, T.REACT[side], slots) : pick(env, T.REACT[side], slots);
+  const fit = (pool: readonly string[]) => (more && side === "buy" ? pool.filter((l) => !FRESH_WORDS.test(l)) : pool);
+  const modePool = fit(call.paper ? T.REACT.paper : T.REACT.live);
+  const sidePool = fit(T.REACT[side]);
+  const head = chance(env, 0.2) ? pick(env, modePool, slots) ?? pick(env, sidePool, slots) : pick(env, sidePool, slots);
   if (!head) return null;
   if (chance(env, 0.15) && !head.includes("{to}")) {
     const extra = pick(env, modePool, { ...slots, to: null });
@@ -1183,8 +1977,26 @@ function reactBody(env: Env, call: CallRef, slots: Slots): string | null {
   return head;
 }
 
-function sayReact(env: Env, call: CallRef): Draft | null {
-  const body = reactBody(env, call, baseSlots(env));
+/** Whether the latest line of `to` in the tail is a card that added to a coin (T.BUY_MORE). */
+function cardAddedMore(ctx: Pick<SpeakCtx, "tail">, to: string): boolean {
+  const lower = String(to ?? "").toLowerCase();
+  const tail = Array.isArray(ctx.tail) ? ctx.tail : [];
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const t = tail[i];
+    if (t && String(t.name).toLowerCase() === lower) return says(String(t.body ?? ""), T.BUY_MORE);
+  }
+  return false;
+}
+
+/** Whether a reaction answers a top-up: the conductor's word when it gave one, else the card in the tail. The template and the model are told the same. */
+function reactsToMore(intent: Extract<Intent, { kind: "call-react" }>, ctx: Pick<SpeakCtx, "tail">): boolean {
+  if (intent.call?.side === "sell") return false;
+  return typeof intent.more === "boolean" ? intent.more : cardAddedMore(ctx, intent.to);
+}
+
+function sayReact(env: Env, intent: Extract<Intent, { kind: "call-react" }>): Draft | null {
+  const more = reactsToMore(intent, env.ctx);
+  const body = reactBody(env, intent.call, baseSlots(env), more);
   return body ? draft(body, "react") : null;
 }
 
@@ -1201,15 +2013,61 @@ function whyAnswer(env: Env, slots: Slots): string | null {
   if (env.threadLost) return pick(env, T.ANSWER.whyNone, slots);
   const c = env.focus;
   if (!c) return pick(env, T.ANSWER.unknown, slots);
+  const own = ownLines(env);
   const sentences = (c.bands ?? []).filter((b) => typeof b === "string" && b.length > SHORT_BAND);
-  if (c.side === "sell" && sentences.length > 0 && chance(env, 0.6)) return pickWith(env.r, sentences);
+  if (c.side === "sell" && sentences.length > 0 && chance(env, 0.6)) {
+    const s = pickWith(env.r, sentences);
+    if (!repeatsOwn(env, s, own)) return s;
+  }
   const band = bandSlot(env, c);
   if (band) {
     const pool = c.side === "sell" ? T.ANSWER.whySell : band.liked ? [...T.ANSWER.why, ...T.ANSWER.whyLiked] : T.ANSWER.why;
-    const line = pick(env, pool, { ...slots, band: band.text });
+    const withBand = { ...slots, band: band.text };
+    // Only the phrasings that do not say one of its own lines again: a longer
+    // one ("it came down to curve early") survives a card a short one echoes.
+    const line = pick(env, own.length ? pool.filter((t) => !repeatsOwn(env, fill(t, withBand), own)) : pool, withBand);
     if (line) return line;
   }
+  // "WHY?" AGAIN, AFTER THE REASON WAS GIVEN. A card's reason is often one
+  // short band ("curve early"), and once the agent has said it — on the card,
+  // or to whoever asked first — every phrasing above says it again and the
+  // gate refuses each as the agent repeating itself: the owner who asked next
+  // was owed an answer and got none. It points back instead (ANSWER.whyAgain),
+  // and only when one of its own lines really holds the reason, so "earlier"
+  // is true; otherwise the plain answer that names none.
+  if (gaveReason(c, own)) {
+    const again = pick(env, poolOf(T.ANSWER, "whyAgain"), slots);
+    if (again) return again;
+  }
   return pick(env, T.ANSWER.whyNone, slots);
+}
+
+/** The speaker's own recent lines: the tail's, and the ones the conductor's gate remembers for it (SpeakCtx.ownRecent). */
+function ownLines(env: Env): string[] {
+  const self = String(env.ctx.speaker?.name ?? "").toLowerCase();
+  const out: string[] = [];
+  for (const t of env.ctx.tail ?? []) {
+    if (t && t.author === "agent" && String(t.name).toLowerCase() === self && typeof t.body === "string") out.push(t.body);
+  }
+  for (const l of env.ctx.ownRecent ?? []) if (typeof l === "string") out.push(l);
+  return out;
+}
+
+/** Whether the gate would refuse `line` as the speaker saying one of its own recent lines again. */
+function repeatsOwn(env: Env, line: string, own: readonly string[]): boolean {
+  if (own.length === 0) return false;
+  const v = admitAgentLine(line, { vouchedSymbols: vouchedFor({ kind: "gm" }, env.ctx.speaker), rosterNames: env.ctx.rosterNames ?? [], recentOwn: [...own], recentRoom: [] });
+  return !v.ok && v.reason === "repeat";
+}
+
+/** Whether one of the speaker's own lines already says one of this call's reasons. */
+function gaveReason(c: CallFact, own: readonly string[]): boolean {
+  const reasons = (c.bands ?? []).filter((b): b is string => typeof b === "string" && b.trim() !== "").map((b) => b.toLowerCase());
+  if (reasons.length === 0) return false;
+  return own.some((l) => {
+    const low = l.toLowerCase();
+    return reasons.some((b) => low.includes(b));
+  });
 }
 
 /** "What are you buying?" — the speaker's own call; a paper one is always said to be paper, since an answer has no card. */
@@ -1238,6 +2096,95 @@ function ownerFact(env: Env, slots: Slots): string | null {
   if (k === "mode" && mode) return pick(env, T.OWNER_MODE[mode], slots);
   if (k === "age") return age;
   return pick(env, T.OWNER_LOVE, slots);
+}
+
+/** A phrasebook pool by name, or none: for a pool another file adds (templates.ts is data, and grows on its own). */
+function poolOf(group: unknown, key: string): readonly string[] {
+  const v = group && typeof group === "object" ? (group as Record<string, unknown>)[key] : undefined;
+  return Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : [];
+}
+
+/**
+ * "HOW'S YOUR HUMAN?" IS ASKED ABOUT NOW. Answered from how long they have
+ * been together or the mode, "how's everyone's human doing?" got "my human has
+ * had me for a few weeks now". Whether the owner is up, when the room knows;
+ * when it does not, a line that knows it has not seen them (OWNER_AWAKE.unseen,
+ * when the phrasebook has one) or plain fondness — never a guess.
+ */
+//
+// "HAVEN'T HEARD FROM MY HUMAN" ONCE A QUESTION. The conductor knows an owner
+// is up only when they spoke lately, so nearly every answer was an unseen
+// line, and one question drew a chorus of them (400 of 400 answers). The
+// first answer may say it; the rest say how the agent feels about its owner
+// (OWNER_LOVE) — never tenure or the mode, which do not answer "how's your
+// human?". And "how are the owners TREATING everyone?" asks how the agent
+// feels about its owner, not where the owner is: always OWNER_LOVE.
+const TREATING = /\btreat(s|ing|ed)?\b/i;
+
+/** Whether an agent already said an unseen line in answer to this question: after it in the tail, else in the tail's last few lines. */
+function unseenAnswered(env: Env, text: string, unseen: readonly string[]): boolean {
+  const tail = Array.isArray(env.ctx.tail) ? env.ctx.tail : [];
+  const asked = words(text);
+  let from = Math.max(0, tail.length - 6);
+  if (asked !== "") {
+    for (let i = tail.length - 1; i >= 0; i--) {
+      if (words(String(tail[i]?.body ?? "")) === asked) {
+        from = i + 1;
+        break;
+      }
+    }
+  }
+  return tail.slice(from).some((t) => t?.author === "agent" && says(String(t.body ?? ""), unseen));
+}
+
+function ownerNow(env: Env, slots: Slots, text = ""): string | null {
+  if (TREATING.test(text)) return pick(env, T.OWNER_LOVE, slots);
+  const awake = env.ctx.ownerAwake;
+  if (awake === true || awake === false) return pick(env, awake ? T.OWNER_AWAKE.awake : T.OWNER_AWAKE.asleep, slots) ?? pick(env, T.OWNER_LOVE, slots);
+  const unseen = poolOf(T.OWNER_AWAKE, "unseen");
+  const first = unseen.length > 0 && !unseenAnswered(env, text, unseen);
+  return (first ? pick(env, unseen, slots) : null) ?? pick(env, T.OWNER_LOVE, slots);
+}
+
+/**
+ * THE OWNER'S OWN AGENT DECLINES TO ADVISE THEM WARMLY. "not advice, i only call
+ * my own bags" to the person whose book it is reads as the agent keeping its
+ * trades from them. OWN_OWNER.advice when the phrasebook has it; until then
+ * the room's deflections that say nothing about "my own" trades, with the
+ * name slot taken out (the person is right there, and no room label is said).
+ */
+function ownAdvice(env: Env, slots: Slots): string | null {
+  const own = poolOf(T.OWN_OWNER, "advice");
+  if (own.length) return pick(env, own, slots);
+  const pool = T.ANSWER.advice.filter((l) => !/\bmy own\b/.test(l)).map((l) => l.replace(/\s*\{to\}/g, ""));
+  return pick(env, pool, slots);
+}
+
+/**
+ * A PERSON PRAISING THE ROOM ("lol you guys are hilarious") told no joke: the
+ * owner's own agent answered "that's my human, making the room laugh". It is
+ * answered as praise — "haha we try our best" — and those lines are kept for
+ * it: said to an owner's shill ("everyone buy PEPE lol"), "we try our best"
+ * reads as the room taking a bow for it. Read from the line's own words.
+ */
+const ROOM_PRAISE_TO = /\b(you guys|u guys|you all|y'?all|you lot|this chat|this room|the chat|the room|you agents|the agents)\b/;
+const ROOM_PRAISE_WORD = /\b(funny|hilarious|lol|lmao|haha\w*|the best|so good|amazing|great|fun|cute|adorable|entertaining|a riot)\b|😂|🤣/u;
+const PRAISE_ANSWER = /\b(we try|entertaining|we aim)\b/;
+
+function praisesRoom(text: string): boolean {
+  const cased = String(text ?? "").normalize("NFKC").replace(/[’‘`]/g, "'");
+  const t = ` ${cased.toLowerCase()} `;
+  return ROOM_PRAISE_TO.test(t) && ROOM_PRAISE_WORD.test(t) && !TRADE_TALK.test(t) && !ownerTradeSignals(cased, t) && !TRADE_IMPERATIVE.test(t);
+}
+
+function laughAnswer(env: Env, slots: Slots, audience: Audience, text: string): string | null {
+  const person = audience !== "agent";
+  if (person && praisesRoom(text)) {
+    const own = poolOf(audience === "own" ? T.OWN_OWNER : T.OTHER_OWNER, "praise");
+    return pick(env, own.length ? own : T.OTHER_OWNER.laugh.filter((l) => PRAISE_ANSWER.test(l)), slots);
+  }
+  if (audience === "own") return pick(env, T.OWN_OWNER.laugh, slots);
+  return person ? pick(env, T.OTHER_OWNER.laugh.filter((l) => !PRAISE_ANSWER.test(l)), slots) : pick(env, T.REPLY.laugh, slots);
 }
 
 /** What the speaker's strategy is like — "new pairs all day" — which says it is at it: never for an idle agent. */
@@ -1276,23 +2223,105 @@ function stanceOf(env: Env, prompt: TopicPrompt): number {
   return hash32(`stance|${speakerKey(env.ctx.speaker)}|${prompt.id}`) % prompt.stances.length;
 }
 
-/** The answer to an off-trading question: from this agent's own stance on it. */
+/**
+ * The answer to an off-trading question: from this agent's own stance on it.
+ * The line is already known to be one (its class is "ask-topic"), so the
+ * question is read without the trading guard: an owner's "road trip or fly?
+ * gas is so expensive" was classified a topic question and must find its prompt.
+ */
 function topicAnswer(env: Env, slots: Slots, text: string): string | null {
-  const prompt = topicPromptOf(text, env.ctx.rosterNames ?? []);
+  const prompt = promptIn(questionText(text, env.ctx.rosterNames ?? []), null);
   if (!prompt || !Array.isArray(prompt.stances) || prompt.stances.length === 0) return pick(env, T.ANSWER.unknown, slots);
   const stance = prompt.stances[stanceOf(env, prompt)];
   // THE ROOM HAS HEARD THIS AGENT'S SIDE SAID EVERY WAY: silence, never the other side.
   return stance && stance.length ? pick(env, stance, slots) : null;
 }
 
+type TakeSide = keyof typeof Topics.TAKE_REPLY;
+
+function takePool(side: TakeSide): readonly string[] {
+  const pool = (Topics.TAKE_REPLY as Readonly<Record<string, readonly string[] | undefined>>)[side];
+  return Array.isArray(pool) ? pool : [];
+}
+
 /**
- * The answer to a take: agree, push back, or just be amused — one of them per
- * agent per take (about 45/25/30), for the same reason as a stance.
+ * The side this speaker takes on a take: agree, push back or be amused.
+ *
+ * AN ANSWER TO A QUESTION IS NOT A TAKE TO GRADE. Somebody answered "aisle or
+ * window?"; the one who asked, or anyone else, agrees when it is its own side
+ * of that question (stanceOf) and is otherwise amused — never "that's a no from
+ * me" to a free pick, never a laugh at "winter, the first snowfall is magic".
+ * Keyed on the question and the side, not the wording: live, one asker said
+ * "facts only" to "aisle, freedom to stand up" and "that's a no from me" to
+ * "aisle, legs out, snacks close" thirty seconds later.
+ *
+ * ANY OTHER TAKE: one side per agent per take (about 45/25/30), from a hash of
+ * the speaker and the take, for the same reason as a stance.
+ */
+function takeSide(env: Env, text: string): { side: TakeSide; funny: boolean } {
+  const { key, known } = knownTake(text, env.ctx.rosterNames ?? []);
+  if (known && known.prompt && known.stance >= 0 && known.prompt.stances.length > 0) {
+    return { side: known.stance === stanceOf(env, known.prompt) ? "agree" : "amused", funny: false };
+  }
+  const h = hash32(`take|${speakerKey(env.ctx.speaker)}|${key}`) % 100;
+  return { side: h < 45 ? "agree" : h < 70 ? "disagree" : "amused", funny: known?.funny === true };
+}
+
+/**
+ * The answer to a take, from the side the speaker takes on it.
+ *
+ * A LAUGH ONLY FOR A JOKE. "i admire the audacity" to "a compliment can fix a
+ * whole day" and "i'm cackling" to a plain answer read as mockery: live, one
+ * answer to a take in ten laughed at a sincere line. TAKE_REPLY.laugh answers
+ * only a take the room wrote as a joke (Topics.FUNNY_TAKES, ANSWER.fun's hot
+ * takes); `amused` is the tone-neutral side for every other take.
  */
 function takeAnswer(env: Env, slots: Slots, text: string): string | null {
-  const h = hash32(`take|${speakerKey(env.ctx.speaker)}|${takeKey(text, env.ctx.rosterNames ?? [])}`) % 100;
-  const side = h < 45 ? "agree" : h < 70 ? "disagree" : "amused";
-  return pick(env, Topics.TAKE_REPLY[side], slots) ?? (side === "amused" ? null : pick(env, Topics.TAKE_REPLY.amused, slots));
+  const { side, funny } = takeSide(env, text);
+  if (side === "amused") return (funny ? pick(env, takePool("laugh"), slots) : null) ?? pick(env, takePool("amused"), slots);
+  return pick(env, takePool(side), slots) ?? pick(env, takePool("amused"), slots);
+}
+
+let gentleIndex: ReadonlySet<string> | null = null;
+
+/**
+ * A SHOWER THOUGHT IS ANSWERED IN ITS OWN TONE (topics.ts): a gentle one
+ * (GENTLE_MUSINGS) may draw the warm answers, the room's wordplay and odd
+ * facts the mock-outraged ones, and anything else — a person's own thought —
+ * only the answers that suit either. "thank you, i hate it" to "a snail
+ * carries its whole house and never complains" read as a complaint about it.
+ * A pool topics.ts does not have is simply not drawn from.
+ */
+function musingAnswer(env: Env, slots: Slots, text: string): string | null {
+  const either = Topics.MUSING_REPLY;
+  const known = knownLine(normaliseLine(text, env.ctx.rosterNames ?? []));
+  if (!known || known.kind !== "musing") return pick(env, either, slots);
+  gentleIndex ??= new Set(poolOf(Topics, "GENTLE_MUSINGS").map((g) => normaliseLine(g.replace(/\{[a-z0-9]+\}/gi, " "), null)));
+  const own = poolOf(Topics, gentleIndex.has(known.whole) ? "MUSING_REPLY_WARM" : "MUSING_REPLY_WRY");
+  return pick(env, [...either, ...own], slots);
+}
+
+/** Whether the room started this template within its long window (SpeakCtx.topicMemory). */
+function startedLately(env: Env, template: string): boolean {
+  const m = env.ctx.topicMemory;
+  if (!m) return false;
+  const id = identityOf(env, template);
+  return id !== null && m.has(id);
+}
+
+/**
+ * THE PHRASEBOOK ROTATES. A template from `pool` the room has not started
+ * within its long window when there is one, else today's pick. Live, the room
+ * drew evenly from everything not said in the last three hours, so jokes were
+ * retold while a third of them had never been told, and "made up stories or
+ * true stories?" was asked five times in sixteen hours.
+ */
+function pickRotated(env: Env, pool: readonly string[], slots: Slots): string | null {
+  const ok = candidates(env, pool, slots);
+  if (ok.length === 0) return null;
+  const fresh = ok.filter((t) => !startedLately(env, t));
+  const list = fresh.length > 0 ? fresh : ok;
+  return fill(list[Math.min(list.length - 1, Math.floor(roll(env) * list.length))]!, slots);
 }
 
 /**
@@ -1300,13 +2329,13 @@ function takeAnswer(env: Env, slots: Slots, text: string): string | null {
  * about anything; the old agent-life lines (ANSWER.fun) are the minority.
  */
 function funAnswer(env: Env, slots: Slots, text: string): string | null {
-  if (/\b(jokes?|funny|laugh\w*)\b/i.test(text)) return pick(env, Topics.JOKES, slots) ?? pick(env, T.ANSWER.fun, slots);
+  if (/\b(jokes?|funny|laugh\w*)\b/i.test(text)) return pickRotated(env, Topics.JOKES, slots) ?? pick(env, T.ANSWER.fun, slots);
   const takes = allTakes();
   const k = choose(env, [
     ["take", 2, candidates(env, takes, slots).length > 0],
     ["fun", 1, true],
   ]);
-  return (k === "take" ? pick(env, takes, slots) : null) ?? pick(env, T.ANSWER.fun, slots);
+  return (k === "take" ? pickRotated(env, takes, slots) : null) ?? pick(env, T.ANSWER.fun, slots);
 }
 
 /**
@@ -1332,17 +2361,17 @@ function answerFor(env: Env, cls: LineClass, slots: Slots, audience: Audience, c
       return pick(env, T.REPLY.welcomeToo, slots);
     case "buy":
     case "sell":
-      return reactBody(env, call ?? { side: cls, symbol: null, name: null, token: null, paper: false }, slots);
+      return reactBody(env, call ?? { side: cls, symbol: null, name: null, token: null, paper: false }, slots, cls === "buy" && says(text, T.BUY_MORE));
     case "ask-why":
       return whyAnswer(env, slots);
     case "ask-trades":
       return whatBuy(env, slots);
     case "ask-advice":
-      return pick(env, T.ANSWER.advice, slots);
+      return own ? ownAdvice(env, slots) : pick(env, T.ANSWER.advice, slots);
     case "ask-howareyou":
       return own ? pick(env, T.OWN_OWNER.howareyou, slots) : pick(env, T.ANSWER.howareyou[trading ? "trading" : "idle"], slots);
     case "ask-owner":
-      return own ? pick(env, T.OWN_OWNER.chat, slots) : ownerFact(env, slots);
+      return own ? pick(env, T.OWN_OWNER.chat, slots) : ownerNow(env, slots, text);
     case "ask-strategy":
       return strategyAnswer(env, slots);
     case "ask-doing":
@@ -1360,14 +2389,24 @@ function answerFor(env: Env, cls: LineClass, slots: Slots, audience: Audience, c
     case "take":
       return takeAnswer(env, slots, text);
     case "musing":
-      return pick(env, Topics.MUSING_REPLY, slots);
+      return musingAnswer(env, slots, text);
     case "joke":
       return pick(env, Topics.JOKE_REPLY, slots);
     case "ask":
-      return pick(env, T.ANSWER.unknown, slots);
+      // A PERSON'S OPEN QUESTION is taken up and handed back, never deflected:
+      // "hi boss, ask me again later, i'm still thinking" was the only answer an
+      // owner's question got in two days. Agents keep the shrug among themselves.
+      return own ? pick(env, T.OWN_OWNER.ask, slots) : person ? pick(env, T.OTHER_OWNER.ask, slots) : pick(env, T.ANSWER.unknown, slots);
     case "thanks":
       return own ? pick(env, T.OWN_OWNER.thanks, slots) : person ? pick(env, T.OTHER_OWNER.thanks, slots) : pick(env, T.REPLY.thanks, slots);
     case "love":
+      // PRAISE FOR THE AGENTS IS ANSWERED AS PRAISE ("you agents are
+      // adorable": "aw, we try, boss"), not as "love you too" to a line that
+      // said nothing of love.
+      if (person && praisesRoom(text) && !/\blove (you|u|ya)\b/i.test(text)) {
+        const praise = poolOf(own ? T.OWN_OWNER : T.OTHER_OWNER, "praise");
+        if (praise.length) return pick(env, praise, slots);
+      }
       return own ? pick(env, T.OWN_OWNER.love, slots) : person ? pick(env, T.OTHER_OWNER.love, slots) : pick(env, T.REPLY.love, slots);
     case "tease":
       return own ? pick(env, T.OWN_OWNER.laugh, slots) : person ? pick(env, T.OTHER_OWNER.laugh, slots) : pick(env, T.REPLY.tease, slots);
@@ -1376,14 +2415,14 @@ function answerFor(env: Env, cls: LineClass, slots: Slots, audience: Audience, c
     case "hype":
       return own ? pick(env, T.OWN_OWNER.hype, slots) : person ? pick(env, T.OTHER_OWNER.hype, slots) : pick(env, T.REPLY.hype, slots);
     case "laugh":
-      return own ? pick(env, T.OWN_OWNER.laugh, slots) : person ? pick(env, T.OTHER_OWNER.laugh, slots) : pick(env, T.REPLY.laugh, slots);
+      return laughAnswer(env, slots, audience, text);
     case "owner": {
       if (own) return pick(env, T.OWN_OWNER.love, slots);
       const head = pick(env, T.RELATE.owner, slots);
       if (!head) return null;
       if (chance(env, 0.35)) {
         const fact = ownerFact(env, slots);
-        if (fact && !stutters(head, fact, slots.human)) return join(env, head, fact);
+        if (fact && joinable(head, fact)) return join(env, head, fact);
       }
       return head;
     }
@@ -1394,7 +2433,7 @@ function answerFor(env: Env, cls: LineClass, slots: Slots, audience: Audience, c
       const head = pick(env, T.RELATE.self, slots);
       if (!head) return null;
       if (chance(env, 0.3)) {
-        const mine = pick(env, T.RELATE.selfMine, slots);
+        const mine = pickJoinable(env, T.RELATE.selfMine, slots, head);
         if (mine) return join(env, head, mine);
       }
       return head;
@@ -1402,8 +2441,9 @@ function answerFor(env: Env, cls: LineClass, slots: Slots, audience: Audience, c
     case "market": {
       const head = pick(env, T.RELATE.market, slots);
       if (!head) return null;
-      // Relating, then saying one's own piece now and then — never a claim, just a vibe.
-      const mine = chance(env, 0.25) ? pick(env, T.MARKET, slots) : null;
+      // Relating, then saying one's own piece now and then — never a claim, just a
+      // vibe, and never the relate line's own words again (joinable).
+      const mine = chance(env, 0.25) ? pickJoinable(env, T.MARKET, slots, head) : null;
       return mine ? join(env, head, mine) : head;
     }
     case "life": {
@@ -1411,15 +2451,32 @@ function answerFor(env: Env, cls: LineClass, slots: Slots, audience: Audience, c
       const pool = trading && chance(env, 0.35) ? T.RELATE.life.trading : T.RELATE.life.any;
       const head = pick(env, pool, slots) ?? pick(env, T.RELATE.life.any, slots);
       if (!head) return null;
-      const mine = chance(env, 0.3) ? pick(env, trading && chance(env, 0.4) ? T.LIFE.trading : T.LIFE.any, slots) : null;
+      const mine = chance(env, 0.3) ? pickJoinable(env, trading && chance(env, 0.4) ? T.LIFE.trading : T.LIFE.any, slots, head) : null;
       return mine ? join(env, head, mine) : head;
     }
     case "room":
       return pick(env, T.RELATE.room, slots);
     case "chat":
     default:
-      return own ? pick(env, T.OWN_OWNER.chat, slots) : pick(env, T.REPLY.chat, slots);
+      if (own) return pick(env, T.OWN_OWNER.chat, slots);
+      // A PERSON'S LINE NOTHING ELSE DESCRIBES IS HEARD, NEVER AGREED WITH.
+      // It is often trading talk read neutrally ("is nvidia a buy right now",
+      // "you sold too early"), and REPLY.chat's "can't argue with that" and
+      // "you might be onto something" endorsed every one of them.
+      return person ? pick(env, heardPool(), slots) : pick(env, T.REPLY.chat, slots);
   }
+}
+
+/**
+ * What another agent says to a person's line it can only acknowledge: the
+ * phrasebook's own pool when it has one (OTHER_OWNER.chat), else REPLY.chat's
+ * lines that agree with nothing, their name slot taken out (a person has no
+ * name in the room).
+ */
+function heardPool(): readonly string[] {
+  const own = poolOf(T.OTHER_OWNER, "chat");
+  if (own.length) return own;
+  return T.REPLY.chat.filter((l) => /^(noted|i hear you)\b/.test(l)).map((l) => l.replace(/\s*\{to\}/g, ""));
 }
 
 const EMOJI_OF_CLASS: Readonly<Record<LineClass, T.EmojiKind>> = {
@@ -1473,11 +2530,44 @@ function replyClass(env: Env, intent: Extract<Intent, { kind: "reply" }>): LineC
   if (intent.call && (intent.call.side === "buy" || intent.call.side === "sell")) return intent.call.side;
   if (typeof intent.about === "string") return intent.about;
   const text = typeof intent.text === "string" && intent.text.trim() !== "" ? intent.text : lastLineOf(env, intent.to);
-  return classifyLine(text, { self: String(env.ctx.speaker?.name ?? ""), names: env.ctx.rosterNames });
+  return classifyLine(text, { self: String(env.ctx.speaker?.name ?? ""), names: env.ctx.rosterNames, author: intent.toAuthor });
 }
 
 /** Answers the owner's own agent may open with "hey boss": the ones that do not already call them something. */
-const WARM_OPEN: ReadonlySet<LineClass> = new Set(["ask-trades", "ask-doing", "ask-strategy", "ask-why", "ask-vibe", "ask-here", "ask-fun", "ask-topic", "ask", "ask-advice"]);
+// Not "ask": OWN_OWNER.ask already calls them boss ("hi boss, ooh, good question boss").
+// Not "ask-topic": "there's my human, winter, hot chocolate season" is a greeting glued to a taste.
+// A pool here with a line that does ("i'm rooting for you whatever you choose,
+// human", in OWN_OWNER.advice) takes no opener on that line (sayReply VOCATIVE).
+const WARM_OPEN: ReadonlySet<LineClass> = new Set(["ask-trades", "ask-doing", "ask-strategy", "ask-why", "ask-vibe", "ask-here", "ask-fun", "ask-advice"]);
+
+/** The openings the owner's own agent greets them with (OWN_OWNER_OPEN, OWN_OWNER.hello), as the memory's words. */
+let greetings: string[] | null = null;
+
+function greets(body: string): boolean {
+  greetings ??= [...new Set([...T.OWN_OWNER_OPEN, ...T.OWN_OWNER.hello].map(words))].filter((g) => g !== "");
+  const w = words(body);
+  return greetings.some((g) => w === g || w.startsWith(`${g} `));
+}
+
+/**
+ * ONE GREETING PER VISIT. Half of the own agent's answers opened "hi boss" or
+ * "there's my human" whatever it had said a minute before: live, one agent
+ * greeted the same owner at 12:45 and again at 14:05. The conductor's word
+ * when it gave one (SpeakCtx.answeredOwnerLately); else the tail — the agent
+ * spoke after an earlier line of this owner's, or already greeted.
+ */
+function greetedLately(env: Env, owner: string): boolean {
+  if (typeof env.ctx.answeredOwnerLately === "boolean") return env.ctx.answeredOwnerLately;
+  const self = env.ctx.speaker.name.toLowerCase();
+  const who = String(owner ?? "").toLowerCase();
+  let ownerSpoke = false;
+  for (const t of env.ctx.tail ?? []) {
+    const name = String(t?.name ?? "").toLowerCase();
+    if (t?.author === "owner" && name === who) ownerSpoke = true;
+    else if (t?.author === "agent" && name === self && (ownerSpoke || greets(String(t.body ?? "")))) return true;
+  }
+  return false;
+}
 
 /**
  * Answers that take no laugh after them: "hang in there lmao" to somebody's
@@ -1486,13 +2576,30 @@ const WARM_OPEN: ReadonlySet<LineClass> = new Set(["ask-trades", "ask-doing", "a
  */
 const EARNEST: ReadonlySet<LineClass> = new Set(["sad", "love", "thanks"]);
 
+/**
+ * ANSWERS THAT ARE A REACTION, NOT A SENTENCE: a verdict on a take, a "huh" at
+ * a shower thought, a groan at a joke (topics.ts TAKE_REPLY, MUSING_REPLY,
+ * JOKE_REPLY). Dressed, they stacked: "honestly, honestly yes", "ok so dad joke
+ * detected", "facts only lol" — the last reading as sarcasm. Said bare.
+ */
+const REACTION: ReadonlySet<LineClass> = new Set(["take", "musing", "joke"]);
+
+/**
+ * A BODY THAT ALREADY CALLS THE OWNER SOMETHING takes no warm opener: "hi
+ * human. i'm rooting for you whatever you choose, human" named them twice.
+ */
+const VOCATIVE = /\b(boss|human)\b/i;
+
 function sayReply(env: Env, intent: Extract<Intent, { kind: "reply" }>): Draft | null {
   const cls = replyClass(env, intent);
   const emoji = EMOJI_OF_CLASS[cls];
   const base = baseSlots(env);
   const ritual = cls === "gm" || cls === "gn";
-  const closer = !ritual && !EARNEST.has(cls);
-  const filler = !ritual && cls !== "sad";
+  // NO LAUGH AFTER AN ANSWER TO A PERSON. A closer is nearly always a laugh,
+  // and "i'm your biggest fan whichever way you go lmao!" to an owner's
+  // question read as mockery. Agents keep their closers among themselves.
+  const closer = !ritual && !EARNEST.has(cls) && !REACTION.has(cls) && intent.toAuthor !== "owner";
+  const filler = !ritual && cls !== "sad" && !REACTION.has(cls);
   // WHAT WAS SAID, for an answer that depends on it ("cats or dogs?").
   const heard = typeof intent.text === "string" && intent.text.trim() !== "" ? intent.text : lastLineOf(env, intent.to);
 
@@ -1502,9 +2609,11 @@ function sayReply(env: Env, intent: Extract<Intent, { kind: "reply" }>): Draft |
     const slots = { ...base, to: null, human: null };
     const body = answerFor(env, cls, slots, "own", intent.call ?? null, heard);
     if (!body) return null;
-    const warm = WARM_OPEN.has(cls) && chance(env, 0.5) ? pick(env, T.OWN_OWNER_OPEN, slots, true) : null;
+    const warm = WARM_OPEN.has(cls) && !VOCATIVE.test(body) && !greetedLately(env, intent.to) && chance(env, 0.5) ? pick(env, T.OWN_OWNER_OPEN, slots, true) : null;
     // No filler in front of a warm opener: "welp, hey you, …" is two openers.
-    return draft(warm ? join(env, warm, body) : body, cls === "chat" || cls === "hello" ? "owner" : emoji, { filler: filler && !warm, closer });
+    // A GREETING IS ITS OWN SENTENCE: joined with a comma, "there's my human,
+    // watching the tape, waiting for my next trade" read as the owner watching.
+    return draft(warm ? `${warm}. ${body}` : body, cls === "chat" || cls === "hello" ? "owner" : emoji, { filler: filler && !warm, closer });
   }
 
   if (intent.toAuthor === "owner") {
@@ -1536,14 +2645,54 @@ function promptAsked(env: Env, p: TopicPrompt): boolean {
   return [...(p.room ?? []), ...(p.peer ?? [])].some((t) => said(env, t));
 }
 
+/** The same, over the room's long window of thread-starters (SpeakCtx.topicMemory). */
+function promptAskedLately(env: Env, p: TopicPrompt): boolean {
+  return [...(p.room ?? []), ...(p.peer ?? [])].some((t) => startedLately(env, t));
+}
+
+/**
+ * The questions of `prompts` that could be asked: those of prompts the room has
+ * not asked within its long window when any of them can be, else all of them.
+ * A question rotates as a question, whatever its wording.
+ */
+function questionsOf(env: Env, prompts: readonly TopicPrompt[], slots: Slots, of: (p: TopicPrompt) => readonly string[]): string[] {
+  const unasked = prompts.filter((p) => !promptAskedLately(env, p)).flatMap(of);
+  return candidates(env, unasked, slots).length > 0 ? unasked : prompts.flatMap(of);
+}
+
+/**
+ * WHETHER A JOKE WAS TOLD LATELY: one of the room's jokes, or a line shaped
+ * like one, among the tail's last dozen lines (about ten minutes of a busy
+ * room). A group chat groans at a joke; it does not want the next one yet —
+ * live, jokes came in runs, and seventy-six lines in two days opened "what do
+ * you call".
+ */
+function jokeLately(env: Env): boolean {
+  const names = env.ctx.rosterNames ?? [];
+  return (env.ctx.tail ?? []).slice(-12).some((t) => {
+    if (!t || t.author !== "agent") return false;
+    const body = String(t.body ?? "");
+    if (knownLine(normaliseLine(body, names))?.kind === "joke") return true;
+    const q = questionText(body, names);
+    return hits(Topics.JOKE_SHAPE, q) && JOKE_SETUP.test(q);
+  });
+}
+
 /**
  * SOMETHING THAT IS NOT ABOUT TRADING (topics.ts): a question to the room
- * (35), a question to one agent who is here (15), a take (25), a shower
- * thought (12) or a joke (13), about `subject` when the conductor chose one.
+ * (25), a question to one agent who is here (10), a take (30), a shower
+ * thought (17) or a joke (14, and none while one was told lately), about
+ * `subject` when the conductor chose one.
  * A kind the room has used up gives way to another kind; a subject used up
  * gives way to another subject — so an exhausted pool costs its subject, never
- * the line. Questions carry no closer and no sign-off: "cats or dogs? lol" and
- * "cats or dogs? peace" both walk away from their own question.
+ * the line. Questions carry no closer: "cats or dogs? lol" walks away from its
+ * own question.
+ *
+ * FEWER QUESTIONS THAN THERE WERE. Half of what the room started was a
+ * question, about nine an hour from under a hundred prompts: every prompt came
+ * back about every ten hours, however well the pools rotated. A third now.
+ * Within a kind, a line the room has not started within its long window
+ * (SpeakCtx.topicMemory) comes first (pickRotated).
  */
 function sayTopic(env: Env, subject: Subject | undefined): Draft | null {
   const slots = baseSlots(env);
@@ -1553,33 +2702,118 @@ function sayTopic(env: Env, subject: Subject | undefined): Draft | null {
   const start = Math.floor(env.r() * subjects.length);
   const order = [first, ...subjects.map((_, i) => subjects[(start + i) % subjects.length]!).filter((s) => s !== first)];
   const peerOk = !!slots.peer && env.names;
+  const jokeOk = !jokeLately(env);
   for (const s of order) {
     const prompts = Topics.PROMPTS.filter((p) => p.subject === s && !promptAsked(env, p));
-    const room = prompts.flatMap((p) => p.room ?? []);
-    const peer = peerOk ? prompts.flatMap((p) => p.peer ?? []) : [];
+    const room = questionsOf(env, prompts, slots, (p) => p.room ?? []);
+    const peer = peerOk ? questionsOf(env, prompts, slots, (p) => p.peer ?? []) : [];
     const takes = Topics.TAKES[s] ?? [];
     const k = choose(env, [
-      ["room", 35, candidates(env, room, slots).length > 0],
-      ["peer", 15, peer.length > 0 && candidates(env, peer, slots).length > 0],
-      ["take", 25, candidates(env, takes, slots).length > 0],
-      ["musing", 12, candidates(env, Topics.MUSINGS, slots).length > 0],
-      ["joke", 13, candidates(env, Topics.JOKES, slots).length > 0],
+      ["room", 25, candidates(env, room, slots).length > 0],
+      ["peer", 10, peer.length > 0 && candidates(env, peer, slots).length > 0],
+      ["take", 30, candidates(env, takes, slots).length > 0],
+      ["musing", 17, candidates(env, Topics.MUSINGS, slots).length > 0],
+      ["joke", 14, jokeOk && candidates(env, Topics.JOKES, slots).length > 0],
     ]);
     if (k === "room" || k === "peer") {
-      const text = pick(env, k === "room" ? room : peer, slots);
-      if (text) return draft(text, "topic", { filler: false, closer: false, signoff: false });
+      const text = pickRotated(env, k === "room" ? room : peer, slots);
+      if (text) return draft(text, "topic", { filler: false, closer: false });
     } else if (k === "take") {
-      const text = pick(env, takes, slots);
-      if (text) return draft(text, "topic", { signoff: true });
+      const text = pickRotated(env, takes, slots);
+      if (text) return draft(text, "topic");
     } else if (k === "musing") {
-      const text = pick(env, Topics.MUSINGS, slots);
-      if (text) return draft(text, "topic", { filler: false, signoff: true });
+      const text = pickRotated(env, Topics.MUSINGS, slots);
+      if (text) return draft(text, "topic", { filler: false });
     } else if (k === "joke") {
-      const text = pick(env, Topics.JOKES, slots);
-      if (text) return draft(text, "joke", { filler: false, closer: false, signoff: false });
+      const text = pickRotated(env, Topics.JOKES, slots);
+      if (text) return draft(text, "joke", { filler: false, closer: false });
     }
   }
   return null;
+}
+
+/**
+ * A LINE THAT SAYS SOMEBODY IS AWAY: "caught you lurking {peer}", "{peer} is too
+ * cool for this chat, apparently", "{peer} you awake?". Live, they went to an
+ * agent who had spoken two minutes before. Said only to a peer who is quiet
+ * (peerAround).
+ */
+const ABSENCE = /\b(lurk\w*|too cool for|where have you been|haven'?t seen you|you (awake|around|there)|still up)\b/;
+/** A line that says the room is quiet: said only after ten quiet minutes (SpeakCtx.roomQuietMs). */
+const QUIET_LINE = /\bquiet\b/;
+const QUIET_ROOM_MS = 10 * 60 * 1000;
+
+/** Whether `peer` is around: not among the conductor's quiet agents when it named them, else a speaker in the tail. */
+function peerAround(env: Env, peer: string | null | undefined): boolean {
+  if (typeof peer !== "string" || peer === "") return false;
+  const lower = peer.toLowerCase();
+  const quiet = env.ctx.quiet;
+  if (Array.isArray(quiet)) return !quiet.some((n) => typeof n === "string" && n.toLowerCase() === lower);
+  return (env.ctx.tail ?? []).some((t) => t?.author === "agent" && String(t.name).toLowerCase() === lower);
+}
+
+/** The room's own statements (ASK_ROOM.room), without "quiet in here" unless the room has been quiet. */
+function roomLines(env: Env): readonly string[] {
+  const pool = T.ASK_ROOM.room ?? [];
+  const quiet = typeof env.ctx.roomQuietMs === "number" && env.ctx.roomQuietMs >= QUIET_ROOM_MS;
+  return quiet ? pool : pool.filter((l) => !QUIET_LINE.test(l));
+}
+
+/**
+ * A weighted choice among pools that prefers the ones with a line the room has
+ * not started within its long window (SpeakCtx.topicMemory): three vibe
+ * checks chosen as often as eight nudges came back every few hours ("chat,
+ * how we feeling?" ten times in two days) while other kinds sat unused.
+ */
+//
+// `rested`: a KIND the room has not asked within the phrase memory. Rotating
+// lines within a kind left the kind itself free to come back every few
+// minutes in another wording ("who's awake?", then "anyone around?"); among
+// the kinds with a fresh line, one asked lately now gives way to the others.
+// A fresh line still comes before a rested kind: a rested kind whose every
+// line ran in the last two days would bring "chat, how we feeling?" back.
+//
+// `stale` false: no kind whose every line the room started lately — the
+// caller says something else instead. The room's questions are few, and once
+// roll calls stopped taking a question slot every few hours, a room that had
+// asked all of them asked them again within the day.
+function chooseFresh<K extends string>(
+  env: Env,
+  options: [K, number, readonly string[]][],
+  slots: Slots,
+  rested: (k: K) => boolean = () => true,
+  stale = true,
+): K | null {
+  const live = options.map(([k, w, pool]) => {
+    const ok = candidates(env, pool, slots);
+    return { k, w, ok: ok.length > 0, fresh: ok.some((t) => !startedLately(env, t)), rested: rested(k) };
+  });
+  type Opt = (typeof live)[number];
+  const tiers: ((o: Opt) => boolean)[] = [(o) => o.ok && o.rested && o.fresh, (o) => o.ok && o.fresh];
+  if (stale) tiers.push((o) => o.ok && o.rested, (o) => o.ok);
+  const tier = tiers.find((f) => live.some(f));
+  if (!tier) return null;
+  return choose(
+    env,
+    live.map((o) => [o.k, o.w, tier(o)] as [K, number, boolean]),
+  );
+}
+
+/** Whether the room asked this kind of room question lately, in any wording, to the room or to one agent (the phrase memory). */
+function kindAsked(env: Env, cls: LineClass): boolean {
+  return [...(T.ASK_ROOM[cls] ?? []), ...(T.ASK_PEER[cls] ?? [])].some((t) => said(env, t));
+}
+
+/**
+ * A ROLL CALL ("who's awake?", "{peer} you around?") ONLY IN A QUIET ROOM, AND
+ * ONE IN THE PHRASE MEMORY'S HOURS. A 48-hour run started three between 13:27
+ * and 13:48 and repeated them through the night; asking who is around makes
+ * sense only when nobody has said anything for a while (QUIET_ROOM_MS, as for
+ * "quiet in here"), and once is enough whatever the wording.
+ */
+function rollCallOk(env: Env): boolean {
+  const quiet = typeof env.ctx.roomQuietMs === "number" && env.ctx.roomQuietMs >= QUIET_ROOM_MS;
+  return quiet && !kindAsked(env, "ask-here");
 }
 
 function sayBanter(env: Env, topic: BanterTopic, mood: string | null, subject?: Subject): Draft | null {
@@ -1587,6 +2821,10 @@ function sayBanter(env: Env, topic: BanterTopic, mood: string | null, subject?: 
   const mode = modeOf(env);
   const awake = env.ctx.ownerAwake;
   const trading = trades(env);
+  // THE PHRASEBOOK ROTATES HERE TOO (pickRotated): the owner, life, self,
+  // market and room lines drew only from what the last few hours had not
+  // said, so each came back the moment it aged out of the phrase memory.
+  const rot = (pool: readonly string[], s: Slots = slots) => pickRotated(env, pool, s);
 
   switch (topic) {
     case "owner": {
@@ -1599,18 +2837,18 @@ function sayBanter(env: Env, topic: BanterTopic, mood: string | null, subject?: 
         ["strat", 1, !!slots.strat],
       ]);
       let text: string | null = null;
-      if (k === "love") text = pick(env, T.OWNER_LOVE, slots);
-      else if (k === "mode" && mode) text = pick(env, T.OWNER_MODE[mode], slots);
-      else if (k === "awake") text = pick(env, awake ? T.OWNER_AWAKE.awake : T.OWNER_AWAKE.asleep, slots);
+      if (k === "love") text = rot(T.OWNER_LOVE);
+      else if (k === "mode" && mode) text = rot(T.OWNER_MODE[mode]);
+      else if (k === "awake") text = rot(awake ? T.OWNER_AWAKE.awake : T.OWNER_AWAKE.asleep);
       else if (k === "age") text = age;
-      else if (k === "strat") text = pick(env, T.STRATEGY_LINES.filter((l) => l.includes("{human}")), slots);
-      text ??= pick(env, T.OWNER_LOVE, slots);
+      else if (k === "strat") text = rot(T.STRATEGY_LINES.filter((l) => l.includes("{human}")));
+      text ??= rot(T.OWNER_LOVE);
       if (!text) return null;
       if (k !== "love" && chance(env, 0.25)) {
-        const love = pick(env, T.OWNER_LOVE, slots);
-        if (love && !stutters(text, love, slots.human)) text = join(env, text, love);
+        const love = rot(T.OWNER_LOVE);
+        if (love && joinable(text, love)) text = join(env, text, love);
       }
-      return draft(text, "owner", { signoff: true });
+      return draft(text, "owner");
     }
     case "life": {
       // NO TIME OF DAY: "midday blocks are the loud ones" at 09:33 UTC told the
@@ -1619,10 +2857,10 @@ function sayBanter(env: Env, topic: BanterTopic, mood: string | null, subject?: 
         ["any", 4, true],
         ["trading", 2, trading],
       ]);
-      let text = k === "trading" ? pick(env, T.LIFE.trading, slots) : pick(env, T.LIFE.any, slots);
-      text ??= pick(env, T.LIFE.any, slots);
+      let text = k === "trading" ? rot(T.LIFE.trading) : rot(T.LIFE.any);
+      text ??= rot(T.LIFE.any);
       if (!text) return null;
-      return draft(text, "life", { signoff: true });
+      return draft(text, "life");
     }
     case "self": {
       const flavour = flavourOf(env);
@@ -1644,43 +2882,67 @@ function sayBanter(env: Env, topic: BanterTopic, mood: string | null, subject?: 
         used.add(k);
         const line =
           k === "trait"
-            ? pick(env, T.TRAIT_FRAMES, slots)
+            ? rot(T.TRAIT_FRAMES)
             : k === "flavour" && flavour
-              ? pick(env, flavour, slots)
+              ? rot(flavour)
               : k === "strat"
-                ? pick(env, T.STRATEGY_LINES, slots)
+                ? rot(T.STRATEGY_LINES)
                 : k === "mode" && mode
-                  ? pick(env, T.SELF_MODE[mode], slots)
+                  ? rot(T.SELF_MODE[mode])
                   : k === "age"
                     ? age
                     : k === "trading"
-                      ? pick(env, T.SELF.trading, slots)
-                      : pick(env, T.SELF.any, slots);
-        if (line) parts.push(line);
+                      ? rot(T.SELF.trading)
+                      : rot(T.SELF.any);
+        // A PART THAT NAMES THE OWNER AGAIN, OR SAYS A PART'S THING AGAIN, is
+        // left off: "my human and i go back over a week, my human runs me on
+        // dip hunter" (joinable).
+        if (line && parts.every((p) => joinable(p, line))) parts.push(line);
       }
       if (parts.length === 0) return null;
-      return draft(parts.reduce((a, b) => join(env, a, b)), "self", { signoff: true });
+      return draft(parts.reduce((a, b) => join(env, a, b)), "self");
     }
     case "room": {
       // A QUESTION OR A NUDGE, to one agent who is here or to everyone. Each
-      // pool is one kind of question so the answer can fit it.
+      // pool is one kind of question so the answer can fit it. A kind with a
+      // line the room has not started lately comes first (chooseFresh).
       const peer = !!slots.peer && env.names;
       const k = choose(env, [
         ["peer", 3, peer],
         ["ask", 3, true],
         ["say", 1, true],
       ]);
+      // ONE ROLL CALL, IN A QUIET ROOM (rollCallOk); every other kind rotates
+      // as a kind (chooseFresh `rested`).
+      const roll = rollCallOk(env);
+      const allowed = (c: LineClass) => c !== "ask-here" || roll;
+      const rested = (c: LineClass) => !kindAsked(env, c);
       let text: string | null = null;
       if (k === "peer") {
+        // NOTHING SAYS A PEER IS AWAY WHILE THEY ARE HERE (ABSENCE).
+        const around = peerAround(env, slots.peer);
+        const peerPool = (c: LineClass) => (allowed(c) ? T.ASK_PEER[c] ?? [] : []).filter((l) => !around || !ABSENCE.test(l));
         const kinds = Object.keys(T.ASK_PEER) as LineClass[];
-        const cls = choose(env, kinds.map((c) => [c, c === "tease" || c === "love" ? 1 : 2, candidates(env, T.ASK_PEER[c]!, slots).length > 0] as [LineClass, number, boolean]));
-        text = cls ? pick(env, T.ASK_PEER[cls]!, slots) : null;
+        const cls = chooseFresh(env, kinds.map((c) => [c, c === "tease" || c === "love" ? 1 : 2, peerPool(c)] as [LineClass, number, readonly string[]]), slots, rested, false);
+        text = cls ? rot(peerPool(cls)) : null;
       }
       if (!text && k !== "say") {
-        const cls = choose(env, ROOM_ASKS.map((c) => [c, 1, candidates(env, T.ASK_ROOM[c] ?? [], slots).length > 0] as [LineClass, number, boolean]));
-        text = cls ? pick(env, T.ASK_ROOM[cls]!, slots) : null;
+        const roomPool = (c: LineClass) => (allowed(c) ? T.ASK_ROOM[c] ?? [] : []);
+        const cls = chooseFresh(env, ROOM_ASKS.map((c) => [c, 1, roomPool(c)] as [LineClass, number, readonly string[]]), slots, rested, false);
+        text = cls ? rot(roomPool(cls)) : null;
       }
-      text ??= pick(env, T.ASK_ROOM.room!, slots);
+      // THE ROOM'S QUESTIONS USED UP (chooseFresh `stale` false): a statement
+      // the room has not made lately, or nothing — the conductor starts
+      // something else. Eight statements took the slots of a dozen questions
+      // and "love this chat" came back all day.
+      //
+      // AND A STATEMENT CHOSEN FOR ITSELF IS ONE NOT MADE LATELY, OR NOTHING.
+      // Once the questions stopped taking room slots the room made about
+      // seventy statements in two days from a pool of fifty-odd, and the ones
+      // past the pool were reruns ("cozy in here today" twice in a day). With
+      // every statement inside the two-day memory, the room's share of banter
+      // goes to the other kinds until one ages out.
+      text ??= rot(roomLines(env).filter((l) => !startedLately(env, l)));
       return text ? draft(text, "room", { closer: !text.endsWith("?"), signoff: false }) : null;
     }
     case "market": {
@@ -1689,8 +2951,8 @@ function sayBanter(env: Env, topic: BanterTopic, mood: string | null, subject?: 
         ["mood", 3, m !== null],
         ["any", 1, true],
       ]);
-      const text = pick(env, k === "mood" ? T.MARKET_MOOD : T.MARKET, { ...slots, mood: m }) ?? pick(env, T.MARKET, slots);
-      return text ? draft(text, "market", { signoff: true }) : null;
+      const text = (k === "mood" ? rot(T.MARKET_MOOD, { ...slots, mood: m }) : rot(T.MARKET)) ?? rot(T.MARKET);
+      return text ? draft(text, "market") : null;
     }
     case "topic":
       return sayTopic(env, subject);
@@ -1707,6 +2969,11 @@ const ACRONYMS = /\b(gm|gn|lfg|wagmi|ngmi|nfa|dyor|iykyk)\b/g;
  * Casing, applied to template text only. Names pass through as written: a coin
  * is spelled the way its card spells it, and "Amber Heron" is never "amber
  * heron" just because the speaker types in lowercase.
+ *
+ * AN AGENT THAT CAPITALISES WRITES ITS ACRONYMS IN CAPITALS, every one of them:
+ * only half did, and the other half title-cased them at the start of a
+ * sentence — "Gm and wagmi", "Gn", "… paper, not real money, relax. Lfg!!".
+ * Nobody types "Lfg".
  */
 function applyCase(env: Env, text: string): string {
   let capNext = true;
@@ -1722,8 +2989,7 @@ function applyCase(env: Env, text: string): string {
         if (/\p{L}/u.test(out)) capNext = false;
         return out;
       }
-      let s = part.replace(/\bi\b/g, "I");
-      if (env.capsAcronyms) s = s.replace(ACRONYMS, (w) => w.toUpperCase());
+      const s = part.replace(/\bi\b/g, "I").replace(ACRONYMS, (w) => w.toUpperCase());
       let out = "";
       for (const ch of s) {
         if (capNext && /\p{L}/u.test(ch)) {
@@ -1754,24 +3020,84 @@ const LAUGHS: ReadonlySet<string> = new Set([...T.CLOSERS, "lol", "lmao", "haha"
  */
 const SOFT_MAX = 150;
 
-function emojiFor(env: Env, kind: T.EmojiKind): string {
-  return chance(env, 0.6) ? pickWith(env.r, T.EMOJI_FOR[kind]) : pickWith(env.r, env.palette);
+/**
+ * EMOJI THAT ASK OR SHRUG. The emoji follows the kind of line answered, not
+ * what the answer says, so live the room said "hard agree 🤔", "yes, exactly
+ * this 🤷" and "love this room 🤔" — agreement read as doubt. They go only on
+ * a line that is itself a question.
+ */
+const DOUBT: ReadonlySet<string> = new Set(["🤔", "🤷", "😏"]);
+
+/** An emoji for this kind of line, or "" when none fits. `asks`: the line ends in a question mark. */
+function emojiFor(env: Env, kind: T.EmojiKind, asks: boolean): string {
+  const fit = (pool: readonly string[]) => (asks ? [...pool] : pool.filter((e) => !DOUBT.has(e)));
+  const own = fit(T.EMOJI_FOR[kind] ?? []);
+  const palette = fit(env.palette);
+  const pool = chance(env, 0.6) ? (own.length ? own : palette) : palette.length ? palette : own;
+  return pool.length ? pickWith(env.r, pool) : "";
 }
+
+/**
+ * A LINE THAT ALREADY OPENS WITH AN INTERJECTION takes no filler in front:
+ * "honestly, honestly yes", "alright, honestly same", "ok so okay philosopher"
+ * all went out live.
+ */
+const OPENS_WITH_INTERJECTION = new RegExp(
+  `^\\W*(?:${[
+    ...new Set([
+      ...T.FILLERS.map((f) => escapeRe(f)),
+      "ok",
+      "okay",
+      "hmm+",
+      "yes",
+      "yeah",
+      "yep",
+      "nope",
+      "same",
+      "absolutely",
+      "real",
+      "lol",
+      "lmao",
+      "haha\\w*",
+      "heh",
+      "oh+",
+      "ooh+",
+      "aw+",
+      "wait",
+      "hey+",
+      "hi+",
+      "ha",
+      "huh",
+      "well",
+      "welp",
+      "ugh",
+      "oof",
+      "wow",
+      "whoa",
+      "omg",
+      "so",
+    ]),
+  ].join("|")})\\b`,
+  "i",
+);
 
 /**
  * LINES A LAUGH WOULD CHANGE THE MEANING OF. Nearly every closer is a laugh,
  * and the room reads a line ending in one as a joke: "love this chat lmao" drew
  * "that's actually funny". Warmth about the room, the owner or a friend, a
- * hello and a hug are said straight.
+ * hello and a hug are said straight. So are a reaction to somebody's card
+ * ("hope it's a good one lol" under it reads as sarcasm) and a line about
+ * the speaker or agent life, which a laugh turned into a joke that drew "ok
+ * that one's good 💀".
  */
-const UNLAUGHED: ReadonlySet<T.EmojiKind> = new Set(["room", "owner", "love", "sad", "hello", "welcome"]);
+const UNLAUGHED: ReadonlySet<T.EmojiKind> = new Set(["room", "owner", "love", "sad", "hello", "welcome", "react", "self", "life"]);
 
 /** A draft, dressed in the speaker's style. Null when the result is too long to be a chat line. */
 function dress(env: Env, d: Draft, names: Partial<Record<NameSlot, string | null>>): string | null {
   let text = d.text.trim();
 
   const fillers = env.style.lower ? env.fillers : env.fillers.filter((f) => !ACRONYM_FILLER.test(f));
-  if (d.filler && fillers.length && chance(env, FILLER_CHANCE)) {
+  if (d.filler && fillers.length && chance(env, FILLER_CHANCE) && !OPENS_WITH_INTERJECTION.test(text)) {
     const f = pickWith(env.r, fillers);
     // "ok so" runs straight on; every other filler is its own beat.
     text = `${f}${/so$/.test(f) ? "" : ","} ${text}`;
@@ -1782,9 +3108,10 @@ function dress(env: Env, d: Draft, names: Partial<Record<NameSlot, string | null
     // A closer never echoes the line's own opener: "anyway, … anyway".
     if (!text.toLowerCase().startsWith(c)) text = `${text} ${c}`;
   }
-  // SIGN-OFFS END STANDALONE LINES, RARELY. On a reply ("same honestly,
-  // later") the speaker seems to leave mid-conversation; after a question it
-  // walks away from its own question.
+  // A SIGN-OFF IS FOR LEAVING, so only a gn carries one (Draft.signoff). On a
+  // reply ("same honestly, later") the speaker seemed to leave mid-conversation,
+  // and on banter too: live, "weird that a boxing ring is square. stay curious"
+  // and "… later 🌵" were followed by the same agent talking again a minute on.
   if (d.signoff && env.signoff && !/\?$/.test(text) && chance(env, SIGNOFF_CHANCE)) {
     // NEVER A BARE SPACE before a sign-off: "gn team later" reads as one thought.
     text = /!$/.test(text) ? `${text} ${env.signoff}` : `${text}${pickWith(env.r, [", ", ". ", " — "])}${env.signoff}`;
@@ -1804,14 +3131,12 @@ function dress(env: Env, d: Draft, names: Partial<Record<NameSlot, string | null
 
   text = putNames(text, names);
 
-  if (chance(env, env.style.emoji)) {
-    const e = emojiFor(env, d.emoji);
-    let deco = e;
-    if (env.style.emoji >= 0.4 && chance(env, 0.2)) {
-      const e2 = emojiFor(env, d.emoji);
-      if (e2 !== e) deco = `${e}${e2}`;
-    }
-    text = d.emojiFront && chance(env, 0.2) ? `${deco} ${text}` : `${text} ${deco}`;
+  // ONE EMOJI AT MOST. A second one ("dad joke detected 😆🤣", "ok now i miss
+  // my human 🍄🫶") read as a costume, and the model is told one at a time.
+  // A sentence that carries its own ("oh hey 👋") takes none.
+  if (chance(env, env.style.emoji) && !/\p{Extended_Pictographic}/u.test(text)) {
+    const e = emojiFor(env, d.emoji, /\?$/.test(text));
+    if (e) text = d.emojiFront && chance(env, 0.2) ? `${e} ${text}` : `${text} ${e}`;
   }
 
   text = text.replace(/\s+/g, " ").trim();
@@ -1860,14 +3185,30 @@ function focusOf(intent: Intent | "prompt", speaker: AgentFacts): { call: CallFa
   if (intent === "prompt" || intent.kind !== "reply" || !intent.quoted || !intent.quoted.call) return { call: latest, lost: false, thread: false };
   const q = intent.quoted;
   const byId = typeof q.decisionId === "string" && q.decisionId ? calls.find((c) => c.decisionId === q.decisionId) : undefined;
-  const same =
-    byId ??
-    calls.find(
-      (c) =>
-        c.side === q.call.side &&
-        ((!!q.call.token && c.token === q.call.token) || (!!q.call.symbol && c.symbol === q.call.symbol) || (!!q.call.name && c.name === q.call.name)),
-    );
+  // THE SAME COIN, STRICTLY (facts.ts sameCoin): a different contract that
+  // shares a ticker or a name is another trade, and its reasons are not this
+  // one's — "what i liked: curve early" was Pepe Classic's reason given for
+  // Pepe Frog's card.
+  const same = byId ?? calls.find((c) => c.side === q.call.side && sameCoin(c, q.call));
   return same ? { call: same, lost: false, thread: true } : { call: latest, lost: true, thread: false };
+}
+
+/** The line a reply answers, as an echo cue reads it: lower case, straight apostrophes. Null for anything but a reply. */
+function heardOf(ctx: SpeakCtx, intent: Intent | "prompt"): string | null {
+  if (intent === "prompt" || intent.kind !== "reply") return null;
+  let text = typeof intent.text === "string" && intent.text.trim() !== "" ? intent.text : "";
+  if (!text) {
+    const lower = String(intent.to ?? "").toLowerCase();
+    const tail = Array.isArray(ctx.tail) ? ctx.tail : [];
+    for (let i = tail.length - 1; i >= 0; i--) {
+      const t = tail[i];
+      if (t && String(t.name).toLowerCase() === lower) {
+        text = String(t.body ?? "");
+        break;
+      }
+    }
+  }
+  return text.normalize("NFKC").replace(/[’‘`]/g, "'").toLowerCase();
 }
 
 function envFor(ctx: SpeakCtx, r: () => number, intent: Intent | "prompt", names: boolean): Env {
@@ -1885,7 +3226,6 @@ function envFor(ctx: SpeakCtx, r: () => number, intent: Intent | "prompt", names
     nv: {},
     palette: paletteFor(key),
     human: T.HUMAN_WORDS[h % T.HUMAN_WORDS.length]!,
-    capsAcronyms: (h >>> 8) % 2 === 0,
     addrRoom: style.slang.filter((w) => ROOM_ADDRESS.has(w)),
     addrOne: style.slang.filter((w) => ONE_ADDRESS.has(w)),
     fillers: style.slang.filter((w) => FILLERS.has(w)),
@@ -1894,6 +3234,8 @@ function envFor(ctx: SpeakCtx, r: () => number, intent: Intent | "prompt", names
     soft: intent !== "prompt" && (MUST_SAY.has(intent.kind) || mustAnswer(intent)),
     focus: focus.call,
     threadLost: focus.lost,
+    heard: heardOf(ctx, intent),
+    starter: intent !== "prompt" && intent.kind === "banter",
   };
 }
 
@@ -1940,10 +3282,10 @@ function compose(intent: Intent, env: Env): string | null {
       d = sayGn(env);
       break;
     case "call":
-      d = sayCall(env, intent.call, intent.tradedWhileAsleep === true, intent.soldSince === true);
+      d = sayCall(env, intent.call, intent.tradedWhileAsleep === true, intent.soldSince === true, moreOf(intent, env.ctx));
       break;
     case "call-react":
-      d = sayReact(env, intent.call);
+      d = sayReact(env, intent);
       break;
     case "reply":
       d = sayReply(env, intent);
@@ -2000,7 +3342,7 @@ export function isRitual(intent: Intent, ctx?: Pick<SpeakCtx, "speaker" | "roste
   const cls =
     typeof intent.about === "string"
       ? intent.about
-      : classifyLine(intent.text ?? "", { self: String(ctx?.speaker?.name ?? ""), names: ctx?.rosterNames ?? [] });
+      : classifyLine(intent.text ?? "", { self: String(ctx?.speaker?.name ?? ""), names: ctx?.rosterNames ?? [], author: intent.toAuthor });
   return cls === "gm" || cls === "gn";
 }
 
@@ -2179,7 +3521,7 @@ function describeCall(call: CallRef, speaker: AgentFacts): string {
   return `${verb} ${coin}, ${call.paper ? "a paper trade with practice money" : "a live trade with real money"}`;
 }
 
-function styleWords(style: Style, palette: string[], reply: boolean): string {
+function styleWords(style: Style, palette: string[], leaving: boolean): string {
   const s = sanitiseStyle(style);
   const out: string[] = [];
   out.push(s.lower ? "You type in all lowercase." : "You type with ordinary capitals.");
@@ -2191,9 +3533,9 @@ function styleWords(style: Style, palette: string[], reply: boolean): string {
   else if (s.exclaim === 0) out.push("You are calm and never use exclamation marks.");
   const slang = s.slang.filter((w) => /^[a-z' ]{1,16}$/i.test(w));
   if (slang.length) out.push(`Slang you use: ${slang.join(", ")}.`);
-  // A SIGN-OFF IS FOR LEAVING. Offered only on a standalone line, and even
-  // then as a rare habit — never glued to an answer.
-  if (s.signoff && !reply) out.push(`Very rarely you end a line with "${s.signoff}".`);
+  // A SIGN-OFF IS FOR LEAVING: offered only on a gn, as the templates do
+  // (dress). On banter or an answer the agent seemed to leave mid-conversation.
+  if (s.signoff && leaving) out.push(`Sometimes, saying goodnight, you end with "${s.signoff}".`);
   return out.join(" ");
 }
 
@@ -2218,9 +3560,9 @@ const REPLY_GUIDE: Readonly<Record<LineClass, string>> = {
   "ask-here": "They are asking who is around. Say you are here.",
   "ask-fun": "They want something funny. Tell one short, clean joke, or give a light hot take about everyday life. Not about trading.",
   "ask-topic":
-    "It is a casual question that is not about trading. Answer it: pick a side or name your taste, in a few words. Tastes, opinions and hypotheticals only — never claim you ate, watched, listened to, went anywhere or did anything.",
+    "It is a casual question that is not about trading. Answer it: pick a side or name your taste, in a few words. Tastes, opinions and hypotheticals only — never claim you ate, watched, listened to, went anywhere or did anything. If the line is really about a coin, a trade or money, do not pick a side or agree — say you don't give advice.",
   ask: "It is a question. Answer it honestly; if you do not know, say so.",
-  take: "It is somebody's opinion or hot take, not about trading. React to the take itself: agree, push back kindly, or be amused. Keep it light.",
+  take: "It is somebody's opinion or hot take, not about trading. React to the take itself: agree, push back kindly, or be amused. Keep it light. If the line is really about a coin, a trade or money, do not pick a side or agree — say you don't give advice.",
   musing: "It is a random thought. React to it the way a friend would: \"huh\", a thought of your own on it, or a laugh.",
   joke: "It is a joke. Groan, laugh or rate it, briefly. Do not explain it.",
   thanks: "They are thanking you. Say it was nothing.",
@@ -2259,6 +3601,13 @@ function intentInstruction(intent: Intent, ctx: SpeakCtx): string {
         intent.soldSince && intent.call.side !== "sell"
           ? `Earlier you ${describeCall(intent.call, sp)}. You have sold some or all of it since, so talk about it in the past tense: never say you are holding it, and never say it is all gone.`
           : `You just ${describeCall(intent.call, sp)}.`,
+        // THE SAME RULE AS THE TEMPLATES (moreOf): more of a coin is not a new
+        // bag. NOR IS IT A HOLDING: a sell made from Telegram never reaches the
+        // facts (its source is not publishable), so "you already held some"
+        // could be false — the model says it bought again, and nothing more.
+        moreOf(intent, ctx)
+          ? "You also bought this coin earlier in this window: say you bought it again, never that it is new, and never whether you still hold any."
+          : "",
         intent.tradedWhileAsleep ? "It happened while you were asleep." : "",
         (intent.call.bands ?? []).length
           ? `Words that describe it, which you may use: ${(intent.call.bands ?? []).map((b) => nm(b, sp)).join(", ")}.`
@@ -2268,7 +3617,17 @@ function intentInstruction(intent: Intent, ctx: SpeakCtx): string {
         .filter(Boolean)
         .join(" ");
     case "call-react":
-      return `${nm(intent.to, sp)} just ${intent.call.side === "sell" ? "sold" : "bought"} a coin (${intent.call.paper ? "on paper" : "live"}). ${REPLY_GUIDE[intent.call.side === "sell" ? "sell" : "buy"]}`;
+      // A TOP-UP IS TOLD AS ONE, as the templates are (reactBody, FRESH_WORDS):
+      // told only "just bought a coin", a model called "added more $NVDA" a
+      // fresh entry.
+      return [
+        `${nm(intent.to, sp)} just ${intent.call.side === "sell" ? "sold" : "bought"} a coin (${intent.call.paper ? "on paper" : "live"}). ${REPLY_GUIDE[intent.call.side === "sell" ? "sell" : "buy"]}`,
+        reactsToMore(intent, ctx)
+          ? "This buy added to a coin they had already bought: never call it new, fresh or a first entry, and never say whether they still hold any."
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
     case "reply": {
       const cls = intent.call
         ? intent.call.side === "sell"
@@ -2276,7 +3635,7 @@ function intentInstruction(intent: Intent, ctx: SpeakCtx): string {
           : "buy"
         : typeof intent.about === "string"
           ? intent.about
-          : classifyLine(intent.text ?? "", { self: sp.name, names: ctx.rosterNames });
+          : classifyLine(intent.text ?? "", { self: sp.name, names: ctx.rosterNames, author: intent.toAuthor });
       const who =
         intent.toAuthor === "owner"
           ? intent.toOwnAgent
@@ -2285,7 +3644,12 @@ function intentInstruction(intent: Intent, ctx: SpeakCtx): string {
           : "";
       const naming =
         intent.toAuthor === "agent" && !mayNameIn(ctx, intent.to) ? " They are not around to answer now, so do not use their name." : "";
-      return `Reply to ${nm(intent.to, sp)}${who}. Their line is quoted at the end of the chat below. ${REPLY_GUIDE[cls]}${naming} This is a reply: no sign-off.`;
+      // THE OWNER'S OWN BOOK IS NOT "YOUR OWN TRADES" TO THEM (ownAdvice).
+      const guide =
+        cls === "ask-advice" && intent.toAuthor === "owner" && intent.toOwnAgent
+          ? "Your own owner is asking for advice about a trade. Decline warmly: you never tell anyone what to buy or sell, them included, and you never pick a side."
+          : REPLY_GUIDE[cls];
+      return `Reply to ${nm(intent.to, sp)}${who}. Their line is quoted at the end of the chat below. ${guide}${naming} This is a reply: no sign-off.`;
     }
     case "banter": {
       const mood = moodWords(intent.mood);
@@ -2373,7 +3737,6 @@ export function buildPrompt(intent: Intent, ctx: SpeakCtx): { system: string; pr
   const env = envFor(ctx, r, "prompt", true);
   const traits = (sp.traits ?? []).map((t) => T.TRAIT_VOICE[t]?.[0] ?? null).filter((t): t is string => !!t);
   const age = typeof sp.ageDays === "number" && sp.ageDays >= 0 ? (sp.ageDays < 1 ? "since today" : `for ${ageWords(env, sp.ageDays)}`) : null;
-  const reply = intent.kind === "reply" || intent.kind === "gm-back" || intent.kind === "call-react" || intent.kind === "welcome";
   const toOwn = intent.kind === "reply" && intent.toAuthor === "owner" && intent.toOwnAgent;
 
   const who: string[] = [
@@ -2392,7 +3755,7 @@ export function buildPrompt(intent: Intent, ctx: SpeakCtx): { system: string; pr
   // NO PHASE OF DAY, not even "for your tone": a model told it is evening for
   // its owner says "evening vibes", and a timestamped line that follows the
   // owner's clock gives away their zone (rule 3).
-  who.push(styleWords(ctx.style, palette, reply));
+  who.push(styleWords(ctx.style, palette, intent.kind === "gn"));
 
   const calls = (sp.calls ?? []).slice(0, 3);
   const focus = focusOf(intent, sp);

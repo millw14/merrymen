@@ -481,7 +481,7 @@ export function GroupChat({
                       <li key={`${p.slug ?? p.name}-${i}`}>
                         <button type="button" disabled={!p.slug} onClick={() => p.slug && onProfile(p.slug)}>
                           <Face name={p.name} slug={p.slug} pin />
-                          <span>{p.name}</span>
+                          <span className="gc-who-name">{p.name}</span>
                           {p.state === "asleep" && (
                             <span className="gc-zz" role="img" aria-label="asleep">
                               💤

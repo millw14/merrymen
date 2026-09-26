@@ -11,6 +11,7 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
+import { agentNameForSlug } from "../../../packages/core/src/agent-name";
 import { wrapSqlite, type Db } from "../db";
 import type { LlmCreds } from "../llm";
 import { REPEAT_LIMIT, similarity } from "../social-post";
@@ -54,6 +55,8 @@ interface Fixture {
   muted?: boolean;
   mode: AgentFacts["mode"];
   calls: CallFact[];
+  /** How old the agent's identity is, in whole days (facts.ts ageDays); twelve unless a test says otherwise. */
+  ageDays?: number | null;
 }
 
 function fixture(byte: number, name: string, tz: string | null, over: Partial<Fixture> = {}): Fixture {
@@ -70,13 +73,27 @@ function fixture(byte: number, name: string, tz: string | null, over: Partial<Fi
 }
 
 let decisionSeq = 0;
+const PEPE_TOKEN = "0x1111222233334444555566667777888899990000";
+
+/**
+ * EACH SYMBOL ITS OWN TOKEN, unless a test names one. sameCoin (facts.ts)
+ * decides by token whenever both are known, so a fixture that gave WIF and
+ * BONK the one default token made them one coin: the paper BONK buy folded
+ * into the WIF card and was never announced. The default coin keeps the
+ * default token.
+ */
+function tokenOf(symbol: string | null | undefined): string {
+  if (!symbol || symbol === "PEPE") return PEPE_TOKEN;
+  return `0x${Buffer.from(symbol, "utf8").toString("hex")}`.padEnd(42, "e").slice(0, 42);
+}
+
 function callAt(atMs: number, over: Partial<CallFact> = {}): CallFact {
   decisionSeq += 1;
   return {
     side: "buy",
     symbol: "PEPE",
     name: "Pepe Frog",
-    token: "0x1111222233334444555566667777888899990000",
+    token: over.token === undefined ? tokenOf(over.symbol) : over.token,
     paper: false,
     decisionId: `d-${decisionSeq}-${atMs}`,
     atSec: Math.floor(atMs / 1000),
@@ -105,7 +122,7 @@ function fakeFacts(fleet: Map<string, Fixture>, seen?: { calls: number }): typeo
         slug: f.slug,
         name: f.name,
         mode: f.mode,
-        ageDays: 12,
+        ageDays: f.ageDays === undefined ? 12 : f.ageDays,
         strategy: "steady-basket",
         traits: ["moves early and does not wait around"],
         calls: f.calls.filter((c) => c.atSec <= nowSec && c.atSec > nowSec - windowSec).sort((a, b) => b.atSec - a.atSec),
@@ -708,6 +725,67 @@ describe("joins", () => {
     assert.ok(!sim.rows().some((r) => r.body.includes("Pine Stoat")), "the room welcomed an agent its owner muted");
     sim.close();
   });
+
+  it("a newcomer is greeted by the name its owner gives it, or by its generated one after the wait — and the pass never fails", async () => {
+    // Live: "Amber Yeoman joined the room", then its hello under "lilbot", the
+    // name its owner chose a minute later. And namePending was called but
+    // never defined: one newcomer failed every pass, for good.
+    const first = [fixture(0x70, "Amber Heron", null), fixture(0x71, "Rusty Weasel", null)];
+    const generated = (slug: string) => agentNameForSlug(slug)!;
+    const named = fixture(0x72, generated("newbienamedabcde"), null, { slug: "newbienamedabcde", ageDays: 0 });
+    const keeps = fixture(0x73, generated("newbiekeepsabcde"), null, { slug: "newbiekeepsabcde", ageDays: 0 });
+    // A day old or more: its owner had a day to name it, and a restart cannot hold it again.
+    const old = fixture(0x74, generated("newbieolderabcde"), null, { slug: "newbieolderabcde", ageDays: 1 });
+    const sim = new Sim(first, { seed: 29 });
+    await sim.setup();
+    await sim.run(T0, T0 + 5 * MIN, 15 * SEC);
+    for (const f of [named, keeps, old]) {
+      sim.fleet.set(f.tenant, f);
+      sim.roster.add(f.tenant);
+    }
+    const joinOf = (f: Fixture) => sim.rows().find((r) => r.dedupe_key === `join:${f.tenant}`);
+    const member = async (f: Fixture) => (await allMembers(sim.db)).some((m) => m.tenant.toLowerCase() === f.tenant);
+
+    await sim.run(T0 + 5 * MIN, T0 + 8 * MIN, 15 * SEC);
+    assert.equal(joinOf(old)?.body, `${old.name} joined the room`, "an agent a day old joins at once");
+    assert.equal(joinOf(named), undefined, "a newcomer under its generated name was announced at once");
+    assert.equal(await member(named), false, "a held newcomer is not in the room yet");
+
+    // Its owner names it.
+    named.name = "Geo StonkBot";
+    await sim.run(T0 + 8 * MIN, T0 + 12 * MIN, 15 * SEC);
+    assert.equal(joinOf(named)?.body, "Geo StonkBot joined the room");
+    const hello = sim.rows().find((r) => r.dedupe_key === `hello:${named.tenant}`);
+    assert.equal(hello?.speaker_name, "Geo StonkBot", "its hello is under the name it was greeted by");
+    assert.equal(joinOf(keeps), undefined, "the one still wearing its generated name is still waiting");
+
+    // One whose owner never names it joins after the wait, under the name it has.
+    await sim.run(T0 + 12 * MIN, T0 + 25 * MIN, 15 * SEC);
+    assert.equal(joinOf(keeps)?.body, `${keeps.name} joined the room`);
+    assert.ok(joinOf(keeps)!.created_at_ms >= T0 + 5 * MIN + 15 * MIN, "it waited the whole wait");
+    assert.ok(!sim.logs.some((l) => /pass failed|then failed/.test(l)), sim.logs.filter((l) => /failed/.test(l)).join("\n"));
+    sim.close();
+  });
+
+  it("a join line held behind the room's hour says the name the agent has when it is written", async () => {
+    // A join queued with the name baked in kept the name its agent had when
+    // it was queued; the owner renamed it while the room's hour was full.
+    const first = [fixture(0x75, "Amber Heron", null), fixture(0x76, "Rusty Weasel", null)];
+    const late = fixture(0x77, "Blue Vole", null);
+    const sim = new Sim(first, { seed: 31, perHour: 3 });
+    await sim.setup();
+    await sim.run(T0, T0 + 10 * MIN, 15 * SEC);
+    sim.fleet.set(late.tenant, late);
+    sim.roster.add(late.tenant);
+    await sim.run(T0 + 10 * MIN, T0 + 20 * MIN, 15 * SEC);
+    assert.ok(await allMembers(sim.db).then((ms) => ms.some((m) => m.tenant.toLowerCase() === late.tenant)), "fixture: it joined");
+    assert.equal(sim.rows().filter((r) => r.kind === "join").length, 0, "fixture: the room's hour holds the join line back");
+    late.name = "Geo StonkBot";
+    await sim.run(T0 + 20 * MIN, T0 + 75 * MIN, 15 * SEC);
+    const join = sim.rows().find((r) => r.kind === "join");
+    assert.equal(join?.body, "Geo StonkBot joined the room");
+    sim.close();
+  });
 });
 
 // ── who a line is for ───────────────────────────────────────────────────────
@@ -829,20 +907,31 @@ describe("an owner's line is answered by the agent it was for", () => {
       bands: ["held briefly", "sold on my own time limit, not on anything the market did"],
     });
     pine.calls.push(pepe, bonk);
-    // THE DICE ARE PINNED, NOT TUNED — and one stream in three hits a known
-    // gap that is not this test's subject: when the card, or an earlier answer
-    // of Pine's, already said its only reason ("curve early"), every short
-    // "why" template is refused as Pine repeating itself, and the owed answer
-    // is never given (voice.ts/templates.ts: an owed answer needs a phrasing
-    // that survives the repeat clause). Seed 3 became such a stream when the
-    // room's draws started leaning toward the quiet (fairOrder); 7, 8 and 10
-    // are others.
-    for (const seed of [1, 2, 4]) {
+    // TEN STREAMS, NONE SKIPPED. When the card already said its only reason
+    // ("liked it: curve early"), most short "why" answers are refused as Pine
+    // repeating its card; with three draws a pass, one stream in three gave
+    // the owner no answer at all (seeds 2, 3, 7, 8 and 10 were pinned out).
+    // An owed answer now gets more draws (conductor.ts OWED_TEMPLATE_TRIES)
+    // and finds a phrasing that survives the repeat clause.
+    //
+    // THE CARD IS AN OLD ONE, posted by the process before this one, so
+    // nobody in this run reacts to it: its thread holds no answer yet. (A card
+    // whose author already told another agent its only reason, minutes
+    // before, leaves the owner's same question with no sentence that survives
+    // the repeat clause — a gap in the why phrasings, not in who answers.)
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
       const sim = new Sim([pine, swift, amber], { seed });
       await sim.setup();
+      await put(sim, pine, "bought PEPE, liked it: curve early", T0 - 45 * MIN, {
+        kind: "call",
+        call: { side: pepe.side, symbol: pepe.symbol, name: pepe.name, token: pepe.token, paper: pepe.paper },
+        callDecisionId: pepe.decisionId,
+        dedupeKey: `call:${pepe.decisionId}`,
+      });
       await sim.run(T0, T0 + 5 * MIN, 15 * SEC);
       const card = sim.rows().find((r) => r.call_decision_id === pepe.decisionId);
-      assert.ok(card, "fixture: the PEPE card was announced");
+      assert.ok(card, "fixture: the PEPE card is in the room");
+      assert.equal(sim.rows().filter((r) => r.call_decision_id === pepe.decisionId).length, 1, "fixture: the PEPE card was not posted twice");
       // Forty lines later the card is out of the thirty-line tail.
       for (let i = 0; i < 40; i++) await put(sim, null, `a quiet line ${"abcdefghij"[i % 10]}`, T0 + 5 * MIN + i * 100);
       const ask = await sim.owner(swift.tenant, "what made you buy that?", T0 + 12 * MIN, "chat", card!.id);
@@ -854,6 +943,43 @@ describe("an owner's line is answered by the agent it was for", () => {
       const pineAnswer = answers.find((r) => r.tenant === pine.tenant)!;
       assert.doesNotMatch(pineAnswer.body, /held briefly|time limit|Bonk|BONK/, `seed ${seed}: another trade's reason: ${pineAnswer.body}`);
       assert.match(pineAnswer.body, /curve early|rules|boxes|checked out/i, `seed ${seed}: ${pineAnswer.body}`);
+      sim.close();
+    }
+  });
+
+  it("an owner's 'why' under a card whose author already gave its reason is still answered — by pointing back, not by saying it again", async () => {
+    // THE CARD IS POSTED LIVE, so the room may ask Pine why first and Pine
+    // then says its only reason ("curve early, that's the whole story"), which
+    // a question under a card to its author now always gets (conductor.ts
+    // T2-33). Every band phrasing after that is refused as Pine repeating
+    // itself, and before ANSWER.whyAgain the owner's same question, owed an
+    // answer, got silence in seeds 5 and 10.
+    const pointers = T.ANSWER.whyAgain;
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+      const pine = fixture(0xe0, "Pine Stoat", null);
+      const swift = fixture(0xe1, "Swift Hedgehog", null, { calls: [callAt(T0 - 20 * MIN, { side: "sell", symbol: "BRETT", name: "Brett", bands: ["held its full window"] })] });
+      const amber = fixture(0xe2, "Amber Heron", null);
+      const pepe = callAt(T0 - 50 * MIN, { symbol: "PEPE", name: "Pepe Frog", bands: ["curve early"] });
+      pine.calls.push(pepe);
+      const sim = new Sim([pine, swift, amber], { seed });
+      await sim.setup();
+      await sim.run(T0, T0 + 5 * MIN, 15 * SEC);
+      const card = sim.rows().find((r) => r.call_decision_id === pepe.decisionId);
+      assert.ok(card, `seed ${seed}: fixture: the PEPE card was announced`);
+      for (let i = 0; i < 40; i++) await put(sim, null, `a quiet line ${"abcdefghij"[i % 10]}`, T0 + 5 * MIN + i * 100);
+      const ask = await sim.owner(swift.tenant, "what made you buy that?", T0 + 12 * MIN, "chat", card!.id);
+      await sim.run(T0 + 12 * MIN, T0 + 15 * MIN, 15 * SEC);
+      const pineAnswer = sim.agentRows().find((r) => r.reply_to === ask && r.tenant === pine.tenant);
+      const said = sim.agentRows().filter((r) => r.tenant === pine.tenant && r.id < ask).map((r) => r.body);
+      assert.ok(pineAnswer, `seed ${seed}: the card's author never answered the owner (it had said: ${said.join(" | ")})`);
+      const names = [pine.name, swift.name, amber.name, "PEPE", "Pepe Frog"];
+      assert.ok(
+        /curve early|rules|boxes|checked out/i.test(pineAnswer!.body) || inPool(pineAnswer!.body, pointers, names),
+        `seed ${seed}: ${pineAnswer!.body}`,
+      );
+      // POINTING BACK IS TRUE ONLY WHEN IT WAS SAID: a pointer answer follows a
+      // line of Pine's that gave the reason.
+      if (inPool(pineAnswer!.body, pointers, names)) assert.ok(said.some((b) => /curve early/i.test(b)), `seed ${seed}: pointed back to nothing: ${said.join(" | ")}`);
       sim.close();
     }
   });
@@ -893,6 +1019,33 @@ describe("an owner's line is answered by the agent it was for", () => {
         assert.ok(own, `"${text}" #${asks.indexOf(a) + 1}: the owner's own agent never answered`);
         assert.ok(inPool(own!.body, pool, fleet.map((f) => f.name)), `"${text}" answered with "${own!.body}"`);
       }
+      sim.close();
+    }
+  });
+
+  it("an owner's line about a coin the room's books trade is read as trading talk: no cheer, and advice declined", async () => {
+    // Pass.factCoins was declared, read and never filled, so no coin rule in
+    // classifyLine ran: "moo deng to the moon" was cheered by the owner's own
+    // agent ("let's go boss"), and a question about staying in the coin got a
+    // stance on going out. A name no list knows: only the room's cards say it is a coin.
+    const moo = { symbol: "MOODENG", name: "Moo Deng", token: "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d", bands: [] };
+    for (const seed of [1, 2, 3, 4]) {
+      const pine = fixture(0x78, "Pine Stoat", null, { calls: [callAt(T0 - 30 * MIN, moo)] });
+      const amber = fixture(0x79, "Amber Heron", null);
+      const sim = new Sim([pine, amber], { seed });
+      await sim.setup();
+      await sim.run(T0, T0 + 3 * MIN, 15 * SEC);
+      const hype = await sim.owner(pine.tenant, "moo deng to the moon 🚀", T0 + 3 * MIN);
+      await sim.run(T0 + 3 * MIN, T0 + 6 * MIN, 15 * SEC);
+      const advice = await sim.owner(pine.tenant, "should i stay in or go out of moo deng?", T0 + 6 * MIN);
+      await sim.run(T0 + 6 * MIN, T0 + 9 * MIN, 15 * SEC);
+      const names = [pine.name, amber.name, "Moo Deng", "MOODENG"];
+      for (const r of sim.agentRows().filter((x) => x.reply_to === hype)) {
+        assert.ok(!inPool(r.body, [...T.OWN_OWNER.hype, ...T.OTHER_OWNER.hype, ...T.REPLY.hype], names), `seed ${seed}: a shill cheered: ${r.body}`);
+      }
+      const own = sim.agentRows().find((x) => x.reply_to === advice && x.tenant === pine.tenant);
+      assert.ok(own, `seed ${seed}: the owner's own agent never answered`);
+      assert.ok(inPool(own!.body, T.OWN_OWNER.advice, names), `seed ${seed}: a question about staying in the coin answered with "${own!.body}"`);
       sim.close();
     }
   });
@@ -1555,11 +1708,22 @@ function ritual(l: Lively, r: Row): boolean {
 }
 
 /** The pools an answer to a line of this class may be drawn from — the spec, written independently of voice.ts. */
+/**
+ * A person praising the room ("lol you guys are funny"): answered from the
+ * praise pools (voice.ts laughAnswer), which nothing else may draw. Close to
+ * voice.ts's own reading, and only ever used to ALLOW those pools.
+ */
+const PRAISES_ROOM = (text: string): boolean =>
+  /\b(you guys|u guys|you all|y'?all|you lot|this chat|this room|the chat|the room)\b/i.test(text) &&
+  /\b(funny|hilarious|lol|lmao|haha\w*|the best|amazing|great|fun|entertaining)\b|😂|🤣/iu.test(text);
+
 function poolsFor(cls: LineClass, audience: "agent" | "own" | "owner", mode: AgentFacts["mode"], text = "", names: string[] = []): (readonly string[])[] {
   const trading = mode !== "idle";
   const own = audience === "own";
   const person = audience !== "agent";
-  const ownerFacts = [T.OWNER_AWAKE.awake, T.OWNER_AWAKE.asleep, T.OWNER_MODE.live, T.OWNER_MODE.paper, T.AGE_LINES, T.AGE_NEW, T.OWNER_LOVE];
+  // "HOW'S YOUR HUMAN?" is asked about now (voice.ts ownerNow): up, asleep,
+  // not seen lately, or fondness — never how long they have been together.
+  const ownerNow = [T.OWNER_AWAKE.awake, T.OWNER_AWAKE.asleep, T.OWNER_AWAKE.unseen, T.OWNER_LOVE];
   switch (cls) {
     case "gm":
       return own ? [T.OWN_OWNER.gm] : person ? [T.GM_BACK_HUMAN] : [T.GM_BACK];
@@ -1580,11 +1744,12 @@ function poolsFor(cls: LineClass, audience: "agent" | "own" | "owner", mode: Age
     case "ask-trades":
       return Object.values(T.WHATBUY);
     case "ask-advice":
-      return [T.ANSWER.advice];
+      // The owner's own agent declines warmly: their book is not its "own bags".
+      return own ? [T.OWN_OWNER.advice] : [T.ANSWER.advice];
     case "ask-howareyou":
       return own ? [T.OWN_OWNER.howareyou] : [trading ? T.ANSWER.howareyou.trading : T.ANSWER.howareyou.idle];
     case "ask-owner":
-      return own ? [T.OWN_OWNER.chat] : ownerFacts;
+      return own ? [T.OWN_OWNER.chat] : ownerNow;
     case "ask-strategy":
       return [T.ANSWER.strategy, T.ANSWER.traits, T.ANSWER.noStrategy, ...Object.values(T.STRATEGY_FLAVOUR), ...Object.values(T.TRAIT_VOICE)];
     case "ask-doing":
@@ -1601,13 +1766,17 @@ function poolsFor(cls: LineClass, audience: "agent" | "own" | "owner", mode: Age
       return prompt ? [...prompt.stances] : [T.ANSWER.unknown];
     }
     case "take":
-      return [Topics.TAKE_REPLY.agree, Topics.TAKE_REPLY.disagree, Topics.TAKE_REPLY.amused];
+      // Every side, the laugh included: a take the room wrote as a joke
+      // (Topics.FUNNY_TAKES, ANSWER.fun) is laughed at by the amused.
+      return Object.values(Topics.TAKE_REPLY);
     case "musing":
-      return [Topics.MUSING_REPLY];
+      // Answered in its own tone: the shared answers, or the warm or wry ones.
+      return [Topics.MUSING_REPLY, Topics.MUSING_REPLY_WARM, Topics.MUSING_REPLY_WRY];
     case "joke":
       return [Topics.JOKE_REPLY];
     case "ask":
-      return [T.ANSWER.unknown];
+      // A person's open question is handed back; agents keep the shrug among themselves.
+      return own ? [T.OWN_OWNER.ask] : person ? [T.OTHER_OWNER.ask] : [T.ANSWER.unknown];
     case "thanks":
       return own ? [T.OWN_OWNER.thanks] : person ? [T.OTHER_OWNER.thanks] : [T.REPLY.thanks];
     case "love":
@@ -1619,6 +1788,8 @@ function poolsFor(cls: LineClass, audience: "agent" | "own" | "owner", mode: Age
     case "hype":
       return own ? [T.OWN_OWNER.hype] : person ? [T.OTHER_OWNER.hype] : [T.REPLY.hype];
     case "laugh":
+      // A person praising the room is answered as praise; nothing else ever is.
+      if (person && PRAISES_ROOM(text)) return own ? [T.OWN_OWNER.laugh, T.OWN_OWNER.praise] : [T.OTHER_OWNER.laugh, T.OTHER_OWNER.praise];
       return own ? [T.OWN_OWNER.laugh] : person ? [T.OTHER_OWNER.laugh] : [T.REPLY.laugh];
     case "owner":
       return own ? [T.OWN_OWNER.love] : [T.RELATE.owner];
@@ -1631,7 +1802,8 @@ function poolsFor(cls: LineClass, audience: "agent" | "own" | "owner", mode: Age
     case "room":
       return [T.RELATE.room];
     case "chat":
-      return own ? [T.OWN_OWNER.chat] : [T.REPLY.chat];
+      // A person's line is heard, never agreed with (voice.ts heardPool).
+      return own ? [T.OWN_OWNER.chat] : person ? [T.OTHER_OWNER.chat] : [T.REPLY.chat];
   }
 }
 
@@ -1707,7 +1879,10 @@ function assertLively(l: Lively): void {
       continue;
     }
     const call = target!.call_decision_id ? l.fleet.flatMap((f) => f.calls).find((c) => c.decisionId === target!.call_decision_id) ?? null : null;
-    const cls = classifyLine(target!.body, { call, kind: target!.kind, names, self: replier.name });
+    // Read as the conductor reads it: told who wrote it and which coins the
+    // room's books trade (conductor.ts classOf, answerOwners).
+    const coins = [...new Set(l.fleet.flatMap((f) => f.calls.flatMap((c) => [c.name, c.symbol].filter((x): x is string => !!x))))];
+    const cls = classifyLine(target!.body, { call, kind: target!.kind, names, self: replier.name, author: target!.author_kind as "agent" | "owner" | "system", coins });
     const audience = target!.author_kind === "owner" ? (target!.tenant === r.tenant ? "own" : "owner") : "agent";
     const pools = poolsFor(cls, audience, replier.mode, target!.body, names);
     // AN ANSWER UNDER ONE OF THE REPLIER'S CARDS is about that card: only its
@@ -2284,5 +2459,758 @@ describe("fixture sanity", () => {
   it("the fixture's past-midnight sleeper really starts its window after midnight", () => {
     const w = sleepWindow(tenantOf(0xa2));
     assert.ok(w.startMin < 12 * 60, "B's window must open after local midnight for the day-boundary case to be exercised");
+  });
+});
+
+// ── the room's two days of starters ─────────────────────────────────────────
+
+describe("the room's two days of thread-starters (the topic memory)", () => {
+  /** A conductor whose model is asked for every banter line and answers nothing: what it was shown is the ctx. */
+  function memoryProbe(fleet: Fixture[], seed: number): { sim: Sim; seen: SpeakCtx[] } {
+    const seen: SpeakCtx[] = [];
+    const sim = new Sim(fleet, {
+      creds: CREDS,
+      llm: async (_c, _i, ctx) => {
+        seen.push(ctx);
+        return null;
+      },
+      seed,
+    });
+    return { sim, seen };
+  }
+  const remembers = (ctx: SpeakCtx | undefined, body: string): boolean => !!ctx?.topicMemory && ctx.topicMemory.hasLine(ctx.topicMemory.norm(body));
+
+  it("learns another replica's starters from the tail, and forgets a starter after two days", async () => {
+    // pruneStarters was defined and never called, and the tail never fed the
+    // memory: a long-running process kept counting starters from days ago as
+    // "started lately", and never saw the ones another replica started.
+    const fleet = awakeFleet(2, 0xb8);
+    const { sim, seen } = memoryProbe(fleet, 37);
+    await sim.setup();
+    await sim.step(T0);
+    const body = "which season would you live in forever, and why?";
+    await put(sim, fleet[0]!, body, T0 + 10 * SEC);
+    await sim.run(T0 + 15 * SEC, T0 + 5 * MIN, 15 * SEC);
+    assert.ok(seen.length > 0, "fixture: the model was asked for a line");
+    assert.ok(remembers(seen.at(-1), body), "a starter another process wrote never reached the topic memory");
+
+    // Nearly two days of an empty room: still remembered.
+    seen.length = 0;
+    await sim.run(T0 + 47 * HOUR, T0 + 47 * HOUR + 5 * MIN, 15 * SEC);
+    assert.ok(seen.length > 0, "fixture: the model was asked at hour forty-seven");
+    assert.ok(remembers(seen[0], body), "forgotten before its two days were up");
+
+    // Past two days: forgotten.
+    seen.length = 0;
+    await sim.run(T0 + 49 * HOUR, T0 + 49 * HOUR + 5 * MIN, 15 * SEC);
+    assert.ok(seen.length > 0, "fixture: the model was asked at hour forty-nine");
+    assert.ok(!remembers(seen[0], body), "a starter from over two days ago still counts as started lately");
+    sim.close();
+  });
+});
+
+// ── what only the conductor knows ───────────────────────────────────────────
+
+describe("the voice is told what only the conductor knows", () => {
+  it("whether a buy is more of a coin the room saw, whether a card was a top-up, whether the agent answered its owner lately, who is away, and how long the room was quiet", async () => {
+    const tsla = { symbol: "TSLA", name: "Tesla", token: "0x7e5a7e5a7e5a7e5a7e5a7e5a7e5a7e5a7e5a7e5a", paper: true, bands: [] };
+    const pine = fixture(0xb0, "Pine Stoat", null, { mode: "paper" });
+    const amber = fixture(0xb1, "Amber Heron", null, { mode: "paper" });
+    const rusty = fixture(0xb2, "Rusty Weasel", null);
+    const first = callAt(T0 + MIN, tsla);
+    // Folded into Pine's card (another agent's card of the coin, minutes before): never posted.
+    const folded = callAt(T0 + 3 * MIN, tsla);
+    const amberLater = callAt(T0 + 2 * HOUR, tsla);
+    // A day after Pine's card (past TOP_UP_FOLD_MS, inside POSTED_CALLS_MS, far past
+    // the twelve hours of facts): its own card, and more of what the room saw.
+    const again = callAt(T0 + 24 * HOUR + 40 * MIN, tsla);
+    pine.calls.push(first, again);
+    amber.calls.push(folded, amberLater);
+    let now = T0;
+    const seen: { at: number; intent: Intent; ctx: SpeakCtx }[] = [];
+    const sim = new Sim([pine, amber, rusty], {
+      creds: CREDS,
+      llm: async (_c, intent, ctx) => {
+        seen.push({ at: now, intent, ctx });
+        return null;
+      },
+      seed: 41,
+    });
+    const tick = (n: number) => {
+      now = n;
+    };
+    await sim.setup();
+    await sim.run(T0, T0 + 10 * MIN, 15 * SEC, tick);
+    const callOf = (c: CallFact) => seen.find((s) => s.intent.kind === "call" && s.intent.call.decisionId === c.decisionId)?.intent as Extract<Intent, { kind: "call" }> | undefined;
+    assert.equal(callOf(first)?.more, false, "a first buy is not more");
+    assert.ok(!sim.rows().some((r) => r.call_decision_id === folded.decisionId), "fixture: Amber's first buy folded into Pine's card");
+
+    // The owner's own agent: not answered lately, then answered, then — across a restart — still answered lately.
+    const ownCtx = (id: number) => seen.find((s) => s.intent.kind === "reply" && s.intent.toOwnAgent && s.ctx.speaker.tenant === rusty.tenant && s.at >= (sim.rows().find((r) => r.id === id)?.created_at_ms ?? Infinity))?.ctx;
+    const ask1 = await sim.owner(rusty.tenant, "how's it going buddy?", T0 + 10 * MIN);
+    await sim.run(T0 + 10 * MIN, T0 + 13 * MIN, 15 * SEC, tick);
+    assert.ok(sim.agentRows().some((r) => r.reply_to === ask1 && r.tenant === rusty.tenant), "fixture: the owner was answered");
+    assert.equal(ownCtx(ask1)?.answeredOwnerLately, false, "a first answer may greet");
+    const ask2 = await sim.owner(rusty.tenant, "what are you up to?", T0 + 40 * MIN);
+    await sim.run(T0 + 40 * MIN, T0 + 43 * MIN, 15 * SEC, tick);
+    assert.equal(ownCtx(ask2)?.answeredOwnerLately, true, "answered half an hour ago: no second greeting");
+    sim.conductor = sim.fresh(1);
+    const ask3 = await sim.owner(rusty.tenant, "you doing ok?", T0 + 70 * MIN);
+    await sim.run(T0 + 70 * MIN, T0 + 73 * MIN, 15 * SEC, tick);
+    assert.equal(ownCtx(ask3)?.answeredOwnerLately, true, "a restart forgot that the agent answered its owner");
+
+    // Nobody speaks for half an hour: the room's silence and who is away are told as they are.
+    const before = Math.max(...sim.rows().map((r) => r.created_at_ms));
+    const quietFrom = seen.length;
+    await sim.run(before + 35 * MIN, before + 36 * MIN, 15 * SEC, tick);
+    const hush = seen.slice(quietFrom).find((s) => s.at === before + 35 * MIN);
+    assert.ok(hush, "fixture: an agent spoke into the silence");
+    assert.equal(hush!.ctx.roomQuietMs, 35 * MIN);
+    assert.deepEqual([...(hush!.ctx.quiet ?? [])].sort(), [...(hush!.ctx.addressable ?? [])].sort(), "after half an hour of silence everyone else is away");
+    // And in a busy stretch, nobody who spoke in the last half hour is away.
+    for (const s of seen) {
+      for (const name of s.ctx.quiet ?? []) {
+        assert.ok((s.ctx.addressable ?? []).includes(name), `${name} is away but not addressable`);
+        const spoke = sim.agentRows().filter((r) => r.speaker_name === name && r.created_at_ms < s.at && s.at - r.created_at_ms < 30 * MIN);
+        assert.equal(spoke.length, 0, `${name} was told away at ${(s.at - T0) / MIN} min, having spoken ${spoke.map((r) => (s.at - r.created_at_ms) / MIN)} min before`);
+      }
+    }
+
+    // Amber's later buy: the room never saw her buy Tesla, so it is not "more".
+    await sim.run(T0 + 2 * HOUR, T0 + 2 * HOUR + 5 * MIN, 15 * SEC, tick);
+    assert.ok(sim.rows().some((r) => r.call_decision_id === amberLater.decisionId), "fixture: Amber's later buy got its card");
+    assert.equal(callOf(amberLater)?.more, false, "a buy after one folded into somebody else's card was said as more");
+
+    // Pine's buy past the top-up fold: more of what the room saw, though the
+    // fill behind that card left the facts twelve hours ago.
+    await sim.run(T0 + 24 * HOUR + 40 * MIN, T0 + 25 * HOUR + 10 * MIN, 15 * SEC, tick);
+    const card = sim.rows().find((r) => r.call_decision_id === again.decisionId);
+    assert.ok(card, "fixture: Pine's second buy got its card");
+    assert.equal(callOf(again)?.more, true, "more of a coin the room saw bought, with no sell since");
+    sim.close();
+  });
+
+  it("a reaction to a card is told whether the card was a top-up", async () => {
+    // "added more $NVDA" drew "ooh, a fresh entry": the reaction did not know.
+    const tsla = { symbol: "TSLA", name: "Tesla", token: "0x7e5a7e5a7e5a7e5a7e5a7e5a7e5a7e5a7e5a7e5a", paper: true, bands: [] };
+    const told: { more: boolean | undefined; top: boolean }[] = [];
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+      const pine = fixture(0xb4, "Pine Stoat", null, { mode: "paper" });
+      const first = callAt(T0 + MIN, tsla);
+      const again = callAt(T0 + 24 * HOUR + 40 * MIN, tsla);
+      pine.calls.push(first, again);
+      const seen: Intent[] = [];
+      const sim = new Sim([pine, fixture(0xb5, "Amber Heron", null), fixture(0xb6, "Rusty Weasel", null), fixture(0xb7, "Winter Raven", null)], {
+        creds: CREDS,
+        llm: async (_c, intent) => {
+          seen.push(intent);
+          return null;
+        },
+        seed,
+      });
+      await sim.setup();
+      await sim.run(T0, T0 + 20 * MIN, 15 * SEC);
+      await sim.run(T0 + 24 * HOUR + 40 * MIN, T0 + 25 * HOUR + 10 * MIN, 15 * SEC);
+      for (const i of seen) {
+        if (i.kind !== "call-react" || i.to !== pine.name) continue;
+        told.push({ more: i.more, top: seen.indexOf(i) > seen.findIndex((x) => x.kind === "call" && x.call.decisionId === again.decisionId) });
+      }
+      sim.close();
+    }
+    assert.ok(told.some((t) => t.top), "fixture: no reaction to the top-up in eight rooms");
+    assert.ok(told.some((t) => !t.top), "fixture: no reaction to the first card in eight rooms");
+    for (const t of told) assert.equal(t.more, t.top, t.top ? "a reaction to a top-up was not told so" : "a reaction to a first buy was told it was more");
+  });
+});
+
+// ── the live room, round two ────────────────────────────────────────────────
+
+/**
+ * WHAT TWO DAYS OF THE LIVE ROOM FOUND AFTER THE FIRST ROUND OF FIXES, PINNED.
+ * Each test below fails with the rule it names reverted (a mutation run
+ * checked each one), and most replay the shape the live room or a seeded
+ * simulation showed. A card written straight into the room with `putCard` is
+ * one the process before this one posted.
+ */
+
+/** A card row written straight into the room, as an earlier process posted it. */
+async function putCard(sim: Sim, f: Fixture, c: CallFact, body: string, at: number): Promise<number> {
+  return put(sim, f, body, at, {
+    kind: "call",
+    call: { side: c.side, symbol: c.symbol, name: c.name, token: c.token, paper: c.paper },
+    callDecisionId: c.decisionId,
+    dedupeKey: `call:${c.decisionId}`,
+  });
+}
+
+const cardsBy = (sim: Sim, f: Fixture): Row[] => sim.agentRows().filter((r) => r.kind === "call" && r.tenant === f.tenant);
+
+const addTo = (sim: Sim, f: Fixture): void => {
+  sim.fleet.set(f.tenant, f);
+  sim.roster.add(f.tenant);
+};
+
+describe("round two: one card per move", () => {
+  it("three lockstep paper baskets buying the same three coins every six hours post one card per coin per book in a day, across a restart", async () => {
+    // The owner's complaint, replayed: Scarlet Bittern, Crimson Siskin and Wry
+    // Otter buy TSLA, NVDA and QQQ every six hours, sixteen minutes apart —
+    // too far apart to fold into each other's cards, and each book's top-up
+    // exactly CALL_REPEAT_MS after its last card, so every coin came back as
+    // "bought more" every six hours.
+    const coins = [
+      { symbol: "TSLA", name: "Tesla" },
+      { symbol: "NVDA", name: "NVIDIA" },
+      { symbol: "QQQ", name: "Invesco" },
+    ].map((c) => ({ ...c, token: tokenOf(c.symbol), paper: true, bands: [] as string[] }));
+    const books = ["Scarlet Bittern", "Crimson Siskin", "Wry Otter"].map((n, i) => fixture(0x31 + i, n, null, { mode: "paper" }));
+    const coinOf = new Map<string, string>();
+    for (const [i, b] of books.entries()) {
+      for (let tick = 0; tick < 4; tick++) {
+        for (const [k, c] of coins.entries()) {
+          const fill = callAt(T0 + (10 + 16 * i) * MIN + tick * 6 * HOUR + k * 20 * SEC, c);
+          b.calls.push(fill);
+          coinOf.set(fill.decisionId, c.symbol);
+        }
+      }
+    }
+    const sim = new Sim([...books, fixture(0x3a, "Amber Heron", null)], { seed: 3 });
+    await sim.setup();
+    await sim.run(T0, T0 + 13 * HOUR, 30 * SEC);
+    // A redeploy between the third and fourth ticks: the cards a top-up folds into are rebuilt from the room.
+    sim.conductor = sim.fresh(1);
+    await sim.run(T0 + 13 * HOUR, T0 + 24 * HOUR, 30 * SEC);
+    for (const b of books) {
+      const cards = cardsBy(sim, b);
+      assert.ok(cards.length >= 1, `fixture: ${b.name} posted no card at all`);
+      for (const c of coins) {
+        const mine = cards.filter((r) => coinOf.get(r.call_decision_id ?? "") === c.symbol);
+        assert.ok(
+          mine.length <= 1,
+          `${b.name} posted ${mine.length} ${c.symbol} cards in a day: ${mine.map((r) => `${new Date(r.created_at_ms).toISOString().slice(11, 16)} ${r.body}`).join(" | ")}`,
+        );
+      }
+    }
+    sim.close();
+  });
+
+  it("a redeploy after a busy book pushed its card's fill past the per-agent cut posts no repeat (the 09-25 16:53 replay)", async () => {
+    // facts.ts keeps each agent's newest CALLS_PER_AGENT fills, plus — when
+    // the conductor passes its dialect — every fill the room already posted.
+    // This fake does the same with a cut of five, so the anchor a repeat is
+    // weighed against falls past it after a few fills.
+    const CUT = 5;
+    const cutFacts = (fleet: Map<string, Fixture>): typeof loadFacts => async (shared, roster, profiles, nowSec, opts = {}) => {
+      const all = await fakeFacts(fleet)(shared, roster, profiles, nowSec, opts);
+      for (const f of all.values()) {
+        const kept: CallFact[] = [];
+        for (const [i, c] of f.calls.entries()) {
+          const posted =
+            opts.dialect !== undefined &&
+            (await shared.prepare("SELECT 1 AS x FROM groupchat_messages WHERE dedupe_key = ?").get(`call:${c.decisionId}`)) !== undefined;
+          if (i < CUT || posted) kept.push(c);
+        }
+        f.calls = kept;
+      }
+      return all;
+    };
+    const wif = { symbol: "WIF", name: "Dogwifhat", token: tokenOf("WIF"), bands: [] as string[] };
+    const pine = fixture(0x38, "Pine Stoat", null);
+    const buys = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((m) => callAt(T0 + m * MIN, wif));
+    pine.calls.push(...buys);
+    const fleet = [pine, fixture(0x39, "Amber Heron", null)];
+    const sim = new Sim(fleet);
+    sim.conductor = makeConductor({ creds: null, dialect: "sqlite", facts: cutFacts(sim.fleet), rng: rngOf(21) });
+    await sim.setup();
+    await sim.run(T0, T0 + 12 * MIN, 15 * SEC);
+    assert.deepEqual(cardsBy(sim, pine).map((r) => r.call_decision_id), [buys[0]!.decisionId], "fixture: nine live buys of one coin are one card");
+    sim.conductor = makeConductor({ creds: null, dialect: "sqlite", facts: cutFacts(sim.fleet), rng: rngOf(22) });
+    await sim.run(T0 + 15 * MIN, T0 + 30 * MIN, 15 * SEC);
+    assert.deepEqual(cardsBy(sim, pine).map((r) => r.call_decision_id), [buys[0]!.decisionId], "a redeploy posted a repeat whose card's fill was past the cut");
+    sim.close();
+  });
+
+  it("a basket tick is one card; a fill of another coin half an hour later is its own", async () => {
+    const book = fixture(0x3c, "Scarlet Bittern", null, { mode: "paper" });
+    const tick = ["TSLA", "NVDA", "QQQ"].map((s, k) => callAt(T0 + MIN + k * 20 * SEC, { symbol: s, name: null, paper: true, bands: [] }));
+    const later = callAt(T0 + 32 * MIN, { symbol: "AAPL", name: null, paper: true, bands: [] });
+    book.calls.push(...tick, later);
+    const sim = new Sim([book, fixture(0x3d, "Amber Heron", null)], { seed: 5 });
+    await sim.setup();
+    await sim.run(T0, T0 + 45 * MIN, 15 * SEC);
+    assert.deepEqual(
+      cardsBy(sim, book).map((r) => r.call_decision_id),
+      [tick[0]!.decisionId, later.decisionId],
+      "three coins in one minute are one card, and a new coin half an hour on is news",
+    );
+    sim.close();
+  });
+
+  it("a paper sell and the paper re-buy two minutes later are two cards", async () => {
+    // Crimson Siskin "just sold NVDA" at 17:02, and the re-entry after it was
+    // folded into the sell: the own-card fold took a card of either side.
+    const nvda = { symbol: "NVDA", name: "NVIDIA", token: tokenOf("NVDA"), paper: true, bands: [] as string[] };
+    const book = fixture(0x3e, "Crimson Siskin", null, { mode: "paper" });
+    const buy = callAt(T0 + MIN, nvda);
+    const sell = callAt(T0 + 40 * MIN, { ...nvda, side: "sell" });
+    const rebuy = callAt(T0 + 42 * MIN, nvda);
+    book.calls.push(buy, sell, rebuy);
+    const sim = new Sim([book, fixture(0x3f, "Amber Heron", null)], { seed: 7 });
+    await sim.setup();
+    await sim.run(T0, T0 + 55 * MIN, 15 * SEC);
+    assert.deepEqual(
+      cardsBy(sim, book).map((r) => r.call_decision_id),
+      [buy, sell, rebuy].map((c) => c.decisionId),
+      "buy, sell, buy is three",
+    );
+    sim.close();
+  });
+
+  it("a sleeper's overnight paper buy is not folded into another agent's card of the coin posted hours after it", async () => {
+    // Pine Stoat bought TSLA on paper three hours before waking; Rusty Weasel
+    // bought it an hour before Pine woke. "Any card posted since the fill"
+    // folded Pine's buy into Rusty's, and Pine's card was never posted.
+    const tsla = { symbol: "TSLA", name: "Tesla", token: tokenOf("TSLA"), paper: true, bands: [] as string[] };
+    const sleeper = fixture(0xa4, "Pine Stoat", "Asia/Tokyo", { mode: "paper" });
+    const span = sleepSpans(sleeper.tz!, sleeper.tenant, T0, T0 + 30 * HOUR).find((s) => s.start > T0 && s.end !== null)!;
+    const rusty = fixture(0x81, "Rusty Weasel", null, { mode: "paper" });
+    const own = callAt(span.end! - 3 * HOUR, tsla);
+    const theirs = callAt(span.end! - HOUR, tsla);
+    sleeper.calls.push(own);
+    rusty.calls.push(theirs);
+    const sim = new Sim([sleeper, rusty, fixture(0x82, "Amber Heron", null)], { seed: 13 });
+    await sim.setup();
+    await sim.run(span.end! - 4 * HOUR, span.end! + 40 * MIN, 30 * SEC);
+    assert.ok(sim.rows().some((r) => r.call_decision_id === theirs.decisionId), "fixture: Rusty's card is in the room");
+    assert.ok(sim.rows().some((r) => r.call_decision_id === own.decisionId), "the sleeper's own buy, two hours earlier, was folded into another agent's card");
+    sim.close();
+  });
+
+  it("books on one schedule are one card: the same coin in one second, and a move that bought the coin too", async () => {
+    const paper = (symbol: string) => ({ symbol, name: null, token: tokenOf(symbol), paper: true, bands: [] as string[] });
+    // Three books filling QQQ in the same second are detected in one pass,
+    // before any of them speaks: folded when written (attempt).
+    const trio = ["Scarlet Bittern", "Crimson Siskin", "Wry Otter"].map((n, i) => fixture(0x41 + i, n, null, { mode: "paper" }));
+    for (const b of trio) b.calls.push(callAt(T0 + 20 * MIN, paper("QQQ")));
+    // Amber's basket card is TSLA; her NVDA fill a second later folded into it.
+    // Pine's NVDA fill four minutes on is that same move: folded too.
+    const amber = fixture(0x44, "Amber Heron", null, { mode: "paper" });
+    amber.calls.push(callAt(T0 + MIN, paper("TSLA")), callAt(T0 + MIN + SEC, paper("NVDA")));
+    const pine = fixture(0x45, "Pine Stoat", null, { mode: "paper" });
+    pine.calls.push(callAt(T0 + 5 * MIN, paper("NVDA")));
+    const sim = new Sim([...trio, amber, pine], { seed: 9 });
+    await sim.setup();
+    await sim.run(T0, T0 + 30 * MIN, 15 * SEC);
+    const qqq = trio.flatMap((b) => cardsBy(sim, b));
+    assert.equal(qqq.length, 1, `three books buying QQQ in one second posted ${qqq.length} cards`);
+    assert.equal(cardsBy(sim, amber).length, 1, "fixture: Amber's basket is one card");
+    assert.deepEqual(cardsBy(sim, pine).map((r) => r.body), [], "a buy in lockstep with another book's basket was posted as news");
+    sim.close();
+  });
+
+  it("a card whose line keeps being refused holds a later card of its coin ten minutes at most, and is never told after it — across a restart too", async () => {
+    // A LINE THAT CANNOT BE SAID, made on purpose. The dice are pinned (rng
+    // 0). The first card's coin has a name that is a link, which no named line
+    // survives, and every nameless line it could say is a sentence Pine said
+    // half an hour ago — so each try is refused as Pine repeating itself.
+    // Throwaway rooms find those sentences: each posts the card with the next
+    // one, until a room has none left and the card is refused.
+    const token = tokenOf("PUMP");
+    const room = async (refused: CallFact, later: CallFact | null, said: readonly string[]) => {
+      const pine = fixture(0xd8, "Pine Stoat", null);
+      pine.calls.push(refused, ...(later ? [later] : []));
+      const sim = new Sim([pine, fixture(0xd9, "Amber Heron", null)], { rng: () => 0 });
+      await sim.setup();
+      for (const [i, body] of said.entries()) await put(sim, pine, body, T0 - 30 * MIN + i * SEC);
+      return { pine, sim };
+    };
+    const refused = callAt(T0 + MIN, { symbol: null, name: "pump.fun", token, bands: [] });
+    const later = callAt(T0 + 3 * MIN, { side: "sell", symbol: null, name: "Pump Coin", token, bands: [] });
+    const said: string[] = [];
+    for (let i = 0; i < 40; i++) {
+      const probe = await room({ ...refused }, { ...later }, said);
+      await probe.sim.run(T0, T0 + 12 * MIN, 15 * SEC);
+      const body = probe.sim.rows().find((r) => r.call_decision_id === refused.decisionId)?.body;
+      probe.sim.close();
+      if (body === undefined) break;
+      said.push(body);
+    }
+    assert.ok(said.length > 0 && said.length < 40, `fixture: ${said.length} sentences before the card could not be said`);
+
+    const { sim } = await room(refused, later, said);
+    await sim.run(T0, T0 + 20 * MIN, 15 * SEC);
+    const card = (c: CallFact) => sim.rows().find((r) => r.call_decision_id === c.decisionId);
+    assert.ok(card(later), "the later card waited for good behind a refused one");
+    assert.ok(card(later)!.created_at_ms <= T0 + 15 * MIN, `the later card waited until ${(card(later)!.created_at_ms - T0) / MIN} min`);
+    assert.ok(card(later)!.created_at_ms >= T0 + 10 * MIN, "fixture: the first card's line was refused, and the later card waited for it");
+    assert.equal(card(refused), undefined, "a buy was told after the sell that followed it");
+    // A redeploy, and the first fill's coin now has a name the gate takes:
+    // it is older than a card of its coin already out, so it stays untold.
+    refused.name = "Pumpkin";
+    sim.conductor = sim.fresh(1);
+    await sim.run(T0 + 20 * MIN, T0 + 40 * MIN, 15 * SEC);
+    assert.equal(card(refused), undefined, "a restart told a buy after the sell that followed it");
+    sim.close();
+  });
+
+  it("two fills in one second are weighed in ledger order: a sell and its re-buy are two cards, a buy sold in the same second is told in the past", async () => {
+    // facts.ts hands fills back newest first in LEDGER order; the fake keeps
+    // the order they are pushed in within a second. The decision ids sort the
+    // other way on purpose: they are random, and never the order.
+    const wif = { symbol: "WIF", name: "Dogwifhat", token: tokenOf("WIF"), bands: [] as string[] };
+    const bonk = { symbol: "BONK", name: "Bonk", token: tokenOf("BONK"), bands: [] as string[] };
+    const pine = fixture(0xda, "Pine Stoat", null);
+    const first = callAt(T0 + MIN, wif);
+    const rebuy = { ...callAt(T0 + 10 * MIN, wif), decisionId: "d-aaa-rebuy" };
+    const sell = { ...callAt(T0 + 10 * MIN, { ...wif, side: "sell" }), decisionId: "d-zzz-sell" };
+    const bonkSell = { ...callAt(T0 + 15 * MIN, { ...bonk, side: "sell" }), decisionId: "d-aaa-bonk-sell" };
+    const bonkBuy = { ...callAt(T0 + 15 * MIN, bonk), decisionId: "d-zzz-bonk-buy" };
+    pine.calls.push(first, rebuy, sell, bonkSell, bonkBuy);
+    const sim = new Sim([pine, fixture(0xdb, "Amber Heron", null)], { seed: 11 });
+    await sim.setup();
+    await sim.run(T0, T0 + 25 * MIN, 15 * SEC);
+    const ids = cardsBy(sim, pine).map((r) => r.call_decision_id);
+    assert.deepEqual(ids, [first, sell, rebuy, bonkBuy, bonkSell].map((c) => c.decisionId), "buy, sell, re-buy is three cards, oldest fill first");
+    const bought = cardsBy(sim, pine).find((r) => r.call_decision_id === bonkBuy.decisionId)!;
+    assert.ok(inPool(bought.body, T.BUY_EARLIER, [pine.name, "Amber Heron", "Bonk", "BONK"]), `a buy sold in the same second was told as held: ${bought.body}`);
+    sim.close();
+  });
+});
+
+describe("round two: who answers what", () => {
+  it("a 'same here' starter takes one answer, the late path included", async () => {
+    // Live, seed 11: "my owner and i make a good team, honestly" drew "big
+    // same, the boss is my favorite", then banter's late reply added "Same
+    // energy with my human." under the flat two-answer ceiling.
+    const starterText = "my owner and i make a good team, honestly";
+    assert.equal(classifyLine(starterText, { names: ROSTER_NAMES, author: "agent" }), "owner", "fixture: a line about an owner");
+    const [rusty, amber, pine] = [fixture(0xe8, "Rusty Weasel", null), fixture(0xe9, "Amber Heron", null), fixture(0xea, "Pine Stoat", null)];
+    const sim = new Sim([rusty, amber, pine], { rng: () => 0 });
+    await sim.setup();
+    const starter = await put(sim, pine, starterText, T0 - 60 * SEC);
+    await put(sim, amber, "big same, the boss is my favorite", T0 - 50 * SEC, { replyTo: starter, dedupeKey: `re:${starter}:${amber.tenant}` });
+    await sim.run(T0, T0 + 6 * MIN, 15 * SEC);
+    assert.ok(sim.agentRows().some((r) => r.created_at_ms >= T0 && r.reply_to === null && r.kind === "chat"), "fixture: the quiet was broken");
+    const answers = sim.agentRows().filter((r) => r.reply_to === starter);
+    assert.equal(answers.length, 1, `a second "same": ${answers.map((r) => `${r.speaker_name}: ${r.body}`).join(" | ")}`);
+    sim.close();
+  });
+
+  it("over a busy stretch, no thought about an owner, the agent itself, the market or agent life draws two answers", async () => {
+    let starters = 0;
+    for (const seed of [1, 2]) {
+      const fleet = LIVELY_NAMES.slice(0, 8).map((n, i) => fixture(0x60 + i, n, null));
+      const sim = new Sim(fleet, { seed });
+      await sim.setup();
+      await sim.run(T0, T0 + 3 * HOUR, 15 * SEC);
+      const rows = sim.agentRows();
+      const names = fleet.map((f) => f.name);
+      const relate = rows.filter(
+        (r) =>
+          r.reply_to === null &&
+          r.kind === "chat" &&
+          !r.dedupe_key?.startsWith("hello:") &&
+          ["owner", "life", "self", "market"].includes(classifyLine(r.body, { kind: "chat", names, author: "agent", coins: [] })),
+      );
+      starters += relate.length;
+      for (const s of relate) {
+        const answers = rows.filter((r) => r.reply_to === s.id);
+        assert.ok(answers.length <= 1, `seed ${seed}: "${s.body}" drew ${answers.length}: ${answers.map((r) => r.body).join(" | ")}`);
+      }
+      sim.close();
+    }
+    assert.ok(starters >= 6, `fixture: only ${starters} such starters`);
+  });
+
+  it("a 'same here' answer ends its thread: the starter's author does not answer it", async () => {
+    const [rusty, amber, pine] = [fixture(0xec, "Rusty Weasel", null), fixture(0xed, "Amber Heron", null), fixture(0xee, "Pine Stoat", null)];
+    const echo = "love that, i feel the same about my human";
+    assert.equal(classifyLine(echo, { names: ROSTER_NAMES, author: "agent" }), "owner", "fixture: an agreement about an owner");
+    const sim = new Sim([rusty, amber, pine], { rng: () => 0 });
+    await sim.setup();
+    const starter = await put(sim, pine, "my owner and i make a good team, honestly", T0 - 60 * SEC);
+    await sim.step(T0);
+    const same = await put(sim, amber, echo, T0 + 5 * SEC, { replyTo: starter, dedupeKey: `re:${starter}:${amber.tenant}` });
+    await sim.run(T0 + 15 * SEC, T0 + 3 * MIN, 15 * SEC);
+    assert.deepEqual(
+      sim.agentRows().filter((r) => r.reply_to === same).map((r) => `${r.speaker_name}: ${r.body}`),
+      [],
+    );
+    sim.close();
+  });
+
+  it("the asker answers one answer to its own question, not each of them — across a restart too", async () => {
+    // Seed 7: shogun asked "best season, go?", got two answers, and said yes to both.
+    const prompt = Topics.PROMPTS.find((p) => p.id === "cats-or-dogs")!;
+    const answersText = prompt.stances.map((s) => s.find((l) => !l.includes("{"))!);
+    for (const a of answersText) assert.equal(classifyLine(a, { names: ROSTER_NAMES, author: "agent" }), "take", `fixture: "${a}" is a take`);
+    const [pine, amber, rusty, raven] = [
+      fixture(0xf0, "Pine Stoat", null),
+      fixture(0xf1, "Amber Heron", null),
+      fixture(0xf2, "Rusty Weasel", null),
+      fixture(0xf3, "Winter Raven", null),
+    ];
+    const sim = new Sim([pine, amber, rusty, raven], { rng: () => 0 });
+    await sim.setup();
+    const q = await put(sim, pine, prompt.room.find((l) => !l.includes("{"))!, T0 - 60 * SEC);
+    await sim.step(T0);
+    const answer = (f: Fixture, text: string, at: number) => put(sim, f, text, at, { replyTo: q, dedupeKey: `re:${q}:${f.tenant}` });
+    const answered: number[] = [];
+    const graded = () => sim.agentRows().filter((r) => r.tenant === pine.tenant && r.reply_to !== null && answered.includes(r.reply_to));
+    // Two answers seen in one pass.
+    answered.push(await answer(amber, answersText[0]!, T0 + 5 * SEC));
+    answered.push(await answer(rusty, answersText[1]!, T0 + 6 * SEC));
+    await sim.run(T0 + 15 * SEC, T0 + 3 * MIN, 15 * SEC);
+    assert.equal(graded().length, 1, `the asker graded ${graded().length} answers: ${graded().map((r) => r.body).join(" | ")}`);
+    // A redeploy, then a third answer: the verdict already in the room still counts.
+    sim.conductor = sim.fresh(1);
+    await sim.step(T0 + 3 * MIN);
+    answered.push(await answer(raven, answersText[2]!, T0 + 3 * MIN + 5 * SEC));
+    await sim.run(T0 + 3 * MIN + 15 * SEC, T0 + 6 * MIN, 15 * SEC);
+    assert.equal(graded().length, 1, `after a restart the asker graded ${graded().length} answers: ${graded().map((r) => r.body).join(" | ")}`);
+    sim.close();
+  });
+
+  it("a question back to the asker is not an answer to grade: it is still answered after the asker graded one", async () => {
+    const prompt = Topics.PROMPTS.find((p) => p.id === "cats-or-dogs")!;
+    const back = "how are you doing Pine Stoat?";
+    assert.ok(classifyLine(back, { names: ROSTER_NAMES, author: "agent" }).startsWith("ask"), "fixture: a question");
+    const [pine, amber, rusty] = [fixture(0xf0, "Pine Stoat", null), fixture(0xf1, "Amber Heron", null), fixture(0xf2, "Rusty Weasel", null)];
+    const sim = new Sim([pine, amber, rusty], { rng: () => 0 });
+    await sim.setup();
+    const q = await put(sim, pine, prompt.room.find((l) => !l.includes("{"))!, T0 - 60 * SEC);
+    await sim.step(T0);
+    const take = await put(sim, amber, prompt.stances[0]!.find((l) => !l.includes("{"))!, T0 + 5 * SEC, { replyTo: q, dedupeKey: `re:${q}:${amber.tenant}` });
+    const asked = await put(sim, rusty, back, T0 + 6 * SEC, { replyTo: q, dedupeKey: `re:${q}:${rusty.tenant}` });
+    await sim.run(T0 + 15 * SEC, T0 + 3 * MIN, 15 * SEC);
+    assert.ok(sim.agentRows().some((r) => r.tenant === pine.tenant && r.reply_to === take), "fixture: the asker graded the first answer");
+    assert.ok(sim.agentRows().some((r) => r.tenant === pine.tenant && r.reply_to === asked), "a question put back to the asker went unanswered");
+    sim.close();
+  });
+
+  it("a question under a card, to the card's author, is always answered", async () => {
+    // Nine of twenty questions under cards went unanswered by the card's
+    // author: two deep, they were left to the dice.
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+      const pine = fixture(0xf4, "Pine Stoat", null);
+      const pepe = callAt(T0 - 50 * MIN, { symbol: "PEPE", name: "Pepe Frog", bands: ["curve early"] });
+      pine.calls.push(pepe);
+      const amber = fixture(0xf5, "Amber Heron", null);
+      const sim = new Sim([pine, amber, fixture(0xf6, "Rusty Weasel", null)], { seed });
+      await sim.setup();
+      const card = await putCard(sim, pine, pepe, "new bag: PEPE", T0 - 45 * MIN);
+      await sim.step(T0);
+      const ask = await put(sim, amber, "why this one?", T0 + 5 * SEC, { replyTo: card, dedupeKey: `re:${card}:${amber.tenant}` });
+      await sim.run(T0 + 15 * SEC, T0 + 3 * MIN, 15 * SEC);
+      assert.ok(
+        sim.agentRows().some((r) => r.reply_to === ask && r.tenant === pine.tenant),
+        `seed ${seed}: the card's author never answered "why this one?"`,
+      );
+      sim.close();
+    }
+  });
+
+  it("a late reaction never lands on a card its author has since replaced with a newer card of the coin", async () => {
+    // Seed 11: "closed my WALLET position", a reaction, "new position: WALLET"
+    // — and a late "ok so SirSendIt sold? respect the discipline" on the sell.
+    const [rusty, amber, pine] = [fixture(0xf8, "Rusty Weasel", null), fixture(0xf9, "Amber Heron", null), fixture(0xfa, "Pine Stoat", null)];
+    const wif = { symbol: "WIF", name: "Dogwifhat", token: tokenOf("WIF"), bands: [] as string[] };
+    // Cards another process posted: the room holds them, the facts need not.
+    const sell = callAt(T0 - 3 * MIN, { ...wif, side: "sell" });
+    const buy = callAt(T0 - MIN, wif);
+    const sim = new Sim([rusty, amber, pine], { rng: () => 0 });
+    await sim.setup();
+    await sim.step(T0);
+    const sold = await putCard(sim, pine, sell, "closed my WIF position", T0 + 2 * SEC);
+    await put(sim, amber, "nice, clean exit", T0 + 3 * SEC, { replyTo: sold, dedupeKey: `re:${sold}:${amber.tenant}` });
+    await putCard(sim, pine, buy, "new position: WIF", T0 + 4 * SEC);
+    await sim.run(T0 + 15 * SEC, T0 + 8 * MIN, 15 * SEC);
+    assert.ok(sim.agentRows().some((r) => r.created_at_ms > T0 + 4 * SEC && r.tenant === rusty.tenant), "fixture: the quiet was broken");
+    const late = sim.agentRows().filter((r) => r.reply_to === sold && r.tenant !== amber.tenant);
+    assert.deepEqual(late.map((r) => `${r.speaker_name}: ${r.body}`), [], "a late reaction landed on a card its author had replaced");
+    sim.close();
+  });
+
+  it("'how's everyone's human?' draws one 'haven't heard from my human' at most, however many answer in one pass", async () => {
+    // voice.ts ownerNow says an unseen line once per question by reading the
+    // tail after it; the answers written earlier in the SAME pass are in that
+    // tail (remember() adds each line to p.room as it is written), so two
+    // answers queued together cannot both say it.
+    const text = "how's everyone's human doing?";
+    assert.equal(classifyLine(text, { names: ROSTER_NAMES, author: "owner" }), "ask-owner", "fixture: a question about the owners");
+    const names = ROSTER_NAMES;
+    let together = 0;
+    for (const rng of [() => 0.02, () => 0.3, rngOf(5), rngOf(9)]) {
+      const fleet = awakeFleet(5, 0xa0);
+      const sim = new Sim(fleet, { rng, maxPerPass: 4 });
+      await sim.setup();
+      await sim.run(T0, T0 + MIN, 15 * SEC);
+      const q = await sim.owner(fleet[0]!.tenant, text, T0 + MIN + 5 * SEC);
+      // One pass queues the answers; the next, minutes later, finds them all
+      // due and writes them together — the case the tail must cover.
+      await sim.run(T0 + MIN + 15 * SEC, T0 + 10 * MIN, 3 * MIN);
+      const others = sim.agentRows().filter((r) => r.reply_to === q && r.tenant !== fleet[0]!.tenant);
+      if (new Set(others.map((r) => r.created_at_ms)).size < others.length) together += 1;
+      const unseen = others.filter((r) => inPool(r.body, T.OWNER_AWAKE.unseen, names));
+      assert.ok(unseen.length <= 1, `two unseen answers: ${others.map((r) => r.body).join(" | ")}`);
+      sim.close();
+    }
+    assert.ok(together >= 1, "fixture: no stream had two other agents answer in one pass");
+  });
+
+  it("an owner's open question to everyone always draws somebody besides their own agent — a bare question too", async () => {
+    // The dice are pinned at 0.9: past the old 0.85 first draw.
+    for (const text of ["hey everyone, what are you all up to?", "what tools would you find useful, everyone?"]) {
+      assert.ok(classifyLine(text, { names: ROSTER_NAMES, author: "owner" }).startsWith("ask"), `fixture: "${text}" is a question`);
+      const fleet = awakeFleet(4, 0xfc);
+      const sim = new Sim(fleet, { rng: () => 0.9 });
+      await sim.setup();
+      await sim.run(T0, T0 + MIN, 15 * SEC);
+      const q = await sim.owner(fleet[0]!.tenant, text, T0 + MIN + 5 * SEC);
+      await sim.run(T0 + MIN + 15 * SEC, T0 + 5 * MIN, 15 * SEC);
+      const answers = sim.agentRows().filter((r) => r.reply_to === q);
+      assert.ok(answers.some((r) => r.tenant === fleet[0]!.tenant), `"${text}": fixture: their own agent answered`);
+      assert.ok(answers.some((r) => r.tenant !== fleet[0]!.tenant), `"${text}": only the owner's own agent answered`);
+      sim.close();
+    }
+  });
+});
+
+describe("round two: newcomers", () => {
+  const generated = (slug: string) => agentNameForSlug(slug)!;
+
+  it("newcomers held for their names count once: three held signups and a named fourth are all greeted, not joined quietly", async () => {
+    const sim = new Sim(awakeFleet(2, 0x40), { seed: 3 });
+    await sim.setup();
+    await sim.run(T0, T0 + 5 * MIN, 15 * SEC);
+    const held = ["newbieonexabcdef", "newbietwoxabcdef", "newbiethrxabcdef"].map((s, i) => fixture(0x50 + i, generated(s), null, { slug: s, ageDays: 0 }));
+    const named = fixture(0x5a, "Geo StonkBot", null, { slug: "newbiefouxabcdef", ageDays: 0 });
+    await sim.run(T0 + 5 * MIN, T0 + 40 * MIN, 15 * SEC, (now) => {
+      if (now === T0 + 5 * MIN) addTo(sim, held[0]!);
+      if (now === T0 + 7 * MIN) addTo(sim, held[1]!);
+      if (now === T0 + 9 * MIN) addTo(sim, held[2]!);
+      if (now === T0 + 11 * MIN) addTo(sim, named);
+    });
+    assert.ok(!sim.logs.some((l) => /joined quietly/.test(l)), sim.logs.filter((l) => /quietly/.test(l)).join("\n"));
+    const joinAt = (f: Fixture) => sim.rows().find((r) => r.dedupe_key === `join:${f.tenant}`)?.created_at_ms;
+    for (const f of [...held, named]) {
+      assert.ok(joinAt(f) !== undefined, `${f.name} was never announced`);
+      assert.equal(sim.rows().filter((r) => r.dedupe_key === `hello:${f.tenant}`).length, 1, `${f.name} never said hello`);
+    }
+    assert.ok(joinAt(named)! < T0 + 12 * MIN, "the named newcomer joins at once");
+    held.forEach((f, i) => assert.ok(joinAt(f)! >= T0 + (5 + 2 * i) * MIN + 15 * MIN, `${f.name} did not wait for its name`));
+    sim.close();
+  });
+
+  it("an owner speaking to their new agent while it waits for its name ends the wait, and is answered by it", async () => {
+    const sim = new Sim(awakeFleet(3, 0x70), { seed: 11 });
+    await sim.setup();
+    await sim.run(T0, T0 + 5 * MIN, 15 * SEC);
+    const nb = fixture(0x7a, generated("ownersnewxabcdef"), null, { slug: "ownersnewxabcdef", ageDays: 0 });
+    addTo(sim, nb);
+    await sim.run(T0 + 5 * MIN, T0 + 6 * MIN, 15 * SEC);
+    assert.equal(sim.rows().filter((r) => r.dedupe_key === `join:${nb.tenant}`).length, 0, "fixture: it is held for its name");
+    const asked = await sim.owner(nb.tenant, "hey buddy, you there?", T0 + 6 * MIN + 5 * SEC);
+    await sim.run(T0 + 6 * MIN + 15 * SEC, T0 + 10 * MIN, 15 * SEC);
+    const join = sim.rows().find((r) => r.dedupe_key === `join:${nb.tenant}`);
+    const answer = sim.agentRows().find((r) => r.reply_to === asked && r.tenant === nb.tenant);
+    assert.ok(join, "the owner spoke and their agent was still held");
+    assert.ok(answer, "the owner's line to their held agent was never answered");
+    assert.ok(join!.id < answer!.id, "it answered before it joined");
+    sim.close();
+  });
+
+  it("a paper newcomer's first line is its hello, not a card", async () => {
+    const sim = new Sim(awakeFleet(3, 0x60), { seed: 5 });
+    await sim.setup();
+    await sim.run(T0, T0 + 5 * MIN, 15 * SEC);
+    const nb = fixture(0x6a, generated("basketnewxabcdef"), null, { slug: "basketnewxabcdef", ageDays: 0, mode: "paper" });
+    for (const [i, m] of [6, 6, 6, 10, 10, 10, 14, 14, 14].entries()) {
+      nb.calls.push(callAt(T0 + m * MIN + i * SEC, { symbol: ["TSLA", "NVDA", "AAPL"][i % 3], name: null, paper: true, bands: [] }));
+    }
+    addTo(sim, nb);
+    await sim.run(T0 + 5 * MIN, T0 + 45 * MIN, 15 * SEC);
+    const mine = sim.agentRows().filter((r) => r.tenant === nb.tenant);
+    assert.ok(mine.some((r) => r.kind === "call"), "fixture: the newcomer posted a card");
+    assert.equal(mine[0]?.dedupe_key, `hello:${nb.tenant}`, `its first line was: ${mine[0]?.body}`);
+    sim.close();
+  });
+
+  it("a newcomer off the roster for a pass while its join line waits is still announced, and says hello", async () => {
+    // A lease flap or a child restart dropped the join line for good, and the
+    // hello with it: the hello is owed only once the join line is out.
+    const sim = new Sim(awakeFleet(2, 0x90), { seed: 31, maxPerPass: 1 });
+    await sim.setup();
+    await sim.run(T0, T0 + 5 * MIN, 15 * SEC);
+    const n1 = fixture(0x9a, "Blue Vole", null);
+    const n2 = fixture(0x9b, "Ochre Falcon", null);
+    addTo(sim, n1);
+    addTo(sim, n2);
+    await sim.step(T0 + 5 * MIN);
+    const joins = () => sim.rows().filter((r) => r.kind === "join").map((r) => r.dedupe_key);
+    assert.deepEqual(joins(), [`join:${n1.tenant}`], "fixture: one join line a pass");
+    sim.roster.delete(n2.tenant);
+    await sim.step(T0 + 5 * MIN + 15 * SEC);
+    sim.roster.add(n2.tenant);
+    await sim.run(T0 + 5 * MIN + 30 * SEC, T0 + 15 * MIN, 15 * SEC);
+    const join = sim.rows().filter((r) => r.dedupe_key === `join:${n2.tenant}`);
+    const hello = sim.rows().filter((r) => r.dedupe_key === `hello:${n2.tenant}`);
+    assert.equal(join.length, 1, "a newcomer off the roster for one pass was never announced");
+    assert.equal(hello.length, 1, "and never said hello");
+    assert.ok(join[0]!.id < hello[0]!.id, "its hello came before its join line");
+    sim.close();
+  });
+
+  it("a newcomer that joins in its morning says hello and no gm that day, across a redeploy too", async () => {
+    const pine = fixture(0xa4, "Pine Stoat", "Asia/Tokyo");
+    const span = sleepSpans(pine.tz!, pine.tenant, T0, T0 + 30 * HOUR).find((s) => s.start > T0 && s.end !== null)!;
+    const sim = new Sim(awakeFleet(2, 0x64), { seed: 13 });
+    await sim.setup();
+    await setMemberPrefs(sim.db, pine.tenant, { tz: pine.tz, tzSource: "owner" }, T0);
+    await sim.run(T0, span.end! + 5 * MIN, 5 * MIN);
+    addTo(sim, pine);
+    await sim.run(span.end! + 5 * MIN, span.end! + 30 * MIN, 15 * SEC);
+    const hello = sim.rows().filter((r) => r.dedupe_key === `hello:${pine.tenant}`);
+    assert.equal(hello.length, 1, "fixture: it said hello before the redeploy");
+    sim.conductor = sim.fresh(1);
+    // Still inside its wake-up gm window (GM_WINDOW_MIN).
+    await sim.run(span.end! + 30 * MIN, span.end! + 3 * HOUR + 30 * MIN, 15 * SEC);
+    const gms = sim.agentRows().filter((r) => r.tenant === pine.tenant && r.kind === "gm" && r.reply_to === null);
+    assert.deepEqual(
+      gms.map((r) => `${new Date(r.created_at_ms).toISOString().slice(11, 16)} ${r.body}`),
+      [],
+      "a newcomer's hello was followed by a gm the same morning",
+    );
+    sim.close();
+  });
+});
+
+describe("round two: the room's memories across a redeploy", () => {
+  it("a restart keeps six hours of the room's sentences and two days of its thread-starters, however many lines came since", async () => {
+    const fleet = awakeFleet(2, 0xbc);
+    const seen: SpeakCtx[] = [];
+    const sim = new Sim(fleet, {
+      creds: CREDS,
+      llm: async (_c, _i, ctx) => {
+        seen.push(ctx);
+        return null;
+      },
+      seed: 43,
+    });
+    await sim.setup();
+    await sim.step(T0);
+    const starter = "which season would you live in forever, and why?";
+    await put(sim, fleet[0]!, starter, T0 + 10 * SEC);
+    // More lines since than the scan's first two pages hold, so a scan that
+    // stops at sixteen hours never reaches the starter.
+    for (let i = 0; i < 450; i++) await put(sim, null, `a quiet line ${"abcdefghij"[i % 10]}`, T0 + HOUR + i * 3 * MIN);
+    const sentence = "honestly the curve looks like a cat stretching";
+    await put(sim, fleet[1]!, sentence, T0 + 26 * HOUR);
+    sim.conductor = sim.fresh(1);
+    await sim.run(T0 + 30 * HOUR, T0 + 30 * HOUR + 5 * MIN, 15 * SEC);
+    const ctx = seen.at(-1);
+    assert.ok(ctx && ctx.memory && ctx.topicMemory, "fixture: the model was asked for a line after the restart");
+    assert.ok(ctx!.memory!.hasLine(ctx!.memory!.norm(sentence)), "a sentence four hours old was forgotten by a restart");
+    assert.ok(ctx!.topicMemory!.hasLine(ctx!.topicMemory!.norm(starter)), "a starter thirty hours old was forgotten by a restart");
+    sim.close();
   });
 });

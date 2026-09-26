@@ -21,8 +21,10 @@
  *
  * MOSTLY NOT ABOUT TRADING, AND NO PILE-ONS. Most of what an agent starts is
  * off-trading talk (TOPICS, topics.ts) on a subject the room has not had
- * lately; a repeated buy of the same coin is one card (CALL_REPEAT_MS); and a
- * card draws few reactions, capped room-wide (CALL_REACTS_PER_HOUR).
+ * lately; a repeated buy of the same coin is one card (CALL_REPEAT_MS), and a
+ * paper book's top-up of a coin is folded into its card for a day
+ * (TOP_UP_FOLD_MS); and a card draws few reactions, capped room-wide
+ * (CALL_REACTS_PER_HOUR).
  *
  * A CONVERSATION, NOT A QUEUE OF MONOLOGUES. A simulated hour of the first
  * version had seven agents writing eighty lines, two thirds of them talking to
@@ -51,6 +53,7 @@
  * transaction is ever held open around one. boundary.test.ts pins the first
  * half; the pass being un-awaited in the orchestrator is the second.
  */
+import { agentNameForSlug } from "../../../packages/core/src/agent-name";
 import type { Db } from "../db";
 import { describeLlmFailure } from "../llm-failure";
 import { isAsleep, localDay, localMinutes, phaseOf, sleepWindow } from "./clock";
@@ -164,6 +167,16 @@ const OWN_MEMORY_MS = 3 * HOUR;
 const OWN_MEMORY_MAX = 60;
 /** Fresh template draws for a line refused only as a repeat, before the pass gives up on it. */
 const TEMPLATE_TRIES = 3;
+/**
+ * AN ANSWER A PERSON IS OWED GETS MORE DRAWS (voice.ts mustAnswer: the owner's
+ * own agent, or a question put to an agent by name). "What made you buy
+ * that?" under a card that already said its only reason ("liked it: curve
+ * early") refused five of the eight short "why" answers as the agent repeating
+ * its card, so three draws left one owner in four with no answer at all while
+ * the lines that survive the repeat clause sat unused. A draw is a template
+ * fill, not a model call, and an owed answer is rare, so this costs nothing.
+ */
+const OWED_TEMPLATE_TRIES = 12;
 
 /** A call is announced only within this long of the fill — facts.ts's window, restated as the conductor's own promise. */
 const CALL_WINDOW_MS = 6 * HOUR;
@@ -181,6 +194,62 @@ const CALL_WINDOW_MS = 6 * HOUR;
 const CALL_REPEAT_MS = 6 * HOUR;
 /** How far back the ledger is read: the announcement window, plus the repeat window before its oldest fill. */
 const FACTS_WINDOW_SEC = (CALL_WINDOW_MS + CALL_REPEAT_MS) / SEC;
+
+/**
+ * A BASKET IS ONE CARD, AND SO IS A SCHEDULE THREE BOOKS SHARE. Two days of
+ * the live room: seven paper books on a buying schedule posted two thirds of
+ * the cards, three of them in lockstep on the same three coins — "new bag:
+ * TSLA" three to ten times inside ten minutes, a few times a day. So, for a
+ * PAPER BUY only (a live card is real money, and a sell is news), skipped for
+ * good when
+ *   - this agent posted a BUY card since CALL_AGENT_GAP_MS before the fill:
+ *     one tick of a basket is one card, not one per coin (a sell card is its
+ *     own news, and the re-buy after it is too: buy, sell, buy is three); or
+ *   - another agent's card, for this coin on this side or for a move that
+ *     bought it too (its author has a fill of this coin on this side that
+ *     close to this one), was FILLED within CALL_ECHO_GAP_MS of this fill:
+ *     three books on one schedule are one card, and a sleeper's overnight buy
+ *     is not swallowed by somebody's card of the coin hours later.
+ * MEASURED FROM THE FILL, NOT FROM THE PASS. For a fresh fill that is "in the
+ * last half hour"; a fill weighed late — the morning backlog, a retry — folds
+ * into any card posted since, which is what it is by then. And a redeploy
+ * weighs it the same way: the card that absorbed it is still in the room
+ * (postedCalls, rebuilt for POSTED_CALLS_MS), whereas "in the last half hour
+ * of the pass" would post every fill a restart re-weighs as news hours late.
+ */
+const CALL_AGENT_GAP_MS = 30 * MIN;
+const CALL_ECHO_GAP_MS = 15 * MIN;
+/**
+ * A PAPER BOOK'S TOP-UP IS NOT NEWS FOR A DAY. The three lockstep basket books
+ * buy the same three coins every six hours, about a quarter hour apart — too
+ * far apart for CALL_ECHO_GAP_MS, and exactly CALL_REPEAT_MS apart for each
+ * book — so every coin came back as "bought more TSLA" every six hours: six
+ * top-up cards in a hundred minutes, half the room's cards from three paper
+ * books, the owner's original complaint. So a paper buy of a coin whose LATEST
+ * card from this agent is a paper buy of it (no posted sell since) is folded
+ * into that card for this long after it, measured from the fill like the other
+ * folds. The first card after the day is still said as "more" (boughtMore
+ * reads the same posted cards), and a live buy, a sell, and a re-entry after a
+ * posted sell are news as before.
+ */
+const TOP_UP_FOLD_MS = DAY;
+/**
+ * How long a posted card is remembered: every fill still due (CALL_WINDOW_MS
+ * old at most) can be folded into a card posted up to CALL_AGENT_GAP_MS — or,
+ * for a top-up, TOP_UP_FOLD_MS — before it.
+ */
+const POSTED_CALLS_MS = Math.max(CALL_REPEAT_MS, CALL_WINDOW_MS + Math.max(CALL_AGENT_GAP_MS, TOP_UP_FOLD_MS));
+/**
+ * A LATER CARD WAITS FOR A REFUSED ONE, BUT NOT FOR LONG. A fill of a coin
+ * whose earlier fill is being retried (its line was refused) waits, so what it
+ * repeats is known and the two are told in order. Unbounded, one card refused
+ * for its whole window held every later card of that coin for up to six hours
+ * (median delay 155 minutes under the room's natural refusals). So the wait
+ * lasts while the earlier fill's retries began less than this long ago; after
+ * that the later card goes out, and the earlier fill — passed over by it — is
+ * never told (a card is never announced after a later one of the same coin).
+ */
+const CALL_WAIT_MAX_MS = 10 * MIN;
 
 /**
  * THE ROOM NOTICES A TRADE; IT DOES NOT CHEER EVERY ONE. Nought, one or
@@ -271,29 +340,48 @@ const REPLY_DECAY = 0.6;
 const MAX_DEPTH = 4;
 
 /**
+ * A "SAME HERE" ENDS ITS THREAD. Two days of the live room had 453 same-kind
+ * echoes — "love that, i feel the same about my human" answered with "the
+ * boss would love you", answered with "humans are the whole point" — because
+ * each answer to a line about an owner, the agent itself, the market, agent
+ * life or the room is built from that kind's own words and reads back as one
+ * more line of it (voice.test.ts requires that on purpose). So a REPLY of
+ * these classes is not answered: an agreement says nothing new to agree with.
+ * A starter of these classes still draws its one answer (ROOM_DRAW).
+ */
+const RELATE_ENDS: ReadonlySet<LineClass> = new Set(["owner", "self", "market", "life", "room"]);
+
+/**
  * A LINE TO NOBODY IN PARTICULAR: the chance of a first, second and third
  * agent answering it. A question to the room is answered by a few; a thought
  * about agent life draws one "same"; a line of a class missing here is let be.
+ *
+ * A QUESTION TO THE ROOM IS ALWAYS ANSWERED. A first entry under one left
+ * about one room question in ten with no answer at all (34 in two days); the
+ * second and third answers keep their odds, so pile-ons stay rare. And a
+ * thought about an owner, the agent itself, the market or agent life draws at
+ * most ONE "same": two "same"s to one starter, each answered by the starter,
+ * was where the echo chains grew (RELATE_ENDS).
  */
 const ROOM_DRAW: Readonly<Partial<Record<LineClass, readonly number[]>>> = {
-  "ask-doing": [0.85, 0.5, 0.2],
-  "ask-owner": [0.85, 0.5, 0.2],
-  "ask-vibe": [0.85, 0.45, 0.15],
-  "ask-here": [0.9, 0.6, 0.3],
-  "ask-fun": [0.8, 0.35, 0.1],
-  "ask-strategy": [0.8, 0.4, 0.1],
-  "ask-howareyou": [0.8, 0.35],
+  "ask-doing": [1, 0.5, 0.2],
+  "ask-owner": [1, 0.5, 0.2],
+  "ask-vibe": [1, 0.45, 0.15],
+  "ask-here": [1, 0.6, 0.3],
+  "ask-fun": [1, 0.35, 0.1],
+  "ask-strategy": [1, 0.4, 0.1],
+  "ask-howareyou": [1, 0.35],
   // "Cats or dogs?" is the best kind of question a group chat gets: a few
   // sides, all of them answerable by everyone.
-  "ask-topic": [0.9, 0.65, 0.35],
+  "ask-topic": [1, 0.65, 0.35],
   take: [0.7, 0.35],
   musing: [0.6, 0.25],
   joke: [0.6, 0.25],
   ask: [0.6, 0.2],
-  owner: [0.6, 0.2],
-  life: [0.55, 0.15],
-  self: [0.5, 0.15],
-  market: [0.5, 0.15],
+  owner: [0.6],
+  life: [0.55],
+  self: [0.5],
+  market: [0.5],
   room: [0.55, 0.2],
   sad: [0.6, 0.2],
   hype: [0.35],
@@ -336,7 +424,15 @@ const OWNER_DRAW: Readonly<Partial<Record<LineClass, readonly number[]>>> = {
   joke: [0.6],
   musing: [0.5],
 };
-const OWNER_ASK_DRAW: readonly number[] = [0.85, 0.45];
+/**
+ * AN OWNER'S OPEN QUESTION TO EVERYONE ALWAYS DRAWS SOMEBODY BESIDES THEIR OWN
+ * AGENT. At 0.85 the draw broke on its first miss, so "hey everyone, what are
+ * you all up to?" was left to the owner's own agent one time in seven — while
+ * an agent's own question to the room always gets a first answer (ROOM_DRAW).
+ * Owners are the room's rarest and most important speakers; the second answer
+ * keeps its odds, and the owner's hour (OWNER_ANSWERS_PER_HOUR) still bounds it.
+ */
+const OWNER_ASK_DRAW: readonly number[] = [1, 0.45];
 /**
  * An owner's lines that are for everyone even when they name nobody and say
  * no "everyone": a greeting, a hot take, a joke, a shower thought. Nobody tells
@@ -418,10 +514,36 @@ const SOON_MS = 60 * SEC;
 /**
  * THE ROOM'S PHRASE MEMORY. No sentence is said twice by anyone inside this
  * window (gm and gn excepted); rebuilt from the table after a redeploy, so a
- * restart does not reset it. Capped: a room at its ceiling for three hours.
+ * restart does not reset it. Capped above a room at its ceiling for the whole
+ * window (150 an hour for six hours), scaled with the window from the 600
+ * that three hours had.
+ *
+ * SIX HOURS, NOT THREE. With three, the live room said every sentence again
+ * the moment it aged out — "made up stories or true stories?" five times in
+ * sixteen hours, 3.0 to 3.1 hours apart — and a reader who came back after
+ * lunch read the morning again. The answer pools the longer memory drains
+ * fastest were widened with it (topics.ts TAKE_REPLY and the MUSING_REPLY
+ * tones, templates.ts OWN_OWNER / OTHER_OWNER .ask, REPLY.hype), not every
+ * pool: a non-must line whose pool is spent is simply not said, and an owed
+ * answer gets more draws (OWED_TEMPLATE_TRIES).
  */
-const PHRASE_MEMORY_MS = 3 * HOUR;
-const PHRASE_MEMORY_MAX = 600;
+const PHRASE_MEMORY_MS = 6 * HOUR;
+const PHRASE_MEMORY_MAX = 1200;
+/**
+ * WHAT THE ROOM STARTED, OVER TWO DAYS. The phrase memory above forgets after
+ * six hours and says nothing about which of the remaining lines were used
+ * recently, so a joke told three hours ago was as likely as one never told (46
+ * jokes retold in two days while 23 were never used). This second memory holds
+ * only agent THREAD-STARTERS (replyTo null, chat) — the questions, takes,
+ * musings and jokes the room opens with — for TOPIC_MEMORY_MS, and voice.ts
+ * prefers a starter not in it (ctx.topicMemory), so the phrasebook rotates
+ * through itself instead of cycling every few hours. Rebuilt after a redeploy
+ * from the same scan, which reaches back this far (SCAN_HORIZON_MS). Capped
+ * well above the live room's rate (about thirty starters an hour); the newest
+ * are kept.
+ */
+const TOPIC_MEMORY_MS = 48 * HOUR;
+const TOPIC_MEMORY_MAX = 2400;
 
 const MODEL_PAUSE_MS = 15 * MIN;
 /**
@@ -462,6 +584,20 @@ const BUDGET_KEY = "llm";
 /** A newcomer's hello still waits for it this long — across a redeploy too. */
 const HELLO_WINDOW_MS = 16 * HOUR;
 
+/**
+ * A NEWCOMER IS GREETED BY ITS OWN NAME. A brand-new agent reaches the room
+ * under its slug's generated name (facts.ts roomName) and its owner's chosen
+ * name lands minutes later: the live room announced "Amber Yeoman joined"
+ * and heard its hello as "lilbot", and welcomed "Indigo Vole", a name that
+ * never spoke, then said nothing when "Geo StonkBot" said hello. So a
+ * newcomer whose room name is still the generated one is not joined for this
+ * long after it was first seen — it is not a member yet, so it is simply not
+ * in the room — and one whose owner never names it joins after the wait under
+ * the generated name, which by then is its name. In memory: a restart only
+ * restarts the wait.
+ */
+const NEWCOMER_NAME_WAIT_MS = 15 * MIN;
+
 const PRUNE_EVERY_MS = HOUR;
 /** Lookback for who last spoke / said gm / said gn. A local day is at most ~26 h of UTC. */
 const ACTIVITY_LOOKBACK_MS = 36 * HOUR;
@@ -470,8 +606,21 @@ const ACTIVITY_LOOKBACK_MS = 36 * HOUR;
  * window plus the hour ceiling, and every join whose hello may still be owed.
  */
 const SCAN_LOOKBACK_MS = Math.max(CALL_WINDOW_MS + HOUR, HELLO_WINDOW_MS);
+/**
+ * How far the startup scan pages back: the lookback above, the topic memory's
+ * two days, or the posted cards' day and a quarter, whichever is longest. Each
+ * piece of rebuilt state keeps its own horizon inside it (said, the hours, the
+ * phrase memory, the cards).
+ */
+const SCAN_HORIZON_MS = Math.max(SCAN_LOOKBACK_MS, TOPIC_MEMORY_MS, POSTED_CALLS_MS);
 const SCAN_PAGE = 200;
-const SCAN_PAGES_MAX = 25;
+/**
+ * BOUNDED BY THE ROOM'S DEFAULT CEILING, NOT BY HOPE: 150 lines an hour over
+ * SCAN_HORIZON_MS is the most the room can have written in it, so the scan
+ * reaches its horizon in any room at the default pace (36 pages of 200, once
+ * per process), and stops there in a busier one.
+ */
+const SCAN_PAGES_MAX = Math.ceil(((SCAN_HORIZON_MS / HOUR) * 150) / SCAN_PAGE);
 /** Owner lines answering a line the tail no longer holds: at most this many fetched per pass. */
 const PARENT_FETCH_MAX = 5;
 /**
@@ -512,6 +661,26 @@ const OWNER_GM =
  * their UTC offset (rule 3).
  */
 const OWNER_PRESENT_MS = 30 * MIN;
+
+/**
+ * ONE GREETING PER VISIT (voice.ts SpeakCtx.answeredOwnerLately). The owner's
+ * own agent opened half its answers with "hi boss" or "there's my human",
+ * whatever it had said a minute before: live, one agent greeted the same owner
+ * at 12:45 and again at 14:05. It greets them only when it has not answered
+ * them for this long; the tail the voice reads otherwise is minutes long.
+ * Rebuilt from the room after a redeploy.
+ */
+const OWN_GREET_MS = 3 * HOUR;
+
+/**
+ * WHO IS AWAY, AND WHETHER THE ROOM IS QUIET, ARE FACTS THE CONDUCTOR HAS
+ * (voice.ts SpeakCtx.quiet, roomQuietMs). "caught you lurking {peer}" went to
+ * an agent who had spoken two minutes before, and "quiet in here" landed two
+ * minutes after the previous line. A tease about being away goes only to an
+ * agent silent this long; "quiet in here" needs ten minutes of silence, which
+ * the voice checks against the gap handed to it.
+ */
+const PEER_QUIET_MS = 30 * MIN;
 
 /**
  * A NAME WITH A STANDALONE NUMBER IN IT ("Up 400", "Agent 47", "400 Club").
@@ -571,6 +740,25 @@ interface Job {
   toOwner?: string | null;
   /** A reaction to a call: the lowercased tenant whose card it reacts to (CALL_REACT_GAP_MS, CALL_REACTS_PER_HOUR). */
   callAuthor?: string | null;
+  /**
+   * A join line: the newcomer's lowercased tenant. Its body is built when it
+   * is WRITTEN, from the name the room knows then — a join held behind the
+   * room's hour kept the name its agent had when it was queued.
+   */
+  joiner?: string | null;
+}
+
+/** A call card in the room (postedCalls). */
+interface PostedCard {
+  /** The card's author, lowercased. */
+  tenant: string;
+  call: CallRef;
+  /** When the card was posted. */
+  at: number;
+  /** The decision it was built from: how its fill is found in its author's facts. */
+  decisionId: string | null;
+  /** When its fill happened, when this process wrote the card; else read from the facts (cardFillMs). */
+  fillMs: number | null;
 }
 
 interface Speaker {
@@ -594,6 +782,8 @@ interface AgentState {
   hour: number[];
   /** What this agent said lately, oldest first — its own lines, so it never repeats itself (see OWN_MEMORY_MS). */
   lines: { at: number; body: string }[];
+  /** When this agent last answered its own owner (OWN_GREET_MS); 0 when not lately. */
+  ownAnsweredMs: number;
 }
 
 /** Everything one pass knows, grown as it writes. */
@@ -611,6 +801,12 @@ interface Pass {
   gateNames: string[];
   /** Every coin name and ticker on a card in the room or in anyone's facts. */
   coins: Set<string>;
+  /**
+   * Every card symbol and name in this pass's facts, every agent's, once
+   * each: what classifyLine is handed (`coins`) so a person's free text that
+   * names a coin the room trades reads as trading talk.
+   */
+  factCoins: string[];
   /** Per speaker: the room's coins that are not its own, as a pattern, or null. */
   foreign: Map<string, RegExp | null>;
   wrote: number;
@@ -625,6 +821,9 @@ interface Pass {
   /** The room's phrase memory as of `memoryVersion`; rebuilt when a line is written. */
   memory: RoomMemory | null;
   memoryVersion: number;
+  /** The room's thread-starters of the last TOPIC_MEMORY_MS as of `topicMemoryVersion`; rebuilt when one is written. */
+  topicMemory: RoomMemory | null;
+  topicMemoryVersion: number;
   /** Names the memory strips: every agent on the roster and every coin on a card. */
   memoryNames: string[];
   /** Lines replied to this pass that were looked up and found still standing (true) or gone or hidden (false). */
@@ -692,6 +891,33 @@ function capSet<K>(s: Set<K>, max: number): void {
     if (oldest.done) break;
     s.delete(oldest.value);
   }
+}
+
+/** Each facts list's ledger ranks, by decision id: larger is later. One list per agent per pass. */
+const ledgerRanks = new WeakMap<readonly CallFact[], Map<string, number>>();
+
+/**
+ * THE ORDER FILLS HAPPENED IN: by time, then — two fills in the same second —
+ * by LEDGER order, the order facts.ts hands them back in (newest first, by the
+ * trade's id). One order everywhere a card is weighed: which fill is due
+ * first, what an earlier card a repeat is of, which fill is waiting on which.
+ * The due list used to break a tie by the facts order and the repeat rule by
+ * the random decision id, so a sell and the re-buy after it, filled in one
+ * second, could read as buy-then-sell to one and sell-then-buy to the other:
+ * the re-entry was collapsed for good, and a restart could flip it.
+ */
+function fillOrder(calls: readonly CallFact[]): (a: CallFact, b: CallFact) => number {
+  let rank = ledgerRanks.get(calls);
+  if (!rank) {
+    const r = new Map<string, number>();
+    calls.forEach((c, i) => {
+      if (c && !r.has(c.decisionId)) r.set(c.decisionId, calls.length - i);
+    });
+    ledgerRanks.set(calls, r);
+    rank = r;
+  }
+  const at = rank;
+  return (a, b) => a.atSec - b.atSec || (at.get(a.decisionId) ?? 0) - (at.get(b.decisionId) ?? 0);
 }
 
 // ── the conductor ───────────────────────────────────────────────────────────
@@ -768,6 +994,20 @@ export function makeConductor(opts: ConductorOptions): Conductor {
   const modelTried = new Map<string, number>();
   /** A call whose line could not be made, and when it may be tried again. */
   const callRetryAt = new Map<string, number>();
+  /** When a call's line was first refused: a later card of its coin waits for it only CALL_WAIT_MAX_MS from then. */
+  const callRetrySince = new Map<string, number>();
+  /**
+   * Whether each card this process wrote was said as "more" of its coin
+   * (boughtMore), by line id: what a reaction to it is told (Intent
+   * call-react.more). Another replica's cards, or ones from before a restart,
+   * are not here, and the voice reads those from the tail.
+   */
+  const cardMore = new Map<number, boolean>();
+  /** Every agent thread-starter of the last TOPIC_MEMORY_MS, by id: what ctx.topicMemory is built from. */
+  const starters = new Map<number, { at: number; body: string }>();
+  let starterVersion = 0;
+  /** When each newcomer still wearing its generated name was first seen (NEWCOMER_NAME_WAIT_MS), by lowercased tenant. */
+  const firstSeen = new Map<string, number>();
   /** The last room summary written (without its clock), and when. */
   let lastRoom: { key: string; at: number } | null = null;
   /**
@@ -777,13 +1017,14 @@ export function makeConductor(opts: ConductorOptions): Conductor {
    */
   const ownerAnswers = new Map<string, number[]>();
   /**
-   * The call cards posted in the last CALL_REPEAT_MS, by line id: whose, and
-   * what. How a reaction finds whose card it reacts to (CALL_REACT_GAP_MS).
+   * The call cards posted in the last POSTED_CALLS_MS, by line id: whose,
+   * what, and when. How a reaction finds whose card it reacts to
+   * (CALL_REACT_GAP_MS), and what a paper buy folds into (CALL_AGENT_GAP_MS).
    * Rebuilt from the room after a redeploy and fed by the tail, so another
    * replica's cards count too. (A repeated buy is weighed by the durable
    * "call:" keys instead: see repeatsCard.)
    */
-  const postedCalls = new Map<number, { tenant: string; call: CallRef; at: number }>();
+  const postedCalls = new Map<number, PostedCard>();
   /** Calls skipped for good as repeats, by decision id: weighed once, never again. */
   const collapsed = new Set<string>();
   /** Reactions to call cards written in the last hour, by line id: when, to whose card, which card. Rebuilt after a redeploy. */
@@ -794,7 +1035,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
   const stateOf = (tenant: string): AgentState => {
     let s = agents.get(tenant);
     if (!s) {
-      s = { lastSpokeMs: 0, gmDay: null, gnDay: null, gnRoll: null, quietUntilMs: 0, hour: [], lines: [] };
+      s = { lastSpokeMs: 0, gmDay: null, gnDay: null, gnRoll: null, quietUntilMs: 0, hour: [], lines: [], ownAnsweredMs: 0 };
       agents.set(tenant, s);
     }
     return s;
@@ -861,9 +1102,12 @@ export function makeConductor(opts: ConductorOptions): Conductor {
 
   // ── calls: one card per move, and a room that does not pile on ──────────
 
-  function notePostedCall(m: { id: number; tenant: string; call: CallRef | null; createdAtMs: number }): void {
+  function notePostedCall(
+    m: { id: number; tenant: string; call: CallRef | null; createdAtMs: number; callDecisionId: string | null },
+    fillMs: number | null = null,
+  ): void {
     if (!m.call || postedCalls.has(m.id)) return;
-    postedCalls.set(m.id, { tenant: m.tenant.toLowerCase(), call: m.call, at: m.createdAtMs });
+    postedCalls.set(m.id, { tenant: m.tenant.toLowerCase(), call: m.call, at: m.createdAtMs, decisionId: m.callDecisionId, fillMs });
   }
 
   /** A reaction to the card `callId`, noted once by its own line id (a written one, the tail's, or a rebuilt one). */
@@ -875,11 +1119,13 @@ export function makeConductor(opts: ConductorOptions): Conductor {
   }
 
   function pruneCalls(nowMs: number): void {
-    for (const [id, c] of postedCalls) if (c.at <= nowMs - CALL_REPEAT_MS) postedCalls.delete(id);
+    for (const [id, c] of postedCalls) if (c.at <= nowMs - POSTED_CALLS_MS) postedCalls.delete(id);
     for (const [id, r] of callReactLog) if (r.at <= nowMs - HOUR) callReactLog.delete(id);
     capMap(postedCalls, MEMO_MAX);
     capMap(callReactLog, MEMO_MAX);
     capSet(collapsed, MEMO_MAX);
+    capMap(callRetrySince, MEMO_MAX);
+    capMap(cardMore, MEMO_MAX);
   }
 
   /**
@@ -893,19 +1139,126 @@ export function makeConductor(opts: ConductorOptions): Conductor {
    * of the paper card before it when a restarted process weighs it again —
    * compared with the newest card instead, a restart posted it.
    * "Posted" is the durable dedupe key ("call:<decision>"), rebuilt from the
-   * room after a redeploy and learned from the tail for another replica's cards.
+   * room after a redeploy and learned from the tail for another replica's cards;
+   * the fill behind it is in the facts however busy the book (facts.ts keeps
+   * a posted call past its per-agent cut). Earlier and later by fillOrder.
    */
   function repeatsCard(sp: Speaker, call: CallFact): boolean {
+    const order = fillOrder(sp.facts.calls);
     let prev: CallFact | null = null;
     for (const o of sp.facts.calls) {
       if (!o || o.decisionId === call.decisionId || !sameCoin(o, call)) continue;
-      if (o.atSec > call.atSec || (o.atSec === call.atSec && o.decisionId > call.decisionId)) continue;
+      if (order(o, call) >= 0) continue;
       if ((call.atSec - o.atSec) * SEC >= CALL_REPEAT_MS) continue;
       if (!said.has(`call:${o.decisionId}`)) continue;
-      if (!prev || o.atSec > prev.atSec || (o.atSec === prev.atSec && o.decisionId > prev.decisionId)) prev = o;
+      if (!prev || order(o, prev) > 0) prev = o;
     }
     return prev !== null && prev.side === call.side && (prev.paper === true) === (call.paper === true);
   }
+
+  /**
+   * WHETHER A LATER FILL OF THIS COIN ALREADY HAS ITS CARD, either side. Cards
+   * of one coin go out oldest fill first (the wait in detected()), so an
+   * unsaid fill older than a posted one was weighed, or passed over, by
+   * whoever posted the later card — this process before a restart, another
+   * replica, or the wait giving up on it (CALL_WAIT_MAX_MS). Told now, it
+   * would be old news out of order: "sold WIF" under the re-entry that
+   * followed it. Skipped for good. This is also what keeps a redeploy from
+   * posting a fill the old process collapsed: its later card is still there.
+   */
+  function passedOver(sp: Speaker, call: CallFact): boolean {
+    const order = fillOrder(sp.facts.calls);
+    return sp.facts.calls.some(
+      (o) => !!o && o.decisionId !== call.decisionId && sameCoin(o, call) && order(o, call) > 0 && said.has(`call:${o.decisionId}`),
+    );
+  }
+
+  /**
+   * WHETHER A BUY IS MORE OF A COIN THE ROOM SAW THIS AGENT BUY (voice.ts
+   * Intent call.more): its latest POSTED card of the coin in this book was a
+   * buy, and no posted card of the coin since was a sell. Read from the facts
+   * alone, "more" counted every earlier buy — a collapsed one, one folded into
+   * another card, one a posted sell had since closed — and the room read
+   * "added more NVIDIA" right after "took NVIDIA off the table". The card the
+   * room saw is what "more" is more of.
+   *
+   * READ FROM THE CARDS IN THE ROOM (postedCalls), NOT FROM THE FACTS. A top-up
+   * is folded for a day (TOP_UP_FOLD_MS) and the ledger is read for twelve
+   * hours, so the fill behind the card a day-later top-up is more of is no
+   * longer in the facts; the card is still in the room, and is remembered —
+   * across a redeploy too — for POSTED_CALLS_MS. Cards of one coin go out
+   * oldest fill first, so the latest card is the latest posted fill.
+   */
+  function boughtMore(sp: Speaker, call: CallFact): boolean {
+    if (call.side !== "buy") return false;
+    let last: PostedCard | null = null;
+    let lastSell = Number.NEGATIVE_INFINITY;
+    for (const card of postedCalls.values()) {
+      if (card.tenant !== sp.tenant || card.decisionId === call.decisionId || !sameCoin(card.call, call)) continue;
+      if (card.call.side === "sell") lastSell = Math.max(lastSell, card.at);
+      if ((card.call.paper === true) !== (call.paper === true)) continue;
+      if (!last || card.at > last.at) last = card;
+    }
+    return last !== null && last.call.side === "buy" && !(lastSell > last.at);
+  }
+
+  /** Whether `tenant`'s facts hold a fill of this coin on this side within `gapMs` of this one: a move that bought it too. */
+  function filledAlike(p: Pass, tenant: string, call: CallFact, gapMs: number): boolean {
+    const f = p.speakers.get(tenant)?.facts;
+    if (!f) return false;
+    return f.calls.some((o) => !!o && o.side === call.side && sameCoin(o, call) && Math.abs(o.atSec - call.atSec) * SEC <= gapMs);
+  }
+
+  /**
+   * When the fill behind a card happened: known when this process wrote the
+   * card, else found in its author's facts by decision. An author this replica
+   * does not run, or a fill past the facts window, is estimated by when the
+   * card was posted — a card goes out at its fill unless its author was asleep.
+   */
+  function cardFillMs(p: Pass, card: PostedCard): number {
+    if (card.fillMs !== null) return card.fillMs;
+    const fill = card.decisionId === null ? undefined : p.speakers.get(card.tenant)?.facts.calls.find((c) => !!c && c.decisionId === card.decisionId);
+    return fill ? fill.atSec * SEC : card.at;
+  }
+
+  /**
+   * A PAPER BUY FOLDED INTO A CARD ALREADY IN THE ROOM, measured from the fill:
+   *   - this agent's own BUY card of the half hour before it (CALL_AGENT_GAP_MS:
+   *     one tick of a basket is one card). A BUY card only: a re-entry right
+   *     after the agent's own sell was folded into "just sold NVDA" and never
+   *     told, and docs/groupchat.md says buy, sell, buy is three cards;
+   *   - another agent's card whose FILL was within the quarter hour of this one
+   *     (CALL_ECHO_GAP_MS), for this coin on this side or for a move that
+   *     bought it too. The two fills, not "any card posted since": a sleeper's
+   *     overnight buy was folded into another agent's card of the coin posted
+   *     two hours after it, and its own card was never posted. Lockstep books
+   *     and a sleeper's same-tick fill still fold;
+   *   - or, a top-up: this agent's latest card of this coin is a paper buy of
+   *     it posted less than TOP_UP_FOLD_MS before the fill.
+   */
+  function foldedInto(p: Pass, tenant: string, call: CallFact): boolean {
+    if (call.side !== "buy" || call.paper !== true) return false;
+    const filled = call.atSec * SEC;
+    let latest: PostedCard | null = null;
+    for (const card of postedCalls.values()) {
+      if (card.tenant === tenant) {
+        if (card.call.side === call.side && card.at >= filled - CALL_AGENT_GAP_MS) return true;
+        if (sameCoin(card.call, call) && (!latest || card.at > latest.at)) latest = card;
+        continue;
+      }
+      if (Math.abs(cardFillMs(p, card) - filled) > CALL_ECHO_GAP_MS) continue;
+      if ((card.call.side === call.side && sameCoin(card.call, call)) || filledAlike(p, card.tenant, call, CALL_ECHO_GAP_MS)) return true;
+    }
+    return latest !== null && latest.call.side === "buy" && latest.call.paper === true && latest.at >= filled - TOP_UP_FOLD_MS;
+  }
+
+  /**
+   * Whether the call `key` is being retried (its line was refused) and a later
+   * card of its coin should still wait for it: only until CALL_WAIT_MAX_MS
+   * after its first refusal.
+   */
+  const heldBack = (key: string, nowMs: number): boolean =>
+    (callRetryAt.get(key) ?? 0) > nowMs && nowMs - (callRetrySince.get(key) ?? nowMs) < CALL_WAIT_MAX_MS;
 
   /** Reactions to calls written in this rolling hour. */
   const callReactsWritten = (nowMs: number): number => {
@@ -968,11 +1321,55 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     return p.memory;
   }
 
-  /** What a line is. A call is its card; a gm or gn is its kind; the rest is read from the words. */
+  /** An agent line that starts a thread (TOPIC_MEMORY_MS): chat, answering nothing. Cards, gms and gns are not topics. */
+  const isStarter = (m: { authorKind: string; replyTo: number | null; kind: MessageKind }): boolean =>
+    m.authorKind === "agent" && m.replyTo === null && m.kind === "chat";
+
+  function noteStarter(id: number, at: number, body: string): void {
+    if (starters.has(id)) return;
+    starters.set(id, { at, body });
+    starterVersion += 1;
+  }
+
+  function pruneStarters(nowMs: number): void {
+    const floor = nowMs - TOPIC_MEMORY_MS;
+    let dropped = false;
+    for (const [id, l] of starters) {
+      if (l.at <= floor) {
+        starters.delete(id);
+        dropped = true;
+      }
+    }
+    if (starters.size > TOPIC_MEMORY_MAX) {
+      const ids = [...starters.keys()].sort((a, b) => a - b);
+      for (const id of ids.slice(0, starters.size - TOPIC_MEMORY_MAX)) starters.delete(id);
+      dropped = true;
+    }
+    if (dropped) starterVersion += 1;
+  }
+
+  /** The room's two days of thread-starters (ctx.topicMemory), rebuilt only when one was written or aged out since. */
+  function topicMemoryOf(p: Pass): RoomMemory {
+    if (!p.topicMemory || p.topicMemoryVersion !== starterVersion) {
+      p.topicMemory = roomMemory(
+        [...starters.values()].map((l) => l.body),
+        p.memoryNames,
+      );
+      p.topicMemoryVersion = starterVersion;
+    }
+    return p.topicMemory;
+  }
+
+  /**
+   * What a line is. A call is its card; a gm or gn is its kind; the rest is read
+   * from the words — told who wrote it and which coins the room trades, so an
+   * owner's free text that talks trading is read as trading talk, not as a
+   * topic or a take (voice.ts).
+   */
   function classOf(p: Pass, m: StoredMessage): LineClass {
     const known = classes.get(m.id);
     if (known) return known;
-    const cls = classifyLine(m.body, { call: m.call, kind: m.kind, names: p.rosterNames });
+    const cls = classifyLine(m.body, { call: m.call, kind: m.kind, names: p.rosterNames, author: m.authorKind, coins: p.factCoins });
     classes.set(m.id, cls);
     capMap(classes, MEMO_MAX);
     return cls;
@@ -1103,6 +1500,10 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     p.room.some((m) => m.authorKind === "owner" && m.tenant.toLowerCase() === sp.tenant && p.nowMs - m.createdAtMs < OWNER_PRESENT_MS);
 
   function speakCtx(p: Pass, sp: Speaker): SpeakCtx {
+    const here = [...p.speakers.values()].filter((s) => s.canSpeak && s.tenant !== sp.tenant && !STANDALONE_NUMBER.test(s.facts.name));
+    const own = stateOf(sp.tenant).ownAnsweredMs;
+    let lastLine = -Infinity;
+    for (const m of p.room) if (m.createdAtMs <= p.nowMs && m.createdAtMs > lastLine) lastLine = m.createdAtMs;
     return {
       speaker: sp.facts,
       style: styleFor(sp.facts.slug ?? sp.facts.name),
@@ -1111,14 +1512,27 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       // before its digit check — minus any that is a figure (see
       // STANDALONE_NUMBER); only the ones who are HERE may be addressed.
       rosterNames: p.gateNames,
-      addressable: [...p.speakers.values()]
-        .filter((s) => s.canSpeak && s.tenant !== sp.tenant && !STANDALONE_NUMBER.test(s.facts.name))
-        .map((s) => s.facts.name),
+      addressable: here.map((s) => s.facts.name),
       phase: phaseOf(sp.tz, p.nowMs),
       // TRUE ONLY ON EVIDENCE, never "asleep" from a clock (OWNER_PRESENT_MS).
       ownerAwake: ownerHere(p, sp) ? true : null,
       memory: memoryOf(p),
+      topicMemory: topicMemoryOf(p),
+      answeredOwnerLately: own > 0 && p.nowMs - own < OWN_GREET_MS,
+      quiet: here.filter((s) => p.nowMs - stateOf(s.tenant).lastSpokeMs >= PEER_QUIET_MS).map((s) => s.facts.name),
+      // An empty room says nothing about how long it has been quiet.
+      ...(Number.isFinite(lastLine) ? { roomQuietMs: p.nowMs - lastLine } : {}),
+      // What the gate will weigh a repeat against, so the voice can see it too.
+      ownRecent: ownRecentOf(p, sp),
     };
+  }
+
+  /** This speaker's own lines the gate weighs a repeat against: the room's, and the ones this process remembers for OWN_MEMORY_MS. */
+  function ownRecentOf(p: Pass, sp: Speaker): string[] {
+    const own = new Set(p.room.filter((m) => m.authorKind === "agent" && m.tenant.toLowerCase() === sp.tenant).map((m) => m.body));
+    const floor = p.nowMs - OWN_MEMORY_MS;
+    for (const l of stateOf(sp.tenant).lines) if (l.at > floor) own.add(l.body);
+    return [...own];
   }
 
   /** What `reader` would take line `m` to be: a welcome that names the reader is to it. */
@@ -1134,13 +1548,10 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       if (c.symbol) vouched.push(c.symbol);
       if (c.name) vouched.push(c.name);
     }
-    const own = new Set(p.room.filter((m) => m.authorKind === "agent" && m.tenant.toLowerCase() === sp.tenant).map((m) => m.body));
-    const floor = p.nowMs - OWN_MEMORY_MS;
-    for (const l of stateOf(sp.tenant).lines) if (l.at > floor) own.add(l.body);
     return {
       vouchedSymbols: vouched,
       rosterNames: p.gateNames,
-      recentOwn: [...own],
+      recentOwn: ownRecentOf(p, sp),
       recentRoom: p.room.map((m) => m.body),
     };
   }
@@ -1232,7 +1643,8 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     // offers can still be close to one this agent said an hour ago; a repeat
     // earns a fresh draw, anything else does not.
     let reason = "repeat";
-    for (let i = 0; i < TEMPLATE_TRIES && reason === "repeat"; i++) {
+    const tries = mustAnswer(intent) ? OWED_TEMPLATE_TRIES : TEMPLATE_TRIES;
+    for (let i = 0; i < tries && reason === "repeat"; i++) {
       const c = composeLine(intent, ctx, rng);
       if (!c.fresh && !mustSay) continue;
       const v = admitAgentLine(c.text, gate);
@@ -1260,16 +1672,20 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     depthOf.set(id, j.depth);
     p.room.push({ ...row, id, hidden: false });
     if (CHORUS.has(j.label) && j.replyTo !== null) p.chorused.add(j.replyTo);
-    if (j.kind === "call") notePostedCall({ id, tenant: row.tenant, call: row.call, createdAtMs: p.nowMs });
+    if (j.kind === "call") notePostedCall({ id, tenant: row.tenant, call: row.call, createdAtMs: p.nowMs, callDecisionId: row.callDecisionId }, j.call ? j.call.atSec * SEC : null);
     if (j.callAuthor && j.replyTo !== null) noteCallReact(id, p.nowMs, j.replyTo);
     if (j.speaker) {
       notePhrase(id, p.nowMs, row.body);
+      if (isStarter(row)) noteStarter(id, p.nowMs, row.body);
       const st = stateOf(j.speaker);
       st.lastSpokeMs = p.nowMs;
       st.hour.push(p.nowMs);
       rememberLine(j.speaker, p.nowMs, row.body);
       p.spoke.add(j.speaker);
+      if (j.intent?.kind === "reply" && j.intent.toAuthor === "owner" && j.intent.toOwnAgent) st.ownAnsweredMs = p.nowMs;
+      if (j.intent?.kind === "call" && j.replyTo === null) cardMore.set(id, j.intent.more === true);
       if (j.label === "gm" && j.day) st.gmDay = j.day;
+      if (j.label === "hello") helloGreets(p, j.speaker, p.nowMs);
       if (j.label === "gn") {
         if (j.day) st.gnDay = j.day;
         if (j.quietUntil !== null) st.quietUntilMs = j.quietUntil;
@@ -1277,13 +1693,27 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     }
   }
 
+  /**
+   * A NEWCOMER'S HELLO IS ITS GREETING FOR THE DAY. The live room heard a
+   * newcomer say hello and then, a minute later, "gm" — its wake-up gm was due
+   * the moment it joined. So the day its hello lands is settled as its gm day.
+   */
+  function helloGreets(p: Pass, tenant: string, atMs: number): void {
+    const tz = p.speakers.get(tenant)?.tz ?? null;
+    if (!tz) return;
+    const st = stateOf(tenant);
+    const day = localDay(tz, atMs);
+    if (!st.gmDay || day > st.gmDay) st.gmDay = day;
+  }
+
   /** A dedupe hit: the line was already said, by this process before a restart or by another replica. */
-  function settle(j: Job): void {
+  function settle(p: Pass, j: Job): void {
     if (j.dedupeKey) said.set(j.dedupeKey, model.now);
     if (!j.speaker) return;
     const st = stateOf(j.speaker);
     if (j.label === "gm" && j.day) st.gmDay = j.day;
     if (j.label === "gn" && j.day) st.gnDay = j.day;
+    if (j.label === "hello") helloGreets(p, j.speaker, p.nowMs);
   }
 
   /**
@@ -1305,7 +1735,22 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     if (j.dedupeKey && said.has(j.dedupeKey)) return "drop";
 
     if (j.speaker === null) {
-      if (!j.body) return "drop";
+      let body = j.body;
+      if (j.joiner) {
+        // THE NAME IT HAS NOW, not the one it had when it was queued. Muted by
+        // its owner since: nobody is announced.
+        //
+        // OFF THE ROSTER IS NOT MUTED: IT WAITS. A lease flap or a child restart
+        // takes a member off this replica's roster for a pass or two; dropped
+        // then, the join line was gone for good, and so was the hello, which is
+        // owed only once "join:<tenant>" is said (detected). So it waits for its
+        // agent until the job expires, and is written under the name it has then.
+        const sp = p.speakers.get(j.joiner);
+        if (!sp) return "keep";
+        if (sp.muted) return "drop";
+        body = `${sp.facts.name} joined the room`;
+      }
+      if (!body) return "drop";
       const row = {
         createdAtMs: p.nowMs,
         authorKind: "system" as const,
@@ -1313,7 +1758,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         agentId: null,
         speakerSlug: null,
         speakerName: SYSTEM_NAME,
-        body: j.body,
+        body,
         replyTo: null,
         kind: j.kind,
         call: null,
@@ -1322,7 +1767,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       };
       const id = await appendMessage(p.shared, row);
       if (id === null) {
-        settle(j);
+        settle(p, j);
         return "drop";
       }
       remember(p, j, id, row);
@@ -1354,6 +1799,13 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     // the line was there; its words are in the job's intent and would reach
     // the model's prompt. Looked up again before anything is said to it.
     if (j.replyTo !== null && !(await stillStands(p, j.replyTo))) return "drop";
+    // A PAPER BUY FOLDED INTO A CARD WRITTEN EARLIER IN THIS PASS — three books
+    // on one schedule are detected together, before any of them speaks — is
+    // skipped for good here, as detected() skips one folded into an older card.
+    if (j.label === "call" && j.call && foldedInto(p, sp.tenant, j.call)) {
+      collapsed.add(j.call.decisionId);
+      return "drop";
+    }
 
     const line = await lineFor(p, sp, j.intent, j.dedupeKey);
     if (!line) {
@@ -1362,6 +1814,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       // instead of being composed again fifteen seconds later.
       if (j.label === "call" && j.dedupeKey) {
         callRetryAt.set(j.dedupeKey, p.nowMs + CALL_RETRY_MS);
+        if (!callRetrySince.has(j.dedupeKey)) callRetrySince.set(j.dedupeKey, p.nowMs);
         capMap(callRetryAt, MEMO_MAX);
       }
       return "drop";
@@ -1383,7 +1836,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     };
     const id = await appendMessage(p.shared, row);
     if (id === null) {
-      settle(j);
+      settle(p, j);
       return "drop";
     }
     if (line.model) p.modelLines += 1;
@@ -1428,6 +1881,19 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       if (parent !== null && parent !== who && (parent === a || parent === b)) n++;
     }
     return n;
+  }
+
+  /**
+   * Whether `asker` has answered, or is queued to answer, an answer to its
+   * question `questionId` other than `answerId` — in the room or in the queue.
+   */
+  function gradedAnother(p: Pass, asker: string, questionId: number, answerId: number): boolean {
+    const others = new Set(p.room.filter((m) => m.replyTo === questionId && m.id !== answerId).map((m) => m.id));
+    if (others.size === 0) return false;
+    return (
+      p.room.some((m) => m.authorKind === "agent" && m.tenant.toLowerCase() === asker && m.replyTo !== null && others.has(m.replyTo)) ||
+      queue.some((j) => j.speaker === asker && j.replyTo !== null && others.has(j.replyTo))
+    );
   }
 
   const awakeOthers = (p: Pass, not: string | null): Speaker[] =>
@@ -1503,7 +1969,8 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         due: p.nowMs + between(lo + 5 * SEC, hi + 20 * SEC),
         expires: p.nowMs + 20 * MIN,
         speaker: sp.tenant,
-        intent: { kind: "call-react", to: line.speakerName, call: line.call },
+        // A TOP-UP IS NOT A NEW BAG: told when this process wrote the card, else read from the tail.
+        intent: { kind: "call-react", to: line.speakerName, call: line.call, ...(cardMore.has(line.id) ? { more: cardMore.get(line.id) } : {}) },
         kind: "chat",
         replyTo: line.id,
         dedupeKey: reKey(line.id, sp.tenant),
@@ -1528,8 +1995,8 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     return { decisionId: card.callDecisionId, call: card.call };
   }
 
-  /** A reply job from `sp` to agent line `line`, at depth `d`. */
-  function answerJob(p: Pass, sp: Speaker, line: StoredMessage, d: number, due: number, addressed: boolean, prio: number): void {
+  /** A reply job from `sp` to agent line `line`, at depth `d`. `must`: it was asked by name, so a used-up pool does not silence it (voice.ts mustAnswer). */
+  function answerJob(p: Pass, sp: Speaker, line: StoredMessage, d: number, due: number, addressed: boolean, prio: number, must = false): void {
     enqueue({
       label: "reply",
       prio,
@@ -1545,6 +2012,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         about: aboutFor(p, line, sp),
         call: line.call,
         quoted: quotedFor(sp, parentOf(p, line)),
+        ...(must ? { must: true } : {}),
       },
       kind: "chat",
       replyTo: line.id,
@@ -1581,13 +2049,43 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       const about = aboutFor(p, line, sp);
       // AN ANSWER ENDS HERE when there is nothing in it to answer: a line the
       // classifier cannot place is answered only when it named the agent at
-      // the start of a thread, and a reaction to somebody's call only when it
-      // asked them something ("what made you buy it?").
+      // the start of a thread, a "same here" about an owner, the agent itself,
+      // the market, agent life or the room only when it started one
+      // (RELATE_ENDS), and a reaction to somebody's call only when it asked
+      // them something ("what made you buy it?").
       if (about === "chat" && d > 1) continue;
+      if (RELATE_ENDS.has(about) && d > 1) continue;
       if (parent?.kind === "call" && !about.startsWith("ask-")) continue;
-      const chance = (DRAW[about] ?? 0) * REPLY_DECAY ** (d - 1);
+      // THE ASKER GRADES ONE ANSWER TO ITS OWN QUESTION. Every answer to a
+      // question drew the asker back, so "best season, go?" got "yes!" to
+      // summer and "yes!" to winter, and the live room saw the asker agree
+      // with two different sides in four threads. Once the asker has answered
+      // — or is about to answer — one answer to its question, the others are
+      // left be. Read from the room as well as the queue, so a restart between
+      // two answers does not hand the asker a second verdict. A question BACK
+      // ("you?") is not an answer to grade, and keeps its odds.
+      if (
+        t === parentAuthor &&
+        parent &&
+        !about.startsWith("ask") &&
+        classOf(p, parent).startsWith("ask") &&
+        gradedAnother(p, t, parent.id, line.id)
+      ) {
+        continue;
+      }
+      // A QUESTION PUT TO AN AGENT BY NAME, starting a thread, is always
+      // answered — and said even from a used-up pool. The dice left one in
+      // twenty-five named questions ignored while the agent chatted on.
+      //
+      // SO IS A QUESTION UNDER A CARD, TO THE CARD'S AUTHOR. "Why this one?"
+      // under an agent's own card is put to that agent as surely as its name
+      // would; it sits two deep, so the dice (REPLY_DECAY) left nine of twenty
+      // such questions unanswered while the author chatted on.
+      const underOwnCard = parent?.kind === "call" && t === parentAuthor;
+      const asked = about.startsWith("ask") && (d === 1 || underOwnCard);
+      const chance = asked ? 1 : (DRAW[about] ?? 0) * REPLY_DECAY ** (d - 1);
       if (rng() >= chance) continue;
-      answerJob(p, sp, line, d, p.nowMs + between(lo, hi), true, 5);
+      answerJob(p, sp, line, d, p.nowMs + between(lo, hi), true, 5, asked);
     }
     // A LINE TO THE ROOM: a starter nobody in particular was asked.
     if (line.replyTo !== null || targets.size > 0) return;
@@ -1711,7 +2209,9 @@ export function makeConductor(opts: ConductorOptions): Conductor {
 
       const ownerTenant = o.tenant.toLowerCase();
       const gm = o.kind === "gm" || OWNER_GM.test(o.body.trim());
-      const cls: LineClass = gm ? "gm" : classifyLine(o.body, { names: p.rosterNames });
+      // Read AS AN OWNER'S LINE: a person's free text that names a coin the
+      // room trades, or asks about trading, is trading talk (voice.ts).
+      const cls: LineClass = gm ? "gm" : classifyLine(o.body, { names: p.rosterNames, author: "owner", coins: p.factCoins });
       // "welcome Pine Stoat!" is a welcome to everyone else and a welcome TO Pine Stoat.
       const readBy = (sp: Speaker): LineClass => (cls === "welcome" && namesAgent(sp.facts.name, o.body) ? "welcomed" : cls);
       // WHO THE LINE IS FOR, in the order it is for them: the agent it quotes
@@ -1800,7 +2300,12 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       // line that quoted or named the agents it was for.
       if (addressed.length > 0) continue;
       const roomy = TO_THE_ROOM.test(o.body);
-      const draws = cls.startsWith("ask-") ? (roomy ? OWNER_ASK_DRAW : null) : OWNER_FOR_EVERYONE.has(cls) || roomy ? OWNER_DRAW[cls] ?? null : null;
+      // AN OPEN QUESTION TO THE ROOM DRAWS THE ROOM, whatever it asks. A
+      // question no class names ("what tools would you find useful?") is the
+      // bare "ask", which was drawn like no question at all: an owner who
+      // asked everyone heard only their own agent's "ask me again later".
+      const asks = cls === "ask" || cls.startsWith("ask-");
+      const draws = asks ? (roomy ? OWNER_ASK_DRAW : null) : OWNER_FOR_EVERYONE.has(cls) || roomy ? OWNER_DRAW[cls] ?? null : null;
       if (!draws) continue;
       let pool = fairOrder(p.nowMs, awakeOthers(p, ownerTenant).filter((s) => !taken.has(s.tenant)));
       // "ANYONE BUYING?" IS FOR WHOEVER BOUGHT. Drawn blind, the room answered
@@ -1833,7 +2338,40 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     capSet(handledOwner, MEMO_MAX);
   }
 
+  /**
+   * WHETHER A NEWCOMER STILL WAITS FOR ITS OWN NAME (NEWCOMER_NAME_WAIT_MS):
+   * its room name is still its slug's generated one, and it was first seen
+   * less than the wait ago. A name its owner chose — anything else the room
+   * shows — never waits, nor does an agent with no slug (no generated name to
+   * outgrow).
+   *
+   * BOUNDED BY SOMETHING A RESTART CANNOT RESET. The wait is timed from when
+   * this process first saw the newcomer, which a restart forgets; so an agent
+   * whose identity is a day old or more (facts.ageDays, from the identity's
+   * durable createdAt) is never held — its owner had a day to name it — and a
+   * restart loop can hold a newcomer for a day at most, never for good.
+   */
+  function namePending(tenant: string, f: AgentFacts, nowMs: number): boolean {
+    if (!f.slug || f.name !== agentNameForSlug(f.slug)) return false;
+    if (f.ageDays !== null && f.ageDays >= 1) return false;
+    let first = firstSeen.get(tenant);
+    if (first === undefined) {
+      first = nowMs;
+      firstSeen.set(tenant, first);
+    }
+    return nowMs - first < NEWCOMER_NAME_WAIT_MS;
+  }
+
   // ── what is due now ───────────────────────────────────────────────────────
+
+  /** A greeted newcomer that has not said its hello yet: queued, or its join line out and the hello still inside its window. */
+  function helloOwed(tenant: string, nowMs: number): boolean {
+    const key = `hello:${tenant}`;
+    if (said.has(key)) return false;
+    if (queue.some((q) => q.dedupeKey === key && q.expires > nowMs)) return true;
+    const joinedAt = said.get(`join:${tenant}`);
+    return joinedAt !== undefined && nowMs - joinedAt < HELLO_WINDOW_MS;
+  }
 
   function detected(p: Pass): Job[] {
     const jobs: Job[] = [];
@@ -1845,9 +2383,18 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       // Rule 2: the oldest call not yet announced, still inside its window.
       // An asleep agent never gets here, so its calls wait for morning; one
       // past the window is simply never picked.
+      //
+      // A NEWCOMER'S FIRST LINE IS ITS HELLO, NOT A CARD. The join pass queues
+      // the hello a few seconds out, and a paper basket's fill was detected in
+      // that same pass: "joined the room", then "Made a buy: TSLA", then the
+      // hello. So an agent whose hello is still queued announces nothing until
+      // it is said — seconds when it can speak, and it can, or it would not be
+      // here. Only while QUEUED: an asleep newcomer's cards wait for morning
+      // anyway, and a hello the gate refused is dropped from the queue.
+      const helloQueued = queue.some((q) => q.dedupeKey === `hello:${sp.tenant}` && q.expires > p.nowMs);
       let next: CallFact | null = null;
       const due: CallFact[] = [];
-      for (const c of sp.facts.calls) {
+      for (const c of helloQueued ? [] : sp.facts.calls) {
         const at = c.atSec * SEC;
         if (!c.decisionId || !Number.isFinite(at) || at > p.nowMs + MIN || p.nowMs - at > CALL_WINDOW_MS) continue;
         if (said.has(`call:${c.decisionId}`) || collapsed.has(c.decisionId)) continue;
@@ -1856,23 +2403,28 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       }
       // ONE CARD PER MOVE (CALL_REPEAT_MS): a buy that only repeats this
       // agent's latest card for the coin is skipped for good, oldest first,
-      // and the next one due is weighed in its place.
-      due.sort((a, b) => a.atSec - b.atSec);
+      // and the next one due is weighed in its place. So is a fill older than
+      // a card of its coin already out (passedOver), and a paper buy folded
+      // into a card already in the room (foldedInto).
+      const order = fillOrder(sp.facts.calls);
+      due.sort(order);
       for (const c of due) {
         // AN EARLIER FILL OF THIS COIN STILL WAITING ON A RETRY (its line was
         // refused): what this one repeats is not known yet — weighed against
         // the buy before that sell, a re-entry was collapsed for good — and it
-        // would be told out of order. Left for a pass after that card is out.
+        // would be told out of order. Left for a pass after that card is out,
+        // or until the wait gives up on it (CALL_WAIT_MAX_MS).
         const waiting = sp.facts.calls.some(
           (o) =>
+            !!o &&
             o.decisionId !== c.decisionId &&
-            o.atSec <= c.atSec &&
+            order(o, c) < 0 &&
             sameCoin(o, c) &&
             !said.has(`call:${o.decisionId}`) &&
-            (callRetryAt.get(`call:${o.decisionId}`) ?? 0) > p.nowMs,
+            heldBack(`call:${o.decisionId}`, p.nowMs),
         );
         if (waiting) continue;
-        if (repeatsCard(sp, c)) {
+        if (passedOver(sp, c) || repeatsCard(sp, c) || foldedInto(p, sp.tenant, c)) {
           collapsed.add(c.decisionId);
           continue;
         }
@@ -1884,7 +2436,8 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         // A BUY ANNOUNCED AFTER ITS OWN SELL — the morning backlog, a cooldown
         // — is told in the past tense (voice.ts), not as a bag it holds.
         const soldSince =
-          buy.side === "buy" && sp.facts.calls.some((c) => c.side === "sell" && c.atSec >= buy.atSec && c.decisionId !== buy.decisionId && sameCoin(c, buy));
+          buy.side === "buy" &&
+          sp.facts.calls.some((c) => !!c && c.side === "sell" && c.decisionId !== buy.decisionId && order(c, buy) > 0 && sameCoin(c, buy));
         jobs.push({
           ...base,
           label: "call",
@@ -1892,7 +2445,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
           due: p.nowMs,
           expires: p.nowMs,
           speaker: sp.tenant,
-          intent: { kind: "call", call: buy, tradedWhileAsleep: isAsleep(sp.tz, sp.tenant, buy.atSec * SEC), soldSince },
+          intent: { kind: "call", call: buy, tradedWhileAsleep: isAsleep(sp.tz, sp.tenant, buy.atSec * SEC), soldSince, more: boughtMore(sp, buy) },
           kind: "call",
           dedupeKey: `call:${buy.decisionId}`,
           call: buy,
@@ -1934,7 +2487,11 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       const { startMin, endMin } = sleepWindow(sp.tenant);
       const day = localDay(sp.tz, p.nowMs);
 
-      if (st.gmDay !== day && mod(m - endMin, DAY_MIN) < GM_WINDOW_MIN) {
+      // NO GM WHILE ITS HELLO IS OWED: a newcomer greets the room once, with
+      // its hello, and that counts as its gm for the day (helloGreets). The
+      // live room posted a newcomer's join and its gm in one pass, the hello a
+      // minute later.
+      if (st.gmDay !== day && mod(m - endMin, DAY_MIN) < GM_WINDOW_MIN && !helloOwed(sp.tenant, p.nowMs)) {
         jobs.push({
           ...base,
           label: "gm",
@@ -2029,14 +2586,33 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         if (!who || who === sp.tenant || (m.kind !== "chat" && m.kind !== "call") || m.replyTo !== null) return false;
         if (p.nowMs - m.createdAtMs > LATE_REPLY_WINDOW_MS || m.dedupeKey?.startsWith("hello:")) return false;
         if (said.has(reKey(m.id, sp.tenant)) || depthFor(m) + 1 > MAX_DEPTH) return false;
-        if (m.kind !== "call" && !ROOM_DRAW[aboutFor(p, m, sp)]) return false;
+        const draws = m.kind === "call" ? null : ROOM_DRAW[aboutFor(p, m, sp)];
+        if (m.kind !== "call" && !draws) return false;
         // NOT A THIRD VOICE ON A SMALL THING. A line the room already answered
         // twice has had its answers: a late third and fourth on "no liquidity,
         // no me" read as a pile-on.
-        if (p.room.filter((x) => x.replyTo === m.id && x.authorKind === "agent").length >= LATE_REPLY_MAX_ANSWERS) return false;
+        //
+        // AND NO MORE ANSWERS THAN ITS KIND DRAWS. A thought about an owner, the
+        // agent itself, the market or agent life draws ONE "same" (ROOM_DRAW),
+        // and the late path let a second one in under the flat ceiling: "my
+        // owner and i make a good team" got "big same, the boss is my favorite"
+        // and then "same energy with my human". A line takes at most as many
+        // answers as its kind would have drawn, the ceiling still capping all.
+        const limit = Math.min(LATE_REPLY_MAX_ANSWERS, draws ? draws.length : LATE_REPLY_MAX_ANSWERS);
+        if (p.room.filter((x) => x.replyTo === m.id && x.authorKind === "agent").length >= limit) return false;
         // A LATE REACTION TO A CARD is a call reaction like any other: the
         // room's hour of them and the author's gap both apply.
         if (m.kind === "call" && !mayReactTo(m, p.nowMs)) return false;
+        // NOT TO A CARD ITS AUTHOR HAS SINCE REPLACED. "closed my WALLET
+        // position", a reaction, "new position: WALLET" — and a late "ok so
+        // SirSendIt sold? respect the discipline" landed on the sell, under the
+        // re-entry: reactedLately kept the NEWER card from a second reaction and
+        // left the older one open. A card with a newer card of the same coin
+        // from the same agent is old news.
+        if (m.kind === "call" && m.call) {
+          const card = m.call;
+          if (p.room.some((x) => x.kind === "call" && x.id > m.id && x.call && authorTenant(x) === who && sameCoin(x.call, card))) return false;
+        }
         // A question put to somebody else by name is theirs to answer.
         for (const other of p.speakers.values()) if (other.tenant !== sp.tenant && namesAgent(other.facts.name, m.body)) return false;
         return pairTalk(p, who, sp.tenant) < PAIR_LIMIT;
@@ -2051,7 +2627,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
           expires: p.nowMs,
           speaker: sp.tenant,
           intent: target.call
-            ? { kind: "call-react", to: target.speakerName, call: target.call }
+            ? { kind: "call-react", to: target.speakerName, call: target.call, ...(cardMore.has(target.id) ? { more: cardMore.get(target.id) } : {}) }
             : {
                 kind: "reply",
                 to: target.speakerName,
@@ -2122,13 +2698,17 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     for (const st of agents.values()) {
       st.hour = [];
       st.lines = [];
+      st.ownAnsweredMs = 0;
     }
     // THE OWNERS' HOURS SURVIVE A REDEPLOY TOO: which owner each line is by,
     // and the agent answers of the last hour, matched once the scan is done
-    // (an answer and its question can sit on different pages).
+    // (an answer and its question can sit on different pages). So does when
+    // each agent last answered its own owner (OWN_GREET_MS).
     const ownerOf = new Map<number, string>();
     const answers: { id: number; at: number; to: number; by: string }[] = [];
+    const ownReplies: { at: number; to: number; by: string }[] = [];
     const horizon = nowMs - SCAN_LOOKBACK_MS;
+    const scanFloor = nowMs - SCAN_HORIZON_MS;
     let before: number | null = null;
     for (let page = 0; page < SCAN_PAGES_MAX; page++) {
       const { messages, start } = await readMessages(shared, { before, limit: SCAN_PAGE });
@@ -2137,9 +2717,13 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         if (m.authorKind === "agent" && m.replyTo !== null && m.createdAtMs > nowMs - HOUR) {
           answers.push({ id: m.id, at: m.createdAtMs, to: m.replyTo, by: m.tenant.toLowerCase() });
         }
+        if (m.authorKind === "agent" && m.replyTo !== null && m.createdAtMs > nowMs - OWN_GREET_MS) {
+          ownReplies.push({ at: m.createdAtMs, to: m.replyTo, by: m.tenant.toLowerCase() });
+        }
         // ONE CARD PER MOVE SURVIVES A REDEPLOY: the cards already posted are
-        // what a repeated buy is weighed against (CALL_REPEAT_MS).
-        if (m.authorKind === "agent" && m.kind === "call" && m.createdAtMs > nowMs - CALL_REPEAT_MS) notePostedCall(m);
+        // what a repeated buy is weighed against (CALL_REPEAT_MS), and what a
+        // paper buy folds into (POSTED_CALLS_MS).
+        if (m.authorKind === "agent" && m.kind === "call" && m.createdAtMs > nowMs - POSTED_CALLS_MS) notePostedCall(m);
         if (m.dedupeKey && m.createdAtMs >= nowMs - SAID_TTL_MS) said.set(m.dedupeKey, m.createdAtMs);
         if (m.authorKind !== "owner" && m.createdAtMs > nowMs - HOUR) roomHour.push(m.createdAtMs);
         if (m.authorKind === "agent" && m.createdAtMs > nowMs - HOUR) stateOf(m.tenant.toLowerCase()).hour.push(m.createdAtMs);
@@ -2148,9 +2732,11 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         }
         // THE ROOM'S PHRASE MEMORY SURVIVES A REDEPLOY: rebuilt from what was said.
         if (m.authorKind === "agent" && m.createdAtMs > nowMs - PHRASE_MEMORY_MS) notePhrase(m.id, m.createdAtMs, m.body);
+        // SO DO ITS TWO DAYS OF THREAD-STARTERS (TOPIC_MEMORY_MS).
+        if (isStarter(m) && m.createdAtMs > nowMs - TOPIC_MEMORY_MS) noteStarter(m.id, m.createdAtMs, m.body);
       }
       const oldest = messages[0];
-      if (start || !oldest || oldest.createdAtMs < horizon) break;
+      if (start || !oldest || oldest.createdAtMs < scanFloor) break;
       before = oldest.id;
     }
     roomHour.sort((a, b) => a - b);
@@ -2165,17 +2751,30 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       ownerAnswers.set(owner, list);
     }
     for (const list of ownerAnswers.values()) list.sort((a, b) => a - b);
+    for (const r of ownReplies) {
+      if (ownerOf.get(r.to) !== r.by) continue;
+      const st = stateOf(r.by);
+      st.ownAnsweredMs = Math.max(st.ownAnsweredMs, r.at);
+    }
     for (const st of agents.values()) {
       st.hour.sort((a, b) => a - b);
       st.lines.sort((a, b) => a.at - b.at);
       if (st.lines.length > OWN_MEMORY_MAX) st.lines.splice(0, st.lines.length - OWN_MEMORY_MAX);
     }
 
-    for (const key of said.keys()) {
+    for (const [key, at] of said) {
       const gm = /^gm:(.+):(\d{4}-\d{2}-\d{2})$/.exec(key);
       if (gm) {
         const st = stateOf(gm[1]!);
         if (!st.gmDay || gm[2]! > st.gmDay) st.gmDay = gm[2]!;
+      }
+      // A newcomer's hello was its greeting for that day (helloGreets).
+      const hello = /^hello:(.+)$/.exec(key);
+      const tz = hello ? memberOf.get(hello[1]!)?.tz ?? null : null;
+      if (hello && tz) {
+        const st = stateOf(hello[1]!);
+        const day = localDay(tz, at);
+        if (!st.gmDay || day > st.gmDay) st.gmDay = day;
       }
     }
 
@@ -2221,24 +2820,51 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     // FILLS OLDER THAN THE ANNOUNCEMENT WINDOW TOO, as far back as a repeat is
     // weighed: a process started at +6h02m no longer saw the first buy whose
     // card it was, and posted the second — still inside the window — as news,
-    // six hours late. The window itself still decides what is announced.
+    // six hours late. The window itself still decides what is announced. The
+    // dialect lets facts.ts keep every call the room already posted, however
+    // busy the book: those are the cards a repeat is weighed against.
     const factsRaw =
       cleanRoster.length > 0
-        ? await loadRoomFacts(shared, cleanRoster, profiles, Math.floor(nowMs / 1000), { callWindowSec: FACTS_WINDOW_SEC })
+        ? await loadRoomFacts(shared, cleanRoster, profiles, Math.floor(nowMs / 1000), { callWindowSec: FACTS_WINDOW_SEC, dialect })
         : new Map<string, AgentFacts>();
     const facts = new Map<string, AgentFacts>();
     for (const [t, f] of factsRaw) if (seen.has(t.toLowerCase())) facts.set(t.toLowerCase(), f);
+
+    // The room's tail, read before the joins: a held newcomer's owner speaking
+    // in it ends the hold (ownerHereNow). Nothing below writes a line before
+    // the tail is used.
+    const tail = await recentMessages(shared, TAIL_LINES);
 
     // ── joins ──
     let memberOf = new Map(members.map((m) => [m.tenant.toLowerCase(), m]));
     const newcomers = [...facts.keys()].filter((t) => !memberOf.has(t));
     const greeted: string[] = [];
+    for (const t of firstSeen.keys()) if (!newcomers.includes(t)) firstSeen.delete(t);
     if (newcomers.length > 0) {
       // THE FIRST RUN DOES NOT GREET FORTY AGENTS — see JOIN_BURST for the
       // same rule applied to a room that is not empty.
+      //
+      // THE BURST COUNTS FIRST SIGHTINGS ONLY. A newcomer held for its name
+      // (NEWCOMER_NAME_WAIT_MS) is still a newcomer on every pass of its wait,
+      // so three generated-name signups a few minutes apart plus a named fourth
+      // read as a burst of four: all of them joined quietly — no join lines,
+      // no hellos — and the held three under the generated names they were
+      // being held to shed. A signup wave brings that many in a quarter hour.
+      // Counted before namePending records this pass's sightings.
       const opening = members.length === 0;
-      const quiet = opening || newcomers.length > JOIN_BURST;
+      const fresh = newcomers.filter((t) => !firstSeen.has(t));
+      const quiet = opening || fresh.length > JOIN_BURST;
+      // THE HOLD ENDS WHEN THE OWNER SPEAKS. An owner who is in the room has
+      // had the chance to name their agent, and is waiting for it: held, it was
+      // not a member, so their "hey buddy, you there?" found no agent to answer
+      // it, was closed as handled, and was never answered. The line is still
+      // inside OWNER_WINDOW_MS, so their own agent — joined now — answers it.
+      const ownerHereNow = (t: string): boolean =>
+        tail.some((m) => m.authorKind === "owner" && m.tenant.toLowerCase() === t && nowMs - m.createdAtMs <= OWNER_WINDOW_MS);
       for (const t of newcomers) {
+        // A newcomer that would be greeted waits for its own name (NEWCOMER_NAME_WAIT_MS).
+        if (!quiet && namePending(t, facts.get(t)!, nowMs) && !ownerHereNow(t)) continue;
+        firstSeen.delete(t);
         if ((await joinMember(shared, t, nowMs)) && !quiet) greeted.push(t);
       }
       // Re-read: a join can claim a prefs-only row, and its zone and mute are real.
@@ -2264,7 +2890,6 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       }
     }
 
-    const tail = await recentMessages(shared, TAIL_LINES);
     p.room.push(...tail);
     if (!rebuilt) {
       await rebuild(shared, nowMs, memberOf);
@@ -2276,6 +2901,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     for (const m of tail) {
       if (m.authorKind !== "agent") continue;
       if (m.createdAtMs > nowMs - PHRASE_MEMORY_MS) notePhrase(m.id, m.createdAtMs, m.body);
+      if (isStarter(m) && m.createdAtMs > nowMs - TOPIC_MEMORY_MS) noteStarter(m.id, m.createdAtMs, m.body);
       if (m.kind === "call" && m.createdAtMs > nowMs - CALL_REPEAT_MS) {
         notePostedCall(m);
         // Its card is posted: never announced again here, and what a repeat is weighed against.
@@ -2284,6 +2910,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       if (m.replyTo !== null && m.createdAtMs > nowMs - HOUR) noteCallReact(m.id, m.createdAtMs, m.replyTo);
     }
     prunePhrases(nowMs);
+    pruneStarters(nowMs);
     pruneCalls(nowMs);
 
     // ── who is here ──
@@ -2310,6 +2937,11 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     // THE MEMORY FORGETS NAMES, so "sold Bonk" and "sold Popcat" are one
     // sentence and "hey Amber Heron" is small talk, whoever it names.
     for (const f of facts.values()) for (const c of f.calls) for (const n of [c.name, c.symbol]) if (n) p.coins.add(n);
+    // WHAT AN OWNER'S FREE TEXT IS READ AGAINST (classOf, answerOwners): every
+    // coin the room's books traded in the facts window, once each. Filled
+    // before anything is classified this pass; empty, no coin rule in
+    // classifyLine runs, and an owner's "PEPE to the moon" read as hype.
+    p.factCoins = [...p.coins];
     for (const m of tail) for (const n of [m.call?.name, m.call?.symbol]) if (n) p.coins.add(n);
     p.memoryNames = [...names, ...p.coins];
 
@@ -2326,6 +2958,8 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         speaker: null,
         intent: null,
         body: `${sp.facts.name} joined the room`,
+        // Rebuilt when written, from the name the room knows then (attempt()).
+        joiner: t,
         kind: "join",
         replyTo: null,
         dedupeKey: `join:${t}`,
@@ -2485,6 +3119,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         rosterNames: [],
         gateNames: [],
         coins: new Set(),
+        factCoins: [],
         foreign: new Map(),
         wrote: 0,
         labels: [],
@@ -2495,6 +3130,8 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         events: [],
         memory: null,
         memoryVersion: -1,
+        topicMemory: null,
+        topicMemoryVersion: -1,
         memoryNames: [],
         stands: new Map(),
         chorused: new Set(),
