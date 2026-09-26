@@ -23,7 +23,7 @@ import { ALL_RESOURCES } from "./resources-catalog";
 import { hasCapability, requireCapability } from "./policy";
 import type { Principal } from "./oauth/server";
 import type { ResourceDef } from "./resources";
-import { defineTool, runTool } from "./tool";
+import { defineTool, runTool, type ToolDef } from "./tool";
 
 let restore: (() => void) | null = null;
 afterEach(() => { restore?.(); restore = null; resetMetricsForTest(); });
@@ -557,11 +557,27 @@ test("tools/list on the directory endpoint names no other tool and instructs not
     const others = [...text.matchAll(toolName)].map((m) => m[1]).filter((n) => n !== self);
     return others.length ? `names ${others.join(", ")}` : OTHER_TOOLS.test(text) ? "points at other tools" : MODEL_INSTRUCTION.test(text) ? "instructs the model" : null;
   };
-  type Listed = { name: string; title?: string; description?: string; inputSchema?: unknown; outputSchema?: unknown };
+  type Listed = { name: string; title?: string; description?: string; inputSchema?: unknown; outputSchema?: unknown; annotations?: Record<string, unknown> };
+  const checkAnnotations = (tools: Listed[], profile: string) => {
+    assert.ok(tools.some((t) => t.annotations?.readOnlyHint === true), `${profile} lists read-only tools`);
+    assert.ok(tools.some((t) => t.annotations?.readOnlyHint === false), `${profile} lists write tools`);
+    for (const tool of tools) {
+      const source = ALL_TOOLS.find((t) => t.name === tool.name)!;
+      const served = tool.annotations;
+      assert.ok(served, `${profile}: ${tool.name}: annotations`);
+      assert.equal(typeof served?.readOnlyHint, "boolean", `${profile}: ${tool.name}: readOnlyHint`);
+      assert.equal(typeof served?.openWorldHint, "boolean", `${profile}: ${tool.name}: openWorldHint`);
+      assert.equal(typeof served?.destructiveHint, "boolean", `${profile}: ${tool.name}: destructiveHint`);
+      assert.equal(served.readOnlyHint, source.annotations.readOnlyHint, `${profile}: ${tool.name}: readOnlyHint value`);
+      assert.equal(served.openWorldHint, source.annotations.openWorldHint, `${profile}: ${tool.name}: openWorldHint value`);
+      assert.equal(served.destructiveHint, source.annotations.destructiveHint ?? false, `${profile}: ${tool.name}: destructiveHint value`);
+    }
+  };
   const expected = ALL_TOOLS.filter((t) => toolInProfile(t, "directory")).map((t) => t.name).sort();
   for (const era of ["legacy", "modern"] as const) {
     const tools = (await rpcResult(await callDir(dirRequest(dir.tokens.access_token, "tools/list", {}, { era })))).result?.tools as Listed[];
     assert.deepEqual(tools.map((t) => t.name).sort(), expected, era);
+    checkAnnotations(tools, `directory ${era}`);
     for (const t of tools) {
       const def = ALL_TOOLS.find((x) => x.name === t.name)!;
       assert.equal(t.description, def.directoryDescription ?? def.description, `${era}: ${t.name} is served its directory description`);
@@ -579,11 +595,23 @@ test("tools/list on the directory endpoint names no other tool and instructs not
   }
   // The full server serves the full descriptions, pointers included.
   const fullTools = (await rpcResult(await call(mcpRequest(full.tokens.access_token, "tools/list")))).result?.tools as Listed[];
+  checkAnnotations(fullTools, "full");
   for (const def of ALL_TOOLS.filter((t) => t.directoryDescription !== undefined)) {
     const served = fullTools.find((t) => t.name === def.name);
     assert.equal(served?.description, def.description, def.name);
   }
   assert.match(fullTools.find((t) => t.name === "run_backtest")!.description!, /Poll get_job/);
+});
+
+test("a tool cannot register with missing or contradictory safety annotations", async () => {
+  const { full } = await setupBoth();
+  const proposal = ALL_TOOLS.find((t) => t.name === "propose_trade")!;
+  // Simulate a JS caller or malformed definition bypassing the TypeScript type.
+  const unclassified = { ...proposal, annotations: { ...proposal.annotations, destructiveHint: undefined } } as unknown as ToolDef;
+  assert.throws(() => buildServer(full.principal, { tools: [unclassified] }), /propose_trade: invalid MCP tool safety annotations/);
+  const listAgents = ALL_TOOLS.find((t) => t.name === "list_agents")!;
+  const contradictory = { ...listAgents, annotations: { ...listAgents.annotations, destructiveHint: true } } as unknown as ToolDef;
+  assert.throws(() => buildServer(full.principal, { tools: [contradictory] }), /list_agents: invalid MCP tool safety annotations/);
 });
 
 test("resourceInProfile: only the proposal view among the views is left off the directory, and every resource stays on the full server", () => {

@@ -49,6 +49,24 @@ describe("the production text", () => {
     assert.match(text, /You cannot add a connector from a chat\. Give the user this link:/);
   });
 
+  it("gives an unfamiliar ChatGPT the exact prompt, manual connection path and a real verification step", () => {
+    const start = text.indexOf("### In ChatGPT\n");
+    const end = text.indexOf("### Other assistants\n", start);
+    assert.ok(start > 0 && end > start, "ChatGPT has its own setup section");
+    const chatgpt = text.slice(start, end);
+    assert.ok(chatgpt.includes('"connect to Merrymen MCP"'));
+    assert.ok(chatgpt.includes("A chat message alone cannot install an MCP connection or approve access"));
+    assert.ok(chatgpt.includes("Settings → Security and login") && chatgpt.includes("Developer mode"));
+    assert.ok(chatgpt.includes(installLinks(PLUGIN_SERVER_URL).chatgpt));
+    assert.ok(chatgpt.includes("enter https://mcp.merrymen.dev/mcp"));
+    assert.ok(chatgpt.includes("personal Plugins directory") && chatgpt.includes("tools menu"));
+    assert.ok(chatgpt.includes("signs in in their own browser") && chatgpt.includes("clicks Allow"));
+    assert.equal(chatgpt.split("`list_agents`").length - 1, 2, "verify an existing or new connection with a tool call");
+    assert.ok(chatgpt.includes("https://merrymen.dev/chatgpt"));
+    assert.ok(chatgpt.includes("https://app.merrymen.dev/connect/mcp"));
+    assert.ok(!chatgpt.includes("automatically installed") && !chatgpt.includes("one click"));
+  });
+
   it("has the Claude Code command, the sign-in step the user must do, and nothing that needs a key", () => {
     assert.ok(lines.some((l) => l.startsWith("3. Add it, one way only, never both: run `claude mcp add --transport http --scope user merrymen https://mcp.merrymen.dev/mcp`;")));
     assert.equal(installCommands(PLUGIN_SERVER_URL).claudeCode[0], "claude mcp add --transport http --scope user merrymen https://mcp.merrymen.dev/mcp");
@@ -130,6 +148,11 @@ describe("a staging or self-hosted server", () => {
     assert.ok(text.includes("https://mcp.example.test/api/mcp/health"));
     assert.ok(text.includes("https://app.example.test/connect/mcp"));
     assert.ok(text.includes("https://app.example.test/connect/apps"));
+    const chatgpt = text.split("### In ChatGPT\n")[1]!.split("### Other assistants\n")[0]!;
+    assert.ok(chatgpt.includes("enter https://mcp.example.test/mcp"));
+    assert.ok(chatgpt.includes("https://app.example.test/connect/mcp"));
+    assert.ok(!chatgpt.includes("https://merrymen.dev/chatgpt"));
+    assert.ok(!chatgpt.includes("mcp.merrymen.dev") && !chatgpt.includes("app.merrymen.dev"));
   });
 
   it("counts its own directory address, and says nothing of one when the directory profile is off", () => {

@@ -10,7 +10,7 @@ import { test } from "node:test";
 import type { Db, Stmt } from "../../../../worker/src/db";
 import type { McpDb } from "../db";
 import {
-  CIMD_REDIRECTS_MAX_BYTES, acceptableCimdResponse, isCimdClientId, ownHostsOf, registerClient, parseCimd, redirectMatches, resolveClient, transientCimdAnswer, validRedirectUri, type CimdFetcher,
+  CIMD_REDIRECTS_MAX_BYTES, ClientError, acceptableCimdResponse, isCimdClientId, ownHostsOf, registerClient, parseCimd, redirectMatches, resolveClient, transientCimdAnswer, validRedirectUri, type CimdFetcher,
 } from "./clients";
 import { pkceS256 } from "./crypto";
 import { FORM_MAX, readBoundedText, readForm } from "./deps";
@@ -371,6 +371,48 @@ test("CIMD: app-scheme callbacks in a metadata document are ignored, not fatal",
   const doc = { client_id: id, redirect_uris: ["myapp://callback", "http://127.0.0.1/callback"], token_endpoint_auth_method: "none" };
   assert.deepEqual(parseCimd(id, Buffer.from(JSON.stringify(doc))).redirectUris, ["http://127.0.0.1/callback"]);
   assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify({ ...doc, redirect_uris: ["myapp://callback"] }))), /redirect_uris/);
+});
+
+test("CIMD: ChatGPT can negotiate public token auth from its advertised methods", async () => {
+  const id = "https://chatgpt.com/oauth/client.json";
+  const redirect = "https://chatgpt.com/connector_platform_oauth_redirect";
+  const fetcher = cimdFetcher([redirect], {}, {
+    token_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
+    token_endpoint_auth_method: "private_key_jwt",
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+  });
+  const d = await makeTestDb();
+  const deps = makeDeps(d, { fetcher });
+  const client = await resolveClient(d, id, deps.now(), {
+    ownHosts: ownHostsOf(deps.cfg), fetcher, cacheNew: true,
+  });
+  assert.equal(client.kind, "cimd");
+  assert.equal(client.authMethod, "none");
+  assert.equal((await authenticateClient(deps, new URLSearchParams({ client_id: id }), null)).authMethod, "none");
+  assert.equal((await startAuthorization(deps, authorizeParams(id, { redirect_uri: redirect }))).kind, "consent");
+});
+
+test("CIMD: offered token auth methods must be unambiguous and include the supported public method", () => {
+  const id = "https://client.example/oauth/metadata.json";
+  const base = { client_id: id, redirect_uris: ["https://client.example/cb"] };
+  for (const [methods, singular] of [
+    [["private_key_jwt"], "private_key_jwt"],
+    [["client_secret_basic"], undefined],
+    [["none"], "private_key_jwt"],
+    [["none", "private_key_jwt"], "client_secret_post"],
+    [[], undefined],
+    ["none", undefined],
+    [["none", 1], undefined],
+    [["none", "none"], undefined],
+  ] as const) {
+    const doc = { ...base, token_endpoint_auth_methods_supported: methods,
+      ...(singular === undefined ? {} : { token_endpoint_auth_method: singular }) };
+    assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify(doc))), ClientError);
+  }
+  assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify({ ...base, token_endpoint_auth_method: "private_key_jwt" }))), /public clients/);
+  assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify({ ...base, token_endpoint_auth_method: null,
+    token_endpoint_auth_methods_supported: ["none"] }))), /nonempty string/);
 });
 
 test("CIMD: the document must name itself, be public, and list safe redirects", async () => {

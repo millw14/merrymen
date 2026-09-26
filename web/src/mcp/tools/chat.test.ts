@@ -620,7 +620,7 @@ test("through the real MCP endpoint: chat tools are listed only with chat:write 
   assert.deepEqual(tools.map((t) => t.name).sort(), ["get_conversation", "list_conversations", "list_research", "send_message", "submit_research"]);
   const send = tools.find((t) => t.name === "send_message")!;
   assert.equal(send.annotations.readOnlyHint, false);
-  assert.equal(send.annotations.destructiveHint, false);
+  assert.equal(send.annotations.destructiveHint, true, "the sent message cannot be recalled");
   assert.equal(send.annotations.openWorldHint, true, "the reply comes from an external model provider");
   assert.equal(tools.find((t) => t.name === "get_conversation")!.annotations.readOnlyHint, true);
 

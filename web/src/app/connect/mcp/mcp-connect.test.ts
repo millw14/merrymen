@@ -52,6 +52,14 @@ test("every other assistant's action is on the page, and app links open the app,
   assert.ok(html.includes(`<code id=`) && html.includes(`>${URL_}</code>`), "the server address is shown");
 });
 
+test("ChatGPT gets a verification step and only production links to the production guide", () => {
+  const html = unescape(render(true));
+  const chatgpt = html.slice(html.indexOf("<h3>ChatGPT</h3>"), html.indexOf("<h3>Codex</h3>"));
+  assert.ok(chatgpt.includes("list your Merrymen agents"));
+  assert.ok(chatgpt.includes('href="https://merrymen.dev/chatgpt"'));
+  assert.ok(!renderOther().includes("https://merrymen.dev/chatgpt"));
+});
+
 test("every control has an accessible name, and every copy announces itself", () => {
   const html = render(true);
   const buttons = html.match(/<button[^>]*>/g) ?? [];

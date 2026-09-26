@@ -101,7 +101,8 @@ const sendMessageTool = defineTool({
   }),
   // Open world: the reply comes from an external language-model provider, and
   // the agent's state is sent to it.
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  // The sent message and model reply are stored and cannot be recalled.
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   // Every new message is a model call billed to Merrymen.
   budget: { bucket: "llm_chat", perMinute: 6, perHour: 30, perDay: 150 },
   timeoutMs: 35_000,
@@ -295,7 +296,8 @@ const submitResearchTool = defineTool({
     how_it_is_used: z.string(),
     observed_at: z.string(),
   }),
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // The note remains visible in later conversations for seven days; no delete tool exists.
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   budget: { perMinute: 10, perDay: 100 },
   async handler(args, ctx) {
     const a = await ctx.agent(args.agent);

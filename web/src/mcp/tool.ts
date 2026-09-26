@@ -23,15 +23,16 @@ import { hasCapability, reachableAgents, requireCapability, resolveOwnedAgent } 
 import type { Capability } from "./scopes";
 import type { Principal } from "./oauth/server";
 
-export interface ToolAnnotations {
-  /** True only when the tool changes nothing anywhere. */
-  readOnlyHint: boolean;
-  /** True when the tool can delete or overwrite something the owner cares about. */
-  destructiveHint?: boolean;
+interface ToolAnnotationBase {
   idempotentHint?: boolean;
   /** True when the tool reaches data sources outside Merrymen (market providers, the chain). */
   openWorldHint: boolean;
 }
+
+export type ToolAnnotations = ToolAnnotationBase & (
+  | { /** The tool changes nothing anywhere. */ readOnlyHint: true; destructiveHint?: false }
+  | { /** The tool changes state. */ readOnlyHint: false; /** True for an irreversible action or one that can delete or overwrite owner state. */ destructiveHint: boolean }
+);
 
 export interface Budget {
   /** Bucket name; defaults to the tool name. Tools sharing a costly backend share a bucket. */

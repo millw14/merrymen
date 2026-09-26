@@ -1,6 +1,6 @@
 # Connecting clients
 
-**Connect in one click:** <https://app.merrymen.dev/connect/mcp>. That page has
+**Connect an AI assistant:** <https://app.merrymen.dev/connect/mcp>. That page has
 every link and command below, with Copy buttons, and shows which assistants
 are already connected when you are signed in.
 
@@ -167,11 +167,18 @@ the permissions you ticked, and revocable on Connected apps.
 
 ## ChatGPT (developer mode)
 
+The [ChatGPT setup page](https://merrymen.dev/chatgpt) is written for a new
+ChatGPT chat asked to "connect to Merrymen MCP". A chat message can guide the
+setup, but you must install the plugin and approve Merrymen access yourself.
+
 1. In ChatGPT, open **Settings** → **Security and login** and turn on
-   **Developer mode**.
-2. Open <https://chatgpt.com/plugins> and create an app: name `Merrymen`,
-   server URL `https://mcp.merrymen.dev/mcp`, authentication **OAuth**.
+   **Developer mode**, if your account or workspace allows it.
+2. Open <https://chatgpt.com/plugins> and create a plugin: name `Merrymen`,
+   public MCP URL `https://mcp.merrymen.dev/mcp`. Review the tools ChatGPT
+   discovers. Merrymen uses OAuth for sign-in.
 3. ChatGPT opens Merrymen. Sign in, choose access, and click **Allow**.
+4. Add Merrymen to a new chat and ask it to call `list_agents` to verify the
+   connection.
 
 If ChatGPT registers itself dynamically, the consent screen says the app is
 "not verified by Merrymen" and shows where it will send you back

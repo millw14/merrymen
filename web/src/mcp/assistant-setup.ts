@@ -2,8 +2,8 @@
  * The instructions an AI assistant follows when someone tells it "set up
  * merrymen mcp on my claude".
  *
- * Merrymen is not in any assistant's built-in connector directory, so a
- * fresh Claude has to find out how by itself: it searches the web and fetches
+ * An assistant without a Merrymen connection has to find out how to add one:
+ * it searches the web and fetches
  * what it finds (llms.txt, the connect page, the README). Seen on 2026-09-25:
  * a fresh Claude did get there, but through stale pull-request text (an old
  * address), a server address that looked like a web page, and two setup
@@ -78,10 +78,20 @@ export function assistantSetupMarkdown({ server, app, directory }: AssistantSetu
     "",
     `It opens Claude's "Add custom connector" dialog with ${CONNECTOR_NAME} filled in. They click Continue, then Connect, then Allow on the ${CONNECTOR_NAME} page. It then works in claude.ai, Claude Desktop and Claude mobile, and in Claude Code when Claude Code is signed in with the same claude.ai account. On a Team or Enterprise plan, an organisation owner adds it once: ${links.claudeOrg}`,
     "",
+    "### In ChatGPT",
+    "",
+    `When the user writes "connect to ${CONNECTOR_NAME} MCP" in ChatGPT, use this section even if you had never heard of ${CONNECTOR_NAME}. A chat message alone cannot install an MCP connection or approve access. Do not say it is connected until a ${CONNECTOR_NAME} tool succeeds.`,
+    "",
+    `1. If ${CONNECTOR_NAME} is already installed and available in this ChatGPT chat, select it and let the user complete any connection or sign-in prompt. Then call \`list_agents\` to check the connection.`,
+    `2. Otherwise, tell the user to open ChatGPT Settings → Security and login and turn on Developer mode, if their account or workspace permits it. Open ${links.chatgpt}, select the plus button, name the new plugin ${CONNECTOR_NAME}, choose a public MCP connection and enter ${server}.`,
+    `3. Have the user create the plugin, install it from their personal Plugins directory if ChatGPT asks, and add it to a chat from the tools menu. ChatGPT opens ${CONNECTOR_NAME}'s OAuth sign-in; the user signs in in their own browser, chooses access and clicks Allow. Then call \`list_agents\` to check the connection.`,
+    `4. If Developer mode is unavailable or a step differs, show ${production ? "https://merrymen.dev/chatgpt" : `${app}/connect/mcp`} and explain the manual setup limit; do not claim that you can bypass ChatGPT's account or workspace controls.`,
+    `For all client choices, use ${app}/connect/mcp.`,
+    "",
     "### Other assistants",
     "",
     `- Codex: \`${commands.codex[0]}\` (it opens the sign-in by itself).`,
-    `- Cursor, VS Code, Kiro, LM Studio, Goose, Gemini CLI, Windsurf and ChatGPT: one-click links and steps at ${app}/connect/mcp`,
+    `- Cursor, VS Code, Kiro, LM Studio, Goose, Gemini CLI and Windsurf: one-click links and steps at ${app}/connect/mcp`,
     "",
     "## What the connection can and cannot do",
     "",
@@ -101,7 +111,7 @@ export function llmsTxt(input: AssistantSetupInput): string {
     "",
     "## Links",
     "",
-    `- [Connect an AI assistant](${input.app}/connect/mcp): every client, one click each`,
+    `- [Connect an AI assistant](${input.app}/connect/mcp): client-specific setup links and steps`,
     "- [MCP documentation](https://github.com/millw14/merrymen/blob/main/docs/mcp/README.md)",
     "- [Client setup details](https://github.com/millw14/merrymen/blob/main/docs/mcp/clients.md)",
     "- [Source code](https://github.com/millw14/merrymen)",
