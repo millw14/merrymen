@@ -104,7 +104,7 @@ describe("a client given the bare MCP domain is pointed at the endpoint", () => 
 
 describe("what the MCP domain serves itself is never redirected, even for a browser", () => {
   for (const path of [
-    "/mcp", "/mcp/anything", "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-authorization-server",
+    "/mcp", "/mcp/anything", "/mcp/directory", "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource/mcp/directory", "/.well-known/oauth-authorization-server",
     "/oauth/authorize?client_id=x", "/oauth/token", "/_next/static/chunks/app.js", "/_next/image?url=x",
     "/icon-192.png", "/mcp-icon.svg", "/favicon.svg", "/sw.js", "/manifest.webmanifest", "/robots.txt",
   ]) {
@@ -224,8 +224,26 @@ describe("the matcher, compiled by Next itself, reaches pages and the API but no
 
   it("does not run for Next's files, static files or the MCP and OAuth endpoints", () => {
     for (const p of ["/_next/static/chunks/app.js", "/_next/image", "/icon-192.png", "/mcp-icon.svg", "/sw.js", "/manifest.webmanifest", "/robots.txt",
-      "/mcp", "/mcp/x", "/oauth/token", "/oauth/authorize", "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-authorization-server"]) {
+      "/mcp", "/mcp/x", "/mcp/directory", "/oauth/token", "/oauth/authorize", "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource/mcp/directory", "/.well-known/oauth-authorization-server"]) {
       assert.equal(runs(p), false, p);
     }
+  });
+});
+
+describe("the directory endpoint (/mcp/directory) passes the MCP-host middleware exactly like /mcp", () => {
+  it("a client POST, a GET stream and a browser page load there all reach the route (which does its own checks)", () => {
+    const client = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+    untouched(mw.middleware(req("https://mcp.test/mcp/directory", { method: "POST", headers: client, body: "{}" })), "POST /mcp/directory");
+    untouched(mw.middleware(req("https://mcp.test/mcp/directory", { headers: { accept: "text/event-stream" } })), "GET stream");
+    untouched(mw.middleware(page("https://mcp.test/mcp/directory")), "page load: the route answers it with the help-page redirect");
+    const lookup = { method: "POST", headers: new Headers({ host: "mcp.test", ...client }), pathname: "/mcp/directory", search: "" };
+    assert.equal(mcpHostLanding(dedicatedMcpHost({ MERRYMEN_PUBLIC_ORIGIN: "https://app.test", MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp" }, true), lookup), null);
+  });
+
+  it("its host is one the endpoint answers on, and its first path segment is mcp", () => {
+    const cfg = mcpConfig({ MERRYMEN_PUBLIC_ORIGIN: "https://app.test", MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp" } as unknown as NodeJS.ProcessEnv);
+    const dir = new URL(cfg.directoryResource);
+    assert.equal(dir.pathname.split("/")[1], "mcp");
+    assert.ok(cfg.allowedHosts.has(dir.host));
   });
 });

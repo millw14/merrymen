@@ -31,6 +31,7 @@ export function testConfig(over: Partial<McpConfig> = {}): McpConfig {
     disabledWhy: null,
     issuer: "https://app.test",
     resource: "https://app.test/mcp",
+    directoryResource: "https://app.test/mcp/directory",
     allowedOrigins: new Set(["https://app.test"]),
     allowedHosts: new Set(["app.test"]),
     staffTenants: new Set<string>(),
@@ -99,23 +100,30 @@ export const VERIFIER = "v".repeat(20) + "erifier-0123456789-abcdefghij";
  * Run the real flow: register a public client, authorize, consent as `tenant`,
  * exchange the code. Returns the tokens and the principal they resolve to.
  */
-export async function connectAs(deps: OAuthDeps, tenant: `0x${string}`, o: { scopes?: string[]; agents?: string[]; redirect?: string } = {}): Promise<{ tokens: TokenResponse; principal: Principal; clientId: string }> {
+export async function connectAs(deps: OAuthDeps, tenant: `0x${string}`, o: {
+  scopes?: string[]; agents?: string[]; redirect?: string;
+  /** Connect to the directory profile instead of the canonical resource. */
+  profile?: "full" | "directory";
+  /** Reuse an already registered client (the same app connecting to both resources). */
+  clientId?: string;
+} = {}): Promise<{ tokens: TokenResponse; principal: Principal; clientId: string }> {
   const redirect = o.redirect ?? "http://127.0.0.1:33418/callback";
-  const reg = await registerClient(deps.d, { redirect_uris: [redirect], token_endpoint_auth_method: "none", client_name: "Test client" }, deps.now());
-  const clientId = String(reg.body.client_id);
+  const profile = o.profile ?? "full";
+  const resource = profile === "directory" ? deps.cfg.directoryResource : deps.cfg.resource;
+  const clientId = o.clientId ?? String((await registerClient(deps.d, { redirect_uris: [redirect], token_endpoint_auth_method: "none", client_name: "Test client" }, deps.now())).body.client_id);
   const params = new URLSearchParams({
     response_type: "code", client_id: clientId, redirect_uri: redirect, code_challenge: pkceS256(VERIFIER), code_challenge_method: "S256",
-    state: "st", scope: (o.scopes ?? ["market:read", "agents:read", "portfolio:read", "decisions:read", "offline_access"]).join(" "), resource: deps.cfg.resource,
+    state: "st", scope: (o.scopes ?? ["market:read", "agents:read", "portfolio:read", "decisions:read", "offline_access"]).join(" "), resource,
   });
   const start = await startAuthorization(deps, params);
   if (start.kind !== "consent") throw new Error(`authorize failed: ${JSON.stringify(start)}`);
   const requestId = decodeURIComponent(start.location.split("#request=")[1]);
   const decided = await decideRequest(deps, requestId, tenant, { approve: true, scopes: o.scopes, agentSlugs: o.agents ?? [tenant === OWNER_B ? SLUG_B : SLUG_A] });
   const code = new URL(decided.location).searchParams.get("code")!;
-  const form = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: redirect, code_verifier: VERIFIER, client_id: clientId, resource: deps.cfg.resource });
+  const form = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: redirect, code_verifier: VERIFIER, client_id: clientId, resource });
   const client = { clientId, kind: "dcr" as const, clientName: "Test client", redirectUris: [redirect], authMethod: "none" as const, secretHash: null, displayHost: "127.0.0.1" };
   const tokens = await exchangeCode(deps, form, client);
-  const principal = await verifyAccessToken(deps.d, deps.cfg, tokens.access_token, deps.now());
+  const principal = await verifyAccessToken(deps.d, deps.cfg, tokens.access_token, deps.now(), profile);
   if (!principal) throw new Error("token did not verify");
   return { tokens, principal, clientId };
 }
@@ -143,7 +151,7 @@ export function installFixtures(d: McpDb, o: { directory?: AgentDirectory; setti
 export type Era = "legacy" | "modern";
 let rpcId = 0;
 
-export function mcpRequest(token: string | null, method: string, params: Record<string, unknown> = {}, o: { era?: Era; headers?: Record<string, string>; host?: string } = {}): Request {
+export function mcpRequest(token: string | null, method: string, params: Record<string, unknown> = {}, o: { era?: Era; headers?: Record<string, string>; host?: string; path?: string } = {}): Request {
   const era = o.era ?? "legacy";
   const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json, text/event-stream", host: o.host ?? "app.test", ...o.headers };
   if (token) headers.authorization = `Bearer ${token}`;
@@ -162,7 +170,7 @@ export function mcpRequest(token: string | null, method: string, params: Record<
     if (method !== "initialize") headers["mcp-protocol-version"] = "2025-06-18";
     body = { jsonrpc: "2.0", id: ++rpcId, method, params };
   }
-  return new Request("https://app.test/mcp", { method: "POST", headers, body: JSON.stringify(body) });
+  return new Request(`https://app.test${o.path ?? "/mcp"}`, { method: "POST", headers, body: JSON.stringify(body) });
 }
 
 /** The JSON-RPC message in a response, whether it came back as JSON or as a one-event SSE stream. */

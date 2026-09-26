@@ -55,6 +55,21 @@ test("every tool is well-formed and annotated consistently with its capability",
   }
 });
 
+/**
+ * A tool that withdraws, stops or removes something the owner cannot get
+ * back as it was is destructive, so a client asks before calling it. By name,
+ * so a new cancel_* or remove_* tool cannot ship marked harmless.
+ */
+test("every tool that cancels, removes, unfollows or unsubscribes is marked destructive", () => {
+  const undoing = /^(cancel|remove|delete|unfollow|unsubscribe)(_|$)/;
+  const found = ALL_TOOLS.filter((t) => undoing.test(t.name)).map((t) => t.name);
+  for (const name of ["cancel_proposal", "cancel_job", "remove_from_watchlist", "unfollow_agent", "unsubscribe"]) assert.ok(found.includes(name), `${name} is in the catalogue`);
+  for (const t of ALL_TOOLS.filter((x) => undoing.test(x.name))) {
+    assert.equal(t.annotations.readOnlyHint, false, t.name);
+    assert.equal(t.annotations.destructiveHint, true, `${t.name} undoes something, so it must be marked destructive`);
+  }
+});
+
 test("no tool can transfer funds, sign, or send arbitrary calls", () => {
   const forbidden = /\b(transfer|withdraw|sign_|send_transaction|execute|calldata|approve_token|sweep|set_live|enable_live|kill)\b/;
   for (const t of ALL_TOOLS) assert.doesNotMatch(t.name, forbidden, t.name);

@@ -9,7 +9,7 @@
  * and this output differ, so the static copy cannot drift from the app's
  * /llms.txt.
  */
-import { llmsTxt } from "../web/src/mcp/assistant-setup";
+import { PRODUCTION_DIRECTORY_URL, llmsTxt } from "../web/src/mcp/assistant-setup";
 import { PLUGIN_SERVER_URL } from "../web/src/mcp/install-links";
 
-process.stdout.write(llmsTxt({ server: PLUGIN_SERVER_URL, app: "https://app.merrymen.dev" }));
+process.stdout.write(llmsTxt({ server: PLUGIN_SERVER_URL, app: "https://app.merrymen.dev", directory: PRODUCTION_DIRECTORY_URL }));

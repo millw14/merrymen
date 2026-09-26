@@ -9,8 +9,8 @@
  * token endpoint auth methods; otherwise it falls back to dynamic
  * registration. Both are advertised.
  */
-import { protectedResourceMetadataUrl, type McpConfig } from "../config";
-import { ADVERTISED_SCOPES } from "../scopes";
+import { protectedResourceMetadataUrl, resourceFor, type McpConfig } from "../config";
+import { ADVERTISED_SCOPES, advertisedScopesFor, type McpProfile } from "../scopes";
 
 export function authorizationServerMetadata(cfg: McpConfig): Record<string, unknown> {
   const i = cfg.issuer;
@@ -33,11 +33,16 @@ export function authorizationServerMetadata(cfg: McpConfig): Record<string, unkn
   };
 }
 
-export function protectedResourceMetadata(cfg: McpConfig): Record<string, unknown> {
+/**
+ * One document per resource. The directory profile's names its own URL and
+ * only the scopes it can grant, so a client that discovers it never asks for a
+ * sensitive scope (and could not be granted one if it did: oauth/server.ts).
+ */
+export function protectedResourceMetadata(cfg: McpConfig, profile: McpProfile = "full"): Record<string, unknown> {
   return {
-    resource: cfg.resource,
+    resource: resourceFor(cfg, profile),
     authorization_servers: [cfg.issuer],
-    scopes_supported: [...ADVERTISED_SCOPES],
+    scopes_supported: [...advertisedScopesFor(profile)],
     bearer_methods_supported: ["header"],
     resource_name: "Merrymen",
     resource_documentation: `${cfg.issuer}/connect/mcp`,
@@ -57,10 +62,14 @@ export function protectedResourceMetadata(cfg: McpConfig): Record<string, unknow
  * scopes (trade:propose, drafts:write, social:write) start unticked.
  * DEFAULT_REQUEST_SCOPES remains only what an /oauth/authorize request with
  * no `scope` at all is treated as asking for (parseScopeParam).
+ *
+ * On the directory profile both halves are its own: its metadata document,
+ * and only the scopes it can grant (never a sensitive one).
  */
-export function bearerChallenge(cfg: McpConfig, opts: { error?: "invalid_token" | "insufficient_scope"; description?: string; scope?: readonly string[] } = {}): string {
-  const parts = [`resource_metadata="${protectedResourceMetadataUrl(cfg)}"`];
-  parts.push(`scope="${(opts.scope ?? ADVERTISED_SCOPES).join(" ")}"`);
+export function bearerChallenge(cfg: McpConfig, opts: { error?: "invalid_token" | "insufficient_scope"; description?: string; scope?: readonly string[]; profile?: McpProfile } = {}): string {
+  const profile = opts.profile ?? "full";
+  const parts = [`resource_metadata="${protectedResourceMetadataUrl(cfg, profile)}"`];
+  parts.push(`scope="${(opts.scope ?? advertisedScopesFor(profile)).join(" ")}"`);
   if (opts.error) parts.push(`error="${opts.error}"`);
   if (opts.description) parts.push(`error_description="${opts.description.replace(/["\\]/g, "")}"`);
   return `Bearer ${parts.join(", ")}`;

@@ -20,13 +20,28 @@ export interface AssistantSetupInput {
   server: string;
   /** The OAuth issuer / app origin, e.g. https://app.merrymen.dev. */
   app: string;
+  /**
+   * The directory profile's address, e.g. https://mcp.merrymen.dev/mcp/directory
+   * (config.ts directoryResource): what a connector added from Anthropic's
+   * connector directory points at. Omitted or "" when that profile is off.
+   */
+  directory?: string;
 }
+
+/**
+ * Production's directory address (MERRYMEN_MCP_DIRECTORY_RESOURCE_URL unset):
+ * the directory's served path, config.ts DIRECTORY_ROUTE_PATH, on the
+ * endpoint's origin. Spelled out rather than imported so this text module (run
+ * by scripts/llms-txt.ts) stays free of server configuration; the test checks
+ * the two agree.
+ */
+export const PRODUCTION_DIRECTORY_URL = `${new URL(PLUGIN_SERVER_URL).origin}/mcp/directory`;
 
 /** The address production used before the dedicated MCP host (retired for spec-strict clients). */
 const OLD_ADDRESS = "https://app.merrymen.dev/mcp";
 
 /** The "Set up the Merrymen MCP server" section, in Markdown (llms.txt style). */
-export function assistantSetupMarkdown({ server, app }: AssistantSetupInput): string {
+export function assistantSetupMarkdown({ server, app, directory }: AssistantSetupInput): string {
   const links = installLinks(server);
   const commands = installCommands(server);
   const production = server === PLUGIN_SERVER_URL;
@@ -44,7 +59,7 @@ export function assistantSetupMarkdown({ server, app }: AssistantSetupInput): st
     "",
     "### In Claude Code",
     "",
-    `1. Run \`claude mcp list\`. Look for an entry whose address is exactly ${server}, whatever it is called (\`${SERVER_KEY}\`${production ? `, \`${plugin}\` from the plugin, or \`claude.ai ${CONNECTOR_NAME}\` if the user added it on claude.ai` : ""}). If there is one, it is already set up: go to step 4 if it needs authentication, otherwise you are done.`,
+    `1. Run \`claude mcp list\`. Look for an entry whose address is exactly ${server}${directory ? ` or exactly ${directory}` : ""}, whatever it is called (\`${SERVER_KEY}\`${production ? `, \`${plugin}\` from the plugin, or \`claude.ai ${CONNECTOR_NAME}\` if the user added it on claude.ai` : ""}). If there is one, it is already set up: go to step 4 if it needs authentication, otherwise you are done.${directory ? ` An entry at ${directory} is ${CONNECTOR_NAME} from Anthropic's connector directory, which cannot suggest trades, setting changes or posts; it still counts, so do not add ${server} on top of it.` : ""}`,
     `2. If an entry named \`${SERVER_KEY}\` points anywhere else${production ? ` (for example ${OLD_ADDRESS})` : ""}, remove it first: \`claude mcp remove ${SERVER_KEY} -s user\` (use the scope that \`claude mcp get ${SERVER_KEY}\` shows).`,
     production
       ? `3. Add it, one way only, never both: run \`${commands.claudeCode[0]}\`; or, for slash commands (/${SERVER_KEY}:status, /${SERVER_KEY}:why, /${SERVER_KEY}:portfolio and more), install the plugin, which includes the server: \`claude plugin marketplace add ${PLUGIN_MARKETPLACE_URL}\`, then \`claude plugin install ${PLUGIN_ID}\`.`
@@ -56,6 +71,7 @@ export function assistantSetupMarkdown({ server, app }: AssistantSetupInput): st
     "",
     "### In claude.ai, Claude Desktop or Claude mobile",
     "",
+    ...(directory ? [`If the user already added ${CONNECTOR_NAME} from Anthropic's connector directory, it is set up; do not add the link below on top of it.`, ""] : []),
     "You cannot add a connector from a chat. Give the user this link:",
     "",
     links.claude,
@@ -69,7 +85,7 @@ export function assistantSetupMarkdown({ server, app }: AssistantSetupInput): st
     "",
     "## What the connection can and cannot do",
     "",
-    `It sees only the agent and the permissions the owner allows when signing in, and the owner can disconnect it at any time at ${app}/connect/apps. It can suggest trades or setting changes only if the owner allowed that, and nothing happens until they approve each one in ${CONNECTOR_NAME}. It can never move funds, see keys, turn on live trading or loosen the owner's limits. Paper (practice) and live money are always reported separately.`,
+    `It sees only the agent and the permissions the owner allows when signing in, and the owner can disconnect it at any time at ${app}/connect/apps. It can suggest trades or setting changes only if the owner allowed that, and nothing happens until they approve each one in ${CONNECTOR_NAME}. It can never move funds, see keys, turn on live trading or loosen the owner's signed limits. Paper (practice) and live money are always reported separately.`,
   ];
   return lines.join("\n");
 }

@@ -39,6 +39,13 @@ export interface ResourceDef {
   mimeType: string;
   /** Null: any authenticated connection may read it (documentation). */
   capability: Capability | null;
+  /**
+   * Listed on a profile only when at least one of these capabilities can exist
+   * there (scopes.ts, capabilityAllowedIn): for a resource that serves only
+   * tools the directory profile lacks, like the proposal view. It gates nothing
+   * per connection; `capability` does that.
+   */
+  profileAnyOf?: readonly Capability[];
   /** A fixed URI, or a URI template with {variables}. */
   uri: string;
   /** For templates: the concrete resources this connection can read. */
