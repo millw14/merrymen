@@ -80,6 +80,26 @@ test("a rebuilt child (the cursor rewinds on the first round) is still drained t
   assert.deepEqual(r.behind, []);
 });
 
+test("decisions packed denser than one batch (one second, or one lookback window) are all copied", async () => {
+  // The mirror's decisions cursor is a timestamp read with a 300 s lookback.
+  // Past one batch per bucket it re-reads the same first rows without
+  // moving, so the drain pages decisions by (at, id) instead.
+  const l = await ledgers();
+  const de = l.childRaw.prepare(`INSERT INTO decisions (id, agent_id, source, action, reason, at) VALUES (?, ?, 'strategy:momentum', 'hold', 'wait', ?)`);
+  for (let i = 0; i < 350; i++) de.run(`same-second-${i}`, ACCOUNT, 1_700_000_000);
+  for (let i = 0; i < 260; i++) de.run(`two-minutes-${i}`, ACCOUNT, 1_700_000_100 + (i % 120));
+
+  const r = await drainTenant({ tenant: "0xt", child: l.child, shared: l.shared, batch: 100 });
+
+  assert.equal(n(l.sharedRaw, "SELECT COUNT(*) AS n FROM decisions"), 610);
+  assert.deepEqual(r.behind, []);
+  assert.equal(
+    (l.sharedRaw.prepare(`SELECT last_id FROM mirror_state WHERE tenant = '0xt' AND table_name = 'decisions'`).get() as { last_id: number }).last_id,
+    1_700_000_219,
+    "the watermark ends at the newest decision",
+  );
+});
+
 test("an empty ledger takes one round", async () => {
   const l = await ledgers();
   const r = await drainTenant({ tenant: "0xt", child: l.child, shared: l.shared });

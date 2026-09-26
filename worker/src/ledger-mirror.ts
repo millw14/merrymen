@@ -361,6 +361,75 @@ export function missingMarkColumn(e: unknown): boolean {
 }
 
 /**
+ * A child's decision rows, with the mark columns when the child has them.
+ * Shared by mirrorTenant and the drain, so both read exactly the same columns.
+ */
+function readDecisions(child: Db, where: string, params: unknown[]): Promise<Record<string, unknown>[]> {
+  // THE MARK COLUMNS ARE READ WHEN THE CHILD HAS THEM. This handle is
+  // read-only, so the mirror cannot migrate a child ledger; one opened
+  // before its own worker has run the ALTER would fail a SELECT naming
+  // `mark_usd`, and the whole decisions copy would stall behind it —
+  // silently, since a stalled table and an idle one print the same line.
+  // So the row is copied without them instead: a post with no mark claims
+  // nothing, and a post that never arrives says nothing at all.
+  //
+  // ONLY for that. Any other failure of the first read throws to the catch
+  // below and the pass retries with the marks — see missingMarkColumn.
+  const read = (marks: boolean) =>
+    child
+      .prepare(
+        `SELECT id, agent_id, source, strategy, provider, model, symbol, action, size_usdg,
+                reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name,
+                ${marks ? "mark_usd, mcap_usd," : ""} at
+         FROM decisions WHERE ${where}`,
+      )
+      .all(...params) as Promise<Record<string, unknown>[]>;
+  return read(true).catch((e: unknown) => {
+    if (missingMarkColumn(e)) return read(false);
+    throw e;
+  });
+}
+
+/**
+ * Insert decision rows into the shared ledger, first write wins. Shared by
+ * mirrorTenant and the drain, so neither can drift from the other.
+ */
+async function insertDecisions(db: Db, rows: Record<string, unknown>[]): Promise<void> {
+  const ins = db.prepare(
+    // ON CONFLICT (id) DO NOTHING IS LOAD-BEARING AND IT CONSTRAINS WHAT
+    // MAY BE ADDED HERE. Every other table in this file upserts; this one
+    // deliberately does not, so a decision row reaches shared storage
+    // EXACTLY AS IT WAS FIRST WRITTEN and never again. Anything written to
+    // a decision after its first mirror pass is therefore unreachable from
+    // the hosted feed, silently — the row is already there and the second
+    // copy is dropped on the floor.
+    //
+    // `evidence_json` is safe here only because it is written in the same
+    // INSERT as the row it belongs to, at intent time, from measurements
+    // that were already in hand. A column filled in later — a post written
+    // after the fill lands, say — must NOT be added to this statement; it
+    // needs its own append-only table, inserted once, or it will pass
+    // every test against a child sqlite and publish nothing in production.
+    //
+    // `mark_usd` and `mcap_usd` are safe here for the same reason: the
+    // writer puts them in the row's own INSERT, at decision time.
+    `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action,
+                            size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name,
+                            mark_usd, mcap_usd, at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (id) DO NOTHING`,
+  );
+  for (const r of rows) {
+    await ins.run(
+      r.id, r.agent_id, r.source, r.strategy ?? null, r.provider ?? null, r.model ?? null,
+      r.symbol ?? null, r.action ?? null, r.size_usdg ?? null, r.reason ?? null,
+      r.dropped_rule ?? null, r.signals_json ?? null, r.hold_kind ?? null, r.evidence_json ?? null,
+      r.provenance ?? null, r.display_name ?? null, r.mark_usd ?? null, r.mcap_usd ?? null, r.at,
+    );
+  }
+}
+
+/**
  * Copy one tenant's ledger forward.
  *
  * Never throws: a tenant whose ledger is mid-write, corrupt, or simply absent
@@ -769,63 +838,10 @@ export async function mirrorTenant(args: {
       .prepare(`SELECT last_id FROM mirror_state WHERE tenant = ? AND table_name = ?`)
       .get(tenant, "decisions")) as { last_id: number } | undefined;
     const since = Math.max(0, (dmark?.last_id ?? 0) - DECISION_LOOKBACK_SEC);
-    // THE MARK COLUMNS ARE READ WHEN THE CHILD HAS THEM. This handle is
-    // read-only, so the mirror cannot migrate a child ledger; one opened
-    // before its own worker has run the ALTER would fail a SELECT naming
-    // `mark_usd`, and the whole decisions copy would stall behind it —
-    // silently, since a stalled table and an idle one print the same line.
-    // So the row is copied without them instead: a post with no mark claims
-    // nothing, and a post that never arrives says nothing at all.
-    //
-    // ONLY for that. Any other failure of the first read throws to the catch
-    // below and the pass retries with the marks — see missingMarkColumn.
-    const read = (marks: boolean) =>
-      child
-        .prepare(
-          `SELECT id, agent_id, source, strategy, provider, model, symbol, action, size_usdg,
-                  reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name,
-                  ${marks ? "mark_usd, mcap_usd," : ""} at
-           FROM decisions WHERE at >= ? ORDER BY at ASC LIMIT ?`,
-        )
-        .all(since, batch) as Promise<Record<string, unknown>[]>;
-    const rows = await read(true).catch((e: unknown) => {
-      if (missingMarkColumn(e)) return read(false);
-      throw e;
-    });
+    const rows = await readDecisions(child, `at >= ? ORDER BY at ASC LIMIT ?`, [since, batch]);
     if (rows.length) {
       await shared.tx(async (db) => {
-        const ins = db.prepare(
-          // ON CONFLICT (id) DO NOTHING IS LOAD-BEARING AND IT CONSTRAINS WHAT
-          // MAY BE ADDED HERE. Every other table in this file upserts; this one
-          // deliberately does not, so a decision row reaches shared storage
-          // EXACTLY AS IT WAS FIRST WRITTEN and never again. Anything written to
-          // a decision after its first mirror pass is therefore unreachable from
-          // the hosted feed, silently — the row is already there and the second
-          // copy is dropped on the floor.
-          //
-          // `evidence_json` is safe here only because it is written in the same
-          // INSERT as the row it belongs to, at intent time, from measurements
-          // that were already in hand. A column filled in later — a post written
-          // after the fill lands, say — must NOT be added to this statement; it
-          // needs its own append-only table, inserted once, or it will pass
-          // every test against a child sqlite and publish nothing in production.
-          //
-          // `mark_usd` and `mcap_usd` are safe here for the same reason: the
-          // writer puts them in the row's own INSERT, at decision time.
-          `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action,
-                                  size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name,
-                                  mark_usd, mcap_usd, at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT (id) DO NOTHING`,
-        );
-        for (const r of rows) {
-          await ins.run(
-            r.id, r.agent_id, r.source, r.strategy ?? null, r.provider ?? null, r.model ?? null,
-            r.symbol ?? null, r.action ?? null, r.size_usdg ?? null, r.reason ?? null,
-            r.dropped_rule ?? null, r.signals_json ?? null, r.hold_kind ?? null, r.evidence_json ?? null,
-            r.provenance ?? null, r.display_name ?? null, r.mark_usd ?? null, r.mcap_usd ?? null, r.at,
-          );
-        }
+        await insertDecisions(db, rows);
         // Same transaction as the rows, for the same reason the log tables do
         // it: a crash between the two re-reads a window that is already there,
         // which ON CONFLICT absorbs, but a watermark that moved without its
@@ -1243,10 +1259,16 @@ export interface DrainReport extends MirrorReport {
  * straight after. A backlog bigger than a batch (after a stalled mirror, or a
  * busy stretch) would be cut off and lost with the home.
  *
- * So this repeats mirrorTenant until no cursored table has a row beyond its
- * cursor, judged against the child ledger itself rather than against the
- * counts. `trades` counts only what it inserted, and `decisions` counts its
- * re-read overlap, so neither count says whether more is left.
+ * So this repeats mirrorTenant until no id-cursored table has a row beyond
+ * its cursor, judged against the child ledger itself rather than against the
+ * counts. `trades` counts only what it inserted, so its count does not say
+ * whether more is left.
+ *
+ * Decisions are then swept separately, by (at, id). Their mirror cursor is a
+ * timestamp read with a 300 s lookback, and `at` is not unique. A bucket of
+ * decisions denser than one batch (sharing a second, or packed into one
+ * lookback window) would make every round re-read the same first batch
+ * without the cursor moving. A key that includes the id always moves.
  *
  * It stops early only when a round changed no cursor at all. A table that
  * fails every round would otherwise spin for ever. `behind` names what was
@@ -1267,8 +1289,8 @@ export async function drainTenant(args: { tenant: string; child: Db; shared: Db;
     if (r.restarted) total.restarted = { ...r.restarted, ...total.restarted };
     if (r.failed) total.failed = r.failed;
     else delete total.failed;
-    total.behind = await behindCursors(args.child, args.shared, args.tenant, r.copied.decisions === batch);
-    if (!total.behind.length) return total;
+    total.behind = await behindCursors(args.child, args.shared, args.tenant);
+    if (!total.behind.length) break;
     const after = await cursorsOf(args.shared, args.tenant);
     // CHANGED, not risen. A child rebuilt by a redeploy rewinds its cursor on
     // the first round, so that round's cursor ends LOWER than it began, and it
@@ -1278,7 +1300,56 @@ export async function drainTenant(args: { tenant: string; child: Db; shared: Db;
       before = after;
       continue;
     }
-    return total;
+    break;
+  }
+  const d = await sweepDecisions(args.child, args.shared, args.tenant, batch);
+  total.copied.decisions = (total.copied.decisions ?? 0) + d.read;
+  if (d.failed) {
+    total.failed = { ...total.failed, decisions: d.failed };
+    total.behind.push("decisions");
+  }
+  return total;
+}
+
+/**
+ * Every decision from the mirror's own starting point (its watermark less the
+ * lookback) to the end, paged by (at, id) so that no bucket of equal
+ * timestamps can pin it. ON CONFLICT makes the overlap with rows already
+ * copied free, exactly as for the mirror pass. The watermark only ever moves
+ * forward here: a page ending behind it must not pull it back.
+ */
+async function sweepDecisions(child: Db, shared: Db, tenant: string, batch: number): Promise<{ read: number; failed?: string }> {
+  let read = 0;
+  try {
+    const dmark = (await shared
+      .prepare(`SELECT last_id FROM mirror_state WHERE tenant = ? AND table_name = ?`)
+      .get(tenant, "decisions")) as { last_id: number } | undefined;
+    // (since, "") admits every row at `since`: ids are never empty.
+    let at = Math.max(0, (dmark?.last_id ?? 0) - DECISION_LOOKBACK_SEC);
+    let id = "";
+    for (;;) {
+      const rows = await readDecisions(child, `(at > ? OR (at = ? AND id > ?)) ORDER BY at ASC, id ASC LIMIT ?`, [at, at, id, batch]);
+      if (!rows.length) return { read };
+      const nowSec = Math.floor(Date.now() / 1000);
+      await shared.tx(async (db) => {
+        await insertDecisions(db, rows);
+        await db
+          .prepare(
+            `INSERT INTO mirror_state (tenant, table_name, last_id, updated_at) VALUES (?, ?, ?, ?)
+             ON CONFLICT (tenant, table_name) DO UPDATE SET
+               last_id = CASE WHEN excluded.last_id > mirror_state.last_id THEN excluded.last_id ELSE mirror_state.last_id END,
+               updated_at = excluded.updated_at`,
+          )
+          .run(tenant, "decisions", Number(rows[rows.length - 1]!.at), nowSec);
+      });
+      read += rows.length;
+      if (rows.length < batch) return { read };
+      const last = rows[rows.length - 1]!;
+      at = Number(last.at);
+      id = String(last.id);
+    }
+  } catch (e) {
+    return { read, failed: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -1292,14 +1363,8 @@ async function cursorsOf(shared: Db, tenant: string): Promise<Map<string, number
   return new Map(rows.map((r) => [String(r.table_name), Number(r.last_id)]));
 }
 
-/**
- * The cursored tables whose child rows the shared ledger has not reached.
- *
- * `decisions` is cursored on `at`, and its batch can end partway through one
- * second. A full last batch therefore counts as behind even when no row is
- * newer than the cursor.
- */
-async function behindCursors(child: Db, shared: Db, tenant: string, decisionsFull: boolean): Promise<string[]> {
+/** The id-cursored tables whose child rows the shared ledger has not reached. Decisions are swept apart. */
+async function behindCursors(child: Db, shared: Db, tenant: string): Promise<string[]> {
   const cursor = await cursorsOf(shared, tenant);
   const out: string[] = [];
   for (const { table } of LOG_TABLES) {
@@ -1309,12 +1374,6 @@ async function behindCursors(child: Db, shared: Db, tenant: string, decisionsFul
     } catch {
       // A child ledger that predates the table has nothing in it to leave behind.
     }
-  }
-  try {
-    const d = (await child.prepare(`SELECT MAX(at) AS m FROM decisions`).get()) as { m: number | null } | undefined;
-    if (decisionsFull || (d?.m !== null && d?.m !== undefined && Number(d.m) > (cursor.get("decisions") ?? 0))) out.push("decisions");
-  } catch {
-    // As above.
   }
   return out;
 }

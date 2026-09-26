@@ -228,6 +228,8 @@ describe("the kill switch stands a child down", () => {
     // lookback) can move past each batch.
     const de = child.prepare(`INSERT INTO decisions (id, agent_id, source, action, reason, at) VALUES (?, ?, 'strategy:momentum', 'hold', 'wait', ?)`);
     for (let i = 0; i < 1100; i++) de.run(`backlog-${i}`, ACCOUNT, t0 + i * 10);
+    // And a bucket that cursor cannot move through: 700 in one second.
+    for (let i = 0; i < 700; i++) de.run(`dense-${i}`, ACCOUNT, t0 + 11_005);
     child.exec("COMMIT");
     child.close();
 
@@ -237,6 +239,7 @@ describe("the kill switch stands a child down", () => {
     assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM events WHERE message LIKE 'backlog %'`), 1234);
     assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM trades WHERE lower(agent_id) = lower(?)`, ACCOUNT), 777);
     assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM decisions WHERE id LIKE 'backlog-%'`), 1100);
+    assert.equal(count(shared.raw, `SELECT COUNT(*) AS n FROM decisions WHERE id LIKE 'dense-%'`), 700);
     assert.equal(status(shared.raw), "killed");
     assert.equal(existsSync(home()), false);
   });
