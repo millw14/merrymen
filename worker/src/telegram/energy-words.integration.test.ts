@@ -80,6 +80,11 @@ describe("the rule both chat prompts carry", () => {
     assert.match(ENERGY_WORDS, /100,000 \$MERRYMEN/);
   });
 
+  it("ON ANOTHER NETWORK only their own wallet counts — never /wallet, never the app-chat buy", () => {
+    assert.match(ENERGY_WORDS, /IF THE LINE SAYS YOUR ACCOUNT IS ON ANOTHER NETWORK, only their own wallet on Robinhood Chain counts/);
+    assert.match(ENERGY_WORDS, /never point them at \/wallet for \$MERRYMEN, never suggest sending anything to your account, and do not offer the app-chat buy/);
+  });
+
   it("the buy is the app chat's, the address is /wallet's, and nothing is said about price", () => {
     assert.match(ENERGY_WORDS, /Merrymen app chat/);
     assert.match(ENERGY_WORDS, /you never buy it from Telegram/);
