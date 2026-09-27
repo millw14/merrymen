@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "./db";
 import { repairHistoricalFills } from "./history-fill-repair";
-import { CASH, STOCK_TOKENS } from "../../packages/core/src/index";
+import { CASH, MERRYMEN_TOKEN, STOCK_TOKENS } from "../../packages/core/src/index";
 import { addressTopic } from "./inflight-reconcile";
 
 test("receipt repair fills missing history, preserves known P&L and refuses duplicate execution rows",async()=>{
@@ -44,5 +44,28 @@ test("a second repair counts nothing — not even a coin whose name can never be
   assert.deepEqual({...row},{fill_side:'buy',fill_symbol:null});
   const second=await repairHistoricalFills(db,'unused',client as never);
   assert.equal(second.repaired,0,"the row is still a candidate, but nothing about it changed");
+ }finally{raw.close();}
+});
+
+test("an energy purchase is never backfilled as a buy, and is counted for what it is",async()=>{
+ // USDG out, $MERRYMEN in: the shape of a buy. But the reserve is capital set
+ // aside (an 'energy-buy' flow), never a position — a 'buy MERRYMEN' fill on the
+ // row would count the spend twice in every fill-derived reader, on every deploy.
+ const raw=new DatabaseSync(':memory:');const db=wrapSqlite(raw);
+ const account='0x'+'1'.repeat(40),pair='0x'+'2'.repeat(40);
+ try{
+  await db.exec(`CREATE TABLE agents(smart_account TEXT,chain_id INTEGER); CREATE TABLE trades(id INTEGER,agent_id TEXT,tx_hash TEXT,status TEXT,kind TEXT,created_at INTEGER,fill_side TEXT,fill_symbol TEXT,buy_token TEXT,sell_token TEXT,fill_cash_usdg REAL,fill_qty_raw TEXT,basis_source TEXT,realized_pnl_usdg REAL);`);
+  await db.prepare('INSERT INTO agents VALUES(?,4663)').run(account);
+  await db.prepare(`INSERT INTO trades(id,agent_id,tx_hash,status,kind,created_at) VALUES(1,?,'0xee','landed','swap',1)`).run(account);
+  const log=(token:string,from:string,to:string,qty:bigint)=>({address:token,topics:['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',addressTopic(from),addressTopic(to)],data:'0x'+qty.toString(16)});
+  let symbolReads=0;
+  const client={getTransactionReceipt:async()=>({status:'success',logs:[log(CASH.USDG,account,pair,42000000n),log(MERRYMEN_TOKEN.address,pair,account,98000n*10n**18n)]}),readContract:async()=>{symbolReads++;throw new Error('not read');}};
+  const result=await repairHistoricalFills(db,'unused',client as never);
+  assert.equal(result.repaired,0);
+  assert.equal(result.unavailable,1);
+  assert.deepEqual(result.reasons,{'energy-reserve':1},"named for what it is, not 'no-unambiguous-account-swap'");
+  assert.equal(symbolReads,0,"and nothing about the reserve is looked up as if it were a position");
+  const row=await db.prepare('SELECT fill_side,buy_token,fill_symbol FROM trades WHERE id=1').get() as Record<string,unknown>;
+  assert.deepEqual({...row},{fill_side:null,buy_token:null,fill_symbol:null});
  }finally{raw.close();}
 });
