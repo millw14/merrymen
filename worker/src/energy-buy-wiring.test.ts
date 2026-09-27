@@ -241,8 +241,26 @@ describe("THE EXECUTOR", () => {
 
   it("the landing block is remembered only AFTER the send came back", () => {
     const arm = energyArm();
-    assert.ok(arm.indexOf("lastEnergyLandedBlock = exec.blockNumber;") > arm.indexOf("exec = await send(calls);"));
-    assert.equal(count(CODE, "lastEnergyLandedBlock = "), 1, "no other writer");
+    assert.ok(arm.indexOf("noteEnergyLanded(exec.blockNumber);") > arm.indexOf("exec = await send(calls);"));
+  });
+
+  it("THE PIN HAS ONE WRITER, which only moves it forward — fed by the executor, the resolver and the arm's ledger seed", () => {
+    // It lived in memory, written by the executor alone: a restart, or a
+    // landing only the stranded resolver saw, left the next ask's balance
+    // reads unpinned (the in-flight guard matches only 'submitted' rows).
+    assert.equal(count(CODE, "lastEnergyLandedBlock = "), 1, "one assignment");
+    const note = CODE.slice(CODE.indexOf("const noteEnergyLanded = "), CODE.indexOf("const noteEnergyLanded = ") + 400);
+    assert.match(note, /if \(block === null \|\| block === undefined \|\| block <= 0n\) return;\s*if \(lastEnergyLandedBlock === null \|\| block > lastEnergyLandedBlock\) lastEnergyLandedBlock = block;/);
+    assert.equal(count(CODE, "noteEnergyLanded("), 3, "three callers: the executor, the resolver, the arm");
+    // The resolver pins a purchase it settled as landed — after its booking decided.
+    const r = arrow("resolveStrandedOps");
+    const settle = r.indexOf("await settleEnergyLanding(");
+    assert.ok(r.indexOf("noteEnergyLanded(r.blockNumber);") > settle);
+    // The arm seeds it from the ledger AFTER the stranded resolver ran, and before the budget.
+    const reconcile = CODE.indexOf("if (executor) await reconcileInFlightAtArm(agentId, client, grant.smartAccount as `0x${string}`);");
+    const seeded = CODE.indexOf("await energyLandedBlockAtArm({", reconcile);
+    assert.ok(reconcile > 0 && seeded > reconcile && seeded < CODE.indexOf("await refreshBudget(agentId);", reconcile));
+    assert.match(CODE.slice(seeded, seeded + 300), /newest: \(\) => newestLandedEnergyBuy\(agentId\),/);
   });
 
   it("tokenLegs names the energy legs, so the pre-broadcast 'submitted' row carries them", () => {

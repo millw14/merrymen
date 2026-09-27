@@ -222,8 +222,8 @@ import {
   sayEnergyPlan,
   usdgText,
 } from "./energy-buy";
-import { bookEnergyPurchase, isEnergyIntent, isEnergyRow, settleEnergyLanding, type EnergySettleDeps } from "./energy-settle";
-import { bookCapitalFlow, energyBuysInFlight } from "./store";
+import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, type EnergySettleDeps } from "./energy-settle";
+import { bookCapitalFlow, energyBuysInFlight, newestLandedEnergyBuy } from "./store";
 import {
   claimEnergy,
   claimEnergyNotice,
@@ -2971,6 +2971,9 @@ async function main() {
             continue;
           }
           if (settled.settled === "booked") capitalPeakDirty = true;
+          // A PURCHASE ONLY THIS RESOLVER SAW LAND still pins the next ask's
+          // balance reads to its landing block, like one the executor saw.
+          noteEnergyLanded(r.blockNumber);
         }
         await addTrade({
           agent_id: agentId,
@@ -3561,10 +3564,23 @@ async function main() {
    * The block the last energy purchase landed in, from its receipt. The buy's
    * balance reads are pinned no earlier than this, so a load-balanced node that
    * has not caught up answers with an error rather than a pre-purchase balance
-   * the next ask would top up a second time. In memory only: across a restart
-   * the in-flight guard and the ledger carry the same protection.
+   * the next ask would top up a second time.
+   *
+   * THREE WRITERS, ONE RULE (noteEnergyLanded — it only moves forward): the
+   * executor's energy arm after a send that landed; the stranded-op resolver
+   * when it settles an energy row as landed; and the arm, which seeds it from
+   * the LEDGER (energy-settle.ts energyLandedBlockAtArm). It used to be written
+   * by the first alone and said "across a restart the in-flight guard and the
+   * ledger carry the same protection" — they did not: the guard matches only
+   * 'submitted' rows, so after a restart, or a landing only the resolver saw,
+   * a node behind the landing block could hand the planner a pre-purchase
+   * balance and a second chunk would be sized on it.
    */
   let lastEnergyLandedBlock: bigint | null = null;
+  const noteEnergyLanded = (block: bigint | null | undefined): void => {
+    if (block === null || block === undefined || block <= 0n) return;
+    if (lastEnergyLandedBlock === null || block > lastEnergyLandedBlock) lastEnergyLandedBlock = block;
+  };
   /**
    * What a booking reads and writes, wired to THIS agent's ledger. The breaker's
    * peak is the persisted risk period's, read without observing — the same
@@ -6284,6 +6300,19 @@ async function main() {
     // BEFORE seeding — else the seed under-counts the day's spend and loosens the
     // cap. Live only (paper never touches the chain); best-effort (guarded).
     if (executor) await reconcileInFlightAtArm(agentId, client, grant.smartAccount as `0x${string}`);
+    // THE ENERGY BUY'S BALANCE PIN, seeded from the ledger — after the resolver
+    // above, which ratchets it for any purchase it just settled. A restart after
+    // a landed purchase must not let the next ask read a node still behind that
+    // landing. Bounded and fail-soft (energy-settle.ts energyLandedBlockAtArm):
+    // the pin is a freshness floor, never a gate. Only where the buy can run.
+    if (executor && grant.chainId === MERRYMEN_TOKEN.chainId) {
+      noteEnergyLanded(
+        await energyLandedBlockAtArm({
+          newest: () => newestLandedEnergyBuy(agentId),
+          receiptBlock: async (hash) => (await client.getTransactionReceipt({ hash })).blockNumber,
+        }),
+      );
+    }
     await refreshBudget(agentId);
 
     // ── epoch boundary ───────────────────────────────────────────────────
@@ -8782,9 +8811,7 @@ async function main() {
         exec = await send(calls);
         // It LANDED (send throws on a revert or an unread receipt). Remember
         // where, so the next ask's balances are read no earlier than this.
-        if (exec.blockNumber > 0n && (lastEnergyLandedBlock === null || exec.blockNumber > lastEnergyLandedBlock)) {
-          lastEnergyLandedBlock = exec.blockNumber;
-        }
+        noteEnergyLanded(exec.blockNumber);
         await addEvent(agentId, "ok", `simulated ✓ energy route quote ${gross} min ${minOut} (after the token's buy tax)`);
       } else {
         // Every EVM kind is handled above, and this arm refuses rather than

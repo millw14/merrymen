@@ -183,6 +183,21 @@ describe("resolveSubmittedOps", () => {
     assert.equal(res[0]!.attributed, true);
   });
 
+  it("carries the block the op landed in, when its log says — the energy buy's balance pin needs it", async () => {
+    const [op, tx] = [h(0x53), h(0x63)];
+    const res = await resolveSubmittedOps({
+      chain: chainFor([{ ...opLog(op, true, tx), blockNumber: "0x8a3b1f" }]),
+      smartAccount: ACCOUNT,
+      usdgToken: USDG,
+      hashes: [op],
+      lookbackBlocks: 1000n,
+    });
+    assert.equal(res[0]!.blockNumber, 0x8a3b1fn);
+    // A log without one leaves it absent — never a 0 that would read as a pin.
+    const bare = await resolveSubmittedOps({ chain: chainFor([opLog(op, true, tx)]), smartAccount: ACCOUNT, usdgToken: USDG, hashes: [op], lookbackBlocks: 1000n });
+    assert.equal("blockNumber" in bare[0]!, false);
+  });
+
   it("settles a stranded op the chain REVERTED — which findOrphanOps would skip", async () => {
     // The asymmetry that makes this a separate function. An unrecorded revert
     // is nothing to an orphan sweep: it moved no money and counts toward no

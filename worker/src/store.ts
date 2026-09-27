@@ -3482,6 +3482,47 @@ export async function energyBuysInFlight(agentId: string, sinceSec: number): Pro
   }
 }
 
+/**
+ * THE NEWEST ENERGY PURCHASE THAT LANDED, and the block it landed in when the
+ * ledger knows it — what the buy's balance-read pin is seeded from at arm.
+ *
+ * The pin (index.ts lastEnergyLandedBlock) makes the next ask read both
+ * $MERRYMEN halves and the cash no earlier than the last purchase's landing,
+ * so a load-balanced node still behind it answers with an error rather than a
+ * pre-purchase balance the planner would top up a second time. It was held in
+ * memory only, so a restart after a landing forgot it — and the in-flight
+ * guard does not cover a LANDED row.
+ *
+ * The block comes from the purchase's own 'energy-buy' flow row (booked from
+ * the receipt's USDG log, before the landed row was written). A landed
+ * purchase with no flow row — its booking was refused or skipped — answers
+ * `blockNumber: null` with its tx hash, and the caller reads that one receipt.
+ * By kind OR by legs, like energyBuysInFlight. Throws when the ledger will not
+ * answer; the caller treats that as "no pin" (fail-soft: the pin is a
+ * freshness floor, never a gate).
+ */
+export async function newestLandedEnergyBuy(agentId: string): Promise<{ txHash: string; blockNumber: number | null } | null> {
+  const reserve = [...new Set(Object.values(ENERGY_RESERVE_TOKENS).flat().map((a) => a.toLowerCase()))];
+  const row = (await getDb()
+    .prepare(
+      `SELECT t.tx_hash AS tx_hash,
+              (SELECT MAX(f.block_number) FROM flows f
+                WHERE f.agent_id = t.agent_id AND f.source = 'energy-buy'
+                  AND LOWER(COALESCE(f.tx_hash, '')) = LOWER(t.tx_hash)) AS block_number
+         FROM trades t
+        WHERE t.agent_id = ? AND t.status = 'landed' AND t.tx_hash IS NOT NULL
+          AND (t.kind = 'energy-buy'
+               OR (LOWER(COALESCE(t.sell_token, '')) = ?
+                   AND LOWER(COALESCE(t.buy_token, '')) IN (${reserve.map(() => "?").join(", ")})))
+        ORDER BY t.created_at DESC, t.id DESC
+        LIMIT 1`,
+    )
+    .get(agentId, (CASH.USDG as string).toLowerCase(), ...reserve)) as { tx_hash: string; block_number: number | string | null } | undefined;
+  if (!row) return null;
+  const block = row.block_number === null || row.block_number === undefined ? null : Number(row.block_number);
+  return { txHash: String(row.tx_hash).toLowerCase(), blockNumber: block !== null && Number.isSafeInteger(block) && block > 0 ? block : null };
+}
+
 // ── chat turns — the conversation survives a restart ──────────────────────
 
 /** Kept per chat on disk. Only the newest few reach a prompt (see service.ts);

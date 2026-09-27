@@ -189,6 +189,44 @@ export async function bookEnergyPurchase(
 }
 
 /**
+ * WHERE THE LAST ENERGY PURCHASE LANDED, read once at arm — the seed for the
+ * buy's balance-read pin (index.ts lastEnergyLandedBlock), which otherwise
+ * lived in memory only and was forgotten by every restart.
+ *
+ * The ledger's own block first (the purchase's energy-buy flow row); failing
+ * that, the one receipt of the newest landed purchase, bounded by `timeoutMs`.
+ * FAIL-SOFT TO NULL on every path — no row, a ledger that throws, a receipt the
+ * chain will not return in time: the pin is a freshness floor on a read, never
+ * a gate, and the in-flight guard and the planner's own refusals still stand.
+ */
+export async function energyLandedBlockAtArm(
+  d: {
+    newest(): Promise<{ txHash: string; blockNumber: number | null } | null>;
+    receiptBlock(txHash: `0x${string}`): Promise<bigint | null>;
+  },
+  timeoutMs = 5_000,
+): Promise<bigint | null> {
+  try {
+    const row = await d.newest();
+    if (!row) return null;
+    if (row.blockNumber !== null && row.blockNumber > 0) return BigInt(row.blockNumber);
+    if (!/^0x[0-9a-f]{64}$/i.test(row.txHash)) return null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), timeoutMs);
+    });
+    try {
+      const block = await Promise.race([d.receiptBlock(row.txHash as `0x${string}`).catch(() => null), late]);
+      return block !== null && block > 0n ? block : null;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The resolver's form: book it, and say whether the row may now be settled.
  *
  * `proceed: false` means the booking could not be READ or WRITTEN — a receipt
