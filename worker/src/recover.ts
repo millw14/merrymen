@@ -36,6 +36,7 @@ import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
 import { assertDerivedAccount } from "../../packages/core/src/index";
 import {
   CASH,
+  MERRYMEN_TOKEN,
   MORPHO,
   STOCK_TOKENS,
   USDG_DECIMALS,
@@ -187,11 +188,20 @@ export interface RecoverResult extends RecoverPlan {
  * them, and snapshot.ts goes through convertToAssets precisely to avoid the
  * question. The amount an owner confirms a sweep against must not be a number
  * we made up, so the vault row is priced in USDG instead (see planRecovery).
+ *
+ * $MERRYMEN IS BUILTIN TOO. It is the agent's energy reserve: bought into the
+ * account on the owner's say-so, and deliberately never watched, never a
+ * position and never on any token list the owner configures — so without this
+ * row the one command that exists to get money out would leave it behind. On a
+ * chain where the token is not deployed it reads `absent`, an honest zero. A
+ * sweep of it moves no USDG, so no capital flow is written, which is right: the
+ * reserve left the trading book when it was bought.
  */
 const BUILTIN_SWEEPABLE: { symbol: string; address: Address; decimals: number }[] = [
   { symbol: "USDG", address: CASH.USDG as Address, decimals: USDG_DECIMALS },
   ...STOCK_TOKENS.map((t) => ({ symbol: t.symbol, address: t.address as Address, decimals: 18 })),
   { symbol: "vault", address: MORPHO.steakhouseUsdgVault as Address, decimals: USDG_DECIMALS },
+  { symbol: MERRYMEN_TOKEN.symbol, address: MERRYMEN_TOKEN.address as Address, decimals: MERRYMEN_TOKEN.decimals },
 ];
 
 /**
