@@ -28,10 +28,19 @@
  * sum balances across wallets, which is a different feature with a different
  * abuse story (borrowing a friend's wallet for an afternoon); one proven wallet
  * answers the reported case and nothing more.
+ *
+ * AND ONE ACCOUNT PER WALLET. The proof above bound a wallet to an account and
+ * nothing bound it back: any number of accounts could link the same
+ * 100,000-token wallet and each agent read the whole bag as its own. So the
+ * wallet is CLAIMED (settings-store holder_claims) before the proof is stored —
+ * first claim wins, a second account is refused with 409, and a store that
+ * cannot answer refuses rather than letting a second account in (the grants
+ * route's FIRST CLAIM WINS, same reasoning). Unlinking releases the claim.
+ * effectiveHolder (packages/core/src/holder-proof.ts) is how the claim is read.
  */
 import { NextResponse } from "next/server";
 import { recoverMessageAddress } from "viem";
-import { getSettingsStore } from "@merrymen/settings-store";
+import { getSettingsStore, type HolderClaim } from "@merrymen/settings-store";
 import { holderProofMessage, isHolderProof, isHostedMode } from "@merrymen/core";
 import {
   consumeChallengeNonce,
@@ -39,6 +48,7 @@ import {
   requestOrigin,
   tenantOf,
 } from "@/lib/auth";
+import { holderWalletFor } from "@/lib/holder-wallet";
 
 export const dynamic = "force-dynamic";
 
@@ -145,16 +155,62 @@ export async function POST(req: Request) {
     );
   }
 
+  const wallet = holder.toLowerCase();
   const store = getSettingsStore();
-  const stored = (await store.get(tenant)) ?? {};
-  await store.put(tenant, {
-    ...stored,
-    holderProof: { address: holder.toLowerCase(), at: Date.now() },
-  });
-  return NextResponse.json({ ok: true, holder: holder.toLowerCase() });
+
+  /**
+   * CLAIMED BEFORE THE PROOF IS STORED, and only now — after the nonce is
+   * burned and the signature recovered, so nobody can squat a wallet they
+   * cannot sign for, and only someone who can sign for it ever learns that
+   * it is claimed. A proof stored first would count (for however briefly)
+   * in two accounts; a claim taken first can only ever be undone.
+   */
+  let claim: HolderClaim;
+  try {
+    claim = await store.claimHolder(wallet, tenant);
+  } catch {
+    return NextResponse.json(
+      // Unreadable is not "free": refuse, as the grants route does.
+      { error: "couldn't check whether another account already uses this wallet — nothing was linked, please try again", ownerFacing: true },
+      { status: 503 },
+    );
+  }
+  if (!claim.ok) {
+    // Never who: that account is somebody's login.
+    return NextResponse.json(
+      {
+        error:
+          "This wallet already powers another merrymen account, and a wallet can power one account. Unlink it there first, or link a different wallet.",
+        ownerFacing: true,
+      },
+      { status: 409 },
+    );
+  }
+
+  try {
+    const stored = (await store.get(tenant)) ?? {};
+    // RE-LINKING MOVES THE CLAIM. The wallet this account linked before is
+    // released first, so a failure below leaves at worst an unclaimed old
+    // proof — which counts nowhere — and a retry finishes the move.
+    const before = stored.holderProof;
+    if (isHolderProof(before) && before.address !== wallet) await store.releaseHolder(before.address, tenant);
+    await store.put(tenant, {
+      ...stored,
+      holderProof: { address: wallet, at: Date.now() },
+    });
+  } catch {
+    // Undo a claim THIS call took, so a failed link does not hold the wallet
+    // hostage. One this account already held stays: it may back a stored proof.
+    if (claim.fresh) await store.releaseHolder(wallet, tenant).catch(() => {});
+    return NextResponse.json(
+      { error: "couldn't save that link just now — nothing changed, please try again", ownerFacing: true },
+      { status: 503 },
+    );
+  }
+  return NextResponse.json({ ok: true, holder: wallet });
 }
 
-/** DELETE — unlink. The tier falls back to the login wallet, which always works. */
+/** DELETE — unlink, and free the wallet for another account. */
 export async function DELETE(req: Request) {
   const tenant = requireTenant(req);
   if (!tenant) {
@@ -164,17 +220,41 @@ export async function DELETE(req: Request) {
     );
   }
   const store = getSettingsStore();
-  const stored = (await store.get(tenant)) ?? {};
-  const { holderProof: _gone, ...rest } = stored;
-  await store.put(tenant, rest);
+  try {
+    const stored = (await store.get(tenant)) ?? {};
+    const { holderProof: gone, ...rest } = stored;
+    // RELEASED BEFORE THE PROOF IS DROPPED, so a failure at either step is
+    // safe to retry: a released claim with its proof still stored counts
+    // nowhere, and asking again finds the proof and finishes the job. The
+    // other order could strand a claim with no proof left to find it by.
+    if (isHolderProof(gone)) await store.releaseHolder(gone.address, tenant);
+    await store.put(tenant, rest);
+  } catch {
+    return NextResponse.json(
+      { error: "couldn't unlink that wallet just now — please try again", ownerFacing: true },
+      { status: 503 },
+    );
+  }
   return NextResponse.json({ ok: true });
 }
 
-/** What the settings screen shows — the linked wallet, or nothing. */
+/**
+ * What the settings screen shows — the linked wallet, or nothing — and which
+ * wallet this account's tier actually reads: `linked`, `login`, or `none` when
+ * another account holds the claim on every candidate. Null when the claims
+ * could not be read; the screen then says nothing about it rather than guess.
+ */
 export async function PATCH(req: Request) {
   const tenant = requireTenant(req);
-  if (!tenant) return NextResponse.json({ linked: null });
+  if (!tenant) return NextResponse.json({ linked: null, reads: null });
   const stored = (await getSettingsStore().get(tenant)) ?? {};
   const proof = stored.holderProof;
-  return NextResponse.json({ linked: isHolderProof(proof) ? proof : null });
+  let reads: "linked" | "login" | "none" | null;
+  try {
+    // The same resolver the tier screens use, so this cannot disagree with them.
+    reads = (await holderWalletFor(tenant))?.source ?? "none";
+  } catch {
+    reads = null;
+  }
+  return NextResponse.json({ linked: isHolderProof(proof) ? proof : null, reads });
 }

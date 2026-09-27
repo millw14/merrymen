@@ -183,11 +183,17 @@ export async function GET(req: Request) {
    * recovering a signature naming both the wallet and this account, and the
    * self-declared `settings.holderAddress` this file has always refused is
    * still refused — the resolver will not read it.
+   *
+   * AND ONE WALLET OPENS ONE DESK. The resolver counts a wallet only while no
+   * other account holds its claim, so there is no fallback to the session
+   * wallet here: when it answers "no wallet" (another account holds this
+   * login's claim), only the caller's own agent account is left to count.
+   * Resolved INSIDE the try — a claims store that will not answer is an
+   * unread standing, never a reason to guess.
    */
-  const wallet = (await holderWalletFor(tenant))?.address ?? tenant;
-
   let raw: bigint;
   try {
+    const wallet = (await holderWalletFor(tenant))?.address ?? null;
     // The wallet above AND this caller's own agent account, in one read. The
     // account is resolved inside the try: a grant store that will not answer
     // is an unread standing, not an agent holding nothing.
@@ -202,9 +208,10 @@ export async function GET(req: Request) {
     });
     raw = standing.raw;
   } catch {
-    // The chain would not answer. That is a fact about our read, not about the
-    // reader's wallet — telling them they hold too little would be a lie they
-    // cannot act on, and they would go and buy more.
+    // The chain (or the store saying whose wallet counts) would not answer.
+    // That is a fact about our read, not about the reader's wallet — telling
+    // them they hold too little would be a lie they cannot act on, and they
+    // would go and buy more.
     return locked("unreachable", counts);
   }
 

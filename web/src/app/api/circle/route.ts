@@ -17,7 +17,8 @@
  *
  * It now resolves the caller the same way every other holder surface does:
  * `tenantOf(req)` → `holderWalletFor()` — a signature-proven linked wallet
- * first, the session wallet otherwise, and NEVER `settings.holderAddress`,
+ * first, the session wallet otherwise (each only while no other account holds
+ * its claim: one wallet powers one agent), and NEVER `settings.holderAddress`,
  * which is typed in and so is a claim about anyone's balance as easily as your
  * own. Self-hosted has no session, and there the settings file genuinely is the
  * operator's own declaration about their own wallet, so that path survives —
@@ -59,7 +60,7 @@ import {
   type MerrymenSettings,
 } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
-import { holderWalletFor } from "@/lib/holder-wallet";
+import { holderWalletFor, type HolderWallet } from "@/lib/holder-wallet";
 import { agentAccountFor } from "@/lib/agent-account";
 import { countedAgent, readStanding, standingTokens } from "@/lib/merrymen-standing";
 import { createPublicClient } from "viem";
@@ -120,7 +121,23 @@ export async function GET(req: Request) {
   let rpcMainnet: string | undefined;
 
   if (hosted) {
-    const resolved = await holderWalletFor(tenantOf(req));
+    let resolved: HolderWallet | null;
+    try {
+      resolved = await holderWalletFor(tenantOf(req));
+    } catch {
+      // WHOSE wallet counts could not be read (the proof or the holder
+      // claims). A fact about our read, with every balance null.
+      return NextResponse.json({
+        why: "unreadable",
+        holderAddress: null,
+        source: null,
+        balance: null,
+        holderBalance: null,
+        agentBalance: null,
+        tier: null,
+        ...table,
+      });
+    }
     if (!resolved) {
       // Signed out. Not "configured: false" — there is nothing misconfigured,
       // we simply do not know who is asking.

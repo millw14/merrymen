@@ -25,8 +25,12 @@ interface Linked {
   at: number;
 }
 
+/** Which wallet the tier reads, per /api/holder PATCH; null when the server could not tell. */
+type Reads = "linked" | "login" | "none" | null;
+
 export function HolderLink() {
   const [linked, setLinked] = useState<Linked | null>(null);
+  const [reads, setReads] = useState<Reads>(null);
   const [holder, setHolder] = useState("");
   const [challenge, setChallenge] = useState<{ message: string; nonce: string } | null>(null);
   const [signature, setSignature] = useState("");
@@ -37,8 +41,9 @@ export function HolderLink() {
   const refresh = useCallback(async () => {
     try {
       const r = await fetch("/api/holder", { method: "PATCH", cache: "no-store" });
-      const j = (await r.json()) as { linked?: Linked | null };
+      const j = (await r.json()) as { linked?: Linked | null; reads?: Reads };
       setLinked(j.linked ?? null);
+      setReads(j.reads ?? null);
     } catch {
       /* an unreadable link is shown as none — never as an error on a settings page */
     }
@@ -130,9 +135,15 @@ export function HolderLink() {
     setBusy(true);
     setError("");
     try {
-      await fetch("/api/holder", { method: "DELETE" });
+      const r = await fetch("/api/holder", { method: "DELETE" });
+      const j = (await r.json().catch(() => ({}))) as { error?: string };
+      // A refused unlink must not read as done: the wallet would still be
+      // held by this account, and unavailable to the one it was meant for.
+      if (!r.ok) throw new Error(j.error ?? "could not unlink that wallet");
       setNote("Unlinked. Your tier reads the wallet you sign in with again.");
       await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -142,19 +153,30 @@ export function HolderLink() {
     <div className="holder-link">
       {linked ? (
         <div className="holder-linked">
-          <p>
-            Your tier reads <span className="mono">{linked.address}</span>, proved by a signature from
-            that wallet.
-          </p>
+          {reads === "linked" || reads === null ? (
+            <p>
+              Your tier reads <span className="mono">{linked.address}</span>, proved by a signature from
+              that wallet.
+            </p>
+          ) : (
+            <p>
+              <span className="mono">{linked.address}</span> is linked but not counting here: a wallet
+              can power one merrymen account, and it already powers another. Unlink it there, or link a
+              different wallet.
+            </p>
+          )}
           <button type="button" className="copy-btn" onClick={() => void unlink()} disabled={busy}>
             unlink
           </button>
         </div>
       ) : (
         <p className="mm-hint">
-          By default your tier reads the wallet you sign in with. If your $MERRYMEN is somewhere
-          else, name that wallet and prove it with a signature from it. It stays read-only — it is
-          never a spend key and never joins your agent&apos;s permission.
+          {reads === "none"
+            ? "The wallet you sign in with already powers another merrymen account, so it does not count here. "
+            : "By default your tier reads the wallet you sign in with. "}
+          If your $MERRYMEN is somewhere else, name that wallet and prove it with a signature from it.
+          A wallet can power one merrymen account; your agent&apos;s own account counts too. It stays
+          read-only — it is never a spend key and never joins your agent&apos;s permission.
         </p>
       )}
 
