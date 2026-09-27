@@ -54,9 +54,9 @@
  * chat can widen a sealed grant. One control, one set of conditions, everything
  * else points at it — the third time this file reaches that conclusion.
  */
-import { riskProfile } from "@merrymen/core";
+import { ENERGY, MERRYMEN_TOKEN, riskProfile } from "@merrymen/core";
 import { isCircleStrategyId } from "@/terminal/strategy";
-import { usd } from "@/lib/format";
+import { count, usd } from "@/lib/format";
 
 /** A value an owner can be asked to confirm. Strings and numbers only. */
 export type CommandArg = string | number | boolean;
@@ -177,11 +177,18 @@ const REGISTRY: ChatCommand[] = [
      * hear "Done". This cannot know their balance (it is pure, and the args
      * are all it gets), but whether the strategy is holder-only is a static
      * fact, and stating the requirement is the half that stops the surprise.
+     *
+     * IT NAMES THE COMBINED BALANCE AND NO LONGER SAYS MONEY CANNOT HELP. It
+     * used to end "however well funded I am", which stopped being true the day
+     * an agent could turn USDG into its own $MERRYMEN (get-energy, below):
+     * what counts is the owner's wallet and this account together, and USDG
+     * converted and arrived there does count. Android Commands.kt carries the
+     * same words.
      */
     say: (a) =>
       `Switch me to the ${String(a.strategy)} strategy. It changes what I trade and when.` +
       (isCircleStrategyId(String(a.strategy))
-        ? " Note: that one only runs while you hold $MERRYMEN — below that I stay idle, however well funded I am."
+        ? ` Note: that one only runs while your wallet and my account hold ${count(ENERGY.fullTokens)} $MERRYMEN between them — below that I leave it idle.`
         : ""),
   },
   {
@@ -305,9 +312,10 @@ const REGISTRY: ChatCommand[] = [
     writes: ["agentName"],
     say: (a) => `Call me ${String(a.agentName)} from now on.`,
   },
-  // ── the two that spend money ─────────────────────────────────────────────
+  // ── the three that spend money ───────────────────────────────────────────
   //
   // THE ONLY COMMANDS THAT ASK FOR A TRADE, and they still do not perform one.
+  // (`buy`, `sell`, and `get-energy` below, which is a buy of one fixed token.)
   // The route writes a row; the WORKER — the one process holding a key —
   // decides whether it is a trade, against the wall the owner signed. Every
   // refusal that always applied still applies in the same place: the sealed
@@ -368,6 +376,41 @@ const REGISTRY: ChatCommand[] = [
       `Sell ${money(a.usdgAmount)} of ${String(a.symbol).toUpperCase()}. ` +
       `If that is more than you hold I sell what is there, and if it is a coin on a bonding curve I have to sell the whole position — ` +
       `I'll tell you which happened. I'll place it; my key's limits still decide.`,
+  },
+  /**
+   * GET-ENERGY — "get your $MERRYMEN": the agent buys the $MERRYMEN it is short
+   * of full energy with its own USDG, and keeps it as energy.
+   *
+   * AN ORDER, NOT A NEW RAIL. It rides `via: "order"` and POST /api/orders like
+   * any buy, so the owner check, the hashed id, the one-at-a-time slot, the
+   * expiry, the chat ceiling and the ferry all apply unchanged, and the web,
+   * iOS and Android confirm it with code they already have. The WORKER is the
+   * resolver: it routes this one symbol to its energy buy, buys only the
+   * shortfall over the one sealed route, and refuses — through the ordinary
+   * order result — when the agent is already full, practising on paper, holding
+   * a key that cannot buy it, short of cash or unable to read the balances.
+   *
+   * THE MODEL CHOOSES NEITHER THE TOKEN NOR THE SIDE. Both are `fixed`, so a
+   * prompt-injected proposal cannot turn "get your energy" into a buy of
+   * something else, or a sell. The one value it supplies, `usdgAmount`, is the
+   * MOST the owner will spend on it, and it is on the card they confirm.
+   *
+   * THE SENTENCE PRINTS NO FEE OR TAX PERCENTAGE. The token's own trading tax is
+   * set by its owner and can change without a line of our code changing; a
+   * number here could become false on its own. And nothing about the token's
+   * price or returns: it is capacity, and the card says so.
+   */
+  {
+    id: "get-energy",
+    via: "order",
+    writes: ["side", "symbol", "usdgAmount"],
+    fixed: { side: "buy", symbol: MERRYMEN_TOKEN.symbol },
+    weighty: true,
+    say: (a) =>
+      `Spend up to ${money(a.usdgAmount)} of my real USDG on the $MERRYMEN I'm short of ${count(ENERGY.fullTokens)} — ` +
+      `through Uniswap on Robinhood Chain (USDG → VIRTUAL → $MERRYMEN), and only what's missing. ` +
+      `Pool fees and the token's own trading tax come out of what arrives. It stays in my account as energy; ` +
+      `my key can't sell or send it. I'll place it — my key's limits still decide whether it goes through.`,
   },
   // ── the ones that only take you somewhere ────────────────────────────────
   {
