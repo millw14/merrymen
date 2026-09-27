@@ -36,6 +36,12 @@
  * does not hold enough" and "we could not read your balance" are three
  * different facts with three different remedies, and only one of them is about
  * the reader. An RPC outage must never render as "you don't hold enough".
+ *
+ * THE SAME TOKENS THE WORKER COUNTS. The Circle gate and energy count the
+ * owner's wallet and their agent's own account together, and so does this —
+ * through lib/merrymen-standing.ts, shared with /api/tier and /api/circle, so
+ * "send $MERRYMEN to my account" opens this desk the same moment it lifts the
+ * gate. Either half failing to read is `unreachable`, never a smaller number.
  */
 import { webChainRead } from "@/lib/chain-read";
 import { NextResponse } from "next/server";
@@ -46,10 +52,12 @@ import {
   robinhoodChain,
   tierForBalance,
 } from "@merrymen/core";
-import { createPublicClient, erc20Abi } from "viem";
+import { createPublicClient } from "viem";
 
 import { tenantOf } from "@/lib/auth";
 import { holderWalletFor } from "@/lib/holder-wallet";
+import { agentAccountFor } from "@/lib/agent-account";
+import { AGENT_BALANCE_TTL_MS, readStanding } from "@/lib/merrymen-standing";
 import { sharedAlpha, type AlphaExtras, type DiscoveryRow, type Payload } from "@/lib/read-discoveries";
 
 export const runtime = "nodejs";
@@ -70,21 +78,8 @@ const ENTRY_TIER = CIRCLE_TIERS.find((t) => t.id === "merryman")!;
  */
 const BALANCE_TTL_MS = 10 * 60_000;
 const balances = new Map<string, { at: number; raw: bigint }>();
-
-async function balanceOf(address: `0x${string}`): Promise<bigint> {
-  const key = address.toLowerCase();
-  const hit = balances.get(key);
-  if (hit && Date.now() - hit.at < BALANCE_TTL_MS) return hit.raw;
-  const client = createPublicClient({ chain: robinhoodChain, transport: webChainRead() });
-  const raw = (await client.readContract({
-    address: MERRYMEN_TOKEN.address,
-    abi: erc20Abi,
-    functionName: "balanceOf",
-    args: [address],
-  })) as bigint;
-  balances.set(key, { at: Date.now(), raw });
-  return raw;
-}
+/** The agent's own account: the balance an owner has just been told to top up. */
+const agentBalances = new Map<string, { at: number; raw: bigint }>();
 
 /**
  * A holder's own copy, and the ONLY place research is attached to a coin.
@@ -193,7 +188,19 @@ export async function GET(req: Request) {
 
   let raw: bigint;
   try {
-    raw = await balanceOf(wallet);
+    // The wallet above AND this caller's own agent account, in one read. The
+    // account is resolved inside the try: a grant store that will not answer
+    // is an unread standing, not an agent holding nothing.
+    const standing = await readStanding({
+      client: createPublicClient({ chain: robinhoodChain, transport: webChainRead() }),
+      holder: wallet,
+      agent: await agentAccountFor(req, true),
+      holderCache: balances,
+      agentCache: agentBalances,
+      holderTtlMs: BALANCE_TTL_MS,
+      agentTtlMs: AGENT_BALANCE_TTL_MS,
+    });
+    raw = standing.raw;
   } catch {
     // The chain would not answer. That is a fact about our read, not about the
     // reader's wallet — telling them they hold too little would be a lie they

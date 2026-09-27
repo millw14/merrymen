@@ -10,7 +10,7 @@ import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
-import { MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
+import { ENERGY, MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 import { telegramLabel, telegramRow } from "../agent-status";
@@ -921,9 +921,12 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                       whether it will run. That&apos;s our read failing, not your wallet.
                     </p>
                   ) : (
+                    /* THE COMBINED FIGURE, the one the worker counts — the
+                       owner's wallet and this agent's account together — and
+                       a dash for a count nobody read, never `?? 0`. */
                     <p>
-                      You hold {count(tier.tokens ?? 0)} $MERRYMEN and it needs{" "}
-                      {count(tier.needTokens)}. Your agent will keep running and
+                      Your wallet and your agent&apos;s account hold {count(tier.tokens)} $MERRYMEN and it
+                      needs {count(tier.needTokens)}. Your agent will keep running and
                       stay idle until you hold enough — saving this won&apos;t change that.
                     </p>
                   )}
@@ -1705,6 +1708,15 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               being told. Holding the token elsewhere is a real case and needs a
               proof, not a text box — see /api/holder. */}
           <HolderLink />
+          {/* WHAT THE TOKEN IS FOR, said where it is linked. Text only — this
+              section's controls are HolderLink's, and the census in
+              app/settings/honesty.test.ts counts every one. */}
+          <p className="mm-hint">
+            On the hosted service your agent runs at full energy while your wallet and its account hold{" "}
+            {count(ENERGY.fullTokens)} $MERRYMEN between them; below that it gets about a tenth of its daily AI reviews and
+            new trades. Selling, stop-losses and your own orders are never limited. $MERRYMEN buys
+            capacity, nothing else — we make no promise about its price.
+          </p>
           <div className="mm-section">{t("settings.section.connections")}</div>
           <div className="mm-grid">
             <Field
