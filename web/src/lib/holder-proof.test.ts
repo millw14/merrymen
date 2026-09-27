@@ -125,6 +125,29 @@ describe("only the verifying route may write a proof", () => {
     assert.match(src, /holderProofMessage\(\{ holder, tenant, origin, nonce \}\)/);
     assert.ok(!/tenant\s*=\s*body\./.test(src), "the account must not come from the caller");
   });
+
+  it("THE WALLET IS CLAIMED AFTER THE SIGNATURE IS RECOVERED AND BEFORE THE PROOF IS STORED", () => {
+    // One wallet powers one agent. Claimed before recovery, anyone could squat
+    // a wallet they cannot sign for; stored before the claim, the proof would
+    // count in two accounts for as long as the gap lasted.
+    const src = read("../app/api/holder/route.ts");
+    const post = src.slice(src.indexOf("export async function POST"), src.indexOf("export async function DELETE"));
+    const consume = post.indexOf("consumeChallengeNonce(");
+    const recover = post.indexOf("recoverMessageAddress(");
+    const claim = post.indexOf("store.claimHolder(wallet, tenant)");
+    const put = post.indexOf("store.put(");
+    assert.ok(consume > 0 && recover > consume && claim > recover && put > claim, "nonce, recover, claim, then store");
+    assert.match(post, /status: 409/, "another account's wallet is a conflict, not an error");
+    assert.match(post, /status: 503/, "and an unreadable store refuses rather than letting a second account in");
+  });
+
+  it("AND UNLINKING RELEASES IT, before the proof is dropped", () => {
+    const src = read("../app/api/holder/route.ts");
+    const del = src.slice(src.indexOf("export async function DELETE"), src.indexOf("export async function PATCH"));
+    const release = del.indexOf("store.releaseHolder(gone.address, tenant)");
+    const put = del.indexOf("store.put(tenant, rest)");
+    assert.ok(release > 0 && put > release, "released first, so a retry can always find the proof again");
+  });
 });
 
 describe("the worker trusts the proof and nothing else", () => {

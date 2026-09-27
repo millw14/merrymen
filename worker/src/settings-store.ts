@@ -369,3 +369,12 @@ export function getSettingsStore(): SettingsStore {
 export function resetSettingsStoreForTest(): void {
   cached = null;
 }
+
+/**
+ * Test seam: serve `store` until the next reset. Hosted routes need a
+ * DATABASE_URL (the nonce store refuses without one), and `pg` is absent here,
+ * so a hosted route test stands a PgSettingsStore over sqlite in through this.
+ */
+export function useSettingsStoreForTest(store: SettingsStore): void {
+  cached = store;
+}
