@@ -4172,3 +4172,69 @@ describe("round four: newcomers", () => {
     }
   });
 });
+
+// ── PR #191 review ──────────────────────────────────────────────────────────
+
+describe("PR #191 review: paper folds only into paper, and a busy room's restart still reaches two days back", () => {
+  it("a paper buy next to the agent's own live buy of the coin is its own card", async () => {
+    // Inside BASKET_TICK_MS of the agent's own LIVE buy card, the paper buy
+    // was folded into the live card and never told.
+    const live = { symbol: "NVDA", name: "NVIDIA", token: tokenOf("NVDA"), paper: false, bands: [] as string[] };
+    const book = fixture(0xd1, "Crimson Siskin", null);
+    const liveBuy = callAt(T0 + MIN, live);
+    const paperBuy = callAt(T0 + 5 * MIN, { ...live, paper: true });
+    book.calls.push(liveBuy, paperBuy);
+    const sim = new Sim([book, fixture(0xd2, "Amber Heron", null)], { seed: 7 });
+    await sim.setup();
+    await sim.run(T0, T0 + 25 * MIN, 15 * SEC);
+    assert.deepEqual(cardsBy(sim, book).map((r) => r.call_decision_id), [liveBuy.decisionId, paperBuy.decisionId], "live and paper are two cards");
+    sim.close();
+  });
+
+  it("a paper buy next to another agent's live buy of the coin is its own card", async () => {
+    const live = { symbol: "NVDA", name: "NVIDIA", token: tokenOf("NVDA"), paper: false, bands: [] as string[] };
+    const a = fixture(0xd3, "Wry Otter", null);
+    const b = fixture(0xd4, "Scarlet Bittern", null, { mode: "paper" });
+    const liveBuy = callAt(T0 + MIN, live);
+    const paperBuy = callAt(T0 + 4 * MIN, { ...live, paper: true });
+    a.calls.push(liveBuy);
+    b.calls.push(paperBuy);
+    const sim = new Sim([a, b, fixture(0xd5, "Amber Heron", null)], { seed: 11 });
+    await sim.setup();
+    await sim.run(T0, T0 + 25 * MIN, 15 * SEC);
+    assert.deepEqual(cardsBy(sim, a).map((r) => r.call_decision_id), [liveBuy.decisionId]);
+    assert.deepEqual(cardsBy(sim, b).map((r) => r.call_decision_id), [paperBuy.decisionId], "the paper buy was folded into another agent's live card");
+    sim.close();
+  });
+
+  it("a restart in a room busier than the agents' ceiling (owners talking) still remembers a starter from forty hours ago", async () => {
+    // Owner lines are not under the conductor's ceiling. A scan sized from
+    // 150 agent lines an hour ran out of pages before its horizon, and the
+    // restart forgot starters inside the two days it promises.
+    const fleet = awakeFleet(2, 0xd6);
+    const seen: SpeakCtx[] = [];
+    const sim = new Sim(fleet, {
+      creds: CREDS,
+      llm: async (_c, _i, ctx) => {
+        seen.push(ctx);
+        return null;
+      },
+      seed: 47,
+    });
+    await sim.setup();
+    await sim.step(T0);
+    const starter = "which season would you live in forever, and why?";
+    await put(sim, fleet[0]!, starter, T0 + 10 * SEC);
+    // Two hundred and forty lines an hour for thirty-seven and a half hours:
+    // more than the old cap's forty-one pages of two hundred (150 an hour over
+    // the 54 h horizon) could read.
+    for (let i = 0; i < 9000; i++) await put(sim, null, `a busy line ${"abcdefghij"[i % 10]}`, T0 + HOUR + i * 15 * SEC);
+    sim.conductor = sim.fresh(1);
+    await sim.run(T0 + 40 * HOUR, T0 + 40 * HOUR + 5 * MIN, 15 * SEC);
+    const ctx = seen.at(-1);
+    assert.ok(ctx && ctx.topicMemory, "fixture: the model was asked for a line after the restart");
+    assert.ok(ctx!.topicMemory!.hasLine(ctx!.topicMemory!.norm(starter)), "a starter forty hours old was forgotten by a restart in a busy room");
+    assert.ok(!sim.logs.some((l) => l.includes("startup scan stopped")), "the scan should reach its horizon here");
+    sim.close();
+  });
+});

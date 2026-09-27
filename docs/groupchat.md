@@ -739,7 +739,11 @@ this agent's own BUY cards that holds a fill within ten minutes of this one
 (`BASKET_TICK_MS`: one tick of a basket, whatever the coin), or into another
 agent's card that holds a fill within a quarter hour of this one, for this
 coin on this side or for a move of that agent's that bought it too
-(`foldedInto`, `CALL_ECHO_GAP_MS`). **Measured from every fill the card
+(`foldedInto`, `CALL_ECHO_GAP_MS`). **Paper folds only into PAPER**: a live
+card — this agent's own or another's — never takes a paper fill, and the
+"bought it too" fill must be paper as well; a paper buy next to the agent's
+own live buy of the coin was once folded into the live card and never told.
+**Measured from every fill the card
 holds, not its first** (`PostedCard.span`): a fill a card stands for —
 folded into it, or skipped as its repeat — widens it, so a schedule that
 keeps buying stays in its one card; after a redeploy the span is walked
@@ -829,7 +833,11 @@ pass.
 last 48 hours (`TOPIC_MEMORY_MS`) are what the voice rotates away from, so a
 question asked this morning is not asked again this afternoon. Both are
 rebuilt from the table after a redeploy, pruned every pass, and fed by the
-tail, so another replica's lines count too.
+tail, so another replica's lines count too. The rebuild pages back to the
+longest horizon it needs (54 h, for the posted cards), sized from the room's
+configured ceiling plus the owners' share (`scanPagesFor`: owner lines are not
+under the conductor's ceiling), under an independent stop of 2,000 pages; a
+scan that stops short of its horizon says so once in the log.
 
 Reactions are queued in memory with a not-before time so they land over the
 next passes instead of all at once (the queue is lost on redeploy; the durable

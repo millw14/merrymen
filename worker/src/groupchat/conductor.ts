@@ -680,12 +680,27 @@ const SCAN_LOOKBACK_MS = Math.max(CALL_WINDOW_MS + HOUR, HELLO_WINDOW_MS);
 const SCAN_HORIZON_MS = Math.max(SCAN_LOOKBACK_MS, TOPIC_MEMORY_MS, POSTED_CALLS_MS);
 const SCAN_PAGE = 200;
 /**
- * BOUNDED BY THE ROOM'S DEFAULT CEILING, NOT BY HOPE: 150 lines an hour over
- * SCAN_HORIZON_MS is the most the room can have written in it, so the scan
- * reaches its horizon in any room at the default pace (41 pages of 200, once
- * per process), and stops there in a busier one.
+ * THE OWNERS' SHARE OF A BUSY ROOM, for sizing the startup scan. Owner lines are
+ * not governed by the conductor's ceiling — the web lets each owner post six a
+ * minute and two hundred a day — so a scan sized from the agents' pace alone
+ * (150 an hour) ran out of pages before its horizon in a room where owners
+ * talk, and a restart forgot starters and cards inside the two days it
+ * promises to remember. Generous on purpose: the scan stops at its horizon
+ * anyway; this only decides how far it may page first.
  */
-const SCAN_PAGES_MAX = Math.ceil(((SCAN_HORIZON_MS / HOUR) * 150) / SCAN_PAGE);
+const SCAN_OWNER_LINES_PER_HOUR = 300;
+/** AN INDEPENDENT STOP, whatever the room is configured to: never more pages than this in one scan. */
+const SCAN_PAGES_HARD_MAX = 2000;
+
+/**
+ * HOW MANY PAGES THE STARTUP SCAN MAY READ: every line the room can have
+ * written inside SCAN_HORIZON_MS at its configured ceiling (`perHour`) plus
+ * the owners' share, under SCAN_PAGES_HARD_MAX. Once per process; a quiet room
+ * reaches its horizon in a few pages and stops there.
+ */
+function scanPagesFor(perHour: number): number {
+  return Math.min(SCAN_PAGES_HARD_MAX, Math.ceil(((SCAN_HORIZON_MS / HOUR) * (perHour + SCAN_OWNER_LINES_PER_HOUR)) / SCAN_PAGE));
+}
 /** Owner lines answering a line the tail no longer holds: at most this many fetched per pass. */
 const PARENT_FETCH_MAX = 5;
 /**
@@ -1003,6 +1018,8 @@ export function makeConductor(opts: ConductorOptions): Conductor {
   const rawRng = opts.rng ?? Math.random;
   const maxPerPass = count(opts.maxPerPass, 3, 1);
   const perHour = count(opts.perHour, 150, 1);
+  /** Said once, in the first pass's log, when the startup scan ran out of pages before its horizon (scanPagesFor). */
+  let scanNote: string | null = null;
   const perAgentPerHour = count(opts.perAgentPerHour, 30, 1);
   // NO CREDS, NO MODEL, whatever the budget says: the budget is a ceiling on a
   // key, and there is no key.
@@ -1342,7 +1359,8 @@ export function makeConductor(opts: ConductorOptions): Conductor {
   function filledAlike(p: Pass, tenant: string, call: CallFact, gapMs: number): boolean {
     const f = p.speakers.get(tenant)?.facts;
     if (!f) return false;
-    return f.calls.some((o) => !!o && o.side === call.side && sameCoin(o, call) && Math.abs(o.atSec - call.atSec) * SEC <= gapMs);
+    // Paper with paper, like the card it folds into (foldedInto).
+    return f.calls.some((o) => !!o && o.side === call.side && (o.paper === true) === (call.paper === true) && sameCoin(o, call) && Math.abs(o.atSec - call.atSec) * SEC <= gapMs);
   }
 
   /**
@@ -1502,8 +1520,13 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     if (turnedUnheard(sp, postedBefore(sp, call) ?? (latest ? anchorOf(p, sp, latest) : null), call, p.nowMs)) return null;
     const onRun = continuesRun(sp, call);
     for (const card of postedCalls.values()) {
+      // A PAPER FILL FOLDS ONLY INTO A PAPER CARD, its own or another agent's.
+      // A paper buy inside BASKET_TICK_MS of the agent's own LIVE buy was
+      // folded into the live card and never told: two different kinds of
+      // money in one card, and the paper fill's provenance lost.
+      if (card.call.paper !== true) continue;
       if (card.tenant === tenant) {
-        if (card.call.side === call.side && holdsNear(p, card, filled, BASKET_TICK_MS)) return card;
+        if (paperBuy(card) && holdsNear(p, card, filled, BASKET_TICK_MS)) return card;
         continue;
       }
       if (onRun ? !holdsNear(p, card, filled, CALL_ECHO_GAP_MS) : Math.abs(cardFillMs(p, card) - filled) > CALL_ECHO_GAP_MS) continue;
@@ -3175,7 +3198,9 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     const horizon = nowMs - SCAN_LOOKBACK_MS;
     const scanFloor = nowMs - SCAN_HORIZON_MS;
     let before: number | null = null;
-    for (let page = 0; page < SCAN_PAGES_MAX; page++) {
+    const pagesMax = scanPagesFor(perHour);
+    let reachedFloor = false;
+    for (let page = 0; page < pagesMax; page++) {
       const { messages, start } = await readMessages(shared, { before, limit: SCAN_PAGE });
       for (const m of messages) {
         if (m.authorKind === "owner") ownerOf.set(m.id, m.tenant.toLowerCase());
@@ -3201,9 +3226,14 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         if (isStarter(m) && m.createdAtMs > nowMs - TOPIC_MEMORY_MS) noteStarter(m.id, m.createdAtMs, m.body);
       }
       const oldest = messages[0];
-      if (start || !oldest || oldest.createdAtMs < scanFloor) break;
+      if (start || !oldest || oldest.createdAtMs < scanFloor) {
+        reachedFloor = true;
+        break;
+      }
       before = oldest.id;
     }
+    // NO SILENT CAP: a scan that stopped short of its horizon is said once, in the first pass's log.
+    if (!reachedFloor) scanNote = `startup scan stopped at ${pagesMax} pages, short of its ${Math.round(SCAN_HORIZON_MS / HOUR)} h horizon`;
     roomHour.sort((a, b) => a - b);
     // So does the room's hour of call reactions: an agent's answer to a card is one.
     for (const a of answers) noteCallReact(a.id, a.at, a.to);
@@ -3585,6 +3615,10 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     if (model.note) {
       extras.push(model.note);
       model.note = null;
+    }
+    if (scanNote) {
+      extras.push(scanNote);
+      scanNote = null;
     }
     if (p.modelRefused > 0) extras.push(`model line refused by the gate ×${p.modelRefused}`);
     const refusal = (reason: string, n: number) => `template refused: ${reason}${n > 1 ? ` ×${n}` : ""}`;
