@@ -239,6 +239,23 @@ describe("the executor's landing: bookEnergyPurchase", () => {
     assert.equal(events.at(-1)!.level, "err");
   });
 
+  it("A LANDED PURCHASE THAT LEAVES NOTHING CONTRIBUTED IS STILL BOOKED — the money moved — and the owner is warned", async () => {
+    // The pre-trade gate refuses this (would-exhaust-contributions); a
+    // purchase that got through anyway (the figure moved between the plan
+    // and the landing) is booked as it must be, and said.
+    exec("DELETE FROM flows");
+    await store.addFlow({ agentId: ACCOUNT, direction: "in", amountUsdg: 10, source: "chain-log", txHash: `0x${"d9".repeat(32)}`, blockNumber: 8_000_000, logIndex: 1, mode: "live", chainId: 4663 });
+    assert.equal(await bookEnergyPurchase(deps(), { txHash: txHash(), logs: energyLogs(10_000_000n) }), "booked");
+    assert.equal(energyFlows(), 1);
+    assert.equal(events.at(-1)!.level, "warn");
+    assert.match(events.at(-1)!.line, /used up all of the capital on record for this agent — until more USDG is sent to it/);
+  });
+
+  it("an ordinary purchase is not warned about", async () => {
+    assert.equal(await bookEnergyPurchase(deps(), { txHash: txHash(), logs: energyLogs(10_000_000n) }), "booked");
+    assert.equal(events.at(-1)!.level, "ok");
+  });
+
   it("no contribution record: refused, nothing moved, and the owner is told", async () => {
     exec("DELETE FROM flows");
     assert.equal(await bookEnergyPurchase(deps(), { txHash: txHash(), logs: energyLogs(10_000_000n) }), "refused");

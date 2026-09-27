@@ -181,6 +181,16 @@ export async function bookEnergyPurchase(
       "ok",
       `set aside ${spent} USDG as energy — capital leaving the trading book, not a loss; your high-water mark moved with it`,
     );
+    // THE PRE-TRADE GATE REFUSES THIS (would-exhaust-contributions), but money
+    // that has moved is booked whatever it leaves — so the owner is told when
+    // it left nothing contributed on record, and what that costs them.
+    if (net !== null && usdg6(net) - r.amountUsdg6 <= 0n) {
+      await d.event(
+        "warn",
+        `that energy purchase used up all of the capital on record for this agent — until more USDG is sent to it, ` +
+          `it has nothing contributed to size trades against. Send USDG to its account to fix it.`,
+      );
+    }
     return "booked";
   }
   if (booking.kind === "already") return "already";

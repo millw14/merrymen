@@ -11,6 +11,7 @@ import { describe, it } from "node:test";
 import { energyBookingGate, energyFlowFromReceipt, energyPreTradeGate } from "./energy-accounting";
 import { TRANSFER_TOPIC } from "./deposit-log";
 import type { ReceiptLog } from "./fills";
+import { rejectRuleLabel, rejectRuleRemedy } from "./thesis-policy";
 
 const ACCOUNT = "0x00000000000000000000000000000000000000A1";
 const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
@@ -162,8 +163,9 @@ describe("energyPreTradeGate", () => {
     assert.equal(energyPreTradeGate(book({ paper: true, netContributionsUsdg: null })).action, "skip");
   });
 
-  it("a contribution record of ZERO is a record, not none", () => {
-    assert.equal(energyPreTradeGate(book({ netContributionsUsdg: 0n })).action, "book");
+  it("a contribution record of ZERO is a record, not none — refused for what spending would do to it, never as 'no record'", () => {
+    const v = energyPreTradeGate(book({ netContributionsUsdg: 0n }));
+    assert.equal(v.action === "refuse" && v.rule, "would-exhaust-contributions");
   });
 
   it("lifetime peak below the spend → peak-below-spend", () => {
@@ -200,6 +202,41 @@ describe("energyPreTradeGate", () => {
 
   it("equity above the peak never trips", () => {
     assert.equal(energyPreTradeGate(book({ equityUsdg: u(120) })).action, "book");
+  });
+
+  it("THE PROFIT-FUNDED CASE: funded 20, made 30, peak 50 — the ask that would leave nothing contributed is refused", () => {
+    // Before this rule every ask passed (the peak stayed above the spend and
+    // the drawdown was 0) while net contributions went 20 → 10 → 0 → −10: an
+    // agent the Brain then held on every decision and the board called
+    // 'no-deposit', or one whose published return was P&L over a sliver.
+    const ask = (net: number, equity: number) =>
+      energyPreTradeGate(book({ netContributionsUsdg: u(net), equityUsdg: u(equity), lifetimePeakUsdg: u(equity), breakerPeakUsdg: u(equity), spendUsdg: u(10) }));
+    assert.equal(ask(20, 50).action, "book", "20 → 10 leaves capital on record");
+    const second = ask(10, 40);
+    assert.equal(second.action === "refuse" && second.rule, "would-exhaust-contributions", "10 → 0 is refused");
+    const third = ask(0, 30);
+    assert.equal(third.action === "refuse" && third.rule, "would-exhaust-contributions");
+    // The boundary is "nothing left": one micro-USDG remaining is still capital on record.
+    assert.equal(energyPreTradeGate(book({ netContributionsUsdg: u(10) + 1n, spendUsdg: u(10) })).action, "book");
+  });
+
+  it("its sentence says what to do — USDG first, then ask again — in capital words only", () => {
+    const v = energyPreTradeGate(book({ netContributionsUsdg: u(10), spendUsdg: u(10) }));
+    assert.equal(v.action, "refuse");
+    const why = v.action === "refuse" ? v.why : "";
+    assert.match(why, /spending 10\.00 USDG on energy would use up all 10\.00 USDG of capital on record for me/);
+    assert.match(why, /send USDG to me first and ask again, or send \$MERRYMEN to my account directly/);
+    assert.doesNotMatch(why, /price|returns?\b|profit|investment|moon|\d+\s*%/i);
+  });
+
+  it("the rule has public words and an owner remedy, so it never reaches a surface as a slug", () => {
+    const label = rejectRuleLabel("would-exhaust-contributions");
+    const remedy = rejectRuleRemedy("would-exhaust-contributions");
+    assert.ok(label && remedy);
+    assert.ok(!label.includes("would-exhaust"), "never the slug echoed back");
+    assert.doesNotMatch(label, /\/grant|\/settings/, "the public sentence names no URL");
+    assert.match(remedy, /Send USDG to the agent's account first, then ask for energy again/);
+    assert.doesNotMatch(`${label} ${remedy}`, /price|returns?\b|profit|investment|\d+\s*%/i);
   });
 
   it("every refusal says how to get energy another way, and never promises anything about the token", () => {

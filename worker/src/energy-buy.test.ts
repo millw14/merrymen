@@ -292,6 +292,15 @@ describe("planEnergyBuy — the accounting gate, on the size to be spent", () =>
     assert.match(p.line, /the limit is not loosened/);
     buyOf(await plan(reads(), caps(), pricing(), { ...b, maxDrawdownBps: 500 }));
   });
+  it("A SPEND THAT WOULD LEAVE NOTHING CONTRIBUTED REFUSES — on the size actually to be spent", async () => {
+    // The worked default spends 10 (the per-trade cap binds). With 10 on
+    // record that leaves nothing; with 10.01 it leaves a cent and is planned.
+    const p = refusal(await plan(reads(), caps(), pricing(), book({ netContributionsUsdg: 10n * USDG })));
+    assert.equal(p.rule, "would-exhaust-contributions");
+    assert.match(p.line, /^I did not buy: spending 10\.00 USDG on energy would use up all 10\.00 USDG of capital on record for me/);
+    assert.match(p.line, /send USDG to me first and ask again/);
+    assert.equal(buyOf(await plan(reads(), caps(), pricing(), book({ netContributionsUsdg: 10n * USDG + 10_000n }))).amountInRaw, 10n * USDG);
+  });
   it("a paper book is never bought on — a skip is a refusal here", async () => {
     assert.equal(refusal(await plan(reads(), caps(), pricing(), book({ paper: true, netContributionsUsdg: null }))).rule, "no-contribution-record");
   });

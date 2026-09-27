@@ -839,6 +839,10 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   "energy-unreadable": "its balances could not be read, so it bought no energy",
   "energy-in-flight": "an earlier energy buy was still settling",
   "energy-too-small": "the most it could spend was below the smallest energy buy",
+  // The accounting gate's own refusal (energy-accounting.ts): the purchase is
+  // capital leaving the book, and this one would have left nothing contributed.
+  // Said as capital, never as performance.
+  "would-exhaust-contributions": "spending that much on energy would have used up all the capital put into it",
 });
 
 /**
@@ -924,6 +928,8 @@ export function rejectRuleRemedy(rule: string | null | undefined): string | null
     case "energy-tax":
     case "energy-too-small":
       return "Send $MERRYMEN to the agent's account on Robinhood Chain directly — it counts the moment it lands.";
+    case "would-exhaust-contributions":
+      return "Send USDG to the agent's account first, then ask for energy again — or send $MERRYMEN to the agent's account on Robinhood Chain directly.";
     default:
       return null;
   }
