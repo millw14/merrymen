@@ -172,7 +172,7 @@ import {
 import { ensureHome, homePaths, merrymenHome } from "./home";
 import { startupSlotMs } from "./stagger";
 import { llmText, resolveLlm } from "./llm";
-import { applyPaperIntent, type PaperPosition } from "./paper";
+import { applyPaperIntent, paperBookPositions, type PaperPosition } from "./paper";
 import { checkPolicy, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
 // ── ENERGY: how much a low-energy agent may still do on its own today ──────
 // The contract is core energy.ts; the pure throttle is energy.ts; the owner's
@@ -9749,8 +9749,10 @@ async function main() {
       // arrangement where the arithmetic is about one world.
       const mults = await readMultipliers(mainnetClient(), watchTokens);
       lastMultipliers = mults.multipliers;
-      for (const p of paperPositionsOf(bookRow.shares)) {
-        if (p.shares <= 0) continue;
+      // paperBookPositions drops empty rows AND the energy reserve: a reserve row
+      // is in no watch set, so below it could only ever be a missingPrice — the
+      // branch that holds the tick, forever for a price that never comes.
+      for (const p of paperBookPositions(paperPositionsOf(bookRow.shares))) {
         const px = paperPriceOf(p.token);
         const mul = mults.multipliers.get(p.symbol);
         if (!px || mul === undefined) {
