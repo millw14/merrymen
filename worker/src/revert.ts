@@ -483,9 +483,15 @@ export function suppressionLegs(
   intent:
     | { kind: "swap"; sellToken: string; buyToken: string }
     | { kind: "curve-trade"; assetIn: string; assetOut: string }
+    | { kind: "energy-buy"; sellToken: string; buyToken: string }
     | { kind: string },
 ): [string | undefined, string | undefined] {
   if (intent.kind === "swap" && "sellToken" in intent) return [intent.sellToken, intent.buyToken];
+  // The energy buy has legs too, and one route: a non-retryable revert on it
+  // (a tax the token's owner raised past the floor, a pair drained) suppresses
+  // the energy route for the arm, never a swap over the same tokens — the kind
+  // is part of the key.
+  if (intent.kind === "energy-buy" && "sellToken" in intent) return [intent.sellToken, intent.buyToken];
   if (intent.kind === "curve-trade" && "assetIn" in intent) return [intent.assetIn, intent.assetOut];
   return [undefined, undefined];
 }

@@ -191,3 +191,29 @@ describe("paper fills — ERC-8056 splits", () => {
     }
   });
 });
+
+describe("the energy buy is never simulated", () => {
+  it("applyPaperIntent refuses kind energy-buy and leaves the book exactly as it was", () => {
+    // SECOND LINE OF DEFENCE. processIntentLocked refuses an energy buy with
+    // `energy-needs-live` before the paper fork is ever reached — a practice
+    // book has no reserve to fill, and simulating one would put a purchase on
+    // the tape that no chain ever saw. If that refusal were ever lost, this
+    // is what stands behind it.
+    const b = book();
+    const held: PaperPosition[] = [{ symbol: "QQQ", token: QQQ, shares: 0.1 }];
+    const energy: TradeIntent = {
+      kind: "energy-buy",
+      target: ROUTER,
+      sellToken: USDG,
+      buyToken: QQQ,
+      sellAmountRaw: 10_000_000n,
+      notionalUsdg: 10_000_000n,
+    };
+    const r = applyPaperIntent(energy, b, held, { ...OPTS, notionalUsdg: 10 });
+    assert.equal(r.ok, false);
+    assert.match(r.reason ?? "", /unsupported paper intent energy-buy/);
+    assert.deepEqual(r.book, book());
+    assert.deepEqual(r.positions, held);
+    assert.equal(r.fill, undefined);
+  });
+});

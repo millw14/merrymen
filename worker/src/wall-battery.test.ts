@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   CASH,
+  ENERGY_ROUTE_V1,
+  GRANT_ENERGY,
   GRANT_V4,
   GRANT_PONS_CLASS,
   STOCK_TOKENS,
@@ -68,7 +70,7 @@ describe("runWallBattery", () => {
     it(`holds every exact rule for an unexpired ${name} grant`, () => {
       const result = runWallBattery(grant([...features], grantedAt), NOW);
       assert.equal(result.allHeld, true);
-      assert.equal(result.cases.length, 11);
+      assert.equal(result.cases.length, 13);
       assert.deepEqual(
         result.cases.map((entry) => entry.rule ?? "approved"),
         [
@@ -88,6 +90,11 @@ describe("runWallBattery", () => {
           "drawdown-breaker",
           "approved",
           "no-exit",
+          // NONE of these fixtures sealed the energy route (it exists only on
+          // chain 4663, under GRANT_ENERGY), so the energy buy is refused by
+          // name — and the router it would use is still no generic swap venue.
+          "energy-not-granted",
+          "target-allowlist",
           // NONE of these fixtures sealed a class vault, so the battery asks
           // the only honest class question they have: what a curve trade aimed
           // at a vault this signature never named actually does. It never
@@ -122,14 +129,33 @@ describe("runWallBattery", () => {
     const result = runWallBattery(classGrant, NOW);
 
     assert.equal(result.allHeld, true);
-    // 10 shared cases + five class ones (a non-class fixture gets one).
-    assert.equal(result.cases.length, 15);
+    // 10 shared cases + two energy ones (no route on this fixture) + five class
+    // ones (a non-class fixture gets one).
+    assert.equal(result.cases.length, 17);
     assert.deepEqual(
       result.cases.slice(-5).map((entry) => entry.rule ?? "approved"),
       // enter · the price of entering · the exit · the exit under a tripped
       // breaker · the bound
       ["approved", "curve-provenance", "approved", "approved", "asset-allowlist"],
     );
+  });
+
+  it("THE ENERGY BUY on a key that sealed it: the honest buy goes, an oversized one and a router swap do not", () => {
+    // The route exists only on Robinhood Chain mainnet under GRANT_ENERGY
+    // (grantEnergyRoute), so this fixture is the one grant here on 4663.
+    const energyGrant = { ...grant([TRADEABLE_V2, GRANT_ENERGY]), chainId: 4663 };
+    const result = runWallBattery(energyGrant, NOW);
+    assert.equal(result.allHeld, true);
+    const energy = result.cases.filter((c) => /energy/i.test(c.attempt));
+    assert.deepEqual(
+      energy.map((c) => c.rule ?? "approved"),
+      ["approved", "per-trade-cap", "target-allowlist"],
+    );
+    // And the mirror really is sourced from the grant: the router is the
+    // energy limit's and NOT an allowed target.
+    const limits = limitsFromGrant(energyGrant);
+    assert.equal(limits.energy?.router, ENERGY_ROUTE_V1.router);
+    assert.ok(!limits.allowedTargets.map((a) => a.toLowerCase()).includes(ENERGY_ROUTE_V1.router));
   });
 
   it("PROVES THE EXIT, which three buy cases could not", () => {
