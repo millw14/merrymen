@@ -16,7 +16,9 @@ import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
 // the note in service.ts). isHostedMode decides whether a missing agent id may
 // fall back to the single-tenant guess, or must refuse.
-import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode } from "../../../packages/core/src/index";
+import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode, ENERGY } from "../../../packages/core/src/index";
+import type { EnergyStatus } from "../../../packages/core/src/index";
+import { count as countTokens } from "../energy-copy";
 
 export function openRO(): DatabaseSync | null {
   const file = homePaths.db();
@@ -175,6 +177,59 @@ export interface StatusContext {
   telegramMaxActionUsdg: number;
   /** Simulated starting cash for the paper book — quoted in the testnet explainer. */
   paperStartUsdg?: number;
+  /**
+   * The worker's own energy report for this agent, as published on its agents
+   * row this tick (index.ts `energyReport`). null/absent = not said yet, which
+   * prints nothing — never "no energy". Only a report with `gated` true is
+   * spoken: off and observe limit nothing, so there is nothing to tell.
+   */
+  energy?: EnergyStatus | null;
+}
+
+/**
+ * THE ONE ENERGY LINE /status CARRIES, or null for none.
+ *
+ * Read-only by design: Telegram tells the owner where energy stands and where
+ * to fix it, and never buys it. The buy is a money path an owner confirms with
+ * the amount in front of them, in the Merrymen app's chat; a bearer link code
+ * is not that (design D6).
+ *
+ * WHAT IT MUST NEVER DO, whichever arm it takes:
+ *   - print a count that was not read. A null used/allowed prints "—"; an
+ *     unread balance is "our read, not your wallet", never 0 — the number that
+ *     sends somebody to buy tokens they may already hold.
+ *   - speak for yesterday. A report whose day has already reset (a tick has not
+ *     run since 00:00 UTC) is not today's, and "spent" from it would be false.
+ *   - point at the agent's account when it is on another network: tokens sent
+ *     there would not count, so that arm names the owner's own wallet instead.
+ *
+ * Exported for the test; readStatus is the only caller.
+ */
+export function energyStatusLine(e: EnergyStatus | null | undefined, nowSec: number): string | null {
+  if (!e || !e.gated) return null;
+  if (nowSec >= e.resetsAt) return null;
+  if (e.level === "full") return "• energy: full ⚡";
+  const n = (v: number | null) => (v === null ? "—" : countTokens(v));
+  if (e.spent) {
+    const unread =
+      e.level === "unread" ? " I couldn't read the $MERRYMEN balances, so I'm on the reduced allowance (our read, not your wallet)." : "";
+    const where =
+      e.buy === "not-mainnet"
+        ? `Full strength: ${countTokens(ENERGY.fullTokens)} $MERRYMEN in your own wallet on Robinhood Chain`
+        : "/wallet shows my address for $MERRYMEN";
+    return (
+      `• energy: spent for today — back at 00:00 UTC. Selling, stop-losses and your own orders still run.${unread} ${where}`
+    );
+  }
+  if (e.level === "unread") {
+    return "• energy: couldn't read the $MERRYMEN balances — on the reduced allowance until I can (our read, not your wallet)";
+  }
+  // LOW, NOT YET SPENT. A meter the worker did not report (no paid reviewer,
+  // or not throttled) is left out, so this never reads "— of — AI reviews".
+  const used: string[] = [];
+  if (e.reviews) used.push(`${n(e.reviews.used)} of ${n(e.reviews.allowed)} AI reviews`);
+  if (e.entries) used.push(`${n(e.entries.used)} of ${n(e.entries.allowed)} new trades`);
+  return `• energy: low — about a tenth of my usual day${used.length ? ` (${used.join(", ")} used today)` : ""}`;
 }
 
 export function readStatus(ctx: StatusContext): string {
@@ -210,6 +265,10 @@ export function readStatus(ctx: StatusContext): string {
     lines.push(`• no grant signed — raise the permission wall in the dashboard`);
   }
   lines.push(`• chat trade ceiling: ${ctx.telegramMaxActionUsdg} USDG/action`);
+  // One line, only while the gate enforces. readLlmState strips the tags off
+  // this whole block, so the chat model sees the same sentence the owner does.
+  const energy = energyStatusLine(ctx.energy, Math.floor(Date.now() / 1000));
+  if (energy) lines.push(energy);
 
   const db = openRO();
   if (db) {
