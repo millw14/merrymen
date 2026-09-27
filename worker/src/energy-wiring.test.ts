@@ -157,6 +157,13 @@ describe("deciding and telling", () => {
     assert.match(refresh, /estimateEnergyUsdg\(client, parts\)/);
   });
 
+  it("THE ESTIMATE IS SIZED BY THE PLANNER'S OWN RULE — margin, tax and the owner's slippage, never the bare shortfall", () => {
+    const e = body("estimateEnergyUsdg");
+    assert.match(e, /energyAmountInFor\(client, energyGrossFor\(shortRaw, tax, cfg\.slippageBps\)\)/);
+    assert.match(e, /usdgCentsUp\(energyAskFor\(amountIn\)\)/, "rounded and floored as the ask is");
+    assert.doesNotMatch(CODE, /grossNeededFor\(/, "no second copy of the sizing lives in index.ts");
+  });
+
   it("THE CLAIM ON TODAY'S NOTICE PRECEDES THE MESSAGE — at most once, even across a crash", () => {
     const w = body("tellEnergySpent");
     const claim = w.indexOf("await claimEnergyNotice(agentId, energyNow.day, now)");

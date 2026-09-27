@@ -73,8 +73,10 @@ export default function TokenPage() {
         <p>
           Send $MERRYMEN on Robinhood Chain to your agent&apos;s account (or keep it in your own linked
           wallet — both count). Or send the agent USDG and ask it in chat to get its $MERRYMEN: you
-          confirm the most it may spend, it buys only what is missing over one pinned Uniswap route
-          (USDG → VIRTUAL → $MERRYMEN), inside the limits you signed. Its key can buy $MERRYMEN into its
+          confirm the most it may spend, and it sizes the buy to cover what is missing, with a small
+          margin for price movement (at least $1.00), over one pinned Uniswap route (USDG → VIRTUAL →
+          $MERRYMEN), inside the limits you signed. The pool fees and the token&apos;s own tax are paid
+          out of the USDG. Its key can buy $MERRYMEN into its
           own account and can never sell or send it; only your owner key moves it out.
         </p>
 

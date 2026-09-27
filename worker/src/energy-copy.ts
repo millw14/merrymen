@@ -48,7 +48,7 @@ export interface EnergyNoticeFacts {
   level: EnergyLevel;
   /** The worker's reading of whether it can buy its own energy; null when not said. */
   buy: EnergyBuy | null;
-  /** USDG that would buy the shortfall now, fees and tax included; null when unknown. */
+  /** USDG the energy buy would ask now, sized as it buys (margin, slippage, fees, tax); null when unknown. */
   estimateUsdg: number | null;
 }
 

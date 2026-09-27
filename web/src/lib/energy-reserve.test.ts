@@ -45,6 +45,9 @@ describe("/api/snipe", () => {
       assert.match(a.say, /my energy, not a coin I trade/);
       assert.match(a.say, /get my \$MERRYMEN/);
       assert.match(a.say, /you confirm the amount first/);
+      // The buy is sized to COVER the shortfall with a margin — never "only what I'm short of".
+      assert.match(a.say, /I size it to cover what I'm short of, with a small margin/);
+      assert.doesNotMatch(a.say, /only buy/);
       assert.doesNotMatch(a.say, RESIGN);
       assert.doesNotMatch(a.say, PRICE);
     }

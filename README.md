@@ -588,8 +588,10 @@ Two ways to top up:
 1. **Send $MERRYMEN** on Robinhood Chain to the agent's account (or keep it in your own linked
    wallet — both count).
 2. **Send USDG and ask the agent in chat to "get its $MERRYMEN".** You confirm a card stating the
-   most it may spend; it buys **only the shortfall** over one pinned route (Uniswap v2,
-   USDG → VIRTUAL → $MERRYMEN), one trade at a time, inside your signed per-trade and daily caps.
+   most it may spend; it sizes the buy to **cover the shortfall, with a small margin for price
+   movement (at least $1.00)**, over one pinned route (Uniswap v2, USDG → VIRTUAL → $MERRYMEN) —
+   the pool fees and the token's own tax are paid out of the USDG — one trade at a time, inside your
+   signed per-trade and daily caps.
    The permission for this is sealed into your key when you sign (re-sign once, free, if your key
    predates it) and it is **buy-only**: the key can turn USDG into $MERRYMEN in its own account
    and can never sell or send it. It moves out only with your owner key (`merrymen recover` /

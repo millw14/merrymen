@@ -139,6 +139,25 @@ export type EnergyPlan =
 
 const ceilCent = (v: bigint) => (v % CENT === 0n ? v : v + (CENT - (v % CENT)));
 const floorCent = (v: bigint) => (v <= 0n ? 0n : v - (v % CENT));
+
+/**
+ * THE ONE SIZING RULE: how much $MERRYMEN to price for a shortfall. What must
+ * arrive is the shortfall plus its rounding margin; grossNeededFor inverts the
+ * token's buy tax and the owner's slippage tolerance on top. The planner sizes
+ * the buy with it and index.ts's "about $X" estimate prices the same figure,
+ * so the number an owner is shown is the number they will be asked for — the
+ * estimate once left the margin and the slippage out and under-asked.
+ */
+export function energyGrossFor(shortRaw: bigint, taxBps: number, slippageBps: number): bigint {
+  const wantNet = (shortRaw * BigInt(10_000 + ENERGY_BUFFER_BPS) + 9_999n) / 10_000n;
+  return grossNeededFor(wantNet, taxBps, slippageBps);
+}
+
+/** A route quote → the USDG one buy asks: rounded UP to the cent, and never under the smallest buy. */
+export function energyAskFor(quotedRaw: bigint): bigint {
+  const need = ceilCent(quotedRaw);
+  return need < ENERGY.minChunkUsdg6 ? ENERGY.minChunkUsdg6 : need;
+}
 /** Raw 6dp USDG → "12.34". */
 export const usdgText = (v: bigint) => (Number(v) / 1e6).toFixed(2);
 const tokens = (raw: bigint) => count(wholeTokens(raw));
@@ -292,8 +311,7 @@ export async function planEnergyBuy(
   }
 
   // 6. THE PRICE OF THE SHORTFALL, then every cap at once.
-  const wantNet = (shortRaw * BigInt(10_000 + ENERGY_BUFFER_BPS) + 9_999n) / 10_000n;
-  const gross = grossNeededFor(wantNet, taxBps, pricing.slippageBps);
+  const gross = energyGrossFor(shortRaw, taxBps, pricing.slippageBps);
   const quoted = await pricing.amountInFor(gross);
   if (quoted === null || quoted <= 0n) {
     return refuse(
@@ -330,7 +348,7 @@ export async function planEnergyBuy(
         `energy buy I make is ${usdgText(minChunk)} USDG, so I bought nothing. ${WAY_ROUND}`,
     );
   }
-  const wanted = needInRaw < minChunk ? minChunk : needInRaw;
+  const wanted = energyAskFor(quoted);
   const amountInRaw = wanted <= cap ? wanted : cap;
   const coversShortfall = amountInRaw >= needInRaw;
 

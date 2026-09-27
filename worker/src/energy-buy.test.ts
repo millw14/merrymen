@@ -3,6 +3,8 @@ import { describe, it } from "node:test";
 import { ENERGY, ENERGY_FULL_RAW } from "../../packages/core/src/index";
 import {
   ENERGY_BUFFER_BPS,
+  energyAskFor,
+  energyGrossFor,
   planEnergyBuy,
   sayEnergyOutcome,
   sayEnergyPlan,
@@ -207,6 +209,40 @@ describe("planEnergyBuy — the size", () => {
       assert.equal(p.amountInRaw % 10_000n, 0n);
     }
     assert.ok(bought > 100, `the property must actually run (${bought} buys)`);
+  });
+
+  it("THE ESTIMATE AND THE ASK ARE ONE RULE — energyGrossFor/energyAskFor size exactly what the planner buys", async () => {
+    // index.ts's "about $X" estimate prices energyAskFor(amountIn(energyGrossFor(...))).
+    // Uncapped, that must be the planner's own amount, to the cent — it once
+    // priced the bare shortfall at zero slippage and under-stated the ask.
+    const big = caps({ ownerMaxRaw: 900n * USDG, perTradeRaw: 900n * USDG, dailyRaw: 900n * USDG });
+    for (const [held, tax, slip] of [
+      [20_000n, 100, 100],
+      [12_345n, 0, 0],
+      [99_000n, 200, 1_000],
+      [99_995n, 100, 100], // a few tokens short: the smallest buy
+    ] as const) {
+      const short = ENERGY_FULL_RAW - held * TOKEN;
+      const p = buyOf(await plan(reads({ holder: held * TOKEN, cashUsdg: 900n * USDG }), big, pricing({ taxBps: tax, slippageBps: slip })));
+      const estimate = energyAskFor(linear(energyGrossFor(short, tax, slip)));
+      assert.equal(estimate, p.amountInRaw, `held ${held}, tax ${tax}, slippage ${slip}`);
+      assert.equal(p.needInRaw, needFor(short, tax, slip), "and the independent arithmetic agrees");
+    }
+  });
+
+  it("the ask is rounded up to the cent and is never under the smallest buy", () => {
+    assert.equal(energyAskFor(1n), ENERGY.minChunkUsdg6);
+    assert.equal(energyAskFor(ENERGY.minChunkUsdg6 - 1n), ENERGY.minChunkUsdg6);
+    assert.equal(energyAskFor(ENERGY.minChunkUsdg6 + 1n), ENERGY.minChunkUsdg6 + 10_000n);
+    assert.equal(energyAskFor(37_120_000n), 37_120_000n);
+  });
+
+  it("the margin and the owner's slippage are IN the size: more slippage, more asked", () => {
+    const short = 87_655n * TOKEN;
+    const bare = grossNeededFor(short, 100, 0);
+    const sized = energyGrossFor(short, 100, 100);
+    assert.ok(sized > bare, "the old estimate's figure is below what is actually bought");
+    assert.ok(energyGrossFor(short, 100, 1_000) > sized);
   });
 
   it("DETERMINISTIC: the same reads give the same plan", async () => {

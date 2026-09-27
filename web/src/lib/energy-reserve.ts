@@ -39,6 +39,6 @@ export function snipeEnergyAnswer(target: { symbol: string; address: string }): 
     target: { symbol: target.symbol, address: target.address, short },
     say:
       `That's $MERRYMEN at ${short} — my energy, not a coin I trade, so I won't snipe it. ` +
-      `Ask me to get my $MERRYMEN instead: I only buy what I'm short of, and you confirm the amount first.`,
+      `Ask me to get my $MERRYMEN instead: I size it to cover what I'm short of, with a small margin, and you confirm the amount first.`,
   };
 }
