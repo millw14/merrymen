@@ -566,28 +566,53 @@ npx tsx scripts/probe-tradability.mts
 
 ---
 
-## $MERRYMEN — the Merry Circle
+## $MERRYMEN — energy and the Merry Circle
 
-merrymen is **free and open to everyone**, whether you hold the token or not. Holding
-**$MERRYMEN** (on Robinhood Chain — [the token page](https://merrymen.dev/token)) just adds
-holder perks — it buys *access*, never the product. **Utility only: no price, no returns, no
-buyback/burn.**
+**$MERRYMEN** (on Robinhood Chain — [the token page](https://merrymen.dev/token)) is an agent's
+**energy**. **Utility only: no price, no returns, no buyback/burn.** Nothing here says anything
+about what the token is worth.
 
-Paste the wallet you hold $MERRYMEN in into the dashboard's **Merry Circle** panel (or set
-`holderAddress` in `/settings`). merrymen reads that balance **read-only** — it never asks for or
-touches the wallet's keys — and sets your tier:
+**Energy (hosted service).** An agent runs at full strength while **your wallet and the agent's
+own account hold 100,000 $MERRYMEN between them**. Below that it still runs, on about **a tenth**
+of a normal day: a tenth of its usual paid AI reviews (paced across the day) and of the new trades
+it opens on its own, resetting at **00:00 UTC**. **Selling, stop-losses, take-profits and orders you
+place yourself are never limited** — an allowance on new work is never a lock on the doors. When
+today's allowance is used, the agent tells you once (dashboard, and Telegram if linked), with its
+account address and what it would cost to top up. The gate is an operator switch,
+`MERRYMEN_ENERGY_GATE` (`observe`, then `1`), and is **never on for a self-hosted install**.
+
+Two ways to top up:
+
+1. **Send $MERRYMEN** on Robinhood Chain to the agent's account (or keep it in your own linked
+   wallet — both count).
+2. **Send USDG and ask the agent in chat to "get its $MERRYMEN".** You confirm a card stating the
+   most it may spend; it buys **only the shortfall** over one pinned route (Uniswap v2,
+   USDG → VIRTUAL → $MERRYMEN), one trade at a time, inside your signed per-trade and daily caps.
+   The permission for this is sealed into your key when you sign (re-sign once, free, if your key
+   predates it) and it is **buy-only**: the key can turn USDG into $MERRYMEN in its own account
+   and can never sell or send it. It moves out only with your owner key (`merrymen recover` /
+   Withdraw). Paper-mode agents do not spend real USDG on energy — send $MERRYMEN instead, or turn
+   on Live trading first. The purchase is booked as capital set aside, not as a trading loss.
+
+One wallet powers one account: a linked holder wallet counts for the first merrymen account that
+proved it.
+
+**The Merry Circle.** Link a wallet that holds $MERRYMEN by signature in **Settings → Merry
+Circle** (the wallet is only ever read — it never becomes a spend key). The same combined balance —
+your wallet plus your agent's account — sets your tier:
 
 | tier | hold | perk |
 |---|---|---|
 | 🌱 **Villager of Sherwood** | 10k+ | **10% off** the platform performance fee · badge · 1× roadmap vote |
-| 🏹 **Merry Man** | 100k+ | **25% off** · the bonus strategy pack (`even-keel`, `dip-hunter`) · 3× vote |
+| 🏹 **Merry Man** | 100k+ | **full energy** · **25% off** · the bonus strategy pack (`even-keel`, `dip-hunter`) · 3× vote |
 | 👑 **Lord of Sherwood** | 1M+ | **50% off** — the lowest we offer · every bonus strategy · 10× vote |
 
 The fee discount is real: merrymen's performance fee is only ever taken on profit above your
 high-water mark, and your tier lowers it in the **actual accrual** (shown live in the panel), not
 just in the copy. Holders also steer the roadmap — which tokens join the basket, which strategies
 ship — weighted by tier ([governance](https://merrymen.dev/governance)). Thresholds live in
-[`packages/core/src/token.ts`](./packages/core/src/token.ts).
+[`packages/core/src/token.ts`](./packages/core/src/token.ts); energy's contract is
+[`packages/core/src/energy.ts`](./packages/core/src/energy.ts).
 
 ---
 
