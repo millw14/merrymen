@@ -45,7 +45,7 @@ import {
 } from "@merrymen/core";
 import { webChainRead } from "@/lib/chain-read";
 import { tenantOf } from "@/lib/auth";
-import { holderWalletFor } from "@/lib/holder-wallet";
+import { holderWalletFor, type HolderWallet } from "@/lib/holder-wallet";
 import { agentAccountFor } from "@/lib/agent-account";
 import {
   AGENT_BALANCE_TTL_MS,
@@ -127,9 +127,18 @@ export async function GET(req: Request) {
   let source: TierView["source"];
   let rpc: string | undefined;
   if (hosted) {
-    const resolved = await holderWalletFor(tenantOf(req));
+    let resolved: HolderWallet | null;
+    try {
+      resolved = await holderWalletFor(tenantOf(req));
+    } catch {
+      // WHOSE wallet counts could not be read (the proof or the holder
+      // claims): an unread standing, every count at its null default.
+      return NextResponse.json(view({ why: "unreadable" }));
+    }
     // Signed out. Nothing about anybody's balance is said to nobody.
     if (!resolved) return NextResponse.json(view({ why: "sign-in" }));
+    // A null address is a wallet another account claims (one wallet powers
+    // one agent): only the agent's own account is left to count.
     wallet = resolved.address;
     source = resolved.source;
   } else {
