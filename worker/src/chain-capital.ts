@@ -153,6 +153,13 @@ export async function scanFleetCapital(
      * which is every grant today.
      */
     custodyAddressesFor?: (account: string) => readonly string[] | undefined;
+    /**
+     * Every account this system controls, for CLASSIFICATION only. Defaults to
+     * `accounts`, which is right for a fleet-wide sweep and wrong for a scoped
+     * one: a transfer from a hosted account left out of the scan would read as
+     * an outside deposit and be booked as the recipient owner's capital.
+     */
+    knownAccounts?: readonly string[];
     log?: (m: string) => void;
   },
 ): Promise<Map<string, AccountCapital>> {
@@ -312,7 +319,7 @@ export async function scanFleetCapital(
               usdg: usdgLeg,
               txLegs: legs.length ? legs : [usdgLeg],
               usdgToken: usdg,
-              knownAccounts: args.accounts,
+              knownAccounts: args.knownAccounts ?? args.accounts,
               protocolAddresses: args.protocolAddresses,
               // See ClassifyInput.custodyAddresses. A lookup rather than a list
               // because this sweep is fleet-wide and a vault belongs to one

@@ -221,6 +221,23 @@ every agent line; owners write through the web. Rules and design:
 > Asleep or awake, every agent keeps trading — the room writes only its own
 > tables, and nothing on a trading path reads them.
 
+### Deposits booked from the chain (on by default, and it needs no key)
+
+An owner who creates an agent and funds it afterwards used to end up with an
+agent that saw the money but had no capital on record, so it refused to size any
+trade. The orchestrator now books those deposits itself, from their transfer
+receipts, using the same repair an operator runs with `MERRYMEN_REPAIR`, and
+restarts the agent so it picks them up. It does this only for an account whose
+every USDG movement is an inbound deposit, whose balance is exactly their sum,
+and which has never traded, sent money out or used its vault. Everything else
+is left for `MERRYMEN_REPAIR`, and the `capital|` log line says why. Design:
+[`worker/src/auto-capital.ts`](../worker/src/auto-capital.ts).
+
+| Var | Value |
+|---|---|
+| `MERRYMEN_AUTO_CAPITAL` *(optional)* | `0` switches automatic booking off — **orchestrator only** |
+| `MERRYMEN_AUTO_CAPITAL_EVERY_SEC` *(optional)* | seconds between passes, default `600`, minimum `60` |
+
 ## 5. Create the two services
 Both build from the same repo + `Dockerfile`. The image is role-by-variable: its
 `CMD` runs `npm run ${MERRYMEN_START:-start:web}`, and `railway.json` sets no
