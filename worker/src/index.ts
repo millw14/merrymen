@@ -4402,6 +4402,12 @@ async function main() {
    * ledger already tracks exactly what was paid per raw unit and survives
    * partial fills, so a second copy could only ever disagree with it.
    */
+  /** A basket, custom or official token — never routed through Trencher custody. */
+  function baseTokenAddress(address: string): boolean {
+    const a = address.toLowerCase();
+    return watchTokensFor(cfg.basketSymbols, cfg.customTokens, officialCoins()).some((t) => t.address.toLowerCase() === a);
+  }
+
   async function trenchOpen(): Promise<OpenPosition[]> {
     if (!active) return [];
     const mode: BasisMode = paperActive() ? "paper" : "live";
@@ -4443,6 +4449,15 @@ async function main() {
         costUsdg: basis.costUsdg,
         qtyRaw: basis.qtyRaw,
         ...(mode === "live" && autoTrenchBalances.get(t.address.toLowerCase()) ? {custodyVault:autoTrench!.custody.vault,qtyRaw:autoTrenchBalances.get(t.address.toLowerCase())!} : {}),
+        // THE EXIT TAKES THE ROUTE THE ENTRY TOOK. A paper Trencher entry is
+        // autonomous (custody target, checked against knownTrencherAssets), but
+        // its exit was built without the custody target and so hit the router
+        // allowlist, which never lists a discovered coin: lilbot's sells of
+        // T57F813C4571 and TA151B4A9E1B were refused `asset-allowlist` 418 times
+        // in 7 hours (2026-09-26 17:07 → 27 00:00). Sells only — the 5 USDG
+        // entry bound in policy.ts applies to buys and is untouched.
+        ...(mode === "paper" && autoTrench && grantTrencher(active.grant) && !baseTokenAddress(t.address) &&
+          active.limits.knownTrencherAssets?.some(a=>a.toLowerCase()===t.address.toLowerCase()) ? {custodyVault:autoTrench.custody.vault} : {}),
       });
     }
     return out;
@@ -8954,8 +8969,23 @@ async function main() {
       const base = watchTokensFor(cfg.basketSymbols,cfg.customTokens,officialCoins());
       const addresses = new Set(base.map(t=>t.address.toLowerCase()));
       const symbols = new Set(base.map(t=>t.symbol));
-      watchTokens=[...base,...autoTrench.tokens.filter(t=>!addresses.has(t.address.toLowerCase())&&!symbols.has(t.symbol))];
-      active.limits.knownTrencherAssets=autoTrench.tokens.map(t=>t.address);
+      const discovered = autoTrench.tokens.filter(t=>!addresses.has(t.address.toLowerCase())&&!symbols.has(t.symbol));
+      // A PAPER POSITION OUTLIVES THE TAPE THAT FOUND IT. Live keeps a held coin
+      // in the universe through the vault's own `tokens()`; paper holds nothing
+      // in the vault, so a coin that left the qualified tape vanished from
+      // watchTokens and its position was orphaned — never valued, never exited.
+      // Carried only while the paper book still holds it. Entry-neutral: buys
+      // still need tape qualification, and a held symbol is never re-entered.
+      if (paperActive()) {
+        const seen = new Set(discovered.map(t=>t.address.toLowerCase()));
+        for (const t of watchTokens) {
+          const a = t.address.toLowerCase();
+          if (addresses.has(a) || symbols.has(t.symbol) || seen.has(a) || t.kind !== "memecoin") continue;
+          if ((await getBasis(active.agentId, "paper", t.symbol)).qtyRaw > 0n) { discovered.push(t); seen.add(a); }
+        }
+      }
+      watchTokens=[...base,...discovered];
+      active.limits.knownTrencherAssets=[...new Set([...autoTrench.tokens.map(t=>t.address), ...discovered.map(t=>t.address)])];
     } else { autoTrench=null; autoTrenchBalances.clear(); }
 
     const market = await readMarketSafety();

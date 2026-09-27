@@ -288,6 +288,11 @@ describe("the report has to fit in the window you can read it in", () => {
       return accountPreviewLines(pl, p);
     });
     assert.equal(roster.length, 25, "one line per tenant, plus the total");
+    // An account nobody scanned has no evidence of being paper; Shogun was
+    // printed PAPER while it landed live trades.
+    const unscanned = roster.filter((l) => !l.startsWith("ROSTER TOTAL") && l.includes("NOT-EXAMINED"));
+    assert.equal(unscanned.length, 23);
+    assert.ok(unscanned.every((l) => l.includes("· UNSCANNED epoch") && !l.includes("PAPER")));
     assert.equal(previews.filter((p) => p.selected).length, 1, "only the named account gets a block");
     assert.ok(roster.length + blocks.length < 100, `report is ${roster.length + blocks.length} lines, well inside 503`);
   });

@@ -154,7 +154,11 @@ export function rosterLines(previews: readonly AccountPreview[]): string[] {
     tally[p.outcome] += 1;
     L.push(
       `ROSTER ${p.account} tenant ${p.tenant ?? "unknown"} · ${p.outcome} · ` +
-        `${p.isPaper ? "PAPER" : "LIVE"} epoch ${p.epoch} · insert ${p.inserts} quarantine ${p.quarantines} · ` +
+        // An unscanned account has no chain evidence, and `isPaper` reads that
+        // absence as "no money": every NOT-EXAMINED line said PAPER, Shogun's
+        // included, while it landed live trades. Say what is known instead.
+        `${p.outcome === "NOT-EXAMINED" ? "UNSCANNED" : p.isPaper ? "PAPER" : "LIVE"} epoch ${p.epoch} · ` +
+        `insert ${p.inserts} quarantine ${p.quarantines} · ` +
         `contributions ${p.contributionsBeforeUsdg.toFixed(6)} -> ${p.contributionsAfterUsdg.toFixed(6)} · ` +
         `known ${p.contributionsKnownBefore} -> ${p.contributionsKnownAfter}` +
         (p.blocked ? ` · BLOCKED: ${p.blocked}` : ""),
