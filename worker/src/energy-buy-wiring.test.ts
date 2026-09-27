@@ -332,6 +332,25 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     assert.match(r.slice(add, add + 600), /\.\.\.\(energyRow \? \{ sell_token: row\.sellToken, buy_token: row\.buyToken \} : \{\}\),/);
   });
 
+  it("(5b) NOTHING IS INFERRED WHILE AN OP IS IN FLIGHT, and the resolver's settlement explains the interval (flow-inference.integration.test.ts runs this shape)", () => {
+    // A stranded purchase was booked twice: inferred as a withdrawal by the
+    // next tick, then booked as energy by the resolver.
+    const f = arrow("reconcileFlows");
+    assert.match(f, /opsHoldInference\(await listSubmittedOps\(agentId\), \{\s*epoch: await getAgentEpoch\(agentId\),/);
+    assert.match(f, /const verdict = steadyStateInference\(\{ lastCashUsdg, cashUsdg, ledgerWrites, ledgerWritesAtSnapshot, opsInFlight \}\);/);
+    const hold = f.indexOf('if (verdict.action === "hold") {');
+    const baseline = f.lastIndexOf("lastCashUsdg = cashUsdg;");
+    assert.ok(hold > 0 && baseline > hold);
+    assert.match(f.slice(hold, baseline), /return;\s*\}\s*if \(verdict\.action === "infer"\) await record\(verdict\.deltaUsdg, "no trade explains this"\);/);
+    assert.doesNotMatch(f, /ledgerWrites === ledgerWritesAtSnapshot\) \{\s*await record\(/, "the old unconditional inference is gone");
+    // The downtime inference across a restart obeys the same rule.
+    assert.match(f, /\} else if \(ledgerWrites === 0\) \{[\s\S]*?const prior = await lastKnownCashUsdg\(agentId\);/);
+    // The resolver moves the count for every op it settles, before the row is written.
+    const r = arrow("resolveStrandedOps");
+    const bump = r.indexOf("ledgerWrites += 1;");
+    assert.ok(bump > r.indexOf("await settleEnergyLanding(") && bump < r.indexOf("await addTrade({"));
+  });
+
   it("(6) the orphan sweep NEVER books", () => {
     const arm = arrow("reconcileInFlightAtArm");
     const orphans = arm.slice(arm.indexOf("const orphans = await findOrphanOps({"));

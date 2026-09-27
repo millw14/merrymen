@@ -222,6 +222,7 @@ import {
   sayEnergyPlan,
   usdgText,
 } from "./energy-buy";
+import { opsHoldInference, STRANDED_RESOLVE_WINDOW_SEC, steadyStateInference } from "./flow-inference";
 import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, type EnergySettleDeps } from "./energy-settle";
 import { bookCapitalFlow, energyBuysInFlight, newestLandedEnergyBuy } from "./store";
 import {
@@ -2975,6 +2976,14 @@ async function main() {
           // balance reads to its landing block, like one the executor saw.
           noteEnergyLanded(r.blockNumber);
         }
+        // THE SETTLEMENT EXPLAINS THE CASH IT MOVED (flow-inference.ts). This
+        // op never passed through recordTrade, so without this bump the tick
+        // that next compares cash would see its money move with "nothing
+        // written" and book it as a withdrawal — beside the energy-buy flow the
+        // booking above just wrote, both peaks lowered twice. Moved BEFORE the
+        // row is written: a tick that reads the ledger mid-settle then sees
+        // either the op still 'submitted' (inference held) or this count moved.
+        ledgerWrites += 1;
         await addTrade({
           agent_id: agentId,
           kind: row.kind as TradeRow["kind"],
@@ -3477,7 +3486,13 @@ async function main() {
         // the reasoning was ever wrong on its own terms.
         if (equityUsdg > 0n && highWaterMarkUsdg === 0n) {
           await record(equityUsdg, "opening balance");
-        } else {
+        } else if (ledgerWrites === 0) {
+          // ONLY WHEN NOTHING THIS PROCESS SETTLED EXPLAINS IT — the steady
+          // state's own rule, applied across the restart. The arm's stranded
+          // resolver runs before this first look and may have just settled an
+          // op that moved this very cash (for an energy purchase, booking it as
+          // capital out already); inferring its cash leg as well would book it
+          // twice. It bumped ledgerWrites when it did.
           const prior = await lastKnownCashUsdg(agentId);
           if (prior !== null) {
             await record(cashUsdg - usdg(prior), "changed while the worker was stopped");
@@ -3504,8 +3519,28 @@ async function main() {
       }
       // `resume-clean` is the remaining arm and it does nothing on purpose: a
       // funded account came back with the cash the anchor said it had.
-    } else if (!covered && lastCashUsdg !== null && ledgerWrites === ledgerWritesAtSnapshot) {
-      await record(cashUsdg - lastCashUsdg, "no trade explains this");
+    } else if (!covered && lastCashUsdg !== null) {
+      // NEVER WHILE AN OP IS IN FLIGHT (flow-inference.ts). An op whose
+      // outcome the worker never heard stays 'submitted' with no recordTrade,
+      // while its money moves on-chain; inferring here booked a stranded
+      // purchase as a withdrawal the resolver then booked again. The ledger
+      // is read only when inference would otherwise fire, and a read that
+      // throws aborts the pass like any failed write (reconcileFlowsOrRetry).
+      const opsInFlight =
+        ledgerWrites === ledgerWritesAtSnapshot &&
+        opsHoldInference(await listSubmittedOps(agentId), {
+          epoch: await getAgentEpoch(agentId),
+          nowSec: Math.floor(Date.now() / 1000),
+        });
+      const verdict = steadyStateInference({ lastCashUsdg, cashUsdg, ledgerWrites, ledgerWritesAtSnapshot, opsInFlight });
+      if (verdict.action === "hold") {
+        // THE BASELINE IS KEPT, BOTH HALVES: the interval stays open until the
+        // op settles, and the settlement's own write (recordTrade, or the
+        // resolver's bump) is what then explains it.
+        console.log(`[flows] an op is still in flight — not inferring a flow from this cash change; baseline kept`);
+        return;
+      }
+      if (verdict.action === "infer") await record(verdict.deltaUsdg, "no trade explains this");
     }
 
     lastCashUsdg = cashUsdg;
@@ -5425,12 +5460,12 @@ async function main() {
         lastStrandedAt = nowSec;
         return;
       }
-      const WINDOW_SEC = 26 * 3600;
+      // The same window opsHoldInference bounds the inference hold with.
       await resolveStrandedOps(
         agentId,
         makeReconcileChain(active.client),
         active.grant.smartAccount as `0x${string}`,
-        BigInt(WINDOW_SEC) * BLOCKS_PER_SEC,
+        BigInt(STRANDED_RESOLVE_WINDOW_SEC) * BLOCKS_PER_SEC,
       );
       lastStrandedAt = nowSec;
     } catch (e) {
