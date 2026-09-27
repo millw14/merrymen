@@ -3077,15 +3077,27 @@ export async function getTransferredTodayUsdg(agentId: string): Promise<number> 
  * Same rail split as getOpsToday, and for the same reason: simulated spend must
  * not consume a real allowance.
  */
-export async function getSpentTodayUsdg(agentId: string, rail: BudgetRail = "live"): Promise<number> {
+export async function getSpentTodayUsdg(
+  agentId: string,
+  rail: BudgetRail = "live",
+  cashToken?: string,
+): Promise<number> {
   const { sql, params } = railFilter(rail);
+  // A SELL INTO CASH SPENDS NOTHING. policy.ts exempts it from the daily-cap
+  // check under exactly that sentence, but this sum still added its proceeds,
+  // so an agent that bought and then sold drew its budget down twice and its
+  // next buys were refused `daily-cap` with half the allowance unspent. The
+  // budget bounds what is SPENT; buys still count in full.
+  const sells = cashToken
+    ? ` AND NOT (kind IN ('swap', 'curve-trade') AND LOWER(COALESCE(buy_token, '')) = ?)`
+    : "";
   const row = await getDb()
     .prepare(
       `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
-       WHERE agent_id = ? AND status IN (${sql}) AND kind != 'vault-withdraw'
+       WHERE agent_id = ? AND status IN (${sql}) AND kind != 'vault-withdraw'${sells}
          AND created_at > unixepoch() - 86400`,
     )
-    .get(agentId, ...params) as { spent: number } | undefined;
+    .get(agentId, ...params, ...(cashToken ? [cashToken.toLowerCase()] : [])) as { spent: number } | undefined;
   return row?.spent ?? 0;
 }
 

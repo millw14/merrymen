@@ -2798,7 +2798,7 @@ async function main() {
    */
   const refreshBudget = async (agentId: string): Promise<void> => {
     const rail = budgetRail();
-    settledSpentUsdg = usdg(await getSpentTodayUsdg(agentId, rail));
+    settledSpentUsdg = usdg(await getSpentTodayUsdg(agentId, rail, CASH.USDG as string));
     settledOps = await getOpsToday(agentId, rail);
   };
 
@@ -5896,6 +5896,12 @@ async function main() {
    * One function so the next venue is added in one place rather than seven, and
    * so a kind that has legs cannot quietly keep failing to name them.
    */
+  /** A swap or curve trade whose proceeds are cash: an exit, which spends no budget. */
+  function returnsCash(intent: TradeIntent): boolean {
+    const out = tokenLegs(intent).buy_token;
+    return out !== undefined && out.toLowerCase() === (CASH.USDG as string).toLowerCase();
+  }
+
   function tokenLegs(intent: TradeIntent): { sell_token?: string; buy_token?: string } {
     if (intent.kind === "swap") return { sell_token: intent.sellToken, buy_token: intent.buyToken };
     if (intent.kind === "curve-trade") return { sell_token: intent.assetIn, buy_token: intent.assetOut };
@@ -6917,7 +6923,7 @@ async function main() {
       // idempotent, so on the normal path recordTrade has already released and
       // this is a no-op.
       try {
-        reserveBudget(intent.kind === "vault-withdraw" ? 0n : notional);
+        reserveBudget(intent.kind === "vault-withdraw" || returnsCash(intent) ? 0n : notional);
         console.log(`[paper] ${fill.receipt}`);
         await addEvent(agentId, "ok", `📜 ${fill.receipt} — inside the wall, nothing signed`);
         // Book the fill against the running cost basis. Paper fills are EXACT (we
@@ -7021,7 +7027,9 @@ async function main() {
     // same stale spend figure and overshoot the daily cap by one action.
     // The reservation is released when the trade row lands (recordTrade) or
     // when execution throws (below) — never both, never neither.
-    const countsSpend = intent.kind !== "vault-withdraw";
+    // A sell into cash spends nothing (getSpentTodayUsdg says why), so it holds
+    // an op but no spend while in flight — the same thing its settled row counts.
+    const countsSpend = intent.kind !== "vault-withdraw" && !returnsCash(intent);
     reserveBudget(countsSpend ? notional : 0n);
 
     // Declared OUTSIDE the try so the revert path can still record it — the

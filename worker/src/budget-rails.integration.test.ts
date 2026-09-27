@@ -153,3 +153,25 @@ describe("the budget window actually rolls", () => {
     assert.equal(await getSpentTodayUsdg(AGED, "live"), 0);
   });
 });
+
+describe("a sell into cash spends nothing", () => {
+  const TRADER = "0xroundtrip00000000000000000000000000000d";
+  const USDG = "0xUSDGUSDGUSDGUSDGUSDGUSDGUSDGUSDGUSDGUSDG";
+  const TOKEN = "0x5555555555555555555555555555555555555555";
+
+  it("a round trip draws the budget down by the buy only", async () => {
+    // Buy 5 USDG of a token, sell it back for 6. policy.ts exempts the sell
+    // from the daily-cap check because it spends nothing; the settled sum used
+    // to add its proceeds anyway, so this read 11 and the next buys were
+    // refused with more than half the day's allowance never spent.
+    await addTrade({ agent_id: TRADER, kind: "swap", target: TOKEN, sell_token: USDG, buy_token: TOKEN, amount_usdg: 5, status: "landed" });
+    await addTrade({ agent_id: TRADER, kind: "swap", target: TOKEN, sell_token: TOKEN, buy_token: USDG, amount_usdg: 6, status: "landed" });
+    await addTrade({ agent_id: TRADER, kind: "curve-trade", target: TOKEN, sell_token: TOKEN, buy_token: USDG.toLowerCase(), amount_usdg: 2, status: "landed" });
+
+    assert.equal(await getSpentTodayUsdg(TRADER, "live", USDG), 5);
+    // Every one of them is still an op: the ops cap is not a spend.
+    assert.equal(await getOpsToday(TRADER, "live"), 3);
+    // Without the cash token the old, conservative sum is unchanged.
+    assert.equal(await getSpentTodayUsdg(TRADER, "live"), 13);
+  });
+});
