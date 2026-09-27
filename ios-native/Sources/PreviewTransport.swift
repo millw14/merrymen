@@ -41,6 +41,24 @@ final class PreviewTransport: URLProtocol {
                 client?.urlProtocol(self, didFailWithError: URLError(.timedOut)); return
             }
             body = UserDefaults.standard.bool(forKey: "uiTest.orderPlaced") ? #"{"state":"queued","id":"test-order-1"}"# : #"{"state":"none"}"#
+        case "/api/mcp/connections":
+            // Like the server: owner writes must carry the site's own Origin.
+            if request.httpMethod == "POST" {
+                if request.value(forHTTPHeaderField: "Origin") != "https://app.merrymen.dev" { body = #"{"error":"forbidden","error_description":"cross-site request"}"#; status = 403 }
+                else { body = #"{"revoked":true,"proposals_cancelled":1}"# }
+            } else {
+                body = #"{"endpoint":"https://mcp.merrymen.dev/mcp","connections":[{"id":"mcpcon_0123456789abcdef0123456789abcdef","kind":"oauth","clientName":"Claude","clientHost":"claude.ai","clientId":"c","scopes":[{"id":"market:read","title":"Read markets","level":"read"},{"id":"orders:propose","title":"Propose trades","level":"write"}],"agentSlugs":["test-agent"],"createdAt":1790287200,"lastUsedAt":1790290000,"recent":[{"action":"propose_trade","outcome":"ok","at":1790290000}]}],"agents":[{"slug":"test-agent","account":null}],"available_scopes":[]}"#
+            }
+        case "/api/mcp/approvals/prp_0123456789abcdef0123456789abcdef":
+            let hash = String(repeating: "a", count: 64)
+            if request.httpMethod == "POST" {
+                let input = readBody()
+                if request.value(forHTTPHeaderField: "Origin") != "https://app.merrymen.dev" { body = #"{"error":"forbidden"}"#; status = 403; break }
+                guard input["hash"] as? String == hash, input["decision"] as? String == "approve" else { body = #"{"error":"invalid_request","error_description":"This request changed. Reload it."}"#; status = 409; break }
+                UserDefaults.standard.set(true, forKey: "uiTest.approvalDecided")
+            }
+            let decided = UserDefaults.standard.bool(forKey: "uiTest.approvalDecided")
+            body = "{\"id\":\"prp_0123456789abcdef0123456789abcdef\",\"kind\":\"trade\",\"status\":\"\(decided ? "submitted" : "awaiting_approval")\",\"binding\":{\"kind\":\"trade\",\"side\":\"buy\",\"symbol\":\"NVDA\",\"token\":\"0x1111111111111111111111111111111111111111\",\"chain_id\":4663,\"amount_usdg\":5,\"slippage_bps\":100,\"book\":\"live\",\"limits\":{\"per_trade_usdg\":25,\"daily_usdg\":100,\"chat_ceiling_usdg\":0}},\"binding_hash\":\"\(hash)\",\"summary\":{\"action\":\"Buy 5 USDG of NVDA\",\"expected_out\":\"0.028\",\"min_out\":\"0.027\"},\"requested_by\":\"Claude\",\"created_at\":1790287200,\"expires_at\":4102444800,\"decided_at\":null,\"result\":null,\"fresh_quote\":null,\"settings_check\":null,\"current_book\":\"live\"}"
         case "/api/tour": body = #"{"done":false,"signedIn":false}"#
         case "/api/theses": body = #"{"source":"db","theses":[{"slug":"test-agent","name":"Test agent","postId":"test-post","at":1790287200,"action":null,"head":"A measured decision","reason":"A test thesis with a clear investment rationale.","paper":true,"outcome":"view","outcomeText":"Paper view","symbol":"NVDA"}]}"#
         case "/api/market": body = #"{"tokens":[{"symbol":"NVDA","name":"Nvidia","address":"0x1111111111111111111111111111111111111111","priceUsd":null,"paused":false}]}"#

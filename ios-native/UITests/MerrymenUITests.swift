@@ -21,7 +21,7 @@ final class MerrymenUITests: XCTestCase {
         if skip.waitForExistence(timeout: 8) { skip.tap() }
         let profile = app.buttons["Perfil"].firstMatch
         XCTAssertTrue(profile.waitForExistence(timeout: 8)); profile.tap()
-        XCTAssertTrue(app.buttons["Iniciar sesión"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["Continuar con X"].waitForExistence(timeout: 8))
         capture(app, "Spanish native navigation")
     }
     func testGuestCanNavigateNativeTabsAndReadThesis() {
@@ -38,7 +38,7 @@ final class MerrymenUITests: XCTestCase {
         app.tabBars.buttons["Chat"].tap()
         XCTAssertTrue(app.textFields["Message your agent"].waitForExistence(timeout: 5))
         app.tabBars.buttons["Profile"].tap()
-        XCTAssertTrue(app.buttons["Sign in"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Continue with X"].waitForExistence(timeout: 5))
         capture(app, "Native profile — guest")
     }
     func testTourDismissalSurvivesRelaunch() {
@@ -118,5 +118,22 @@ final class MerrymenUITests: XCTestCase {
         capture(app, "Resolved contract awaits explicit order confirmation")
         app.buttons["Cancel"].tap()
         XCTAssertFalse(app.staticTexts["Queued"].exists)
+    }
+    func testAssistantTradeShowsRealMoneyAndApprovesOnlyWhatWasShown() {
+        let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-signed-in", "-approval-test", "-reset-tour"]; app.launch()
+        if app.buttons["Skip tour"].waitForExistence(timeout: 8) { app.buttons["Skip tour"].tap() }
+        XCTAssertTrue(app.staticTexts["Claude"].waitForExistence(timeout: 8))
+        let link = app.textFields["Paste the approval link"]
+        XCTAssertTrue(link.waitForExistence(timeout: 5)); link.tap()
+        link.typeText("https://app.merrymen.dev/connect/approve/prp_0123456789abcdef0123456789abcdef")
+        app.buttons["Open request"].tap()
+        XCTAssertTrue(app.staticTexts["Waiting for your decision"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Real money")).firstMatch.exists)
+        capture(app, "Assistant trade awaiting approval with real-money warning")
+        let approve = app.buttons["Approve"].firstMatch
+        for _ in 0..<6 { if approve.isHittable { break }; app.swipeUp() }
+        approve.tap()
+        XCTAssertTrue(app.buttons["Yes, approve"].waitForExistence(timeout: 5)); app.buttons["Yes, approve"].tap()
+        XCTAssertTrue(app.staticTexts["Queued for your agent"].waitForExistence(timeout: 10))
     }
 }

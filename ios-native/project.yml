@@ -20,8 +20,8 @@ settings:
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
     PRIVY_APP_ID: cmtnun9wn00rg0dl5txyoxpju
-    PRIVY_CLIENT_ID: ""
-    WALLETCONNECT_PROJECT_ID: ""
+    PRIVY_CLIENT_ID: client-WY6d71sbtkjt4rYm47MtP3J8PM6dmqSUD2LrCfP8BzQHv
+    WALLETCONNECT_PROJECT_ID: 8042e5914f92e6de57b20821a8b9228c
 targets:
   Merrymen:
     type: application

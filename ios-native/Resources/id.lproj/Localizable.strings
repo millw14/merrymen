@@ -128,6 +128,7 @@
 "connection" = "connection";
 "Connections" = "Connections";
 "Continue" = "Lanjutkan";
+"Continue with X" = "Lanjutkan dengan X";
 "contract address" = "contract address";
 "Copy message" = "Salin pesan";
 "Could not load your settings." = "Could not load your settings.";
@@ -256,6 +257,7 @@
 "Open Telegram →" = "Open Telegram →";
 "Optional custom connection to Robinhood Chain mainnet." = "Optional custom connection to Robinhood Chain mainnet.";
 "Optional." = "Optional.";
+"Other ways to sign in" = "Cara lain untuk masuk";
 "Outbound & public" = "Outbound & public";
 "Overrides the Pimlico connection. Must support your wallet’s network." = "Overrides the Pimlico connection. Must support your wallet’s network.";
 "Owner" = "Pemilik";

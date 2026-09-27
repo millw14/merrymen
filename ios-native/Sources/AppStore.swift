@@ -9,8 +9,8 @@ enum Route: Hashable {
     case settingsProposal(String)
     case holderWallet, walletSignIn
     case snipe(String, String), tradeRequest(String, String, String, String?)
-    case markets, search, agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof
-    case trade(String), deposit, permissions, create, limits, withdraw, signIn, siteAccess, tour
+    case markets, search, searchFor(String), approval(String), connectedApps, agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof
+    case trade(String), deposit, permissions, create, limits, withdraw, signIn
 }
 
 @MainActor
@@ -26,6 +26,10 @@ final class AppStore: ObservableObject {
     @Published var watchlist: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "watchlist") ?? [])
     @Published var likes: Set<String> = []
     @Published var following: Set<String> = []
+    /// The server's follow budget (MAX_FOLLOWS); unknown until /api/follow answers.
+    @Published var followMax: Int?
+    /// A question the tour leaves in the chat box; used only if the box is empty.
+    @Published var chatDraft: String?
     private(set) var privy: (any Privy)?
 
     init() {
@@ -45,6 +49,10 @@ final class AppStore: ObservableObject {
                 try? SecureStore.remove("dev.merrymen.orders", "pendingOrder.0x1111111111111111111111111111111111111111")
             }
         }
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-approval-test") {
+            path = [.connectedApps]
+            UserDefaults.standard.removeObject(forKey: "uiTest.approvalDecided")
+        }
         if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-snipe-test") {
             path = [.snipe("NEON", "5.00")]
             UserDefaults.standard.removeObject(forKey: "uiTest.orderPlaced")
@@ -57,12 +65,17 @@ final class AppStore: ObservableObject {
             if Language.options.contains(where: { $0.0 == locale }) { UserDefaults.standard.set(locale, forKey: "language") }
         }
         #endif
+        privy = Self.sharedPrivy
+    }
+
+    /// PrivySdk.initialize may run once per process; a second call is a fatal
+    /// error inside the SDK. Any extra AppStore (tests, previews) shares it.
+    private static let sharedPrivy: (any Privy)? = {
         let app = Bundle.main.object(forInfoDictionaryKey: "PrivyAppID") as? String ?? ""
         let client = Bundle.main.object(forInfoDictionaryKey: "PrivyClientID") as? String ?? ""
-        if !app.isEmpty, !client.isEmpty, !app.contains("$("), !client.contains("$(") {
-            privy = PrivySdk.initialize(config: PrivyConfig(appId: app, appClientId: client))
-        }
-    }
+        guard !app.isEmpty, !client.isEmpty, !app.contains("$("), !client.contains("$(") else { return nil }
+        return PrivySdk.initialize(config: PrivyConfig(appId: app, appClientId: client))
+    }()
 
     func refreshSession() async {
         let initialGeneration = generation
@@ -75,7 +88,7 @@ final class AppStore: ObservableObject {
             if next != nil {
                 let accountGeneration = generation
                 if let l = try? await api.request("/api/likes"), l["read"].bool == true, accountGeneration == generation { likes = Set(l["liked"].array.compactMap(\.string)) }
-                if let f = try? await api.request("/api/follow"), accountGeneration == generation { following = Set(f["wired"].array.compactMap(\.string)) }
+                if let f = try? await api.request("/api/follow"), accountGeneration == generation { following = Set(f["wired"].array.compactMap(\.string)); followMax = f["max"].number.map { Int($0) } }
             }
         } catch { sessionError = error.localizedDescription }
     }
@@ -146,6 +159,7 @@ final class AppStore: ObservableObject {
             let r = try await perform("/api/follow", body: .object(["target": .string(slug), "on": .bool(!following.contains(slug))]), expectedOwner: owner)
             guard r["read"].bool != false else { throw APIError(status: 503, message: "Could not read your follows.") }
             following = Set(r["wired"].array.compactMap(\.string))
+            if let max = r["max"].number { followMax = Int(max) }
             if let refusal = r["refused"].string { notice = refusal == "self" ? "You cannot follow your own agent." : "Your follow list is full." }
         } catch { notice = error.localizedDescription }
     }
@@ -167,9 +181,12 @@ final class AppStore: ObservableObject {
         case "/deposit": path.append(.deposit)
         case "/withdraw": path.append(.withdraw)
         case "/tokens": path.append(.markets)
+        case "/connect/apps": path.append(.connectedApps)
         default:
             if u.path.hasPrefix("/a/") { path.append(.agent(String(u.path.dropFirst(3)))) }
             if u.path.hasPrefix("/t/") { path.append(.token(String(u.path.dropFirst(3)))) }
+            // Only opens the review screen; the policy admits the exact id shape.
+            if u.path.hasPrefix("/connect/approve/") { path.append(.approval(String(u.path.dropFirst(17)))) }
         }
     }
 }

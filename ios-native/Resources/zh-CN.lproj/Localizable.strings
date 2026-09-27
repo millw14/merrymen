@@ -128,6 +128,7 @@
 "connection" = "connection";
 "Connections" = "Connections";
 "Continue" = "继续";
+"Continue with X" = "使用 X 继续";
 "contract address" = "contract address";
 "Copy message" = "复制消息";
 "Could not load your settings." = "Could not load your settings.";
@@ -256,6 +257,7 @@
 "Open Telegram →" = "Open Telegram →";
 "Optional custom connection to Robinhood Chain mainnet." = "Optional custom connection to Robinhood Chain mainnet.";
 "Optional." = "Optional.";
+"Other ways to sign in" = "其他登录方式";
 "Outbound & public" = "Outbound & public";
 "Overrides the Pimlico connection. Must support your wallet’s network." = "Overrides the Pimlico connection. Must support your wallet’s network.";
 "Owner" = "所有者";

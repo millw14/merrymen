@@ -199,19 +199,66 @@ struct GrantScreen: View {
     private func retrySaved() async {
         guard !submitting else { return }; submitting = true; defer { submitting = false }
         do {
-            guard let owner, let saved = try WalletHost.savedGrant(owner: owner) else { throw APIError(status: 0, message: "No saved grant was found.") }
-            let session = store.api.binding()
-            try await store.verifyOwner(owner)
-            let latest = try await store.api.request("/api/grants")
-            if latest["grant"]["sessionKeyAddress"] != saved["sessionKeyAddress"] {
-                let token: String?
-                if saved["binding"]["version"].text == "privy-did-owner-v1" {
-                    guard let user = await store.privy?.getUser() else { throw APIError(status: 401, message: "Sign in to your embedded wallet again.") }
-                    token = try await user.getAccessToken()
-                } else { token = nil }
-                _ = try await store.api.request("/api/grants", method: "POST", body: saved, token: token, expectedSession: session)
-            }
+            guard let owner else { throw APIError(status: 0, message: "No saved grant was found.") }
+            let saved = try await store.resendSavedGrant(owner: owner, onlyIfServerHasNone: false)
             result = .object(["smartAccount": saved["smartAccount"], "handoff": .object(["ok": .bool(true)])])
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+extension AppStore {
+    /// Sends this device's saved trading permission back to the service.
+    ///
+    /// With `onlyIfServerHasNone`, it goes only when the service holds no grant
+    /// at all (the web's "this wallet isn't active" rule), so it can never
+    /// replace a newer permission signed somewhere else. The service validates
+    /// the grant exactly as on first activation.
+    @discardableResult
+    func resendSavedGrant(owner: String, onlyIfServerHasNone: Bool) async throws -> J {
+        guard let saved = try WalletHost.savedGrant(owner: owner) else { throw APIError(status: 0, message: "No saved grant was found.") }
+        let session = api.binding()
+        try await verifyOwner(owner)
+        let latest = try await api.request("/api/grants")
+        if onlyIfServerHasNone, latest["exists"].bool != false { throw APIError(status: 409, message: "Your agent already has an active permission. Nothing was changed.") }
+        if latest["grant"]["sessionKeyAddress"] != saved["sessionKeyAddress"] {
+            let token: String?
+            if saved["binding"]["version"].text == "privy-did-owner-v1" {
+                guard let user = await privy?.getUser() else { throw APIError(status: 401, message: "Sign in to your embedded wallet again.") }
+                token = try await user.getAccessToken()
+            } else { token = nil }
+            _ = try await api.request("/api/grants", method: "POST", body: saved, token: token, expectedSession: session)
+        }
+        return saved
+    }
+}
+
+/// "This wallet isn't active": this device holds a signed permission the
+/// service no longer has (for example after a stand-down elsewhere). The
+/// account and its funds are on-chain and untouched; re-arming re-sends it.
+struct InactiveWalletPanel: View {
+    @EnvironmentObject var store: AppStore
+    let status: J
+    let rearmed: () -> Void
+    @State private var busy = false
+    @State private var error: String?
+    private var saved: J? { store.owner.flatMap { try? WalletHost.savedGrant(owner: $0) } }
+    var body: some View {
+        if status["exists"].bool == false, let saved {
+            Card {
+                Label("This wallet isn't active", systemImage: "pause.circle.fill").font(.headline).foregroundStyle(.orange)
+                Text("Trading is inactive. The service no longer holds this device's trading permission. Your account and its funds are on-chain and unchanged.").font(.subheadline)
+                Text(saved["smartAccount"].text).font(.caption.monospaced()).textSelection(.enabled)
+                if let error { Text(error).font(.caption).foregroundStyle(Brand.down) }
+                Button(busy ? "Re-arming…" : "Re-arm this wallet") { rearm() }.buttonStyle(PrimaryButtonStyle(fill: true)).disabled(busy)
+                Text("Re-arming sends the same signed permission again: same account, same limits. Moves no funds.").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+    private func rearm() {
+        guard !busy, let owner = store.owner else { return }; busy = true; error = nil
+        Task { defer { busy = false }; do {
+            try await store.resendSavedGrant(owner: owner, onlyIfServerHasNone: true)
+            store.notice = "Wallet re-armed. Your agent picks it up on its next cycle."; rearmed()
+        } catch { self.error = error.localizedDescription } }
     }
 }

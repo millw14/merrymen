@@ -19,7 +19,7 @@ import { CAUSE_KINDS, CHECK_ORDER, CHECK_STATUSES, diagnoseInactivity, readInact
 import { settingsReader } from "@/lib/services/settings-view";
 import { McpError } from "../errors";
 import type { ResourceDef } from "../resources";
-import { defineTool, type ToolContext } from "../tool";
+import { defineTool, withToolRefs, type ToolContext } from "../tool";
 import { AGENT_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, isCursorInt, isoOrNull, untrusted, usd } from "./shared";
 
 const EXPLANATION_NOTE =
@@ -251,9 +251,9 @@ const LIFECYCLE_TRADE = z.object({
   fill_qty_raw: z.string().nullable(),
   fill_cash_usdg: z.number().nullable(),
   fill_price_usd: z.number().nullable(),
-  realized_pnl_usdg: z.number().nullable().describe("The figure the worker booked; see realized_pnl_measured before reading it as a result"),
+  realized_pnl_usdg: z.number().nullable().describe("The figure the worker booked; a measured result only when realized_pnl_measured is true"),
   realized_pnl_measured: z.boolean().nullable()
-    .describe("The rule get_trade uses: true only when the sell's proceeds AND the cost it sold against were both evidenced (read from receipts on the live book, or the paper book's own fills); false when either half was not read from receipts in full (a pre-trade quote, a history too long to replay, or an older record without its source); null when there is no realized figure or the cost could not be replayed"),
+    .describe("True only when the sell's proceeds AND the cost it sold against were both evidenced (read from receipts on the live book, or the paper book's own fills); false when either half was not read from receipts in full (a pre-trade quote, a history too long to replay, or an older record without its source); null when there is no realized figure or the cost could not be replayed"),
   basis_source: z.string().nullable(),
   at: z.string().nullable(),
 });
@@ -354,7 +354,7 @@ const REFUSAL = z.object({
 const getRefusals = defineTool({
   name: "get_refusals",
   title: "What was refused, and why",
-  description: "A histogram of the agent's refused and reverted operations over a window: each rule with what it means, what you can do about it, how often it fired, when it last fired, and example trade and decision ids (open one with get_decision).",
+  ...withToolRefs("A histogram of the agent's refused and reverted operations over a window: each rule with what it means, what you can do about it, how often it fired, when it last fired, and example trade and decision ids (open one with get_decision).", " (open one with get_decision)"),
   capability: "decisions.read",
   input: z.object({ agent: AGENT_ARG, window_hours: WINDOW_ARG }).strict(),
   output: z.object({
@@ -550,7 +550,7 @@ export const DECISIONS_RESOURCES: ResourceDef[] = [
   {
     name: "decision",
     title: "A decision and its lifecycle",
-    description: "One of your agent's decisions with every trade that attached to it, as get_decision returns it.",
+    description: "One of your agent's decisions with every trade that attached to it.",
     mimeType: "application/json",
     capability: "decisions.read",
     uri: "merrymen://agents/{agent}/decisions/{decision_id}",

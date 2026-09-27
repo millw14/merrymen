@@ -21,11 +21,14 @@ public struct NavigationPolicy {
     public static let routes: Set<String> = [
         "/", "/home", "/feed", "/chat", "/agent", "/alpha", "/profile", "/you",
         "/search", "/create", "/settings", "/grant", "/limits", "/deposit", "/withdraw",
-        "/groupchat", "/leaderboard", "/tokens"
+        "/groupchat", "/leaderboard", "/tokens", "/connect/apps"
     ]
 
     public func isProductPath(_ path: String) -> Bool {
         if Self.routes.contains(path) { return true }
+        // An assistant's approval link opens its review screen; approving is
+        // still a separate tap there. Only the exact proposal-id shape passes.
+        if path.wholeMatch(of: #/\/connect\/approve\/prp_[0-9a-f]{32}/#) != nil { return true }
         let parts = path.split(separator: "/", omittingEmptySubsequences: false)
         return parts.count == 3 && parts[0].isEmpty && ["a", "t"].contains(String(parts[1])) &&
             !parts[2].isEmpty && ![".", ".."].contains(String(parts[2])) &&

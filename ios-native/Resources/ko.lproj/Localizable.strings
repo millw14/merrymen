@@ -128,6 +128,7 @@
 "connection" = "connection";
 "Connections" = "Connections";
 "Continue" = "계속";
+"Continue with X" = "X로 계속하기";
 "contract address" = "contract address";
 "Copy message" = "메시지 복사";
 "Could not load your settings." = "Could not load your settings.";
@@ -256,6 +257,7 @@
 "Open Telegram →" = "Open Telegram →";
 "Optional custom connection to Robinhood Chain mainnet." = "Optional custom connection to Robinhood Chain mainnet.";
 "Optional." = "Optional.";
+"Other ways to sign in" = "다른 로그인 방법";
 "Outbound & public" = "Outbound & public";
 "Overrides the Pimlico connection. Must support your wallet’s network." = "Overrides the Pimlico connection. Must support your wallet’s network.";
 "Owner" = "소유자";

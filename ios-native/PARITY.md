@@ -11,8 +11,9 @@ Reference: trusted main `40cf77494e04de40eef88ac1113743c6e30c42a9`, fetched agai
 | Token | OHLC windows, age/gap warnings, holders/activity, trade entry | Includes indexed trading windows and optional recent pool transactions with token binding; live empty/error acceptance remains |
 | Profile | Images, verified X, private-book handling, holdings/fills/top trades, average hold, strategy, heartbeat/joined time, shared evidenced chart windows | Owner-only trade overlay with session invalidation; controlled cross-account acceptance remains |
 | Alpha | Tier/lock explanations, picks, passed coins, research/liquidity warnings | All six site-research fields and advisory conviction shown; tier acceptance remains |
-| Privy email/X | SDK, canonical challenge/signature exchange, server-owner checks | **Public iOS Client ID missing**; callbacks, returning identities, account switches and expiry acceptance blocked |
-| External wallet / holder | Native Reown wallet connection and message signing, manual proof fallback, local signer recovery, login/link/unlink; embedded-wallet shortcut | Public Reown Project ID required; wallet switching, cancellation, callback and backend/device acceptance remain |
+| Privy email/X | SDK, X-first sign-in, canonical challenge/signature exchange, server-owner checks; iOS client `merrymen-ios` configured | Simulator reaches X's authorization sheet; completed X login, returning identities, account switches and expiry acceptance remain |
+| Re-sign / setup | Web `resignPromptApplies` and `setupStep` run through FeedEngine: stale-grant notice (navigates to Trading limits only), Finish-setting-up checklist, paper book restart | Signed-in acceptance with a stale grant and an unfunded live agent |
+| External wallet / holder | Native Reown wallet connection and message signing, manual proof fallback, local signer recovery, login/link/unlink; embedded-wallet shortcut | Reown Project ID configured; simulator lists wallet apps. Wallet switching, cancellation, callback and backend/device acceptance remain |
 | Chat | SSE, reasoning removal, per-owner text history, canonical command allowlist, editable setting/order prefills, coin resolver | Proposals are ephemeral and never restored from history; conversation/reconnection acceptance remains |
 | Voice | On-device Apple speech into an editable draft; explicit start/stop/timeout/background cancellation | Physical-device/language acceptance; no server fallback |
 | Orders | Frozen confirmation, exact amount, owner/session binding, pending Keychain record, receipt polling, no automatic replay | Fixture verifies restart after timeout; actual queue/fill/rejection acceptance remains |
@@ -40,4 +41,4 @@ Reference: trusted main `40cf77494e04de40eef88ac1113743c6e30c42a9`, fetched agai
 
 Never relabel a queue as a fill, an unread balance as zero, paper as live, private dollars as public, or a partial chart as a full period. Timeout/cancellation must not repeat a financial operation. No live financial operation has been performed; authentication and account-switch acceptance are required before distribution.
 
-Milla will provide the public iOS Client ID, public Reown Project ID and Apple Team later. Remind her at handoff; no secret or certificate is needed in this task.
+The public iOS Client ID and Reown Project ID are configured. Milla will provide the Apple Team later. Remind her at handoff; no secret or certificate is needed in this task.

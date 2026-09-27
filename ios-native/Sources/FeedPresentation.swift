@@ -15,6 +15,18 @@ final class FeedPresentation: ObservableObject {
     func markets(_ input: J) -> J? { value(input, function: "markets") }
     func overview(_ feed: J) -> J? { value(.object(["feed": feed, "now": .number(Date().timeIntervalSince1970 * 1000)]), function: "overview") }
     func connections(telegram: J?, settings: J?) -> J? { value(.object(["telegram": telegram ?? .null, "settings": settings ?? .null]), function: "connections") }
+    /// True only when the server says an agent exists, its grant was read, and
+    /// that grant predates the wall release bundled with this app.
+    func resignApplies(exists: Bool?, grantedAt: Double?, canSign: Bool) -> Bool {
+        value(.object(["exists": exists.map(J.bool) ?? .null, "grantedAt": grantedAt.map(J.number) ?? .null, "canSign": .bool(canSign)]), function: "resign")?.bool == true
+    }
+    /// "create", "fund", "unread" or "done" (web lib/can-start setupStep).
+    func setupStep(status: J, paper: Bool) -> String? {
+        value(.object(["status": status, "paper": .bool(paper)]), function: "setup")?.string
+    }
+    /// The web approval page's rules for an assistant's proposal: headline,
+    /// real-money box, approvable, finished.
+    func approval(_ view: J) -> J? { value(view, function: "approval") }
     func command(_ input: J) -> J? {
         guard let result = value(input, function: "command"), result != .null else { return nil }
         return result
@@ -40,7 +52,7 @@ struct FeedBeatCard: View {
     @State private var members: ReviewValue?
     var body: some View { Card {
         HStack {
-            Avatar(slug: beat["actor"]["slug"].string)
+            Avatar(slug: beat["actor"]["slug"].string, name: beat["actor"]["name"].string)
             NavigationLink(beat["actor"]["name"].text, value: Route.agent(beat["actor"]["slug"].text)).font(.headline)
             Spacer()
             if let time = beat["atMs"].number { Text(Date(timeIntervalSince1970: time / 1000), style: .relative).font(.caption).foregroundStyle(.secondary) }

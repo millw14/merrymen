@@ -33,10 +33,11 @@ final class PolicyTests: XCTestCase {
     }
     func testDeepLinksCannotPerformActionsOrCarryCredentials() {
         let policy = NavigationPolicy()
-        for raw in ["https://evil.example/home", "http://app.merrymen.dev/home", "https://app.merrymen.dev:444/home", "https://user@app.merrymen.dev/home", "merrymen://app/api/auth/logout", "merrymen://evil/home", "merrymen://app/a/a/b", "javascript:alert(1)", "merrymen://app/t/%252e%252e"] {
+        for raw in ["https://evil.example/home", "http://app.merrymen.dev/home", "https://app.merrymen.dev:444/home", "https://user@app.merrymen.dev/home", "merrymen://app/api/auth/logout", "merrymen://evil/home", "merrymen://app/a/a/b", "javascript:alert(1)", "merrymen://app/t/%252e%252e", "merrymen://app/connect/approve/prp_123", "merrymen://app/connect/approve/prp_0123456789abcdef0123456789abcdef/x", "merrymen://app/connect/app"] {
             XCTAssertNil(URL(string: raw).flatMap(policy.deepLink), raw)
         }
         XCTAssertEqual(policy.deepLink(URL(string: "merrymen://app/groupchat?token=secret#code")!)?.absoluteString, "https://app.merrymen.dev/groupchat")
         XCTAssertEqual(policy.deepLink(URL(string: "https://app.merrymen.dev/a/shogun")!)?.path, "/a/shogun")
+        XCTAssertEqual(policy.deepLink(URL(string: "https://app.merrymen.dev/connect/approve/prp_0123456789abcdef0123456789abcdef?decision=approve")!)?.absoluteString, "https://app.merrymen.dev/connect/approve/prp_0123456789abcdef0123456789abcdef")
     }
 }

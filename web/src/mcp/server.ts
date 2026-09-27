@@ -90,7 +90,8 @@ export function buildServer(principal: Principal | null, opts: { tools?: readonl
     if (!usable) continue;
     server.registerTool(def.name, {
       title: def.title,
-      description: def.description,
+      // The directory profile's copy has its pointers to other tools cut (withToolRefs).
+      description: profile === "directory" ? def.directoryDescription ?? def.description : def.description,
       inputSchema: def.input,
       outputSchema: def.output,
       annotations: { title: def.title, ...def.annotations },

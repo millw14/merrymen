@@ -76,6 +76,14 @@ export interface ToolDef<I extends z.ZodType = z.ZodType, O extends z.ZodType = 
   name: string;
   title: string;
   description: string;
+  /**
+   * The description served on the directory profile (/mcp/directory), when it
+   * differs: `description` with its pointers to other tools cut. Build it with
+   * withToolRefs, never by hand, so it can only ever be a cut of `description`.
+   */
+  directoryDescription?: string;
+  /** The pointers withToolRefs cut to make directoryDescription (a test re-derives the cut from these). */
+  directoryCuts?: readonly string[];
   capability: Capability;
   /**
    * When set, holding ANY of these is enough (e.g. reading a proposal: the
@@ -106,6 +114,27 @@ export interface ToolDef<I extends z.ZodType = z.ZodType, O extends z.ZodType = 
 /** Keeps the generic types attached when tools are collected into arrays. */
 export function defineTool<I extends z.ZodType, O extends z.ZodType>(def: ToolDef<I, O>): ToolDef<I, O> {
   return def;
+}
+
+/**
+ * A description that points at other tools ("open one with get_decision"),
+ * and its copy for the directory profile with those pointers cut: Anthropic's
+ * connector directory asks that tool descriptions carry no instructions about
+ * other tools. The full server keeps them, because they tell a client which
+ * tool comes next. Each ref is cut verbatim and must occur exactly once, so a
+ * description edited without its refs throws when the module loads (and every
+ * test fails) instead of serving a stale or half-cut copy.
+ */
+export function withToolRefs(description: string, ...refs: string[]): { description: string; directoryDescription: string; directoryCuts: readonly string[] } {
+  let cut = description;
+  for (const ref of refs) {
+    const at = cut.indexOf(ref);
+    if (!ref || at < 0 || cut.indexOf(ref, at + 1) >= 0) {
+      throw new Error(`withToolRefs: ${JSON.stringify(ref)} must occur exactly once in ${JSON.stringify(description.slice(0, 60))}…`);
+    }
+    cut = cut.slice(0, at) + cut.slice(at + ref.length);
+  }
+  return { description, directoryDescription: cut, directoryCuts: refs };
 }
 
 export const DEFAULT_PER_MINUTE = 60;

@@ -128,6 +128,7 @@
 "connection" = "connection";
 "Connections" = "Connections";
 "Continue" = "Tiếp tục";
+"Continue with X" = "Tiếp tục với X";
 "contract address" = "contract address";
 "Copy message" = "Sao chép tin nhắn";
 "Could not load your settings." = "Could not load your settings.";
@@ -256,6 +257,7 @@
 "Open Telegram →" = "Open Telegram →";
 "Optional custom connection to Robinhood Chain mainnet." = "Optional custom connection to Robinhood Chain mainnet.";
 "Optional." = "Optional.";
+"Other ways to sign in" = "Cách đăng nhập khác";
 "Outbound & public" = "Outbound & public";
 "Overrides the Pimlico connection. Must support your wallet’s network." = "Overrides the Pimlico connection. Must support your wallet’s network.";
 "Owner" = "Chủ sở hữu";

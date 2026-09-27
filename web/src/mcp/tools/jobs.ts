@@ -18,7 +18,7 @@ import {
   type BacktestParams, type CancelOutcome, type JobRow, type JobStatus,
 } from "../../../../worker/src/mcp/jobs";
 import { McpError } from "../errors";
-import { defineTool, type ToolContext } from "../tool";
+import { defineTool, withToolRefs, type ToolContext } from "../tool";
 import { LIMIT_ARG, decodeCursor, encodeCursor, isCursorInt, isoOrNull, untrusted } from "./shared";
 
 /** Stock and ETF tokens with a Chainlink feed: the only ones oracle data can replay. */
@@ -257,12 +257,12 @@ async function ownedJob(ctx: ToolContext, id: string): Promise<JobRow> {
 const runBacktestTool = defineTool({
   name: "run_backtest",
   title: "Run a backtest",
-  description: [
+  ...withToolRefs([
     "Queue a backtest of steady-basket or weekend-gap over stock and ETF tokens, comparing 1-4 settings variants. It replays the agent's real strategy and policy code with naive fills (at the bar's price, flat cost, no depth or MEV).",
     `data 'oracle' replays Chainlink history (hourly bars, up to ${JOB_LIMITS.oracleMaxDays} days, symbols: ${ORACLE_SYMBOLS.join(", ")}); data 'synthetic' is a seeded random walk (daily bars, up to ${JOB_LIMITS.syntheticMaxDays} days, any of ${ALL_SYMBOLS.join(", ")}).`,
     `Returns a job_id at once. ${WHERE_IT_RUNS} Poll get_job for progress and the result.`,
     `At most ${JOB_LIMITS.maxActivePerTenant} queued or running per owner. Results are simulations, never promises of live returns. Memecoins and launchpad coins cannot be backtested.`,
-  ].join(" "),
+  ].join(" "), " with get_job", " Poll get_job for progress and the result."),
   capability: "jobs.run",
   input: z.object({
     strategy: z.enum(BACKTEST_STRATEGIES),
@@ -314,7 +314,7 @@ const getJob = defineTool({
 const listJobs = defineTool({
   name: "list_jobs",
   title: "List backtest jobs",
-  description: `This owner's backtest jobs from any connection, newest first, without results (get_job has those). ${WHERE_IT_RUNS}`,
+  ...withToolRefs(`This owner's backtest jobs from any connection, newest first, without results (get_job has those). ${WHERE_IT_RUNS}`, " (get_job has those)", " with get_job"),
   capability: "jobs.run",
   input: z.object({
     limit: LIMIT_ARG(50, 10),

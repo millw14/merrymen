@@ -25,7 +25,7 @@ const PROMPTS: PromptDef[] = [
     title: "Why hasn't my agent traded?",
     description: "Walk through the agent's recorded state, blockers and recent decisions to explain why it has not traded.",
     needs: ["decisions.read"],
-    args: z.object({ agent: z.string().optional().describe("Agent id from list_agents (optional when only one is shared)") }),
+    args: z.object({ agent: z.string().optional().describe("The id of an agent shared with this connection (optional when only one is shared)") }),
     text: (a) => `Call explain_agent_inactivity${a.agent ? ` with agent "${a.agent}"` : ""}. Report the primary cause first in one sentence, then the evidence (observed value vs threshold, and when it was recorded), then what the owner can do. Distinguish a deliberate hold by the model from missing data, a provider failure, a policy refusal, a quote failure and an execution failure. Do not speculate beyond the recorded evidence.`,
   },
   {
