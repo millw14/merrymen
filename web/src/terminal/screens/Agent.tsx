@@ -212,14 +212,6 @@ export function Agent({
       />
     );
   /**
-   * Has this owner chosen a strategy their tier will not run?
-   *
-   * Both halves have to be known: an unread tier is not a locked one, so the
-   * banner stays away until the chain has actually answered. `bonusStrategies`
-   * is the tier's own field, so a future tier that unlocks these needs no
-   * change here.
-   */
-  /**
    * THE WORKER'S WORD ON ENERGY, and what the desk makes of it (energy-view.ts).
    *
    * `workerSaysFull` also stands the Circle banner down. /api/tier caches a
@@ -229,6 +221,14 @@ export function Agent({
    */
   const energyNow = energyView(energy, Date.now() / 1000);
   const remedies = energyRemedies(energy, chainId);
+  /**
+   * Has this owner chosen a strategy their tier will not run?
+   *
+   * Both halves have to be known: an unread tier is not a locked one, so the
+   * banner stays away until the chain has actually answered. `bonusStrategies`
+   * is the tier's own field, so a future tier that unlocks these needs no
+   * change here.
+   */
   const circleLocked =
     isCircleStrategyId(mine.glance.id) && tier !== null && tier.why !== "sign-in" && !tier.bonusStrategies &&
     !workerSaysFull(energy);
