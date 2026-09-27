@@ -40,7 +40,7 @@
  */
 import { NextResponse } from "next/server";
 import { recoverMessageAddress } from "viem";
-import { getSettingsStore } from "@merrymen/settings-store";
+import { getSettingsStore, type HolderClaim } from "@merrymen/settings-store";
 import { holderProofMessage, isHolderProof, isHostedMode } from "@merrymen/core";
 import {
   consumeChallengeNonce,
@@ -161,10 +161,11 @@ export async function POST(req: Request) {
   /**
    * CLAIMED BEFORE THE PROOF IS STORED, and only now — after the nonce is
    * burned and the signature recovered, so nobody can squat a wallet they
-   * cannot sign for. A proof stored first would count (for however briefly)
+   * cannot sign for, and only someone who can sign for it ever learns that
+   * it is claimed. A proof stored first would count (for however briefly)
    * in two accounts; a claim taken first can only ever be undone.
    */
-  let claim: Awaited<ReturnType<typeof store.claimHolder>>;
+  let claim: HolderClaim;
   try {
     claim = await store.claimHolder(wallet, tenant);
   } catch {
