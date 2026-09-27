@@ -391,7 +391,24 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
 
   it("net contributions reach the gates as a 6dp bigint, rounded the one way", () => {
     assert.match(SETTLE, /const usdg6 = \(v: number\) => BigInt\(Math\.round\(v \* 1e6\)\);/);
-    assert.match(body("energyBuyLocked"), /netContributionsUsdg: net === null \? null : usdg\(net\),/);
+    assert.match(body("energyBuyLocked"), /netContributionsUsdg: net,/);
+  });
+
+  it("DURABLE FIRST: the planner, the booking gate and the Brain snapshot all read durableNetContributions, never the child's local sum", () => {
+    // A redeployed hosted child's flows table is empty: the local sum refused
+    // every energy buy as "no record", and the anchor alone never saw a
+    // purchase booked after arm (net-contributions.integration.test.ts).
+    assert.match(body("energyBuyLocked"), /durableNetContributions\(agentId\)\.catch\(\(\) => undefined\),/);
+    const deps = CODE.slice(CODE.indexOf("const energySettleDeps = "), CODE.indexOf("const energySettleDeps = ") + 900);
+    assert.match(deps, /netContributionsUsdg: async \(\) => \{\s*const net = await durableNetContributions\(agentId\);\s*return net === null \? null : Number\(net\) \/ 1e6;/);
+    assert.match(CODE, /const netContrib = await durableNetContributions\(agentId\);/);
+    assert.match(CODE, /netContributionsUsdg: netContrib === null \? null : Number\(netContrib\),/);
+    assert.doesNotMatch(CODE, /getNetContributionsUsdg\(/, "no consumer in the child reads the local sum alone");
+    assert.doesNotMatch(CODE, /\? Number\(anchorNetContributionsUsdg\)/, "nor the arm-time anchor alone");
+    const helper = body("durableNetContributions");
+    assert.match(helper, /getNetContributionsSince\(agentId, anchorWrittenAtSec \?\? 0\)/);
+    assert.match(helper, /anchorNetUsdg6: anchorNetContributionsUsdg,\s*anchorEpoch,/);
+    assert.match(CODE, /anchorWrittenAtSec = verdict\.kind === "valid" \? verdict\.state\.generatedAt : null;/);
   });
 });
 

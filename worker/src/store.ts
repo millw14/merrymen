@@ -2089,6 +2089,33 @@ export async function getNetContributionsUsdg(agentId: string): Promise<number |
 }
 
 /**
+ * The same epoch-scoped sum, and the part of it booked at or after `sinceSec` —
+ * the two halves net-contributions.ts durableNetContributionsUsdg6 needs.
+ *
+ * `netUsdg` is exactly getNetContributionsUsdg (null when no flow is on record
+ * in this epoch). `sinceUsdg` is the signed sum of this epoch's flows whose
+ * `at` is at or after `sinceSec` (0 when none): on a hosted child, the flows
+ * this process booked after the orchestrator wrote its accounting anchor —
+ * which the anchor's own figure cannot contain.
+ */
+export async function getNetContributionsSince(
+  agentId: string,
+  sinceSec: number,
+): Promise<{ epoch: number; netUsdg: number | null; sinceUsdg: number }> {
+  const epoch = await epochOf(agentId);
+  const row = (await getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n,
+              COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net,
+              COALESCE(SUM(CASE WHEN at >= ? THEN (CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END) ELSE 0 END), 0) AS since
+       FROM flows WHERE agent_id = ? AND epoch = ?`,
+    )
+    .get(Math.floor(sinceSec), agentId, epoch)) as { n: number; net: number; since: number } | undefined;
+  const n = Number(row?.n ?? 0);
+  return { epoch, netUsdg: n === 0 ? null : Number(row!.net), sinceUsdg: n === 0 ? 0 : Number(row!.since) };
+}
+
+/**
  * The evidence behind this epoch's contributions, so a caller can say whether
  * the total is a receipt, a bridge, or an opinion.
  *

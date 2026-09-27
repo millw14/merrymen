@@ -223,6 +223,7 @@ import {
   usdgText,
 } from "./energy-buy";
 import { opsHoldInference, STRANDED_RESOLVE_WINDOW_SEC, steadyStateInference } from "./flow-inference";
+import { durableNetContributionsUsdg6 } from "./net-contributions";
 import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, type EnergySettleDeps } from "./energy-settle";
 import { bookCapitalFlow, energyBuysInFlight, newestLandedEnergyBuy } from "./store";
 import {
@@ -514,7 +515,7 @@ import {
   setAgentXHandle,
   positionsExplained,
   getGasPaidUsdg,
-  getNetContributionsUsdg,
+  getNetContributionsSince,
   setAgentEpoch,
   restoreAgentHwmParts,
   setAgentHwm,
@@ -3629,7 +3630,12 @@ async function main() {
     chainId: grant.chainId,
     paper: paperActive(),
     receiptLogs: (txHash) => chain.getReceiptLogs(txHash),
-    netContributionsUsdg: () => getNetContributionsUsdg(agentId),
+    // DURABLE FIRST: a redeployed hosted child's own table is empty, and a
+    // purchase that already moved money must not be refused for it.
+    netContributionsUsdg: async () => {
+      const net = await durableNetContributions(agentId);
+      return net === null ? null : Number(net) / 1e6;
+    },
     lifetimePeakUsdg: async () => (await getAgentFinancials(agentId)).hwmUsdg,
     breakerPeakUsdg: () => getRiskPeriodPeak(agentId),
     book: (flow) => bookCapitalFlow(flow),
@@ -3716,6 +3722,9 @@ async function main() {
     // exactly why it exists. The first shadow Brain run refused on
     // "contributions unknown" for a book that knew perfectly well.
     anchorNetContributionsUsdg = l.netContributionsUsdg;
+    // WHEN THE PARENT WROTE IT — the line between flows its figure already
+    // holds and flows this child books after (durableNetContributions).
+    anchorWrittenAtSec = verdict.kind === "valid" ? verdict.state.generatedAt : null;
 
     // DOUBT IS STICKY FOR THE LIFE OF THE PROCESS.
     //
@@ -3746,6 +3755,32 @@ async function main() {
 
   /** Contributed capital as the ORCHESTRATOR read it from durable state. */
   let anchorNetContributionsUsdg: bigint | null = null;
+  /** Unix seconds the anchor file was written (its generatedAt); null with no valid anchor. */
+  let anchorWrittenAtSec: number | null = null;
+
+  /**
+   * NET CONTRIBUTIONS, DURABLE FIRST, raw 6dp — the anchor's figure plus the
+   * flows this child has booked since the anchor was written; the local epoch
+   * sum when there is no anchor figure (self-hosted) or the epoch moved on;
+   * null when neither knows (net-contributions.ts says why each half).
+   *
+   * THE ONE READER for everything that judges or reports this book's capital
+   * from inside the child: the energy buy's pre-trade gate, the energy
+   * booking gate (energySettleDeps), and the Brain's snapshot. The local sum
+   * alone read a redeployed hosted child's empty table as "no record" and
+   * refused every energy buy; the anchor alone never saw a purchase booked
+   * after arm. Throws when the ledger will not answer — never a guess.
+   */
+  async function durableNetContributions(agentId: string): Promise<bigint | null> {
+    const local = await getNetContributionsSince(agentId, anchorWrittenAtSec ?? 0);
+    return durableNetContributionsUsdg6({
+      anchorNetUsdg6: anchorNetContributionsUsdg,
+      anchorEpoch,
+      epoch: local.epoch,
+      localNetUsdg: local.netUsdg,
+      localSinceAnchorUsdg: local.sinceUsdg,
+    });
+  }
 
   /** The anchor verdict, read once. See `anchorOnce`. */
   let anchorVerdict: AnchorVerdict | null = null;
@@ -10890,7 +10925,7 @@ async function main() {
     if ((fastTrencher || shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)) && cfg.brainUrl && cfg.brainToken && !bookIncomplete && plan.brain && energyNow.reviews.open) {
       try {
         const epochNow = await getAgentEpoch(agentId);
-        const netContrib = await getNetContributionsUsdg(agentId);
+        const netContrib = await durableNetContributions(agentId);
         const gasNow = await getGasPaidUsdg(agentId, epochNow);
         // Asked once per run, from the ledger this agent actually has.
         const historyAuditable = await accountingHistoryAuditable(agentId, epochNow);
@@ -11133,16 +11168,13 @@ async function main() {
               quarantined: false,
             })),
             // NULL SURVIVES AS NULL all the way to Brain, which refuses on it.
-            // DURABLE FIRST, local second. The child ledger is ephemeral; the
-            // anchor is what the orchestrator read from Postgres. Falling back
-            // to the local sum keeps self-hosted working unchanged, where there
-            // is no anchor and the ledger IS the durable copy.
-            netContributionsUsdg:
-              anchorNetContributionsUsdg !== null
-                ? Number(anchorNetContributionsUsdg)
-                : netContrib === null
-                  ? null
-                  : Math.round(netContrib * 1e6),
+            // DURABLE FIRST, local second (durableNetContributions). The child
+            // ledger is ephemeral; the anchor is what the orchestrator read from
+            // Postgres — PLUS what this child booked since, or an energy
+            // purchase (or a deposit) after arm read as a loss (or a gain) of
+            // its own size until the next respawn. Self-hosted, with no anchor,
+            // it is the local sum, unchanged.
+            netContributionsUsdg: netContrib === null ? null : Number(netContrib),
             grossContributionsUsdg: null,
             grossWithdrawalsUsdg: null,
             gasUsdg: gasNow.unpricedTrades > 0 ? null : Math.round(gasNow.usdg * 1e6),
@@ -12644,7 +12676,9 @@ async function main() {
       readCash(),
       energyBuysInFlight(agentId, nowSec - 6 * 3600),
       readEnergyTaxBps(client),
-      getNetContributionsUsdg(agentId).catch(() => undefined),
+      // DURABLE FIRST (durableNetContributions): a hosted child rebuilt by a
+      // redeploy has an empty flows table and the record is in the anchor.
+      durableNetContributions(agentId).catch(() => undefined),
       getAgentFinancials(agentId).then((f) => f.hwmUsdg).catch(() => undefined),
       getRiskPeriodPeak(agentId).catch(() => undefined),
     ]);
@@ -12674,7 +12708,7 @@ async function main() {
           paper: paperActive(),
           equityKnown: judged.equityKnown,
           equityUsdg: judged.equityUsdg,
-          netContributionsUsdg: net === null ? null : usdg(net),
+          netContributionsUsdg: net,
           lifetimePeakUsdg: usdg(lifetime),
           // THE BREAKER'S OWN PEAK, the one checkPolicy will judge this intent
           // against: the persisted risk period's, else the lifetime peak.
