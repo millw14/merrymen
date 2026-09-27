@@ -10,7 +10,7 @@ import { PrivySignIn } from "@/terminal/PrivySignIn";
 import { announceSignedIn } from "@/lib/resign-anchor";
 import { privyEnabled } from "@/lib/privy-client";
 import { blockerAdvice } from "@/lib/live-blocker";
-import { RISK_LEVELS, RISK_PROFILES, levelOf, type RiskLevel } from "@merrymen/core";
+import { RISK_LEVELS, RISK_PROFILES, levelOf, type EnergyStatus, type RiskLevel } from "@merrymen/core";
 import { usd } from "@/lib/format";
 import type { GrantBalances } from "@/lib/grant-balances";
 import { requestJson } from "./request-json";
@@ -40,8 +40,12 @@ export interface AccountState {
    * the grant store the POST writes synchronously, `workerAliveAt` from the
    * mirrored `agents` row that also carries `liveBlocker`. That pairing is what
    * makes the comparison sound: the blocker and the beat are the same row.
+   *
+   * `energy` is the worker's own report of what the agent may start on its own
+   * today (AgentStatus.energy). Null or absent is "not said yet", never an
+   * empty allowance and never a zero balance.
    */
-  status: {exists: boolean; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; balances?: GrantBalances; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number; grantedAt?:number}};
+  status: {exists: boolean; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; balances?: GrantBalances; energy?: EnergyStatus | null; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number; grantedAt?:number}};
 }
 // Moved to its own module so it can be executed in a test; re-exported so no import moves.
 export { requestJson } from "./request-json";

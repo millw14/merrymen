@@ -147,13 +147,16 @@ describe("the Circle gate is satisfiable, and the warning is visible", () => {
     assert.match(live, /notice\?: \{ level: string; message: string; at: string \} \| null;/);
     assert.match(live, /e\.level === "warn" \|\| e\.level === "err"/);
     const agent = readFileSync(new URL("./screens/Agent.tsx", import.meta.url), "utf8");
-    assert.match(agent, /\{!blocked && !circleLocked && mine\.notice && \(/);
+    // `notice` is mine.notice, minus the one dated "Energy spent for …" line
+    // while the energy panel is already saying it (energy-banner.test.ts).
+    assert.match(agent, /\{!blocked && !circleLocked && notice && \(/);
+    assert.match(agent, /const notice =\s*mine\.notice &&/);
   });
 
   it("and the blocker still outranks it, because one is resolved and one is a log line", () => {
     const agent = readFileSync(new URL("./screens/Agent.tsx", import.meta.url), "utf8");
     assert.ok(
-      agent.indexOf("{blocked && (") < agent.indexOf("{!blocked && !circleLocked && mine.notice && ("),
+      agent.indexOf("{blocked && (") < agent.indexOf("{!blocked && !circleLocked && notice && ("),
       "the resolved blocker must render above the notice",
     );
   });
@@ -177,13 +180,23 @@ describe("the Circle gate is satisfiable, and the warning is visible", () => {
     assert.match(agent, /tier\.why !== "sign-in" && !tier\.bonusStrategies/);
   });
 
-  it("and it names the one remedy that is not money", () => {
-    // The commonest wrong move is to send more USDG at an agent that is not
-    // short of USDG.
+  it("AND IT NAMES THE REMEDIES, NONE OF THEM \"ADD FUNDS\"", () => {
+    // THIS ASSERTION USED TO RUN THE OTHER WAY. It pinned "Adding funds won't
+    // change it", which was true while only the owner's own wallet counted and
+    // stopped being true the day an agent could turn USDG into its own
+    // $MERRYMEN (the get-energy command). A funded owner told money is not the
+    // fix is exactly the owner who needs to hear that, converted, it is.
+    //
+    // What is pinned now: the count is the COMBINED one — the owner's wallet
+    // and the agent's account, "between them" — the remedies are named, and an
+    // unread balance is never defaulted to a zero.
     const agent = readFileSync(new URL("./screens/Agent.tsx", import.meta.url), "utf8");
+    assert.doesNotMatch(agent, /Adding funds won't change it/);
+    assert.match(agent, /between them/);
     // Inside a template literal, so it is a plain apostrophe rather than the
     // JSX entity the surrounding markup uses.
-    assert.match(agent, /Adding funds won't change it/);
+    assert.match(agent, /ask me to get my \$MERRYMEN/);
+    assert.doesNotMatch(agent, /tokens \?\? 0/, "an unread balance rendered as 'you hold 0'");
   });
 
   it("and the picker shows the same standing at the moment of choosing", () => {
