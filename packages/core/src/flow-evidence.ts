@@ -15,11 +15,18 @@
  */
 
 /**
- * The four ways a flow gets on the books, ranked by what each can support.
+ * The five ways a flow gets on the books, ranked by what each can support.
  *
  *   chain-log        read off a USDG Transfer log naming this account. A receipt:
  *                    anyone with an RPC can refetch it. The only evidence that
  *                    survives distrust of the operator.
+ *   energy-buy       the USDG Transfer log of the agent's own energy-reserve
+ *                    purchase, read off its SETTLED receipt (never the intent),
+ *                    identified by tx#logIndex, classified `reserve-out` by the
+ *                    same shared rule (capital-classify.ts) and refetchable by
+ *                    anyone. A receipt exactly as chain-log is; a separate
+ *                    source only so it never moves the deposit scanner's resume
+ *                    watermark and the scanner stays the only chain-log writer.
  *   epoch-carry      the closing equity of the epoch just closed, written as the
  *                    new one's opening balance. NOT a receipt — it has no
  *                    transaction and never can — but not guesswork either: it is
@@ -32,7 +39,7 @@
  *                    opinion — and the specific shape that a redeploy's phantom
  *                    opening balance and the mirror's cursor rewind both produce.
  */
-export type FlowEvidence = "chain-log" | "epoch-carry" | "transfer-intent" | "inferred";
+export type FlowEvidence = "chain-log" | "epoch-carry" | "transfer-intent" | "inferred" | "energy-buy";
 
 /**
  * The sources that can support a published contribution total.
@@ -41,7 +48,7 @@ export type FlowEvidence = "chain-log" | "epoch-carry" | "transfer-intent" | "in
  * and silent about what settled, and a contribution total is a claim about money
  * that actually arrived.
  */
-export const EVIDENCED_FLOW_SOURCES: readonly FlowEvidence[] = ["chain-log", "epoch-carry"];
+export const EVIDENCED_FLOW_SOURCES: readonly FlowEvidence[] = ["chain-log", "epoch-carry", "energy-buy"];
 
 /** Takes a bare string, because it is fed straight from a database column. */
 export function isEvidencedFlow(source: string): boolean {

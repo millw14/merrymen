@@ -194,6 +194,12 @@ describe("S2 — the carry is EVIDENCE, and it is checked", () => {
     assert.equal(isEvidencedFlow("chain-log"), true);
     assert.equal(isEvidencedFlow("inferred"), false);
     assert.equal(isEvidencedFlow("transfer-intent"), false, "known by construction, but the settlement is not re-read");
+    // The energy purchase is booked from its SETTLED receipt's USDG log, keyed
+    // tx#logIndex — a receipt anyone can refetch, like chain-log. Unevidenced,
+    // the web would call a funded agent's contributions guesswork while the
+    // worker's anchor (any tx-hashed row) counted them, the exact disagreement
+    // flow-evidence.ts exists to end.
+    assert.equal(isEvidencedFlow("energy-buy"), true);
 
     const src = readFileSync(new URL("./store.ts", import.meta.url), "utf8");
     assert.match(src, /source: "epoch-carry"/, "openNextEpoch must write the distinct source");
