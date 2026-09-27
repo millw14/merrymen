@@ -22,6 +22,15 @@
  * exactly nothing, whatever its simulated book says — and the simulated book is
  * where the −59,000 / −26,000 / −7,900 USDG "contributions" came from. This
  * refuses to manufacture a real capital row from a paper balance, and says so.
+ *
+ * ENERGY PURCHASES ARE CAPITAL TOO. USDG an agent spent on its energy reserve
+ * left the trading book; the worker books it at landing as an 'energy-buy'
+ * out-flow keyed on the same tx#logIndex this scan reads. So a `reserve-out`
+ * movement is proposed as exactly that row: where the worker already booked it
+ * the INSERT collides on `flows_chain_identity` and is a no-op, and where a
+ * redeploy during the receipt wait lost the booking, this is what restores it.
+ * Proposed as 'chain-log' it would collide with a different source and fail
+ * verification; left out, contributions would disagree with the ledger.
  */
 import type { Db } from "./db";
 import { isEvidencedFlow } from "./accounting-scope";
@@ -35,7 +44,8 @@ export interface ProposedFlowRow {
   /** Decimal USDG, matching the column's type. The raw figure travels beside it. */
   amountUsdg: number;
   amountRaw: string;
-  source: "chain-log";
+  /** 'chain-log' for owner capital; 'energy-buy' for a `reserve-out` — the source the worker books it under. */
+  source: "chain-log" | "energy-buy";
   txHash: string;
   blockNumber: number;
   logIndex: number;
@@ -65,6 +75,9 @@ export interface AccountPlan {
 
   chainGrossInUsdg: number;
   chainGrossOutUsdg: number;
+  /** Σ USDG spent on the energy reserve (`reserve-out`). Not a withdrawal; still capital leaving the book. */
+  chainReserveUsdg: number;
+  /** in − out − reserve. */
   chainNetUsdg: number;
   chainTradeLegs: number;
   chainAmbiguous: number;
@@ -136,6 +149,7 @@ export function planReconstruction(args: {
 
     const chainIn = cap ? toUsdg(cap.totals.grossContributionsRaw) : 0;
     const chainOut = cap ? toUsdg(cap.totals.grossWithdrawalsRaw) : 0;
+    const chainReserve = cap ? toUsdg(cap.totals.grossReservePurchasesRaw) : 0;
     const chainNet = cap ? toUsdg(cap.totals.netContributionsRaw) : 0;
     const onchainCash = args.onchainCash.get(key) ?? null;
 
@@ -149,14 +163,15 @@ export function planReconstruction(args: {
     const insert: ProposedFlowRow[] = [];
     if (cap && cap.complete) {
       for (const m of cap.movements) {
-        if (m.classification.kind !== "capital-in" && m.classification.kind !== "capital-out") continue;
+        const kind = m.classification.kind;
+        if (kind !== "capital-in" && kind !== "capital-out" && kind !== "reserve-out") continue;
         insert.push({
           agentId: account,
           epoch,
-          direction: m.classification.kind === "capital-in" ? "in" : "out",
+          direction: kind === "capital-in" ? "in" : "out",
           amountUsdg: toUsdg(m.amountRaw),
           amountRaw: m.amountRaw,
-          source: "chain-log",
+          source: kind === "reserve-out" ? "energy-buy" : "chain-log",
           txHash: m.txHash,
           blockNumber: m.blockNumber,
           logIndex: m.logIndex,
@@ -194,8 +209,9 @@ export function planReconstruction(args: {
       (s, r) => s + (r.direction === "in" ? r.amountUsdg : -r.amountUsdg),
       0,
     );
-    // Every surviving row is chain-log, so contributions are evidenced by
-    // construction — PROVIDED the scan was complete and unambiguous.
+    // Every surviving row is chain-log or energy-buy — both receipts — so
+    // contributions are evidenced by construction, PROVIDED the scan was
+    // complete and unambiguous.
     const known = blocked === null && cap !== undefined && cap.complete && cap.totals.ambiguous === 0;
 
     plans.push({
@@ -209,6 +225,7 @@ export function planReconstruction(args: {
       navUsdg: args.equityByAccountEpoch.get(`${key}#${epoch}`) ?? null,
       chainGrossInUsdg: chainIn,
       chainGrossOutUsdg: chainOut,
+      chainReserveUsdg: chainReserve,
       chainNetUsdg: chainNet,
       chainTradeLegs: cap?.totals.tradeLegs ?? 0,
       chainAmbiguous: cap?.totals.ambiguous ?? 0,
@@ -257,7 +274,7 @@ export function reconstructionLines(plans: readonly AccountPlan[]): string[] {
 
   L.push(
     `PLAN summary · ${plans.length} account(s) · ` +
-      `insert ${plans.reduce((s, p) => s + p.insert.length, 0)} chain-log row(s) · ` +
+      `insert ${plans.reduce((s, p) => s + p.insert.length, 0)} evidenced row(s) · ` +
       `quarantine ${plans.reduce((s, p) => s + p.quarantine.length, 0)} inferred row(s) · ` +
       `blocked ${plans.filter((p) => p.blocked !== null).length}`,
   );
@@ -269,7 +286,8 @@ export function reconstructionLines(plans: readonly AccountPlan[]): string[] {
     L.push(`${t} mode ${p.mode ?? "unknown"} · ${p.isPaper ? "PAPER" : "LIVE"} · epoch ${p.epoch}`);
     L.push(`${t} on-chain USDG ${f(p.onchainCashUsdg)} · NAV(ledger) ${f(p.navUsdg)}`);
     L.push(
-      `${t} chain: in ${f(p.chainGrossInUsdg)} out ${f(p.chainGrossOutUsdg)} NET ${f(p.chainNetUsdg)} · ` +
+      `${t} chain: in ${f(p.chainGrossInUsdg)} out ${f(p.chainGrossOutUsdg)} energy ${f(p.chainReserveUsdg)} ` +
+        `NET ${f(p.chainNetUsdg)} · ` +
         `trade legs ${p.chainTradeLegs} · ambiguous ${p.chainAmbiguous} · complete ${p.chainComplete}`,
     );
     L.push(
@@ -278,7 +296,7 @@ export function reconstructionLines(plans: readonly AccountPlan[]): string[] {
     );
     for (const r of p.insert) {
       L.push(
-        `${t} INSERT ${r.direction} ${f(r.amountUsdg)} src chain-log tx ${r.txHash} blk ${r.blockNumber} log ${r.logIndex}`,
+        `${t} INSERT ${r.direction} ${f(r.amountUsdg)} src ${r.source} tx ${r.txHash} blk ${r.blockNumber} log ${r.logIndex}`,
       );
     }
     for (const q of p.quarantine) {

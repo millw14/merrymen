@@ -75,6 +75,7 @@ const plan = (over: Partial<AccountPlan> & { smartAccount: string }): AccountPla
   navUsdg: 3.334,
   chainGrossInUsdg: 10,
   chainGrossOutUsdg: 0,
+  chainReserveUsdg: 0,
   chainNetUsdg: 10,
   chainTradeLegs: 4,
   chainAmbiguous: 0,
@@ -558,4 +559,106 @@ test("mode parsing has exactly one owner, and the orchestrator uses it", () => {
   const src = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
   assert.match(src, /parseRepairOptions\(process\.env\)/, "one owner for mode parsing");
   assert.doesNotMatch(src, /parsePreviewRequest/, "and the read-only-build parser is gone with its build");
+});
+
+// ── ENERGY PURCHASES ───────────────────────────────────────────────────────
+//
+// USDG an agent spent on its energy reserve is capital that left the book. The
+// worker books it at landing as an 'energy-buy' row keyed on the same
+// (chain, agent, tx, logIndex) the chain scan reads, and reconstruction
+// proposes it under that same source. So where the worker got there first the
+// INSERT is a no-op; where a redeploy lost the booking, the repair restores it.
+
+const ENERGY_TX = "0xe0e0e0e0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const energyRow = (over: Partial<ProposedFlowRow> = {}) =>
+  row({ txHash: ENERGY_TX, logIndex: 3, direction: "out", amountUsdg: 42, amountRaw: "42000000", source: "energy-buy", ...over });
+
+async function seedWorkerEnergyRow(db: Db, account: string, source = "energy-buy") {
+  await db
+    .prepare(
+      `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id)
+       VALUES (?, 'out', 42, ?, 100, 3, ?, 1, ?)`,
+    )
+    .run(account, ENERGY_TX, source, CHAIN);
+}
+
+test("an energy-buy the worker already booked is a no-op insert, verifies, and keeps contributions known", async () => {
+  const db = await freshDb();
+  await seedAgent(db, A);
+  await db.prepare("UPDATE agents SET contributions_known = 1 WHERE smart_account = ?").run(A);
+  await seedWorkerEnergyRow(db, A);
+  const legacy = await seedInferred(db, A, "in", 100);
+
+  const p = plan({
+    smartAccount: A,
+    insert: [row({ txHash: TX, logIndex: 0, amountUsdg: 100, amountRaw: "100000000" }), energyRow()],
+    quarantine: [{ id: legacy, direction: "in", amountUsdg: 100, source: "inferred", reason: "superseded" }],
+    chainGrossInUsdg: 100,
+    chainReserveUsdg: 42,
+    chainNetUsdg: 58,
+    contributionsAfterUsdg: 58,
+  });
+
+  const r = await repairAccount(db, p, COMMIT, CHAIN);
+  assert.equal(r.stage, "recomputed", r.why);
+  assert.equal(r.inserted, 1, "only the deposit was new");
+  assert.equal(r.insertsAlreadyPresent, 1, "the worker's energy row collided on the identity index");
+  assert.equal(r.contributionsAfterUsdg, 58, "after.net equals the plan: 100 in − 42 on energy");
+  assert.equal(r.contributionsKnownAfter, true, "energy-buy counts as evidence");
+  const q = (await db.prepare("SELECT contributions_known AS k FROM agents WHERE smart_account = ?").get(A)) as { k: number };
+  assert.equal(Number(q.k), 1, "contributions_known stays 1");
+  const energy = (await db.prepare("SELECT COUNT(*) AS n FROM flows WHERE source = 'energy-buy'").get()) as { n: number };
+  assert.equal(Number(energy.n), 1, "one energy row, not two");
+});
+
+test("verify-only confirms an existing worker energy-buy row against the plan", async () => {
+  const db = await freshDb();
+  await seedAgent(db, A);
+  await seedWorkerEnergyRow(db, A);
+  const v = await repairAccount(db, plan({ smartAccount: A, insert: [energyRow()] }), { ...COMMIT, mode: "verify-only" }, CHAIN);
+  assert.equal(v.stage, "verified", v.why);
+  assert.equal(v.insertsAlreadyPresent, 1);
+});
+
+test("an energy purchase whose booking was LOST is restored as an energy-buy row", async () => {
+  // A redeploy during the receipt wait: the child's 'submitted' row died with
+  // it, and nothing booked the flow. The repair writes the row the worker would
+  // have, under the source the worker would have used.
+  const db = await freshDb();
+  await seedAgent(db, A);
+  const p = plan({
+    smartAccount: A,
+    insert: [row({ txHash: TX, logIndex: 0, amountUsdg: 100, amountRaw: "100000000" }), energyRow()],
+    contributionsAfterUsdg: 58,
+  });
+  const r = await repairAccount(db, p, COMMIT, CHAIN);
+  assert.equal(r.stage, "recomputed", r.why);
+  assert.equal(r.inserted, 2);
+  const e = (await db.prepare("SELECT source, direction, amount_usdg FROM flows WHERE log_index = 3").get()) as Record<string, unknown>;
+  assert.deepEqual({ ...e }, { source: "energy-buy", direction: "out", amount_usdg: 42 });
+  assert.equal(r.contributionsKnownAfter, true);
+});
+
+test("the same identity held under ANOTHER source fails verification, and nothing is quarantined", async () => {
+  const db = await freshDb();
+  await seedAgent(db, A);
+  await seedWorkerEnergyRow(db, A, "chain-log");
+  const legacy = await seedInferred(db, A, "in", 100);
+  const p = plan({
+    smartAccount: A,
+    insert: [energyRow()],
+    quarantine: [{ id: legacy, direction: "in", amountUsdg: 100, source: "inferred", reason: "superseded" }],
+    contributionsAfterUsdg: -42,
+  });
+  const r = await repairAccount(db, p, COMMIT, CHAIN);
+  assert.equal(r.stage, "failed");
+  assert.match(r.why, /is source 'chain-log', not energy-buy/);
+  assert.equal(await countFlows(db, A), 2, "the inferred row is still there");
+});
+
+test("the unevidenced count reads the ONE evidenced list, not a hard-coded copy", () => {
+  const src = readFileSync(new URL("./accounting-repair.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /source IN \('chain-log','epoch-carry'\)/, "a second copy of the list drifts");
+  assert.match(src, /EVIDENCED_FLOW_SOURCES\.map/);
+  assert.doesNotMatch(src, /VALUES \([^)]*'chain-log'/, "the INSERT binds the proposed source");
 });

@@ -33,6 +33,7 @@ const plan = (over: Partial<AccountPlan> & { smartAccount: string }): AccountPla
   navUsdg: null,
   chainGrossInUsdg: 0,
   chainGrossOutUsdg: 0,
+  chainReserveUsdg: 0,
   chainNetUsdg: 0,
   chainTradeLegs: 0,
   chainAmbiguous: 0,
@@ -59,6 +60,7 @@ const canaryPlan = () =>
     navUsdg: 9.884,
     chainGrossInUsdg: 10,
     chainGrossOutUsdg: 0,
+    chainReserveUsdg: 0,
     chainNetUsdg: 10,
     chainTradeLegs: 4,
     chainAmbiguous: 0,
@@ -221,6 +223,35 @@ describe("a funded-then-withdrawn account", () => {
     assert.equal(p.grossWithdrawalsAfterUsdg, 1010);
     assert.equal(p.contributionsAfterUsdg, 0);
     assert.equal(p.outcome, "EVIDENCE-BACKED-REPAIR");
+  });
+});
+
+describe("an account that bought energy", () => {
+  it("reports the energy purchase apart from withdrawals — capital that left the book, not money sent home", () => {
+    const pl = plan({
+      smartAccount: "0xeee",
+      insert: [
+        { agentId: "0xeee", epoch: 1, direction: "in", amountUsdg: 100, amountRaw: "100000000", source: "chain-log", txHash: "0x1", blockNumber: 1, logIndex: 0 },
+        { agentId: "0xeee", epoch: 1, direction: "out", amountUsdg: 42, amountRaw: "42000000", source: "energy-buy", txHash: "0x2", blockNumber: 2, logIndex: 3 },
+      ],
+      chainReserveUsdg: 42,
+      contributionsAfterUsdg: 58,
+      contributionsKnownAfter: true,
+    });
+    const p = previewAccount(pl, []);
+    assert.equal(p.grossWithdrawalsAfterUsdg, 0, "not a withdrawal");
+    assert.equal(p.energyPurchasesAfterUsdg, 42);
+    assert.equal(p.contributionsAfterUsdg, 58);
+    const body = accountPreviewLines(pl, p).join("\n");
+    assert.match(body, /0 external outbound = 0\.000000 USDG/);
+    assert.match(body, /1 energy purchase\(s\) = 42\.000000 USDG/);
+    assert.match(body, /insert 1 chain-log contribution row\(s\) and 1 energy-buy row\(s\)/);
+    assert.match(body, /energy purchases = 42\.000000/);
+  });
+
+  it("an account that never bought energy renders exactly as before", () => {
+    const body = accountPreviewLines(canaryPlan(), previewAccount(canaryPlan(), [])).join("\n");
+    assert.doesNotMatch(body, /energy/);
   });
 });
 
