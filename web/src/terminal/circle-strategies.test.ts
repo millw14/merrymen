@@ -114,7 +114,7 @@ describe("the Circle gate is satisfiable, and the warning is visible", () => {
     // And one $MERRYMEN wallet powers one agent: which of the two counts is
     // effectiveHolder's call, over the holder claims (B2).
     const orch = readFileSync(new URL("../../../worker/src/orchestrator.ts", import.meta.url), "utf8");
-    assert.match(orch, /const holder = effectiveHolder\(tenant, settings\?\.holderProof \?\? null, \(w\) => claims\.get\(w\)\);/);
+    assert.match(orch, /effectiveHolder\(tenant, settings\?\.holderProof \?\? null, \(w\) => claims\.get\(w\)\)\?\.address \?\? null/);
     assert.match(orch, /JSON\.stringify\(forChild, null, 2\)/, "and the child must be written the amended copy");
   });
 
@@ -138,7 +138,7 @@ describe("the Circle gate is satisfiable, and the warning is visible", () => {
     const helper = readFileSync(new URL("../../../worker/src/holder-claims.ts", import.meta.url), "utf8");
     const fn = helper.slice(helper.indexOf("export function childSettingsFor("));
     const drop = fn.indexOf("const { holderAddress: _typedIn, ...rest } = settings ?? {};");
-    const write = fn.indexOf("holderAddress: holder.address");
+    const write = fn.indexOf("holderAddress: holder }");
     assert.ok(drop > 0 && write > drop, "the established address replaces the stored one, never the other way round");
     // And the stored, typed-in field is never a fallback: only a signature or
     // the session wallet decides whose balance counts.

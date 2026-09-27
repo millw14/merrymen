@@ -9,6 +9,9 @@
  *   childSettingsFor — the settings.json a child is handed, with the counted
  *   wallet written in or, when no wallet counts, the key DELETED.
  *
+ *   lastWrittenHolder — the wallet the orchestrator itself wrote last, kept
+ *   for a pass where the claims cannot be read.
+ *
  *   backfillHolderClaims — proofs linked before claims existed have no claim,
  *   and effectiveHolder counts no unclaimed proof. Claimed once at startup in
  *   the order they were proven, so where two accounts linked one wallet the
@@ -17,7 +20,8 @@
  * Nothing here moves money or touches a grant; the worst a fault here can do
  * is count a wallet for one account fewer or none, never one more.
  */
-import { isHolderProof, type EffectiveHolder, type HolderProof, type MerrymenSettings } from "../../packages/core/src/index";
+import { readFileSync } from "node:fs";
+import { isHolderProof, type HolderProof, type MerrymenSettings } from "../../packages/core/src/index";
 import type { SettingsStore } from "./settings-store";
 
 /**
@@ -32,9 +36,32 @@ import type { SettingsStore } from "./settings-store";
  * absent means no holder wallet: circle.ts then reads the agent's own account
  * alone. A self-declared value never survives into the child.
  */
-export function childSettingsFor(settings: MerrymenSettings | null, holder: EffectiveHolder | null): MerrymenSettings {
+export function childSettingsFor(settings: MerrymenSettings | null, holder: `0x${string}` | null): MerrymenSettings {
   const { holderAddress: _typedIn, ...rest } = settings ?? {};
-  return holder ? { ...rest, holderAddress: holder.address } : rest;
+  return holder ? { ...rest, holderAddress: holder } : rest;
+}
+
+/**
+ * THE WALLET THE ORCHESTRATOR WROTE INTO THIS CHILD'S settings.json LAST, or
+ * null (no file, no key, or not an address).
+ *
+ * For a pass where the holder claims cannot be read. The rest of settings.json
+ * must still be written — a child spawned without one runs the defaults, and
+ * the default is paper, which takes a live agent off its real stop-losses — so
+ * the one field that needs the claims keeps the answer last derived from
+ * claims that COULD be read. Only the orchestrator writes this key into a
+ * child's file (the child's own Telegram patches cannot name it), so this is
+ * never a self-declared value. A fresh home has no file, and so no wallet: the
+ * same fail-closed answer as a settings outage, never a guess.
+ */
+export function lastWrittenHolder(settingsFile: string): `0x${string}` | null {
+  try {
+    const prev = JSON.parse(readFileSync(settingsFile, "utf8")) as MerrymenSettings;
+    const a = typeof prev.holderAddress === "string" ? prev.holderAddress.toLowerCase() : "";
+    return /^0x[0-9a-f]{40}$/.test(a) ? (a as `0x${string}`) : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface ProofRow {

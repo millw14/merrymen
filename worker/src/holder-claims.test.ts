@@ -7,11 +7,11 @@
  */
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { backfillHolderClaims, childSettingsFor, planHolderBackfill } from "./holder-claims";
+import { backfillHolderClaims, childSettingsFor, lastWrittenHolder, planHolderBackfill } from "./holder-claims";
 import { FileSettingsStore } from "./settings-store";
 
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-holder-backfill-"));
@@ -28,7 +28,7 @@ const W2 = "0x000000000000000000000000000000000000cafe";
 
 describe("childSettingsFor — what the child is handed", () => {
   it("THE COUNTED WALLET IS WRITTEN; the typed-in one is never kept", () => {
-    const got = childSettingsFor({ strategy: "trencher", holderAddress: W2 }, { address: W, source: "linked" });
+    const got = childSettingsFor({ strategy: "trencher", holderAddress: W2 }, W);
     assert.deepEqual(got, { strategy: "trencher", holderAddress: W });
   });
 
@@ -39,7 +39,7 @@ describe("childSettingsFor — what the child is handed", () => {
   });
 
   it("a tenant who saved nothing gets the wallet alone, or an empty file", () => {
-    assert.deepEqual(childSettingsFor(null, { address: t(1), source: "login" }), { holderAddress: t(1) });
+    assert.deepEqual(childSettingsFor(null, t(1)), { holderAddress: t(1) });
     assert.deepEqual(childSettingsFor(null, null), {});
   });
 
@@ -47,6 +47,25 @@ describe("childSettingsFor — what the child is handed", () => {
     const stored = { holderAddress: W2 };
     childSettingsFor(stored, null);
     assert.deepEqual(stored, { holderAddress: W2 });
+  });
+});
+
+describe("lastWrittenHolder — the wallet kept when the claims cannot be read", () => {
+  it("READS BACK WHAT THE ORCHESTRATOR WROTE, lower-cased", () => {
+    const file = path.join(HOME, "last-written.json");
+    writeFileSync(file, JSON.stringify({ strategy: "trencher", holderAddress: W.toUpperCase().replace("0X", "0x") }));
+    assert.equal(lastWrittenHolder(file), W);
+  });
+
+  it("NO FILE, NO KEY, OR NOT AN ADDRESS → NO WALLET (never a guess)", () => {
+    assert.equal(lastWrittenHolder(path.join(HOME, "never-written.json")), null);
+    const file = path.join(HOME, "no-key.json");
+    writeFileSync(file, JSON.stringify({ strategy: "trencher" }));
+    assert.equal(lastWrittenHolder(file), null);
+    writeFileSync(file, JSON.stringify({ holderAddress: "0xnothex" }));
+    assert.equal(lastWrittenHolder(file), null);
+    writeFileSync(file, "{ torn");
+    assert.equal(lastWrittenHolder(file), null);
   });
 });
 
@@ -192,11 +211,15 @@ describe("the orchestrator wiring", () => {
     assert.match(rec, /writeSettingsForChild\(tenant as `0x\$\{string\}`, seenBotTokens, holderClaims\)/);
   });
 
-  it("UNREADABLE CLAIMS WRITE NOTHING — the child keeps the file written from claims we could read", () => {
+  it("UNREADABLE CLAIMS KEEP THE WALLET WRITTEN LAST — and the rest of settings.json is still written", () => {
+    // Skipping the write would spawn a fresh child on the defaults, and the
+    // default is paper: a live agent off its real stop-losses.
     const fn = body("async function writeSettingsForChild(");
-    const unread = fn.indexOf("if (!claims) return settings;");
+    const decide = fn.indexOf("const holder: `0x${string}` | null = claims");
+    const kept = fn.indexOf(': lastWrittenHolder(path.join(childHome(tenant), "settings.json"));');
     const firstWrite = fn.indexOf("writeChildSettings(");
-    assert.ok(unread > 0 && firstWrite > unread, "no write of any kind before the claims are known");
+    assert.ok(decide > 0 && kept > decide && firstWrite > kept, "the holder is decided before any write");
+    assert.ok(!/if \(!claims\) return/.test(fn), "an unread claims table never stops the file being written");
     const reader = body("async function readHolderClaims(");
     assert.match(reader, /return await getSettingsStore\(\)\.holderClaims\(\);/);
     assert.match(reader, /return null;/);

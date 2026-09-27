@@ -200,7 +200,7 @@ describe("writeSettingsForChild always writes settings.json", () => {
     // B2 (sybil) changed WHICH address: effectiveHolder's, by the same claims
     // as the saved-settings path — the login wallet unless another account
     // claims it, and then no key at all (childSettingsFor).
-    const holder = fn.indexOf("const holder = effectiveHolder(tenant, settings?.holderProof ?? null, (w) => claims.get(w));");
+    const holder = fn.indexOf("? (effectiveHolder(tenant, settings?.holderProof ?? null, (w) => claims.get(w))?.address ?? null)");
     const write = fn.indexOf("if (!settings) writeChildSettings(tenant, childSettingsFor(null, holder));");
     const early = fn.indexOf("if (!settings) return null;");
     assert.ok(holder > 0 && write > holder, "a settings-less tenant still gets a file, by the one holder rule");

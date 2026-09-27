@@ -74,7 +74,7 @@ import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
 import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
-import { backfillHolderClaims, childSettingsFor } from "./holder-claims";
+import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
@@ -834,14 +834,14 @@ type HolderClaimsRead = ReadonlyMap<string, string> | null;
 /**
  * EVERY HOLDER CLAIM, READ ONCE FOR THE WHOLE PASS — one query for the fleet
  * rather than one per tenant every fifteen seconds. Null when unreadable: an
- * unread claim is not "nobody claims it", so writeSettingsForChild then leaves
- * each child's settings.json as it last wrote it rather than guess.
+ * unread claim is not "nobody claims it", so writeSettingsForChild then keeps
+ * the holder wallet it wrote last rather than guess (lastWrittenHolder).
  */
 async function readHolderClaims(): Promise<HolderClaimsRead> {
   try {
     return await getSettingsStore().holderClaims();
   } catch (e) {
-    log(`holder claims unreadable — settings.json left as last written this pass: ${e instanceof Error ? e.message : String(e)}`);
+    log(`holder claims unreadable — each child keeps the holder wallet last written: ${e instanceof Error ? e.message : String(e)}`);
     return null;
   }
 }
@@ -885,13 +885,18 @@ async function writeSettingsForChild(
      * tenant, the login wallet only while no other tenant claims it, and
      * otherwise nothing: one bag linked into many accounts powers one agent,
      * not all of them. The claims are read once per pass (reconcile), or here
-     * for a spawn. UNREADABLE → WRITE NOTHING: the child keeps the file this
-     * wrote last, from claims we could read, rather than a guess in either
-     * direction; a fresh home has none, the same as a settings outage.
+     * for a spawn.
+     *
+     * UNREADABLE CLAIMS KEEP THE WALLET WRITTEN LAST, and the rest of the file
+     * is still written: skipping the write would hand a freshly spawned child
+     * the defaults, and the default is paper. The kept wallet was derived from
+     * claims we could read; a fresh home has none, which is no wallet at all —
+     * never a guess in the generous direction.
      */
     const claims = claimsRead === undefined ? await readHolderClaims() : claimsRead;
-    if (!claims) return settings;
-    const holder = effectiveHolder(tenant, settings?.holderProof ?? null, (w) => claims.get(w));
+    const holder: `0x${string}` | null = claims
+      ? (effectiveHolder(tenant, settings?.holderProof ?? null, (w) => claims.get(w))?.address ?? null)
+      : lastWrittenHolder(path.join(childHome(tenant), "settings.json"));
     /**
      * A TENANT WHO NEVER SAVED SETTINGS STILL GETS A settings.json — holding
      * only the wallet whose $MERRYMEN counts, by the same rule as below, or

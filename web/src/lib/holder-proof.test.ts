@@ -169,7 +169,7 @@ describe("the worker trusts the proof and nothing else", () => {
     // One $MERRYMEN wallet powers one agent: the orchestrator and
     // holderWalletFor (/api/tier, /api/circle, /api/alpha) both ask
     // effectiveHolder, with the same claims, so they cannot drift apart.
-    assert.match(writeSettings(), /const holder = effectiveHolder\(tenant, settings\?\.holderProof \?\? null, \(w\) => claims\.get\(w\)\);/);
+    assert.match(writeSettings(), /\? \(effectiveHolder\(tenant, settings\?\.holderProof \?\? null, \(w\) => claims\.get\(w\)\)\?\.address \?\? null\)/);
     assert.match(writeSettings(), /const forChild: MerrymenSettings = childSettingsFor\(settings, holder\);/);
     assert.match(writeSettings(), /writeChildSettings\(tenant, childSettingsFor\(null, holder\)\)/);
     const wallet = read("./holder-wallet.ts");
@@ -198,7 +198,7 @@ describe("the worker trusts the proof and nothing else", () => {
       assert.equal(none.strategy, "trencher", "and everything else the tenant saved is kept");
       assert.deepEqual(childSettingsFor(null, null), {}, "a tenant who saved nothing and counts no wallet gets an empty file");
       const own = `0x${"b".repeat(40)}` as const;
-      assert.equal(childSettingsFor(typed, { address: own, source: "linked" }).holderAddress, own, "the counted wallet overrides the typed one");
+      assert.equal(childSettingsFor(typed, own).holderAddress, own, "the counted wallet overrides the typed one");
     });
   });
 
